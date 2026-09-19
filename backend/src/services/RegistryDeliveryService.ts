@@ -14,6 +14,12 @@ import {
 import { normalizePullRefList } from '../helpers/registryPullReference';
 import { isTrustedProxyPeer } from '../helpers/trustedProxyCidrs';
 import type { RegistryDeliveryEnvelope, RegistryDeliveryAuthEntry } from '../helpers/registryDeliveryContext';
+import {
+  buildSealedAuthsAad,
+  getOrCreateSealingKey,
+  sealAuths,
+} from '../helpers/registryEnvelopeSeal';
+import { attestationJtiFromToken } from '../helpers/registryDeliveryEvidence';
 import { classifyRegistryDeliveryOp, type RegistryDeliveryStage } from '../helpers/registryOpClassifier';
 import { prepareSourceForDiscover, resolveBlueprintPostApplyDiscovery, type RegistryDeliverySourceKind } from '../helpers/registryDeliveryPrepare';
 import { PreparedSourceStore } from './preparedSourceStore';
@@ -52,6 +58,9 @@ export interface RegistryDeliveryDiscoverResponse {
   actionSetHash: string;
   deliverySourceId: string;
   attestation: string;
+  /** Base64 of the target's raw 32-byte X25519 public sealing key. */
+  sealingKey?: string;
+  sealingKeyFingerprint?: string;
 }
 
 export class RegistryDeliveryService {
@@ -320,6 +329,8 @@ export class RegistryDeliveryService {
       prepId,
     });
 
+    const sealing = getOrCreateSealingKey();
+
     return {
       prepId,
       contractVersion,
@@ -330,6 +341,8 @@ export class RegistryDeliveryService {
       actionSetHash: request.actionSetHash,
       deliverySourceId,
       attestation,
+      sealingKey: sealing.publicKeyBase64,
+      sealingKeyFingerprint: sealing.fingerprint,
     };
   }
 
@@ -337,6 +350,7 @@ export class RegistryDeliveryService {
     nodeId: number,
     discover: RegistryDeliveryDiscoverResponse,
     challengedHosts: string[],
+    recipientPublicKeyRaw?: Buffer,
   ): Promise<RegistryDeliveryEnvelope | null> {
     // Envelope coverage is all-or-nothing. Only hosts holding at least one
     // challenged exact ref may enter the envelope, and every challenged host
@@ -386,13 +400,24 @@ export class RegistryDeliveryService {
     // provider credential, whichever expires first.
     const notAfter = Math.min(envelopeExp, ...providerExpiries.length > 0 ? providerExpiries : [envelopeExp]);
 
-    return {
+    const base = {
       attestation: discover.attestation,
       prepId: discover.prepId,
-      auths,
       notAfter,
       deliverySourceId: discover.deliverySourceId,
     };
+
+    if (!recipientPublicKeyRaw) {
+      return { ...base, auths };
+    }
+
+    const jtiT = attestationJtiFromToken(discover.attestation);
+    if (!jtiT) {
+      throw new Error('Registry delivery attestation missing jti');
+    }
+    const aad = buildSealedAuthsAad(discover.deliverySourceId, jtiT, discover.prepId);
+    const sealedAuths = sealAuths(recipientPublicKeyRaw, auths, aad);
+    return { ...base, sealedAuths };
   }
 
   isProxyTransportConfidential(nodeId: number): boolean {

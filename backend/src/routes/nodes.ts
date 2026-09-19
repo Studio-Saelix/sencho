@@ -558,6 +558,43 @@ nodesRouter.post('/:id/uncordon', (req: Request, res: Response) => {
 });
 
 /**
+ * Clear the hub-pinned registry sealing public key for a remote node (TOFU reset).
+ * The next credential delivery re-pins whatever key the target advertises.
+ */
+nodesRouter.delete('/:id/sealing-key', async (req: Request, res: Response) => {
+  if (rejectApiTokenScope(req, res, NODE_SCOPE_MESSAGE)) return;
+  const nodeIdParam = req.params.id as string;
+  if (!requirePermission(req, res, 'node:manage', 'node', nodeIdParam)) return;
+  try {
+    const id = parseInt(nodeIdParam, 10);
+    if (!Number.isFinite(id) || id <= 0) {
+      res.status(400).json({ error: 'Invalid node id' });
+      return;
+    }
+    const db = DatabaseService.getInstance();
+    const node = db.getNode(id);
+    if (!node) {
+      res.status(404).json({ error: 'Node not found' });
+      return;
+    }
+    if (node.type !== 'remote') {
+      res.status(400).json({ error: 'Sealing key pins apply only to remote nodes' });
+      return;
+    }
+    const previous = db.getNodeSealingKey(id);
+    db.clearNodeSealingKey(id);
+    console.log(
+      `[Nodes] Registry sealing key pin cleared for node ${id} ("${sanitizeForLog(node.name)}")`,
+      previous ? { fingerprint: previous.fingerprint } : { fingerprint: null },
+    );
+    res.status(204).send();
+  } catch (error: unknown) {
+    console.error('Failed to clear node sealing key:', error);
+    res.status(500).json({ error: getErrorMessage(error, 'Failed to clear sealing key pin') });
+  }
+});
+
+/**
  * Reset the FleetSync control anchor on a remote peer.
  *
  * Proxies POST /api/fleet/role/reanchor to the peer using its stored

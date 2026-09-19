@@ -11,7 +11,12 @@ import { StackOpLockService } from '../services/StackOpLockService';
 import { discoverRegistryReferences } from '../services/registryReferenceDiscovery';
 import { REMOTE_REGISTRY_EXACT_REF_CONTRACT_VERSION } from '../services/CapabilityRegistry';
 import { normalizePullRefList } from './registryPullReference';
-import type { RegistryDeliveryEnvelope } from './registryDeliveryContext';
+import type { RegistryDeliveryEnvelope, RegistryDeliveryAuthEntry } from './registryDeliveryContext';
+import {
+  buildSealedAuthsAad,
+  openAuths,
+  parseAuthEntries,
+} from './registryEnvelopeSeal';
 import { hashActionSet, hashSelectionInputs, hashPullRefList } from './registryDeliveryHashes';
 import type { RegistryDeliveryStage } from './registryOpClassifier';
 import { isValidStackName } from '../utils/validation';
@@ -98,6 +103,27 @@ export async function resolveRegistryAuthAtSeam(
     payload.deliveryContractVersion === REMOTE_REGISTRY_EXACT_REF_CONTRACT_VERSION,
     'Delivery contract version mismatch',
   );
+
+  const hasSealed = input.envelope.sealedAuths !== undefined;
+  const hasPlain = input.envelope.auths !== undefined;
+  assertClaim(
+    hasSealed !== hasPlain,
+    'Registry delivery envelope must carry exactly one of auths or sealedAuths',
+  );
+
+  let deliveredAuths: RegistryDeliveryAuthEntry[];
+  if (hasSealed) {
+    const jtiForAad = payload.jti_t;
+    assertClaim(typeof jtiForAad === 'string' && jtiForAad.length > 0, 'Attestation missing jti');
+    const aad = buildSealedAuthsAad(
+      input.envelope.deliverySourceId,
+      jtiForAad,
+      input.envelope.prepId,
+    );
+    deliveredAuths = openAuths(input.envelope.sealedAuths, aad);
+  } else {
+    deliveredAuths = parseAuthEntries(input.envelope.auths);
+  }
 
   const heldLock = StackOpLockService.getInstance().get(input.nodeId, input.stack);
   const jtiForLock = payload.jti_t;
@@ -234,7 +260,7 @@ export async function resolveRegistryAuthAtSeam(
     }
   }
 
-  for (const entry of input.envelope.auths) {
+  for (const entry of deliveredAuths) {
     const normalized = normalizeImageHost(entry.host);
     if (!referencedSet.has(normalized) && !coveredSet.has(normalized)) {
       throw new Error('Delivery includes undeclared registry host');

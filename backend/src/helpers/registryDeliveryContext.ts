@@ -1,6 +1,7 @@
 import { AsyncLocalStorage } from 'async_hooks';
 
 import { attestationJtiFromToken } from './registryDeliveryEvidence';
+import type { SealedAuthsV1 } from './registryEnvelopeSeal';
 import type { RegistryDeliveryStage } from './registryOpClassifier';
 
 export interface RegistryDeliveryAuthEntry {
@@ -10,13 +11,17 @@ export interface RegistryDeliveryAuthEntry {
   expiresAt?: number;
 }
 
-export interface RegistryDeliveryEnvelope {
+type RegistryDeliveryEnvelopeBase = {
   attestation: string;
   prepId?: string;
-  auths: RegistryDeliveryAuthEntry[];
   notAfter: number;
   deliverySourceId: string;
-}
+};
+
+/** Delivered envelope: exactly one of plaintext auths or sealedAuths. */
+export type RegistryDeliveryEnvelope =
+  | (RegistryDeliveryEnvelopeBase & { auths: RegistryDeliveryAuthEntry[]; sealedAuths?: never })
+  | (RegistryDeliveryEnvelopeBase & { sealedAuths: SealedAuthsV1; auths?: never });
 
 export interface RegistryDeliveryContext {
   envelope: RegistryDeliveryEnvelope;

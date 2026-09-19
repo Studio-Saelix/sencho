@@ -43,7 +43,7 @@ export function NodeManager() {
   // check scoped can('node:manage', 'node', id). Generate-token and reset-anchor
   // stay isAdmin-only to match their requireAdmin backend guards.
   const canManageNodes = isAdmin || can('node:manage');
-  const { nodes, refreshNodeMeta } = useNodes();
+  const { nodes, refreshNodes, refreshNodeMeta } = useNodes();
   useMastheadStats([
     { label: 'NODES', value: `${nodes.length}` },
     {
@@ -70,6 +70,7 @@ export function NodeManager() {
 
   const { statuses: syncStatuses, refresh: refreshSyncStatuses } = useFleetSyncStatus();
   const [resettingAnchor, setResettingAnchor] = useState<number | null>(null);
+  const [resettingSealPin, setResettingSealPin] = useState<number | null>(null);
 
   // Per-node aggregate of CONTROL_IDENTITY_MISMATCH sticky errors. All resources
   // for one peer share the same root cause (the peer's cached fingerprint), so
@@ -107,6 +108,26 @@ export function NodeManager() {
       toast.error((error as Error).message || 'Failed to reset anchor on peer');
     } finally {
       setResettingAnchor(null);
+    }
+  };
+
+  const handleResetSealingKey = async (node: Node) => {
+    setResettingSealPin(node.id);
+    try {
+      const res = await apiFetch(`/nodes/${node.id}/sealing-key`, {
+        method: 'DELETE',
+        localOnly: true,
+      });
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({})) as { error?: string };
+        throw new Error(body.error || 'Failed to reset sealing key pin');
+      }
+      toast.success(`Sealing key pin cleared for "${node.name}". The next private-image deploy will re-pin.`);
+      await refreshNodes();
+    } catch (error) {
+      toast.error((error as Error).message || 'Failed to reset sealing key pin');
+    } finally {
+      setResettingSealPin(null);
     }
   };
 
@@ -334,9 +355,29 @@ export function NodeManager() {
                   )}
                 </TableCell>
                 <TableCell className="font-medium">
-                  <div className="flex items-center gap-2">
-                    {getNodeIcon(node.type)}
-                    {node.name}
+                  <div className="flex flex-col gap-1 min-w-0">
+                    <div className="flex items-center gap-2">
+                      {getNodeIcon(node.type)}
+                      {node.name}
+                    </div>
+                    {node.type === 'remote' && node.sealingKeyFingerprint && (
+                      <div className="flex flex-wrap items-center gap-2 pl-6 text-xs text-muted-foreground max-md:pl-0">
+                        <span className="font-mono truncate" title={node.sealingKeyFingerprint}>
+                          Seal {node.sealingKeyFingerprint.slice(0, 12)}…
+                        </span>
+                        {canManageThis && (
+                          <Button
+                            size="sm"
+                            variant="ghost"
+                            className="h-6 px-2 text-xs"
+                            onClick={() => void handleResetSealingKey(node)}
+                            disabled={resettingSealPin === node.id}
+                          >
+                            {resettingSealPin === node.id ? 'Resetting…' : 'Reset seal pin'}
+                          </Button>
+                        )}
+                      </div>
+                    )}
                   </div>
                 </TableCell>
                 <TableCell>

@@ -9,6 +9,11 @@ import { REGISTRY_DELIVERY_BODY_FIELD, REGISTRY_DELIVERY_FIELD_LIMIT_BYTES } fro
 import { classifyRegistryDeliveryOp } from '../helpers/registryOpClassifier';
 import { UnsafeRegistryHopError } from '../helpers/registrySafeProbe';
 import { hashPullRefList } from '../helpers/registryDeliveryHashes';
+import {
+  fingerprintOf,
+  getOrCreateSealingKey,
+  resetSealingKeyCacheForTests,
+} from '../helpers/registryEnvelopeSeal';
 
 const mockProbeRemoteCapability = vi.fn();
 const mockProbeManifestAnonymous = vi.fn();
@@ -521,7 +526,7 @@ describe('registryDeliveryOutbound', () => {
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     expect(result.augmented).toBe(true);
-    expect(buildSpy).toHaveBeenCalledWith(nodeId, discover, ['ghcr.io']);
+    expect(buildSpy).toHaveBeenCalledWith(nodeId, discover, ['ghcr.io'], undefined);
   });
 
   it('passes through when every ref on a mixed host is public, so no envelope is built', async () => {
@@ -1041,5 +1046,247 @@ describe('registryDeliveryOutbound', () => {
     expect(result.augmented).toBe(true);
     expect(result.body[REGISTRY_DELIVERY_BODY_FIELD]).toBeDefined();
     expect(mockIsTunnelConfidential).toHaveBeenCalledWith(pilotNodeId);
+  });
+
+  it('seals credentials and skips the transport gate when discover advertises a sealing key', async () => {
+    resetSealingKeyCacheForTests();
+    const sealing = getOrCreateSealingKey();
+    mockProbeRemoteCapability.mockResolvedValue({ kind: 'supported' });
+    mockIsProxyConfidential.mockReturnValue(false);
+    const delivery = RegistryDeliveryService.getInstance();
+    const discover = {
+      ...makeDiscover(delivery),
+      sealingKey: sealing.publicKeyBase64,
+      sealingKeyFingerprint: sealing.fingerprint,
+    };
+    mockAxiosPost.mockResolvedValue({ status: 200, data: discover });
+    mockAssertSafeRegistryHost.mockResolvedValue(undefined);
+    mockProbeManifestAnonymous.mockResolvedValue({ classification: 'challenged', status: 401 });
+    vi.spyOn(RegistryService.getInstance(), 'resolveDockerConfigForHostDetailed').mockResolvedValue({
+      state: 'available',
+      auth: { username: 'user', password: 's3cret-token-value' },
+    });
+
+    const remoteId = DatabaseService.getInstance().addNode({
+      name: 'seal-outbound-remote',
+      type: 'remote',
+      mode: 'proxy',
+      compose_dir: '/tmp',
+      is_default: false,
+      api_url: 'http://192.168.1.50:1852',
+      api_token: 'token',
+    });
+    const node = DatabaseService.getInstance().getNode(remoteId)!;
+
+    const result = await augmentJsonBodyForRegistryDelivery({
+      method: 'POST',
+      apiPath: '/api/stacks/demo/deploy',
+      nodeId: remoteId,
+      node,
+      target: TEST_TARGET,
+      body: {},
+    });
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.augmented).toBe(true);
+    const envelope = result.body[REGISTRY_DELIVERY_BODY_FIELD] as {
+      auths?: unknown;
+      sealedAuths?: { v: number; epk: string; n: string; ct: string };
+    };
+    expect(envelope.auths).toBeUndefined();
+    expect(envelope.sealedAuths?.v).toBe(1);
+    expect(envelope.sealedAuths?.epk).toBeTruthy();
+    expect(JSON.stringify(envelope)).not.toContain('s3cret-token-value');
+    expect(JSON.stringify(envelope)).not.toContain('"password"');
+    expect(DatabaseService.getInstance().getNodeSealingKey(remoteId)?.fingerprint).toBe(sealing.fingerprint);
+  });
+
+  it('returns 409 SEAL_KEY_MISMATCH when the presented key differs from the pinned key', async () => {
+    resetSealingKeyCacheForTests();
+    const sealing = getOrCreateSealingKey();
+    mockProbeRemoteCapability.mockResolvedValue({ kind: 'supported' });
+    mockIsProxyConfidential.mockReturnValue(false);
+    const delivery = RegistryDeliveryService.getInstance();
+
+    const remoteId = DatabaseService.getInstance().addNode({
+      name: 'seal-mismatch-remote',
+      type: 'remote',
+      mode: 'proxy',
+      compose_dir: '/tmp',
+      is_default: false,
+      api_url: 'http://192.168.1.52:1852',
+      api_token: 'token',
+    });
+    DatabaseService.getInstance().pinNodeSealingKey(remoteId, sealing.publicKeyBase64, sealing.fingerprint);
+
+    const otherRaw = Buffer.alloc(32, 7);
+    const otherB64 = otherRaw.toString('base64');
+    const otherFp = fingerprintOf(otherRaw);
+    const discover = {
+      ...makeDiscover(delivery),
+      sealingKey: otherB64,
+      sealingKeyFingerprint: otherFp,
+    };
+    mockAxiosPost.mockResolvedValue({ status: 200, data: discover });
+    mockAssertSafeRegistryHost.mockResolvedValue(undefined);
+    mockProbeManifestAnonymous.mockResolvedValue({ classification: 'challenged', status: 401 });
+    vi.spyOn(RegistryService.getInstance(), 'resolveDockerConfigForHostDetailed').mockResolvedValue({
+      state: 'available',
+      auth: { username: 'user', password: 'pass' },
+    });
+
+    const node = DatabaseService.getInstance().getNode(remoteId)!;
+    const result = await augmentJsonBodyForRegistryDelivery({
+      method: 'POST',
+      apiPath: '/api/stacks/demo/deploy',
+      nodeId: remoteId,
+      node,
+      target: TEST_TARGET,
+      body: {},
+    });
+
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.status).toBe(409);
+    expect(result.code).toBe('REGISTRY_DELIVERY_SEAL_KEY_MISMATCH');
+    expect(result.error).toContain(sealing.fingerprint);
+    expect(result.error).toContain(otherFp);
+  });
+
+  it('classifies POST /api/auto-update/execute-checked as delivery-eligible', () => {
+    expect(classifyRegistryDeliveryOp('POST', '/api/auto-update/execute-checked')).toEqual({
+      eligible: true,
+      stage: 'scheduler-auto-update',
+      stack: undefined,
+    });
+  });
+
+  it('returns 409 SEAL_KEY_MISMATCH when a pin exists but discover omits sealingKey', async () => {
+    resetSealingKeyCacheForTests();
+    const sealing = getOrCreateSealingKey();
+    mockProbeRemoteCapability.mockResolvedValue({ kind: 'supported' });
+    mockIsProxyConfidential.mockReturnValue(true);
+    const delivery = RegistryDeliveryService.getInstance();
+
+    const remoteId = DatabaseService.getInstance().addNode({
+      name: 'seal-omit-remote',
+      type: 'remote',
+      mode: 'proxy',
+      compose_dir: '/tmp',
+      is_default: false,
+      api_url: 'https://192.168.1.53:1852',
+      api_token: 'token',
+    });
+    DatabaseService.getInstance().pinNodeSealingKey(remoteId, sealing.publicKeyBase64, sealing.fingerprint);
+
+    mockAxiosPost.mockResolvedValue({ status: 200, data: makeDiscover(delivery) });
+    mockAssertSafeRegistryHost.mockResolvedValue(undefined);
+    mockProbeManifestAnonymous.mockResolvedValue({ classification: 'challenged', status: 401 });
+    vi.spyOn(RegistryService.getInstance(), 'resolveDockerConfigForHostDetailed').mockResolvedValue({
+      state: 'available',
+      auth: { username: 'user', password: 'pass' },
+    });
+    const node = DatabaseService.getInstance().getNode(remoteId)!;
+
+    const result = await augmentJsonBodyForRegistryDelivery({
+      method: 'POST',
+      apiPath: '/api/stacks/demo/deploy',
+      nodeId: remoteId,
+      node,
+      target: TEST_TARGET,
+      body: {},
+    });
+
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.status).toBe(409);
+    expect(result.code).toBe('REGISTRY_DELIVERY_SEAL_KEY_MISMATCH');
+    expect(result.error).toContain(sealing.fingerprint);
+    expect(result.error).toContain('presented none');
+  });
+
+  it('returns generic REGISTRY_DELIVERY_FAILED when discover sealingKey is invalid', async () => {
+    mockProbeRemoteCapability.mockResolvedValue({ kind: 'supported' });
+    mockIsProxyConfidential.mockReturnValue(true);
+    const delivery = RegistryDeliveryService.getInstance();
+    const discover = {
+      ...makeDiscover(delivery),
+      sealingKey: 'not-valid-base64-key!!',
+      sealingKeyFingerprint: 'ignored',
+    };
+    mockAxiosPost.mockResolvedValue({ status: 200, data: discover });
+    mockAssertSafeRegistryHost.mockResolvedValue(undefined);
+    mockProbeManifestAnonymous.mockResolvedValue({ classification: 'challenged', status: 401 });
+
+    const remoteId = DatabaseService.getInstance().addNode({
+      name: 'seal-bad-key-remote',
+      type: 'remote',
+      mode: 'proxy',
+      compose_dir: '/tmp',
+      is_default: false,
+      api_url: 'https://192.168.1.54:1852',
+      api_token: 'token',
+    });
+    const node = DatabaseService.getInstance().getNode(remoteId)!;
+
+    const result = await augmentJsonBodyForRegistryDelivery({
+      method: 'POST',
+      apiPath: '/api/stacks/demo/deploy',
+      nodeId: remoteId,
+      node,
+      target: TEST_TARGET,
+      body: {},
+    });
+
+    expect(result).toEqual({
+      ok: false,
+      status: 500,
+      code: 'REGISTRY_DELIVERY_FAILED',
+      error: 'Registry delivery failed',
+    });
+  });
+
+  it('returns generic REGISTRY_DELIVERY_FAILED when sealingKeyFingerprint does not match', async () => {
+    resetSealingKeyCacheForTests();
+    const sealing = getOrCreateSealingKey();
+    mockProbeRemoteCapability.mockResolvedValue({ kind: 'supported' });
+    mockIsProxyConfidential.mockReturnValue(true);
+    const delivery = RegistryDeliveryService.getInstance();
+    const discover = {
+      ...makeDiscover(delivery),
+      sealingKey: sealing.publicKeyBase64,
+      sealingKeyFingerprint: 'not-the-real-fingerprint',
+    };
+    mockAxiosPost.mockResolvedValue({ status: 200, data: discover });
+    mockAssertSafeRegistryHost.mockResolvedValue(undefined);
+    mockProbeManifestAnonymous.mockResolvedValue({ classification: 'challenged', status: 401 });
+
+    const remoteId = DatabaseService.getInstance().addNode({
+      name: 'seal-bad-fp-remote',
+      type: 'remote',
+      mode: 'proxy',
+      compose_dir: '/tmp',
+      is_default: false,
+      api_url: 'https://192.168.1.55:1852',
+      api_token: 'token',
+    });
+    const node = DatabaseService.getInstance().getNode(remoteId)!;
+
+    const result = await augmentJsonBodyForRegistryDelivery({
+      method: 'POST',
+      apiPath: '/api/stacks/demo/deploy',
+      nodeId: remoteId,
+      node,
+      target: TEST_TARGET,
+      body: {},
+    });
+
+    expect(result).toEqual({
+      ok: false,
+      status: 500,
+      code: 'REGISTRY_DELIVERY_FAILED',
+      error: 'Registry delivery failed',
+    });
   });
 });

@@ -23,12 +23,14 @@ import {
 } from './registryDeliveryBodyLimits';
 import { classifyRegistryDeliveryOp } from './registryOpClassifier';
 import { buildRegistryDiscoverPayload } from './registryDeliveryDiscoverPayload';
+import { fingerprintOf, parseSealingKeyBase64 } from './registryEnvelopeSeal';
 import { getErrorMessage } from '../utils/errors';
 import { sanitizeForLog } from '../utils/safeLog';
 
 export const REGISTRY_DELIVERY_ABORTED = 'REGISTRY_DELIVERY_ABORTED';
 const REGISTRY_DELIVERY_TRANSPORT_NOT_CONFIDENTIAL = 'REGISTRY_DELIVERY_TRANSPORT_NOT_CONFIDENTIAL';
 const REGISTRY_DELIVERY_CREDENTIAL_UNAVAILABLE = 'REGISTRY_DELIVERY_CREDENTIAL_UNAVAILABLE';
+const REGISTRY_DELIVERY_SEAL_KEY_MISMATCH = 'REGISTRY_DELIVERY_SEAL_KEY_MISMATCH';
 const REGISTRY_DELIVERY_ENVELOPE_TOO_LARGE = 'REGISTRY_DELIVERY_ENVELOPE_TOO_LARGE';
 const REGISTRY_DELIVERY_BODY_LIMIT = 'REGISTRY_DELIVERY_BODY_LIMIT';
 const REGISTRY_DELIVERY_FAILED = 'REGISTRY_DELIVERY_FAILED';
@@ -43,6 +45,7 @@ export const REGISTRY_DELIVERY_REFUSAL_CODES: ReadonlySet<string> = new Set([
   REGISTRY_DELIVERY_ABORTED,
   REGISTRY_DELIVERY_TRANSPORT_NOT_CONFIDENTIAL,
   REGISTRY_DELIVERY_CREDENTIAL_UNAVAILABLE,
+  REGISTRY_DELIVERY_SEAL_KEY_MISMATCH,
   REGISTRY_DELIVERY_ENVELOPE_TOO_LARGE,
   REGISTRY_DELIVERY_BODY_LIMIT,
   REGISTRY_DELIVERY_FAILED,
@@ -117,6 +120,20 @@ function passthrough(body: Record<string, unknown>): RegistryDeliveryAugmentResu
 
 function aborted(): RegistryDeliveryAugmentResult {
   return { ok: false, status: 499, code: REGISTRY_DELIVERY_ABORTED, error: 'Request aborted' };
+}
+
+function sealKeyMismatchRefusal(
+  pinnedFingerprint: string,
+  presentedLabel: string,
+): Extract<RegistryDeliveryAugmentResult, { ok: false }> {
+  return {
+    ok: false,
+    status: 409,
+    code: REGISTRY_DELIVERY_SEAL_KEY_MISMATCH,
+    error:
+      `Registry sealing key mismatch for this node (pinned ${pinnedFingerprint}, `
+      + `presented ${presentedLabel}). Reset the pin under Settings → Nodes, then retry.`,
+  };
 }
 
 /** Structured log for a passthrough caused by a remote that cannot take delivery. */
@@ -199,7 +216,27 @@ function parseDiscoverResponse(data: unknown): RegistryDeliveryDiscoverResponse 
   if (canonical.length !== refs.length || canonical.some((ref, index) => ref !== refs[index])) {
     throw new Error('Registry delivery discovery response failed validation');
   }
-  return data;
+
+  const raw = data as RegistryDeliveryDiscoverResponse & Record<string, unknown>;
+  const sealingKeyRaw = parseSealingKeyBase64(raw.sealingKey);
+  if (sealingKeyRaw) {
+    const expectedFp = fingerprintOf(sealingKeyRaw);
+    if (
+      typeof raw.sealingKeyFingerprint !== 'string'
+      || raw.sealingKeyFingerprint !== expectedFp
+    ) {
+      throw new Error('Registry delivery discovery response failed validation');
+    }
+    return {
+      ...data,
+      sealingKey: sealingKeyRaw.toString('base64'),
+      sealingKeyFingerprint: expectedFp,
+    };
+  }
+  // Absent sealing key: strip any partial sealing fields so a half-present
+  // advertisement cannot be treated as sealed-capable.
+  const { sealingKey: _sk, sealingKeyFingerprint: _fp, ...rest } = raw;
+  return rest;
 }
 
 async function callTargetDiscover(
@@ -351,10 +388,34 @@ export async function augmentJsonBodyForRegistryDelivery(
       return passthrough(input.body);
     }
 
+    let recipientPublicKeyRaw: Buffer | undefined;
+    const db = DatabaseService.getInstance();
+    const existingPin = db.getNodeSealingKey(input.nodeId);
+    if (discover.sealingKey) {
+      const presentedRaw = Buffer.from(discover.sealingKey, 'base64');
+      // parseDiscoverResponse already verified fingerprint; recompute only if absent.
+      const presentedFp = discover.sealingKeyFingerprint ?? fingerprintOf(presentedRaw);
+      const pinned = db.pinNodeSealingKey(input.nodeId, discover.sealingKey, presentedFp);
+      if (pinned.pubkey !== discover.sealingKey || pinned.fingerprint !== presentedFp) {
+        return sealKeyMismatchRefusal(pinned.fingerprint, presentedFp);
+      }
+      if (!existingPin) {
+        console.log(
+          '[registryDeliveryOutbound] contact: sealing key pinned (TOFU)',
+          { nodeId: input.nodeId, fingerprint: presentedFp },
+        );
+      }
+      recipientPublicKeyRaw = presentedRaw;
+    } else if (existingPin) {
+      // Discover omitted sealing while a pin exists: refuse plaintext downgrade.
+      return sealKeyMismatchRefusal(existingPin.fingerprint, 'none');
+    }
+
     const envelope = await RegistryDeliveryService.getInstance().buildHubEnvelope(
       input.nodeId,
       discover,
       challengedHosts,
+      recipientPublicKeyRaw,
     );
     if (input.abortSignal?.aborted) {
       return aborted();
@@ -370,9 +431,9 @@ export async function augmentJsonBodyForRegistryDelivery(
       };
     }
 
-    // Refuse before any credential is attached to the outbound body when the
-    // transport back to the remote is not confidential.
-    if (!isTransportConfidential(input.nodeId, input.node)) {
+    // Sealed envelopes skip the transport gate. Plaintext still requires a
+    // confidential hop (HTTPS api_url or a confidential Pilot tunnel).
+    if (!recipientPublicKeyRaw && !isTransportConfidential(input.nodeId, input.node)) {
       return {
         ok: false,
         status: 409,
