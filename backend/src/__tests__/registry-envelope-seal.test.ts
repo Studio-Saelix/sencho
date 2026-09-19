@@ -45,9 +45,16 @@ describe('registryEnvelopeSeal', () => {
     expect(first.fingerprint).toBe(fingerprintOf(first.publicKeyRaw));
 
     const keyFile = path.join(dataDir, 'registry-seal.key');
-    const mode = fs.statSync(keyFile).mode & 0o777;
-    expect(mode).toBe(0o600);
-    expect(fs.readFileSync(keyFile, 'utf-8')).toContain('BEGIN PRIVATE KEY');
+    const fd = fs.openSync(keyFile, 'r');
+    try {
+      expect(fs.fstatSync(fd).mode & 0o777).toBe(0o600);
+      const size = fs.fstatSync(fd).size;
+      const buf = Buffer.alloc(size);
+      fs.readSync(fd, buf, 0, size, 0);
+      expect(buf.toString('utf-8')).toContain('BEGIN PRIVATE KEY');
+    } finally {
+      fs.closeSync(fd);
+    }
 
     resetSealingKeyCacheForTests();
     const second = getOrCreateSealingKey();
