@@ -54,7 +54,11 @@ These tune optional subsystems. Most deployments never set them; the defaults ar
 | `GITSOURCE_MAX_BUILD_CONTEXT_BYTES` | `268435456` | Maximum size of a single materialized build context after `.dockerignore` filtering (256 MB). A context that exceeds it, including a repository-root context, is refused. |
 | `GITSOURCE_MAX_PATH_DEPTH` | `64` | Maximum directory depth for a materialized repository path. Deeper paths are refused. |
 | `GITSOURCE_MAX_FILE_BYTES` | `10485760` | Maximum size of a single materialized file (10 MB). Oversized files are refused. |
-| `SENCHO_PUBLIC_URL` | *(request host)* | Set on the primary instance. Its externally reachable `http(s)://` URL, no trailing slash, baked into pilot enrollment so remote agents dial the public hostname rather than the address the admin used at setup. |
+| `SENCHO_PUBLIC_URL` | *(request host)* | Set on the primary instance. Its externally reachable `http(s)://` URL, no trailing slash, baked into pilot enrollment so remote agents dial the public hostname rather than the address the admin used at setup. Use `https://` when this instance terminates TLS itself. |
+| `SENCHO_TLS_CERT_FILE` | *(unset)* | Path inside the container to the PEM certificate (leaf plus any intermediates). Set together with `SENCHO_TLS_KEY_FILE` to listen with HTTPS. Unset keeps the HTTP listener, which is the right default behind a reverse proxy. |
+| `SENCHO_TLS_KEY_FILE` | *(unset)* | Path inside the container to the PEM private key. Must be set with `SENCHO_TLS_CERT_FILE`; setting only one of the two refuses to start. |
+| `SENCHO_TLS_CA_FILE` | *(unset)* | Optional CA bundle. When set, Pilot enrollment bind-mounts it into the agent as `SENCHO_PILOT_CA_FILE` and returns the PEM in the enrollment dialog. Required for private or self-signed issuers; leave unset for publicly trusted certificates. |
+| `SENCHO_TLS_KEY_PASSPHRASE` | *(unset)* | Passphrase for an encrypted private key. Leave unset for unencrypted keys. |
 | `SENCHO_TRUSTED_PROXY_CIDRS` | *(unset)* | Comma-separated CIDRs of reverse proxy peers trusted to supply forwarded client addresses and schemes. Use `/32` for one IPv4 proxy, `/128` for one IPv6 proxy, or the proxy network CIDR. Unset or invalid values make Sencho ignore forwarding headers. |
 | `SENCHO_COMPOSE_COMMAND_TIMEOUT_MS` | `1800000` | Hard timeout for a single Compose command (pull, up, down) during deploy and update, in milliseconds (30 minutes). Sencho kills the command and reports failure if it runs longer than this, regardless of whether it is still producing output. Raise it only for very large images or slow storage. |
 | `SENCHO_COMPOSE_STALL_TIMEOUT_MS` | `600000` | Idle-output backstop for deploy and update Compose steps (pull and recreate), separate from the hard timeout above. If a step produces no output for this long while still running, Sencho stops it so a hung image pull surfaces a clear failure and the in-app recovery actions instead of spinning. Raise it on slow links or for heavy local image builds. |
@@ -242,6 +246,39 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock
       - /opt/compose:/opt/compose
       - ./sencho-data:/app/data
+```
+
+## Native TLS on the control instance
+
+When Sencho is not behind a TLS-terminating reverse proxy, point `SENCHO_TLS_CERT_FILE` and `SENCHO_TLS_KEY_FILE` at PEM files inside the container. Sencho then listens with HTTPS on port 1852. Pilot agents dial `wss://`, and private-registry credential delivery can use that confidential tunnel.
+
+Both files must be set. Setting only one refuses to start rather than falling back to HTTP. Leave both unset when a reverse proxy already terminates TLS; that path keeps using `SENCHO_TRUSTED_PROXY_CIDRS`. These variables apply only to the control instance. On a Pilot agent (`SENCHO_MODE=pilot`) they are ignored, because the agent replays tunneled requests to its own loopback HTTP listener.
+
+The certificate must include a Subject Alternative Name that matches how agents dial: a DNS name for a hostname, or an `iPAddress` SAN for a raw IP. A certificate with only a Common Name fails Node's verification.
+
+Set `SENCHO_PUBLIC_URL` to the matching `https://` URL. For a private or self-signed issuer, also set `SENCHO_TLS_CA_FILE` so enrollment can give agents the CA bundle. Publicly trusted certificates do not need a CA file.
+
+Existing Pilot agents keep their persisted `pilot.jwt` across a scheme change. Edit the agent compose file so `SENCHO_PRIMARY_URL` uses `https://` (and add the CA bind-mount if enrollment now includes one), then recreate the agent container.
+
+```yaml
+services:
+  sencho:
+    image: saelix/sencho:latest
+    ports:
+      - "1852:1852"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./data:/app/data
+      - /opt/compose:/opt/compose
+      - ./certs/fullchain.pem:/app/certs/fullchain.pem:ro
+      - ./certs/privkey.pem:/app/certs/privkey.pem:ro
+      - ./certs/ca.pem:/app/certs/ca.pem:ro
+    environment:
+      - COMPOSE_DIR=/opt/compose
+      - SENCHO_PUBLIC_URL=https://192.168.1.50:1852
+      - SENCHO_TLS_CERT_FILE=/app/certs/fullchain.pem
+      - SENCHO_TLS_KEY_FILE=/app/certs/privkey.pem
+      - SENCHO_TLS_CA_FILE=/app/certs/ca.pem
 ```
 
 ## Reverse proxy setup

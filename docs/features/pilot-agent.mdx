@@ -76,7 +76,7 @@ Pilot mode narrows the operator surface in a couple of places where parity with 
 |---|---|
 | **Remote host** | Docker installed and a user that can run containers. About 1 GB free on the volume that backs `/app/data` and the selected compose directory. |
 | **Network from remote → control instance** | Outbound TCP to the control instance's HTTPS port (whatever your reverse proxy or Sencho exposes). Nothing inbound. |
-| **Network at the control instance** | The path from the remote to the control instance must allow WebSocket upgrades end-to-end. If you terminate TLS at a reverse proxy in front of Sencho, that proxy needs `Upgrade: websocket` passthrough. |
+| **Network at the control instance** | The path from the remote to the control instance must allow WebSocket upgrades end-to-end. If you terminate TLS at a reverse proxy in front of Sencho, that proxy needs `Upgrade: websocket` passthrough. If Sencho terminates TLS itself, see [Native TLS on the control instance](/getting-started/configuration#native-tls-on-the-control-instance). |
 | **Operator role** | Admin on the control instance. The Settings → Nodes panel is admin-only. |
 | **License tier** | None. Pilot Agent is Community-tier core surface. |
 
@@ -190,7 +190,7 @@ Enrollment is rate-limited to 10 requests per minute per operator (per source IP
 
 ### TLS
 
-The agent dials `wss://`. Certificate validation is on by default against the system trust store. There is no flag to disable verification; that would defeat the credential model. For internal CAs, mount your bundle into the agent container and set `SENCHO_PILOT_CA_FILE` to the in-container path. See [Self-signed control-instance TLS certificates](#self-signed-control-instance-tls-certificates) below for a worked example.
+The agent dials `wss://` when `SENCHO_PRIMARY_URL` is `https://`. Certificate validation is on by default against the system trust store. There is no flag to disable verification; that would defeat the credential model. For internal CAs, mount your bundle into the agent container and set `SENCHO_PILOT_CA_FILE` to the in-container path. When the control instance uses native TLS with `SENCHO_TLS_CA_FILE` set, enrollment already includes that bind-mount. See [Self-signed control-instance TLS certificates](#self-signed-control-instance-tls-certificates) below for a worked example.
 
 ### Trust boundaries
 
@@ -205,7 +205,9 @@ The tunnel JWTs are signed with the control instance's `auth_jwt_secret`. If tha
 
 ## Self-signed control-instance TLS certificates
 
-If your control instance terminates TLS with an internal CA that the agent's system trust store does not recognise, mount the CA bundle into the agent container and point `SENCHO_PILOT_CA_FILE` at it:
+If your control instance terminates TLS with an internal CA that the agent's system trust store does not recognise, mount the CA bundle into the agent container and point `SENCHO_PILOT_CA_FILE` at it. Native TLS on the hub with `SENCHO_TLS_CA_FILE` set does this for you in the generated compose file: save the PEM from the enrollment dialog as `sencho-hub-ca.pem` next to `compose.yaml`.
+
+If you are writing the agent compose file by hand:
 
 ```yaml
 name: sencho-agent
@@ -266,7 +268,9 @@ One variable is read on the **control instance** side, not the agent:
 
 | Variable | Required? | Default | Notes |
 |---|---|---|---|
-| `SENCHO_PUBLIC_URL` | Optional | request Host | Locks in the URL the enrollment dialog bakes into `SENCHO_PRIMARY_URL`. See [The control instance's public URL](#the-control-instances-public-url) above. Must be `http(s)://`, no loopback. |
+| `SENCHO_PUBLIC_URL` | Optional | request Host | Locks in the URL the enrollment dialog bakes into `SENCHO_PRIMARY_URL`. See [The control instance's public URL](#the-control-instances-public-url) above. Must be `http(s)://`, no loopback. Use `https://` when native TLS is enabled. |
+| `SENCHO_TLS_CERT_FILE` / `SENCHO_TLS_KEY_FILE` | Optional | unset | Enable the hub's own HTTPS listener. Ignored if set on a Pilot agent; the loopback listener stays HTTP. See [Native TLS on the control instance](/getting-started/configuration#native-tls-on-the-control-instance). |
+| `SENCHO_TLS_CA_FILE` | Optional | unset | CA bundle copied into Pilot enrollment so agents trust a private issuer. |
 
 The agent does not currently expose tunables for the ping interval (30 s), the reconnect backoff (1–60 s), or the per-stream idle timeout (10 min). These are deliberate fixed values; if your environment requires different ones, open an issue.
 

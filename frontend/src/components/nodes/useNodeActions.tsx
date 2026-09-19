@@ -28,9 +28,11 @@ interface PilotEnrollment {
   token: string;
   expiresAt: number;
   composeYaml: string;
+  caPem?: string;
 }
 
 const PILOT_AGENT_START_COMMAND = 'docker compose up -d';
+const PILOT_CA_HOST_FILE = 'sencho-hub-ca.pem';
 
 interface NodeFormData {
   name: string;
@@ -107,6 +109,7 @@ export function useNodeActions(opts: UseNodeActionsOptions = {}): UseNodeActions
 
   const [activeEnrollment, setActiveEnrollment] = useState<{ nodeId: number; nodeName: string; enrollment: PilotEnrollment } | null>(null);
   const [enrollmentCopied, setEnrollmentCopied] = useState(false);
+  const [caCopied, setCaCopied] = useState(false);
 
   const refresh = useCallback(async () => {
     await refreshNodes();
@@ -239,6 +242,19 @@ export function useNodeActions(opts: UseNodeActionsOptions = {}): UseNodeActions
       setTimeout(() => setEnrollmentCopied(false), 2000);
     } catch {
       toast.error('Could not copy automatically. Please select and copy the compose file manually.');
+    }
+  };
+
+  const copyCaFile = async () => {
+    const caPem = activeEnrollment?.enrollment.caPem;
+    if (!caPem) return;
+    try {
+      await copyToClipboard(caPem);
+      setCaCopied(true);
+      toast.success('CA file copied to clipboard');
+      setTimeout(() => setCaCopied(false), 2000);
+    } catch {
+      toast.error('Could not copy automatically. Please select and copy the CA file manually.');
     }
   };
 
@@ -537,6 +553,7 @@ export function useNodeActions(opts: UseNodeActionsOptions = {}): UseNodeActions
           if (!open) {
             setActiveEnrollment(null);
             setEnrollmentCopied(false);
+            setCaCopied(false);
             setCreateOpen(false);
             setFormData(defaultFormData);
           }
@@ -561,6 +578,23 @@ export function useNodeActions(opts: UseNodeActionsOptions = {}): UseNodeActions
                   <pre className="text-xs font-mono whitespace-pre overflow-x-auto text-foreground/90">{activeEnrollment.enrollment.composeYaml}</pre>
                 </div>
               </div>
+
+              {activeEnrollment.enrollment.caPem && (
+                <div className="space-y-2">
+                  <p className="text-xs font-medium text-foreground/80">
+                    Step 1b: save the hub CA as <code className="font-mono text-[0.7rem] px-1 py-0.5 rounded bg-muted">{PILOT_CA_HOST_FILE}</code> next to the compose file
+                  </p>
+                  <div className="rounded-md border border-card-border bg-muted/50 p-3">
+                    <pre className="text-xs font-mono whitespace-pre overflow-x-auto text-foreground/90">{activeEnrollment.enrollment.caPem}</pre>
+                  </div>
+                  <div className="flex justify-end">
+                    <Button size="sm" variant="outline" className="gap-1" onClick={copyCaFile}>
+                      {caCopied ? <Check className="w-3.5 h-3.5 text-success" /> : <Copy className="w-3.5 h-3.5" />}
+                      {caCopied ? 'Copied' : 'Copy CA file'}
+                    </Button>
+                  </div>
+                </div>
+              )}
 
               <div className="space-y-2">
                 <p className="text-xs font-medium text-foreground/80">Step 2: start the agent on the remote host</p>

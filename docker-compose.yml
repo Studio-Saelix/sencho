@@ -38,6 +38,11 @@ services:
       # - /proc/spl/kstat/zfs/arcstats:/host/proc/spl/kstat/zfs/arcstats:ro
       # VM ballooning: mount /proc/meminfo if your runtime does not expose it.
       # - /proc/meminfo:/host/proc/meminfo:ro
+      # Optional: native TLS when there is no reverse proxy. See
+      # docs/getting-started/configuration.mdx (Native TLS on the control instance).
+      # - ./certs/fullchain.pem:/app/certs/fullchain.pem:ro
+      # - ./certs/privkey.pem:/app/certs/privkey.pem:ro
+      # - ./certs/ca.pem:/app/certs/ca.pem:ro
 
     environment:
       # ENVIRONMENT VARIABLES FOR INSIDE THE CONTAINER
@@ -55,6 +60,11 @@ services:
       # Optional: mount /proc/meminfo for VM memory ballooning awareness
       # - /proc/meminfo:/host/proc/meminfo:ro
       - SENCHO_PROC_MEMINFO_PATH=${SENCHO_PROC_MEMINFO_PATH:-}
+      # Optional: native TLS. Uncomment with the cert volume mounts above.
+      # - SENCHO_PUBLIC_URL=https://192.168.1.50:1852
+      # - SENCHO_TLS_CERT_FILE=/app/certs/fullchain.pem
+      # - SENCHO_TLS_KEY_FILE=/app/certs/privkey.pem
+      # - SENCHO_TLS_CA_FILE=/app/certs/ca.pem
     
     # ⚠️ GLOBAL ENVIRONMENT VARIABLES ⚠️
     # If your compose files rely on host-level shell variables (like $PUID, $TZ)

@@ -29,6 +29,8 @@ import { BlueprintReconciler } from '../services/BlueprintReconciler';
 import { recordPlacementShift, snapshotPlacementWith } from '../services/gitops/nodePlacementProducers';
 import { projectCommittedRevisions } from '../helpers/gitopsResponse';
 import { assertSafeOutboundUrl, safeRemoteFetch, UnsafeOutboundTargetError } from '../utils/outboundTarget';
+import { isNativeTlsEnabled, loadNativeTlsMaterial, rewriteHttpUrlToHttps } from '../helpers/nativeTls';
+import { buildPilotEnrollmentCompose } from '../helpers/pilotEnrollmentCompose';
 
 const NODE_SCOPE_MESSAGE = 'API tokens cannot manage nodes.';
 const REMOTE_META_CACHE_TTL = 3 * 60 * 1000;
@@ -43,30 +45,34 @@ function normalizePilotComposeDir(value: unknown): string | null {
   return path.posix.normalize(candidate);
 }
 
-function yamlString(value: string): string {
-  return JSON.stringify(value);
-}
-
 /**
  * Pick the URL the pilot agent should dial. SENCHO_PUBLIC_URL wins when set
  * and well-formed, because the request Host header is only reachable from
  * the network the operator opened the dialog from. Pilots on a public cloud
  * cannot dial a LAN or loopback address, so an explicit public URL is the
  * only thing that lets the enrolled YAML work unmodified.
+ *
+ * When the hub itself terminates TLS, an http:// URL would open a cleartext
+ * connection to an HTTPS listener. Rewrite the scheme so enrollment matches
+ * the listener even if SENCHO_PUBLIC_URL was left on http.
  */
 function resolvePrimaryUrl(req: Request): string {
   const override = process.env.SENCHO_PUBLIC_URL?.trim();
+  let url = `${req.protocol}://${req.get('host') || 'localhost:1852'}`;
   if (override) {
     const check = isValidRemoteUrl(override);
-    if (check.valid) return override.replace(/\/$/, '');
-    console.warn(`[Enrollment] SENCHO_PUBLIC_URL is set but invalid (${check.reason}); falling back to request host.`);
+    if (check.valid) url = override.replace(/\/$/, '');
+    else console.warn(`[Enrollment] SENCHO_PUBLIC_URL is set but invalid (${check.reason}); falling back to request host.`);
   }
-  const protocol = req.protocol;
-  const host = req.get('host') || 'localhost:1852';
-  return `${protocol}://${host}`;
+  return isNativeTlsEnabled() ? rewriteHttpUrlToHttps(url) : url;
 }
 
-function mintPilotEnrollment(nodeId: number, req: Request): { token: string; expiresAt: number; composeYaml: string } {
+function mintPilotEnrollment(nodeId: number, req: Request): {
+  token: string;
+  expiresAt: number;
+  composeYaml: string;
+  caPem?: string;
+} {
   const db = DatabaseService.getInstance();
   const node = db.getNode(nodeId);
   if (!node) throw new Error('Node not found');
@@ -87,35 +93,17 @@ function mintPilotEnrollment(nodeId: number, req: Request): { token: string; exp
   db.createPilotEnrollment(nodeId, tokenHash, expiresAt);
 
   const primaryUrl = resolvePrimaryUrl(req);
+  const caPem = isNativeTlsEnabled() ? loadNativeTlsMaterial()?.caPem : undefined;
+  const composeYaml = buildPilotEnrollmentCompose({
+    primaryUrl,
+    token,
+    composeDir,
+    caPem,
+  });
 
-  // Top-level `name` plus `container_name` make the agent container's HOSTNAME
-  // equal to `sencho-agent`, which is how SelfUpdateService locates its own
-  // compose context to enable remote self-update.
-  const composeYaml = [
-    `name: sencho-agent`,
-    `services:`,
-    `  agent:`,
-    `    image: saelix/sencho:latest`,
-    `    container_name: sencho-agent`,
-    `    restart: unless-stopped`,
-    `    volumes:`,
-    `      - /var/run/docker.sock:/var/run/docker.sock`,
-    `      - sencho-agent-data:/app/data`,
-    `      - type: bind`,
-    `        source: ${yamlString(composeDir)}`,
-    `        target: ${yamlString(composeDir)}`,
-    `    environment:`,
-    `      SENCHO_MODE: pilot`,
-    `      SENCHO_PRIMARY_URL: ${yamlString(primaryUrl)}`,
-    `      SENCHO_ENROLL_TOKEN: ${yamlString(token)}`,
-    `      COMPOSE_DIR: ${yamlString(composeDir)}`,
-    ``,
-    `volumes:`,
-    `  sencho-agent-data:`,
-    ``,
-  ].join('\n');
-
-  return { token, expiresAt, composeYaml };
+  return caPem
+    ? { token, expiresAt, composeYaml, caPem }
+    : { token, expiresAt, composeYaml };
 }
 
 export const nodesRouter = Router();

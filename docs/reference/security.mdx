@@ -284,7 +284,7 @@ For copy-paste verification commands, see [Verifying Images](/operations/verifyi
   These steps are recommended for production deployments. Sencho works securely out of the box, but the following actions strengthen your security posture.
 </Note>
 
-1. **Place Sencho behind a TLS reverse proxy** (nginx, Traefik, Caddy) so that session cookies are transmitted over HTTPS only. See [Self-Hosting](/operations/self-hosting).
+1. **Serve Sencho over HTTPS**, either behind a TLS reverse proxy (nginx, Traefik, Caddy) or with [native TLS on the instance](/getting-started/configuration#native-tls-on-the-control-instance), so session cookies travel on a confidential connection. See [Self-Hosting](/operations/self-hosting).
 2. **Configure the Docker socket proxy** with the minimum API groups the Sencho features you use require, keeping mutating and build groups disabled where possible. See [Self-Hosting: Docker socket proxy](/operations/self-hosting#docker-socket-proxy).
 3. **Enable at least one SSO provider** to centralize identity management and reduce password sprawl. See [SSO & LDAP Authentication](/features/sso).
 4. **Enroll all admin accounts in 2FA** to protect against credential theft. See [Two-Factor Authentication](/features/two-factor-authentication).
