@@ -489,7 +489,12 @@ blueprintsRouter.delete('/:id', async (req: Request, res: Response): Promise<voi
 // and stack:deploy, the same permissions as the PUT-compose + deploy it bundles;
 // the node token the hub presents satisfies them.
 blueprintsRouter.post('/apply-local', async (req: Request, res: Response): Promise<void> => {
-    const body = (req.body ?? {}) as { stackName?: unknown; composeContent?: unknown; markerContent?: unknown };
+    const body = (req.body ?? {}) as {
+        stackName?: unknown;
+        composeContent?: unknown;
+        markerContent?: unknown;
+        allowGitManagedContent?: unknown;
+    };
     if (typeof body.stackName !== 'string' || !isValidStackName(body.stackName)) {
         res.status(400).json({ error: 'Invalid stack name' });
         return;
@@ -505,13 +510,25 @@ blueprintsRouter.post('/apply-local', async (req: Request, res: Response): Promi
         res.status(413).json({ error: 'compose content too large' });
         return;
     }
-    if (BlueprintService.parseMarker(body.markerContent) === null) {
+    const marker = BlueprintService.parseMarker(body.markerContent);
+    if (marker === null) {
         res.status(400).json({ error: 'Invalid blueprint marker' });
         return;
     }
+    const allowGitManaged = body.allowGitManagedContent === true
+        && typeof marker.applicationId === 'string'
+        && marker.applicationId.length > 0
+        // Hub-to-leaf proxy only. Browser sessions and opaque API tokens must
+        // not opt a git-managed Blueprint into snapshot compose writes.
+        && req.machineAuthScope === 'node_proxy';
     try {
         const outcome = await BlueprintService.getInstance().applyLocalUnderLock(
-            req.nodeId, body.stackName, body.composeContent, body.markerContent, '/api/blueprints/apply-local',
+            req.nodeId,
+            body.stackName,
+            body.composeContent,
+            body.markerContent,
+            '/api/blueprints/apply-local',
+            { allowGitManaged },
         );
         if (!outcome.ran) {
             res.status(409).json({

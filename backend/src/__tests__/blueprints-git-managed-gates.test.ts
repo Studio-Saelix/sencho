@@ -5,7 +5,8 @@
  */
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import request from 'supertest';
-import { setupTestDb, cleanupTestDb, loginAsTestAdmin } from './helpers/setupTestDb';
+import jwt from 'jsonwebtoken';
+import { setupTestDb, cleanupTestDb, loginAsTestAdmin, TEST_JWT_SECRET } from './helpers/setupTestDb';
 import { intentFingerprint, serializeApprovedBlast } from '../services/blueprintApproval';
 import { GitManagedContentError } from '../services/gitops/binding';
 import { directApplicationFixture } from './helpers/gitopsFixtures';
@@ -114,6 +115,34 @@ describe('Git-managed Blueprint fail-closed gates', () => {
     )).rejects.toBeInstanceOf(GitManagedContentError);
   });
 
+  it('skips the git-managed refuse gate when applyLocalUnderLock allows authorized content', async () => {
+    const { blueprint, nodeId } = converted();
+    const { ComposeService } = await import('../services/ComposeService');
+    const deploySpy = vi.spyOn(ComposeService.prototype, 'deployStack').mockResolvedValue({
+      recoveryId: null,
+      deployedGenerationId: null,
+      gitopsOperationId: null,
+    });
+    try {
+      await expect(BlueprintService.getInstance().applyLocalUnderLock(
+        nodeId,
+        blueprint.name,
+        'services:\n  fromgen:\n    image: alpine:3.20\n',
+        JSON.stringify({
+          blueprintId: blueprint.id,
+          revision: blueprint.revision,
+          lastApplied: Date.now(),
+          applicationId: 'app-authorized',
+        }),
+        '/api/blueprints/test/authorized-apply',
+        { allowGitManaged: true },
+      )).resolves.toEqual({ ran: true });
+      expect(deploySpy).toHaveBeenCalled();
+    } finally {
+      deploySpy.mockRestore();
+    }
+  });
+
   it('returns 409 git_managed_content when compose_content is posted to a Git-managed Blueprint', async () => {
     const { blueprint } = converted();
     const before = DatabaseService.getInstance().getBlueprint(blueprint.id)!.compose_content;
@@ -123,6 +152,69 @@ describe('Git-managed Blueprint fail-closed gates', () => {
       .send({ compose_content: 'services:\n  web:\n    image: nginx:1.28\n' });
     expectGitManaged409(res);
     expect(DatabaseService.getInstance().getBlueprint(blueprint.id)!.compose_content).toBe(before);
+  });
+
+  it('ignores allowGitManagedContent on apply-local for cookie sessions', async () => {
+    const { blueprint, nodeId, applicationId } = converted();
+    const { ComposeService } = await import('../services/ComposeService');
+    const deploySpy = vi.spyOn(ComposeService.prototype, 'deployStack').mockResolvedValue({
+      recoveryId: null,
+      deployedGenerationId: null,
+      gitopsOperationId: null,
+    });
+    try {
+      const res = await request(app)
+        .post('/api/blueprints/apply-local')
+        .set('Cookie', adminCookie)
+        .send({
+          stackName: blueprint.name,
+          composeContent: 'services:\n  fromgen:\n    image: alpine:3.20\n',
+          markerContent: JSON.stringify({
+            blueprintId: blueprint.id,
+            revision: blueprint.revision,
+            lastApplied: Date.now(),
+            applicationId,
+          }),
+          allowGitManagedContent: true,
+        });
+      expectGitManaged409(res);
+      expect(deploySpy).not.toHaveBeenCalled();
+      expect(nodeId).toBeGreaterThan(0);
+    } finally {
+      deploySpy.mockRestore();
+    }
+  });
+
+  it('honors allowGitManagedContent on apply-local for node_proxy', async () => {
+    const { blueprint, applicationId } = converted();
+    const { ComposeService } = await import('../services/ComposeService');
+    const deploySpy = vi.spyOn(ComposeService.prototype, 'deployStack').mockResolvedValue({
+      recoveryId: null,
+      deployedGenerationId: null,
+      gitopsOperationId: null,
+    });
+    const token = jwt.sign({ scope: 'node_proxy' }, TEST_JWT_SECRET, { expiresIn: '1m' });
+    try {
+      const res = await request(app)
+        .post('/api/blueprints/apply-local')
+        .set('Authorization', `Bearer ${token}`)
+        .send({
+          stackName: blueprint.name,
+          composeContent: 'services:\n  fromgen:\n    image: alpine:3.20\n',
+          markerContent: JSON.stringify({
+            blueprintId: blueprint.id,
+            revision: blueprint.revision,
+            lastApplied: Date.now(),
+            applicationId,
+          }),
+          allowGitManagedContent: true,
+        });
+      expect(res.status).toBe(200);
+      expect(res.body.deployed).toBe(true);
+      expect(deploySpy).toHaveBeenCalled();
+    } finally {
+      deploySpy.mockRestore();
+    }
   });
 
   it('projects a blocked rollout after conversion', () => {

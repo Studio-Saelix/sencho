@@ -4750,12 +4750,13 @@ export class GitSourceService {
     }
 
     /**
-     * Route an accepted generation to its target. Blueprint mode always
-     * blocks at BlueprintTargetAdapter: Git-managed content cannot deploy
-     * from the stored snapshot. Direct mode promotes the generation's own
-     * staged candidate through the shared completion pipeline: it never
-     * re-enters reconcile()/apply(), because the pending-pull validation those paths
-     * perform is about a pull, not about an already-accepted generation.
+     * Route an accepted generation to its target. Blueprint mode places from
+     * an authorized accepted generation's materialization via
+     * BlueprintTargetAdapter (never from blueprints.compose_content). Direct
+     * mode promotes the generation's own staged candidate through the shared
+     * completion pipeline: it never re-enters reconcile()/apply(), because the
+     * pending-pull validation those paths perform is about a pull, not about
+     * an already-accepted generation.
      * Instead the target is revalidated under the shared stack lock
      * immediately before promotion: the acceptance, the live application
      * row, the target candidate pointer, and a change plan recomputed from

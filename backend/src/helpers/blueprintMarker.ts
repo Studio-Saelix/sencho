@@ -13,6 +13,23 @@ export interface BlueprintMarker {
   bindingRevision?: string;
 }
 
+export function buildBlueprintMarker(input: {
+  blueprintId: number;
+  revision: number;
+  lastApplied: number;
+  applicationId?: string;
+  bindingRevision?: string;
+}): BlueprintMarker {
+  const marker: BlueprintMarker = {
+    blueprintId: input.blueprintId,
+    revision: input.revision,
+    lastApplied: input.lastApplied,
+  };
+  if (input.applicationId !== undefined) marker.applicationId = input.applicationId;
+  if (input.bindingRevision !== undefined) marker.bindingRevision = input.bindingRevision;
+  return marker;
+}
+
 export function parseBlueprintMarker(content: string): BlueprintMarker | null {
   try {
     const parsed: unknown = JSON.parse(content);

@@ -7,6 +7,11 @@ import {
 import { GitOpsStore } from './store';
 import { parseSecretCapabilityFromJson } from './sops/capability';
 import { SopsIdentityStore } from './sops/identityStore';
+import {
+  buildPreflightEvidence,
+  fingerprintPreflightEvidence,
+  isPreflightBlocked,
+} from './preflight';
 import type { BlueprintObservationStage } from './transitions';
 import type {
   ArtifactExpectedIdentity,
@@ -73,21 +78,18 @@ export function deriveGitOpsRevision(
   facts: DeriveFacts,
   futureEvidence: FutureGitOpsEvidence | null,
 ): GitOpsRevisionProjection {
-  // Future-only facets are typed here so callers share one deriver; this slice
-  // projects only persisted current evidence.
-  void futureEvidence;
   const app = facts.application;
   if (!app) return NOT_APPLICABLE_REVISION;
   const limitations: GitOpsLimitation[] = [];
   mergePersistedLimitations(app.evidence_limitations_json, limitations);
   const source = deriveSource(app, limitations);
   const artifact = deriveArtifact(app, app.accepted_generation_id, app.artifact_set_id, app.latest_artifact_set_id, limitations);
-  const placement = derivePlacement(app);
+  const placement = derivePlacement(app, futureEvidence);
   const targets = facts.targets
     .slice()
     .sort((a, b) => a.node_id - b.node_id)
     .map((target) => deriveTarget(app, target, facts.healthDisabled, limitations));
-  const rollout = deriveRollout(app, targets);
+  const rollout = deriveRollout(app, targets, artifact, facts.healthDisabled, futureEvidence);
   const availableActions = deriveActions(app, source, placement, targets);
   return {
     schemaVersion: 1,
@@ -461,16 +463,130 @@ function toExpected(
   }
 }
 
-function derivePlacement(app: GitOpsApplicationRow): PlacementFacet {
+function derivePlacement(
+  app: GitOpsApplicationRow,
+  futureEvidence: FutureGitOpsEvidence | null,
+): PlacementFacet {
+  if (futureEvidence?.placement) {
+    const ev = futureEvidence.placement;
+    if (ev.kind === 'source_acceptance_pending') {
+      return {
+        status: 'source_acceptance_pending',
+        sourceAcceptanceRef: app.source_acceptance_ref,
+        candidateGenerationId: ev.candidateGenerationId,
+      };
+    }
+    if (ev.kind === 'authorization_pending') {
+      return {
+        status: 'rollout_authorization_pending',
+        rolloutAuthorizationRef: null,
+        binding: ev.binding,
+      };
+    }
+    if (ev.kind === 'authorization_stale') {
+      return {
+        status: 'rollout_authorization_stale',
+        rolloutAuthorizationRef: ev.rolloutAuthorizationRef,
+        bound: ev.bound,
+      };
+    }
+    if (ev.kind === 'preflight_blocked') {
+      return {
+        status: 'preflight_blocked',
+        reason: ev.reason,
+        binding: ev.binding,
+      };
+    }
+  }
+
   if (app.target_mode === 'direct') return { status: 'unbound_direct' };
   if (!app.intent_revision_id) return { status: 'unknown', limitation: 'missing_intent' };
   if (app.legacy_combined_approval_ref && !app.placement_approval_ref) {
     return { status: 'placement_review_pending' };
   }
+
+  const store = GitOpsStore.getInstance();
+  const candidateGenerationId = app.candidate_generation_id
+    ?? (app.rollout_candidate_id
+      ? store.getRolloutCandidate(app.rollout_candidate_id)?.accepted_generation_id
+      : null);
+  if (candidateGenerationId && !app.source_acceptance_ref) {
+    return {
+      status: 'source_acceptance_pending',
+      sourceAcceptanceRef: null,
+      candidateGenerationId,
+    };
+  }
+
+  const ingredients = store.authorizationIngredients(app);
+  if (ingredients) {
+    const preflight = buildPreflightEvidence();
+    const fingerprint = fingerprintPreflightEvidence(preflight);
+    const binding = { ...ingredients, preflightFingerprint: fingerprint };
+
+    if (app.rollout_authorization_ref) {
+      const live = store.currentAuthorizationBinding(app);
+      if (!live) {
+        return {
+          status: 'rollout_authorization_stale',
+          rolloutAuthorizationRef: app.rollout_authorization_ref,
+          bound: binding,
+        };
+      }
+      const resolved = store.resolveApprovalRef(app.rollout_authorization_ref, {
+        kind: 'rollout_authorization',
+        applicationId: app.id,
+        binding: live,
+      });
+      if (!resolved) {
+        return {
+          status: 'rollout_authorization_stale',
+          rolloutAuthorizationRef: app.rollout_authorization_ref,
+          bound: live,
+        };
+      }
+    } else if (isPreflightBlocked(preflight)) {
+      return {
+        status: 'preflight_blocked',
+        reason: 'One or more preflight slots are blocked',
+        binding,
+      };
+    } else {
+      return {
+        status: 'rollout_authorization_pending',
+        rolloutAuthorizationRef: null,
+        binding,
+      };
+    }
+  }
+
   return { status: 'blueprint_bound', completion: 'unknown' };
 }
 
-function deriveRollout(app: GitOpsApplicationRow, targets: GitOpsTargetProjection[]): RolloutFacet {
+function deriveRollout(
+  app: GitOpsApplicationRow,
+  targets: GitOpsTargetProjection[],
+  artifact: ArtifactFacet,
+  healthDisabled: boolean,
+  futureEvidence: FutureGitOpsEvidence | null,
+): RolloutFacet {
+  if (futureEvidence?.rollout) {
+    const ev = futureEvidence.rollout;
+    const statusMap = {
+      queued: 'rollout_queued',
+      canary: 'canary_in_progress',
+      batch: 'batch_in_progress',
+      superseded: 'rollout_superseded',
+      fully_deployed_health_pending: 'fully_deployed_health_pending',
+      configuration_converged_artifact_qualified: 'configuration_converged_artifact_qualified',
+      exactly_converged_healthy: 'exactly_converged_healthy',
+    } as const;
+    return {
+      status: statusMap[ev.kind],
+      rolloutGenerationId: ev.rolloutGenerationId,
+    };
+  }
+
   if (app.recovery_phase === 'restoring' || app.recovery_phase === 'compensating') {
     return { status: 'rollback_in_progress', recoveryRef: app.recovery_ref ?? '', recoveryGenerationId: null };
   }
@@ -489,7 +605,57 @@ function deriveRollout(app: GitOpsApplicationRow, targets: GitOpsTargetProjectio
   if (app.pause_at) return { status: 'rollout_paused', pauseAt: app.pause_at, pauseReason: app.pause_reason };
   if (app.partial_json) return { status: 'partially_rolled_out', partial: app.partial_json };
   if (app.target_mode === 'direct') return { status: 'not_applicable' };
-  if (app.rollout_candidate_id) return { status: 'rollout_not_executable', rolloutCandidateId: app.rollout_candidate_id };
+
+  const store = GitOpsStore.getInstance();
+  if (app.rollout_generation_id) {
+    const generation = store.getRolloutGeneration(app.rollout_generation_id);
+    if (generation?.superseded_at) {
+      return { status: 'rollout_superseded', rolloutGenerationId: app.rollout_generation_id };
+    }
+  }
+
+  if (app.rollout_authorization_ref && app.rollout_generation_id) {
+    const binding = store.currentAuthorizationBinding(app);
+    if (binding) {
+      const rolloutGenerationId = app.rollout_generation_id;
+      const required = binding.requiredNodeIds;
+      const byNode = new Map(targets.map((target) => [target.nodeId, target]));
+
+      const liveTarget = (nodeId: number): GitOpsTargetProjection | undefined => {
+        const target = byNode.get(nodeId);
+        return target && !target.tombstoned ? target : undefined;
+      };
+
+      const allAcked = required.every((nodeId) => {
+        const target = liveTarget(nodeId);
+        return !!target
+          && target.appliedGenerationId === binding.acceptedGenerationId
+          && target.intentRevisionId === binding.intentRevisionId
+          && target.approvals.rolloutAuthorizationRef === app.rollout_authorization_ref;
+      });
+      if (!allAcked) {
+        return { status: 'rollout_queued', rolloutGenerationId };
+      }
+
+      const allHealthy = required.every((nodeId) => {
+        const target = liveTarget(nodeId);
+        if (!target) return false;
+        return healthDisabled || target.healthyGenerationId === binding.acceptedGenerationId;
+      });
+      if (!allHealthy) {
+        return { status: 'fully_deployed_health_pending', rolloutGenerationId };
+      }
+
+      if (artifact.status !== 'artifact_exact') {
+        return { status: 'configuration_converged_artifact_qualified', rolloutGenerationId };
+      }
+      return { status: 'exactly_converged_healthy', rolloutGenerationId };
+    }
+  }
+
+  if (app.rollout_candidate_id) {
+    return { status: 'rollout_not_executable', rolloutCandidateId: app.rollout_candidate_id };
+  }
   return { status: 'not_applicable' };
 }
 

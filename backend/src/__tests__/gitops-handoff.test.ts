@@ -129,7 +129,7 @@ const _structurallyContentOnly: AssertNoTargetModeFields<AcceptedGeneration> = t
 void _structurallyContentOnly;
 
 describe('BlueprintTargetAdapter', () => {
-  it('always returns a durable blocked result, never inspecting selectors or placement', async () => {
+  it('blocks when authorization ingredients are incomplete', async () => {
     const adapter = new BlueprintTargetAdapter();
     const gen = buildAcceptedGeneration(baseRow());
     const result = await adapter.dispatch(gen, { targetMode: 'blueprint', nodeId: null, bindingRevision: null });

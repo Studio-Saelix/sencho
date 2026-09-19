@@ -550,8 +550,9 @@ export class GitOpsTransitions {
   }
 
   applied(args: AppliedArgs): TransitionResult {
-    return this.mutateApp(args.applicationId, args.envelope, 'applied', 'committed', (app) => {
+    return this.mutateApp(args.applicationId, args.envelope, 'applied', 'committed', (app, extras) => {
       const targets = this.acceptanceTargets(app, args);
+      this.invalidateAuthorizationOnSourceChange(app, args.envelope, extras);
       this.applySourceAcceptanceMutation(app, args);
       for (const target of targets) {
         if (app.target_mode === 'direct') {
@@ -575,13 +576,14 @@ export class GitOpsTransitions {
     // Application-row pointer move only. Generation content is written
     // exclusively by insertGeneration; this transition must never UPDATE a
     // generation row.
-    return this.mutateApp(args.applicationId, args.envelope, 'source_accepted', 'committed', (app) => {
+    return this.mutateApp(args.applicationId, args.envelope, 'source_accepted', 'committed', (app, extras) => {
       // Unlike applied() (preserved byte-identical, predates suspension),
       // this new entry point is the one a suspended source must refuse: no
       // new acceptance while suspended, so the check lives here rather than
       // in the shared requireAcceptableCandidate guard.
       if (app.suspended_at) throw new GitOpsTransitionError('source is suspended');
       this.requireAcceptableCandidate(app, args);
+      this.invalidateAuthorizationOnSourceChange(app, args.envelope, extras);
       this.applySourceAcceptanceMutation(app, args);
     }, {
       generationId: args.generationId,
@@ -1684,6 +1686,148 @@ export class GitOpsTransitions {
   }
 
   /**
+   * Mint rollout authorization for a Git-managed Blueprint and open the
+   * generation that may execute.
+   *
+   * Requires live intent, candidate, placement, accepted generation, artifact
+   * set, and source acceptance. Exact artifact qualification is not required
+   * to authorize (config deploy may proceed under a qualified claim); exact
+   * convergence is derived later only when qualification is exact.
+   */
+  rolloutAuthorized(args: {
+    applicationId: string;
+    approvalId: string;
+    rolloutGenerationId: string;
+    preflightFingerprint: string;
+    preflightEvidenceJson: string;
+    actor: string | null;
+    envelope: EventEnvelope;
+    strategyJson?: string;
+  }): TransitionResult {
+    return this.mutateApp(
+      args.applicationId,
+      args.envelope,
+      'rollout_generation_opened',
+      'committed',
+      (app, extras) => {
+        if (app.lifecycle_status !== 'active') throw new GitOpsTransitionError('application is not live');
+        if (app.target_mode !== 'blueprint') {
+          throw new GitOpsTransitionError('rollout authorization is only for Blueprint target mode');
+        }
+        if (app.rollout_authorization_ref) {
+          const live = this.store().currentAuthorizationBinding(app);
+          if (
+            live
+            && this.store().resolveApprovalRef(app.rollout_authorization_ref, {
+              kind: 'rollout_authorization',
+              applicationId: app.id,
+              binding: live,
+            })
+          ) {
+            throw new GitOpsTransitionError('rollout authorization already live');
+          }
+        }
+        const ingredients = this.store().authorizationIngredients(app);
+        if (!ingredients) {
+          throw new GitOpsTransitionError('authorization binding is incomplete');
+        }
+        if (!this.store().getArtifactSet(ingredients.artifactSetId)) {
+          throw new GitOpsTransitionError('artifact set not found');
+        }
+        // Any persisted artifact row may authorize. Exact convergence remains a
+        // derived claim that requires qualification === 'exact'.
+        this.store().bindRolloutCandidateSource(
+          ingredients.rolloutCandidateId,
+          ingredients.acceptedGenerationId,
+          ingredients.artifactSetId,
+        );
+        const requiredTargetsJson = encodeGitOpsRequiredTargetsJson(ingredients.requiredNodeIds);
+
+        this.store().insertApproval({
+          id: args.approvalId,
+          kind: 'rollout_authorization',
+          authority: 'configured_policy',
+          authoritative: 1,
+          application_id: args.applicationId,
+          generation_id: ingredients.acceptedGenerationId,
+          intent_revision_id: ingredients.intentRevisionId,
+          artifact_set_id: ingredients.artifactSetId,
+          rollout_candidate_id: ingredients.rolloutCandidateId,
+          rollout_generation_id: args.rolloutGenerationId,
+          source_acceptance_ref: ingredients.sourceAcceptanceRef,
+          placement_approval_ref: ingredients.placementApprovalRef,
+          required_targets_json: requiredTargetsJson,
+          preflight_fingerprint: args.preflightFingerprint,
+          fingerprint: null,
+          blast_json: null,
+          policy_provenance_json: null,
+          actor: args.actor,
+          created_at: args.envelope.at,
+        });
+
+        const previousGenerationId = app.rollout_generation_id;
+        if (previousGenerationId) {
+          this.recordRolloutGenerationSuperseded(
+            app,
+            previousGenerationId,
+            args.rolloutGenerationId,
+            args.envelope,
+            extras,
+          );
+        }
+
+        const generation: GitOpsRolloutGenerationRow = {
+          id: args.rolloutGenerationId,
+          application_id: args.applicationId,
+          intent_revision_id: ingredients.intentRevisionId,
+          rollout_candidate_id: ingredients.rolloutCandidateId,
+          accepted_generation_id: ingredients.acceptedGenerationId,
+          artifact_set_id: ingredients.artifactSetId,
+          placement_approval_ref: ingredients.placementApprovalRef,
+          source_acceptance_ref: ingredients.sourceAcceptanceRef,
+          rollout_authorization_ref: args.approvalId,
+          required_targets_json: requiredTargetsJson,
+          preflight_fingerprint: args.preflightFingerprint,
+          preflight_evidence_json: args.preflightEvidenceJson,
+          rollout_strategy_json: args.strategyJson ?? '{}',
+          provenance: 'rollout_authorization',
+          supersedes_generation_id: previousGenerationId,
+          superseded_at: null,
+          operation_id: args.envelope.operationId,
+          actor: args.actor,
+          trigger: args.envelope.trigger,
+          created_at: args.envelope.at,
+        };
+        this.store().insertRolloutGeneration(generation);
+
+        const previousAuthorizationRef = app.rollout_authorization_ref;
+        app.rollout_authorization_ref = args.approvalId;
+        app.preflight_fingerprint = args.preflightFingerprint;
+        app.rollout_generation_id = args.rolloutGenerationId;
+        this.clearGitManagedRolloutLimitation(app);
+
+        const authorized = this.history(app, args.envelope, {
+          stage: 'rollout_authorized',
+          outcome: 'committed',
+          rolloutAuthorizationRef: args.approvalId,
+          rolloutGenerationId: args.rolloutGenerationId,
+          generationId: ingredients.acceptedGenerationId,
+          artifactSetId: ingredients.artifactSetId,
+          sourceAcceptanceRef: ingredients.sourceAcceptanceRef,
+          placementApprovalRef: ingredients.placementApprovalRef,
+          before: { rolloutAuthorizationRef: previousAuthorizationRef },
+          after: {
+            rolloutAuthorizationRef: args.approvalId,
+            rolloutGenerationId: args.rolloutGenerationId,
+            preflightFingerprint: args.preflightFingerprint,
+          },
+        });
+        if (authorized) extras.historyIds.push(authorized);
+      },
+    );
+  }
+
+  /**
    * A Blueprint deploy was handed to one node.
    *
    * The intent and candidate it was launched for are recorded on the target, so
@@ -1784,6 +1928,18 @@ export class GitOpsTransitions {
         target.rollout_candidate_id = request.rolloutCandidateId;
         // Display only. The acknowledged identity is the intent, never this.
         target.legacy_applied_revision = args.legacyAppliedRevision;
+        // Bind the live authorized generation onto the target. Transport ack
+        // does not claim healthy, exact-artifact, or converged; those stay
+        // derived from later evidence.
+        const app = this.requireApp(args.applicationId);
+        target.desired_generation_id = app.accepted_generation_id;
+        target.applied_generation_id = app.accepted_generation_id;
+        target.expected_artifact_set_id = app.artifact_set_id;
+        target.latest_artifact_set_id = app.artifact_set_id;
+        target.source_acceptance_ref = app.source_acceptance_ref;
+        target.placement_approval_ref = app.placement_approval_ref;
+        target.rollout_authorization_ref = app.rollout_authorization_ref;
+        target.rollout_generation_id = app.rollout_generation_id;
         if (target.failure_stage === 'blueprint_deploy') {
           target.failure_stage = null;
           target.failure_class = null;
@@ -2580,7 +2736,7 @@ export class GitOpsTransitions {
     artifactSetId: string;
     envelope: EventEnvelope;
   }): TransitionResult {
-    return this.mutateApp(args.applicationId, args.envelope, 'artifact_expectation_accepted', 'committed', (app) => {
+    return this.mutateApp(args.applicationId, args.envelope, 'artifact_expectation_accepted', 'committed', (app, extras) => {
       const artifact = this.store().getArtifactSet(args.artifactSetId);
       if (!artifact || artifact.generation_id !== args.generationId) {
         throw new GitOpsTransitionError('artifact set is not owned by the generation');
@@ -2590,6 +2746,9 @@ export class GitOpsTransitions {
       }
       if (app.accepted_generation_id !== args.generationId) {
         throw new GitOpsTransitionError('application accepted generation does not match');
+      }
+      if (app.artifact_set_id !== args.artifactSetId) {
+        this.invalidateAuthorizationOnSourceChange(app, args.envelope, extras);
       }
       app.artifact_set_id = args.artifactSetId;
       this.forEachLiveDirectTarget(app, (target) => {
@@ -2773,9 +2932,39 @@ export class GitOpsTransitions {
   ): void {
     app.placement_approval_ref = null;
     app.rollout_authorization_ref = null;
+    app.preflight_fingerprint = null;
     if (!app.rollout_generation_id) return;
     this.recordRolloutGenerationSuperseded(app, app.rollout_generation_id, null, envelope, extras);
     app.rollout_generation_id = null;
+  }
+
+  /**
+   * Source acceptance for a Blueprint keeps placement, but a new generation
+   * or artifact identity cannot reuse the prior rollout authorization.
+   */
+  private invalidateAuthorizationOnSourceChange(
+    app: GitOpsApplicationRow,
+    envelope: EventEnvelope,
+    extras: { historyIds: string[] },
+  ): void {
+    if (app.target_mode !== 'blueprint') return;
+    if (!app.rollout_authorization_ref && !app.preflight_fingerprint) return;
+    app.rollout_authorization_ref = null;
+    app.preflight_fingerprint = null;
+    if (!app.rollout_generation_id) return;
+    const live = this.store().getRolloutGeneration(app.rollout_generation_id);
+    if (!live || live.provenance !== 'rollout_authorization') return;
+    this.recordRolloutGenerationSuperseded(app, app.rollout_generation_id, null, envelope, extras);
+    app.rollout_generation_id = null;
+  }
+
+  /** Drop the fail-closed limitation that blocked Git-managed rollout before authorization. */
+  private clearGitManagedRolloutLimitation(app: GitOpsApplicationRow): void {
+    app.evidence_limitations_json = encodeGitOpsEvidenceLimitations(
+      decodeGitOpsEvidenceLimitations(app.evidence_limitations_json),
+      'git_managed_rollout_not_enabled',
+      null,
+    );
   }
 
   /** Mark the prior live generation superseded and append history. */
@@ -2928,6 +3117,7 @@ export class GitOpsTransitions {
       artifactSetId?: string | null;
       sourceAcceptanceRef?: string | null;
       placementApprovalRef?: string | null;
+      rolloutAuthorizationRef?: string | null;
       rolloutGenerationId?: string | null;
       commitSha?: string | null;
     },
@@ -2948,6 +3138,7 @@ export class GitOpsTransitions {
       artifactSetId: fields.artifactSetId,
       sourceAcceptanceRef: fields.sourceAcceptanceRef,
       placementApprovalRef: fields.placementApprovalRef,
+      rolloutAuthorizationRef: fields.rolloutAuthorizationRef,
       rolloutGenerationId: fields.rolloutGenerationId,
       commitSha: fields.commitSha,
       at: envelope.at,

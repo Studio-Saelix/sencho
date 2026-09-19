@@ -141,12 +141,149 @@ export class BlueprintService {
         this.inflight.delete(this.lockKey(blueprintId, nodeId));
     }
 
+    /** Hold the per-blueprint/node deploy lock before recording deploy-started. */
+    tryAcquireAuthorizedDeployLock(blueprintId: number, nodeId: number): boolean {
+        return this.acquireLock(blueprintId, nodeId);
+    }
+
+    releaseAuthorizedDeployLock(blueprintId: number, nodeId: number): void {
+        this.releaseLock(blueprintId, nodeId);
+    }
+
     private buildMarker(blueprint: Blueprint): BlueprintMarker {
         return {
             blueprintId: blueprint.id,
             revision: blueprint.revision,
             lastApplied: Date.now(),
         };
+    }
+
+    /**
+     * Deploy already-authorized materialized compose bytes to one node.
+     *
+     * Used by Git-managed Blueprint rollout after rollout_authorization resolves.
+     * Never reads blueprints.compose_content; the caller supplies the generation
+     * materialization. Bypasses the Inline git-managed refuse gate because the
+     * content is not the stored snapshot.
+     *
+     * Pass `lockHeld: true` when the caller already acquired the lock (so
+     * deploy-started is not recorded before the lock is held). The caller
+     * releases in that case; otherwise this method acquires and releases.
+     */
+    async deployAuthorizedMaterialization(args: {
+        blueprint: Blueprint;
+        node: Node;
+        composeContent: string;
+        marker: BlueprintMarker;
+        auditPath: string;
+        lockHeld?: boolean;
+    }): Promise<DeployOutcome> {
+        const manageLock = !args.lockHeld;
+        if (manageLock && !this.acquireLock(args.blueprint.id, args.node.id)) {
+            return { status: 'pending' };
+        }
+        try {
+            this.setStatus(args.blueprint.id, args.node.id, 'deploying', 'deploy_start');
+            if (await this.hasNameConflict(args.blueprint.name, args.node, args.blueprint.id)) {
+                this.setStatus(args.blueprint.id, args.node.id, 'name_conflict', 'name_conflict', {
+                    last_error: `A stack named "${args.blueprint.name}" already exists on this node and is not managed by Sencho.`,
+                });
+                return { status: 'name_conflict', error: 'name_conflict' };
+            }
+            const markerContent = JSON.stringify(args.marker, null, 2);
+            if (args.node.type === 'local') {
+                const outcome = await this.applyLocalUnderLock(
+                    args.node.id,
+                    args.blueprint.name,
+                    args.composeContent,
+                    markerContent,
+                    args.auditPath,
+                    { allowGitManaged: true },
+                );
+                if (!outcome.ran) {
+                    throw new Error(stackOpSkipMessage(args.blueprint.name, outcome.existingAction));
+                }
+            } else {
+                await this.deployRemoteMaterialization(args.blueprint, args.node, args.composeContent, markerContent);
+            }
+            this.setStatus(args.blueprint.id, args.node.id, 'active', 'deploy_ack', {
+                applied_revision: args.blueprint.revision,
+                last_deployed_at: Date.now(),
+                last_drift_at: null,
+                drift_summary: null,
+                last_error: null,
+            });
+            return { status: 'active' };
+        } catch (err) {
+            if (err instanceof BlueprintNameConflictError) {
+                this.setStatus(args.blueprint.id, args.node.id, 'name_conflict', 'name_conflict', { last_error: err.message });
+                return { status: 'name_conflict', error: 'name_conflict' };
+            }
+            const refusal = registryDeliveryRefusal(err);
+            const message = refusal
+                ? appendRegistryDeliveryCode(BlueprintService.formatError(err), refusal.code)
+                : BlueprintService.formatError(err);
+            this.setStatus(args.blueprint.id, args.node.id, 'failed', 'deploy_fail', { last_error: message });
+            return { status: 'failed', error: message, code: refusal?.code };
+        } finally {
+            if (manageLock) {
+                this.releaseLock(args.blueprint.id, args.node.id);
+            }
+        }
+    }
+
+    private async deployRemoteMaterialization(
+        blueprint: Blueprint,
+        node: Node,
+        composeContent: string,
+        markerContent: string,
+    ): Promise<void> {
+        const target = NodeRegistry.getInstance().getProxyTarget(node.id);
+        if (!target) throw new Error(`Remote node "${node.name}" has no proxy target configured`);
+        const baseUrl = target.apiUrl.replace(/\/$/, '');
+        const headers = this.remoteHeaders(target.apiToken);
+        const applyBody = {
+            stackName: blueprint.name,
+            composeContent,
+            markerContent,
+            allowGitManagedContent: true,
+        };
+        const augmented = await prepareOutboundRegistryDeliveryBody({
+            method: 'POST',
+            apiPath: '/api/blueprints/apply-local',
+            nodeId: node.id,
+            body: applyBody,
+        });
+        if (!augmented.ok) {
+            throwRegistryDeliveryRefusal(augmented);
+        }
+        const res = await axios.post(
+            `${baseUrl}/api/blueprints/apply-local`,
+            augmented.body,
+            {
+                ...safeAxiosTransport(target.trustedLoopback),
+                headers,
+                timeout: REMOTE_HTTP_TIMEOUT_MS,
+                validateStatus: () => true,
+            },
+        );
+        if (res.status === 404) {
+            throw new BlueprintRemoteUpgradeRequiredError(
+                `Remote node "${node.name}" does not support atomic blueprint apply (/api/blueprints/apply-local). Upgrade that Sencho instance, then retry.`,
+            );
+        }
+        if (res.status === 409) {
+            if (BlueprintService.extractApiCode(res.data) === 'name_conflict') {
+                throw new BlueprintNameConflictError(
+                    BlueprintService.extractApiError(res.data)
+                    || `A stack named "${blueprint.name}" already exists on this node and is not managed by this blueprint.`,
+                );
+            }
+            throw new Error(`blueprint apply skipped: ${BlueprintService.extractApiError(res.data) || 'another operation is already in progress'}`);
+        }
+        if (res.status >= 400) {
+            throw new Error(`blueprint apply: HTTP ${res.status} ${BlueprintService.extractApiError(res.data)}`);
+        }
     }
 
     /**
@@ -542,12 +679,15 @@ export class BlueprintService {
         composeContent: string,
         markerContent: string,
         auditPath: string,
+        options: { allowGitManaged?: boolean } = {},
     ): Promise<{ ran: true } | { ran: false; existingAction: StackOpAction }> {
         const expected = parseBlueprintMarker(markerContent);
         if (!expected) {
             throw new Error('Invalid blueprint marker');
         }
-        throwIfGitManagedDeploy(DatabaseService.getInstance().getBlueprint(expected.blueprintId));
+        if (!options.allowGitManaged) {
+            throwIfGitManagedDeploy(DatabaseService.getInstance().getBlueprint(expected.blueprintId));
+        }
         const fs = FileSystemService.getInstance(nodeId);
         const lock = await StackOpLockService.getInstance().runExclusive(
             nodeId, stackName, 'deploy', 'system',
