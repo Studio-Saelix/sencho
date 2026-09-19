@@ -7,7 +7,7 @@
  * the per-test `request` fixture after its own login, or `page.request`
  * (which shares the browser context's auth cookie).
  */
-import type { APIRequestContext } from '@playwright/test';
+import type { APIRequestContext, APIResponse } from '@playwright/test';
 import { request as pwRequest } from '@playwright/test';
 import { TEST_USERNAME, TEST_PASSWORD } from './helpers';
 
@@ -59,6 +59,16 @@ export async function currentUserId(request: APIRequestContext): Promise<number>
   return userId;
 }
 
+/** Per-minute limiter: wait ~5s and retry up to 4 times (~20s worst case). Non-429 responses return as-is. */
+async function retryOn429(send: () => Promise<APIResponse>): Promise<APIResponse> {
+  let res = await send();
+  for (let attempt = 0; !res.ok() && res.status() === 429 && attempt < 4; attempt += 1) {
+    await new Promise((r) => setTimeout(r, 5_000));
+    res = await send();
+  }
+  return res;
+}
+
 /**
  * Create (or reuse) a dedicated suite account, so the suite's preference rows
  * are isolated from the shared admin account and from other suites. Returns
@@ -80,9 +90,9 @@ export async function ensureE2EUser(
     const found = users.find((u) => u.username === username);
     if (found) return found.id;
   }
-  const create = await request.post('/api/users', {
+  const create = await retryOn429(() => request.post('/api/users', {
     data: { username, password, role },
-  });
+  }));
   if (!create.ok()) throw new Error(`create ${username} failed with ${create.status()}`);
   const body = (await create.json()) as { id: number };
   return body.id;
@@ -97,16 +107,9 @@ export async function deleteE2EUser(request: APIRequestContext, userId: number):
 export async function getPreferences(request: APIRequestContext, userId: number): Promise<{
   preferences: Record<string, PreferenceEnvelope | null>;
 }> {
-  // The suite user's GET shares the global per-minute API limiter with every
-  // other request from the same account; a burst of test traffic in the same
-  // window can 429, so retry (up to ~20s worst case) before failing the
-  // suite. Non-429 failures surface immediately.
-  let res = await request.get('/api/user-preferences', { headers: prefHeaders(userId) });
-  for (let attempt = 0; !res.ok() && attempt < 4; attempt += 1) {
-    if (res.status() !== 429) throw new Error(`GET preferences failed with ${res.status()}`);
-    await new Promise((r) => setTimeout(r, 5_000));
-    res = await request.get('/api/user-preferences', { headers: prefHeaders(userId) });
-  }
+  const res = await retryOn429(() =>
+    request.get('/api/user-preferences', { headers: prefHeaders(userId) }),
+  );
   if (!res.ok()) throw new Error(`GET preferences failed with ${res.status()}`);
   return (await res.json()) as { preferences: Record<string, PreferenceEnvelope | null> };
 }
@@ -115,7 +118,8 @@ export async function getPreferences(request: APIRequestContext, userId: number)
  * Write a full domain document as a known baseline. The row's current revision
  * is read first, so the conditional PUT always targets it; a 409 is retried
  * because a concurrent boot migration can move the revision between the read
- * and the write.
+ * and the write. A 429 is retried in place so a hot limiter does not burn
+ * the 409 attempts.
  */
 export async function putDomain(
   request: APIRequestContext,
@@ -126,12 +130,13 @@ export async function putDomain(
   for (let attempt = 0; attempt < 3; attempt += 1) {
     const rows = await getPreferences(request, userId);
     const row = rows.preferences[domain];
-    const res = await request.put(`/api/user-preferences/${domain}`, {
+    const data = row
+      ? { expectedRevision: row.revision, ...doc }
+      : { absent: true, ...doc };
+    const res = await retryOn429(() => request.put(`/api/user-preferences/${domain}`, {
       headers: prefHeaders(userId),
-      data: row
-        ? { expectedRevision: row.revision, ...doc }
-        : { absent: true, ...doc },
-    });
+      data,
+    }));
     if (res.ok()) return (await res.json()) as PutResponseEnvelope;
     if (res.status() !== 409) throw new Error(`PUT ${domain} failed with ${res.status()}`);
   }
