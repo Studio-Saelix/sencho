@@ -86,7 +86,7 @@ export function digestPinsOverlayYaml(pins: DigestPinsMap): string {
 }
 
 /** Service names declared in compose YAML, or null when the document cannot be parsed. */
-function composeServiceNames(composeContent: string): string[] | null {
+export function composeServiceNames(composeContent: string): string[] | null {
   try {
     const parsed: unknown = parseYaml(composeContent);
     if (!isRecord(parsed) || !isRecord(parsed.services)) return null;
@@ -97,10 +97,22 @@ function composeServiceNames(composeContent: string): string[] | null {
   }
 }
 
-/** True when every pin key names a service in the submitted compose content. */
-export function digestPinsMatchComposeServices(pins: DigestPinsMap, composeContent: string): boolean {
+/**
+ * True when every pin key names a service in the deploy-time composed model:
+ * submitted compose services plus any additional names (typically from the leaf's
+ * auto-discovered compose.override.yml). Pins are derived from the rendered model,
+ * so the guard must accept the same set.
+ */
+export function digestPinsMatchComposeServices(
+  pins: DigestPinsMap,
+  composeContent: string,
+  additionalServiceNames: readonly string[] = [],
+): boolean {
   const names = composeServiceNames(composeContent);
   if (!names) return false;
   const allowed = new Set(names);
+  for (const name of additionalServiceNames) {
+    if (name.length > 0) allowed.add(name);
+  }
   return Object.keys(pins).every((key) => allowed.has(key));
 }

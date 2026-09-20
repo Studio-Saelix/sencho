@@ -1,4 +1,6 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from 'vitest';
+import fs from 'fs';
+import path from 'path';
 import request from 'supertest';
 import { setupTestDb, cleanupTestDb, loginAsTestAdmin } from './helpers/setupTestDb';
 import { MAX_BLUEPRINT_COMPOSE_BYTES } from '../routes/blueprints';
@@ -143,7 +145,7 @@ describe('POST /api/blueprints/apply-local (node-to-node atomic apply)', () => {
         expect(res.body.error).toMatch(/digestPins/i);
     });
 
-    it('rejects digestPins keys that are not services in composeContent', async () => {
+    it('rejects digestPins keys that match no service in compose or override', async () => {
         const res = await request(app)
             .post('/api/blueprints/apply-local')
             .set('Cookie', adminCookie)
@@ -155,6 +157,51 @@ describe('POST /api/blueprints/apply-local (node-to-node atomic apply)', () => {
             });
         expect(res.status).toBe(400);
         expect(res.body.error).toMatch(/must match services/i);
+    });
+
+    it('accepts digestPins for services declared only in the leaf compose override', async () => {
+        const stackName = 'apply-local-override-pins';
+        const stackDir = path.join(process.env.COMPOSE_DIR!, stackName);
+        fs.mkdirSync(stackDir, { recursive: true });
+        // getOverrideFilename only needs the override file on disk.
+        fs.writeFileSync(
+            path.join(stackDir, 'compose.override.yml'),
+            'services:\n  sidecar:\n    image: busybox\n',
+        );
+
+        const { BlueprintService } = await import('../services/BlueprintService');
+        const applySpy = vi.spyOn(BlueprintService.getInstance(), 'applyLocalUnderLock')
+            .mockResolvedValue({ ran: true });
+
+        const digest = `sha256:${'a'.repeat(64)}`;
+        const digestPins = {
+            app: `nginx@${digest}`,
+            sidecar: `busybox@${digest}`,
+        };
+        try {
+            const res = await request(app)
+                .post('/api/blueprints/apply-local')
+                .set('Cookie', adminCookie)
+                .send({
+                    stackName,
+                    composeContent: 'services:\n  app:\n    image: nginx\n',
+                    markerContent: JSON.stringify({ blueprintId: 1, revision: 1, lastApplied: 123 }),
+                    digestPins,
+                });
+
+            expect(res.status).toBe(200);
+            expect(applySpy).toHaveBeenCalledWith(
+                expect.any(Number),
+                stackName,
+                expect.any(String),
+                expect.any(String),
+                '/api/blueprints/apply-local',
+                expect.objectContaining({ digestPins }),
+            );
+        } finally {
+            applySpy.mockRestore();
+            fs.rmSync(stackDir, { recursive: true, force: true });
+        }
     });
 });
 
