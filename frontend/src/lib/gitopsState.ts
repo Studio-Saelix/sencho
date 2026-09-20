@@ -301,7 +301,7 @@ export const PLACEMENT_STATE: Record<GitOpsPlacementStatus, GitOpsStateMeta> = {
   preflight_blocked: {
     label: 'registry preflight blocked',
     tone: 'destructive',
-    line: 'Registry readiness blocked.',
+    line: 'Registry readiness is blocked, or has not been evaluated yet.',
     icon: Ban,
   },
   blueprint_bound: {

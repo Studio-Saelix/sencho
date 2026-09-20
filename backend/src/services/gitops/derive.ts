@@ -12,6 +12,7 @@ import {
   decodePreflightEvidenceJson,
   fingerprintPreflightEvidence,
   isPreflightBlocked,
+  REGISTRY_PREFLIGHT_UNEVALUATED_REASON,
   registryPreflightBlockReason,
 } from './preflight';
 import type { BlueprintObservationStage } from './transitions';
@@ -609,13 +610,10 @@ function derivePlacement(
     };
   }
 
-  // 7. No stored evidence, no live auth: fail closed.
+  // 7. No stored evidence, no live auth: blocked with unevaluated reason.
   return {
     status: 'preflight_blocked',
-    reason: registryPreflightBlockReason(buildPreflightEvidence({
-      artifactSetId: app.artifact_set_id,
-      targets: [],
-    })),
+    reason: REGISTRY_PREFLIGHT_UNEVALUATED_REASON,
     binding,
   };
 }

@@ -552,6 +552,7 @@ export async function evaluateRegistryReadiness(
     }
     const hostClass = await classifyHostsFromRefs(refsByHost, deps);
 
+    // One inbound envelope host set applies to every requiredNodeId in this evaluation.
     const envelopeHosts = envelopeCoverageHosts();
     const targets: PreflightRegistryTargetEvidence[] = [];
     for (const nodeId of nodeIds) {

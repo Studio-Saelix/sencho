@@ -12,6 +12,7 @@ import {
   buildPreflightEvidence,
   encodePreflightEvidenceJson,
   fingerprintPreflightEvidence,
+  REGISTRY_PREFLIGHT_UNEVALUATED_REASON,
 } from '../services/gitops/preflight';
 import { directApplicationFixture } from './helpers/gitopsFixtures';
 import type {
@@ -307,6 +308,22 @@ describe('derive facets for authorization and convergence', () => {
     }, null);
     expect(projection.facets?.placement.status).toBe('rollout_authorization_pending');
     expect(JSON.parse(JSON.stringify(projection.facets?.placement)).status).toBe('rollout_authorization_pending');
+  });
+
+  it('projects preflight_blocked as unevaluated when ingredients exist but evidence does not', () => {
+    const fixture = seedAuthorizedReadyApp();
+    const app = GitOpsStore.getInstance().getApplication(fixture.applicationId)!;
+    expect(app.latest_preflight_evidence_json).toBeNull();
+    expect(app.rollout_authorization_ref).toBeNull();
+    const projection = deriveGitOpsRevision({
+      application: app,
+      targets: GitOpsStore.getInstance().listTargets(fixture.applicationId),
+      healthDisabled: false,
+    }, null);
+    expect(projection.facets?.placement).toMatchObject({
+      status: 'preflight_blocked',
+      reason: REGISTRY_PREFLIGHT_UNEVALUATED_REASON,
+    });
   });
 
   it('rejects exactly_converged_healthy when artifact status is not artifact_exact', () => {

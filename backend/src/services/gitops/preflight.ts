@@ -239,6 +239,10 @@ export function isRegistryPreflightTransient(body: PreflightEvidenceBody): boole
   return false;
 }
 
+/** Operator-facing reason when derive has no stored preflight evidence or live authorization. */
+export const REGISTRY_PREFLIGHT_UNEVALUATED_REASON =
+  'Registry readiness has not been evaluated yet.';
+
 /** Operator-facing reason from the worst target class. Never secrets. */
 export function registryPreflightBlockReason(body: PreflightEvidenceBody): string {
   const priority: RegistryTargetReadinessClass[] = [
