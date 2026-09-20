@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   digestPinsMatchComposeServices,
+  digestPinsMatchServiceNames,
   digestPinsOverlayYaml,
   isDigestPinValue,
   isDigestPinsMap,
@@ -80,6 +81,21 @@ describe('digestPins', () => {
       { web: `nginx@${DIGEST_A}`, ghost: `busybox@${DIGEST_B}` },
       compose,
       ['sidecar'],
+    )).toBe(false);
+  });
+
+  it('matches pin keys against the rendered multi-file service set', () => {
+    const pins = {
+      web: `nginx@${DIGEST_A}`,
+      worker: `busybox@${DIGEST_B}`,
+    };
+    // Git-managed multi-file / override merge: only the rendered names matter.
+    expect(digestPinsMatchServiceNames(pins, ['web', 'worker'])).toBe(true);
+    expect(digestPinsMatchServiceNames(pins, ['web'])).toBe(false);
+    expect(digestPinsMatchServiceNames(pins, [])).toBe(false);
+    expect(digestPinsMatchServiceNames(
+      { ghost: `nginx@${DIGEST_A}` },
+      ['web', 'worker'],
     )).toBe(false);
   });
 });

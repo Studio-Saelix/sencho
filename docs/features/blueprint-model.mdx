@@ -140,7 +140,7 @@ The three policy cards in the editor map exactly to the three modes the reconcil
 
 Even **Observe** keeps Sencho honest about what it found: the deployment row shows "drifted 3h ago: service caddy exited code 1". Silence would forfeit Sencho's authority over your fleet.
 
-Enforce's auto-fix only ever redeploys the blueprint's *current* revision. Container-level drift (a stopped or crashed container) uses the ordinary deploy path. Frozen image-digest disagreement uses a digest-pinned overlay with `--pull never`, so authored tags on disk stay unchanged. A compose edit never reaches that auto-fix path on a stateful or state-unknown blueprint: any revision change re-enters **Awaiting confirmation** on every targeted node first, regardless of drift mode, so a human always signs off before a new revision touches existing data. See [Lifecycle: status transitions](#lifecycle-status-transitions).
+Enforce's auto-fix only ever redeploys the blueprint's *current* revision. Container-level drift (a stopped or crashed container) uses the ordinary deploy path. Frozen image-digest disagreement uses a digest-pinned overlay with `--pull never`, so authored tags on disk stay unchanged. For a remote target, Sencho freezes and repairs against that node's own rendered Compose model and Docker platform (fetched over the authenticated proxy), not the controlling instance's local filesystem. A compose edit never reaches that auto-fix path on a stateful or state-unknown blueprint: any revision change re-enters **Awaiting confirmation** on every targeted node first, regardless of drift mode, so a human always signs off before a new revision touches existing data. See [Lifecycle: status transitions](#lifecycle-status-transitions).
 
 ## The detail sheet
 

@@ -35,6 +35,7 @@ const EXACT_SUFFIX_RULES: readonly SuffixRule[] = [
   { method: 'GET', suffix: '/containers', action: 'stack:read' },
   { method: 'GET', suffix: '/services', action: 'stack:read' },
   { method: 'GET', suffix: '/runtime-artifact-identity', action: 'stack:read' },
+  { method: 'GET', suffix: '/effective-artifact-context', action: 'stack:read' },
   { method: 'GET', suffix: '/drift', action: 'stack:read' },
   { method: 'GET', suffix: '/preflight', action: 'stack:read' },
   { method: 'GET', suffix: '/missing-external-networks', action: 'stack:read' },

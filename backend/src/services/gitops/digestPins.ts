@@ -98,10 +98,21 @@ export function composeServiceNames(composeContent: string): string[] | null {
 }
 
 /**
- * True when every pin key names a service in the deploy-time composed model:
- * submitted compose services plus any additional names (typically from the leaf's
- * auto-discovered compose.override.yml). Pins are derived from the rendered model,
- * so the guard must accept the same set.
+ * True when every pin key names a service in the deploy-time composed model.
+ * Callers supply the service names from the rendered model (or compose + override).
+ */
+export function digestPinsMatchServiceNames(
+  pins: DigestPinsMap,
+  serviceNames: readonly string[],
+): boolean {
+  const allowed = new Set(serviceNames.filter((name) => name.length > 0));
+  if (allowed.size === 0) return false;
+  return Object.keys(pins).every((key) => allowed.has(key));
+}
+
+/**
+ * True when every pin key names a service in composeContent and/or additional names.
+ * Prefer digestPinsMatchServiceNames against the rendered model when available.
  */
 export function digestPinsMatchComposeServices(
   pins: DigestPinsMap,
@@ -110,9 +121,13 @@ export function digestPinsMatchComposeServices(
 ): boolean {
   const names = composeServiceNames(composeContent);
   if (!names) return false;
-  const allowed = new Set(names);
-  for (const name of additionalServiceNames) {
-    if (name.length > 0) allowed.add(name);
+  return digestPinsMatchServiceNames(pins, [...names, ...additionalServiceNames]);
+}
+
+/** Thrown when digestPins do not match the leaf's composed service set. */
+export class DigestPinsMismatchError extends Error {
+  constructor(message = 'digestPins keys must match services in the composed model') {
+    super(message);
+    this.name = 'DigestPinsMismatchError';
   }
-  return Object.keys(pins).every((key) => allowed.has(key));
 }

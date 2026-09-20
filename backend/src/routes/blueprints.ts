@@ -48,12 +48,10 @@ import { isDebugEnabled } from '../utils/debug';
 import { sanitizeForLog } from '../utils/safeLog';
 import { isSqliteUniqueViolation, getErrorMessage } from '../utils/errors';
 import {
-    composeServiceNames,
-    digestPinsMatchComposeServices,
     isDigestPinsMap,
+    DigestPinsMismatchError,
     type DigestPinsMap,
 } from '../services/gitops/digestPins';
-import { FileSystemService } from '../services/FileSystemService';
 import {
     GitManagedContentError,
     GitOpsBindingError,
@@ -235,29 +233,6 @@ function validateComposeContent(composeContent: unknown): string | null {
     const analysis = BlueprintAnalyzer.analyze(composeContent);
     if (analysis.parseError) return `compose_content must be valid YAML: ${analysis.parseError}`;
     return null;
-}
-
-/**
- * Service names from the leaf's auto-discovered compose override, if any.
- * Empty when the stack has no override, does not exist yet, or the file cannot
- * be read. Fail-closed on I/O: the pin guard then accepts only composeContent keys.
- */
-async function readOverrideServiceNames(nodeId: number, stackName: string): Promise<string[]> {
-    try {
-        const fs = FileSystemService.getInstance(nodeId);
-        const overrideFile = await fs.getOverrideFilename(stackName);
-        if (!overrideFile) return [];
-        const override = await fs.readStackFile(stackName, overrideFile);
-        if (!override.content || override.oversized || override.binary) return [];
-        return composeServiceNames(override.content) ?? [];
-    } catch (err) {
-        console.warn(
-            '[Blueprints] Could not read compose override services for digest pin validation on "%s": %s',
-            sanitizeForLog(stackName),
-            sanitizeForLog(getErrorMessage(err, 'unknown')),
-        );
-        return [];
-    }
 }
 
 function summarizeBlueprint(blueprintId: number) {
@@ -552,13 +527,8 @@ blueprintsRouter.post('/apply-local', async (req: Request, res: Response): Promi
             res.status(400).json({ error: 'digestPins must be an object of serviceName to image@digest strings' });
             return;
         }
-        // Pins come from the rendered model (compose + auto-discovered override).
-        // Accept override-only keys so remote repair matches hub-local behavior.
-        const overrideServiceNames = await readOverrideServiceNames(req.nodeId, body.stackName);
-        if (!digestPinsMatchComposeServices(body.digestPins, body.composeContent, overrideServiceNames)) {
-            res.status(400).json({ error: 'digestPins keys must match services in the composed model' });
-            return;
-        }
+        // Authoritative key check runs after compose is written, against the
+        // leaf's rendered model (compose + override + multi-file specs).
         digestPins = body.digestPins;
     }
     const allowGitManaged = body.allowGitManagedContent === true
@@ -586,6 +556,10 @@ blueprintsRouter.post('/apply-local', async (req: Request, res: Response): Promi
         }
         res.json({ deployed: true });
     } catch (error) {
+        if (error instanceof DigestPinsMismatchError) {
+            res.status(400).json({ error: error.message });
+            return;
+        }
         if (error instanceof BlueprintNameConflictError) {
             res.status(409).json({ error: error.message, code: 'name_conflict' });
             return;

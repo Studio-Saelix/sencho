@@ -16,7 +16,7 @@ vi.mock('../services/gitops/artifactResolve', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../services/gitops/artifactResolve')>();
   return {
     ...actual,
-    readNodePlatform: vi.fn(async () => ({ os: 'linux', architecture: 'amd64' })),
+    resolvePlatformLabelForNode: vi.fn(async () => 'linux/amd64'),
   };
 });
 

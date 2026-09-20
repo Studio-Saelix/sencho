@@ -41,9 +41,15 @@ import {
     freezeInlineRevisionAfterDeploy,
     type BlueprintDeploymentCause,
 } from './gitops/blueprintDeploymentProducers';
-import { observeStackRuntimeArtifact, readNodePlatform } from './gitops/artifactResolve';
+import { observeStackRuntimeArtifact, resolvePlatformLabelForNode } from './gitops/artifactResolve';
 import { stackManagedRoot } from './gitops/directApplication';
-import { buildDigestPinsFromArtifactSet, type DigestPinsMap } from './gitops/digestPins';
+import {
+    buildDigestPinsFromArtifactSet,
+    DigestPinsMismatchError,
+    digestPinsMatchServiceNames,
+    type DigestPinsMap,
+} from './gitops/digestPins';
+import { buildEffectiveServiceModel } from './effectiveServiceModel';
 import { comparableObservationMatches } from './gitops/artifactIdentity';
 import {
     decodeArtifactEvidenceJson,
@@ -196,8 +202,7 @@ export class BlueprintService {
         if (!expectedSetId) {
             return { status: 'failed', error: 'no expected artifact set for digest repair' };
         }
-        const platform = await readNodePlatform(node.id);
-        const platformLabel = platform ? `${platform.os}/${platform.architecture}` : null;
+        const platformLabel = await resolvePlatformLabelForNode(node.id, blueprint.name);
         const digestPins = buildDigestPinsFromArtifactSet(expectedSetId, platformLabel);
         if (!digestPins) {
             return { status: 'failed', error: 'approved digest unavailable for digest repair' };
@@ -987,6 +992,20 @@ export class BlueprintService {
                 // Clear lower-priority compose siblings so discovery cannot shadow compose.yaml.
                 await fs.removeAlternateRootComposeFiles(stackName);
                 try {
+                    if (options.digestPins) {
+                        const model = await buildEffectiveServiceModel(nodeId, stackName);
+                        if (!model.renderable) {
+                            throw new Error(
+                                `Cannot validate digestPins: composed model is not renderable (${model.error})`,
+                            );
+                        }
+                        if (!digestPinsMatchServiceNames(
+                            options.digestPins,
+                            model.services.map((service) => service.name),
+                        )) {
+                            throw new DigestPinsMismatchError();
+                        }
+                    }
                     await assertPolicyGateAllows(
                         stackName,
                         nodeId,

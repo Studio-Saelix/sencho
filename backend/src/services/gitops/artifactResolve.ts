@@ -3,6 +3,7 @@ import { classifyReferenceKind } from '../composeProjectContext';
 import { buildEffectiveServiceModel, type EffectiveServiceSpec } from '../effectiveServiceModel';
 import DockerController from '../DockerController';
 import type { ContainerInfo } from 'dockerode';
+import axios from 'axios';
 import { RegistryService } from '../RegistryService';
 import {
   parseImageRef,
@@ -10,11 +11,17 @@ import {
   selectLocalRepoDigests,
 } from '../registry-api';
 import { DatabaseService } from '../DatabaseService';
+import { NodeRegistry } from '../NodeRegistry';
+import { LicenseService } from '../LicenseService';
+import { PROXY_TIER_HEADER } from '../license-headers';
+import { safeAxiosTransport } from '../../utils/outboundTarget';
 import type { BuildContextPlan } from '../../types/gitProjectManifest';
 import type { ArtifactQualification } from './types';
 import {
   computeArtifactSetFingerprint,
+  decodeArtifactEvidenceJson,
   encodeArtifactEvidenceJson,
+  isRecord,
   type ArtifactEvidenceJson,
   type ArtifactServiceFailureClass,
   type ObservedArtifactIdentity,
@@ -23,8 +30,17 @@ import {
 import { GitOpsStore } from './store';
 import { GitOpsTransitions, type EventEnvelope } from './transitions';
 import { newGitOpsId } from './directApplication';
-import { decodeArtifactEvidenceJson } from './json';
 import { sanitizeForLog } from '../../utils/safeLog';
+import {
+  loadEffectiveArtifactContext,
+  platformLabelOf,
+  type EffectiveArtifactContext,
+  type NodePlatform,
+} from './effectiveArtifactContext';
+
+export { readNodePlatform } from './effectiveArtifactContext';
+
+const REMOTE_RESOLVE_TIMEOUT_MS = 30_000;
 
 function isComposeOneOff(labels: Record<string, string> | undefined): boolean {
   return labels?.['com.docker.compose.oneoff'] === 'True';
@@ -84,18 +100,6 @@ function mapRegistryFailure(reason: string): ArtifactServiceFailureClass {
     return 'digest_unavailable';
   }
   return 'registry_unavailable';
-}
-
-export async function readNodePlatform(nodeId: number): Promise<{ os: string; architecture: string } | null> {
-  try {
-    const info = await DockerController.getInstance(nodeId).getDocker().info();
-    const os = typeof info.OSType === 'string' ? info.OSType : '';
-    const architecture = typeof info.Architecture === 'string' ? info.Architecture : '';
-    if (!os || !architecture) return null;
-    return { os, architecture };
-  } catch {
-    return null;
-  }
 }
 
 async function resolveRegistryService(
@@ -288,14 +292,130 @@ async function resolveOneService(
   }
 }
 
+function isNodePlatform(value: unknown): value is NodePlatform {
+  return isRecord(value)
+    && typeof value.os === 'string'
+    && value.os.length > 0
+    && typeof value.architecture === 'string'
+    && value.architecture.length > 0;
+}
+
+function isEffectiveServiceSpec(value: unknown): value is EffectiveServiceSpec {
+  return isRecord(value)
+    && typeof value.name === 'string'
+    && value.name.length > 0
+    && (value.declaredImage === null || typeof value.declaredImage === 'string')
+    && typeof value.hasBuild === 'boolean'
+    && typeof value.expectedReplicas === 'number'
+    && Array.isArray(value.dependsOn)
+    && typeof value.hasHealthcheck === 'boolean';
+}
+
+function isEffectiveArtifactContext(value: unknown): value is EffectiveArtifactContext {
+  if (!isRecord(value) || !Array.isArray(value.services)) return false;
+  if (value.platform !== null && !isNodePlatform(value.platform)) return false;
+  if (value.renderable === true) {
+    return value.services.every(isEffectiveServiceSpec);
+  }
+  if (value.renderable === false) {
+    return value.services.length === 0 && typeof value.error === 'string';
+  }
+  return false;
+}
+
+/**
+ * Fetch the leaf's rendered model and Docker platform over the node proxy.
+ * Never interprets the remote node's compose_dir as a hub-local path.
+ */
+export async function fetchRemoteEffectiveArtifactContext(
+  nodeId: number,
+  stackName: string,
+): Promise<EffectiveArtifactContext | null> {
+  const target = NodeRegistry.getInstance().getProxyTarget(nodeId);
+  if (!target) {
+    console.warn(
+      '[GitOpsArtifactResolve] No proxy target for remote effective-artifact-context on node %s (%s)',
+      nodeId,
+      sanitizeForLog(stackName),
+    );
+    return null;
+  }
+  const proxy = LicenseService.getInstance().getProxyHeaders();
+  const url = `${target.apiUrl.replace(/\/$/, '')}/api/stacks/${encodeURIComponent(stackName)}/effective-artifact-context`;
+  try {
+    const res = await axios.get(url, {
+      ...safeAxiosTransport(target.trustedLoopback),
+      headers: {
+        Authorization: `Bearer ${target.apiToken}`,
+        [PROXY_TIER_HEADER]: proxy.tier,
+        'Content-Type': 'application/json',
+      },
+      timeout: REMOTE_RESOLVE_TIMEOUT_MS,
+      validateStatus: () => true,
+    });
+    if (res.status !== 200) {
+      console.warn(
+        '[GitOpsArtifactResolve] Remote effective-artifact-context returned %s for %s on node %s',
+        res.status,
+        sanitizeForLog(stackName),
+        nodeId,
+      );
+      return null;
+    }
+    if (!isEffectiveArtifactContext(res.data)) {
+      console.warn(
+        '[GitOpsArtifactResolve] Remote effective-artifact-context invalid shape for %s on node %s',
+        sanitizeForLog(stackName),
+        nodeId,
+      );
+      return null;
+    }
+    return res.data;
+  } catch (err) {
+    console.warn(
+      '[GitOpsArtifactResolve] Remote effective-artifact-context failed for %s on node %s: %s',
+      sanitizeForLog(stackName),
+      nodeId,
+      sanitizeForLog(err instanceof Error ? err.message : String(err)),
+    );
+    return null;
+  }
+}
+
+async function loadArtifactContextForNode(
+  nodeId: number,
+  stackName: string,
+): Promise<EffectiveArtifactContext | null> {
+  const node = DatabaseService.getInstance().getNode(nodeId);
+  if (!node) return null;
+  if (node.type === 'remote') {
+    return fetchRemoteEffectiveArtifactContext(nodeId, stackName);
+  }
+  return loadEffectiveArtifactContext(nodeId, stackName);
+}
+
+/** Platform label for digest pins: leaf context for remote, local Docker for hub. */
+export async function resolvePlatformLabelForNode(nodeId: number, stackName: string): Promise<string | null> {
+  const ctx = await loadArtifactContextForNode(nodeId, stackName);
+  return platformLabelOf(ctx?.platform ?? null);
+}
+
 async function resolveServices(
   stackName: string,
   nodeId: number,
   buildContexts: readonly BuildContextPlan[],
   resolvedAt: number,
 ): Promise<{ services: ServiceArtifactEvidence[]; qualification: ArtifactQualification; evidence: ArtifactEvidenceJson }> {
-  const model = await buildEffectiveServiceModel(nodeId, stackName);
-  if (!model.renderable) {
+  const context = await loadArtifactContextForNode(nodeId, stackName);
+  if (context && !context.renderable) {
+    console.warn(
+      '[GitOpsArtifactResolve] Composed model not renderable for %s on node %s: %s',
+      sanitizeForLog(stackName),
+      nodeId,
+      sanitizeForLog(context.error),
+    );
+  }
+  if (!context || !context.renderable) {
     return {
       services: [],
       qualification: 'unresolved',
@@ -303,9 +423,9 @@ async function resolveServices(
     };
   }
 
-  const platform = await readNodePlatform(nodeId);
+  const platform = context.platform;
   const resolved = await Promise.all(
-    model.services.map((spec) => resolveOneService(spec, platform, buildContexts, resolvedAt)),
+    context.services.map((spec) => resolveOneService(spec, platform, buildContexts, resolvedAt)),
   );
   const serviceQuals = resolved.map((entry) => entry.qualification);
   const services = resolved.map((entry) => entry.evidence);

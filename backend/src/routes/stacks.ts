@@ -25,6 +25,7 @@ import {
 import { GitSourceService, GitSourceError, repoHost as gitRepoHost, type SourcePolicy } from '../services/GitSourceService';
 import { repoUrlRejectionMessage } from '../services/gitops/repoIdentity';
 import { observeStackRuntimeArtifact } from '../services/gitops/artifactResolve';
+import { loadEffectiveArtifactContext } from '../services/gitops/effectiveArtifactContext';
 import { encodeObservedArtifactIdentity } from '../services/gitops/json';
 import { REF_MAX_LEN } from '../services/git/nativeGitTransport';
 import { validateCaBundlePem } from '../services/git/caBundle';
@@ -1369,6 +1370,22 @@ stacksRouter.get('/:stackName/runtime-artifact-identity', async (req: Request, r
       error,
     );
     res.status(500).json({ error: 'Failed to observe runtime artifact identity' });
+  }
+});
+
+stacksRouter.get('/:stackName/effective-artifact-context', async (req: Request, res: Response) => {
+  const stackName = req.params.stackName as string;
+  if (!(await requireStackExists(req.nodeId, stackName, res))) return;
+  try {
+    const context = await loadEffectiveArtifactContext(req.nodeId, stackName);
+    res.json(context);
+  } catch (error) {
+    console.error(
+      '[Stacks] Failed to load effective artifact context for %s:',
+      sanitizeForLog(stackName),
+      error,
+    );
+    res.status(500).json({ error: 'Failed to load effective artifact context' });
   }
 });
 

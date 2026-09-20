@@ -35,6 +35,9 @@ describe('classifyStackApiPath', () => {
       expect(classifyStackApiPath('GET', '/stacks/web/runtime-artifact-identity')).toEqual({
         kind: 'named-stack', stackName: 'web', action: 'stack:read',
       });
+      expect(classifyStackApiPath('GET', '/stacks/web/effective-artifact-context')).toEqual({
+        kind: 'named-stack', stackName: 'web', action: 'stack:read',
+      });
       expect(classifyStackApiPath('POST', '/stacks/web/drift/recheck')).toEqual({
         kind: 'named-stack', stackName: 'web', action: 'stack:read',
       });

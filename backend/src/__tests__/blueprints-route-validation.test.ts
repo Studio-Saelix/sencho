@@ -1,6 +1,4 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from 'vitest';
-import fs from 'fs';
-import path from 'path';
 import request from 'supertest';
 import { setupTestDb, cleanupTestDb, loginAsTestAdmin } from './helpers/setupTestDb';
 import { MAX_BLUEPRINT_COMPOSE_BYTES } from '../routes/blueprints';
@@ -145,30 +143,30 @@ describe('POST /api/blueprints/apply-local (node-to-node atomic apply)', () => {
         expect(res.body.error).toMatch(/digestPins/i);
     });
 
-    it('rejects digestPins keys that match no service in compose or override', async () => {
-        const res = await request(app)
-            .post('/api/blueprints/apply-local')
-            .set('Cookie', adminCookie)
-            .send({
-                stackName: 'apply-local-stack',
-                composeContent: 'services:\n  app:\n    image: nginx\n',
-                markerContent: JSON.stringify({ blueprintId: 1, revision: 1, lastApplied: 123 }),
-                digestPins: { other: `nginx@sha256:${'a'.repeat(64)}` },
-            });
-        expect(res.status).toBe(400);
-        expect(res.body.error).toMatch(/must match services/i);
+    it('rejects digestPins keys that match no service in the composed model', async () => {
+        const { BlueprintService } = await import('../services/BlueprintService');
+        const { DigestPinsMismatchError } = await import('../services/gitops/digestPins');
+        const applySpy = vi.spyOn(BlueprintService.getInstance(), 'applyLocalUnderLock')
+            .mockRejectedValue(new DigestPinsMismatchError());
+        try {
+            const res = await request(app)
+                .post('/api/blueprints/apply-local')
+                .set('Cookie', adminCookie)
+                .send({
+                    stackName: 'apply-local-stack',
+                    composeContent: 'services:\n  app:\n    image: nginx\n',
+                    markerContent: JSON.stringify({ blueprintId: 1, revision: 1, lastApplied: 123 }),
+                    digestPins: { other: `nginx@sha256:${'a'.repeat(64)}` },
+                });
+            expect(res.status).toBe(400);
+            expect(res.body.error).toMatch(/must match services/i);
+        } finally {
+            applySpy.mockRestore();
+        }
     });
 
     it('accepts digestPins for services declared only in the leaf compose override', async () => {
         const stackName = 'apply-local-override-pins';
-        const stackDir = path.join(process.env.COMPOSE_DIR!, stackName);
-        fs.mkdirSync(stackDir, { recursive: true });
-        // getOverrideFilename only needs the override file on disk.
-        fs.writeFileSync(
-            path.join(stackDir, 'compose.override.yml'),
-            'services:\n  sidecar:\n    image: busybox\n',
-        );
-
         const { BlueprintService } = await import('../services/BlueprintService');
         const applySpy = vi.spyOn(BlueprintService.getInstance(), 'applyLocalUnderLock')
             .mockResolvedValue({ ran: true });
@@ -200,7 +198,6 @@ describe('POST /api/blueprints/apply-local (node-to-node atomic apply)', () => {
             );
         } finally {
             applySpy.mockRestore();
-            fs.rmSync(stackDir, { recursive: true, force: true });
         }
     });
 });
