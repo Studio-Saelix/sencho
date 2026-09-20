@@ -321,18 +321,24 @@ export class ComposeService {
 
   /**
    * Layer a digest-pin overlay onto authored compose args and append `--pull never`.
-   * Authored files on disk are unchanged; the overlay lives under os.tmpdir()
-   * (absolute path) so it never touches the stack directory.
+   * Authored files on disk are unchanged. The overlay is written into an exclusive
+   * mkdtemp directory under os.tmpdir() so the path is neither stack-tainted nor
+   * a shared-temp TOCTOU race.
    */
   private async withDigestPinOverlay(
     stackName: string,
     action: string[],
     stackDirOverride: string | undefined,
     digestPins: DigestPinsMap,
-  ): Promise<{ args: string[]; overlayPath: string }> {
-    const overlayPath = path.join(os.tmpdir(), `sencho-digest-pins-${randomUUID()}.yml`);
-    await fs.promises.writeFile(overlayPath, digestPinsOverlayYaml(digestPins), 'utf8');
+  ): Promise<{ args: string[]; overlayDir: string }> {
+    const overlayDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'sencho-digest-pins-'));
+    const overlayPath = path.join(overlayDir, 'overlay.yml');
     try {
+      await fs.promises.writeFile(overlayPath, digestPinsOverlayYaml(digestPins), {
+        encoding: 'utf8',
+        flag: 'wx',
+        mode: 0o600,
+      });
       const base = await this.authoredComposeArgs(stackName, [], stackDirOverride);
       const filePrefix = authoredComposeFileArgs(stackName, this.nodeId, stackDirOverride);
       const args = [...base];
@@ -341,9 +347,9 @@ export class ComposeService {
         args.push('-f', baseFilename);
       }
       args.push('-f', overlayPath, ...action, '--pull', 'never');
-      return { args, overlayPath };
+      return { args, overlayDir };
     } catch (err) {
-      await fs.promises.unlink(overlayPath).catch(() => undefined);
+      await fs.promises.rm(overlayDir, { recursive: true, force: true }).catch(() => undefined);
       throw err;
     }
   }
@@ -1025,7 +1031,7 @@ export class ComposeService {
 
       await this.withRegistryAuth(async (env) => {
         const digestPins = ctx?.digestPins;
-        let overlayPath: string | null = null;
+        let overlayDir: string | null = null;
         try {
           const upAction = ['up', '-d', '--remove-orphans'];
           let args: string[];
@@ -1037,15 +1043,15 @@ export class ComposeService {
               digestPins,
             );
             args = pinned.args;
-            overlayPath = pinned.overlayPath;
+            overlayDir = pinned.overlayDir;
           } else {
             args = await this.authoredComposeArgs(stackName, upAction, stackDir);
           }
           composeHandedOff = true;
           await this.execute('docker', args, stackDir, ws, true, env, getComposeStallTimeoutMs());
         } finally {
-          if (overlayPath) {
-            await fs.promises.unlink(overlayPath).catch(() => undefined);
+          if (overlayDir) {
+            await fs.promises.rm(overlayDir, { recursive: true, force: true }).catch(() => undefined);
           }
         }
       }, sendOutput);
