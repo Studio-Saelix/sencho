@@ -958,7 +958,8 @@ function isUnacknowledgedStackDelete(req: Request): boolean {
 /** Nested service update/restore/recovery routes (path is post-/api strip). */
 function isServiceScopedUpdateRoute(req: Request): boolean {
   if (req.method === 'GET') {
-    return /^\/stacks\/[^/]+\/services\/[^/]+\/recovery$/.test(req.path);
+    return /^\/stacks\/[^/]+\/services\/[^/]+\/recovery$/.test(req.path)
+      || /^\/stacks\/[^/]+\/recoveries$/.test(req.path);
   }
   if (req.method === 'POST') {
     return /^\/stacks\/[^/]+\/services\/[^/]+\/(?:update|restore)$/.test(req.path);

@@ -13,6 +13,24 @@ vi.mock('@/lib/api', async (importOriginal) => {
 });
 import { apiFetch } from '@/lib/api';
 
+// Mock serviceUpdate (apiFetch is already mocked above) and toast-store.
+vi.mock('@/lib/serviceUpdate', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/lib/serviceUpdate')>();
+  return { ...actual, fetchStackRecoveries: vi.fn() };
+});
+import { fetchStackRecoveries, type StackRecoveryEntry } from '@/lib/serviceUpdate';
+
+vi.mock('@/components/ui/toast-store', () => ({
+  toast: {
+    error: vi.fn(),
+    success: vi.fn(),
+    warning: vi.fn(),
+    info: vi.fn(),
+    dismiss: vi.fn(),
+  },
+}));
+import { toast } from '@/components/ui/toast-store';
+
 function wrapper({ children }: { children: ReactNode }) {
   return <DeployFeedbackProvider>{children}</DeployFeedbackProvider>;
 }
@@ -21,6 +39,8 @@ describe('DeployFeedbackContext', () => {
   beforeEach(() => {
     localStorage.setItem(DEPLOY_FEEDBACK_KEY, 'true');
     vi.mocked(apiFetch).mockReset();
+    vi.mocked(fetchStackRecoveries).mockReset();
+    vi.mocked(fetchStackRecoveries).mockResolvedValue([]);
     vi.useRealTimers();
   });
   afterEach(() => {
@@ -362,5 +382,124 @@ describe('DeployFeedbackContext', () => {
     act(() => result.current.onPanelClose());
     expect(result.current.minimized).toBe(false);
     expect(result.current.panelState.isOpen).toBe(false);
+  });
+});
+
+describe('overlapping silent gates', () => {
+  beforeEach(() => {
+    // Deploy Progress must be disabled so the silent gate recovery resurface logic runs.
+    localStorage.setItem(DEPLOY_FEEDBACK_KEY, 'false');
+  });
+
+  afterEach(() => {
+    localStorage.setItem(DEPLOY_FEEDBACK_KEY, 'true');
+  });
+
+  async function runServiceUpdate(
+    nodeId: number | null = null,
+    stackName = 'web',
+    serviceName = 'api',
+    initialRecoveries: StackRecoveryEntry[] = [],
+  ) {
+    const { result } = renderHook(() => useDeployFeedback(), { wrapper });
+    // startGatePolling's tick() needs apiFetch to return a health-gate response.
+    vi.mocked(apiFetch).mockImplementation(async (url: string) => {
+      if (!String(url).includes('/recoveries')) {
+        return new Response(JSON.stringify({ id: 'gate-svc', status: 'observing', reason: null, windowSeconds: 90, startedAt: Date.now(), targetScope: 'service', serviceName: 'api', failureSource: null }), { status: 200 });
+      }
+      return new Response(JSON.stringify(initialRecoveries), { status: 200 });
+    });
+    // fetchStackRecoveries is called inside runWithLog's !isEnabled branch.
+    // Give it a real implementation that returns initialRecoveries so the
+    // for-of loop doesn't throw and the resurface logic actually runs.
+    vi.mocked(fetchStackRecoveries).mockImplementation(async () => initialRecoveries);
+    const startedPromise = new Promise<void>(resolve => { setTimeout(resolve, 0); });
+
+    await act(async () => {
+      result.current.runWithLog(
+        { stackName, action: 'update', nodeId, serviceName },
+        async (started) => { await started; await startedPromise; return { ok: true, healthGateId: 'gate-svc', recoveryId: 'rec-1' }; },
+      );
+      await Promise.resolve();
+    });
+    await act(async () => { await new Promise(r => setTimeout(r, 100)); });
+    return result;
+  }
+
+  it('surfaces a failed sibling recovery as a Restore toast at session start', async () => {
+    const siblingRecovery = { serviceName: 'sibling', recoveryId: 'rec-sibling', healthGateId: 'gate-sibling', healthGateStatus: 'failed' as const, healthGateReason: 'timeout', healthGateFailureSource: 'primary' as const, expiresAt: Date.now() + 60_000 };
+    await runServiceUpdate(null, 'web', 'api', [siblingRecovery]);
+
+    expect(toast.error).toHaveBeenCalled();
+    const [msg, opts] = (toast.error as ReturnType<typeof vi.fn>).mock.calls[0];
+    expect(msg).toContain('sibling');
+    expect(opts).toMatchObject({ duration: 120_000, action: { label: 'Restore' } });
+  });
+
+  it('excludes the current service row from the sibling-check set', async () => {
+    const currentOnly = [
+      { serviceName: 'api', recoveryId: 'rec-api', healthGateId: 'gate-api', healthGateStatus: 'failed' as const, healthGateReason: 'timeout', healthGateFailureSource: 'primary' as const, expiresAt: Date.now() + 60_000 },
+    ];
+    await runServiceUpdate(null, 'web', 'api', currentOnly);
+    expect(toast.error).not.toHaveBeenCalled();
+  });
+
+  it('re-surfaces a failed sibling on a later silent session after watched state clears', async () => {
+    const sibling = { serviceName: 'sibling', recoveryId: 'rec-sibling', healthGateId: 'gate-sibling', healthGateStatus: 'failed' as const, healthGateReason: 'timeout', healthGateFailureSource: 'primary' as const, expiresAt: Date.now() + 60_000 };
+    await runServiceUpdate(null, 'web', 'api', [sibling]);
+    const firstToastCount = (toast.error as ReturnType<typeof vi.fn>).mock.calls.length;
+    expect(firstToastCount).toBeGreaterThan(0);
+
+    await runServiceUpdate(null, 'web', 'api', [sibling]);
+    const secondToastCount = (toast.error as ReturnType<typeof vi.fn>).mock.calls.length;
+    expect(secondToastCount).toBeGreaterThan(firstToastCount);
+  });
+
+  it('continues polling an observing sibling and surfaces it when it transitions to failed', async () => {
+    const observingEntry = { serviceName: 'sibling', recoveryId: 'rec-sibling', healthGateId: 'gate-sibling', healthGateStatus: 'observing' as const, healthGateReason: null, healthGateFailureSource: null, expiresAt: Date.now() + 60_000 };
+    const failedEntry = { serviceName: 'sibling', recoveryId: 'rec-sibling', healthGateId: 'gate-sibling', healthGateStatus: 'failed' as const, healthGateReason: 'timeout', healthGateFailureSource: 'primary' as const, expiresAt: Date.now() + 60_000 };
+
+    vi.useFakeTimers();
+    try {
+      const { result } = renderHook(() => useDeployFeedback(), { wrapper });
+      const gateBody = {
+        id: 'gate-svc', status: 'observing', reason: null, windowSeconds: 90, startedAt: Date.now(),
+        targetScope: 'service', serviceName: 'api', failureSource: null,
+      };
+      vi.mocked(apiFetch).mockImplementation(async () =>
+        new Response(JSON.stringify(gateBody), { status: 200 }),
+      );
+      vi.mocked(fetchStackRecoveries).mockResolvedValue([observingEntry]);
+
+      let runDone: Promise<unknown> | undefined;
+      await act(async () => {
+        runDone = result.current.runWithLog(
+          { stackName: 'web', action: 'update', nodeId: null, serviceName: 'api' },
+          async (started) => {
+            await started;
+            return { ok: true, healthGateId: 'gate-svc', recoveryId: 'rec-1' };
+          },
+        );
+        await vi.advanceTimersByTimeAsync(50);
+      });
+      await act(async () => { await runDone; });
+      expect(toast.error).not.toHaveBeenCalled();
+
+      vi.mocked(fetchStackRecoveries).mockResolvedValue([failedEntry]);
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(4_000);
+      });
+      expect(toast.error).toHaveBeenCalled();
+      const [msg, opts] = (toast.error as ReturnType<typeof vi.fn>).mock.calls[0];
+      expect(msg).toContain('sibling');
+      expect(opts).toMatchObject({ duration: 120_000, action: { label: 'Restore' } });
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(4_000);
+      });
+      expect((toast.error as ReturnType<typeof vi.fn>).mock.calls.length).toBe(1);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

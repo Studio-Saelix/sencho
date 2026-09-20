@@ -228,6 +228,37 @@ describe('claim + mandatory renewal (RECOVERY-CLAIM-2)', () => {
   });
 });
 
+describe('listAllActiveForStack', () => {
+  it('returns active unexpired rows across all services in the stack', () => {
+    const now = Date.now();
+    db().insertServiceUpdateRecovery({
+      id: 'rec-api', node_id: 1, stack_name: 'web', service_name: 'api',
+      replicas_json: '[]', majority_image_id: 'sha256:a', declared_image_ref: 'x:1',
+      weak_floating_tag: 0, health_gate_id: null, status: 'active',
+      expires_at: now + 60_000, claim_expires_at: null, created_at: now, created_by: null,
+    });
+    db().insertServiceUpdateRecovery({
+      id: 'rec-db', node_id: 1, stack_name: 'web', service_name: 'db',
+      replicas_json: '[]', majority_image_id: 'sha256:b', declared_image_ref: 'x:2',
+      weak_floating_tag: 0, health_gate_id: null, status: 'active',
+      expires_at: now + 60_000, claim_expires_at: null, created_at: now, created_by: null,
+    });
+    db().insertServiceUpdateRecovery({
+      id: 'rec-expired', node_id: 1, stack_name: 'web', service_name: 'cache',
+      replicas_json: '[]', majority_image_id: 'sha256:c', declared_image_ref: 'x:3',
+      weak_floating_tag: 0, health_gate_id: null, status: 'active',
+      expires_at: now - 1_000, claim_expires_at: null, created_at: now, created_by: null,
+    });
+
+    const rows = svc().listAllActiveForStack(1, 'web');
+    expect(rows.map(r => r.id)).toEqual(['rec-api', 'rec-db']);
+  });
+
+  it('returns an empty array when no rows match the stack', () => {
+    expect(svc().listAllActiveForStack(1, 'web')).toEqual([]);
+  });
+});
+
 describe('sweep()', () => {
   it('expires an abandoned restoring claim but leaves a live one and an unexpired active one alone', () => {
     const now = Date.now();
