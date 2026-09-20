@@ -248,4 +248,27 @@ describe('service_update_recovery accessors', () => {
     expect(db().getServiceUpdateRecovery('rec-web')).toBeUndefined();
     expect(db().getServiceUpdateRecovery('rec-api')).toBeTruthy();
   });
+
+  describe('listActiveServiceUpdateRecoveriesForStack', () => {
+    it('returns active unexpired rows for all services in a stack, most recent first', () => {
+      const now = Date.now();
+      db().insertServiceUpdateRecovery(makeRow({ id: 'rec-old', created_at: now - 10_000, expires_at: now + 60_000, service_name: 'api' }));
+      db().insertServiceUpdateRecovery(makeRow({ id: 'rec-new', created_at: now - 1_000, expires_at: now + 60_000, service_name: 'db' }));
+
+      const rows = db().listActiveServiceUpdateRecoveriesForStack(NODE, 'web', now);
+      expect(rows.map(r => r.id)).toEqual(['rec-new', 'rec-old']);
+    });
+
+    it('excludes expired, terminal, and other-node rows', () => {
+      const now = Date.now();
+      db().insertServiceUpdateRecovery(makeRow({ id: 'rec-active', node_id: NODE, stack_name: 'web', status: 'active', expires_at: now + 60_000, service_name: 'api' }));
+      db().insertServiceUpdateRecovery(makeRow({ id: 'rec-expired', node_id: NODE, stack_name: 'web', status: 'active', expires_at: now - 1_000, service_name: 'api' }));
+      db().insertServiceUpdateRecovery(makeRow({ id: 'rec-restoring', node_id: NODE, stack_name: 'web', status: 'restoring', expires_at: now + 60_000, service_name: 'api' }));
+      db().insertServiceUpdateRecovery(makeRow({ id: 'rec-other-node', node_id: 99, stack_name: 'web', status: 'active', expires_at: now + 60_000, service_name: 'api' }));
+      db().insertServiceUpdateRecovery(makeRow({ id: 'rec-other-stack', node_id: NODE, stack_name: 'api', status: 'active', expires_at: now + 60_000, service_name: 'api' }));
+
+      const rows = db().listActiveServiceUpdateRecoveriesForStack(NODE, 'web', now);
+      expect(rows.map(r => r.id)).toEqual(['rec-active']);
+    });
+  });
 });

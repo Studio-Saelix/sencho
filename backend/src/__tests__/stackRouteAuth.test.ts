@@ -66,6 +66,9 @@ describe('classifyStackApiPath', () => {
       expect(classifyStackApiPath('GET', '/stacks/web/services/api/recovery')).toEqual({
         kind: 'named-stack', stackName: 'web', action: 'stack:deploy',
       });
+      expect(classifyStackApiPath('GET', '/stacks/web/recoveries')).toEqual({
+        kind: 'named-stack', stackName: 'web', action: 'stack:deploy',
+      });
     });
 
     it('maps stack DELETE to stack:delete', () => {

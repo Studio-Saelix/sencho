@@ -4535,6 +4535,15 @@ stmt.run('gitops_schema_version', '1');
         ).all(nodeId, stackName, serviceName) as ServiceUpdateRecoveryRow[];
     }
 
+    /** Active, unexpired rows for all services in a stack, most recent first. */
+    public listActiveServiceUpdateRecoveriesForStack(nodeId: number, stackName: string, now: number): ServiceUpdateRecoveryRow[] {
+        return this.db.prepare(
+            `SELECT * FROM service_update_recovery
+             WHERE node_id = ? AND stack_name = ? AND status = 'active' AND expires_at > ?
+             ORDER BY created_at DESC`
+        ).all(nodeId, stackName, now) as ServiceUpdateRecoveryRow[];
+    }
+
     /** Attach the update flow's own health gate run id while the row is still active. */
     public linkServiceUpdateRecoveryHealthGate(id: string, healthGateId: string): void {
         this.db.prepare(

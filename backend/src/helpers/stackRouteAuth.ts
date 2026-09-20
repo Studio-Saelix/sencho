@@ -57,6 +57,7 @@ const EXACT_SUFFIX_RULES: readonly SuffixRule[] = [
   { method: 'GET', suffix: '/files/download', action: 'stack:read' },
   { method: 'GET', suffix: '/files/bulk-download', action: 'stack:read' },
   { method: 'GET', suffix: '/files/permissions', action: 'stack:read' },
+  { method: 'GET', suffix: '/recoveries', action: 'stack:deploy' },
   { method: 'GET', suffix: '/activity', action: 'stack:read' },
   { method: 'GET', suffix: '/git-source', action: 'stack:read' },
   { method: 'GET', suffix: '/git-source/history', action: 'stack:read' },
