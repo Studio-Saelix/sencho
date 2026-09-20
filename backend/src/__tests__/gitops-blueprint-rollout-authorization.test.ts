@@ -384,6 +384,11 @@ describe('derive facets for authorization and convergence', () => {
       latest_artifact_set_id: binding.artifactSetId,
       rollout_authorization_ref: app.rollout_authorization_ref,
       latest_stage: 'blueprint_ack_recorded',
+      observed_artifact_identity_json: JSON.stringify({
+        kind: 'exact',
+        identity: 'sha256:deadbeef',
+        observedAt: 1,
+      }),
     });
     const projection = deriveGitOpsRevision({
       application: store.getApplication(fixture.applicationId)!,
@@ -391,6 +396,68 @@ describe('derive facets for authorization and convergence', () => {
       healthDisabled: false,
     }, null);
     expect(projection.facets?.rollout.status).toBe('exactly_converged_healthy');
+  });
+
+  it('withholds exactly_converged_healthy when a required target lacks matching digest observation', () => {
+    const fixture = seedAuthorizedReadyApp({ artifactQualification: 'exact' });
+    authorize(fixture.applicationId);
+    const store = GitOpsStore.getInstance();
+    const app = store.getApplication(fixture.applicationId)!;
+    const binding = store.currentAuthorizationBinding(app)!;
+    store.upsertTarget({
+      ...emptyTarget(fixture.applicationId, fixture.nodeId),
+      intent_revision_id: binding.intentRevisionId,
+      applied_generation_id: binding.acceptedGenerationId,
+      desired_generation_id: binding.acceptedGenerationId,
+      deployed_generation_id: binding.acceptedGenerationId,
+      healthy_generation_id: binding.acceptedGenerationId,
+      expected_artifact_set_id: binding.artifactSetId,
+      latest_artifact_set_id: binding.artifactSetId,
+      rollout_authorization_ref: app.rollout_authorization_ref,
+      latest_stage: 'blueprint_ack_recorded',
+      // No observation: pointers and health alone must not claim exact convergence.
+    });
+    const projection = deriveGitOpsRevision({
+      application: store.getApplication(fixture.applicationId)!,
+      targets: store.listTargets(fixture.applicationId),
+      healthDisabled: false,
+    }, null);
+    expect(projection.facets?.rollout.status).not.toBe('exactly_converged_healthy');
+    expect(projection.facets?.rollout.status).toBe('partially_rolled_out');
+  });
+
+  it('emits rollout_artifact_drift when an authorized target disagrees with the approved set', () => {
+    const fixture = seedAuthorizedReadyApp({ artifactQualification: 'exact' });
+    authorize(fixture.applicationId);
+    const store = GitOpsStore.getInstance();
+    const app = store.getApplication(fixture.applicationId)!;
+    const binding = store.currentAuthorizationBinding(app)!;
+    store.upsertTarget({
+      ...emptyTarget(fixture.applicationId, fixture.nodeId),
+      intent_revision_id: binding.intentRevisionId,
+      applied_generation_id: binding.acceptedGenerationId,
+      desired_generation_id: binding.acceptedGenerationId,
+      deployed_generation_id: binding.acceptedGenerationId,
+      healthy_generation_id: binding.acceptedGenerationId,
+      expected_artifact_set_id: binding.artifactSetId,
+      latest_artifact_set_id: binding.artifactSetId,
+      rollout_authorization_ref: app.rollout_authorization_ref,
+      rollout_generation_id: app.rollout_generation_id,
+      latest_stage: 'blueprint_ack_recorded',
+      observed_artifact_identity_json: JSON.stringify({
+        kind: 'exact',
+        identity: 'sha256:serving-other',
+        observedAt: 9,
+      }),
+    });
+    const projection = deriveGitOpsRevision({
+      application: store.getApplication(fixture.applicationId)!,
+      targets: store.listTargets(fixture.applicationId),
+      healthDisabled: false,
+    }, null);
+    expect(projection.targets[0]?.runtime.status).toBe('rollout_artifact_drift');
+    expect(projection.facets?.rollout.status).not.toBe('exactly_converged_healthy');
+    expect(projection.drift.some((item) => item.class === 'rollout')).toBe(true);
   });
 
   it('does not treat synced_and_healthy as healthy for a different generation', () => {

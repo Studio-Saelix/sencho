@@ -683,10 +683,10 @@ describe('BlueprintReconciler drift alert node wording', () => {
     it('enforce correction-failure on local uses on this node', async () => {
         const { NotificationService } = await import('../services/NotificationService');
         const dispatchSpy = vi.spyOn(NotificationService.getInstance(), 'dispatchAlert').mockResolvedValue({ persisted: true });
-        vi.spyOn(BlueprintService.getInstance(), 'deployToNode').mockResolvedValue({
+        vi.spyOn(BlueprintService.getInstance(), 'enforceDigestRepair').mockResolvedValue({
             status: 'failed',
             error: 'compose up failed',
-        } as Awaited<ReturnType<typeof BlueprintService.prototype.deployToNode>>);
+        } as Awaited<ReturnType<typeof BlueprintService.prototype.enforceDigestRepair>>);
         const nodeId = seedNode();
         const bp = seedBlueprint({
             name: 'fix-local',
@@ -705,5 +705,48 @@ describe('BlueprintReconciler drift alert node wording', () => {
             'Auto-fix for "fix-local" on this node failed: compose up failed',
             { stackName: 'fix-local', actor: 'system:blueprint' },
         );
+    });
+
+    it('unverified drift never calls Enforce digest repair', async () => {
+        const enforceSpy = vi.spyOn(BlueprintService.getInstance(), 'enforceDigestRepair');
+        vi.spyOn(BlueprintService.getInstance(), 'checkForDrift').mockResolvedValue({
+            kind: 'unverified',
+            reason: 'runtime identity could not be collected',
+        });
+        const nodeId = seedNode();
+        const bp = seedBlueprint({
+            name: 'unverified-local',
+            drift_mode: 'enforce',
+            classification: 'stateless',
+            nodeIds: [nodeId],
+        });
+        const node = DatabaseService.getInstance().getNode(nodeId)!;
+        DatabaseService.getInstance().upsertDeployment({
+            blueprint_id: bp.id,
+            node_id: nodeId,
+            status: 'active',
+            applied_revision: bp.revision,
+            last_deployed_at: Date.now(),
+        });
+        const reconciler = BlueprintReconciler.getInstance() as unknown as {
+            executeOneAction: (
+                blueprint: Blueprint,
+                node: Node,
+                action: string,
+                svc: typeof BlueprintService.prototype,
+            ) => Promise<{ status: string }>;
+        };
+
+        const outcome = await reconciler.executeOneAction(
+            bp,
+            node,
+            'check_enforce',
+            BlueprintService.getInstance(),
+        );
+
+        expect(outcome.status).toBe('ok');
+        expect(enforceSpy).not.toHaveBeenCalled();
+        const dep = DatabaseService.getInstance().getDeployment(bp.id, nodeId);
+        expect(dep?.status).toBe('active');
     });
 });

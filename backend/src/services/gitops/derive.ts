@@ -174,7 +174,13 @@ function collectRuntimeDrift(
       });
     }
     // Artifact mismatch: comparable exact/qualified expectation vs observation.
-    if (target.runtime.status !== 'runtime_artifact_drift') continue;
+    // Per-node Direct (and unbound) mismatch stays runtime class;
+    // authorized-rollout disagreement is rollout class.
+    const driftClass =
+      target.runtime.status === 'rollout_artifact_drift' ? 'rollout'
+        : target.runtime.status === 'runtime_artifact_drift' ? 'runtime'
+          : null;
+    if (!driftClass) continue;
     const expected = target.artifact.status !== 'not_applicable' && 'expected' in target.artifact
       ? target.artifact.expected
       : null;
@@ -184,7 +190,7 @@ function collectRuntimeDrift(
       continue;
     }
     items.push({
-      class: 'runtime',
+      class: driftClass,
       expected: {
         kind: 'artifact_set',
         id: expected.artifactSetId,
@@ -194,13 +200,31 @@ function collectRuntimeDrift(
       observed: { kind: 'runtime_artifact', identity: observed.identity, observedAt: observed.observedAt },
       freshnessAt: observed.observedAt,
       owner: 'observed_artifact_identity',
-      reason: 'the running workload reports an artifact identity other than the expected artifact set',
+      reason: driftClass === 'rollout'
+        ? 'a required rollout target reports an artifact identity other than the approved rollout set'
+        : 'the running workload reports an artifact identity other than the expected artifact set',
       configuredPolicy: null,
       affectedTargets: [{ nodeId: target.nodeId, stackName: app.stack_name }],
       action: 'none',
     });
   }
   return items;
+}
+
+/**
+ * True when a target's observed identity is exact or qualified and equals the
+ * expected artifact identity. Used to withhold exactly_converged_healthy until
+ * every required live target has digest proof, not only applied/healthy pointers.
+ */
+function targetObservationMatchesExpected(target: GitOpsTargetProjection): boolean {
+  const expected = target.artifact.status !== 'not_applicable' && 'expected' in target.artifact
+    ? target.artifact.expected
+    : null;
+  if (!expected || expected.identity === null) return false;
+  if (expected.qualification !== 'exact' && expected.qualification !== 'qualified') return false;
+  const observed = target.observedArtifactIdentity;
+  return (observed.kind === 'exact' || observed.kind === 'qualified')
+    && observed.identity === expected.identity;
 }
 
 function deriveSource(app: GitOpsApplicationRow, limitations: GitOpsLimitation[]): SourceFacet {
@@ -352,7 +376,12 @@ function deriveArtifact(
   latestId: string | null,
   limitations: GitOpsLimitation[],
 ): ArtifactFacet {
-  if (app.target_mode === 'inline_blueprint' || !generationId) return { status: 'not_applicable' };
+  // Inline without a frozen generation stays not_applicable (no fabricated
+  // exact convergence). Once freeze binds generation + expected set pointers,
+  // Inline derives the same way as Git-managed. Direct with a null
+  // generationId is likewise not_applicable.
+  if (app.target_mode === 'inline_blueprint' && !generationId) return { status: 'not_applicable' };
+  if (!generationId) return { status: 'not_applicable' };
   const store = GitOpsStore.getInstance();
   const expected = expectedId ? toExpected(store, expectedId, limitations) : null;
   if (!latestId) {
@@ -704,6 +733,19 @@ function deriveRollout(
       if (artifact.status !== 'artifact_exact') {
         return { status: 'configuration_converged_artifact_qualified', rolloutGenerationId };
       }
+      // Exact convergence also needs per-target digest proof. Pointers and
+      // health alone must not claim exactly_converged_healthy while any
+      // required live target lacks a matching exact/qualified observation.
+      const allDigestMatched = required.every((nodeId) => {
+        const target = liveTarget(nodeId);
+        return !!target && targetObservationMatchesExpected(target);
+      });
+      if (!allDigestMatched) {
+        return {
+          status: 'partially_rolled_out',
+          partial: app.partial_json ?? { reason: 'runtime_artifact_divergence' },
+        };
+      }
       return { status: 'exactly_converged_healthy', rolloutGenerationId };
     }
   }
@@ -879,6 +921,11 @@ function deriveRuntime(
       && artifact.expected.identity
       && observed.identity !== artifact.expected.identity
     ) {
+      // Authorized-rollout targets report fleet-class disagreement; Direct and
+      // unbound per-node mismatches stay runtime_artifact_drift.
+      if (target.rollout_authorization_ref || target.rollout_generation_id) {
+        return { status: 'rollout_artifact_drift' };
+      }
       return { status: 'runtime_artifact_drift' };
     }
   }

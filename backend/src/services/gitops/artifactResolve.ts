@@ -541,32 +541,35 @@ function recordRuntimeObservation(
   });
 }
 
-export async function recordObservedRuntimeArtifactForDeploy(args: {
+/**
+ * Observe the running image identity for a stack on a node.
+ * Does not require a GitOps application or generation; callers record when they have one.
+ * Compose project labels use the lowercase stack name (Docker Compose convention).
+ */
+export async function observeStackRuntimeArtifact(args: {
   stackName: string;
   nodeId: number;
-  applicationId: string;
-  envelope: EventEnvelope;
-}): Promise<void> {
+  observedAt?: number;
+}): Promise<ObservedArtifactIdentity> {
+  const observedAt = args.observedAt ?? Date.now();
+  const projectName = args.stackName.toLowerCase();
   try {
     const model = await buildEffectiveServiceModel(args.nodeId, args.stackName);
     if (!model.renderable) {
-      recordRuntimeObservation(args, { kind: 'unavailable' });
-      return;
+      return { kind: 'unavailable' };
     }
 
     const docker = DockerController.getInstance(args.nodeId).getDocker();
-    const observedAt = args.envelope.at;
     const observed = await Promise.all(
       model.services.map((spec) =>
-        observeServiceRuntime(docker, args.stackName, spec.name, spec.declaredImage, observedAt),
+        observeServiceRuntime(docker, projectName, spec.name, spec.declaredImage, observedAt),
       ),
     );
     const serviceQuals = observed.map((entry) => entry.qualification);
     const services = observed.map((entry) => entry.evidence);
 
     if (services.every((service) => service.failureClass === 'unresolved' && !service.platformDigest)) {
-      recordRuntimeObservation(args, { kind: 'missing' });
-      return;
+      return { kind: 'missing' };
     }
 
     const qualification = weakestQualification(serviceQuals);
@@ -575,16 +578,37 @@ export async function recordObservedRuntimeArtifactForDeploy(args: {
       qualification !== 'qualified' &&
       qualification !== 'local_build_unverified'
     ) {
-      recordRuntimeObservation(args, { kind: 'unavailable' });
-      return;
+      return { kind: 'unavailable' };
     }
 
-    recordRuntimeObservation(args, {
+    return {
       kind: qualification,
       identity: computeArtifactSetFingerprint(services),
       observedAt,
       services,
+    };
+  } catch (error) {
+    console.error(
+      `[GitOpsArtifactResolve] Runtime observation failed for stack ${args.stackName}:`,
+      error instanceof Error ? error.message : String(error),
+    );
+    return { kind: 'unavailable' };
+  }
+}
+
+export async function recordObservedRuntimeArtifactForDeploy(args: {
+  stackName: string;
+  nodeId: number;
+  applicationId: string;
+  envelope: EventEnvelope;
+}): Promise<void> {
+  try {
+    const observed = await observeStackRuntimeArtifact({
+      stackName: args.stackName,
+      nodeId: args.nodeId,
+      observedAt: args.envelope.at,
     });
+    recordRuntimeObservation(args, observed);
   } catch (error) {
     console.error(
       `[GitOpsArtifactResolve] Runtime observation failed for ${args.applicationId}:`,

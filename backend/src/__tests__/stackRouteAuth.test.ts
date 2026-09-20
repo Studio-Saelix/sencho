@@ -30,6 +30,11 @@ describe('classifyStackApiPath', () => {
       expect(classifyStackApiPath('GET', '/stacks/web/git-source/manifest')).toEqual({
         kind: 'named-stack', stackName: 'web', action: 'stack:read',
       });
+      // Hub-to-remote Blueprint digest observation; missing this rule fails
+      // closed as unknown-named and 403s proxied callers (and non-admin hub callers).
+      expect(classifyStackApiPath('GET', '/stacks/web/runtime-artifact-identity')).toEqual({
+        kind: 'named-stack', stackName: 'web', action: 'stack:read',
+      });
       expect(classifyStackApiPath('POST', '/stacks/web/drift/recheck')).toEqual({
         kind: 'named-stack', stackName: 'web', action: 'stack:read',
       });

@@ -159,8 +159,8 @@ Possible status values:
 | **Pending** | The reconciler has acquired the deployment lock and is about to start. |
 | **Awaiting confirmation** | A stateful blueprint reached a new node. The reconciler refuses to deploy until you click **Confirm deploy** in the action column. |
 | **Deploying** | The compose action is in flight on this node. |
-| **Active** | The container set matches the blueprint's revision. |
-| **Drifted** | The reconciler detected a difference between the live state and the desired one. |
+| **Active** | The deployment is placed and its containers are running for this blueprint revision. Exact image identity is a separate GitOps / Drift proof; a row can read Active while Drift shows runtime artifact disagreement. |
+| **Drifted** | The reconciler detected a difference between the live state and the desired one (marker, revision, container health, or frozen image digest). |
 | **Correcting** | An Enforce-mode auto-fix is in flight. |
 | **Failed** | The deployment or withdrawal errored. The notes column carries the message. |
 | **Withdrawing** | A withdraw is in flight. |
@@ -355,7 +355,7 @@ A future Volume Migration feature will automate this with app-aware backup tooli
     The deployment row moves to **Failed** and records the Docker or registry error. Resolve the daemon, socket, registry credentials, rate limit, disk, or volume-permission issue on the affected node, then click **Apply now**. Watch that node's stack activity and security scan status after retry.
   </Accordion>
   <Accordion title="Drift is reported but never gets corrected">
-    Confirm the drift policy is **Enforce** and that **Reconciler enabled** is on. Open the detail sheet to check the row's status and the most recent drift summary. If the row is sitting in **Awaiting confirmation** instead of **Drifted**, that is expected: a compose edit on a stateful or state-unknown blueprint never auto-corrects under any drift mode, including Enforce. It always waits for an explicit **Confirm deploy** so a human signs off before the new revision touches that node's data. Enforce's auto-fix only applies to container-level drift (a stopped or crashed container) on a deployment that is already **Active**.
+    Confirm the drift policy is **Enforce** and that **Reconciler enabled** is on. Open the detail sheet to check the row's status and the most recent drift summary. If the row is sitting in **Awaiting confirmation** instead of **Drifted**, that is expected: a compose edit on a stateful or state-unknown blueprint never auto-corrects under any drift mode, including Enforce. It always waits for an explicit **Confirm deploy** so a human signs off before the new revision touches that node's data. Enforce's auto-fix applies to container-level drift (a stopped or crashed container) and to frozen image-digest disagreement on a deployment that is already **Active**. Unreachable nodes and missing digest evidence stay unverified and never auto-correct.
   </Accordion>
   <Accordion title="'Apply now' is greyed out">
     **Apply now** requires the blueprint to be enabled and Inline. Open the detail sheet, click **Enable** to flip the reconciler back on, then click **Apply now**. The button is also disabled while the detail sheet is in edit mode; save or cancel the edit first. Git-managed Blueprints do not offer Apply now: content comes from Git, and place runs from an authorized accepted generation rather than from the editor or the detach snapshot. Use **Detach Git** if you need Inline editing and Confirm Apply again.

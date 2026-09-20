@@ -47,6 +47,7 @@ import {
 import { isDebugEnabled } from '../utils/debug';
 import { sanitizeForLog } from '../utils/safeLog';
 import { isSqliteUniqueViolation, getErrorMessage } from '../utils/errors';
+import { isDigestPinsMap } from '../services/gitops/digestPins';
 import {
     GitManagedContentError,
     GitOpsBindingError,
@@ -494,6 +495,7 @@ blueprintsRouter.post('/apply-local', async (req: Request, res: Response): Promi
         composeContent?: unknown;
         markerContent?: unknown;
         allowGitManagedContent?: unknown;
+        digestPins?: unknown;
     };
     if (typeof body.stackName !== 'string' || !isValidStackName(body.stackName)) {
         res.status(400).json({ error: 'Invalid stack name' });
@@ -515,6 +517,14 @@ blueprintsRouter.post('/apply-local', async (req: Request, res: Response): Promi
         res.status(400).json({ error: 'Invalid blueprint marker' });
         return;
     }
+    let digestPins: Record<string, string> | undefined;
+    if (body.digestPins !== undefined) {
+        if (!isDigestPinsMap(body.digestPins)) {
+            res.status(400).json({ error: 'digestPins must be an object of serviceName to image@digest strings' });
+            return;
+        }
+        digestPins = body.digestPins;
+    }
     const allowGitManaged = body.allowGitManagedContent === true
         && typeof marker.applicationId === 'string'
         && marker.applicationId.length > 0
@@ -528,7 +538,7 @@ blueprintsRouter.post('/apply-local', async (req: Request, res: Response): Promi
             body.composeContent,
             body.markerContent,
             '/api/blueprints/apply-local',
-            { allowGitManaged },
+            { allowGitManaged, digestPins },
         );
         if (!outcome.ran) {
             res.status(409).json({

@@ -23,7 +23,7 @@ describe('gitops derivation', () => {
     expect(FACET_EVIDENCE_SOURCE.source.applying).toBe('current');
     expect(FACET_EVIDENCE_SOURCE.rollout.completion_unknown).toBe('current_or_future');
     expect(FACET_EVIDENCE_SOURCE.source.source_superseded).toBe('future');
-    expect(FACET_EVIDENCE_SOURCE.runtime.rollout_artifact_drift).toBe('future');
+    expect(FACET_EVIDENCE_SOURCE.runtime.rollout_artifact_drift).toBe('current');
     expect(FACET_EVIDENCE_SOURCE.lkg.none).toBe('current');
   });
 
@@ -1027,6 +1027,77 @@ describe('gitops derivation', () => {
     expect(projection.availableActions).not.toContain('suspend');
     expect(projection.availableActions).not.toContain('resume');
     expect(projection.availableActions).not.toContain('retry');
+  });
+
+  it('keeps Inline artifact not_applicable until a frozen generation exists', () => {
+    const store = GitOpsStore.getInstance();
+    store.insertApplication(rawApp('app-inline-nofreeze', {
+      target_mode: 'inline_blueprint',
+      blueprint_id: 40,
+      lifecycle_key: 'blueprint:40',
+      stack_name: null,
+      configured_repo_url: null,
+      repo_identity_json: null,
+      configured_ref: null,
+    }));
+    store.upsertTarget(emptyTargetRow('app-inline-nofreeze', 1, 1));
+
+    const projection = projectApplication('app-inline-nofreeze', false);
+    if (projection.targetMode === 'not_applicable') throw new Error('expected application');
+    expect(projection.facets.artifact.status).toBe('not_applicable');
+    expect(projection.targets[0]?.artifact.status).toBe('not_applicable');
+    expect(projection.facets.rollout.status).not.toBe('exactly_converged_healthy');
+  });
+
+  it('projects runtime_artifact_drift for Inline once a frozen exact set disagrees with observation', () => {
+    const store = GitOpsStore.getInstance();
+    store.insertGeneration(gen('gen-inline-freeze', 'app-inline-freeze'));
+    store.insertArtifactSet({
+      id: 'art-inline-freeze',
+      generation_id: 'gen-inline-freeze',
+      evidence_version: 1,
+      authoritative: 0,
+      qualification: 'exact',
+      evidence_json: JSON.stringify({ kind: 'exact', identity: 'sha256:wanted-inline' }),
+      created_at: 1,
+    });
+    store.insertApplication(rawApp('app-inline-freeze', {
+      target_mode: 'inline_blueprint',
+      blueprint_id: 41,
+      lifecycle_key: 'blueprint:41',
+      stack_name: null,
+      configured_repo_url: null,
+      repo_identity_json: null,
+      configured_ref: null,
+      accepted_generation_id: 'gen-inline-freeze',
+      artifact_set_id: 'art-inline-freeze',
+      latest_artifact_set_id: 'art-inline-freeze',
+    }));
+    store.upsertTarget({
+      ...emptyTargetRow('app-inline-freeze', 1, 1),
+      desired_generation_id: 'gen-inline-freeze',
+      applied_generation_id: 'gen-inline-freeze',
+      deployed_generation_id: 'gen-inline-freeze',
+      expected_artifact_set_id: 'art-inline-freeze',
+      latest_artifact_set_id: 'art-inline-freeze',
+      observed_artifact_identity_json: JSON.stringify({
+        kind: 'exact',
+        identity: 'sha256:serving-inline',
+        observedAt: 7,
+      }),
+    });
+
+    const projection = projectApplication('app-inline-freeze', false);
+    if (projection.targetMode === 'not_applicable') throw new Error('expected application');
+    expect(projection.facets.artifact.status).toBe('artifact_exact');
+    expect(projection.targets[0]?.runtime.status).toBe('runtime_artifact_drift');
+    expect(projection.drift).toHaveLength(1);
+    expect(projection.drift[0]?.class).toBe('runtime');
+    expect(projection.drift[0]?.observed).toEqual({
+      kind: 'runtime_artifact',
+      identity: 'sha256:serving-inline',
+      observedAt: 7,
+    });
   });
 });
 
