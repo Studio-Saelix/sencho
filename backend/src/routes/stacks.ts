@@ -18,6 +18,7 @@ import DockerController from '../services/DockerController';
 import { DatabaseService, type StackDossierFields } from '../services/DatabaseService';
 import { type CacheFetchOutcome } from '../services/CacheService';
 import { buildStackStatusesEvidence } from '../services/stackStatusesEvidence';
+import { buildStackReadinessSummary } from '../services/readiness/stackReadinessSummary';
 import {
   UpdatePreviewService,
   isAuthoritativeNegativePreview,
@@ -387,6 +388,22 @@ stacksRouter.get('/statuses', async (req: Request, res: Response) => {
       elapsedMs: Date.now() - startedAt,
       outcome,
     });
+  }
+});
+
+// Per-stack update and rollback verdicts for the fleet readiness surface,
+// computed by this node because the Docker socket is here: the update preview's
+// remote path aborts at a hard 90s ceiling per stack, which a fleet fan-out
+// cannot wait on. Registered ahead of the `/:stackName` catch-all, like
+// `/statuses` above, or the request would resolve as a stack named
+// `readiness-summary`.
+stacksRouter.get('/readiness-summary', async (req: Request, res: Response) => {
+  if (!requirePermission(req, res, 'stack:read')) return;
+  try {
+    res.json(await buildStackReadinessSummary(req.nodeId));
+  } catch (error) {
+    console.error('Failed to build stack readiness summary:', error);
+    res.status(500).json({ error: 'Failed to build stack readiness summary' });
   }
 });
 

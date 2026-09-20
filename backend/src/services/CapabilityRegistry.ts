@@ -72,6 +72,7 @@ export const CAPABILITIES = [
   'remote-image-inspect-v1',
   'remote-auto-update-checked-v1',
   'gitops-source-controller',
+  'fleet-readiness-v1',
 ] as const;
 
 /**
@@ -158,6 +159,15 @@ export const REMOTE_REGISTRY_SEALED_ENVELOPE_V1_CAPABILITY =
 /** Direct GitOps source-controller routes and source-policy representation. Not Blueprint source evaluation. */
 export const GITOPS_SOURCE_CONTROLLER_CAPABILITY =
   'gitops-source-controller' as const satisfies Capability;
+
+/**
+ * Per-node readiness evidence and the live per-stack readiness rollup. These
+ * are the node-local half of fleet readiness: a node advertises the flag to say
+ * it serves them, and a hub that reads its matrix's Updates and Recovery
+ * columns from these reports a node without the flag as `unavailable` rather
+ * than unknown.
+ */
+export const FLEET_READINESS_V1_CAPABILITY = 'fleet-readiness-v1' as const satisfies Capability;
 
 /** Contract version the hub and target negotiate for exact-ref proof. */
 export const REMOTE_REGISTRY_EXACT_REF_CONTRACT_VERSION = 1;

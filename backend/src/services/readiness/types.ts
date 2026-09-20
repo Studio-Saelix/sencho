@@ -234,6 +234,50 @@ export interface FleetReadinessNode {
   stackCount: number | null;
 }
 
+export interface StackUpdateReadinessRow {
+  verdict: ReadinessVerdict;
+  /**
+   * The strongest signal detail behind the verdict, or null. Redacted the same
+   * way `ReadinessFinding.detail` is: it carries text the canonical contracts
+   * pass through from the managed-project inventory, which can embed a
+   * materialized input path.
+   */
+  topReason: string | null;
+  computedAt: number;
+}
+
+export interface StackRollbackReadinessRow {
+  overall: RollbackOverall;
+  /** Redacted the same way `StackUpdateReadinessRow.topReason` is. */
+  topReason: string | null;
+  computedAt: number;
+}
+
+/**
+ * One stack's readiness in a node-local pass.
+ *
+ * A null verdict slot means the compute for that question failed, which
+ * `unavailableReason` names when both failed. It is not the same statement as a
+ * present slot whose verdict is itself `unknown`, which means the compute ran
+ * and could not decide; `RollbackOverall` has no `unknown` member, so a failed
+ * rollback compute can only be reported as a null slot.
+ */
+export interface StackReadinessRow {
+  stack: string;
+  /** The canonical update verdict, or null when it was never evaluated. */
+  update: StackUpdateReadinessRow | null;
+  /** The canonical rollback verdict, or null when it was never evaluated. */
+  rollback: StackRollbackReadinessRow | null;
+  /**
+   * Set only when both `update` and `rollback` are null, naming why neither
+   * verdict could be produced for this stack (the deadline, or a compute
+   * error). A stack the cap excluded has no entry here at all; the cap is
+   * reported by `truncated` instead, so a row present in this array always
+   * carries either a verdict or a reason it has none.
+   */
+  unavailableReason: ReadinessReasonCode | null;
+}
+
 /**
  * Per-stack readiness as the node that owns the Docker socket computed it,
  * served by `GET /api/stacks/readiness-summary`.
@@ -243,35 +287,29 @@ export interface FleetReadinessNode {
  * scoring: it selects, bounds, and reports.
  */
 export interface NodeStackReadinessSummary {
+  /** Epoch ms of the pass that produced these verdicts, not of this request. */
   generatedAt: number;
   /** True when the stack cap or the deadline cut the pass short. */
   truncated: boolean;
-  stacks: Array<{
-    stack: string;
-    update: {
-      verdict: ReadinessVerdict;
-      /**
-       * The strongest signal detail behind the verdict, or null. Redacted the
-       * same way `ReadinessFinding.detail` is: it carries text the canonical
-       * contracts pass through from the managed-project inventory, which can
-       * embed a materialized input path.
-       */
-      topReason: string | null;
-      computedAt: number;
-    } | null;
-    rollback: {
-      overall: RollbackOverall;
-      /** Redacted the same way `update.topReason` is. */
-      topReason: string | null;
-      computedAt: number;
-    } | null;
-    /**
-     * Set only when both `update` and `rollback` are null, naming why neither
-     * verdict could be produced for this stack (the cap, the deadline, or a
-     * compute error).
-     */
-    unavailableReason: ReadinessReasonCode | null;
-  }>;
+  /**
+   * True when the verdicts served are older than the freshness window, which is
+   * what an earlier failed pass leaves behind. These rows fold into the hub's
+   * `updates` and `recovery` cells, and neither cell may be `healthy` while this
+   * is true: the verdicts are real but their age is unbounded.
+   *
+   * A `false` here says only that a pass completed within the window, not that
+   * the verdicts are current relative to anything else. A stack deployed since
+   * the pass is neither, so a consumer that needs currency bounds the age
+   * through `generatedAt` as well.
+   */
+  stale: boolean;
+  /**
+   * Worst first: stacks whose stored check failed, then those with an update
+   * available, then those with open drift findings, then alphabetical. The cap
+   * keeps this prefix, so a stack missing from the array was not judged healthy,
+   * only left unevaluated.
+   */
+  stacks: StackReadinessRow[];
 }
 
 /**
