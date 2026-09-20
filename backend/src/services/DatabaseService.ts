@@ -5954,7 +5954,20 @@ stmt.run('gitops_schema_version', '1');
     }
 
     public deleteGitProviderEndpoint(id: string): void {
-        this.db.prepare('DELETE FROM git_provider_endpoints WHERE id = ?').run(id);
+        this.db.transaction(() => {
+            this.db.prepare('DELETE FROM git_provider_deliveries WHERE endpoint_id = ?').run(id);
+            this.db.prepare('DELETE FROM git_provider_endpoints WHERE id = ?').run(id);
+        })();
+    }
+
+    public deleteGitProviderEndpointsForStack(stackName: string): number {
+        return this.db.transaction(() => {
+            this.db.prepare(
+                'DELETE FROM git_provider_deliveries WHERE endpoint_id IN (SELECT id FROM git_provider_endpoints WHERE stack_name = ?)',
+            ).run(stackName);
+            const result = this.db.prepare('DELETE FROM git_provider_endpoints WHERE stack_name = ?').run(stackName);
+            return result.changes;
+        })();
     }
 
     public upsertGitProviderDelivery(args: {

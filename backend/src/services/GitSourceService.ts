@@ -35,6 +35,7 @@ import { nativeGitTransport, verifyFastForward } from './git/nativeGitTransport'
 import { fingerprintFromKnownHostsLine } from './git/sshTrust';
 import { validateCaBundlePem } from './git/caBundle';
 import { GitOpsStore } from './gitops/store';
+import { GitProviderWebhookStore } from './gitops/providerWebhooks/store';
 import { isDeployDispatchedPayload, type GitOpsHistoryCursor } from './gitops/history';
 import { projectApplication } from './gitops/derive';
 import { outcomeFromSourceFacet, parseReconcileResultPayload, type ReconcileOutcome, type ReconcileResult } from './gitops/outcomes';
@@ -1373,6 +1374,9 @@ export class GitSourceService {
                 const gitopsApp = this.gitopsApplicationFor(stackName);
                 DatabaseService.getInstance().getDb().transaction(() => {
                     DatabaseService.getInstance().deleteGitSource(stackName);
+                    // Provider webhook endpoints carry encrypted secrets; prune
+                    // them (and their deliveries) atomically with the source.
+                    GitProviderWebhookStore.getInstance().deleteEndpointsForStack(stackName);
                     if (!gitopsApp) return;
                     const tx = GitOpsTransitions.getInstance();
                     const envelope = this.gitopsEnvelope(crypto.randomUUID(), 'system:git-source', 'detach');
