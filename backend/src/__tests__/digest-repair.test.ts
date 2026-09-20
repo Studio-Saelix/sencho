@@ -218,7 +218,7 @@ describe('buildDigestPinsFromArtifactSet', () => {
 describe('enforceDigestRepair', () => {
   it('fails closed without mutating LKG pointers when the set is missing or not comparable', async () => {
     const { bp, node } = seedBlueprint();
-    const seeded = seedApp(bp, node, { omitSet: true, qualification: 'unresolved' });
+    seedApp(bp, node, { omitSet: true, qualification: 'unresolved' });
     const deploySpy = vi.spyOn(BlueprintService.getInstance() as unknown as {
       deployAuthorizedMaterialization: () => Promise<unknown>;
     }, 'deployAuthorizedMaterialization');
