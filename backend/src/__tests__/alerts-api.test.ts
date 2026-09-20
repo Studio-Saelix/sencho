@@ -528,6 +528,15 @@ describe('POST /api/notifications/test', () => {
     expect(res.status).toBe(403);
   });
 
+  it('rejects a redacted Discord webhook URL', async () => {
+    const res = await request(app)
+      .post('/api/notifications/test')
+      .set('Cookie', authCookie)
+      .send({ type: 'discord', url: 'https://discord.com/<redacted>' });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/redacted/i);
+  });
+
   it('rejects invalid type with 400', async () => {
     const res = await request(app)
       .post('/api/notifications/test')

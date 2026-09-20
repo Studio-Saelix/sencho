@@ -50,13 +50,30 @@ describe('GET /api/agents', () => {
     expect(res.body).toEqual([]);
   });
 
-  it('lists configured agents for authenticated users', async () => {
+  it('lists configured agents with credential-bearing URLs redacted', async () => {
     const db = DatabaseService.getInstance();
-    db.upsertAgent(1, { type: 'discord', url: 'https://discord.com/api/webhooks/abc/def', enabled: true });
+    db.upsertAgent(1, { type: 'discord', url: 'https://discord.com/api/webhooks/abc/def-secret', enabled: true });
     const res = await request(app).get('/api/agents').set('Cookie', adminCookie);
     expect(res.status).toBe(200);
     expect(res.body.length).toBe(1);
     expect(res.body[0].type).toBe('discord');
+    expect(res.body[0].url).toBe('https://discord.com/<redacted>');
+    expect(res.body[0].secrets_redacted).toBe(true);
+    expect(JSON.stringify(res.body)).not.toContain('def-secret');
+  });
+
+  it('allows viewers to list agents but never returns embedded webhook tokens', async () => {
+    DatabaseService.getInstance().upsertAgent(1, {
+      type: 'discord',
+      url: 'https://discord.com/api/webhooks/1234567890123456789/POC_SECRET_TOKEN',
+      enabled: true,
+    });
+    const res = await request(app).get('/api/agents').set('Cookie', viewerCookie);
+    expect(res.status).toBe(200);
+    expect(res.body[0].enabled).toBe(true);
+    expect(res.body[0].url).toBe('https://discord.com/<redacted>');
+    expect(res.body[0].secrets_redacted).toBe(true);
+    expect(JSON.stringify(res.body)).not.toContain('POC_SECRET_TOKEN');
   });
 });
 
@@ -75,6 +92,40 @@ describe('POST /api/agents', () => {
   it('rejects non-admin users with 403', async () => {
     const res = await request(app).post('/api/agents').set('Cookie', viewerCookie).send(validPayload);
     expect(res.status).toBe(403);
+  });
+
+  it('rejects posting a redacted Discord webhook URL', async () => {
+    DatabaseService.getInstance().upsertAgent(1, {
+      type: 'discord',
+      url: 'https://discord.com/api/webhooks/1/real-token',
+      enabled: true,
+    });
+    const res = await request(app).post('/api/agents').set('Cookie', adminCookie).send({
+      type: 'discord',
+      url: 'https://discord.com/<redacted>',
+      enabled: true,
+    });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/redacted/i);
+    expect(DatabaseService.getInstance().getAgents(1)[0].url).toBe(
+      'https://discord.com/api/webhooks/1/real-token',
+    );
+  });
+
+  it('preserves the stored Discord URL when the write omits url', async () => {
+    DatabaseService.getInstance().upsertAgent(1, {
+      type: 'discord',
+      url: 'https://discord.com/api/webhooks/1/real-token',
+      enabled: false,
+    });
+    const res = await request(app).post('/api/agents').set('Cookie', adminCookie).send({
+      type: 'discord',
+      enabled: true,
+    });
+    expect(res.status).toBe(200);
+    const agent = DatabaseService.getInstance().getAgents(1)[0];
+    expect(Boolean(agent.enabled)).toBe(true);
+    expect(agent.url).toBe('https://discord.com/api/webhooks/1/real-token');
   });
 
   it('rejects unsupported channel types with 400', async () => {

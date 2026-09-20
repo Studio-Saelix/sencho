@@ -19,7 +19,7 @@ Below the channel tabs, **Delivery retries** sets how many extra in-process atte
 Each Discord, Slack, and Webhook tab carries an **Enabled** toggle, a **Webhook URL** input (HTTPS only), and **Test** / **Save**. The Apprise tab uses an **Apprise endpoint**: keyed `/notify/{key}` shows optional **Tags**; stateless `/notify` shows **Destination URLs**. The ntfy tab accepts an ntfy server and topic URL with an **Enabled** toggle and **Test** / **Save**. The kicker on each tab toggles between `enabled` and `off` so you can see at a glance which slots are wired up.
 
 <Note>
-  Discord, Slack, and webhook URLs must use HTTPS. Apprise and ntfy endpoints may use HTTP or HTTPS. Every endpoint must parse as a URL.
+  Discord, Slack, and webhook URLs must use HTTPS. Apprise and ntfy endpoints may use HTTP or HTTPS. Every endpoint must parse as a URL. After save, Sencho shows an origin-only placeholder instead of the stored token. Paste a full URL again to rotate the destination or to use **Test**.
 </Note>
 
 ### Discord

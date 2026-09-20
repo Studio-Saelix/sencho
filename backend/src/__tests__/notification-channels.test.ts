@@ -196,28 +196,84 @@ describe('Apprise channel helpers', () => {
     expect(validateNotificationChannel('apprise', `http://apprise.local/notify/${'A1_-'}${'b'.repeat(124)}`)).toBeNull();
   });
 
-  it('sets secrets_redacted only for Apprise public DTOs', () => {
-    expect(serializePublicAgent({
+  it('redacts credential-bearing Discord, Slack, webhook, and ntfy public DTOs', () => {
+    const discord = serializePublicAgent({
       type: 'discord',
       url: 'https://discord.com/api/webhooks/1/token',
       enabled: true,
-    }).secrets_redacted).toBe(false);
-    expect(serializePublicAgent({
+    });
+    expect(discord).toMatchObject({
+      url: 'https://discord.com/<redacted>',
+      secrets_redacted: true,
+    });
+    expect(JSON.stringify(discord)).not.toContain('token');
+
+    const slack = serializePublicAgent({
       type: 'slack',
       url: 'https://hooks.slack.com/services/a/b/c',
       enabled: true,
-    }).secrets_redacted).toBe(false);
-    expect(serializePublicAgent({
+    });
+    expect(slack).toMatchObject({
+      url: 'https://hooks.slack.com/<redacted>',
+      secrets_redacted: true,
+    });
+    expect(JSON.stringify(slack)).not.toContain('/a/b/c');
+
+    const webhook = serializePublicAgent({
       type: 'webhook',
       url: 'https://example.com/hook',
       enabled: true,
-    }).secrets_redacted).toBe(false);
+    });
+    expect(webhook).toMatchObject({
+      url: 'https://example.com/<redacted>',
+      secrets_redacted: true,
+    });
+
+    const ntfy = serializePublicAgent({
+      type: 'ntfy',
+      url: 'https://ntfy.sh/mytopic?auth=super-secret',
+      enabled: true,
+    });
+    expect(ntfy).toMatchObject({
+      url: 'https://ntfy.sh/<redacted>',
+      secrets_redacted: true,
+    });
+    expect(JSON.stringify(ntfy)).not.toContain('super-secret');
+
+    expect(serializePublicAgent({
+      type: 'discord',
+      url: '',
+      enabled: false,
+    })).toMatchObject({ url: '', secrets_redacted: false });
+
     expect(serializePublicAgent({
       type: 'apprise',
       url: 'http://apprise.local/notify/k',
       enabled: true,
       config: '{}',
     }).secrets_redacted).toBe(true);
+
+    const route = serializePublicNotificationRoute({
+      id: 1,
+      name: 'r',
+      node_id: null,
+      stack_patterns: [],
+      label_ids: null,
+      categories: null,
+      levels: null,
+      channel_type: 'discord',
+      channel_url: 'https://discord.com/api/webhooks/9/secret-token',
+      config: null,
+      priority: 0,
+      enabled: true,
+      created_at: 1,
+      updated_at: 1,
+    });
+    expect(route).toMatchObject({
+      channel_url: 'https://discord.com/<redacted>',
+      secrets_redacted: true,
+    });
+    expect(JSON.stringify(route)).not.toContain('secret-token');
   });
 
   it('treats null/empty stored config as valid empty keyed', () => {

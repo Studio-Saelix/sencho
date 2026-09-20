@@ -39,6 +39,7 @@ interface NotificationRoute {
     channel_type: 'discord' | 'slack' | 'webhook' | 'apprise' | 'ntfy';
     channel_url: string;
     config: { mode: 'keyed' | 'stateless'; tags?: string; has_urls: boolean; providers?: string[]; url_count?: number } | null;
+    secrets_redacted?: boolean;
     priority: number;
     enabled: boolean;
     created_at: number;
@@ -220,6 +221,10 @@ export function NotificationRoutingSection() {
             return;
         }
 
+        const preserveRedactedUrl = Boolean(editingId)
+            && !channelTypeChanged
+            && !appriseEndpointDirty
+            && (Boolean(routes.find(r => r.id === editingId)?.secrets_redacted) || formChannelUrl.includes('<redacted>'));
         setSaving(true);
         try {
             const body = {
@@ -230,9 +235,7 @@ export function NotificationRoutingSection() {
                 categories: formCategories.length > 0 ? formCategories : null,
                 levels: formLevels.length > 0 ? formLevels : null,
                 channel_type: formChannelType,
-                ...(formChannelType !== 'apprise' || !editingId || appriseEndpointDirty || channelTypeChanged
-                    ? { channel_url: formChannelUrl.trim() }
-                    : {}),
+                ...(preserveRedactedUrl ? {} : { channel_url: formChannelUrl.trim() }),
                 ...(needsAppriseConfig
                     ? {
                         config: appriseMode === 'stateless'
@@ -582,7 +585,7 @@ export function NotificationRoutingSection() {
                                     value={formChannelUrl}
                                     onChange={e => {
                                         setFormChannelUrl(e.target.value);
-                                        if (formChannelType === 'apprise') setAppriseEndpointDirty(true);
+                                        setAppriseEndpointDirty(true);
                                     }}
                                 />
                                 {formChannelType === 'apprise' && (

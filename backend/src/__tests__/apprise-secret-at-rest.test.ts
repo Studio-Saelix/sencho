@@ -115,7 +115,7 @@ describe('Apprise secrets at rest (downgrade-safe)', () => {
     expect(JSON.stringify(pub)).not.toContain(keySecret);
   });
 
-  it('does not encrypt Discord agent URLs (unchanged channel behavior)', () => {
+  it('stores Discord agent URLs in plaintext at rest but redacts them on the public DTO', () => {
     const db = DatabaseService.getInstance();
     const url = 'https://discord.com/api/webhooks/123/plaintext-token';
     db.upsertAgent(1, { type: 'discord', url, enabled: true });
@@ -123,8 +123,9 @@ describe('Apprise secrets at rest (downgrade-safe)', () => {
     expect(raw.url).toBe(url);
     expect(raw.url.startsWith('enc:')).toBe(false);
     const pub = serializePublicAgent(db.getAgents(1).find(a => a.type === 'discord')!);
-    expect(pub.secrets_redacted).toBe(false);
-    expect(pub.url).toBe(url);
+    expect(pub.secrets_redacted).toBe(true);
+    expect(pub.url).toBe('https://discord.com/<redacted>');
+    expect(JSON.stringify(pub)).not.toContain('plaintext-token');
   });
 
   it('isolates corrupt Apprise ciphertext so sibling channels still load and Apprise can be repaired', () => {
