@@ -49,7 +49,7 @@ export function buildDigestPinsFromArtifactSet(
   }
   const pins: DigestPinsMap = {};
   for (const service of evidence.services) {
-    const digest = approvedPlatformDigest(service, platformLabel ?? null);
+    const digest = approvedPlatformDigest(service, platformLabel);
     if (!digest || !PLATFORM_DIGEST_RE.test(digest)) {
       return null;
     }
