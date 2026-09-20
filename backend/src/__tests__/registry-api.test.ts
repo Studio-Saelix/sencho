@@ -1621,6 +1621,7 @@ describe('resolveRegistryImageDigestForPlatform', () => {
       platformDigest: digest,
       platformLabel: 'linux/amd64',
       qualification: 'exact',
+      platformVariants: [{ platform: 'linux/amd64', digest }],
     });
   });
 
