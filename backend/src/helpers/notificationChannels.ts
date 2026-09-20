@@ -22,7 +22,7 @@ export type PublicAppriseConfig = {
 export type PublicAgent = Omit<Agent, 'config' | 'type'> & {
   type: NotificationChannelType;
   config: PublicAppriseConfig | null;
-  /** True only when Apprise masking was applied; Discord/Slack/webhook still return raw URLs. */
+  /** True when this payload is a public projection and must not be written back. */
   secrets_redacted: boolean;
 };
 
@@ -243,9 +243,9 @@ export function resolvePreservedAppriseConfig(
 }
 
 /**
- * Shared preserve-on-write guard for agent/route Apprise writes: blocks a
- * write that echoes a redacted public URL, config, or DTO shape back as raw
- * input. Identical across `agents.ts` POST and `notification-routes` PUT.
+ * Shared preserve-on-write guard for agent/route channel writes: blocks echoing
+ * a redacted public URL. For Apprise, also rejects a public config/DTO shape
+ * written back as raw input. Used on agent POST, route create/update, and test.
  */
 export function redactedChannelWriteError(
   type: string,
@@ -304,33 +304,61 @@ export function maskAppriseEndpoint(value: string): string {
   }
 }
 
+/**
+ * Public URL for Discord, Slack, generic webhook, and ntfy channels.
+ * Empty stays empty; masked values come from `maskWebhookUrl`.
+ */
+function publicWebhookChannelUrl(raw: string): { url: string; secrets_redacted: boolean } {
+  if (!raw.trim()) return { url: '', secrets_redacted: false };
+  const url = maskWebhookUrl(raw);
+  return { url, secrets_redacted: url !== raw };
+}
+
 export function serializePublicAgent(agent: Agent): PublicAgent {
-  const isApprise = agent.type === 'apprise';
+  if (agent.type === 'apprise') {
+    return {
+      ...agent,
+      type: agent.type,
+      url: maskAppriseEndpoint(agent.url),
+      config: publicAppriseConfig(agent.url, agent.config ?? null),
+      secrets_redacted: true,
+    };
+  }
+  const { url, secrets_redacted } = publicWebhookChannelUrl(agent.url);
   return {
     ...agent,
     type: agent.type,
-    url: isApprise ? maskAppriseEndpoint(agent.url) : agent.url,
-    config: isApprise ? publicAppriseConfig(agent.url, agent.config ?? null) : null,
-    secrets_redacted: isApprise,
+    url,
+    config: null,
+    secrets_redacted,
   };
 }
 
 export function serializePublicNotificationRoute(route: NotificationRoute): PublicNotificationRoute {
-  const isApprise = route.channel_type === 'apprise';
+  if (route.channel_type === 'apprise') {
+    return {
+      ...route,
+      channel_type: route.channel_type,
+      channel_url: maskAppriseEndpoint(route.channel_url),
+      config: publicAppriseConfig(route.channel_url, route.config ?? null),
+      secrets_redacted: true,
+    };
+  }
+  const { url, secrets_redacted } = publicWebhookChannelUrl(route.channel_url);
   return {
     ...route,
     channel_type: route.channel_type,
-    channel_url: isApprise ? maskAppriseEndpoint(route.channel_url) : route.channel_url,
-    config: isApprise ? publicAppriseConfig(route.channel_url, route.config ?? null) : null,
-    secrets_redacted: isApprise,
+    channel_url: url,
+    config: null,
+    secrets_redacted,
   };
 }
 
 /**
- * Mask a channel webhook URL for logging. Discord/Slack/custom webhook URLs
- * embed their auth token in the path (and sometimes the query), so only the
- * origin is safe to emit. Returns `https://host/<redacted>` or a generic
- * placeholder if the value is not a parseable URL.
+ * Mask a channel webhook URL for public DTOs and logs. Path or query may carry
+ * a token or topic, so only the origin is safe to emit. Returns
+ * `https://host/<redacted>` or a generic placeholder if the value is not a
+ * parseable URL.
  */
 export function maskWebhookUrl(value: unknown): string {
   if (typeof value !== 'string' || value.length === 0) return '<no url>';

@@ -243,6 +243,73 @@ describe('NotificationsSection', () => {
         expect(body).not.toHaveProperty('config');
     });
 
+    it('omits a redacted Discord webhook URL on enable-only save', async () => {
+        mockedFetch.mockImplementation(async (url: string, opts?: { method?: string }) => {
+            if (url === '/agents' && !opts?.method) {
+                return agentsResponse([{
+                    type: 'discord',
+                    url: 'https://discord.com/<redacted>',
+                    enabled: false,
+                    secrets_redacted: true,
+                }]);
+            }
+            if (url === '/agents' && opts?.method === 'POST') {
+                return { ok: true, json: async () => ({}) };
+            }
+            if (url === '/settings' && !opts?.method) {
+                return { ok: true, json: async () => ({ notification_dispatch_retries: '0' }) };
+            }
+            return { ok: true, json: async () => ([]) };
+        });
+
+        render(<NotificationsSection />);
+        await waitFor(() => expect(screen.getByLabelText(/Webhook URL/i)).toHaveValue('https://discord.com/<redacted>'));
+
+        await userEvent.click(screen.getByRole('switch'));
+        await userEvent.click(screen.getByRole('button', { name: 'Save' }));
+
+        await waitFor(() => expect(findAgentsPost()).toBeTruthy());
+        const body = JSON.parse((findAgentsPost()![1] as { body: string }).body);
+        expect(body).toEqual({ type: 'discord', enabled: true });
+        expect(body).not.toHaveProperty('url');
+        expect(JSON.stringify(body)).not.toContain('<redacted>');
+    });
+
+    it('sends a replaced Discord webhook URL on save', async () => {
+        mockedFetch.mockImplementation(async (url: string, opts?: { method?: string }) => {
+            if (url === '/agents' && !opts?.method) {
+                return agentsResponse([{
+                    type: 'discord',
+                    url: 'https://discord.com/<redacted>',
+                    enabled: true,
+                    secrets_redacted: true,
+                }]);
+            }
+            if (url === '/agents' && opts?.method === 'POST') {
+                return { ok: true, json: async () => ({}) };
+            }
+            if (url === '/settings' && !opts?.method) {
+                return { ok: true, json: async () => ({ notification_dispatch_retries: '0' }) };
+            }
+            return { ok: true, json: async () => ([]) };
+        });
+
+        render(<NotificationsSection />);
+        const urlInput = await screen.findByLabelText(/Webhook URL/i);
+        expect(urlInput).toHaveValue('https://discord.com/<redacted>');
+        expect(screen.getByRole('button', { name: 'Test' })).toBeDisabled();
+
+        await userEvent.clear(urlInput);
+        await userEvent.type(urlInput, 'https://discord.com/api/webhooks/9/new-token');
+        expect(screen.getByRole('button', { name: 'Test' })).toBeEnabled();
+        await userEvent.click(screen.getByRole('button', { name: 'Save' }));
+
+        await waitFor(() => expect(findAgentsPost()).toBeTruthy());
+        const body = JSON.parse((findAgentsPost()![1] as { body: string }).body);
+        expect(body.url).toBe('https://discord.com/api/webhooks/9/new-token');
+        expect(JSON.stringify(body)).not.toContain('<redacted>');
+    });
+
     it('sends destination URLs when stateless destinations are edited', async () => {
         mockedFetch.mockImplementation(async (url: string, opts?: { method?: string }) => {
             if (url === '/agents' && !opts?.method) {

@@ -55,6 +55,14 @@ function hasStoredAppriseAgent(agent: Agent): boolean {
     return Boolean(agent.config?.mode) || agent.url.includes('<redacted>');
 }
 
+function urlLooksRedacted(url: string): boolean {
+    return url.includes('<redacted>') || url === '<invalid url>' || url === '<no url>';
+}
+
+function storedChannelUrlIsRedacted(agent: Agent): boolean {
+    return Boolean(agent.secrets_redacted) || urlLooksRedacted(agent.url);
+}
+
 function clampRetryExtras(raw: string): string {
     const n = Math.trunc(Number(raw));
     if (!Number.isFinite(n)) return DEFAULT_SETTINGS.notification_dispatch_retries!;
@@ -81,6 +89,7 @@ export function NotificationsSection({ onDirtyChange }: NotificationsSectionProp
     const [isTestingAgent, setIsTestingAgent] = useState<Record<string, boolean>>({});
     const [appriseUrlDirty, setAppriseUrlDirty] = useState(false);
     const [appriseConfigDirty, setAppriseConfigDirty] = useState(false);
+    const [urlDirty, setUrlDirty] = useState<Record<ChannelType, boolean>>(EMPTY_TEMPLATE_STATE);
     const [payloadOpen, setPayloadOpen] = useState<Record<string, boolean>>(EMPTY_TEMPLATE_STATE);
     const [templateDirty, setTemplateDirty] = useState<Record<string, boolean>>(EMPTY_TEMPLATE_STATE);
 
@@ -118,6 +127,7 @@ export function NotificationsSection({ onDirtyChange }: NotificationsSectionProp
             setAgents(next);
             setAppriseUrlDirty(false);
             setAppriseConfigDirty(false);
+            setUrlDirty(EMPTY_TEMPLATE_STATE);
             setTemplateDirty(EMPTY_TEMPLATE_STATE);
         } catch (e) {
             console.error('Failed to fetch agents', e);
@@ -208,6 +218,7 @@ export function NotificationsSection({ onDirtyChange }: NotificationsSectionProp
         setAgents(emptyAgents());
         setAppriseUrlDirty(false);
         setAppriseConfigDirty(false);
+        setUrlDirty(EMPTY_TEMPLATE_STATE);
         setPayloadOpen(EMPTY_TEMPLATE_STATE);
         setTemplateDirty(EMPTY_TEMPLATE_STATE);
         setRetries(DEFAULT_SETTINGS.notification_dispatch_retries!);
@@ -315,7 +326,10 @@ export function NotificationsSection({ onDirtyChange }: NotificationsSectionProp
             }
 
             if (type !== 'apprise') {
-                body.url = agent.url;
+                // Omit a redacted url on clean saves so preserve-on-write keeps the stored token.
+                if (urlDirty[type as ChannelType] || !storedChannelUrlIsRedacted(agent)) {
+                    body.url = agent.url;
+                }
             } else {
                 const stored = hasStoredAppriseAgent(agent);
                 // Omit url/config on clean saves (including enable toggles) so preserve-on-write keeps destinations.
@@ -358,13 +372,18 @@ export function NotificationsSection({ onDirtyChange }: NotificationsSectionProp
         return true;
     })();
 
+    const channelUrlIsPlaceholder = (type: ChannelType): boolean => urlLooksRedacted(agents[type].url);
+
     const testAgent = async (type: string) => {
         if (type === 'apprise' && !appriseCanTest) {
             toast.error('Enter a raw Apprise endpoint (and destination URLs for /notify) before testing.');
             return;
         }
-        if (!agents[type].url) {
-            toast.error('Please enter a webhook URL first.');
+        const placeholder = !agents[type].url.trim() || channelUrlIsPlaceholder(type as ChannelType);
+        if (placeholder) {
+            toast.error(channelUrlIsPlaceholder(type as ChannelType)
+                ? 'Enter the full webhook URL again before testing.'
+                : 'Please enter a webhook URL first.');
             return;
         }
         setIsTestingAgent(prev => ({ ...prev, [type]: true }));
@@ -449,6 +468,7 @@ export function NotificationsSection({ onDirtyChange }: NotificationsSectionProp
                     value={agents[type].url}
                     onChange={(e) => {
                         if (type === 'apprise') setAppriseUrlDirty(true);
+                        else setUrlDirty(prev => ({ ...prev, [type]: true }));
                         handleAgentChange(type, 'url', e.target.value);
                     }}
                 />
@@ -485,10 +505,17 @@ export function NotificationsSection({ onDirtyChange }: NotificationsSectionProp
                 <Button
                     variant="outline"
                     onClick={() => testAgent(type)}
-                    disabled={isTestingAgent[type] || (type === 'apprise' && !appriseCanTest)}
-                    title={type === 'apprise' && !appriseCanTest
-                        ? 'Enter a raw Apprise endpoint (and destination URLs for /notify) before testing.'
-                        : undefined}
+                    disabled={
+                        isTestingAgent[type]
+                        || (type === 'apprise' ? !appriseCanTest : channelUrlIsPlaceholder(type))
+                    }
+                    title={
+                        type === 'apprise' && !appriseCanTest
+                            ? 'Enter a raw Apprise endpoint (and destination URLs for /notify) before testing.'
+                            : type !== 'apprise' && channelUrlIsPlaceholder(type)
+                                ? 'Enter the full webhook URL again before testing.'
+                                : undefined
+                    }
                 >
                     {isTestingAgent[type] ? (
                         <>

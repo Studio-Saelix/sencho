@@ -239,6 +239,9 @@ describe('Notification Routes - CRUD', () => {
     expect(res.body.name).toBe('Prod Discord');
     expect(res.body.stack_patterns).toEqual(['prod-api', 'prod-web']);
     expect(res.body.channel_type).toBe('discord');
+    expect(res.body.channel_url).toBe('https://discord.com/<redacted>');
+    expect(res.body.secrets_redacted).toBe(true);
+    expect(JSON.stringify(res.body)).not.toContain('/123/abc');
     expect(res.body.priority).toBe(5);
     expect(res.body.enabled).toBe(true);
     createdId = res.body.id;
@@ -264,6 +267,13 @@ describe('Notification Routes - CRUD', () => {
     expect(res.body.length).toBeGreaterThanOrEqual(2);
     // First route should have lower priority number
     expect(res.body[0].priority).toBeLessThanOrEqual(res.body[1].priority);
+    const discord = res.body.find((r: { name: string }) => r.name === 'Prod Discord');
+    const slack = res.body.find((r: { name: string }) => r.name === 'Staging Slack');
+    expect(discord.channel_url).toBe('https://discord.com/<redacted>');
+    expect(discord.secrets_redacted).toBe(true);
+    expect(slack.channel_url).toBe('https://hooks.slack.com/<redacted>');
+    expect(JSON.stringify(res.body)).not.toContain('T00/B00/xyz');
+    expect(JSON.stringify(res.body)).not.toContain('/123/abc');
   });
 
   it('PUT updates specific fields', async () => {
@@ -276,6 +286,8 @@ describe('Notification Routes - CRUD', () => {
     expect(res.body.priority).toBe(10);
     // Unchanged fields preserved
     expect(res.body.channel_type).toBe('discord');
+    expect(res.body.channel_url).toBe('https://discord.com/<redacted>');
+    expect(res.body.secrets_redacted).toBe(true);
   });
 
   it('PUT returns 404 for non-existent route', async () => {
@@ -400,6 +412,17 @@ describe('PUT /api/notification-routes/:id - validation', () => {
       .set('Cookie', authCookie)
       .send({ name: 'PUT test', stack_patterns: ['app'], channel_type: 'discord', channel_url: 'https://discord.com/api/webhooks/123/abc' });
     routeId = res.body.id;
+  });
+
+  it('rejects echoing a redacted Discord channel_url', async () => {
+    const stored = DatabaseService.getInstance().getNotificationRoute(routeId)!;
+    const res = await request(app)
+      .put(`/api/notification-routes/${routeId}`)
+      .set('Cookie', authCookie)
+      .send({ channel_url: 'https://discord.com/<redacted>' });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/redacted/i);
+    expect(DatabaseService.getInstance().getNotificationRoute(routeId)!.channel_url).toBe(stored.channel_url);
   });
 
   it('rejects invalid route ID (NaN)', async () => {
