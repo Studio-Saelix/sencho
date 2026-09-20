@@ -32,6 +32,8 @@ import {
   Undo2,
   Upload,
   Fingerprint,
+  KeyRound,
+  MapPin,
   type LucideIcon,
 } from 'lucide-react';
 
@@ -43,6 +45,7 @@ import type {
   GitOpsRevisionProjection,
   GitOpsRuntimeStatus,
   GitOpsSourceStatus,
+  PlacementFacet,
   SourceFacet,
 } from '@/types/gitops';
 
@@ -244,6 +247,71 @@ export const SOURCE_STATE: Record<GitOpsSourceStatus, GitOpsStateMeta> = {
   },
 };
 
+export type GitOpsPlacementStatus = PlacementFacet['status'];
+
+export const PLACEMENT_STATE: Record<GitOpsPlacementStatus, GitOpsStateMeta> = {
+  not_applicable: {
+    label: 'no placement',
+    tone: 'neutral',
+    line: 'Blueprint placement does not apply to this application.',
+    icon: CircleSlash,
+  },
+  unbound_direct: {
+    label: 'unbound direct',
+    tone: 'neutral',
+    line: 'This Direct stack is not bound to a Blueprint placement model.',
+    icon: CircleSlash,
+  },
+  unknown: {
+    label: 'placement unknown',
+    tone: 'warning',
+    line: 'Sencho could not resolve placement because the intent revision is missing.',
+    icon: CircleHelp,
+  },
+  source_acceptance_pending: {
+    label: 'source acceptance pending',
+    tone: 'brand',
+    line: 'A generation is waiting for source acceptance before placement can proceed.',
+    icon: Hourglass,
+  },
+  placement_review_pending: {
+    label: 'placement review pending',
+    tone: 'warning',
+    line: 'Placement is waiting for operator review of the confirmed blast radius.',
+    icon: Hourglass,
+  },
+  rollout_authorization_pending: {
+    label: 'rollout authorization pending',
+    tone: 'brand',
+    line: 'Registry preflight is satisfied and rollout authorization is waiting to be recorded.',
+    icon: KeyRound,
+  },
+  rollout_authorization_stale: {
+    label: 'rollout authorization stale',
+    tone: 'warning',
+    line: 'Rollout authorization no longer matches the current placement or preflight fingerprint.',
+    icon: RefreshCw,
+  },
+  stateful_confirmation_required: {
+    label: 'stateful confirmation required',
+    tone: 'warning',
+    line: 'A stateful placement outcome needs operator confirmation before it can proceed.',
+    icon: Hourglass,
+  },
+  preflight_blocked: {
+    label: 'registry preflight blocked',
+    tone: 'destructive',
+    line: 'Registry readiness is blocked, or has not been evaluated yet.',
+    icon: Ban,
+  },
+  blueprint_bound: {
+    label: 'blueprint bound',
+    tone: 'success',
+    line: 'Placement is bound to this Blueprint; fleet completion is reported separately.',
+    icon: MapPin,
+  },
+};
+
 export const RUNTIME_STATE: Record<GitOpsRuntimeStatus, GitOpsStateMeta> = {
   tombstoned: {
     label: 'tombstoned',
@@ -433,7 +501,18 @@ export const RUNTIME_STATE: Record<GitOpsRuntimeStatus, GitOpsStateMeta> = {
  */
 export const SOURCE_STATE_LOOKUP: Partial<Record<string, GitOpsStateMeta>> = SOURCE_STATE;
 export const ARTIFACT_STATE_LOOKUP: Partial<Record<string, GitOpsStateMeta>> = ARTIFACT_STATE;
+export const PLACEMENT_STATE_LOOKUP: Partial<Record<string, GitOpsStateMeta>> = PLACEMENT_STATE;
 export const RUNTIME_STATE_LOOKUP: Partial<Record<string, GitOpsStateMeta>> = RUNTIME_STATE;
+
+/** Card copy for a placement facet. Preflight blocked uses the redacted server reason as the line. */
+export function placementStateMeta(facet: PlacementFacet): GitOpsStateMeta | undefined {
+  const base = PLACEMENT_STATE_LOOKUP[facet.status];
+  if (!base) return undefined;
+  if (facet.status === 'preflight_blocked') {
+    return { ...base, line: facet.reason };
+  }
+  return base;
+}
 
 /**
  * Frontend view state: stack name to the source status of its waiting candidate.

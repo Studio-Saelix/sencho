@@ -151,6 +151,7 @@ export function buildDirectApplicationRow(args: {
     rollout_authorization_ref: null,
     legacy_combined_approval_ref: null,
     preflight_fingerprint: null,
+    latest_preflight_evidence_json: null,
     latest_operation_id: null,
     active_operation_id: null,
     active_operation_stage: null,

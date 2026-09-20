@@ -2,7 +2,7 @@
  * PR2: rollout authorization, Git-managed dispatch from materialized
  * generations, derive facets, and restart-safe sequential place.
  */
-import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { promises as fsPromises } from 'fs';
 import path from 'path';
 import { randomUUID } from 'crypto';
@@ -12,6 +12,7 @@ import {
   buildPreflightEvidence,
   encodePreflightEvidenceJson,
   fingerprintPreflightEvidence,
+  REGISTRY_PREFLIGHT_UNEVALUATED_REASON,
 } from '../services/gitops/preflight';
 import { directApplicationFixture } from './helpers/gitopsFixtures';
 import type {
@@ -30,6 +31,7 @@ let FACET_EVIDENCE_SOURCE: typeof import('../services/gitops/types').FACET_EVIDE
 let BlueprintTargetAdapter: typeof import('../services/gitops/handoff').BlueprintTargetAdapter;
 let buildAcceptedGeneration: typeof import('../services/gitops/handoff').buildAcceptedGeneration;
 let ensureRolloutAuthorization: typeof import('../services/gitops/handoff').ensureRolloutAuthorization;
+let setRegistryReadinessDepsForTests: typeof import('../services/gitops/handoff').setRegistryReadinessDepsForTests;
 let reconstructBlueprintRolloutQueue: typeof import('../services/gitops/handoff').reconstructBlueprintRolloutQueue;
 let BlueprintService: typeof import('../services/BlueprintService').BlueprintService;
 let DatabaseService: typeof import('../services/DatabaseService').DatabaseService;
@@ -47,6 +49,7 @@ beforeAll(async () => {
     buildAcceptedGeneration,
     ensureRolloutAuthorization,
     reconstructBlueprintRolloutQueue,
+    setRegistryReadinessDepsForTests,
   } = await import('../services/gitops/handoff'));
   ({ BlueprintService } = await import('../services/BlueprintService'));
   ({ DatabaseService } = await import('../services/DatabaseService'));
@@ -54,16 +57,41 @@ beforeAll(async () => {
 
 afterAll(() => cleanupTestDb(tmpDir));
 
+function registryReadyTestDeps() {
+  return {
+    probeRemoteCapability: vi.fn(async () => ({ kind: 'supported' as const })),
+    probeManifestAnonymous: vi.fn(async () => ({ classification: 'public' as const, status: 200 })),
+    resolveHubDockerConfigForHost: vi.fn(async () => ({ state: 'missing' as const })),
+    discoverOnTarget: vi.fn(async () => ({
+      contractVersion: 1 as const,
+      referencedHosts: [] as string[],
+      referencedPullRefs: [] as string[],
+      coveredHosts: [] as string[],
+      sourceHash: 's',
+      actionSetHash: 'a',
+      deliverySourceId: 'd',
+      attestation: 'tok',
+    })),
+    isControlNode: () => true,
+    nowMs: () => 1_000_000,
+  };
+}
+
 beforeEach(() => {
   vi.restoreAllMocks();
   GitOpsStore.resetForTests();
   GitOpsTransitions.resetForTests();
+  setRegistryReadinessDepsForTests(registryReadyTestDeps());
+});
+
+afterEach(() => {
+  setRegistryReadinessDepsForTests(null);
 });
 
 describe('rollout authorization transition', () => {
   it('mints rollout_authorization and opens a rollout_authorization generation', () => {
     const fixture = seedAuthorizedReadyApp();
-    const preflight = buildPreflightEvidence();
+    const preflight = nonBlockingPreflightForApp(fixture.applicationId);
     const fingerprint = fingerprintPreflightEvidence(preflight);
     GitOpsTransitions.getInstance().rolloutAuthorized({
       applicationId: fixture.applicationId,
@@ -271,6 +299,7 @@ describe('derive facets for authorization and convergence', () => {
 
   it('projects rollout_authorization_pending when binding ingredients are ready', () => {
     const fixture = seedAuthorizedReadyApp();
+    recordNonBlockingPreflight(fixture.applicationId);
     const app = GitOpsStore.getInstance().getApplication(fixture.applicationId)!;
     const projection = deriveGitOpsRevision({
       application: app,
@@ -279,6 +308,22 @@ describe('derive facets for authorization and convergence', () => {
     }, null);
     expect(projection.facets?.placement.status).toBe('rollout_authorization_pending');
     expect(JSON.parse(JSON.stringify(projection.facets?.placement)).status).toBe('rollout_authorization_pending');
+  });
+
+  it('projects preflight_blocked as unevaluated when ingredients exist but evidence does not', () => {
+    const fixture = seedAuthorizedReadyApp();
+    const app = GitOpsStore.getInstance().getApplication(fixture.applicationId)!;
+    expect(app.latest_preflight_evidence_json).toBeNull();
+    expect(app.rollout_authorization_ref).toBeNull();
+    const projection = deriveGitOpsRevision({
+      application: app,
+      targets: GitOpsStore.getInstance().listTargets(fixture.applicationId),
+      healthDisabled: false,
+    }, null);
+    expect(projection.facets?.placement).toMatchObject({
+      status: 'preflight_blocked',
+      reason: REGISTRY_PREFLIGHT_UNEVALUATED_REASON,
+    });
   });
 
   it('rejects exactly_converged_healthy when artifact status is not artifact_exact', () => {
@@ -377,19 +422,19 @@ describe('derive facets for authorization and convergence', () => {
 });
 
 describe('ensureRolloutAuthorization', () => {
-  it('auto-mints when ingredients are ready and preflight is not blocked', () => {
+  it('auto-mints when ingredients are ready and preflight is not blocked', async () => {
     const fixture = seedAuthorizedReadyApp();
-    const result = ensureRolloutAuthorization(fixture.applicationId, 'tester');
+    const result = await ensureRolloutAuthorization(fixture.applicationId, 'tester');
     expect(result.ok).toBe(true);
     if (result.ok) {
       expect(result.binding.acceptedGenerationId).toBe(fixture.generationId);
     }
   });
 
-  it('is idempotent when a live authorization already matches', () => {
+  it('is idempotent when a live authorization already matches', async () => {
     const fixture = seedAuthorizedReadyApp();
-    const first = ensureRolloutAuthorization(fixture.applicationId, 'tester');
-    const second = ensureRolloutAuthorization(fixture.applicationId, 'tester');
+    const first = await ensureRolloutAuthorization(fixture.applicationId, 'tester');
+    const second = await ensureRolloutAuthorization(fixture.applicationId, 'tester');
     expect(first.ok).toBe(true);
     expect(second.ok).toBe(true);
     const ref = GitOpsStore.getInstance().getApplication(fixture.applicationId)!.rollout_authorization_ref;
@@ -399,14 +444,46 @@ describe('ensureRolloutAuthorization', () => {
   });
 });
 
+function nonBlockingPreflightForApp(applicationId: string) {
+  const store = GitOpsStore.getInstance();
+  const app = store.getApplication(applicationId);
+  if (!app) throw new Error('application not found');
+  const ingredients = store.authorizationIngredients(app);
+  const nodeIds = ingredients?.requiredNodeIds ?? [];
+  return buildPreflightEvidence({
+    registryReadiness: 'not_required',
+    artifactSetId: app.artifact_set_id,
+    targets: nodeIds.map((nodeId) => ({
+      nodeId,
+      sourceClass: 'public' as const,
+      readiness: 'not_required' as const,
+      hosts: [],
+      expired: false,
+    })),
+  });
+}
+
+function recordNonBlockingPreflight(applicationId: string): void {
+  const preflight = nonBlockingPreflightForApp(applicationId);
+  GitOpsTransitions.getInstance().recordPreflightEvaluation({
+    applicationId,
+    evidenceJson: encodePreflightEvidenceJson(preflight),
+  });
+}
+
 function authorize(applicationId: string): void {
-  const preflight = buildPreflightEvidence();
+  const preflight = nonBlockingPreflightForApp(applicationId);
+  const evidenceJson = encodePreflightEvidenceJson(preflight);
+  GitOpsTransitions.getInstance().recordPreflightEvaluation({
+    applicationId,
+    evidenceJson,
+  });
   GitOpsTransitions.getInstance().rolloutAuthorized({
     applicationId,
     approvalId: randomUUID(),
     rolloutGenerationId: randomUUID(),
     preflightFingerprint: fingerprintPreflightEvidence(preflight),
-    preflightEvidenceJson: encodePreflightEvidenceJson(preflight),
+    preflightEvidenceJson: evidenceJson,
     actor: 'tester',
     envelope: { operationId: randomUUID(), actor: 'tester', trigger: 'manual', at: Date.now() },
   });
@@ -470,7 +547,7 @@ function seedAuthorizedReadyApp(opts: {
   store.insertIntentRevision(intent(intentId, applicationId, blueprintId));
   store.insertRolloutCandidate(candidate(candidateId, applicationId, intentId, nodeIds));
   insertGeneration(generationId, applicationId, app.materialization_fingerprint ?? 'a'.repeat(64));
-  store.insertArtifactSet(artifact(artifactId, generationId, opts.artifactQualification ?? 'unresolved'));
+  store.insertArtifactSet(artifact(artifactId, generationId, opts.artifactQualification ?? 'exact'));
   store.insertApproval({
     id: acceptanceId,
     kind: 'source_acceptance',

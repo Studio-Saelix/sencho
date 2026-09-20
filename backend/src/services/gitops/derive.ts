@@ -9,8 +9,11 @@ import { parseSecretCapabilityFromJson } from './sops/capability';
 import { SopsIdentityStore } from './sops/identityStore';
 import {
   buildPreflightEvidence,
+  decodePreflightEvidenceJson,
   fingerprintPreflightEvidence,
   isPreflightBlocked,
+  REGISTRY_PREFLIGHT_UNEVALUATED_REASON,
+  registryPreflightBlockReason,
 } from './preflight';
 import type { BlueprintObservationStage } from './transitions';
 import type {
@@ -519,48 +522,100 @@ function derivePlacement(
   }
 
   const ingredients = store.authorizationIngredients(app);
-  if (ingredients) {
-    const preflight = buildPreflightEvidence();
-    const fingerprint = fingerprintPreflightEvidence(preflight);
-    const binding = { ...ingredients, preflightFingerprint: fingerprint };
-
-    if (app.rollout_authorization_ref) {
-      const live = store.currentAuthorizationBinding(app);
-      if (!live) {
-        return {
-          status: 'rollout_authorization_stale',
-          rolloutAuthorizationRef: app.rollout_authorization_ref,
-          bound: binding,
-        };
-      }
-      const resolved = store.resolveApprovalRef(app.rollout_authorization_ref, {
-        kind: 'rollout_authorization',
-        applicationId: app.id,
-        binding: live,
-      });
-      if (!resolved) {
-        return {
-          status: 'rollout_authorization_stale',
-          rolloutAuthorizationRef: app.rollout_authorization_ref,
-          bound: live,
-        };
-      }
-    } else if (isPreflightBlocked(preflight)) {
-      return {
-        status: 'preflight_blocked',
-        reason: 'One or more preflight slots are blocked',
-        binding,
-      };
-    } else {
-      return {
-        status: 'rollout_authorization_pending',
-        rolloutAuthorizationRef: null,
-        binding,
-      };
-    }
+  if (!ingredients) {
+    return { status: 'blueprint_bound', completion: 'unknown' };
   }
 
-  return { status: 'blueprint_bound', completion: 'unknown' };
+  // Stored evidence drives derive. Never probe here.
+  let stored = app.latest_preflight_evidence_json
+    ? decodePreflightEvidenceJson(app.latest_preflight_evidence_json)
+    : null;
+  // Artifact set mismatch: treat stored body as unknown (do not project last cycle).
+  if (stored && stored.artifactSetId !== app.artifact_set_id) {
+    stored = buildPreflightEvidence({
+      artifactSetId: app.artifact_set_id,
+      targets: ingredients.requiredNodeIds.map((nodeId) => ({
+        nodeId,
+        sourceClass: 'hub_ephemeral' as const,
+        readiness: 'unknown' as const,
+        hosts: [],
+        expired: false,
+      })),
+    });
+  }
+
+  const fingerprint = stored
+    ? fingerprintPreflightEvidence(stored)
+    : fingerprintPreflightEvidence(buildPreflightEvidence({
+      artifactSetId: app.artifact_set_id,
+      targets: [],
+    }));
+  const binding = { ...ingredients, preflightFingerprint: fingerprint };
+
+  // 2. Stored blocked/unknown outranks live pointers.
+  if (stored && isPreflightBlocked(stored)) {
+    return {
+      status: 'preflight_blocked',
+      reason: registryPreflightBlockReason(stored),
+      binding,
+    };
+  }
+
+  const authRef = app.rollout_authorization_ref;
+  const live = authRef ? store.currentAuthorizationBinding(app) : null;
+  const liveResolved = Boolean(
+    live
+    && authRef
+    && store.resolveApprovalRef(authRef, {
+      kind: 'rollout_authorization',
+      applicationId: app.id,
+      binding: live,
+    }),
+  );
+
+  // 3. Live resolving auth and no stored evaluation: keep authorized path (R6).
+  if (liveResolved && !stored) {
+    return { status: 'blueprint_bound', completion: 'unknown' };
+  }
+
+  // 4. Live auth fingerprint disagrees with stored evidence.
+  if (liveResolved && live && stored && live.preflightFingerprint !== fingerprint) {
+    return {
+      status: 'rollout_authorization_stale',
+      rolloutAuthorizationRef: authRef!,
+      bound: live,
+    };
+  }
+
+  // 5. Stored ready and live auth fingerprint matches.
+  if (liveResolved && stored && live && live.preflightFingerprint === fingerprint) {
+    return { status: 'blueprint_bound', completion: 'unknown' };
+  }
+
+  // Stale/missing live ref while pointer present.
+  if (authRef && !liveResolved) {
+    return {
+      status: 'rollout_authorization_stale',
+      rolloutAuthorizationRef: authRef,
+      bound: live ?? binding,
+    };
+  }
+
+  // 6. Stored ready/not_required and no live auth.
+  if (stored && !isPreflightBlocked(stored) && !liveResolved) {
+    return {
+      status: 'rollout_authorization_pending',
+      rolloutAuthorizationRef: null,
+      binding,
+    };
+  }
+
+  // 7. No stored evidence, no live auth: blocked with unevaluated reason.
+  return {
+    status: 'preflight_blocked',
+    reason: REGISTRY_PREFLIGHT_UNEVALUATED_REASON,
+    binding,
+  };
 }
 
 function deriveRollout(

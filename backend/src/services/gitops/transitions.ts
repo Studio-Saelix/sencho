@@ -2958,6 +2958,88 @@ export class GitOpsTransitions {
     app.rollout_generation_id = null;
   }
 
+  /**
+   * Persist the latest redacted preflight evaluation on the application row.
+   * Writes no history (reconcile-time evaluations must not spam the operator
+   * list). Call before any mint or invalidate decision.
+   */
+  recordPreflightEvaluation(args: {
+    applicationId: string;
+    evidenceJson: string;
+    at?: number;
+  }): void {
+    this.raw().transaction(() => {
+      const app = this.store().getApplication(args.applicationId);
+      if (!app) throw new GitOpsTransitionError('application not found');
+      app.latest_preflight_evidence_json = args.evidenceJson;
+      app.updated_at = args.at ?? Date.now();
+      this.writeApplication(app);
+    })();
+  }
+
+  /**
+   * Record or clear the deploy-time registry preflight limitation on the
+   * application row. Acceptance and artifact pointers stay intact when set.
+   */
+  setRegistryPreflightBlockedLimitation(args: {
+    applicationId: string;
+    detail: string | null;
+    at?: number;
+  }): void {
+    this.raw().transaction(() => {
+      const app = this.store().getApplication(args.applicationId);
+      if (!app) throw new GitOpsTransitionError('application not found');
+      app.evidence_limitations_json = encodeGitOpsEvidenceLimitations(
+        decodeGitOpsEvidenceLimitations(app.evidence_limitations_json),
+        'registry_preflight_blocked',
+        args.detail === null ? null : { code: 'registry_preflight_blocked', detail: args.detail },
+      );
+      app.updated_at = args.at ?? Date.now();
+      this.writeApplication(app);
+    })();
+  }
+
+  /**
+   * Clear a live rollout authorization when preflight evidence drifted or
+   * blocked. Leaves placement approval intact. Appends history only when a
+   * live rollout_authorization generation is superseded.
+   */
+  invalidateAuthorizationOnPreflightDrift(args: {
+    applicationId: string;
+    envelope: EventEnvelope;
+  }): TransitionResult {
+    return this.raw().transaction(() => {
+      const app = this.store().getApplication(args.applicationId);
+      if (!app) throw new GitOpsTransitionError('application not found');
+      if (app.target_mode !== 'blueprint') {
+        throw new GitOpsTransitionError('preflight drift invalidation is only for Blueprint target mode');
+      }
+      if (!app.rollout_authorization_ref && !app.preflight_fingerprint) {
+        return { historyIds: [], replayed: true };
+      }
+      const extras = { historyIds: [] as string[] };
+      app.rollout_authorization_ref = null;
+      app.preflight_fingerprint = null;
+      if (app.rollout_generation_id) {
+        const live = this.store().getRolloutGeneration(app.rollout_generation_id);
+        if (live && live.provenance === 'rollout_authorization') {
+          this.recordRolloutGenerationSuperseded(
+            app,
+            app.rollout_generation_id,
+            null,
+            args.envelope,
+            extras,
+          );
+        }
+        app.rollout_generation_id = null;
+      }
+      app.latest_operation_id = args.envelope.operationId;
+      app.updated_at = args.envelope.at;
+      this.writeApplication(app);
+      return { historyIds: extras.historyIds, replayed: extras.historyIds.length === 0 };
+    })();
+  }
+
   /** Drop the fail-closed limitation that blocked Git-managed rollout before authorization. */
   private clearGitManagedRolloutLimitation(app: GitOpsApplicationRow): void {
     app.evidence_limitations_json = encodeGitOpsEvidenceLimitations(
@@ -3257,7 +3339,7 @@ export class GitOpsTransitions {
         review_required=?, artifact_set_id=?, latest_artifact_set_id=?,
         intent_revision_id=?, rollout_candidate_id=?, rollout_generation_id=?,
         source_acceptance_ref=?, placement_approval_ref=?, rollout_authorization_ref=?,
-        legacy_combined_approval_ref=?, preflight_fingerprint=?,
+        legacy_combined_approval_ref=?, preflight_fingerprint=?, latest_preflight_evidence_json=?,
         latest_operation_id=?, active_operation_id=?,
         active_operation_stage=?, active_operation_at=?, active_generation_id=?,
         pause_at=?, pause_reason=?, source_suspended_reason=?,
@@ -3275,7 +3357,7 @@ export class GitOpsTransitions {
       app.review_required, app.artifact_set_id, app.latest_artifact_set_id,
       app.intent_revision_id, app.rollout_candidate_id, app.rollout_generation_id,
       app.source_acceptance_ref, app.placement_approval_ref, app.rollout_authorization_ref,
-      app.legacy_combined_approval_ref, app.preflight_fingerprint,
+      app.legacy_combined_approval_ref, app.preflight_fingerprint, app.latest_preflight_evidence_json,
       app.latest_operation_id, app.active_operation_id,
       app.active_operation_stage, app.active_operation_at, app.active_generation_id,
       app.pause_at, app.pause_reason, app.source_suspended_reason,

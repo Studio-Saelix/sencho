@@ -7,6 +7,18 @@ import {
 } from '../services/gitops/preflight';
 import { isPreflightFingerprint } from '../services/gitops/json';
 
+const nonBlockingRegistryEvidence = () =>
+  buildPreflightEvidence({
+    registryReadiness: 'not_required',
+    targets: [{
+      nodeId: 1,
+      sourceClass: 'public',
+      readiness: 'not_required',
+      hosts: [],
+      expired: false,
+    }],
+  });
+
 describe('gitops preflight evidence', () => {
   it('defaults every slot to unknown with no credential fields', () => {
     const body = buildPreflightEvidence();
@@ -15,14 +27,18 @@ describe('gitops preflight evidence', () => {
       secretReadiness: 'unknown',
       registryReadiness: 'unknown',
       connectivity: 'unknown',
+      artifactSetId: null,
+      targets: [],
     });
     const encoded = encodePreflightEvidenceJson(body);
     expect(encoded).not.toMatch(/credential|password|token|secretValue|apiKey/i);
     expect(JSON.parse(encoded)).toEqual({
+      artifactSetId: null,
       capability: 'unknown',
       connectivity: 'unknown',
       registryReadiness: 'unknown',
       secretReadiness: 'unknown',
+      targets: [],
     });
   });
 
@@ -46,7 +62,8 @@ describe('gitops preflight evidence', () => {
   });
 
   it('detects a blocked slot', () => {
-    expect(isPreflightBlocked(buildPreflightEvidence())).toBe(false);
+    expect(isPreflightBlocked(buildPreflightEvidence())).toBe(true);
+    expect(isPreflightBlocked(nonBlockingRegistryEvidence())).toBe(false);
     expect(isPreflightBlocked(buildPreflightEvidence({ connectivity: 'blocked' }))).toBe(true);
   });
 
@@ -64,10 +81,12 @@ describe('gitops preflight evidence', () => {
     expect(encoded).not.toContain('hunter2');
     expect(encoded).not.toContain('tok');
     expect(Object.keys(JSON.parse(encoded)).sort()).toEqual([
+      'artifactSetId',
       'capability',
       'connectivity',
       'registryReadiness',
       'secretReadiness',
+      'targets',
     ]);
   });
 });

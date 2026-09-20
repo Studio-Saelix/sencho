@@ -15,11 +15,13 @@
 import crypto from 'crypto';
 import fs from 'fs';
 import path from 'path';
-import { describe, it, expect, vi, beforeAll, afterAll, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeAll, afterAll, beforeEach, afterEach } from 'vitest';
 import { setupTestDb, cleanupTestDb } from './helpers/setupTestDb';
 import type { TransportFailure } from '../services/git/errors';
 import { GitOpsStore } from '../services/gitops/store';
 import { GitOpsTransitions } from '../services/gitops/transitions';
+import { setRegistryReadinessDepsForTests, setEvaluateRegistryReadinessForTests } from '../services/gitops/registryReadiness';
+import { buildPreflightEvidence } from '../services/gitops/preflight';
 import { StackOpLockService } from '../services/StackOpLockService';
 import { coalesceKey, deliveryKey, type ReconcileRequest, type ReconcileTrigger } from '../services/gitops/triggers';
 import {
@@ -163,11 +165,29 @@ beforeEach(() => {
     mockRecordObservedRuntimeArtifactForDeploy.mockImplementation(async () => undefined);
 
     StackOpLockService.resetForTests();
+    // Non-registry Direct apply+deploy fixtures often carry unresolved artifact
+    // evidence; override the full evaluator so those suites still reach Compose.
+    setEvaluateRegistryReadinessForTests(async (input) => buildPreflightEvidence({
+        artifactSetId: input.artifactSetId,
+        targets: input.requiredNodeIds.map((nodeId) => ({
+            nodeId,
+            sourceClass: 'public' as const,
+            readiness: 'not_required' as const,
+            hosts: [],
+            expired: false,
+        })),
+    }));
+    setRegistryReadinessDepsForTests(null);
 
     // Wipe persisted git sources between tests
     const db = DatabaseService.getInstance();
     for (const s of db.getGitSources()) db.deleteGitSource(s.stack_name);
     for (const p of db.getScanPolicies()) db.deleteScanPolicy(p.id);
+});
+
+afterEach(() => {
+    setEvaluateRegistryReadinessForTests(null);
+    setRegistryReadinessDepsForTests(null);
 });
 
 // ── Helpers ────────────────────────────────────────────────────────────

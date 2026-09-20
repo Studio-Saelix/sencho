@@ -49,7 +49,8 @@ vi.mock('./RetireBlueprintDialog', () => ({
 
 import { getBlueprint } from '@/lib/blueprintsApi';
 import { BlueprintDetail } from './BlueprintDetail';
-import { absentRevision, missingApplicationLimitation } from '@/__tests__/gitopsFixtures';
+import { absentRevision, facets, liveRevision, missingApplicationLimitation } from '@/__tests__/gitopsFixtures';
+import type { FutureRolloutAuthorizationBinding } from '@/types/gitops';
 
 function summary(overrides: Partial<BlueprintSummary> = {}): BlueprintSummary {
     return {
@@ -221,6 +222,45 @@ describe('BlueprintDetail GitOps state', () => {
         render(detail());
         await screen.findByText('Show compose source');
         expect(screen.queryByTestId('gitops-fault')).not.toBeInTheDocument();
+    });
+
+    const rolloutBinding: FutureRolloutAuthorizationBinding = {
+        rolloutCandidateId: 'rc-1',
+        acceptedGenerationId: 'gen-accepted',
+        artifactSetId: 'art-1',
+        intentRevisionId: 'int-1',
+        requiredNodeIds: [1],
+        sourceAcceptanceRef: 'sa-1',
+        placementApprovalRef: 'pa-1',
+        preflightFingerprint: 'a'.repeat(64),
+    };
+
+    it('shows a blocked placement card with the redacted reason and no credential-shaped text', async () => {
+        const reason = 'Registry credentials are missing for a required private image.';
+        vi.mocked(getBlueprint).mockResolvedValue(summary({
+            blueprint: {
+                ...summary().blueprint,
+                content_origin: 'git',
+                application_id: 'app-web',
+            },
+            gitopsRevision: liveRevision({
+                targetMode: 'blueprint',
+                blueprintId: 1,
+                facets: facets({
+                    source: { status: 'not_applicable' },
+                    placement: {
+                        status: 'preflight_blocked',
+                        reason,
+                        binding: rolloutBinding,
+                    },
+                }),
+            }),
+        }));
+        render(detail());
+        const card = await screen.findByTestId('gitops-placement');
+        expect(card).toHaveAttribute('data-state', 'preflight_blocked');
+        expect(card).toHaveTextContent(reason);
+        expect(card.textContent).not.toMatch(/password|secret|token|Bearer|eyJ/i);
     });
 });
 

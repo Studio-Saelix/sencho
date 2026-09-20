@@ -2,8 +2,10 @@
  * R1: Git apply promote succeeds, deploy fails → applied true, generation current,
  * compensateWithCandidate is not called.
  */
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { beforeEach, afterEach, describe, expect, it, vi } from 'vitest';
 import { GIT_CHANGE_PLAN_SCHEMA_VERSION } from '../types/gitChangePlan';
+import { buildPreflightEvidence } from '../services/gitops/preflight';
+import { setEvaluateRegistryReadinessForTests } from '../services/gitops/registryReadiness';
 
 const mockCaptureCandidate = vi.fn();
 const mockAbandon = vi.fn();
@@ -30,6 +32,8 @@ const mockGitOpsStore = {
 const mockGitOpsTransitions = {
   allocateReconcileAttempt: vi.fn().mockReturnValue({ operationId: 'gitops-app:attempt:1', reserved: true }),
   settleReconcileAttempt: vi.fn().mockReturnValue({ settled: true }),
+  recordPreflightEvaluation: vi.fn(),
+  setRegistryPreflightBlockedLimitation: vi.fn(),
 };
 
 vi.mock('../services/gitops/store', () => ({
@@ -203,6 +207,16 @@ vi.mock('fs', async () => {
 describe('git-source apply recovery (R1)', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    setEvaluateRegistryReadinessForTests(async (input) => buildPreflightEvidence({
+      artifactSetId: input.artifactSetId,
+      targets: input.requiredNodeIds.map((nodeId) => ({
+        nodeId,
+        sourceClass: 'public',
+        readiness: 'not_required',
+        hosts: [],
+        expired: false,
+      })),
+    }));
     mockCaptureCandidate.mockResolvedValue({
       id: 'rec-1',
       node_id: 1,
@@ -245,6 +259,10 @@ describe('git-source apply recovery (R1)', () => {
       auto_deploy_on_apply: true,
       applied_deploy_spec: null,
     });
+  });
+
+  afterEach(() => {
+    setEvaluateRegistryReadinessForTests(null);
   });
 
   const CLEAN_PLAN = {

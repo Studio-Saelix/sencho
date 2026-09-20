@@ -72,7 +72,7 @@ interface EcrCacheEntry {
 }
 
 const DOCKER_HUB_AUTHS_KEY = 'https://index.docker.io/v1/';
-const ECR_CACHE_SAFETY_MS = 5 * 60 * 1000;
+export const ECR_CACHE_SAFETY_MS = 5 * 60 * 1000;
 const ECR_DEFAULT_TTL_MS = 12 * 60 * 60 * 1000;
 
 // ─── URL helpers ─────────────────────────────────────────────────────────────

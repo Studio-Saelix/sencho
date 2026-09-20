@@ -85,6 +85,9 @@ CREATE TABLE IF NOT EXISTS gitops_applications (
   rollout_authorization_ref TEXT NULL,
   legacy_combined_approval_ref TEXT NULL,
   preflight_fingerprint TEXT NULL,
+  -- Latest registry/capability preflight evaluation for derive. Independent of
+  -- the fingerprint frozen into a live rollout_authorization.
+  latest_preflight_evidence_json TEXT NULL,
   latest_operation_id TEXT NULL,
   active_operation_id TEXT NULL,
   active_operation_stage TEXT NULL CHECK (

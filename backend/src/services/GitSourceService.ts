@@ -75,6 +75,13 @@ import {
     recordObservedRuntimeArtifactForDeploy,
     resolveAndRecordArtifactSet,
 } from './gitops/artifactResolve';
+import {
+    encodePreflightEvidenceJson,
+    isPreflightBlocked,
+    isRegistryPreflightTransient,
+    registryPreflightBlockReason,
+} from './gitops/preflight';
+import { evaluateRegistryReadiness } from './gitops/registryReadiness';
 import { cleanupUnclaimedManagedRoot, removeOperationOwnedPaths } from './gitops/createCleanup';
 import { managedAreaBase } from './gitops/managedPaths';
 import { getRegistryDeliveryContext, getRegistryDeliveryLockContext } from '../helpers/registryDeliveryContext';
@@ -434,6 +441,11 @@ type GitApplyResult = {
      * this arm.
      */
     deployIntentUnavailable?: true;
+    /**
+     * Set when registry preflight blocked the deploy branch after acceptance
+     * and artifact resolution. Compose never ran; acceptance stays intact.
+     */
+    registryPreflightBlocked?: { reason: string; transient: boolean };
     /**
      * Canonical GitOps deploy operation id (ComposeService's beginGitOpsDeploy
      * identity), not this method's own apply/dispatch operation id. A string
@@ -3782,6 +3794,14 @@ export class GitSourceService {
                 nextAction: 'view_target_results',
             };
         }
+        if (outcome.status === 'fulfilled' && outcome.value.registryPreflightBlocked) {
+            const { reason, transient } = outcome.value.registryPreflightBlocked;
+            return {
+                outcome: 'blocked',
+                reason,
+                nextAction: transient ? 'retry' : 'resolve_conflict',
+            };
+        }
         return this.finalizeReconcileOutcome(stackName, outcome.status === 'rejected' ? outcome.reason : undefined);
     }
 
@@ -4984,7 +5004,7 @@ export class GitSourceService {
                 // Acceptance already happened at the source layer, so the
                 // pipeline records no new acceptance and there is no apply
                 // operation for an applyFailed wrapper to close.
-                gitopsApp: null,
+                gitopsApp: app,
                 gitopsGenerationId: null,
                 manifest: revalidation.manifest,
                 prior: revalidation.prior,
@@ -5045,6 +5065,10 @@ export class GitSourceService {
                     return intent.deployOperationId;
                 },
             });
+            if (result.registryPreflightBlocked) {
+                const { reason, transient } = result.registryPreflightBlocked;
+                return transient ? settleTransient(reason) : settleBlocked(reason);
+            }
             if (result.bindRejected) {
                 // The bind ran after promotion committed, inside the
                 // pipeline, and its false return stopped the pipeline before
@@ -5720,6 +5744,49 @@ export class GitSourceService {
                     envelope: gitopsEnv,
                 });
             }
+        }
+
+        if (args.deploy && gitopsApp) {
+            const store = GitOpsStore.getInstance();
+            const appRow = store.getApplication(gitopsApp.id) ?? gitopsApp;
+            const artifactSetId = appRow.artifact_set_id;
+            const composeFile = args.pending.files.find((f) => f.path === PRIMARY_COMPOSE_FILENAME)
+                ?? args.pending.files[0];
+            const composeContent = composeFile?.content ?? null;
+            const preflight = await evaluateRegistryReadiness(
+                {
+                    artifactSetId,
+                    requiredNodeIds: [nodeId],
+                    stackName,
+                    composeContent,
+                },
+                { abortSignal: AbortSignal.timeout(30_000) },
+            );
+            const transitions = GitOpsTransitions.getInstance();
+            transitions.recordPreflightEvaluation({
+                applicationId: gitopsApp.id,
+                evidenceJson: encodePreflightEvidenceJson(preflight),
+            });
+            if (isPreflightBlocked(preflight)) {
+                const reason = registryPreflightBlockReason(preflight);
+                transitions.setRegistryPreflightBlockedLimitation({
+                    applicationId: gitopsApp.id,
+                    detail: reason,
+                });
+                return {
+                    applied: true,
+                    deployed: false,
+                    recoveryId,
+                    registryPreflightBlocked: {
+                        reason,
+                        transient: isRegistryPreflightTransient(preflight),
+                    },
+                };
+            }
+            transitions.setRegistryPreflightBlockedLimitation({
+                applicationId: gitopsApp.id,
+                detail: null,
+            });
         }
 
         // The caller's post-commit bind (Direct dispatch's targetApplied)

@@ -75,6 +75,8 @@ export type GitOpsApplicationRow = {
   rollout_authorization_ref: string | null;
   legacy_combined_approval_ref: string | null;
   preflight_fingerprint: string | null;
+  /** Latest redacted preflight evaluation (blocked or ready). Derive reads this. */
+  latest_preflight_evidence_json: string | null;
   latest_operation_id: string | null;
   active_operation_id: string | null;
   active_operation_stage: ApplicationActiveStage | null;

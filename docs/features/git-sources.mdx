@@ -449,7 +449,7 @@ Back up both the Sencho data directory encryption key (`encryption.key`) and any
 
 ## Known limitations
 
-- **Git-managed Blueprint binding.** Convert or Adopt moves a live Direct source onto a Blueprint. That stack's Git Source sheet is then read-only until you Detach Git or Retire to Direct on the Blueprint. Git-managed Blueprints bind and show a blocked rollout state; they do not deploy from the stored snapshot. See [Blueprints](/features/blueprint-model).
+- **Git-managed Blueprint binding.** Convert or Adopt moves a live Direct source onto a Blueprint. That stack's Git Source sheet is then read-only until you Detach Git or Retire to Direct on the Blueprint. Git-managed Blueprints bind and show a blocked rollout state; they do not deploy from the stored snapshot. Fleet place for those Blueprints waits on registry preflight before rollout authorization. See [Blueprints](/features/blueprint-model).
 - **HTTPS and SSH.** HTTPS uses tokens; SSH uses deploy keys with strict host-key verification. Custom URL schemes are not supported.
 - **No Git LFS.** Compose and env files stored via LFS are rejected. Commit plain files instead.
 - **No submodules.** Submodule contents are not fetched. Inputs and build contexts that reference submodule contents are refused with an actionable message; a warning is shown when `.gitmodules` is present.
