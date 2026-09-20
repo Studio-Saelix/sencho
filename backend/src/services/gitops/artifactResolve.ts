@@ -24,6 +24,7 @@ import { GitOpsStore } from './store';
 import { GitOpsTransitions, type EventEnvelope } from './transitions';
 import { newGitOpsId } from './directApplication';
 import { decodeArtifactEvidenceJson } from './json';
+import { sanitizeForLog } from '../../utils/safeLog';
 
 function isComposeOneOff(labels: Record<string, string> | undefined): boolean {
   return labels?.['com.docker.compose.oneoff'] === 'True';
@@ -589,7 +590,8 @@ export async function observeStackRuntimeArtifact(args: {
     };
   } catch (error) {
     console.error(
-      `[GitOpsArtifactResolve] Runtime observation failed for stack ${args.stackName}:`,
+      '[GitOpsArtifactResolve] Runtime observation failed for stack %s:',
+      sanitizeForLog(args.stackName),
       error instanceof Error ? error.message : String(error),
     );
     return { kind: 'unavailable' };

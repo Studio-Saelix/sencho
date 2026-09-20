@@ -1,5 +1,6 @@
 import { spawn } from 'child_process';
 import fs from 'fs';
+import os from 'os';
 import path from 'path';
 import WebSocket from 'ws';
 import DockerController from './DockerController';
@@ -320,8 +321,8 @@ export class ComposeService {
 
   /**
    * Layer a digest-pin overlay onto authored compose args and append `--pull never`.
-   * Authored files on disk are unchanged; the overlay is an ephemeral file
-   * under the stack directory (absolute path).
+   * Authored files on disk are unchanged; the overlay lives under os.tmpdir()
+   * (absolute path) so it never touches the stack directory.
    */
   private async withDigestPinOverlay(
     stackName: string,
@@ -329,8 +330,7 @@ export class ComposeService {
     stackDirOverride: string | undefined,
     digestPins: DigestPinsMap,
   ): Promise<{ args: string[]; overlayPath: string }> {
-    const stackDir = stackDirOverride ?? path.join(this.baseDir, stackName);
-    const overlayPath = path.join(stackDir, `.sencho-digest-pins-${randomUUID()}.yml`);
+    const overlayPath = path.join(os.tmpdir(), `sencho-digest-pins-${randomUUID()}.yml`);
     await fs.promises.writeFile(overlayPath, digestPinsOverlayYaml(digestPins), 'utf8');
     try {
       const base = await this.authoredComposeArgs(stackName, [], stackDirOverride);
