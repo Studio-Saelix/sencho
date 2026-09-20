@@ -215,4 +215,21 @@ describe('POST /api/stacks/:stackName/pull-images', () => {
       .set('Cookie', adminCookie);
     expect(retry.status).toBe(200);
   });
+
+  it('logs the pull failure without line breaks and keeps the compose lines apart', async () => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    // Compose reports a failed pull as multi-line output, so an entry that
+    // keeps those breaks would let image or registry text forge new lines.
+    mockPullStackImages.mockRejectedValueOnce(new Error('manifest unknown\n[INFO] forged entry'));
+
+    const failed = await request(app)
+      .post('/api/stacks/web/pull-images')
+      .set('Cookie', adminCookie);
+
+    expect(failed.status).toBe(500);
+    const logged = errorSpy.mock.calls.flat().map(String).join(' ');
+    expect(logged).not.toMatch(/[\r\n]/);
+    expect(logged).toContain('manifest unknown | [INFO] forged entry');
+    errorSpy.mockRestore();
+  });
 });

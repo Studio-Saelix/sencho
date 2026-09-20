@@ -1992,7 +1992,13 @@ stacksRouter.post('/:stackName/pull-images', async (req: Request, res: Response)
       skippedBuildBacked: result.skippedBuildBacked,
     });
   } catch (error: unknown) {
-    console.error('[Stacks] Image pull failed: %s', sanitizeForLog(stackName), error);
+    // A failed compose step reports the output it accumulated, so collapse the
+    // line breaks into a visible separator before the sanitizer deletes them
+    // outright: this entry is the only durable record of the failure, and
+    // welded lines cannot be read. The fallback stays neutral so a throw the
+    // log cannot render does not read back as the operation's name.
+    const detail = getErrorMessage(error, 'unknown').replace(/\s*[\r\n]+\s*/g, ' | ');
+    console.error('[Stacks] Image pull failed: %s', sanitizeForLog(stackName), sanitizeForLog(detail));
     if (!res.headersSent) {
       res.status(500).json({ error: getErrorMessage(error, 'Image pull failed') });
     }
