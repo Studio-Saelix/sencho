@@ -72,5 +72,11 @@
     "title": "Sealed private-registry credentials",
     "blurb": "Hub credentials for private images travel sealed to remote nodes, including over plain HTTP. Each node pins a sealing key on first use; reset the pin under Settings → Nodes after a rebuild.",
     "docUrl": "https://docs.sencho.io/features/private-registries"
+  },
+  {
+    "id": "save-and-pull-images",
+    "title": "Save & Pull Images",
+    "blurb": "Download a stack's images without deploying it. The compose editor's save menu now writes your edits and fetches the registry images in one step, so the next deploy in a maintenance window has nothing left to download. Running containers are left exactly as they are.",
+    "docUrl": "https://docs.sencho.io/features/editor"
   }
 ]

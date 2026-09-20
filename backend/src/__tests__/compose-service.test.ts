@@ -1257,6 +1257,115 @@ describe('ComposeService - updateStack build-aware', () => {
   });
 });
 
+// ── pullStackImages: acquire images, reconcile nothing ─────────────────
+
+describe('ComposeService - pullStackImages', () => {
+  it('pulls with --ignore-buildable and never builds when build services exist', async () => {
+    mockGetRegistries.mockReturnValue([]);
+    mockLoadStackBuildServices.mockResolvedValueOnce(['app']);
+    setupAutoCloseSpawn();
+
+    const svc = ComposeService.getInstance(1);
+    const promise = svc.pullStackImages('my-stack');
+    await vi.advanceTimersByTimeAsync(3100);
+    const result = await promise;
+
+    expect(result).toEqual({ skippedBuildBacked: ['app'] });
+    const spawnArgs = mockSpawn.mock.calls.map(c => c[1] as string[]);
+    expect(spawnArgs).toHaveLength(1);
+    expect(spawnArgs[0]).toContain('pull');
+    expect(spawnArgs[0]).toContain('--ignore-buildable');
+    expect(spawnArgs[0]).not.toContain('build');
+    expect(spawnArgs[0]).not.toContain('up');
+    // A successful pull opens no recovery generation either: the same four
+    // recovery entry points the failure case asserts stay cold on this path.
+    expect(mockCaptureCandidate).not.toHaveBeenCalled();
+    expect(mockMarkAcquired).not.toHaveBeenCalled();
+    expect(mockHandoff).not.toHaveBeenCalled();
+    expect(mockAbandon).not.toHaveBeenCalled();
+  });
+
+  it('issues a plain pull when no service is build-backed', async () => {
+    mockGetRegistries.mockReturnValue([]);
+    mockLoadStackBuildServices.mockResolvedValueOnce([]);
+    setupAutoCloseSpawn();
+
+    const svc = ComposeService.getInstance(1);
+    const promise = svc.pullStackImages('my-stack');
+    await vi.advanceTimersByTimeAsync(3100);
+    const result = await promise;
+
+    expect(result).toEqual({ skippedBuildBacked: [] });
+    const spawnArgs = mockSpawn.mock.calls.map(c => c[1] as string[]);
+    expect(spawnArgs).toHaveLength(1);
+    expect(spawnArgs[0]).toContain('pull');
+    expect(spawnArgs[0]).not.toContain('--ignore-buildable');
+  });
+
+  it('runs the pull under the registry-auth temp config when registries exist', async () => {
+    mockGetRegistries.mockReturnValue([{ url: 'https://registry.example.com' }]);
+    mockResolveDockerConfig.mockResolvedValue({
+      config: { auths: { 'registry.example.com': { auth: 'dGVzdA==' } } },
+      warnings: [],
+    });
+    mockGetGlobalSettings.mockReturnValue({ delivery_source_id: 'test-delivery-source' });
+    setupAutoCloseSpawn();
+
+    const svc = ComposeService.getInstance(1);
+    const promise = svc.pullStackImages('my-stack');
+    await vi.advanceTimersByTimeAsync(3100);
+    await promise;
+
+    const spawnOptions = mockSpawn.mock.calls[0][2] as { env?: Record<string, string> };
+    expect(spawnOptions.env?.DOCKER_CONFIG).toBe('/tmp/sencho-docker-test');
+    expect(mockCleanupDockerAuthTempDir).toHaveBeenCalled();
+  });
+
+  it('names the skipped build-backed services on the terminal stream', async () => {
+    mockGetRegistries.mockReturnValue([]);
+    mockLoadStackBuildServices.mockResolvedValueOnce(['app', 'worker']);
+    setupAutoCloseSpawn();
+    const ws = createMockWs();
+
+    const svc = ComposeService.getInstance(1);
+    const promise = svc.pullStackImages('my-stack', ws);
+    await vi.advanceTimersByTimeAsync(3100);
+    await promise;
+
+    const sendCalls = ws.send.mock.calls.map(c => c[0] as string);
+    expect(
+      sendCalls.some(msg => msg.includes('Skipping build-backed services') && msg.includes('app, worker')),
+    ).toBe(true);
+  });
+
+  // The recovery generation is opened by deploy/update, and a pull must not open
+  // one even when the compose call fails. These assertions pin that on the pull's
+  // own paths; they are a regression tripwire, not a proof of the call graph.
+  it('touches no recovery state when the pull fails', async () => {
+    mockGetRegistries.mockReturnValue([]);
+    mockLoadStackBuildServices.mockResolvedValueOnce(['app']);
+    mockSpawn.mockImplementation(() => {
+      const proc = createMockProcess();
+      Promise.resolve().then(() => {
+        proc.stderr.emit('data', Buffer.from('manifest unknown'));
+        proc.emit('close', 1);
+      });
+      return proc;
+    });
+
+    const svc = ComposeService.getInstance(1);
+    const result = svc.pullStackImages('my-stack').then(() => null, (e: Error) => e);
+    await vi.runAllTimersAsync();
+    const error = await result;
+
+    expect(error).toBeInstanceOf(Error);
+    expect(mockCaptureCandidate).not.toHaveBeenCalled();
+    expect(mockMarkAcquired).not.toHaveBeenCalled();
+    expect(mockHandoff).not.toHaveBeenCalled();
+    expect(mockAbandon).not.toHaveBeenCalled();
+  });
+});
+
 // ── updateStack: prune-on-update ───────────────────────────────────────
 
 describe('ComposeService - updateStack prune-on-update', () => {

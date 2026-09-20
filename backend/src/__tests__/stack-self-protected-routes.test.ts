@@ -16,6 +16,7 @@ const {
   mockRunDown,
   mockUpdateStack,
   mockDownStack,
+  mockPullStackImages,
   mockGetContainersByStack,
   mockStopContainer,
   mockRestartContainer,
@@ -26,6 +27,7 @@ const {
   mockRunDown: vi.fn(),
   mockUpdateStack: vi.fn(),
   mockDownStack: vi.fn(),
+  mockPullStackImages: vi.fn(),
   mockGetContainersByStack: vi.fn(),
   mockStopContainer: vi.fn(),
   mockRestartContainer: vi.fn(),
@@ -46,6 +48,7 @@ vi.mock('../services/ComposeService', async () => {
         runDown: mockRunDown,
         updateStack: mockUpdateStack,
         downStack: mockDownStack,
+        pullStackImages: mockPullStackImages,
       }),
     },
   };
@@ -136,6 +139,7 @@ describe('self stack lifecycle refusal', () => {
     ['POST', '/api/stacks/sencho/stop'],
     ['POST', '/api/stacks/sencho/rollback'],
     ['POST', '/api/stacks/sencho/services/web/stop'],
+    ['POST', '/api/stacks/sencho/pull-images'],
     ['DELETE', '/api/stacks/sencho'],
   ] as const;
 
@@ -151,6 +155,7 @@ describe('self stack lifecycle refusal', () => {
     expect(mockRunCommand).not.toHaveBeenCalled();
     expect(mockRunDown).not.toHaveBeenCalled();
     expect(mockDownStack).not.toHaveBeenCalled();
+    expect(mockPullStackImages).not.toHaveBeenCalled();
     expect(mockStopContainer).not.toHaveBeenCalled();
   });
 

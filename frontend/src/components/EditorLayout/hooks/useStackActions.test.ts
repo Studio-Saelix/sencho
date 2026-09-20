@@ -153,6 +153,7 @@ function setup(over: {
   isAdmin?: boolean;
   canReapplyCompose?: boolean;
   hasServiceScopedUpdate?: boolean;
+  diffPreviewEnabled?: boolean;
 } = {}) {
   const editorState = makeEditorState(over.editorState);
   const stackListState = makeStackListState(over.stackList);
@@ -183,10 +184,10 @@ function setup(over: {
       nodes: [],
       runWithLog,
       getLastDeployOutputLine: over.getLastDeployOutputLine ?? (() => undefined),
-      diffPreviewEnabled: false,
       hasUpdateGuard: over.hasUpdateGuard ?? false,
       hasGuidedExternalNetworkPreflight: over.hasGuidedExternalNetworkPreflight ?? false,
       hasServiceScopedUpdate: over.hasServiceScopedUpdate ?? false,
+      diffPreviewEnabled: over.diffPreviewEnabled ?? false,
       canEditStack: over.canEditStack ?? (() => true),
       onDeletedOpenStack,
       removeNotificationsForStack,
@@ -272,6 +273,160 @@ describe('useStackActions.handleSaveAndDeploy', () => {
     await result.current.handleSaveAndDeploy({ preventDefault: vi.fn(), stopPropagation: vi.fn() } as unknown as React.MouseEvent);
     const calls = vi.mocked(apiFetch).mock.calls.map(c => c[0]);
     expect(calls.some(c => String(c).includes('/deploy'))).toBe(true);
+  });
+});
+
+describe('useStackActions.handleSaveAndPullImages', () => {
+  const pullEvent = () =>
+    ({ preventDefault: vi.fn(), stopPropagation: vi.fn() }) as unknown as React.MouseEvent;
+
+  // URL-keyed dispatcher, like the editor chain below: the save PUT and the pull
+  // POST are addressed independently, so neither a Once-chain nor an extra
+  // incidental request can desynchronize the pair.
+  function mockPullChain(options: { save?: Response; pull?: Response } = {}) {
+    vi.mocked(apiFetch).mockImplementation((url: string, init?: RequestInit) => {
+      const u = String(url);
+      const method = init?.method ?? 'GET';
+      if (u === '/stacks/web.yml' && method === 'PUT') {
+        return Promise.resolve(options.save ?? new Response(null, { status: 200 }));
+      }
+      if (u === '/stacks/web/pull-images' && method === 'POST') {
+        return Promise.resolve(
+          options.pull ?? okJson({ message: 'Pulled registry images', skippedBuildBacked: [] }),
+        );
+      }
+      return Promise.resolve(new Response('', { status: 404 }));
+    });
+  }
+
+  function initFor(fragment: string, method: string) {
+    const call = vi.mocked(apiFetch).mock.calls.find(
+      c => String(c[0]).includes(fragment) && ((c[1] as RequestInit | undefined)?.method ?? 'GET') === method,
+    );
+    expect(call, `expected a ${method} call matching ${fragment}`).toBeDefined();
+    return (call![1] ?? {}) as RequestInit & { nodeId?: number | null };
+  }
+
+  const successTexts = () => vi.mocked(toast.success).mock.calls.map(c => String(c[0]));
+  const errorTexts = () => vi.mocked(toast.error).mock.calls.map(c => String(c[0]));
+
+  beforeEach(() => {
+    vi.mocked(apiFetch).mockReset();
+    vi.mocked(toast.success).mockClear();
+    vi.mocked(toast.error).mockClear();
+    lastRunWithLogParams = null;
+  });
+
+  it('does NOT pull when saveFile fails', async () => {
+    mockPullChain({ save: new Response('save broke', { status: 500 }) });
+    const { result } = setup();
+    await result.current.handleSaveAndPullImages(pullEvent());
+    const calls = vi.mocked(apiFetch).mock.calls.map(c => c[0]);
+    expect(calls.some(c => String(c).includes('/pull-images'))).toBe(false);
+  });
+
+  it('publishes the pull as an in-flight stack action, then clears it', async () => {
+    mockPullChain();
+    const { result, stackListState } = setup();
+    await result.current.handleSaveAndPullImages(pullEvent());
+    expect(vi.mocked(stackListState.setStackAction)).toHaveBeenCalledWith('web.yml', 'pull');
+    expect(vi.mocked(stackListState.clearStackAction)).toHaveBeenCalledWith('web.yml');
+
+    // Ordering is the point, not just the calls: an action published after the
+    // request leaves the stack looking idle while it is locked, and one cleared
+    // before the response leaves it looking busy after it settled.
+    const pullCallIndex = vi.mocked(apiFetch).mock.calls.findIndex(
+      c => String(c[0]).includes('/pull-images') && (c[1] as RequestInit | undefined)?.method === 'POST',
+    );
+    expect(pullCallIndex).toBeGreaterThanOrEqual(0);
+    const postOrder = vi.mocked(apiFetch).mock.invocationCallOrder[pullCallIndex];
+    expect(vi.mocked(stackListState.setStackAction).mock.invocationCallOrder[0]).toBeLessThan(postOrder);
+    expect(postOrder).toBeLessThan(vi.mocked(stackListState.clearStackAction).mock.invocationCallOrder[0]);
+  });
+
+  it('clears the published action even when the pull fails', async () => {
+    mockPullChain({ pull: new Response('registry unreachable', { status: 500 }) });
+    const { result, stackListState } = setup();
+    await result.current.handleSaveAndPullImages(pullEvent());
+    // A stuck action would leave every other affordance for this stack disabled
+    // until a reload, so the clear belongs in the finally, not the success path.
+    expect(vi.mocked(stackListState.clearStackAction)).toHaveBeenCalledWith('web.yml');
+  });
+
+  it('opens the diff preview in the pull mode instead of pulling, when that setting is on', async () => {
+    mockPullChain();
+    const { result, overlayState } = setup({ diffPreviewEnabled: true });
+    result.current.requestSaveAndPullImages(pullEvent());
+    expect(vi.mocked(overlayState.setDiffPreview)).toHaveBeenCalledWith(
+      expect.objectContaining({ mode: 'save-and-pull-images' }),
+    );
+    // Confirming the preview is what saves and pulls; a wrong mode literal here
+    // would silently downgrade the confirm button, to a plain Save or a deploy
+    // depending on which one.
+    expect(vi.mocked(apiFetch)).not.toHaveBeenCalled();
+  });
+
+  it('pulls on the same captured node as the save, under the pull verb', async () => {
+    mockPullChain();
+    const { result } = setup();
+    await result.current.handleSaveAndPullImages(pullEvent());
+    expect(initFor('/stacks/web.yml', 'PUT').nodeId).toBe(1);
+    expect(initFor('/pull-images', 'POST').nodeId).toBe(1);
+    // The feedback panel labels the run from this verb; 'deploy' here would
+    // announce a reconciliation that never happens.
+    expect(lastRunWithLogParams).toEqual({ stackName: 'web', action: 'pull', nodeId: 1 });
+  });
+
+  it('reports a save that succeeded and a pull that failed, with no second save confirmation', async () => {
+    mockPullChain({ pull: new Response('registry unreachable', { status: 500 }) });
+    const { result } = setup();
+    await result.current.handleSaveAndPullImages(pullEvent());
+    expect(successTexts()).toEqual(['File saved successfully!']);
+    expect(errorTexts()).toHaveLength(1);
+    expect(errorTexts()[0]).toContain('Image pull failed');
+  });
+
+  it('names the build-backed services the pull skipped', async () => {
+    mockPullChain({
+      pull: okJson({ message: 'Pulled registry images', skippedBuildBacked: ['web', 'api'] }),
+    });
+    const { result } = setup();
+    await result.current.handleSaveAndPullImages(pullEvent());
+    expect(successTexts()).toContain(
+      'Pulled registry images. Skipped 2 build-backed services: web, api.',
+    );
+  });
+
+  it('renders a 409 from a concurrent pull as the in-progress sentence, not a raw error', async () => {
+    mockPullChain({
+      pull: new Response(
+        JSON.stringify({
+          code: 'stack_op_in_progress',
+          inProgress: { action: 'image_pull', startedAt: 1, user: 'system' },
+        }),
+        { status: 409, headers: { 'Content-Type': 'application/json' } },
+      ),
+    });
+    const { result } = setup();
+    await result.current.handleSaveAndPullImages(pullEvent());
+    // The pull half names itself: the save's own toast already claimed success,
+    // so the reader must be able to tell which half this reports.
+    expect(errorTexts()).toContain('Image pull failed: web is already pulling images.');
+  });
+
+  it('renders a 409 from a concurrent deploy with the deploy sentence', async () => {
+    mockPullChain({
+      pull: new Response(
+        JSON.stringify({
+          code: 'stack_op_in_progress',
+          inProgress: { action: 'deploy', startedAt: 1, user: 'system' },
+        }),
+        { status: 409, headers: { 'Content-Type': 'application/json' } },
+      ),
+    });
+    const { result } = setup();
+    await result.current.handleSaveAndPullImages(pullEvent());
+    expect(errorTexts()).toContain('Image pull failed: web is already deploying.');
   });
 });
 

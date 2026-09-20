@@ -6,7 +6,7 @@ import { readDeployFeedbackStyle } from '../hooks/use-deploy-feedback-style';
 import { toast } from '../components/ui/toast-store';
 import { fetchActiveServiceRecovery, requestServiceRestore } from '../lib/serviceUpdate';
 
-export type ActionVerb = 'deploy' | 'update' | 'down' | 'restart' | 'stop' | 'install' | 'scan';
+export type ActionVerb = 'deploy' | 'update' | 'down' | 'restart' | 'stop' | 'install' | 'scan' | 'pull';
 
 // eslint-disable-next-line react-refresh/only-export-components
 export const VERB_LABELS: Record<ActionVerb, { present: string; past: string }> = {
@@ -17,6 +17,11 @@ export const VERB_LABELS: Record<ActionVerb, { present: string; past: string }> 
   stop:    { present: 'Stopping',   past: 'Stopped'   },
   install: { present: 'Installing', past: 'Installed' },
   scan:    { present: 'Scanning',   past: 'Scanned'   },
+  // Acquiring registry images: nothing about the running workload changes, so
+  // this verb never reaches the health gate. No `startGatePolling` call below
+  // passes 'pull': the two that forward a user action are guarded on 'update' or
+  // 'deploy', and the service-restore path hardcodes 'update'.
+  pull:    { present: 'Pulling images', past: 'Pulled images' },
 };
 
 export interface DeployPanelState {

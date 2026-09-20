@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { render, screen, fireEvent } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 import type { ReactNode } from 'react';
 import { EditorView } from '../EditorView';
 import type { EditorViewProps } from '../EditorView';
@@ -76,6 +77,7 @@ function makeProps(over: Partial<EditorViewProps> = {}): EditorViewProps {
     closeComposeEditor: vi.fn(),
     requestSave: vi.fn(),
     requestSaveAndDeploy: vi.fn(),
+    requestSaveAndPullImages: vi.fn(),
     discardChanges: vi.fn(),
     setContent: vi.fn(),
     setEnvContent: vi.fn(),
@@ -231,6 +233,49 @@ describe('EditorView single edit gate', () => {
     );
     fireEvent.click(screen.getByRole('button', { name: 'Close editor' }));
     expect(closeComposeEditor).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('EditorView image pull affordance', () => {
+  /** Opens the save dropdown attached to Save & Deploy. The trigger is the
+   *  chevron Radix marks with aria-haspopup, which is the only stable handle:
+   *  the button carries an icon and no text. */
+  const openSaveMenu = async () => {
+    const trigger = document.querySelector('[aria-haspopup="menu"]');
+    if (!trigger) throw new Error('save menu trigger not found');
+    await userEvent.click(trigger);
+  };
+
+  it('offers Save & Pull Images when the user holds stack:edit and stack:deploy', async () => {
+    render(<EditorView {...makeProps({ editingCompose: true, activeTab: 'compose' })} />);
+    await openSaveMenu();
+    expect(await screen.findByText('Save & Pull Images')).toBeInTheDocument();
+  });
+
+  it('hides the item for an edit-only user while Save Only stays available', async () => {
+    render(
+      <EditorView
+        {...makeProps({
+          editingCompose: true,
+          activeTab: 'compose',
+          can: (action) => action === 'stack:edit',
+        })}
+      />,
+    );
+    await openSaveMenu();
+    expect(await screen.findByText('Save Only')).toBeInTheDocument();
+    expect(screen.queryByText('Save & Pull Images')).not.toBeInTheDocument();
+  });
+
+  it('hides the item on the self stack, whose images update through their own channel', async () => {
+    render(
+      <EditorView
+        {...makeProps({ editingCompose: true, activeTab: 'compose', isSelfStack: true })}
+      />,
+    );
+    await openSaveMenu();
+    expect(await screen.findByText('Save Only')).toBeInTheDocument();
+    expect(screen.queryByText('Save & Pull Images')).not.toBeInTheDocument();
   });
 });
 

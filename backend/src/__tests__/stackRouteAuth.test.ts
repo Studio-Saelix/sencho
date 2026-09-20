@@ -80,6 +80,12 @@ describe('classifyStackApiPath', () => {
       });
     });
 
+    it('treats pull-images primary as stack:edit', () => {
+      expect(classifyStackApiPath('POST', '/stacks/web/pull-images')).toEqual({
+        kind: 'named-stack', stackName: 'web', action: 'stack:edit',
+      });
+    });
+
     // Load-bearing the same way as history/manifest above: without a rule
     // here, suspend/resume/retry 403 on every remote node before the
     // controller routes that use them exist.
@@ -180,6 +186,15 @@ describe('classifyStackApiPath', () => {
         kind: 'unknown-named',
       });
       expect(classifyStackApiPath('POST', '/stacks/web/services/api/recovery')).toEqual({
+        kind: 'unknown-named',
+      });
+    });
+
+    // The index is exact-match, so registering one suffix never widens
+    // authority to a lookalike neighbour.
+    it('refuses the bare pull suffix that has no route', () => {
+      expect(classifyStackApiPath('POST', '/stacks/web/pull')).toEqual({ kind: 'unknown-named' });
+      expect(classifyStackApiPath('POST', '/stacks/web/pull-images/extra')).toEqual({
         kind: 'unknown-named',
       });
     });

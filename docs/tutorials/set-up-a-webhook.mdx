@@ -52,7 +52,7 @@ This tutorial covers creating and triggering one webhook for the **Deploy (down 
     Open the `storefront` stack, edit `compose.yaml`, and bump the pinned tag from `nginx:1.27-alpine` to `nginx:1.28-alpine`. Instead of **Save & Deploy**, open the dropdown next to it and select **Save Only**. This writes the change to disk without deploying it, the same gap that exists in a real pipeline between committing a new image reference and the moment something actually applies it.
 
     <Frame>
-      <img src="/images/tutorials/set-up-a-webhook/webhook-save-only-menu.png" alt="Compose editor for storefront with the image line changed to nginx:1.28-alpine, and the Save & Deploy dropdown open showing Save Only and Discard Changes. The running container's logs below still show nginx/1.27.5, confirming the change is staged but not yet deployed." />
+      <img src="/images/tutorials/set-up-a-webhook/webhook-save-only-menu.png" alt="Compose editor for storefront with the image line changed to nginx:1.28-alpine, and the dropdown next to Save & Deploy open with Save Only visible. The running container's logs below still show nginx/1.27.5, confirming the change is staged but not yet deployed." />
     </Frame>
   </Step>
   <Step title="Trigger it like your pipeline would">
