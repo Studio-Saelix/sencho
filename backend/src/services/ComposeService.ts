@@ -41,6 +41,7 @@ import {
   type DeployInvocationContext,
 } from './network/missingExternalNetworksError';
 import { digestPinsOverlayYaml, type DigestPinsMap } from './gitops/digestPins';
+import { DIGEST_PIN_TEMP_PREFIX } from '../helpers/digestPinTempDir';
 import { assertGitOverlaySource, SOPS_DIRECT_MUTATION_MESSAGE } from './gitops/sops/prepareOverlay';
 import { resolveActiveRequiredRecipients } from './gitops/sops/capability';
 import { GitOpsDecryptOverlay } from './gitops/sops/overlay';
@@ -331,7 +332,7 @@ export class ComposeService {
     stackDirOverride: string | undefined,
     digestPins: DigestPinsMap,
   ): Promise<{ args: string[]; overlayDir: string }> {
-    const overlayDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'sencho-digest-pins-'));
+    const overlayDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), DIGEST_PIN_TEMP_PREFIX));
     const overlayPath = path.join(overlayDir, 'overlay.yml');
     try {
       await fs.promises.writeFile(overlayPath, digestPinsOverlayYaml(digestPins), {
@@ -339,13 +340,8 @@ export class ComposeService {
         flag: 'wx',
         mode: 0o600,
       });
-      const base = await this.authoredComposeArgs(stackName, [], stackDirOverride);
-      const filePrefix = authoredComposeFileArgs(stackName, this.nodeId, stackDirOverride);
-      const args = [...base];
-      if (filePrefix.length === 0 && !args.includes('-f')) {
-        const baseFilename = await FileSystemService.getInstance(this.nodeId).getComposeFilename(stackName);
-        args.push('-f', baseFilename);
-      }
+      const args = await this.authoredComposeArgs(stackName, [], stackDirOverride);
+      await this.ensureExplicitComposeFiles(stackName, args, true);
       args.push('-f', overlayPath, ...action, '--pull', 'never');
       return { args, overlayDir };
     } catch (err) {

@@ -47,7 +47,7 @@ import {
 import { isDebugEnabled } from '../utils/debug';
 import { sanitizeForLog } from '../utils/safeLog';
 import { isSqliteUniqueViolation, getErrorMessage } from '../utils/errors';
-import { isDigestPinsMap } from '../services/gitops/digestPins';
+import { digestPinsMatchComposeServices, isDigestPinsMap } from '../services/gitops/digestPins';
 import {
     GitManagedContentError,
     GitOpsBindingError,
@@ -521,6 +521,10 @@ blueprintsRouter.post('/apply-local', async (req: Request, res: Response): Promi
     if (body.digestPins !== undefined) {
         if (!isDigestPinsMap(body.digestPins)) {
             res.status(400).json({ error: 'digestPins must be an object of serviceName to image@digest strings' });
+            return;
+        }
+        if (!digestPinsMatchComposeServices(body.digestPins, body.composeContent)) {
+            res.status(400).json({ error: 'digestPins keys must match services in composeContent' });
             return;
         }
         digestPins = body.digestPins;

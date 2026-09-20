@@ -38,6 +38,7 @@ import { sanitizeForLog } from '../utils/safeLog';
 import { PORT } from '../helpers/constants';
 import { isNativeTlsEnabled } from '../helpers/nativeTls';
 import { sweepDockerAuthTempDirs, classifyDockerAuthChildName } from '../helpers/dockerAuthTempDir';
+import { sweepStaleDigestPinDirs } from '../helpers/digestPinTempDir';
 import { recordRegistryDeliveryEvent } from '../helpers/registryDeliveryEvidence';
 import { PreparedSourceStore } from '../services/preparedSourceStore';
 import { RegistryDeliveryService } from '../services/RegistryDeliveryService';
@@ -378,6 +379,9 @@ export async function startServer(server: Server): Promise<void> {
   );
   sweepStaleTrivyTempDirs().catch((err) => {
     console.warn('[Trivy] Temp dir sweep failed:', (err as Error).message);
+  });
+  sweepStaleDigestPinDirs().catch((err) => {
+    console.warn('[Compose] Digest-pin temp dir sweep failed:', (err as Error).message);
   });
 
   const isPilotAgent = isPilotMode();

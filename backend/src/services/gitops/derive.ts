@@ -3,8 +3,10 @@ import {
   decodeGitOpsEvidenceLimitations,
   decodeObservedArtifactIdentity,
   GitOpsJsonError,
+  type ObservedArtifactIdentity,
 } from './json';
 import { GitOpsStore } from './store';
+import { comparableObservationMatches } from './artifactIdentity';
 import { parseSecretCapabilityFromJson } from './sops/capability';
 import { SopsIdentityStore } from './sops/identityStore';
 import {
@@ -186,9 +188,8 @@ function collectRuntimeDrift(
       : null;
     if (!expected || expected.identity === null) continue;
     const observed = target.observedArtifactIdentity;
-    if ((observed.kind !== 'exact' && observed.kind !== 'qualified') || observed.identity === expected.identity) {
-      continue;
-    }
+    if (observed.kind !== 'exact' && observed.kind !== 'qualified') continue;
+    if (expectedSetAgreesWithObservation(expected.artifactSetId, observed, expected.identity)) continue;
     items.push({
       class: driftClass,
       expected: {
@@ -212,19 +213,39 @@ function collectRuntimeDrift(
 }
 
 /**
- * True when a target's observed identity is exact or qualified and equals the
- * expected artifact identity. Used to withhold exactly_converged_healthy until
- * every required live target has digest proof, not only applied/healthy pointers.
+ * True when a target's observed identity is exact or qualified and matches
+ * the expected set by per-service membership (platform child or index),
+ * falling back to identity-string equality only when the set has no services.
+ * Used to withhold exactly_converged_healthy until every required live target
+ * has digest proof, not only applied/healthy pointers.
  */
+function expectedSetAgreesWithObservation(
+  expectedSetId: string,
+  observed: ObservedArtifactIdentity,
+  identityFallback: string | null,
+): boolean {
+  if (observed.kind !== 'exact' && observed.kind !== 'qualified') return false;
+  const expectedRow = GitOpsStore.getInstance().getArtifactSet(expectedSetId);
+  if (expectedRow) {
+    try {
+      const decoded = decodeArtifactEvidenceJson(expectedRow.evidence_json);
+      if (decoded.services && decoded.services.length > 0) {
+        return comparableObservationMatches(decoded.services, observed);
+      }
+    } catch {
+      return false;
+    }
+  }
+  return identityFallback !== null && observed.identity === identityFallback;
+}
+
 function targetObservationMatchesExpected(target: GitOpsTargetProjection): boolean {
   const expected = target.artifact.status !== 'not_applicable' && 'expected' in target.artifact
     ? target.artifact.expected
     : null;
   if (!expected || expected.identity === null) return false;
   if (expected.qualification !== 'exact' && expected.qualification !== 'qualified') return false;
-  const observed = target.observedArtifactIdentity;
-  return (observed.kind === 'exact' || observed.kind === 'qualified')
-    && observed.identity === expected.identity;
+  return expectedSetAgreesWithObservation(expected.artifactSetId, target.observedArtifactIdentity, expected.identity);
 }
 
 function deriveSource(app: GitOpsApplicationRow, limitations: GitOpsLimitation[]): SourceFacet {
@@ -919,10 +940,8 @@ function deriveRuntime(
     if (
       (observed.kind === 'exact' || observed.kind === 'qualified')
       && artifact.expected.identity
-      && observed.identity !== artifact.expected.identity
+      && !expectedSetAgreesWithObservation(artifact.expected.artifactSetId, observed, artifact.expected.identity)
     ) {
-      // Authorized-rollout targets report fleet-class disagreement; Direct and
-      // unbound per-node mismatches stay runtime_artifact_drift.
       if (target.rollout_authorization_ref || target.rollout_generation_id) {
         return { status: 'rollout_artifact_drift' };
       }

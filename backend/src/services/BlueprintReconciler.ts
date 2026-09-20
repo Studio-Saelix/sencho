@@ -4,7 +4,7 @@ import {
     type BlueprintDeployment,
     type Node,
 } from './DatabaseService';
-import { BlueprintService, type DeployOutcome } from './BlueprintService';
+import { BlueprintService, type DeployOutcome, type DriftCause } from './BlueprintService';
 import { BlueprintAnalyzer } from './BlueprintAnalyzer';
 import { NodeLabelService } from './NodeLabelService';
 import { NotificationService } from './NotificationService';
@@ -408,7 +408,7 @@ export class BlueprintReconciler {
                     });
                     return { ...base, status: 'ok' };
                 }
-                const reason = driftResult.reason ?? 'unknown drift';
+                const reason = driftResult.reason;
                 commitBlueprintDeploymentCause('drift_observed', blueprint.id, node.id, {
                     status: 'drifted',
                     last_checked_at: Date.now(),
@@ -416,7 +416,7 @@ export class BlueprintReconciler {
                     drift_summary: reason,
                 }, null);
                 // observe/suggest/enforce: notify path via handleDrift still respects drift_mode
-                await this.handleDrift(blueprint, node, reason);
+                await this.handleDrift(blueprint, node, reason, driftResult.cause);
                 return { ...base, status: 'ok' };
             }
             default:
@@ -768,7 +768,12 @@ export class BlueprintReconciler {
         return decision;
     }
 
-    private async handleDrift(blueprint: Blueprint, node: Node, reason: string): Promise<void> {
+    private async handleDrift(
+        blueprint: Blueprint,
+        node: Node,
+        reason: string,
+        cause: DriftCause,
+    ): Promise<void> {
         const notifications = NotificationService.getInstance();
         switch (blueprint.drift_mode) {
             case 'observe':
@@ -802,7 +807,11 @@ export class BlueprintReconciler {
                     status: 'correcting',
                     last_checked_at: Date.now(),
                 }, null);
-                const result = await BlueprintService.getInstance().enforceDigestRepair(blueprint, node);
+                const result = cause === 'digest'
+                    ? await BlueprintService.getInstance().enforceDigestRepair(blueprint, node)
+                    : isGitManagedBlueprint(blueprint)
+                        ? await BlueprintService.getInstance().reapplyAuthorizedMaterialization(blueprint, node)
+                        : await BlueprintService.getInstance().deployToNode(blueprint, node);
                 if (result.status !== 'active') {
                     notifications.dispatchAlert(
                         'error',
@@ -848,14 +857,14 @@ export class BlueprintReconciler {
                 });
                 continue;
             }
-            const reason = driftResult.reason ?? 'unknown drift';
+            const reason = driftResult.reason;
             commitBlueprintDeploymentCause('drift_observed', blueprint.id, node.id, {
                 status: 'drifted',
                 last_checked_at: Date.now(),
                 last_drift_at: Date.now(),
                 drift_summary: reason,
             }, null);
-            await this.handleDrift(blueprint, node, reason);
+            await this.handleDrift(blueprint, node, reason, driftResult.cause);
         }
     }
 

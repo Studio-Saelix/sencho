@@ -5,6 +5,11 @@ import { GitOpsStore, emptyTargetRow } from '../services/gitops/store';
 import { GitOpsTransitions, type EventEnvelope } from '../services/gitops/transitions';
 import { projectApplication } from '../services/gitops/derive';
 import type { GitOpsApplicationRow, GitOpsGenerationRow } from '../services/gitops/types';
+import {
+  encodeArtifactEvidenceJson,
+  encodeObservedArtifactIdentity,
+  type ServiceArtifactEvidence,
+} from '../services/gitops/json';
 
 describe('gitops derivation', () => {
   let tmpDir: string;
@@ -1098,6 +1103,71 @@ describe('gitops derivation', () => {
       identity: 'sha256:serving-inline',
       observedAt: 7,
     });
+  });
+
+  it('treats mixed-platform observations as matched against each target\'s approved child', () => {
+    const amd = `sha256:${'a'.repeat(64)}`;
+    const arm = `sha256:${'b'.repeat(64)}`;
+    const index = `sha256:${'1'.repeat(64)}`;
+    const expectedService: ServiceArtifactEvidence = {
+      serviceName: 'web',
+      authoredRef: 'nginx:latest',
+      source: 'registry',
+      platform: 'linux/amd64',
+      indexDigest: index,
+      platformDigest: amd,
+      platformVariants: [
+        { platform: 'linux/amd64', digest: amd },
+        { platform: 'linux/arm64', digest: arm },
+      ],
+      localDigests: null,
+      buildContextFingerprint: null,
+      producedImageId: null,
+      failureClass: null,
+      resolvedAt: 1,
+    };
+    const store = GitOpsStore.getInstance();
+    const tx = GitOpsTransitions.getInstance();
+    tx.activateDirect({ application: app('app-mixed-arch', 'mixed-arch-web'), nodeId: 1, envelope: env('op-mixed') });
+    store.insertGeneration(gen('gen-mixed-arch', 'app-mixed-arch'));
+    store.insertArtifactSet({
+      id: 'art-mixed-arch',
+      generation_id: 'gen-mixed-arch',
+      evidence_version: 1,
+      authoritative: 0,
+      qualification: 'exact',
+      evidence_json: encodeArtifactEvidenceJson({
+        kind: 'exact',
+        identity: `sha256:${'e'.repeat(64)}`,
+        services: [expectedService],
+      }),
+      created_at: 1,
+    });
+    store.upsertTarget({
+      ...emptyTargetRow('app-mixed-arch', 1, 1),
+      desired_generation_id: 'gen-mixed-arch',
+      applied_generation_id: 'gen-mixed-arch',
+      deployed_generation_id: 'gen-mixed-arch',
+      healthy_generation_id: 'gen-mixed-arch',
+      expected_artifact_set_id: 'art-mixed-arch',
+      observed_artifact_identity_json: encodeObservedArtifactIdentity({
+        kind: 'exact',
+        identity: `sha256:${'f'.repeat(64)}`,
+        observedAt: 11,
+        services: [{
+          ...expectedService,
+          platform: 'linux/arm64',
+          platformDigest: arm,
+          localDigests: [arm],
+          platformVariants: null,
+        }],
+      }),
+    });
+
+    const projection = projectApplication('app-mixed-arch', false);
+    if (projection.targetMode === 'not_applicable') throw new Error('expected application');
+    expect(projection.targets[0]?.runtime.status).toBe('synced_and_healthy');
+    expect(projection.drift).toHaveLength(0);
   });
 });
 

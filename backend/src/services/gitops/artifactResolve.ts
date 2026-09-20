@@ -86,7 +86,7 @@ function mapRegistryFailure(reason: string): ArtifactServiceFailureClass {
   return 'registry_unavailable';
 }
 
-async function readNodePlatform(nodeId: number): Promise<{ os: string; architecture: string } | null> {
+export async function readNodePlatform(nodeId: number): Promise<{ os: string; architecture: string } | null> {
   try {
     const info = await DockerController.getInstance(nodeId).getDocker().info();
     const os = typeof info.OSType === 'string' ? info.OSType : '';
@@ -212,6 +212,9 @@ async function resolveRegistryService(
       platform: remote.platformLabel,
       indexDigest: remote.indexDigest,
       platformDigest: remote.platformDigest,
+      platformVariants: remote.platformVariants && remote.platformVariants.length > 0
+        ? [...remote.platformVariants].sort((a, b) => a.platform.localeCompare(b.platform))
+        : [{ platform: remote.platformLabel, digest: remote.platformDigest }],
       buildContextFingerprint: null,
       producedImageId: null,
       failureClass: null,
@@ -507,18 +510,21 @@ async function observeServiceRuntime(
       repo: serviceName,
       tag: 'latest',
     });
-    const platformDigest = repoDigests[0] ?? null;
+    const localDigests = [...repoDigests].sort((a, b) => a.localeCompare(b));
+    const hasRepoDigest = localDigests.length > 0;
+    const platformDigest = localDigests[0] ?? null;
     const producedImageId = imageId.replace(/^sha256:/, '');
-    const qualification: ServiceQualification = platformDigest ? 'exact' : 'local_build_unverified';
+    const qualification: ServiceQualification = hasRepoDigest ? 'exact' : 'local_build_unverified';
     return {
       qualification,
       evidence: {
         serviceName,
         authoredRef: declaredImage,
-        source: platformDigest ? 'registry' : 'build',
+        source: hasRepoDigest ? 'registry' : 'build',
         platform,
-        indexDigest: platformDigest,
+        indexDigest: null,
         platformDigest,
+        localDigests: hasRepoDigest ? localDigests : null,
         buildContextFingerprint: null,
         producedImageId,
         failureClass: null,

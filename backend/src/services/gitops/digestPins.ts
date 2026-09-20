@@ -1,5 +1,7 @@
-import { decodeArtifactEvidenceJson } from './json';
+import { decodeArtifactEvidenceJson, isRecord } from './json';
 import { GitOpsStore } from './store';
+import { approvedPlatformDigest } from './artifactIdentity';
+import { parse as parseYaml } from 'yaml';
 
 /** serviceName → `name@sha256:<64 hex>` pin map used by digest overlay deploys. */
 export type DigestPinsMap = Record<string, string>;
@@ -30,7 +32,9 @@ export function isDigestPinsMap(value: unknown): value is DigestPinsMap {
  */
 export function buildDigestPinsFromArtifactSet(
   artifactSetId: string,
+  platformLabel?: string | null,
 ): DigestPinsMap | null {
+  if (!platformLabel) return null;
   const row = GitOpsStore.getInstance().getArtifactSet(artifactSetId);
   if (!row) return null;
   if (row.qualification !== 'exact' && row.qualification !== 'qualified') return null;
@@ -45,11 +49,12 @@ export function buildDigestPinsFromArtifactSet(
   }
   const pins: DigestPinsMap = {};
   for (const service of evidence.services) {
-    if (!service.platformDigest || !PLATFORM_DIGEST_RE.test(service.platformDigest)) {
+    const digest = approvedPlatformDigest(service, platformLabel ?? null);
+    if (!digest || !PLATFORM_DIGEST_RE.test(digest)) {
       return null;
     }
     if (!service.authoredRef) return null;
-    const pin = toDigestImageRef(service.authoredRef, service.platformDigest);
+    const pin = toDigestImageRef(service.authoredRef, digest);
     if (!pin) return null;
     pins[service.serviceName] = pin;
   }
@@ -78,4 +83,24 @@ export function digestPinsOverlayYaml(pins: DigestPinsMap): string {
   }
   lines.push('');
   return lines.join('\n');
+}
+
+/** Service names declared in compose YAML, or null when the document cannot be parsed. */
+function composeServiceNames(composeContent: string): string[] | null {
+  try {
+    const parsed: unknown = parseYaml(composeContent);
+    if (!isRecord(parsed) || !isRecord(parsed.services)) return null;
+    const names = Object.keys(parsed.services).filter((name) => name.length > 0);
+    return names.length > 0 ? names : null;
+  } catch {
+    return null;
+  }
+}
+
+/** True when every pin key names a service in the submitted compose content. */
+export function digestPinsMatchComposeServices(pins: DigestPinsMap, composeContent: string): boolean {
+  const names = composeServiceNames(composeContent);
+  if (!names) return false;
+  const allowed = new Set(names);
+  return Object.keys(pins).every((key) => allowed.has(key));
 }

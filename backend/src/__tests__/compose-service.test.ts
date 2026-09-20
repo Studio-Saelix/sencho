@@ -36,6 +36,9 @@ const {
   mockBuildUnifiedHeldImagePredicate,
   mockGetRecovery,
   mockFsStat,
+  mockPromisesMkdtemp,
+  mockPromisesWriteFile,
+  mockPromisesRm,
   mockCleanupDockerAuthTempDir,
   mockCreateDockerAuthTempDir,
   mockRecordRegistryDeliveryEvent,
@@ -95,6 +98,9 @@ const {
   mockBuildUnifiedHeldImagePredicate: vi.fn().mockReturnValue(() => false),
   mockGetRecovery: vi.fn().mockReturnValue(undefined),
   mockFsStat: vi.fn().mockResolvedValue({ isDirectory: () => true }),
+  mockPromisesMkdtemp: vi.fn<(prefix: string) => Promise<string>>().mockResolvedValue('/tmp/sencho-digest-pins-XXXX'),
+  mockPromisesWriteFile: vi.fn<(path: string, data: string | Buffer, opts?: unknown) => Promise<void>>().mockResolvedValue(undefined),
+  mockPromisesRm: vi.fn<(path: string, opts?: unknown) => Promise<void>>().mockResolvedValue(undefined),
   mockCleanupDockerAuthTempDir,
   mockCreateDockerAuthTempDir: vi.fn(() => ({
     dirPath: '/tmp/sencho-docker-test',
@@ -134,13 +140,23 @@ vi.mock('fs', () => ({
     writeFileSync: (...args: unknown[]) => mockWriteFileSync(...args),
     unlinkSync: (...args: unknown[]) => mockUnlinkSync(...args),
     rmdirSync: (...args: unknown[]) => mockRmdirSync(...args),
-    promises: { stat: (...args: unknown[]) => mockFsStat(...args) },
+    promises: {
+      stat: (...args: unknown[]) => mockFsStat(...args),
+      mkdtemp: (prefix: string) => mockPromisesMkdtemp(prefix),
+      writeFile: (path: string, data: string | Buffer, opts?: unknown) => mockPromisesWriteFile(path, data, opts),
+      rm: (path: string, opts?: unknown) => mockPromisesRm(path, opts),
+    },
   },
   mkdtempSync: (...args: unknown[]) => mockMkdtempSync(...args),
   writeFileSync: (...args: unknown[]) => mockWriteFileSync(...args),
   unlinkSync: (...args: unknown[]) => mockUnlinkSync(...args),
   rmdirSync: (...args: unknown[]) => mockRmdirSync(...args),
-  promises: { stat: (...args: unknown[]) => mockFsStat(...args) },
+  promises: {
+    stat: (...args: unknown[]) => mockFsStat(...args),
+    mkdtemp: (prefix: string) => mockPromisesMkdtemp(prefix),
+    writeFile: (path: string, data: string | Buffer, opts?: unknown) => mockPromisesWriteFile(path, data, opts),
+    rm: (path: string, opts?: unknown) => mockPromisesRm(path, opts),
+  },
 }));
 
 vi.mock('../services/NodeRegistry', () => ({
@@ -359,6 +375,9 @@ beforeEach(() => {
   mockCompensateWithCandidate.mockResolvedValue(true);
   mockBuildUnifiedHeldImagePredicate.mockReturnValue(() => false);
   mockFsStat.mockResolvedValue({ isDirectory: () => true });
+  mockPromisesMkdtemp.mockResolvedValue('/tmp/sencho-digest-pins-XXXX');
+  mockPromisesWriteFile.mockResolvedValue(undefined);
+  mockPromisesRm.mockResolvedValue(undefined);
   delete process.env.SENCHO_MODE;
   vi.useFakeTimers({ shouldAdvanceTime: true });
 });
@@ -1401,6 +1420,36 @@ describe('ComposeService - drift reconcile hook', () => {
 
     expect(spy).toHaveBeenCalledWith(1, 'my-stack');
     spy.mockRestore();
+  });
+
+  it('layers a digest overlay, keeps compose.override.yml, and uses --pull never', async () => {
+    setupAutoCloseSpawn();
+    mockListContainers.mockResolvedValue([]);
+    mockGetOverrideFilename.mockResolvedValue('compose.override.yml');
+    const overlayDir = '/tmp/sencho-digest-pins-testXXXX';
+    mockPromisesMkdtemp.mockResolvedValue(overlayDir);
+
+    const pin = `nginx@sha256:${'a'.repeat(64)}`;
+    const promise = ComposeService.getInstance(1).deployStack('my-stack', undefined, false, {
+      source: 'blueprint',
+      digestPins: { web: pin },
+    });
+    await vi.advanceTimersByTimeAsync(3100);
+    await promise;
+
+    expect(mockPromisesWriteFile).toHaveBeenCalled();
+    const writeArgs = mockPromisesWriteFile.mock.calls[0];
+    expect(String(writeArgs[0])).toContain('overlay.yml');
+    expect(String(writeArgs[1])).toContain(pin);
+    const dockerArgs = mockSpawn.mock.calls.find((call) => call[0] === 'docker' && Array.isArray(call[1]) && call[1].includes('up'))?.[1] as string[];
+    expect(dockerArgs).toEqual(expect.arrayContaining([
+      '-f', 'compose.yaml',
+      '-f', 'compose.override.yml',
+      '-f', `${overlayDir}/overlay.yml`,
+      'up', '-d', '--remove-orphans',
+      '--pull', 'never',
+    ]));
+    expect(mockPromisesRm).toHaveBeenCalledWith(overlayDir, { recursive: true, force: true });
   });
 
   it('does not reconcile the ledger when a deploy fails', async () => {

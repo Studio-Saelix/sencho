@@ -41,13 +41,15 @@ import {
     freezeInlineRevisionAfterDeploy,
     type BlueprintDeploymentCause,
 } from './gitops/blueprintDeploymentProducers';
-import { observeStackRuntimeArtifact } from './gitops/artifactResolve';
+import { observeStackRuntimeArtifact, readNodePlatform } from './gitops/artifactResolve';
 import { stackManagedRoot } from './gitops/directApplication';
 import { buildDigestPinsFromArtifactSet, type DigestPinsMap } from './gitops/digestPins';
+import { comparableObservationMatches } from './gitops/artifactIdentity';
 import {
     decodeArtifactEvidenceJson,
     decodeObservedArtifactIdentity,
     type ObservedArtifactIdentity,
+    type ServiceArtifactEvidence,
 } from './gitops/json';
 import { GitOpsStore } from './gitops/store';
 import { GitOpsTransitions } from './gitops/transitions';
@@ -58,9 +60,11 @@ import type { GitOpsApplicationRow, GitOpsGenerationRow } from './gitops/types';
 const COMPOSE_FILENAME = 'compose.yaml';
 const REMOTE_HTTP_TIMEOUT_MS = 30_000;
 
+export type DriftCause = 'revision' | 'container' | 'digest';
+
 export type DriftCheckResult =
     | { kind: 'matched' }
-    | { kind: 'drifted'; reason: string }
+    | { kind: 'drifted'; reason: string; cause: DriftCause }
     | { kind: 'unverified'; reason: string };
 
 function isDeveloperModeEnabled(): boolean {
@@ -192,16 +196,35 @@ export class BlueprintService {
         if (!expectedSetId) {
             return { status: 'failed', error: 'no expected artifact set for digest repair' };
         }
-        const digestPins = buildDigestPinsFromArtifactSet(expectedSetId);
+        const platform = await readNodePlatform(node.id);
+        const platformLabel = platform ? `${platform.os}/${platform.architecture}` : null;
+        const digestPins = buildDigestPinsFromArtifactSet(expectedSetId, platformLabel);
         if (!digestPins) {
             return { status: 'failed', error: 'approved digest unavailable for digest repair' };
         }
+        return this.reapplyAuthorizedMaterialization(blueprint, node, digestPins);
+    }
 
+    /**
+     * Re-apply already-authorized compose without rewriting authored tags.
+     * Used by Enforce for git-managed container/revision drift, where
+     * deployToNode would refuse Git-managed content.
+     */
+    async reapplyAuthorizedMaterialization(
+        blueprint: Blueprint,
+        node: Node,
+        digestPins?: DigestPinsMap,
+    ): Promise<DeployOutcome> {
+        const store = GitOpsStore.getInstance();
+        const app = store.getLiveBlueprintApplication(blueprint.id);
+        if (!recordableApplication(app)) {
+            return { status: 'failed', error: 'no recordable GitOps application for authorized reapply' };
+        }
         let composeContent = blueprint.compose_content;
         if (app.target_mode === 'blueprint' && app.accepted_generation_id) {
             const generation = store.getGeneration(app.accepted_generation_id);
             if (!generation) {
-                return { status: 'failed', error: 'accepted generation missing for digest repair' };
+                return { status: 'failed', error: 'accepted generation missing for authorized reapply' };
             }
             try {
                 composeContent = await this.readGitManagedAppliedCompose(app, generation);
@@ -209,13 +232,12 @@ export class BlueprintService {
                 return { status: 'failed', error: BlueprintService.formatError(err) };
             }
         }
-
         return this.deployAuthorizedMaterialization({
             blueprint,
             node,
             composeContent,
             marker: this.buildMarker(blueprint),
-            auditPath: `/api/blueprints/${blueprint.id}/enforce-digest`,
+            auditPath: `/api/blueprints/${blueprint.id}/enforce-reapply`,
             digestPins,
         });
     }
@@ -666,15 +688,16 @@ export class BlueprintService {
 
             const marker = await this.readMarker(blueprint.name, node);
             if (!marker) {
-                return { kind: 'drifted', reason: 'marker file missing on node' };
+                return { kind: 'drifted', reason: 'marker file missing on node', cause: 'revision' };
             }
             if (marker.blueprintId !== blueprint.id) {
-                return { kind: 'drifted', reason: 'marker references a different blueprint' };
+                return { kind: 'drifted', reason: 'marker references a different blueprint', cause: 'revision' };
             }
             if (marker.revision !== blueprint.revision) {
                 return {
                     kind: 'drifted',
                     reason: `revision drift (node has ${marker.revision}, blueprint is ${blueprint.revision})`,
+                    cause: 'revision',
                 };
             }
 
@@ -683,7 +706,7 @@ export class BlueprintService {
                 return { kind: 'unverified', reason: containerState.detail };
             }
             if (containerState.kind === 'not_running') {
-                return { kind: 'drifted', reason: containerState.detail };
+                return { kind: 'drifted', reason: containerState.detail, cause: 'container' };
             }
 
             const observed = await this.observeRuntimeIdentity(blueprint.name, node);
@@ -722,9 +745,11 @@ export class BlueprintService {
                 return { kind: 'unverified', reason: 'expected artifact set is not comparable' };
             }
             let expectedIdentity: string | null = null;
+            let expectedServices: ServiceArtifactEvidence[] | undefined;
             try {
                 const decoded = decodeArtifactEvidenceJson(expectedRow.evidence_json);
                 expectedIdentity = 'identity' in decoded ? decoded.identity : null;
+                expectedServices = 'services' in decoded ? decoded.services : undefined;
             } catch {
                 return { kind: 'unverified', reason: 'expected artifact evidence is invalid' };
             }
@@ -735,10 +760,24 @@ export class BlueprintService {
             if (observed.kind !== 'exact' && observed.kind !== 'qualified') {
                 return { kind: 'unverified', reason: `observation is ${observed.kind}` };
             }
+            if (expectedServices && expectedServices.length > 0) {
+                if (!observed.services || observed.services.length === 0) {
+                    return { kind: 'unverified', reason: 'observation has no per-service digest evidence' };
+                }
+                if (comparableObservationMatches(expectedServices, observed)) {
+                    return { kind: 'matched' };
+                }
+                return {
+                    kind: 'drifted',
+                    reason: 'runtime artifact identity differs from the expected artifact set',
+                    cause: 'digest',
+                };
+            }
             if (observed.identity !== expectedIdentity) {
                 return {
                     kind: 'drifted',
                     reason: 'runtime artifact identity differs from the expected artifact set',
+                    cause: 'digest',
                 };
             }
             return { kind: 'matched' };

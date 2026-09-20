@@ -128,6 +128,34 @@ describe('POST /api/blueprints/apply-local (node-to-node atomic apply)', () => {
         // The manual op still owns the lock; the apply never acquired it.
         expect(StackOpLockService.getInstance().get(1, 'apply-local-busy')?.action).toBe('update');
     });
+
+    it('rejects a malformed digestPins body', async () => {
+        const res = await request(app)
+            .post('/api/blueprints/apply-local')
+            .set('Cookie', adminCookie)
+            .send({
+                stackName: 'apply-local-stack',
+                composeContent: 'services:\n  app:\n    image: nginx\n',
+                markerContent: JSON.stringify({ blueprintId: 1, revision: 1, lastApplied: 123 }),
+                digestPins: { app: 'nginx:latest' },
+            });
+        expect(res.status).toBe(400);
+        expect(res.body.error).toMatch(/digestPins/i);
+    });
+
+    it('rejects digestPins keys that are not services in composeContent', async () => {
+        const res = await request(app)
+            .post('/api/blueprints/apply-local')
+            .set('Cookie', adminCookie)
+            .send({
+                stackName: 'apply-local-stack',
+                composeContent: 'services:\n  app:\n    image: nginx\n',
+                markerContent: JSON.stringify({ blueprintId: 1, revision: 1, lastApplied: 123 }),
+                digestPins: { other: `nginx@sha256:${'a'.repeat(64)}` },
+            });
+        expect(res.status).toBe(400);
+        expect(res.body.error).toMatch(/must match services/i);
+    });
 });
 
 describe('POST /api/blueprints/withdraw-local', () => {
