@@ -531,7 +531,7 @@ describe('GET /api/fleet/readiness aggregation', () => {
       [hung]: proxyTarget('http://hung.example.com'),
       [unknownStatus]: proxyTarget('http://unknown.example.com'),
     });
-    mockFetch((url, init) => (url.startsWith(PROXY_BASE)
+    mockFetch((url, init) => (new URL(url).origin === PROXY_BASE
       ? nodeReadHandler(evidenceBody(), summaryBody([row('web')]))(url)
       : hungUntilAbort(init)));
 
@@ -602,7 +602,7 @@ describe('GET /api/fleet/readiness aggregation', () => {
     }
     const refusedContactBefore = contactSecondsOf(refused);
     mockTargets({ [refused]: proxyTarget(PROXY_BASE), [hung]: proxyTarget('http://hung.example.com') });
-    mockFetch((url, init) => (url.startsWith(PROXY_BASE)
+    mockFetch((url, init) => (new URL(url).origin === PROXY_BASE
       ? Promise.reject(new Error('connect ECONNREFUSED'))
       : hungUntilAbort(init)));
 
@@ -1218,7 +1218,7 @@ describe('GET /api/fleet/readiness per-domain evidence', () => {
     setNodeStatus(older, 'online');
     setNodeStatus(newer, 'online');
     mockTargets({ [older]: proxyTarget(PROXY_BASE), [newer]: proxyTarget(HEALTHY_BASE) });
-    mockFetch((url) => (url.startsWith(PROXY_BASE)
+    mockFetch((url) => (new URL(url).origin === PROXY_BASE
       // Neither route exists on the older build, so it answers both with 404.
       ? new Response('not found', { status: 404 })
       : nodeReadHandler(evidenceBody(), summaryBody([row('web')]))(url)));
@@ -1476,7 +1476,7 @@ describe('GET /api/fleet/readiness per-domain evidence', () => {
     setNodeStatus(noScanner, 'online');
     setNodeStatus(neverRan, 'online');
     mockTargets({ [noScanner]: proxyTarget(PROXY_BASE), [neverRan]: proxyTarget(HEALTHY_BASE) });
-    mockFetch((url) => (url.startsWith(PROXY_BASE)
+    mockFetch((url) => (new URL(url).origin === PROXY_BASE
       ? nodeReadHandler(evidenceBody({
         security: {
           generatedAt: Date.now(),
