@@ -268,6 +268,13 @@ describe('BlueprintService marker edge cases', () => {
         const bp = seedBlueprint([localNode.id]);
         const bpObj = DatabaseService.getInstance().getBlueprint(bp.id)!;
 
+        // A live application is required before marker/digest comparison runs.
+        const { GitOpsStore } = await import('../services/gitops/store');
+        const { blankInlineApplication } = await import('../services/gitops/blueprintProducers');
+        const { newGitOpsId } = await import('../services/gitops/directApplication');
+        const appId = newGitOpsId();
+        GitOpsStore.getInstance().insertApplication(blankInlineApplication(appId, bp.id, Date.now()));
+
         vi.spyOn(BlueprintService.getInstance(), 'readMarker').mockResolvedValue({
             blueprintId: bp.id,
             revision: bpObj.revision + 5,
@@ -276,8 +283,285 @@ describe('BlueprintService marker edge cases', () => {
 
         const result = await BlueprintService.getInstance().checkForDrift(bpObj, localNode);
 
-        expect(result.drifted).toBe(true);
-        expect(result.reason).toContain('revision drift');
+        expect(result.kind).toBe('drifted');
+        if (result.kind === 'drifted') {
+            expect(result.reason).toContain('revision drift');
+        }
+    });
+
+    it('returns unverified when no recordable GitOps application exists', async () => {
+        const localNode = DatabaseService.getInstance().getNodes()[0];
+        const bp = seedBlueprint([localNode.id]);
+        const bpObj = DatabaseService.getInstance().getBlueprint(bp.id)!;
+
+        const result = await BlueprintService.getInstance().checkForDrift(bpObj, localNode);
+
+        expect(result.kind).toBe('unverified');
+        if (result.kind === 'unverified') {
+            expect(result.reason).toMatch(/no recordable/i);
+        }
+    });
+
+    it('returns unverified when a remote node has no proxy target', async () => {
+        const localNode = DatabaseService.getInstance().getNodes()[0];
+        const bp = seedBlueprint([localNode.id]);
+        const bpObj = DatabaseService.getInstance().getBlueprint(bp.id)!;
+        const { GitOpsStore } = await import('../services/gitops/store');
+        const { blankInlineApplication } = await import('../services/gitops/blueprintProducers');
+        const { newGitOpsId } = await import('../services/gitops/directApplication');
+        GitOpsStore.getInstance().insertApplication(blankInlineApplication(newGitOpsId(), bp.id, Date.now()));
+
+        vi.spyOn(BlueprintService.getInstance(), 'readMarker').mockResolvedValue({
+            blueprintId: bp.id,
+            revision: bpObj.revision,
+            lastApplied: 0,
+        });
+        const remoteNode = { ...localNode, type: 'remote' as const };
+        const { NodeRegistry } = await import('../services/NodeRegistry');
+        vi.spyOn(NodeRegistry.getInstance(), 'getProxyTarget').mockReturnValue(null);
+
+        const result = await BlueprintService.getInstance().checkForDrift(bpObj, remoteNode);
+        expect(result.kind).toBe('unverified');
+    });
+
+    it('detects digest drift when marker and containers match but observation identity differs', async () => {
+        const localNode = DatabaseService.getInstance().getNodes()[0];
+        const bp = seedBlueprint([localNode.id]);
+        const bpObj = DatabaseService.getInstance().getBlueprint(bp.id)!;
+        const { GitOpsStore } = await import('../services/gitops/store');
+        const { blankInlineApplication } = await import('../services/gitops/blueprintProducers');
+        const { newGitOpsId } = await import('../services/gitops/directApplication');
+        const store = GitOpsStore.getInstance();
+        const appId = newGitOpsId();
+        const genId = newGitOpsId();
+        const artId = newGitOpsId();
+        const expectedIdentity = `exact:${'a'.repeat(64)}`;
+        store.insertApplication(blankInlineApplication(appId, bp.id, Date.now()));
+        store.insertGeneration({
+            id: genId,
+            application_id: appId,
+            commit_sha: 'a'.repeat(40),
+            repo_url: `inline://blueprint/${bp.id}`,
+            configured_ref: 'inline',
+            resolved_ref_kind: null,
+            repo_identity_json: JSON.stringify({ host: 'inline', pathname: `/blueprint/${bp.id}` }),
+            manifest_version: 1,
+            candidate_dir: `generations/inline-${genId}`,
+            applied_dir: `generations/inline-${genId}-applied`,
+            expected_invocation_json: '{}',
+            materialization_fingerprint: 'a'.repeat(64),
+            validation_ok: 1,
+            plan_blocked: 0,
+            change_plan_fingerprint: null,
+            operation_id: 'op-digest-drift',
+            trigger: 'test',
+            actor: null,
+            previous_generation_id: null,
+            redacted_limitations_json: '[]',
+            portable_manifest_json: null,
+            compose_inputs_json: null,
+            source_policy_evidence_json: null,
+            security_policy_evidence_json: null,
+            support_requirements_json: null,
+            compatibility_requirements_json: null,
+            secret_capability_json: null,
+            created_at: Date.now(),
+        });
+        store.insertArtifactSet({
+            id: artId,
+            generation_id: genId,
+            evidence_version: 1,
+            authoritative: 0,
+            qualification: 'exact',
+            evidence_json: JSON.stringify({ kind: 'exact', identity: expectedIdentity }),
+            created_at: Date.now(),
+        });
+        const app = store.getApplication(appId)!;
+        app.accepted_generation_id = genId;
+        app.artifact_set_id = artId;
+        app.latest_artifact_set_id = artId;
+        store.writeApplicationPointers(app);
+
+        vi.spyOn(BlueprintService.getInstance(), 'readMarker').mockResolvedValue({
+            blueprintId: bp.id,
+            revision: bpObj.revision,
+            lastApplied: 0,
+        });
+        const svc = BlueprintService.getInstance() as unknown as {
+            containerHealth: () => Promise<{ kind: 'running' }>;
+            observeRuntimeIdentity: () => Promise<import('../services/gitops/json').ObservedArtifactIdentity>;
+        };
+        vi.spyOn(svc, 'containerHealth').mockResolvedValue({ kind: 'running' });
+        vi.spyOn(svc, 'observeRuntimeIdentity').mockResolvedValue({
+            kind: 'exact',
+            identity: `exact:${'b'.repeat(64)}`,
+            observedAt: Date.now(),
+        });
+
+        const drifted = await BlueprintService.getInstance().checkForDrift(bpObj, localNode);
+        expect(drifted.kind).toBe('drifted');
+        if (drifted.kind === 'drifted') {
+            expect(drifted.reason).toMatch(/identity differs/i);
+        }
+
+        vi.spyOn(svc, 'observeRuntimeIdentity').mockResolvedValue({
+            kind: 'exact',
+            identity: expectedIdentity,
+            observedAt: Date.now(),
+        });
+        const matched = await BlueprintService.getInstance().checkForDrift(bpObj, localNode);
+        expect(matched.kind).toBe('matched');
+
+        vi.spyOn(svc, 'observeRuntimeIdentity').mockResolvedValue({
+            kind: 'stale',
+            identity: expectedIdentity,
+            observedAt: Date.now(),
+        });
+        const unverified = await BlueprintService.getInstance().checkForDrift(bpObj, localNode);
+        expect(unverified.kind).toBe('unverified');
+    });
+
+    it('matches mixed-platform observations against the approved child, not a shared fingerprint', async () => {
+        const localNode = DatabaseService.getInstance().getNodes()[0];
+        const bp = seedBlueprint([localNode.id]);
+        const bpObj = DatabaseService.getInstance().getBlueprint(bp.id)!;
+        const { GitOpsStore } = await import('../services/gitops/store');
+        const { blankInlineApplication } = await import('../services/gitops/blueprintProducers');
+        const { newGitOpsId } = await import('../services/gitops/directApplication');
+        const {
+            encodeArtifactEvidenceJson,
+            encodeObservedArtifactIdentity,
+        } = await import('../services/gitops/json');
+        const amd = `sha256:${'a'.repeat(64)}`;
+        const arm = `sha256:${'b'.repeat(64)}`;
+        const index = `sha256:${'1'.repeat(64)}`;
+        const expectedService = {
+            serviceName: 'web',
+            authoredRef: 'nginx:latest',
+            source: 'registry' as const,
+            platform: 'linux/amd64',
+            indexDigest: index,
+            platformDigest: amd,
+            platformVariants: [
+                { platform: 'linux/amd64', digest: amd },
+                { platform: 'linux/arm64', digest: arm },
+            ],
+            localDigests: null,
+            buildContextFingerprint: null,
+            producedImageId: null,
+            failureClass: null,
+            resolvedAt: 1,
+        };
+        const store = GitOpsStore.getInstance();
+        const appId = newGitOpsId();
+        const genId = newGitOpsId();
+        const artId = newGitOpsId();
+        store.insertApplication(blankInlineApplication(appId, bp.id, Date.now()));
+        store.insertGeneration({
+            id: genId,
+            application_id: appId,
+            commit_sha: 'a'.repeat(40),
+            repo_url: `inline://blueprint/${bp.id}`,
+            configured_ref: 'inline',
+            resolved_ref_kind: null,
+            repo_identity_json: JSON.stringify({ host: 'inline', pathname: `/blueprint/${bp.id}` }),
+            manifest_version: 1,
+            candidate_dir: `generations/inline-${genId}`,
+            applied_dir: `generations/inline-${genId}-applied`,
+            expected_invocation_json: '{}',
+            materialization_fingerprint: 'a'.repeat(64),
+            validation_ok: 1,
+            plan_blocked: 0,
+            change_plan_fingerprint: null,
+            operation_id: 'op-mixed-arch',
+            trigger: 'test',
+            actor: null,
+            previous_generation_id: null,
+            redacted_limitations_json: '[]',
+            portable_manifest_json: null,
+            compose_inputs_json: null,
+            source_policy_evidence_json: null,
+            security_policy_evidence_json: null,
+            support_requirements_json: null,
+            compatibility_requirements_json: null,
+            secret_capability_json: null,
+            created_at: Date.now(),
+        });
+        store.insertArtifactSet({
+            id: artId,
+            generation_id: genId,
+            evidence_version: 1,
+            authoritative: 0,
+            qualification: 'exact',
+            evidence_json: encodeArtifactEvidenceJson({
+                kind: 'exact',
+                identity: `exact:${'e'.repeat(64)}`,
+                services: [expectedService],
+            }),
+            created_at: Date.now(),
+        });
+        const app = store.getApplication(appId)!;
+        app.accepted_generation_id = genId;
+        app.artifact_set_id = artId;
+        app.latest_artifact_set_id = artId;
+        store.writeApplicationPointers(app);
+
+        vi.spyOn(BlueprintService.getInstance(), 'readMarker').mockResolvedValue({
+            blueprintId: bp.id,
+            revision: bpObj.revision,
+            lastApplied: 0,
+        });
+        const svc = BlueprintService.getInstance() as unknown as {
+            containerHealth: () => Promise<{ kind: 'running' }>;
+            observeRuntimeIdentity: () => Promise<import('../services/gitops/json').ObservedArtifactIdentity>;
+        };
+        vi.spyOn(svc, 'containerHealth').mockResolvedValue({ kind: 'running' });
+        vi.spyOn(svc, 'observeRuntimeIdentity').mockResolvedValue(JSON.parse(encodeObservedArtifactIdentity({
+            kind: 'exact',
+            identity: `exact:${'f'.repeat(64)}`,
+            observedAt: Date.now(),
+            services: [{
+                ...expectedService,
+                platform: 'linux/arm64',
+                platformDigest: arm,
+                localDigests: [arm],
+                platformVariants: null,
+            }],
+        })));
+
+        const matched = await BlueprintService.getInstance().checkForDrift(bpObj, localNode);
+        expect(matched.kind).toBe('matched');
+    });
+
+    it('returns unverified for a Blueprint with no frozen digest record', async () => {
+        const localNode = DatabaseService.getInstance().getNodes()[0];
+        const bp = seedBlueprint([localNode.id]);
+        const bpObj = DatabaseService.getInstance().getBlueprint(bp.id)!;
+        const { GitOpsStore } = await import('../services/gitops/store');
+        const { blankInlineApplication } = await import('../services/gitops/blueprintProducers');
+        const { newGitOpsId } = await import('../services/gitops/directApplication');
+        GitOpsStore.getInstance().insertApplication(blankInlineApplication(newGitOpsId(), bp.id, Date.now()));
+        vi.spyOn(BlueprintService.getInstance(), 'readMarker').mockResolvedValue({
+            blueprintId: bp.id,
+            revision: bpObj.revision,
+            lastApplied: 0,
+        });
+        const svc = BlueprintService.getInstance() as unknown as {
+            containerHealth: () => Promise<{ kind: 'running' }>;
+            observeRuntimeIdentity: () => Promise<import('../services/gitops/json').ObservedArtifactIdentity>;
+        };
+        vi.spyOn(svc, 'containerHealth').mockResolvedValue({ kind: 'running' });
+        vi.spyOn(svc, 'observeRuntimeIdentity').mockResolvedValue({
+            kind: 'exact',
+            identity: `exact:${'a'.repeat(64)}`,
+            observedAt: Date.now(),
+        });
+
+        const result = await BlueprintService.getInstance().checkForDrift(bpObj, localNode);
+        expect(result.kind).toBe('unverified');
+        if (result.kind === 'unverified') {
+            expect(result.reason).toMatch(/no expected artifact set/i);
+        }
     });
 
     it('refuses to withdraw when the marker belongs to a different blueprint', async () => {

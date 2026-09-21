@@ -414,6 +414,8 @@ export type FutureGitOpsEvidence = {
       | 'exactly_converged_healthy';
     rolloutGenerationId: string;
   }> | null;
+  // Future-envelope only: current derivers emit status-only RuntimeFacet
+  // `rollout_artifact_drift`. This richer per-target shape is not produced yet.
   readonly targetRuntime: ReadonlyArray<Readonly<{
     nodeId: number;
     kind: 'rollout_artifact_drift';
@@ -734,7 +736,7 @@ export const FACET_EVIDENCE_SOURCE: FacetEvidenceSource = {
     paused: 'current',
     recovery_failed: 'current',
     completion_unknown: 'current',
-    rollout_artifact_drift: 'future',
+    rollout_artifact_drift: 'current',
   },
   lkg: {
     none: 'current',

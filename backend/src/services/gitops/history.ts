@@ -61,6 +61,7 @@ export type GitOpsHistoryStage =
   | 'fetched'
   | 'fetched_invalid'
   | 'health_finalized'
+  | 'inline_revision_frozen'
   | 'intent_revised'
   | 'legacy_combined_appended'
   | 'operation_interrupted'

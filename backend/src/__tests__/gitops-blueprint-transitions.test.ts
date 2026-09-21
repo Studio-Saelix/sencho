@@ -511,7 +511,182 @@ describe('gitops blueprint transitions', () => {
 
     expect(runtimeStatusOf('app-failfirst')).toBe('failed_after_mutation');
   });
+
+  it('freezes an Inline revision once: mints generation and set, binds null targets, then no-ops', () => {
+    const store = GitOpsStore.getInstance();
+    const tx = GitOpsTransitions.getInstance();
+    seedInline('app-freeze', 320, 1);
+    tx.intentRevised({
+      applicationId: 'app-freeze',
+      intent: intent('int-freeze', 'app-freeze', 320),
+      envelope: env('op-int-freeze'),
+    });
+    tx.blueprintDeployStarted({
+      applicationId: 'app-freeze',
+      nodeId: 1,
+      intentRevisionId: 'int-freeze',
+      rolloutCandidateId: null,
+      envelope: env('op-dep-freeze'),
+    });
+    tx.blueprintAckRecorded({
+      applicationId: 'app-freeze',
+      nodeId: 1,
+      intentRevisionId: 'int-freeze',
+      rolloutCandidateId: null,
+      legacyAppliedRevision: 1,
+      envelope: env('op-ack-freeze'),
+    });
+    expect(store.getTarget('app-freeze', 1)?.desired_generation_id).toBeNull();
+
+    const generationId = 'gen-freeze-1';
+    const artifactSetId = 'art-freeze-1';
+    const first = tx.inlineRevisionFrozen({
+      applicationId: 'app-freeze',
+      generation: inlineGeneration(generationId, 'app-freeze', 'c'.repeat(64)),
+      artifactSetId,
+      envelope: env('op-freeze-1'),
+    });
+    expect(first.replayed).toBe(false);
+    const app = store.getApplication('app-freeze')!;
+    expect(app.accepted_generation_id).toBe(generationId);
+    expect(app.artifact_set_id).toBe(artifactSetId);
+    expect(store.getArtifactSet(artifactSetId)?.qualification).toBe('unresolved');
+    const target = store.getTarget('app-freeze', 1)!;
+    expect(target.desired_generation_id).toBe(generationId);
+    expect(target.expected_artifact_set_id).toBe(artifactSetId);
+
+    const second = tx.inlineRevisionFrozen({
+      applicationId: 'app-freeze',
+      generation: inlineGeneration('gen-freeze-2', 'app-freeze', 'd'.repeat(64)),
+      artifactSetId: 'art-freeze-2',
+      envelope: env('op-freeze-2'),
+    });
+    expect(second.replayed).toBe(true);
+    expect(store.getApplication('app-freeze')?.accepted_generation_id).toBe(generationId);
+    expect(store.getApplication('app-freeze')?.artifact_set_id).toBe(artifactSetId);
+    expect(store.getGeneration('gen-freeze-2')).toBeUndefined();
+  });
+
+  it('clears Inline freeze pointers on a new intent so the next deploy can re-freeze', () => {
+    const store = GitOpsStore.getInstance();
+    const tx = GitOpsTransitions.getInstance();
+    seedInline('app-freeze-revise', 322, 1);
+    tx.intentRevised({
+      applicationId: 'app-freeze-revise',
+      intent: intent('int-freeze-r1', 'app-freeze-revise', 322),
+      envelope: env('op-int-r1'),
+    });
+    tx.blueprintDeployStarted({
+      applicationId: 'app-freeze-revise',
+      nodeId: 1,
+      intentRevisionId: 'int-freeze-r1',
+      rolloutCandidateId: null,
+      envelope: env('op-dep-r1'),
+    });
+    tx.blueprintAckRecorded({
+      applicationId: 'app-freeze-revise',
+      nodeId: 1,
+      intentRevisionId: 'int-freeze-r1',
+      rolloutCandidateId: null,
+      legacyAppliedRevision: 1,
+      envelope: env('op-ack-r1'),
+    });
+    tx.inlineRevisionFrozen({
+      applicationId: 'app-freeze-revise',
+      generation: inlineGeneration('gen-freeze-r1', 'app-freeze-revise', 'c'.repeat(64)),
+      artifactSetId: 'art-freeze-r1',
+      envelope: env('op-freeze-r1'),
+    });
+    expect(store.getApplication('app-freeze-revise')?.accepted_generation_id).toBe('gen-freeze-r1');
+    expect(store.getTarget('app-freeze-revise', 1)?.expected_artifact_set_id).toBe('art-freeze-r1');
+
+    tx.intentRevised({
+      applicationId: 'app-freeze-revise',
+      intent: intent('int-freeze-r2', 'app-freeze-revise', 322),
+      envelope: env('op-int-r2'),
+    });
+    const cleared = store.getApplication('app-freeze-revise')!;
+    expect(cleared.accepted_generation_id).toBeNull();
+    expect(cleared.artifact_set_id).toBeNull();
+    expect(store.getTarget('app-freeze-revise', 1)?.expected_artifact_set_id).toBeNull();
+
+    const again = tx.inlineRevisionFrozen({
+      applicationId: 'app-freeze-revise',
+      generation: inlineGeneration('gen-freeze-r2', 'app-freeze-revise', 'd'.repeat(64)),
+      artifactSetId: 'art-freeze-r2',
+      envelope: env('op-freeze-r2'),
+    });
+    expect(again.replayed).toBe(false);
+    expect(store.getApplication('app-freeze-revise')?.accepted_generation_id).toBe('gen-freeze-r2');
+    expect(store.getApplication('app-freeze-revise')?.artifact_set_id).toBe('art-freeze-r2');
+  });
+
+  it('refuses an Inline freeze whose artifact set does not belong to the generation', () => {
+    const store = GitOpsStore.getInstance();
+    const tx = GitOpsTransitions.getInstance();
+    seedInline('app-freeze-ptr', 321, 1);
+    store.insertGeneration(inlineGeneration('gen-other', 'app-freeze-ptr', 'e'.repeat(64)));
+    store.insertArtifactSet({
+      id: 'art-other-gen',
+      generation_id: 'gen-other',
+      evidence_version: 1,
+      authoritative: 0,
+      qualification: 'unresolved',
+      evidence_json: JSON.stringify({ kind: 'unresolved' }),
+      created_at: 1,
+    });
+    // Pre-seed a target desired pointer at a different generation so binding
+    // the freeze set would violate assertArtifactPointer.
+    store.upsertTarget({
+      ...emptyTargetRow('app-freeze-ptr', 1, 1),
+      desired_generation_id: 'gen-other',
+    });
+
+    expect(() => tx.inlineRevisionFrozen({
+      applicationId: 'app-freeze-ptr',
+      generation: inlineGeneration('gen-freeze-ptr', 'app-freeze-ptr', 'f'.repeat(64)),
+      artifactSetId: 'art-freeze-ptr',
+      envelope: env('op-freeze-ptr'),
+    })).toThrow(/desired generation does not match/);
+  });
 });
+
+function inlineGeneration(
+  id: string,
+  applicationId: string,
+  materializationFingerprint: string,
+): import('../services/gitops/types').GitOpsGenerationRow {
+  return {
+    id,
+    application_id: applicationId,
+    commit_sha: materializationFingerprint.slice(0, 40),
+    repo_url: `inline://blueprint/${applicationId}`,
+    configured_ref: 'inline',
+    resolved_ref_kind: null,
+    repo_identity_json: JSON.stringify({ host: 'inline', pathname: `/blueprint/${applicationId}` }),
+    manifest_version: 1,
+    candidate_dir: `generations/inline-${id}`,
+    applied_dir: `generations/inline-${id}-applied`,
+    expected_invocation_json: '{}',
+    materialization_fingerprint: materializationFingerprint,
+    validation_ok: 1,
+    plan_blocked: 0,
+    change_plan_fingerprint: null,
+    operation_id: `op-${id}`,
+    trigger: 'manual',
+    actor: 'tester',
+    previous_generation_id: null,
+    redacted_limitations_json: '[]',
+    portable_manifest_json: null,
+    compose_inputs_json: null,
+    source_policy_evidence_json: null,
+    security_policy_evidence_json: null,
+    support_requirements_json: null,
+    compatibility_requirements_json: null,
+    secret_capability_json: null,
+    created_at: 1,
+  };
+}
 
 function runtimeStatusOf(applicationId: string): string | undefined {
   const projection = projectApplication(applicationId, false);

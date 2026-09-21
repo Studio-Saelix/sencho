@@ -397,16 +397,16 @@ export const RUNTIME_STATE: Record<GitOpsRuntimeStatus, GitOpsStateMeta> = {
     line: 'The files on disk no longer match the invocation that deployed them.',
     icon: TriangleAlert,
   },
-  rollout_artifact_drift: {
-    label: 'rollout artifact drift',
-    tone: 'warning',
-    line: 'The planned rollout artifact differs from the one this node holds.',
-    icon: TriangleAlert,
-  },
   runtime_artifact_drift: {
     label: 'runtime artifact drift',
     tone: 'warning',
-    line: 'The running image differs from the expected artifact for this node.',
+    line: 'The running image digest differs from the frozen expected artifact for this node.',
+    icon: TriangleAlert,
+  },
+  rollout_artifact_drift: {
+    label: 'rollout artifact drift',
+    tone: 'warning',
+    line: 'A required rollout target holds a different image digest than the approved set.',
     icon: TriangleAlert,
   },
   stale_acknowledgement: {

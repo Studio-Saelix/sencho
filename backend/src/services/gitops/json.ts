@@ -212,6 +212,11 @@ export type ArtifactServiceFailureClass =
   | 'digest_unavailable'
   | 'stale_resolution';
 
+export interface ArtifactPlatformVariant {
+  platform: string;
+  digest: string;
+}
+
 export interface ServiceArtifactEvidence {
   serviceName: string;
   authoredRef: string | null;
@@ -219,6 +224,10 @@ export interface ServiceArtifactEvidence {
   platform: string | null;
   indexDigest: string | null;
   platformDigest: string | null;
+  /** Frozen index children keyed by os/arch, recorded at resolve time. */
+  platformVariants?: readonly ArtifactPlatformVariant[] | null;
+  /** All local RepoDigest candidates from observation; compare every one. */
+  localDigests?: readonly string[] | null;
   buildContextFingerprint: string | null;
   producedImageId: string | null;
   failureClass: ArtifactServiceFailureClass | null;
@@ -245,6 +254,82 @@ function assertArtifactEvidenceKeys(decoded: Record<string, unknown>, allowed: r
   }
 }
 
+function decodeOptionalArray(value: unknown, error: string): unknown[] | null {
+  if (value == null) return null;
+  if (!Array.isArray(value)) throw new GitOpsJsonError(error);
+  return value;
+}
+
+function sortedOptionalField<T>(
+  items: readonly T[] | null | undefined,
+  compare: (a: T, b: T) => number,
+): T[] | null {
+  if (items == null) return null;
+  return [...items].sort(compare);
+}
+
+function decodePlatformVariants(value: unknown): ArtifactPlatformVariant[] | null {
+  const raw = decodeOptionalArray(value, 'service artifact evidence platformVariants must be an array');
+  if (raw === null) return null;
+  const variants: ArtifactPlatformVariant[] = raw.map((entry) => {
+    if (!isRecord(entry)) {
+      throw new GitOpsJsonError('platform variant must be an object');
+    }
+    const allowed = ['platform', 'digest'];
+    for (const key of Object.keys(entry)) {
+      if (!allowed.includes(key)) {
+        throw new GitOpsJsonError('platform variant has unknown keys');
+      }
+    }
+    if (typeof entry.platform !== 'string' || entry.platform.length === 0) {
+      throw new GitOpsJsonError('platform variant platform must be a non-empty string');
+    }
+    if (typeof entry.digest !== 'string' || entry.digest.length === 0) {
+      throw new GitOpsJsonError('platform variant digest must be a non-empty string');
+    }
+    return { platform: entry.platform, digest: entry.digest };
+  });
+  const sorted = [...variants].sort((a, b) => a.platform.localeCompare(b.platform));
+  const seen = new Set<string>();
+  for (const variant of sorted) {
+    if (seen.has(variant.platform)) {
+      throw new GitOpsJsonError('platform variants must be unique by platform');
+    }
+    seen.add(variant.platform);
+  }
+  for (let i = 0; i < variants.length; i += 1) {
+    if (variants[i].platform !== sorted[i].platform) {
+      throw new GitOpsJsonError('platform variants must be sorted by platform');
+    }
+  }
+  return sorted;
+}
+
+function decodeLocalDigests(value: unknown): string[] | null {
+  const raw = decodeOptionalArray(value, 'service artifact evidence localDigests must be an array');
+  if (raw === null) return null;
+  const digests: string[] = [];
+  const seen = new Set<string>();
+  for (const entry of raw) {
+    if (typeof entry !== 'string' || entry.length === 0) {
+      throw new GitOpsJsonError('local digest must be a non-empty string');
+    }
+    const key = entry.toLowerCase();
+    if (seen.has(key)) {
+      throw new GitOpsJsonError('localDigests must be unique');
+    }
+    seen.add(key);
+    digests.push(entry);
+  }
+  const sorted = [...digests].sort((a, b) => a.localeCompare(b));
+  for (let i = 0; i < digests.length; i += 1) {
+    if (digests[i] !== sorted[i]) {
+      throw new GitOpsJsonError('localDigests must be sorted');
+    }
+  }
+  return sorted;
+}
+
 function decodeServiceArtifactEvidence(value: unknown): ServiceArtifactEvidence {
   if (!isRecord(value)) {
     throw new GitOpsJsonError('service artifact evidence must be an object');
@@ -257,6 +342,8 @@ function decodeServiceArtifactEvidence(value: unknown): ServiceArtifactEvidence 
     'platform',
     'indexDigest',
     'platformDigest',
+    'platformVariants',
+    'localDigests',
     'buildContextFingerprint',
     'producedImageId',
     'failureClass',
@@ -285,6 +372,8 @@ function decodeServiceArtifactEvidence(value: unknown): ServiceArtifactEvidence 
   if (value.platformDigest !== null && typeof value.platformDigest !== 'string') {
     throw new GitOpsJsonError('service artifact evidence platformDigest must be a string or null');
   }
+  const platformVariants = decodePlatformVariants(value.platformVariants);
+  const localDigests = decodeLocalDigests(value.localDigests);
   if (value.buildContextFingerprint !== null && typeof value.buildContextFingerprint !== 'string') {
     throw new GitOpsJsonError('service artifact evidence buildContextFingerprint must be a string or null');
   }
@@ -308,6 +397,8 @@ function decodeServiceArtifactEvidence(value: unknown): ServiceArtifactEvidence 
     platform: value.platform,
     indexDigest: value.indexDigest,
     platformDigest: value.platformDigest,
+    platformVariants,
+    localDigests,
     buildContextFingerprint: value.buildContextFingerprint,
     producedImageId: value.producedImageId,
     failureClass: value.failureClass as ArtifactServiceFailureClass | null,
@@ -339,12 +430,24 @@ function decodeServiceArtifactEvidenceList(value: unknown): ServiceArtifactEvide
 export function canonicalizeServiceEvidence(
   services: readonly ServiceArtifactEvidence[],
 ): ServiceArtifactEvidence[] {
-  return [...services].sort((a, b) => a.serviceName.localeCompare(b.serviceName));
+  return [...services]
+    .map((service) => ({
+      ...service,
+      platformVariants: sortedOptionalField(
+        service.platformVariants,
+        (a, b) => a.platform.localeCompare(b.platform),
+      ),
+      localDigests: sortedOptionalField(service.localDigests, (a, b) => a.localeCompare(b)),
+    }))
+    .sort((a, b) => a.serviceName.localeCompare(b.serviceName));
 }
 
 export function computeArtifactSetFingerprint(services: readonly ServiceArtifactEvidence[]): string {
   const sorted = canonicalizeServiceEvidence(services);
   const parts = sorted.map((service) => {
+    if (service.localDigests && service.localDigests.length > 0) {
+      return `${service.serviceName}@${service.localDigests.map((d) => d.toLowerCase()).join(',')}`;
+    }
     const digest = service.platformDigest ?? service.producedImageId ?? '';
     return digest ? `${service.serviceName}@${digest}` : `${service.serviceName}:unverified`;
   });

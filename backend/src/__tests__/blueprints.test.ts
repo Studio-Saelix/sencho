@@ -607,7 +607,7 @@ describe('BlueprintService marker parsing + name-conflict guard', () => {
 
 describe('BlueprintReconciler drift alert node wording', () => {
     type ReconcilerWithDrift = {
-        handleDrift: (blueprint: Blueprint, node: Node, reason: string) => Promise<void>;
+        handleDrift: (blueprint: Blueprint, node: Node, reason: string, cause: 'revision' | 'container' | 'digest') => Promise<void>;
     };
 
     function seedRemoteNode(name: string): number {
@@ -628,7 +628,7 @@ describe('BlueprintReconciler drift alert node wording', () => {
         const node = DatabaseService.getInstance().getNode(nodeId)!;
         const reconciler = BlueprintReconciler.getInstance() as unknown as ReconcilerWithDrift;
 
-        await reconciler.handleDrift(bp, node, 'compose changed');
+        await reconciler.handleDrift(bp, node, 'compose changed', 'revision');
 
         expect(dispatchSpy).toHaveBeenCalledWith(
             'warning',
@@ -646,7 +646,7 @@ describe('BlueprintReconciler drift alert node wording', () => {
         const node = DatabaseService.getInstance().getNode(nodeId)!;
         const reconciler = BlueprintReconciler.getInstance() as unknown as ReconcilerWithDrift;
 
-        await reconciler.handleDrift(bp, node, 'compose changed');
+        await reconciler.handleDrift(bp, node, 'compose changed', 'revision');
 
         expect(dispatchSpy).toHaveBeenCalledWith(
             'warning',
@@ -670,7 +670,7 @@ describe('BlueprintReconciler drift alert node wording', () => {
         const node = DatabaseService.getInstance().getNode(nodeId)!;
         const reconciler = BlueprintReconciler.getInstance() as unknown as ReconcilerWithDrift;
 
-        await reconciler.handleDrift(bp, node, 'volumes diverged');
+        await reconciler.handleDrift(bp, node, 'volumes diverged', 'revision');
 
         expect(dispatchSpy).toHaveBeenCalledWith(
             'warning',
@@ -683,10 +683,10 @@ describe('BlueprintReconciler drift alert node wording', () => {
     it('enforce correction-failure on local uses on this node', async () => {
         const { NotificationService } = await import('../services/NotificationService');
         const dispatchSpy = vi.spyOn(NotificationService.getInstance(), 'dispatchAlert').mockResolvedValue({ persisted: true });
-        vi.spyOn(BlueprintService.getInstance(), 'deployToNode').mockResolvedValue({
+        vi.spyOn(BlueprintService.getInstance(), 'enforceDigestRepair').mockResolvedValue({
             status: 'failed',
             error: 'compose up failed',
-        } as Awaited<ReturnType<typeof BlueprintService.prototype.deployToNode>>);
+        } as Awaited<ReturnType<typeof BlueprintService.prototype.enforceDigestRepair>>);
         const nodeId = seedNode();
         const bp = seedBlueprint({
             name: 'fix-local',
@@ -697,7 +697,7 @@ describe('BlueprintReconciler drift alert node wording', () => {
         const node = DatabaseService.getInstance().getNode(nodeId)!;
         const reconciler = BlueprintReconciler.getInstance() as unknown as ReconcilerWithDrift;
 
-        await reconciler.handleDrift(bp, node, 'compose changed');
+        await reconciler.handleDrift(bp, node, 'compose changed', 'digest');
 
         expect(dispatchSpy).toHaveBeenCalledWith(
             'error',
@@ -705,5 +705,98 @@ describe('BlueprintReconciler drift alert node wording', () => {
             'Auto-fix for "fix-local" on this node failed: compose up failed',
             { stackName: 'fix-local', actor: 'system:blueprint' },
         );
+    });
+
+    it('enforce container-level drift uses deployToNode even without a comparable artifact set', async () => {
+        const { NotificationService } = await import('../services/NotificationService');
+        const dispatchSpy = vi.spyOn(NotificationService.getInstance(), 'dispatchAlert').mockResolvedValue({ persisted: true });
+        const deploySpy = vi.spyOn(BlueprintService.getInstance(), 'deployToNode').mockResolvedValue({
+            status: 'active',
+        } as Awaited<ReturnType<typeof BlueprintService.prototype.deployToNode>>);
+        const digestSpy = vi.spyOn(BlueprintService.getInstance(), 'enforceDigestRepair');
+        const nodeId = seedNode();
+        const bp = seedBlueprint({
+            name: 'fix-container',
+            drift_mode: 'enforce',
+            classification: 'stateless',
+            nodeIds: [nodeId],
+        });
+        const node = DatabaseService.getInstance().getNode(nodeId)!;
+        const reconciler = BlueprintReconciler.getInstance() as unknown as ReconcilerWithDrift;
+
+        await reconciler.handleDrift(bp, node, 'no containers running for this blueprint', 'container');
+
+        expect(deploySpy).toHaveBeenCalledTimes(1);
+        expect(digestSpy).not.toHaveBeenCalled();
+        expect(dispatchSpy).not.toHaveBeenCalled();
+    });
+
+    it('enforce container-level drift on a git-managed Blueprint reapplies authorized compose', async () => {
+        const { NotificationService } = await import('../services/NotificationService');
+        const dispatchSpy = vi.spyOn(NotificationService.getInstance(), 'dispatchAlert').mockResolvedValue({ persisted: true });
+        const deploySpy = vi.spyOn(BlueprintService.getInstance(), 'deployToNode');
+        const reapplySpy = vi.spyOn(BlueprintService.getInstance(), 'reapplyAuthorizedMaterialization').mockResolvedValue({
+            status: 'active',
+        } as Awaited<ReturnType<typeof BlueprintService.prototype.reapplyAuthorizedMaterialization>>);
+        const nodeId = seedNode();
+        const bp = seedBlueprint({
+            name: 'fix-git-container',
+            drift_mode: 'enforce',
+            classification: 'stateless',
+            nodeIds: [nodeId],
+        });
+        DatabaseService.getInstance().updateBlueprintContentOrigin(bp.id, 'git', 'app-git-container');
+        const gitBp = DatabaseService.getInstance().getBlueprint(bp.id)!;
+        const node = DatabaseService.getInstance().getNode(nodeId)!;
+        const reconciler = BlueprintReconciler.getInstance() as unknown as ReconcilerWithDrift;
+
+        await reconciler.handleDrift(gitBp, node, 'no containers running for this blueprint', 'container');
+
+        expect(reapplySpy).toHaveBeenCalledTimes(1);
+        expect(deploySpy).not.toHaveBeenCalled();
+        expect(dispatchSpy).not.toHaveBeenCalled();
+    });
+
+    it('unverified drift never calls Enforce digest repair', async () => {
+        const enforceSpy = vi.spyOn(BlueprintService.getInstance(), 'enforceDigestRepair');
+        vi.spyOn(BlueprintService.getInstance(), 'checkForDrift').mockResolvedValue({
+            kind: 'unverified',
+            reason: 'runtime identity could not be collected',
+        });
+        const nodeId = seedNode();
+        const bp = seedBlueprint({
+            name: 'unverified-local',
+            drift_mode: 'enforce',
+            classification: 'stateless',
+            nodeIds: [nodeId],
+        });
+        const node = DatabaseService.getInstance().getNode(nodeId)!;
+        DatabaseService.getInstance().upsertDeployment({
+            blueprint_id: bp.id,
+            node_id: nodeId,
+            status: 'active',
+            applied_revision: bp.revision,
+            last_deployed_at: Date.now(),
+        });
+        const reconciler = BlueprintReconciler.getInstance() as unknown as {
+            executeOneAction: (
+                blueprint: Blueprint,
+                node: Node,
+                action: string,
+                svc: typeof BlueprintService.prototype,
+            ) => Promise<{ status: string }>;
+        };
+
+        const outcome = await reconciler.executeOneAction(
+            bp,
+            node,
+            'check_enforce',
+            BlueprintService.getInstance(),
+        );
+
+        expect(outcome.status).toBe('ok');
+        expect(enforceSpy).not.toHaveBeenCalled();
+        const dep = DatabaseService.getInstance().getDeployment(bp.id, nodeId);
+        expect(dep?.status).toBe('active');
     });
 });

@@ -835,15 +835,20 @@ export class GitOpsTransitions {
           app.artifact_set_id = args.artifactSetId;
         }
       }
-      this.forEachLiveDirectTarget(app, (target) => {
-        if (target.desired_generation_id !== args.generationId) return;
+      // Advance live targets in every mode. Direct already needed this for
+      // apply; Inline freeze binds desired_generation_id the same way, and
+      // without this the resolve that follows freeze would leave Blueprint
+      // targets stuck on the unresolved placeholder.
+      for (const target of this.store().listTargets(app.id)) {
+        if (target.target_status !== 'active') continue;
+        if (target.desired_generation_id !== args.generationId) continue;
         const loadedExpected = target.expected_artifact_set_id;
         target.latest_artifact_set_id = args.artifactSetId;
         if (this.allowedExpectedAdvance(loadedExpected, args.qualification)) {
           target.expected_artifact_set_id = args.artifactSetId;
         }
         this.store().upsertTarget(target);
-      });
+      }
     }, { generationId: args.generationId, artifactSetId: args.artifactSetId });
   }
 
@@ -1486,6 +1491,11 @@ export class GitOpsTransitions {
       }
       this.store().insertIntentRevision(args.intent);
       app.intent_revision_id = args.intent.id;
+      // Inline freeze is per intent revision. A new intent must drop the prior
+      // freeze so the next successful deploy binds digests for this compose.
+      if (app.target_mode === 'inline_blueprint') {
+        this.clearInlineFreezePointers(app);
+      }
       this.invalidatePlacementOnMaterialChange(app, args.envelope, extras);
     });
   }
@@ -1948,6 +1958,89 @@ export class GitOpsTransitions {
         return { before, after: { intentRevisionId: args.intentRevisionId } };
       },
     );
+  }
+
+  /**
+   * Freeze the exact artifact identity for an Inline Blueprint after its first
+   * successful deploy of a revision.
+   *
+   * This is not source acceptance: it mints an inline-owned generation and an
+   * unresolved expected artifact set, then binds those pointers onto the
+   * application and any placed targets that still lack them. Callers resolve
+   * the set afterward via `resolveAndRecordArtifactSet`; that advance never
+   * replaces an already exact/qualified expectation.
+   *
+   * No-op when accepted_generation_id and artifact_set_id are already set, so
+   * same-revision re-ticks and tag movement cannot overwrite the freeze.
+   * A new intent clears those pointers in `intentRevised` before the next deploy.
+   */
+  inlineRevisionFrozen(args: {
+    applicationId: string;
+    generation: GitOpsGenerationRow;
+    artifactSetId: string;
+    envelope: EventEnvelope;
+  }): TransitionResult {
+    const existingApp = this.store().getApplication(args.applicationId);
+    if (!existingApp) throw new GitOpsTransitionError('application not found');
+    if (existingApp.target_mode !== 'inline_blueprint') {
+      throw new GitOpsTransitionError('inline freeze requires an inline_blueprint application');
+    }
+    // Same-revision re-tick / tag movement: never replace an already-bound freeze set.
+    if (existingApp.accepted_generation_id && existingApp.artifact_set_id) {
+      return { historyIds: [], replayed: true };
+    }
+    return this.mutateApp(args.applicationId, args.envelope, 'inline_revision_frozen', 'committed', (app) => {
+      // Re-check under the write lock: a concurrent freeze must stay a no-op.
+      if (app.accepted_generation_id && app.artifact_set_id) {
+        return;
+      }
+      if (args.generation.application_id !== app.id) {
+        throw new GitOpsTransitionError('generation does not belong to the application');
+      }
+      if (this.store().getGeneration(args.generation.id)) {
+        throw new GitOpsTransitionError('generation already exists');
+      }
+      if (this.store().getArtifactSet(args.artifactSetId)) {
+        throw new GitOpsTransitionError('artifact set already exists');
+      }
+
+      this.store().insertGeneration(args.generation);
+      this.store().insertArtifactSet({
+        id: args.artifactSetId,
+        generation_id: args.generation.id,
+        evidence_version: 1,
+        authoritative: 0,
+        qualification: 'unresolved',
+        evidence_json: encodeArtifactEvidenceJson({ kind: 'unresolved' }),
+        created_at: args.envelope.at,
+      });
+
+      app.accepted_generation_id = args.generation.id;
+      app.artifact_set_id = args.artifactSetId;
+      app.latest_artifact_set_id = args.artifactSetId;
+
+      for (const target of this.store().listTargets(app.id)) {
+        if (target.target_status !== 'active') continue;
+        // Only fill nulls: an ack that already copied app pointers, or a prior
+        // freeze, must not be overwritten here.
+        if (target.desired_generation_id !== null && target.expected_artifact_set_id !== null) {
+          continue;
+        }
+        if (target.desired_generation_id === null) {
+          target.desired_generation_id = args.generation.id;
+        }
+        if (target.desired_generation_id !== args.generation.id) {
+          throw new GitOpsTransitionError('target desired generation does not match the frozen generation');
+        }
+        if (target.expected_artifact_set_id === null) {
+          target.expected_artifact_set_id = args.artifactSetId;
+        }
+        if (target.latest_artifact_set_id === null) {
+          target.latest_artifact_set_id = args.artifactSetId;
+        }
+        this.store().upsertTarget(target);
+      }
+    }, { generationId: args.generation.id, artifactSetId: args.artifactSetId });
   }
 
   /** A Blueprint deploy failed. Acknowledgement pointers stay where they were. */
@@ -2936,6 +3029,24 @@ export class GitOpsTransitions {
     if (!app.rollout_generation_id) return;
     this.recordRolloutGenerationSuperseded(app, app.rollout_generation_id, null, envelope, extras);
     app.rollout_generation_id = null;
+  }
+
+  /**
+   * Drop Inline freeze pointers so the next successful deploy can mint a new
+   * generation and expected set for the current intent. Does not delete the
+   * prior generation/artifact rows (history stays).
+   */
+  private clearInlineFreezePointers(app: GitOpsApplicationRow): void {
+    app.accepted_generation_id = null;
+    app.artifact_set_id = null;
+    app.latest_artifact_set_id = null;
+    for (const target of this.store().listTargets(app.id)) {
+      if (target.target_status !== 'active') continue;
+      target.desired_generation_id = null;
+      target.expected_artifact_set_id = null;
+      target.latest_artifact_set_id = null;
+      this.store().upsertTarget(target);
+    }
   }
 
   /**

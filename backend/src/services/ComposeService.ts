@@ -1,5 +1,6 @@
 import { spawn } from 'child_process';
 import fs from 'fs';
+import os from 'os';
 import path from 'path';
 import WebSocket from 'ws';
 import DockerController from './DockerController';
@@ -39,6 +40,8 @@ import {
   MissingExternalNetworksError,
   type DeployInvocationContext,
 } from './network/missingExternalNetworksError';
+import { digestPinsOverlayYaml, type DigestPinsMap } from './gitops/digestPins';
+import { DIGEST_PIN_TEMP_PREFIX } from '../helpers/digestPinTempDir';
 import { assertGitOverlaySource, SOPS_DIRECT_MUTATION_MESSAGE } from './gitops/sops/prepareOverlay';
 import { resolveActiveRequiredRecipients } from './gitops/sops/capability';
 import { GitOpsDecryptOverlay } from './gitops/sops/overlay';
@@ -315,6 +318,36 @@ export class ComposeService {
     }
     args.push(...action);
     return args;
+  }
+
+  /**
+   * Layer a digest-pin overlay onto authored compose args and append `--pull never`.
+   * Authored files on disk are unchanged. The overlay is written into an exclusive
+   * mkdtemp directory under os.tmpdir() so the path is neither stack-tainted nor
+   * a shared-temp TOCTOU race.
+   */
+  private async withDigestPinOverlay(
+    stackName: string,
+    action: string[],
+    stackDirOverride: string | undefined,
+    digestPins: DigestPinsMap,
+  ): Promise<{ args: string[]; overlayDir: string }> {
+    const overlayDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), DIGEST_PIN_TEMP_PREFIX));
+    const overlayPath = path.join(overlayDir, 'overlay.yml');
+    try {
+      await fs.promises.writeFile(overlayPath, digestPinsOverlayYaml(digestPins), {
+        encoding: 'utf8',
+        flag: 'wx',
+        mode: 0o600,
+      });
+      const args = await this.authoredComposeArgs(stackName, [], stackDirOverride);
+      await this.ensureExplicitComposeFiles(stackName, args, true);
+      args.push('-f', overlayPath, ...action, '--pull', 'never');
+      return { args, overlayDir };
+    } catch (err) {
+      await fs.promises.rm(overlayDir, { recursive: true, force: true }).catch(() => undefined);
+      throw err;
+    }
   }
 
   private execute(
@@ -993,9 +1026,30 @@ export class ComposeService {
       }
 
       await this.withRegistryAuth(async (env) => {
-        const args = await this.authoredComposeArgs(stackName, ['up', '-d', '--remove-orphans'], stackDir);
-        composeHandedOff = true;
-        await this.execute('docker', args, stackDir, ws, true, env, getComposeStallTimeoutMs());
+        const digestPins = ctx?.digestPins;
+        let overlayDir: string | null = null;
+        try {
+          const upAction = ['up', '-d', '--remove-orphans'];
+          let args: string[];
+          if (digestPins && Object.keys(digestPins).length > 0) {
+            const pinned = await this.withDigestPinOverlay(
+              stackName,
+              upAction,
+              stackDir,
+              digestPins,
+            );
+            args = pinned.args;
+            overlayDir = pinned.overlayDir;
+          } else {
+            args = await this.authoredComposeArgs(stackName, upAction, stackDir);
+          }
+          composeHandedOff = true;
+          await this.execute('docker', args, stackDir, ws, true, env, getComposeStallTimeoutMs());
+        } finally {
+          if (overlayDir) {
+            await fs.promises.rm(overlayDir, { recursive: true, force: true }).catch(() => undefined);
+          }
+        }
       }, sendOutput);
 
       // Post-Deploy Health Probe

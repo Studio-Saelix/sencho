@@ -37,6 +37,8 @@ describe('named stack route permission inventory', () => {
     ['GET', '/stacks/web', 'stack:read'],
     ['GET', '/stacks/web/env', 'stack:read'],
     ['GET', '/stacks/web/services', 'stack:read'],
+    ['GET', '/stacks/web/runtime-artifact-identity', 'stack:read'],
+    ['GET', '/stacks/web/effective-artifact-context', 'stack:read'],
     ['GET', '/stacks/web/update-preview', 'stack:read'],
     ['GET', '/stacks/web/files/content', 'stack:read'],
     ['PUT', '/stacks/web', 'stack:edit'],

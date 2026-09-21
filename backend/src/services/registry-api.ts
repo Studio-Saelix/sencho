@@ -938,6 +938,7 @@ export type RegistryPlatformDigestResolution =
         platformDigest: string;
         platformLabel: string;
         qualification: 'exact' | 'qualified';
+        platformVariants?: ReadonlyArray<{ platform: string; digest: string }>;
     }
     | { ok: false; reason: string };
 
@@ -983,6 +984,7 @@ export async function resolveRegistryImageDigestForPlatform(
             platformDigest: primaryDigest,
             platformLabel,
             qualification: 'exact',
+            platformVariants: [{ platform: platformLabel, digest: primaryDigest }],
         };
     }
 
@@ -1010,6 +1012,7 @@ export async function resolveRegistryImageDigestForPlatform(
                 platformDigest,
                 platformLabel,
                 qualification: 'qualified',
+                platformVariants: [{ platform: platformLabel, digest: platformDigest }],
             };
         }
         return {
@@ -1023,12 +1026,20 @@ export async function resolveRegistryImageDigestForPlatform(
             reason: `Remote image index has multiple ${platformLabel} variants for ${ref}`,
         };
     }
+    const variantsByPlatform = new Map<string, string>();
+    for (const descriptor of classification.descriptors) {
+        const label = `${descriptor.os}/${descriptor.architecture}`;
+        if (!variantsByPlatform.has(label)) variantsByPlatform.set(label, descriptor.digest);
+    }
     return {
         ok: true,
         indexDigest: primaryDigest,
         platformDigest: platformDescriptors[0].digest,
         platformLabel,
         qualification: 'qualified',
+        platformVariants: [...variantsByPlatform.entries()]
+            .map(([platform, digest]) => ({ platform, digest }))
+            .sort((a, b) => a.platform.localeCompare(b.platform)),
     };
 }
 

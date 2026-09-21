@@ -3,10 +3,12 @@ import { setupTestDb, cleanupTestDb } from './helpers/setupTestDb';
 import { GitOpsStore } from '../services/gitops/store';
 import { GitOpsTransitions, type EventEnvelope } from '../services/gitops/transitions';
 import {
+  observeStackRuntimeArtifact,
   recordObservedRuntimeArtifactForDeploy,
   resolveAndRecordArtifactSet,
 } from '../services/gitops/artifactResolve';
 import { decodeObservedArtifactIdentity, encodeArtifactEvidenceJson } from '../services/gitops/json';
+import { observationMatchesExpected } from '../services/gitops/artifactIdentity';
 import type { GitOpsApplicationRow, GitOpsGenerationRow } from '../services/gitops/types';
 
 const mockBuildEffectiveServiceModel = vi.fn();
@@ -14,6 +16,8 @@ const mockResolveRegistryImageDigestForPlatform = vi.fn();
 const mockGetAuthForRegistry = vi.fn();
 const mockDockerInfo = vi.fn();
 const mockListContainers = vi.fn();
+const mockContainerInspect = vi.fn();
+const mockImageInspect = vi.fn();
 
 vi.mock('../services/effectiveServiceModel', () => ({
   buildEffectiveServiceModel: (...args: unknown[]) => mockBuildEffectiveServiceModel(...args),
@@ -42,6 +46,12 @@ vi.mock('../services/DockerController', () => ({
       getDocker: () => ({
         info: (...args: unknown[]) => mockDockerInfo(...args),
         listContainers: (...args: unknown[]) => mockListContainers(...args),
+        getContainer: () => ({
+          inspect: (...args: unknown[]) => mockContainerInspect(...args),
+        }),
+        getImage: () => ({
+          inspect: (...args: unknown[]) => mockImageInspect(...args),
+        }),
       }),
     }),
   },
@@ -68,6 +78,8 @@ describe('gitops artifact resolve', () => {
     mockGetAuthForRegistry.mockReset();
     mockDockerInfo.mockReset();
     mockListContainers.mockReset();
+    mockContainerInspect.mockReset();
+    mockImageInspect.mockReset();
     mockGetAuthForRegistry.mockResolvedValue(null);
     mockDockerInfo.mockResolvedValue({ OSType: 'linux', Architecture: 'amd64' });
     mockListContainers.mockResolvedValue([]);
@@ -237,6 +249,107 @@ describe('gitops artifact resolve', () => {
     expect(decodeObservedArtifactIdentity(
       GitOpsStore.getInstance().getTarget('app-list', 1)?.observed_artifact_identity_json ?? null,
     )).toEqual({ kind: 'unavailable' });
+  });
+
+  it('keeps the first exact expected set when a later resolve sees a new tag digest', async () => {
+    seedDirectApp({ applicationId: 'app-tag-move', generationId: 'gen-tag-move', stackName: 'tag-move-web', artifactSetId: 'art-tag-v1' });
+    mockBuildEffectiveServiceModel.mockResolvedValue({
+      renderable: true,
+      services: [
+        { name: 'web', declaredImage: 'nginx:latest', hasBuild: false, expectedReplicas: 1, dependsOn: [], hasHealthcheck: false },
+      ],
+    });
+    const firstDigest = `sha256:${'a'.repeat(64)}`;
+    const movedDigest = `sha256:${'b'.repeat(64)}`;
+    mockResolveRegistryImageDigestForPlatform.mockResolvedValueOnce({
+      ok: true,
+      indexDigest: firstDigest,
+      platformDigest: firstDigest,
+      platformLabel: 'linux/amd64',
+      qualification: 'exact',
+      platformVariants: [{ platform: 'linux/amd64', digest: firstDigest }],
+    });
+    await resolveAndRecordArtifactSet({
+      stackName: 'tag-move-web',
+      nodeId: 1,
+      applicationId: 'app-tag-move',
+      generationId: 'gen-tag-move',
+      buildContexts: [],
+      envelope: envelope('op-resolve-tag-1'),
+    });
+    const expectedAfterFirst = GitOpsStore.getInstance().getApplication('app-tag-move')?.artifact_set_id;
+    expect(expectedAfterFirst).toBeTruthy();
+    expect(GitOpsStore.getInstance().getArtifactSet(expectedAfterFirst!)?.qualification).toBe('exact');
+
+    mockResolveRegistryImageDigestForPlatform.mockResolvedValueOnce({
+      ok: true,
+      indexDigest: movedDigest,
+      platformDigest: movedDigest,
+      platformLabel: 'linux/amd64',
+      qualification: 'exact',
+      platformVariants: [{ platform: 'linux/amd64', digest: movedDigest }],
+    });
+    await resolveAndRecordArtifactSet({
+      stackName: 'tag-move-web',
+      nodeId: 1,
+      applicationId: 'app-tag-move',
+      generationId: 'gen-tag-move',
+      buildContexts: [],
+      envelope: envelope('op-resolve-tag-2'),
+    });
+    const app = GitOpsStore.getInstance().getApplication('app-tag-move')!;
+    expect(app.artifact_set_id).toBe(expectedAfterFirst);
+    expect(app.latest_artifact_set_id).not.toBe(expectedAfterFirst);
+    expect(GitOpsStore.getInstance().getArtifactSet(app.latest_artifact_set_id!)?.qualification).toBe('exact');
+  });
+
+  it('observes every RepoDigest candidate so an index-first listing still matches the approved child', async () => {
+    const indexDigest = `sha256:${'1'.repeat(64)}`;
+    const platformDigest = `sha256:${'a'.repeat(64)}`;
+    mockBuildEffectiveServiceModel.mockResolvedValue({
+      renderable: true,
+      services: [
+        { name: 'web', declaredImage: 'nginx:latest', hasBuild: false, expectedReplicas: 1, dependsOn: [], hasHealthcheck: false },
+      ],
+    });
+    mockListContainers.mockResolvedValue([{
+      Id: 'ctr-web',
+      State: 'running',
+      Labels: {
+        'com.docker.compose.project': 'obs-index',
+        'com.docker.compose.service': 'web',
+      },
+    }]);
+    mockContainerInspect.mockResolvedValue({ Image: 'sha256:imagedeadbeef' });
+    mockImageInspect.mockResolvedValue({
+      Os: 'linux',
+      Architecture: 'amd64',
+      RepoDigests: [
+        `nginx@${indexDigest}`,
+        `nginx@${platformDigest}`,
+      ],
+    });
+
+    const observed = await observeStackRuntimeArtifact({ stackName: 'obs-index', nodeId: 1, observedAt: 9 });
+    expect(observed.kind).toBe('exact');
+    if (observed.kind !== 'exact' && observed.kind !== 'qualified') throw new Error('expected comparable observation');
+    expect(observed.services?.[0]?.localDigests).toEqual([indexDigest, platformDigest]);
+
+    const expected = [{
+      serviceName: 'web',
+      authoredRef: 'nginx:latest',
+      source: 'registry' as const,
+      platform: 'linux/amd64',
+      indexDigest,
+      platformDigest,
+      platformVariants: [{ platform: 'linux/amd64', digest: platformDigest }],
+      localDigests: null,
+      buildContextFingerprint: null,
+      producedImageId: null,
+      failureClass: null,
+      resolvedAt: 1,
+    }];
+    expect(observationMatchesExpected(expected, observed.services ?? [])).toBe(true);
   });
 });
 
