@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react';
 import {
     RefreshCw, Camera, FileDown,
-    Network, SlidersHorizontal,
+    Network, Activity,
     Send, KeyRound, ArrowLeftRight, Wrench, Workflow, Tag,
 } from 'lucide-react';
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
@@ -26,7 +26,7 @@ import { useNodes } from '@/context/NodeContext';
 import { useExperimental } from '@/hooks/useExperimental';
 import { PaidGate } from './PaidGate';
 import FleetSnapshots from './FleetSnapshots';
-import { FleetConfiguration } from './fleet/FleetConfiguration';
+import { FleetReadiness } from './fleet/FleetReadiness';
 import { RoutingTab } from './fleet/RoutingTab';
 import { FederationTab } from './fleet/FederationTab';
 import { DeploymentsTab } from './blueprints/DeploymentsTab';
@@ -167,9 +167,9 @@ export function FleetView({
                                     </TabsTrigger>
                                 </TabsHighlightItem>
                             )}
-                            <TabsHighlightItem value="configuration">
-                                <TabsTrigger value="configuration">
-                                    <SlidersHorizontal className="w-4 h-4 mr-1.5" />Status
+                            <TabsHighlightItem value="readiness">
+                                <TabsTrigger value="readiness">
+                                    <Activity className="w-4 h-4 mr-1.5" />Readiness
                                 </TabsTrigger>
                             </TabsHighlightItem>
                             <TabsHighlightItem value="dependencies">
@@ -302,8 +302,12 @@ export function FleetView({
                         <FleetSnapshots />
                     </TabsContent>
                 )}
-                <TabsContent value="configuration">
-                    <FleetConfiguration />
+                <TabsContent value="readiness">
+                    <FleetReadiness
+                        onOpenNodeDetails={setDetailsNodeId}
+                        onOpenSettingsSection={onOpenSettingsSection}
+                        isAdmin={isAdmin}
+                    />
                 </TabsContent>
                 <TabsContent value="dependencies">
                     <DependencyMapTab />

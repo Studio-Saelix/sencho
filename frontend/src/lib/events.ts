@@ -41,7 +41,7 @@ export type SecurityTab =
 export type FleetTab =
   | 'overview'
   | 'snapshots'
-  | 'configuration'
+  | 'readiness'
   | 'dependencies'
   | 'container-labels'
   | 'deployments'

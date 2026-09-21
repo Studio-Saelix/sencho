@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { renderHook, act } from '@testing-library/react';
 import type { Node } from '@/context/NodeContext';
+import type { FleetTab } from '@/lib/events';
 import type { ReachabilityContext } from '@/lib/routing/reachability';
 import { useUrlSync, type UseUrlSyncOptions } from './useUrlSync';
 
@@ -378,6 +379,45 @@ describe('useUrlSync', () => {
     });
 
     expect(setActiveView).toHaveBeenCalledWith('fleet');
+  });
+
+  it('moves a legacy fleet Status deep link onto the Readiness tab', () => {
+    // The segment a deep link arrives with is not the segment the app writes
+    // back, so a bookmark made before the tab was renamed lands on Readiness
+    // and then stops saying `configuration`. Both halves are the point: the
+    // hydration proves the parse accepted the old name, and the settled path
+    // proves the address bar caught up instead of preserving it.
+    window.history.replaceState({ senchoIdx: 0 }, '', '/nodes/local/fleet/configuration');
+    const setFleetActiveTab = vi.fn();
+
+    const { rerender } = renderHook(
+      (props) => useUrlSync(props),
+      {
+        initialProps: makeOpts({
+          activeView: 'fleet',
+          fleetActiveTab: 'overview',
+          setFleetActiveTab,
+        }),
+      },
+    );
+
+    expect(setFleetActiveTab).toHaveBeenCalledWith('readiness');
+
+    // Re-render with the tab the hook asked for, the way the real parent would
+    // after its state update. Feeding back the spy's own argument keeps the
+    // settled-path assertion honest: without the normalization the tab resolves
+    // to the fallback below, and the address bar assertion fails with it.
+    const resolvedTab: FleetTab = setFleetActiveTab.mock.calls[0]?.[0] ?? 'overview';
+
+    act(() => {
+      rerender(makeOpts({
+        activeView: 'fleet',
+        fleetActiveTab: resolvedTab,
+        setFleetActiveTab,
+      }));
+    });
+
+    expect(window.location.pathname).toBe('/nodes/local/fleet/readiness');
   });
 
   it('normalizes unknown view segments to dashboard', () => {

@@ -28,11 +28,20 @@ const SECURITY_TABS = new Set<SecurityTab>([
   'overview', 'images', 'compose', 'secrets', 'policies', 'suppressions', 'history', 'scanner',
 ]);
 const FLEET_TABS = new Set<FleetTab>([
-  'overview', 'snapshots', 'configuration', 'dependencies', 'container-labels',
+  'overview', 'snapshots', 'readiness', 'dependencies', 'container-labels',
   'deployments', 'routing', 'federation', 'actions', 'secrets',
 ]);
 
 const MAX_QUERY_LEN = 512;
+
+/**
+ * Narrows a raw string to a Security tab, the way a deep link does. Shared with
+ * callers that receive a tab as data rather than as a URL segment, so the set of
+ * accepted values stays defined in exactly one place.
+ */
+export function toSecurityTab(raw: string): SecurityTab | null {
+  return SECURITY_TABS.has(raw as SecurityTab) ? (raw as SecurityTab) : null;
+}
 
 function normalizePathname(pathname: string): string {
   const trimmed = pathname.replace(/\/+$/, '') || '/';
@@ -118,11 +127,16 @@ export function parsePath(pathname: string, search: string): ParsedRoute {
   const result: ParsedRoute = { ...empty, nodeSlug, view, filterNodeId };
 
   if (view === 'security' && parts[3]) {
-    const tab = parts[3].toLowerCase();
-    if (SECURITY_TABS.has(tab as SecurityTab)) result.securityTab = tab as SecurityTab;
+    const tab = toSecurityTab(parts[3].toLowerCase());
+    if (tab) result.securityTab = tab;
   }
   if (view === 'fleet' && parts[3]) {
-    const tab = parts[3].toLowerCase();
+    // Readiness replaced a tab that shipped as `configuration`, so a deep link
+    // that predates the rename still lands on a surface instead of nowhere.
+    // Normalizing here covers every consumer of `fleetTab`, because they all
+    // read the parsed result rather than the raw segment.
+    const raw = parts[3].toLowerCase();
+    const tab = raw === 'configuration' ? 'readiness' : raw;
     if (FLEET_TABS.has(tab as FleetTab)) result.fleetTab = tab as FleetTab;
   }
   if (view === 'settings' && parts[3]) {
