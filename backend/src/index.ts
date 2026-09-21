@@ -26,6 +26,7 @@ import { usersRouter } from './routes/users';
 import { gitSourcesRouter, stackGitSourceRouter } from './routes/gitSources';
 import { fleetRouter } from './routes/fleet';
 import { fleetActionsRouter } from './routes/fleetActions';
+import { readinessRouter } from './routes/readiness';
 import { cloudBackupRouter } from './routes/cloudBackup';
 import { permissionsRouter } from './routes/permissions';
 import { convertRouter } from './routes/convert';
@@ -131,6 +132,10 @@ app.use('/api/api-tokens', apiTokensRouter);
 app.use('/api/audit-log', auditLogRouter);
 app.use('/api/fleet', fleetRouter);
 app.use('/api/fleet-actions', fleetActionsRouter);
+// Node-local readiness slices. Deliberately outside the `/api/fleet/` prefix:
+// that prefix is proxy-exempt, so a request naming a remote node would be
+// answered by this instance's own copy instead of by the node it names.
+app.use('/api/readiness', readinessRouter);
 app.use('/api/cloud-backup', cloudBackupRouter);
 app.use('/api/webhooks', webhooksRouter);
 app.use('/api/gitops', gitProviderHooksRouter);

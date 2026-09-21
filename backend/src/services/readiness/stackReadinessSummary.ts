@@ -23,8 +23,13 @@ type StackReadinessPass = Omit<NodeStackReadinessSummary, 'stale'>;
  * are in flight. Deliberately under the hub's budget for this route so the node
  * answers with partial results instead of the hub timing out and learning
  * nothing about any stack.
+ *
+ * Exported so a test can pin that ordering. The hub's budget for the same read
+ * is a separate constant in the aggregator, which imports this module's builder
+ * but not this value, so the relationship between the two is a convention the
+ * tests hold rather than one the compiler enforces.
  */
-const PASS_DEADLINE_MS = 6_000;
+export const PASS_DEADLINE_MS = 6_000;
 const CONCURRENCY = 3;
 /**
  * Stacks evaluated live in one pass. Stacks past this bound are omitted from

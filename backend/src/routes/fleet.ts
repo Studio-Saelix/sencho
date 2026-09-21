@@ -56,7 +56,7 @@ import { foldNodeEstimate, type FleetEstimateTargetResult, type FleetNodeEstimat
 const FLEET_DF_TIMEOUT_MS = 12_000;
 import { POLICY_SEVERITIES } from '../utils/severity';
 import { isNoOpBlockingPolicy } from '../utils/policy-risk';
-import { sanitizeForLog, redactSensitiveText } from '../utils/safeLog';
+import { errorMessageForLog, sanitizeForLog, redactSensitiveText } from '../utils/safeLog';
 import { formatNoTargetError } from '../utils/remoteTarget';
 import {
   applyFleetSnapshotFiles,
@@ -77,8 +77,8 @@ import { runLocalLabelStop, isLabelLocalStopResponse, type StackStopResult } fro
 import { collectFleetLabelSummaries } from '../helpers/fleetLabelSummary';
 import { runLocalLabelAssign, validateLabelTemplate, validateRemoteAssignResults, failAllAssign, type AssignNodeResult } from '../helpers/fleetLabelAssign';
 import { MAX_ASSIGNMENTS } from '../helpers/constants';
-import { buildLocalConfigurationStatus, type ConfigurationStatus } from './dashboard';
-import { normalizeRemoteConfigurationStatus } from '../helpers/configurationStatus';
+import { buildFleetReadiness } from '../services/readiness/readinessAggregator';
+import { READINESS_DOMAINS, type ReadinessDomainKey } from '../services/readiness/types';
 import { buildLocalGraph, mergeFleetGraph, isLocalDependencyGraph, type FleetNodeGraphResult } from '../services/DependencyGraphService';
 import { buildNodeLabelInventory, VALID_LABEL_SOURCES, type NodeLabelInventory } from '../services/LabelInventoryService';
 import { labelInventoryOptionsFromRequest, requireRevealAdmin } from '../helpers/labelInventoryRequest';
@@ -650,81 +650,106 @@ fleetRouter.get('/overview', authMiddleware, async (req: Request, res: Response)
   }
 });
 
-interface FleetNodeConfiguration {
-  id: number;
-  name: string;
-  type: 'local' | 'remote';
-  status: 'online' | 'offline';
-  configuration: ConfigurationStatus | null;
+function isReadinessDomain(value: string): value is ReadinessDomainKey {
+  return (READINESS_DOMAINS as readonly string[]).includes(value);
 }
 
-fleetRouter.get('/configuration', authMiddleware, async (req: Request, res: Response): Promise<void> => {
+/**
+ * The `domains` parameter as a validated key list, or null when it names
+ * something that is not a domain.
+ *
+ * Validated rather than ignored, because an unknown value is a caller working
+ * from a different vocabulary and answering with the default set would look
+ * like the filter had worked. Omitted (or empty) means every domain. Duplicates
+ * collapse to one entry per domain, and the order is the caller's here but not
+ * on the wire: the response publishes `domains` in `READINESS_DOMAINS` order,
+ * so what a caller chooses is the set, never the sequence.
+ */
+function parseReadinessDomains(raw: unknown): ReadinessDomainKey[] | null {
+  if (raw === undefined) return [...READINESS_DOMAINS];
+  if (typeof raw !== 'string') return null;
+  const parts = raw.split(',').map((part) => part.trim()).filter((part) => part.length > 0);
+  const domains: ReadinessDomainKey[] = [];
+  for (const part of parts) {
+    if (!isReadinessDomain(part)) return null;
+    if (!domains.includes(part)) domains.push(part);
+  }
+  return domains.length > 0 ? domains : [...READINESS_DOMAINS];
+}
+
+/**
+ * The `nodeIds` parameter as an id list, `null` for every node, or `undefined`
+ * when it is malformed. The three outcomes are distinguishable on purpose:
+ * "all nodes" and "malformed" are different answers, and they fail differently
+ * (a whole fleet against a 400).
+ *
+ * An empty list is not "no nodes": it collapses to `null`, the same as the
+ * parameter being absent, so a request that names nothing selects everything.
+ * There is no syntax for an empty matrix, and a caller that wants one has to
+ * read the fleet it was already given.
+ */
+function parseReadinessNodeIds(raw: unknown): number[] | null | undefined {
+  if (raw === undefined) return null;
+  if (typeof raw !== 'string') return undefined;
+  const parts = raw.split(',').map((part) => part.trim()).filter((part) => part.length > 0);
+  if (parts.length === 0) return null;
+  const ids: number[] = [];
+  for (const part of parts) {
+    const id = Number(part);
+    if (!Number.isInteger(id) || id <= 0) return undefined;
+    if (!ids.includes(id)) ids.push(id);
+  }
+  return ids;
+}
+
+/**
+ * Fleet-wide readiness: one row per node, per domain, with the evidence behind
+ * each cell.
+ *
+ * Guarded by `node:read`, matching `/api/fleet/overview`: this is the same fleet
+ * the overview already shows, read through a different lens. Control is not a
+ * second gate on the request but an omission from the response: it is derived
+ * from the rows `/api/fleet/sync-status` reserves for admins, so a caller who
+ * fails that check receives a response with no control domain at all rather
+ * than a 403 for the whole page. That keeps the admin boundary enforced by
+ * absence, which no client can mistake for an empty domain.
+ *
+ * The abort signal is wired to the response, so a navigation away stops the
+ * remote reads still in flight instead of leaving them to run out their budgets.
+ * The hub's own node is read in process, where a signal cannot interrupt work
+ * that has already started: that read is bounded by its budget instead, which is
+ * the same ceiling the request waits on either way.
+ */
+fleetRouter.get('/readiness', authMiddleware, async (req: Request, res: Response): Promise<void> => {
   if (!requirePermission(req, res, 'node:read')) return;
+
+  const domains = parseReadinessDomains(req.query.domains);
+  if (domains === null) {
+    res.status(400).json({ error: `domains must be a comma-separated subset of: ${READINESS_DOMAINS.join(', ')}` });
+    return;
+  }
+  const nodeIds = parseReadinessNodeIds(req.query.nodeIds);
+  if (nodeIds === undefined) {
+    res.status(400).json({ error: 'nodeIds must be a comma-separated list of positive node ids' });
+    return;
+  }
+
+  const controller = new AbortController();
+  const onClose = (): void => controller.abort();
+  res.on('close', onClose);
   try {
-    const db = DatabaseService.getInstance();
-    const nodes = db.getNodes();
-    const userId = req.user?.userId ?? 0;
-    const ls = LicenseService.getInstance();
-    const localTier = ls.getTier();
-
-    const results = await Promise.allSettled(
-      nodes.map(async (node: Node): Promise<FleetNodeConfiguration> => {
-        if (node.type === 'local') {
-          return {
-            id: node.id,
-            name: node.name,
-            type: 'local',
-            status: 'online',
-            configuration: await buildLocalConfigurationStatus(node.id, userId, localTier),
-          };
-        }
-
-        const target = NodeRegistry.getInstance().getProxyTarget(node.id);
-        if (!target) {
-          return { id: node.id, name: node.name, type: 'remote', status: 'offline', configuration: null };
-        }
-
-        try {
-          const resp = await safeRemoteFetch(
-            `${target.apiUrl.replace(/\/$/, '')}/api/dashboard/configuration`,
-            {
-              headers: {
-                ...(target.apiToken ? { Authorization: `Bearer ${target.apiToken}` } : {}),
-                [PROXY_TIER_HEADER]: localTier,
-              },
-              signal: AbortSignal.timeout(10000),
-            },
-            target.trustedLoopback,
-          );
-          const raw = resp.ok ? (await resp.json() as ConfigurationStatus) : null;
-          const configuration = raw ? normalizeRemoteConfigurationStatus(raw) : null;
-          return {
-            id: node.id,
-            name: node.name,
-            type: 'remote',
-            status: configuration ? 'online' : 'offline',
-            configuration,
-          };
-        } catch (error: unknown) {
-          console.warn(
-            `[Fleet] Configuration fetch failed for node "${sanitizeForLog(node.name)}":`,
-            getErrorMessage(error, 'unknown'),
-          );
-          return { id: node.id, name: node.name, type: 'remote', status: 'offline', configuration: null };
-        }
-      }),
-    );
-
-    const fleet: FleetNodeConfiguration[] = results.map((result, i) => {
-      if (result.status === 'fulfilled') return result.value;
-      console.error(`[Fleet] Configuration fetch failed for node ${nodes[i].name}:`, result.reason);
-      return { id: nodes[i].id, name: nodes[i].name, type: nodes[i].type, status: 'offline', configuration: null };
+    const payload = await buildFleetReadiness({
+      domains,
+      nodeIds,
+      includeControl: req.user?.role === 'admin',
+      signal: controller.signal,
     });
-
-    res.json(fleet);
+    res.json(payload);
   } catch (error) {
-    console.error('[Fleet] Configuration overview error:', error);
-    res.status(500).json({ error: 'Failed to fetch fleet configuration' });
+    console.error('[Fleet] Readiness error:', errorMessageForLog(error));
+    res.status(500).json({ error: 'Failed to fetch fleet readiness' });
+  } finally {
+    res.off('close', onClose);
   }
 });
 

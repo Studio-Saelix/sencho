@@ -16,10 +16,27 @@ export interface StackStatusInfo extends BulkStackInfo {
 }
 
 export interface StackStatusesEvidence {
-  /** Keyed by compose filename (`foo.yml`), not by stack name. */
+  /** Keyed by stack name, the compose directory under `COMPOSE_DIR`. */
   data: Record<string, StackStatusInfo>;
   /** True when an enrichment source failed, so the labels may be wrong. */
   degraded: boolean;
+  /**
+   * Epoch ms the read behind this payload finished, so a caller can report the
+   * age of the evidence instead of the age of the cache entry serving it. The
+   * snapshot is complete as of this instant, though individual container reads
+   * inside the pass may be marginally older. `GET /api/stacks/statuses` serves
+   * `data` alone, so adding a field here does not change that route's shape;
+   * the readiness evidence route re-serves this stamp, so a field meant to stay
+   * internal has to be kept out of that payload too.
+   *
+   * Stamped at completion rather than at the start of the pass on purpose:
+   * `CacheService` starts an entry's TTL clock when the fetcher returns, so a
+   * caller comparing this stamp against that same TTL is asking the cache's own
+   * question and getting its answer. Stamped at the start, the comparison would
+   * be true for the last fetch-duration milliseconds of every entry's life and
+   * would call a read that had just succeeded stale.
+   */
+  generatedAt: number;
 }
 
 export interface StackStatusesEvidenceResult {
@@ -88,7 +105,11 @@ export async function buildStackStatusesEvidence(nodeId: number): Promise<StackS
       // The payload is flagged degraded when any enrichment source failed
       // (Docker socket unreachable, git-source scan failure) so the caller
       // can refuse to let a mislabeled payload persist.
-      return { data: withSource, degraded: selfIdentity.degraded || gitSourcesDegraded };
+      return {
+        generatedAt: Date.now(),
+        data: withSource,
+        degraded: selfIdentity.degraded || gitSourcesDegraded,
+      };
     },
   );
   // A degraded identity resolution (Docker socket unreachable) cannot be

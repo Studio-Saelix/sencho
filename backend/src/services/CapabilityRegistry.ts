@@ -162,10 +162,14 @@ export const GITOPS_SOURCE_CONTROLLER_CAPABILITY =
 
 /**
  * Per-node readiness evidence and the live per-stack readiness rollup. These
- * are the node-local half of fleet readiness: a node advertises the flag to say
- * it serves them, and a hub that reads its matrix's Updates and Recovery
- * columns from these reports a node without the flag as `unavailable` rather
- * than unknown.
+ * are the node-local half of fleet readiness, and the flag says a node serves
+ * them.
+ *
+ * The hub does not gate on it. It reads the answer instead: a node without the
+ * routes replies 404, which reports the route as actually absent rather than
+ * reporting a cached flag that can be stale across an upgrade. The flag is
+ * advertised for consumers that read it from `/api/meta`, and the discovery
+ * surface it feeds.
  */
 export const FLEET_READINESS_V1_CAPABILITY = 'fleet-readiness-v1' as const satisfies Capability;
 

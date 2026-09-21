@@ -106,7 +106,9 @@ describe('GET /api/stacks/readiness-summary', () => {
       // nothing to check, which is the misread the strict listing prevents.
       expect(res.status).toBe(500);
       expect(res.body).toEqual({ error: 'Failed to build stack readiness summary' });
-      expect(logged).toHaveBeenCalledWith('Failed to build stack readiness summary:', expect.any(Error));
+      // The redacted message is the whole payload of the log line, so this pins
+      // that a failure is named rather than counted.
+      expect(logged).toHaveBeenCalledWith('Failed to build stack readiness summary:', 'EACCES: permission denied');
     } finally {
       listStacks.mockRestore();
       logged.mockRestore();

@@ -62,7 +62,7 @@ import { isValidGitSourcePath, isValidStackName, isValidServiceName, isValidRela
 import { normalizeBulkPaths, destWithinAnySource } from '../utils/bulkPaths';
 import { getErrorMessage } from '../utils/errors';
 import { isDebugEnabled } from '../utils/debug';
-import { sanitizeForLog } from '../utils/safeLog';
+import { errorMessageForLog, sanitizeForLog } from '../utils/safeLog';
 import { logDebugTiming } from '../utils/requestTiming';
 import { sendGitSourceError } from '../utils/gitSourceHttp';
 import { buildPolicyGateOptions, runPolicyGate, triggerPostDeployScan, describePolicyBlock } from '../helpers/policyGate';
@@ -402,7 +402,7 @@ stacksRouter.get('/readiness-summary', async (req: Request, res: Response) => {
   try {
     res.json(await buildStackReadinessSummary(req.nodeId));
   } catch (error) {
-    console.error('Failed to build stack readiness summary:', error);
+    console.error('Failed to build stack readiness summary:', errorMessageForLog(error));
     res.status(500).json({ error: 'Failed to build stack readiness summary' });
   }
 });
