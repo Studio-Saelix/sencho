@@ -5,6 +5,8 @@ import { ApplicationsTable } from './ApplicationsTable';
 import { PortfolioFilterBar } from './PortfolioFilterBar';
 import { PortfolioMasthead } from './PortfolioMasthead';
 import { useGitOpsPortfolio } from './useGitOpsPortfolio';
+import { GitOpsApplicationView } from '../application/GitOpsApplicationView';
+import { useGitOpsApplicationSelection } from '../application/useGitOpsApplicationSelection';
 
 /**
  * The GitOps portfolio workplace: one answer to "what is GitOps doing across
@@ -15,12 +17,20 @@ import { useGitOpsPortfolio } from './useGitOpsPortfolio';
  * parallel status engine. Refresh is event-driven (gitops invalidate channel),
  * never a per-node browser poll.
  *
+ * A row drills into its application view in place (the `application` query
+ * parameter). The portfolio hook keeps running while the application view
+ * replaces the list, so returning keeps its filters and page (both held in
+ * hook state) without a reload.
+ *
  * Desktop only by itself; the phone treatment is the bespoke screen in
  * components/mobile/MobileGitOps.tsx (mobile-treatments entry: bespoke).
  */
 export function GitOpsWorkplaceView() {
   const portfolio = useGitOpsPortfolio();
   const { data, loading, error, staleSince, refreshing } = portfolio;
+  const selectedApplication = useGitOpsApplicationSelection();
+
+  if (selectedApplication !== null) return <GitOpsApplicationView key={selectedApplication} id={selectedApplication} />;
 
   return (
     <div className="flex h-full min-h-0 flex-col overflow-hidden p-6">

@@ -11,8 +11,9 @@ import { useNodes } from '@/context/NodeContext';
 import GitOpsStateCard, { GitOpsFaultCard } from '@/components/gitops/GitOpsStateCard';
 import GitOpsCaveats from '@/components/gitops/GitOpsCaveats';
 import GitOpsApprovalChips from '@/components/gitops/GitOpsApprovalChips';
-import { ARTIFACT_STATE_LOOKUP, ROLLOUT_STATE_LOOKUP, RUNTIME_STATE_LOOKUP, SOURCE_STATE_LOOKUP, absentFault, identityRefLabel, liveArtifactFacet, livePlacementFacet, liveRolloutFacet, liveSourceFacet, placementStateMeta } from '@/lib/gitopsState';
-import type { GitOpsDriftItem, GitOpsRevisionProjection } from '@/types/gitops';
+import GitOpsDriftRow from '@/components/gitops/GitOpsDriftRow';
+import { ARTIFACT_STATE_LOOKUP, ROLLOUT_STATE_LOOKUP, RUNTIME_STATE_LOOKUP, SOURCE_STATE_LOOKUP, absentFault, liveArtifactFacet, livePlacementFacet, liveRolloutFacet, liveSourceFacet, placementStateMeta } from '@/lib/gitopsState';
+import type { GitOpsRevisionProjection } from '@/types/gitops';
 
 // Mirrors the backend payload shape (the frontend never imports backend).
 type StackDriftStatus = 'in-sync' | 'drifted' | 'missing-runtime' | 'unreachable';
@@ -176,28 +177,6 @@ function LedgerRow({ entry }: { entry: DriftLedgerEntry }) {
       <div className="mt-1 font-mono text-[10px] text-stat-subtitle">
         detected {formatTimeAgo(entry.detectedAt)}
         {entry.resolvedAt != null ? ` · resolved ${formatTimeAgo(entry.resolvedAt)}` : ''}
-      </div>
-    </div>
-  );
-}
-
-/**
- * One classified divergence between intent and observation, in the same
- * expected-to-observed idiom the compose findings above it use.
- */
-function GitOpsDriftRow({ item }: { item: GitOpsDriftItem }) {
-  return (
-    <div className="border-t border-muted py-2 first:border-t-0">
-      <div className="flex flex-wrap items-center gap-2">
-        <span className="rounded-md bg-brand/15 px-1.5 py-0.5 font-mono text-[11px] text-brand">{item.class}</span>
-        <span className="font-mono text-[10px] uppercase tracking-wide text-stat-subtitle">{item.owner}</span>
-      </div>
-      <div className="mt-1 text-[12px] text-foreground/90">{item.reason}</div>
-      <div className="mt-1 flex flex-wrap items-center gap-1.5 font-mono text-[11px]">
-        <span className="text-stat-subtitle">expected</span>
-        <span className="text-foreground/90">{identityRefLabel(item.expected)}</span>
-        <span className="text-stat-subtitle">→ observed</span>
-        <span className="font-semibold text-foreground">{identityRefLabel(item.observed)}</span>
       </div>
     </div>
   );

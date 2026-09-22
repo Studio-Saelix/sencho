@@ -8,9 +8,10 @@
  * file so the read and write halves of the filter contract stay together.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { renderHook, waitFor } from '@testing-library/react';
+import { act, renderHook, waitFor } from '@testing-library/react';
 import { apiFetch } from '@/lib/api';
 import { useGitOpsPortfolio } from '@/components/gitops/portfolio/useGitOpsPortfolio';
+import { applicationIdFromSearch, openGitOpsApplication } from '@/components/gitops/portfolio/portfolioNavigation';
 import type { GitOpsPortfolioResponse } from '@/types/gitopsPortfolio';
 
 vi.mock('@/lib/api', () => ({
@@ -57,10 +58,31 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  window.history.replaceState({}, '', '/');
   vi.restoreAllMocks();
 });
 
 describe('useGitOpsPortfolio', () => {
+  it('never lets a search debounce replace the URL of an application opened meanwhile', async () => {
+    window.history.replaceState({ senchoIdx: 1 }, '', '/nodes/local/gitops');
+    mockFetch.mockResolvedValue(ok(response()));
+    const { result } = renderHook(() => useGitOpsPortfolio());
+    await waitFor(() => expect(result.current.data).not.toBeNull());
+
+    vi.useFakeTimers();
+    try {
+      act(() => result.current.setQuery('web'));
+      act(() => openGitOpsApplication('1:a'));
+      act(() => { vi.advanceTimersByTime(1000); });
+    } finally {
+      vi.useRealTimers();
+    }
+
+    expect(applicationIdFromSearch(window.location.search)).toBe('1:a');
+    // The search still applies to the list the operator returns to.
+    expect(result.current.filters.q).toBe('web');
+  });
+
   it('loads the portfolio on mount', async () => {
     mockFetch.mockResolvedValue(ok(response()));
     const { result } = renderHook(() => useGitOpsPortfolio());
