@@ -659,7 +659,7 @@ export type LiveSourceFacet = Exclude<SourceFacet, { status: 'not_applicable' }>
  * state would be a claim the model never made.
  */
 export function liveSourceFacet(revision: GitOpsRevisionProjection | null): LiveSourceFacet | null {
-  if (!revision || revision.targetMode === 'not_applicable') return null;
+  if (!revision || revision.targetMode === 'not_applicable' || !revision.facets) return null;
   const source = revision.facets.source;
   return source.status === 'not_applicable' ? null : source;
 }

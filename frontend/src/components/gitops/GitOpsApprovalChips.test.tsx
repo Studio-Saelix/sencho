@@ -11,19 +11,21 @@ const REFS = {
   legacy: 'lcy-combined-0123456789',
 };
 
+const BINDING = {
+  rolloutCandidateId: 'rc-1',
+  acceptedGenerationId: 'gen-1',
+  artifactSetId: 'art-1',
+  intentRevisionId: 'int-1',
+  requiredNodeIds: [1],
+  sourceAcceptanceRef: REFS.source,
+  placementApprovalRef: REFS.placement,
+  preflightFingerprint: 'fp-1',
+};
+
 const stalePlacement: PlacementFacet = {
   status: 'rollout_authorization_stale',
   rolloutAuthorizationRef: REFS.rollout,
-  bound: {
-    rolloutCandidateId: 'rc-1',
-    acceptedGenerationId: 'gen-1',
-    artifactSetId: 'art-1',
-    intentRevisionId: 'int-1',
-    requiredNodeIds: [1],
-    sourceAcceptanceRef: REFS.source,
-    placementApprovalRef: REFS.placement,
-    preflightFingerprint: 'fp-1',
-  },
+  bound: BINDING,
 };
 
 describe('GitOpsApprovalChips', () => {
@@ -73,6 +75,46 @@ describe('GitOpsApprovalChips', () => {
       placement={stalePlacement}
     />);
     const chip = screen.getByText('rollout authorization pending').closest('[data-approval]');
+    expect(chip).toHaveAttribute('data-state', 'pending');
+  });
+
+  it.each<{
+    name: string;
+    placement: PlacementFacet;
+    label: string;
+    approval: 'source' | 'placement' | 'rollout';
+  }>([
+    {
+      name: 'source acceptance outstanding',
+      placement: { status: 'source_acceptance_pending', sourceAcceptanceRef: null, candidateGenerationId: 'gen-1' },
+      label: 'source acceptance pending',
+      approval: 'source',
+    },
+    {
+      name: 'placement needs a stateful confirmation',
+      placement: { status: 'stateful_confirmation_required' },
+      label: 'placement approval pending',
+      approval: 'placement',
+    },
+    {
+      name: 'rollout authorization never recorded',
+      placement: { status: 'rollout_authorization_pending', rolloutAuthorizationRef: null, binding: BINDING },
+      label: 'rollout authorization pending',
+      approval: 'rollout',
+    },
+    {
+      name: 'preflight still blocking the rollout',
+      placement: { status: 'preflight_blocked', reason: 'Image scan is still running.', binding: BINDING },
+      label: 'rollout authorization pending',
+      approval: 'rollout',
+    },
+  ])('reads $name as a pending chip', ({ placement, label, approval }) => {
+    render(<GitOpsApprovalChips
+      approvals={{ ...noApprovals, legacyCombinedApprovalRef: REFS.legacy }}
+      placement={placement}
+    />);
+    const chip = screen.getByText(label).closest('[data-approval]');
+    expect(chip).toHaveAttribute('data-approval', approval);
     expect(chip).toHaveAttribute('data-state', 'pending');
   });
 
