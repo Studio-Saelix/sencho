@@ -18,7 +18,6 @@ import { DatabaseService } from '../services/DatabaseService';
 import { GitOpsStore } from '../services/gitops/store';
 import { GitOpsTransitions, type EventEnvelope } from '../services/gitops/transitions';
 import { aggregateGitOpsPortfolio, postureOf } from '../services/gitops/portfolioAggregator';
-import { projectApplication } from '../services/gitops/derive';
 import { directApplicationFixture } from './helpers/gitopsFixtures';
 import type { GitOpsRevisionProjection } from '../services/gitops/types';
 import type { ArtifactFacet } from '../services/gitops/types';

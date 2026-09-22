@@ -39,7 +39,7 @@ import type {
   GitOpsPortfolioResponse,
   GitOpsPortfolioRow,
 } from '../services/gitops/portfolioTypes';
-import type { GitOpsDriftItem, GitOpsRevisionProjection } from '../services/gitops/types';
+import type { GitOpsDriftItem } from '../services/gitops/types';
 
 export const gitopsApplicationsRouter = Router();
 

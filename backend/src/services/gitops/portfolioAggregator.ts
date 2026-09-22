@@ -35,7 +35,7 @@ import type {
   GitOpsPortfolioRow,
   GitOpsPortfolioTargetSummary,
 } from './portfolioTypes';
-import type { GitOpsApplicationRow, GitOpsRevisionProjection } from './types';
+import type { GitOpsRevisionProjection } from './types';
 import { isRecord } from './json';
 
 /** Per-remote probe budget; mirrors the fleet overview probe so one dead node cannot stall the portfolio. */
