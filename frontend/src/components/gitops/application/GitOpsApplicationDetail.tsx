@@ -1,5 +1,5 @@
 import type { ReactNode } from 'react';
-import { CircleSlash } from 'lucide-react';
+import { CircleHelp, CircleSlash } from 'lucide-react';
 
 import GitOpsApprovalChips from '@/components/gitops/GitOpsApprovalChips';
 import GitOpsCaveats from '@/components/gitops/GitOpsCaveats';
@@ -17,6 +17,7 @@ import {
   liveRolloutFacet,
   liveSourceFacet,
   placementStateMeta,
+  type GitOpsStateMeta,
 } from '@/lib/gitopsState';
 import { cn } from '@/lib/utils';
 import type { GitOpsTargetProjection, ObservedArtifactIdentity } from '@/types/gitops';
@@ -55,6 +56,21 @@ function IdentityRow({ term, children }: { term: string; children: ReactNode }) 
   );
 }
 
+/**
+ * The state for a status, or an explicit unrecognized state when this build
+ * does not know it. The shared card renders nothing for an unknown status,
+ * which suits a list row; here the whole point is that no facet and no target
+ * disappears, so a status from a newer node still gets a card that says so.
+ */
+function stateOrUnrecognized(state: GitOpsStateMeta | undefined, status: string): GitOpsStateMeta {
+  return state ?? {
+    label: 'unrecognized state',
+    tone: 'neutral',
+    line: `Reported as "${status}", a state this version of Sencho does not recognize.`,
+    icon: CircleHelp,
+  };
+}
+
 function observedArtifactLine(observed: ObservedArtifactIdentity): string {
   switch (observed.kind) {
     case 'unknown':
@@ -79,7 +95,7 @@ function TargetCard({ target, nodeName }: { target: GitOpsTargetProjection; node
     <GitOpsStateCard
       data-testid="gitops-target"
       stateKey={target.runtime.status}
-      state={RUNTIME_STATE_LOOKUP[target.runtime.status]}
+      state={stateOrUnrecognized(RUNTIME_STATE_LOOKUP[target.runtime.status], target.runtime.status)}
     >
       <div className="mt-1 space-y-0.5 font-mono text-[10px] text-stat-subtitle">
         <div>{nodeName}{target.stackName ? ` · ${target.stackName}` : ''}</div>
@@ -186,16 +202,16 @@ export default function GitOpsApplicationDetail({ detail }: { detail: GitOpsPort
               <GitOpsApprovalChips approvals={live.approvals} placement={placement} rollout={rollout} />
             )}
             {source && (
-              <GitOpsStateCard data-testid="gitops-source" stateKey={source.status} state={SOURCE_STATE_LOOKUP[source.status]} />
+              <GitOpsStateCard data-testid="gitops-source" stateKey={source.status} state={stateOrUnrecognized(SOURCE_STATE_LOOKUP[source.status], source.status)} />
             )}
             {artifact && (
-              <GitOpsStateCard data-testid="gitops-artifact" stateKey={artifact.status} state={ARTIFACT_STATE_LOOKUP[artifact.status]} />
+              <GitOpsStateCard data-testid="gitops-artifact" stateKey={artifact.status} state={stateOrUnrecognized(ARTIFACT_STATE_LOOKUP[artifact.status], artifact.status)} />
             )}
             {placement && (
-              <GitOpsStateCard data-testid="gitops-placement" stateKey={placement.status} state={placementStateMeta(placement)} />
+              <GitOpsStateCard data-testid="gitops-placement" stateKey={placement.status} state={stateOrUnrecognized(placementStateMeta(placement), placement.status)} />
             )}
             {rollout && (
-              <GitOpsStateCard data-testid="gitops-rollout" stateKey={rollout.status} state={ROLLOUT_STATE_LOOKUP[rollout.status]}>
+              <GitOpsStateCard data-testid="gitops-rollout" stateKey={rollout.status} state={stateOrUnrecognized(ROLLOUT_STATE_LOOKUP[rollout.status], rollout.status)}>
                 {rollout.status === 'rollout_paused' && rollout.pauseReason && (
                   <div className="mt-1 font-mono text-[11px] text-stat-subtitle">{rollout.pauseReason}</div>
                 )}
