@@ -95,7 +95,7 @@ function HeaderShell({
         {kicker}
       </div>
       <TitleComponent
-        className="mt-1 font-heading text-[1.75rem] leading-tight text-stat-value break-all line-clamp-3"
+        className="mt-1 font-heading text-[1.75rem] leading-tight text-stat-value break-words text-balance"
         title={typeof title === 'string' ? title : undefined}
       >
         {title}
