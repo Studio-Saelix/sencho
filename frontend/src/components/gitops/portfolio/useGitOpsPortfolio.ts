@@ -179,8 +179,8 @@ export function useGitOpsPortfolio(): GitOpsPortfolioState {
     // While an application view is open the address bar is its link, not the
     // list's: a search debounce that fires after a row was opened must not
     // replace it.
-    if (typeof window !== 'undefined' && applicationIdFromSearch(window.location.search) !== null) return;
-    if (typeof window !== 'undefined' && typeof window.history?.replaceState === 'function') {
+    if (typeof window === 'undefined' || applicationIdFromSearch(window.location.search) !== null) return;
+    if (typeof window.history?.replaceState === 'function') {
       const qs = buildQueryString(next, null).replace(/[?&]limit=\d+/, '');
       // Keep the existing history state: the router stores its own index
       // marker in it, and wiping it would corrupt its back/forward deltas.

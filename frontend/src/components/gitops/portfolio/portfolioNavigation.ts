@@ -32,7 +32,7 @@ const MAX_APPLICATION_ID_LEN = 512;
 
 /** The application id encoded in a search string, or null when none (or a malformed one) is present. */
 export function applicationIdFromSearch(search: string): string | null {
-  const id = new URLSearchParams(search.startsWith('?') ? search.slice(1) : search).get(APPLICATION_QUERY_PARAM);
+  const id = new URLSearchParams(search).get(APPLICATION_QUERY_PARAM);
   if (!id || id.length > MAX_APPLICATION_ID_LEN) return null;
   return id;
 }
@@ -94,7 +94,7 @@ export function closeGitOpsApplicationIfOpen(): void {
  * panel. The shell consumes the event; a missing node or stack leaves the
  * operator wherever they were (the caller survives navigation failure).
  */
-export function openDirectGitApplication(row: GitOpsPortfolioRow): void {
+function openDirectGitApplication(row: GitOpsPortfolioRow): void {
   if (row.nodeId === null || row.stackName === null) return;
   window.dispatchEvent(new CustomEvent<SenchoOpenStackDetail>(SENCHO_OPEN_STACK_EVENT, {
     detail: { nodeId: row.nodeId, stackName: row.stackName, destination: 'git' },
@@ -102,7 +102,7 @@ export function openDirectGitApplication(row: GitOpsPortfolioRow): void {
 }
 
 /** Open the Blueprint-backed application's rollout surface on the Fleet view. */
-export function openBlueprintGitApplication(row: GitOpsPortfolioRow): void {
+function openBlueprintGitApplication(row: GitOpsPortfolioRow): void {
   if (row.blueprintId === null) return;
   window.dispatchEvent(new CustomEvent<SenchoNavigateDetail>(SENCHO_NAVIGATE_EVENT, {
     detail: { view: 'fleet', fleetTab: 'deployments' },

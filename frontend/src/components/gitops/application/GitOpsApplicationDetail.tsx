@@ -95,6 +95,14 @@ function observedArtifactLine(observed: ObservedArtifactIdentity): string {
   }
 }
 
+function evidenceLine(evidence: GitOpsPortfolioRow['evidence'], nodeName: (id: number) => string): string {
+  if (!evidence.partial) return 'The evidence behind this application\'s state could not be established.';
+  const who = evidence.unreachableNodes.length > 0
+    ? `${evidence.unreachableNodes.map(nodeName).join(', ')} could not be reached`
+    : 'not every target could report';
+  return `Evidence is partial: ${who}, so their target state may not be current.`;
+}
+
 function TargetCard({ target, nodeName }: { target: GitOpsTargetProjection; nodeName: string }) {
   return (
     <GitOpsStateCard
@@ -232,13 +240,7 @@ export default function GitOpsApplicationDetail({ detail }: { detail: GitOpsPort
       <div className="flex min-w-0 flex-col gap-6">
         {(row.evidence.partial || row.evidence.unknown) && (
           <div data-testid="gitops-application-evidence" className="rounded-lg border border-warning/40 bg-warning/[0.06] px-3 py-2">
-            <p className="font-mono text-[11px] text-warning">
-              {row.evidence.partial
-                ? `Evidence is partial: ${row.evidence.unreachableNodes.length > 0
-                  ? `${row.evidence.unreachableNodes.map(nodeName).join(', ')} could not be reached`
-                  : 'not every target could report'}, so their target state may not be current.`
-                : 'The evidence behind this application\'s state could not be established.'}
-            </p>
+            <p className="font-mono text-[11px] text-warning">{evidenceLine(row.evidence, nodeName)}</p>
           </div>
         )}
 
