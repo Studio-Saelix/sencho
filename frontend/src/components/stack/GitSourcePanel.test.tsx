@@ -584,6 +584,38 @@ describe('GitSourcePanel GitOps state', () => {
     expect(screen.queryByTestId('git-artifact-state')).not.toBeInTheDocument();
   });
 
+  it('shows the placement card for a Direct application and no rollout card', async () => {
+    vi.mocked(apiFetch).mockResolvedValue(jsonRes(linkedWith(liveRevision())));
+    render(panel());
+
+    const card = await screen.findByTestId('git-placement-state');
+    expect(card).toHaveAttribute('data-state', 'unbound_direct');
+    expect(screen.queryByTestId('git-rollout-state')).not.toBeInTheDocument();
+  });
+
+  it('renders the approval chips and the rollout card for an authorized rollout', async () => {
+    vi.mocked(apiFetch).mockResolvedValue(jsonRes(linkedWith(liveRevision({
+      approvals: {
+        sourceAcceptanceRef: 'src-acceptance-1',
+        placementApprovalRef: 'plc-approval-1',
+        rolloutAuthorizationRef: 'rlo-authorization-1',
+        legacyCombinedApprovalRef: null,
+      },
+      facets: facets({
+        placement: { status: 'blueprint_bound', completion: 'unknown' },
+        rollout: { status: 'rollout_queued', rolloutGenerationId: 'rg-1' },
+      }),
+    }))));
+    render(panel());
+
+    const chips = await screen.findByTestId('gitops-approvals');
+    expect(within(chips).getByText('source accepted')).toBeInTheDocument();
+    expect(within(chips).getByText('placement approved')).toBeInTheDocument();
+    expect(within(chips).getByText('rollout authorized')).toBeInTheDocument();
+    expect(screen.getByTestId('git-rollout-state')).toHaveAttribute('data-state', 'rollout_queued');
+    expect(screen.getByTestId('git-placement-state')).toHaveAttribute('data-state', 'blueprint_bound');
+  });
+
   it('still reports a waiting commit when no projection answered', async () => {
     // A swallowed GitOps write leaves the flat pointer as the only evidence.
     // The sidebar keeps showing it, so the panel has to agree.

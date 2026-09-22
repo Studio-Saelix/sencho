@@ -18,7 +18,8 @@ import { AdoptBlueprintDialog } from '@/components/blueprints/AdoptBlueprintDial
 import GitOpsStateCard, { GitOpsFaultCard } from '@/components/gitops/GitOpsStateCard';
 import { GitProviderHooksCard } from './GitProviderHooksCard';
 import GitOpsCaveats from '@/components/gitops/GitOpsCaveats';
-import { ARTIFACT_STATE_LOOKUP, SOURCE_STATE_LOOKUP, absentFault, liveArtifactFacet, liveSourceFacet, type LiveSourceFacet } from '@/lib/gitopsState';
+import GitOpsApprovalChips from '@/components/gitops/GitOpsApprovalChips';
+import { ARTIFACT_STATE_LOOKUP, ROLLOUT_STATE_LOOKUP, SOURCE_STATE_LOOKUP, absentFault, liveArtifactFacet, livePlacementFacet, liveRolloutFacet, liveSourceFacet, placementStateMeta, type LiveSourceFacet } from '@/lib/gitopsState';
 import { GITOPS_SOURCE_CONTROLLER_CAPABILITY } from '@/lib/capabilities';
 import type {
   GitOpsAvailableAction,
@@ -169,6 +170,9 @@ export function GitSourcePanel({
 
   const sourceFacet = liveSourceFacet(revision);
   const artifactFacet = liveArtifactFacet(revision);
+  const placementFacet = livePlacementFacet(revision);
+  const rolloutFacet = liveRolloutFacet(revision);
+  const approvals = revision && revision.targetMode !== 'not_applicable' ? revision.approvals : null;
   const artifactIdentity = artifactFacet?.expected?.identity ?? null;
   const faults = revision ? absentFault(revision) : [];
   const pending = derivePendingCommit(sourceFacet, faults.length, source?.pending_commit_sha ?? null);
@@ -669,6 +673,8 @@ export function GitSourcePanel({
             <SheetSection title="Status">
               {faults.length > 0 && <GitOpsFaultCard message={faults[0].message} />}
 
+              <GitOpsApprovalChips approvals={approvals} placement={placementFacet} rollout={rolloutFacet} />
+
               {showPendingReview && pending && (
                 <GitOpsStateCard
                   data-testid="git-pending"
@@ -703,6 +709,28 @@ export function GitSourcePanel({
                   {artifactIdentity && (
                     <div className="mt-1 font-mono text-[11px] text-stat-subtitle break-all max-md:text-[10px]">
                       {artifactIdentity.slice(0, 19)}
+                    </div>
+                  )}
+                </GitOpsStateCard>
+              )}
+
+              {placementFacet && (
+                <GitOpsStateCard
+                  data-testid="git-placement-state"
+                  stateKey={placementFacet.status}
+                  state={placementStateMeta(placementFacet)}
+                />
+              )}
+
+              {rolloutFacet && (
+                <GitOpsStateCard
+                  data-testid="git-rollout-state"
+                  stateKey={rolloutFacet.status}
+                  state={ROLLOUT_STATE_LOOKUP[rolloutFacet.status]}
+                >
+                  {rolloutFacet.status === 'rollout_paused' && rolloutFacet.pauseReason && (
+                    <div className="mt-1 font-mono text-[11px] text-stat-subtitle">
+                      {rolloutFacet.pauseReason}
                     </div>
                   )}
                 </GitOpsStateCard>
