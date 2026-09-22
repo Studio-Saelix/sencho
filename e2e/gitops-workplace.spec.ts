@@ -2,11 +2,11 @@
  * GitOps workplace: the hub-owned portfolio destination.
  *
  * Covers the navigation contract the surface promises (first-class launcher
- * entry, direct URL), the masthead-led render, and the filter interaction. The
- * suite does not assert portfolio contents: CI starts from a fresh database,
- * so the meaningful assertions here are structural (the view resolves without
- * a stack or a node's GitOps state) while row-level classification is pinned
- * by the backend unit suites.
+ * entry, direct URL), the masthead-led render, the shared filter row
+ * (collapsible search + combobox filters), and the phone layout. The suite
+ * does not assert portfolio contents: CI starts from a fresh database, so the
+ * meaningful assertions here are structural while row-level classification is
+ * pinned by the backend unit suites.
  */
 import { test, expect } from '@playwright/test';
 import { loginAs, waitForShellReady } from './helpers';
@@ -24,33 +24,48 @@ test.describe('GitOps workplace', () => {
     await page.goto('/nodes/local/gitops');
     await waitForShellReady(page);
 
-    // Masthead: kicker + verdict, on its own hub-owned surface.
-    await expect(page.getByText('GITOPS · PORTFOLIO')).toBeVisible({ timeout: 10_000 });
-    // The summary strip is portfolio-level, independent of which rows exist.
-    await expect(page.getByText('Applications', { exact: true }).first()).toBeVisible();
-    await expect(page.getByText('Attention', { exact: true }).first()).toBeVisible();
-
-    // Either the table or the empty state renders; both are the surface
-    // answering rather than bouncing to another view.
-    const table = page.getByRole('region', { name: 'GitOps applications' });
-    await expect(table).toBeVisible({ timeout: 10_000 });
+    // The filter row is the surface's stable landmark (the masthead's state
+    // word varies with what is in the portfolio).
+    await expect(page.getByRole('button', { name: 'Search applications' })).toBeVisible({ timeout: 10_000 });
+    await expect(page.getByRole('region', { name: 'GitOps applications' })).toBeVisible({ timeout: 10_000 });
+    // The count tiles live in the masthead, independent of which rows exist.
+    await expect(page.getByText('APPLICATIONS', { exact: true })).toBeVisible();
   });
 
-  test('filter chips narrow the list and clear restores it', async ({ page }) => {
+  test('combobox filters narrow the list and reset through the same control', async ({ page }) => {
     await loginAs(page);
     await page.goto('/nodes/local/gitops');
     await waitForShellReady(page);
-    await expect(page.getByText('GITOPS · PORTFOLIO')).toBeVisible({ timeout: 10_000 });
 
-    const attentionChip = page.getByRole('button', { name: 'Attention', exact: true }).first();
-    await expect(attentionChip).toHaveAttribute('aria-pressed', 'false');
-    await attentionChip.click();
-    await expect(attentionChip).toHaveAttribute('aria-pressed', 'true');
+    // The shared Combobox trigger carries role="combobox" (an author-named
+    // widget role), so target it by role plus its visible label text.
+    const attentionFilter = page.locator('button[role="combobox"]').filter({ hasText: 'All applications' });
+    await expect(attentionFilter).toBeVisible({ timeout: 10_000 });
+    await attentionFilter.click();
+    await page.getByRole('button', { name: 'Attention required' }).click();
+    await expect(page).toHaveURL(/attention=1/);
 
-    const clear = page.getByRole('button', { name: /Clear/ }).first();
-    await expect(clear).toBeVisible();
-    await clear.click();
-    await expect(attentionChip).toHaveAttribute('aria-pressed', 'false');
+    // Resetting through the same control returns the question to the whole set.
+    await page.locator('button[role="combobox"]').filter({ hasText: 'Attention required' }).click();
+    await page.getByRole('button', { name: 'All applications' }).click();
+    await expect(page).not.toHaveURL(/attention=1/);
+  });
+
+  test('the search accordion expands, filters, and collapses when cleared', async ({ page }) => {
+    await loginAs(page);
+    await page.goto('/nodes/local/gitops');
+    await waitForShellReady(page);
+
+    await page.getByRole('button', { name: 'Search applications' }).click();
+    const input = page.getByPlaceholder('Search applications...');
+    await expect(input).toBeVisible();
+    await input.fill('no-such-application-anywhere');
+    await expect(page).toHaveURL(/q=no-such-application-anywhere/);
+    await expect(page.getByText('No GitOps application matches the current filters.')).toBeVisible({ timeout: 10_000 });
+
+    await input.fill('');
+    await input.blur();
+    await expect(input).toBeHidden();
   });
 
   test('the phone layout keeps the workplace readable', async ({ page }) => {

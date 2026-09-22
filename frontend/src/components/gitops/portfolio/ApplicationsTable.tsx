@@ -1,4 +1,7 @@
-import { Activity, Check, ChevronLeft, ChevronRight, CircleHelp, CircleSlash, Clock, ExternalLink, XCircle } from 'lucide-react';
+import { Activity, Check, ChevronLeft, ChevronRight, CircleHelp, CircleSlash, Clock, XCircle } from 'lucide-react';
+import { Button } from '@/components/ui/button';
+import { ScrollArea } from '@/components/ui/scroll-area';
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import {
   RUNTIME_STATE_LOOKUP,
   SOURCE_STATE_LOOKUP,
@@ -6,8 +9,7 @@ import {
   type GitOpsTone,
 } from '@/lib/gitopsState';
 import { attentionLabel, POSTURE_TONE_CLASS } from '@/lib/gitopsPortfolio';
-import { cn } from '@/lib/utils';
-import { formatRelativeTime } from '@/lib/utils';
+import { cn, formatRelativeTime } from '@/lib/utils';
 import type { GitOpsPortfolioRow } from '@/types/gitopsPortfolio';
 import { openPortfolioApplication } from './portfolioNavigation';
 
@@ -53,28 +55,13 @@ function FacetChip({ status, lookup }: { status: string; lookup?: Partial<Record
   );
 }
 
-/** Where the application runs, in one line. */
-function TargetCell({ row }: { row: GitOpsPortfolioRow }) {
-  if (row.targetMode === 'direct') {
-    return (
-      <span className="block min-w-0">
-        <span className="block truncate font-mono text-[11px] text-stat-value">{row.nodeName ?? `node ${row.nodeId}`}</span>
-        <span className="block font-mono text-[10px] uppercase tracking-[0.1em] text-stat-icon">direct</span>
-      </span>
-    );
-  }
-  return (
-    <span className="block min-w-0">
-      <span className="block truncate font-mono text-[11px] text-stat-value">
-        {row.targets.length} target{row.targets.length === 1 ? '' : 's'}
-      </span>
-      <span className="block font-mono text-[10px] uppercase tracking-[0.1em] text-stat-icon">blueprint</span>
-    </span>
-  );
-}
-
-const GRID_COLS = 'grid-cols-[20px_minmax(140px,1.3fr)_minmax(150px,1.1fr)_92px_110px_110px_110px_90px_72px_minmax(150px,1fr)_96px_20px]';
-
+/**
+ * The portfolio application list, built on the same table shell as the
+ * Security tabs: a beveled card holding a ScrollArea with the shared Table
+ * primitives, tracked-mono header cells, hover-tinted rows, and the pagination
+ * footer underneath. Scrolling stays inside the card, so the page itself never
+ * scrolls and the header/rows stay a single visual block.
+ */
 export function ApplicationsTable({
   rows,
   nextCursor,
@@ -93,68 +80,61 @@ export function ApplicationsTable({
   const open = (row: GitOpsPortfolioRow) => (onDrillDown ? onDrillDown(row) : openPortfolioApplication(row));
 
   return (
-    <section
-      aria-label="GitOps applications"
-      className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-lg border border-card-border border-t-card-border-top bg-card shadow-card-bevel"
-    >
-      {/* The header scrolls with the rows so it stays visible at the column
-          count's minimum width instead of being clipped by the card. */}
-      <div className="min-h-0 flex-1 overflow-auto">
-        <div className={cn('sticky top-0 z-10 grid items-center gap-2 border-b border-card-border/70 bg-card px-3 py-2 font-mono text-[10px] uppercase tracking-[0.18em] text-stat-subtitle min-w-[1180px]', GRID_COLS)}>
-          <span aria-hidden />
-          <span>Application</span>
-          <span>Repository · ref</span>
-          <span>Target</span>
-          <span>Source</span>
-          <span>Rollout</span>
-          <span>Runtime</span>
-          <span>Health</span>
-          <span>Drift</span>
-          <span>Attention</span>
-          <span>Last activity</span>
-          <span aria-hidden />
-        </div>
-
-        {rows.length === 0 ? (
-          <div className="flex h-full min-h-[200px] items-center justify-center p-10 text-center">
-            <div>
-              <p className="font-heading text-xl text-stat-value">Nothing here</p>
-              <p className="mt-1 font-mono text-xs text-stat-subtitle">
-                No GitOps application matches the current filters.
-              </p>
+    <section aria-label="GitOps applications" className="flex min-h-0 flex-1 flex-col">
+      <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-lg border border-card-border border-t-card-border-top bg-card shadow-card-bevel">
+        <ScrollArea className="flex-1 min-h-0">
+          <Table>
+            <TableHeader>
+              <TableRow className="hover:bg-transparent">
+                <TableHead className="w-8 text-[10px] uppercase tracking-[0.18em]" aria-label="State" />
+                <TableHead className="text-[10px] uppercase tracking-[0.18em]">Application</TableHead>
+                <TableHead className="text-[10px] uppercase tracking-[0.18em]">Repository · ref</TableHead>
+                <TableHead className="text-[10px] uppercase tracking-[0.18em]">Target</TableHead>
+                <TableHead className="text-[10px] uppercase tracking-[0.18em]">Source</TableHead>
+                <TableHead className="text-[10px] uppercase tracking-[0.18em]">Rollout</TableHead>
+                <TableHead className="text-[10px] uppercase tracking-[0.18em]">Runtime</TableHead>
+                <TableHead className="text-[10px] uppercase tracking-[0.18em]">Health</TableHead>
+                <TableHead className="text-[10px] uppercase tracking-[0.18em]">Drift</TableHead>
+                <TableHead className="text-[10px] uppercase tracking-[0.18em]">Attention</TableHead>
+                <TableHead className="text-[10px] uppercase tracking-[0.18em]">Last activity</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {rows.map(row => (
+                <ApplicationRow key={row.id} row={row} onOpen={() => open(row)} />
+              ))}
+            </TableBody>
+          </Table>
+          {rows.length === 0 && (
+            <div className="py-12 text-center text-sm text-muted-foreground">
+              No GitOps application matches the current filters.
             </div>
-          </div>
-        ) : (
-          <ul className="divide-y divide-card-border/50">
-            {rows.map(row => <ApplicationRow key={row.id} row={row} onOpen={() => open(row)} />)}
-          </ul>
-        )}
+          )}
+        </ScrollArea>
       </div>
 
-      <div className="flex items-center justify-between gap-3 border-t border-card-border/70 px-3 py-2">
-        <span className="font-mono text-[10px] uppercase tracking-[0.18em] text-stat-subtitle">
-          Page {pageLoaded}
-        </span>
-        <div className="flex items-center gap-1">
-          <button
-            type="button"
-            onClick={onPrevPage}
-            disabled={pageLoaded <= 1}
-            className="inline-flex h-7 w-7 items-center justify-center rounded-md border border-card-border text-stat-subtitle transition-colors hover:text-stat-value disabled:cursor-not-allowed disabled:opacity-40"
-            aria-label="Previous page"
-          >
-            <ChevronLeft className="h-3.5 w-3.5" strokeWidth={1.5} />
-          </button>
-          <button
-            type="button"
-            onClick={onNextPage}
-            disabled={nextCursor === null}
-            className="inline-flex h-7 w-7 items-center justify-center rounded-md border border-card-border text-stat-subtitle transition-colors hover:text-stat-value disabled:cursor-not-allowed disabled:opacity-40"
-            aria-label="Next page"
-          >
-            <ChevronRight className="h-3.5 w-3.5" strokeWidth={1.5} />
-          </button>
-        </div>
+      <div className="flex items-center justify-end gap-1 pt-2">
+        <Button
+          variant="ghost"
+          size="icon"
+          className="h-7 w-7"
+          onClick={onPrevPage}
+          disabled={pageLoaded <= 1}
+          aria-label="Previous page"
+        >
+          <ChevronLeft className="w-4 h-4" strokeWidth={1.5} />
+        </Button>
+        <span className="text-xs text-stat-subtitle tabular-nums px-1">Page {pageLoaded}</span>
+        <Button
+          variant="ghost"
+          size="icon"
+          className="h-7 w-7"
+          onClick={onNextPage}
+          disabled={nextCursor === null}
+          aria-label="Next page"
+        >
+          <ChevronRight className="w-4 h-4" strokeWidth={1.5} />
+        </Button>
       </div>
     </section>
   );
@@ -171,71 +151,93 @@ function ApplicationRow({ row, onOpen }: { row: GitOpsPortfolioRow; onOpen: () =
     : failureAttention ? 'bg-destructive/[0.04]' : 'bg-warning/[0.04]';
 
   return (
-    <li>
-      <button
-        type="button"
-        onClick={openingPossible ? onOpen : undefined}
-        disabled={!openingPossible}
-        className={cn(
-          'group grid w-full min-w-[1180px] items-center gap-2 px-3 py-2 text-left transition-colors',
-          GRID_COLS,
-          rowTint,
-          openingPossible && 'hover:bg-accent/40',
-          !openingPossible && 'cursor-default',
-        )}
-      >
-        <span aria-hidden className={cn(
-          'h-2 w-2 rounded-full',
-          row.posture === 'failed' && 'bg-destructive shadow-[0_0_6px_0_var(--destructive)]',
-          row.posture === 'attention' && 'bg-warning shadow-[0_0_6px_0_var(--warning)]',
-          row.posture === 'in_progress' && 'bg-brand',
-          row.posture === 'converged' && 'bg-success',
-          row.posture === 'converged_qualified' && 'bg-success/70',
-          row.posture === 'unknown' && 'bg-stat-icon',
-        )} />
+    <TableRow className={cn('transition-colors hover:bg-muted/30', rowTint)}>
+      <TableCell className="align-top">
+        <span
+          aria-hidden
+          className={cn(
+            'mt-1 inline-block h-2 w-2 rounded-full',
+            row.posture === 'failed' && 'bg-destructive shadow-[0_0_6px_0_var(--destructive)]',
+            row.posture === 'attention' && 'bg-warning shadow-[0_0_6px_0_var(--warning)]',
+            row.posture === 'in_progress' && 'bg-brand',
+            row.posture === 'converged' && 'bg-success',
+            row.posture === 'converged_qualified' && 'bg-success/70',
+            row.posture === 'unknown' && 'bg-stat-icon',
+          )}
+        />
+      </TableCell>
 
-        <span className="min-w-0">
-          <span className="block truncate font-mono text-xs font-medium text-stat-value">{row.name}</span>
-          <span className="block truncate font-mono text-[10px] text-stat-icon">
+      <TableCell className="align-top">
+        <div className="min-w-0 max-w-[220px]">
+          {openingPossible ? (
+            <button
+              type="button"
+              className="block min-w-0 truncate text-left font-mono text-xs hover:text-brand"
+              onClick={onOpen}
+            >
+              {row.name}
+            </button>
+          ) : (
+            <span className="block min-w-0 truncate font-mono text-xs">{row.name}</span>
+          )}
+          <span className="block truncate font-mono text-[10px] text-stat-subtitle">
             {row.stackName ?? (row.blueprintId !== null ? `blueprint #${row.blueprintId}` : '')}
           </span>
-        </span>
+        </div>
+      </TableCell>
 
-        <span className="min-w-0">
-          {row.repository ? (
-            <>
-              <span className="block truncate font-mono text-[11px] text-stat-title">
-                {row.repository.host}{row.repository.pathname}
-              </span>
-              <span className="block truncate font-mono text-[10px] text-stat-subtitle">
-                {row.repository.configuredRef}
-                {row.fetchedCommitSha ? ` · ${row.fetchedCommitSha.slice(0, 7)}` : ''}
-              </span>
-            </>
-          ) : (
-            <span className="font-mono text-[11px] text-stat-icon">--</span>
-          )}
-        </span>
+      <TableCell className="align-top">
+        {row.repository ? (
+          <div className="min-w-0 max-w-[220px]">
+            <span className="block truncate font-mono text-[11px] text-stat-title">
+              {row.repository.host}{row.repository.pathname}
+            </span>
+            <span className="block truncate font-mono text-[10px] text-stat-subtitle">
+              {row.repository.configuredRef}
+              {row.fetchedCommitSha ? ` · ${row.fetchedCommitSha.slice(0, 7)}` : ''}
+            </span>
+          </div>
+        ) : (
+          <span className="font-mono text-[11px] text-stat-icon">--</span>
+        )}
+      </TableCell>
 
-        <TargetCell row={row} />
+      <TableCell className="align-top">
+        {row.targetMode === 'direct' ? (
+          <div className="min-w-0">
+            <span className="block truncate font-mono text-[11px] text-stat-value">{row.nodeName ?? `node ${row.nodeId}`}</span>
+            <span className="block font-mono text-[10px] uppercase tracking-[0.1em] text-stat-icon">direct</span>
+          </div>
+        ) : (
+          <div className="min-w-0">
+            <span className="block truncate font-mono text-[11px] text-stat-value">
+              {row.targets.length} target{row.targets.length === 1 ? '' : 's'}
+            </span>
+            <span className="block font-mono text-[10px] uppercase tracking-[0.1em] text-stat-icon">blueprint</span>
+          </div>
+        )}
+      </TableCell>
 
-        <FacetChip status={row.sourceStatus} lookup={SOURCE_STATE_LOOKUP} />
-        <FacetChip status={row.rolloutStatus} lookup={RUNTIME_STATE_LOOKUP} />
-        <FacetChip status={row.runtimeStatus} lookup={RUNTIME_STATE_LOOKUP} />
-        <FacetChip status={row.healthStatus} lookup={HEALTH_STATE} />
+      <TableCell className="align-top"><FacetChip status={row.sourceStatus} lookup={SOURCE_STATE_LOOKUP} /></TableCell>
+      <TableCell className="align-top"><FacetChip status={row.rolloutStatus} lookup={RUNTIME_STATE_LOOKUP} /></TableCell>
+      <TableCell className="align-top"><FacetChip status={row.runtimeStatus} lookup={RUNTIME_STATE_LOOKUP} /></TableCell>
+      <TableCell className="align-top"><FacetChip status={row.healthStatus} lookup={HEALTH_STATE} /></TableCell>
 
-        <span className="min-w-0">
-          {row.drift.count > 0 ? (
+      <TableCell className="align-top">
+        {row.drift.count > 0 ? (
+          <div className="min-w-0 max-w-[140px]">
             <span className="font-mono text-[11px] text-warning">
               {row.drift.count} {row.drift.count === 1 ? 'item' : 'items'}
-              <span className="block truncate text-[10px] text-stat-subtitle">{row.drift.classes.join(' · ')}</span>
             </span>
-          ) : (
-            <span className="font-mono text-[11px] text-stat-icon">none</span>
-          )}
-        </span>
+            <span className="block truncate text-[10px] text-stat-subtitle">{row.drift.classes.join(' · ')}</span>
+          </div>
+        ) : (
+          <span className="font-mono text-[11px] text-stat-icon">none</span>
+        )}
+      </TableCell>
 
-        <span className="flex min-w-0 flex-wrap gap-1">
+      <TableCell className="align-top">
+        <span className="flex min-w-0 max-w-[190px] flex-wrap gap-1">
           {row.attention.slice(0, 2).map(reason => {
             const label = attentionLabel(reason);
             return (
@@ -256,20 +258,16 @@ function ApplicationRow({ row, onOpen }: { row: GitOpsPortfolioRow; onOpen: () =
           )}
           {row.attention.length === 0 && <span className="font-mono text-[11px] text-stat-icon">--</span>}
         </span>
+      </TableCell>
 
-        <span className="min-w-0 truncate font-mono text-[11px] text-stat-subtitle">
+      <TableCell className="align-top">
+        <span className="block truncate font-mono text-[11px] text-stat-subtitle">
           {row.lastActivityAt !== null
             ? formatRelativeTime(Math.floor(row.lastActivityAt / 1000))
             : 'unknown'}
-          {row.evidence.unknown && <span className="block text-[10px] text-warning">evidence partial</span>}
         </span>
-
-        {openingPossible ? (
-          <ExternalLink className="h-3.5 w-3.5 text-stat-icon transition-colors group-hover:text-brand" strokeWidth={1.5} />
-        ) : (
-          <span />
-        )}
-      </button>
-    </li>
+        {row.evidence.unknown && <span className="block font-mono text-[10px] text-warning">evidence partial</span>}
+      </TableCell>
+    </TableRow>
   );
 }

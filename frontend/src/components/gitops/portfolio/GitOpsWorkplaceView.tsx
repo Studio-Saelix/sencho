@@ -23,7 +23,7 @@ export function GitOpsWorkplaceView() {
   const { data, loading, error, staleSince, refreshing } = portfolio;
 
   return (
-    <div className="flex h-full flex-col gap-4 overflow-hidden p-6">
+    <div className="flex h-full min-h-0 flex-col overflow-hidden p-6">
       {loading && !data ? (
         <div className="flex flex-col gap-4" aria-busy="true">
           <Skeleton className="h-24 w-full rounded-lg" />
@@ -36,38 +36,39 @@ export function GitOpsWorkplaceView() {
         <>
           <PortfolioMasthead data={data} staleSince={staleSince} />
 
-          <CoverageNotices data={data} />
+          <div className="flex min-h-0 flex-1 flex-col gap-4">
+            <CoverageNotices data={data} />
 
-          <PortfolioFilterBar
-            filters={portfolio.filters}
-            nodes={data.coverage.map(entry => ({ id: entry.nodeId, name: entry.nodeName ?? `node ${entry.nodeId}` }))}
-            onChange={portfolio.setFilters}
-            onQueryChange={portfolio.setQuery}
-            onClear={portfolio.clearFilters}
-          />
+            <AttentionQueue rows={data.attentionQueue} />
 
-          <AttentionQueue rows={data.attentionQueue} />
+            {data.attentionQueueTruncated && (
+              <p className="font-mono text-[11px] text-warning">
+                More than {data.attentionQueue.length} applications require attention; the queue shows the first
+                {' '}{data.attentionQueue.length}, ordered by severity.
+              </p>
+            )}
 
-          {data.attentionQueueTruncated && (
-            <p className="font-mono text-[11px] text-warning">
-              More than {data.attentionQueue.length} applications require attention; the queue shows the first
-              {' '}{data.attentionQueue.length}, ordered by severity.
-            </p>
-          )}
+            <PortfolioFilterBar
+              filters={portfolio.filters}
+              nodes={data.coverage.map(entry => ({ id: entry.nodeId, name: entry.nodeName ?? `node ${entry.nodeId}` }))}
+              onChange={portfolio.setFilters}
+              onQueryChange={portfolio.setQuery}
+            />
 
-          <ApplicationsTable
-            rows={data.applications}
-            nextCursor={data.nextCursor}
-            pageLoaded={portfolio.pageLoaded}
-            onPrevPage={portfolio.prevPage}
-            onNextPage={portfolio.nextPage}
-          />
+            <ApplicationsTable
+              rows={data.applications}
+              nextCursor={data.nextCursor}
+              pageLoaded={portfolio.pageLoaded}
+              onPrevPage={portfolio.prevPage}
+              onNextPage={portfolio.nextPage}
+            />
 
-          {data.truncated && (
-            <p className="font-mono text-[11px] text-warning">
-              The portfolio is larger than one response can carry ({'>'}1000 rows); narrow with filters or pages.
-            </p>
-          )}
+            {data.truncated && (
+              <p className="font-mono text-[11px] text-warning">
+                The portfolio is larger than one response can carry ({'>'}1000 rows); narrow with filters or pages.
+              </p>
+            )}
+          </div>
         </>
       ) : null}
 
