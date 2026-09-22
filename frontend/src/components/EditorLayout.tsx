@@ -68,6 +68,7 @@ import { MobileMoreMenu } from './MobileMoreMenu';
 import { Masthead, type Tone } from './mobile/mobile-ui';
 import { MobileDashboard } from './mobile/MobileDashboard';
 import { MobileFleet } from './mobile/MobileFleet';
+import { MobileGitOps } from './mobile/MobileGitOps';
 import { MobileSchedules } from './mobile/MobileSchedules';
 import { MobileSettings } from './mobile/MobileSettings';
 import { deriveMobileSurface, type MobileView } from './EditorLayout/mobile-surface';
@@ -473,6 +474,11 @@ export default function EditorLayout() {
   // before loadFile's fetch resolves selectedFile; cleared once it settles.
   const [pendingDetailStack, setPendingDetailStack] = useState<string | null>(null);
   const [pendingAnatomyTab, setPendingAnatomyTab] = useState<'networking' | 'doctor' | 'dossier' | 'drift' | undefined>();
+  // Set by the 'git' open-stack destination; the panel opens only once the
+  // requested stack has actually loaded, so a cross-node hop (or a canceled
+  // dirty-editor switch) never opens it against the stack that was selected
+  // before the request.
+  const [pendingGitPanelStack, setPendingGitPanelStack] = useState<string | null>(null);
   const [fleetUpdatesIntent, setFleetUpdatesIntent] = useState<{ tab: 'nodes' | 'changelog' } | null>(null);
   onDeletedOpenStackRef.current = () => {
     setPendingDetailStack(null);
@@ -554,6 +560,15 @@ export default function EditorLayout() {
     return undefined;
   }, [isFileLoading, pendingAnatomyTab, selectedFile]);
 
+  useEffect(() => {
+    if (pendingGitPanelStack === null || selectedFile !== pendingGitPanelStack || isFileLoading) return undefined;
+    const timer = window.setTimeout(() => {
+      setPendingGitPanelStack(null);
+      setGitSourceOpen(true);
+    }, 0);
+    return () => window.clearTimeout(timer);
+  }, [pendingGitPanelStack, selectedFile, isFileLoading, setGitSourceOpen]);
+
   // A phone shows one surface at a time, so every mobile navigation tears down
   // the current detail and switches surfaces, guarding a dirty editor first.
   // `then` runs the destination-specific work (navigate to a view, open
@@ -615,6 +630,7 @@ export default function EditorLayout() {
         : destination === 'drift' ? 'drift'
         : undefined,
     );
+    if (destination === 'git') setPendingGitPanelStack(stackName);
     if (isMobile) setPendingDetailStack(stackName);
     if (activeNode?.id === nodeId) {
       void stackActions.loadFile(stackName);
@@ -1288,6 +1304,14 @@ export default function EditorLayout() {
                     <AuditLogView headerActions={mobileMastheadActions} />
                   </Suspense>
                 </CapabilityGate>
+              </HubOnlyGate>
+            );
+          case 'gitops':
+            // Hub-only like the desktop path (ViewRouter); Community surface,
+            // reuses the desktop hook through the bespoke phone screen.
+            return (
+              <HubOnlyGate>
+                <MobileGitOps headerActions={mobileMastheadActions} />
               </HubOnlyGate>
             );
           case 'resources':

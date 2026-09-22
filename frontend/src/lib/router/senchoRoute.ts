@@ -12,6 +12,7 @@ const VIEW_SEGMENTS = {
   templates: 'templates',
   'global-observability': 'logs',
   fleet: 'fleet',
+  gitops: 'gitops',
   security: 'security',
   'audit-log': 'audit',
   'scheduled-ops': 'schedules',

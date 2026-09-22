@@ -81,6 +81,28 @@ function currentPath(): string {
   return window.location.pathname + window.location.search;
 }
 
+/**
+ * Views that own URL query parameters the route state does not model.
+ *
+ * The settled writer below derives a canonical path from route state; for
+ * these views that path intentionally carries no query, while the view itself
+ * writes its own parameters (for example the GitOps portfolio's filters, so a
+ * triage view can be linked). Without this set the writer would strip those
+ * parameters moments after the view set them, and a copied or reloaded link
+ * would silently lose the question it encoded.
+ *
+ * Add a view here only when it manages its own query parameters and keeps them
+ * in sync itself; the writer then leaves them alone as long as the router is
+ * not moving to a different path.
+ */
+const VIEW_OWNED_QUERY: ReadonlySet<ActiveView> = new Set(['gitops']);
+
+function splitSearch(path: string): { pathname: string; search: string } {
+  const question = path.indexOf('?');
+  if (question === -1) return { pathname: path, search: '' };
+  return { pathname: path.slice(0, question), search: path.slice(question) };
+}
+
 function readIdx(state: unknown): number | null {
   if (state && typeof state === 'object' && 'senchoIdx' in state) {
     const v = (state as HistoryState).senchoIdx;
@@ -474,6 +496,13 @@ export function useUrlSync(options: UseUrlSyncOptions) {
 
     const target = buildCurrentPath();
     if (!target || target === currentPath()) return;
+    // Never strip parameters a view owns on the path it already occupies:
+    // see VIEW_OWNED_QUERY.
+    if (VIEW_OWNED_QUERY.has(options.activeView)) {
+      const built = splitSearch(target);
+      const shown = splitSearch(currentPath());
+      if (built.search === '' && built.pathname === shown.pathname) return;
+    }
 
     const intent: RouteIntent = routeReplaceRef.current ? 'replace' : 'push';
     routeReplaceRef.current = false;

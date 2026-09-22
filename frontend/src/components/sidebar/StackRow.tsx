@@ -10,6 +10,7 @@ import { sidebarRowActive, sidebarRowBase, sidebarRowCheckboxSlot } from './side
 import { statusText, statusColor } from './stack-status-utils';
 import type { StackRowStatus } from './stack-status-utils';
 import { updateAvailableLabel } from '@/lib/updateAvailableLabel';
+import { openGitOpsWorkplace } from '@/components/gitops/portfolio/portfolioNavigation';
 import { SOURCE_STATE_LOOKUP } from '@/lib/gitopsState';
 import type { GitOpsSourceStatus } from '@/types/gitops';
 
@@ -188,7 +189,21 @@ export function StackRow(props: StackRowProps) {
           />
         ) : gitPending ? (
           <RowTooltip
-            trigger={<span data-testid="stack-trailing-git-pending"><GitBranch className="w-3 h-3 text-brand" strokeWidth={1.5} /></span>}
+            trigger={
+              // Click opens the GitOps workplace; hovering explains. The stack
+              // row keeps its own click target (stopPropagation above it).
+              <button
+                type="button"
+                data-testid="stack-trailing-git-pending"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  openGitOpsWorkplace();
+                }}
+                aria-label="Open the GitOps portfolio"
+              >
+                <GitBranch className="w-3 h-3 text-brand" strokeWidth={1.5} />
+              </button>
+            }
             label={SOURCE_STATE_LOOKUP[gitPending]?.line ?? 'A Git update is waiting on this stack.'}
           />
         ) : null}

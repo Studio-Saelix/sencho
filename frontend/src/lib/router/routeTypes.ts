@@ -8,6 +8,7 @@ export const HUB_ONLY_VIEWS: ReadonlySet<ActiveView> = new Set([
   'audit-log',
   'global-observability',
   'auto-updates',
+  'gitops',
 ]);
 
 export type ActiveView =
@@ -19,6 +20,7 @@ export type ActiveView =
   | 'templates'
   | 'global-observability'
   | 'fleet'
+  | 'gitops'
   | 'security'
   | 'audit-log'
   | 'scheduled-ops'
