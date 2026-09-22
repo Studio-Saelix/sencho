@@ -656,7 +656,8 @@ export type LiveSourceFacet = Exclude<SourceFacet, { status: 'not_applicable' }>
  * Two exclusions, and both mean "this surface has nothing to say", not "an
  * error": the absent arm carries no facets at all, and a live application whose
  * source facet is `not_applicable` is Blueprint-owned, where naming a source
- * state would be a claim the model never made.
+ * state would be a claim the model never made. Defensively, a live payload
+ * missing its facets (a malformed remote answer) also reads as nothing to show.
  */
 export function liveSourceFacet(revision: GitOpsRevisionProjection | null): LiveSourceFacet | null {
   if (!revision || revision.targetMode === 'not_applicable' || !revision.facets) return null;

@@ -27,7 +27,7 @@ export const GITOPS_APPLICATION_EVENT = 'sencho:gitops-application';
 /** Marks a history entry this module pushed, so closing can pop it instead of stacking another. */
 const PUSHED_MARKER = 'senchoGitOpsApplication';
 
-/** Portfolio ids are short (`bp:<n>`, `<node>:<uuid>`, `<node>:legacy:<stack>`); anything longer is not one. */
+/** A generous cap well above any real portfolio id (`bp:<n>`, `<node>:<uuid>`, `<node>:legacy:<stack>`); longer values are rejected as malformed. */
 const MAX_APPLICATION_ID_LEN = 512;
 
 /** The application id encoded in a search string, or null when none (or a malformed one) is present. */
@@ -47,9 +47,9 @@ function historyStateObject(): Record<string, unknown> {
 }
 
 /**
- * Open one application's view. Pushes a history entry on the current path,
- * keeping the router's own history marker so its back/forward deltas stay
- * intact.
+ * Open one application's view. Pushes a history entry on the current path
+ * that copies the router's `senchoIdx`, so the router sees Back and Forward
+ * across this entry as a delta of 0 and does not treat it as a route change.
  */
 export function openGitOpsApplication(id: string): void {
   const params = new URLSearchParams();
@@ -100,17 +100,29 @@ export function openBlueprintGitApplication(row: GitOpsPortfolioRow): void {
   }));
 }
 
+export interface OwningSurfaceHandoff {
+  label: string;
+  open: () => void;
+}
+
 /**
  * The owning surface for an application, by target mode, or null when the
  * row carries no identity that surface could open.
  */
-export function owningSurfaceHandoff(row: GitOpsPortfolioRow): { label: string; open: () => void } | null {
-  if (row.targetMode === 'direct') {
-    if (row.nodeId === null || row.stackName === null) return null;
-    return { label: 'Open stack', open: () => openDirectGitApplication(row) };
+export function owningSurfaceHandoff(row: GitOpsPortfolioRow): OwningSurfaceHandoff | null {
+  switch (row.targetMode) {
+    case 'direct':
+      if (row.nodeId === null || row.stackName === null) return null;
+      return { label: 'Open stack', open: () => openDirectGitApplication(row) };
+    case 'blueprint':
+    case 'inline_blueprint':
+      if (row.blueprintId === null) return null;
+      return { label: 'Open Blueprint deployments', open: () => openBlueprintGitApplication(row) };
+    default: {
+      const unhandled: never = row.targetMode;
+      return unhandled;
+    }
   }
-  if (row.blueprintId === null) return null;
-  return { label: 'Open Blueprint deployments', open: () => openBlueprintGitApplication(row) };
 }
 
 /** Where every contextual GitOps indicator (dashboard badge, sidebar pending icon) leads. */
@@ -120,7 +132,7 @@ export function openGitOpsWorkplace(): void {
   }));
 }
 
-/** The drill-down for one row: its application view. Every portfolio row has an id the detail read resolves. */
+/** The drill-down for one row: its application view, keyed by the row's portfolio id. */
 export function openPortfolioApplication(row: GitOpsPortfolioRow): void {
   openGitOpsApplication(row.id);
 }

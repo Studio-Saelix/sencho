@@ -10,19 +10,21 @@ import { useGitOpsApplication, type GitOpsApplicationError } from './useGitOpsAp
 
 /**
  * One GitOps application inside the workplace: the read-only review surface a
- * portfolio row drills into. It renders; it never acts. The one action it
- * offers is the hand-off to the surface that owns operator decisions for this
+ * portfolio row drills into. It never changes state; its only outbound action
+ * is the hand-off to the surface that owns operator decisions for this
  * application (the stack's Git panel, or the Blueprint deployments tab).
  *
- * Used by both the desktop workplace and the phone screen; the layout below
- * reflows to one column on a narrow viewport without a separate phone build,
- * because reviewing an application is the review-capable part of the loop.
+ * Used by both the desktop workplace and the phone screen; the layout reflows
+ * to one column on a narrow viewport without a separate phone build, because
+ * review is the part of the operate loop the phone supports and acting stays
+ * on the owning surfaces.
  */
 export function GitOpsApplicationView({ id, className }: { id: string; className?: string }) {
   const { data, loading, error, staleSince, refreshing, refresh } = useGitOpsApplication(id);
   const row = data?.application ?? null;
   const handoff = row ? owningSurfaceHandoff(row) : null;
-  const posture = row ? POSTURE_LABEL[row.posture] : null;
+  // A posture from a newer build still renders, as an explicit unknown.
+  const posture = row ? (POSTURE_LABEL[row.posture] ?? { label: `unrecognized (${row.posture})`, tone: 'neutral' as const }) : null;
 
   return (
     <div data-testid="gitops-application-view" className={cn('flex h-full min-h-0 flex-col overflow-hidden p-6', className)}>
@@ -61,9 +63,14 @@ export function GitOpsApplicationView({ id, className }: { id: string; className
                   </span>
                 )}
                 {staleSince !== null && (
-                  <span className="rounded-sm border border-warning/30 bg-warning/10 px-1.5 py-0.5 font-mono text-[10px] uppercase tracking-wide text-warning">
-                    last refresh failed · showing last-known
-                  </span>
+                  <>
+                    <span className="rounded-sm border border-warning/30 bg-warning/10 px-1.5 py-0.5 font-mono text-[10px] uppercase tracking-wide text-warning">
+                      last refresh failed · showing last-known
+                    </span>
+                    <Button variant="ghost" size="sm" className="h-6 px-2 font-mono text-[10px] uppercase tracking-wide max-md:min-h-11" onClick={refresh}>
+                      Retry
+                    </Button>
+                  </>
                 )}
               </div>
             </div>
@@ -86,12 +93,22 @@ function errorCopy(error: GitOpsApplicationError): { title: string; line: string
     case 'not_readable':
       return {
         title: 'This application is not available',
-        line: 'It no longer exists, or your account cannot read it.',
+        line: 'It no longer exists, your account cannot read it, or its owning node is not reporting it right now.',
+      };
+    case 'invalid_link':
+      return {
+        title: 'This link does not point to a GitOps application',
+        line: 'Open the application from the portfolio list instead.',
+      };
+    case 'unsupported':
+      return {
+        title: 'The owning node cannot show this application',
+        line: `Update that node to the same Sencho version as this one to read its applications here (${error.message}).`,
       };
     case 'unreachable':
       return {
         title: 'The owning node did not answer',
-        line: `${error.message}. The application's state is unknown until the node reports again.`,
+        line: `The application's state is unknown until the node reports again (${error.message}).`,
       };
     case 'failed':
       return { title: 'The application could not be read', line: error.message };
@@ -104,7 +121,7 @@ function ApplicationLoadError({ error, onRetry }: { error: GitOpsApplicationErro
     <div data-testid="gitops-application-error" data-error={error.kind} className="flex flex-1 flex-col items-center justify-center gap-3 text-center">
       <p className="font-heading text-xl text-stat-value">{copy.title}</p>
       <p className="max-w-md font-mono text-xs text-stat-subtitle">{copy.line}</p>
-      {error.kind !== 'not_readable' && (
+      {error.kind !== 'invalid_link' && error.kind !== 'unsupported' && (
         <Button variant="outline" size="sm" className="max-md:min-h-11" onClick={onRetry}>Retry</Button>
       )}
     </div>

@@ -177,12 +177,49 @@ describe('GitOpsApplicationView', () => {
     window.removeEventListener(SENCHO_NAVIGATE_EVENT, listener);
   });
 
-  it('explains an unreadable application without offering a retry that cannot help', async () => {
+  it('explains an unreadable application and still offers a retry, since a node may be mid-transition', async () => {
     mockFetch.mockResolvedValueOnce({ ok: false, status: 404, json: async () => ({ error: 'Application not found' }) } as unknown as Response);
     render(<GitOpsApplicationView id="1:gone" />);
     await waitFor(() => expect(screen.getByTestId('gitops-application-error')).toHaveAttribute('data-error', 'not_readable'));
     expect(screen.getByText('This application is not available')).toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: 'Retry' })).toBeNull();
+    expect(screen.getByRole('button', { name: 'Retry' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /all applications/i })).toBeInTheDocument();
+  });
+
+  it('offers no retry for a node too old to answer, and retries an unreachable one', async () => {
+    mockFetch.mockResolvedValueOnce({
+      ok: false, status: 502, json: async () => ({ error: 'too old', code: 'node_unsupported' }),
+    } as unknown as Response);
+    const { unmount } = render(<GitOpsApplicationView id="2:a" />);
+    await waitFor(() => expect(screen.getByTestId('gitops-application-error')).toHaveAttribute('data-error', 'unsupported'));
+    expect(screen.queryByRole('button', { name: 'Retry' })).toBeNull();
+    unmount();
+
+    mockFetch.mockResolvedValueOnce({ ok: false, status: 503, json: async () => ({ error: 'Owning node is unreachable' }) } as unknown as Response);
+    render(<GitOpsApplicationView id="2:a" />);
+    await waitFor(() => expect(screen.getByTestId('gitops-application-error')).toHaveAttribute('data-error', 'unreachable'));
+    mockFetch.mockResolvedValueOnce(ok(detailResponse()));
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+    expect(await screen.findByRole('heading', { name: 'bookstack' })).toBeInTheDocument();
+  });
+
+  it('shows a last-known banner with a retry when a refresh fails', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    mockFetch.mockResolvedValueOnce(ok(detailResponse()));
+    render(<GitOpsApplicationView id="1:app-1" />);
+    await screen.findByRole('heading', { name: 'bookstack' });
+
+    mockFetch.mockRejectedValueOnce(new Error('network down'));
+    window.dispatchEvent(new CustomEvent('sencho:state-invalidate', { detail: { scope: 'gitops' } }));
+    expect(await screen.findByText(/last refresh failed/i)).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: 'bookstack' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Retry' })).toBeInTheDocument();
+  });
+
+  it('offers no hand-off when the row names no surface that could open it', async () => {
+    mockFetch.mockResolvedValueOnce(ok(detailResponse({ nodeId: null })));
+    render(<GitOpsApplicationView id="1:app-1" />);
+    await screen.findByRole('heading', { name: 'bookstack' });
+    expect(screen.queryByRole('button', { name: /open stack/i })).toBeNull();
   });
 });

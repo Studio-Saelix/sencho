@@ -44,12 +44,66 @@ describe('useGitOpsApplication', () => {
     expect(result.current.error).toBeNull();
   });
 
-  it.each([404, 403, 400])('reports %i as not readable, without distinguishing absent from forbidden', async (status) => {
+  it.each([404, 403])('reports %i as not readable, without distinguishing absent from forbidden', async (status) => {
     mockFetch.mockResolvedValueOnce(fail(status, 'Application not found'));
     const { result } = renderHook(() => useGitOpsApplication('1:gone'));
     await waitFor(() => expect(result.current.loading).toBe(false));
     expect(result.current.error).toEqual({ kind: 'not_readable' });
     expect(result.current.data).toBeNull();
+  });
+
+  it('reports a malformed id as an invalid link, not as a missing application', async () => {
+    mockFetch.mockResolvedValueOnce(fail(400, 'Application id is not a portfolio id'));
+    const { result } = renderHook(() => useGitOpsApplication('nonsense'));
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    expect(result.current.error).toEqual({ kind: 'invalid_link' });
+  });
+
+  it('tells a node too old to answer apart from a node that did not answer', async () => {
+    mockFetch.mockResolvedValueOnce({
+      ok: false, status: 502, json: async () => ({ error: 'Owning node cannot answer GitOps portfolio reads', code: 'node_unsupported' }),
+    } as unknown as Response);
+    const { result } = renderHook(() => useGitOpsApplication('2:app'));
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    expect(result.current.error).toEqual({ kind: 'unsupported', message: 'Owning node cannot answer GitOps portfolio reads' });
+  });
+
+  it('reports a 502 without the unsupported code as unreachable', async () => {
+    mockFetch.mockResolvedValueOnce(fail(502, 'Bad Gateway'));
+    const { result } = renderHook(() => useGitOpsApplication('2:app'));
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    expect(result.current.error).toEqual({ kind: 'unreachable', message: 'Bad Gateway' });
+  });
+
+  it('reports a server failure and a thrown first load as failed, with no data', async () => {
+    mockFetch.mockResolvedValueOnce(fail(500, 'boom'));
+    const first = renderHook(() => useGitOpsApplication('1:a'));
+    await waitFor(() => expect(first.result.current.error).toEqual({ kind: 'failed', message: 'boom' }));
+
+    mockFetch.mockRejectedValueOnce(new Error('network down'));
+    const second = renderHook(() => useGitOpsApplication('1:b'));
+    await waitFor(() => expect(second.result.current.error).toEqual({ kind: 'failed', message: 'network down' }));
+    expect(second.result.current.data).toBeNull();
+  });
+
+  it('rejects a successful answer it cannot read instead of rendering a blank view', async () => {
+    mockFetch.mockResolvedValueOnce({ ok: true, status: 200, json: async () => ({ schemaVersion: 2 }) } as unknown as Response);
+    const { result } = renderHook(() => useGitOpsApplication('1:a'));
+    await waitFor(() => expect(result.current.error?.kind).toBe('failed'));
+    expect(result.current.data).toBeNull();
+  });
+
+  it('never lets a slow earlier answer overwrite a newer one', async () => {
+    let resolveFirst: (r: Response) => void = () => {};
+    mockFetch.mockReturnValueOnce(new Promise<Response>(resolve => { resolveFirst = resolve; }));
+    const { result } = renderHook(() => useGitOpsApplication('1:app-1'));
+
+    mockFetch.mockResolvedValueOnce(ok(detailResponse({ name: 'new' })));
+    act(() => result.current.refresh());
+    await waitFor(() => expect(result.current.data?.application.name).toBe('new'));
+
+    await act(async () => resolveFirst(ok(detailResponse({ name: 'old' }))));
+    expect(result.current.data?.application.name).toBe('new');
   });
 
   it('reports an unreachable owning node as unreachable, with the server message', async () => {
@@ -80,6 +134,7 @@ describe('useGitOpsApplication', () => {
     act(() => result.current.refresh());
     await waitFor(() => expect(result.current.error).toEqual({ kind: 'not_readable' }));
     expect(result.current.data).toBeNull();
+    expect(result.current.staleSince).toBeNull();
   });
 
   it('refetches on a gitops invalidation and ignores other scopes', async () => {

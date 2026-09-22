@@ -26,7 +26,7 @@ import type { GitOpsPortfolioDetailResponse, GitOpsPortfolioRow } from '@/types/
 const SECTION_LABEL = 'font-mono text-[10px] uppercase tracking-[0.18em] text-stat-subtitle';
 const CARD_SHELL = 'rounded-lg border border-card-border border-t-card-border-top bg-card shadow-card-bevel';
 
-const TARGET_MODE_LABEL: Record<GitOpsPortfolioRow['targetMode'], string> = {
+const TARGET_MODE_LABEL: Partial<Record<string, string>> & Record<GitOpsPortfolioRow['targetMode'], string> = {
   direct: 'Direct node',
   blueprint: 'Blueprint',
   inline_blueprint: 'Inline Blueprint',
@@ -87,6 +87,11 @@ function observedArtifactLine(observed: ObservedArtifactIdentity): string {
       return `observed ${observed.identity} (stale)`;
     case 'local_build_unverified':
       return `observed ${observed.identity} (local build, unverified)`;
+    default: {
+      // A kind from a newer build: say so rather than end the line blank.
+      const kind: string = (observed as { kind: string }).kind;
+      return `observed artifact of unrecognized kind "${kind}"`;
+    }
   }
 }
 
@@ -115,9 +120,12 @@ function TargetCard({ target, nodeName }: { target: GitOpsTargetProjection; node
  * One GitOps application, in full: identity, attention, decomposed authority,
  * the four application facets, every target, classified drift, and caveats.
  *
- * Presentation only. Every state rendered here is the canonical projection
- * the endpoint returned, read through the same lookups and cards the Git
- * source panel, Drift tab and Blueprint sheet use; nothing is derived locally.
+ * Presentation only: every status comes from the projection the endpoint
+ * returned, and facet and runtime statuses read through the same lookups and
+ * cards the Git source panel, Drift tab and Blueprint sheet use. No status is
+ * inferred here; one this build does not recognize is labelled unrecognized
+ * rather than guessed. Health, connectivity and last known good are shown as
+ * their raw status words.
  * Application-level facts precede per-node facts, and caveats come last.
  */
 export default function GitOpsApplicationDetail({ detail }: { detail: GitOpsPortfolioDetailResponse }) {
@@ -136,7 +144,7 @@ export default function GitOpsApplicationDetail({ detail }: { detail: GitOpsPort
       <div className="flex min-w-0 flex-col gap-6">
         <Section label="Identity">
           <dl className={cn(CARD_SHELL, 'grid grid-cols-[auto_minmax(0,1fr)] gap-x-4 gap-y-1.5 px-3 py-2.5')}>
-            <IdentityRow term="Target">{TARGET_MODE_LABEL[row.targetMode]}</IdentityRow>
+            <IdentityRow term="Target">{TARGET_MODE_LABEL[row.targetMode] ?? `unrecognized (${row.targetMode})`}</IdentityRow>
             {row.targetMode === 'direct'
               ? <IdentityRow term="Node">{row.nodeId === null ? 'none' : nodeName(row.nodeId)}</IdentityRow>
               : <IdentityRow term="Blueprint">{row.blueprintId === null ? 'none' : `#${row.blueprintId}`}</IdentityRow>}

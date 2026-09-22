@@ -2,11 +2,12 @@
  * Rendering tests for the portfolio attention queue.
  *
  * What matters: failures sort ahead of pending decisions, the *reason* words
- * are inline (never tooltip-only), and every entry drills into the owning
- * surface rather than duplicating it.
+ * are inline (never tooltip-only), and every entry opens that application's
+ * view, whether or not its row names an owning surface.
  */
-import { describe, expect, it } from 'vitest';
-import { render, screen } from '@testing-library/react';
+import { describe, expect, it, vi } from 'vitest';
+import { fireEvent, render, screen } from '@testing-library/react';
+import { applicationIdFromSearch } from './portfolioNavigation';
 import { AttentionQueue } from './AttentionQueue';
 import type { GitOpsPortfolioRow } from '@/types/gitopsPortfolio';
 
@@ -72,5 +73,23 @@ describe('AttentionQueue', () => {
     const items = screen.getAllByRole('listitem');
     expect(items[0]!.textContent).toContain('failed-app');
     expect(items[1]!.textContent).toContain('pending-app');
+  });
+
+  it('opens the application view even for a row with no owning surface identity', () => {
+    window.history.replaceState({}, '', '/nodes/local/gitops');
+    render(<AttentionQueue rows={[row({ attention: ['source_failed'], nodeId: null, stackName: null })]} />);
+    const open = screen.getByRole('button', { name: /web/ });
+    expect(open).toBeEnabled();
+    fireEvent.click(open);
+    expect(applicationIdFromSearch(window.location.search)).toBe('1:app-x');
+  });
+
+  it('routes a drill-down to the override when one is given, leaving the URL alone', () => {
+    window.history.replaceState({}, '', '/nodes/local/gitops');
+    const onDrillDown = vi.fn();
+    render(<AttentionQueue rows={[row({ attention: ['source_failed'] })]} onDrillDown={onDrillDown} />);
+    fireEvent.click(screen.getByRole('button', { name: /web/ }));
+    expect(onDrillDown).toHaveBeenCalledWith(expect.objectContaining({ id: '1:app-x' }));
+    expect(window.location.search).toBe('');
   });
 });

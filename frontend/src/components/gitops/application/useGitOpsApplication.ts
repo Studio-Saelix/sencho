@@ -16,16 +16,26 @@ const INVALIDATE_DEBOUNCE_MS = 250;
 /**
  * Why there is no application to show.
  *
- * `not_readable` covers both "does not exist" and "not yours to read": the
- * endpoint answers 404 for an application the caller may not read, precisely
- * so the two cannot be told apart. `unreachable` is the owning node failing to
- * answer, which says nothing about the application itself.
+ * `not_readable` covers "does not exist" and "not yours to read" (a Direct
+ * read answers 404 for both, precisely so the two cannot be told apart) and a
+ * Blueprint read without fleet read access (403). `invalid_link` is an id that
+ * is not a portfolio id at all (400). `unreachable` is the owning node failing to answer, and
+ * `unsupported` is the owning node answering that it cannot serve this read;
+ * neither says anything about the application itself.
  */
 export type GitOpsApplicationError =
   | { kind: 'not_readable' }
+  | { kind: 'invalid_link' }
   | { kind: 'unreachable'; message: string }
+  | { kind: 'unsupported'; message: string }
   | { kind: 'failed'; message: string };
 
+/**
+ * The hook keeps three rules the flat shape (shared with the portfolio hook)
+ * does not encode: `data` and `error` are never both set, `staleSince` is only
+ * set while `data` is, and `loading` is true only while there is no answer to
+ * show (the first load, or a retry after a failed one).
+ */
 export interface GitOpsApplicationState {
   data: GitOpsPortfolioDetailResponse | null;
   loading: boolean;
@@ -39,22 +49,37 @@ export interface GitOpsApplicationState {
 class ApplicationReadError extends Error {
   readonly failure: GitOpsApplicationError;
   constructor(failure: GitOpsApplicationError) {
-    super(failure.kind === 'not_readable' ? 'Application not found' : failure.message);
+    super('message' in failure ? failure.message : failure.kind);
     this.failure = failure;
   }
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null;
+}
+
+/** Enough of the shape to render without crashing; anything else is an answer this build cannot read. */
+function isDetailResponse(body: unknown): body is GitOpsPortfolioDetailResponse {
+  return isRecord(body) && body.schemaVersion === 1 && isRecord(body.application) && isRecord(body.projection);
+}
+
 async function readApplication(id: string): Promise<GitOpsPortfolioDetailResponse> {
   const res = await apiFetch(`/gitops/applications/${encodeURIComponent(id)}`, { localOnly: true });
-  if (res.ok) return await res.json() as GitOpsPortfolioDetailResponse;
-  const body = await res.json().catch(() => null) as { error?: string } | null;
+  if (res.ok) {
+    const body: unknown = await res.json().catch(() => null);
+    if (!isDetailResponse(body)) {
+      throw new ApplicationReadError({ kind: 'failed', message: 'The server returned an answer this version of Sencho cannot read.' });
+    }
+    return body;
+  }
+  const body = await res.json().catch(() => null) as { error?: string; code?: string } | null;
   const message = body?.error ?? `HTTP ${res.status}`;
-  if (res.status === 404 || res.status === 403 || res.status === 400) {
-    throw new ApplicationReadError({ kind: 'not_readable' });
+  if (res.status === 400) throw new ApplicationReadError({ kind: 'invalid_link' });
+  if (res.status === 404 || res.status === 403) throw new ApplicationReadError({ kind: 'not_readable' });
+  if (res.status === 502 && body?.code === 'node_unsupported') {
+    throw new ApplicationReadError({ kind: 'unsupported', message });
   }
-  if (res.status === 502 || res.status === 503) {
-    throw new ApplicationReadError({ kind: 'unreachable', message });
-  }
+  if (res.status === 502 || res.status === 503) throw new ApplicationReadError({ kind: 'unreachable', message });
   throw new ApplicationReadError({ kind: 'failed', message });
 }
 
@@ -69,7 +94,10 @@ export function useGitOpsApplication(id: string): GitOpsApplicationState {
 
   const fetchApplication = useCallback(async () => {
     const current = ++generation.current;
+    // With data on screen this is a refresh; without it (a retry after a
+    // failed load) it is a load again, so the view shows progress either way.
     if (dataRef.current !== null) setRefreshing(true);
+    else setLoading(true);
     try {
       const body = await readApplication(id);
       if (current !== generation.current) return;
@@ -82,14 +110,16 @@ export function useGitOpsApplication(id: string): GitOpsApplicationState {
       const failure: GitOpsApplicationError = e instanceof ApplicationReadError
         ? e.failure
         : { kind: 'failed', message: e instanceof Error ? e.message : 'Failed to load the application.' };
-      if (failure.kind === 'not_readable' || dataRef.current === null) {
+      if (failure.kind === 'not_readable' || failure.kind === 'invalid_link' || dataRef.current === null) {
         // An application that stopped being readable is gone from this view,
         // not stale: keeping its last state would show something the reader
         // may no longer see.
         dataRef.current = null;
         setData(null);
+        setStaleSince(null);
         setError(failure);
       } else {
+        console.warn('[GitOps application] refresh failed; showing last-known state', id, failure);
         setStaleSince(prev => prev ?? Date.now());
       }
     } finally {

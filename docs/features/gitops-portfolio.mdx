@@ -34,9 +34,24 @@ Rows with pending or failed items are tinted so the list reads as a signal, not 
 
 ## The attention queue
 
-Above the list, the **Attention required** section groups everything currently waiting: failed reconciliations, pending reviews or authorizations, preflight blocks like an unready private registry, partial or paused rollouts, drift, stale or unreachable targets, and recovery states. Each entry names the application and states the reason in one inline line, so it is readable without hovering anything. Opening an entry hands off to the surface that owns that decision: the stack's Git Source sheet for a Direct application, the Blueprint's deployments for a Blueprint application.
+Above the list, the **Attention required** section groups everything currently waiting: failed reconciliations, pending reviews or authorizations, preflight blocks like an unready private registry, partial or paused rollouts, drift, stale or unreachable targets, and recovery states. Each entry names the application and states the reason in one inline line, so it is readable without hovering anything. Opening an entry shows that application's full state (see [One application](#one-application) below).
 
 Failure-toned entries (failures, unreachable targets, failed rollbacks or recovery) sort ahead of pending decisions.
+
+## One application
+
+Selecting an application name in the list, or an entry in the attention queue, opens that application's view without leaving the portfolio. It is read-only and shows, in order:
+
+- **Identity**: the target (Direct node or Blueprint), the repository and ref, the desired and fetched commits, the candidate and accepted source generations, and for a Blueprint application the rollout generation.
+- **Attention**: every reason the application is waiting on an operator, each with its one-line explanation.
+- **Application state**: the three authority steps as separate chips (**source accepted**, **placement approved**, **rollout authorized**, plus a **legacy combined approval** chip when one was recorded), then the source, artifact, placement, and rollout state cards.
+- **Targets**: one card per node, with its runtime state, health, connectivity, last known good state, the deployed generation, and the artifact identity observed running there. A target is never folded into an aggregate; a node reporting a state this Sencho build does not recognize still gets a card that says so.
+- **Drift**: each confirmed divergence, expected versus observed.
+- Anything Sencho could not prove about the state shown, stated last.
+
+When some targets could not be reached, a notice names them so their cards are not read as current. The view's URL carries the application, so it can be bookmarked or shared, and the browser's Back button (or **All applications**) returns to the list with its filters intact.
+
+To act on the application, use the button in the view's header: **Open stack** takes a Direct application to its stack's Git Source sheet, and **Open Blueprint deployments** takes a Blueprint application to the Fleet deployments tab.
 
 ## Filtering and search
 
@@ -54,4 +69,4 @@ The portfolio refreshes on GitOps transitions, not on a timer. When a node canno
 - Verifying a rollout or webhook pipeline end to end, across stacks and nodes.
 - Finding drift concentrated on a node or in one class, for example all runtime drift across the fleet at once.
 
-Single-application work (reviewing a candidate, authorizing a rollout, recovering) keeps its home on the owning stack or Blueprint surfaces; the portfolio always links there instead of duplicating them.
+Single-application actions (reviewing a candidate, authorizing a rollout, recovering) keep their home on the owning stack or Blueprint surfaces; the application view shows the full state and links there instead of duplicating them.

@@ -18,8 +18,9 @@ import { useGitOpsApplicationSelection } from '../application/useGitOpsApplicati
  * never a per-node browser poll.
  *
  * A row drills into its application view in place (the `application` query
- * parameter); the portfolio hook stays mounted underneath, so returning to the
- * list keeps its filters and page without a reload.
+ * parameter). The portfolio hook keeps running while the application view
+ * replaces the list, so returning keeps its filters and page (both held in
+ * hook state) without a reload.
  *
  * Desktop only by itself; the phone treatment is the bespoke screen in
  * components/mobile/MobileGitOps.tsx (mobile-treatments entry: bespoke).

@@ -186,7 +186,7 @@ function MobileGitOpsRow({ row }: { row: GitOpsPortfolioRow }) {
     <li>
       <button
         type="button"
-        onClick={() => void openPortfolioApplication(row)}
+        onClick={() => openPortfolioApplication(row)}
         className="block w-full min-h-11 px-3 py-2.5 text-left"
       >
         <span className="flex items-center gap-2">
