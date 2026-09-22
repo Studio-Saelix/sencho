@@ -81,6 +81,15 @@ export function closeGitOpsApplication(): void {
 }
 
 /**
+ * Return to the portfolio list if an application view is open; otherwise do
+ * nothing. For entry points that mean "take me to GitOps" (the nav item, the
+ * contextual indicators), which change nothing when GitOps is already active.
+ */
+export function closeGitOpsApplicationIfOpen(): void {
+  if (applicationIdFromSearch(window.location.search) !== null) closeGitOpsApplication();
+}
+
+/**
  * Open a Direct application's owning stack on its node, landing on the Git
  * panel. The shell consumes the event; a missing node or stack leaves the
  * operator wherever they were (the caller survives navigation failure).

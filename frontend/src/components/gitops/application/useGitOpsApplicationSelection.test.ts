@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest';
+import { SENCHO_NAVIGATE_EVENT } from '@/lib/events';
 import { act, renderHook } from '@testing-library/react';
 import { openGitOpsApplication } from '../portfolio/portfolioNavigation';
 import { useGitOpsApplicationSelection } from './useGitOpsApplicationSelection';
@@ -29,5 +30,19 @@ describe('useGitOpsApplicationSelection', () => {
       window.dispatchEvent(new PopStateEvent('popstate'));
     });
     expect(result.current).toBeNull();
+  });
+
+  it('closes an open application when something navigates to GitOps', () => {
+    window.history.replaceState({}, '', '/nodes/local/gitops?application=1%3Ax');
+    const { result } = renderHook(() => useGitOpsApplicationSelection());
+    act(() => {
+      window.dispatchEvent(new CustomEvent(SENCHO_NAVIGATE_EVENT, { detail: { view: 'fleet' } }));
+    });
+    expect(result.current).toBe('1:x');
+    act(() => {
+      window.dispatchEvent(new CustomEvent(SENCHO_NAVIGATE_EVENT, { detail: { view: 'gitops' } }));
+    });
+    expect(result.current).toBeNull();
+    expect(window.location.search).toBe('');
   });
 });

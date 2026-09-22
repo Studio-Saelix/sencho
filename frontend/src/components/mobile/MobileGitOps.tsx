@@ -54,7 +54,9 @@ export function MobileGitOps({ headerActions }: { headerActions?: ReactNode }) {
   const activeChip: typeof modeChips[number]['value'] =
     filters.attention === '1' ? 'attention' : filters.mode === 'direct' ? 'direct' : filters.mode === 'blueprint' ? 'blueprint' : 'all';
 
-  if (selectedApplication !== null) return <GitOpsApplicationView key={selectedApplication} id={selectedApplication} className="p-4" />;
+  if (selectedApplication !== null) return (
+      <GitOpsApplicationView key={selectedApplication} id={selectedApplication} className="p-4" headerActions={headerActions} />
+    );
 
   return (
     <div className="flex h-full flex-col">

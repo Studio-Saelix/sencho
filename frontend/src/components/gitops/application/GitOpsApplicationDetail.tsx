@@ -236,7 +236,7 @@ export default function GitOpsApplicationDetail({ detail }: { detail: GitOpsPort
               {row.evidence.partial
                 ? `Evidence is partial: ${row.evidence.unreachableNodes.length > 0
                   ? `${row.evidence.unreachableNodes.map(nodeName).join(', ')} could not be reached`
-                  : 'not every target could report'}, so the target state below may not be current.`
+                  : 'not every target could report'}, so their target state may not be current.`
                 : 'The evidence behind this application\'s state could not be established.'}
             </p>
           </div>

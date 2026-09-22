@@ -1,3 +1,4 @@
+import type { ReactNode } from 'react';
 import { ArrowLeft, ExternalLink, RefreshCw } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { ScrollArea } from '@/components/ui/scroll-area';
@@ -19,7 +20,12 @@ import { useGitOpsApplication, type GitOpsApplicationError } from './useGitOpsAp
  * review is the part of the operate loop the phone supports and acting stays
  * on the owning surfaces.
  */
-export function GitOpsApplicationView({ id, className }: { id: string; className?: string }) {
+export function GitOpsApplicationView({ id, className, headerActions }: {
+  id: string;
+  className?: string;
+  /** Shell actions for the top bar; the phone screen passes its masthead actions so they stay reachable. */
+  headerActions?: ReactNode;
+}) {
   const { data, loading, error, staleSince, refreshing, refresh } = useGitOpsApplication(id);
   const row = data?.application ?? null;
   const handoff = row ? owningSurfaceHandoff(row) : null;
@@ -36,6 +42,7 @@ export function GitOpsApplicationView({ id, className }: { id: string; className
         {refreshing && (
           <RefreshCw className="h-3.5 w-3.5 animate-spin text-stat-subtitle" strokeWidth={1.5} aria-label="Refreshing" />
         )}
+        {headerActions && <div className="ml-auto flex items-center gap-2">{headerActions}</div>}
       </div>
 
       {loading && !data ? (
@@ -103,7 +110,7 @@ function errorCopy(error: GitOpsApplicationError): { title: string; line: string
     case 'unsupported':
       return {
         title: 'The owning node cannot show this application',
-        line: `Update that node to the same Sencho version as this one to read its applications here (${error.message}).`,
+        line: `Its Sencho version cannot serve application reads; run the same version there as on this node (${error.message}).`,
       };
     case 'unreachable':
       return {

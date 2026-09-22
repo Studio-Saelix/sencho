@@ -11,6 +11,7 @@ import type { MuteRuleDraft } from '@/lib/muteRules';
 import type { ActiveView } from '@/lib/router/routeTypes';
 import { HUB_ONLY_VIEWS } from '@/lib/router/routeTypes';
 import { readUrlRouteState } from '@/lib/router/readUrlRouteState';
+import { closeGitOpsApplicationIfOpen } from '@/components/gitops/portfolio/portfolioNavigation';
 import {
   authzReady,
   isViewHidden,
@@ -96,7 +97,11 @@ export function useViewNavigationState(options?: UseViewNavigationStateOptions) 
   }, []);
 
   const handleNavigate = useCallback((value: string) => {
-    if (value === activeView) return;
+    if (value === activeView) {
+      // Re-selecting GitOps from an open application view returns to its list.
+      if (value === 'gitops') closeGitOpsApplicationIfOpen();
+      return;
+    }
     if (value === 'fleet') {
       setFleetActiveTab('overview');
     }
