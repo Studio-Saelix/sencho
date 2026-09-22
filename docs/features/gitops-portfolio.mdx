@@ -1,0 +1,57 @@
+---
+title: GitOps Portfolio
+description: A hub-wide workplace listing every Git-managed application, its canonical source/rollout/runtime evidence, and a triage queue of everything waiting on an operator.
+---
+
+The GitOps portfolio answers one question for the whole control plane: what is GitOps doing across every node right now, and what needs attention. It aggregates Direct Git sources and Blueprint-managed applications into a single hub-owned view, so reconciliation failures, pending reviews, drift, and unreachable targets surface in one place without visiting each node or stack.
+
+<Note>
+  The GitOps portfolio is available on every tier, including Community.
+</Note>
+
+## Open it
+
+Select **GitOps** in the main navigation (next to Fleet), or navigate to `/nodes/local/gitops`. The page lives on the hub: the active-node switcher does not change what it covers, and the entry is hidden while a remote node is selected.
+
+## Reading the page
+
+<Frame>
+  <img src="/images/gitops-portfolio/workplace.png" alt="The GitOps portfolio: a masthead reading Needs action with application and attention counts, a coverage notice naming an unreachable node, a filter bar, an Attention required list of source failed and review required entries, and an application table with source, runtime, health, drift, and attention columns" />
+</Frame>
+
+The masthead leads with the portfolio's verdict (`Converged`, `In progress`, `Needs attention`, `Needs action`, or `Unknown` when evidence is missing), followed by counts for applications, attention-required, drifted, in-progress, and converged applications. Qualified convergence counts separately from exact convergence: an application whose runtime matches its intent but whose executable artifact could not be proven bit-identical is shown as `Converged · qualified`, never as fully exact.
+
+The application list shows, per application:
+
+- the application name and target (**Direct** node or **Blueprint** with its target count)
+- the repository host/path and configured ref (secret-safe; credentials never appear)
+- canonical source, placement/rollout, runtime, and health states, using the same words as the Git Source sheet everywhere else in Sencho
+- confirmed drift, with its class (source, runtime, placement, and so on)
+- the freshest activity timestamp Sencho holds for it
+- attention chips when something is waiting on an operator
+
+Rows with pending or failed items are tinted so the list reads as a signal, not a spreadsheet. Statuses that arrived from a node running a newer Sencho build are shown with their raw state and flagged as unknown evidence rather than being reinterpreted as something else.
+
+## The attention queue
+
+Above the list, the **Attention required** section groups everything currently waiting: failed reconciliations, pending reviews or authorizations, preflight blocks like an unready private registry, partial or paused rollouts, drift, stale or unreachable targets, and recovery states. Each entry names the application and states the reason in one inline line, so it is readable without hovering anything. Opening an entry hands off to the surface that owns that decision: the stack's Git Source sheet for a Direct application, the Blueprint's deployments for a Blueprint application.
+
+Failure-toned entries (failures, unreachable targets, failed rollbacks or recovery) sort ahead of pending decisions.
+
+## Filtering and search
+
+Search matches application names, repositories, and refs. Filter chips narrow the list to applications requiring attention, to a target mode (Direct or Blueprint), or combine with a node, drift class, or evidence-state filter (stale, unreachable, unknown). The node filter means involvement: a Blueprint application spans every node it targets and stays visible under each of them.
+
+Filter state is part of the URL, so a narrowed view can be bookmarked or shared.
+
+## Freshness and honesty
+
+The portfolio refreshes on GitOps transitions, not on a timer. When a node cannot be reached, it is named in a coverage banner and its applications stay absent from the list rather than being reported with evidence Sencho does not hold. When a refresh fails after a good read, the page keeps the previous data and says it is showing last-known evidence and when it came from.
+
+## What it is for
+
+- An operator's daily sweep: open GitOps, read the masthead verdict, and work the attention queue top to bottom.
+- Verifying a rollout or webhook pipeline end to end, across stacks and nodes.
+- Finding drift concentrated on a node or in one class, for example all runtime drift across the fleet at once.
+
+Single-application work (reviewing a candidate, authorizing a rollout, recovering) keeps its home on the owning stack or Blueprint surfaces; the portfolio always links there instead of duplicating them.

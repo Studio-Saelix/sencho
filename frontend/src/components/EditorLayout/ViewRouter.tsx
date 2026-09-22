@@ -55,6 +55,9 @@ const SecurityView = lazy(() =>
 const NetworkingView = lazy(() =>
   import('../networking/NetworkingView').then(m => ({ default: m.NetworkingView })),
 );
+const GitOpsWorkplaceView = lazy(() =>
+  import('../gitops/portfolio/GitOpsWorkplaceView').then(m => ({ default: m.GitOpsWorkplaceView })),
+);
 
 // Sized for the main workspace area (flex-1 with p-6 padding). Visible
 // only during the brief window between an unlocked view's chunk request
@@ -252,6 +255,17 @@ export function ViewRouter({
             <HubOnlyGate>
                 <LazyView>
                     <GlobalObservabilityView />
+                </LazyView>
+            </HubOnlyGate>
+        );
+    }
+    if (activeView === 'gitops') {
+        // Hub-owned GitOps portfolio. Community surface: no CapabilityGate; the
+        // aggregate endpoint itself filters rows per the caller's grants.
+        return (
+            <HubOnlyGate>
+                <LazyView>
+                    <GitOpsWorkplaceView />
                 </LazyView>
             </HubOnlyGate>
         );

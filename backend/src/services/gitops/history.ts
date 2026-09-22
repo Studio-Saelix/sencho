@@ -457,6 +457,39 @@ export function toHistoryItem(row: GitOpsHistoryRow): GitOpsHistoryItem {
 }
 
 /**
+ * Latest recorded transition timestamp per application.
+ *
+ * The portfolio workplace uses this for each row's "last activity" fact. One
+ * grouped query over the caller's id list rather than one query per row, since
+ * the list route already projected every application it is about to render.
+ * Applications with no history yet are absent from the map rather than
+ * timestamped null, so "no transitions" stays distinguishable from "transitions
+ * exist, none read".
+ *
+ * Ids are bound in chunks under SQLite's variable limit; the chunks are merged
+ * before returning so the caller sees one map for the whole list.
+ */
+export function latestTransitionByApplication(
+  db: Database.Database,
+  applicationIds: readonly string[],
+): Map<string, number> {
+  const latest = new Map<string, number>();
+  const CHUNK = 500;
+  for (let i = 0; i < applicationIds.length; i += CHUNK) {
+    const chunk = applicationIds.slice(i, i + CHUNK);
+    const placeholders = chunk.map(() => '?').join(',');
+    const rows = db.prepare(
+      `SELECT application_id, MAX(created_at) AS latest
+       FROM gitops_history
+       WHERE application_id IN (${placeholders})
+       GROUP BY application_id`,
+    ).all(...chunk) as Array<{ application_id: string; latest: number }>;
+    for (const row of rows) latest.set(row.application_id, row.latest);
+  }
+  return latest;
+}
+
+/**
  * Read one scan window of history rows, newest first.
  *
  * Returns raw rows rather than a finished page because authorization is decided

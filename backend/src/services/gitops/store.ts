@@ -978,6 +978,23 @@ export class GitOpsStore {
   }
 
   /**
+   * Every live Blueprint-mode application, in both blueprint modes.
+   *
+   * The portfolio workplace aggregates these alongside Direct applications.
+   * `listAuthorizedBlueprintApplications` is not this: it holds the narrower
+   * restart-reconstruction set (rollout authorization already minted), which
+   * would hide every Blueprint still waiting for its first rollout decision.
+   */
+  listLiveBlueprintApplications(): GitOpsApplicationRow[] {
+    return this.db().prepare(
+      `SELECT * FROM gitops_applications
+       WHERE target_mode IN ('inline_blueprint','blueprint')
+         AND lifecycle_status = 'active'
+       ORDER BY blueprint_id ASC`,
+    ).all() as GitOpsApplicationRow[];
+  }
+
+  /**
    * Live Blueprint applications that hold a rollout authorization and may
    * need sequential restart reconstruction.
    */

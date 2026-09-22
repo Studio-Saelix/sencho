@@ -35,6 +35,10 @@ export function isProxyExemptPath(path: string): boolean {
 // that holds the desired-state definitions and the label set its placement
 // selectors resolve against, so a proxied request would read or write a remote
 // node's unrelated copy instead of the fleet's actual intent.
+// The GitOps portfolio read surface (`/api/gitops/applications`) is hub-owned
+// for the same reason: it aggregates Direct applications across every node
+// with the hub's blueprint application roster, so asking a remote node for it
+// would answer with that node's partial view of the control plane.
 // Per-user interface preferences follow the same rule: they live in the hub's
 // SQLite database keyed by the hub's user ids, so a proxied request would read
 // or write a remote instance's unrelated per-user rows.
@@ -68,6 +72,7 @@ export const HUB_ONLY_PREFIXES: readonly string[] = [
   '/api/registries/',
   '/api/secrets/',
   '/api/blueprints/',
+  '/api/gitops/applications/',
   '/api/node-labels/',
   '/api/registry-delivery/',
   '/api/image-updates/inspect-facts/',

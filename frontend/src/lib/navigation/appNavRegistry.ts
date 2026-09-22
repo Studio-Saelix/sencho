@@ -1,6 +1,7 @@
 import {
   Terminal, CloudDownload, Home, HardDrive, ScrollText,
   Activity, Radar, RefreshCw, Clock, ShieldCheck, Network, Settings,
+  GitBranch,
 } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 import type { ActiveView } from '@/lib/router/routeTypes';
@@ -72,6 +73,18 @@ export const APP_NAV_REGISTRY: readonly AppNavItem[] = [
     smart: 'primary',
     quickLinkEligible: true,
     defaultQuickLink: true,
+  },
+  {
+    // First-class control-plane destination next to Fleet: hub-owned aggregate
+    // read model, hidden on a remote node via HUB_ONLY_VIEWS.
+    value: 'gitops',
+    label: 'GitOps',
+    icon: GitBranch,
+    group: 'fleet',
+    navOrder: 25,
+    smart: 'primary',
+    quickLinkEligible: true,
+    defaultQuickLink: false,
   },
   {
     value: 'networking',

@@ -28,6 +28,7 @@ export const MOBILE_TREATMENTS: Record<ActiveView, MobileTreatment> = {
   'global-observability': 'bespoke',
   'auto-updates': 'bespoke',
   'audit-log': 'bespoke',
+  'gitops': 'bespoke',
   'host-console': 'desktop-only',
 };
 
