@@ -346,10 +346,10 @@ test.describe('Desktop navigation styles', () => {
     await expect(viewport).toBeVisible();
 
     // Content fits without being clipped when the viewport is roomy enough.
-    const metrics = await viewport.evaluate((el) => ({
-      clientHeight: el.clientHeight,
-      scrollHeight: el.scrollHeight,
-    }));
-    expect(metrics.scrollHeight).toBeLessThanOrEqual(metrics.clientHeight + 1);
+    // Polled rather than read once: the popper's available-height variable is
+    // applied after the panel opens, so a single immediate read can observe the
+    // pre-positioning clamp and misreport a settled panel as clipped.
+    await expect.poll(async () => viewport.evaluate((el) => el.scrollHeight - el.clientHeight))
+      .toBeLessThanOrEqual(1);
   });
 });
