@@ -13,16 +13,29 @@ import {
   ARTIFACT_STATE_LOOKUP,
   GITOPS_TONE_CLASS,
   PLACEMENT_STATE,
+  PLACEMENT_STATE_LOOKUP,
+  ROLLOUT_STATE,
+  ROLLOUT_STATE_LOOKUP,
   RUNTIME_STATE,
+  RUNTIME_STATE_LOOKUP,
   SOURCE_STATE,
+  SOURCE_STATE_LOOKUP,
   absentFault,
   identityRefLabel,
+  livePlacementFacet,
+  liveRolloutFacet,
   liveSourceFacet,
   pendingSourceStatus,
-  type GitOpsPlacementStatus,
   type GitOpsTone,
 } from '@/lib/gitopsState';
-import type { GitOpsArtifactStatus, GitOpsIdentityRef, GitOpsRuntimeStatus, GitOpsSourceStatus } from '@/types/gitops';
+import type {
+  GitOpsArtifactStatus,
+  GitOpsIdentityRef,
+  GitOpsPlacementStatus,
+  GitOpsRolloutStatus,
+  GitOpsRuntimeStatus,
+  GitOpsSourceStatus,
+} from '@/types/gitops';
 
 // Listed rather than derived from the map: this is the copy of the contract the
 // test owns, so a status silently dropped from SOURCE_STATE fails here instead
@@ -73,6 +86,26 @@ const PLACEMENT_STATUSES: GitOpsPlacementStatus[] = [
   'blueprint_bound',
 ];
 
+const ROLLOUT_STATUSES: GitOpsRolloutStatus[] = [
+  'not_applicable',
+  'rollout_not_executable',
+  'rollout_queued',
+  'canary_in_progress',
+  'batch_in_progress',
+  'rollout_paused',
+  'partially_rolled_out',
+  'fully_deployed_health_pending',
+  'configuration_converged_artifact_qualified',
+  'exactly_converged_healthy',
+  'rollout_superseded',
+  'target_stale',
+  'target_unreachable',
+  'rollback_in_progress',
+  'rollback_partial_failed',
+  'recovery_required',
+  'completion_unknown',
+];
+
 const RUNTIME_STATUSES: GitOpsRuntimeStatus[] = [
   'tombstoned',
   'recovery_required',
@@ -113,8 +146,20 @@ describe('the state vocabulary', () => {
     }
   });
 
-  it('returns nothing for unknown artifact statuses through the lookup view', () => {
+  it('returns nothing for unknown statuses through the lookup views', () => {
+    // The views are what surfaces read, because a newer remote node can send a
+    // status this build predates. A miss has to be a quiet undefined, and the
+    // view has to be the very same object as the map, not a drifting copy.
+    expect(SOURCE_STATE_LOOKUP.forward_source_status).toBeUndefined();
     expect(ARTIFACT_STATE_LOOKUP.forward_artifact_status).toBeUndefined();
+    expect(PLACEMENT_STATE_LOOKUP.forward_placement_status).toBeUndefined();
+    expect(ROLLOUT_STATE_LOOKUP.forward_rollout_status).toBeUndefined();
+    expect(RUNTIME_STATE_LOOKUP.forward_runtime_status).toBeUndefined();
+    expect(SOURCE_STATE_LOOKUP).toBe(SOURCE_STATE);
+    expect(ARTIFACT_STATE_LOOKUP).toBe(ARTIFACT_STATE);
+    expect(PLACEMENT_STATE_LOOKUP).toBe(PLACEMENT_STATE);
+    expect(ROLLOUT_STATE_LOOKUP).toBe(ROLLOUT_STATE);
+    expect(RUNTIME_STATE_LOOKUP).toBe(RUNTIME_STATE);
   });
 
   it('names every source status', () => {
@@ -128,12 +173,19 @@ describe('the state vocabulary', () => {
     }
   });
 
+  it('names every rollout status', () => {
+    expect(Object.keys(ROLLOUT_STATE).sort()).toEqual([...ROLLOUT_STATUSES].sort());
+    for (const status of ROLLOUT_STATUSES) {
+      expect(ROLLOUT_STATE[status].label.length).toBeGreaterThan(0);
+    }
+  });
+
   it('names every runtime status', () => {
     expect(Object.keys(RUNTIME_STATE).sort()).toEqual([...RUNTIME_STATUSES].sort());
   });
 
   it('gives every state a tone from the five semantic slots and copy that stands alone', () => {
-    for (const meta of [...Object.values(SOURCE_STATE), ...Object.values(PLACEMENT_STATE), ...Object.values(RUNTIME_STATE)]) {
+    for (const meta of [...Object.values(SOURCE_STATE), ...Object.values(PLACEMENT_STATE), ...Object.values(ROLLOUT_STATE), ...Object.values(RUNTIME_STATE)]) {
       expect(TONES).toContain(meta.tone);
       expect(meta.label.trim().length).toBeGreaterThan(0);
       // The line doubles as the sidebar tooltip, so it has to be a sentence.
@@ -240,6 +292,48 @@ describe('liveSourceFacet', () => {
     // waiting to be applied.
     const source = { ...sourceIdentity(), status: 'not_live' as const, lifecycleStatus: 'detached' as const };
     expect(liveSourceFacet(liveRevision({ facets: facets({ source }) }))).toEqual(source);
+  });
+});
+
+describe('livePlacementFacet', () => {
+  it('is null when there is no revision to read', () => {
+    expect(livePlacementFacet(null)).toBeNull();
+  });
+
+  it('is null when there is no application to ask', () => {
+    expect(livePlacementFacet(absentRevision())).toBeNull();
+  });
+
+  it('is null when placement does not apply to the application', () => {
+    const revision = liveRevision({ facets: facets({ placement: { status: 'not_applicable' } }) });
+    expect(livePlacementFacet(revision)).toBeNull();
+  });
+
+  it('returns the facet for a live application', () => {
+    // The fixture default is a Direct application, whose placement reads as
+    // unbound_direct rather than not_applicable.
+    expect(livePlacementFacet(liveRevision())).toEqual({ status: 'unbound_direct' });
+  });
+});
+
+describe('liveRolloutFacet', () => {
+  it('is null when there is no revision to read', () => {
+    expect(liveRolloutFacet(null)).toBeNull();
+  });
+
+  it('is null when there is no application to ask', () => {
+    expect(liveRolloutFacet(absentRevision())).toBeNull();
+  });
+
+  it('is null when no rollout applies to the application', () => {
+    // The fixture default is a Direct application with no rollout in play.
+    expect(liveRolloutFacet(liveRevision())).toBeNull();
+  });
+
+  it('returns the facet when a rollout is in play', () => {
+    const rollout = { status: 'rollout_queued' as const, rolloutGenerationId: 'rg-1' };
+    const revision = liveRevision({ facets: facets({ rollout }) });
+    expect(liveRolloutFacet(revision)).toEqual(rollout);
   });
 });
 

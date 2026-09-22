@@ -240,6 +240,8 @@ export type PlacementFacet =
   | { status: 'preflight_blocked'; reason: string; binding: FutureRolloutAuthorizationBinding }
   | { status: 'blueprint_bound'; completion: 'unknown' };
 
+export type GitOpsPlacementStatus = PlacementFacet['status'];
+
 /** `partial` arrives as the stored JSON string, not a parsed object. Nothing decodes it yet. */
 export type RolloutFacet =
   | { status: 'not_applicable' }
@@ -265,6 +267,8 @@ export type RolloutFacet =
     }
   | { status: 'recovery_required' }
   | { status: 'completion_unknown' };
+
+export type GitOpsRolloutStatus = RolloutFacet['status'];
 
 // --- per-target facets ------------------------------------------------------
 
