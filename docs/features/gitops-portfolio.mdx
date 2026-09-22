@@ -42,6 +42,10 @@ Failure-toned entries (failures, unreachable targets, failed rollbacks or recove
 
 Selecting an application name in the list, or an entry in the attention queue, opens that application's view without leaving the portfolio. It is read-only and shows, in order:
 
+<Frame>
+  <img src="/images/gitops-portfolio/application-view.png" alt="The application view for a Direct Git application: an identity card with repository, ref, commits and generations, an attention entry reading artifact unverified, source accepted, placement n/a and rollout n/a chips above the source, artifact and placement state cards, and one target card reading applied not deployed" />
+</Frame>
+
 - **Identity**: the target (Direct node or Blueprint), the repository and ref, the desired and fetched commits, the candidate and accepted source generations, and for a Blueprint application the rollout generation.
 - **Attention**: every reason the application is waiting on an operator, each with its one-line explanation.
 - **Application state**: the three authority steps as separate chips (**source accepted**, **placement approved**, **rollout authorized**, plus a **legacy combined approval** chip when one was recorded), then the source, artifact, placement, and rollout state cards.
