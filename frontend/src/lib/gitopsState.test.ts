@@ -281,6 +281,12 @@ describe('liveSourceFacet', () => {
     expect(liveSourceFacet(revision)).toBeNull();
   });
 
+  it('is null for a live payload that arrived without its facets', () => {
+    // A malformed remote answer, not a shape the typed projection allows.
+    const malformed = JSON.parse(JSON.stringify({ ...liveRevision(), facets: null })) as ReturnType<typeof liveRevision>;
+    expect(liveSourceFacet(malformed)).toBeNull();
+  });
+
   it('returns the facet, identity fields and all, for a live Git source', () => {
     const source = plainSource('source_review_pending');
     expect(liveSourceFacet(liveRevision({ facets: facets({ source }) }))).toEqual(source);

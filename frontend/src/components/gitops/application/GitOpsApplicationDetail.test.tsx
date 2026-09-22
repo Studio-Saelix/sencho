@@ -116,6 +116,16 @@ describe('GitOpsApplicationDetail', () => {
     expect(card).toHaveTextContent('"from_a_newer_node"');
   });
 
+  it('names a target mode and an observed artifact kind this build does not know', () => {
+    const unknownMode = JSON.parse('"from_a_newer_node"') as ReturnType<typeof detailResponse>['application']['targetMode'];
+    const unknownObserved = JSON.parse('{"kind":"from_a_newer_node"}') as ReturnType<typeof target>['observedArtifactIdentity'];
+    const projection = liveRevision({ targets: [target({ observedArtifactIdentity: unknownObserved })] });
+    render(<GitOpsApplicationDetail detail={detailResponse({ targetMode: unknownMode }, projection)} />);
+
+    expect(screen.getByText('unrecognized (from_a_newer_node)')).toBeInTheDocument();
+    expect(screen.getByTestId('gitops-target')).toHaveTextContent('observed artifact of unrecognized kind "from_a_newer_node"');
+  });
+
   it('states partial evidence by node, and keeps attention reasons inline', () => {
     render(<GitOpsApplicationDetail detail={detailResponse(blueprintRow, blueprintProjection)} />);
 
@@ -213,6 +223,28 @@ describe('GitOpsApplicationView', () => {
     window.dispatchEvent(new CustomEvent('sencho:state-invalidate', { detail: { scope: 'gitops' } }));
     expect(await screen.findByText(/last refresh failed/i)).toBeInTheDocument();
     expect(screen.getByRole('heading', { name: 'bookstack' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Retry' })).toBeInTheDocument();
+  });
+
+  it('names a posture this build does not know instead of dropping the chip', async () => {
+    const unknownPosture = JSON.parse('"from_a_newer_node"') as ReturnType<typeof detailResponse>['application']['posture'];
+    mockFetch.mockResolvedValueOnce(ok(detailResponse({ posture: unknownPosture })));
+    render(<GitOpsApplicationView id="1:app-1" />);
+    expect(await screen.findByTestId('gitops-application-posture')).toHaveTextContent('unrecognized (from_a_newer_node)');
+  });
+
+  it('explains a malformed link without a retry, and a server failure with one', async () => {
+    mockFetch.mockResolvedValueOnce({ ok: false, status: 400, json: async () => ({ error: 'Application id is not a portfolio id' }) } as unknown as Response);
+    const { unmount } = render(<GitOpsApplicationView id="nonsense" />);
+    await waitFor(() => expect(screen.getByTestId('gitops-application-error')).toHaveAttribute('data-error', 'invalid_link'));
+    expect(screen.getByText('This link does not point to a GitOps application')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Retry' })).toBeNull();
+    unmount();
+
+    mockFetch.mockResolvedValueOnce({ ok: false, status: 500, json: async () => ({ error: 'hub exploded' }) } as unknown as Response);
+    render(<GitOpsApplicationView id="1:app-1" />);
+    await waitFor(() => expect(screen.getByTestId('gitops-application-error')).toHaveAttribute('data-error', 'failed'));
+    expect(screen.getByText('hub exploded')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Retry' })).toBeInTheDocument();
   });
 
