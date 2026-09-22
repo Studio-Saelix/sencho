@@ -40,19 +40,12 @@ export function AttentionQueue({
       <ul className="divide-y divide-card-border/60 rounded-lg border border-card-border border-t-card-border-top bg-card shadow-card-bevel">
         {failuresFirst.map(({ reason, row }) => {
           const label = attentionLabel(reason);
-          const openable = row.targetMode === 'direct'
-            ? row.nodeId !== null && row.stackName !== null
-            : row.blueprintId !== null;
           return (
             <li key={`${row.id}:${reason}`}>
               <button
                 type="button"
-                onClick={openable ? () => (onDrillDown ? onDrillDown(row) : openPortfolioApplication(row)) : undefined}
-                disabled={!openable}
-                className={cn(
-                  'group flex w-full items-start gap-3 px-3 py-2 text-left transition-colors',
-                  openable ? 'hover:bg-accent/40' : 'cursor-default',
-                )}
+                onClick={() => (onDrillDown ? onDrillDown(row) : openPortfolioApplication(row))}
+                className="group flex w-full items-start gap-3 px-3 py-2 text-left transition-colors hover:bg-accent/40"
               >
                 <span
                   className={cn(
@@ -67,7 +60,7 @@ export function AttentionQueue({
                   <span className="block truncate text-xs text-stat-subtitle">{label.line}</span>
                 </span>
                 <span className="shrink-0 self-center font-mono text-[10px] uppercase tracking-[0.12em] text-stat-icon transition-colors group-hover:text-brand">
-                  {openable ? 'Open' : '--'}
+                  Open
                 </span>
               </button>
             </li>

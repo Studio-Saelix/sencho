@@ -1,11 +1,15 @@
 /**
  * Drill-down navigation for the GitOps portfolio rows.
  *
- * The portfolio owns the aggregate picture; operator action happens on the
- * owning surface, so every drill-down is a hand-off, never an in-place edit:
- * Direct applications open their stack's Git source panel, Blueprint
- * applications land on the Blueprint deployments surface that owns rollout
- * decisions.
+ * A row opens its application view inside the workplace: the full canonical
+ * state for one application, read-only. Operator action still happens on the
+ * owning surface, so the application view hands off from there: Direct
+ * applications to their stack's Git source panel, Blueprint applications to
+ * the Blueprint deployments surface that owns rollout decisions.
+ *
+ * The open application lives in the `application` query parameter of the
+ * GitOps path, a parameter the view owns (see VIEW_OWNED_QUERY in useUrlSync),
+ * so an application view is a shareable link and Back returns to the list.
  */
 import {
   SENCHO_NAVIGATE_EVENT,
@@ -14,6 +18,67 @@ import {
   type SenchoOpenStackDetail,
 } from '@/lib/events';
 import type { GitOpsPortfolioRow } from '@/types/gitopsPortfolio';
+
+export const APPLICATION_QUERY_PARAM = 'application';
+
+/** Fired after the open application changes without a popstate (open, or a close that replaced history). */
+export const GITOPS_APPLICATION_EVENT = 'sencho:gitops-application';
+
+/** Marks a history entry this module pushed, so closing can pop it instead of stacking another. */
+const PUSHED_MARKER = 'senchoGitOpsApplication';
+
+/** Portfolio ids are short (`bp:<n>`, `<node>:<uuid>`, `<node>:legacy:<stack>`); anything longer is not one. */
+const MAX_APPLICATION_ID_LEN = 512;
+
+/** The application id encoded in a search string, or null when none (or a malformed one) is present. */
+export function applicationIdFromSearch(search: string): string | null {
+  const id = new URLSearchParams(search.startsWith('?') ? search.slice(1) : search).get(APPLICATION_QUERY_PARAM);
+  if (!id || id.length > MAX_APPLICATION_ID_LEN) return null;
+  return id;
+}
+
+function notifyApplicationChanged(): void {
+  window.dispatchEvent(new Event(GITOPS_APPLICATION_EVENT));
+}
+
+function historyStateObject(): Record<string, unknown> {
+  const state: unknown = window.history.state;
+  return state && typeof state === 'object' ? { ...(state as Record<string, unknown>) } : {};
+}
+
+/**
+ * Open one application's view. Pushes a history entry on the current path,
+ * keeping the router's own history marker so its back/forward deltas stay
+ * intact.
+ */
+export function openGitOpsApplication(id: string): void {
+  const params = new URLSearchParams();
+  params.set(APPLICATION_QUERY_PARAM, id);
+  window.history.pushState(
+    { ...historyStateObject(), [PUSHED_MARKER]: true },
+    '',
+    `${window.location.pathname}?${params.toString()}`,
+  );
+  notifyApplicationChanged();
+}
+
+/**
+ * Return from an application view to the portfolio list. When the view was
+ * opened from the list, this pops that entry so the list's own URL (and its
+ * filters) come back; a view reached by a direct link has no list entry
+ * behind it, so the parameter is dropped in place instead.
+ */
+export function closeGitOpsApplication(): void {
+  if (historyStateObject()[PUSHED_MARKER] === true) {
+    window.history.back();
+    return;
+  }
+  const params = new URLSearchParams(window.location.search);
+  params.delete(APPLICATION_QUERY_PARAM);
+  const qs = params.toString();
+  window.history.replaceState(window.history.state, '', `${window.location.pathname}${qs ? `?${qs}` : ''}`);
+  notifyApplicationChanged();
+}
 
 /**
  * Open a Direct application's owning stack on its node, landing on the Git
@@ -35,6 +100,19 @@ export function openBlueprintGitApplication(row: GitOpsPortfolioRow): void {
   }));
 }
 
+/**
+ * The owning surface for an application, by target mode, or null when the
+ * row carries no identity that surface could open.
+ */
+export function owningSurfaceHandoff(row: GitOpsPortfolioRow): { label: string; open: () => void } | null {
+  if (row.targetMode === 'direct') {
+    if (row.nodeId === null || row.stackName === null) return null;
+    return { label: 'Open stack', open: () => openDirectGitApplication(row) };
+  }
+  if (row.blueprintId === null) return null;
+  return { label: 'Open Blueprint deployments', open: () => openBlueprintGitApplication(row) };
+}
+
 /** Where every contextual GitOps indicator (dashboard badge, sidebar pending icon) leads. */
 export function openGitOpsWorkplace(): void {
   window.dispatchEvent(new CustomEvent<SenchoNavigateDetail>(SENCHO_NAVIGATE_EVENT, {
@@ -42,14 +120,7 @@ export function openGitOpsWorkplace(): void {
   }));
 }
 
-/** The drill-down for one row, by target mode. Returns false when nothing can open it. */
-export function openPortfolioApplication(row: GitOpsPortfolioRow): boolean {
-  if (row.targetMode === 'direct') {
-    if (row.nodeId === null || row.stackName === null) return false;
-    openDirectGitApplication(row);
-    return true;
-  }
-  if (row.blueprintId === null) return false;
-  openBlueprintGitApplication(row);
-  return true;
+/** The drill-down for one row: its application view. Every portfolio row has an id the detail read resolves. */
+export function openPortfolioApplication(row: GitOpsPortfolioRow): void {
+  openGitOpsApplication(row.id);
 }

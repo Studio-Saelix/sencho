@@ -141,10 +141,6 @@ export function ApplicationsTable({
 }
 
 function ApplicationRow({ row, onOpen }: { row: GitOpsPortfolioRow; onOpen: () => void }) {
-  const openingPossible = row.targetMode === 'direct'
-    ? row.nodeId !== null && row.stackName !== null
-    : row.blueprintId !== null;
-
   const failureAttention = row.attention.some(reason => attentionLabel(reason).tone === 'destructive');
   const rowTint = row.attention.length === 0
     ? ''
@@ -169,17 +165,13 @@ function ApplicationRow({ row, onOpen }: { row: GitOpsPortfolioRow; onOpen: () =
 
       <TableCell className="align-top">
         <div className="min-w-0 max-w-[220px]">
-          {openingPossible ? (
-            <button
-              type="button"
-              className="block min-w-0 truncate text-left font-mono text-xs hover:text-brand"
-              onClick={onOpen}
-            >
-              {row.name}
-            </button>
-          ) : (
-            <span className="block min-w-0 truncate font-mono text-xs">{row.name}</span>
-          )}
+          <button
+            type="button"
+            className="block min-w-0 truncate text-left font-mono text-xs hover:text-brand"
+            onClick={onOpen}
+          >
+            {row.name}
+          </button>
           <span className="block truncate font-mono text-[10px] text-stat-subtitle">
             {row.stackName ?? (row.blueprintId !== null ? `blueprint #${row.blueprintId}` : '')}
           </span>

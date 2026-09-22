@@ -6,6 +6,8 @@ import { formatRelativeTime } from '@/lib/utils';
 import type { GitOpsPortfolioRow } from '@/types/gitopsPortfolio';
 import { openPortfolioApplication } from '../gitops/portfolio/portfolioNavigation';
 import { useGitOpsPortfolio } from '../gitops/portfolio/useGitOpsPortfolio';
+import { GitOpsApplicationView } from '../gitops/application/GitOpsApplicationView';
+import { useGitOpsApplicationSelection } from '../gitops/application/useGitOpsApplicationSelection';
 import type { ReactNode } from 'react';
 
 /**
@@ -18,11 +20,13 @@ import type { ReactNode } from 'react';
  * attention reasons stay inline under each application name, because a narrow
  * viewport is exactly where triage cannot afford to hide them. Consequential
  * operations stay where they always were: on the owning detail surfaces the
- * rows hand off to.
+ * application view hands off to. The application view itself is the same
+ * read-only component the desktop workplace uses, reflowed to one column.
  */
 export function MobileGitOps({ headerActions }: { headerActions?: ReactNode }) {
   const portfolio = useGitOpsPortfolio();
   const { data, loading, error, staleSince } = portfolio;
+  const selectedApplication = useGitOpsApplicationSelection();
 
   const masthead = data
     ? portfolioMastheadState(data.summary, data.coverage.some(entry => entry.state !== 'ok'))
@@ -49,6 +53,8 @@ export function MobileGitOps({ headerActions }: { headerActions?: ReactNode }) {
   ];
   const activeChip: typeof modeChips[number]['value'] =
     filters.attention === '1' ? 'attention' : filters.mode === 'direct' ? 'direct' : filters.mode === 'blueprint' ? 'blueprint' : 'all';
+
+  if (selectedApplication !== null) return <GitOpsApplicationView key={selectedApplication} id={selectedApplication} className="p-4" />;
 
   return (
     <div className="flex h-full flex-col">

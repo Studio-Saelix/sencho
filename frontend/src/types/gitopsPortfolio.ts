@@ -9,6 +9,7 @@
  * the partial lookups in `lib/gitopsPortfolio.ts`, so an unknown status renders
  * as an explicit unknown state rather than a blank cell.
  */
+import type { GitOpsRevisionProjection } from '@/types/gitops';
 
 /** Per-application attention reason, as classified server-side. */
 export type GitOpsAttentionReason = string;
@@ -107,6 +108,17 @@ export interface GitOpsPortfolioResponse {
   applications: GitOpsPortfolioRow[];
   nextCursor: string | null;
   truncated: boolean;
+}
+
+/**
+ * One application (`GET /api/gitops/applications/:id`): the same row the list
+ * serves, plus the full canonical projection behind it.
+ */
+export interface GitOpsPortfolioDetailResponse {
+  schemaVersion: 1;
+  generatedAt: number;
+  application: GitOpsPortfolioRow;
+  projection: GitOpsRevisionProjection;
 }
 
 /** Filter set the list route accepts; mirrored from the backend contract. */
