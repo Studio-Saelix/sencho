@@ -13,6 +13,7 @@ import { GitOpsTransitions, type EventEnvelope } from './transitions';
 import {
   decodePreflightEvidenceJson,
   encodePreflightEvidenceJson,
+  executableArtifactRefusalReason,
   fingerprintPreflightEvidence,
   isPreflightBlocked,
   registryPreflightBlockReason,
@@ -234,12 +235,16 @@ function liveRolloutBinding(app: GitOpsApplicationRow): FutureRolloutAuthorizati
  * Ensure a live rollout_authorization exists for the application, minting
  * one when every binding ingredient is present and registry preflight is ready.
  * Recomputes registry readiness on every call; remints when the fingerprint drifts.
+ *
+ * `authority` names who is minting: the automatic handoff acts on the
+ * configured policy, an explicit operator authorization on the operator.
  */
 export async function ensureRolloutAuthorization(
   applicationId: string,
   actor: string | null,
   trigger = 'blueprint_dispatch',
   depsPartial?: Partial<RegistryReadinessDeps>,
+  authority: 'operator' | 'configured_policy' = 'configured_policy',
 ): Promise<{ ok: true; binding: FutureRolloutAuthorizationBinding } | { ok: false; reason: string }> {
   return withSerializedEvaluation(applicationId, async () => {
     const store = GitOpsStore.getInstance();
@@ -259,6 +264,11 @@ export async function ensureRolloutAuthorization(
         reason: 'Source acceptance, artifact set, and placement must all be current before rollout authorization.',
       };
     }
+
+    const artifactRefusal = executableArtifactRefusalReason(
+      store.getArtifactSet(ingredients.artifactSetId)?.qualification,
+    );
+    if (artifactRefusal) return { ok: false, reason: artifactRefusal };
 
     let composeContent: string | null = null;
     const genRow = store.getGeneration(ingredients.acceptedGenerationId);
@@ -328,6 +338,7 @@ export async function ensureRolloutAuthorization(
         preflightEvidenceJson,
         actor,
         envelope: envelopeFor(actor, trigger),
+        authority,
       });
     } catch (err) {
       const message = errorMessage(err);
@@ -351,6 +362,7 @@ export async function ensureRolloutAuthorization(
               preflightEvidenceJson,
               actor,
               envelope: envelopeFor(actor, trigger),
+              authority,
             });
           } catch (retryErr) {
             return { ok: false, reason: `Rollout authorization failed: ${errorMessage(retryErr)}` };

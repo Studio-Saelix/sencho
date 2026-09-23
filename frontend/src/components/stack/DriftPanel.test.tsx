@@ -4,7 +4,7 @@
  * retry state on load failure, and re-checks on demand.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, fireEvent, waitFor } from '@testing-library/react';
+import { render, screen, fireEvent, waitFor, within } from '@testing-library/react';
 
 vi.mock('@/lib/api', () => ({ apiFetch: vi.fn() }));
 vi.mock('@/components/ui/toast-store', () => ({ toast: { success: vi.fn(), error: vi.fn() } }));
@@ -402,5 +402,61 @@ describe('DriftPanel GitOps state', () => {
 
     await screen.findByTestId('gitops-source');
     expect(screen.queryByText('gitops drift')).not.toBeInTheDocument();
+  });
+
+  it('renders placement and rollout cards, using the redacted reason as the preflight line', async () => {
+    vi.mocked(apiFetch).mockResolvedValue(jsonRes(report({
+      gitopsRevision: liveRevision({
+        facets: facets({
+          placement: {
+            status: 'preflight_blocked',
+            reason: 'Image scan is still running.',
+            binding: {
+              rolloutCandidateId: 'rc-1',
+              acceptedGenerationId: 'gen-accepted',
+              artifactSetId: 'art-1',
+              intentRevisionId: 'int-1',
+              requiredNodeIds: [1],
+              sourceAcceptanceRef: 'src-acceptance-1',
+              placementApprovalRef: 'plc-approval-1',
+              preflightFingerprint: 'fp-1',
+            },
+          },
+          rollout: { status: 'rollout_not_executable', rolloutCandidateId: 'rc-1' },
+        }),
+      }),
+    })));
+    render(<DriftPanel stackName="web" />);
+
+    const placement = await screen.findByTestId('gitops-placement');
+    expect(placement).toHaveAttribute('data-state', 'preflight_blocked');
+    expect(placement).toHaveTextContent('Image scan is still running.');
+    expect(screen.getByTestId('gitops-rollout')).toHaveAttribute('data-state', 'rollout_not_executable');
+  });
+
+  it('renders the approval chips from the recorded refs and the facets', async () => {
+    vi.mocked(apiFetch).mockResolvedValue(jsonRes(report({
+      gitopsRevision: liveRevision({
+        approvals: {
+          sourceAcceptanceRef: 'src-acceptance-1',
+          placementApprovalRef: null,
+          rolloutAuthorizationRef: null,
+          legacyCombinedApprovalRef: null,
+        },
+        facets: facets({
+          placement: { status: 'placement_review_pending' },
+          rollout: { status: 'rollout_not_executable', rolloutCandidateId: 'rc-1' },
+        }),
+      }),
+    })));
+    render(<DriftPanel stackName="web" />);
+
+    const chips = await screen.findByTestId('gitops-approvals');
+    const source = within(chips).getByText('source accepted');
+    expect(source.closest('[data-approval]')).toHaveAttribute('data-state', 'granted');
+    const placement = within(chips).getByText('placement approval pending');
+    expect(placement.closest('[data-approval]')).toHaveAttribute('data-state', 'pending');
+    // No rollout ref and no facet saying it is outstanding: no rollout chip.
+    expect(within(chips).queryByText(/rollout/)).not.toBeInTheDocument();
   });
 });

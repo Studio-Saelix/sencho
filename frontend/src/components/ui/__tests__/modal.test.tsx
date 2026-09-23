@@ -1,8 +1,8 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, waitFor, act } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import type { ComponentProps } from 'react';
-import { ConfirmModal, ModalFooter } from '../modal';
+import type { ComponentProps, ReactNode } from 'react';
+import { ConfirmModal, Modal, ModalDestructiveHeader, ModalFooter, ModalHeader } from '../modal';
 import { DURATION_BASE_MS } from '@/hooks/useVisualBusy';
 
 function renderConfirm(props: Partial<ComponentProps<typeof ConfirmModal>> = {}) {
@@ -120,5 +120,63 @@ describe('ModalFooter containment contract', () => {
     expect(hintWrapper).toHaveClass('wrap-anywhere');
     // The footer may flow to a second row instead of pushing the actions out.
     expect(hintWrapper?.parentElement).toHaveClass('flex-wrap');
+  });
+});
+
+describe('HeaderShell title wrapping contract', () => {
+  const LONG_WORD_TITLE = 'Prune Sencho-managed containers';
+
+  function expectWordWrap(el: HTMLElement) {
+    expect(el).toHaveClass('break-words');
+    expect(el).toHaveClass('text-balance');
+    expect(el).not.toHaveClass('break-all');
+  }
+
+  function renderHeaderInModal(variant: 'default' | 'destructive', title: ReactNode) {
+    render(
+      <Modal open onOpenChange={() => {}}>
+        {variant === 'destructive' ? (
+          <ModalDestructiveHeader kicker="RESOURCES" title={title} description="d" />
+        ) : (
+          <ModalHeader kicker="RESOURCES" title={title} description="d" />
+        )}
+      </Modal>,
+    );
+  }
+
+  function renderHeaderInConfirm(variant: 'default' | 'destructive', title: ReactNode) {
+    render(
+      <ConfirmModal open onOpenChange={() => {}} variant={variant} kicker="RESOURCES" title={title} description="d" confirmLabel="Confirm" onConfirm={() => {}} />,
+    );
+  }
+
+  it('wraps ModalHeader titles on word boundaries', () => {
+    renderHeaderInModal('default', LONG_WORD_TITLE);
+    expectWordWrap(screen.getByRole('heading', { name: LONG_WORD_TITLE }));
+  });
+
+  it('wraps ModalDestructiveHeader titles on word boundaries', () => {
+    renderHeaderInModal('destructive', LONG_WORD_TITLE);
+    expectWordWrap(screen.getByRole('heading', { name: LONG_WORD_TITLE }));
+  });
+
+  it('wraps ConfirmHeader titles on word boundaries', () => {
+    renderHeaderInConfirm('default', LONG_WORD_TITLE);
+    expectWordWrap(screen.getByRole('heading', { name: LONG_WORD_TITLE }));
+  });
+
+  it('wraps ConfirmDestructiveHeader titles on word boundaries', () => {
+    renderHeaderInConfirm('destructive', LONG_WORD_TITLE);
+    expectWordWrap(screen.getByRole('heading', { name: LONG_WORD_TITLE }));
+  });
+
+  it('keeps overflow safety for long unbroken tokens', () => {
+    renderHeaderInConfirm('destructive', 'x'.repeat(200));
+    expect(screen.getByRole('heading', { name: 'x'.repeat(200) })).toHaveClass('break-words');
+  });
+
+  it('leaves a normal short title on the standard contract', () => {
+    renderHeaderInConfirm('default', 'Confirm?');
+    expectWordWrap(screen.getByRole('heading', { name: 'Confirm?' }));
   });
 });

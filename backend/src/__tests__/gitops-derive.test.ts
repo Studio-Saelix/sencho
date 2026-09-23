@@ -828,6 +828,197 @@ describe('gitops derivation', () => {
     expect(projection.availableActions).toEqual(['approve_legacy']);
   });
 
+  it('projects placement review pending for a Git-managed candidate with no placement approval', () => {
+    const store = GitOpsStore.getInstance();
+    store.insertApplication(rawApp('app-bp-git-placement', {
+      target_mode: 'blueprint',
+      blueprint_id: 91,
+      lifecycle_key: 'blueprint:91',
+      stack_name: null,
+      intent_revision_id: 'ir-91',
+      rollout_candidate_id: 'cand-91',
+      source_acceptance_ref: 'acc-91',
+    }));
+
+    const projection = projectApplication('app-bp-git-placement', false);
+    if (projection.targetMode === 'not_applicable') throw new Error('expected application');
+    expect(projection.facets.placement.status).toBe('placement_review_pending');
+    // The combined Apply action belongs to the Inline flow; a Git-managed
+    // review is the decomposed placement action.
+    expect(projection.availableActions).not.toContain('approve_legacy');
+  });
+
+  it('projects source acceptance pending for a Git-managed candidate newer than the accepted generation', () => {
+    const store = GitOpsStore.getInstance();
+    store.insertApplication(rawApp('app-bp-git-followup', {
+      target_mode: 'blueprint',
+      blueprint_id: 93,
+      lifecycle_key: 'blueprint:93',
+      stack_name: null,
+      intent_revision_id: 'ir-93',
+      candidate_generation_id: 'gen-new',
+      accepted_generation_id: 'gen-old',
+      source_acceptance_ref: 'acc-old',
+      placement_approval_ref: 'place-old',
+      rollout_candidate_id: 'cand-93',
+    }));
+
+    const projection = projectApplication('app-bp-git-followup', false);
+    if (projection.targetMode === 'not_applicable') throw new Error('expected application');
+    expect(projection.facets.placement.status).toBe('source_acceptance_pending');
+    if (projection.facets.placement.status !== 'source_acceptance_pending') throw new Error('expected pending');
+    expect(projection.facets.placement.candidateGenerationId).toBe('gen-new');
+    expect(projection.facets.placement.sourceAcceptanceRef).toBe('acc-old');
+  });
+
+  it('keeps blueprint_bound for an Inline candidate with no placement approval', () => {
+    const store = GitOpsStore.getInstance();
+    store.insertApplication(rawApp('app-bp-inline-placement', {
+      target_mode: 'inline_blueprint',
+      blueprint_id: 92,
+      lifecycle_key: 'blueprint:92',
+      stack_name: null,
+      configured_repo_url: null,
+      repo_identity_json: null,
+      configured_ref: null,
+      intent_revision_id: 'ir-92',
+      rollout_candidate_id: 'cand-92',
+      source_acceptance_ref: 'acc-92',
+    }));
+
+    const projection = projectApplication('app-bp-inline-placement', false);
+    if (projection.targetMode === 'not_applicable') throw new Error('expected application');
+    expect(projection.facets.placement.status).toBe('blueprint_bound');
+  });
+
+  it('does not report source acceptance pending for a stale candidate binding', () => {
+    const store = GitOpsStore.getInstance();
+    store.insertApplication(rawApp('app-bp-git-rebound', {
+      target_mode: 'blueprint',
+      blueprint_id: 94,
+      lifecycle_key: 'blueprint:94',
+      stack_name: null,
+      intent_revision_id: 'ir-94',
+      candidate_generation_id: null,
+      accepted_generation_id: 'gen-new',
+      source_acceptance_ref: 'acc-new',
+      placement_approval_ref: 'place-94',
+      artifact_set_id: 'art-94',
+      latest_artifact_set_id: 'art-94',
+      rollout_candidate_id: 'cand-94',
+    }));
+    // The candidate was bound by an earlier rollout to the previous
+    // generation. Its binding is not a generation awaiting acceptance.
+    store.insertRolloutCandidate({
+      id: 'cand-94',
+      application_id: 'app-bp-git-rebound',
+      intent_revision_id: 'ir-94',
+      compose_content_sha256: 'c'.repeat(64),
+      accepted_generation_id: 'gen-old',
+      artifact_set_id: null,
+      required_targets_json: '{"nodeIds":[1]}',
+      authoritative: 1,
+      provenance: 'intent_change',
+      operation_id: 'op-cand-94',
+      created_at: 1,
+    });
+    store.insertArtifactSet({
+      id: 'art-94',
+      generation_id: 'gen-new',
+      evidence_version: 1,
+      authoritative: 0,
+      qualification: 'unresolved',
+      evidence_json: '{"kind":"unresolved"}',
+      created_at: 1,
+    });
+
+    const projection = projectApplication('app-bp-git-rebound', false);
+    if (projection.targetMode === 'not_applicable') throw new Error('expected application');
+    expect(projection.facets.placement.status).toBe('blueprint_bound');
+  });
+
+  it('names the unresolved artifact identity as the placement block reason', () => {
+    const store = GitOpsStore.getInstance();
+    store.insertApplication(rawApp('app-bp-git-artifact', {
+      target_mode: 'blueprint',
+      blueprint_id: 95,
+      lifecycle_key: 'blueprint:95',
+      stack_name: null,
+      intent_revision_id: 'ir-95',
+      candidate_generation_id: null,
+      accepted_generation_id: 'gen-95',
+      source_acceptance_ref: 'acc-95',
+      placement_approval_ref: 'place-95',
+      artifact_set_id: 'art-95',
+      latest_artifact_set_id: 'art-95',
+      rollout_candidate_id: 'cand-95',
+    }));
+    store.insertRolloutCandidate({
+      id: 'cand-95',
+      application_id: 'app-bp-git-artifact',
+      intent_revision_id: 'ir-95',
+      compose_content_sha256: 'c'.repeat(64),
+      accepted_generation_id: null,
+      artifact_set_id: null,
+      required_targets_json: '{"nodeIds":[1]}',
+      authoritative: 1,
+      provenance: 'intent_change',
+      operation_id: 'op-cand-95',
+      created_at: 1,
+    });
+    store.insertArtifactSet({
+      id: 'art-95',
+      generation_id: 'gen-95',
+      evidence_version: 1,
+      authoritative: 0,
+      qualification: 'unresolved',
+      evidence_json: '{"kind":"unresolved"}',
+      created_at: 1,
+    });
+    store.insertGeneration(gen('gen-95', 'app-bp-git-artifact'));
+    const approvalBase = {
+      application_id: 'app-bp-git-artifact',
+      generation_id: null,
+      intent_revision_id: null,
+      artifact_set_id: null,
+      rollout_candidate_id: null,
+      rollout_generation_id: null,
+      source_acceptance_ref: null,
+      placement_approval_ref: null,
+      required_targets_json: null,
+      preflight_fingerprint: null,
+      fingerprint: null,
+      blast_json: null,
+      policy_provenance_json: null,
+      actor: 'tester',
+      created_at: 1,
+    };
+    store.insertApproval({
+      ...approvalBase,
+      id: 'acc-95',
+      kind: 'source_acceptance',
+      authority: 'operator',
+      authoritative: 1,
+      generation_id: 'gen-95',
+    });
+    store.insertApproval({
+      ...approvalBase,
+      id: 'place-95',
+      kind: 'placement_approval',
+      authority: 'operator',
+      authoritative: 1,
+      intent_revision_id: 'ir-95',
+      required_targets_json: '{"nodeIds":[1]}',
+      blast_json: '[]',
+    });
+
+    const projection = projectApplication('app-bp-git-artifact', false);
+    if (projection.targetMode === 'not_applicable') throw new Error('expected application');
+    expect(projection.facets.placement.status).toBe('preflight_blocked');
+    if (projection.facets.placement.status !== 'preflight_blocked') throw new Error('expected blocked');
+    expect(projection.facets.placement.reason).toMatch(/artifact identity/i);
+  });
+
   it('still judges a target with no desired id against its deployed pointer', () => {
     const store = GitOpsStore.getInstance();
     const tx = GitOpsTransitions.getInstance();

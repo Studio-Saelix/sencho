@@ -15,13 +15,31 @@ export interface SenchoSettingsChangedDetail {
 
 export const SENCHO_LABELS_CHANGED = 'sencho-labels-changed';
 
+/**
+ * Cross-component request to switch the active view.
+ *
+ * Lives here rather than beside its original dispatcher (`NodeManager`) so
+ * lib-level callers (the GitOps portfolio's navigation helpers) do not import
+ * a page component; `NodeManager` re-exports both for existing call sites.
+ */
+export const SENCHO_NAVIGATE_EVENT = 'sencho-navigate';
+
+export interface SenchoNavigateDetail {
+  view: 'scheduled-ops' | 'auto-updates' | 'security' | 'fleet' | 'networking' | 'resources' | 'gitops';
+  nodeId?: number;
+  /** Target tab when navigating to the Security view. */
+  tab?: SecurityTab;
+  /** Target tab when navigating to the Fleet view (e.g. 'snapshots'). */
+  fleetTab?: FleetTab;
+}
+
 /** Open a stack on a given node from elsewhere in the app (e.g. a Resources network card). */
 export const SENCHO_OPEN_STACK_EVENT = 'sencho-open-stack';
 
 export interface SenchoOpenStackDetail {
   nodeId: number;
   stackName: string;
-  destination?: 'stack' | 'editor' | 'anatomy-networking' | 'doctor' | 'dossier' | 'drift';
+  destination?: 'stack' | 'editor' | 'anatomy-networking' | 'doctor' | 'dossier' | 'drift' | 'git';
 }
 
 /** Tabs of the top-level Security view. Used by the nav state and by

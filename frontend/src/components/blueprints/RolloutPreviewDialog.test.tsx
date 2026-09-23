@@ -1,21 +1,48 @@
 /**
- * RolloutPreviewDialog rendering: reachability notes and full warning lists.
+ * RolloutPreviewDialog rendering: reachability notes, full warning lists, and
+ * the composed GitOps authority evidence bound to the confirmation.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, waitFor } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 import type { BlueprintPreview } from '@/lib/blueprintsApi';
+import type { GitOpsRevisionLive } from '@/types/gitops';
+import { absentRevision, facets, liveArtifact, liveRevision, missingApplicationLimitation, noApprovals, plainSource } from '@/__tests__/gitopsFixtures';
 
 vi.mock('@/lib/blueprintsApi', async (importOriginal) => {
     const actual = await importOriginal<typeof import('@/lib/blueprintsApi')>();
     return { ...actual, previewBlueprint: vi.fn(), applyBlueprint: vi.fn() };
 });
 
+vi.mock('@/lib/gitopsAuthorityApi', async (importOriginal) => {
+    const actual = await importOriginal<typeof import('@/lib/gitopsAuthorityApi')>();
+    return { ...actual, approveGitOpsPlacement: vi.fn() };
+});
+
 vi.mock('@/components/ui/toast-store', () => ({
     toast: { error: vi.fn(), success: vi.fn(), warning: vi.fn(), info: vi.fn(), loading: vi.fn(), dismiss: vi.fn() },
 }));
 
-import { previewBlueprint } from '@/lib/blueprintsApi';
+import { previewBlueprint, applyBlueprint } from '@/lib/blueprintsApi';
+import { approveGitOpsPlacement } from '@/lib/gitopsAuthorityApi';
 import { RolloutPreviewDialog } from './RolloutPreviewDialog';
+
+/** An Inline Blueprint application with a recorded placement approval. */
+function boundApplication(): GitOpsRevisionLive {
+    return liveRevision({
+        targetMode: 'inline_blueprint',
+        applicationId: 'bp-app-1',
+        stackName: null,
+        blueprintId: 1,
+        facets: facets({
+            source: { status: 'not_applicable' },
+            artifact: { status: 'not_applicable' },
+            placement: { status: 'blueprint_bound', completion: 'unknown' },
+            rollout: { status: 'rollout_not_executable', rolloutCandidateId: 'candidate-1' },
+        }),
+        approvals: { ...noApprovals, placementApprovalRef: 'placement-approval-1' },
+    });
+}
 
 function previewFixture(overrides: Partial<BlueprintPreview> = {}): BlueprintPreview {
     return {
@@ -60,7 +87,51 @@ function previewFixture(overrides: Partial<BlueprintPreview> = {}): BlueprintPre
             { id: 'compat:1', message: 'uses named volumes' },
             { id: 'req:1', message: 'Required variable DB_PASSWORD' },
         ],
+        gitops: absentRevision(),
+        gitopsFingerprint: null,
         ...overrides,
+    };
+}
+
+/**
+ * A Git-managed Blueprint whose placement is waiting for review: the composed
+ * evidence carries a real source and artifact facet, which the Inline fixture
+ * cannot exercise.
+ */
+function gitManagedPlacementPending(): GitOpsRevisionLive {
+    return liveRevision({
+        targetMode: 'blueprint',
+        applicationId: 'git-app-1',
+        stackName: null,
+        blueprintId: 1,
+        facets: facets({
+            source: plainSource('application_generation_accepted', { candidateGenerationId: null }),
+            artifact: liveArtifact(),
+            placement: { status: 'placement_review_pending' },
+            rollout: { status: 'rollout_not_executable', rolloutCandidateId: 'candidate-9' },
+        }),
+        approvals: { ...noApprovals, sourceAcceptanceRef: 'source-acceptance-1' },
+    });
+}
+
+function confirmablePreview(): Partial<BlueprintPreview> {
+    return {
+        gitops: boundApplication(),
+        gitopsFingerprint: 'deadbeefcafebabe',
+        summary: { safe: 1, warning: 0, blocker: 0, total: 1 },
+        blockers: [],
+        warnings: [],
+        changes: [{
+            nodeId: 2,
+            nodeName: 'edge',
+            nodeType: 'remote',
+            status: 'online',
+            action: 'create',
+            severity: 'safe',
+            kind: 'executor',
+            detail: 'New placement',
+            reachabilityNote: 'Local node',
+        }],
     };
 }
 
@@ -89,5 +160,286 @@ describe('RolloutPreviewDialog', () => {
         expect(screen.getByText(/Blockers \(1\)/i)).toBeInTheDocument();
         expect(screen.getByText(/\(remote\/offline\)/i)).toBeInTheDocument();
         expect(screen.getByRole('button', { name: /confirm apply/i })).toBeDisabled();
+    });
+
+    it('renders the composed GitOps evidence and the evidence snapshot id', async () => {
+        vi.mocked(previewBlueprint).mockResolvedValue(previewFixture(confirmablePreview()));
+
+        render(
+            <RolloutPreviewDialog
+                blueprintId={1}
+                blueprintName="web"
+                open
+                onOpenChange={() => {}}
+                onApplied={() => {}}
+            />,
+        );
+
+        await waitFor(() => expect(screen.getByTestId('gitops-approvals')).toBeInTheDocument());
+        expect(screen.getByTestId('gitops-placement')).toHaveAttribute('data-state', 'blueprint_bound');
+        expect(screen.getByTestId('gitops-rollout')).toHaveAttribute('data-state', 'rollout_not_executable');
+        // An Inline Blueprint has no Git source or executable artifact set: the
+        // facets are not applicable and must not be rendered as cards.
+        expect(screen.queryByTestId('gitops-source')).toBeNull();
+        expect(screen.queryByTestId('gitops-artifact')).toBeNull();
+        expect(screen.getByText('deadbeef')).toBeInTheDocument();
+    });
+
+    it('confirms with the evidence fingerprint the preview was reviewed against', async () => {
+        const user = userEvent.setup();
+        vi.mocked(previewBlueprint).mockResolvedValue(previewFixture(confirmablePreview()));
+        vi.mocked(applyBlueprint).mockResolvedValue({
+            message: 'Rollout confirmed',
+            blueprintId: 1,
+            effectiveApproval: 'approved',
+            outcomes: [],
+            outcomeSummary: { total: 0, ok: 0, failed: 0, pending: 0, skipped: 0 },
+        });
+
+        render(
+            <RolloutPreviewDialog
+                blueprintId={1}
+                blueprintName="web"
+                open
+                onOpenChange={() => {}}
+                onApplied={() => {}}
+            />,
+        );
+
+        const confirm = screen.getByRole('button', { name: /confirm apply/i });
+        await waitFor(() => expect(confirm).toBeEnabled());
+        await user.click(confirm);
+
+        await waitFor(() => expect(applyBlueprint).toHaveBeenCalledWith(1, {
+            planFingerprint: 'abc',
+            gitopsFingerprint: 'deadbeefcafebabe',
+            actions: [{ nodeId: 2, action: 'create' }],
+        }));
+    });
+
+    it('qualifies the combined approval as legacy when the Blueprint has a live application', async () => {
+        vi.mocked(previewBlueprint).mockResolvedValue(previewFixture(confirmablePreview()));
+
+        render(
+            <RolloutPreviewDialog
+                blueprintId={1}
+                blueprintName="web"
+                open
+                onOpenChange={() => {}}
+                onApplied={() => {}}
+            />,
+        );
+
+        await waitFor(() => expect(screen.getByText(/legacy combined: pending/i)).toBeInTheDocument());
+    });
+
+    it('closes instead of arming a stale preview when the 409 refresh fails', async () => {
+        const user = userEvent.setup();
+        const onOpenChange = vi.fn();
+        vi.mocked(previewBlueprint)
+            .mockResolvedValueOnce(previewFixture(confirmablePreview()))
+            .mockRejectedValueOnce(new Error('refresh failed'));
+        const conflict = new Error('Preview is stale') as Error & { status: number };
+        conflict.status = 409;
+        vi.mocked(applyBlueprint).mockRejectedValueOnce(conflict);
+
+        render(
+            <RolloutPreviewDialog
+                blueprintId={1}
+                blueprintName="web"
+                open
+                onOpenChange={onOpenChange}
+                onApplied={() => {}}
+            />,
+        );
+
+        const confirm = screen.getByRole('button', { name: /confirm apply/i });
+        await waitFor(() => expect(confirm).toBeEnabled());
+        await user.click(confirm);
+
+        await waitFor(() => expect(onOpenChange).toHaveBeenCalledWith(false));
+    });
+
+    it('shows the projection fault when the application could not be derived', async () => {
+        vi.mocked(previewBlueprint).mockResolvedValue(previewFixture({
+            ...confirmablePreview(),
+            gitops: absentRevision([missingApplicationLimitation]),
+            gitopsFingerprint: 'faultdigest',
+        }));
+
+        render(
+            <RolloutPreviewDialog
+                blueprintId={1}
+                blueprintName="web"
+                open
+                onOpenChange={() => {}}
+                onApplied={() => {}}
+            />,
+        );
+
+        await waitFor(() => expect(screen.getByTestId('gitops-fault')).toBeInTheDocument());
+        expect(screen.getByText(/could not be read/i)).toBeInTheDocument();
+        expect(screen.getByText('faultdig')).toBeInTheDocument();
+    });
+
+    it('re-arms on a refreshed preview after a stale refusal', async () => {
+        const user = userEvent.setup();
+        const onOpenChange = vi.fn();
+        vi.mocked(previewBlueprint)
+            .mockResolvedValueOnce(previewFixture(confirmablePreview()))
+            .mockResolvedValueOnce(previewFixture({
+                ...confirmablePreview(),
+                planFingerprint: 'refreshed-plan',
+                gitopsFingerprint: 'refresheddigest',
+            }));
+        const conflict = new Error('Preview is stale') as Error & { status: number };
+        conflict.status = 409;
+        vi.mocked(applyBlueprint)
+            .mockRejectedValueOnce(conflict)
+            .mockResolvedValueOnce({
+                message: 'Rollout confirmed',
+                blueprintId: 1,
+                effectiveApproval: 'approved',
+                outcomes: [],
+                outcomeSummary: { total: 0, ok: 0, failed: 0, pending: 0, skipped: 0 },
+            });
+
+        render(
+            <RolloutPreviewDialog
+                blueprintId={1}
+                blueprintName="web"
+                open
+                onOpenChange={onOpenChange}
+                onApplied={() => {}}
+            />,
+        );
+
+        const confirm = screen.getByRole('button', { name: /confirm apply/i });
+        await waitFor(() => expect(confirm).toBeEnabled());
+        await user.click(confirm);
+
+        // The refreshed preview replaces the stale one and the dialog stays open.
+        await waitFor(() => expect(screen.getByText('refreshe')).toBeInTheDocument());
+        expect(onOpenChange).not.toHaveBeenCalledWith(false);
+
+        await user.click(confirm);
+        await waitFor(() => expect(applyBlueprint).toHaveBeenLastCalledWith(1, {
+            planFingerprint: 'refreshed-plan',
+            gitopsFingerprint: 'refresheddigest',
+            actions: [{ nodeId: 2, action: 'create' }],
+        }));
+    });
+
+    it('renders no evidence block and binds nothing when the Blueprint has no live application', async () => {
+        const user = userEvent.setup();
+        vi.mocked(previewBlueprint).mockResolvedValue(previewFixture({
+            ...confirmablePreview(),
+            gitops: absentRevision(),
+            gitopsFingerprint: null,
+        }));
+        vi.mocked(applyBlueprint).mockResolvedValue({
+            message: 'Rollout confirmed',
+            blueprintId: 1,
+            effectiveApproval: 'approved',
+            outcomes: [],
+            outcomeSummary: { total: 0, ok: 0, failed: 0, pending: 0, skipped: 0 },
+        });
+
+        render(
+            <RolloutPreviewDialog
+                blueprintId={1}
+                blueprintName="web"
+                open
+                onOpenChange={() => {}}
+                onApplied={() => {}}
+            />,
+        );
+
+        const confirm = screen.getByRole('button', { name: /confirm apply/i });
+        await waitFor(() => expect(confirm).toBeEnabled());
+        expect(screen.queryByTestId('gitops-approvals')).toBeNull();
+        expect(screen.queryByTestId('gitops-placement')).toBeNull();
+        expect(screen.queryByText(/evidence snapshot/i)).toBeNull();
+        expect(screen.queryByText(/legacy combined/i)).toBeNull();
+
+        await user.click(confirm);
+        await waitFor(() => expect(applyBlueprint).toHaveBeenCalledWith(1, {
+            planFingerprint: 'abc',
+            gitopsFingerprint: null,
+            actions: [{ nodeId: 2, action: 'create' }],
+        }));
+    });
+
+    it('renders the Git-managed source and artifact evidence and approves placement instead of applying', async () => {
+        const user = userEvent.setup();
+        const onApplied = vi.fn();
+        vi.mocked(previewBlueprint).mockResolvedValue(previewFixture({
+            ...confirmablePreview(),
+            gitops: gitManagedPlacementPending(),
+            gitopsFingerprint: 'gitmanageddigest',
+        }));
+        vi.mocked(approveGitOpsPlacement).mockResolvedValue(undefined);
+
+        render(
+            <RolloutPreviewDialog
+                blueprintId={1}
+                blueprintName="web"
+                open
+                onOpenChange={() => {}}
+                onApplied={onApplied}
+            />,
+        );
+
+        await waitFor(() => expect(screen.getByTestId('gitops-source')).toBeInTheDocument());
+        expect(screen.getByTestId('gitops-artifact')).toBeInTheDocument();
+        expect(screen.getByTestId('gitops-placement')).toHaveAttribute('data-state', 'placement_review_pending');
+
+        const confirm = screen.getByRole('button', { name: /approve placement/i });
+        await waitFor(() => expect(confirm).toBeEnabled());
+        await user.click(confirm);
+
+        await waitFor(() => expect(approveGitOpsPlacement).toHaveBeenCalledWith('bp:1', {
+            planFingerprint: 'abc',
+            actions: [{ nodeId: 2, action: 'create' }],
+        }));
+        expect(applyBlueprint).not.toHaveBeenCalled();
+        expect(onApplied).toHaveBeenCalled();
+    });
+
+    it('re-arms with the server fresh preview after a stale placement refusal', async () => {
+        const user = userEvent.setup();
+        vi.mocked(previewBlueprint).mockResolvedValue(previewFixture({
+            ...confirmablePreview(),
+            gitops: gitManagedPlacementPending(),
+            gitopsFingerprint: 'gitmanageddigest',
+        }));
+        const conflict = new Error('Preview is stale; refresh and confirm again') as Error & {
+            status: number;
+            preview?: unknown;
+        };
+        conflict.status = 409;
+        conflict.preview = previewFixture({
+            ...confirmablePreview(),
+            gitops: gitManagedPlacementPending(),
+            gitopsFingerprint: 'freshdigest',
+            planFingerprint: 'fresh-plan',
+        });
+        vi.mocked(approveGitOpsPlacement).mockRejectedValueOnce(conflict);
+
+        render(
+            <RolloutPreviewDialog
+                blueprintId={1}
+                blueprintName="web"
+                open
+                onOpenChange={() => {}}
+                onApplied={() => {}}
+            />,
+        );
+
+        await waitFor(() => expect(screen.getByRole('button', { name: /approve placement/i })).toBeEnabled());
+        await user.click(screen.getByRole('button', { name: /approve placement/i }));
+
+        // The refusal carried the fresh preview, which replaces the stale one.
+        await waitFor(() => expect(screen.getByText('freshdig')).toBeInTheDocument());
     });
 });

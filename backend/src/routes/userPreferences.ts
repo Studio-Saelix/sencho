@@ -38,7 +38,7 @@ const ANATOMY_WIDTH = { min: 320, max: 4096 } as const;
 // quickLinkEligible: true). Cross-reference comment: the parity script
 // verifies this list against the frontend's eligible registry entries.
 const QUICK_LINK_IDS = [
-  'dashboard', 'fleet', 'resources', 'networking', 'security', 'templates',
+  'dashboard', 'fleet', 'gitops', 'resources', 'networking', 'security', 'templates',
   'global-observability', 'auto-updates', 'scheduled-ops', 'host-console', 'audit-log',
 ] as const;
 

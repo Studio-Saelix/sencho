@@ -3,6 +3,7 @@
  * Executor cleanup helpers for clear_reversed_evict / clear_stale_guard live at the bottom.
  */
 
+import { createHash } from 'crypto';
 import { parse as parseYaml } from 'yaml';
 import {
     DatabaseService,
@@ -11,6 +12,16 @@ import {
     type Node,
 } from './DatabaseService';
 import { BlueprintReconciler, type ReconcileDecision } from './BlueprintReconciler';
+import { projectBlueprintRevision } from '../helpers/gitopsResponse';
+import type {
+    ArtifactFacet,
+    FutureRolloutAuthorizationBinding,
+    GitOpsLimitation,
+    GitOpsRevisionProjection,
+    PlacementFacet,
+    RolloutFacet,
+    SourceFacet,
+} from './gitops/types';
 import { parseInterpolationRefs } from '../helpers/envVarParse';
 import { normalizeEnvFileField } from '../helpers/envFileResolution';
 import { isLikelySecretKey } from '../helpers/secretClassification';
@@ -118,6 +129,21 @@ export interface BlueprintPreviewResult {
     healthNote: string;
     blockers: PreviewWarningItem[];
     warnings: PreviewWarningItem[];
+    /**
+     * The canonical GitOps projection for this Blueprint's application, or the
+     * absent arm when it has none. Read-only evidence: the preview never derives
+     * state from it, it only reports what the projection already says.
+     */
+    gitops: GitOpsRevisionProjection;
+    /**
+     * Digest of the authority evidence this preview displays, or null when there
+     * is nothing to bind; a projection that faulted binds its limitation codes
+     * instead. Apply refuses with PREVIEW_STALE when the fresh digest differs
+     * from the one the operator confirmed, so a source acceptance, artifact
+     * identity, placement approval, preflight result, or rollout authorization
+     * that moved under the preview cannot execute against stale evidence.
+     */
+    gitopsFingerprint: string | null;
 }
 
 const HEALTH_NOTE = 'Reachability is from cached node status and mode-specific contact timestamps; preview does not probe remotes.';
@@ -612,6 +638,8 @@ export async function buildBlueprintPreview(blueprintId: number): Promise<Bluepr
         .filter(d => !desiredIds.has(d.node_id) && d.status !== 'withdrawn')
         .map(d => d.node_id);
 
+    const gitops = projectBlueprintRevision(blueprint.id);
+
     return {
         blueprintId: blueprint.id,
         classification: blueprint.classification,
@@ -638,7 +666,251 @@ export async function buildBlueprintPreview(blueprintId: number): Promise<Bluepr
         healthNote: HEALTH_NOTE,
         blockers,
         warnings,
+        gitops,
+        gitopsFingerprint: gitopsEvidenceFingerprint(gitops),
     };
+}
+
+/**
+ * A flat canonical view of one facet's evidence. Values are scalars so the
+ * digest below is a stable JSON string whatever the facet carries.
+ */
+type EvidenceJson = Record<string, string | number | boolean | null>;
+
+/**
+ * The binding fields of a rollout authorization. Every field is authority, so
+ * the whole object is evidence; sorting the node ids keeps the digest stable
+ * against the order a producer happened to record them in.
+ */
+function bindingEvidence(binding: FutureRolloutAuthorizationBinding): EvidenceJson {
+    return {
+        rolloutCandidateId: binding.rolloutCandidateId,
+        acceptedGenerationId: binding.acceptedGenerationId,
+        artifactSetId: binding.artifactSetId,
+        intentRevisionId: binding.intentRevisionId,
+        requiredNodeIds: [...binding.requiredNodeIds].sort((a, b) => a - b).join(','),
+        sourceAcceptanceRef: binding.sourceAcceptanceRef,
+        placementApprovalRef: binding.placementApprovalRef,
+        preflightFingerprint: binding.preflightFingerprint,
+    };
+}
+
+/** Identity fields plus the status: what a reader would need to re-derive the source state. */
+function sourceEvidence(facet: SourceFacet): EvidenceJson {
+    if (facet.status === 'not_applicable') return { status: facet.status };
+    const base: EvidenceJson = {
+        status: facet.status,
+        configuredRepoUrl: facet.configuredRepoUrl,
+        repoIdentityHost: facet.repoIdentity.host,
+        repoIdentityPathname: facet.repoIdentity.pathname,
+        configuredRef: facet.configuredRef,
+        desiredCommitSha: facet.desiredCommitSha,
+        fetchedCommitSha: facet.fetchedCommitSha,
+        candidateGenerationId: facet.candidateGenerationId,
+        acceptedGenerationId: facet.acceptedGenerationId,
+    };
+    switch (facet.status) {
+        case 'source_superseded':
+            return { ...base, supersededGenerationId: facet.supersededGenerationId };
+        case 'applying':
+            return { ...base, activeGenerationId: facet.activeGenerationId };
+        case 'source_unknown':
+            return {
+                ...base,
+                interruptedStage: facet.interruptedStage,
+                interruptedGenerationId: facet.interruptedGenerationId,
+            };
+        case 'recovery_required':
+            return { ...base, recoveryRef: facet.recoveryRef, recoveryGenerationId: facet.recoveryGenerationId };
+        case 'recovery_failed':
+            return {
+                ...base,
+                recoveryRef: facet.recoveryRef,
+                recoveryGenerationId: facet.recoveryGenerationId,
+                failureClass: facet.failureClass,
+            };
+        case 'source_failed':
+            return { ...base, failureStage: facet.failureStage, failureClass: facet.failureClass };
+        case 'not_live':
+            return { ...base, lifecycleStatus: facet.lifecycleStatus };
+        case 'never_reconciled':
+        case 'checking_fetching':
+        case 'application_generation_accepted':
+        case 'candidate_ready':
+        case 'source_review_pending':
+        case 'source_conflict_blocker':
+        case 'source_reconcile_required':
+        case 'source_retry_scheduled':
+        case 'source_poll_scheduled':
+        case 'source_suspended':
+            return base;
+        default: {
+            // Exhaustiveness guard: a status added to SourceFacet without a case
+            // here fails to compile rather than silently binding only its name.
+            const _exhaustive: never = facet;
+            void _exhaustive;
+            return base;
+        }
+    }
+}
+
+/**
+ * The artifact set identity and qualification, which are what "executable"
+ * means here. The observed identity strings (expected/latest evidence) are
+ * excluded: the set id plus evidence version is the immutable identity they
+ * describe, and re-observing the same identity would otherwise move the digest.
+ */
+function artifactEvidence(facet: ArtifactFacet): EvidenceJson {
+    const base: EvidenceJson = { status: facet.status };
+    if (facet.status === 'not_applicable') return base;
+    base.generationId = facet.generationId;
+    if (facet.expected) {
+        base.expectedArtifactSetId = facet.expected.artifactSetId;
+        base.expectedEvidenceVersion = facet.expected.evidenceVersion;
+        base.expectedQualification = facet.expected.qualification;
+    }
+    if (facet.latestEvidence === null) {
+        base.limitation = facet.limitation;
+        return base;
+    }
+    base.artifactSetId = facet.artifactSetId;
+    base.evidenceVersion = facet.evidenceVersion;
+    base.qualification = facet.qualification;
+    return base;
+}
+
+/** Placement is pure authority: pending, stale, blocked and bound states carry nothing else. */
+function placementEvidence(facet: PlacementFacet): EvidenceJson {
+    const base: EvidenceJson = { status: facet.status };
+    switch (facet.status) {
+        case 'unknown':
+            return { ...base, limitation: facet.limitation };
+        case 'source_acceptance_pending':
+            return {
+                ...base,
+                sourceAcceptanceRef: facet.sourceAcceptanceRef,
+                candidateGenerationId: facet.candidateGenerationId,
+            };
+        case 'rollout_authorization_pending':
+            return { ...base, binding: JSON.stringify(bindingEvidence(facet.binding)) };
+        case 'rollout_authorization_stale':
+            return {
+                ...base,
+                rolloutAuthorizationRef: facet.rolloutAuthorizationRef,
+                bound: JSON.stringify(bindingEvidence(facet.bound)),
+            };
+        case 'preflight_blocked':
+            return { ...base, reason: facet.reason, binding: JSON.stringify(bindingEvidence(facet.binding)) };
+        case 'blueprint_bound':
+            return { ...base, completion: facet.completion };
+        case 'not_applicable':
+        case 'unbound_direct':
+        case 'placement_review_pending':
+        case 'stateful_confirmation_required':
+            return base;
+        default: {
+            // Exhaustiveness guard: a status added to PlacementFacet without a
+            // case here fails to compile rather than silently dropping the
+            // authority fields it carries.
+            const _exhaustive: never = facet;
+            void _exhaustive;
+            return base;
+        }
+    }
+}
+
+/** The rollout generation identity. `partial` is progress detail, not authority. */
+function rolloutEvidence(facet: RolloutFacet): EvidenceJson {
+    const base: EvidenceJson = { status: facet.status };
+    switch (facet.status) {
+        case 'rollout_not_executable':
+            return { ...base, rolloutCandidateId: facet.rolloutCandidateId };
+        case 'rollout_queued':
+        case 'canary_in_progress':
+        case 'batch_in_progress':
+        case 'fully_deployed_health_pending':
+        case 'configuration_converged_artifact_qualified':
+        case 'exactly_converged_healthy':
+        case 'rollout_superseded':
+            return { ...base, rolloutGenerationId: facet.rolloutGenerationId };
+        case 'rollback_in_progress':
+            return { ...base, recoveryRef: facet.recoveryRef, recoveryGenerationId: facet.recoveryGenerationId };
+        case 'rollback_partial_failed':
+            return {
+                ...base,
+                recoveryRef: facet.recoveryRef,
+                recoveryGenerationId: facet.recoveryGenerationId,
+                failureClass: facet.failureClass,
+            };
+        case 'not_applicable':
+        case 'rollout_paused':
+        case 'partially_rolled_out':
+        case 'target_stale':
+        case 'target_unreachable':
+        case 'recovery_required':
+        case 'completion_unknown':
+            return base;
+        default: {
+            // Exhaustiveness guard: a status added to RolloutFacet without a case
+            // here fails to compile rather than silently binding only its name.
+            const _exhaustive: never = facet;
+            void _exhaustive;
+            return base;
+        }
+    }
+}
+
+function limitationEvidence(limitations: readonly GitOpsLimitation[]): string {
+    return JSON.stringify([...limitations].map(limitation => limitation.code).sort());
+}
+
+/**
+ * Digest of the evidence a preview binds an operator's confirmation to.
+ *
+ * Covers the authority the preview displays: the recorded authority refs, the
+ * rollout generation, and the source/artifact/placement/rollout statuses with
+ * their identity-bearing fields. Timestamps, retry counters, operation ids and
+ * per-target runtime/health observations are deliberately excluded: they are
+ * shown for judgement, not treated as authority, and folding in one that moves
+ * on a poll or heartbeat would strand every preview in a steady-state fleet as
+ * permanently stale. Per-target identity fields, live-arm caveats and pause
+ * reasons are excluded the same way; the application-level authority above is
+ * what gates execution.
+ *
+ * Null when there is nothing to bind: a Blueprint with no application row, or
+ * none the model has been asked about, has no GitOps evidence and its preview
+ * keeps the intent fingerprint as its only currency. A projection that could
+ * not derive an application it had reason to believe exists is a distinct
+ * fault, so its limitation codes are bound rather than read as the ordinary
+ * absence. The codes are the classified facts; the free-form evidence payload
+ * behind them is not, since nothing validates its shape or stability.
+ */
+export function gitopsEvidenceFingerprint(projection: GitOpsRevisionProjection): string | null {
+    if (projection.targetMode === 'not_applicable') {
+        if (projection.limitations.length === 0) return null;
+        return digest({ limitations: limitationEvidence(projection.limitations) });
+    }
+    return digest({
+        applicationId: projection.applicationId,
+        lifecycleStatus: projection.lifecycleStatus,
+        rolloutGenerationId: projection.rolloutGenerationId,
+        approvals: {
+            sourceAcceptanceRef: projection.approvals.sourceAcceptanceRef,
+            placementApprovalRef: projection.approvals.placementApprovalRef,
+            rolloutAuthorizationRef: projection.approvals.rolloutAuthorizationRef,
+            legacyCombinedApprovalRef: projection.approvals.legacyCombinedApprovalRef,
+        },
+        facets: {
+            source: sourceEvidence(projection.facets.source),
+            artifact: artifactEvidence(projection.facets.artifact),
+            placement: placementEvidence(projection.facets.placement),
+            rollout: rolloutEvidence(projection.facets.rollout),
+        },
+    });
+}
+
+function digest(evidence: unknown): string {
+    return createHash('sha256').update(JSON.stringify(evidence), 'utf8').digest('hex');
 }
 
 function createHashId(msg: string): string {

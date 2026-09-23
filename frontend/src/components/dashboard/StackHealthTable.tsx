@@ -8,6 +8,7 @@ import { SegmentedControl } from '@/components/ui/segmented-control';
 import type { RowState } from './classifyRow';
 import { updateAvailableLabel } from '@/lib/updateAvailableLabel';
 import GitOpsBadge from '@/components/gitops/GitOpsBadge';
+import { openGitOpsWorkplace } from '@/components/gitops/portfolio/portfolioNavigation';
 import type { StackHealthCoverage, StackHealthNavTarget, StackHealthRow, StackHealthScopeMode, StackHealthViewKind } from './stackHealthTypes';
 import { STACK_HEALTH_COLLAPSE_SIZE } from './useStackHealthScope';
 
@@ -302,7 +303,17 @@ export function StackHealthTable({
                     </span>
                   )}
                   {row.gitopsSourceState && (
-                    <GitOpsBadge facet="source" status={row.gitopsSourceState} className="shrink-0" />
+                    <button
+                      type="button"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        openGitOpsWorkplace();
+                      }}
+                      aria-label="Open the GitOps portfolio"
+                      className="shrink-0 cursor-pointer"
+                    >
+                      <GitOpsBadge facet="source" status={row.gitopsSourceState} />
+                    </button>
                   )}
                 </span>
                 {scope === 'all-nodes' ? (

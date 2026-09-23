@@ -13,8 +13,11 @@ export { NOT_APPLICABLE_REVISION };
  * Only the explicit `'0'` disables it, matching HealthGateService. The setting
  * is seeded to `'1'` at schema init, so an absent row means a database whose
  * seed did not run; reading that as enabled matches the seeded default.
+ *
+ * Exported so GitOps surfaces that project applications outside this helper
+ * (the portfolio aggregator and its detail route) read the flag the same way.
  */
-function healthGateDisabled(): boolean {
+export function healthGateDisabled(): boolean {
   return DatabaseService.getInstance().getGlobalSettings()['health_gate_enabled'] === '0';
 }
 

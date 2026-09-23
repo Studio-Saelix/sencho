@@ -10,8 +10,10 @@ import { formatTimeAgo } from '@/lib/relativeTime';
 import { useNodes } from '@/context/NodeContext';
 import GitOpsStateCard, { GitOpsFaultCard } from '@/components/gitops/GitOpsStateCard';
 import GitOpsCaveats from '@/components/gitops/GitOpsCaveats';
-import { ARTIFACT_STATE_LOOKUP, RUNTIME_STATE_LOOKUP, SOURCE_STATE_LOOKUP, absentFault, identityRefLabel, liveArtifactFacet, liveSourceFacet } from '@/lib/gitopsState';
-import type { GitOpsDriftItem, GitOpsRevisionProjection } from '@/types/gitops';
+import GitOpsApprovalChips from '@/components/gitops/GitOpsApprovalChips';
+import GitOpsDriftRow from '@/components/gitops/GitOpsDriftRow';
+import { ARTIFACT_STATE_LOOKUP, ROLLOUT_STATE_LOOKUP, RUNTIME_STATE_LOOKUP, SOURCE_STATE_LOOKUP, absentFault, liveArtifactFacet, livePlacementFacet, liveRolloutFacet, liveSourceFacet, placementStateMeta } from '@/lib/gitopsState';
+import type { GitOpsRevisionProjection } from '@/types/gitops';
 
 // Mirrors the backend payload shape (the frontend never imports backend).
 type StackDriftStatus = 'in-sync' | 'drifted' | 'missing-runtime' | 'unreachable';
@@ -180,28 +182,6 @@ function LedgerRow({ entry }: { entry: DriftLedgerEntry }) {
   );
 }
 
-/**
- * One classified divergence between intent and observation, in the same
- * expected-to-observed idiom the compose findings above it use.
- */
-function GitOpsDriftRow({ item }: { item: GitOpsDriftItem }) {
-  return (
-    <div className="border-t border-muted py-2 first:border-t-0">
-      <div className="flex flex-wrap items-center gap-2">
-        <span className="rounded-md bg-brand/15 px-1.5 py-0.5 font-mono text-[11px] text-brand">{item.class}</span>
-        <span className="font-mono text-[10px] uppercase tracking-wide text-stat-subtitle">{item.owner}</span>
-      </div>
-      <div className="mt-1 text-[12px] text-foreground/90">{item.reason}</div>
-      <div className="mt-1 flex flex-wrap items-center gap-1.5 font-mono text-[11px]">
-        <span className="text-stat-subtitle">expected</span>
-        <span className="text-foreground/90">{identityRefLabel(item.expected)}</span>
-        <span className="text-stat-subtitle">→ observed</span>
-        <span className="font-semibold text-foreground">{identityRefLabel(item.observed)}</span>
-      </div>
-    </div>
-  );
-}
-
 export default function DriftPanel({ stackName }: { stackName: string }) {
   const { activeNode, nodes } = useNodes();
   const nodeId = activeNode?.id;
@@ -283,6 +263,9 @@ export default function DriftPanel({ stackName }: { stackName: string }) {
   // manages the directory, and a Blueprint application has no Git source facet.
   const gitopsSource = liveSourceFacet(revision);
   const gitopsArtifact = liveArtifactFacet(revision);
+  const gitopsPlacement = livePlacementFacet(revision);
+  const gitopsRollout = liveRolloutFacet(revision);
+  const gitopsApprovals = gitopsLive ? gitopsLive.approvals : null;
   const gitopsTargets = gitopsLive?.targets ?? [];
   const gitopsDrift = gitopsLive?.drift ?? [];
   // A target can name a node this client has no record of, so fall back to the
@@ -347,10 +330,11 @@ export default function DriftPanel({ stackName }: { stackName: string }) {
 
           {gitopsFaults.length > 0 && <GitOpsFaultCard message={gitopsFaults[0].message} />}
 
-          {(gitopsSource || gitopsArtifact || gitopsTargets.length > 0) && (
+          {(gitopsSource || gitopsArtifact || gitopsPlacement || gitopsRollout || gitopsTargets.length > 0) && (
             <section>
               <div className={cn(LABEL_CLASS, 'mb-1.5')}>gitops</div>
               <div className="flex flex-col gap-2">
+                <GitOpsApprovalChips approvals={gitopsApprovals} placement={gitopsPlacement} rollout={gitopsRollout} />
                 {gitopsSource && (
                   <GitOpsStateCard
                     data-testid="gitops-source"
@@ -363,6 +347,20 @@ export default function DriftPanel({ stackName }: { stackName: string }) {
                     data-testid="gitops-artifact"
                     stateKey={gitopsArtifact.status}
                     state={ARTIFACT_STATE_LOOKUP[gitopsArtifact.status]}
+                  />
+                )}
+                {gitopsPlacement && (
+                  <GitOpsStateCard
+                    data-testid="gitops-placement"
+                    stateKey={gitopsPlacement.status}
+                    state={placementStateMeta(gitopsPlacement)}
+                  />
+                )}
+                {gitopsRollout && (
+                  <GitOpsStateCard
+                    data-testid="gitops-rollout"
+                    stateKey={gitopsRollout.status}
+                    state={ROLLOUT_STATE_LOOKUP[gitopsRollout.status]}
                   />
                 )}
                 {gitopsTargets.map(t => (

@@ -136,6 +136,7 @@
                   "features/deploy-enforcement",
                   "features/git-sources",
                   "features/git-transport-support",
+                  "features/gitops-portfolio",
                   "features/blueprint-model",
                   "features/scheduled-operations",
                   "features/auto-update-policies",

@@ -1,5 +1,5 @@
 import { apiFetch } from './api';
-import type { GitOpsRevisionCarrier, GitOpsRevisionsCarrier } from '@/types/gitops';
+import type { GitOpsRevisionCarrier, GitOpsRevisionProjection, GitOpsRevisionsCarrier } from '@/types/gitops';
 
 export type DriftMode = 'observe' | 'suggest' | 'enforce';
 export type ContentOrigin = 'inline' | 'git';
@@ -158,6 +158,20 @@ export interface BlueprintPreview {
     healthNote: string;
     blockers: BlueprintPreviewWarning[];
     warnings: BlueprintPreviewWarning[];
+    /**
+     * The canonical GitOps projection for this Blueprint's application, or the
+     * absent arm when it has none. Rendered through the same lookups and cards
+     * every other GitOps surface uses; the preview derives nothing from it.
+     */
+    gitops: GitOpsRevisionProjection;
+    /**
+     * Digest of the authority evidence this preview shows. Apply refuses with
+     * PREVIEW_STALE when it no longer matches, so an acceptance, artifact
+     * identity, placement approval, preflight result, or rollout authorization
+     * that moved under the operator cannot execute. Null when the Blueprint has
+     * no live application and there is nothing to bind.
+     */
+    gitopsFingerprint: string | null;
 }
 
 export type WithdrawConfirm = 'standard' | 'snapshot_then_evict' | 'evict_and_destroy';
@@ -273,7 +287,11 @@ export interface ApplyBlueprintResult {
 
 export async function applyBlueprint(
     id: number,
-    confirm: { planFingerprint: string; actions: Array<{ nodeId: number; action: PreviewAction }> },
+    confirm: {
+        planFingerprint: string;
+        gitopsFingerprint: string | null;
+        actions: Array<{ nodeId: number; action: PreviewAction }>;
+    },
 ): Promise<ApplyBlueprintResult> {
     const res = await apiFetch(`/blueprints/${id}/apply`, {
         method: 'POST',
