@@ -641,6 +641,22 @@ export function placementStateMeta(facet: PlacementFacet): GitOpsStateMeta | und
 }
 
 /**
+ * The state for a status, or an explicit unrecognized state when this build
+ * does not know it. The shared card renders nothing for an unknown status,
+ * which suits a list row; on an evidence surface the whole point is that no
+ * facet and no target disappears, so a status from a newer node still gets a
+ * card that says so.
+ */
+export function stateOrUnrecognized(state: GitOpsStateMeta | undefined, status: string): GitOpsStateMeta {
+  return state ?? {
+    label: 'unrecognized state',
+    tone: 'neutral',
+    line: `Reported as "${status}", a state this version of Sencho does not recognize.`,
+    icon: CircleHelp,
+  };
+}
+
+/**
  * Frontend view state: stack name to the source status of its waiting candidate.
  * A key being present is what "this stack has a Git update waiting" means, so
  * the value is optional: a miss is a stack with nothing waiting, not a status.

@@ -66,8 +66,10 @@ This tutorial does not cover stateful Blueprints (the extra confirmation step fo
   <Step title="Review and confirm the rollout">
     Click **Apply now**. Sencho computes a rollout preview: `Safe 1 · Warnings 1 · Blockers 0`, with a warning noting `no persistent volumes detected` (informational for a stateless Blueprint, not a problem), and one line under **Changes**: `Local (local/online) · create · safe: New placement`.
 
-    <Frame caption="The rollout preview for the first deploy: one safe create, one informational warning.">
-      <img src="/images/tutorials/create-and-approve-a-blueprint/rollout-preview.png" alt="Confirm rollout dialog for whoami-edge reading Safe 1, Warnings 1, Blockers 0, pending. A Warnings section lists 'no persistent volumes detected'. A Changes section lists Local (local/online) · create · safe: New placement." />
+    Above the change list, the same dialog reads out the recorded GitOps authority and state: the three authority steps as chips, then the source and executable-artifact evidence, the placement and rollout state, and the per-target observations. An Inline Blueprint has no Git source or executable artifact set, so those two facets are omitted as not applicable, while placement and rollout report what is on record. A combined approval recorded as a single decision is labelled a legacy combined approval rather than one of the steps. The footer notes that confirming is bound to the evidence snapshot shown; if a recorded authority fact changes first, the apply is refused as stale and the dialog refreshes.
+
+    <Frame caption="The rollout preview for the first deploy: one safe create, one informational warning, and the recorded authority and state for the application.">
+      <img src="/images/tutorials/create-and-approve-a-blueprint/rollout-preview.png" alt="Confirm rollout dialog for whoami-edge reading Safe 1, Warnings 1, Blockers 0, legacy combined: pending. A GitOps authority and evidence block shows a rollout generation of none, a placement card reading 'blueprint bound', and a rollout card reading 'rollout not executable'. A Warnings section lists 'no persistent volumes detected'. A Changes section lists Local (local/online) · create · safe: New placement." />
     </Frame>
 
     This preview is the actual authorization step: nothing on the fleet has changed yet, and Sencho is showing you exactly what it's about to do before it does it. Click **Confirm Apply**.

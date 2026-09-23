@@ -637,11 +637,17 @@ blueprintsRouter.post('/:id/apply', async (req: Request, res: Response): Promise
             return;
         }
 
-        const body = (req.body ?? {}) as { planFingerprint?: unknown; actions?: unknown };
+        const body = (req.body ?? {}) as { planFingerprint?: unknown; actions?: unknown; gitopsFingerprint?: unknown };
         if (typeof body.planFingerprint !== 'string' || body.planFingerprint.length === 0) {
             res.status(400).json({ error: 'planFingerprint is required', code: 'CONFIRM_REQUIRED' });
             return;
         }
+        // The intent fingerprint covers compose content and selector intent. The
+        // evidence fingerprint covers the GitOps authority facts the unified
+        // preview displays (acceptance, artifact identity, placement approval,
+        // rollout authorization). A Git-bound Blueprint must echo both; a
+        // Blueprint with no live application has neither and stays unchanged.
+        const gitopsFingerprint = typeof body.gitopsFingerprint === 'string' ? body.gitopsFingerprint : null;
         const parsedActions = parseConfirmableActionsBody(body.actions);
         if (!parsedActions.ok) {
             res.status(400).json({ error: `Invalid actions: ${parsedActions.reason}`, code: 'CONFIRM_REQUIRED' });
@@ -659,6 +665,7 @@ blueprintsRouter.post('/:id/apply', async (req: Request, res: Response): Promise
         }
         if (
             body.planFingerprint !== preview.planFingerprint
+            || gitopsFingerprint !== preview.gitopsFingerprint
             || !confirmableActionsEqual(parsedActions.actions, preview.confirmableActions)
         ) {
             res.status(409).json({ error: 'Preview is stale; refresh and confirm again', code: 'PREVIEW_STALE', preview });

@@ -1,26 +1,23 @@
 import type { ReactNode } from 'react';
-import { CircleHelp, CircleSlash } from 'lucide-react';
+import { CircleSlash } from 'lucide-react';
 
 import GitOpsApprovalChips from '@/components/gitops/GitOpsApprovalChips';
 import GitOpsCaveats from '@/components/gitops/GitOpsCaveats';
 import GitOpsDriftRow from '@/components/gitops/GitOpsDriftRow';
+import { GitOpsFacetCards } from '@/components/gitops/GitOpsFacetCards';
+import { IdentityRow } from '@/components/gitops/GitOpsIdentityRow';
 import GitOpsStateCard, { GitOpsFaultCard } from '@/components/gitops/GitOpsStateCard';
+import { ShortId } from '@/components/gitops/GitOpsShortId';
+import { GitOpsTargetCard } from '@/components/gitops/GitOpsTargetCard';
 import { attentionLabel, POSTURE_TONE_CLASS } from '@/lib/gitopsPortfolio';
 import {
-  ARTIFACT_STATE_LOOKUP,
-  ROLLOUT_STATE_LOOKUP,
-  RUNTIME_STATE_LOOKUP,
-  SOURCE_STATE_LOOKUP,
   absentFault,
   liveArtifactFacet,
   livePlacementFacet,
   liveRolloutFacet,
   liveSourceFacet,
-  placementStateMeta,
-  type GitOpsStateMeta,
 } from '@/lib/gitopsState';
 import { cn } from '@/lib/utils';
-import type { GitOpsTargetProjection, ObservedArtifactIdentity } from '@/types/gitops';
 import type { GitOpsPortfolioDetailResponse, GitOpsPortfolioRow } from '@/types/gitopsPortfolio';
 
 const SECTION_LABEL = 'font-mono text-[10px] uppercase tracking-[0.18em] text-stat-subtitle';
@@ -32,12 +29,6 @@ const TARGET_MODE_LABEL: Partial<Record<string, string>> & Record<GitOpsPortfoli
   inline_blueprint: 'Inline Blueprint',
 };
 
-/** A short id with the full value in the tooltip; the short form is enough to compare at a glance. */
-function ShortId({ value, length = 8 }: { value: string | null; length?: number }) {
-  if (value === null) return <span className="text-stat-icon">none</span>;
-  return <span title={value}>{value.slice(0, length)}</span>;
-}
-
 function Section({ label, children }: { label: string; children: ReactNode }) {
   return (
     <section className="flex flex-col gap-2">
@@ -47,81 +38,12 @@ function Section({ label, children }: { label: string; children: ReactNode }) {
   );
 }
 
-function IdentityRow({ term, children }: { term: string; children: ReactNode }) {
-  return (
-    <>
-      <dt className="font-mono text-[10px] uppercase tracking-[0.12em] text-stat-subtitle">{term}</dt>
-      <dd className="min-w-0 truncate font-mono text-[11px] text-stat-value">{children}</dd>
-    </>
-  );
-}
-
-/**
- * The state for a status, or an explicit unrecognized state when this build
- * does not know it. The shared card renders nothing for an unknown status,
- * which suits a list row; here the whole point is that no facet and no target
- * disappears, so a status from a newer node still gets a card that says so.
- */
-function stateOrUnrecognized(state: GitOpsStateMeta | undefined, status: string): GitOpsStateMeta {
-  return state ?? {
-    label: 'unrecognized state',
-    tone: 'neutral',
-    line: `Reported as "${status}", a state this version of Sencho does not recognize.`,
-    icon: CircleHelp,
-  };
-}
-
-function observedArtifactLine(observed: ObservedArtifactIdentity): string {
-  switch (observed.kind) {
-    case 'unknown':
-      return 'observed artifact unknown';
-    case 'missing':
-      return 'no running artifact observed';
-    case 'unavailable':
-      return 'observed artifact unavailable';
-    case 'exact':
-      return `observed ${observed.identity}`;
-    case 'qualified':
-      return `observed ${observed.identity} (qualified)`;
-    case 'stale':
-      return `observed ${observed.identity} (stale)`;
-    case 'local_build_unverified':
-      return `observed ${observed.identity} (local build, unverified)`;
-    default: {
-      // A kind from a newer build: say so rather than end the line blank.
-      const kind: string = (observed as { kind: string }).kind;
-      return `observed artifact of unrecognized kind "${kind}"`;
-    }
-  }
-}
-
 function evidenceLine(evidence: GitOpsPortfolioRow['evidence'], nodeName: (id: number) => string): string {
   if (!evidence.partial) return 'The evidence behind this application\'s state could not be established.';
   const who = evidence.unreachableNodes.length > 0
     ? `${evidence.unreachableNodes.map(nodeName).join(', ')} could not be reached`
     : 'not every target could report';
   return `Evidence is partial: ${who}, so their target state may not be current.`;
-}
-
-function TargetCard({ target, nodeName }: { target: GitOpsTargetProjection; nodeName: string }) {
-  return (
-    <GitOpsStateCard
-      data-testid="gitops-target"
-      stateKey={target.runtime.status}
-      state={stateOrUnrecognized(RUNTIME_STATE_LOOKUP[target.runtime.status], target.runtime.status)}
-    >
-      <div className="mt-1 space-y-0.5 font-mono text-[10px] text-stat-subtitle">
-        <div>{nodeName}{target.stackName ? ` · ${target.stackName}` : ''}</div>
-        <div>
-          health {target.health.status} · {target.connectivity} · last known good {target.lkg.status}
-          {target.tombstoned ? ' · retired' : ''}
-        </div>
-        <div className="truncate">
-          deployed <ShortId value={target.deployedGenerationId} /> · {observedArtifactLine(target.observedArtifactIdentity)}
-        </div>
-      </div>
-    </GitOpsStateCard>
-  );
 }
 
 /**
@@ -217,22 +139,7 @@ export default function GitOpsApplicationDetail({ detail }: { detail: GitOpsPort
             {live && (
               <GitOpsApprovalChips approvals={live.approvals} placement={placement} rollout={rollout} />
             )}
-            {source && (
-              <GitOpsStateCard data-testid="gitops-source" stateKey={source.status} state={stateOrUnrecognized(SOURCE_STATE_LOOKUP[source.status], source.status)} />
-            )}
-            {artifact && (
-              <GitOpsStateCard data-testid="gitops-artifact" stateKey={artifact.status} state={stateOrUnrecognized(ARTIFACT_STATE_LOOKUP[artifact.status], artifact.status)} />
-            )}
-            {placement && (
-              <GitOpsStateCard data-testid="gitops-placement" stateKey={placement.status} state={stateOrUnrecognized(placementStateMeta(placement), placement.status)} />
-            )}
-            {rollout && (
-              <GitOpsStateCard data-testid="gitops-rollout" stateKey={rollout.status} state={stateOrUnrecognized(ROLLOUT_STATE_LOOKUP[rollout.status], rollout.status)}>
-                {rollout.status === 'rollout_paused' && rollout.pauseReason && (
-                  <div className="mt-1 font-mono text-[11px] text-stat-subtitle">{rollout.pauseReason}</div>
-                )}
-              </GitOpsStateCard>
-            )}
+            <GitOpsFacetCards source={source} artifact={artifact} placement={placement} rollout={rollout} />
           </div>
         </Section>
       </div>
@@ -247,7 +154,7 @@ export default function GitOpsApplicationDetail({ detail }: { detail: GitOpsPort
         {live && live.targets.length > 0 && (
           <Section label={`Targets · ${live.targets.length}`}>
             <div className="flex flex-col gap-2">
-              {live.targets.map(t => <TargetCard key={t.nodeId} target={t} nodeName={nodeName(t.nodeId)} />)}
+              {live.targets.map(t => <GitOpsTargetCard key={t.nodeId} target={t} nodeName={nodeName(t.nodeId)} />)}
             </div>
           </Section>
         )}
