@@ -16,13 +16,34 @@
  * read as partial evidence, not as health.
  */
 import { Router, type Request, type Response } from 'express';
-import { DatabaseService } from '../services/DatabaseService';
+import { DatabaseService, type Blueprint } from '../services/DatabaseService';
 import { NodeRegistry } from '../services/NodeRegistry';
-import { checkPermission } from '../middleware/permissions';
+import { checkPermission, requirePermission } from '../middleware/permissions';
 import { projectApplication } from '../services/gitops/derive';
 import { latestTransitionByApplication } from '../services/gitops/history';
 import { classifySourceRow, satisfiesGitOpsRead } from '../services/gitops/readAuth';
 import { healthGateDisabled, NOT_APPLICABLE_REVISION, stackResourceSet } from '../helpers/gitopsResponse';
+import { buildBlueprintPreview, type BlueprintPreviewResult } from '../services/blueprintPreviewProjection';
+import {
+  confirmableActionsEqual,
+  deriveBlastFromConfirmableActions,
+  parseConfirmableActionsBody,
+} from '../services/blueprintApproval';
+import { isGitManagedBlueprint } from '../services/gitops/binding';
+import {
+  canonicalizeNodeIds,
+  decodeGitOpsRequiredTargetsJson,
+  encodeGitOpsApprovedTargetEffectJson,
+} from '../services/gitops/json';
+import { placementEffectCompatible } from '../services/gitops/store';
+import { GitOpsTransitions, GitOpsTransitionError } from '../services/gitops/transitions';
+import { newGitOpsId } from '../services/gitops/directApplication';
+import {
+  buildAcceptedGeneration,
+  ensureRolloutAuthorization,
+} from '../services/gitops/handoff';
+import { GitSourceService } from '../services/GitSourceService';
+import { sanitizeForLog } from '../utils/safeLog';
 import {
   aggregateGitOpsPortfolio,
   fetchRemoteSourceRows,
@@ -39,7 +60,7 @@ import type {
   GitOpsPortfolioResponse,
   GitOpsPortfolioRow,
 } from '../services/gitops/portfolioTypes';
-import type { GitOpsDriftItem } from '../services/gitops/types';
+import type { GitOpsApplicationRow, GitOpsDriftItem } from '../services/gitops/types';
 
 export const gitopsApplicationsRouter = Router();
 
@@ -331,6 +352,55 @@ function nodeNameMap(db: DatabaseService, maySeeNodeNames: boolean): Map<number,
   return new Map(db.getNodes().map(node => [node.id, maySeeNodeNames ? node.name ?? null : null]));
 }
 
+type AuthorityTarget = { application: GitOpsApplicationRow; blueprint: Blueprint };
+
+const NOT_GIT_MANAGED = {
+  error: 'Decomposed authority actions apply to Git-managed Blueprint applications',
+  code: 'NOT_GIT_MANAGED',
+} as const;
+
+/**
+ * Resolve a portfolio id to the local Git-managed Blueprint application a
+ * decomposed authority action may write to.
+ *
+ * Decomposed actions cover the Git-managed path only: an Inline Blueprint's
+ * combined approval is written by Apply, and a Direct application has no
+ * placement or rollout authority to record. Anything else is answered here
+ * rather than refused later by a transition, so the reason names the surface
+ * contract instead of an internal precondition.
+ */
+function resolveAuthorityTarget(req: Request, res: Response): AuthorityTarget | null {
+  const rawParam: unknown = req.params.id;
+  const id = typeof rawParam === 'string' ? rawParam : Array.isArray(rawParam) ? rawParam.join('/') : '';
+  const parsedId = parsePortfolioId(id);
+  if (parsedId.kind === 'invalid') {
+    res.status(400).json({ error: 'Application id is not a portfolio id' });
+    return null;
+  }
+  if (parsedId.kind !== 'blueprint') {
+    res.status(409).json(NOT_GIT_MANAGED);
+    return null;
+  }
+  const application = GitOpsStore.getInstance().getLiveBlueprintApplication(parsedId.blueprintId);
+  const blueprint = application?.blueprint_id !== null && application?.blueprint_id !== undefined
+    ? DatabaseService.getInstance().getBlueprint(application.blueprint_id)
+    : undefined;
+  if (!application || !blueprint) {
+    res.status(404).json({ error: 'Application not found' });
+    return null;
+  }
+  if (application.target_mode !== 'blueprint' || !isGitManagedBlueprint(blueprint)) {
+    res.status(409).json(NOT_GIT_MANAGED);
+    return null;
+  }
+  return { application, blueprint };
+}
+
+/** The actor recorded on a decomposed authority action's transition. */
+function actorFromRequest(req: Request): string | null {
+  return req.user?.username ?? null;
+}
+
 gitopsApplicationsRouter.get('/:id', async (req: Request, res: Response): Promise<void> => {
   try {
     const rawParam: unknown = req.params.id;
@@ -515,4 +585,232 @@ gitopsApplicationsRouter.get('/:id', async (req: Request, res: Response): Promis
     console.error('[GitOps portfolio] Detail error:', error);
     res.status(500).json({ error: 'Failed to fetch GitOps application' });
   }
+});
+
+/**
+ * Record an operator source acceptance for the waiting candidate generation.
+ *
+ * The operator path for a manual source policy: the controller never accepts
+ * on a policy's behalf when the policy says a human must look. The body echoes
+ * the generation the caller reviewed; the transition refuses anything that is
+ * no longer the current candidate, so a stale review cannot accept different
+ * content than it named.
+ */
+gitopsApplicationsRouter.post('/:id/source/accept', (req: Request, res: Response): void => {
+  if (!requirePermission(req, res, 'stack:create')) return;
+  const target = resolveAuthorityTarget(req, res);
+  if (!target) return;
+  const generationId = typeof req.body?.generationId === 'string' ? req.body.generationId : '';
+  if (generationId.length === 0) {
+    res.status(400).json({ error: 'generationId is required', code: 'CONFIRM_REQUIRED' });
+    return;
+  }
+  const actor = actorFromRequest(req);
+  try {
+    GitOpsTransitions.getInstance().sourceAccepted({
+      applicationId: target.application.id,
+      generationId,
+      artifactSetId: newGitOpsId(),
+      sourceAcceptanceId: newGitOpsId(),
+      authority: 'operator',
+      envelope: { operationId: newGitOpsId(), actor, trigger: 'manual', at: Date.now() },
+    });
+  } catch (error) {
+    if (error instanceof GitOpsTransitionError) {
+      res.status(409).json({ error: error.message, code: 'SOURCE_ACCEPTANCE_REFUSED' });
+      return;
+    }
+    console.error('[GitOps authority] Source acceptance failed:', error);
+    res.status(500).json({ error: 'Failed to accept the source revision' });
+    return;
+  }
+  res.json({ ok: true });
+});
+
+/**
+ * Record an operator placement approval for the current intent and candidate.
+ *
+ * The reviewed placement is the Blueprint's own plan, so the preview and its
+ * fingerprint are the confirmation contract: the request echoes the plan it
+ * reviewed, and the route recomputes it and refuses with a fresh preview when
+ * anything moved. The frozen candidate set is validated against the reviewed
+ * blast before the approval is written, so an approval that could never
+ * resolve later is refused here instead.
+ */
+gitopsApplicationsRouter.post('/:id/placement/approve', async (req: Request, res: Response): Promise<void> => {
+  if (!requirePermission(req, res, 'stack:create')) return;
+  if (!requirePermission(req, res, 'stack:deploy')) return;
+  const target = resolveAuthorityTarget(req, res);
+  if (!target) return;
+
+  const body = (req.body ?? {}) as { planFingerprint?: unknown; actions?: unknown };
+  if (typeof body.planFingerprint !== 'string' || body.planFingerprint.length === 0) {
+    res.status(400).json({ error: 'planFingerprint is required', code: 'CONFIRM_REQUIRED' });
+    return;
+  }
+  const parsedActions = parseConfirmableActionsBody(body.actions);
+  if (!parsedActions.ok) {
+    res.status(400).json({ error: `Invalid actions: ${parsedActions.reason}`, code: 'CONFIRM_REQUIRED' });
+    return;
+  }
+
+  if (!target.blueprint.enabled) {
+    res.status(409).json({
+      error: 'The Blueprint is disabled. Enable it before approving placement.',
+      code: 'BLUEPRINT_DISABLED',
+    });
+    return;
+  }
+
+  const app = target.application;
+  const store = GitOpsStore.getInstance();
+  const intent = app.intent_revision_id ? store.getIntentRevision(app.intent_revision_id) : undefined;
+  const candidate = app.rollout_candidate_id ? store.getRolloutCandidate(app.rollout_candidate_id) : undefined;
+  if (!intent || !candidate) {
+    res.status(409).json({
+      error: 'This application has no current placement question to approve',
+      code: 'PLACEMENT_REFUSED',
+    });
+    return;
+  }
+
+  let preview: BlueprintPreviewResult | null;
+  try {
+    preview = await buildBlueprintPreview(target.blueprint.id);
+  } catch (error) {
+    console.error('[GitOps authority] Placement preview failed:', error);
+    res.status(500).json({ error: 'Failed to preview the placement' });
+    return;
+  }
+  if (!preview) {
+    res.status(404).json({ error: 'Application not found' });
+    return;
+  }
+  if (preview.summary.blocker > 0) {
+    res.status(409).json({ error: 'Plan has blockers', code: 'PLAN_BLOCKED', preview });
+    return;
+  }
+  if (
+    body.planFingerprint !== preview.planFingerprint
+    || !confirmableActionsEqual(parsedActions.actions, preview.confirmableActions)
+  ) {
+    res.status(409).json({ error: 'Preview is stale; refresh and confirm again', code: 'PREVIEW_STALE', preview });
+    return;
+  }
+
+  const blast = deriveBlastFromConfirmableActions(preview.confirmableActions);
+  let frozenNodeIds: number[];
+  try {
+    frozenNodeIds = decodeGitOpsRequiredTargetsJson(candidate.required_targets_json).nodeIds;
+  } catch (error) {
+    console.error('[GitOps authority] Candidate frozen set is unreadable:', error);
+    res.status(409).json({
+      error: 'The frozen placement set could not be read; refresh the application and try again',
+      code: 'PLACEMENT_REFUSED',
+    });
+    return;
+  }
+  if (!placementEffectCompatible(blast, frozenNodeIds)) {
+    res.status(409).json({
+      error: 'The reviewed plan no longer matches the frozen placement set; refresh and try again',
+      code: 'PLACEMENT_REFUSED',
+    });
+    return;
+  }
+
+  const actor = actorFromRequest(req);
+  try {
+    GitOpsTransitions.getInstance().placementApproved({
+      applicationId: app.id,
+      approvalId: newGitOpsId(),
+      intentRevisionId: intent.id,
+      blastJson: encodeGitOpsApprovedTargetEffectJson(blast),
+      requiredNodeIds: canonicalizeNodeIds(
+        blast.filter(entry => entry.outcome === 'place').map(entry => entry.nodeId),
+      ),
+      fingerprint: preview.planFingerprint,
+      actor,
+      envelope: { operationId: newGitOpsId(), actor, trigger: 'manual', at: Date.now() },
+      rolloutGenerationId: newGitOpsId(),
+      candidateId: candidate.id,
+      strategyJson: intent.rollout_strategy_json,
+      provenance: 'placement_approval',
+    });
+  } catch (error) {
+    if (error instanceof GitOpsTransitionError) {
+      res.status(409).json({ error: error.message, code: 'PLACEMENT_REFUSED' });
+      return;
+    }
+    console.error('[GitOps authority] Placement approval failed:', error);
+    res.status(500).json({ error: 'Failed to record the placement approval' });
+    return;
+  }
+  res.json({ ok: true });
+});
+
+/**
+ * Authorize the current rollout and start the sequential rollout.
+ *
+ * The authorization evaluates registry preflight, records the operator
+ * authority, and then dispatches the accepted generation through the shared
+ * dispatch boundary, which is the one executor this model has today. A
+ * dispatch refusal leaves the authorization standing and is reported as a
+ * note, not as a failed request: the decision was recorded, the execution was
+ * not.
+ */
+gitopsApplicationsRouter.post('/:id/rollout/authorize', async (req: Request, res: Response): Promise<void> => {
+  if (!requirePermission(req, res, 'stack:deploy')) return;
+  const target = resolveAuthorityTarget(req, res);
+  if (!target) return;
+
+  if (!target.blueprint.enabled) {
+    res.status(409).json({
+      error: 'The Blueprint is disabled. Enable it before authorizing the rollout.',
+      code: 'BLUEPRINT_DISABLED',
+    });
+    return;
+  }
+
+  const app = target.application;
+  const actor = actorFromRequest(req);
+  let auth;
+  try {
+    auth = await ensureRolloutAuthorization(app.id, actor, 'manual', undefined, 'operator');
+  } catch (error) {
+    console.error('[GitOps authority] Rollout authorization failed:', error);
+    res.status(500).json({ error: 'Failed to evaluate and record the rollout authorization' });
+    return;
+  }
+  if (!auth.ok) {
+    res.status(409).json({ error: auth.reason, code: 'ROLLOUT_AUTHORIZATION_REFUSED' });
+    return;
+  }
+
+  const genRow = GitOpsStore.getInstance().getGeneration(auth.binding.acceptedGenerationId);
+  if (!genRow) {
+    res.status(409).json({
+      error: 'The authorized generation could not be read; refresh the application and try again',
+      code: 'ROLLOUT_AUTHORIZATION_REFUSED',
+    });
+    return;
+  }
+
+  let dispatched = false;
+  let note: string | null = null;
+  try {
+    const result = await GitSourceService.getInstance().dispatchAcceptedGeneration(
+      buildAcceptedGeneration(genRow),
+      GitSourceService.dispatchContextFor(app),
+      { trigger: 'manual', actor: actor ?? 'operator' },
+    );
+    dispatched = result.status === 'dispatched';
+    if (result.status === 'blocked') note = result.reason;
+  } catch (error) {
+    console.error(
+      '[GitOps authority] Rollout dispatch failed after authorization:',
+      sanitizeForLog(error instanceof Error ? error.message : String(error)),
+    );
+    note = 'The rollout was authorized but could not start. Retry it from the Blueprint deployments surface.';
+  }
+  res.json({ ok: true, dispatched, note });
 });

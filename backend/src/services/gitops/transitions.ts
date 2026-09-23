@@ -1571,10 +1571,13 @@ export class GitOpsTransitions {
    * Operator placement approval opens a rollout generation for the current
    * intent and candidate.
    *
-   * This transition always opens a `legacy_inline` generation. History
-   * order is placement_approved, then rollout_generation_opened, so a
+   * History order is placement_approved, then rollout_generation_opened, so a
    * reader can tell the approval happened before the generation pointer
-   * moved.
+   * moved. The generation's provenance names the path that opened it:
+   * `legacy_inline` for the combined Inline Apply (which passes nothing and
+   * gets the default), `placement_approval` for the decomposed Git-managed
+   * action, where the generation is a placement-only placeholder until a
+   * rollout authorization supersedes it.
    */
   placementApproved(args: {
     applicationId: string;
@@ -1588,6 +1591,7 @@ export class GitOpsTransitions {
     rolloutGenerationId: string;
     candidateId: string;
     strategyJson?: string;
+    provenance?: 'legacy_inline' | 'placement_approval';
   }): TransitionResult {
     return this.mutateApp(
       args.applicationId,
@@ -1663,7 +1667,7 @@ export class GitOpsTransitions {
           preflight_fingerprint: null,
           preflight_evidence_json: null,
           rollout_strategy_json: args.strategyJson ?? '{}',
-          provenance: 'legacy_inline',
+          provenance: args.provenance ?? 'legacy_inline',
           supersedes_generation_id: previousGenerationId,
           superseded_at: null,
           operation_id: args.envelope.operationId,
@@ -1703,6 +1707,10 @@ export class GitOpsTransitions {
    * set, and source acceptance. Exact artifact qualification is not required
    * to authorize (config deploy may proceed under a qualified claim); exact
    * convergence is derived later only when qualification is exact.
+   *
+   * Authority defaults to `configured_policy` (the automatic handoff minting
+   * on the configured policy's behalf). An explicit operator authorization
+   * passes `operator`, so the approval row records who actually decided.
    */
   rolloutAuthorized(args: {
     applicationId: string;
@@ -1713,6 +1721,7 @@ export class GitOpsTransitions {
     actor: string | null;
     envelope: EventEnvelope;
     strategyJson?: string;
+    authority?: 'operator' | 'configured_policy';
   }): TransitionResult {
     return this.mutateApp(
       args.applicationId,
@@ -1756,7 +1765,7 @@ export class GitOpsTransitions {
         this.store().insertApproval({
           id: args.approvalId,
           kind: 'rollout_authorization',
-          authority: 'configured_policy',
+          authority: args.authority ?? 'configured_policy',
           authoritative: 1,
           application_id: args.applicationId,
           generation_id: ingredients.acceptedGenerationId,
