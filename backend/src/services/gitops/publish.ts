@@ -31,7 +31,8 @@ import type Database from 'better-sqlite3';
 import { GitOpsMetricsService } from '../GitOpsMetricsService';
 import type { GitOpsHistoryStage, HistoryOutcome } from './history';
 import type { GitOpsTargetMode } from './types';
-import { drainSettledOutboxRow } from './outbox';
+import { drainGitOpsOutboxRow } from './outbox';
+import { hasGitOpsOutboxRow } from './notifications';
 
 /**
  * The `state-invalidate` payload one committed transition produces.
@@ -135,8 +136,10 @@ function drain(): void {
   for (const row of batch) {
     if (!survived(row)) continue;
     metrics.record(row.stage, row.outcome);
-    if (row.stage === 'source_reconcile_settled') {
-      drainSettledOutboxRow(row.db, row.id);
+    // The same predicate the insert uses, so a stage that writes an outbox row
+    // is always drained and a stage that writes none is never looked up.
+    if (hasGitOpsOutboxRow(row.stage)) {
+      drainGitOpsOutboxRow(row.db, row.id);
     }
     if (!sink) {
       warnUnannounced();

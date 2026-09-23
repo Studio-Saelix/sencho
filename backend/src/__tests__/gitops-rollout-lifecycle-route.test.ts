@@ -339,6 +339,44 @@ describe('POST /api/gitops/applications/:id/rollout/pause', () => {
     expect(projectApplication(seeded.applicationId, false).facets?.rollout.status).toBe('rollout_paused');
   });
 
+  it('records the pause as one notification naming the operator decision', async () => {
+    const seeded = seedGitManagedBlueprint();
+    await authorizeRollout(seeded);
+    const res = await request(app)
+      .post(`/api/gitops/applications/bp:${seeded.blueprintId}/rollout/pause`)
+      .set('Cookie', adminCookie)
+      .send({ reason: 'waiting for the maintenance window' });
+    expect(res.status).toBe(200);
+
+    // The live drain runs on a macrotask; the startup repair drains the same
+    // row synchronously and would duplicate it if the dedupe key were missing.
+    const { repairGitOpsOutbox } = await import('../services/gitops/outbox');
+    repairGitOpsOutbox();
+
+    const db = DatabaseService.getInstance().getDb();
+    const history = db.prepare(
+      `SELECT operation_id, actor FROM gitops_history
+       WHERE application_id = ? AND stage = 'rollout_paused'
+       ORDER BY created_at DESC, id DESC LIMIT 1`,
+    ).get(seeded.applicationId) as { operation_id: string; actor: string };
+    const notes = db.prepare(
+      `SELECT category, level, message, actor_username, gitops_operation_id
+       FROM notification_history WHERE gitops_operation_id = ?`,
+    ).all(history.operation_id) as Array<{
+      category: string;
+      level: string;
+      message: string;
+      actor_username: string;
+      gitops_operation_id: string;
+    }>;
+    expect(notes).toHaveLength(1);
+    expect(notes[0].category).toBe('gitops_rollout_paused');
+    expect(notes[0].level).toBe('warning');
+    expect(notes[0].message).toContain('rollout paused');
+    expect(notes[0].message).toContain('waiting for the maintenance window');
+    expect(notes[0].actor_username).toBe(history.actor);
+  });
+
   it('requires a reason', async () => {
     const seeded = seedGitManagedBlueprint();
     await authorizeRollout(seeded);

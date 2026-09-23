@@ -1418,6 +1418,11 @@ export class GitOpsTransitions {
         if (app.lifecycle_status !== 'active') throw new GitOpsTransitionError('application is not live');
         app.pause_at = envelope.at;
         app.pause_reason = reason;
+      }, {
+        // The reason is operator-authored evidence for the hold. The compact
+        // app snapshot omits it, so it is merged into the delta explicitly and
+        // the notification carries it.
+        historyAfter: { pauseReason: reason },
       });
     }
     return this.mutateTarget(applicationId, nodeId, envelope, 'rollout_paused', null, (target) => {
@@ -3271,6 +3276,13 @@ export class GitOpsTransitions {
       artifactSetId?: string;
       sourceAcceptanceRef?: string;
       rolloutGenerationId?: string;
+      /**
+       * Fields merged into the recorded `after` delta on top of the compact
+       * application snapshot. The snapshot carries a fixed subset, so an
+       * operator-authored value it omits (a pause reason) is attached here
+       * rather than by widening every app-level delta with it.
+       */
+      historyAfter?: Record<string, unknown>;
     } = {},
   ): TransitionResult {
     return this.raw().transaction(() => {
@@ -3290,7 +3302,7 @@ export class GitOpsTransitions {
         sourceAcceptanceRef: extraHistory.sourceAcceptanceRef,
         rolloutGenerationId: extraHistory.rolloutGenerationId,
         before,
-        after: snapshotApp(app),
+        after: { ...snapshotApp(app), ...extraHistory.historyAfter },
       });
       if (historyId) extras.historyIds.push(historyId);
       return { historyIds: extras.historyIds, replayed: extras.historyIds.length === 0 };

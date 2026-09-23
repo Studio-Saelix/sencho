@@ -128,10 +128,10 @@ export async function runGitOpsSourceRecovery(): Promise<void> {
   }
 
   try {
-    const { repairGitOpsSettledOutbox } = await import('../services/gitops/outbox');
-    repairGitOpsSettledOutbox();
+    const { repairGitOpsOutbox } = await import('../services/gitops/outbox');
+    repairGitOpsOutbox();
   } catch (err) {
-    console.error('[GitOps] Settled-outbox repair failed:', err instanceof Error ? err.stack ?? err.message : String(err));
+    console.error('[GitOps] Outbox repair failed:', err instanceof Error ? err.stack ?? err.message : String(err));
   }
 }
 
