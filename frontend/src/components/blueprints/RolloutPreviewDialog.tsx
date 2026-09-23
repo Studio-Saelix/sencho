@@ -21,6 +21,11 @@ import {
     previewBlueprint,
     applyBlueprint,
 } from '@/lib/blueprintsApi';
+import {
+    approveGitOpsPlacement,
+    blueprintApplicationId,
+    type GitOpsAuthorityError,
+} from '@/lib/gitopsAuthorityApi';
 
 interface RolloutPreviewDialogProps {
     blueprintId: number;
@@ -28,6 +33,22 @@ interface RolloutPreviewDialogProps {
     open: boolean;
     onOpenChange: (open: boolean) => void;
     onApplied: () => void;
+}
+
+/**
+ * Whether this preview's confirm is a placement approval rather than an inline
+ * apply. A Git-managed Blueprint refuses inline apply outright, so its preview
+ * is the reviewed placement plan and the confirm records the decomposed
+ * placement approval; an Inline Blueprint keeps the combined Apply flow.
+ */
+function isGitManagedPreview(preview: BlueprintPreview | null): boolean {
+    return preview?.gitops != null && preview.gitops.targetMode === 'blueprint';
+}
+
+function isBlueprintPreview(value: unknown): value is BlueprintPreview {
+    return typeof value === 'object'
+        && value !== null
+        && typeof (value as { planFingerprint?: unknown }).planFingerprint === 'string';
 }
 
 /**
@@ -89,10 +110,50 @@ export function RolloutPreviewDialog({
 
     const blocked = (preview?.summary.blocker ?? 0) > 0;
     const canConfirm = !!preview && !loading && !submitting && !blocked;
+    const gitManaged = isGitManagedPreview(preview);
+
+    async function refreshPreview(): Promise<void> {
+        try {
+            setPreview(await previewBlueprint(blueprintId));
+        } catch (refreshErr) {
+            // The preview just confirmed is no longer current and the refresh
+            // could not replace it, so there is nothing here left to confirm
+            // against. Close rather than leave a stale preview armed behind a
+            // re-enabled Confirm button.
+            toast.error(refreshErr instanceof Error ? refreshErr.message : 'Failed to refresh preview');
+            setPreview(null);
+            onOpenChangeRef.current(false);
+        }
+    }
+
+    async function handleApprovalConfirm(confirmed: BlueprintPreview): Promise<void> {
+        try {
+            await approveGitOpsPlacement(blueprintApplicationId(blueprintId), {
+                planFingerprint: confirmed.planFingerprint,
+                actions: confirmed.confirmableActions,
+            });
+            toast.success('Placement approved');
+            onApplied();
+            onOpenChange(false);
+        } catch (err) {
+            const failure = err as GitOpsAuthorityError;
+            if (failure.status === 409) {
+                if (isBlueprintPreview(failure.preview)) setPreview(failure.preview);
+                else await refreshPreview();
+            }
+            toast.error(err instanceof Error ? err.message : 'Failed to record the placement approval');
+        } finally {
+            setSubmitting(false);
+        }
+    }
 
     async function handleConfirm() {
         if (!preview) return;
         setSubmitting(true);
+        if (gitManaged) {
+            await handleApprovalConfirm(preview);
+            return;
+        }
         try {
             const result = await applyBlueprint(blueprintId, {
                 planFingerprint: preview.planFingerprint,
@@ -114,19 +175,7 @@ export function RolloutPreviewDialog({
         } catch (err) {
             const message = err instanceof Error ? err.message : 'Failed to apply blueprint';
             const status = (err as Error & { status?: number }).status;
-            if (status === 409) {
-                try {
-                    setPreview(await previewBlueprint(blueprintId));
-                } catch (refreshErr) {
-                    // The preview just confirmed is no longer current and the
-                    // refresh could not replace it, so there is nothing here
-                    // left to confirm against. Close rather than leave a stale
-                    // preview armed behind a re-enabled Confirm button.
-                    toast.error(refreshErr instanceof Error ? refreshErr.message : 'Failed to refresh preview');
-                    setPreview(null);
-                    onOpenChangeRef.current(false);
-                }
-            }
+            if (status === 409) await refreshPreview();
             toast.error(message);
         } finally {
             setSubmitting(false);
@@ -152,7 +201,9 @@ export function RolloutPreviewDialog({
                 ) : (
                     <div className="space-y-4 max-md:max-h-[60vh] max-md:overflow-y-auto">
                         <p className="text-xs text-stat-subtitle">
-                            Enabled blueprints still need this confirmation before the reconciler mutates the fleet.
+                            {gitManaged
+                                ? 'This approval covers the reviewed place and remove outcomes for this Blueprint. Rollout authorization is a separate step.'
+                                : 'Enabled blueprints still need this confirmation before the reconciler mutates the fleet.'}
                         </p>
                         <div className="flex flex-wrap gap-3 text-xs font-mono uppercase tracking-[0.15em]">
                             <span className="text-stat-value">Safe {preview.summary.safe}</span>
@@ -245,7 +296,9 @@ export function RolloutPreviewDialog({
                 }
                 primary={
                     <Button size="sm" onClick={() => void handleConfirm()} disabled={!canConfirm}>
-                        {submitting ? 'Applying…' : 'Confirm Apply'}
+                        {gitManaged
+                            ? (submitting ? 'Approving…' : 'Approve placement')
+                            : (submitting ? 'Applying…' : 'Confirm Apply')}
                     </Button>
                 }
             />

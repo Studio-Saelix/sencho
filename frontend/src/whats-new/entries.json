@@ -72,5 +72,11 @@
     "title": "Sealed private-registry credentials",
     "blurb": "Hub credentials for private images travel sealed to remote nodes, including over plain HTTP. Each node pins a sealing key on first use; reset the pin under Settings → Nodes after a rebuild.",
     "docUrl": "https://docs.sencho.io/features/private-registries"
+  },
+  {
+    "id": "gitops-authority-actions",
+    "title": "Decomposed approval actions",
+    "blurb": "Accept source, approve placement, and authorize rollout as separate actions on a Git-managed Blueprint, so each authority step is reviewed and recorded on its own.",
+    "docUrl": "https://docs.sencho.io/features/blueprint-model#accept-source-approve-placement-authorize-rollout"
   }
 ]

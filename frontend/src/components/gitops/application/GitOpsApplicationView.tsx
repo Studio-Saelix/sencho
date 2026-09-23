@@ -4,9 +4,11 @@ import { Button } from '@/components/ui/button';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { Skeleton } from '@/components/ui/skeleton';
 import { POSTURE_LABEL, POSTURE_TONE_CLASS } from '@/lib/gitopsPortfolio';
+import { useAuth } from '@/context/AuthContext';
 import { cn } from '@/lib/utils';
 import { closeGitOpsApplication, owningSurfaceHandoff } from '../portfolio/portfolioNavigation';
 import GitOpsApplicationDetail from './GitOpsApplicationDetail';
+import GitOpsAuthorityActions from '@/components/gitops/GitOpsAuthorityActions';
 import { useGitOpsApplication, type GitOpsApplicationError } from './useGitOpsApplication';
 
 /**
@@ -27,6 +29,7 @@ export function GitOpsApplicationView({ id, className, headerActions }: {
   headerActions?: ReactNode;
 }) {
   const { data, loading, error, staleSince, refreshing, refresh } = useGitOpsApplication(id);
+  const { can } = useAuth();
   const row = data?.application ?? null;
   const handoff = row ? owningSurfaceHandoff(row) : null;
   // A posture from a newer build still renders, as an explicit unknown.
@@ -88,7 +91,19 @@ export function GitOpsApplicationView({ id, className, headerActions }: {
               </Button>
             )}
           </header>
-          <GitOpsApplicationDetail detail={data} />
+          <GitOpsApplicationDetail
+            detail={data}
+            actions={(
+              <GitOpsAuthorityActions
+                applicationId={id}
+                blueprintId={row.blueprintId}
+                blueprintName={row.name}
+                projection={data.projection}
+                onChanged={refresh}
+                can={can}
+              />
+            )}
+          />
         </ScrollArea>
       ) : null}
     </div>
