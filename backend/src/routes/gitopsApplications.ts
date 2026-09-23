@@ -927,6 +927,18 @@ gitopsApplicationsRouter.post('/:id/rollout/pause', (req: Request, res: Response
     });
     return;
   }
+  // A pause holds a rollout that exists. With no authorization and no partial
+  // record there is nothing to hold, and recording a pause would only make the
+  // surface read as held when it never had anything running.
+  const hasRollout = !!target.application.rollout_authorization_ref
+    || !!target.application.partial_json;
+  if (!hasRollout) {
+    res.status(409).json({
+      error: 'There is no rollout to pause.',
+      code: 'ROLLOUT_PAUSE_REFUSED',
+    });
+    return;
+  }
 
   try {
     GitOpsTransitions.getInstance().rolloutPaused(
@@ -998,13 +1010,10 @@ gitopsApplicationsRouter.post('/:id/rollout/resume', async (req: Request, res: R
     return;
   }
 
-  // A per-target resume clears that target's pause only; continuing the queue
-  // is a fleet decision the next dispatch makes for itself.
-  if (nodeId !== null) {
-    res.json({ ok: true, dispatched: false, note: null });
-    return;
-  }
-
+  // Resuming continues the queue in both scopes: an application resume clears
+  // the fleet hold, and a target resume clears that target's hold so the
+  // dispatch below reaches it. Targets still individually paused are skipped
+  // by the adapter.
   const store = GitOpsStore.getInstance();
   const app = store.getApplication(target.application.id) ?? target.application;
   const binding = store.currentAuthorizationBinding(app);

@@ -350,6 +350,17 @@ describe('POST /api/gitops/applications/:id/rollout/pause', () => {
     expect(res.body.code).toBe('CONFIRM_REQUIRED');
   });
 
+  it('refuses to pause when there is no rollout to hold', async () => {
+    const seeded = seedGitManagedBlueprint();
+    const res = await request(app)
+      .post(`/api/gitops/applications/bp:${seeded.blueprintId}/rollout/pause`)
+      .set('Cookie', adminCookie)
+      .send({ reason: 'wait for the window' });
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe('ROLLOUT_PAUSE_REFUSED');
+    expect(GitOpsStore.getInstance().getApplication(seeded.applicationId)!.pause_at).toBeNull();
+  });
+
   it('rejects a caller without stack:deploy', async () => {
     const seeded = seedGitManagedBlueprint();
     const res = await request(app)
@@ -420,12 +431,18 @@ describe('POST /api/gitops/applications/:id/rollout/resume', () => {
     expect(store.getTarget(seeded.applicationId, seeded.nodeIds[0])!.pause_at).not.toBeNull();
     expect(store.getApplication(seeded.applicationId)!.pause_at).toBeNull();
 
+    // A target resume clears that target's hold and continues the queue, so
+    // the still-authorized rollout is dispatched again.
+    const dispatchSpy = vi
+      .spyOn((await import('../services/GitSourceService')).GitSourceService.getInstance(), 'dispatchAcceptedGeneration')
+      .mockResolvedValue({ status: 'dispatched' });
     const resume = await request(app)
       .post(`/api/gitops/applications/bp:${seeded.blueprintId}/rollout/resume`)
       .set('Cookie', adminCookie)
       .send({ nodeId: seeded.nodeIds[0] });
     expect(resume.status).toBe(200);
-    expect(resume.body).toMatchObject({ ok: true, dispatched: false, note: null });
+    expect(resume.body).toMatchObject({ ok: true, dispatched: true, note: null });
+    expect(dispatchSpy).toHaveBeenCalledTimes(1);
     expect(store.getTarget(seeded.applicationId, seeded.nodeIds[0])!.pause_at).toBeNull();
   });
 
