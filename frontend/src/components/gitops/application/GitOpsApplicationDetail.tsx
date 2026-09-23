@@ -58,7 +58,11 @@ function evidenceLine(evidence: GitOpsPortfolioRow['evidence'], nodeName: (id: n
  * their raw status words.
  * Application-level facts precede per-node facts, and caveats come last.
  */
-export default function GitOpsApplicationDetail({ detail }: { detail: GitOpsPortfolioDetailResponse }) {
+export default function GitOpsApplicationDetail({ detail, actions }: {
+  detail: GitOpsPortfolioDetailResponse;
+  /** The decomposed authority actions for this application, when it has any. */
+  actions?: ReactNode;
+}) {
   const { application: row, projection } = detail;
   const live = projection.targetMode === 'not_applicable' ? null : projection;
   const faults = absentFault(projection);
@@ -139,6 +143,7 @@ export default function GitOpsApplicationDetail({ detail }: { detail: GitOpsPort
             {live && (
               <GitOpsApprovalChips approvals={live.approvals} placement={placement} rollout={rollout} />
             )}
+            {actions}
             <GitOpsFacetCards source={source} artifact={artifact} placement={placement} rollout={rollout} />
           </div>
         </Section>

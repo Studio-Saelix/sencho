@@ -8,6 +8,12 @@ vi.mock('@/lib/api', () => ({
   apiFetch: vi.fn(),
 }));
 
+// The application view reads the session's permissions for its authority
+// actions; this suite drives the phone shell, not authorization.
+vi.mock('@/context/AuthContext', () => ({
+  useAuth: () => ({ can: () => false }),
+}));
+
 const mockFetch = vi.mocked(apiFetch);
 
 const emptyList = {

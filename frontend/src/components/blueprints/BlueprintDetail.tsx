@@ -3,7 +3,9 @@ import { Pencil, Pin, Play, Power, Trash2, GitBranch, Unlink, CornerDownLeft } f
 import { SystemSheet, SheetSection } from '@/components/ui/system-sheet';
 import GitOpsStateCard, { GitOpsFaultCard } from '@/components/gitops/GitOpsStateCard';
 import GitOpsApprovalChips from '@/components/gitops/GitOpsApprovalChips';
+import GitOpsAuthorityActions from '@/components/gitops/GitOpsAuthorityActions';
 import GitOpsCaveats from '@/components/gitops/GitOpsCaveats';
+import { blueprintApplicationId } from '@/lib/gitopsAuthorityApi';
 import { ROLLOUT_STATE_LOOKUP, absentFault, liveCaveats, livePlacementFacet, liveRolloutFacet, placementStateMeta } from '@/lib/gitopsState';
 import { Modal, ModalDestructiveHeader, ModalBody, ModalFooter } from '@/components/ui/modal';
 import { Input } from '@/components/ui/input';
@@ -378,6 +380,15 @@ export function BlueprintDetail({ blueprintId, open, onOpenChange, onChanged, ca
                                             )}
                                         </GitOpsStateCard>
                                     )}
+                                    <GitOpsAuthorityActions
+                                        applicationId={blueprintApplicationId(blueprint.id)}
+                                        blueprintId={blueprint.id}
+                                        blueprintName={blueprint.name}
+                                        projection={summary.gitopsRevision}
+                                        onChanged={handleRolloutApplied}
+                                        can={can}
+                                        blueprintEnabled={blueprint.enabled}
+                                    />
                                     {gitopsFaults.length > 0 && <GitOpsFaultCard message={gitopsFaults[0].message} />}
                                     <GitOpsCaveats revision={summary.gitopsRevision} />
                                 </div>
