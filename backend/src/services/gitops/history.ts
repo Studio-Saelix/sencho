@@ -4,7 +4,7 @@ import { decodeGitOpsJson, encodeGitOpsJson, isRecord, GitOpsJsonError } from '.
 import { enqueueHistoryPublication } from './publish';
 import { insertSettledOutbox, insertGitOpsEventOutbox } from './outbox';
 import { GITOPS_EVENT_PAYLOAD_VERSION, SETTLED_ATTEMPT_PAYLOAD_VERSION } from './attemptPayload';
-import { gitOpsNotificationReason, isNotifiableGitOpsStage } from './notifications';
+import { gitOpsNotificationReason, gitOpsOutboxPlan } from './notifications';
 import { sanitizeForLog } from '../../utils/safeLog';
 import type {
   GitOpsApplicationRow,
@@ -233,7 +233,8 @@ export function insertHistory(db: Database.Database, row: HistoryInsert): string
     row.redactedReasonClass ?? null,
   );
   if (result.changes !== 1) return null;
-  if (row.stage === 'source_reconcile_settled') {
+  const outboxPlan = gitOpsOutboxPlan(row.stage, row.application.target_mode);
+  if (outboxPlan?.kind === 'settled') {
     insertSettledOutbox(db, {
       version: SETTLED_ATTEMPT_PAYLOAD_VERSION,
       settledHistoryId: id,
@@ -248,13 +249,13 @@ export function insertHistory(db: Database.Database, row: HistoryInsert): string
       actor: row.actor,
       at: row.at,
     });
-  } else if (isNotifiableGitOpsStage(row.stage)) {
+  } else if (outboxPlan?.kind === 'event') {
     insertGitOpsEventOutbox(db, {
       version: GITOPS_EVENT_PAYLOAD_VERSION,
       historyId: id,
       applicationId: row.application.id,
       operationId: row.operationId,
-      stage: row.stage,
+      stage: outboxPlan.stage,
       stackName: row.application.stack_name,
       nodeId: row.nodeId,
       actor: row.actor,

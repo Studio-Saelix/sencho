@@ -20,9 +20,15 @@ export type SettledAttemptPayloadV1 = {
 
 export type SettledAttemptPayload = SettledAttemptPayloadV1;
 
-export type SettledAttemptDecode =
-  | { ok: true; payload: SettledAttemptPayload }
+/**
+ * The one decode result shape, so a caller that handles either payload kind
+ * narrows the same way and the two cannot drift apart.
+ */
+export type GitOpsDecodeResult<T> =
+  | { ok: true; payload: T }
   | { ok: false; limitation: string };
+
+export type SettledAttemptDecode = GitOpsDecodeResult<SettledAttemptPayload>;
 
 function isNonEmptyString(value: unknown): value is string {
   return typeof value === 'string' && value.length > 0;
@@ -98,10 +104,11 @@ export const GITOPS_EVENT_PAYLOAD_VERSION = 2;
  * stateful-confirmation decision.
  *
  * Carries identities and the recorded operator reason only. Source content,
- * diffs, digests, and secret values never reach this payload, and the drain
- * composes the notification message from the stage mapping rather than from
- * free text here, so a rewritten payload cannot inject a message the mapping
- * does not produce.
+ * diffs, digests, and secret values never reach this payload. The drain takes
+ * the notification's fixed text from the stage mapping, with the payload
+ * contributing only the reason suffix and a stack name the classifier may
+ * label with, so a rewritten payload cannot produce a phrase the mapping does
+ * not define.
  */
 export type GitOpsEventPayloadV2 = {
   version: 2;
@@ -118,9 +125,7 @@ export type GitOpsEventPayloadV2 = {
 
 export type GitOpsEventPayload = GitOpsEventPayloadV2;
 
-export type GitOpsEventDecode =
-  | { ok: true; payload: GitOpsEventPayload }
-  | { ok: false; limitation: string };
+export type GitOpsEventDecode = GitOpsDecodeResult<GitOpsEventPayload>;
 
 export function encodeGitOpsEventPayload(payload: GitOpsEventPayload): string {
   return encodeGitOpsJson(payload);

@@ -3277,10 +3277,10 @@ export class GitOpsTransitions {
       sourceAcceptanceRef?: string;
       rolloutGenerationId?: string;
       /**
-       * Fields merged into the recorded `after` delta on top of the compact
-       * application snapshot. The snapshot carries a fixed subset, so an
-       * operator-authored value it omits (a pause reason) is attached here
-       * rather than by widening every app-level delta with it.
+       * Fields added to the recorded `after` delta. The compact application
+       * snapshot wins every key it carries, so this can only contribute an
+       * operator-authored value the snapshot omits (a pause reason) and never
+       * rewrite the audit fields the snapshot exists to record.
        */
       historyAfter?: Record<string, unknown>;
     } = {},
@@ -3302,7 +3302,7 @@ export class GitOpsTransitions {
         sourceAcceptanceRef: extraHistory.sourceAcceptanceRef,
         rolloutGenerationId: extraHistory.rolloutGenerationId,
         before,
-        after: { ...snapshotApp(app), ...extraHistory.historyAfter },
+        after: { ...extraHistory.historyAfter, ...snapshotApp(app) },
       });
       if (historyId) extras.historyIds.push(historyId);
       return { historyIds: extras.historyIds, replayed: extras.historyIds.length === 0 };

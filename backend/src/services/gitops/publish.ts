@@ -32,7 +32,7 @@ import { GitOpsMetricsService } from '../GitOpsMetricsService';
 import type { GitOpsHistoryStage, HistoryOutcome } from './history';
 import type { GitOpsTargetMode } from './types';
 import { drainGitOpsOutboxRow } from './outbox';
-import { hasGitOpsOutboxRow } from './notifications';
+import { gitOpsOutboxPlan } from './notifications';
 
 /**
  * The `state-invalidate` payload one committed transition produces.
@@ -136,9 +136,9 @@ function drain(): void {
   for (const row of batch) {
     if (!survived(row)) continue;
     metrics.record(row.stage, row.outcome);
-    // The same predicate the insert uses, so a stage that writes an outbox row
-    // is always drained and a stage that writes none is never looked up.
-    if (hasGitOpsOutboxRow(row.stage)) {
+    // The same plan the insert uses, so a stage that writes an outbox row is
+    // always drained and a stage that writes none is never looked up.
+    if (gitOpsOutboxPlan(row.stage, row.targetMode) !== null) {
       drainGitOpsOutboxRow(row.db, row.id);
     }
     if (!sink) {

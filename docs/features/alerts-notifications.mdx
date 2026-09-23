@@ -212,15 +212,15 @@ Every alert Sencho dispatches carries a category that you can filter on in the b
 | `blueprint_drift_detected` | `blueprint_drift_detected` | Blueprint drift detected in `suggest` or `enforce` mode |
 | `blueprint_drift_correction_failed` | `blueprint_drift_correction_failed` | Blueprint enforce-mode redeploy failed |
 
-The four `blueprint_*` categories are accepted by routing rules but render as raw category strings in the bell because the frontend label map omits them.
+The four `blueprint_*` categories are accepted by routing rules but are missing from the bell's category filter and the Settings category pickers because the frontend label map omits them.
 
-Twenty-four further categories are written to notification history, and can be targeted by a mute rule, but are never dispatched to external channels or accepted by a routing rule:
+Twenty-four further categories are written to notification history. They are never dispatched to external channels or accepted by a routing rule, and because a mute rule is applied when an alert is dispatched, a rule naming one of them is accepted by the API but does not hide the entry from the bell:
 
 - Lifecycle markers: `drift_detected` (Drift detected), `drift_resolved` (Drift resolved), `update_started` (Update started), `health_gate_passed` (Health gate passed), `health_gate_failed` (Health gate failed), `rollback_generation_released` (Rollback protection released), and `network_auto_created`.
 - Git source attempts: `git_pull_ready`, `git_plan_blocked`, `git_pull_failed`, `git_apply`, `git_apply_failed`, `git_apply_rolled_back`, and `git_create`.
-- GitOps authority and rollout decisions: `gitops_source_accepted`, `gitops_placement_approved`, `gitops_rollout_authorized`, `gitops_rollout_paused`, `gitops_rollout_resumed`, `gitops_rollout_superseded`, `gitops_rollback_started`, `gitops_rollback_completed`, `gitops_rollback_partial_failed`, and `gitops_stateful_confirmation`.
+- GitOps authority, rollout, and confirmation decisions: `gitops_source_accepted`, `gitops_placement_approved`, `gitops_rollout_authorized`, `gitops_rollout_paused`, `gitops_rollout_resumed`, `gitops_rollout_superseded`, `gitops_rollback_started`, `gitops_rollback_completed`, `gitops_rollback_partial_failed`, and `gitops_stateful_confirmation`.
 
-The Git source, GitOps, and `network_auto_created` categories render as raw category strings in the bell because the frontend label map omits them, same as the `blueprint_*` categories above. The lifecycle markers carry their labels.
+The Git source, GitOps, and `network_auto_created` categories are missing from the bell's category filter and the Settings category pickers because the frontend label map omits them, same as the `blueprint_*` categories above. The lifecycle markers appear under their labels.
 
 ## Stack alert rules
 
