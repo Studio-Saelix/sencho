@@ -85,7 +85,7 @@ export function rolloutTargetSet(app: GitOpsApplicationRow): {
     console.error(
       '[GitOps recovery] Rollout generation required set is unreadable:',
       sanitizeForLog(app.id),
-      error,
+      sanitizeForLog(error instanceof Error ? error.message : String(error)),
     );
     return null;
   }
@@ -266,7 +266,11 @@ function restoreLocal(args: {
         }
         return { ok: true as const };
       } catch (error) {
-        console.error('[GitOps recovery] Local restore failed for %s:', sanitizeForLog(args.stackName), error);
+        console.error(
+        '[GitOps recovery] Local restore failed for %s:',
+        sanitizeForLog(args.stackName),
+        sanitizeForLog(error instanceof Error ? error.message : String(error)),
+      );
         return { ok: false as const, code: errorCode(error), error: errorText(error) };
       }
     })
@@ -339,7 +343,11 @@ async function restoreRemote(args: {
       : `The node answered HTTP ${res.status} to the restore request.`;
     return { ok: false, code, error: message };
   } catch (error) {
-    console.error('[GitOps recovery] Remote restore request failed for node %s:', args.nodeId, error);
+    console.error(
+      '[GitOps recovery] Remote restore request failed for node %s:',
+      args.nodeId,
+      sanitizeForLog(error instanceof Error ? error.message : String(error)),
+    );
     return { ok: false, code: 'NODE_UNREACHABLE', error: 'The restore request to the owning node failed.' };
   }
 }

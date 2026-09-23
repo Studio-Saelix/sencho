@@ -940,7 +940,10 @@ gitopsApplicationsRouter.post('/:id/rollout/pause', (req: Request, res: Response
       res.status(409).json({ error: error.message, code: 'ROLLOUT_PAUSE_REFUSED' });
       return;
     }
-    console.error('[GitOps authority] Rollout pause failed:', error);
+    console.error(
+      '[GitOps authority] Rollout pause failed:',
+      sanitizeForLog(error instanceof Error ? error.message : String(error)),
+    );
     res.status(500).json({ error: 'Failed to pause the rollout' });
     return;
   }
@@ -987,7 +990,10 @@ gitopsApplicationsRouter.post('/:id/rollout/resume', async (req: Request, res: R
       res.status(409).json({ error: error.message, code: 'ROLLOUT_RESUME_REFUSED' });
       return;
     }
-    console.error('[GitOps authority] Rollout resume failed:', error);
+    console.error(
+      '[GitOps authority] Rollout resume failed:',
+      sanitizeForLog(error instanceof Error ? error.message : String(error)),
+    );
     res.status(500).json({ error: 'Failed to resume the rollout' });
     return;
   }
@@ -1071,7 +1077,10 @@ gitopsApplicationsRouter.post('/:id/rollout/replan', (req: Request, res: Respons
   try {
     frozenNodeIds = decodeGitOpsRequiredTargetsJson(candidate.required_targets_json).nodeIds;
   } catch (error) {
-    console.error('[GitOps authority] Rollout candidate frozen set is unreadable:', error);
+    console.error(
+      '[GitOps authority] Rollout candidate frozen set is unreadable:',
+      sanitizeForLog(error instanceof Error ? error.message : String(error)),
+    );
     res.status(409).json({
       error: 'The current placement could not be read; refresh the application and try again.',
       code: 'REPLAN_UNAVAILABLE',
@@ -1118,7 +1127,10 @@ gitopsApplicationsRouter.post('/:id/rollout/replan', (req: Request, res: Respons
       res.status(409).json({ error: error.message, code: 'REPLAN_UNAVAILABLE' });
       return;
     }
-    console.error('[GitOps authority] Rollout replan failed:', error);
+    console.error(
+      '[GitOps authority] Rollout replan failed:',
+      sanitizeForLog(error instanceof Error ? error.message : String(error)),
+    );
     res.status(500).json({ error: 'Failed to replan the rollout' });
     return;
   }
@@ -1154,7 +1166,10 @@ gitopsApplicationsRouter.post('/:id/rollout/supersede', (req: Request, res: Resp
       res.status(409).json({ error: error.message, code: 'ROLLOUT_SUPERSEDE_REFUSED' });
       return;
     }
-    console.error('[GitOps authority] Rollout supersede failed:', error);
+    console.error(
+      '[GitOps authority] Rollout supersede failed:',
+      sanitizeForLog(error instanceof Error ? error.message : String(error)),
+    );
     res.status(500).json({ error: 'Failed to supersede the rollout' });
     return;
   }
@@ -1212,7 +1227,11 @@ async function runRollbackTarget(
       scopedActions: scopedActionsForStack(ctx.userId, nodeId, ctx.stackName),
     });
   } catch (error) {
-    console.error('[GitOps authority] Rollout restore request failed on node %s:', nodeId, error);
+    console.error(
+      '[GitOps authority] Rollout restore request failed on node %s:',
+      nodeId,
+      sanitizeForLog(error instanceof Error ? error.message : String(error)),
+    );
     outcome = { ok: false, code: 'ROLLBACK_FAILED', error: 'The restore request failed.' };
   }
 
@@ -1233,7 +1252,10 @@ async function runRollbackTarget(
       });
       return { nodeId, status: 'restored' };
     } catch (error) {
-      console.error('[GitOps authority] Restore succeeded but its completion could not be recorded:', error);
+      console.error(
+        '[GitOps authority] Restore succeeded but its completion could not be recorded:',
+        sanitizeForLog(error instanceof Error ? error.message : String(error)),
+      );
       outcome = { ok: false, code: 'RECORD_FAILED', error: 'The restore completed but its result could not be recorded.' };
     }
   }
@@ -1248,7 +1270,10 @@ async function runRollbackTarget(
       envelope: ctx.envelope,
     });
   } catch (error) {
-    console.error('[GitOps authority] Could not record the failed rollback target:', error);
+    console.error(
+      '[GitOps authority] Could not record the failed rollback target:',
+      sanitizeForLog(error instanceof Error ? error.message : String(error)),
+    );
   }
   return { nodeId, status: 'failed', error: outcome.error };
 }
@@ -1340,7 +1365,10 @@ gitopsApplicationsRouter.post('/:id/rollout/rollback', async (req: Request, res:
     try {
       GitOpsTransitions.getInstance().rolloutSuperseded({ applicationId: app.id, envelope });
     } catch (error) {
-      console.error('[GitOps authority] Could not withdraw the rollout before rolling back:', error);
+      console.error(
+        '[GitOps authority] Could not withdraw the rollout before rolling back:',
+        sanitizeForLog(error instanceof Error ? error.message : String(error)),
+      );
       res.status(409).json({
         error: 'The live rollout authorization could not be withdrawn; refresh the application and try again.',
         code: 'ROLLBACK_REFUSED',
@@ -1377,7 +1405,10 @@ gitopsApplicationsRouter.post('/:id/rollout/rollback', async (req: Request, res:
         envelope,
       });
     } catch (error) {
-      console.error('[GitOps authority] Could not record the partial rollback failure:', error);
+      console.error(
+        '[GitOps authority] Could not record the partial rollback failure:',
+        sanitizeForLog(error instanceof Error ? error.message : String(error)),
+      );
     }
   }
   res.json({ ok: !failedAny, results });
