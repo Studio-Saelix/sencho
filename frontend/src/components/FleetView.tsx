@@ -35,7 +35,7 @@ import { SecretsTab } from './fleet/secrets/SecretsTab';
 import { DependencyMapTab } from './fleet/DependencyMapTab';
 import { ContainerLabelsTab } from './fleet/ContainerLabelsTab';
 import { useNodeActions } from './nodes/useNodeActions';
-import type { FleetTab } from '@/lib/events';
+import type { FleetTab, SecurityTab } from '@/lib/events';
 import type { SectionId } from '@/components/settings/types';
 import type { MuteRuleDraft } from '@/lib/muteRules';
 
@@ -43,6 +43,8 @@ interface FleetViewProps {
     onNavigateToNode: (nodeId: number, stackName: string) => void;
     /** Switches to a node and opens its Networking page (Fleet networking signal). */
     onOpenNodeNetworking: (nodeId: number) => void;
+    /** Switches to a node and opens its Security view (Readiness security findings). */
+    onOpenNodeSecurity?: (nodeId: number, tab: SecurityTab | null) => void;
     /** Opens a Settings section (used to send "Add node" to Settings > Nodes). */
     onOpenSettingsSection?: (section: SectionId) => void;
     onOpenMuteRulesWithPrefill?: (draft: MuteRuleDraft) => void;
@@ -56,6 +58,7 @@ interface FleetViewProps {
 export function FleetView({
     onNavigateToNode,
     onOpenNodeNetworking,
+    onOpenNodeSecurity,
     onOpenSettingsSection,
     onOpenMuteRulesWithPrefill,
     fleetUpdatesIntent,
@@ -95,6 +98,8 @@ export function FleetView({
 
     const [initialUpdatesTab, setInitialUpdatesTab] = useState<'nodes' | 'changelog'>('nodes');
     const [detailsNodeId, setDetailsNodeId] = useState<number | null>(null);
+    // Bumped by the toolbar Refresh so the Readiness tab re-checks alongside the overview.
+    const [readinessRefreshKey, setReadinessRefreshKey] = useState(0);
 
     const [internalTab, setInternalTab] = useState<FleetTab>('overview');
     const activeTab = controlledTab ?? internalTab;
@@ -223,7 +228,10 @@ export function FleetView({
                                     <Button
                                         variant="outline"
                                         size="sm"
-                                        onClick={() => overview.fetchOverview(true)}
+                                        onClick={() => {
+                                            void overview.fetchOverview(true);
+                                            setReadinessRefreshKey(key => key + 1);
+                                        }}
                                         disabled={refreshing}
                                         className="h-9 w-9 p-0"
                                         aria-label="Refresh"
@@ -304,7 +312,9 @@ export function FleetView({
                 )}
                 <TabsContent value="readiness">
                     <FleetReadiness
+                        refreshKey={readinessRefreshKey}
                         onOpenNodeDetails={setDetailsNodeId}
+                        onOpenNodeSecurity={onOpenNodeSecurity}
                         onOpenSettingsSection={onOpenSettingsSection}
                         isAdmin={isAdmin}
                     />

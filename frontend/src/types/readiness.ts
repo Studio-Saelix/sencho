@@ -202,11 +202,13 @@ export interface FleetReadinessNode {
   mode: 'proxy' | 'pilot_agent';
   transport: NodeTransport;
   reachability: NodeReachability;
+  /** The worst state among this node's cells; rows arrive sorted by it. */
+  state: DomainState;
   /**
-   * Keys are exactly `FleetReadinessResponse.domains`, so columns are laid out
-   * from that list once and every row read against it. A domain missing from
-   * that list is one this caller was not told about and renders as no column at
-   * all, never as a column of unavailable cells.
+   * Keys are the subset of `FleetReadinessResponse.domains` that apply to this
+   * node. Control applies only to nodes Policy Sync pushes to, so the hub's own
+   * node and Pilot-agent nodes carry no Control cell: a missing key renders as
+   * "does not apply", never as a gap.
    */
   cells: Partial<Record<ReadinessDomainKey, NodeDomainCell>>;
   /** Stacks known on this node, or null when it could not be read. */
