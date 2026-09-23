@@ -102,5 +102,18 @@ if (typeof window !== 'undefined' && !window.matchMedia) {
 }
 
 afterEach(() => {
+  if (document.activeElement instanceof HTMLElement) {
+    document.activeElement.blur();
+  }
   cleanup();
+  // jsdom 30.1 drops a removed focused element without firing blur; the next
+  // focus() call then synchronously fires a blur retargeted at the window,
+  // which would land mid-click in the next test and trip Radix's
+  // close-menu-on-window-blur handler. Force a focus change on a scratch
+  // element here so the stale blur fires before the next test starts.
+  const scratch = document.createElement('button');
+  document.body.appendChild(scratch);
+  scratch.focus();
+  scratch.blur();
+  scratch.remove();
 });
