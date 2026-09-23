@@ -15,6 +15,7 @@ import { setupTestDb, cleanupTestDb, loginAsTestAdmin } from './helpers/setupTes
 import { directApplicationFixture } from './helpers/gitopsFixtures';
 import { commitBlueprintCreate } from '../services/gitops/blueprintProducers';
 import {
+  encodeArtifactEvidenceJson,
   encodeGitOpsApprovedTargetEffectJson,
   encodeGitOpsRequiredTargetsJson,
 } from '../services/gitops/json';
@@ -579,6 +580,87 @@ describe('POST /api/gitops/applications/:id/rollout/authorize', () => {
     expect(res.body.code).toBe('ROLLOUT_AUTHORIZATION_REFUSED');
     expect(dispatchSpy).not.toHaveBeenCalled();
     expect(store.getApplication(seeded.applicationId)!.rollout_authorization_ref).toBeNull();
+  });
+
+  it('names the unresolved artifact identity when an operator-accepted generation is authorized', async () => {
+    const seeded = seedGitManagedBlueprint({ sourceAccepted: false });
+
+    // The operator review chain, through the routes only: the acceptance seed
+    // carries an unresolved artifact set, exactly as production does.
+    const accept = await request(app)
+      .post(`/api/gitops/applications/bp:${seeded.blueprintId}/source/accept`)
+      .set('Cookie', adminCookie)
+      .send({ generationId: seeded.generationId });
+    expect(accept.status).toBe(200);
+    const accepted = GitOpsStore.getInstance().getApplication(seeded.applicationId)!;
+    expect(GitOpsStore.getInstance().getArtifactSet(accepted.artifact_set_id!)?.qualification).toBe('unresolved');
+
+    const preview = await buildBlueprintPreview(seeded.blueprintId);
+    const approve = await request(app)
+      .post(`/api/gitops/applications/bp:${seeded.blueprintId}/placement/approve`)
+      .set('Cookie', adminCookie)
+      .send({ planFingerprint: preview!.planFingerprint, actions: preview!.confirmableActions });
+    expect(approve.status).toBe(200);
+
+    const dispatchSpy = vi
+      .spyOn(GitSourceService.getInstance(), 'dispatchAcceptedGeneration')
+      .mockResolvedValue({ status: 'dispatched' });
+    const authorize = await request(app)
+      .post(`/api/gitops/applications/bp:${seeded.blueprintId}/rollout/authorize`)
+      .set('Cookie', adminCookie)
+      .send({});
+    expect(authorize.status).toBe(409);
+    expect(authorize.body.code).toBe('ROLLOUT_AUTHORIZATION_REFUSED');
+    expect(authorize.body.error).toMatch(/artifact identity/i);
+    expect(authorize.body.error).not.toMatch(/registry readiness/i);
+    expect(dispatchSpy).not.toHaveBeenCalled();
+    expect(GitOpsStore.getInstance().getApplication(seeded.applicationId)!.rollout_authorization_ref).toBeNull();
+  });
+
+  it('authorizes and dispatches once executable artifact evidence is recorded', async () => {
+    const seeded = seedGitManagedBlueprint({ sourceAccepted: false });
+    await request(app)
+      .post(`/api/gitops/applications/bp:${seeded.blueprintId}/source/accept`)
+      .set('Cookie', adminCookie)
+      .send({ generationId: seeded.generationId })
+      .expect(200);
+    const preview = await buildBlueprintPreview(seeded.blueprintId);
+    await request(app)
+      .post(`/api/gitops/applications/bp:${seeded.blueprintId}/placement/approve`)
+      .set('Cookie', adminCookie)
+      .send({ planFingerprint: preview!.planFingerprint, actions: preview!.confirmableActions })
+      .expect(200);
+
+    // No producer resolves artifact evidence for a Git-managed Blueprint yet,
+    // so this records what that producer will write: resolved evidence for the
+    // accepted generation, advancing the pointer. It proves the chain
+    // completes once evidence exists, and guards the refusal above from
+    // over-reaching.
+    const appRow = GitOpsStore.getInstance().getApplication(seeded.applicationId)!;
+    GitOpsTransitions.getInstance().recordArtifactEvidence({
+      applicationId: seeded.applicationId,
+      generationId: appRow.accepted_generation_id!,
+      artifactSetId: `art-${randomUUID().slice(0, 8)}`,
+      evidenceVersion: 2,
+      qualification: 'exact',
+      evidenceJson: encodeArtifactEvidenceJson({ kind: 'exact', identity: 'sha256:deadbeef' }),
+      authoritative: 0,
+      envelope: { operationId: randomUUID(), actor: 'tester', trigger: 'manual', at: Date.now() },
+    });
+    expect(GitOpsStore.getInstance().getApplication(seeded.applicationId)!.artifact_set_id).toBeTruthy();
+
+    const dispatchSpy = vi
+      .spyOn(GitSourceService.getInstance(), 'dispatchAcceptedGeneration')
+      .mockResolvedValue({ status: 'dispatched' });
+    const authorize = await request(app)
+      .post(`/api/gitops/applications/bp:${seeded.blueprintId}/rollout/authorize`)
+      .set('Cookie', adminCookie)
+      .send({});
+    expect(authorize.status).toBe(200);
+    expect(authorize.body).toMatchObject({ dispatched: true, note: null });
+    expect(dispatchSpy).toHaveBeenCalledTimes(1);
+    const authorized = GitOpsStore.getInstance().getApplication(seeded.applicationId)!;
+    expect(authorized.rollout_authorization_ref).toBeTruthy();
   });
 
   it('rejects a caller without stack:deploy', async () => {

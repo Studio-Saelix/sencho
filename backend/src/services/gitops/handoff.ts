@@ -13,6 +13,7 @@ import { GitOpsTransitions, type EventEnvelope } from './transitions';
 import {
   decodePreflightEvidenceJson,
   encodePreflightEvidenceJson,
+  executableArtifactRefusalReason,
   fingerprintPreflightEvidence,
   isPreflightBlocked,
   registryPreflightBlockReason,
@@ -263,6 +264,11 @@ export async function ensureRolloutAuthorization(
         reason: 'Source acceptance, artifact set, and placement must all be current before rollout authorization.',
       };
     }
+
+    const artifactRefusal = executableArtifactRefusalReason(
+      store.getArtifactSet(ingredients.artifactSetId)?.qualification,
+    );
+    if (artifactRefusal) return { ok: false, reason: artifactRefusal };
 
     let composeContent: string | null = null;
     const genRow = store.getGeneration(ingredients.acceptedGenerationId);

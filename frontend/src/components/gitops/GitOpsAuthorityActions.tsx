@@ -24,7 +24,12 @@ interface GitOpsAuthorityActionsProps {
    * one the session may not hold.
    */
   can?: (action: PermissionAction) => boolean;
-  /** The bound Blueprint's state, when the surface knows it; disabled withholds every action. */
+  /**
+   * The bound Blueprint's state, when the surface knows it. Disabled withholds
+   * the execution authority (placement and rollout) but not source
+   * acceptance: content review stays available while the reconciler is off,
+   * the same way an Inline Blueprint's editor stays editable.
+   */
   blueprintEnabled?: boolean;
 }
 
@@ -139,7 +144,7 @@ export default function GitOpsAuthorityActions({
             size="sm"
             className="gap-1.5 max-md:min-h-11"
             onClick={() => void handleAcceptSource()}
-            disabled={pending !== null || !blueprintEnabled}
+            disabled={pending !== null}
             data-testid="gitops-action-accept-source"
           >
             <CheckCheck className="h-3.5 w-3.5" strokeWidth={1.5} />

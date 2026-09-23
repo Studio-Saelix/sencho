@@ -498,6 +498,14 @@ describe('ensureRolloutAuthorization', () => {
     }
   });
 
+  it('refuses to authorize while the accepted artifact evidence is unresolved', async () => {
+    const fixture = seedAuthorizedReadyApp({ artifactQualification: 'unresolved' });
+    const result = await ensureRolloutAuthorization(fixture.applicationId, 'tester');
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.reason).toMatch(/artifact identity/i);
+    expect(GitOpsStore.getInstance().getApplication(fixture.applicationId)!.rollout_authorization_ref).toBeNull();
+  });
+
   it('is idempotent when a live authorization already matches', async () => {
     const fixture = seedAuthorizedReadyApp();
     const first = await ensureRolloutAuthorization(fixture.applicationId, 'tester');
