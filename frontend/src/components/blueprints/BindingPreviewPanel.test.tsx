@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { render, screen } from '@testing-library/react';
 import type { BindingPreview, BlueprintPreview } from '@/lib/blueprintsApi';
+import { absentRevision } from '@/__tests__/gitopsFixtures';
 import { BindingPreviewPanel } from './BindingPreviewPanel';
 
 const blueprintPreview: BlueprintPreview = {
@@ -42,6 +43,8 @@ const blueprintPreview: BlueprintPreview = {
   healthNote: '',
   blockers: [],
   warnings: [],
+  gitops: absentRevision(),
+  gitopsFingerprint: null,
 };
 
 const preview: BindingPreview = {

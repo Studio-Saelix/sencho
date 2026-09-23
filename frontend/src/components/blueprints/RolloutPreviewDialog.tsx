@@ -2,6 +2,20 @@ import { useEffect, useRef, useState } from 'react';
 import { Modal, ModalHeader, ModalBody, ModalFooter } from '@/components/ui/modal';
 import { Button } from '@/components/ui/button';
 import { toast } from '@/components/ui/toast-store';
+import GitOpsApprovalChips from '@/components/gitops/GitOpsApprovalChips';
+import GitOpsCaveats from '@/components/gitops/GitOpsCaveats';
+import { GitOpsFacetCards } from '@/components/gitops/GitOpsFacetCards';
+import { GitOpsFaultCard } from '@/components/gitops/GitOpsStateCard';
+import { IdentityRow } from '@/components/gitops/GitOpsIdentityRow';
+import { ShortId } from '@/components/gitops/GitOpsShortId';
+import { GitOpsTargetCard } from '@/components/gitops/GitOpsTargetCard';
+import {
+    absentFault,
+    liveArtifactFacet,
+    livePlacementFacet,
+    liveRolloutFacet,
+    liveSourceFacet,
+} from '@/lib/gitopsState';
 import {
     type BlueprintPreview,
     previewBlueprint,
@@ -16,9 +30,18 @@ interface RolloutPreviewDialogProps {
     onApplied: () => void;
 }
 
-function approvalLabel(value: BlueprintPreview['effectiveApproval']): string {
-    if (value === 'reapproval_required') return 'reapproval required';
-    return value;
+/**
+ * The legacy combined approval stays separate from the decomposed authority
+ * chips. It is only called combined rather than legacy when the Blueprint has
+ * no live application, where it is the whole approval mechanism rather than the
+ * pre-decomposition surface of one.
+ */
+function approvalLabel(preview: BlueprintPreview): string {
+    const value = preview.effectiveApproval === 'reapproval_required'
+        ? 'reapproval required'
+        : preview.effectiveApproval;
+    const hasLiveApplication = preview.gitops != null && preview.gitops.targetMode !== 'not_applicable';
+    return hasLiveApplication ? `legacy combined: ${value}` : value;
 }
 
 function sectionBorderClass(tone: 'destructive' | 'warning' | 'neutral'): string {
@@ -73,6 +96,7 @@ export function RolloutPreviewDialog({
         try {
             const result = await applyBlueprint(blueprintId, {
                 planFingerprint: preview.planFingerprint,
+                gitopsFingerprint: preview.gitopsFingerprint,
                 actions: preview.confirmableActions,
             });
             const { failed = 0, pending = 0 } = result.outcomeSummary ?? {};
@@ -94,7 +118,13 @@ export function RolloutPreviewDialog({
                 try {
                     setPreview(await previewBlueprint(blueprintId));
                 } catch (refreshErr) {
+                    // The preview just confirmed is no longer current and the
+                    // refresh could not replace it, so there is nothing here
+                    // left to confirm against. Close rather than leave a stale
+                    // preview armed behind a re-enabled Confirm button.
                     toast.error(refreshErr instanceof Error ? refreshErr.message : 'Failed to refresh preview');
+                    setPreview(null);
+                    onOpenChangeRef.current(false);
                 }
             }
             toast.error(message);
@@ -128,9 +158,19 @@ export function RolloutPreviewDialog({
                             <span className="text-stat-value">Safe {preview.summary.safe}</span>
                             <span className="text-warning">Warnings {preview.summary.warning}</span>
                             <span className="text-destructive">Blockers {preview.summary.blocker}</span>
-                            <span className="text-stat-subtitle">{approvalLabel(preview.effectiveApproval)}</span>
+                            <span className="text-stat-subtitle">{approvalLabel(preview)}</span>
                         </div>
                         <p className="text-xs text-stat-subtitle">{preview.healthNote}</p>
+                        <GitOpsEvidenceSection preview={preview} />
+                        {preview.gitopsFingerprint && (
+                            <p className="text-xs text-stat-subtitle">
+                                Confirmation is bound to this evidence snapshot (
+                                <span className="font-mono" title={preview.gitopsFingerprint}>
+                                    {preview.gitopsFingerprint.slice(0, 8)}
+                                </span>
+                                ). If any recorded authority fact changes first, the apply is refused and the preview refreshes.
+                            </p>
+                        )}
                         {preview.blockers.length > 0 && (
                             <Section title={`Blockers (${preview.blockers.length})`} tone="destructive">
                                 {preview.blockers.map(b => (
@@ -226,6 +266,94 @@ function Section({
         <div className={`rounded-md border ${sectionBorderClass(tone)} px-3 py-2`}>
             <div className="font-mono text-[10px] uppercase tracking-[0.2em] text-stat-subtitle mb-1.5">{title}</div>
             <ul className="space-y-1 list-disc pl-4">{children}</ul>
+        </div>
+    );
+}
+
+/**
+ * The composed GitOps evidence: recorded authority, source and artifact
+ * identity, placement and rollout state, then per-target observations and the
+ * caveats that qualify the whole reading.
+ *
+ * Presentation only. Every value is the projection the preview endpoint
+ * returned, rendered through the same lookups and cards the Git source panel,
+ * Drift tab, Blueprint sheet and application view use. A Blueprint with no live
+ * application renders the fault card (a projection that could not reach an
+ * application it had reason to believe exists) or nothing at all. Placement and
+ * rollout are never inferred from source state, and configuration convergence
+ * is never worded as executable convergence: the facet copy already carries
+ * that distinction.
+ */
+function GitOpsEvidenceSection({ preview }: { preview: BlueprintPreview }) {
+    const projection = preview.gitops ?? null;
+    const live = projection && projection.targetMode !== 'not_applicable' ? projection : null;
+    const faults = projection ? absentFault(projection) : [];
+    const source = liveSourceFacet(projection);
+    const artifact = liveArtifactFacet(projection);
+    const placement = livePlacementFacet(projection);
+    const rollout = liveRolloutFacet(projection);
+    if (!live && faults.length === 0) return null;
+
+    const nodeNames = new Map<number, string>();
+    for (const node of preview.matchedNodes) nodeNames.set(node.id, node.name);
+    for (const change of preview.changes) nodeNames.set(change.nodeId, change.nodeName);
+    const nodeName = (id: number) => nodeNames.get(id) ?? `node ${id}`;
+
+    return (
+        <div className={`rounded-md border ${sectionBorderClass('neutral')} px-3 py-2`}>
+            <div className="font-mono text-[10px] uppercase tracking-[0.2em] text-stat-subtitle mb-1.5">
+                {live ? 'GitOps authority and evidence' : 'GitOps state unavailable'}
+            </div>
+            <div className="space-y-2">
+                {faults.length > 0 && <GitOpsFaultCard message={faults[0].message} />}
+                {live && (
+                    <>
+                        <GitOpsApprovalChips approvals={live.approvals} placement={placement} rollout={rollout} />
+                        <dl className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-1">
+                            {source && (
+                                <>
+                                    <IdentityRow term="Repository" title={source.configuredRepoUrl}>
+                                        {source.repoIdentity.host}{source.repoIdentity.pathname}
+                                    </IdentityRow>
+                                    <IdentityRow term="Ref">{source.configuredRef}</IdentityRow>
+                                    <IdentityRow term="Desired commit">
+                                        <ShortId value={source.desiredCommitSha} length={7} />
+                                    </IdentityRow>
+                                    <IdentityRow term="Fetched commit">
+                                        <ShortId value={source.fetchedCommitSha} length={7} />
+                                    </IdentityRow>
+                                    <IdentityRow term="Candidate generation">
+                                        <ShortId value={source.candidateGenerationId} />
+                                    </IdentityRow>
+                                    <IdentityRow term="Accepted generation">
+                                        <ShortId value={source.acceptedGenerationId} />
+                                    </IdentityRow>
+                                </>
+                            )}
+                            <IdentityRow term="Rollout generation">
+                                <ShortId value={live.rolloutGenerationId} />
+                            </IdentityRow>
+                        </dl>
+                        <GitOpsFacetCards
+                            source={source}
+                            artifact={artifact}
+                            placement={placement}
+                            rollout={rollout}
+                        />
+                        {live.targets.length > 0 && (
+                            <div className="space-y-2">
+                                <div className="font-mono text-[10px] uppercase tracking-[0.15em] text-stat-subtitle">
+                                    Targets · {live.targets.length}
+                                </div>
+                                {live.targets.map(t => (
+                                    <GitOpsTargetCard key={t.nodeId} target={t} nodeName={nodeName(t.nodeId)} />
+                                ))}
+                            </div>
+                        )}
+                        <GitOpsCaveats revision={projection} />
+                    </>
+                )}
+            </div>
         </div>
     );
 }

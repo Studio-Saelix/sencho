@@ -90,10 +90,111 @@ describe('POST /api/blueprints/:id/apply confirm binding', () => {
             .set('Cookie', adminCookie)
             .send({
                 planFingerprint: 'deadbeef',
+                gitopsFingerprint: preview.body.gitopsFingerprint,
                 actions: preview.body.confirmableActions,
             });
         expect(res.status).toBe(409);
         expect(res.body.code).toBe('PREVIEW_STALE');
+    });
+
+    it('rejects an omitted evidence fingerprint when the preview carries one', async () => {
+        const node = seedNode();
+        counter += 1;
+        const created = await request(app)
+            .post('/api/blueprints')
+            .set('Cookie', adminCookie)
+            .send(validBlueprintBody(node.id));
+        expect(created.status).toBe(201);
+
+        const preview = await request(app)
+            .get(`/api/blueprints/${created.body.id}/preview`)
+            .set('Cookie', adminCookie);
+        expect(preview.status).toBe(200);
+        expect(preview.body.gitopsFingerprint).toEqual(expect.any(String));
+
+        const reconcileSpy = vi.mocked(BlueprintReconciler.getInstance().reconcileConfirmedPlan);
+        const res = await request(app)
+            .post(`/api/blueprints/${created.body.id}/apply`)
+            .set('Cookie', adminCookie)
+            .send({
+                planFingerprint: preview.body.planFingerprint,
+                actions: preview.body.confirmableActions,
+            });
+        expect(res.status).toBe(409);
+        expect(res.body.code).toBe('PREVIEW_STALE');
+        expect(reconcileSpy).not.toHaveBeenCalled();
+    });
+
+    it('applies with a null evidence fingerprint when the Blueprint has no live application', async () => {
+        const node = seedNode();
+        counter += 1;
+        const created = await request(app)
+            .post('/api/blueprints')
+            .set('Cookie', adminCookie)
+            .send(validBlueprintBody(node.id));
+        expect(created.status).toBe(201);
+
+        DatabaseService.getInstance().getDb().prepare(
+            `UPDATE gitops_applications SET lifecycle_status = 'deleted' WHERE blueprint_id = ?`,
+        ).run(created.body.id);
+
+        const preview = await request(app)
+            .get(`/api/blueprints/${created.body.id}/preview`)
+            .set('Cookie', adminCookie);
+        expect(preview.status).toBe(200);
+        expect(preview.body.gitops.targetMode).toBe('not_applicable');
+        expect(preview.body.gitopsFingerprint).toBeNull();
+
+        const reconcileSpy = vi.mocked(BlueprintReconciler.getInstance().reconcileConfirmedPlan);
+        const res = await request(app)
+            .post(`/api/blueprints/${created.body.id}/apply`)
+            .set('Cookie', adminCookie)
+            .send({
+                planFingerprint: preview.body.planFingerprint,
+                gitopsFingerprint: null,
+                actions: preview.body.confirmableActions,
+            });
+        expect(res.status).toBe(200);
+        expect(res.body.effectiveApproval).toBe('approved');
+        expect(reconcileSpy).toHaveBeenCalledWith(created.body.id, preview.body.executorActions);
+    });
+
+    it('rejects moved GitOps evidence with PREVIEW_STALE even when intent still matches', async () => {
+        const node = seedNode();
+        counter += 1;
+        const created = await request(app)
+            .post('/api/blueprints')
+            .set('Cookie', adminCookie)
+            .send(validBlueprintBody(node.id));
+        expect(created.status).toBe(201);
+
+        const preview = await request(app)
+            .get(`/api/blueprints/${created.body.id}/preview`)
+            .set('Cookie', adminCookie);
+        expect(preview.status).toBe(200);
+        expect(preview.body.gitops.targetMode).toBe('inline_blueprint');
+        expect(preview.body.gitopsFingerprint).toEqual(expect.any(String));
+
+        // The recorded authority moves under the preview without touching the
+        // Blueprint row, so the intent fingerprint alone would still confirm.
+        DatabaseService.getInstance().getDb().prepare(
+            `UPDATE gitops_applications SET placement_approval_ref = ?, rollout_generation_id = ?
+             WHERE blueprint_id = ?`,
+        ).run('approval-outside-preview', 'generation-outside-preview', created.body.id);
+
+        const reconcileSpy = vi.mocked(BlueprintReconciler.getInstance().reconcileConfirmedPlan);
+        const res = await request(app)
+            .post(`/api/blueprints/${created.body.id}/apply`)
+            .set('Cookie', adminCookie)
+            .send({
+                planFingerprint: preview.body.planFingerprint,
+                gitopsFingerprint: preview.body.gitopsFingerprint,
+                actions: preview.body.confirmableActions,
+            });
+        expect(res.status).toBe(409);
+        expect(res.body.code).toBe('PREVIEW_STALE');
+        expect(res.body.preview.gitopsFingerprint).not.toBe(preview.body.gitopsFingerprint);
+        expect(reconcileSpy).not.toHaveBeenCalled();
     });
 
     it('persists approval and calls reconcileConfirmedPlan with executor actions', async () => {
@@ -118,6 +219,7 @@ describe('POST /api/blueprints/:id/apply confirm binding', () => {
             .set('Cookie', adminCookie)
             .send({
                 planFingerprint: preview.body.planFingerprint,
+                gitopsFingerprint: preview.body.gitopsFingerprint,
                 actions: preview.body.confirmableActions,
             });
         expect(res.status).toBe(200);
@@ -193,6 +295,7 @@ describe('POST /api/blueprints/:id/apply confirm binding', () => {
             .set('Cookie', adminCookie)
             .send({
                 planFingerprint: preview.body.planFingerprint,
+                gitopsFingerprint: preview.body.gitopsFingerprint,
                 actions: preview.body.confirmableActions,
             });
         expect(res.status).toBe(409);
@@ -239,6 +342,7 @@ describe('POST /api/blueprints/:id/apply confirm binding', () => {
             .set('Cookie', adminCookie)
             .send({
                 planFingerprint: preview.body.planFingerprint,
+                gitopsFingerprint: preview.body.gitopsFingerprint,
                 actions: preview.body.confirmableActions,
             });
         expect(res.status).toBe(409);
@@ -274,6 +378,7 @@ describe('POST /api/blueprints/:id/apply confirm binding', () => {
             .set('Cookie', adminCookie)
             .send({
                 planFingerprint: preview.body.planFingerprint,
+                gitopsFingerprint: preview.body.gitopsFingerprint,
                 actions: preview.body.confirmableActions,
             });
         expect(res.status).toBe(409);
@@ -316,6 +421,7 @@ describe('POST /api/blueprints/:id/apply confirm binding', () => {
             .set('Cookie', adminCookie)
             .send({
                 planFingerprint: preview.body.planFingerprint,
+                gitopsFingerprint: preview.body.gitopsFingerprint,
                 actions: preview.body.confirmableActions,
             });
         expect(res.status).toBe(200);
@@ -358,6 +464,7 @@ describe('POST /api/blueprints/:id/apply confirm binding', () => {
             .set('Cookie', adminCookie)
             .send({
                 planFingerprint: preview.body.planFingerprint,
+                gitopsFingerprint: preview.body.gitopsFingerprint,
                 actions: preview.body.confirmableActions,
             });
         expect(res.status).toBe(200);
