@@ -4,6 +4,7 @@ import { SystemSheet, SheetSection } from '@/components/ui/system-sheet';
 import GitOpsStateCard, { GitOpsFaultCard } from '@/components/gitops/GitOpsStateCard';
 import GitOpsApprovalChips from '@/components/gitops/GitOpsApprovalChips';
 import GitOpsAuthorityActions from '@/components/gitops/GitOpsAuthorityActions';
+import GitOpsRolloutControls from '@/components/gitops/GitOpsRolloutControls';
 import GitOpsCaveats from '@/components/gitops/GitOpsCaveats';
 import { blueprintApplicationId } from '@/lib/gitopsAuthorityApi';
 import { ROLLOUT_STATE_LOOKUP, absentFault, liveCaveats, livePlacementFacet, liveRolloutFacet, placementStateMeta } from '@/lib/gitopsState';
@@ -388,6 +389,14 @@ export function BlueprintDetail({ blueprintId, open, onOpenChange, onChanged, ca
                                         onChanged={handleRolloutApplied}
                                         can={can}
                                         blueprintEnabled={blueprint.enabled}
+                                    />
+                                    <GitOpsRolloutControls
+                                        applicationId={blueprintApplicationId(blueprint.id)}
+                                        projection={summary.gitopsRevision}
+                                        onChanged={handleRolloutApplied}
+                                        can={can}
+                                        blueprintEnabled={blueprint.enabled}
+                                        rollbackGenerations={summary.rollbackCandidates}
                                     />
                                     {gitopsFaults.length > 0 && <GitOpsFaultCard message={gitopsFaults[0].message} />}
                                     <GitOpsCaveats revision={summary.gitopsRevision} />

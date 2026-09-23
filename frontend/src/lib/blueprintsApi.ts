@@ -70,6 +70,8 @@ export interface BlueprintSummary extends GitOpsRevisionCarrier {
     deployments: BlueprintDeployment[];
     statusCounts: Partial<Record<BlueprintDeploymentStatus, number>>;
     effectiveApproval?: EffectiveApproval;
+    /** Prior generations a Git-managed rollout rollback can select. */
+    rollbackCandidates?: Array<{ generationId: string; rolloutGenerationId: string; createdAt: number }>;
 }
 
 /**

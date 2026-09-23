@@ -392,7 +392,9 @@ export const ROLLOUT_STATE: Record<GitOpsRolloutStatus, GitOpsStateMeta> = {
   rollout_superseded: {
     label: 'superseded',
     tone: 'neutral',
-    line: 'A newer rollout generation replaced this one.',
+    // Covers both producers: a newer generation replaced it, or an operator
+    // withdrew it (supersede, or a rollback that abandoned it).
+    line: 'This rollout generation is no longer active: an operator withdrew it or a newer generation replaced it.',
     icon: ArchiveX,
   },
   target_stale: {

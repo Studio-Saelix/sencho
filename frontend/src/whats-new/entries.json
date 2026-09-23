@@ -78,5 +78,11 @@
     "title": "Decomposed approval actions",
     "blurb": "Accept source, approve placement, and authorize rollout as separate actions on a Git-managed Blueprint, so each authority step is reviewed and recorded on its own.",
     "docUrl": "https://docs.sencho.io/features/blueprint-model#accept-source-approve-placement-authorize-rollout"
+  },
+  {
+    "id": "gitops-rollout-controls",
+    "title": "Rollout lifecycle controls",
+    "blurb": "Pause, resume, replan, supersede, or roll back a Blueprint rollout from the GitOps application view, with an explicit recovery scope and per-target results.",
+    "docUrl": "https://docs.sencho.io/features/blueprint-model#pause-resume-replan-or-supersede-a-rollout"
   }
 ]
