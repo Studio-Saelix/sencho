@@ -25,6 +25,7 @@ import {
 } from './registryReadiness';
 import { stackManagedRoot } from './directApplication';
 import { decodeGitOpsRequiredTargetsJson } from './json';
+import { recoveryBindingForTarget } from './recoveryCapture';
 import { DatabaseService } from '../DatabaseService';
 import { BlueprintService } from '../BlueprintService';
 import { buildBlueprintMarker } from '../../helpers/blueprintMarker';
@@ -548,6 +549,10 @@ export class BlueprintTargetAdapter implements TargetAdapter {
           bindingRevision: binding.intentRevisionId,
         });
 
+        // Capture the pre-deploy state so this rollout can be rolled back
+        // later. The binding names the generation the target is running now,
+        // which is the one a rollback would restore from here.
+        const recoveryTarget = store.getTarget(liveApp.id, nodeId);
         const outcome = await svc.deployAuthorizedMaterialization({
           blueprint,
           node,
@@ -555,6 +560,8 @@ export class BlueprintTargetAdapter implements TargetAdapter {
           marker,
           auditPath: `/api/blueprints/${blueprint.id}/rollout/${liveApp.id}`,
           lockHeld: true,
+          captureRecovery: true,
+          recoveryBinding: recoveryBindingForTarget(liveApp, recoveryTarget),
         });
 
         if (outcome.status !== 'active') {

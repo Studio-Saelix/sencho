@@ -185,6 +185,82 @@ describe('Git-managed Blueprint fail-closed gates', () => {
     }
   });
 
+  it('refuses a malformed recoveryBinding on apply-local', async () => {
+    const { blueprint, applicationId } = converted();
+    const token = jwt.sign({ scope: 'node_proxy' }, TEST_JWT_SECRET, { expiresIn: '1m' });
+    const res = await request(app)
+      .post('/api/blueprints/apply-local')
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        stackName: blueprint.name,
+        composeContent: 'services:\n  fromgen:\n    image: alpine:3.20\n',
+        markerContent: JSON.stringify({
+          blueprintId: blueprint.id,
+          revision: blueprint.revision,
+          lastApplied: Date.now(),
+          applicationId,
+        }),
+        allowGitManagedContent: true,
+        captureRecovery: true,
+        recoveryBinding: { generationId: 123 },
+      });
+    expect(res.status).toBe(400);
+  });
+
+  it('refuses a non-boolean captureRecovery on apply-local', async () => {
+    const { blueprint, applicationId } = converted();
+    const token = jwt.sign({ scope: 'node_proxy' }, TEST_JWT_SECRET, { expiresIn: '1m' });
+    const res = await request(app)
+      .post('/api/blueprints/apply-local')
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        stackName: blueprint.name,
+        composeContent: 'services:\n  fromgen:\n    image: alpine:3.20\n',
+        markerContent: JSON.stringify({
+          blueprintId: blueprint.id,
+          revision: blueprint.revision,
+          lastApplied: Date.now(),
+          applicationId,
+        }),
+        allowGitManagedContent: true,
+        captureRecovery: 'yes',
+      });
+    expect(res.status).toBe(400);
+  });
+
+  it('does not capture a recovery point for a cookie session', async () => {
+    const { blueprint, applicationId } = converted();
+    const { BlueprintService } = await import('../services/BlueprintService');
+    const applySpy = vi.spyOn(BlueprintService.prototype, 'applyLocalUnderLock').mockResolvedValue({ ran: true });
+    try {
+      const res = await request(app)
+        .post('/api/blueprints/apply-local')
+        .set('Cookie', adminCookie)
+        .send({
+          stackName: blueprint.name,
+          composeContent: 'services:\n  fromgen:\n    image: alpine:3.20\n',
+          markerContent: JSON.stringify({
+            blueprintId: blueprint.id,
+            revision: blueprint.revision,
+            lastApplied: Date.now(),
+            applicationId,
+          }),
+          allowGitManagedContent: true,
+          captureRecovery: true,
+          recoveryBinding: {
+            generationId: 'gen-1',
+            artifactSetId: null,
+            sourceAcceptanceRef: null,
+          },
+        });
+      expect(res.status).toBe(200);
+      const options = applySpy.mock.calls[0][5] as { captureRecovery?: boolean };
+      expect(options.captureRecovery).toBe(false);
+    } finally {
+      applySpy.mockRestore();
+    }
+  });
+
   it('honors allowGitManagedContent on apply-local for node_proxy', async () => {
     const { blueprint, applicationId } = converted();
     const { ComposeService } = await import('../services/ComposeService');

@@ -250,6 +250,15 @@ export interface CaptureStackUpdateInput {
   createdBy: string | null;
   /** Capture trigger; defaults to 'update'. */
   operationKind?: RollbackOperationKind;
+  /**
+   * GitOps binding to record on the recovery row, when the caller knows it.
+   *
+   * A remote node has no GitOps application rows (they are hub-owned), so it
+   * cannot resolve this binding itself. The hub supplies the generation the
+   * target was running before the deploy it is asking for, and only that hub
+   * reaches this field.
+   */
+  gitopsBinding?: GitOpsRecoveryCapture;
 }
 
 function yamlQuote(value: string): string {
@@ -578,7 +587,7 @@ export class StackUpdateRecoveryService {
         artifacts_retired: 0,
         released_at: null,
         released_by: null,
-        ...this.captureGitOpsBindingOrEmpty(stackName, nodeId),
+        ...(input.gitopsBinding ?? this.captureGitOpsBindingOrEmpty(stackName, nodeId)),
       };
       DatabaseService.getInstance().insertStackUpdateRecoveryGeneration(row);
       return row;
@@ -614,16 +623,32 @@ export class StackUpdateRecoveryService {
    * than swallowed, and the degraded shape is the same one legacy rows carry.
    */
   private captureGitOpsBindingOrEmpty(stackName: string, nodeId: number): GitOpsRecoveryCapture {
+    let resolved: GitOpsRecoveryCapture | null = null;
     try {
-      return captureGitOpsRecoveryBinding(stackName, nodeId);
+      resolved = captureGitOpsRecoveryBinding(stackName, nodeId);
     } catch (error) {
       console.warn(
         '[StackUpdateRecovery] Could not capture the GitOps binding for %s; recovery point stored without it: %s',
         sanitizeForLog(stackName),
         sanitizeForLog(getErrorMessage(error, 'unknown')),
       );
-      return { ...EMPTY_GITOPS_RECOVERY_CAPTURE };
     }
+    if (resolved?.gitops_generation_id) return resolved;
+    // A node without the GitOps rows (a leaf keeping a Blueprint-managed
+    // stack) cannot resolve the owning application. The row being replaced
+    // still describes the generation this node is running, and a re-capture
+    // (backup, atomic deploy) does not change what is running, so the binding
+    // carries forward rather than dropping to null and stranding a later
+    // rollback.
+    const previous = this.getCurrent(nodeId, stackName);
+    if (previous?.gitops_generation_id) {
+      return {
+        gitops_generation_id: previous.gitops_generation_id,
+        gitops_artifact_set_id: previous.gitops_artifact_set_id ?? null,
+        gitops_source_acceptance_ref: previous.gitops_source_acceptance_ref ?? null,
+      };
+    }
+    return resolved ?? { ...EMPTY_GITOPS_RECOVERY_CAPTURE };
   }
 
   /**

@@ -35,6 +35,7 @@ import {
     type BlueprintMarker,
 } from '../helpers/blueprintMarker';
 import { throwIfGitManagedDeploy } from './gitops/gitManaged';
+import type { GitOpsRecoveryCapture } from './gitops/recoveryCapture';
 import {
     commitBlueprintDeploymentCause,
     commitBlueprintDeploymentRemoved,
@@ -281,6 +282,13 @@ export class BlueprintService {
      * Pass `lockHeld: true` when the caller already acquired the lock (so
      * deploy-started is not recorded before the lock is held). The caller
      * releases in that case; otherwise this method acquires and releases.
+     *
+     * `captureRecovery` asks the node to capture a recovery generation of the
+     * pre-deploy state before it deploys, which is what lets a Git-managed
+     * rollout be rolled back later. `recoveryBinding` names the GitOps
+     * generation that state belongs to, because a remote node cannot resolve a
+     * hub-owned GitOps application itself. Both travel to the remote in the
+     * apply-local request so the capture happens where the files are.
      */
     async deployAuthorizedMaterialization(args: {
         blueprint: Blueprint;
@@ -290,6 +298,8 @@ export class BlueprintService {
         auditPath: string;
         lockHeld?: boolean;
         digestPins?: DigestPinsMap;
+        captureRecovery?: boolean;
+        recoveryBinding?: GitOpsRecoveryCapture;
     }): Promise<DeployOutcome> {
         const manageLock = !args.lockHeld;
         if (manageLock && !this.acquireLock(args.blueprint.id, args.node.id)) {
@@ -311,7 +321,12 @@ export class BlueprintService {
                     args.composeContent,
                     markerContent,
                     args.auditPath,
-                    { allowGitManaged: true, digestPins: args.digestPins },
+                    {
+                        allowGitManaged: true,
+                        digestPins: args.digestPins,
+                        captureRecovery: args.captureRecovery,
+                        recoveryBinding: args.recoveryBinding,
+                    },
                 );
                 if (!outcome.ran) {
                     throw new Error(stackOpSkipMessage(args.blueprint.name, outcome.existingAction));
@@ -323,6 +338,8 @@ export class BlueprintService {
                     args.composeContent,
                     markerContent,
                     args.digestPins,
+                    args.captureRecovery === true,
+                    args.recoveryBinding,
                 );
             }
             this.setStatus(args.blueprint.id, args.node.id, 'active', 'deploy_ack', {
@@ -362,6 +379,8 @@ export class BlueprintService {
         composeContent: string,
         markerContent: string,
         digestPins?: DigestPinsMap,
+        captureRecovery = false,
+        recoveryBinding?: GitOpsRecoveryCapture,
     ): Promise<void> {
         const target = NodeRegistry.getInstance().getProxyTarget(node.id);
         if (!target) throw new Error(`Remote node "${node.name}" has no proxy target configured`);
@@ -375,6 +394,16 @@ export class BlueprintService {
         };
         if (digestPins) {
             applyBody.digestPins = digestPins;
+        }
+        if (captureRecovery) {
+            applyBody.captureRecovery = true;
+            if (recoveryBinding) {
+                applyBody.recoveryBinding = {
+                    generationId: recoveryBinding.gitops_generation_id,
+                    artifactSetId: recoveryBinding.gitops_artifact_set_id,
+                    sourceAcceptanceRef: recoveryBinding.gitops_source_acceptance_ref,
+                };
+            }
         }
         const augmented = await prepareOutboundRegistryDeliveryBody({
             method: 'POST',
@@ -948,7 +977,14 @@ export class BlueprintService {
         composeContent: string,
         markerContent: string,
         auditPath: string,
-        options: { allowGitManaged?: boolean; digestPins?: DigestPinsMap } = {},
+        options: {
+            allowGitManaged?: boolean;
+            digestPins?: DigestPinsMap;
+            /** Capture a recovery generation of the pre-deploy state (atomic deploy). */
+            captureRecovery?: boolean;
+            /** GitOps binding to record on that recovery generation, when known. */
+            recoveryBinding?: GitOpsRecoveryCapture;
+        } = {},
     ): Promise<{ ran: true } | { ran: false; existingAction: StackOpAction }> {
         const expected = parseBlueprintMarker(markerContent);
         if (!expected) {
@@ -988,10 +1024,45 @@ export class BlueprintService {
                     }
                     previousComposeContent = prior.content;
                 }
-                await fs.writeStackFile(stackName, COMPOSE_FILENAME, composeContent);
-                // Clear lower-priority compose siblings so discovery cannot shadow compose.yaml.
-                await fs.removeAlternateRootComposeFiles(stackName);
+                // The recovery point must describe the project as it stands
+                // before this apply, so it is captured before the new compose
+                // is written. A newly created stack has no prior state and no
+                // rollback to offer.
+                let recoveryId: string | null = null;
+                if (options.captureRecovery === true && !createdStack) {
+                    const { StackUpdateRecoveryService } = await import('./StackUpdateRecoveryService');
+                    const recoverySvc = StackUpdateRecoveryService.getInstance();
+                    const candidate = await recoverySvc.captureCandidate({
+                        nodeId,
+                        stackName,
+                        createdBy: 'blueprint-rollout',
+                        operationKind: 'deployment',
+                        gitopsBinding: options.recoveryBinding,
+                    });
+                    if (!recoverySvc.markAcquired(candidate.id)) {
+                        await recoverySvc.abandon(candidate.id);
+                        throw new Error('Failed to acquire the recovery generation for this Blueprint apply');
+                    }
+                    if (!recoverySvc.handoff(candidate.id, nodeId, stackName)) {
+                        await recoverySvc.abandon(candidate.id);
+                        throw new Error('Failed to hand off the recovery generation for this Blueprint apply');
+                    }
+                    // From here the row is the stack's current recovery point,
+                    // so every later failure path must settle it: the catch
+                    // below compensates it rather than leaving a current row
+                    // nothing owns.
+                    recoveryId = candidate.id;
+                }
                 try {
+                    if (recoveryId !== null) {
+                        const { StackUpdateRecoveryService } = await import('./StackUpdateRecoveryService');
+                        if (!StackUpdateRecoveryService.getInstance().markReconciling(recoveryId)) {
+                            throw new Error('Failed to mark the recovery generation reconciling for this Blueprint apply');
+                        }
+                    }
+                    await fs.writeStackFile(stackName, COMPOSE_FILENAME, composeContent);
+                    // Clear lower-priority compose siblings so discovery cannot shadow compose.yaml.
+                    await fs.removeAlternateRootComposeFiles(stackName);
                     if (options.digestPins) {
                         const model = await buildEffectiveServiceModel(nodeId, stackName);
                         if (!model.renderable) {
@@ -1021,8 +1092,44 @@ export class BlueprintService {
                             digestPins: options.digestPins,
                         },
                     );
+                    if (recoveryId !== null) {
+                        const { StackUpdateRecoveryService } = await import('./StackUpdateRecoveryService');
+                        if (!StackUpdateRecoveryService.getInstance().markImmediateVerified(recoveryId)) {
+                            console.warn(
+                                '[BlueprintService] Could not mark recovery %s immediate_verified',
+                                sanitizeForLog(recoveryId),
+                            );
+                        }
+                    }
                     await fs.writeStackFile(stackName, BLUEPRINT_MARKER_FILENAME, markerContent);
                 } catch (err) {
+                    // A failed apply attempts to restore the project and the
+                    // runtime the recovery point captured, so the node is not
+                    // left running a half-applied generation. A restore that
+                    // cannot complete is logged and the original failure still
+                    // surfaces.
+                    if (recoveryId !== null) {
+                        try {
+                            const { StackUpdateRecoveryService } = await import('./StackUpdateRecoveryService');
+                            const recovered = await StackUpdateRecoveryService.getInstance().compensateWithCandidate(
+                                recoveryId,
+                                (overridePath, invocation, overlay) => ComposeService.getInstance(nodeId)
+                                    .composeUpWithRecoveryOverride(stackName, overridePath, undefined, invocation, overlay),
+                            );
+                            if (!recovered) {
+                                console.warn(
+                                    '[BlueprintService] Recovery compensation did not complete for "%s"',
+                                    sanitizeForLog(stackName),
+                                );
+                            }
+                        } catch (compError) {
+                            console.error(
+                                '[BlueprintService] Recovery compensation failed for "%s": %s',
+                                sanitizeForLog(stackName),
+                                sanitizeForLog(BlueprintService.formatError(compError)),
+                            );
+                        }
+                    }
                     if (createdStack) {
                         try {
                             await fs.deleteStack(stackName);
