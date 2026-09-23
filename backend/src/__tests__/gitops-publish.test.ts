@@ -34,7 +34,7 @@ import {
 } from '../services/gitops/attemptPayload';
 import {
   GITOPS_NOTIFICATION_META,
-  gitOpsNotificationReason,
+  gitOpsPauseReason,
 } from '../services/gitops/notifications';
 import type { GitOpsApplicationRow } from '../services/gitops/types';
 
@@ -537,9 +537,7 @@ describe('gitops transition announcements', () => {
     resetGitOpsPublicationsForTests();
     // `applied` is a real history stage and not a notifiable one, so the
     // decoder must refuse it rather than map it to another stage's event.
-    db().prepare(
-      'UPDATE gitops_settled_outbox SET payload_json = ? WHERE settled_history_id = ?',
-    ).run(JSON.stringify({
+    const tampered = {
       version: 2,
       historyId,
       applicationId: 'app-op-event-tamper',
@@ -550,20 +548,15 @@ describe('gitops transition announcements', () => {
       actor: null,
       reason: null,
       at: 4242,
-    }), historyId);
+    };
+    db().prepare(
+      'UPDATE gitops_settled_outbox SET payload_json = ? WHERE settled_history_id = ?',
+    ).run(JSON.stringify(tampered), historyId);
     drainGitOpsOutboxRow(db(), historyId);
-    expect(decodeGitOpsEventPayload(JSON.stringify({
-      version: 2,
-      historyId: 'h',
-      applicationId: 'a',
-      operationId: 'o',
-      stage: 'applied',
-      stackName: null,
-      nodeId: null,
-      actor: null,
-      reason: null,
-      at: 1,
-    }), 2)).toEqual({ ok: false, limitation: 'gitops_event_payload_invalid' });
+    expect(decodeGitOpsEventPayload(JSON.stringify(tampered), 2)).toEqual({
+      ok: false,
+      limitation: 'gitops_event_payload_invalid',
+    });
     const count = db().prepare(
       'SELECT COUNT(*) AS n FROM notification_history WHERE gitops_operation_id = ?',
     ).get('op-event-tamper') as { n: number };
@@ -613,12 +606,11 @@ describe('GitOps notification mapping', () => {
     }), 2)).toEqual({ ok: false, limitation: 'gitops_event_payload_invalid' });
   });
 
-  it('reads the reason a transition recorded, preferring the generic key', () => {
-    expect(gitOpsNotificationReason({})).toBeNull();
-    expect(gitOpsNotificationReason({ reason: 'fetch failed' })).toBe('fetch failed');
-    expect(gitOpsNotificationReason({ pauseReason: 'window' })).toBe('window');
-    expect(gitOpsNotificationReason({ reason: '', pauseReason: 'window' })).toBe('window');
-    expect(gitOpsNotificationReason({ reason: 'first', pauseReason: 'second' })).toBe('first');
+  it('reads the pause reason a transition recorded, and ignores an empty one', () => {
+    expect(gitOpsPauseReason({})).toBeNull();
+    expect(gitOpsPauseReason({ pauseReason: 'window' })).toBe('window');
+    expect(gitOpsPauseReason({ pauseReason: '' })).toBeNull();
+    expect(gitOpsPauseReason({ pauseReason: 7 })).toBeNull();
   });
 });
 

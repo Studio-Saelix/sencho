@@ -57,22 +57,31 @@ export function gitOpsEventNotificationDedupeKey(historyId: string): string {
   return `gitops:event:${historyId}`;
 }
 
-export function insertSettledOutbox(
+function insertOutboxRow(
   db: Database.Database,
-  payload: SettledAttemptPayload,
+  historyId: string,
+  payloadJson: string,
+  payloadVersion: number,
+  at: number,
 ): void {
-  const now = payload.at;
   db.prepare(
     `INSERT INTO gitops_settled_outbox (
       settled_history_id, payload_json, payload_version, created_at, updated_at, drained_at
     ) VALUES (?, ?, ?, ?, ?, NULL)
     ON CONFLICT(settled_history_id) DO NOTHING`,
-  ).run(
+  ).run(historyId, payloadJson, payloadVersion, at, at);
+}
+
+export function insertSettledOutbox(
+  db: Database.Database,
+  payload: SettledAttemptPayload,
+): void {
+  insertOutboxRow(
+    db,
     payload.settledHistoryId,
     encodeSettledAttemptPayload(payload),
     SETTLED_ATTEMPT_PAYLOAD_VERSION,
-    now,
-    now,
+    payload.at,
   );
 }
 
@@ -80,18 +89,12 @@ export function insertGitOpsEventOutbox(
   db: Database.Database,
   payload: GitOpsEventPayload,
 ): void {
-  const now = payload.at;
-  db.prepare(
-    `INSERT INTO gitops_settled_outbox (
-      settled_history_id, payload_json, payload_version, created_at, updated_at, drained_at
-    ) VALUES (?, ?, ?, ?, ?, NULL)
-    ON CONFLICT(settled_history_id) DO NOTHING`,
-  ).run(
+  insertOutboxRow(
+    db,
     payload.historyId,
     encodeGitOpsEventPayload(payload),
     GITOPS_EVENT_PAYLOAD_VERSION,
-    now,
-    now,
+    payload.at,
   );
 }
 

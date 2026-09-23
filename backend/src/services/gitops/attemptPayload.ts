@@ -20,10 +20,7 @@ export type SettledAttemptPayloadV1 = {
 
 export type SettledAttemptPayload = SettledAttemptPayloadV1;
 
-/**
- * The one decode result shape, so a caller that handles either payload kind
- * narrows the same way and the two cannot drift apart.
- */
+/** The one decode result shape both payload kinds return. */
 export type GitOpsDecodeResult<T> =
   | { ok: true; payload: T }
   | { ok: false; limitation: string };

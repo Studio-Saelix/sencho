@@ -117,16 +117,15 @@ export const GITOPS_NOTIFICATION_META: Record<NotifiableGitOpsStage, GitOpsNotif
 };
 
 /**
- * The operator-supplied reason on a transition delta, when one was recorded.
+ * The pause reason a transition delta recorded, when it recorded one.
  *
- * A v2 stage records its reason under `pauseReason` when it is a pause; the
- * generic `reason` key is read first so a future failure stage can carry one
- * without changing the outbox. The settled source attempt has its own payload
- * field and never reaches this helper. An absent or empty value stays null
- * rather than becoming an empty suffix in the message.
+ * Only the pause stages carry operator free text today. A later notifiable
+ * stage that records its reason under another key adds that key here rather
+ * than being guessed at, and an absent or empty value stays null instead of
+ * becoming an empty suffix in the message.
  */
-export function gitOpsNotificationReason(after: Record<string, unknown>): string | null {
-  if (typeof after.reason === 'string' && after.reason.length > 0) return after.reason;
-  if (typeof after.pauseReason === 'string' && after.pauseReason.length > 0) return after.pauseReason;
-  return null;
+export function gitOpsPauseReason(after: Record<string, unknown>): string | null {
+  return typeof after.pauseReason === 'string' && after.pauseReason.length > 0
+    ? after.pauseReason
+    : null;
 }
