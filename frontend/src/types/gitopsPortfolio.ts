@@ -119,6 +119,17 @@ export interface GitOpsPortfolioDetailResponse {
   generatedAt: number;
   application: GitOpsPortfolioRow;
   projection: GitOpsRevisionProjection;
+  /** For a Git-managed Blueprint: the prior generations a rollout rollback can select. */
+  rollbackCandidates?: GitOpsRollbackCandidate[];
+  /** The bound Blueprint's enabled state, when the application has one. */
+  blueprintEnabled?: boolean | null;
+}
+
+/** A prior application generation a rollout rollback can select. */
+export interface GitOpsRollbackCandidate {
+  generationId: string;
+  rolloutGenerationId: string;
+  createdAt: number;
 }
 
 /** Filter set the list route accepts; mirrored from the backend contract. */

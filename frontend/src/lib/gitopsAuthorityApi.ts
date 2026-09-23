@@ -88,3 +88,86 @@ export async function authorizeGitOpsRollout(applicationId: string): Promise<Rol
     note: typeof payload.note === 'string' ? payload.note : null,
   };
 }
+
+/** Which targets a rollback recovers. */
+export type RolloutRollbackScope =
+  | { kind: 'target'; nodeId: number }
+  | { kind: 'failed' }
+  | { kind: 'all_changed' };
+
+export type RolloutRollbackTargetResult = {
+  nodeId: number;
+  status: 'restored' | 'failed';
+  error?: string;
+};
+
+export type RolloutRollbackResult = {
+  /** True only when every in-scope target restored. */
+  ok: boolean;
+  results: RolloutRollbackTargetResult[];
+};
+
+/** Pause the rollout application-wide. */
+export async function pauseGitOpsRollout(applicationId: string, options: { reason: string }): Promise<void> {
+  await postAuthorityAction(
+    `/gitops/applications/${encodeURIComponent(applicationId)}/rollout/pause`,
+    options,
+    'Failed to pause the rollout',
+  );
+}
+
+/** Resume a paused rollout and continue the queue when one is authorized. */
+export async function resumeGitOpsRollout(applicationId: string): Promise<RolloutAuthorizationResult> {
+  const payload = await postAuthorityAction(
+    `/gitops/applications/${encodeURIComponent(applicationId)}/rollout/resume`,
+    {},
+    'Failed to resume the rollout',
+  );
+  return {
+    dispatched: payload.dispatched === true,
+    note: typeof payload.note === 'string' ? payload.note : null,
+  };
+}
+
+/** Re-derive placement for the current Blueprint and open a fresh review. */
+export async function replanGitOpsRollout(applicationId: string): Promise<void> {
+  await postAuthorityAction(
+    `/gitops/applications/${encodeURIComponent(applicationId)}/rollout/replan`,
+    {},
+    'Failed to replan the rollout',
+  );
+}
+
+/** Withdraw the live rollout authorization. */
+export async function supersedeGitOpsRollout(applicationId: string): Promise<void> {
+  await postAuthorityAction(
+    `/gitops/applications/${encodeURIComponent(applicationId)}/rollout/supersede`,
+    {},
+    'Failed to supersede the rollout',
+  );
+}
+
+/** Restore the selected application generation on the requested target scope. */
+export async function rollbackGitOpsRollout(
+  applicationId: string,
+  confirm: { generationId: string; scope: RolloutRollbackScope },
+): Promise<RolloutRollbackResult> {
+  const payload = await postAuthorityAction(
+    `/gitops/applications/${encodeURIComponent(applicationId)}/rollout/rollback`,
+    confirm,
+    'Failed to roll back the rollout',
+  );
+  const rawResults = Array.isArray(payload.results) ? payload.results : [];
+  const results: RolloutRollbackTargetResult[] = [];
+  for (const entry of rawResults) {
+    if (typeof entry !== 'object' || entry === null) continue;
+    const { nodeId, status, error } = entry as { nodeId?: unknown; status?: unknown; error?: unknown };
+    if (typeof nodeId !== 'number' || (status !== 'restored' && status !== 'failed')) continue;
+    results.push({
+      nodeId,
+      status,
+      ...(typeof error === 'string' ? { error } : {}),
+    });
+  }
+  return { ok: payload.ok === true, results };
+}

@@ -227,6 +227,27 @@ A disabled Blueprint withholds placement approval and rollout authorization unti
 
 The **Apply now** flow stays Inline-only. For a Git-managed Blueprint the rollout preview is a placement review: its confirm writes the placement approval instead of applying the frozen snapshot.
 
+### Pause, resume, replan, or supersede a rollout
+
+A live rollout also offers lifecycle controls on the same GitOps section, on the **Rollout controls** row:
+
+- **Pause rollout** stops the rollout from advancing and asks for a reason. Nodes keep running what they already deployed, and a paused rollout never reads as converged.
+- **Resume rollout** clears the pause and continues the sequential rollout when it is still authorized. If the authorization is no longer live, the surface says so instead of starting anything.
+- **Replan placement** re-derives the Blueprint's target nodes and opens a fresh placement review, which withdraws the existing placement approval and rollout authorization. It appears in the overflow menu and refuses when the current placement already matches the Blueprint, so a review that is still accurate is not invalidated for nothing.
+- **Supersede rollout** withdraws the rollout authorization and marks that rollout generation superseded. Nodes that already received it keep running it; the rollout reads as superseded until you authorize a new one.
+
+Rollout authorization needs resolved executable artifact evidence for the accepted generation. While that evidence is unresolved, the authorization is refused with the artifact identity as the reason, and the lifecycle controls do not work around it.
+
+### Roll back a rollout
+
+Every Git-managed rollout deploy captures the node's previous project as a recovery generation before it applies anything, which is what a later rollback restores from. **Roll back rollout** lists the application's earlier generations, newest first, and asks for the scope: one target, the targets recorded as failed, unreachable, or stale, or every changed target in the rollout. A target already running the selected generation is skipped.
+
+Each node in the scope must hold a recovery generation that names the selected application generation. A node keeps the generation captured immediately before its latest rollout, so an older selection has no recovery generation to restore from and is reported as a failed target; the rollout then reads as a partially failed rollback rather than a completion.
+
+Rollback restores the authored project. It does not restore application data, and a locally built image is rebuilt from its authored inputs unless the node's recovery generation still holds the previous image. The per-target result states what actually happened.
+
+A Blueprint with drift mode **enforce** keeps enforcing its current revision, so it will re-apply the accepted generation on the next reconciliation after a rollback. Switch that Blueprint to observe or suggest while a rollback should stand.
+
 ### Detach Git-managed content
 
 **Detach Git** restores Inline editing from the frozen snapshot. Later Git commits are not written back. Detach is refused when that snapshot is empty (no generation exists to restore as Inline content). After detach, **Apply now** and compose editing return.

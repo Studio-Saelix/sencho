@@ -9,6 +9,7 @@ import { cn } from '@/lib/utils';
 import { closeGitOpsApplication, owningSurfaceHandoff } from '../portfolio/portfolioNavigation';
 import GitOpsApplicationDetail from './GitOpsApplicationDetail';
 import GitOpsAuthorityActions from '@/components/gitops/GitOpsAuthorityActions';
+import GitOpsRolloutControls from '@/components/gitops/GitOpsRolloutControls';
 import { useGitOpsApplication, type GitOpsApplicationError } from './useGitOpsApplication';
 
 /**
@@ -94,14 +95,29 @@ export function GitOpsApplicationView({ id, className, headerActions }: {
           <GitOpsApplicationDetail
             detail={data}
             actions={(
-              <GitOpsAuthorityActions
-                applicationId={id}
-                blueprintId={row.blueprintId}
-                blueprintName={row.name}
-                projection={data.projection}
-                onChanged={refresh}
-                can={can}
-              />
+              <div className="flex flex-col gap-2">
+                <GitOpsAuthorityActions
+                  applicationId={id}
+                  blueprintId={row.blueprintId}
+                  blueprintName={row.name}
+                  projection={data.projection}
+                  onChanged={refresh}
+                  can={can}
+                  blueprintEnabled={data.blueprintEnabled ?? undefined}
+                />
+                <GitOpsRolloutControls
+                  applicationId={id}
+                  projection={data.projection}
+                  onChanged={refresh}
+                  can={can}
+                  blueprintEnabled={data.blueprintEnabled ?? undefined}
+                  rollbackGenerations={data.rollbackCandidates}
+                  nodeLabel={(nodeId) => {
+                    const target = row.targets.find(entry => entry.nodeId === nodeId);
+                    return target?.nodeName ?? `node ${nodeId}`;
+                  }}
+                />
+              </div>
             )}
           />
         </ScrollArea>

@@ -25,6 +25,7 @@ import {
 } from './registryReadiness';
 import { stackManagedRoot } from './directApplication';
 import { decodeGitOpsRequiredTargetsJson } from './json';
+import { recoveryBindingForTarget } from './recoveryCapture';
 import { DatabaseService } from '../DatabaseService';
 import { BlueprintService } from '../BlueprintService';
 import { buildBlueprintMarker } from '../../helpers/blueprintMarker';
@@ -238,6 +239,12 @@ function liveRolloutBinding(app: GitOpsApplicationRow): FutureRolloutAuthorizati
  *
  * `authority` names who is minting: the automatic handoff acts on the
  * configured policy, an explicit operator authorization on the operator.
+ *
+ * `shouldAbort` lets a dispatch caller refuse to mint while a hold is placed.
+ * It is re-read after the preflight await, because a pause that lands during
+ * the evaluation must not mint or supersede an authorization the pause is
+ * holding. Explicit operator authorizations do not pass it: the operator's own
+ * decision is the authority there.
  */
 export async function ensureRolloutAuthorization(
   applicationId: string,
@@ -245,6 +252,7 @@ export async function ensureRolloutAuthorization(
   trigger = 'blueprint_dispatch',
   depsPartial?: Partial<RegistryReadinessDeps>,
   authority: 'operator' | 'configured_policy' = 'configured_policy',
+  shouldAbort?: () => boolean,
 ): Promise<{ ok: true; binding: FutureRolloutAuthorizationBinding } | { ok: false; reason: string }> {
   return withSerializedEvaluation(applicationId, async () => {
     const store = GitOpsStore.getInstance();
@@ -253,6 +261,7 @@ export async function ensureRolloutAuthorization(
     if (app.target_mode !== 'blueprint') {
       return { ok: false, reason: 'Rollout authorization is only for Blueprint target mode.' };
     }
+    if (shouldAbort?.()) return { ok: false, reason: 'The rollout is paused.' };
 
     const ingredients = store.authorizationIngredients(app);
     if (!ingredients) {
@@ -297,6 +306,9 @@ export async function ensureRolloutAuthorization(
       },
       deps,
     );
+    // Re-read after the await: a pause placed while preflight ran must not
+    // mint, supersede, or invalidate the authorization it is holding.
+    if (shouldAbort?.()) return { ok: false, reason: 'The rollout is paused.' };
     const preflightEvidenceJson = encodePreflightEvidenceJson(preflight);
     const preflightFingerprint = fingerprintPreflightEvidence(preflight);
     const transitions = GitOpsTransitions.getInstance();
@@ -450,9 +462,22 @@ export class BlueprintTargetAdapter implements TargetAdapter {
     if (blueprintId === null) {
       return { status: 'blocked', reason: 'No Blueprint is bound to this application.' };
     }
+    // A pause is an execution hold, not a rendering state: nothing dispatches
+    // while it is set, including the boot-time reconstruction that resumes
+    // authorized rollouts.
+    if (app.pause_at) {
+      return { status: 'blocked', reason: 'The rollout is paused.' };
+    }
 
     const trigger = generation.trigger || 'blueprint_dispatch';
-    const auth = await ensureRolloutAuthorization(app.id, generation.actor ?? null, trigger);
+    const auth = await ensureRolloutAuthorization(
+      app.id,
+      generation.actor ?? null,
+      trigger,
+      undefined,
+      'configured_policy',
+      () => !!store.getApplication(app.id)?.pause_at,
+    );
     if (!auth.ok) return { status: 'blocked', reason: auth.reason };
     const binding = auth.binding;
 
@@ -469,6 +494,9 @@ export class BlueprintTargetAdapter implements TargetAdapter {
     }
     if (!resolvesRolloutAuthorization(liveApp, binding)) {
       return { status: 'blocked', reason: 'The current rollout authorization no longer matches the live binding.' };
+    }
+    if (liveApp.pause_at) {
+      return { status: 'blocked', reason: 'The rollout is paused.' };
     }
     const liveAuthorizationRef = liveApp.rollout_authorization_ref;
 
@@ -491,10 +519,24 @@ export class BlueprintTargetAdapter implements TargetAdapter {
 
     const tx = GitOpsTransitions.getInstance();
     const svc = BlueprintService.getInstance();
+    const pausedTargets: number[] = [];
+    let anyDispatched = false;
 
     for (const nodeId of binding.requiredNodeIds) {
+      // Re-read before every target: a pause that lands while this loop runs
+      // stops the rollout at the next target rather than after the fleet.
+      if (store.getApplication(liveApp.id)?.pause_at) {
+        return { status: 'blocked', reason: 'The rollout was paused while it was running.' };
+      }
       const target = store.getTarget(liveApp.id, nodeId);
       if (targetAlreadyAcked(target, binding, liveAuthorizationRef)) {
+        continue;
+      }
+      // A per-target pause holds that target alone: the rest of the queue
+      // continues, and this target is retried by the dispatch a later resume
+      // triggers.
+      if (target?.pause_at) {
+        pausedTargets.push(nodeId);
         continue;
       }
 
@@ -548,6 +590,10 @@ export class BlueprintTargetAdapter implements TargetAdapter {
           bindingRevision: binding.intentRevisionId,
         });
 
+        // Capture the pre-deploy state so this rollout can be rolled back
+        // later. The binding names the generation the target is running now,
+        // which is the one a rollback would restore from here.
+        const recoveryTarget = store.getTarget(liveApp.id, nodeId);
         const outcome = await svc.deployAuthorizedMaterialization({
           blueprint,
           node,
@@ -555,6 +601,8 @@ export class BlueprintTargetAdapter implements TargetAdapter {
           marker,
           auditPath: `/api/blueprints/${blueprint.id}/rollout/${liveApp.id}`,
           lockHeld: true,
+          captureRecovery: true,
+          recoveryBinding: recoveryBindingForTarget(liveApp, recoveryTarget),
         });
 
         if (outcome.status !== 'active') {
@@ -595,11 +643,20 @@ export class BlueprintTargetAdapter implements TargetAdapter {
             reason: `Could not record ack for node ${nodeId}: ${errorMessage(err)}`,
           };
         }
+        anyDispatched = true;
       } finally {
         svc.releaseAuthorizedDeployLock(blueprint.id, nodeId);
       }
     }
 
+    // Nothing ran because every remaining target is paused: report the hold
+    // rather than a dispatch, so the caller does not count it as progress.
+    if (!anyDispatched && pausedTargets.length > 0) {
+      return {
+        status: 'blocked',
+        reason: `The rollout is paused on ${pausedTargets.length} target${pausedTargets.length === 1 ? '' : 's'}.`,
+      };
+    }
     return { status: 'dispatched' };
   }
 }
@@ -615,6 +672,9 @@ export async function reconstructBlueprintRolloutQueue(): Promise<number> {
   let resumed = 0;
   for (const app of apps) {
     if (!app.accepted_generation_id || !app.rollout_authorization_ref) continue;
+    // A pause survives a restart: reconstruction resumes only rollouts that
+    // nothing is holding. A per-target pause is honored inside the adapter.
+    if (app.pause_at) continue;
     if (!app.latest_preflight_evidence_json) continue;
     const stored = decodePreflightEvidenceJson(app.latest_preflight_evidence_json);
     if (isPreflightBlocked(stored)) continue;

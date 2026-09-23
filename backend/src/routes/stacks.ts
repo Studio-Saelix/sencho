@@ -2599,6 +2599,30 @@ stacksRouter.post('/:stackName/rollback', async (req: Request, res: Response) =>
     const { StackUpdateRecoveryService } = await import('../services/StackUpdateRecoveryService');
     const recoverySvc = StackUpdateRecoveryService.getInstance();
     const currentGen = recoverySvc.getCurrent(req.nodeId, stackName);
+    // A caller that names the application generation it means to restore
+    // (the GitOps rollout rollback path) must be answered against that
+    // generation, never against whatever recovery point happens to be current.
+    // Restoring the wrong point under a rollback claim would report a rollout
+    // recovery that never happened.
+    const expectedGitopsGenerationId = typeof req.body?.expectedGitopsGenerationId === 'string'
+      && req.body.expectedGitopsGenerationId.length > 0
+      ? req.body.expectedGitopsGenerationId
+      : null;
+    if (expectedGitopsGenerationId !== null && !currentGen) {
+      res.status(409).json({
+        error: 'This stack has no recovery point to restore.',
+        code: 'NO_RECOVERY_POINT',
+      });
+      return;
+    }
+    if (expectedGitopsGenerationId !== null && currentGen
+      && currentGen.gitops_generation_id !== expectedGitopsGenerationId) {
+      res.status(409).json({
+        error: 'The current recovery point does not restore the requested application generation.',
+        code: 'RECOVERY_POINT_MISMATCH',
+      });
+      return;
+    }
     // Any current recovery row uses compensateWithCandidate. Policy is evaluated
     // against the restored target inside compensate, not the live pre-restore project.
     if (currentGen) {
@@ -2651,7 +2675,14 @@ stacksRouter.post('/:stackName/rollback', async (req: Request, res: Response) =>
       }
       invalidateNodeCaches(req.nodeId);
       dlog(`[Stacks] Rollback completed: ${sanitizeForLog(stackName)}`);
-      res.json({ message: 'Stack rolled back from recovery generation.', recoveryId: currentGen.id });
+      // Echo the generation the point was bound to. A hub-driven rollout
+      // rollback requires this to equal the generation it asked for, so a
+      // node that ignored the request cannot be reported as a restore.
+      res.json({
+        message: 'Stack rolled back from recovery generation.',
+        recoveryId: currentGen.id,
+        gitopsGenerationId: currentGen.gitops_generation_id ?? null,
+      });
       notifyActionSuccess('deploy_success', `${stackName} rolled back`, stackName, req.user?.username ?? 'system');
       return;
     }

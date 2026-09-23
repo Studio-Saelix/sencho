@@ -173,12 +173,31 @@ export type GitOpsPortfolioResponse = {
   truncated: boolean;
 };
 
+/**
+ * A prior application generation a rollout rollback can select, from the
+ * hub's own rollout-generation history. Optional so a node or build that does
+ * not compute it omits the field rather than claiming an empty list.
+ */
+export type GitOpsRollbackCandidate = {
+  generationId: string;
+  rolloutGenerationId: string;
+  createdAt: number;
+};
+
 export type GitOpsPortfolioDetailResponse = {
   schemaVersion: 1;
   generatedAt: number;
   application: GitOpsPortfolioRow;
   /** The full canonical projection for the application (the SEN-510 read shape). */
   projection: GitOpsRevisionProjection;
+  /** For a Git-managed Blueprint: the prior generations its rollback can select. */
+  rollbackCandidates?: GitOpsRollbackCandidate[];
+  /**
+   * The bound Blueprint's enabled state, when there is one. Execution
+   * controls are withheld on a disabled Blueprint, and this read is where the
+   * application view learns that.
+   */
+  blueprintEnabled?: boolean | null;
 };
 
 /** Query filters accepted by the list route. Unknown values are rejected, not dropped. */

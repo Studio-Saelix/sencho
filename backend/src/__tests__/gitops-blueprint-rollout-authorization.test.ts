@@ -288,6 +288,141 @@ describe('BlueprintTargetAdapter unlock', () => {
   });
 });
 
+describe('rollout pause holds execution', () => {
+  function pauseEnvelope() {
+    return { operationId: randomUUID(), actor: 'tester', trigger: 'test', at: Date.now() };
+  }
+
+  /**
+   * Reconstruction walks every authorized application in the DB, and earlier
+   * tests leave their fixtures behind, so a count assertion needs only this
+   * test's application to exist.
+   */
+  function clearGitOpsState(): void {
+    const db = DatabaseService.getInstance().getDb();
+    for (const table of [
+      'gitops_target_current', 'gitops_history', 'gitops_approvals', 'gitops_rollout_generations',
+      'gitops_rollout_candidates', 'gitops_artifact_sets', 'gitops_generations',
+      'gitops_intent_revisions', 'gitops_applications',
+    ]) {
+      db.prepare(`DELETE FROM ${table}`).run();
+    }
+  }
+
+  it('blocks a dispatch while the application is paused', async () => {
+    clearGitOpsState();
+    const fixture = seedAuthorizedReadyApp();
+    await writeAppliedCompose(fixture.applicationId, fixture.generationId, 'services:\n  web:\n    image: alpine:3.20\n');
+    authorize(fixture.applicationId);
+    GitOpsTransitions.getInstance().rolloutPaused(
+      fixture.applicationId, null, 'wait for the window', pauseEnvelope(),
+    );
+    const deploySpy = vi.spyOn(BlueprintService.getInstance(), 'deployAuthorizedMaterialization')
+      .mockResolvedValue({ status: 'active' });
+    const store = GitOpsStore.getInstance();
+    const before = store.getApplication(fixture.applicationId)!;
+
+    const gen = buildAcceptedGeneration(store.getGeneration(fixture.generationId)!);
+    const result = await new BlueprintTargetAdapter().dispatch(gen, {
+      targetMode: 'blueprint',
+      nodeId: fixture.nodeId,
+      bindingRevision: null,
+    });
+    expect(result.status).toBe('blocked');
+    if (result.status === 'blocked') expect(result.reason).toMatch(/paused/i);
+    expect(deploySpy).not.toHaveBeenCalled();
+    // The hold also prevents minting or superseding an authorization during
+    // the preflight window.
+    const after = store.getApplication(fixture.applicationId)!;
+    expect(after.rollout_authorization_ref).toBe(before.rollout_authorization_ref);
+    expect(after.rollout_generation_id).toBe(before.rollout_generation_id);
+    expect(after.latest_preflight_evidence_json).toBe(before.latest_preflight_evidence_json);
+  });
+
+  it('does not resume a paused rollout on restart', async () => {
+    clearGitOpsState();
+    const fixture = seedAuthorizedReadyApp({ nodeCount: 2 });
+    await writeAppliedCompose(fixture.applicationId, fixture.generationId, 'services:\n  web:\n    image: alpine:3.20\n');
+    authorize(fixture.applicationId);
+    GitOpsTransitions.getInstance().rolloutPaused(
+      fixture.applicationId, null, 'wait for the window', pauseEnvelope(),
+    );
+    const deploySpy = vi.spyOn(BlueprintService.getInstance(), 'deployAuthorizedMaterialization')
+      .mockResolvedValue({ status: 'active' });
+    const dispatchSpy = vi.spyOn(BlueprintTargetAdapter.prototype, 'dispatch');
+
+    const resumed = await reconstructBlueprintRolloutQueue();
+    expect(resumed).toBe(0);
+    expect(dispatchSpy).not.toHaveBeenCalled();
+    expect(deploySpy).not.toHaveBeenCalled();
+  });
+
+  it('continues the queue but skips an individually paused target', async () => {
+    clearGitOpsState();
+    const fixture = seedAuthorizedReadyApp({ nodeCount: 3 });
+    await writeAppliedCompose(fixture.applicationId, fixture.generationId, 'services:\n  web:\n    image: alpine:3.20\n');
+    authorize(fixture.applicationId);
+    const store = GitOpsStore.getInstance();
+    const app = store.getApplication(fixture.applicationId)!;
+    const binding = store.currentAuthorizationBinding(app)!;
+    const [firstNode, pausedNode, lastNode] = fixture.nodeIds;
+
+    store.upsertTarget({
+      ...emptyTarget(fixture.applicationId, firstNode!),
+      intent_revision_id: binding.intentRevisionId,
+      rollout_candidate_id: binding.rolloutCandidateId,
+      applied_generation_id: binding.acceptedGenerationId,
+      desired_generation_id: binding.acceptedGenerationId,
+      rollout_authorization_ref: app.rollout_authorization_ref,
+      latest_stage: 'blueprint_ack_recorded',
+    });
+    store.upsertTarget(emptyTarget(fixture.applicationId, pausedNode!));
+    GitOpsTransitions.getInstance().rolloutPaused(
+      fixture.applicationId, pausedNode!, 'node maintenance', pauseEnvelope(),
+    );
+    store.upsertTarget(emptyTarget(fixture.applicationId, lastNode!));
+
+    const deploySpy = vi.spyOn(BlueprintService.getInstance(), 'deployAuthorizedMaterialization')
+      .mockResolvedValue({ status: 'active' });
+    const resumed = await reconstructBlueprintRolloutQueue();
+    expect(resumed).toBe(1);
+    expect(deploySpy).toHaveBeenCalledTimes(1);
+    expect(deploySpy.mock.calls[0]![0].node.id).toBe(lastNode);
+    expect(store.getTarget(fixture.applicationId, pausedNode!)?.pause_at).not.toBeNull();
+  });
+
+  it('reports a hold instead of progress when every remaining target is paused', async () => {
+    clearGitOpsState();
+    const fixture = seedAuthorizedReadyApp({ nodeCount: 2 });
+    await writeAppliedCompose(fixture.applicationId, fixture.generationId, 'services:\n  web:\n    image: alpine:3.20\n');
+    authorize(fixture.applicationId);
+    const store = GitOpsStore.getInstance();
+    const app = store.getApplication(fixture.applicationId)!;
+    const binding = store.currentAuthorizationBinding(app)!;
+    const [firstNode, pausedNode] = fixture.nodeIds;
+
+    store.upsertTarget({
+      ...emptyTarget(fixture.applicationId, firstNode!),
+      intent_revision_id: binding.intentRevisionId,
+      rollout_candidate_id: binding.rolloutCandidateId,
+      applied_generation_id: binding.acceptedGenerationId,
+      desired_generation_id: binding.acceptedGenerationId,
+      rollout_authorization_ref: app.rollout_authorization_ref,
+      latest_stage: 'blueprint_ack_recorded',
+    });
+    store.upsertTarget(emptyTarget(fixture.applicationId, pausedNode!));
+    GitOpsTransitions.getInstance().rolloutPaused(
+      fixture.applicationId, pausedNode!, 'node maintenance', pauseEnvelope(),
+    );
+
+    const deploySpy = vi.spyOn(BlueprintService.getInstance(), 'deployAuthorizedMaterialization')
+      .mockResolvedValue({ status: 'active' });
+    const resumed = await reconstructBlueprintRolloutQueue();
+    expect(resumed).toBe(0);
+    expect(deploySpy).not.toHaveBeenCalled();
+  });
+});
+
 describe('derive facets for authorization and convergence', () => {
   it('flips produced placement and rollout statuses to current', () => {
     expect(FACET_EVIDENCE_SOURCE.placement.rollout_authorization_pending).toBe('current');
