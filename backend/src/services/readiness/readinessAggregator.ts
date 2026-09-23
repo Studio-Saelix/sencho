@@ -6,6 +6,7 @@ import {
 } from '../DatabaseService';
 import { NodeRegistry, type ProxyTarget } from '../NodeRegistry';
 import { SYNC_ERROR_CODES } from '../fleetSyncConstants';
+import { isFleetSyncTarget } from '../FleetSyncService';
 import { contactInfo, type PreviewReachabilityNote } from '../blueprintPreviewProjection';
 import { safeRemoteFetch } from '../../utils/outboundTarget';
 import { mapWithConcurrency } from '../../utils/mapWithConcurrency';
@@ -41,11 +42,11 @@ import {
 /**
  * Budget for one node's readiness evidence.
  *
- * This does not bound a row's latency, and the reason is worth stating: both of
- * this node's reads run in one `Promise.all`, so the row settles at the slower
- * of the two legs, which is the summary budget whenever tier two was asked for.
- * What this bounds is the leg itself, so a request that asked for no verdicts is
- * not held for the longer budget.
+ * Both reads run together, so a node that answers settles at the slower of the
+ * two. When this probe gets no answer (timeout or lost transport), `readNode`
+ * cancels the summary read to a remote node, so a dead remote costs this budget
+ * rather than the summary's. The hub's own node is read in process, where
+ * nothing can be cancelled, so it still waits out its own summary budget.
  */
 const EVIDENCE_BUDGET_MS = 3_000;
 /**
@@ -106,6 +107,8 @@ const NODE_LEVEL_CODES = [
 ] as const;
 
 type NodeLevelCode = (typeof NODE_LEVEL_CODES)[number];
+
+const NODE_LEVEL_CODE_SET: ReadonlySet<ReadinessReasonCode> = new Set(NODE_LEVEL_CODES);
 
 /**
  * What each domain may publish, as a type. A domain that can carry one of the
@@ -217,10 +220,14 @@ interface ConcernSpec {
  * exactly the case this surface has nothing to say about; the workload map is
  * keyed by problems only, so a ready stack never reaches it.
  */
-const WORKLOAD_STATUS_CONCERNS: Record<NodeWorkloadProblem['status'], ConcernSpec> = {
+const WORKLOAD_STATUS_CONCERNS: Record<NodeWorkloadProblem['status'], ConcernSpec | null> = {
   exited: { state: 'attention', code: 'workloads_exited' },
   partial: { state: 'degraded', code: 'workloads_partial' },
-  unknown: { state: 'unknown', code: 'workloads_unknown' },
+  // The bulk status read reports `unknown` for a stack with no containers at
+  // all: a stack that is not deployed. That is a known state rather than missing
+  // evidence, and Home's stack classifier (`classifyRow`) treats it as quiet, so
+  // it is not a concern here either.
+  unknown: null,
 };
 
 const UPDATE_VERDICT_CONCERNS: Record<ReadinessVerdict, ConcernSpec | null> = {
@@ -272,11 +279,12 @@ const SECURITY_POSTURE_CONCERNS: Record<SecurityPostureState, ConcernSpec | null
  * answered and the answer was unusable (a status this hub rejects, a body it
  * cannot read), which is a fact about that node's build or its health;
  * `unreachable` means the transport produced no answer at all (a refused
- * connection, a reset stream, a request cancelled with the caller), which is a
- * fact about the path between the two instances. Reporting the second as the
- * first sends someone to read logs on a node that never heard the question.
+ * connection, a reset stream, a request cancelled with the caller or by a lost
+ * probe), which is a fact about the path between the two instances. Reporting
+ * the second as the first sends someone to read logs on a node that never heard
+ * the question.
  */
-type NodeRead<T> =
+export type NodeRead<T> =
   | { kind: 'ok'; value: T; elapsedMs: number }
   | { kind: 'absent' }
   | { kind: 'timeout' }
@@ -736,7 +744,7 @@ async function fetchNodeJson<T>(
     return { kind: 'ok', value: body, elapsedMs: Date.now() - startedAt };
   } catch (error) {
     if (signal.aborted) {
-      console.warn(`Readiness aggregate: ${path} aborted with the request for node ${sanitizeForLog(nodeName)}`);
+      console.warn(`Readiness aggregate: ${path} was cancelled for node ${sanitizeForLog(nodeName)}`);
       return { kind: 'unreachable' };
     }
     if (bounded.aborted) {
@@ -1041,7 +1049,8 @@ function workloadsConcerns(node: Node, evidence: NodeWorkloadEvidence): DomainCo
       concerns.push(concern({ state: 'unknown', code: 'workloads_unknown' }, stackTarget, { stack: problem.stack }));
       continue;
     }
-    concerns.push(concern(WORKLOAD_STATUS_CONCERNS[problem.status], stackTarget, { stack: problem.stack }));
+    const spec = WORKLOAD_STATUS_CONCERNS[problem.status];
+    if (spec !== null) concerns.push(concern(spec, stackTarget, { stack: problem.stack }));
   }
   return concerns;
 }
@@ -1175,10 +1184,11 @@ function securityResult(node: Node, read: NodeRead<NodeReadinessEvidence> | null
  * is itself `unknown` is reported as unknown rather than folded into healthy,
  * because "nobody could decide" is the answer this surface exists to publish.
  */
-function updatesConcerns(node: Node, summary: NodeStackReadinessSummary): DomainConcern[] {
+function updatesConcerns(node: Node, summary: NodeStackReadinessSummary, notDeployed: ReadonlySet<string>): DomainConcern[] {
   const concerns: DomainConcern[] = [];
   const target: ReadinessTarget = { surface: 'auto-updates' };
   for (const row of summary.stacks) {
+    if (notDeployed.has(row.stack)) continue;
     const stackTarget: ReadinessTarget = { surface: 'stack', nodeId: node.id, stackName: row.stack };
     if (row.update === null) {
       // The row carries its own reason for having no verdict, so that reason is
@@ -1215,12 +1225,16 @@ function updatesConcerns(node: Node, summary: NodeStackReadinessSummary): Domain
   return concerns;
 }
 
-function recoveryConcerns(node: Node, summary: NodeStackReadinessSummary, missed: number | null): DomainConcern[] {
+function recoveryConcerns(
+  node: Node,
+  summary: NodeStackReadinessSummary,
+  coverage: SnapshotCoverage,
+  notDeployed: ReadonlySet<string>,
+): DomainConcern[] {
   const concerns: DomainConcern[] = [];
-  // Every node-level row in this domain is a fact about the fleet's snapshots,
-  // which is where a reader goes to act on it.
   const snapshotsTarget: ReadinessTarget = { surface: 'fleet-snapshots' };
   for (const row of summary.stacks) {
+    if (notDeployed.has(row.stack)) continue;
     const stackTarget: ReadinessTarget = { surface: 'stack', nodeId: node.id, stackName: row.stack };
     if (row.rollback === null) {
       concerns.push(concern(
@@ -1245,16 +1259,18 @@ function recoveryConcerns(node: Node, summary: NodeStackReadinessSummary, missed
     }));
   }
   if (summary.truncated) {
-    concerns.push(concern({ state: 'unknown', code: 'summary_truncated' }, snapshotsTarget));
+    // The pass stopped before every stack was judged; the stacks it skipped are
+    // on this node, so the node is where the operator goes next.
+    concerns.push(concern({ state: 'unknown', code: 'summary_truncated' }, { surface: 'node-details', nodeId: node.id }));
   }
-  if (missed === null) {
-    // There is no snapshot to read, or the newest one's own columns could not be
-    // read: either way whether this node was captured is not knowable from here.
-    // It is not 0 and it is not healthy, because the answer a reader would take
-    // from a healthy cell is that recovery coverage for this node is confirmed.
-    concerns.push(concern({ state: 'unknown', code: 'stacks_unknown' }, snapshotsTarget));
-  } else if (missed > 0) {
-    concerns.push(concern({ state: 'degraded', code: 'snapshot_failed' }, snapshotsTarget, { count: missed }));
+  // Fleet snapshots are optional, so a fleet that never took one says nothing
+  // about this node's recovery. Only a snapshot that exists can speak: one that
+  // skipped this node is a failed recovery point, and one whose skip columns the
+  // hub cannot read is a check that could not run.
+  if (coverage.kind === 'unreadable') {
+    concerns.push(domainErrorConcern(snapshotsTarget));
+  } else if (coverage.kind === 'captured' && coverage.missed > 0) {
+    concerns.push(concern({ state: 'degraded', code: 'snapshot_failed' }, snapshotsTarget, { count: coverage.missed }));
   }
   return concerns;
 }
@@ -1263,27 +1279,21 @@ function isSkipEntry(value: unknown): value is { nodeId: number } {
   return isRecord(value) && 'nodeId' in value && typeof value.nodeId === 'number';
 }
 
+/** What the newest fleet snapshot says about one node. */
+type SnapshotCoverage =
+  | { kind: 'none' }
+  | { kind: 'unreadable' }
+  | { kind: 'captured'; missed: number };
+
 /**
  * How many entries of the newest snapshot name this node among the ones it could
- * not capture, or null when that cannot be answered.
- *
- * Two things produce the null, and they mean the same thing to a reader: no
- * snapshot exists at all, or the newest one's skip column could not be read.
- * Zero is the answer "this node was fully captured", and neither a fleet with no
- * recovery point nor a fault in the hub's own storage may give it. The caller
- * turns null into an unknown cell, the way every other missing input on this
- * surface is reported.
- *
- * An entry the reader cannot classify is treated as an unreadable column for the
- * same reason a partly understood list would be: a count taken from the entries
- * that happened to parse is a guess wearing the dress of a number.
+ * not capture. An entry the reader cannot classify makes the whole column
+ * unreadable: a count taken from the entries that happened to parse would be a
+ * guess presented as a number.
  */
-function snapshotMisses(snapshot: FleetSnapshot | null, nodeId: number): number | null {
-  // No snapshot at all, which is a fleet that has never been captured rather
-  // than a fleet that captured everything. Returning 0 here would report every
-  // node as fully captured on the strength of a capture that does not exist.
-  if (snapshot === null) return null;
-  let misses = 0;
+function snapshotCoverage(snapshot: FleetSnapshot | null, nodeId: number): SnapshotCoverage {
+  if (snapshot === null) return { kind: 'none' };
+  let missed = 0;
   for (const column of [snapshot.skipped_nodes, snapshot.skipped_stacks]) {
     let parsed: unknown;
     try {
@@ -1293,15 +1303,15 @@ function snapshotMisses(snapshot: FleetSnapshot | null, nodeId: number): number 
         `Readiness aggregate: unreadable skip column on snapshot ${snapshot.id}:`,
         errorMessageForLog(error),
       );
-      return null;
+      return { kind: 'unreadable' };
     }
     if (!Array.isArray(parsed) || !parsed.every(isSkipEntry)) {
       console.error(`Readiness aggregate: snapshot ${snapshot.id} carries a skip column this hub cannot read`);
-      return null;
+      return { kind: 'unreadable' };
     }
-    misses += parsed.filter((entry) => entry.nodeId === nodeId).length;
+    missed += parsed.filter((entry) => entry.nodeId === nodeId).length;
   }
-  return misses;
+  return { kind: 'captured', missed };
 }
 
 function tierTwoResult(
@@ -1309,13 +1319,14 @@ function tierTwoResult(
   domain: 'updates' | 'recovery',
   read: NodeRead<NodeStackReadinessSummary> | null,
   snapshot: FleetSnapshot | null,
+  notDeployed: ReadonlySet<string>,
 ): DomainResult {
-  // Which surface answers for this domain, with no node id in it: neither target
-  // varies by node, so this is a value rather than the function of the node id
-  // the callers used to hand over.
+  // Where a node-level concern in this domain sends the operator. Updates have a
+  // fleet-wide board; rollback readiness has no fleet surface of its own, so a
+  // node-level Recovery concern points at the node.
   const target: ReadinessTarget = domain === 'updates'
     ? { surface: 'auto-updates' }
-    : { surface: 'fleet-snapshots' };
+    : { surface: 'node-details', nodeId: node.id };
   if (read === null || read.kind !== 'ok') {
     return unreadResult(node, domain, read, target);
   }
@@ -1324,16 +1335,15 @@ function tierTwoResult(
 
   // Read once here rather than inside the recovery branch, because the age below
   // has to know whether the snapshot actually decided anything.
-  const missed = domain === 'recovery' ? snapshotMisses(snapshot, node.id) : null;
+  const coverage: SnapshotCoverage = domain === 'recovery' ? snapshotCoverage(snapshot, node.id) : { kind: 'none' };
   const concerns = domain === 'updates'
-    ? updatesConcerns(node, summary)
-    : recoveryConcerns(node, summary, missed);
+    ? updatesConcerns(node, summary, notDeployed)
+    : recoveryConcerns(node, summary, coverage, notDeployed);
   // A pass older than its freshness window is real but unbounded in age, and
   // neither cell may be healthy on it, so staleness enters as a concern rather
   // than as a flag the cell would still be allowed to call healthy. It carries
-  // its own code rather than `stacks_unknown` so that a stale pass and an
-  // unknown coverage answer, which can hold at once, stay two findings with two
-  // ids instead of one id counted twice.
+  // its own code rather than `stacks_unknown` so a stale pass reads as one
+  // node-level finding, distinct from any stack whose own verdict is unknown.
   if (summary.stale) {
     concerns.push(concern({ state: 'unknown', code: 'summary_stale' }, target));
   }
@@ -1343,7 +1353,7 @@ function tierTwoResult(
     // of the ones that decided it: a fresh snapshot that skipped nobody does not
     // make an hour-old verdict set current, and an old snapshot that contributed
     // nothing does not age a cell whose verdicts are new.
-    domain === 'recovery' && snapshot !== null && (missed === null || missed > 0)
+    snapshot !== null && (coverage.kind === 'unreadable' || (coverage.kind === 'captured' && coverage.missed > 0))
       ? ageOf(snapshot.created_at)
       : null,
   );
@@ -1398,6 +1408,20 @@ function controlResult(nodeId: number, rows: readonly FleetSyncStatus[] | null):
   return domainResult(nodeId, 'control', concerns, { counts, evidenceAgeMs, source: 'stored' });
 }
 
+/**
+ * Stacks the node's own status read reports with no containers at all. Update
+ * and rollback verdicts describe a running deployment, so for a stack that is
+ * not deployed they answer a question nobody is asking ("updating will start
+ * it", "no backup yet") and are left out. Empty when the evidence read did not
+ * answer, or answered with a stale or degraded status read, so evidence that
+ * cannot be trusted never hides a verdict.
+ */
+function notDeployedStacks(read: NodeRead<NodeReadinessEvidence> | null): ReadonlySet<string> {
+  const evidence = read !== null && read.kind === 'ok' ? read.value.workloads : null;
+  if (evidence === null || evidence.stale || evidence.degraded) return new Set();
+  return new Set(evidence.problems.filter((problem) => problem.status === 'unknown').map((problem) => problem.stack));
+}
+
 function stackCountOf(read: NodeRead<NodeReadinessEvidence> | null): number | null {
   const evidence = read !== null && read.kind === 'ok' ? read.value.workloads : null;
   if (evidence === null || evidence.degraded) return null;
@@ -1414,65 +1438,116 @@ function stackCountOf(read: NodeRead<NodeReadinessEvidence> | null): number | nu
 }
 
 interface NodeRowResult {
-  node: FleetReadinessNode;
+  /** The row before Control is merged; its worst `state` is settled after that. */
+  node: Omit<FleetReadinessNode, 'state'>;
   findings: ReadinessFinding[];
 }
 
-async function buildNodeRow(node: Node, request: FleetReadinessRequest): Promise<NodeRowResult> {
-  const db = DatabaseService.getInstance();
-  const isLocal = node.type === 'local';
-  const target = isLocal ? null : NodeRegistry.getInstance().getProxyTarget(node.id);
-  const transport = transportOf(node, target);
-  const reachable = isLocal || target !== null;
-  const wanted = new Set(request.domains);
-  const wantsTierTwo = wanted.has('updates') || wanted.has('recovery');
+export interface NodeReads {
+  evidenceRead: NodeRead<NodeReadinessEvidence> | null;
+  summaryRead: NodeRead<NodeStackReadinessSummary> | null;
+}
 
+/**
+ * Both of this node's reads. The evidence read doubles as the reachability
+ * probe: when it gets no answer at all (a lost transport or an expired budget),
+ * the slower verdict read to the same node is cancelled rather than left to run
+ * out its own, longer budget. A dead node then costs this row the probe budget,
+ * not the verdict budget, and the verdict columns report the probe's outcome.
+ * This holds for remote reads only: an in-process read cannot be cancelled.
+ */
+async function readNode(node: Node, target: ProxyTarget | null, request: FleetReadinessRequest): Promise<NodeReads> {
+  const reachable = node.type === 'local' || target !== null;
+  if (!reachable) return { evidenceRead: null, summaryRead: null };
+  const wantsTierTwo = request.domains.includes('updates') || request.domains.includes('recovery');
+  const summaryCancel = new AbortController();
+  const summarySignal = AbortSignal.any([request.signal, summaryCancel.signal]);
   const [evidenceRead, summaryRead] = await Promise.all([
-    reachable ? readNodeSlice(node, target, request.signal, EVIDENCE_SLICE) : null,
-    reachable && wantsTierTwo ? readNodeSlice(node, target, request.signal, SUMMARY_SLICE) : null,
+    readNodeSlice(node, target, request.signal, EVIDENCE_SLICE).then((read) => {
+      if (read.kind === 'timeout' || read.kind === 'unreachable') summaryCancel.abort();
+      return read;
+    }),
+    wantsTierTwo ? readNodeSlice(node, target, summarySignal, SUMMARY_SLICE) : null,
   ]);
-
-  // A 404 counts as contact: the node answered, which is what this timestamp
-  // records. Only a read that produced no answer at all leaves it alone, because
-  // writing it on a failed attempt would turn the hub's assumption into the
-  // record it later reads back as fact.
-  const answered = evidenceRead !== null && (evidenceRead.kind === 'ok' || evidenceRead.kind === 'absent');
-  if (!isLocal && answered) {
-    try {
-      db.updateNodeLastContact(node.id);
-    } catch (error) {
-      // Guarded on its own rather than by the worker's catch: that one returns an
-      // empty row, so letting this throw would discard the evidence already read
-      // above over a failed timestamp write. The stamp is the side effect, so a
-      // failure costs the stamp.
-      console.error(
-        `Readiness aggregate: could not record last contact for node ${sanitizeForLog(node.name)}:`,
-        errorMessageForLog(error),
-      );
-    }
+  // Only a verdict read this cancellation ended is relabelled with the probe's
+  // outcome; one that failed on its own (a 500, a 404) keeps its own cause.
+  const cancelledByProbe = summaryCancel.signal.aborted && summaryRead !== null && summaryRead.kind === 'unreachable';
+  if (cancelledByProbe && (evidenceRead.kind === 'timeout' || evidenceRead.kind === 'unreachable')) {
+    return { evidenceRead, summaryRead: { kind: evidenceRead.kind } };
   }
+  return { evidenceRead, summaryRead };
+}
 
+/**
+ * Stamp the node's last contact when its probe answered. A 404 counts: the node
+ * answered, which is what this timestamp records. A read that produced no answer
+ * leaves it alone, so the hub's assumption never becomes the record it later
+ * reads back as fact. A failed write costs the stamp, not the evidence read.
+ */
+function recordContact(node: Node, evidenceRead: NodeRead<NodeReadinessEvidence> | null): void {
+  const answered = evidenceRead !== null && (evidenceRead.kind === 'ok' || evidenceRead.kind === 'absent');
+  if (node.type === 'local' || !answered) return;
+  try {
+    DatabaseService.getInstance().updateNodeLastContact(node.id);
+  } catch (error) {
+    console.error(
+      `Readiness aggregate: could not record last contact for node ${sanitizeForLog(node.name)}:`,
+      errorMessageForLog(error),
+    );
+  }
+}
+
+/**
+ * Whether a domain's unread cell restates a cause Connectivity already flags
+ * for this node, in which case the findings list names that cause once
+ * (on Connectivity) instead of once per gated domain. The matrix still shows
+ * every cell.
+ *
+ * Only when Connectivity carries a finding of its own (never for the hub's own
+ * node, whose Connectivity is always healthy), and only when the domain's read
+ * failed the same way the probe did: a verdict read that failed for a different
+ * reason than the probe is a separate fact and keeps its finding.
+ */
+export function restatesProbe(domain: ReadinessDomainKey, reads: NodeReads, connectivityFlagged: boolean): boolean {
+  if (!connectivityFlagged || domain === 'connectivity' || domain === 'control') return false;
+  const { evidenceRead, summaryRead } = reads;
+  if (evidenceRead === null) return true;
+  if (evidenceRead.kind === 'ok' || evidenceRead.kind === 'failed') return false;
+  if (domain === 'updates' || domain === 'recovery') {
+    return summaryRead === null || summaryRead.kind === evidenceRead.kind;
+  }
+  return true;
+}
+
+async function buildNodeRow(node: Node, request: FleetReadinessRequest): Promise<NodeRowResult> {
+  const target = node.type === 'local' ? null : NodeRegistry.getInstance().getProxyTarget(node.id);
+  const reads = await readNode(node, target, request);
+  const { evidenceRead, summaryRead } = reads;
+  recordContact(node, evidenceRead);
+
+  const wanted = new Set(request.domains);
   const connectivity = connectivityResult({ node, target, read: evidenceRead });
+  const connectivityFlagged = wanted.has('connectivity') && connectivity.result.findings.length > 0;
   const cells: Partial<Record<ReadinessDomainKey, NodeDomainCell>> = {};
   const findings: ReadinessFinding[] = [];
-  // The producer is a thunk rather than a value so a domain the caller did not
-  // ask for costs nothing. Recovery's would otherwise read the newest snapshot
-  // on every request, including the ones that never look at that column.
+  // The producer is a thunk so a domain the caller did not ask for costs
+  // nothing: Recovery's would otherwise read the newest snapshot every time.
   const publish = (domain: ReadinessDomainKey, produce: () => DomainResult): void => {
     if (!wanted.has(domain)) return;
     const result = produce();
     cells[domain] = result.cell;
-    findings.push(...result.findings);
+    findings.push(...(restatesProbe(domain, reads, connectivityFlagged)
+      ? result.findings.filter((finding) => !NODE_LEVEL_CODE_SET.has(finding.code))
+      : result.findings));
   };
 
-  // Reachability is node-level and always published, but the cell is one of the
-  // six domains and follows the same rule as its siblings: a caller that did not
-  // ask for Connectivity does not get a cell for it, and `domainsOmitted` is
-  // where its absence is accounted for.
+  const notDeployed = notDeployedStacks(evidenceRead);
   publish('connectivity', () => connectivity.result);
   publish('workloads', () => workloadsResult(node, evidenceRead));
-  publish('updates', () => tierTwoResult(node, 'updates', summaryRead, null));
-  publish('recovery', () => tierTwoResult(node, 'recovery', summaryRead, db.getSnapshots(1)[0] ?? null));
+  publish('updates', () => tierTwoResult(node, 'updates', summaryRead, null, notDeployed));
+  publish('recovery', () => tierTwoResult(
+    node, 'recovery', summaryRead, DatabaseService.getInstance().getSnapshots(1)[0] ?? null, notDeployed,
+  ));
   publish('security', () => securityResult(node, evidenceRead));
 
   return {
@@ -1481,7 +1556,7 @@ async function buildNodeRow(node: Node, request: FleetReadinessRequest): Promise
       name: node.name,
       type: node.type,
       mode: node.mode,
-      transport,
+      transport: transportOf(node, target),
       reachability: connectivity.reachability,
       cells,
       stackCount: stackCountOf(evidenceRead),
@@ -1552,7 +1627,7 @@ export async function buildFleetReadiness(request: FleetReadinessRequest): Promi
     }
   });
 
-  const nodes = rows.map((row) => row.node);
+  const rowNodes = rows.map((row) => row.node);
   const findings = rows.flatMap((row) => row.findings);
   // Both halves are required: the admin check decides whether the hub may
   // publish Control at all, and the filter decides whether this caller asked for
@@ -1575,11 +1650,16 @@ export async function buildFleetReadiness(request: FleetReadinessRequest): Promi
         errorMessageForLog(error),
       );
     }
-    findings.push(...mergeControlCells(nodes, statuses));
+    const syncTargets = new Set(selected.filter(isFleetSyncTarget).map((node) => node.id));
+    findings.push(...mergeControlCells(rowNodes, syncTargets, statuses));
   }
 
+  const nodes: FleetReadinessNode[] = rowNodes.map((node) => ({ ...node, state: worstNodeState(node.cells) }));
   const summaryNodes = emptyStateCounts();
-  for (const node of nodes) summaryNodes[worstNodeState(node.cells)] += 1;
+  for (const node of nodes) summaryNodes[node.state] += 1;
+  // Problem rows lead, so the matrix reads worst first; name breaks ties so a
+  // refetch cannot shuffle rows that share a state.
+  nodes.sort((a, b) => stateRank(a.state) - stateRank(b.state) || a.name.localeCompare(b.name));
   const summaryFindings = emptySeverityCounts();
   for (const finding of findings) summaryFindings[finding.severity] += 1;
 
@@ -1597,20 +1677,25 @@ export async function buildFleetReadiness(request: FleetReadinessRequest): Promi
 }
 
 /**
- * Attach the Control domain to every node row, returning the findings it added.
+ * Attach the Control domain to the rows Policy Sync targets, returning the
+ * findings it added.
  *
  * Control is the one domain that does not come from the fan-out: it is classified
  * from the hub's own sync rows, after every node row exists, which is what lets
- * the caller's admin check decide whether it is classified at all.
+ * the caller's admin check decide whether it is classified at all. A node the
+ * hub never pushes to (itself, a Pilot-agent node) gets no Control cell: the
+ * domain does not apply there, which is a different answer from "unknown".
  */
 function mergeControlCells(
-  nodes: readonly FleetReadinessNode[],
+  nodes: ReadonlyArray<Omit<FleetReadinessNode, 'state'>>,
+  syncTargets: ReadonlySet<number>,
   // Null when the hub could not read its own rows, which `controlResult` files
   // as an unreadable Control domain rather than as a fleet with no sync history.
   statuses: readonly FleetSyncStatus[] | null,
 ): ReadinessFinding[] {
   const findings: ReadinessFinding[] = [];
   for (const node of nodes) {
+    if (!syncTargets.has(node.id)) continue;
     const result = controlResult(
       node.id,
       statuses === null ? null : statuses.filter((status) => status.node_id === node.id),

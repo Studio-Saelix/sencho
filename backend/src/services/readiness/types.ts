@@ -271,12 +271,16 @@ export interface FleetReadinessNode {
   mode: NodeMode;
   transport: NodeTransport;
   reachability: NodeReachability;
+  /** The worst state among this node's cells; `unknown` when it has none. */
+  state: DomainState;
   /**
-   * Keys are exactly `FleetReadinessResponse.domains`, so a consumer lays out
-   * its columns from that list once and reads every row against it. A domain
-   * missing from that list is one this caller was not told about
-   * (`domainsOmitted` names it) and renders as no column at all, never as a
-   * column of unavailable cells.
+   * Keys are the subset of `FleetReadinessResponse.domains` that apply to this
+   * node. Control applies only to nodes Policy Sync pushes to, so the hub's own
+   * node and Pilot-agent nodes carry no Control cell: a missing key is "does not
+   * apply here", never a gap to render as unavailable. A consumer lays out its
+   * columns from `domains` once and reads every row against it; a domain missing
+   * from that list is one this caller was not told about (`domainsOmitted` names
+   * it) and renders as no column at all.
    */
   cells: Partial<Record<ReadinessDomainKey, NodeDomainCell>>;
   /** Stacks known on this node, or null when it could not be read. */
@@ -401,9 +405,10 @@ export interface FleetReadinessResponse {
  * One stack whose containers are not all running, as this node's bulk status
  * read reported it.
  *
- * Every status other than `running` is here, `unknown` and `partial` included:
- * a stack nobody could read is not a stack that is fine, and the reason codes
- * separate the three so the copy can say which one it is.
+ * Every status other than `running` is here. The hub decides which of them is a
+ * concern: `exited` and `partial` are, while `unknown` is how the bulk read
+ * reports a stack with no containers (not deployed), which is a known state,
+ * not a concern.
  */
 export interface NodeWorkloadProblem {
   /**

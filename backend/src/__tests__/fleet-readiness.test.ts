@@ -3,12 +3,14 @@
  *
  * These cases own the hub's behavior: the bounded per-node budget, per-domain
  * degradation, the truthful reachability classification, finding ordering, the
- * admin-only Control domain, and route input validation. The node-local
+ * admin-only Control domain (applied only to policy sync targets), and route
+ * input validation. The node-local
  * producers the fan-out calls (the evidence route and the per-stack summary)
  * have their own suites, so the fixtures here are deliberately minimal payloads
  * rather than realistic ones.
  *
- * A remote that should hang stays pending until the request's AbortSignal fires
+ * A remote that should hang stays pending until the fetch's signal fires (its
+ * budget, the caller, or a lost probe)
  * and only then rejects. A mock that rejected on its own would let a missing
  * signal look like a fast offline answer, which is the regression these cases
  * exist to catch.
@@ -19,6 +21,7 @@ import jwt from 'jsonwebtoken';
 import bcrypt from 'bcrypt';
 import { setupTestDb, cleanupTestDb, TEST_USERNAME, TEST_JWT_SECRET } from './helpers/setupTestDb';
 import { READINESS_DOMAINS } from '../services/readiness/types';
+import { restatesProbe, type NodeReads } from '../services/readiness/readinessAggregator';
 import { SYNC_ERROR_CODES } from '../services/fleetSyncConstants';
 import type { ProxyTarget } from '../services/NodeRegistry';
 import type {
@@ -41,14 +44,15 @@ const PROXY_BASE = 'http://remote.example.com';
 const HEALTHY_BASE = 'http://good-host.example.com';
 const PRIOR_CONTACT = 1_700_000_000;
 /**
- * A node that never answers settles when its longest read gives up, and that is
- * the tier-two summary at its 8s budget. The floor catches a row that returned
- * early instead of waiting on it; the header and the hang helper state why the
- * mock is built to hang rather than to reject.
+ * A node that never answers settles when its reachability probe (the 3s
+ * evidence read) gives up: the probe's loss cancels the slower tier-two read to
+ * the same node, so the row does not wait out the 8s summary budget. The floor
+ * catches a row that returned before the probe gave up; the header and the hang
+ * helper state why the mock is built to hang rather than to reject.
  */
-const HUNG_ROW_FLOOR_MS = 1_500;
-/** That 8s budget plus a second and a half of slack for the request round trip. */
-const HUNG_ROW_CEILING_MS = 9_500;
+const HUNG_ROW_FLOOR_MS = 2_500;
+/** The 3s probe budget plus slack for the request round trip, well under 8s. */
+const HUNG_ROW_CEILING_MS = 5_500;
 const FAST_PATH_CEILING_MS = 2_000;
 const LOCAL_READ_CEILING_MS = 4_000;
 /**
@@ -92,11 +96,10 @@ beforeAll(async () => {
   );
   viewerAuthHeader = `Bearer ${viewerJwt}`;
 
-  // The Recovery cell reads the newest fleet snapshot's skip columns to learn
-  // whether a node was captured at all, so this file starts from a snapshot that
-  // captured everything and the cases that are not about coverage read Recovery
-  // as healthy. The case that pins the no-snapshot answer removes it itself. The
-  // baseline copy is per-file, so this does not reach other suites.
+  // Starts from a snapshot that captured everything, so every case runs through
+  // the snapshot coverage branch; the no-snapshot and unreadable-column cases
+  // replace it themselves. The baseline copy is per-file, so this does not reach
+  // other suites.
   clearSnapshots();
   seedCapturedSnapshot();
 });
@@ -455,8 +458,11 @@ function expectWorstFirst(findings: ReadinessFinding[]): void {
  * either, so this checks key presence rather than a per-domain spot check.
  */
 function expectCellsMatchDomains(body: FleetReadinessResponse): void {
-  const expected = [...body.domains].sort();
   for (const node of body.nodes) {
+    // Control applies only to the nodes Policy Sync pushes to (proxy-mode
+    // remotes), so every other row carries no Control cell at all.
+    const syncTarget = node.type === 'remote' && node.mode === 'proxy';
+    const expected = body.domains.filter((domain) => domain !== 'control' || syncTarget).sort();
     expect(Object.keys(node.cells).sort()).toEqual(expected);
   }
 }
@@ -579,6 +585,11 @@ describe('GET /api/fleet/readiness aggregation', () => {
 
     const ids = findingIds(body.findings);
     expect(ids).toContain(`connectivity:${hung}:probe_timeout`);
+    // The gated domains' cells say "timed out", but the findings list names the
+    // cause once, on Connectivity, instead of once per gated domain.
+    for (const domain of NODE_LOCAL_DOMAINS) {
+      expect(ids.filter((id) => id.startsWith(`${domain}:${hung}:`)), domain).toEqual([]);
+    }
     expect(ids).toContain(`connectivity:${unknownStatus}:node_unreachable`);
     // Every finding is counted once, by severity, and the two lists agree.
     expect(sumFindingSeverities(body)).toBe(body.findings.length);
@@ -731,7 +742,10 @@ describe('GET /api/fleet/readiness aggregation', () => {
       expect(node.cells[domain], domain).toMatchObject({ state: 'unavailable', reasonCode: 'pilot_disconnected' });
     }
     expect(node.stackCount).toBeNull();
-    expect(body.summary.findings).toMatchObject({ attention: 1, unavailable: 4 });
+    // The four gated cells are unread for the same reason the tunnel is down, so
+    // the findings list names that cause once rather than once per domain.
+    expect(body.summary.findings).toMatchObject({ attention: 1, unavailable: 0 });
+    expect(findingIds(body.findings)).toEqual([`connectivity:${nodeId}:pilot_disconnected`]);
     expectWorstFirst(body.findings);
     expectCellsMatchDomains(body);
   });
@@ -1054,6 +1068,38 @@ describe('GET /api/fleet/readiness aggregation', () => {
     expectCellsMatchDomains(body);
   });
 
+  it('gives Control only to the nodes Policy Sync pushes to', async () => {
+    // The hub is the source of replicated policy and Pilot-agent nodes do not
+    // accept pushes, so neither can be out of sync. A permanent "unknown" there
+    // would be noise on every fleet, so the domain does not apply to them.
+    const proxy = addProxyNode('synced-proxy', PROXY_BASE);
+    seedSyncSuccess(proxy);
+    const pilot = addPilotNode('pilot-peer');
+    mockTargets({ [proxy]: null, [pilot]: null });
+
+    const { body } = await getReadiness({ domains: 'control' });
+    expect(body.domains).toEqual(['control']);
+    expect(rowOf(body, proxy).cells.control).toMatchObject({ state: 'healthy', reasonCode: null });
+    expect(rowOf(body, pilot).cells).toEqual({});
+    const local = body.nodes.find((node) => node.type === 'local')!;
+    expect(local.cells).toEqual({});
+    expect(body.findings.filter((finding) => finding.nodeId !== proxy)).toEqual([]);
+    expectCellsMatchDomains(body);
+  });
+
+  it('orders rows worst first and publishes each row own worst state', async () => {
+    const healthy = addOnlineProxyNode('a-healthy');
+    const broken = addProxyNode('z-broken', HEALTHY_BASE);
+    setNodeStatus(broken, 'offline');
+    mockTargets({ [healthy]: proxyTarget(PROXY_BASE), [broken]: null });
+    mockFetch(nodeReadHandler(evidenceBody(), summaryBody([row('web')])));
+
+    const { body } = await getReadiness({ domains: 'connectivity,workloads', nodeIds: `${healthy},${broken}` });
+    expect(body.nodes.map((node) => node.id)).toEqual([broken, healthy]);
+    expect(rowOf(body, broken).state).toBe('attention');
+    expect(rowOf(body, healthy).state).toBe('healthy');
+  });
+
   it('omits the control domain from a caller without the admin check', async () => {
     const nodeId = addProxyNode('paused-proxy', PROXY_BASE);
     DatabaseService.getInstance().setFleetSyncSticky(nodeId, 'stacks', SYNC_ERROR_CODES.controlIdentityMismatch, null, null);
@@ -1241,6 +1287,23 @@ describe('GET /api/fleet/readiness per-domain evidence', () => {
     expectCellsMatchDomains(body);
   });
 
+  it('keeps the verdicts when the evidence read answers with an error', async () => {
+    // An answered error is not a lost node: the verdict read is not cancelled,
+    // its findings stay, and the failed domains report their own error.
+    const nodeId = addOnlineProxyNode('evidence-500');
+    mockFetch((url) => (url.endsWith(EVIDENCE_PATH)
+      ? new Response('boom', { status: 500 })
+      : jsonResponse(summaryBody([row('draft', { update: 'blocked' }), row('web')]))));
+
+    const { body } = await getReadiness({ domains: ALL_DOMAINS, nodeIds: String(nodeId) });
+    const node = rowOf(body, nodeId);
+    expect(node.cells.updates).toMatchObject({ state: 'attention', reasonCode: 'update_blocked' });
+    const ids = findingIds(body.findings);
+    expect(ids).toContain(`updates:${nodeId}:draft:update_blocked`);
+    expect(ids).toContain(`workloads:${nodeId}:domain_error`);
+    expect(ids).toContain(`security:${nodeId}:domain_error`);
+  });
+
   it('keeps the evidence domains when the summary read fails', async () => {
     const nodeId = addOnlineProxyNode('summary-down');
     mockFetch((url) => (url.endsWith(SUMMARY_PATH)
@@ -1300,7 +1363,7 @@ describe('GET /api/fleet/readiness per-domain evidence', () => {
     expect(finding.detail).toBe('could not read /home/<user>/app/.env');
   });
 
-  it('never reads Recovery as healthy with no snapshot to read', async () => {
+  it('does not flag Recovery for a fleet that never took a snapshot', async () => {
     clearSnapshots();
     try {
       const nodeId = addOnlineProxyNode('fresh-install');
@@ -1308,11 +1371,11 @@ describe('GET /api/fleet/readiness per-domain evidence', () => {
 
       const { body } = await getReadiness({ domains: 'updates,recovery', nodeIds: String(nodeId) });
       const node = rowOf(body, nodeId);
-      // A fleet that has never been captured has no recovery point, and the one
-      // answer that may not stand in for that is "this node is captured".
-      expect(node.cells.recovery).toMatchObject({ state: 'unknown', reasonCode: 'stacks_unknown' });
-      expect(findingIds(body.findings)).toContain(`recovery:${nodeId}:stacks_unknown`);
-      // The stacks themselves were judged, so the column beside it is healthy.
+      // Fleet snapshots are optional. Their absence is a configuration choice,
+      // not a recovery risk, so the cell follows the per-stack rollback verdicts
+      // alone and those are all ready here.
+      expect(node.cells.recovery).toMatchObject({ state: 'healthy', reasonCode: null });
+      expect(body.findings.filter((finding) => finding.domain === 'recovery')).toEqual([]);
       expect(node.cells.updates).toMatchObject({ state: 'healthy', reasonCode: null });
       expectCellsMatchDomains(body);
     } finally {
@@ -1321,7 +1384,7 @@ describe('GET /api/fleet/readiness per-domain evidence', () => {
     }
   });
 
-  it('reads an unreadable skip column as unknown rather than as full coverage', async () => {
+  it('reads an unreadable skip column as a check that could not run, not as full coverage', async () => {
     clearSnapshots();
     try {
       const nodeId = addOnlineProxyNode('unreadable-skip');
@@ -1329,7 +1392,9 @@ describe('GET /api/fleet/readiness per-domain evidence', () => {
       seedSnapshot('{not json');
 
       const { body } = await getReadiness({ domains: 'recovery', nodeIds: String(nodeId) });
-      expect(rowOf(body, nodeId).cells.recovery).toMatchObject({ state: 'unknown', reasonCode: 'stacks_unknown' });
+      expect(rowOf(body, nodeId).cells.recovery).toMatchObject({ state: 'unavailable', reasonCode: 'domain_error' });
+      const finding = body.findings.find((candidate) => candidate.id === `recovery:${nodeId}:domain_error`);
+      expect(finding).toMatchObject({ severity: 'unavailable', target: { surface: 'fleet-snapshots' } });
     } finally {
       clearSnapshots();
       seedCapturedSnapshot();
@@ -1643,6 +1708,50 @@ describe('GET /api/fleet/readiness per-domain evidence', () => {
     expect(rowOf(body, nodeId).cells.security).toMatchObject({ state: 'healthy', reasonCode: null });
   });
 
+  it('does not flag a stack that is simply not deployed', async () => {
+    // The bulk status read reports `unknown` for a stack with no containers.
+    // That is a known state (not deployed), and Home's stack classifier treats it
+    // as quiet, so Readiness must not turn it into uncertainty.
+    const nodeId = addOnlineProxyNode('draft-stacks');
+    mockFetch(nodeReadHandler(evidenceBody({
+      workloads: {
+        generatedAt: Date.now(),
+        counts: { running: 1, unknown: 2 },
+        degraded: false,
+        stale: false,
+        problems: [{ stack: 'draft-a', status: 'unknown' }, { stack: 'draft-b', status: 'unknown' }],
+      },
+    }), summaryBody([])));
+
+    const { body } = await getReadiness({ domains: 'workloads', nodeIds: String(nodeId) });
+    const node = rowOf(body, nodeId);
+    expect(node.cells.workloads).toMatchObject({ state: 'healthy', reasonCode: null, counts: { running: 1, unknown: 2 } });
+    expect(node.stackCount).toBe(3);
+    expect(body.findings).toEqual([]);
+  });
+
+  it('leaves update and rollback verdicts out for a stack that is not deployed', async () => {
+    const nodeId = addOnlineProxyNode('draft-verdicts');
+    mockFetch(nodeReadHandler(evidenceBody({
+      workloads: {
+        generatedAt: Date.now(),
+        counts: { running: 1, unknown: 1 },
+        degraded: false,
+        stale: false,
+        problems: [{ stack: 'draft', status: 'unknown' }],
+      },
+    }), summaryBody([
+      row('draft', { update: 'ready_with_warnings', rollback: 'not_ready' }),
+      row('web', { rollback: 'partial' }),
+    ])));
+
+    const { body } = await getReadiness({ domains: 'workloads,updates,recovery', nodeIds: String(nodeId) });
+    const node = rowOf(body, nodeId);
+    expect(node.cells.updates).toMatchObject({ state: 'healthy', reasonCode: null });
+    expect(node.cells.recovery).toMatchObject({ state: 'degraded', reasonCode: 'rollback_partial' });
+    expect(findingIds(body.findings)).toEqual([`recovery:${nodeId}:web:rollback_partial`]);
+  });
+
   it('degrades Workloads when the node served a stale or degraded status bundle', async () => {
     const nodeId = addOnlineProxyNode('stale-status');
     mockFetch(nodeReadHandler(evidenceBody({
@@ -1760,8 +1869,41 @@ describe('readiness budgets', () => {
     expect(elapsedMs).toBeLessThan(TIER_ONE_CEILING_MS);
     expect(rowOf(body, nodeId).cells.workloads)
       .toMatchObject({ state: 'unavailable', reasonCode: 'probe_timeout' });
+    // Connectivity was not requested, so nothing else names the cause: the
+    // gated domain keeps its own finding rather than leaving the row silent.
+    expect(findingIds(body.findings)).toEqual([`workloads:${nodeId}:probe_timeout`]);
     expectCellsMatchDomains(body);
   }, 20_000);
+});
+
+describe('restatesProbe', () => {
+  const summaryOk: NodeReads['summaryRead'] = { kind: 'ok', value: { generatedAt: 0, truncated: false, stale: false, stacks: [] }, elapsedMs: 1 };
+  const evidenceTimeout = { evidenceRead: { kind: 'timeout' }, summaryRead: { kind: 'timeout' } } as const;
+
+  it('never collapses when Connectivity carries no finding, as on the hub own node', () => {
+    // A local node's Connectivity is always healthy, so a timed-out local read
+    // has nothing standing in for it and every gated finding must stay.
+    for (const domain of NODE_LOCAL_DOMAINS) {
+      expect(restatesProbe(domain, evidenceTimeout, false), domain).toBe(false);
+    }
+  });
+
+  it('collapses a gated domain whose read failed the same way the probe did', () => {
+    for (const domain of NODE_LOCAL_DOMAINS) {
+      expect(restatesProbe(domain, evidenceTimeout, true), domain).toBe(true);
+    }
+    expect(restatesProbe('workloads', { evidenceRead: null, summaryRead: null }, true)).toBe(true);
+  });
+
+  it('keeps a finding whose cause differs from the probe or whose probe answered', () => {
+    // A 404 probe and a verdict read that timed out are two different facts.
+    expect(restatesProbe('updates', { evidenceRead: { kind: 'absent' }, summaryRead: { kind: 'timeout' } }, true)).toBe(false);
+    expect(restatesProbe('recovery', { evidenceRead: { kind: 'absent' }, summaryRead: summaryOk }, true)).toBe(false);
+    // A probe that answered with an error is not a lost node.
+    expect(restatesProbe('workloads', { evidenceRead: { kind: 'failed' }, summaryRead: null }, true)).toBe(false);
+    expect(restatesProbe('connectivity', evidenceTimeout, true)).toBe(false);
+    expect(restatesProbe('control', evidenceTimeout, true)).toBe(false);
+  });
 });
 
 describe('GET /api/fleet/configuration (retired)', () => {
