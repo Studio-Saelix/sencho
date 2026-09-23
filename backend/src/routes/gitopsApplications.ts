@@ -810,7 +810,7 @@ gitopsApplicationsRouter.post('/:id/rollout/authorize', async (req: Request, res
       '[GitOps authority] Rollout dispatch failed after authorization:',
       sanitizeForLog(error instanceof Error ? error.message : String(error)),
     );
-    note = 'The rollout was authorized but could not start. Retry it from the Blueprint deployments surface.';
+    note = 'The rollout was authorized but could not start; the authorization stands and the rollout remains queued.';
   }
   res.json({ ok: true, dispatched, note });
 });

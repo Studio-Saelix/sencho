@@ -192,10 +192,19 @@ describe('GitOpsAuthorityActions', () => {
     await waitFor(() => expect(acceptGitOpsSource).toHaveBeenCalledWith('bp:5', 'gen-new'));
   });
 
-  it('withholds every action while the Blueprint is disabled', () => {
-    renderActions(placementPending(), () => true, () => {}, false);
+  it('withholds placement and rollout while the Blueprint is disabled', () => {
+    const { unmount } = renderActions(placementPending(), () => true, () => {}, false);
     expect(screen.getByTestId('gitops-authority-actions')).toHaveTextContent('Blueprint disabled');
     expect(screen.getByTestId('gitops-action-approve-placement')).toBeDisabled();
+    unmount();
+
+    renderActions(rolloutPending(), () => true, () => {}, false);
+    expect(screen.getByTestId('gitops-action-authorize-rollout')).toBeDisabled();
+  });
+
+  it('keeps source acceptance available while the Blueprint is disabled', () => {
+    renderActions(sourcePending(), () => true, () => {}, false);
+    expect(screen.getByTestId('gitops-action-accept-source')).toBeEnabled();
   });
 
   it('offers nothing for a Direct or Inline application', () => {

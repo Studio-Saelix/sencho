@@ -1,5 +1,6 @@
 import { createHash } from 'crypto';
 import { encodeGitOpsJson, isPreflightFingerprint } from './json';
+import type { ArtifactQualification } from './types';
 
 export type PreflightSlotStatus = 'unknown' | 'not_required' | 'ready' | 'blocked';
 
@@ -242,6 +243,29 @@ export function isRegistryPreflightTransient(body: PreflightEvidenceBody): boole
 /** Operator-facing reason when derive has no stored preflight evidence or live authorization. */
 export const REGISTRY_PREFLIGHT_UNEVALUATED_REASON =
   'Registry readiness has not been evaluated yet.';
+
+/**
+ * Operator-facing reason when the accepted generation has no executable
+ * artifact evidence yet.
+ *
+ * Registry readiness is not the question until an artifact set exists to probe:
+ * every target would report unknown for the same missing-input reason, so a
+ * registry-worded refusal would blame the registry for the model's own gap.
+ */
+export const EXECUTABLE_ARTIFACT_UNRESOLVED_REASON =
+  'Executable artifact identity is not resolved for this generation, so the rollout cannot be authorized.';
+
+/**
+ * The refusal reason for an accepted artifact set that cannot authorize a
+ * rollout, or null when the qualification can (or no row was read). One
+ * predicate so the route refusal and the placement facet cannot drift apart.
+ */
+export function executableArtifactRefusalReason(
+  qualification: ArtifactQualification | null | undefined,
+): string | null {
+  if (qualification !== 'unresolved' && qualification !== 'unavailable') return null;
+  return EXECUTABLE_ARTIFACT_UNRESOLVED_REASON;
+}
 
 /** Operator-facing reason from the worst target class. Never secrets. */
 export function registryPreflightBlockReason(body: PreflightEvidenceBody): string {
