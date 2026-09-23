@@ -1847,6 +1847,50 @@ export class GitOpsTransitions {
   }
 
   /**
+   * Withdraw a live rollout authorization on the operator's decision.
+   *
+   * The generation stays on the application as the record that a rollout was
+   * abandoned, while the authorization itself is cleared: a superseded
+   * generation whose authorization still resolved would let the dispatch
+   * boundary start it again. A later authorization mints a new generation over
+   * the same placement and accepted source, which is the only way forward from
+   * here.
+   */
+  rolloutSuperseded(args: {
+    applicationId: string;
+    envelope: EventEnvelope;
+  }): TransitionResult {
+    // Read before the transaction only to annotate the history row; the
+    // guards below re-read and remain authoritative if the row moved.
+    const named = this.store().getApplication(args.applicationId)?.rollout_generation_id ?? null;
+    return this.mutateApp(
+      args.applicationId,
+      args.envelope,
+      'rollout_generation_superseded',
+      'superseded',
+      (app) => {
+        if (app.lifecycle_status !== 'active') throw new GitOpsTransitionError('application is not live');
+        if (!app.rollout_generation_id) {
+          throw new GitOpsTransitionError('there is no live rollout generation to supersede');
+        }
+        const live = this.store().getRolloutGeneration(app.rollout_generation_id);
+        if (!live || live.application_id !== app.id) {
+          throw new GitOpsTransitionError('the live rollout generation could not be read');
+        }
+        if (live.provenance !== 'rollout_authorization') {
+          throw new GitOpsTransitionError('only an authorized rollout can be superseded');
+        }
+        app.rollout_authorization_ref = null;
+        app.preflight_fingerprint = null;
+        // The generation pointer stays: the projection reports the abandoned
+        // rollout rather than pretending the application never had one.
+        this.store().markRolloutGenerationSuperseded(app.rollout_generation_id, args.envelope.at);
+      },
+      named ? { rolloutGenerationId: named } : {},
+    );
+  }
+
+  /**
    * A Blueprint deploy was handed to one node.
    *
    * The intent and candidate it was launched for are recorded on the target, so
@@ -2242,8 +2286,9 @@ export class GitOpsTransitions {
    * A rollout-scoped rollback started.
    *
    * The same columns and the same rules as `recovery_started`; only the trigger
-   * differs. Direct Git recovery emits the `recovery_*` names, and a later
-   * rollout producer emits these. Nothing in this PR writes them.
+   * differs. Direct Git recovery emits the `recovery_*` names; the rollout
+   * rollback route emits these, because a rollout recovery is not a stack
+   * update recovery even when it restores the same kind of state.
    */
   rollbackInProgress(args: {
     applicationId: string;
@@ -2344,6 +2389,7 @@ export class GitOpsTransitions {
     applicationId: string;
     nodeId: number;
     recoveryRef: string;
+    recoveryGenerationId: string;
     capturedArtifactSetId: string | null;
     capturedSourceAcceptanceRef: string | null;
     envelope: EventEnvelope;
@@ -2353,7 +2399,7 @@ export class GitOpsTransitions {
       args.nodeId,
       args.envelope,
       'rollback_completed',
-      null,
+      args.recoveryGenerationId,
       (target) => {
         const restored = target.recovery_generation_id;
         if (!restored) {
@@ -2649,11 +2695,13 @@ export class GitOpsTransitions {
   /**
    * Rebind the artifact expectation to the restored generation.
    *
-   * The expectation comes from what the recovery point captured, never from
-   * what the application expects now: those describe different generations
-   * after a restore. Latest becomes the newest evidence for the restored
-   * generation, which is a statement about what has been seen, not an
-   * acceptance of it.
+   * The expectation is the captured set when the caller has it (a node
+   * recovery point), otherwise the strongest set recorded for the restored
+   * generation. Either way it is never what the application expects now: those
+   * describe different generations after a restore. A set the generation does
+   * not own is dropped with a limitation. Latest becomes the newest evidence
+   * for the restored generation, which is a statement about what has been
+   * seen, not an acceptance of it.
    */
   private restoreArtifactPointers(
     target: GitOpsTargetCurrentRow,
@@ -2672,12 +2720,8 @@ export class GitOpsTransitions {
       capturedArtifactSetId && !usable ? capturedArtifactSetId : null,
     );
 
-    const newest = this.raw().prepare(
-      `SELECT id FROM gitops_artifact_sets
-       WHERE generation_id = ?
-       ORDER BY evidence_version DESC LIMIT 1`,
-    ).get(generationId) as { id: string } | undefined;
-    target.latest_artifact_set_id = newest?.id ?? target.expected_artifact_set_id;
+    target.latest_artifact_set_id = this.store().newestArtifactSetIdForGeneration(generationId)
+      ?? target.expected_artifact_set_id;
   }
 
   /**
@@ -3226,6 +3270,7 @@ export class GitOpsTransitions {
       generationId?: string;
       artifactSetId?: string;
       sourceAcceptanceRef?: string;
+      rolloutGenerationId?: string;
     } = {},
   ): TransitionResult {
     return this.raw().transaction(() => {
@@ -3243,6 +3288,7 @@ export class GitOpsTransitions {
         generationId: extraHistory.generationId,
         artifactSetId: extraHistory.artifactSetId,
         sourceAcceptanceRef: extraHistory.sourceAcceptanceRef,
+        rolloutGenerationId: extraHistory.rolloutGenerationId,
         before,
         after: snapshotApp(app),
       });

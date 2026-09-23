@@ -18,7 +18,8 @@
 import { Router, type Request, type Response } from 'express';
 import { DatabaseService, type Blueprint } from '../services/DatabaseService';
 import { NodeRegistry } from '../services/NodeRegistry';
-import { checkPermission, requirePermission } from '../middleware/permissions';
+import { checkPermission, requirePermission, scopedActionsForStack } from '../middleware/permissions';
+import { BlueprintReconciler } from '../services/BlueprintReconciler';
 import { projectApplication } from '../services/gitops/derive';
 import { latestTransitionByApplication } from '../services/gitops/history';
 import { classifySourceRow, satisfiesGitOpsRead } from '../services/gitops/readAuth';
@@ -35,6 +36,15 @@ import {
   decodeGitOpsRequiredTargetsJson,
   encodeGitOpsApprovedTargetEffectJson,
 } from '../services/gitops/json';
+import { candidateRowFor, intentRowFor } from '../services/gitops/blueprintProducers';
+import {
+  resolveRollbackTargets,
+  restoreTargetToGeneration,
+  rollbackCandidatesForApplication,
+  type RestoreTargetOutcome,
+  type RolloutRollbackScope,
+  type RolloutRollbackTargetResult,
+} from '../services/gitops/rolloutRecovery';
 import { placementEffectCompatible } from '../services/gitops/store';
 import { GitOpsTransitions, GitOpsTransitionError } from '../services/gitops/transitions';
 import { newGitOpsId } from '../services/gitops/directApplication';
@@ -401,6 +411,64 @@ function actorFromRequest(req: Request): string | null {
   return req.user?.username ?? null;
 }
 
+/** One envelope per operator action, so every row it writes shares an operation. */
+function authorityEnvelope(req: Request): { operationId: string; actor: string | null; trigger: string; at: number } {
+  return { operationId: newGitOpsId(), actor: actorFromRequest(req), trigger: 'manual', at: Date.now() };
+}
+
+type AuthorityEnvelope = ReturnType<typeof authorityEnvelope>;
+
+/** `null` when absent, `'invalid'` when present but unusable. */
+function parseOptionalNodeId(raw: unknown): number | null | 'invalid' {
+  if (raw === undefined) return null;
+  return typeof raw === 'number' && Number.isSafeInteger(raw) && raw >= 1 ? raw : 'invalid';
+}
+
+/**
+ * The stack a Blueprint's targets run, from its current intent.
+ *
+ * Permissions and node-side lookups are both stack-scoped, and the deploy
+ * stack name is frozen on the intent rather than copied onto the application.
+ */
+function deployStackNameFor(app: { intent_revision_id: string | null }): string | null {
+  if (!app.intent_revision_id) return null;
+  return GitOpsStore.getInstance().getIntentRevision(app.intent_revision_id)?.deploy_stack_name ?? null;
+}
+
+/** Exact deploy grant on one target's stack, checked before any target work starts. */
+function requireDeployOnTarget(req: Request, res: Response, stackName: string, nodeId: number): boolean {
+  if (checkPermission(req, 'stack:deploy', 'stack', stackName, nodeId)) return true;
+  res.status(403).json({
+    error: `Permission denied for the target on node ${nodeId}.`,
+    code: 'PERMISSION_DENIED',
+  });
+  return false;
+}
+
+type ScopeParse = { ok: true; scope: RolloutRollbackScope } | { ok: false; message: string };
+
+function parseRolloutScope(raw: unknown): ScopeParse {
+  if (typeof raw !== 'object' || raw === null) {
+    return { ok: false, message: "scope must be { kind: 'target' | 'failed' | 'all_changed' }" };
+  }
+  const { kind, nodeId } = raw as { kind?: unknown; nodeId?: unknown };
+  if (kind === 'target') {
+    if (typeof nodeId !== 'number' || !Number.isSafeInteger(nodeId) || nodeId < 1) {
+      return { ok: false, message: 'scope.nodeId must be a positive integer for a target rollback' };
+    }
+    return { ok: true, scope: { kind: 'target', nodeId } };
+  }
+  if (kind === 'failed' || kind === 'all_changed') return { ok: true, scope: { kind } };
+  return { ok: false, message: "scope.kind must be 'target', 'failed', or 'all_changed'" };
+}
+
+function sameNodeSet(a: readonly number[], b: readonly number[]): boolean {
+  if (a.length !== b.length) return false;
+  const left = [...a].sort((x, y) => x - y);
+  const right = [...b].sort((x, y) => x - y);
+  return left.every((value, index) => value === right[index]);
+}
+
 gitopsApplicationsRouter.get('/:id', async (req: Request, res: Response): Promise<void> => {
   try {
     const rawParam: unknown = req.params.id;
@@ -445,6 +513,10 @@ gitopsApplicationsRouter.get('/:id', async (req: Request, res: Response): Promis
           nodeNames,
         }),
         projection,
+        rollbackCandidates: application.target_mode === 'blueprint'
+          ? rollbackCandidatesForApplication(application.id)
+          : undefined,
+        blueprintEnabled: blueprint?.enabled ?? null,
       };
       res.json(response);
       return;
@@ -813,4 +885,500 @@ gitopsApplicationsRouter.post('/:id/rollout/authorize', async (req: Request, res
     note = 'The rollout was authorized but could not start; the authorization stands and the rollout remains queued.';
   }
   res.json({ ok: true, dispatched, note });
+});
+
+/**
+ * Pause the rollout, application-wide or on one target.
+ *
+ * A pause is a statement about future execution, never about health: what was
+ * deployed stays deployed, and the projection reports the rollout as paused
+ * rather than converged. The reason is required because a paused rollout
+ * outlives the session that paused it.
+ */
+gitopsApplicationsRouter.post('/:id/rollout/pause', (req: Request, res: Response): void => {
+  const target = resolveAuthorityTarget(req, res);
+  if (!target) return;
+  const reason = typeof req.body?.reason === 'string' ? req.body.reason.trim() : '';
+  if (reason.length === 0 || reason.length > 280) {
+    res.status(400).json({ error: 'A pause reason of 1 to 280 characters is required', code: 'CONFIRM_REQUIRED' });
+    return;
+  }
+  const nodeId = parseOptionalNodeId(req.body?.nodeId);
+  if (nodeId === 'invalid') {
+    res.status(400).json({ error: 'nodeId must be a positive integer' });
+    return;
+  }
+  const stackName = deployStackNameFor(target.application);
+  if (nodeId !== null) {
+    // A single target's pause is an exact stack action; the caller may hold the
+    // grant for that target without holding it fleet-wide.
+    if (!stackName) {
+      res.status(409).json({ error: 'The deploy stack identity could not be resolved', code: 'ROLLOUT_PAUSE_REFUSED' });
+      return;
+    }
+    if (!requireDeployOnTarget(req, res, stackName, nodeId)) return;
+  } else if (!requirePermission(req, res, 'stack:deploy')) {
+    return;
+  }
+  if (!target.blueprint.enabled) {
+    res.status(409).json({
+      error: 'The Blueprint is disabled. Enable it before pausing the rollout.',
+      code: 'BLUEPRINT_DISABLED',
+    });
+    return;
+  }
+
+  try {
+    GitOpsTransitions.getInstance().rolloutPaused(
+      target.application.id,
+      nodeId,
+      reason,
+      authorityEnvelope(req),
+    );
+  } catch (error) {
+    if (error instanceof GitOpsTransitionError) {
+      res.status(409).json({ error: error.message, code: 'ROLLOUT_PAUSE_REFUSED' });
+      return;
+    }
+    console.error('[GitOps authority] Rollout pause failed:', error);
+    res.status(500).json({ error: 'Failed to pause the rollout' });
+    return;
+  }
+  res.json({ ok: true });
+});
+
+/**
+ * Resume a paused rollout and continue the queue when one is still authorized.
+ *
+ * Unpausing is the decision; continuing is the executor's answer. A resume
+ * with no live authorization reports that nothing started rather than
+ * minting authority the operator never granted.
+ */
+gitopsApplicationsRouter.post('/:id/rollout/resume', async (req: Request, res: Response): Promise<void> => {
+  const target = resolveAuthorityTarget(req, res);
+  if (!target) return;
+  const nodeId = parseOptionalNodeId(req.body?.nodeId);
+  if (nodeId === 'invalid') {
+    res.status(400).json({ error: 'nodeId must be a positive integer' });
+    return;
+  }
+  const stackName = deployStackNameFor(target.application);
+  if (nodeId !== null) {
+    if (!stackName) {
+      res.status(409).json({ error: 'The deploy stack identity could not be resolved', code: 'ROLLOUT_RESUME_REFUSED' });
+      return;
+    }
+    if (!requireDeployOnTarget(req, res, stackName, nodeId)) return;
+  } else if (!requirePermission(req, res, 'stack:deploy')) {
+    return;
+  }
+  if (!target.blueprint.enabled) {
+    res.status(409).json({
+      error: 'The Blueprint is disabled. Enable it before resuming the rollout.',
+      code: 'BLUEPRINT_DISABLED',
+    });
+    return;
+  }
+
+  try {
+    GitOpsTransitions.getInstance().rolloutUnpaused(target.application.id, nodeId, authorityEnvelope(req));
+  } catch (error) {
+    if (error instanceof GitOpsTransitionError) {
+      res.status(409).json({ error: error.message, code: 'ROLLOUT_RESUME_REFUSED' });
+      return;
+    }
+    console.error('[GitOps authority] Rollout resume failed:', error);
+    res.status(500).json({ error: 'Failed to resume the rollout' });
+    return;
+  }
+
+  // A per-target resume clears that target's pause only; continuing the queue
+  // is a fleet decision the next dispatch makes for itself.
+  if (nodeId !== null) {
+    res.json({ ok: true, dispatched: false, note: null });
+    return;
+  }
+
+  const store = GitOpsStore.getInstance();
+  const app = store.getApplication(target.application.id) ?? target.application;
+  const binding = store.currentAuthorizationBinding(app);
+  if (!binding) {
+    res.json({
+      ok: true,
+      dispatched: false,
+      note: 'The rollout is resumed, but no live authorization exists; authorize the rollout to start it.',
+    });
+    return;
+  }
+  const genRow = store.getGeneration(binding.acceptedGenerationId);
+  if (!genRow) {
+    res.json({
+      ok: true,
+      dispatched: false,
+      note: 'The authorized generation could not be read; refresh the application and authorize again.',
+    });
+    return;
+  }
+
+  const actor = actorFromRequest(req);
+  let dispatched = false;
+  let note: string | null = null;
+  try {
+    const result = await GitSourceService.getInstance().dispatchAcceptedGeneration(
+      buildAcceptedGeneration(genRow),
+      GitSourceService.dispatchContextFor(app),
+      { trigger: 'manual', actor: actor ?? 'operator' },
+    );
+    dispatched = result.status === 'dispatched';
+    if (result.status === 'blocked') note = result.reason;
+  } catch (error) {
+    console.error(
+      '[GitOps authority] Rollout dispatch failed after resume:',
+      sanitizeForLog(error instanceof Error ? error.message : String(error)),
+    );
+    note = 'The rollout is resumed but could not start; the authorization stands and the rollout remains queued.';
+  }
+  res.json({ ok: true, dispatched, note });
+});
+
+/**
+ * Re-derive placement for the current Blueprint and open a fresh review.
+ *
+ * Replanning is an operator statement that the current placement question is
+ * no longer the right one (a node was rebuilt, a cordon moved, a plan was
+ * reviewed against stale intent). It mints intent and candidate through the
+ * same producers an edit uses, which invalidates the old placement approval
+ * and authorization. Nothing moved means nothing is written: re-opening a
+ * review that already describes the Blueprint would invalidate approvals that
+ * are still accurate.
+ */
+gitopsApplicationsRouter.post('/:id/rollout/replan', (req: Request, res: Response): void => {
+  if (!requirePermission(req, res, 'stack:create')) return;
+  const target = resolveAuthorityTarget(req, res);
+  if (!target) return;
+  const store = GitOpsStore.getInstance();
+  const app = target.application;
+  const candidate = app.rollout_candidate_id ? store.getRolloutCandidate(app.rollout_candidate_id) : undefined;
+  if (!candidate) {
+    res.status(409).json({
+      error: 'There is no current placement to replan.',
+      code: 'REPLAN_UNAVAILABLE',
+    });
+    return;
+  }
+  const intent = app.intent_revision_id ? store.getIntentRevision(app.intent_revision_id) : undefined;
+  let frozenNodeIds: number[];
+  try {
+    frozenNodeIds = decodeGitOpsRequiredTargetsJson(candidate.required_targets_json).nodeIds;
+  } catch (error) {
+    console.error('[GitOps authority] Rollout candidate frozen set is unreadable:', error);
+    res.status(409).json({
+      error: 'The current placement could not be read; refresh the application and try again.',
+      code: 'REPLAN_UNAVAILABLE',
+    });
+    return;
+  }
+  const desiredNodeIds = BlueprintReconciler.getInstance()
+    .listDesiredNodes(target.blueprint, DatabaseService.getInstance().getNodes())
+    .map(node => node.id);
+  const intentIsCurrent = !!intent
+    && intent.blueprint_revision === target.blueprint.revision
+    && intent.pinned_node_id === target.blueprint.pinned_node_id
+    && intent.deploy_stack_name === target.blueprint.name
+    && intent.selector_json === JSON.stringify(target.blueprint.selector);
+  if (intentIsCurrent && sameNodeSet(desiredNodeIds, frozenNodeIds)) {
+    res.status(409).json({
+      error: 'The current placement already matches the Blueprint; there is nothing to replan.',
+      code: 'REPLAN_UNAVAILABLE',
+    });
+    return;
+  }
+
+  const envelope = authorityEnvelope(req);
+  try {
+    DatabaseService.getInstance().getDb().transaction(() => {
+      const tx = GitOpsTransitions.getInstance();
+      const nextIntent = intentRowFor(app.id, target.blueprint, envelope.operationId, envelope.actor, envelope.at);
+      tx.intentRevised({ applicationId: app.id, intent: nextIntent, envelope });
+      tx.rolloutCandidateOpened({
+        applicationId: app.id,
+        candidate: candidateRowFor(
+          app.id,
+          nextIntent,
+          desiredNodeIds,
+          'roster_change',
+          envelope.operationId,
+          envelope.at,
+        ),
+        envelope,
+      });
+    })();
+  } catch (error) {
+    if (error instanceof GitOpsTransitionError) {
+      res.status(409).json({ error: error.message, code: 'REPLAN_UNAVAILABLE' });
+      return;
+    }
+    console.error('[GitOps authority] Rollout replan failed:', error);
+    res.status(500).json({ error: 'Failed to replan the rollout' });
+    return;
+  }
+  res.json({ ok: true });
+});
+
+/**
+ * Withdraw the live rollout authorization on the operator's decision.
+ *
+ * The abandoned generation stays visible as superseded, and the authorization
+ * is cleared so the dispatch boundary cannot start it again. A later rollout
+ * authorization mints a new generation over the same placement and accepted
+ * source.
+ */
+gitopsApplicationsRouter.post('/:id/rollout/supersede', (req: Request, res: Response): void => {
+  if (!requirePermission(req, res, 'stack:deploy')) return;
+  const target = resolveAuthorityTarget(req, res);
+  if (!target) return;
+  if (!target.blueprint.enabled) {
+    res.status(409).json({
+      error: 'The Blueprint is disabled. Enable it before superseding the rollout.',
+      code: 'BLUEPRINT_DISABLED',
+    });
+    return;
+  }
+  try {
+    GitOpsTransitions.getInstance().rolloutSuperseded({
+      applicationId: target.application.id,
+      envelope: authorityEnvelope(req),
+    });
+  } catch (error) {
+    if (error instanceof GitOpsTransitionError) {
+      res.status(409).json({ error: error.message, code: 'ROLLOUT_SUPERSEDE_REFUSED' });
+      return;
+    }
+    console.error('[GitOps authority] Rollout supersede failed:', error);
+    res.status(500).json({ error: 'Failed to supersede the rollout' });
+    return;
+  }
+  res.json({ ok: true });
+});
+
+/**
+ * Restore one target and record what happened, whatever path the restore took.
+ *
+ * Every exit attempts to record a terminal state for the target: a restore
+ * that cannot be opened, cannot be requested, or cannot have its result
+ * recorded is reported as a failed target rather than a clean restore. If the
+ * terminal write itself fails it is logged; the boot-time reclassification
+ * settles a row left in `restoring`.
+ */
+async function runRollbackTarget(
+  ctx: {
+    app: GitOpsApplicationRow;
+    stackName: string;
+    generationId: string;
+    recoveryRef: string;
+    envelope: AuthorityEnvelope;
+    actor: string | null;
+    role: string;
+    userId: number;
+  },
+  nodeId: number,
+): Promise<RolloutRollbackTargetResult> {
+  const tx = GitOpsTransitions.getInstance();
+  try {
+    tx.rollbackInProgress({
+      applicationId: ctx.app.id,
+      nodeId,
+      recoveryRef: ctx.recoveryRef,
+      recoveryGenerationId: ctx.generationId,
+      envelope: ctx.envelope,
+    });
+  } catch (error) {
+    return {
+      nodeId,
+      status: 'failed',
+      error: error instanceof Error ? error.message : 'The rollback could not be opened.',
+    };
+  }
+
+  let outcome: RestoreTargetOutcome;
+  try {
+    outcome = await restoreTargetToGeneration({
+      app: ctx.app,
+      stackName: ctx.stackName,
+      nodeId,
+      generationId: ctx.generationId,
+      actor: ctx.actor,
+      role: ctx.role,
+      scopedActions: scopedActionsForStack(ctx.userId, nodeId, ctx.stackName),
+    });
+  } catch (error) {
+    console.error('[GitOps authority] Rollout restore request failed on node %s:', nodeId, error);
+    outcome = { ok: false, code: 'ROLLBACK_FAILED', error: 'The restore request failed.' };
+  }
+
+  if (outcome.ok) {
+    const store = GitOpsStore.getInstance();
+    try {
+      tx.rollbackCompleted({
+        applicationId: ctx.app.id,
+        nodeId,
+        recoveryRef: ctx.recoveryRef,
+        recoveryGenerationId: ctx.generationId,
+        // The strongest evidence recorded for the restored generation. The
+        // node's own capture is not read here; restoreArtifactPointers drops
+        // anything this generation does not own and records the limitation.
+        capturedArtifactSetId: store.newestArtifactSetIdForGeneration(ctx.generationId),
+        capturedSourceAcceptanceRef: store.newestSourceAcceptanceId(ctx.app.id, ctx.generationId),
+        envelope: ctx.envelope,
+      });
+      return { nodeId, status: 'restored' };
+    } catch (error) {
+      console.error('[GitOps authority] Restore succeeded but its completion could not be recorded:', error);
+      outcome = { ok: false, code: 'RECORD_FAILED', error: 'The restore completed but its result could not be recorded.' };
+    }
+  }
+
+  console.error('[GitOps authority] Rollout rollback failed on node %s:', nodeId, sanitizeForLog(outcome.error));
+  try {
+    tx.rollbackPartialFailed({
+      applicationId: ctx.app.id,
+      nodeId,
+      recoveryRef: ctx.recoveryRef,
+      failureClass: 'partial',
+      envelope: ctx.envelope,
+    });
+  } catch (error) {
+    console.error('[GitOps authority] Could not record the failed rollback target:', error);
+  }
+  return { nodeId, status: 'failed', error: outcome.error };
+}
+
+/**
+ * Roll a rollout back to an explicit prior application generation.
+ *
+ * The scope names which targets recover: one target, the targets recorded as
+ * failed or unreachable, or every changed target in the frozen set. Each
+ * target is restored from its own captured recovery point, and that point must
+ * name the selected generation, so a rollback that cannot prove what it
+ * restored reports a partial failure instead of a completion. Configuration is
+ * restored; application data is untouched, and the restored generation's
+ * artifact expectation is rebound only from evidence that generation owns.
+ */
+gitopsApplicationsRouter.post('/:id/rollout/rollback', async (req: Request, res: Response): Promise<void> => {
+  // Fleet-wide on purpose: a rollback withdraws the application's rollout
+  // authorization, which is broader than any one target. The per-target
+  // checks below then pin the exact stack and node of every restore.
+  if (!requirePermission(req, res, 'stack:deploy')) return;
+  const target = resolveAuthorityTarget(req, res);
+  if (!target) return;
+  const body = (req.body ?? {}) as { generationId?: unknown; scope?: unknown };
+  const generationId = typeof body.generationId === 'string' ? body.generationId : '';
+  if (generationId.length === 0) {
+    res.status(400).json({ error: 'generationId is required', code: 'CONFIRM_REQUIRED' });
+    return;
+  }
+  const parsedScope = parseRolloutScope(body.scope);
+  if (!parsedScope.ok) {
+    res.status(400).json({ error: parsedScope.message, code: 'CONFIRM_REQUIRED' });
+    return;
+  }
+  if (!target.blueprint.enabled) {
+    res.status(409).json({
+      error: 'The Blueprint is disabled. Enable it before rolling back a rollout.',
+      code: 'BLUEPRINT_DISABLED',
+    });
+    return;
+  }
+
+  const app = target.application;
+  const store = GitOpsStore.getInstance();
+  const generation = store.getGeneration(generationId);
+  if (!generation || generation.application_id !== app.id) {
+    res.status(409).json({
+      error: 'The selected application generation is not part of this application.',
+      code: 'ROLLBACK_REFUSED',
+    });
+    return;
+  }
+  const stackName = deployStackNameFor(app);
+  if (!stackName) {
+    res.status(409).json({
+      error: 'The deploy stack identity could not be resolved.',
+      code: 'ROLLBACK_REFUSED',
+    });
+    return;
+  }
+  const resolved = resolveRollbackTargets(app, parsedScope.scope, generationId);
+  if (!resolved.ok) {
+    res.status(409).json({ error: resolved.error, code: resolved.code });
+    return;
+  }
+  // Exact authorization on every resolved target, before any restore starts:
+  // the application spans nodes, so a fleet-wide grant is not what this action
+  // needs, and a bulk action that half-runs on a permission failure would
+  // leave a partial recovery nobody asked for.
+  for (const nodeId of resolved.nodeIds) {
+    if (!requireDeployOnTarget(req, res, stackName, nodeId)) return;
+  }
+
+  // The abandoned rollout must not be dispatchable while its targets are being
+  // restored. Only an authorized rollout has a dispatch to stop; a placement
+  // generation that never authorized cannot be superseded and does not need to
+  // be.
+  const liveRolloutGeneration = app.rollout_generation_id
+    ? store.getRolloutGeneration(app.rollout_generation_id)
+    : undefined;
+  if (app.rollout_generation_id && !liveRolloutGeneration) {
+    res.status(409).json({
+      error: 'The current rollout generation could not be read; refresh the application and try again.',
+      code: 'ROLLBACK_REFUSED',
+    });
+    return;
+  }
+  const envelope = authorityEnvelope(req);
+  if (liveRolloutGeneration?.provenance === 'rollout_authorization') {
+    try {
+      GitOpsTransitions.getInstance().rolloutSuperseded({ applicationId: app.id, envelope });
+    } catch (error) {
+      console.error('[GitOps authority] Could not withdraw the rollout before rolling back:', error);
+      res.status(409).json({
+        error: 'The live rollout authorization could not be withdrawn; refresh the application and try again.',
+        code: 'ROLLBACK_REFUSED',
+      });
+      return;
+    }
+  }
+
+  const ctx = {
+    app,
+    stackName,
+    generationId,
+    recoveryRef: newGitOpsId(),
+    envelope,
+    actor: actorFromRequest(req),
+    role: req.user?.role ?? 'viewer',
+    userId: req.user?.userId ?? 0,
+  };
+  const results: RolloutRollbackTargetResult[] = [];
+  for (const nodeId of resolved.nodeIds) {
+    results.push(await runRollbackTarget(ctx, nodeId));
+  }
+
+  const failedAny = results.some(result => result.status === 'failed');
+  if (failedAny) {
+    // Lift the application out of `restoring` so the projection reports the
+    // partial failure rather than an in-flight rollback that nothing drives.
+    try {
+      GitOpsTransitions.getInstance().rollbackPartialFailed({
+        applicationId: app.id,
+        nodeId: null,
+        recoveryRef: ctx.recoveryRef,
+        failureClass: 'partial',
+        envelope,
+      });
+    } catch (error) {
+      console.error('[GitOps authority] Could not record the partial rollback failure:', error);
+    }
+  }
+  res.json({ ok: !failedAny, results });
 });

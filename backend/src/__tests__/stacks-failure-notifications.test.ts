@@ -544,7 +544,7 @@ describe('deploy_failure notification on /update error', () => {
 });
 
 describe('generation rollback error mapping', () => {
-  function stubCurrentGeneration(id: string): StackUpdateRecoveryGenerationRow {
+  function stubCurrentGeneration(id: string, gitopsGenerationId?: string): StackUpdateRecoveryGenerationRow {
     return {
       id,
       node_id: 1,
@@ -567,6 +567,7 @@ describe('generation rollback error mapping', () => {
       artifacts_retired: 0,
       released_at: null,
       released_by: null,
+      gitops_generation_id: gitopsGenerationId,
     };
   }
 
@@ -610,6 +611,62 @@ describe('generation rollback error mapping', () => {
     expect(res.status).toBe(500);
     expect(res.body).toMatchObject({ error: 'Rollback restore did not complete.' });
     expect(res.body.code).toBeUndefined();
+  });
+
+  it('restores the requested generation when the recovery point names it', async () => {
+    const { StackUpdateRecoveryService } = await import('../services/StackUpdateRecoveryService');
+    const svc = StackUpdateRecoveryService.getInstance();
+    const getSpy = vi.spyOn(svc, 'getCurrent').mockReturnValue(stubCurrentGeneration('gen-1', 'gen-app-1'));
+    const compensateSpy = vi.spyOn(svc, 'compensateWithCandidate').mockResolvedValue(true);
+    try {
+      const res = await request(app)
+        .post('/api/stacks/myapp/rollback')
+        .set('Cookie', authCookie)
+        .send({ expectedGitopsGenerationId: 'gen-app-1' });
+      expect(res.status).toBe(200);
+      expect(compensateSpy).toHaveBeenCalledTimes(1);
+    } finally {
+      getSpy.mockRestore();
+      compensateSpy.mockRestore();
+    }
+  });
+
+  it('refuses when the stack has no recovery point at all', async () => {
+    const { StackUpdateRecoveryService } = await import('../services/StackUpdateRecoveryService');
+    const svc = StackUpdateRecoveryService.getInstance();
+    const getSpy = vi.spyOn(svc, 'getCurrent').mockReturnValue(undefined);
+    const compensateSpy = vi.spyOn(svc, 'compensateWithCandidate').mockResolvedValue(true);
+    try {
+      const res = await request(app)
+        .post('/api/stacks/myapp/rollback')
+        .set('Cookie', authCookie)
+        .send({ expectedGitopsGenerationId: 'gen-app-1' });
+      expect(res.status).toBe(409);
+      expect(res.body.code).toBe('NO_RECOVERY_POINT');
+      expect(compensateSpy).not.toHaveBeenCalled();
+    } finally {
+      getSpy.mockRestore();
+      compensateSpy.mockRestore();
+    }
+  });
+
+  it('refuses when the recovery point names a different generation', async () => {
+    const { StackUpdateRecoveryService } = await import('../services/StackUpdateRecoveryService');
+    const svc = StackUpdateRecoveryService.getInstance();
+    const getSpy = vi.spyOn(svc, 'getCurrent').mockReturnValue(stubCurrentGeneration('gen-1', 'gen-app-1'));
+    const compensateSpy = vi.spyOn(svc, 'compensateWithCandidate').mockResolvedValue(true);
+    try {
+      const res = await request(app)
+        .post('/api/stacks/myapp/rollback')
+        .set('Cookie', authCookie)
+        .send({ expectedGitopsGenerationId: 'gen-app-2' });
+      expect(res.status).toBe(409);
+      expect(res.body.code).toBe('RECOVERY_POINT_MISMATCH');
+      expect(compensateSpy).not.toHaveBeenCalled();
+    } finally {
+      getSpy.mockRestore();
+      compensateSpy.mockRestore();
+    }
   });
 });
 
