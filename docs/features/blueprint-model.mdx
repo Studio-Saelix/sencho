@@ -242,7 +242,7 @@ Rollout authorization needs resolved executable artifact evidence for the accept
 
 Every Git-managed rollout deploy captures the node's previous project as a recovery generation before it applies anything, which is what a later rollback restores from. **Roll back rollout** lists the application's earlier generations, newest first, and asks for the scope: one target, the targets recorded as failed, unreachable, or stale, or every changed target in the rollout. A target already running the selected generation is skipped.
 
-Each node in the scope must hold a recovery generation that names the selected application generation; a node that cannot prove that is reported as a failed target, and the rollout reads as a partially failed rollback rather than a completion.
+Each node in the scope must hold a recovery generation that names the selected application generation. A node keeps the generation captured immediately before its latest rollout, so an older selection has no recovery generation to restore from and is reported as a failed target; the rollout then reads as a partially failed rollback rather than a completion.
 
 Rollback restores the authored project. It does not restore application data, and a locally built image is rebuilt from its authored inputs unless the node's recovery generation still holds the previous image. The per-target result states what actually happened.
 

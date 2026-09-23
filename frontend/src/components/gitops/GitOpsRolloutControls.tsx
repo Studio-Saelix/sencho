@@ -485,7 +485,8 @@ function RollbackRolloutDialog({
           <p className="font-mono text-[11px] text-stat-subtitle" data-testid="gitops-rollback-caveats">
             Rollback restores the authored project captured on each node. It does not restore application data. A locally
             built image is rebuilt from its authored inputs unless the node's recovery point still holds the previous
-            image; the per-target result reports what actually happened.
+            image; the per-target result reports what actually happened. Only the generation captured immediately before
+            each node's latest rollout can be restored there, so an older selection is reported as a failed target.
           </p>
         </div>
       </ModalBody>

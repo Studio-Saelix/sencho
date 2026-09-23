@@ -188,6 +188,9 @@ describe('GitOpsRolloutControls', () => {
     );
 
     await user.click(screen.getByTestId('gitops-action-rollback'));
+    expect(screen.getByTestId('gitops-rollback-caveats')).toHaveTextContent(
+      /Only the generation captured immediately before each node's latest rollout can be restored there/,
+    );
     await user.click(screen.getByTestId('gitops-confirm-rollback'));
     await waitFor(() => expect(rollbackGitOpsRollout).toHaveBeenCalledWith('bp:5', {
       generationId: 'gen-lkg',
