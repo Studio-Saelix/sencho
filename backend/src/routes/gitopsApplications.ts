@@ -1229,7 +1229,7 @@ async function runRollbackTarget(
   } catch (error) {
     console.error(
       '[GitOps authority] Rollout restore request failed on node %s:',
-      nodeId,
+      sanitizeForLog(nodeId),
       sanitizeForLog(error instanceof Error ? error.message : String(error)),
     );
     outcome = { ok: false, code: 'ROLLBACK_FAILED', error: 'The restore request failed.' };
@@ -1260,7 +1260,11 @@ async function runRollbackTarget(
     }
   }
 
-  console.error('[GitOps authority] Rollout rollback failed on node %s:', nodeId, sanitizeForLog(outcome.error));
+  console.error(
+    '[GitOps authority] Rollout rollback failed on node %s:',
+    sanitizeForLog(nodeId),
+    sanitizeForLog(outcome.error),
+  );
   try {
     tx.rollbackPartialFailed({
       applicationId: ctx.app.id,

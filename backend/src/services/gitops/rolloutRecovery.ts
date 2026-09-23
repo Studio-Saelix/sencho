@@ -345,7 +345,7 @@ async function restoreRemote(args: {
   } catch (error) {
     console.error(
       '[GitOps recovery] Remote restore request failed for node %s:',
-      args.nodeId,
+      sanitizeForLog(args.nodeId),
       sanitizeForLog(error instanceof Error ? error.message : String(error)),
     );
     return { ok: false, code: 'NODE_UNREACHABLE', error: 'The restore request to the owning node failed.' };
