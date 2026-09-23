@@ -1,12 +1,14 @@
 ---
 title: Dashboard
-description: Real-time system health, stack load, configuration overview, fleet activity, and recent alerts for the active node.
+description: Real-time system health, stack load, recent alerts, fleet connectivity, and a configuration summary for the active node.
 ---
 
-The **Home** tab is the first thing you see after logging in. It surfaces the active node's overall health, live system metrics, the load on every stack, the on/off state of every automation and security feature, a fleet- or restart-activity panel, and the running alert tape, all on a single scrollable page.
+The **Home** tab is the first thing you see after logging in. It reads top to bottom as a triage: whether anything is wrong, what is affected, what changed, and finally how the instance is configured. The state masthead, the resource gauges, and the Stack health table come first. The operational row below them leads with **Recent alerts**, with **Fleet heartbeat** beside it on a multi-node install. **Configuration summary** closes the page.
+
+Every card below the gauges shares the same table design as Stack health: a heading with a tracked-mono summary line, column headers, and rows that open something when they lead somewhere. Click anywhere on such a row, or press <kbd>Tab</kbd> to reach its name and open it with <kbd>Enter</kbd> or <kbd>Space</kbd>. A row that leads nowhere is plain text with no hover highlight or chevron.
 
 <Frame>
-  <img src="/images/dashboard/dashboard-overview.png" alt="Sencho Home dashboard showing the Healthy state masthead with its left-edge accent rail, four-tile resource gauge strip, Stack health table with State, Source, Networks, and Port columns, Configuration Status card paired with Fleet Heartbeat, and the Recent Alerts feed." />
+  <img src="/images/dashboard/dashboard-overview.png" alt="Sencho Home dashboard showing the Critical state masthead, the four-tile resource gauge strip, the Stack health table, the operational row with the Recent alerts table on the left and the Fleet heartbeat table on the right at the same height, and the Configuration summary table below." />
 </Frame>
 
 ## Status masthead
@@ -24,7 +26,7 @@ It carries:
 - A **meta line** in uppercase mono tracking with the active node's name, the number of nodes registered to this Sencho instance, and the time since the last successful poll, for example `LOCAL · 4 NODES · LAST SYNC 1S`.
 - A **reasons line** that names exactly which signals moved the state away from Healthy, for example `RAM 95% · 18 unread errors`. When the state is Healthy the reasons line reads `All systems nominal`.
 - Three quick stat tiles on the right edge of the bar, hidden below the `md` breakpoint: **RUNNING** (`active/total`), **CPU**, and **MEM**.
-- An alerts counter pinned to the far right, showing the number of unread notifications next to a bell icon and the word `alert` or `alerts`. The bell and count tint amber while at least one alert is unread.
+- An alerts counter pinned to the far right, showing the number of unread notifications next to a bell icon and the word `alert` or `alerts`. The bell and count tint amber while at least one alert is unread. The count covers unread entries across the whole bell feed, so it rarely matches the Recent alerts row count: the card leaves out entries that are not alerts, and it still lists alerts you have read.
 
 The masthead's CPU stat tile tints amber once host CPU crosses 80% and stays amber even at 90% or higher. The MEM and RUNNING values stay neutral; the reasons line and the gauge strip below are where you read severity.
 
@@ -80,7 +82,7 @@ By default, rows sort by state (errors → warnings → healthy) and then by 10-
 
 The table shows the first eight rows and a **Show all N stacks** footer when there are more; **Show less** collapses again. In **All nodes**, the subtitle reports full coverage as `N stacks · M nodes`, or `N stacks · K/M nodes reporting` while some nodes are still pending, stale, denied, or offline. Retry refreshes only the nodes that need it. When every node fails to report, the card shows an unavailable state with Retry rather than an empty fleet. When the active node (or every confirmed reporter) has no stacks, the card renders an empty state with a layered-disks glyph and the message `No stacks found. Create one from the sidebar.` On narrow widths the table scrolls horizontally so columns stay readable.
 
-The phone dashboard uses the same eight-row collapse, shared state classifier, and composite navigation. When more than one node is available it shows the same **This node | All nodes** control; **Show all** / **Show less** replace the older jump away from Stack health.
+The phone dashboard uses the same eight-row collapse, shared state classifier, and composite navigation. When more than one node is available it shows the same **This node | All nodes** control; **Show all** / **Show less** expand and collapse the list in place.
 
 ### GitOps state chip
 
@@ -92,109 +94,97 @@ Hover the chip for the full sentence. A stack with no Git source carries no chip
 
 The phone dashboard shows the same chip on its stack rows, beside the node name.
 
-## Configuration Status
+## Recent alerts
 
-The Configuration Status card is the at-a-glance audit of every toggleable automation and security feature on the active node, so nothing is silently off when you expect it to be on.
-
-<Frame>
-  <img src="/images/dashboard/configuration-status.png" alt="Configuration Status card with four sections: Notifications (Channels 'Discord', Alert rules None, Routing None, Mute Rules None), Automation (Auto-heal policies '1 / 1 active', Auto-update schedules '1 / 1 active', Webhooks None, Scheduled tasks '1 active'), Security (MFA Off, SSO Off, Trivy installed Installed, Scan policies None), and Backups & Thresholds (Recovery Vault active, Alert thresholds Off, Crash detection On)." />
-</Frame>
-
-The card is divided into four sections.
-
-### Notifications
-
-| Row | What it shows |
-|-----|---------------|
-| **Channels** | The list of enabled delivery agents from `Discord`, `Slack`, `Webhook`, and `Apprise`, joined by commas; reads `None` when no agent is enabled |
-| **Alert rules** | Total per-stack alert rules in effect, formatted `<n> rules` |
-| **Routing** | Number of enabled routing rules that direct categories to specific agents, formatted `<n> routes` |
-| **Mute Rules** | Number of enabled notification-suppression rules, formatted `<n> rules`. See [Mute Rules](/features/alerts-notifications#mute-rules). |
-
-### Automation
-
-| Row | What it shows |
-|-----|---------------|
-| **Auto-heal policies** | `<enabled> / <total> active` for crash-recovery policies across all stacks; reads `None` when no policies exist |
-| **Auto-update schedules** | `<enabled> / <total> active` count of `Auto-update Stack` / `Auto-update All Stacks on Node` rows configured for this node; reads `None` when none are configured |
-| **Webhooks** | Active inbound deploy webhooks tied to Git Sources or stacks, formatted `<n> actives` |
-| **Scheduled tasks** | Active scheduled operations (backups, restarts, scripts), formatted `<n> actives` |
-
-### Security
-
-| Row | What it shows |
-|-----|---------------|
-| **MFA** | `On` when TOTP is configured for the signed-in operator, `Off` when configured but disabled, `Not set up` when there is no MFA secret on file |
-| **SSO** | The active SSO provider name (`OIDC`, `Google`, `GitHub`, `Okta`, `LDAP`); reads `Off` when SSO is not enabled |
-| **Trivy installed** | `Installed` when a Trivy scanner binary is available on this node, `Not installed` otherwise |
-| **Scan policies** | Count of enabled vulnerability scan policies on the active node, formatted `<n> policies`; reads `None` when no policy is enabled |
-
-### Backups & Thresholds
-
-| Row | What it shows |
-|-----|---------------|
-| **Recovery Vault** | The active recovery target: `Recovery Vault` (Admiral), `Custom S3` (with ` (auto)` appended when auto-upload is enabled), or `Disabled` |
-| **Alert thresholds** | The current host thresholds, formatted `CPU x% · RAM y% · Disk z%`, or `Off` when host threshold alerts are disabled |
-| **Crash detection** | `On` when global container-crash notifications are enabled, `Off` otherwise |
-
-Click any row to jump directly to the settings section that manages it.
-
-The card refreshes automatically every 60 seconds. It also refreshes immediately whenever a scheduled task is created, edited, toggled, or deleted, so the **Scheduled tasks** row (and the rest of the card) reflects that change within a second. Other changes covered by this card, such as switching the cloud backup provider or enabling SSO, update on the next 60-second tick.
-
-## Activity panel
-
-To the right of Configuration Status, the dashboard shows one of two activity panels:
-
-- **Fleet Heartbeat** when at least one remote node is registered and your role has the `node:read` permission.
-- **Stack Restarts (7d)** when this Sencho instance manages only the local node, or when your role lacks `node:read` (so a deployer-level role never sees a fleet card it cannot load).
-
-### Fleet Heartbeat
+The first card in the operational row answers "what needs attention". It lists the recent alerts worth acting on, newest first, whether or not you have read them (read ones are dimmed): warnings, errors, and availability notices for a stack or node update. Completion records, such as an image update that was applied, stay in the notification feed and are not repeated here, and deploys and other stack actions you ran yourself appear in the activity ticker instead. The card reads as a short list of things to do rather than a log of everything the instance did.
 
 <Frame>
-  <img src="/images/dashboard/fleet-heartbeat.png" alt="Fleet Heartbeat card with the radio-tower kicker '4 NODES' on the right, listing four entries with green status dots: Local with the brand 'LOCAL' pill and 16 containers; Opsix with 4 containers and 75 ms latency; Pitt-Moba with 3 containers and 65 ms latency; SLX-Mars with 4 containers and 243 ms latency." />
+  <img src="/images/dashboard/recent-alerts.png" alt="Recent alerts table under the All nodes scope with the caption '14 alerts · 2/3 nodes reporting', eight rows with a severity icon, the alert message and its stack, the node name, and a relative time, and a footer noting that one node has no current feed beside View all alerts." />
 </Frame>
 
-The header carries a radio-tower icon, the total node count, and a `<n> unreachable` callout in destructive red whenever any node is offline. Each row shows:
+The card shows the latest eight alerts and always keeps the height of a full eight-row preview, even with fewer alerts or none, so it never grows or shrinks as alerts come and go. The footer says how many more there are (`Latest 8 of 11`), unless a node in scope is silent, when it names that node instead (see below). **View all alerts** opens the notification feed, the same surface as the bell in the top bar. That feed carries every notification the card leaves out, and it is where you read history or clear entries; the Home card has no clear action of its own.
 
-- A **status dot**: green when the node has answered a recent heartbeat, amber when its state is unknown, rose when offline or unreachable.
-- The **node name** in mono.
-- A **LOCAL** brand pill on the local node.
-- The **active container count** for that node, returned alongside the latency in the fleet-overview payload.
-- A **latency** column on the right of online proxy nodes, in milliseconds. Pilot-agent nodes (which receive their commands over an outbound tunnel rather than being polled) read `n/a` since round-trip latency is not meaningful for them.
-- A **last-seen** timestamp on offline rows; pilot-agent nodes use their tunnel heartbeat, regular proxy nodes use the local Sencho instance's last successful contact.
+When more than one node is registered, a **This node | All nodes** control appears in the card header. **This node** is the default and always means the active node: switch nodes and the card follows. **All nodes** adds every other node's alerts and a **Node** column so identical messages from different nodes stay distinct. The choice is remembered for your browser, independently of the active node, so switching nodes or leaving Home does not reset it.
 
-The card refreshes every 30 seconds. When you have not registered any node it shows a `No nodes registered.` empty state.
+The summary line beside the title reads `<n> alerts · <node>` under **This node**, and `<n> alerts · <m> nodes` under **All nodes**. When a node in scope did not answer the latest fetch (it is offline, or its request failed), a notice names the silent node (in the footer while alerts are listed, in place of the list when there are none), and under **All nodes** the summary switches to `<k>/<m> nodes reporting`. Rows already received from that node stay visible; a silent node is never read as having no alerts. If the card would otherwise be empty, it says the node's alerts may be missing instead of showing the all-clear. Until the first fetch after sign-in settles, the card shows a loading state rather than an all-clear.
 
-### Stack Restarts (7d)
+Each row shows a severity icon (info, warning, or error, also announced as text to screen readers), the message with the stack and container it concerns underneath, the node under **All nodes**, and a relative time. Rows with a deterministic destination open it:
 
-When the dashboard renders this variant, the same column shows a 7-day rolling restart map. Each stack with at least one restart in the window appears as a row carrying:
+| Alert | Opens |
+|-------|-------|
+| A stack alert (crash, unhealthy container, failed deploy, auto-heal, update available) | That stack on the node that raised it, with the container's logs when the alert names a container |
+| A drift alert | The stack's **Drift** tab |
+| A scan finding that names no stack | **Security › History** on the node that raised it |
+| A node update or integration build notice | **Fleet** with its updates sheet on **Nodes** or **Changelog** |
 
-- The **stack name** in mono.
-- A **category badge** for the dominant restart reason: `crash` (rose), `auto-heal` (green), or `manual` (brand). Ties resolve in favor of `crash` over `auto-heal` over `manual`.
-- The **total restart count** on the right, with a proportional fill bar tinted to match the badge.
+An alert raised on another node switches the active node first, the same way opening a stack from Fleet does. The switch is real: when you come back to Home it shows the node you switched to, until you pick another one from the node switcher. Rows about the host as a whole, such as a threshold breach, and any row whose destination your role cannot open, are not clickable.
 
-Stacks with zero restarts are not listed individually; they are summarized in a single footer row that reads `<n> stacks stable`. When no stack has restarted in the window the card shows a green check and `No restarts in the last 7 days.` This panel refreshes every five minutes.
-
-## Recent Alerts
-
-The bottom-most card on the dashboard collects every triggered notification on the active node, sorted by recency.
-
-<Frame>
-  <img src="/images/dashboard/recent-alerts.png" alt="Recent Alerts card listing eight local, unbadged info-level rows about stack image updates and auto-update runs for plex, radarr, and swag, each carrying a relative timestamp such as '4h ago', with a 'Clear All Notifications' button anchored at the bottom right. No pagination chevrons appear because the feed holds exactly eight entries." />
-</Frame>
-
-Each row shows:
-
-- A **severity icon**: an info circle (brand) for `info`, a warning triangle (amber) for `warning`, an octagonal alert (rose) for `error`.
-- An optional **node badge** when the alert came from a remote node, showing the source node's name. Local-node alerts skip the badge.
-- The **alert message**, dimmed once the alert has been read.
-- A relative **timestamp** on the right, for example `2h ago`.
-
-A **Clear All Notifications** button is anchored at the bottom right of the card. Clicking it deletes every alert in the feed by issuing a `DELETE /api/notifications` against each node that contributed an entry; while the request is in flight the button label switches to `Clearing...` and the button disables. The button stays visible while there are alerts; when none remain the card collapses to a green check and the message `No recent alerts.`
-
-The list paginates at eight rows; chevrons and an `N / M` indicator appear in the header when there is more than one page.
+When nothing actionable is outstanding the card shows a green check and `No recent alerts.` An empty card is the healthy answer rather than a broken one, and the bell counter can still report unread entries that are not alerts.
 
 Per-stack alert rules live on each stack's **Monitor** sheet; delivery channels and severity routing are configured in **Settings · Notifications**. See [Alerts and notifications](/features/alerts-notifications) for channel setup, per-stack rules, mute rules, and the routing engine.
+
+## Fleet heartbeat
+
+Beside the alerts, Fleet heartbeat answers "what is affected" at fleet scale. It appears once at least one remote node is registered, for roles that can read nodes. It always describes the whole fleet, whichever node is active. Side by side, the card has the same fixed height as the Recent alerts card, and when the fleet has more nodes than fit, its table scrolls inside the card. On a single-node install, or for a role that cannot read nodes, Recent alerts spans the full width instead.
+
+<Frame>
+  <img src="/images/dashboard/fleet-heartbeat.png" alt="Fleet heartbeat table with the caption '3 nodes · 1 offline', and Node, State, Active, and Contact columns: an offline remote first reading 'never reached', then an online remote with its latency, then the local node with its LOCAL pill." />
+</Frame>
+
+The summary line gives the node count and one clause per problem it can name, for example `3 nodes · 1 offline · 1 unknown`. Offline is counted in red and unknown in amber: a node Sencho failed to reach is not the same as one whose state it could not determine, and unknown is never folded into offline. When the mesh data plane is down, a `mesh down` clause and its banner appear alongside the counts. If a refresh fails after an earlier one succeeded, the last answer stays on screen, marked `stale` in the summary line, with a notice that names the error.
+
+Rows are ordered so problems surface first: offline nodes, then unknown nodes, then healthy remote nodes, then the local node, each group by name.
+
+| Column | What it shows |
+|--------|---------------|
+| **Node** | A status dot (green online, amber unknown, red offline), the node name, and a **LOCAL** pill on the local node |
+| **State** | `online`, `unknown`, or `offline`, in words as well as color |
+| **Active** | Running containers on that node, or `--` when the node did not report |
+| **Contact** | Round-trip latency for an online proxy node, `tunnel` for a Pilot agent node, `--` for the local node, or how long ago the node was last reached once it stops answering (`never reached` if it never has) |
+
+Every row opens that node's details in the Fleet view, so an offline node is one click from the connection details you need to fix it. Fleet lives on the hub, so from a remote node the row switches back to the hub first. The card refreshes every 30 seconds.
+
+## Configuration summary
+
+Configuration summary closes the page. It is the at-a-glance audit of the automation, alerting, and security features that can be switched on, so nothing is quietly off when you expect it to be on. It is deliberately compact: one row per domain until you ask for more.
+
+<Frame>
+  <img src="/images/dashboard/configuration-summary.png" alt="Configuration summary table with the caption '2 of 15 set up · Local', Setting, Status, Scope, and Set up columns, the Notifications and Security domains expanded into their individual settings with a Node, Account, or Instance scope each, and the Automation and Recovery & alerts domains collapsed." />
+</Frame>
+
+Each domain row carries a one-line summary, the scopes its settings span, and how many of them are set up, for example `Notifications · Discord, ntfy · 4 alert rules · no routes · 1 mute rule · 3/4`. Click a domain row, or reach its name with <kbd>Tab</kbd> and press <kbd>Enter</kbd> or <kbd>Space</kbd>, to expand its settings; do the same again to collapse. The summary line beside the title totals the whole card, for example `9 of 15 set up · edge-01`.
+
+A setting counts as set up when it is actually in effect, not merely configured: an enabled delivery channel, at least one active policy, a scanner that is present, thresholds that are switched on. Settings for features that are not available on this instance are left out of the table and of every count.
+
+Every setting names its **scope**, because switching the active node changes some rows and not others:
+
+| Scope | Meaning |
+|-------|---------|
+| **Node** | Follows the active node: switch nodes and the value changes |
+| **Account** | Belongs to you, the signed-in operator |
+| **Instance** | Belongs to the Sencho instance serving the active node: the hub, or the remote itself when a remote node is active. With a remote active, rows such as Routing, Scheduled tasks, and SSO show that remote's own copy of the setting; switch to the hub to see the values that govern the fleet. |
+
+| Domain | Setting | Scope | Opens |
+|--------|---------|-------|-------|
+| Notifications | **Channels**: enabled delivery channels (`Discord`, `Slack`, `Webhook`, `Apprise`, `ntfy`) | Node | Settings · Notifications |
+| | **Alert rules**: per-stack alert rules on this node | Node | Settings · Notifications |
+| | **Routing**: enabled routing rules | Instance | Settings · Notification Routing |
+| | **Mute rules**: enabled mute rules. See [Mute Rules](/features/alerts-notifications#mute-rules). | Instance | Settings · Mute Rules |
+| Automation | **Auto-heal policies**: `<enabled> / <total> active` | Node | Settings · Container Alerts |
+| | **Auto-update schedules**: `<enabled> / <total> active` | Node | Auto-Update |
+| | **Scheduled tasks**: active scheduled operations | Instance | Schedules |
+| | **Webhooks**: active inbound deploy webhooks | Instance | Settings · Webhooks |
+| Security | **MFA**: `On`, `Off`, or `Not set up` for your account | Account | Settings · Account |
+| | **SSO**: the active provider (`OIDC`, `Google`, `GitHub`, `Okta`, `LDAP`) or `Off` | Instance | Settings · SSO |
+| | **Trivy**: whether a scanner is installed on this node | Node | Security · Scanner |
+| | **Scan policies**: enabled vulnerability scan policies | Instance | Security · Policies |
+| Recovery & alerts | **Backups**: `Recovery Vault`, `Custom S3` (with `(auto)` when auto-upload is on), or `Off` | Instance | Settings · Cloud Backup |
+| | **Host thresholds**: `CPU x% · RAM y% · Disk z%`, or `Off` | Node | Settings · Host Alerts |
+| | **Crash detection**: global container-crash notifications | Node | Settings · Container Alerts |
+
+Click a setting row to open where it is managed. A row whose destination your role cannot open, or that is not available from the active node (such as your account settings or Schedules while a remote node is active), stays visible but is not clickable.
+
+The card refreshes when you come back to Home after changing a setting, when a scheduled task changes, when you add a mute rule from the notification feed, when the notification stream reconnects, and every 60 seconds as a safety net for changes made elsewhere. A response that arrives after you switched nodes is discarded, so one node's configuration never appears under another's name. If a refresh fails, the last values stay on screen and the summary line adds `stale` until the next refresh succeeds.
 
 ## On a phone
 
@@ -204,7 +194,7 @@ Per-stack alert rules live on each stack's **Monitor** sheet; delivery channels 
 
 The phone layout condenses the dashboard to what fits a single thumb-scroll: the masthead (state word, status dot, and a compact `<n> stacks · <n> up · <n> dn · sync <age>` meta line), the CPU hero card with its sparkline, a three-up memory/disk/network strip, and a **Stack Health** list capped at six rows with a **view all →** link to the full stack list. Rows show only the stack name, its host, a 10-minute sparkline, and current CPU; tap a row to open that stack's editor.
 
-Configuration Status, the Fleet Heartbeat / Stack Restarts panel, and Recent Alerts are desktop-only; open Sencho on a wider screen to see them. Notifications stay reachable from the bell icon in the mobile masthead.
+Recent alerts, Fleet heartbeat, and Configuration summary are desktop-only; open Sencho on a wider screen to see them. Notifications stay reachable from the bell icon in the mobile masthead. Between the phone layout and a wide desktop, the operational cards stack in one column in reading order (alerts, then heartbeat) with Configuration summary last.
 
 ## How health is derived
 
@@ -227,12 +217,11 @@ The dashboard is built from several independent polling loops so that fast-movin
 | Container counts and host system stats (masthead, gauges) | 5 seconds |
 | Stack statuses (status dots and uptime in the table) | 10 seconds |
 | Historical metrics (CPU sparklines and per-stack 10m series) | 60 seconds |
-| Configuration Status card | 60 seconds |
-| Fleet Heartbeat | 30 seconds |
-| Stack Restarts (7d) | 5 minutes |
-| Recent Alerts | Pushed live over the notifications WebSocket, with a 60-second safety-net reconcile poll |
+| Configuration summary | 60 seconds, plus the refresh signals described above |
+| Fleet heartbeat | 30 seconds |
+| Recent alerts | Pushed live over the notifications WebSocket, with a 60-second safety-net reconcile poll |
 
-In addition, every Docker container event (start, stop, die, restart, health-status change) on the active node fires a `sencho:state-invalidate` browser event that immediately refetches container counts, system stats, and stack statuses, so the masthead, gauges, and stack health table react in well under a second instead of waiting for the next polling tick. The Configuration Status card ignores these container-level events; it only reacts early to scheduled-task changes (see the section above), so it stays on its 60-second cadence for everything else.
+In addition, every Docker container event (start, stop, die, restart, health-status change) on the active node fires a `sencho:state-invalidate` browser event that immediately refetches container counts, system stats, and stack statuses, so the masthead, gauges, and stack health table react in well under a second instead of waiting for the next polling tick. Configuration summary ignores these container-level events, since none of them change a setting.
 
 When you switch the active node from the node switcher, the dashboard resets every panel to its loading state and starts a new round of fetches against the new node so you never see stale data from the previous one.
 
@@ -242,25 +231,25 @@ When you switch the active node from the node switcher, the dashboard resets eve
   <Accordion title="Stack health is empty even though I have stacks on disk">
     The table reads from the active node's `COMPOSE_DIR`. If you mounted the compose volume to a different path inside the container, set the environment variable in your `docker-compose.yml` so it matches what is on the host. Per-node overrides live on the **Compose directory** field of the node entry; the resolution chain is `node.compose_dir` → `process.env.COMPOSE_DIR` → `/app/compose`. After fixing the mount or the field, the table populates on the next 10-second poll.
   </Accordion>
-  <Accordion title="Fleet Heartbeat shows a node as 'unreachable' or with a red dot">
-    The Heartbeat card calls `/api/fleet/overview` on the local Sencho instance every 30 seconds; that endpoint records the last contact for each remote node. A red dot means the local instance has not been able to reach that node's `api_url`, or that the long-lived API token attached to the node entry has expired or been revoked. Re-test the connection from **Settings · Nodes**, regenerate the token on the remote instance, paste the new value into the node form, and the heartbeat clears on the next tick. See [Multi-node management](/features/multi-node) for the full setup flow and [Pilot agent](/features/pilot-agent) when the offline node is in agent mode.
+  <Accordion title="Fleet heartbeat shows a node as offline or unknown">
+    The heartbeat card reads the local Sencho instance's record of its last contact with each remote node, refreshed every 30 seconds. A red dot and an **offline** count mean the local instance has not been able to reach that node, or that the long-lived API token attached to the node entry has expired or been revoked. An amber dot and an **unknown** count mark a node whose status could not be determined; those nodes are never counted as offline. Re-test the connection from **Settings · Nodes**, regenerate the token on the remote instance, paste the new value into the node form, and the heartbeat clears on the next tick. See [Multi-node management](/features/multi-node) for the full setup flow and [Pilot agent](/features/pilot-agent) when the offline node is in agent mode.
   </Accordion>
-  <Accordion title="A pilot-agent node shows 'n/a' for latency">
-    Pilot-agent nodes connect outbound to the primary over a reverse tunnel, so there is no synchronous request-response loop to measure. The Heartbeat card uses the tunnel's last heartbeat to set the dot color, and intentionally renders `n/a` in the latency column. If the dot is red, check the agent container's logs for the first `[Pilot]` line and confirm the agent can reach the primary URL it is dialing. See [Pilot agent](/features/pilot-agent).
+  <Accordion title="A pilot-agent node shows 'tunnel' instead of a latency">
+    Pilot-agent nodes connect outbound to the primary over a reverse tunnel, so there is no synchronous request-response loop to measure. The heartbeat card uses the tunnel's last heartbeat to set the dot color, and shows `tunnel` in the **Contact** column instead of a latency. If the dot is red, check the agent container's logs for the first `[Pilot]` line and confirm the agent can reach the primary URL it is dialing. See [Pilot agent](/features/pilot-agent).
   </Accordion>
-  <Accordion title="Configuration Status still shows the old value after I changed a setting">
-    The card refreshes every 60 seconds on its own schedule. Creating, editing, toggling, or deleting a scheduled task also dispatches a live invalidation that the card picks up within a second. Other settings changes (cloud backup provider switch, SSO provider change, alert rule edit, agent toggle) update on the next 60-second tick. If the row stays stale after a minute, hard-reload the dashboard tab to force a fresh fetch.
+  <Accordion title="Configuration summary still shows the old value after I changed a setting">
+    Settings you change in Sencho are picked up as soon as you return to Home. A change made somewhere else, such as another browser or another operator, appears within 60 seconds. If a row stays stale after a minute, reload the tab to force a fresh fetch.
   </Accordion>
   <Accordion title="The masthead shows a 'metrics stale' chip next to the node name">
     The chip appears after three consecutive failures of the live metrics endpoints (`/api/stats` or `/api/system/stats`), which usually means the Docker socket is unreachable from this Sencho instance or the metrics service has stopped. The dashboard keeps polling on every cycle; the chip describes the freshness of the visible numbers, not the polling cadence. The chip clears on the first successful response once both endpoints are within the threshold. Check the Docker daemon status on the active node first, then the Sencho container logs for `[Dashboard]` lines if the chip persists.
   </Accordion>
-  <Accordion title="Recent Alerts shows '1 / 12' but I want to scrub through history">
-    The card paginates at eight rows. Use the chevrons in the header to flip pages. The full alert history (with filters and search) lives in the bell menu in the top bar; the dashboard card is a tape view of the latest entries on the active node. **Clear All Notifications** deletes the whole feed in one call, fanned out across every node that contributed an entry.
+  <Accordion title="Recent alerts is empty but the bell shows unread notifications">
+    The card is a short list of alerts to act on, not a mirror of the feed, so two filters can legitimately leave it empty while the bell still counts unread entries. The first is severity: warnings, errors, and availability notices for stack or node updates appear here, while completion records such as an applied image update stay in the feed. The second is scope: the default **This node** view shows the active node only, so an alert raised on a remote node is hidden until you choose **All nodes**. Open **View all alerts** to read the whole feed, including every alert the card leaves out, or the bell in the top bar for the same surface.
   </Accordion>
   <Accordion title="The masthead reads 'Critical' but my CPU is low">
     Critical can fire on RAM, disk, or the combination of any exited container with an unread error alert, not only on CPU. Read the reasons line right under the meta line; it lists every signal pushing the state up. Common cases: RAM at or above 90% from an oversized service, disk at or above 90% from runaway log retention, or a crashed container that no one has acknowledged in the alerts panel.
   </Accordion>
   <Accordion title="The dashboard feels sluggish on a large deployment">
-    Toggle **Developer mode** under **Settings · Operations · Developer Diagnostics**. Both dashboard endpoints then emit a `[Dashboard:debug]` line in the Sencho container logs for every request, reporting elapsed milliseconds and the contextual fields (`nodeId`, row count, `days` window). Use the timings to identify whether the Configuration Status payload or the stack-restarts query is the bottleneck. Disable developer mode when you are done to keep the log volume manageable.
+    Toggle **Developer mode** under **Settings · Operations · Developer Diagnostics**. The Configuration summary endpoint then emits a `[Dashboard:debug]` line in the Sencho container logs for every request, reporting elapsed milliseconds and the node it was built for. Use the timing to tell whether the Configuration summary payload is the bottleneck. Disable developer mode when you are done to keep the log volume manageable.
   </Accordion>
 </AccordionGroup>

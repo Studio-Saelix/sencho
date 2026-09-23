@@ -8,7 +8,7 @@ Sencho gives operators one browser workspace for the Docker Compose projects run
 A Sencho install can manage its local Docker host directly. It can also manage remote Sencho nodes through direct proxy connections or through the Pilot Agent for environments behind CG-NAT, firewalls, or networks where inbound ports are not available. Remote management does not require SSH access or an exposed Docker TCP socket.
 
 <Frame>
-  <img src="/images/introduction/home-overview.png" alt="Sencho Home view with the health masthead, resource gauges, stack health table, Configuration Status, Fleet Heartbeat, and Recent Alerts" />
+  <img src="/images/introduction/home-overview.png" alt="Sencho Home view with the health masthead, resource gauges, the Stack health table, Recent alerts beside the Fleet heartbeat table, and the Configuration summary table." />
 </Frame>
 
 ## Core concepts
@@ -30,9 +30,9 @@ The **Home** view is the default landing page. It is designed for a fast operati
 - The status masthead reports **Healthy**, **Degraded**, or **Critical**, names the active node, shows the node count, and lists the signals that need attention.
 - The resource gauge strip tracks **CPU**, **Memory**, **Disk**, and **Network** with sparklines and threshold coloring.
 - **Stack health** lists stacks by state and load, with optional All nodes coverage across the inventory, uptime, CPU, memory, and a 10-minute CPU sparkline per stack.
-- **Configuration Status** summarizes notifications, automation, security, backups, thresholds, and crash detection. Rows link to the Settings section that controls each item.
-- The activity panel shows **Fleet Heartbeat** when remote nodes exist, or **Stack Restarts (7d)** on a local-only install.
-- **Recent Alerts** shows the latest notification feed and includes **Clear All Notifications** when there is anything to clear.
+- **Recent alerts** leads the operational row with the latest warnings, errors, and update notices, scoped to the active node or to every node. A row opens the stack, scan history, or Fleet update sheet it concerns, and **View all alerts** opens the full notification feed.
+- **Fleet heartbeat** sits beside it on multi-node installs with every node's state, problem nodes first; a row opens that node's details in Fleet.
+- **Configuration summary** closes the page with one row per domain (notifications, automation, security, recovery and alerts), expandable into each setting with the scope it applies to and a link to where it is managed.
 
 The top navigation starts with **Home**, **Resources**, **Networking**, **Security**, and **App Store**. **Fleet** appears when your role can read nodes. Additional operator views (**Logs**, **Update**, **Schedules**, and **Console**) appear for admins. **Audit** appears based on your role and license tier. Fleet-wide views describe the control instance, so they are hidden while a remote node is active. Choose Compact (the default) or Smart desktop navigation under **Settings → Appearance → Navigation**; phone navigation stays on its own layout.
 
