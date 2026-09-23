@@ -1,180 +1,179 @@
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
-import { Radio, CheckCircle2 } from 'lucide-react';
-import { formatRelativeTime } from '@/lib/utils';
+import { AlertCircle, ChevronRight } from 'lucide-react';
+import { ScrollArea } from '@/components/ui/scroll-area';
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
+import { cn, formatRelativeTime } from '@/lib/utils';
 import { useFleetHeartbeat } from './useFleetHeartbeat';
 import { useMeshDataPlane } from './useMeshDataPlane';
-import { useNodes } from '@/context/NodeContext';
 import { MeshDataPlaneBanner } from '@/components/fleet/MeshDataPlaneBanner';
+import { DashboardPanel, PanelMeta, PanelNotice, PanelSkeleton, PanelWarning, RowAction } from './DashboardPanel';
+import {
+  PANEL_TABLE_HEAD,
+  PANEL_TABLE_HEADER_ROW,
+  PANEL_TABLE_ROW,
+  PANEL_TABLE_ROW_ACTIONABLE,
+} from './panelTable';
 import type { FleetNodeOverview } from './useFleetHeartbeat';
-import type { Node } from '@/context/NodeContext';
 
-function StatusDot({ status }: { status: 'online' | 'offline' | 'unknown' }) {
-  const colorClass =
-    status === 'online'
-      ? 'bg-success'
-      : status === 'unknown'
-        ? 'bg-warning'
-        : 'bg-destructive';
-  return (
-    <span
-      className={`inline-block h-2 w-2 rounded-full shrink-0 ${colorClass}`}
-      aria-hidden="true"
-    />
-  );
+type NodeStatus = FleetNodeOverview['status'];
+
+const DOT_CLASS: Record<NodeStatus, string> = {
+  online: 'bg-success',
+  unknown: 'bg-warning',
+  offline: 'bg-destructive',
+};
+
+const STATE_TEXT_CLASS: Record<NodeStatus, string> = {
+  online: 'text-stat-subtitle',
+  unknown: 'text-warning',
+  offline: 'text-destructive',
+};
+
+const ROW_TINT: Record<NodeStatus, string> = {
+  online: '',
+  unknown: 'bg-warning/[0.04]',
+  offline: 'bg-destructive/[0.04]',
+};
+
+/**
+ * Operational order: a node we failed to reach, then one whose state we could
+ * not determine, then healthy remotes, then the local node, which is the one
+ * the operator is already looking at. Name breaks ties so polls do not reshuffle.
+ */
+function rank(node: FleetNodeOverview): number {
+  if (node.status === 'offline') return 0;
+  if (node.status === 'unknown') return 1;
+  return node.type === 'remote' ? 2 : 3;
 }
 
-function getLatencyLabel(node: FleetNodeOverview, isPilot: boolean): string | null {
-  if (node.type === 'local') return null;
-  if (isPilot) return 'n/a';
-  if (node.status === 'online' && node.latency_ms !== undefined) return `${node.latency_ms} ms`;
-  return null;
+function sortHeartbeatNodes(nodes: FleetNodeOverview[]): FleetNodeOverview[] {
+  return nodes.slice().sort((a, b) => rank(a) - rank(b) || a.name.localeCompare(b.name));
 }
 
-function getLastSeenLabel(node: FleetNodeOverview): string | null {
-  if (node.status === 'online') return null;
-  // Pilot-agent nodes use the tunnel heartbeat timestamp
-  if (node.mode === 'pilot_agent') {
-    if (node.pilot_last_seen) return formatRelativeTime(node.pilot_last_seen);
-    return 'never reached';
+/** Latency while the node answers; how long it has been silent once it stops. */
+function contactLabel(node: FleetNodeOverview): string {
+  if (node.status === 'online') {
+    if (node.type === 'local') return '--';
+    if (node.mode === 'pilot_agent') return 'tunnel';
+    return node.latency_ms !== undefined ? `${node.latency_ms} ms` : '--';
   }
-  // Proxy nodes use the contact timestamp updated by the fleet overview handler
-  const contact = node.last_successful_contact;
-  if (!contact) return 'never reached';
-  return formatRelativeTime(contact);
+  const seen = node.mode === 'pilot_agent' ? node.pilot_last_seen : node.last_successful_contact;
+  return seen ? formatRelativeTime(seen) : 'never reached';
 }
 
-function SkeletonRow() {
-  return (
-    <div className="flex items-center gap-2.5 py-1.5 px-1">
-      <div className="h-2 w-2 rounded-full bg-accent/10 animate-pulse shrink-0" />
-      <div className="h-3 w-24 rounded-sm bg-accent/10 animate-pulse" />
-      <div className="h-3 flex-1 rounded-sm bg-accent/10 animate-pulse" />
-      <div className="h-3 w-12 rounded-sm bg-accent/10 animate-pulse shrink-0" />
-    </div>
-  );
+interface FleetHeartbeatProps {
+  onOpenNode: (nodeId: number) => void;
+  className?: string;
 }
 
-export function FleetHeartbeat() {
-  const { nodes: overviewNodes, loading, error } = useFleetHeartbeat();
+export function FleetHeartbeat({ onOpenNode, className }: FleetHeartbeatProps) {
+  const { nodes, loading, error } = useFleetHeartbeat();
   const { status: meshDataPlane } = useMeshDataPlane();
-  const { nodes: contextNodes } = useNodes();
   const meshDown = meshDataPlane?.ok === false
     && meshDataPlane.reason !== 'not_in_docker'
     && meshDataPlane.reason !== 'not_started';
 
+  // Offline and unknown are different states and get different words: a node we
+  // failed to reach is not the same as one whose status we could not determine.
+  const offlineCount = nodes.filter(n => n.status === 'offline').length;
+  const unknownCount = nodes.filter(n => n.status === 'unknown').length;
+
+  const meta = loading ? null : (
+    <PanelMeta>
+      {nodes.length} {nodes.length === 1 ? 'node' : 'nodes'}
+      {offlineCount > 0 && <span className="text-destructive"> · {offlineCount} offline</span>}
+      {unknownCount > 0 && <span className="text-warning"> · {unknownCount} unknown</span>}
+      {meshDown && <span className="text-destructive"> · mesh down</span>}
+      {error && nodes.length > 0 && <span className="text-warning"> · stale</span>}
+    </PanelMeta>
+  );
+
+  let body;
   if (loading) {
-    return (
-      <Card className="bg-card shadow-card-bevel">
-        <CardHeader className="pb-2">
-          <CardTitle className="text-sm font-medium text-stat-title">Fleet Heartbeat</CardTitle>
-        </CardHeader>
-        <CardContent className="pt-0 space-y-0.5">
-          {Array.from({ length: 3 }).map((_, i) => <SkeletonRow key={i} />)}
-        </CardContent>
-      </Card>
+    body = <PanelSkeleton rows={3} />;
+  } else if (nodes.length === 0) {
+    // With no previous answer to fall back on, a failed poll has nothing to show.
+    body = error ? (
+      <PanelNotice icon={<AlertCircle className="h-4 w-4 text-stat-icon" strokeWidth={1.5} />}>
+        Unable to load fleet status.
+      </PanelNotice>
+    ) : (
+      <PanelNotice>No nodes registered.</PanelNotice>
+    );
+  } else {
+    body = (
+      <>
+        {error ? (
+          // The rows below are the last answer, not a live one: say so rather
+          // than let green dots imply the fleet was just checked.
+          <PanelWarning>Fleet status could not be refreshed ({error}). Showing the last known state.</PanelWarning>
+        ) : null}
+        <Table>
+          <TableHeader>
+            <TableRow className={PANEL_TABLE_HEADER_ROW}>
+              <TableHead className={cn(PANEL_TABLE_HEAD, 'w-px whitespace-nowrap')}><span className="sr-only">Status</span></TableHead>
+              <TableHead className={cn(PANEL_TABLE_HEAD, 'w-full')}>Node</TableHead>
+              <TableHead className={cn(PANEL_TABLE_HEAD, 'w-px whitespace-nowrap')}>State</TableHead>
+              <TableHead className={cn(PANEL_TABLE_HEAD, 'w-px whitespace-nowrap text-right')}>Active</TableHead>
+              <TableHead className={cn(PANEL_TABLE_HEAD, 'w-px whitespace-nowrap text-right')}>Contact</TableHead>
+              <TableHead className={cn(PANEL_TABLE_HEAD, 'w-px whitespace-nowrap')}><span className="sr-only">Open</span></TableHead>
+            </TableRow>
+          </TableHeader>
+          <TableBody>
+            {sortHeartbeatNodes(nodes).map(node => (
+              <TableRow
+                key={node.id}
+                className={cn(PANEL_TABLE_ROW, PANEL_TABLE_ROW_ACTIONABLE, ROW_TINT[node.status])}
+                onClick={() => onOpenNode(node.id)}
+              >
+                <TableCell className="w-px whitespace-nowrap">
+                  <span className={cn('inline-block h-2 w-2 rounded-full', DOT_CLASS[node.status])} aria-hidden />
+                </TableCell>
+                <TableCell className="w-full max-w-0">
+                  {/* The status dot is decorative, so the button's label carries
+                      the state for a screen reader as well as the destination. */}
+                  <RowAction label={`Open ${node.name} (${node.status}) in Fleet`}>
+                    <span className="flex min-w-0 items-center gap-1.5">
+                      <span className="truncate font-mono text-xs text-stat-value">{node.name}</span>
+                      {node.type === 'local' && (
+                        <span className="shrink-0 rounded-sm border border-brand/30 bg-brand/10 px-1.5 py-px font-mono text-[10px] uppercase tracking-wide text-brand">
+                          local
+                        </span>
+                      )}
+                    </span>
+                  </RowAction>
+                </TableCell>
+                <TableCell className={cn('w-px whitespace-nowrap font-mono text-[11px] uppercase tracking-wide', STATE_TEXT_CLASS[node.status])}>
+                  {node.status}
+                </TableCell>
+                <TableCell className="w-px whitespace-nowrap text-right font-mono text-xs tabular-nums text-stat-subtitle">
+                  {node.stats ? node.stats.active : '--'}
+                </TableCell>
+                <TableCell className="w-px whitespace-nowrap text-right font-mono text-xs tabular-nums text-stat-icon">
+                  {contactLabel(node)}
+                </TableCell>
+                <TableCell className="w-px whitespace-nowrap">
+                  <ChevronRight className="h-3.5 w-3.5 text-stat-icon" strokeWidth={1.5} aria-hidden />
+                </TableCell>
+              </TableRow>
+            ))}
+          </TableBody>
+        </Table>
+      </>
     );
   }
-
-  if (error) {
-    return (
-      <Card className="bg-card shadow-card-bevel">
-        <CardHeader className="pb-2">
-          <CardTitle className="text-sm font-medium text-stat-title">Fleet Heartbeat</CardTitle>
-        </CardHeader>
-        <CardContent className="pt-0">
-          <p className="text-xs text-stat-subtitle py-4 text-center">Unable to load fleet status.</p>
-        </CardContent>
-      </Card>
-    );
-  }
-
-  const unreachableCount = overviewNodes.filter(n => n.status !== 'online').length;
-
-  const sorted = overviewNodes.slice().sort((a, b) => {
-    if (a.type === 'local' && b.type !== 'local') return -1;
-    if (b.type === 'local' && a.type !== 'local') return 1;
-    return 0;
-  });
 
   return (
-    <Card className="bg-card shadow-card-bevel">
-      <CardHeader className="pb-2">
-        <div className="flex items-center justify-between">
-          <CardTitle className="text-sm font-medium text-stat-title">Fleet Heartbeat</CardTitle>
-          <div className="flex items-center gap-1.5">
-            <Radio className="h-3.5 w-3.5 text-stat-icon" strokeWidth={1.5} />
-            <span className="text-[10px] font-mono tracking-[0.18em] uppercase text-stat-subtitle">
-              {overviewNodes.length} node{overviewNodes.length !== 1 ? 's' : ''}
-              {unreachableCount > 0 && (
-                <span className="text-destructive"> · {unreachableCount} unreachable</span>
-              )}
-              {meshDown && (
-                <span className="text-destructive"> · mesh down</span>
-              )}
-            </span>
+    // A column so the body can take whatever height the panel is given (Home
+    // sizes it to the Recent alerts card) and scroll inside it.
+    <DashboardPanel title="Fleet heartbeat" meta={meta} className={cn('flex flex-col', className)}>
+      <ScrollArea block className="min-h-0 flex-1">
+        {meshDown && meshDataPlane ? (
+          <div className="px-5 pb-3">
+            <MeshDataPlaneBanner status={meshDataPlane} variant="card" />
           </div>
-        </div>
-      </CardHeader>
-      <CardContent className="pt-0">
-        {meshDown && <MeshDataPlaneBanner status={meshDataPlane} variant="card" />}
-        {sorted.length === 0 ? (
-          <div className="flex items-center justify-center gap-2 py-6 text-stat-subtitle">
-            <CheckCircle2 className="h-4 w-4 text-success" strokeWidth={1.5} />
-            <span className="text-sm">No nodes registered.</span>
-          </div>
-        ) : (
-          <div className="space-y-0.5">
-            {sorted.map(node => {
-              const ctxNode = contextNodes.find((n: Node) => n.id === node.id);
-              const isPilot = ctxNode?.mode === 'pilot_agent';
-              const containerText = node.stats
-                ? `${node.stats.active} container${node.stats.active !== 1 ? 's' : ''}`
-                : null;
-              const latencyCell = getLatencyLabel(node, isPilot ?? false);
-              const lastSeenCell = getLastSeenLabel(node);
-
-              return (
-                <div
-                  key={node.id}
-                  className="flex items-center gap-2.5 py-1.5 px-1 rounded-sm hover:bg-accent/5"
-                >
-                  <StatusDot status={node.status} />
-
-                  <span className="text-xs font-mono text-stat-value truncate">
-                    {node.name}
-                  </span>
-
-                  {node.type === 'local' && (
-                    <span className="inline-flex items-center rounded-sm border border-brand/30 bg-brand/10 px-1.5 py-0.5 text-[10px] font-mono tracking-wide uppercase text-brand shrink-0">
-                      local
-                    </span>
-                  )}
-
-                  <span className="flex-1" />
-
-                  {containerText && (
-                    <span className="text-xs font-mono tabular-nums text-stat-subtitle shrink-0">
-                      {containerText}
-                    </span>
-                  )}
-
-                  {latencyCell !== null && (
-                    <span className="text-xs font-mono tabular-nums text-stat-icon shrink-0 min-w-[3rem] text-right">
-                      {latencyCell}
-                    </span>
-                  )}
-
-                  {lastSeenCell !== null && (
-                    <span className="text-xs font-mono tabular-nums text-stat-icon shrink-0">
-                      {lastSeenCell}
-                    </span>
-                  )}
-                </div>
-              );
-            })}
-          </div>
-        )}
-      </CardContent>
-    </Card>
+        ) : null}
+        {body}
+      </ScrollArea>
+    </DashboardPanel>
   );
 }

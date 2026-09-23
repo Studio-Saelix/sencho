@@ -754,4 +754,40 @@ describe('useNotifications', () => {
     });
     expect(result.current.notifications.some((n) => n.stack_name === 'web')).toBe(false);
   });
+  it('counts an offline remote as unreported without polling it', async () => {
+    (apiFetch as ReturnType<typeof vi.fn>).mockResolvedValue({ ok: true, json: async () => [] });
+    const { result } = renderHook(() =>
+      useNotifications({ nodes: [localNode, makeRemoteNode('offline')], onStateInvalidate: vi.fn(), onImageUpdatesChange: vi.fn(), onGitOpsChange: vi.fn() }),
+    );
+
+    await waitFor(() => expect([...(result.current.unreportedNodeIds ?? [])]).toEqual([2]));
+    expect(fetchForNode).not.toHaveBeenCalled();
+  });
+
+  it('reports a node whose feed leg did not land, and clears it once the node answers', async () => {
+    (apiFetch as ReturnType<typeof vi.fn>).mockResolvedValue({ ok: true, json: async () => [] });
+    (fetchForNode as ReturnType<typeof vi.fn>).mockResolvedValue({ ok: false, status: 502, json: async () => [] });
+    const { result } = renderHook(() =>
+      useNotifications({ nodes: [localNode, makeRemoteNode('online')], onStateInvalidate: vi.fn(), onImageUpdatesChange: vi.fn(), onGitOpsChange: vi.fn() }),
+    );
+
+    // The remote answered 502, so its silence is not an empty feed.
+    await waitFor(() => expect([...(result.current.unreportedNodeIds ?? [])]).toEqual([2]));
+
+    (fetchForNode as ReturnType<typeof vi.fn>).mockResolvedValue({ ok: true, json: async () => [] });
+    act(() => {
+      MockWS.instances[0]?.onmessage?.({
+        data: JSON.stringify({ type: 'state-invalidate', scope: 'notifications', nodeId: 1, ts: 1000 }),
+      });
+    });
+    await waitFor(() => expect(result.current.unreportedNodeIds?.size).toBe(0));
+  });
+  it('starts with no feed report and marks the local node when its own leg fails', async () => {
+    (apiFetch as ReturnType<typeof vi.fn>).mockResolvedValue({ ok: false, status: 500, json: async () => [] });
+    const { result } = renderHook(() =>
+      useNotifications({ nodes: [localNode], onStateInvalidate: vi.fn(), onImageUpdatesChange: vi.fn(), onGitOpsChange: vi.fn() }),
+    );
+    expect(result.current.unreportedNodeIds).toBeNull();
+    await waitFor(() => expect([...(result.current.unreportedNodeIds ?? [])]).toEqual([1]));
+  });
 });

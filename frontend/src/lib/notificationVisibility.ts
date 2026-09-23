@@ -36,3 +36,27 @@ export function countVisibleUnread(notifications: NotificationItem[]): number {
 export function filterPanelVisible(notifications: NotificationItem[]): NotificationItem[] {
   return notifications.filter((n) => !isPanelHiddenNotification(n));
 }
+
+/**
+ * Info-level categories that still ask the operator to do something. Absent on
+ * purpose: `image_update_applied`, a completion record with nothing to act on.
+ * The Home preview answers "what needs me", not "what happened"; applied rows
+ * would otherwise crowd warnings out of its fixed-size preview.
+ */
+const ACTIONABLE_INFO_CATEGORIES = new Set<NotificationCategory>([
+  'image_update_available',
+  'node_update_available',
+  'dev_build_update_available',
+]);
+
+/**
+ * Narrower than `filterPanelVisible`, the feed's own predicate: on top of what
+ * the panel already hides, this also drops info-level rows outside
+ * `ACTIONABLE_INFO_CATEGORIES`. The feed keeps those rows; the preview does not.
+ */
+export function isActionableAlert(n: NotificationItem): boolean {
+  if (isPanelHiddenNotification(n)) return false;
+  if (n.level === 'warning' || n.level === 'error') return true;
+  if (n.level !== 'info' || n.category === undefined) return false;
+  return ACTIONABLE_INFO_CATEGORIES.has(n.category as NotificationCategory);
+}

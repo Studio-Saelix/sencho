@@ -36,6 +36,7 @@ export function useFleetHeartbeat(): FleetHeartbeatResult {
       const res = await apiFetch('/fleet/overview', { localOnly: true });
       if (!res.ok) {
         const body = await res.json().catch(() => ({})) as { error?: string };
+        console.error('[dashboard] fleet overview fetch failed:', res.status, body.error);
         setError(body.error ?? 'Failed to load fleet overview');
         return;
       }
@@ -43,6 +44,7 @@ export function useFleetHeartbeat(): FleetHeartbeatResult {
       setNodes(data);
       setError(null);
     } catch (err) {
+      console.error('[dashboard] fleet overview fetch error:', err);
       setError((err as Error)?.message || 'Failed to load fleet overview');
     } finally {
       setLoading(false);
