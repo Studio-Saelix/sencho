@@ -970,7 +970,7 @@ components:
 
     FleetReadinessNode:
       type: object
-      required: [id, name, type, mode, transport, reachability, cells, stackCount]
+      required: [id, name, type, mode, transport, reachability, state, cells, stackCount]
       properties:
         id:
           type: integer
@@ -988,13 +988,17 @@ components:
           description: Which transport the hub would use to reach this node.
         reachability:
           $ref: "#/components/schemas/NodeReachability"
+        state:
+          $ref: "#/components/schemas/ReadinessDomainState"
+          description: The worst state among this node's cells. Nodes are returned worst first, then by name.
         cells:
           type: object
           description: |
-            Keys are exactly `domains` on the response, so a client lays out its columns
-            from that list once and reads every row against it. A domain absent from both
-            is one this caller was not told about (`domainsOmitted`) and renders as no
-            column at all, never as a column of unavailable cells.
+            Keys are the subset of `domains` on the response that apply to this node. The
+            `control` domain applies only to nodes that receive policy sync (proxy-mode
+            remotes with an API URL and token), so this instance's own node and Pilot-agent nodes carry no `control`
+            cell: a missing key means the domain does not apply. A domain absent from
+            `domains` is one this caller was not told about (`domainsOmitted`).
           additionalProperties:
             $ref: "#/components/schemas/NodeDomainCell"
         stackCount:
@@ -1046,7 +1050,11 @@ components:
                 unknown: { type: integer }
         findings:
           type: array
-          description: Worst severity first, then by `id`.
+          description: |
+            Worst severity first, then by `id`. When a node's Connectivity cell carries a
+            finding and a gated domain went unread for that same reason (no answer, a
+            timeout, or a route the node does not serve), the domain keeps its unavailable
+            cell but adds no finding. This applies only when `connectivity` is in `domains`.
           items:
             $ref: "#/components/schemas/ReadinessFinding"
         nodes:

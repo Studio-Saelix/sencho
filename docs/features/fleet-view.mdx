@@ -193,46 +193,48 @@ A subtle `Auto-refreshing every 30 seconds` line at the bottom of the page confi
 
 The **Readiness** tab answers one question across the whole estate: what needs attention before you operate, update, recover, or rely on this fleet? It reports conditions, not configuration. A setting you deliberately left off is not a finding here, and nothing on this tab changes your stacks.
 
-Nothing is scored. Every state comes from evidence the hub or the node actually gathered, so a check that could not run reads as `unknown` or `unavailable` and never as healthy.
+Nothing is scored. Every state comes from evidence the hub or the node actually gathered, so a check that could not run reads as `not checked` or `unverified` and never as healthy.
 
 <Frame>
-  <img src="/images/fleet-view/fleet-readiness-tab.png" alt="Fleet Readiness tab. The tab strip along the top lists Overview, Snapshots, Readiness, Map, Docker Labels, Deployments, Federation, Actions, and Secrets, with Readiness selected. The top card reads 'fleet readiness' over the headline 'Needs attention', with the sub-line '1 node needs attention' and a right-aligned 'last checked 3s ago' above '1 node'. Below it, a Findings card lists six rows. The first carries a NEEDS ATTENTION chip reading 'Stacks are not running' against 'Local / web', with an 'Open stack' button. The five below it carry an UNKNOWN chip: 'Policy sync state is unknown' with a Settings button, 'Stack readiness could not be determined' with a Snapshots button, 'No scan has completed yet' with a Security button, and 'Stack state is unknown' against 'Local / api' and 'Local / cache', each with an 'Open stack' button. The bottom matrix is one row for the single Local node, with a column per domain: Connectivity, Workloads, Updates, Recovery, Security, Control. Connectivity and Updates show a healthy dot, Workloads carries a NEEDS ATTENTION chip, and Recovery, Security, and Control each read UNKNOWN." />
+  <img src="/images/fleet-view/fleet-readiness-tab.png" alt="Fleet Readiness tab with Readiness selected in the Fleet tab strip. Under the 'Fleet Readiness' heading, a summary strip reads 'fleet readiness' over the headline 'Needs attention' and the line '4 of 4 nodes have something to review', followed by tiles for needs attention (3 nodes), unverified (1 node), healthy (0 of 4 nodes), and last checked (24s ago, 11 findings). Below it, the Findings section has a search button and filters for domain, state, verdict, and node above a table with Finding, Node, Stack, Domain, State, and Action columns. The first rows read 'Node did not answer' on edge-blackhole and 'Pilot tunnel is down' on pilot-west, each with a Node details action, followed by 'Rollback is not ready' for the api and web stacks with the explanation 'No backup exists yet', 'Stack is stopped' for api, 'Policy sync is failing' with the reason 'timeout of 15000ms exceeded', and 'Update needs review first' for api and web." />
 </Frame>
 
 ### The summary
 
-The card at the top names the fleet's worst state in a single word: `All clear`, `Partly unknown`, `Degraded`, `Unavailable`, or `Needs attention`. Under it, a sub-line counts how many nodes sit in each state, and a right-aligned `last checked` delta keeps ticking while the tab stays open, so you can tell a live reading from a stale one at a glance.
+The strip at the top names the fleet's worst state in a short phrase (`All clear`, `Partly verified`, `Partly checked`, `Degraded`, or `Needs attention`), says how many nodes have something to review, and counts nodes by state: needing attention, unverified, and healthy. The **last checked** tile keeps ticking while the tab stays open, so you can tell a fresh reading from an old one at a glance. The **Refresh** button in the Fleet toolbar runs the check again.
 
-The order is deliberate and worst-first: a known problem outranks a condition the hub could not check, and a condition it could not check outranks a healthy one. A fleet where every node is fine does not outrank a fleet where one node is on fire because the other nodes reported first.
+The order is deliberate and worst-first: a known problem outranks a condition that could not be verified, and an unverified condition outranks a healthy one.
 
 ### Findings
 
-**Findings** is the worklist. It lists every condition the fleet reported, problems and unknowns ahead of anything healthy, each row carrying the domain it came from, a plain-language line naming the node and stack it concerns, and a button that opens the surface where you act on it.
+**Findings** is the worklist, worst first. Each row names the condition in a sentence, carries the explanation the owning check gave (for example, why an update needs review), and names the node, stack, and domain it concerns. The action button opens the surface where you act on it: the stack, the node's details, the node's Security view, Auto-updates, Fleet Snapshots, or Settings > Nodes. A finding that restates a stack's update or rollback verdict repeats that verdict in the same words the stack's own readiness check uses, so `rollback not ready` means the same thing in both places.
 
-A finding that restates a stack's pre-update or rollback verdict repeats that verdict in the same words the stack's own readiness check uses, so `blocked` means the same thing in both places. Findings the current user cannot act on still appear; only the shortcut button is withheld.
+Use the filters above the table to narrow the list:
+
+- **Domain**, **state**, and **node** narrow to one slice of the fleet.
+- **Verdict** has two presets: **Rollback partial or not ready** lists every stack you could not cleanly roll back today, and **Update blocked or needs review** lists updates that should not go out unattended.
+- **Search** matches the finding text, its explanation, and node and stack names.
+
+When a node cannot be reached, its finding says so once, on Connectivity, instead of repeating the same cause for every domain the hub could not read.
 
 ### The readiness matrix
 
-The matrix is one row per node, one column per domain, so a fleet-wide pattern (every node's security evidence is stale) is visible as a column rather than inferred from a stack of cards.
+The matrix is one row per node, problem nodes first, one column per domain, so a fleet-wide pattern (every node has stale scans) shows up as a column rather than something you piece together. Each cell names its state in that domain's own words, for example `online`, `3 running`, `ready`, `covered`, `clear`, and `in sync` when all is well, or `offline`, `1 exited`, `2 to review`, `2 not ready`, `never scanned`, and `sync failing` when it is not. Click a problem cell to filter the findings to that node and domain; for a node that cannot be reached, the filter shows that node's connectivity finding. Click a node name to open that node's details.
 
 | Domain | What it reads |
 |--------|---------------|
 | **Connectivity** | Whether the hub can reach the node, over which transport (`local`, `pilot`, or `proxy`), and when it last made successful contact. A configured proxy address is never treated as proof that the node is answering. |
-| **Workloads** | Stacks the node reports as crashed, exited, or only partly running, plus material uncertainty in the stack listing itself. |
-| **Updates** | The canonical per-stack update verdict: which stacks are ready to update, which carry warnings, which need review first, and which are blocked. |
-| **Recovery** | Whether rollback would actually save you for each stack, and whether a fleet snapshot covers it. |
-| **Security** | Whether the node's scanner is available, how fresh its scans are, and whether its posture evidence was complete enough to trust. Security remains the surface for the detail. |
-| **Control** | Policy Sync state for the node: in sync, failing, or paused because its control identity no longer matches. See [Fleet Sync](/features/fleet-sync). |
+| **Workloads** | Stacks that are stopped or only partly running, plus uncertainty in the node's stack listing itself. A stack that has not been deployed is not a finding. |
+| **Updates** | The per-stack update verdict for deployed stacks: which carry warnings, which need review first, and which are blocked. |
+| **Recovery** | The per-stack rollback verdict for deployed stacks, and whether the latest fleet snapshot skipped the node. Fleet snapshots are optional, so a fleet without one is not a finding. |
+| **Security** | Whether the node's scanner is available, whether scans have run and are fresh, and whether the Security posture asks for action. Security remains the surface for the detail. |
+| **Policy sync** | Whether security policy from this instance is reaching the node: in sync, failing, or paused because its control identity no longer matches. See [Fleet Sync](/features/fleet-sync). |
 
-The **Control** column is admin-only.
-
-A healthy cell is a dot rather than a word, so the eye lands on the cells that carry a state. A cell reads `needs attention`, `degraded`, `unavailable`, or `unknown` otherwise.
-
-Clicking a node name opens that node's details.
+The **Policy sync** column is visible to admins. It shows `--` for nodes that do not receive policy sync, such as this instance's own node and Pilot-agent nodes.
 
 ### When a node cannot be reached
 
-The tab is built so that one bad node degrades one row, not the page. A node keeps whatever the hub could establish about it and reports the rest as `unavailable` or `unknown` with the reason: it did not answer, its Pilot tunnel is down, it does not report a check yet, or the check did not finish inside its budget. Nodes that did answer render normally, and their results are never erased by a slower sibling.
+The tab is built so that one bad node degrades one row, not the page. A node that does not answer within a few seconds is reported as `offline`, `pilot offline`, or `timed out` in its row, and the nodes that did answer render normally. Their results are never held back or erased by a slower sibling.
 
 ## The Map tab
 
