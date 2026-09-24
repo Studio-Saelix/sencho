@@ -16,7 +16,7 @@ import { MeshForwarder, type MeshForwarderHost } from './MeshForwarder';
 import { NodeRegistry } from './NodeRegistry';
 import { PilotTunnelManager } from './PilotTunnelManager';
 import { MeshProxyTunnelDialer, type DialFailureCode } from './MeshProxyTunnelDialer';
-import { generateOverrideYaml, MeshAlias, SENCHO_MESH_NETWORK } from './MeshComposeOverride';
+import { generateOverrideYaml, MeshAlias, SENCHO_MESH_NETWORK, type MeshServiceNetworkShape } from './MeshComposeOverride';
 import { lookupContainerIp } from '../mesh/containerLookup';
 import { STREAM_PENDING_DATA_MAX_BYTES } from '../pilot/protocol';
 import { redactSensitiveText, sanitizeForLog } from '../utils/safeLog';
@@ -400,7 +400,7 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
     private constructor() {
         super();
         this.setMaxListeners(50);
-        this.forwarder = new MeshForwarder(this);
+        this.forwarder = new MeshForwarder(this, () => this.senchoIp);
     }
 
     public static getInstance(): MeshService {
@@ -1437,6 +1437,9 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
                 });
             }
         }
+        // Listeners bind to Sencho's mesh IP only; without a working data
+        // plane there is nothing safe to bind to, so wait for the next tick.
+        if (!this.senchoIp) return;
         for (const port of wantPorts) {
             if (havePorts.has(port)) continue;
             try {
@@ -1824,6 +1827,7 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
 
         const yaml = generateOverrideYaml({
             services: serviceNames,
+            serviceShapes: await this.getDeclaredStackServiceShapes(stackName, nodeId),
             aliases,
             senchoIp: this.senchoIp,
         });
@@ -1908,6 +1912,7 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
 
         const yaml = generateOverrideYaml({
             services: serviceNames,
+            serviceShapes: await this.getDeclaredStackServiceShapes(stackName, localNodeId),
             aliases,
             senchoIp,
         });
@@ -2326,6 +2331,58 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
             );
             return [];
         }
+    }
+
+    /**
+     * Read the stack's compose file(s) and return each declared service's
+     * network shape (`network_mode`, whether it declares `networks:`). The
+     * override generator uses it to keep the implicit `default` network and
+     * to skip services that share another container's namespace. Returns {}
+     * when the files are unreadable; the generator then assumes `default`.
+     */
+    public async getDeclaredStackServiceShapes(stackName: string, nodeId?: number): Promise<Record<string, MeshServiceNetworkShape>> {
+        if (!isValidStackName(stackName)) return {};
+        const targetNodeId = nodeId ?? NodeRegistry.getInstance().getDefaultNodeId();
+        const shapes: Record<string, MeshServiceNetworkShape> = {};
+        try {
+            const fsSvc = FileSystemService.getInstance(targetNodeId);
+            const baseDir = fsSvc.getBaseDir();
+            const spec = DatabaseService.getInstance().getGitSource(stackName)?.applied_deploy_spec;
+            const relFiles = spec && spec.files.length > 0
+                ? spec.files
+                : [await fsSvc.getComposeFilename(stackName)];
+            for (const relFile of relFiles) {
+                if (relFile === '' || !isValidRelativeStackPath(relFile)) continue;
+                const composePath = path.join(baseDir, path.basename(stackName), relFile);
+                if (!isPathWithinBase(composePath, baseDir)) continue;
+                let parsed: { services?: Record<string, unknown> } | null;
+                try {
+                    parsed = YAML.parse(await fs.readFile(composePath, 'utf8')) as { services?: Record<string, unknown> } | null;
+                } catch {
+                    continue;
+                }
+                const services = parsed?.services && typeof parsed.services === 'object' ? parsed.services : null;
+                if (!services) continue;
+                // Later files override earlier ones, mirroring Compose's merge.
+                for (const [name, raw] of Object.entries(services)) {
+                    const svc = raw && typeof raw === 'object' ? raw as Record<string, unknown> : {};
+                    const prev = shapes[name] ?? { declaresNetworks: false };
+                    const networkMode = typeof svc.network_mode === 'string' && svc.network_mode.trim() !== ''
+                        ? svc.network_mode.trim()
+                        : prev.networkMode;
+                    shapes[name] = {
+                        declaresNetworks: prev.declaresNetworks || svc.networks != null,
+                        ...(networkMode ? { networkMode } : {}),
+                    };
+                }
+            }
+        } catch (err) {
+            console.warn(
+                '[MeshService] getDeclaredStackServiceShapes failed:',
+                sanitizeForLog((err as Error).message),
+            );
+        }
+        return shapes;
     }
 
     /**
@@ -3035,10 +3092,21 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
             cleanupRecord();
             try { src.end(); } catch { /* ignore */ }
         });
+        let awaitingDrain = false;
         src.on('data', (chunk: Buffer) => {
             record.bytesOut += chunk.length;
             if (tcpOpen) {
-                tcpStream.write(chunk);
+                // Backpressure: pause the local container's socket while the
+                // tunnel is saturated so a bulk upload over a slow link does
+                // not buffer without bound; resume on the stream's 'drain'.
+                if (!tcpStream.write(chunk) && !awaitingDrain) {
+                    awaitingDrain = true;
+                    src.pause();
+                    tcpStream.once('drain', () => {
+                        awaitingDrain = false;
+                        src.resume();
+                    });
+                }
                 return;
             }
             if (pendingBytes + chunk.length > STREAM_PENDING_DATA_MAX_BYTES) {
@@ -3397,6 +3465,7 @@ export interface MeshTcpStreamLike {
     on(event: 'data', listener: (chunk: Buffer) => void): this;
     on(event: 'error', listener: (err: Error) => void): this;
     on(event: 'close', listener: () => void): this;
+    once(event: 'drain', listener: () => void): this;
 }
 
 /**

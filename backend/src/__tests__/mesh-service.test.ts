@@ -1076,6 +1076,31 @@ describe('MeshService.getDeclaredStackServiceNames (BUG-1)', () => {
         const names = await svc.getDeclaredStackServiceNames('no-services');
         expect(names).toEqual([]);
     });
+
+    it('reports each service network shape so the override keeps default and skips network_mode', async () => {
+        const svc = MeshService.getInstance();
+        writeStackFile('shaped-stack', [
+            'services:',
+            '  web:',
+            '    image: nginx',
+            '  api:',
+            '    image: busybox',
+            '    networks: [proxy]',
+            '  app:',
+            '    image: busybox',
+            '    network_mode: "service:vpn"',
+            'networks:',
+            '  proxy:',
+            '    external: true',
+        ].join('\n'));
+
+        const shapes = await svc.getDeclaredStackServiceShapes('shaped-stack');
+        expect(shapes).toEqual({
+            web: { declaresNetworks: false },
+            api: { declaresNetworks: true },
+            app: { declaresNetworks: false, networkMode: 'service:vpn' },
+        });
+    });
 });
 
 describe('MeshService.ensureStackOverride (BUG-1 fix)', () => {

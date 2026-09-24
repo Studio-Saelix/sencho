@@ -20,6 +20,7 @@ import {
 import { isDebugEnabled } from '../utils/debug';
 import { sanitizeForLog } from '../utils/safeLog';
 import { PilotMetrics } from './PilotMetrics';
+import { startWsHeartbeat } from '../utils/wsHeartbeat';
 
 const BUFFER_HIGH_WATER_MARK = 4 * 1024 * 1024;
 const PING_INTERVAL_MS = 30_000;
@@ -179,7 +180,9 @@ export class PilotTunnelBridge extends EventEmitter implements MeshTunnelHandle 
     private readonly pausedReqs = new Map<number, IncomingMessage>();
     private readonly tcpAwaitingDrain = new Set<number>();
     private loopbackUrl = '';
-    private pingTimer?: NodeJS.Timeout;
+    private stopHeartbeat?: () => void;
+    /** Local TCP sockets paused because the tunnel's send buffer is full. */
+    private readonly pausedTcpSockets = new Set<net.Socket>();
     private drainTimer?: NodeJS.Timeout;
     private closed = false;
 
@@ -216,10 +219,7 @@ export class PilotTunnelBridge extends EventEmitter implements MeshTunnelHandle 
                 resolve();
             });
         });
-        this.pingTimer = setInterval(() => {
-            if (this.tunnelWs.readyState !== WebSocket.OPEN) return;
-            try { this.tunnelWs.ping(); } catch { /* surfaced via 'error' */ }
-        }, PING_INTERVAL_MS);
+        this.stopHeartbeat = startWsHeartbeat(this.tunnelWs, PING_INTERVAL_MS);
     }
 
     public getLoopbackUrl(): string { return this.loopbackUrl; }
@@ -292,7 +292,7 @@ export class PilotTunnelBridge extends EventEmitter implements MeshTunnelHandle 
     public close(code = 1000, reason = 'closed by primary'): void {
         if (this.closed) return;
         this.closed = true;
-        if (this.pingTimer) { clearInterval(this.pingTimer); this.pingTimer = undefined; }
+        if (this.stopHeartbeat) { this.stopHeartbeat(); this.stopHeartbeat = undefined; }
         this.stopDrainTimer();
         // Resume any paused IncomingMessage so its end event can fire and
         // its parser unwinds; the loopback close below will tear down the
@@ -302,6 +302,10 @@ export class PilotTunnelBridge extends EventEmitter implements MeshTunnelHandle 
             try { req.resume(); } catch { /* ignore */ }
         }
         this.pausedReqs.clear();
+        for (const socket of this.pausedTcpSockets) {
+            try { socket.resume(); } catch { /* ignore */ }
+        }
+        this.pausedTcpSockets.clear();
         this.tcpAwaitingDrain.clear();
 
         for (const [, state] of this.streams) {
@@ -715,6 +719,10 @@ export class PilotTunnelBridge extends EventEmitter implements MeshTunnelHandle 
             try { req.resume(); } catch { /* ignore */ }
         }
         this.pausedReqs.clear();
+        for (const socket of this.pausedTcpSockets) {
+            try { socket.resume(); } catch { /* ignore */ }
+        }
+        this.pausedTcpSockets.clear();
         // Fire 'drain' only on TCP streams that signaled backpressure; do not
         // wake every accepted TCP stream because that violates the documented
         // event contract on TcpStream.
@@ -980,8 +988,15 @@ export class PilotTunnelBridge extends EventEmitter implements MeshTunnelHandle 
                 this.sendBinary(BinaryFrameType.TcpData, s, chunk);
                 cur.bytesOut += chunk.length;
                 this.refreshIdleTimer(s, cur);
+                // Backpressure: stop reading the local container while the
+                // tunnel is saturated; checkDrain resumes it.
+                if (this.tunnelWs.bufferedAmount > BUFFER_HIGH_WATER_MARK) {
+                    socket.pause();
+                    this.pausedTcpSockets.add(socket);
+                    this.ensureDrainTimer();
+                }
             });
-            socket.on('close', () => teardown(true));
+            socket.on('close', () => { this.pausedTcpSockets.delete(socket); teardown(true); });
         });
     }
 

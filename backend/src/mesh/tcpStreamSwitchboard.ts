@@ -44,6 +44,14 @@ import { isDebugEnabled } from '../utils/debug';
  * scoped to a single WS instance — recreate the switchboard on reconnect.
  */
 const MESH_CONNECT_TIMEOUT_MS = 10_000;
+/**
+ * WS send-buffer level above which the switchboard stops reading local
+ * sockets (and reports backpressure to reverse-stream writers). Matches
+ * the central-side bridge so both ends of a tunnel behave the same.
+ */
+export const SWITCHBOARD_BUFFER_HIGH_WATER_MARK = 4 * 1024 * 1024;
+/** Poll cadence while waiting for the WS send buffer to drain. */
+const DRAIN_CHECK_INTERVAL_MS = 100;
 
 export type MeshResolveResult =
     | { ok: true; host: string; port: number }
@@ -89,13 +97,13 @@ interface ForwardTcpStream {
  */
 export class ReverseTcpStreamHandle extends EventEmitter {
     public readonly streamId: number;
-    private readonly sendData: (streamId: number, payload: Buffer) => void;
+    private readonly sendData: (streamId: number, payload: Buffer) => boolean;
     private readonly sendClose: (streamId: number) => void;
     private closed = false;
 
     constructor(
         streamId: number,
-        sendData: (streamId: number, payload: Buffer) => void,
+        sendData: (streamId: number, payload: Buffer) => boolean,
         sendClose: (streamId: number) => void,
     ) {
         super();
@@ -104,10 +112,13 @@ export class ReverseTcpStreamHandle extends EventEmitter {
         this.sendClose = sendClose;
     }
 
+    /**
+     * Send bytes to the peer. Returns false when the tunnel is saturated;
+     * the caller should pause its source until this handle emits 'drain'.
+     */
     public write(chunk: Buffer): boolean {
         if (this.closed) return false;
-        this.sendData(this.streamId, chunk);
-        return true;
+        return this.sendData(this.streamId, chunk);
     }
 
     public end(): void {
@@ -122,6 +133,8 @@ export class ReverseTcpStreamHandle extends EventEmitter {
     public _dispatchOpen(): void { this.emit('open'); }
     /** @internal Called by the switchboard on inbound `TcpData` for this stream. */
     public _dispatchData(chunk: Buffer): void { this.emit('data', chunk); }
+    /** @internal Called by the switchboard once the WS send buffer drains. */
+    public _dispatchDrain(): void { if (!this.closed) this.emit('drain'); }
     /** @internal Called by the switchboard on tunnel-side error or rejection. */
     public _dispatchError(err: Error): void { this.emit('error', err); }
     /** @internal Called by the switchboard on tunnel-side close. */
@@ -139,6 +152,11 @@ export class TcpStreamSwitchboard {
     private readonly reverseTcpStreams = new Map<number, ReverseTcpStreamHandle>();
     private reverseStreamIds = new StreamIdAllocator(AGENT_REVERSE_ID_BASE);
     private readonly idleTimers = new Map<number, NodeJS.Timeout>();
+    /** Local sockets paused while the WS send buffer is above the high-water mark. */
+    private readonly pausedSockets = new Set<net.Socket>();
+    /** Reverse handles whose last write reported backpressure. */
+    private readonly handlesAwaitingDrain = new Set<ReverseTcpStreamHandle>();
+    private drainTimer: NodeJS.Timeout | null = null;
 
     constructor(ctx: SwitchboardCtx) {
         this.ctx = ctx;
@@ -159,6 +177,41 @@ export class TcpStreamSwitchboard {
         if (existing) clearTimeout(existing);
         const timer = setTimeout(() => this.onStreamIdle(streamId), STREAM_IDLE_TIMEOUT_MS);
         this.idleTimers.set(streamId, timer);
+    }
+
+    private isSaturated(): boolean {
+        return this.ctx.ws.bufferedAmount > SWITCHBOARD_BUFFER_HIGH_WATER_MARK;
+    }
+
+    private ensureDrainTimer(): void {
+        if (this.drainTimer) return;
+        this.drainTimer = setInterval(() => this.checkDrain(), DRAIN_CHECK_INTERVAL_MS);
+        this.drainTimer.unref?.();
+    }
+
+    private stopDrainTimer(): void {
+        if (this.drainTimer) {
+            clearInterval(this.drainTimer);
+            this.drainTimer = null;
+        }
+    }
+
+    private checkDrain(): void {
+        if (this.ctx.ws.readyState !== WebSocket.OPEN) {
+            this.pausedSockets.clear();
+            this.handlesAwaitingDrain.clear();
+            this.stopDrainTimer();
+            return;
+        }
+        if (this.isSaturated()) return;
+        for (const socket of this.pausedSockets) {
+            try { socket.resume(); } catch { /* ignore */ }
+        }
+        this.pausedSockets.clear();
+        const handles = Array.from(this.handlesAwaitingDrain);
+        this.handlesAwaitingDrain.clear();
+        for (const handle of handles) handle._dispatchDrain();
+        this.stopDrainTimer();
     }
 
     private clearIdleTimer(streamId: number): void {
@@ -320,6 +373,14 @@ export class TcpStreamSwitchboard {
                 ws.send(encodeBinaryFrame(BinaryFrameType.TcpData, frame.s, chunk), { binary: true });
             } catch { /* ignore */ }
             this.refreshIdleTimer(frame.s);
+            // Backpressure: stop reading the container while the tunnel is
+            // saturated (slow link, tunnel or VPN) so the WS buffer cannot
+            // grow without bound; checkDrain resumes it.
+            if (this.isSaturated()) {
+                socket.pause();
+                this.pausedSockets.add(socket);
+                this.ensureDrainTimer();
+            }
         });
         socket.on('timeout', () => {
             if (entry.accepted) return;
@@ -346,6 +407,7 @@ export class TcpStreamSwitchboard {
             }
         });
         socket.on('close', () => {
+            this.pausedSockets.delete(socket);
             if (this.tcpStreams.delete(frame.s)) {
                 this.clearIdleTimer(frame.s);
                 try { ws.send(encodeJsonFrame({ t: 'tcp_close', s: frame.s })); } catch { /* ignore */ }
@@ -401,9 +463,16 @@ export class TcpStreamSwitchboard {
         const handle = new ReverseTcpStreamHandle(
             streamId,
             (sid, payload) => {
-                if (ws.readyState !== WebSocket.OPEN) return;
+                if (ws.readyState !== WebSocket.OPEN) return false;
                 try { ws.send(encodeBinaryFrame(BinaryFrameType.TcpData, sid, payload), { binary: true }); } catch { /* ignore */ }
                 this.refreshIdleTimer(sid);
+                if (!this.isSaturated()) return true;
+                const h = this.reverseTcpStreams.get(sid);
+                if (h) {
+                    this.handlesAwaitingDrain.add(h);
+                    this.ensureDrainTimer();
+                }
+                return false;
             },
             (sid) => {
                 if (!this.reverseTcpStreams.has(sid)) return;
@@ -459,6 +528,9 @@ export class TcpStreamSwitchboard {
         this.reverseStreamIds = new StreamIdAllocator(AGENT_REVERSE_ID_BASE);
         for (const [, timer] of this.idleTimers) clearTimeout(timer);
         this.idleTimers.clear();
+        this.pausedSockets.clear();
+        this.handlesAwaitingDrain.clear();
+        this.stopDrainTimer();
     }
 }
 

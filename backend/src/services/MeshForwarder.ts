@@ -33,13 +33,28 @@ export class MeshForwarder {
     private readonly pending = new Map<number, Promise<void>>();
     private shuttingDown = false;
 
-    constructor(private readonly host: MeshForwarderHost) {}
+    /**
+     * @param resolveBindAddress Returns the address listeners bind to. The
+     *   service passes Sencho's static `sencho_mesh` IP so mesh ports are
+     *   reachable only from the mesh bridge, never from other networks the
+     *   Sencho container joins (a reverse proxy's network, or the host's
+     *   interfaces under `network_mode: host`). Returning null refuses the
+     *   bind. Defaults to loopback for standalone use.
+     */
+    constructor(
+        private readonly host: MeshForwarderHost,
+        private readonly resolveBindAddress: () => string | null = () => '127.0.0.1',
+    ) {}
 
     public async listen(port: number): Promise<void> {
         if (this.shuttingDown) return;
         if (this.listeners.has(port)) return;
         const inflight = this.pending.get(port);
         if (inflight) return inflight;
+        const bindAddress = this.resolveBindAddress();
+        if (!bindAddress) {
+            throw new Error('mesh forwarder has no bind address (mesh data plane not ready)');
+        }
         const promise = (async () => {
             const server = net.createServer((socket) => this.acceptConnection(port, socket));
             try {
@@ -48,11 +63,10 @@ export class MeshForwarder {
                     const onListening = () => { server.removeListener('error', onError); resolve(); };
                     server.once('error', onError);
                     server.once('listening', onListening);
-                    // Bind on all interfaces inside the Sencho container's
-                    // networking namespace. The sencho_mesh bridge attaches
-                    // both Sencho and meshed user containers, so peers reach
-                    // this listener at Sencho's mesh-network IP.
-                    server.listen(port, '0.0.0.0');
+                    // Bind only on Sencho's mesh-network IP: meshed user
+                    // containers reach the listener there, while containers on
+                    // any other network Sencho is attached to cannot.
+                    server.listen(port, bindAddress);
                 });
                 this.listeners.set(port, server);
             } finally {

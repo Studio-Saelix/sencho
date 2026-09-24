@@ -163,4 +163,22 @@ describe('MeshForwarder', () => {
         const closed = new Promise<void>((resolve) => client.once('close', () => resolve()));
         await closed;
     });
+
+    it('binds only on the address the service resolves (the mesh IP), not on every interface', async () => {
+        const { host } = makeRecordingHost();
+        forwarder = new MeshForwarder(host, () => '127.0.0.1');
+        const port = await getEphemeralPort();
+        await forwarder.listen(port);
+        const server = (forwarder as unknown as { listeners: Map<number, net.Server> }).listeners.get(port);
+        const addr = server?.address();
+        expect(typeof addr === 'object' && addr ? addr.address : null).toBe('127.0.0.1');
+    });
+
+    it('refuses to bind when no mesh address is available', async () => {
+        const { host } = makeRecordingHost();
+        forwarder = new MeshForwarder(host, () => null);
+        const port = await getEphemeralPort();
+        await expect(forwarder.listen(port)).rejects.toThrow(/no bind address/);
+        expect(forwarder.getListenerPorts()).toEqual([]);
+    });
 });
