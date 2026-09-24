@@ -163,6 +163,8 @@ Review-only sources still fetch on the schedule and stage a plan for review. Aut
 
 **Retry** is offered when the last attempt failed or a retry is already scheduled, and not while the source is suspended. Retry is stage-aware: a failed fetch refetches, and a failed apply or deploy continues from the evidence already on disk. Permanent failures (for example a missing ref) do not schedule an automatic retry; use **Retry** after you fix the cause.
 
+When a deploy fails its [health gate](/features/health-gated-updates), Retry re-runs the deploy for the applied commit. With health gates enabled, the resumed deploy records a new gate verdict, so a later Retry falls back to refetching once that deploy succeeds. With health gates disabled, no new verdict is recorded and the earlier failed verdict stays the latest one, so each further Retry re-runs the deploy again instead of refetching. Every retry is still an explicit action you take; Sencho never loops on it unattended.
+
 ## Pulling and reviewing changes
 
 Click **Pull now** on the Git Source sheet to fetch the latest commit on the configured branch, tag, or commit.
