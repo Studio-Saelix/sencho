@@ -1,7 +1,7 @@
 /**
  * F9 regression guard: fleet aggregator routes return real data for
  * pilot-agent nodes (capabilities, version, metrics, stacks, drilldown,
- * configuration) by dispatching through NodeRegistry.getProxyTarget instead
+ * readiness) by dispatching through NodeRegistry.getProxyTarget instead
  * of reading node.api_url/api_token directly.
  *
  * Pre-fix:
@@ -11,7 +11,6 @@
  *   - GET /api/fleet/node/:id/stacks/:stack/containers 503'd the same way.
  *   - GET /api/fleet/update-status reported version=null and the Fleet card
  *     showed perpetual "Update available".
- *   - GET /api/fleet/configuration reported configuration=null.
  *
  * Post-fix: each surface fetches through the loopback URL when a pilot
  * tunnel is active and degrades to a mode-aware offline shape when not.
@@ -269,33 +268,80 @@ describe('GET /api/fleet/update-status (pilot-agent)', () => {
   });
 });
 
-describe('GET /api/fleet/configuration (pilot-agent)', () => {
-  it('fetches the dashboard configuration via the loopback target', async () => {
+describe('GET /api/fleet/readiness (pilot-agent)', () => {
+  // Tier 2 (the per-stack verdicts) is out of the requested set on purpose: it
+  // reads a second route, and these two cases exist to pin which transport the
+  // node evidence went over, not the fan-out's coverage.
+  const DOMAINS = 'connectivity,workloads,security';
+
+  /** A payload both tier-1 domains read as healthy. */
+  function evidenceBody(): string {
+    const generatedAt = Date.now();
+    return JSON.stringify({
+      generatedAt,
+      workloads: { generatedAt, counts: { running: 2 }, degraded: false, stale: false, problems: [] },
+      security: {
+        generatedAt,
+        posture: 'Secure',
+        posturePartial: false,
+        scannerAvailable: true,
+        staleScans: 0,
+        failedScans: 0,
+        lastSuccessfulScanAt: null,
+      },
+    });
+  }
+
+  function pilotCells(body: unknown): Record<string, { state: string; reasonCode: string | null }> {
+    const nodes = (body as { nodes: Array<Record<string, unknown>> }).nodes;
+    const pilotRow = nodes.find(n => n.id === pilotNodeId);
+    expect(pilotRow).toBeDefined();
+    return pilotRow!.cells as Record<string, { state: string; reasonCode: string | null }>;
+  }
+
+  it('reads the node evidence via the loopback target', async () => {
     mockTargetActive();
     mockFetch((url) => {
-      expect(url).toBe(`${LOOPBACK}/api/dashboard/configuration`);
-      return new Response(
-        JSON.stringify({ ssoConfigured: false, alertsConfigured: true }),
-        { status: 200, headers: { 'content-type': 'application/json' } },
-      );
+      expect(url).toBe(`${LOOPBACK}/api/readiness/evidence`);
+      return new Response(evidenceBody(), { status: 200, headers: { 'content-type': 'application/json' } });
     });
 
-    const res = await request(app).get('/api/fleet/configuration').set('Authorization', authHeader);
+    const res = await request(app)
+      .get(`/api/fleet/readiness?domains=${DOMAINS}`)
+      .set('Authorization', authHeader);
 
     expect(res.status).toBe(200);
-    const pilotRow = (res.body as Array<Record<string, unknown>>).find(r => r.id === pilotNodeId);
-    expect(pilotRow).toBeDefined();
-    expect(pilotRow!.status).toBe('online');
-    expect(pilotRow!.configuration).toMatchObject({ alertsConfigured: true });
+    const nodes = (res.body as { nodes: Array<Record<string, unknown>> }).nodes;
+    const pilotRow = nodes.find(n => n.id === pilotNodeId);
+    expect(pilotRow!.transport).toBe('pilot');
+    expect((pilotRow!.reachability as Record<string, unknown>).probedLive).toBe(true);
+    const cells = pilotCells(res.body);
+    expect(cells.connectivity.state).toBe('healthy');
+    expect(cells.workloads.state).toBe('healthy');
+    expect(cells.security.state).toBe('healthy');
   });
 
-  it('returns offline configuration=null when the tunnel is down', async () => {
+  it('reaches the disconnected-Pilot fast path without issuing a fetch', async () => {
     mockTargetOffline();
-    const res = await request(app).get('/api/fleet/configuration').set('Authorization', authHeader);
+    const fetchSpy = vi.spyOn(globalThis, 'fetch');
+
+    const res = await request(app)
+      .get(`/api/fleet/readiness?domains=${DOMAINS}`)
+      .set('Authorization', authHeader);
 
     expect(res.status).toBe(200);
-    const pilotRow = (res.body as Array<Record<string, unknown>>).find(r => r.id === pilotNodeId);
-    expect(pilotRow!.status).toBe('offline');
-    expect(pilotRow!.configuration).toBeNull();
+    const nodes = (res.body as { nodes: Array<Record<string, unknown>> }).nodes;
+    const pilotRow = nodes.find(n => n.id === pilotNodeId);
+    expect(pilotRow!.transport).toBe('unreachable');
+    const cells = pilotCells(res.body);
+    expect(cells.connectivity.state).toBe('attention');
+    expect(cells.connectivity.reasonCode).toBe('pilot_disconnected');
+    // Both domains behind the unanswered read say the same thing: the transport
+    // is what is missing, so neither reports an error the node never produced.
+    expect(cells.workloads.state).toBe('unavailable');
+    expect(cells.workloads.reasonCode).toBe('pilot_disconnected');
+    expect(cells.security.state).toBe('unavailable');
+    expect(cells.security.reasonCode).toBe('pilot_disconnected');
+    expect(fetchSpy).not.toHaveBeenCalled();
   });
 });

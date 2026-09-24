@@ -11,6 +11,7 @@ const STATIC_STACK_PATHS = new Set([
   '/stacks',
   '/stacks/',
   '/stacks/statuses',
+  '/stacks/readiness-summary',
   '/stacks/discovery',
   '/stacks/import/scan',
   '/stacks/import/move',

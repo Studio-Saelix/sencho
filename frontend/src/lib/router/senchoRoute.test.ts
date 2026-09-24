@@ -72,6 +72,10 @@ describe('senchoRoute', () => {
     const fleet = parsePath('/nodes/local/fleet/snapshots', '');
     expect(fleet.view).toBe('fleet');
     expect(fleet.fleetTab).toBe('snapshots');
+    expect(parsePath('/nodes/local/fleet/readiness', '').fleetTab).toBe('readiness');
+    // The tab shipped as `configuration` before the rename, so a bookmark that
+    // predates it has to resolve to the surface that replaced it.
+    expect(parsePath('/nodes/local/fleet/configuration', '').fleetTab).toBe('readiness');
 
     const settings = parsePath('/nodes/local/settings/nodes', '');
     expect(settings.view).toBe('settings');

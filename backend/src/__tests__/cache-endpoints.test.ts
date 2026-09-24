@@ -437,6 +437,25 @@ describe('GET /api/stacks/statuses caching', () => {
 
     listSpy.mockRestore();
   });
+
+  it('answers 500 with the clean message and logs the real error when the Docker read fails', async () => {
+    mockGetStacks.mockResolvedValue(['web.yml']);
+    const dockerError = new Error('connect ENOENT /var/run/docker.sock');
+    mockGetBulkStackStatuses.mockRejectedValue(dockerError);
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+
+    const res = await request(app).get('/api/stacks/statuses').set('Cookie', authCookie);
+
+    expect(res.status).toBe(500);
+    expect(res.body).toEqual({ error: 'Failed to fetch stack statuses' });
+    // Asserting the logged argument is the half that catches a future swallow:
+    // a 500 with the clean body alone would still pass if the diagnostic were
+    // dropped. The rejection happens before any cache entry exists, so nothing
+    // is available to serve stale.
+    expect(errorSpy).toHaveBeenCalledWith('Failed to fetch stack statuses:', dockerError);
+
+    errorSpy.mockRestore();
+  });
 });
 
 // ── /api/system/cache-stats ────────────────────────────────────────────
