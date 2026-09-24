@@ -12,6 +12,12 @@ describe('readUrlRouteState', () => {
     expect(readUrlRouteState().fleetActiveTab).toBe('snapshots');
   });
 
+  it('resolves a fleet URL from before the readiness rename', () => {
+    window.history.replaceState({}, '', '/nodes/local/fleet/configuration');
+    expect(readUrlRouteState().activeView).toBe('fleet');
+    expect(readUrlRouteState().fleetActiveTab).toBe('readiness');
+  });
+
   it('reads security tab from the current URL', () => {
     window.history.replaceState({}, '', '/nodes/local/security/images');
     expect(readUrlRouteState().activeView).toBe('security');

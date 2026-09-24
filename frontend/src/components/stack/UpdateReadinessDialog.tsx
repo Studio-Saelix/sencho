@@ -10,9 +10,10 @@ import { apiFetch } from '@/lib/api';
 import { cn } from '@/lib/utils';
 import { formatTimeAgo } from '@/lib/relativeTime';
 import { useAuth } from '@/context/AuthContext';
+import { verdictMeta } from './stackReadinessMeta';
+import type { ReadinessVerdict } from '@/types/readiness';
 
 // Mirrors the backend payload shape (the frontend never imports backend).
-type ReadinessVerdict = 'ready' | 'ready_with_warnings' | 'review_required' | 'blocked' | 'unknown';
 type SignalStatus = 'ok' | 'warning' | 'attention' | 'blocked' | 'unknown';
 
 interface ReadinessSignal {
@@ -31,39 +32,6 @@ interface UpdateReadinessReport {
 }
 
 const FETCH_TIMEOUT_MS = 4_000;
-
-const VERDICT_META: Record<ReadinessVerdict, { label: string; icon: LucideIcon; tone: string; line: string }> = {
-  ready: {
-    label: 'ready',
-    icon: Check,
-    tone: 'border-success/40 bg-success/[0.06] text-success',
-    line: 'Nothing stands out; the update can proceed.',
-  },
-  ready_with_warnings: {
-    label: 'ready with warnings',
-    icon: Info,
-    tone: 'border-info/40 bg-info/[0.06] text-info',
-    line: 'The update can proceed; review the warnings below first.',
-  },
-  review_required: {
-    label: 'review required',
-    icon: TriangleAlert,
-    tone: 'border-warning/40 bg-warning/[0.06] text-warning',
-    line: 'Something needs a look before this update.',
-  },
-  blocked: {
-    label: 'blocked',
-    icon: ShieldAlert,
-    tone: 'border-destructive/40 bg-destructive/[0.06] text-destructive',
-    line: 'A blocker was found. Proceeding is likely to fail or be stopped by policy.',
-  },
-  unknown: {
-    label: 'unknown',
-    icon: CircleHelp,
-    tone: 'border-muted bg-card/40 text-stat-subtitle',
-    line: 'Readiness could not be fully verified; proceed with care.',
-  },
-};
 
 // The `?? unknown` fallbacks at the lookup sites are forward-compat guards: a
 // newer backend may send statuses this build does not know.
@@ -222,7 +190,7 @@ export function UpdateReadinessDialog({ open, stackName, nodeId, serviceName, mo
     onProceed();
   };
 
-  const verdict = report ? VERDICT_META[report.verdict] ?? VERDICT_META.unknown : null;
+  const verdict = report ? verdictMeta(report.verdict) : null;
   const VerdictIcon = verdict?.icon;
 
   return (

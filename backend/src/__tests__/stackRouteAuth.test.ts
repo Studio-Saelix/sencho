@@ -132,6 +132,7 @@ describe('classifyStackApiPath', () => {
       expect(classifyStackApiPath('GET', '/stacks/')).toEqual({ kind: 'static' });
       expect(classifyStackApiPath('POST', '/stacks')).toEqual({ kind: 'static' });
       expect(classifyStackApiPath('GET', '/stacks/statuses')).toEqual({ kind: 'static' });
+      expect(classifyStackApiPath('GET', '/stacks/readiness-summary')).toEqual({ kind: 'static' });
       expect(classifyStackApiPath('GET', '/stacks/discovery')).toEqual({ kind: 'static' });
       expect(classifyStackApiPath('POST', '/stacks/import/scan')).toEqual({ kind: 'static' });
       expect(classifyStackApiPath('POST', '/stacks/import/move')).toEqual({ kind: 'static' });

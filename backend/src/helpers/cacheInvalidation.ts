@@ -1,6 +1,7 @@
 import { CacheService } from '../services/CacheService';
 import { StackFileRootsService } from '../services/StackFileRootsService';
 import { invalidateNodeNetworkingAggregate } from '../services/network/networkingAggregateCache';
+import { stackReadinessSummaryKey } from '../services/readiness/stackReadinessSummary';
 
 export const REMOTE_META_NAMESPACE = 'remote-meta';
 
@@ -17,6 +18,11 @@ export function invalidateNodeCaches(nodeId: number): void {
   const cache = CacheService.getInstance();
   cache.invalidate(`stats:${nodeId}`);
   cache.invalidate(`stack-statuses:${nodeId}`);
+  // Update and rollback verdicts are computed from the stack's on-disk state and
+  // its stored rows, so a deploy, edit, or delete invalidates them the same way
+  // it invalidates the statuses above. Without this the rollup keeps serving
+  // pre-mutation verdicts for its full TTL.
+  cache.invalidate(stackReadinessSummaryKey(nodeId));
   cache.invalidate('project-name-map');
   // Stack and container mutations (create/delete/edit/deploy/rename/prune),
   // auto-created externals during deploy, and network create/delete all reshape

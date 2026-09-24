@@ -92,6 +92,7 @@ export interface ViewRouterProps {
     onHostConsoleClose: () => void;
     onFleetNavigateToNode: (nodeId: number, stackName: string) => void;
     onOpenNodeNetworking: (nodeId: number) => void;
+    onOpenNodeSecurity: (nodeId: number, tab: SecurityTab | null) => void;
     filterNodeId: number | null;
     onClearScheduledOpsFilter: () => void;
     schedulePrefill: ScheduleTaskPrefill | null;
@@ -134,6 +135,7 @@ export function ViewRouter({
     onHostConsoleClose,
     onFleetNavigateToNode,
     onOpenNodeNetworking,
+    onOpenNodeSecurity,
     filterNodeId,
     onClearScheduledOpsFilter,
     schedulePrefill,
@@ -283,6 +285,7 @@ export function ViewRouter({
                         <FleetView
                       onNavigateToNode={onFleetNavigateToNode}
                       onOpenNodeNetworking={onOpenNodeNetworking}
+                      onOpenNodeSecurity={onOpenNodeSecurity}
                       onOpenSettingsSection={onOpenSettingsSection}
                       onOpenMuteRulesWithPrefill={onOpenMuteRulesWithPrefill}
                       fleetUpdatesIntent={fleetUpdatesIntent}

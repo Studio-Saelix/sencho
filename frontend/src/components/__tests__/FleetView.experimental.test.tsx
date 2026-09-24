@@ -91,7 +91,7 @@ vi.mock('../FleetView/ReconnectingOverlay', () => ({ ReconnectingOverlay: () => 
 vi.mock('../FleetView/NodeUpdatesSheet', () => ({ NodeUpdatesSheet: () => null }));
 vi.mock('../FleetView/LocalUpdateConfirmDialog', () => ({ LocalUpdateConfirmDialog: () => null }));
 vi.mock('../FleetSnapshots', () => ({ default: () => null }));
-vi.mock('../fleet/FleetConfiguration', () => ({ FleetConfiguration: () => null }));
+vi.mock('../fleet/FleetReadiness', () => ({ FleetReadiness: () => null }));
 vi.mock('../fleet/RoutingTab', () => ({ RoutingTab: () => <div data-testid="routing-tab" /> }));
 vi.mock('../fleet/FederationTab', () => ({ FederationTab: () => <div data-testid="federation-tab" /> }));
 vi.mock('../blueprints/DeploymentsTab', () => ({ DeploymentsTab: () => <div data-testid="deployments-tab" /> }));

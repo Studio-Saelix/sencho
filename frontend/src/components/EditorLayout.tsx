@@ -39,7 +39,7 @@ import {
     GlobalCommandPaletteTrigger,
 } from './GlobalCommandPalette';
 import { SENCHO_OPEN_LOGS_EVENT, SENCHO_OPEN_STACK_EVENT } from '@/lib/events';
-import type { SenchoOpenLogsDetail, SenchoOpenStackDetail } from '@/lib/events';
+import type { SecurityTab, SenchoOpenLogsDetail, SenchoOpenStackDetail } from '@/lib/events';
 import { useNodes, type Node } from '@/context/NodeContext';
 import type { StackHealthNavTarget } from './dashboard/useStackHealthScope';
 import { applyStackHealthNavigate } from './dashboard/planStackHealthNavigate';
@@ -438,12 +438,12 @@ export default function EditorLayout() {
     pendingStackLoadRef,
     pendingLogsRef,
   } = stackActions;
-  // Pending-intent target for a cross-node "open this node's Networking page"
-  // request (e.g. a Fleet networking signal). Mirrors pendingStackLoadRef:
-  // setActiveNode first, then the node-settled effect below navigates once
-  // activeNode actually reflects the target, so Networking never briefly
-  // mounts and fetches against the previous node.
-  const pendingNetworkingNodeRef = useRef<number | null>(null);
+  // Pending-intent target for a cross-node "open this node's <view>" request
+  // (a Fleet networking signal, a Readiness security finding). Mirrors
+  // pendingStackLoadRef: setActiveNode first, then the node-settled effect below
+  // opens the view once activeNode actually reflects the target, so the view
+  // never briefly mounts and fetches against the previous node.
+  const pendingNodeViewRef = useRef<{ nodeId: number; open: () => void } | null>(null);
 
   const panelStartedAt = usePanelSessionStartedAt(panelState);
 
@@ -658,20 +658,29 @@ export default function EditorLayout() {
     return () => window.removeEventListener(SENCHO_OPEN_STACK_EVENT, handler);
   }, []);
 
-  // Open a node's Networking page from a Fleet card's networking signal.
-  // Pending-intent gated (see pendingNetworkingNodeRef above): if the node is
-  // already active, navigate immediately; otherwise switch nodes first and let
-  // the node-settled effect complete the navigation once activeNode reflects
-  // the switch.
-  const handleOpenNodeNetworking = (nodeId: number) => {
+  // Open a node-scoped view (Networking from a Fleet card's networking signal,
+  // Security from a Readiness finding). Pending-intent gated (see
+  // pendingNodeViewRef above): if the node is already active, navigate
+  // immediately; otherwise switch nodes first and let the node-settled effect
+  // complete the navigation once activeNode reflects the switch.
+  const openViewOnNode = (nodeId: number, open: () => void) => {
     const node = nodes.find(n => n.id === nodeId);
     if (!node) return;
     if (activeNode?.id === nodeId) {
-      setActiveView('networking');
+      open();
       return;
     }
-    pendingNetworkingNodeRef.current = nodeId;
+    pendingNodeViewRef.current = { nodeId, open };
     setActiveNode(node);
+  };
+  const handleOpenNodeNetworking = (nodeId: number) => {
+    openViewOnNode(nodeId, () => setActiveView('networking'));
+  };
+  const handleOpenNodeSecurity = (nodeId: number, tab: SecurityTab | null) => {
+    openViewOnNode(nodeId, () => {
+      setSecurityTab(tab ?? 'overview');
+      setActiveView('security');
+    });
   };
 
   // "Inspect" a node from the mobile Fleet screen: switch to it and land on its
@@ -900,8 +909,8 @@ export default function EditorLayout() {
 
     const pendingStack = pendingStackLoadRef.current;
     pendingStackLoadRef.current = null;
-    const pendingNetworkingNodeId = pendingNetworkingNodeRef.current;
-    pendingNetworkingNodeRef.current = null;
+    const pendingNodeView = pendingNodeViewRef.current;
+    pendingNodeViewRef.current = null;
 
     stackActions.resetEditorState();
     // Stack filenames can repeat across nodes; drop the previous node's failure
@@ -913,12 +922,12 @@ export default function EditorLayout() {
       isRealSwitch,
       pendingStack,
       pendingNodeIntent: takePendingNodeIntent(activeNode.id),
-      pendingNetworkingNodeId,
+      pendingNodeView,
     });
     switch (settle.kind) {
       case 'load-stack': void stackActions.loadFile(settle.stackName); break;
       case 'run-intent': settle.run(); break;
-      case 'open-networking': setActiveView('networking'); break;
+      case 'open-node-view': settle.open(); break;
       case 'go-home': setActiveView('dashboard'); break;
       case 'none': break;
     }
@@ -1187,6 +1196,7 @@ export default function EditorLayout() {
             onHostConsoleClose={() => setActiveView(selectedFile ? 'editor' : 'dashboard')}
             onFleetNavigateToNode={handleFleetNavigateToNode}
             onOpenNodeNetworking={handleOpenNodeNetworking}
+            onOpenNodeSecurity={handleOpenNodeSecurity}
             filterNodeId={filterNodeId}
             onClearScheduledOpsFilter={() => setFilterNodeId(null)}
             schedulePrefill={schedulePrefill}

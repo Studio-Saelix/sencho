@@ -50,7 +50,7 @@ export interface ConfigurationStatus {
   };
 }
 
-export async function buildLocalConfigurationStatus(
+async function buildLocalConfigurationStatus(
   nodeId: number,
   userId: number,
   tier: LicenseTier,

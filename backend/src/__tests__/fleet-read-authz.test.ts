@@ -1,5 +1,5 @@
 /**
- * Authorization tests for the fleet topology reads. /overview, /configuration,
+ * Authorization tests for the fleet topology reads. /overview, /readiness,
  * /dependency-map, /networking-summary, and /update-status expose node names,
  * host stats, versions, and cross-node topology, so they require node:read.
  * Every shipped role carries node:read except deployer, the denial persona here.
@@ -17,7 +17,7 @@ let deployerToken: string;
 
 const NODE_READ_ROUTES = [
   '/api/fleet/overview',
-  '/api/fleet/configuration',
+  '/api/fleet/readiness',
   '/api/fleet/dependency-map',
   '/api/fleet/networking-summary',
   '/api/fleet/update-status',

@@ -196,7 +196,7 @@ describe('GET /api/dashboard/configuration', () => {
     }
   });
 
-  it('scopes alertRules to stacks on the active node for dashboard and fleet local row', async () => {
+  it('scopes alertRules to stacks on the active node', async () => {
     const db = DatabaseService.getInstance();
     const composeDir = process.env.COMPOSE_DIR as string;
     const stackName = 'cfg-alert-scope';
@@ -229,16 +229,6 @@ describe('GET /api/dashboard/configuration', () => {
       const dash = await request(app).get('/api/dashboard/configuration').set('Cookie', adminCookie);
       expect(dash.status).toBe(200);
       expect(dash.body.notifications.alertRules).toBe(2);
-
-      const fleet = await request(app).get('/api/fleet/configuration').set('Cookie', adminCookie);
-      expect(fleet.status).toBe(200);
-      expect(Array.isArray(fleet.body)).toBe(true);
-      const localRow = fleet.body.find(
-        (row: { type: string; configuration: { notifications: { alertRules: number } } | null }) =>
-          row.type === 'local' && row.configuration != null,
-      );
-      expect(localRow).toBeDefined();
-      expect(localRow.configuration.notifications.alertRules).toBe(2);
     } finally {
       for (const id of alertIds) {
         db.deleteStackAlert(id);

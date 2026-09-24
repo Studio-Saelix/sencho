@@ -73,6 +73,19 @@ export class ControlIdentityMismatchError extends Error {
 }
 
 /**
+ * Whether the control instance pushes replicated security state to `node`:
+ * proxy-mode remotes with a URL and a token. Local nodes are the source of that
+ * state, and Pilot-agent nodes do not accept pushes.
+ */
+export function isFleetSyncTarget(node: Node): node is Node & { id: number } {
+    return node.type === 'remote'
+        && node.mode !== 'pilot_agent'
+        && Boolean(node.api_url)
+        && Boolean(node.api_token)
+        && node.id != null;
+}
+
+/**
  * FleetSyncService replicates security configuration from a control Sencho
  * instance to every managed remote node. Security rules live on the control's
  * SQLite database; each write triggers a push of the full table to every
@@ -213,9 +226,7 @@ export class FleetSyncService {
                 FleetSyncService.warnedPilotAgents.add(n.id);
             }
         }
-        const nodes = allNodes.filter((n): n is Node & { id: number } => {
-            return n.type === 'remote' && n.mode !== 'pilot_agent' && Boolean(n.api_url) && Boolean(n.api_token) && n.id != null;
-        });
+        const nodes = allNodes.filter(isFleetSyncTarget);
         if (nodes.length === 0) {
             if (isDebugEnabled()) {
                 console.debug(`[FleetSync:debug] No eligible remote nodes for ${resource} push`);

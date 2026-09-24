@@ -36,6 +36,7 @@ const baseProps = {
   onHostConsoleClose: vi.fn(),
   onFleetNavigateToNode: vi.fn(),
   onOpenNodeNetworking: vi.fn(),
+  onOpenNodeSecurity: vi.fn(),
   filterNodeId: null,
   onClearScheduledOpsFilter: vi.fn(),
   schedulePrefill: null,

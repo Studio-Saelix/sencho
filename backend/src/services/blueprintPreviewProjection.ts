@@ -41,6 +41,27 @@ export const BLUEPRINT_PREVIEW_PROXY_STALE_MS = 120_000;
 
 export type PreviewSeverity = 'safe' | 'warning' | 'blocker';
 
+/**
+ * Which signal a contact timestamp came from. Named so callers that classify
+ * reachability can share one vocabulary instead of redeclaring the union.
+ */
+export type PreviewContactSource = 'local' | 'pilot_last_seen' | 'last_successful_contact';
+
+/**
+ * How `contactInfo` decided a node's reachability, as a closed set rather than
+ * free prose so a caller that renders it needs no fallback string for an
+ * unknown value.
+ */
+export type PreviewReachabilityNote =
+  | 'Local node'
+  | 'Pilot heartbeat fresh but cached status is offline'
+  | 'Pilot node cached as offline or unknown'
+  | 'Pilot heartbeat expired (cached)'
+  | 'Pilot heartbeat fresh (cached)'
+  | 'Remote node cached as offline or unknown'
+  | 'Proxy contact missing or stale (cached status)'
+  | 'Proxy contact fresh (cached)';
+
 export interface PreviewChangeRow {
     nodeId: number;
     nodeName: string;
@@ -48,7 +69,7 @@ export interface PreviewChangeRow {
     mode: string | null;
     status: Node['status'];
     contactAt: number | null;
-    contactSource: 'local' | 'pilot_last_seen' | 'last_successful_contact';
+    contactSource: PreviewContactSource;
     action: PreviewAction;
     severity: PreviewSeverity;
     kind: 'executor' | 'informational';
@@ -134,10 +155,21 @@ function isMutatingAction(action: PreviewAction): boolean {
         || action === 'check_enforce';
 }
 
-function contactInfo(node: Node): {
+/**
+ * Classify a node's reachability from cached state alone: no probe, no HTTP.
+ *
+ * `contactAt` is epoch milliseconds, normalized from the source column the
+ * classification used: `pilot_last_seen` already holds milliseconds, while
+ * `last_successful_contact` holds seconds. A configured proxy identity is not
+ * proof of reachability, so a caller that also probes must layer the live
+ * result on top of `reachabilityNote` rather than replacing this
+ * classification. `elevateMutating` is the blueprint-preview severity bump;
+ * callers that only need reachability can ignore it.
+ */
+export function contactInfo(node: Node): {
     contactAt: number | null;
-    contactSource: PreviewChangeRow['contactSource'];
-    reachabilityNote: string;
+    contactSource: PreviewContactSource;
+    reachabilityNote: PreviewReachabilityNote;
     elevateMutating: PreviewSeverity | null;
 } {
     if (node.type === 'local') {

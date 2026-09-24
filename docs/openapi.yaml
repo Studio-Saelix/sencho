@@ -799,6 +799,358 @@ components:
           type: boolean
           description: Whether sidebar update-status indicators are enabled. Controlled by the `image_update_sidebar_indicators` global setting. Default is `false`.
 
+    ReadinessDomainKey:
+      type: string
+      enum: [connectivity, workloads, updates, recovery, security, control]
+      description: One of the six readiness domains, in column order.
+
+    ReadinessDomainState:
+      type: string
+      enum: [attention, degraded, unavailable, unknown, healthy]
+      description: |
+        Ordered worst first. A node's overall state is the first of its cell states
+        found in this list. A known problem outranks a not-knowable one:
+        `unavailable` (no evidence at all) ranks above `unknown` (incomplete evidence).
+
+    ReadinessReasonCode:
+      type: string
+      description: |
+        A closed vocabulary naming why a cell is not healthy. Each code belongs to one
+        domain and maps to fixed copy in the client, which renders a code it does not
+        know as "this check reported something this build does not know" rather than as
+        healthy. `capability_absent` and `domain_error` apply to any domain.
+      enum:
+        - node_unreachable
+        - pilot_disconnected
+        - contact_stale
+        - probe_timeout
+        - workloads_exited
+        - workloads_partial
+        - workloads_unknown
+        - status_evidence_degraded
+        - status_evidence_stale
+        - update_blocked
+        - update_review_required
+        - update_ready_with_warnings
+        - rollback_not_ready
+        - rollback_partial
+        - snapshot_failed
+        - stacks_unknown
+        - summary_truncated
+        - summary_stale
+        - posture_partial
+        - posture_action_needed
+        - scanner_unavailable
+        - scans_stale
+        - scans_never_completed
+        - control_paused
+        - control_degraded
+        - control_unknown
+        - capability_absent
+        - domain_error
+
+    ReadinessTarget:
+      type: object
+      required: [surface]
+      description: |
+        Where a finding sends the operator. `surface` discriminates the variant and
+        names an existing navigation affordance rather than a URL: `stack` carries
+        `nodeId` and `stackName`; `auto-updates`, `fleet-snapshots` and
+        `settings-nodes` carry nothing else; `security` carries a `tab` segment;
+        `node-details` carries a `nodeId`.
+      properties:
+        surface:
+          type: string
+          enum: [stack, auto-updates, fleet-snapshots, security, node-details, settings-nodes]
+        nodeId:
+          type: integer
+        stackName:
+          type: string
+        tab:
+          type: ["string", "null"]
+          description: Security tab segment, or null for the Security overview.
+
+    ReadinessFinding:
+      type: object
+      required: [id, domain, nodeId, stack, code, severity, count, verdict, detail, target]
+      properties:
+        id:
+          type: string
+          description: Stable across refetches, so a client keys and de-duplicates on it.
+        domain:
+          $ref: "#/components/schemas/ReadinessDomainKey"
+        nodeId:
+          type: integer
+        stack:
+          type: ["string", "null"]
+          description: Stack name for a stack-scoped finding, null otherwise.
+        code:
+          $ref: "#/components/schemas/ReadinessReasonCode"
+        severity:
+          $ref: "#/components/schemas/ReadinessDomainState"
+          description: The state of the concern that produced this row; never `healthy`.
+        count:
+          type: integer
+          description: How many items sit behind this row (stacks, containers, snapshots).
+        verdict:
+          type: ["object", "null"]
+          description: |
+            The canonical verdict this row restates, tagged by the vocabulary it holds:
+            `{ "kind": "update", "value": "ready" | "ready_with_warnings" |
+            "review_required" | "blocked" | "unknown" }` or
+            `{ "kind": "rollback", "value": "ready" | "partial" | "not_ready" }`.
+            Null when no verdict applies.
+        detail:
+          type: ["string", "null"]
+          description: Pass-through of the canonical explanation, with sensitive values redacted.
+        target:
+          $ref: "#/components/schemas/ReadinessTarget"
+
+    NodeDomainCell:
+      type: object
+      required: [state, reasonCode, counts, evidenceAgeMs, source]
+      description: |
+        One domain's state for one node. A healthy cell carries `reasonCode: null` by
+        construction, so a client cannot look up an explanation for a state that needs
+        none.
+      properties:
+        state:
+          $ref: "#/components/schemas/ReadinessDomainState"
+        reasonCode:
+          oneOf:
+            - $ref: "#/components/schemas/ReadinessReasonCode"
+            - type: "null"
+          description: Null when, and only when, `state` is `healthy`.
+        counts:
+          type: object
+          description: |
+            Tallies in the domain's own vocabulary (`running`, `blocked`, `unknown`, ...),
+            never a score. A client renders the keys it knows and ignores the rest, so a
+            newer hub can add one without breaking an older UI.
+          additionalProperties:
+            type: integer
+        evidenceAgeMs:
+          type: ["integer", "null"]
+          description: |
+            Age of the evidence behind this cell, or null when it is not knowable. Which
+            stamp that is belongs to the domain: the newest where the newest input decided
+            the answer, the oldest where every input contributed.
+        source:
+          type: string
+          enum: [live, stored]
+          description: |
+            Whether this request's own read of the node produced the answer (`live`), or
+            the hub answered from what it already had (`stored`). A `live` cell can still
+            carry old evidence, which is `evidenceAgeMs`'s question rather than this one.
+
+    NodeReachability:
+      type: object
+      required: [status, contactAt, contactSource, note, probedLive, latencyMs]
+      properties:
+        status:
+          type: string
+          enum: [online, offline, unknown]
+        contactAt:
+          type: ["integer", "null"]
+          description: Epoch ms of the last contact this hub can vouch for.
+        contactSource:
+          type: string
+          enum: [local, pilot_last_seen, last_successful_contact]
+        note:
+          type: string
+          description: |
+            How reachability was decided, as a closed set rather than free prose, so a
+            client renders it without a fallback string.
+        probedLive:
+          type: boolean
+          description: True when this request itself reached the node.
+        latencyMs:
+          type: ["integer", "null"]
+          description: Round-trip time of the probe that produced this row, or null when there was none.
+
+    FleetReadinessNode:
+      type: object
+      required: [id, name, type, mode, transport, reachability, state, cells, stackCount]
+      properties:
+        id:
+          type: integer
+        name:
+          type: string
+        type:
+          type: string
+          enum: [local, remote]
+        mode:
+          type: string
+          enum: [proxy, pilot_agent]
+        transport:
+          type: string
+          enum: [local, pilot, proxy, unreachable]
+          description: Which transport the hub would use to reach this node.
+        reachability:
+          $ref: "#/components/schemas/NodeReachability"
+        state:
+          $ref: "#/components/schemas/ReadinessDomainState"
+          description: The worst state among this node's cells. Nodes are returned worst first, then by name.
+        cells:
+          type: object
+          description: |
+            Keys are the subset of `domains` on the response that apply to this node. The
+            `control` domain applies only to nodes that receive policy sync (proxy-mode
+            remotes with an API URL and token), so this instance's own node and Pilot-agent nodes carry no `control`
+            cell: a missing key means the domain does not apply. A domain absent from
+            `domains` is one this caller was not told about (`domainsOmitted`).
+          additionalProperties:
+            $ref: "#/components/schemas/NodeDomainCell"
+        stackCount:
+          type: ["integer", "null"]
+          description: Stacks known on this node, or null when it could not be read.
+
+    FleetReadinessResponse:
+      type: object
+      required: [generatedAt, domains, domainsOmitted, summary, findings, nodes]
+      properties:
+        generatedAt:
+          type: integer
+          description: Epoch ms this response was assembled; the surface's "last checked" time.
+        domains:
+          type: array
+          description: Domains present in this response, in column order.
+          items:
+            $ref: "#/components/schemas/ReadinessDomainKey"
+        domainsOmitted:
+          type: array
+          description: |
+            Domains withheld from this caller. Today the only member is `control`, omitted
+            unless the caller passes the same admin check `GET /api/fleet/sync-status`
+            uses; the key never appears in a node's cells.
+          items:
+            $ref: "#/components/schemas/ReadinessDomainKey"
+        summary:
+          type: object
+          required: [nodes, findings]
+          properties:
+            nodes:
+              type: object
+              description: |
+                Nodes whose worst domain state is each value, counted over the domains this
+                response carries. A node counts once, so the values sum to `nodes.length`.
+              properties:
+                attention: { type: integer }
+                degraded: { type: integer }
+                unavailable: { type: integer }
+                unknown: { type: integer }
+                healthy: { type: integer }
+            findings:
+              type: object
+              description: Findings across the fleet, by severity.
+              properties:
+                attention: { type: integer }
+                degraded: { type: integer }
+                unavailable: { type: integer }
+                unknown: { type: integer }
+        findings:
+          type: array
+          description: |
+            Worst severity first, then by `id`. When a node's Connectivity cell carries a
+            finding and a gated domain went unread for that same reason (no answer, a
+            timeout, or a route the node does not serve), the domain keeps its unavailable
+            cell but adds no finding. This applies only when `connectivity` is in `domains`.
+          items:
+            $ref: "#/components/schemas/ReadinessFinding"
+        nodes:
+          type: array
+          items:
+            $ref: "#/components/schemas/FleetReadinessNode"
+
+    StackReadinessRow:
+      type: object
+      required: [stack, update, rollback, unavailableReason]
+      properties:
+        stack:
+          type: string
+        update:
+          type: ["object", "null"]
+          description: |
+            The canonical update verdict, or null when it was never evaluated:
+            `{ "verdict": "ready" | "ready_with_warnings" | "review_required" | "blocked" |
+            "unknown", "computedAt": <epoch ms|null>, "topReason": <string|null> }`.
+            `topReason` is redacted before it leaves the node.
+        rollback:
+          type: ["object", "null"]
+          description: |
+            The canonical rollback verdict, or null when it was never evaluated:
+            `{ "overall": "ready" | "partial" | "not_ready", "computedAt": <epoch ms|null>,
+            "topReason": <string|null> }`.
+        unavailableReason:
+          oneOf:
+            - $ref: "#/components/schemas/ReadinessReasonCode"
+            - type: "null"
+          description: |
+            Set only when both `update` and `rollback` are null, naming why neither verdict
+            could be produced (the deadline, or a compute error). A stack the cap excluded
+            has no row at all; the cap is reported by `truncated` instead.
+
+    NodeStackReadinessSummary:
+      type: object
+      required: [generatedAt, truncated, stale, stacks]
+      description: |
+        Per-stack readiness as the node that owns the Docker socket computed it. The
+        verdicts are the canonical update-readiness and rollback-readiness values passed
+        through unchanged; this route adds no scoring.
+      properties:
+        generatedAt:
+          type: integer
+          description: Epoch ms of the pass that produced these verdicts, not of this request.
+        truncated:
+          type: boolean
+          description: True when the stack cap or the deadline cut the pass short.
+        stale:
+          type: boolean
+          description: |
+            True when the verdicts served are older than the freshness window, which is
+            what an earlier failed pass leaves behind. Neither the Updates nor the
+            Recovery cell may be `healthy` while this is true.
+        stacks:
+          type: array
+          description: Worst first; see `StackReadinessRow`. A stack missing from the array was not judged healthy, only left unevaluated.
+          items:
+            $ref: "#/components/schemas/StackReadinessRow"
+
+    NodeReadinessEvidence:
+      type: object
+      required: [generatedAt, workloads, security]
+      description: |
+        One node's own workload and security facts, served by `GET /api/readiness/evidence`
+        for the hub's fleet fan-out. Evidence, not verdicts: the hub owns the mapping from
+        these facts to a domain state and reason code.
+      properties:
+        generatedAt:
+          type: integer
+          description: |
+            Epoch ms this payload finished assembling, taken after both domains settled.
+            Not the age of either domain: each carries its own `generatedAt` below, and a
+            consumer ages a cell by its domain's.
+        workloads:
+          type: ["object", "null"]
+          description: |
+            This node's workload facts, or null when they could not be read:
+            `{ "generatedAt": <epoch ms>, "counts": { <status>: <number> },
+            "degraded": <boolean>, "stale": <boolean>,
+            "problems": [{ "stack": <string>, "status": "exited" | "unknown" | "partial" }] }`.
+            Every status other than `running` is a problem, `unknown` and `partial`
+            included. `degraded` and `stale` describe how the read itself went and are
+            the only signal that a served payload is no longer current.
+        security:
+          type: ["object", "null"]
+          description: |
+            This node's security posture pass, or null when it could not be computed:
+            `{ "generatedAt": <epoch ms>, "posture": <string>, "posturePartial": <boolean>,
+            "scannerAvailable": <boolean>, "staleScans": <number>, "failedScans": <number>,
+            "lastSuccessfulScanAt": <epoch ms|null> }`. `posture` is authoritative over the
+            fields beside it; `posturePartial` is true when any bounded pass behind the
+            posture was capped, so a `0` beside it is ambiguous between "none" and "not
+            counted".
+
   responses:
     Unauthorized:
       description: Authentication required. Provide a valid Bearer token.
@@ -1024,6 +1376,37 @@ paths:
                 $ref: "#/components/schemas/Error"
               example:
                 error: Stack already exists
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/stacks/readiness-summary:
+    get:
+      operationId: getStacksReadinessSummary
+      tags: [Stacks]
+      summary: Readiness summary for this node's stacks
+      description: |
+        Computes the canonical update and rollback readiness verdicts for the
+        stacks on this node, worst first, for the Fleet Readiness fan-out. It
+        runs the same verdicts that `GET
+        /api/stacks/{stackName}/update-readiness` and `GET
+        /api/stacks/{stackName}/rollback-readiness` return one stack at a time,
+        and adds no scoring of its own. The pass is bounded (an internal
+        deadline, a stack cap, and limited concurrency) and cached briefly, so a
+        truncated or stale result is reported as such rather than as a healthy
+        one. Requires `stack:read` permission.
+      parameters:
+        - $ref: "#/components/parameters/nodeId"
+      responses:
+        "200":
+          description: Per-stack readiness for the node.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NodeStackReadinessSummary"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
         "500":
           $ref: "#/components/responses/InternalError"
 
@@ -3113,6 +3496,58 @@ paths:
         "500":
           $ref: "#/components/responses/InternalError"
 
+  /api/fleet/readiness:
+    get:
+      operationId: getFleetReadiness
+      tags: [Fleet]
+      summary: Fleet readiness
+      description: |
+        Aggregates readiness across six domains (connectivity, workloads,
+        updates, recovery, security, control) into a fleet summary, a
+        prioritized findings list, and a per-node matrix. Each node and each
+        domain degrades independently: a node that does not answer keeps the
+        domains the control instance could establish and reports the rest as
+        unavailable or unknown with a reason, so one unreachable node neither
+        blanks the page nor erases another node's results. Nothing is scored,
+        and no state is reported as healthy unless it was actually established.
+        Requires `node:read` permission. The `control` domain is withheld from
+        callers that do not pass the administrative check, and is named in
+        `domainsOmitted`.
+      parameters:
+        - name: domains
+          in: query
+          required: false
+          schema:
+            type: string
+          description: |
+            Comma-separated subset of `connectivity`, `workloads`, `updates`,
+            `recovery`, `security`, `control`. Defaults to every domain.
+        - name: nodeIds
+          in: query
+          required: false
+          schema:
+            type: string
+          description: Comma-separated list of node ids to limit the response to.
+      responses:
+        "200":
+          description: Fleet readiness aggregate.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FleetReadinessResponse"
+        "400":
+          description: Invalid domains or nodeIds filter.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
   /api/fleet/node/{nodeId}/stacks:
     get:
       operationId: getFleetNodeStacks
@@ -3898,6 +4333,34 @@ paths:
           $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  # ── Readiness ───────────────────────────────────────────
+  /api/readiness/evidence:
+    get:
+      operationId: getReadinessEvidence
+      tags: [Fleet]
+      summary: Node readiness evidence
+      description: |
+        This node's readiness evidence: workload, security, and stored recovery
+        facts, in the minimal shape the Fleet Readiness fan-out consumes. The
+        control instance reads this during its fan-out, so a node that does not
+        answer, or a domain it cannot produce, reads as unknown rather than as
+        healthy. Requires `stack:read` permission.
+      parameters:
+        - $ref: "#/components/parameters/nodeId"
+      responses:
+        "200":
+          description: Readiness evidence for the node.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NodeReadinessEvidence"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
         "500":
           $ref: "#/components/responses/InternalError"
 

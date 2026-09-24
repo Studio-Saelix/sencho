@@ -10,7 +10,7 @@ The **Fleet** tab is the single page you open when you want to see the whole est
 </Note>
 
 <Frame>
-  <img src="/images/fleet-view/fleet-overview.png" alt="Fleet page showing the masthead with the editorial 'The fleet' word, a meta line reading '4 nodes · 4 online · last sync 5s', and CPU / MEM / CONTAINERS stat tiles next to a 0-alert counter. Below, the tab strip runs Overview, Snapshots, Status, Map, Docker Labels, Deployments, Federation, Actions. Under that, the toolbar (collapsed search icon, sort, filters, Grid/Topology toggle, Node Update, Manage nodes) sits above a grid of four node cards: a pinned Local card with a cyan ★ Local rail, an Online badge, a version chip, and a 'Networking · exposed' pill, followed by Opsix, Pitt-Moba, and SLX-Mars." />
+  <img src="/images/fleet-view/fleet-overview.png" alt="Fleet page showing the masthead with the editorial 'The fleet' word, a meta line reading '4 nodes · 4 online · last sync 5s', and CPU / MEM / CONTAINERS stat tiles next to a 0-alert counter. Below, the toolbar (collapsed search icon, sort, filters, Grid/Topology toggle, Node Update, Manage nodes) sits above a grid of four node cards: a pinned Local card with a cyan ★ Local rail, an Online badge, a version chip, and a 'Networking · exposed' pill, followed by Opsix, Pitt-Moba, and SLX-Mars." />
 </Frame>
 
 ## Page layout
@@ -37,13 +37,13 @@ A single rail summarises the state of every registered node so you can read the 
 
 ### Tabs
 
-The Fleet view is a tab strip. Every tier sees Overview, Status, Map, Docker Labels, Deployments, Federation, and Actions. Snapshots appears for admins. Secrets appears for admins. Routing is a limited-availability fleet surface and is not part of the default tab strip. A vertical separator after **Docker Labels** (or after **Map** when Docker Labels is not present) divides the per-node monitoring tabs from the fleet-wide orchestration tabs.
+The Fleet view is a tab strip. Every tier sees Overview, Readiness, Map, Docker Labels, Deployments, Federation, and Actions. Snapshots appears for admins. Secrets appears for admins. Routing is a limited-availability fleet surface and is not part of the default tab strip. A vertical separator after **Docker Labels** (or after **Map** when Docker Labels is not present) divides the per-node monitoring tabs from the fleet-wide orchestration tabs.
 
 | Tab | Tier | What it does |
 |-----|------|--------------|
 | **Overview** | Community | The grid or topology view of every node and its health. Covered in the next section. |
 | **Snapshots** | Community (admin role) | Snapshot every compose file across the fleet. See [Fleet-Wide Backups](/features/fleet-backups). |
-| **Status** | Community | One card per node summarising which automations and security features are configured. Covered below. |
+| **Readiness** | Community | What across the fleet needs attention before you operate, update, or recover it. Covered below. |
 | **Map** | Community | A read-only map of how stacks, services, networks, volumes, and ports relate across the fleet, with anomaly flags. Covered below. |
 | **Docker Labels** | Community | Estate-wide audit of Docker and Compose labels across every node. See [Docker Label Audit](/features/docker-label-audit). |
 | **Deployments** | Community | Blueprint deployments and reconciler state. See [Blueprints](/features/blueprint-model). |
@@ -189,31 +189,52 @@ The Overview data refreshes on its own:
 
 A subtle `Auto-refreshing every 30 seconds` line at the bottom of the page confirms the loop is alive. The **Refresh** button in the top-right forces an immediate poll without waiting.
 
-## The Status tab
+## The Readiness tab
 
-The **Status** tab gives you a fleet-wide rollup of which automations and security features are configured on every node, without having to open each node's settings individually.
+The **Readiness** tab answers one question across the whole estate: what needs attention before you operate, update, recover, or rely on this fleet? It reports conditions, not configuration. A setting you deliberately left off is not a finding here, and nothing on this tab changes your stacks.
+
+Nothing is scored. Every state comes from evidence the hub or the node actually gathered, so a check that could not run reads as `not checked` or `unverified` and never as healthy.
 
 <Frame>
-  <img src="/images/fleet-view/fleet-status-tab.png" alt="Fleet Status tab with four node cards. The Local card shows the full eight-row summary (Agents 1 active, Alert rules None, Auto-heal 1/1, Webhooks None, MFA Off, Scanning None, Backup Enabled, Crash detect On). Opsix, Pitt-Moba, and SLX-Mars each show a seven-row summary that omits MFA and Backup but adds a Policy sync row reading 'In sync'." />
+  <img src="/images/fleet-view/fleet-readiness-tab.png" alt="Fleet Readiness tab with Readiness selected in the Fleet tab strip. Under the 'Fleet Readiness' heading, a summary strip reads 'fleet readiness' over the headline 'Needs attention' and the line '4 of 4 nodes have something to review', followed by tiles for needs attention (3 nodes), unverified (1 node), healthy (0 of 4 nodes), and last checked (24s ago, 11 findings). Below it, the Findings section has a search button and filters for domain, state, verdict, and node above a table with Finding, Node, Stack, Domain, State, and Action columns. The first rows read 'Node did not answer' on edge-blackhole and 'Pilot tunnel is down' on pilot-west, each with a Node details action, followed by 'Rollback is not ready' for the api and web stacks with the explanation 'No backup exists yet', 'Stack is stopped' for api, 'Policy sync is failing' with the reason 'timeout of 15000ms exceeded', and 'Update needs review first' for api and web." />
 </Frame>
 
-Online nodes render a two-column summary grid with up to nine rows:
+### The summary
 
-| Row | What it shows | Visibility |
-|-----|---------------|------------|
-| **Agents** | Active notification agents, formatted `<n> active` or `None` | Always |
-| **Alert rules** | Per-stack alert rule count, formatted `<n> rule(s)` | Always |
-| **Auto-heal** | Enabled / total auto-heal policies, formatted `<enabled>/<total>` | Always |
-| **Webhooks** | Active outbound webhooks, formatted `<n> active` | Always (when not gated) |
-| **MFA** | `On`, `Off`, or `Not set` | Local node only |
-| **Scanning** | Active vulnerability-scan policies, formatted `<n> policy/policies` | Always (when not gated) |
-| **Backup** | `Enabled` or `Disabled` | Local node only |
-| **Crash detect** | `On` or `Off` | Always |
-| **Policy sync** | `In sync`, or a `degraded` / `paused` pill with a tooltip naming the cause. See [Fleet Sync](/features/fleet-sync). | Remote nodes that have received at least one sync push |
+The strip at the top names the fleet's worst state in a short phrase (`All clear`, `Partly verified`, `Partly checked`, `Degraded`, or `Needs attention`), says how many nodes have something to review, and counts nodes by state: needing attention, unverified, and healthy. The **last checked** tile keeps ticking while the tab stays open, so you can tell a fresh reading from an old one at a glance. The **Refresh** button in the Fleet toolbar runs the check again.
 
-Offline nodes show a muted card with the heading and the message `Node is unreachable. Configuration unavailable.` The Online or Offline indicator in the card header confirms reachability at the time of the last fetch.
+The order is deliberate and worst-first: a known problem outranks a condition that could not be verified, and an unverified condition outranks a healthy one.
 
-The tab fetches each node's configuration in parallel; a single dead node does not block the rest from rendering.
+### Findings
+
+**Findings** is the worklist, worst first. Each row names the condition in a sentence, carries the explanation the owning check gave (for example, why an update needs review), and names the node, stack, and domain it concerns. The action button opens the surface where you act on it: the stack, the node's details, the node's Security view, Auto-updates, Fleet Snapshots, or Settings > Nodes. A finding that restates a stack's update or rollback verdict repeats that verdict in the same words the stack's own readiness check uses, so `rollback not ready` means the same thing in both places.
+
+Use the filters above the table to narrow the list:
+
+- **Domain**, **state**, and **node** narrow to one slice of the fleet.
+- **Verdict** has two presets: **Rollback partial or not ready** lists every stack you could not cleanly roll back today, and **Update blocked or needs review** lists updates that should not go out unattended.
+- **Search** matches the finding text, its explanation, and node and stack names.
+
+When a node cannot be reached, its finding says so once, on Connectivity, instead of repeating the same cause for every domain the hub could not read.
+
+### The readiness matrix
+
+The matrix is one row per node, problem nodes first, one column per domain, so a fleet-wide pattern (every node has stale scans) shows up as a column rather than something you piece together. Each cell names its state in that domain's own words, for example `online`, `3 running`, `ready`, `covered`, `clear`, and `in sync` when all is well, or `offline`, `1 exited`, `2 to review`, `2 not ready`, `never scanned`, and `sync failing` when it is not. Click a problem cell to filter the findings to that node and domain; for a node that cannot be reached, the filter shows that node's connectivity finding. Click a node name to open that node's details.
+
+| Domain | What it reads |
+|--------|---------------|
+| **Connectivity** | Whether the hub can reach the node, over which transport (`local`, `pilot`, or `proxy`), and when it last made successful contact. A configured proxy address is never treated as proof that the node is answering. |
+| **Workloads** | Stacks that are stopped or only partly running, plus uncertainty in the node's stack listing itself. A stack that has not been deployed is not a finding. |
+| **Updates** | The per-stack update verdict for deployed stacks: which carry warnings, which need review first, and which are blocked. |
+| **Recovery** | The per-stack rollback verdict for deployed stacks, and whether the latest fleet snapshot skipped the node. Fleet snapshots are optional, so a fleet without one is not a finding. |
+| **Security** | Whether the node's scanner is available, whether scans have run and are fresh, and whether the Security posture asks for action. Security remains the surface for the detail. |
+| **Policy sync** | Whether security policy from this instance is reaching the node: in sync, failing, or paused because its control identity no longer matches. See [Fleet Sync](/features/fleet-sync). |
+
+The **Policy sync** column is visible to admins. It shows `--` for nodes that do not receive policy sync, such as this instance's own node and Pilot-agent nodes.
+
+### When a node cannot be reached
+
+The tab is built so that one bad node degrades one row, not the page. A node that does not answer within a few seconds is reported as `offline`, `pilot offline`, or `timed out` in its row, and the nodes that did answer render normally. Their results are never held back or erased by a slower sibling.
 
 ## The Map tab
 

@@ -3,10 +3,11 @@ import { AlertTriangle, Ban, Check, CircleHelp, Database, X, type LucideIcon } f
 import { apiFetch } from '@/lib/api';
 import { cn } from '@/lib/utils';
 import { useNodes } from '@/context/NodeContext';
+import { overallMeta } from './stackReadinessMeta';
+import type { RollbackOverall } from '@/types/readiness';
 
 // Mirrors the backend payload shape (the frontend never imports backend).
 type RollbackItemState = 'ready' | 'missing' | 'unknown' | 'not_covered' | 'blocked' | 'warning';
-type RollbackOverall = 'ready' | 'partial' | 'not_ready';
 
 interface RollbackReadinessItem {
   id: string;
@@ -25,12 +26,6 @@ interface RollbackReadinessReport {
 }
 
 const LABEL_CLASS = 'font-mono text-[10px] uppercase tracking-[0.18em] text-stat-subtitle';
-
-const OVERALL_META: Record<RollbackOverall, { label: string; tone: string }> = {
-  ready: { label: 'ready', tone: 'border-success/40 bg-success/[0.06] text-success' },
-  partial: { label: 'partial', tone: 'border-warning/40 bg-warning/[0.06] text-warning' },
-  not_ready: { label: 'not ready', tone: 'border-destructive/40 bg-destructive/[0.06] text-destructive' },
-};
 
 const STATE_META: Record<RollbackItemState, { icon: LucideIcon; tone: string }> = {
   ready: { icon: Check, tone: 'text-success' },
@@ -77,7 +72,7 @@ export function RollbackReadinessSection({ stackName }: { stackName: string }) {
 
   if (!enabled || !report) return null;
 
-  const overall = OVERALL_META[report.overall] ?? OVERALL_META.partial;
+  const overall = overallMeta(report.overall);
 
   return (
     <section data-testid="dossier-rollback-readiness">

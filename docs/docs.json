@@ -265,6 +265,7 @@
             "pages": [
               "GET /api/stacks",
               "POST /api/stacks",
+              "GET /api/stacks/readiness-summary",
               "GET /api/stacks/{stackName}",
               "PUT /api/stacks/{stackName}",
               "DELETE /api/stacks/{stackName}",
@@ -328,6 +329,8 @@
             "group": "Fleet",
             "pages": [
               "GET /api/fleet/overview",
+              "GET /api/fleet/readiness",
+              "GET /api/readiness/evidence",
               "GET /api/fleet/node/{nodeId}/stacks",
               "GET /api/fleet/node/{nodeId}/stacks/{stackName}/containers",
               "GET /api/fleet/update-status",
