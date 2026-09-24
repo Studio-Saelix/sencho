@@ -7,6 +7,18 @@ import request from 'supertest';
 import jwt from 'jsonwebtoken';
 import { setupTestDb, cleanupTestDb, TEST_USERNAME, TEST_JWT_SECRET } from './helpers/setupTestDb';
 import { MonitorService } from '../services/MonitorService';
+import SelfIdentityService from '../services/SelfIdentityService';
+
+/** Seed a dev-build availability digest recorded against `recordedImageId`
+ * (defaults to the running image, which is what MonitorService writes on detection). */
+function markDevBuildAvailable(db: { setSystemState(key: string, value: string): void }, recordedImageId = 'img-running') {
+  vi.spyOn(SelfIdentityService.getInstance(), 'getIdentity').mockReturnValue({
+    containerId: null, containerName: null, composeProjectName: null,
+    imageId: 'img-running', networkNames: [], volumeNames: [],
+  });
+  db.setSystemState(MonitorService.SENCHO_DEV_BUILD_AVAILABLE_KEY, 'sha256:aaaa');
+  db.setSystemState(MonitorService.SENCHO_DEV_BUILD_AVAILABLE_IMAGE_KEY, recordedImageId);
+}
 
 let tmpDir: string;
 let app: import('express').Express;
@@ -227,7 +239,7 @@ describe('stale stable skip does not leak onto a dev-pinned node', () => {
       composeImageRef: 'ghcr.io/studio-saelix/sencho-dev:dev',
       filePath: '/opt/sencho/docker-compose.yml',
     });
-    db.setSystemState(MonitorService.SENCHO_DEV_BUILD_AVAILABLE_KEY, 'sha256:aaaa');
+    markDevBuildAvailable(db);
 
     const res = await request(app)
       .get('/api/fleet/update-status')

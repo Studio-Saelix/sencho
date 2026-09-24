@@ -9,8 +9,21 @@ import jwt from 'jsonwebtoken';
 import { buildTargetImageRef } from '../helpers/selfUpdateCompose';
 import { setupTestDb, cleanupTestDb, TEST_USERNAME, TEST_JWT_SECRET } from './helpers/setupTestDb';
 import { MonitorService } from '../services/MonitorService';
+import SelfIdentityService from '../services/SelfIdentityService';
 
 let tmpDir: string;
+
+/** Seed a dev-build availability digest recorded against `recordedImageId`
+ * (defaults to the running image, which is what MonitorService writes on detection). */
+function markDevBuildAvailable(db: { setSystemState(key: string, value: string): void }, recordedImageId = 'img-running') {
+  vi.spyOn(SelfIdentityService.getInstance(), 'getIdentity').mockReturnValue({
+    containerId: null, containerName: null, composeProjectName: null,
+    imageId: 'img-running', networkNames: [], volumeNames: [],
+  });
+  db.setSystemState(MonitorService.SENCHO_DEV_BUILD_AVAILABLE_KEY, 'sha256:aaaa');
+  db.setSystemState(MonitorService.SENCHO_DEV_BUILD_AVAILABLE_IMAGE_KEY, recordedImageId);
+}
+
 let app: import('express').Express;
 let adminAuth: string;
 let localNodeId: number;
@@ -223,7 +236,7 @@ describe('GET /api/fleet/update-status pin projection', () => {
     mockSelfUpdateAvailable({
       pinInfo: { pinKind: 'floating', composeImageRef: 'ghcr.io/studio-saelix/sencho-dev:dev', filePath: '/opt/sencho/docker-compose.yml' },
     });
-    DatabaseService.getInstance().setSystemState(MonitorService.SENCHO_DEV_BUILD_AVAILABLE_KEY, 'sha256:aaaa');
+    markDevBuildAvailable(DatabaseService.getInstance());
 
     const res = await request(app)
       .get('/api/fleet/update-status')
@@ -233,6 +246,41 @@ describe('GET /api/fleet/update-status pin projection', () => {
     expect(local.isDevImage).toBe(true);
     expect(local.devBuildUpdateAvailable).toBe(true);
     expect(local.updateAvailable).toBe(false);
+  });
+
+  it('does not report a digest recorded against a previous image once the container is recreated', async () => {
+    mockCompareTargetFetch();
+    mockSelfUpdateAvailable({
+      pinInfo: { pinKind: 'floating', composeImageRef: 'ghcr.io/studio-saelix/sencho-dev:dev', filePath: '/opt/sencho/docker-compose.yml' },
+    });
+    markDevBuildAvailable(DatabaseService.getInstance(), 'img-before-update');
+
+    const res = await request(app)
+      .get('/api/fleet/update-status')
+      .set('Authorization', adminAuth);
+
+    const local = res.body.nodes.find((n: { nodeId: number }) => n.nodeId === localNodeId);
+    expect(local.isDevImage).toBe(true);
+    expect(local.devBuildUpdateAvailable).toBe(false);
+  });
+
+  it('does not report availability when the running image id is unknown', async () => {
+    mockCompareTargetFetch();
+    mockSelfUpdateAvailable({
+      pinInfo: { pinKind: 'floating', composeImageRef: 'ghcr.io/studio-saelix/sencho-dev:dev', filePath: '/opt/sencho/docker-compose.yml' },
+    });
+    vi.spyOn(SelfIdentityService.getInstance(), 'getIdentity').mockReturnValue({
+      containerId: null, containerName: null, composeProjectName: null,
+      imageId: null, networkNames: [], volumeNames: [],
+    });
+    DatabaseService.getInstance().setSystemState(MonitorService.SENCHO_DEV_BUILD_AVAILABLE_KEY, 'sha256:aaaa');
+
+    const res = await request(app)
+      .get('/api/fleet/update-status')
+      .set('Authorization', adminAuth);
+
+    const local = res.body.nodes.find((n: { nodeId: number }) => n.nodeId === localNodeId);
+    expect(local.devBuildUpdateAvailable).toBe(false);
   });
 
   it('marks a :dev-pinned local node as a dev image but not available when no digest key is set', async () => {
@@ -256,7 +304,7 @@ describe('GET /api/fleet/update-status pin projection', () => {
     mockSelfUpdateAvailable({
       pinInfo: { pinKind: 'floating', composeImageRef: 'ghcr.io/studio-saelix/sencho-dev:dev-a1b2c3d', filePath: '/opt/sencho/docker-compose.yml' },
     });
-    DatabaseService.getInstance().setSystemState(MonitorService.SENCHO_DEV_BUILD_AVAILABLE_KEY, 'sha256:aaaa');
+    markDevBuildAvailable(DatabaseService.getInstance());
 
     const res = await request(app)
       .get('/api/fleet/update-status')
@@ -272,7 +320,7 @@ describe('GET /api/fleet/update-status pin projection', () => {
     mockSelfUpdateAvailable({
       pinInfo: { pinKind: 'semver', composeImageRef: 'saelix/sencho:0.83.0', filePath: '/opt/sencho/docker-compose.yml' },
     });
-    DatabaseService.getInstance().setSystemState(MonitorService.SENCHO_DEV_BUILD_AVAILABLE_KEY, 'sha256:aaaa');
+    markDevBuildAvailable(DatabaseService.getInstance());
 
     const res = await request(app)
       .get('/api/fleet/update-status')
