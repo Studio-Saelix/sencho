@@ -197,10 +197,6 @@ test.describe('Desktop navigation styles', () => {
   test('the launcher hamburger morphs open/closed and does not animate under Reduced motion', async ({ page }) => {
     const trigger = page.getByRole('button', { name: 'Open navigation launcher' });
     await expect(trigger).toHaveAttribute('data-state', 'closed');
-    await trigger.click();
-    await expect(trigger).toHaveAttribute('data-state', 'open');
-    await page.keyboard.press('Escape');
-    await expect(trigger).toHaveAttribute('data-state', 'closed');
 
     // The bar actually moves open vs. closed, not just a duration-clamp check.
     // Read translate and rotate alongside transform: Tailwind v4 compiles these
@@ -212,9 +208,21 @@ test.describe('Desktop navigation styles', () => {
       const s = getComputedStyle(el);
       return `${s.translate}|${s.rotate}|${s.transform}`;
     };
+    // Read the closed bar while it is at rest, before anything has animated.
     const closedMorph = await bar.evaluate(morphState);
+
     await trigger.click();
     await expect(trigger).toHaveAttribute('data-state', 'open');
+    await page.keyboard.press('Escape');
+    await expect(trigger).toHaveAttribute('data-state', 'closed');
+
+    await trigger.click();
+    await expect(trigger).toHaveAttribute('data-state', 'open');
+    // The bars move through a CSS transition (150ms, clamped under Reduced
+    // motion), so a computed-style read right after the data-state flip can
+    // land before the transition settles and report the closed values. Poll
+    // until the morph differs instead of sampling once.
+    await expect.poll(() => bar.evaluate(morphState), { timeout: 5_000 }).not.toBe(closedMorph);
     const openMorph = await bar.evaluate(morphState);
     expect(openMorph).not.toBe(closedMorph);
     await page.keyboard.press('Escape');
