@@ -126,6 +126,9 @@ interface NotificationPanelProps {
     onDelete: (notif: NotificationItem) => void;
     onNavigate?: (notif: NotificationItem) => void;
     onNavigateChangelog?: (notif: NotificationItem) => void;
+    /** Shell-owned so Home's "View all alerts" action can open the panel. */
+    open: boolean;
+    onOpenChange: (open: boolean) => void;
 }
 
 export function NotificationPanel({
@@ -136,12 +139,13 @@ export function NotificationPanel({
     onDelete,
     onNavigate,
     onNavigateChangelog,
+    open,
+    onOpenChange,
 }: NotificationPanelProps) {
     const { isAdmin } = useAuth();
     const [filter, setFilter] = useState<NotifFilter>('all');
     const [nodeFilter, setNodeFilter] = useState<NodeFilter>(NODE_FILTER_ALL);
     const [categoryFilter, setCategoryFilter] = useState<CategoryFilter>(CATEGORY_FILTER_ALL);
-    const [open, setOpen] = useState(false);
     const [showFilters, setShowFilters] = useState(false);
 
     const hasActiveFilters =
@@ -211,16 +215,16 @@ export function NotificationPanel({
         if (!onNavigate) return;
         if (notif.category === 'node_update_available') {
             onNavigate(notif);
-            setOpen(false);
+            onOpenChange(false);
             return;
         }
         if (!notif.stack_name) return;
         onNavigate(notif);
-        setOpen(false);
+        onOpenChange(false);
     };
 
     return (
-        <Popover open={open} onOpenChange={setOpen}>
+        <Popover open={open} onOpenChange={onOpenChange}>
             <PopoverTrigger asChild>
                 <Button
                     variant="ghost"

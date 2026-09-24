@@ -84,5 +84,12 @@
     "title": "Rollout lifecycle controls",
     "blurb": "Pause, resume, replan, supersede, or roll back a Blueprint rollout from the GitOps application view, with an explicit recovery scope and per-target results.",
     "docUrl": "https://docs.sencho.io/features/blueprint-model#pause-resume-replan-or-supersede-a-rollout"
+  },
+  {
+    "id": "home-fleet-triage",
+    "title": "Fleet triage on Home",
+    "blurb": "Recent alerts opens the operational row with a This node / All nodes scope, and each alert leads to the stack, scan history, or update it concerns, switching nodes when needed. Fleet heartbeat sits beside it at the same height, lists problem nodes first, and opens their details, and Configuration summary gives one row per domain with each setting's scope.",
+    "docUrl": "https://docs.sencho.io/features/dashboard",
+    "screenshot": "home-fleet-triage.png"
   }
 ]

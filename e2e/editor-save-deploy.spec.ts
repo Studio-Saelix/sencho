@@ -141,7 +141,14 @@ test.describe('EditorView save-and-deploy', () => {
       await loginAs(tab2);
       await waitForStacksLoaded(tab2);
       await tab2.getByRole('button', { name: 'Switch node' }).click();
-      await tab2.getByRole('button', { name: REMOTE_NODE_NAME }).first().click();
+      // The Home dashboard's Fleet heartbeat row also matches this node name
+      // (its aria-label embeds it), and name matching is substring-based. The
+      // row precedes the portaled popover in document order, so an unscoped
+      // `.first()` navigates to Fleet instead of switching nodes.
+      await tab2
+        .locator('[data-sn-chrome="popover"]')
+        .getByRole('button', { name: REMOTE_NODE_NAME })
+        .click();
       await expect(tab2.getByRole('button', { name: 'Switch node' })).toContainText(
         new RegExp(REMOTE_NODE_NAME, 'i'),
         { timeout: 10_000 },

@@ -102,12 +102,6 @@ The next few healthchecks pass, and the container settles back to **healthy** on
   <img src="/images/tutorials/configure-auto-heal-policies/container-healthy-recovered.png" alt="The ops-status stack back to RUNNING HEALTHY, with ops-status-web-1 showing healthy status about a minute after restarting." />
 </Frame>
 
-Check from a second, independent surface too: open the dashboard's **Stack Restarts (7d)** card. It shows an `ops-status` row tagged **AUTO-HEAL** with a restart count, confirming the restarts came from the policy and not a manual action:
-
-<Frame>
-  <img src="/images/tutorials/configure-auto-heal-policies/dashboard-stack-restarts-autoheal.png" alt="The dashboard's Stack Restarts (7d) card showing an ops-status row with an AUTO-HEAL badge and a restart count of 2, and the Configuration Status card showing Auto-heal policies 1 / 1 active." />
-</Frame>
-
 ## If something goes wrong
 
 **The policy never fires, and the container never shows a health word at all.** Compare the container card's status line: a container with a working healthcheck reads `up X minutes · healthy` (or `unhealthy`); a container with no `HEALTHCHECK` declared just reads `up X minutes`, with nothing after it. If your service is missing the health word entirely, Auto-Heal's healthcheck path has nothing to evaluate: add a `healthcheck` block to that service in `docker-compose.yml` (see the [Prerequisites](#prerequisites) snippet above) and redeploy the stack. See [Auto-Heal Policies · Troubleshooting](/features/auto-heal-policies#troubleshooting) for the other ways a policy can fail to fire.

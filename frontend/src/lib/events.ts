@@ -54,6 +54,9 @@ export type SecurityTab =
   | 'history'
   | 'scanner';
 
+/** Tabs of the Fleet update-availability sheet. */
+export type FleetUpdatesTab = 'nodes' | 'changelog';
+
 /** Fleet view sub-tabs, used for deep-link navigation (e.g. the stack storage
  *  warning linking to Snapshots). Mirrors the TabsTrigger values in FleetView. */
 export type FleetTab =

@@ -13,7 +13,7 @@ import { SettingsPage } from '../settings/SettingsPage';
 import type { SectionId } from '../settings/types';
 import { AppStoreView } from '../AppStoreView';
 import ResourcesView from '../ResourcesView';
-import HomeDashboard from '../HomeDashboard';
+import HomeDashboard, { type HomeNavigation } from '../HomeDashboard';
 import type { NotificationItem } from '../dashboard/types';
 import type { ScheduleTaskPrefill } from '../ScheduledOperationsView';
 import type { MuteRuleDraft } from '@/lib/muteRules';
@@ -22,7 +22,6 @@ import type { StackUpdateInfo } from '@/types/imageUpdates';
 import type { SecurityTab, FleetTab } from '@/lib/events';
 import { isStackEditorDeepLink, isHostConsoleStackDeepLink } from '@/lib/router/readUrlRouteState';
 import type { NavDestination } from '@/lib/navigation/appNavRegistry';
-import type { StackHealthNavTarget } from '../dashboard/useStackHealthScope';
 
 // Paid-tier views are loaded on demand. Their internal PaidGate /
 // CapabilityGate wrappers render
@@ -101,14 +100,18 @@ export interface ViewRouterProps {
     muteRulePrefill: MuteRuleDraft | null;
     onMutePrefillConsumed: () => void;
     notifications: NotificationItem[];
-    onNavigateToStack: (target: StackHealthNavTarget) => void;
     onOpenSettingsSection: (section: SectionId) => void;
     onOpenMuteRulesWithPrefill?: (draft: MuteRuleDraft) => void;
-    onClearNotifications: () => void;
     securityTab: SecurityTab;
     onSecurityTabChange: (tab: SecurityTab) => void;
     fleetUpdatesIntent?: { tab: 'nodes' | 'changelog' } | null;
     onFleetUpdatesIntentConsumed?: () => void;
+    /** Every hand-off out of the Home dashboard. */
+    homeNavigation: HomeNavigation;
+    /** Nodes whose latest notification fetch did not land; null before the first fetch settles. */
+    unreportedNotificationNodeIds: ReadonlySet<number> | null;
+    fleetNodeIntent: number | null;
+    onFleetNodeIntentConsumed: () => void;
     fleetActiveTab?: FleetTab;
     onFleetActiveTabChange?: (tab: FleetTab) => void;
     // Render slot for the inline editor view. Kept as a callback so the
@@ -140,14 +143,16 @@ export function ViewRouter({
     muteRulePrefill,
     onMutePrefillConsumed,
     notifications,
-    onNavigateToStack,
     onOpenSettingsSection,
     onOpenMuteRulesWithPrefill,
-    onClearNotifications,
     securityTab,
     onSecurityTabChange,
     fleetUpdatesIntent,
     onFleetUpdatesIntentConsumed,
+    homeNavigation,
+    unreportedNotificationNodeIds,
+    fleetNodeIntent,
+    onFleetNodeIntentConsumed,
     fleetActiveTab,
     onFleetActiveTabChange,
     renderEditor,
@@ -285,6 +290,8 @@ export function ViewRouter({
                       onOpenMuteRulesWithPrefill={onOpenMuteRulesWithPrefill}
                       fleetUpdatesIntent={fleetUpdatesIntent}
                       onFleetUpdatesIntentConsumed={onFleetUpdatesIntentConsumed}
+                      fleetNodeIntent={fleetNodeIntent}
+                      onFleetNodeIntentConsumed={onFleetNodeIntentConsumed}
                       fleetActiveTab={fleetActiveTab}
                       onFleetActiveTabChange={onFleetActiveTabChange}
                     />
@@ -333,10 +340,9 @@ export function ViewRouter({
     }
     return (
         <HomeDashboard
-            onNavigateToStack={onNavigateToStack}
-            onOpenSettingsSection={onOpenSettingsSection}
             notifications={notifications}
-            onClearNotifications={onClearNotifications}
+            unreportedNodeIds={unreportedNotificationNodeIds}
+            navigation={homeNavigation}
             stackUpdates={stackUpdates}
         />
     );

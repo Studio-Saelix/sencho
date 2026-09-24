@@ -212,7 +212,7 @@ These are the explicit boundaries of the v1 mesh.
 
 <AccordionGroup>
   <Accordion title="Mesh data plane is down">
-    The Routing tab shows a red banner when the local Sencho's `sencho_mesh` setup did not complete, and the dashboard's Fleet Heartbeat card surfaces the same failure as a compact status line. The reason also appears in the mesh activity log and on `/api/health` as `mesh.dataPlane.reason`.
+    The Routing tab shows a red banner when the local Sencho's `sencho_mesh` setup did not complete, and the dashboard's Fleet heartbeat card surfaces the same failure as a compact status line. The reason also appears in the mesh activity log and on `/api/health` as `mesh.dataPlane.reason`.
 
     **Subnet selection.** When `SENCHO_MESH_SUBNET` is unset, Sencho tries `172.30.0.0/24`, then `172.31.0.0/24`, then `10.42.0.0/24`, then `10.43.0.0/24` in order, and keeps the first subnet Docker accepts. If `sencho_mesh` already exists on the daemon, Sencho adopts that network's subnet without touching the candidate list. Set `SENCHO_MESH_SUBNET` only when you need to force a specific CIDR.
 

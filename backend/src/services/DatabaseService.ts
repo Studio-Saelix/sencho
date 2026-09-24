@@ -398,14 +398,6 @@ export interface Node {
     cordoned_reason: string | null;
 }
 
-export interface StackRestartSummary {
-    stackName: string;
-    crash: number;
-    autoheal: number;
-    manual: number;
-    total: number;
-}
-
 export interface PilotEnrollment {
     node_id: number;
     token_hash: string;
@@ -5142,25 +5134,6 @@ stmt.run('gitops_schema_version', '1');
         snapshot: { rules: { id: number; name: string }[]; bellSuppressed: boolean; externalSuppressed: boolean },
     ): void {
         this.db.prepare('UPDATE notification_history SET suppression_match = ? WHERE id = ?').run(JSON.stringify(snapshot), id);
-    }
-
-    public getStackRestartSummary(nodeId: number, days: number): StackRestartSummary[] {
-        const since = Date.now() - days * 86400 * 1000;
-        return this.db.prepare(`
-            SELECT
-              stack_name AS stackName,
-              SUM(CASE WHEN category = 'deploy_failure'     THEN 1 ELSE 0 END) AS crash,
-              SUM(CASE WHEN category = 'autoheal_triggered' THEN 1 ELSE 0 END) AS autoheal,
-              SUM(CASE WHEN category = 'stack_restarted'    THEN 1 ELSE 0 END) AS manual,
-              COUNT(*) AS total
-            FROM notification_history
-            WHERE node_id = ?
-              AND timestamp >= ?
-              AND category IN ('deploy_failure', 'autoheal_triggered', 'stack_restarted')
-              AND stack_name IS NOT NULL
-            GROUP BY stack_name
-            ORDER BY total DESC
-        `).all(nodeId, since) as StackRestartSummary[];
     }
 
     // --- Container Metrics ---

@@ -3,6 +3,7 @@ import { useNodes } from '@/context/NodeContext';
 import { apiFetch } from '@/lib/api';
 import { visibilityInterval } from '@/lib/utils';
 import { normalizeConfigurationAgents, type AgentStatus } from '@/lib/configurationStatus';
+import { MUTE_RULES_CHANGED_EVENT } from '@/lib/muteRules';
 
 // Trailing-edge debounce window for filtered settings-event refetches,
 // matching the precedent in useNextAutoUpdateRun.
@@ -75,25 +76,46 @@ export function useConfigurationStatus() {
 
   const [status, setStatus] = useState<ConfigurationStatus | null>(null);
   const [loading, setLoading] = useState(true);
+  // Set when the latest refresh failed. The last good payload stays on screen,
+  // and the card marks it stale instead of passing it off as current.
+  const [stale, setStale] = useState(false);
+  const requestSeqRef = useRef(0);
 
   const fetchStatus = useCallback(async () => {
+    // Poll, invalidation, and reconnect fetches can overlap, and a switch can
+    // land mid-request. Only the newest request for the current node may write.
+    const requestedFor = nodeIdRef.current;
+    const seq = ++requestSeqRef.current;
+    const current = () => nodeIdRef.current === requestedFor && seq === requestSeqRef.current;
     try {
       const res = await apiFetch('/dashboard/configuration');
-      if (!res.ok) return;
+      if (!current()) return;
+      if (!res.ok) {
+        console.error('[dashboard] configuration status fetch failed:', res.status);
+        setStale(true);
+        return;
+      }
       const data = await res.json() as WireConfigurationStatus;
+      if (!current()) return;
       setStatus(normalizeConfigurationStatus(data));
-    } catch {
-      // Silent; stale data stays visible
+      setStale(false);
+    } catch (err) {
+      if (!current()) return;
+      console.error('[dashboard] configuration status fetch error:', err);
+      setStale(true);
     } finally {
-      setLoading(false);
+      if (current()) setLoading(false);
     }
   }, []);
 
   // Configuration data is derived from settings/policy tables (agents,
   // alert rules, auto-heal policies, scheduled tasks, scan policies, cloud
-  // backup config). The 60 s poll catches settings drift on its own.
+  // backup config). Settings are edited in their own view, so returning to Home
+  // remounts and refetches; the signals below cover edits made while Home stays
+  // mounted, and the 60 s poll is the safety net for edits made elsewhere.
   useEffect(() => {
     setStatus(null);
+    setStale(false);
     setLoading(true);
     const currentNodeId = nodeId;
     const guard = () => { if (nodeIdRef.current === currentNodeId) void fetchStatus(); };
@@ -123,5 +145,25 @@ export function useConfigurationStatus() {
     };
   }, [fetchStatus]);
 
-  return { status, loading };
+  // Mute rules can be created from the notification panel while Home stays
+  // mounted underneath it.
+  useEffect(() => {
+    const onMuteRulesChanged = () => { void fetchStatus(); };
+    window.addEventListener(MUTE_RULES_CHANGED_EVENT, onMuteRulesChanged);
+    return () => window.removeEventListener(MUTE_RULES_CHANGED_EVENT, onMuteRulesChanged);
+  }, [fetchStatus]);
+
+  // Socket reconnect: refetch on the connected edge only, since configuration
+  // may have moved while the stream was down. This fires on the first connect
+  // as well as a reconnect; a disconnect is not a fetch signal.
+  useEffect(() => {
+    const onConnection = (e: Event) => {
+      const detail = (e as CustomEvent<{ connected?: boolean }>).detail;
+      if (detail?.connected === true) void fetchStatus();
+    };
+    window.addEventListener('sencho:notifications-connection', onConnection);
+    return () => window.removeEventListener('sencho:notifications-connection', onConnection);
+  }, [fetchStatus]);
+
+  return { status, loading, stale };
 }

@@ -50,6 +50,9 @@ interface FleetViewProps {
     onOpenMuteRulesWithPrefill?: (draft: MuteRuleDraft) => void;
     fleetUpdatesIntent?: { tab: 'nodes' | 'changelog' } | null;
     onFleetUpdatesIntentConsumed?: () => void;
+    /** One-shot deep link that opens one node's details sheet. */
+    fleetNodeIntent?: number | null;
+    onFleetNodeIntentConsumed?: () => void;
     /** Controlled fleet sub-tab (shell-owned for URL sync). */
     fleetActiveTab?: FleetTab;
     onFleetActiveTabChange?: (tab: FleetTab) => void;
@@ -63,6 +66,8 @@ export function FleetView({
     onOpenMuteRulesWithPrefill,
     fleetUpdatesIntent,
     onFleetUpdatesIntentConsumed,
+    fleetNodeIntent,
+    onFleetNodeIntentConsumed,
     fleetActiveTab: controlledTab,
     onFleetActiveTabChange,
 }: FleetViewProps) {
@@ -133,6 +138,15 @@ export function FleetView({
             onFleetUpdatesIntentConsumed?.();
         }
     }, [fleetUpdatesIntent, updateStatus, onFleetUpdatesIntentConsumed]);
+
+    // Home heartbeat deep link: opens the clicked node's details sheet. One-shot,
+    // so closing the sheet and returning to Fleet later does not re-open it.
+    useEffect(() => {
+        if (fleetNodeIntent != null) {
+            setDetailsNodeId(fleetNodeIntent);
+            onFleetNodeIntentConsumed?.();
+        }
+    }, [fleetNodeIntent, onFleetNodeIntentConsumed]);
 
     const { mastheadStats, lastSyncAt, loading, refreshing } = overview;
 

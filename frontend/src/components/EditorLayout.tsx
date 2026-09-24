@@ -28,6 +28,8 @@ import { useNotifications } from './EditorLayout/hooks/useNotifications';
 import { useContainerStats } from './EditorLayout/hooks/useContainerStats';
 import { useSidebarContextMenu } from './EditorLayout/hooks/useSidebarContextMenu';
 import { useActiveNodeReapplyEligibility } from './EditorLayout/hooks/useActiveNodeReapplyEligibility';
+import { useHomeNavigation } from './EditorLayout/hooks/useHomeNavigation';
+import { resolveNodeSettleAction } from './EditorLayout/resolveNodeSettleAction';
 import { resolveCanSaveAndReapply } from './EditorLayout/resolveCanSaveAndReapply';
 import { useComposeReapplyAction } from './FleetView/hooks/useComposeReapplyAction';
 import { NodeSwitcher } from './NodeSwitcher';
@@ -324,6 +326,7 @@ export default function EditorLayout() {
 
   const {
     notifications,
+    unreportedNodeIds,
     tickerConnected,
     markAllRead,
     deleteNotification,
@@ -479,13 +482,13 @@ export default function EditorLayout() {
   // dirty-editor switch) never opens it against the stack that was selected
   // before the request.
   const [pendingGitPanelStack, setPendingGitPanelStack] = useState<string | null>(null);
-  const [fleetUpdatesIntent, setFleetUpdatesIntent] = useState<{ tab: 'nodes' | 'changelog' } | null>(null);
+  // The notification bell popover is shell-owned so the Home alert preview can
+  // open the same canonical surface.
+  const [notificationsOpen, setNotificationsOpen] = useState(false);
   onDeletedOpenStackRef.current = () => {
     setPendingDetailStack(null);
     setMobileView('list');
   };
-
-  const handleFleetUpdatesIntentConsumed = useCallback(() => setFleetUpdatesIntent(null), []);
 
   const { surface: mobileSurface, detailReady, detailOpen } = deriveMobileSurface({
     activeView,
@@ -714,31 +717,51 @@ export default function EditorLayout() {
     }
   }, [stackActions, setActiveView, isMobile, navigateMobileAware]);
 
+  // Every hand-off out of Home (stack, alert, heartbeat, restart, and
+  // configuration rows) plus the Fleet update sheet, which the bell and the
+  // stack view also open. Fleet and Security hops to another node arm a pending
+  // intent that the node-settled effect runs; stack rows use the pending stack load.
+  const {
+    homeNavigation,
+    openFleetUpdates,
+    fleetNodeIntent,
+    onFleetNodeIntentConsumed,
+    fleetUpdatesIntent,
+    onFleetUpdatesIntentConsumed,
+    takePendingNodeIntent,
+  } = useHomeNavigation({
+    nodes,
+    activeNode,
+    setActiveNode,
+    reachCtx,
+    can,
+    isMobile,
+    navigateMobileAware,
+    handleNavigate,
+    setActiveView,
+    setSecurityTab,
+    openSettings,
+    toStack: handleStackHealthNavigate,
+    openStackOnNode: handleFleetNavigateToNode,
+    pendingLogsRef,
+    openNotifications: () => setNotificationsOpen(true),
+  });
+
   // Notification navigation: node_update_available notifications route to the
-  // Fleet view and open the Node Updates sheet (desktop only). The intent state
-  // handles both cross-view navigation and same-view re-entry (handleNavigate
-  // returns early when already on Fleet, but the state change triggers render).
+  // Fleet view (switching to the hub first when a remote node is active) and
+  // open the Node Updates sheet on desktop.
   const handleNotificationNavigate = useCallback((notif: NotificationItem) => {
     if (notif.category === 'node_update_available') {
-      if (isMobile) {
-        navigateMobileAware('fleet');
-      } else {
-        setFleetUpdatesIntent({ tab: 'nodes' });
-        handleNavigate('fleet');
-      }
+      openFleetUpdates('nodes');
       return;
     }
     stackActions.navigateToNotification(notif);
-  }, [isMobile, navigateMobileAware, handleNavigate, stackActions]);
+  }, [openFleetUpdates, stackActions]);
 
-  const handleNotificationNavigateChangelog = useCallback(() => {
-    if (isMobile) {
-      navigateMobileAware('fleet');
-    } else {
-      setFleetUpdatesIntent({ tab: 'changelog' });
-      handleNavigate('fleet');
-    }
-  }, [isMobile, navigateMobileAware, handleNavigate]);
+  const handleNotificationNavigateChangelog = useCallback(
+    () => openFleetUpdates('changelog'),
+    [openFleetUpdates],
+  );
 
   const renderEditor = (headerActions?: ReactNode) => (
     <EditorView
@@ -894,12 +917,19 @@ export default function EditorLayout() {
     // records so a stale recovery panel cannot surface on the new node.
     clearActionRecords();
 
-    if (pendingStack) {
-      void stackActions.loadFile(pendingStack);
-    } else if (pendingNodeView?.nodeId === activeNode.id) {
-      pendingNodeView.open();
-    } else if (isRealSwitch) {
-      setActiveView('dashboard');
+    const settle = resolveNodeSettleAction({
+      settledNodeId: activeNode.id,
+      isRealSwitch,
+      pendingStack,
+      pendingNodeIntent: takePendingNodeIntent(activeNode.id),
+      pendingNodeView,
+    });
+    switch (settle.kind) {
+      case 'load-stack': void stackActions.loadFile(settle.stackName); break;
+      case 'run-intent': settle.run(); break;
+      case 'open-node-view': settle.open(); break;
+      case 'go-home': setActiveView('dashboard'); break;
+      case 'none': break;
     }
 
     refreshStacks();
@@ -1105,6 +1135,8 @@ export default function EditorLayout() {
           onDelete={deleteNotification}
           onNavigate={handleNotificationNavigate}
           onNavigateChangelog={handleNotificationNavigateChangelog}
+          open={notificationsOpen}
+          onOpenChange={setNotificationsOpen}
         />
       );
       const themeSwitchEl = <ThemeQuickSwitch onOpenAppearance={() => openSettings('appearance')} />;
@@ -1172,12 +1204,14 @@ export default function EditorLayout() {
             muteRulePrefill={muteRulePrefill}
             onMutePrefillConsumed={handleMutePrefillConsumed}
             notifications={notifications}
-            onNavigateToStack={handleStackHealthNavigate}
             onOpenSettingsSection={(section) => openSettings(section)}
             onOpenMuteRulesWithPrefill={openMuteRulesWithPrefill}
-            onClearNotifications={clearAllNotifications}
             fleetUpdatesIntent={fleetUpdatesIntent}
-            onFleetUpdatesIntentConsumed={handleFleetUpdatesIntentConsumed}
+            onFleetUpdatesIntentConsumed={onFleetUpdatesIntentConsumed}
+            homeNavigation={homeNavigation}
+            unreportedNotificationNodeIds={unreportedNodeIds}
+            fleetNodeIntent={fleetNodeIntent}
+            onFleetNodeIntentConsumed={onFleetNodeIntentConsumed}
             securityTab={securityTab}
             onSecurityTabChange={setSecurityTab}
             fleetActiveTab={fleetActiveTab}
@@ -1211,14 +1245,7 @@ export default function EditorLayout() {
           canSaveAndReapply={canSaveAndReapply}
           canOfferVolumeRemoval={canOfferVolumeRemoval}
           deleteVolumePreservation={deleteVolumePreservation}
-          onOpenFleetNodeUpdates={() => {
-            if (isMobile) {
-              navigateMobileAware('fleet');
-            } else {
-              setFleetUpdatesIntent({ tab: 'nodes' });
-              handleNavigate('fleet');
-            }
-          }}
+          onOpenFleetNodeUpdates={() => openFleetUpdates('nodes')}
           hydrationReady={hydrationReady}
         />
       );
