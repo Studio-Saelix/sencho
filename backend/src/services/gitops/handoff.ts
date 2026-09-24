@@ -30,6 +30,7 @@ import { DatabaseService } from '../DatabaseService';
 import { BlueprintService } from '../BlueprintService';
 import { buildBlueprintMarker } from '../../helpers/blueprintMarker';
 import { sanitizeForLog } from '../../utils/safeLog';
+import { mapWithConcurrency } from '../../utils/mapWithConcurrency';
 
 export { setRegistryReadinessDepsForTests };
 
@@ -713,15 +714,33 @@ export async function reconstructBlueprintRolloutQueue(): Promise<number> {
  * stored preflight evidence are evaluated once so derive can project honestly
  * without painting them blocked for a missing column.
  */
-export async function backfillMissingPreflightEvaluations(): Promise<number> {
+/** Max concurrent preflight evaluations during the startup backfill. */
+export const PREFLIGHT_BACKFILL_CONCURRENCY = 3;
+
+export async function backfillMissingPreflightEvaluations(
+  authorize: (applicationId: string, actor: string | null, trigger: string) => ReturnType<typeof ensureRolloutAuthorization> = ensureRolloutAuthorization,
+): Promise<number> {
   const store = GitOpsStore.getInstance();
   const apps = store.listAuthorizedBlueprintApplications().filter(
     (app) => app.latest_preflight_evidence_json == null,
   );
   let filled = 0;
-  for (const app of apps) {
-    if (!liveRolloutBinding(app)) continue;
-    const result = await ensureRolloutAuthorization(app.id, null, 'preflight_backfill');
+  const live = apps.filter((app) => liveRolloutBinding(app));
+  // Bounded parallelism: each evaluation can take up to the preflight timeout,
+  // so serial awaits would delay startup linearly with the number of legacy apps.
+  await mapWithConcurrency(live, PREFLIGHT_BACKFILL_CONCURRENCY, async (app) => {
+    let result: Awaited<ReturnType<typeof ensureRolloutAuthorization>>;
+    try {
+      result = await authorize(app.id, null, 'preflight_backfill');
+    } catch (err) {
+      // One failed app must not abort the rest; it stays fail-closed without evidence.
+      console.warn(
+        '[GitOps] Preflight backfill failed for %s: %s',
+        sanitizeForLog(app.id),
+        sanitizeForLog(errorMessage(err)),
+      );
+      return;
+    }
     if (store.getApplication(app.id)?.latest_preflight_evidence_json) {
       filled += 1;
     } else if (!result.ok) {
@@ -731,7 +750,7 @@ export async function backfillMissingPreflightEvaluations(): Promise<number> {
         sanitizeForLog(result.reason),
       );
     }
-  }
+  });
   return filled;
 }
 
