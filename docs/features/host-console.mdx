@@ -23,6 +23,10 @@ The Host Console gives you a real terminal session on the Sencho host, streamed 
 - Copy and paste
 - Cursor blinking
 
+### Copy and paste
+
+Right-click copies the selected text, or pastes from the clipboard when nothing is selected. Ctrl+V, Ctrl+Shift+V, and Shift+Insert also paste (Cmd+V on macOS). When Sencho is served over plain HTTP, the browser does not let pages read the clipboard, so right-click opens the browser's own menu instead; choose **Paste** there or use the keyboard shortcut.
+
 ## Opening the console
 
 Click **Console** in the top navigation bar. The session starts immediately in the `COMPOSE_DIR` root. If a stack is selected in the sidebar, the terminal opens directly inside that stack's directory instead, and a small back button appears in the masthead so you can return to the stack editor.

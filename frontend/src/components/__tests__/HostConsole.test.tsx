@@ -6,8 +6,17 @@ import HostConsole from '../HostConsole';
 
 vi.mock('@/context/NodeContext');
 
+const originalIsSecureContext = Object.getOwnPropertyDescriptor(window, 'isSecureContext');
+const originalClipboard = Object.getOwnPropertyDescriptor(navigator, 'clipboard');
+
 vi.mock('@/lib/xtermLoader', () => {
   class FakeTerminal {
+    static lastOptions: Record<string, unknown> | undefined;
+    static lastInstance: FakeTerminal | undefined;
+    constructor(options?: Record<string, unknown>) {
+      FakeTerminal.lastOptions = options;
+      FakeTerminal.lastInstance = this;
+    }
     cols = 80;
     rows = 24;
     open = vi.fn();
@@ -16,6 +25,10 @@ vi.mock('@/lib/xtermLoader', () => {
     clear = vi.fn();
     dispose = vi.fn();
     getSelection = vi.fn(() => '');
+    hasSelection = vi.fn(() => false);
+    clearSelection = vi.fn();
+    paste = vi.fn();
+    attachCustomKeyEventHandler = vi.fn();
     loadAddon = vi.fn();
     onData = vi.fn();
   }
@@ -94,6 +107,10 @@ describe('HostConsole socket targeting', () => {
 
   afterEach(() => {
     globalThis.WebSocket = OriginalWebSocket;
+    if (originalIsSecureContext) Object.defineProperty(window, 'isSecureContext', originalIsSecureContext);
+    else delete (window as { isSecureContext?: boolean }).isSecureContext;
+    if (originalClipboard) Object.defineProperty(navigator, 'clipboard', originalClipboard);
+    else delete (navigator as { clipboard?: Clipboard }).clipboard;
     localStorage.removeItem('sencho-active-node');
     vi.clearAllMocks();
   });
@@ -104,6 +121,38 @@ describe('HostConsole socket targeting', () => {
     await waitFor(() => expect(sockets.length).toBe(1));
     expect(sockets[0].url).toContain('nodeId=7');
     expect(sockets[0].url).not.toContain('nodeId=99');
+  });
+
+  it('disables right-click word selection so right-click can paste on macOS', async () => {
+    const { loadXtermModules } = await import('@/lib/xtermLoader');
+    const { Terminal } = await loadXtermModules();
+    render(<HostConsole nodeId={1} stackName={null} onClose={vi.fn()} />);
+    await waitFor(() => expect(sockets.length).toBe(1));
+    expect((Terminal as unknown as { lastOptions?: Record<string, unknown> }).lastOptions)
+      .toMatchObject({ rightClickSelectsWord: false });
+  });
+
+  it('pastes on right-click and stops listening after unmount', async () => {
+    Object.defineProperty(window, 'isSecureContext', { configurable: true, value: true });
+    const readText = vi.fn(async () => 'ls');
+    Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { readText } });
+    const { loadXtermModules } = await import('@/lib/xtermLoader');
+    const { Terminal } = await loadXtermModules();
+    type Fake = { open: ReturnType<typeof vi.fn>; paste: ReturnType<typeof vi.fn> };
+    const fake = () => (Terminal as unknown as { lastInstance?: Fake }).lastInstance;
+
+    const { unmount } = render(<HostConsole nodeId={1} stackName={null} onClose={vi.fn()} />);
+    await waitFor(() => expect(sockets.length).toBe(1));
+    const term = fake()!;
+    const container = term.open.mock.calls[0][0] as HTMLElement;
+
+    container.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true }));
+    await waitFor(() => expect(term.paste).toHaveBeenCalledWith('ls'));
+
+    unmount();
+    container.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true }));
+    await Promise.resolve();
+    expect(readText).toHaveBeenCalledTimes(1);
   });
 
   it('includes the stack parameter when provided', async () => {
