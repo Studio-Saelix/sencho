@@ -171,6 +171,13 @@ export interface ArtifactExpectedIdentity {
   evidenceVersion: number;
   qualification: ArtifactQualification;
   identity: string | null;
+  /**
+   * Per-service digests as the frozen artifact set recorded them, when it
+   * recorded any. Absent is not the same as empty: an absent list means the
+   * set carries no per-service evidence, so a per-service comparison cannot be
+   * made and nothing may be claimed about it.
+   */
+  services?: ServiceArtifactEvidence[];
 }
 
 export interface ArtifactLatestEvidence {
@@ -336,15 +343,41 @@ export type HealthFacet =
   | { status: 'failed'; runId: string; deployedGenerationId: string | null }
   | { status: 'unknown'; runId: string | null; limitation: 'health_unknown' };
 
+/** One frozen child digest for a platform, recorded at resolve time. */
+export interface ArtifactPlatformVariant {
+  platform: string;
+  digest: string;
+}
+
+/**
+ * Per-service image evidence. The digests are candidates, not one answer: a
+ * multi-platform image records a frozen child per platform, and an observation
+ * on a given node only proves the child for that node's platform.
+ */
+export interface ServiceArtifactEvidence {
+  serviceName: string;
+  authoredRef: string | null;
+  source: 'registry' | 'build' | 'unsupported';
+  platform: string | null;
+  indexDigest: string | null;
+  platformDigest: string | null;
+  platformVariants?: readonly ArtifactPlatformVariant[] | null;
+  localDigests?: readonly string[] | null;
+  buildContextFingerprint: string | null;
+  producedImageId: string | null;
+  failureClass: string | null;
+  resolvedAt: number | null;
+}
+
 /** What was observed running, and how much that observation can be trusted as proof. */
 export type ObservedArtifactIdentity =
   | { kind: 'unknown' }
   | { kind: 'missing' }
   | { kind: 'unavailable' }
-  | { kind: 'exact'; identity: string; observedAt: number }
-  | { kind: 'qualified'; identity: string; observedAt: number }
-  | { kind: 'stale'; identity: string; observedAt: number }
-  | { kind: 'local_build_unverified'; identity: string; observedAt: number };
+  | { kind: 'exact'; identity: string; observedAt: number; services?: ServiceArtifactEvidence[] }
+  | { kind: 'qualified'; identity: string; observedAt: number; services?: ServiceArtifactEvidence[] }
+  | { kind: 'stale'; identity: string; observedAt: number; services?: ServiceArtifactEvidence[] }
+  | { kind: 'local_build_unverified'; identity: string; observedAt: number; services?: ServiceArtifactEvidence[] };
 
 // --- application facets, targets, drift -------------------------------------
 

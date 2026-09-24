@@ -505,6 +505,7 @@ function toExpected(
       evidenceVersion: row.evidence_version,
       qualification: row.qualification,
       identity: 'identity' in decoded ? decoded.identity : null,
+      ...(decoded.services ? { services: decoded.services } : {}),
     };
   } catch {
     limitations.push({ code: 'artifact_evidence_json_invalid', message: 'expected artifact evidence is invalid', evidence: id });

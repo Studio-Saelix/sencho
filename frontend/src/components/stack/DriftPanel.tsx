@@ -12,6 +12,7 @@ import GitOpsStateCard, { GitOpsFaultCard } from '@/components/gitops/GitOpsStat
 import GitOpsCaveats from '@/components/gitops/GitOpsCaveats';
 import GitOpsApprovalChips from '@/components/gitops/GitOpsApprovalChips';
 import GitOpsDriftRow from '@/components/gitops/GitOpsDriftRow';
+import { GitOpsDigestDetail } from '@/components/gitops/GitOpsDigestDetail';
 import { ARTIFACT_STATE_LOOKUP, ROLLOUT_STATE_LOOKUP, RUNTIME_STATE_LOOKUP, SOURCE_STATE_LOOKUP, absentFault, liveArtifactFacet, livePlacementFacet, liveRolloutFacet, liveSourceFacet, placementStateMeta } from '@/lib/gitopsState';
 import type { GitOpsRevisionProjection } from '@/types/gitops';
 
@@ -373,6 +374,7 @@ export default function DriftPanel({ stackName }: { stackName: string }) {
                     <div className="mt-1 font-mono text-[10px] text-stat-subtitle">
                       {nodeLabel(t.nodeId)}{t.stackName ? ` · ${t.stackName}` : ''}
                     </div>
+                    <GitOpsDigestDetail target={t} />
                   </GitOpsStateCard>
                 ))}
                 <GitOpsCaveats revision={revision} />

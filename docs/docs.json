@@ -137,6 +137,7 @@
                   "features/git-sources",
                   "features/git-transport-support",
                   "features/gitops-portfolio",
+                  "features/gitops-drift-model",
                   "features/blueprint-model",
                   "features/scheduled-operations",
                   "features/auto-update-policies",

@@ -1360,6 +1360,100 @@ describe('gitops derivation', () => {
     expect(projection.targets[0]?.runtime.status).toBe('synced_and_healthy');
     expect(projection.drift).toHaveLength(0);
   });
+
+  it('carries the expected per-service digests so a reader can compare service by service', () => {
+    const store = GitOpsStore.getInstance();
+    const tx = GitOpsTransitions.getInstance();
+    const expected = `sha256:${'a'.repeat(64)}`;
+    const observed = `sha256:${'b'.repeat(64)}`;
+    const service = (platformDigest: string | null, localDigests: string[] | null = null): ServiceArtifactEvidence => ({
+      serviceName: 'web',
+      authoredRef: 'nginx:alpine',
+      source: 'registry',
+      platform: 'linux/amd64',
+      indexDigest: `sha256:${'1'.repeat(64)}`,
+      platformDigest,
+      platformVariants: null,
+      localDigests,
+      buildContextFingerprint: null,
+      producedImageId: null,
+      failureClass: null,
+      resolvedAt: 1,
+    });
+    tx.activateDirect({ application: app('app-digest-detail', 'digest-detail-web'), nodeId: 1, envelope: env('op-digest') });
+    store.insertGeneration(gen('gen-digest-detail', 'app-digest-detail'));
+    store.insertArtifactSet({
+      id: 'art-digest-detail',
+      generation_id: 'gen-digest-detail',
+      evidence_version: 1,
+      authoritative: 0,
+      qualification: 'exact',
+      evidence_json: encodeArtifactEvidenceJson({
+        kind: 'exact',
+        identity: `sha256:${'e'.repeat(64)}`,
+        services: [service(expected)],
+      }),
+      created_at: 1,
+    });
+    store.upsertTarget({
+      ...emptyTargetRow('app-digest-detail', 1, 1),
+      desired_generation_id: 'gen-digest-detail',
+      applied_generation_id: 'gen-digest-detail',
+      deployed_generation_id: 'gen-digest-detail',
+      expected_artifact_set_id: 'art-digest-detail',
+      observed_artifact_identity_json: encodeObservedArtifactIdentity({
+        kind: 'exact',
+        identity: `sha256:${'f'.repeat(64)}`,
+        observedAt: 5,
+        services: [service(observed, [observed])],
+      }),
+    });
+
+    const projection = projectApplication('app-digest-detail', false);
+    if (projection.targetMode === 'not_applicable') throw new Error('expected application');
+    const facet = projection.targets[0]?.artifact;
+    if (!facet || facet.status === 'not_applicable' || !facet.expected) {
+      throw new Error('expected artifact evidence');
+    }
+    expect(facet.expected.services).toEqual([service(expected, null)]);
+    const observedIdentity = projection.targets[0]?.observedArtifactIdentity;
+    if (observedIdentity.kind !== 'exact') throw new Error('expected an exact observation');
+    expect(observedIdentity.services).toEqual([service(observed, [observed])]);
+    expect(projection.drift.filter((entry) => entry.class === 'runtime')).toHaveLength(1);
+  });
+
+  it('omits the expected service list when the frozen set recorded none', () => {
+    const store = GitOpsStore.getInstance();
+    const tx = GitOpsTransitions.getInstance();
+    tx.activateDirect({ application: app('app-digest-absent', 'digest-absent-web'), nodeId: 1, envelope: env('op-digest-absent') });
+    store.insertGeneration(gen('gen-digest-absent', 'app-digest-absent'));
+    store.insertArtifactSet({
+      id: 'art-digest-absent',
+      generation_id: 'gen-digest-absent',
+      evidence_version: 1,
+      authoritative: 0,
+      qualification: 'exact',
+      evidence_json: encodeArtifactEvidenceJson({ kind: 'exact', identity: 'sha256:wanted' }),
+      created_at: 1,
+    });
+    store.upsertTarget({
+      ...emptyTargetRow('app-digest-absent', 1, 1),
+      desired_generation_id: 'gen-digest-absent',
+      applied_generation_id: 'gen-digest-absent',
+      deployed_generation_id: 'gen-digest-absent',
+      expected_artifact_set_id: 'art-digest-absent',
+    });
+
+    const projection = projectApplication('app-digest-absent', false);
+    if (projection.targetMode === 'not_applicable') throw new Error('expected application');
+    const facet = projection.targets[0]?.artifact;
+    if (!facet || facet.status === 'not_applicable' || !facet.expected) {
+      throw new Error('expected artifact evidence');
+    }
+    // No per-service list is attached, so a reader knows there is nothing to
+    // compare rather than comparing an empty list to something.
+    expect(facet.expected.services).toBeUndefined();
+  });
 });
 
 function env(operationId: string): EventEnvelope {
