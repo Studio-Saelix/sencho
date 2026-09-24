@@ -21,13 +21,16 @@ const INVALIDATE_DEBOUNCE_MS = 250;
  * Blueprint read without fleet read access (403). `invalid_link` is an id that
  * is not a portfolio id at all (400). `unreachable` is the owning node failing to answer, and
  * `unsupported` is the owning node answering that it cannot serve this read;
- * neither says anything about the application itself.
+ * neither says anything about the application itself. `evidence_unavailable`
+ * is the owning node reporting the application without evidence the hub can
+ * read yet: it exists and is readable, but its state is momentarily unknown.
  */
 export type GitOpsApplicationError =
   | { kind: 'not_readable' }
   | { kind: 'invalid_link' }
   | { kind: 'unreachable'; message: string }
   | { kind: 'unsupported'; message: string }
+  | { kind: 'evidence_unavailable'; message: string }
   | { kind: 'failed'; message: string };
 
 /**
@@ -58,9 +61,19 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null;
 }
 
-/** Enough of the shape to render without crashing; anything else is an answer this build cannot read. */
+/**
+ * Enough of the shape to render without crashing; anything else is an answer
+ * this build cannot read. The arrays the view maps are checked too: the row's
+ * targets and attention always, and the projection's targets and drift on the
+ * live arm (the not-applicable arm renders none of them).
+ */
 function isDetailResponse(body: unknown): body is GitOpsPortfolioDetailResponse {
-  return isRecord(body) && body.schemaVersion === 1 && isRecord(body.application) && isRecord(body.projection);
+  if (!isRecord(body) || body.schemaVersion !== 1) return false;
+  const { application, projection } = body;
+  if (!isRecord(application) || !isRecord(projection)) return false;
+  if (!Array.isArray(application.targets) || !Array.isArray(application.attention)) return false;
+  if (projection.targetMode === 'not_applicable') return true;
+  return Array.isArray(projection.targets) && Array.isArray(projection.drift);
 }
 
 async function readApplication(id: string): Promise<GitOpsPortfolioDetailResponse> {
@@ -78,6 +91,9 @@ async function readApplication(id: string): Promise<GitOpsPortfolioDetailRespons
   if (res.status === 404 || res.status === 403) throw new ApplicationReadError({ kind: 'not_readable' });
   if (res.status === 502 && body?.code === 'node_unsupported') {
     throw new ApplicationReadError({ kind: 'unsupported', message });
+  }
+  if (res.status === 503 && body?.code === 'evidence_unavailable') {
+    throw new ApplicationReadError({ kind: 'evidence_unavailable', message });
   }
   if (res.status === 502 || res.status === 503) throw new ApplicationReadError({ kind: 'unreachable', message });
   throw new ApplicationReadError({ kind: 'failed', message });

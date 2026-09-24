@@ -667,6 +667,21 @@ gitopsApplicationsRouter.get('/:id', async (req: Request, res: Response): Promis
       row => isUsableRevision(row.gitopsRevision) && row.gitopsRevision.applicationId === parsedId.applicationId,
     );
     if (!match || !isUsableRevision(match.gitopsRevision)) {
+      // A readable row that names this application but carries a revision the
+      // hub cannot walk is a momentary evidence gap, not a missing
+      // application. Candidates were already filtered by this caller's read
+      // rules, so this answer never discloses an application they may not
+      // read: unreadable ids still fall through to the 404 below.
+      const unusable = candidates.some(
+        row => isRecord(row.gitopsRevision) && row.gitopsRevision.applicationId === parsedId.applicationId,
+      );
+      if (unusable) {
+        res.status(503).json({
+          error: 'The owning node has not reported usable evidence for this application yet',
+          code: 'evidence_unavailable',
+        });
+        return;
+      }
       res.status(404).json({ error: 'Application not found' });
       return;
     }

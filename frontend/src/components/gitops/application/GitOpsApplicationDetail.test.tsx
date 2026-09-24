@@ -241,6 +241,19 @@ describe('GitOpsApplicationView', () => {
     expect(await screen.findByRole('heading', { name: 'bookstack' })).toBeInTheDocument();
   });
 
+  it('says evidence is unavailable, not that the application is missing, and retries', async () => {
+    mockFetch.mockResolvedValueOnce({
+      ok: false, status: 503, json: async () => ({ error: 'no usable evidence', code: 'evidence_unavailable' }),
+    } as unknown as Response);
+    render(<GitOpsApplicationView id="2:a" />);
+    await waitFor(() => expect(screen.getByTestId('gitops-application-error')).toHaveAttribute('data-error', 'evidence_unavailable'));
+    expect(screen.getByText('Evidence for this application is unavailable')).toBeInTheDocument();
+    expect(screen.queryByText('This application is not available')).toBeNull();
+    mockFetch.mockResolvedValueOnce(ok(detailResponse()));
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+    expect(await screen.findByRole('heading', { name: 'bookstack' })).toBeInTheDocument();
+  });
+
   it('shows a last-known banner with a retry when a refresh fails', async () => {
     vi.spyOn(console, 'warn').mockImplementation(() => {});
     mockFetch.mockResolvedValueOnce(ok(detailResponse()));

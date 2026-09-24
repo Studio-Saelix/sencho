@@ -86,6 +86,34 @@ describe('useGitOpsApplication', () => {
     expect(second.result.current.data).toBeNull();
   });
 
+  it('reports a matched application without usable evidence apart from an unreachable node', async () => {
+    mockFetch.mockResolvedValueOnce({
+      ok: false, status: 503, json: async () => ({ error: 'no usable evidence', code: 'evidence_unavailable' }),
+    } as unknown as Response);
+    const { result } = renderHook(() => useGitOpsApplication('2:app'));
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    expect(result.current.error).toEqual({ kind: 'evidence_unavailable', message: 'no usable evidence' });
+    expect(result.current.data).toBeNull();
+  });
+
+  it('rejects a successful answer whose live projection targets are not an array', async () => {
+    const body = detailResponse();
+    const malformed = { ...body, projection: { ...body.projection, targets: null } };
+    mockFetch.mockResolvedValueOnce({ ok: true, status: 200, json: async () => malformed } as unknown as Response);
+    const { result } = renderHook(() => useGitOpsApplication('1:a'));
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    expect(result.current.error).toEqual({ kind: 'failed', message: 'The server returned an answer this version of Sencho cannot read.' });
+    expect(result.current.data).toBeNull();
+  });
+
+  it('rejects a successful answer whose row attention is not an array', async () => {
+    const body = detailResponse();
+    const malformed = { ...body, application: { ...body.application, attention: 'x' } };
+    mockFetch.mockResolvedValueOnce({ ok: true, status: 200, json: async () => malformed } as unknown as Response);
+    const { result } = renderHook(() => useGitOpsApplication('1:a'));
+    await waitFor(() => expect(result.current.error?.kind).toBe('failed'));
+  });
+
   it('rejects a successful answer it cannot read instead of rendering a blank view', async () => {
     mockFetch.mockResolvedValueOnce({ ok: true, status: 200, json: async () => ({ schemaVersion: 2 }) } as unknown as Response);
     const { result } = renderHook(() => useGitOpsApplication('1:a'));

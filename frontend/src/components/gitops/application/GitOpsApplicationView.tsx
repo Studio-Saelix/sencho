@@ -152,6 +152,11 @@ function errorCopy(error: GitOpsApplicationError): { title: string; line: string
         title: 'The owning node did not answer',
         line: `The application's state is unknown until the node reports again (${error.message}).`,
       };
+    case 'evidence_unavailable':
+      return {
+        title: 'Evidence for this application is unavailable',
+        line: `Its owning node reports it, but not yet with state this node can read; retry once it reports again (${error.message}).`,
+      };
     case 'failed':
       return { title: 'The application could not be read', line: error.message };
   }
