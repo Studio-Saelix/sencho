@@ -455,6 +455,42 @@ describe('overlapping silent gates', () => {
     expect(secondToastCount).toBeGreaterThan(firstToastCount);
   });
 
+  it('ignores a sibling-recovery response that lands after a newer session started', async () => {
+    // Session 1's /recoveries fetch is still in flight when session 2 begins.
+    // When the stale response finally lands it must not toast or re-arm
+    // observing state that session 2 already cleared.
+    let resolveFirst: (entries: StackRecoveryEntry[]) => void = () => {};
+    const firstFetch = new Promise<StackRecoveryEntry[]>((resolve) => { resolveFirst = resolve; });
+    vi.mocked(fetchStackRecoveries)
+      .mockImplementationOnce(() => firstFetch)
+      .mockResolvedValue([]);
+    vi.mocked(apiFetch).mockImplementation(async () =>
+      new Response(JSON.stringify({
+        id: 'gate-svc', status: 'observing', reason: null, windowSeconds: 90, startedAt: Date.now(),
+        targetScope: 'service', serviceName: 'api', failureSource: null,
+      }), { status: 200 }),
+    );
+
+    const { result } = renderHook(() => useDeployFeedback(), { wrapper });
+    const runUpdate = (gateId: string) =>
+      result.current.runWithLog(
+        { stackName: 'web', action: 'update', nodeId: null, serviceName: 'api' },
+        async (started) => { await started; return { ok: true, healthGateId: gateId, recoveryId: 'rec-1' }; },
+      );
+
+    await act(async () => { await runUpdate('gate-svc-1'); });
+    await act(async () => { await runUpdate('gate-svc-2'); });
+
+    const failedSibling = { serviceName: 'sibling', recoveryId: 'rec-sibling', healthGateId: 'gate-sibling', healthGateStatus: 'failed' as const, healthGateReason: 'timeout', healthGateFailureSource: 'primary' as const, expiresAt: Date.now() + 60_000 };
+    await act(async () => {
+      resolveFirst([failedSibling]);
+      await firstFetch;
+      await Promise.resolve();
+    });
+
+    expect(toast.error).not.toHaveBeenCalled();
+  });
+
   it('continues polling an observing sibling and surfaces it when it transitions to failed', async () => {
     const observingEntry = { serviceName: 'sibling', recoveryId: 'rec-sibling', healthGateId: 'gate-sibling', healthGateStatus: 'observing' as const, healthGateReason: null, healthGateFailureSource: null, expiresAt: Date.now() + 60_000 };
     const failedEntry = { serviceName: 'sibling', recoveryId: 'rec-sibling', healthGateId: 'gate-sibling', healthGateStatus: 'failed' as const, healthGateReason: 'timeout', healthGateFailureSource: 'primary' as const, expiresAt: Date.now() + 60_000 };
@@ -503,3 +539,98 @@ describe('overlapping silent gates', () => {
     }
   });
 });
+
+describe('sibling recoveries with Deploy Progress on', () => {
+  // DEPLOY_FEEDBACK_KEY defaults to 'true' in the top-level beforeEach.
+  const failedSibling: StackRecoveryEntry = {
+    serviceName: 'sibling', recoveryId: 'rec-sibling', healthGateId: 'gate-sibling',
+    healthGateStatus: 'failed', healthGateReason: 'timeout', healthGateFailureSource: 'primary',
+    expiresAt: Date.now() + 60_000,
+  };
+
+  async function runEnabledServiceUpdate() {
+    vi.mocked(fetchStackRecoveries).mockResolvedValue([failedSibling]);
+    vi.mocked(apiFetch).mockImplementation(async () =>
+      new Response(JSON.stringify({
+        id: 'gate-svc', status: 'observing', reason: null, windowSeconds: 90, startedAt: Date.now(),
+        targetScope: 'service', serviceName: 'api', failureSource: null,
+      }), { status: 200 }),
+    );
+    const { result } = renderHook(() => useDeployFeedback(), { wrapper });
+
+    let outer: Promise<unknown> | undefined;
+    await act(async () => {
+      outer = result.current.runWithLog(
+        { stackName: 'web', action: 'update', nodeId: null, serviceName: 'api' },
+        async (started) => { await started; return { ok: true, healthGateId: 'gate-svc', recoveryId: 'rec-1' }; },
+      );
+      await Promise.resolve();
+    });
+    await act(async () => {
+      result.current.onTerminalReady();
+      await outer;
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    return result;
+  }
+
+  function expectSiblingRestoreToast() {
+    expect(toast.error).toHaveBeenCalled();
+    const [msg, opts] = (toast.error as ReturnType<typeof vi.fn>).mock.calls[0];
+    expect(msg).toContain('sibling');
+    expect(opts).toMatchObject({ duration: 120_000, action: { label: 'Restore' } });
+  }
+
+  it('surfaces a failed sibling as a Restore toast on the enabled path', async () => {
+    await runEnabledServiceUpdate();
+    expectSiblingRestoreToast();
+  });
+
+  it('keeps watching an observing sibling after the panel is dismissed', async () => {
+    vi.useFakeTimers();
+    try {
+      const observingSibling: StackRecoveryEntry = { ...failedSibling, healthGateStatus: 'observing', healthGateReason: null, healthGateFailureSource: null };
+      vi.mocked(fetchStackRecoveries).mockResolvedValue([observingSibling]);
+      vi.mocked(apiFetch).mockImplementation(async () =>
+        new Response(JSON.stringify({
+          id: 'gate-svc', status: 'observing', reason: null, windowSeconds: 90, startedAt: Date.now(),
+          targetScope: 'service', serviceName: 'api', failureSource: null,
+        }), { status: 200 }),
+      );
+      const { result } = renderHook(() => useDeployFeedback(), { wrapper });
+
+      let outer: Promise<unknown> | undefined;
+      await act(async () => {
+        outer = result.current.runWithLog(
+          { stackName: 'web', action: 'update', nodeId: null, serviceName: 'api' },
+          async (started) => { await started; return { ok: true, healthGateId: 'gate-svc', recoveryId: 'rec-1' }; },
+        );
+        await Promise.resolve();
+      });
+      await act(async () => {
+        result.current.onTerminalReady();
+        await vi.advanceTimersByTimeAsync(60);
+        await outer;
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      // Observing sibling produces no toast yet.
+      expect(toast.error).not.toHaveBeenCalled();
+
+      // Dismiss the panel: the service gate keeps watching silently, and so
+      // must the sibling poll.
+      act(() => { result.current.onPanelClose(); });
+      expect(result.current.panelState.isOpen).toBe(false);
+
+      vi.mocked(fetchStackRecoveries).mockResolvedValue([failedSibling]);
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(4_000);
+      });
+      expectSiblingRestoreToast();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+

@@ -120,6 +120,28 @@ describe('GET /api/stacks/:stackName/recoveries', () => {
     getReportSpy.mockRestore();
   });
 
+  it('returns only the newest active row per service', async () => {
+    vi.mocked(getActiveCapabilities).mockReset();
+    vi.mocked(getActiveCapabilities).mockReturnValue(['service-scoped-update' as const]);
+    const now = Date.now();
+    const getReportSpy = vi.spyOn(HealthGateService.prototype, 'getReport').mockImplementation((_nodeId: number, _stackName: string, gateId?: string) => {
+      if (gateId === 'gate-old') return { ...gateReport, id: 'gate-old', status: 'failed' };
+      return { ...gateReport, id: gateId ?? 'gate-new', status: 'passed', reason: null, failureSource: null };
+    });
+
+    // Older failed recovery followed by a newer passed one for the same service:
+    // only the newer row may be returned, or a Restore offer would target a stale snapshot.
+    insertRecovery({ id: 'rec-old', service_name: 'api', health_gate_id: 'gate-old', created_at: now - 10_000 });
+    insertRecovery({ id: 'rec-new', service_name: 'api', health_gate_id: 'gate-new', created_at: now - 1_000 });
+
+    const res = await request(app).get('/api/stacks/web/recoveries').set('Cookie', adminCookie);
+    expect(res.status).toBe(200);
+    const body = res.body as Array<{ recoveryId: string; healthGateStatus: string }>;
+    expect(body).toHaveLength(1);
+    expect(body[0]).toMatchObject({ recoveryId: 'rec-new', healthGateStatus: 'passed' });
+    getReportSpy.mockRestore();
+  });
+
   it('maps null health_gate_id to unknown with no-health-gate reason', async () => {
     vi.mocked(getActiveCapabilities).mockReset();
     vi.mocked(getActiveCapabilities).mockReturnValue(['service-scoped-update' as const]);

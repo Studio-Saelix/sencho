@@ -229,9 +229,19 @@ export async function fetchStackRecoveries(params: {
         }
         const body: unknown = await res.json().catch(() => null);
         if (!Array.isArray(body)) return [];
-        return body
+        const parsed = body
             .map(parseStackRecoveryEntry)
             .filter((entry): entry is StackRecoveryEntry => entry !== null);
+        // Defensive dedup: the server orders newest-first and already returns one
+        // row per service, but an older node (or a bug) could send several. Keep
+        // only the first entry per service so a superseded row can never produce
+        // a Restore toast pointing at a stale snapshot.
+        const seen = new Set<string>();
+        return parsed.filter((entry) => {
+            if (seen.has(entry.serviceName)) return false;
+            seen.add(entry.serviceName);
+            return true;
+        });
     } catch {
         console.warn('[serviceUpdate] stack recoveries fetch failed');
         return [];

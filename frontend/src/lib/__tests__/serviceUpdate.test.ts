@@ -86,6 +86,25 @@ describe('fetchStackRecoveries', () => {
     expect(result.map((r) => r.recoveryId)).toEqual(['rec-api', 'rec-db']);
   });
 
+  it('keeps only the first (newest) entry per service when the server sends duplicates', async () => {
+    // The server orders newest-first; a duplicate older failed row for the same
+    // service must be dropped so no Restore toast can target a stale snapshot.
+    const olderFailed = {
+      serviceName: 'api',
+      recoveryId: 'rec-api-old',
+      healthGateId: 'gate-old',
+      healthGateStatus: 'failed' as const,
+      healthGateReason: 'timeout',
+      healthGateFailureSource: 'primary' as const,
+      expiresAt: Date.now() + 60_000,
+    };
+    const newerPassed = { ...sampleEntries[0], recoveryId: 'rec-api-new', healthGateStatus: 'passed' as const, healthGateReason: null, healthGateFailureSource: null };
+    mockedApiFetch.mockResolvedValue(new Response(JSON.stringify([newerPassed, olderFailed]), { status: 200 }));
+    const result = await fetchStackRecoveries({ nodeId: null, stackName: 'web' });
+    expect(result).toHaveLength(1);
+    expect(result[0]).toMatchObject({ recoveryId: 'rec-api-new', healthGateStatus: 'passed' });
+  });
+
   it('returns an empty array on network failure', async () => {
     mockedApiFetch.mockRejectedValue(new Error('ECONNREFUSED'));
     const result = await fetchStackRecoveries({ nodeId: null, stackName: 'web' });

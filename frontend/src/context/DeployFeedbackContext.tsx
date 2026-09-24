@@ -555,8 +555,13 @@ export function DeployFeedbackProvider({ children }: { children: React.ReactNode
   // Used by both the !isEnabled branch and the enabled branch in runWithLog.
   const surfaceSiblingRecoveries = useCallback(
     async (stackName: string, nodeId: number | null, currentServiceName: string | undefined) => {
-      observingContextRef.current = { stackName, nodeId };
+      // Bail out if a newer session started while the fetch was in flight;
+      // otherwise this stale call would re-arm observing state that the new
+      // session already cleared, pointing sibling polling at the wrong context.
+      const session = sessionIdRef.current;
       const recoveries = await fetchStackRecoveries({ nodeId, stackName });
+      if (sessionIdRef.current !== session) return;
+      observingContextRef.current = { stackName, nodeId };
       for (const recovery of recoveries) {
         if (recovery.serviceName === currentServiceName) continue;
         if (recovery.healthGateStatus === 'failed' && !watchedRecoveriesRef.current.has(recovery.recoveryId)) {
