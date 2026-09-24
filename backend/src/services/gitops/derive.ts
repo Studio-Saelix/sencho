@@ -39,6 +39,7 @@ import type {
   RuntimeFacet,
   SourceFacet,
   SourceIdentityFields,
+  SourceReviewBlockReason,
 } from './types';
 
 /**
@@ -249,6 +250,18 @@ function targetObservationMatchesExpected(target: GitOpsTargetProjection): boole
   return expectedSetAgreesWithObservation(expected.artifactSetId, target.observedArtifactIdentity, expected.identity);
 }
 
+/**
+ * The persisted block reason, narrowed to the codes this build knows.
+ *
+ * A value from a newer writer is dropped rather than passed through: the
+ * projection feeds a closed classifier, and an unknown code would have to be
+ * treated as a code by every consumer anyway. Dropping degrades to the plain
+ * review state, which is still truthful about what is happening.
+ */
+function normalizeSourceReviewBlockReason(value: string | null): SourceReviewBlockReason | null {
+  return value === 'stateful_withdrawal' ? value : null;
+}
+
 function deriveSource(app: GitOpsApplicationRow, limitations: GitOpsLimitation[]): SourceFacet {
   if (app.target_mode === 'inline_blueprint') return { status: 'not_applicable' };
   const identity = sourceIdentity(app, limitations);
@@ -329,7 +342,13 @@ function deriveSource(app: GitOpsApplicationRow, limitations: GitOpsLimitation[]
       return { ...identity, status: 'source_reconcile_required' };
     }
     if (app.candidate_plan_blocked === 1) return { ...identity, status: 'source_conflict_blocker' };
-    if (app.review_required === 1) return { ...identity, status: 'source_review_pending' };
+    if (app.review_required === 1) {
+      return {
+        ...identity,
+        status: 'source_review_pending',
+        reviewBlockReason: normalizeSourceReviewBlockReason(app.review_block_reason),
+      };
+    }
     return { ...identity, status: 'candidate_ready' };
   }
   if (app.accepted_generation_id) {

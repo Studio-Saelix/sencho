@@ -65,6 +65,11 @@ export type GitOpsApplicationRow = {
   accepted_generation_id: string | null;
   candidate_plan_blocked: number;
   review_required: number;
+  /**
+   * Why an automatic acceptance refused and fell back to review. Null under
+   * the ordinary review policy, which was never going to accept on its own.
+   */
+  review_block_reason: SourceReviewBlockReason | null;
   artifact_set_id: string | null;
   latest_artifact_set_id: string | null;
   intent_revision_id: string | null;
@@ -445,6 +450,12 @@ export type SourceIdentityFields = {
   acceptedGenerationId: string | null;
 };
 
+/**
+ * Why the source policy's automatic path refused a candidate and left it for
+ * review. A closed set: the projection carries the code, the surface names it.
+ */
+export type SourceReviewBlockReason = 'stateful_withdrawal';
+
 export type SourceFacet =
   | { status: 'not_applicable' }
   | (SourceIdentityFields & {
@@ -453,9 +464,13 @@ export type SourceFacet =
         | 'checking_fetching'
         | 'application_generation_accepted'
         | 'candidate_ready'
-        | 'source_review_pending'
         | 'source_conflict_blocker'
         | 'source_reconcile_required';
+    })
+  | (SourceIdentityFields & {
+      status: 'source_review_pending';
+      /** Set when automatic acceptance refused for safety, null for a review policy. */
+      reviewBlockReason: SourceReviewBlockReason | null;
     })
   | (SourceIdentityFields & { status: 'source_superseded'; supersededGenerationId: string })
   | (SourceIdentityFields & { status: 'applying'; activeOperationId: string; activeGenerationId: string })

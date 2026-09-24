@@ -47,6 +47,7 @@ import {
     type ReconcileTrigger,
 } from './gitops/triggers';
 import { classifyFailure, effectivePollIntervalSecs } from './gitops/backoff';
+import { checkStatefulWithdrawal, holdForStatefulReview } from './gitops/statefulGuard';
 import { BlueprintTargetAdapter, buildAcceptedGeneration, type AcceptedGeneration, type DispatchContext, type DispatchResult } from './gitops/handoff';
 import {
     GitOpsTransitions,
@@ -2608,16 +2609,29 @@ export class GitSourceService {
                 // for a different commit, or no candidate at all, mints anew:
                 // staging after an apply is a new dispatch cycle and needs its
                 // own generation to accept.
+                //
+                // A safety-held candidate counts as the expected state for an
+                // automatic source even though its review flag reads 1: the
+                // hold is durable and must survive repeat pulls of the same
+                // commit. Minting a lookalike would clear the hold and re-run
+                // the guard on every poll, churning generations and history.
+                // A plan-blocked candidate carries no review meaning at all,
+                // so its flag never takes part in the no-op identity.
                 const reviewRequired = gitopsApp.source_policy !== 'automatic';
                 const staged = gitopsApp.candidate_generation_id
                     ? GitOpsStore.getInstance().getGeneration(gitopsApp.candidate_generation_id)
                     : undefined;
+                const reviewStateMatches = staged?.plan_blocked === 1
+                    ? true
+                    : reviewRequired
+                        ? gitopsApp.review_required === 1
+                        : gitopsApp.review_required === 0 || gitopsApp.review_block_reason !== null;
                 if (
                     staged &&
                     staged.commit_sha === fetched.commitSha &&
                     staged.materialization_fingerprint === identity.fingerprint &&
                     staged.plan_blocked === (plan?.blocked === true ? 1 : 0) &&
-                    gitopsApp.review_required === (reviewRequired ? 1 : 0) &&
+                    reviewStateMatches &&
                     storedCandidateContentSha256(staged.compose_inputs_json) !== null
                 ) {
                     return;
@@ -7363,6 +7377,15 @@ export class GitSourceService {
             if (diag) console.log(`[GitSource:diag] webhook pending-only stack=${stackName} sha=${commitSha.slice(0, 7)}`);
             return { status: 'success', message: `Pending update ready at ${commitSha.slice(0, 7)}.` };
         }
+        // Automatic modes have no human in the loop, so the same stateful
+        // guard the poll path applies must hold a withdrawing delivery instead
+        // of applying it. The delivery still reads as received; the operator
+        // sees the block in the attention queue and accepts explicitly.
+        const statefulHold = this.statefulWebhookHold(stackName, gitopsApp.id, trigger, actor);
+        if (statefulHold !== null) {
+            if (diag) console.log(`[GitSource:diag] webhook auto-apply held stack=${stackName} sha=${commitSha.slice(0, 7)}`);
+            return { status: 'success', message: statefulHold };
+        }
 
         try {
             const request: ReconcileRequest = {
@@ -7404,6 +7427,51 @@ export class GitSourceService {
         } catch (e) {
             return this.webhookFailure(stackName, deliverySuffix, 'apply', e);
         }
+    }
+
+    /**
+     * Hold an automatic webhook delivery when the staged candidate withdraws
+     * or renames a stateful service, or when that cannot be proven. Returns
+     * the operator-facing message when held, null when the delivery may apply.
+     */
+    private statefulWebhookHold(
+        stackName: string,
+        applicationId: string,
+        trigger: ReconcileTrigger,
+        actor: string,
+    ): string | null {
+        const app = GitOpsStore.getInstance().getApplication(applicationId);
+        // The call site only reaches here for an automated delivery intent, so
+        // the current policy value is not the gate: a stored redelivery keeps
+        // its original automated authority even if the policy has moved since.
+        if (!app) return null;
+        if (app.review_block_reason !== null) {
+            return 'Held for review: the pending update removes or renames a stateful service.';
+        }
+        if (!app.candidate_generation_id) return null;
+        const generation = GitOpsStore.getInstance().getGeneration(app.candidate_generation_id);
+        if (!generation) {
+            console.warn(
+                `[GitSource] webhook auto-apply held for ${sanitizeForLog(app.id)}: the candidate generation row is missing, so a stateful withdrawal cannot be ruled out`,
+            );
+            return 'Held for review: the pending update could not be checked for stateful services.';
+        }
+        const withdrawal = checkStatefulWithdrawal(stackName, app, generation);
+        if (withdrawal.status === 'clear') return null;
+        const recorded = holdForStatefulReview(app, generation, {
+            operationId: crypto.randomUUID(),
+            actor,
+            trigger,
+            at: Date.now(),
+        });
+        const detail = withdrawal.status === 'withdrawn'
+            ? `withdraws or renames stateful services (${withdrawal.services.map((name) => sanitizeForLog(name)).join(', ')})`
+            : `cannot be proven safe for stateful services (${withdrawal.reason})`;
+        console.warn(
+            `[GitSource] webhook auto-apply held for ${sanitizeForLog(app.id)}: the candidate ${detail}; an operator must accept explicitly`,
+        );
+        const unrecorded = recorded ? '' : ' The block could not be recorded; check the server logs.';
+        return `Held for review: the pending update ${detail}.${unrecorded}`;
     }
 
     private webhookFailure(stackName: string, deliverySuffix: string, phase: 'pull' | 'apply', error: unknown): WebhookPullResult {
