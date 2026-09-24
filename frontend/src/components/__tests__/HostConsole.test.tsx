@@ -3,6 +3,8 @@ import { render, waitFor, act } from '@testing-library/react';
 import type { ReactNode } from 'react';
 import * as NodeContext from '@/context/NodeContext';
 import HostConsole from '../HostConsole';
+import { copyToClipboard } from '@/lib/clipboard';
+import { toast } from '@/components/ui/toast-store';
 
 vi.mock('@/context/NodeContext');
 
@@ -59,6 +61,10 @@ vi.mock('../ui/button', () => ({
 
 vi.mock('@/lib/clipboard', () => ({
   copyToClipboard: vi.fn(async () => undefined),
+}));
+
+vi.mock('@/components/ui/toast-store', () => ({
+  toast: { error: vi.fn() },
 }));
 
 type FakeWs = {
@@ -153,6 +159,21 @@ describe('HostConsole socket targeting', () => {
     container.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true }));
     await Promise.resolve();
     expect(readText).toHaveBeenCalledTimes(1);
+  });
+
+  it('reports a failed Copy selection instead of failing silently', async () => {
+    const { loadXtermModules } = await import('@/lib/xtermLoader');
+    const { Terminal } = await loadXtermModules();
+    vi.mocked(copyToClipboard).mockRejectedValueOnce(new Error('blocked'));
+
+    const { getByLabelText } = render(<HostConsole nodeId={1} stackName={null} onClose={vi.fn()} />);
+    await waitFor(() => expect(sockets.length).toBe(1));
+    const term = (Terminal as unknown as { lastInstance?: { getSelection: ReturnType<typeof vi.fn> } }).lastInstance!;
+    term.getSelection.mockReturnValue('docker ps');
+
+    getByLabelText('Copy selection').click();
+    await waitFor(() => expect(toast.error).toHaveBeenCalledTimes(1));
+    expect(copyToClipboard).toHaveBeenCalledWith('docker ps');
   });
 
   it('includes the stack parameter when provided', async () => {
