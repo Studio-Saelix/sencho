@@ -1919,6 +1919,99 @@ describe('GitSourceService.handleWebhookPull debounce', () => {
         }
     });
 
+    it('holds a webhook auto-apply that would withdraw a stateful service', async () => {
+        const stackName = 'webhook-stateful-hold';
+        const svc = GitSourceService.getInstance();
+        const validateSpy = vi.spyOn(svc, 'validateCompose').mockResolvedValue({ ok: true });
+        const statefulCompose = [
+            'services:',
+            '  db:',
+            '    image: postgres:16',
+            '    volumes:',
+            '      - pgdata:/var/lib/postgresql/data',
+            'volumes:',
+            '  pgdata:',
+            '',
+        ].join('\n');
+        const withdrawnCompose = 'services:\n  web:\n    image: nginx:1.27\n';
+        try {
+            // The promotion writes the stack's compose file for real, exactly
+            // as a linked stack would have one, so the second delivery's
+            // change plan compares against live state rather than a missing
+            // file (which would read as a local conflict).
+            fs.mkdirSync(path.join(process.env.COMPOSE_DIR!, stackName), { recursive: true });
+            mockSuccessfulClone({ compose: statefulCompose, sha: 'b1'.repeat(20) });
+            await svc.upsert({
+                stackName,
+                repoUrl: 'https://github.com/example/repo.git',
+                branch: 'main',
+                composePaths: ['compose.yaml'],
+                contextDir: null,
+                syncEnv: false,
+                envPath: null,
+                authType: 'none',
+                autoApplyOnWebhook: true,
+                autoDeployOnApply: false,
+            });
+
+            // The first delivery applies a stateful generation; that defines
+            // the managed baseline the guard compares later deliveries to.
+            const first = await svc.handleWebhookPull(stackName, true, 'delivery-stateful-first');
+            expect(first.status).toBe('success');
+            const baseline = GitOpsStore.getInstance().getLiveDirectApplication(stackName)!;
+            const acceptedId = baseline.accepted_generation_id;
+            expect(acceptedId).toBeTruthy();
+
+            // The next commit withdraws that service. An automatic webhook
+            // delivery must hold it for review instead of applying it, and the
+            // hold must be visible as a canonical attention reason.
+            DatabaseService.getInstance().getDb()
+                .prepare('UPDATE stack_git_sources SET last_debounce_at = ? WHERE stack_name = ?')
+                .run(Date.now() - 999_999, stackName);
+            mockSuccessfulClone({ compose: withdrawnCompose, sha: 'b2'.repeat(20) });
+            const held = await svc.handleWebhookPull(stackName, true, 'delivery-stateful-second');
+
+            expect(held.status).toBe('success');
+            expect(held.message).toMatch(/Held for review/i);
+            const after = GitOpsStore.getInstance().getLiveDirectApplication(stackName)!;
+            expect(after.accepted_generation_id).toBe(acceptedId);
+            expect(after.review_required).toBe(1);
+            expect(after.review_block_reason).toBe('stateful_withdrawal');
+            // The withdrawing candidate is still staged, not applied.
+            expect(after.candidate_generation_id).toBeTruthy();
+            expect(GitOpsStore.getInstance().getGeneration(after.candidate_generation_id!)?.commit_sha)
+                .toBe('b2'.repeat(20));
+
+            // A stored redelivery keeps its automated intent even if the policy
+            // moved to review in the meantime. The guard must still hold the
+            // withdrawal rather than let the stored intent apply it.
+            GitOpsTransitions.getInstance().sourcePolicyChanged(after.id, 'review', {
+                operationId: 'policy-to-review',
+                actor: 'operator',
+                trigger: 'manual',
+                at: Date.now(),
+            });
+            const redeliveryId = 'delivery-stateful-redelivery';
+            GitOpsTransitions.getInstance().reserveReconcileAttempt(after.id, {
+                operationId: deliveryKey('webhook', 'fetch', redeliveryId),
+                actor: 'system:webhook',
+                trigger: 'webhook',
+                at: Date.now(),
+            }, undefined, { autoApply: true, deploy: false });
+            mockSuccessfulClone({ compose: withdrawnCompose, sha: 'b3'.repeat(20) });
+            const redelivered = await svc.handleWebhookPull(stackName, false, redeliveryId);
+
+            expect(redelivered.status).toBe('success');
+            expect(redelivered.message).toMatch(/Held for review/i);
+            const afterRedelivery = GitOpsStore.getInstance().getLiveDirectApplication(stackName)!;
+            expect(afterRedelivery.accepted_generation_id).toBe(acceptedId);
+            expect(afterRedelivery.review_block_reason).toBe('stateful_withdrawal');
+        } finally {
+            validateSpy.mockRestore();
+            await cleanupStackDir(stackName);
+        }
+    });
+
     it('reserves and durably settles an attempt for a successful webhook fetch', async () => {
         mockSuccessfulClone({ sha: '8'.repeat(40) });
         const svc = GitSourceService.getInstance();
@@ -2986,6 +3079,46 @@ describe('GitSourceService.pull', () => {
         expect(GitOpsStore.getInstance().getLiveDirectApplication('pull-repeat')!.candidate_generation_id).toBe(stagedId);
         expect(DatabaseService.getInstance().getGitSource('pull-repeat')?.pending_commit_sha).toBe(updatedSha);
         await cleanupStackDir('pull-repeat');
+    });
+
+    it('repeat pulls of a safety-held candidate keep one candidate and its block', async () => {
+        const svc = GitSourceService.getInstance();
+        await createFromGit('pull-held', '4444444444444444444444444444444444444444', true);
+        const base = generationCount('pull-held');
+
+        const updatedSha = '5555555555555555555555555555555555555555';
+        mockSuccessfulClone({
+            compose: 'services:\n  web:\n    image: nginx:1.29\n',
+            sha: updatedSha,
+        });
+        await svc.pull('pull-held');
+        const app = GitOpsStore.getInstance().getLiveDirectApplication('pull-held')!;
+        const stagedId = app.candidate_generation_id;
+        expect(stagedId).toBeTruthy();
+        expect(generationCount('pull-held')).toBe(base + 1);
+
+        // The automatic path refused the candidate for stateful safety. The
+        // hold must survive a repeat pull of the same commit: minting a
+        // lookalike would clear the reason and re-run the guard every poll.
+        GitOpsTransitions.getInstance().sourceReviewBlocked({
+            applicationId: app.id,
+            generationId: stagedId!,
+            reason: 'stateful_withdrawal',
+            envelope: { operationId: 'hold-pull-held', actor: 'system:source-controller', trigger: 'poll', at: Date.now() },
+        });
+
+        mockSuccessfulClone({
+            compose: 'services:\n  web:\n    image: nginx:1.29\n',
+            sha: updatedSha,
+        });
+        await svc.pull('pull-held');
+
+        expect(generationCount('pull-held')).toBe(base + 1);
+        const after = GitOpsStore.getInstance().getLiveDirectApplication('pull-held')!;
+        expect(after.candidate_generation_id).toBe(stagedId);
+        expect(after.review_required).toBe(1);
+        expect(after.review_block_reason).toBe('stateful_withdrawal');
+        await cleanupStackDir('pull-held');
     });
 
     it('a pull against a staged candidate missing its content digest mints anew', async () => {

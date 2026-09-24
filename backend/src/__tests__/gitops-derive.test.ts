@@ -3,8 +3,15 @@ import { setupTestDb, cleanupTestDb } from './helpers/setupTestDb';
 import { FACET_EVIDENCE_SOURCE } from '../services/gitops/types';
 import { GitOpsStore, emptyTargetRow } from '../services/gitops/store';
 import { GitOpsTransitions, type EventEnvelope } from '../services/gitops/transitions';
-import { projectApplication } from '../services/gitops/derive';
-import type { GitOpsApplicationRow, GitOpsGenerationRow } from '../services/gitops/types';
+import { deriveGitOpsRevision, projectApplication } from '../services/gitops/derive';
+import { DatabaseService } from '../services/DatabaseService';
+import type {
+  FutureGitOpsEvidence,
+  GitOpsApplicationRow,
+  GitOpsGenerationRow,
+  GitOpsIntentRevisionRow,
+  GitOpsRevisionProjection,
+} from '../services/gitops/types';
 import {
   encodeArtifactEvidenceJson,
   encodeObservedArtifactIdentity,
@@ -166,7 +173,10 @@ describe('gitops derivation', () => {
     const tx = GitOpsTransitions.getInstance();
     tx.activateDirect({ application: app('app-fail-drift', 'fail-drift-web'), nodeId: 1, envelope: env('op-fd-act') });
     store.insertGeneration(gen('gen-fd-a', 'app-fail-drift'));
-    store.insertGeneration(gen('gen-fd-b', 'app-fail-drift'));
+    // B is built from the commit the second fetch resolves, so its accepted
+    // commit matches the configured ref: the point of this fixture is the
+    // runtime mismatch, not a source one.
+    store.insertGeneration({ ...gen('gen-fd-b', 'app-fail-drift'), commit_sha: 'def456' });
     // Generation A ships and binds, then B is applied as the new desired
     // state while A keeps serving.
     tx.fetchStarted('app-fail-drift', env('op-fd-f1'));
@@ -1361,6 +1371,799 @@ describe('gitops derivation', () => {
     expect(projection.drift).toHaveLength(0);
   });
 
+  /**
+   * The application-level drift classes beyond the runtime family. Each class
+   * is pinned in three directions: an item when the rows prove divergence, no
+   * item when they agree, and no item (never a fabricated convergence or
+   * divergence claim) when the evidence a comparison would need is missing.
+   */
+  /**
+   * The same projection with an explicit rollout facet. The stored rows for a
+   * completed rollout are the subject of the rollout suites; these tests need
+   * the settled and queued statuses as the given fact, and the rows still have
+   * to satisfy every other producer.
+   */
+  function projectionWithRollout(
+    applicationId: string,
+    rollout: NonNullable<FutureGitOpsEvidence['rollout']>,
+  ): GitOpsRevisionProjection {
+    const store = GitOpsStore.getInstance();
+    const application = store.getApplication(applicationId);
+    if (!application) throw new Error('application missing');
+    return deriveGitOpsRevision(
+      { application, targets: store.listTargets(applicationId), healthDisabled: false },
+      { applicationId, source: null, placement: null, rollout, targetRuntime: [] },
+    );
+  }
+
+  function seedGitSource(stackName: string, overrides: Partial<{
+    autoApplyOnWebhook: boolean;
+    autoDeployOnApply: boolean;
+  }> = {}): void {
+    DatabaseService.getInstance().upsertGitSource({
+      stack_name: stackName,
+      repo_url: 'https://github.com/org/repo.git',
+      branch: 'main',
+      compose_path: 'compose.yml',
+      compose_paths: ['compose.yml'],
+      context_dir: null,
+      sync_env: false,
+      env_path: null,
+      auth_type: 'none',
+      encrypted_token: null,
+      encrypted_deploy_key: null,
+      ssh_known_hosts_entry: null,
+      ssh_host_key_fingerprint: null,
+      encrypted_ca_bundle: null,
+      auto_apply_on_webhook: overrides.autoApplyOnWebhook ?? false,
+      auto_deploy_on_apply: overrides.autoDeployOnApply ?? false,
+      last_applied_commit_sha: null,
+      last_applied_content_hash: null,
+      pending_commit_sha: null,
+      pending_compose_content: null,
+      pending_env_content: null,
+      pending_fetched_at: null,
+      last_debounce_at: null,
+    });
+  }
+
+  function setManifestCache(
+    stackName: string,
+    cache: { version: number | null; state: string | null; generation: string | null; commit: string | null; updatedAt?: number },
+  ): void {
+    DatabaseService.getInstance().getDb().prepare(
+      `UPDATE stack_git_sources
+         SET manifest_version = ?, manifest_state = ?, manifest_generation = ?, last_applied_commit_sha = ?, updated_at = ?
+       WHERE stack_name = ?`,
+    ).run(cache.version, cache.state, cache.generation, cache.commit, cache.updatedAt ?? 1, stackName);
+  }
+
+  function intentRev(
+    id: string,
+    applicationId: string,
+    sha: string,
+    driftPolicy: string | null = null,
+  ): GitOpsIntentRevisionRow {
+    return {
+      id,
+      application_id: applicationId,
+      blueprint_id: 1,
+      compose_content_sha256: sha,
+      blueprint_revision: 1,
+      deploy_stack_name: `${applicationId}-stack`,
+      selector_json: '{}',
+      pinned_node_id: null,
+      cordon_implications_json: '[]',
+      rollout_strategy_json: '{}',
+      runtime_drift_policy: driftPolicy,
+      stateful_policy_json: null,
+      health_failure_rollback_policy_json: null,
+      operation_id: `op-${id}`,
+      actor: 'tester',
+      created_at: 1,
+    };
+  }
+
+  function gitManagedApp(id: string, blueprintId: number, overrides: Partial<GitOpsApplicationRow> = {}): GitOpsApplicationRow {
+    // The blueprint CHECK requires blueprint_id, a null stack name, and a
+    // configured repo URL; the URL is the source identity the mode carries.
+    // One live application per blueprint, so every caller names its own id.
+    return rawApp(id, {
+      target_mode: 'blueprint',
+      blueprint_id: blueprintId,
+      lifecycle_key: `blueprint:${blueprintId}:${id}`,
+      stack_name: null,
+      ...overrides,
+    });
+  }
+
+  it('reports source drift when the accepted generation trails the configured ref', () => {
+    const store = GitOpsStore.getInstance();
+    seedGitSource('src-drift-web', { autoApplyOnWebhook: true });
+    store.insertApplication(rawApp('app-src-drift', {
+      stack_name: 'src-drift-web',
+      desired_commit_sha: 'newsha',
+      accepted_generation_id: 'gen-src-drift',
+    }));
+    store.insertGeneration({ ...gen('gen-src-drift', 'app-src-drift'), commit_sha: 'oldsha' });
+
+    const projection = projectApplication('app-src-drift', false);
+    if (projection.targetMode === 'not_applicable') throw new Error('expected application');
+    const item = projection.drift.find((entry) => entry.class === 'source');
+    expect(item).toMatchObject({
+      class: 'source',
+      expected: { kind: 'commit', sha: 'newsha', repoUrl: 'https://github.com/org/repo.git', ref: 'main' },
+      observed: { kind: 'commit', sha: 'oldsha' },
+      owner: 'GitSourceService',
+      configuredPolicy: { kind: 'git_source', autoApplyOnWebhook: true, autoDeployOnApply: false },
+      action: 'fetch',
+    });
+  });
+
+  it('does not call a staged or held candidate source drift', () => {
+    const store = GitOpsStore.getInstance();
+    // The ref has already advanced to a commit nobody accepted, which is
+    // exactly the pointer state a staged candidate and a held review create.
+    const staged = [
+      { appId: 'app-src-ready', stackName: 'src-ready-web', reviewRequired: 0, facet: 'candidate_ready' },
+      { appId: 'app-src-held', stackName: 'src-held-web', reviewRequired: 1, facet: 'source_review_pending' },
+    ] as const;
+    for (const { appId, stackName, reviewRequired } of staged) {
+      seedGitSource(stackName);
+      store.insertApplication(rawApp(appId, {
+        stack_name: stackName,
+        desired_commit_sha: 'newsha',
+        fetched_commit_sha: 'newsha',
+        accepted_generation_id: `gen-src-staged-${appId}`,
+        candidate_generation_id: `gen-src-candidate-${appId}`,
+        review_required: reviewRequired,
+      }));
+      store.insertGeneration({ ...gen(`gen-src-staged-${appId}`, appId), commit_sha: 'oldsha' });
+      store.insertGeneration({ ...gen(`gen-src-candidate-${appId}`, appId), commit_sha: 'newsha' });
+    }
+
+    for (const { appId, facet } of staged) {
+      const projection = projectApplication(appId, false);
+      if (projection.targetMode === 'not_applicable') throw new Error('expected application');
+      expect(projection.facets?.source.status).toBe(facet);
+      expect(projection.drift.filter((entry) => entry.class === 'source')).toEqual([]);
+    }
+  });
+
+  it('reports a failed fetch as source drift and stays quiet once the ref is accepted', () => {
+    const store = GitOpsStore.getInstance();
+    store.insertApplication(rawApp('app-src-fail', {
+      stack_name: 'src-fail-web',
+      failure_stage: 'fetch',
+      failure_class: 'NETWORK_TIMEOUT',
+      failure_at: 42,
+    }));
+    let projection = projectApplication('app-src-fail', false);
+    if (projection.targetMode === 'not_applicable') throw new Error('expected application');
+    expect(projection.drift).toEqual([
+      expect.objectContaining({
+        class: 'source',
+        expected: { kind: 'none' },
+        observed: { kind: 'unknown' },
+        freshnessAt: 42,
+        action: 'fetch',
+      }),
+    ]);
+
+    // Converged: the accepted generation is the commit the ref names.
+    store.insertApplication(rawApp('app-src-ok', {
+      stack_name: 'src-ok-web',
+      desired_commit_sha: 'abc123',
+      accepted_generation_id: 'gen-src-ok',
+    }));
+    store.insertGeneration(gen('gen-src-ok', 'app-src-ok'));
+    projection = projectApplication('app-src-ok', false);
+    if (projection.targetMode === 'not_applicable') throw new Error('expected application');
+    expect(projection.drift).toEqual([]);
+  });
+
+  it('reports a stale placement approval that no longer binds the current intent', () => {
+    const store = GitOpsStore.getInstance();
+    store.insertApplication(gitManagedApp('app-place-stale', 71, {
+      intent_revision_id: 'ir-place-current',
+      rollout_candidate_id: 'cand-place',
+      placement_approval_ref: 'place-stale',
+    }));
+    store.insertIntentRevision(intentRev('ir-place-current', 'app-place-stale', 'a'.repeat(64), 'suggest'));
+    store.insertIntentRevision(intentRev('ir-place-old', 'app-place-stale', 'b'.repeat(64)));
+    store.insertRolloutCandidate({
+      id: 'cand-place',
+      application_id: 'app-place-stale',
+      intent_revision_id: 'ir-place-current',
+      compose_content_sha256: 'a'.repeat(64),
+      accepted_generation_id: null,
+      artifact_set_id: null,
+      required_targets_json: '{"nodeIds":[1]}',
+      authoritative: 1,
+      provenance: 'intent_change',
+      operation_id: 'op-cand-place',
+      created_at: 1,
+    });
+    store.insertApproval({
+      id: 'place-stale',
+      kind: 'placement_approval',
+      authority: 'operator',
+      authoritative: 1,
+      application_id: 'app-place-stale',
+      generation_id: null,
+      intent_revision_id: 'ir-place-old',
+      artifact_set_id: null,
+      rollout_candidate_id: null,
+      rollout_generation_id: null,
+      source_acceptance_ref: null,
+      placement_approval_ref: null,
+      required_targets_json: '{"nodeIds":[1]}',
+      preflight_fingerprint: null,
+      fingerprint: null,
+      blast_json: '[]',
+      policy_provenance_json: null,
+      actor: 'tester',
+      created_at: 9,
+    });
+
+    const projection = projectApplication('app-place-stale', false);
+    if (projection.targetMode === 'not_applicable') throw new Error('expected application');
+    const items = projection.drift.filter((entry) => entry.class === 'placement');
+    expect(items).toHaveLength(1);
+    expect(items[0]).toMatchObject({
+      expected: { kind: 'intent', id: 'ir-place-current', composeContentSha256: 'a'.repeat(64) },
+      observed: { kind: 'intent', id: 'ir-place-old', composeContentSha256: 'b'.repeat(64) },
+      freshnessAt: 9,
+      owner: 'BlueprintReconciler',
+      configuredPolicy: { kind: 'blueprint_drift', driftMode: 'suggest' },
+      action: 'none',
+    });
+  });
+
+  it('reports a target holding authority outside the current required set once the rollout settles', () => {
+    const store = GitOpsStore.getInstance();
+    // A placement approval that does bind the current intent and target set,
+    // so the application is settled rather than waiting for a decision.
+    store.insertApproval({
+      id: 'place-ok',
+      kind: 'placement_approval',
+      authority: 'operator',
+      authoritative: 1,
+      application_id: 'app-place-outside',
+      generation_id: null,
+      intent_revision_id: 'ir-place-set',
+      artifact_set_id: null,
+      rollout_candidate_id: null,
+      rollout_generation_id: null,
+      source_acceptance_ref: null,
+      placement_approval_ref: null,
+      required_targets_json: '{"nodeIds":[1]}',
+      preflight_fingerprint: null,
+      fingerprint: null,
+      blast_json: '[]',
+      policy_provenance_json: null,
+      actor: 'tester',
+      created_at: 1,
+    });
+    store.insertApplication(gitManagedApp('app-place-outside', 72, {
+      intent_revision_id: 'ir-place-set',
+      rollout_candidate_id: 'cand-place-set',
+      placement_approval_ref: 'place-ok',
+    }));
+    store.insertIntentRevision(intentRev('ir-place-set', 'app-place-outside', 'c'.repeat(64)));
+    store.insertRolloutCandidate({
+      id: 'cand-place-set',
+      application_id: 'app-place-outside',
+      intent_revision_id: 'ir-place-set',
+      compose_content_sha256: 'c'.repeat(64),
+      accepted_generation_id: null,
+      artifact_set_id: null,
+      required_targets_json: '{"nodeIds":[1]}',
+      authoritative: 1,
+      provenance: 'intent_change',
+      operation_id: 'op-cand-place-set',
+      created_at: 1,
+    });
+    // Node 1 is in the required set and is not drift; node 2 applied under the
+    // same intent but is outside it.
+    store.upsertTarget({
+      ...emptyTargetRow('app-place-outside', 1, 1),
+      applied_generation_id: 'gen-place',
+      intent_revision_id: 'ir-place-set',
+    });
+    store.upsertTarget({
+      ...emptyTargetRow('app-place-outside', 2, 1),
+      applied_generation_id: 'gen-place',
+      intent_revision_id: 'ir-place-set',
+    });
+
+    // Settled: the rollout that should have withdrawn node 2 has converged.
+    const settled = projectionWithRollout('app-place-outside', {
+      kind: 'configuration_converged_artifact_qualified',
+      rolloutGenerationId: 'rg-place',
+    });
+    if (settled.targetMode === 'not_applicable') throw new Error('expected application');
+    expect(settled.facets?.placement.status).toBe('blueprint_bound');
+    expect(settled.facets?.rollout.status).toBe('configuration_converged_artifact_qualified');
+    const items = settled.drift.filter((entry) => entry.class === 'placement');
+    expect(items).toHaveLength(1);
+    expect(items[0]).toMatchObject({
+      owner: 'BlueprintReconciler',
+      freshnessAt: 1,
+      affectedTargets: [{ nodeId: 2, stackName: 'app-place-outside-stack' }],
+      action: 'none',
+    });
+    expect(items[0].observed).toEqual({
+      kind: 'intent',
+      id: 'ir-place-set',
+      composeContentSha256: 'c'.repeat(64),
+    });
+
+    // Queued: the same extra target is the shape of a rollout in progress.
+    const queued = projectionWithRollout('app-place-outside', {
+      kind: 'queued',
+      rolloutGenerationId: 'rg-place',
+    });
+    if (queued.targetMode === 'not_applicable') throw new Error('expected application');
+    expect(queued.drift.filter((entry) => entry.class === 'placement')).toEqual([]);
+
+    // Interrupted withdrawal: the outcome of the operation is unknown, so the
+    // extra target is not a settled divergence.
+    store.upsertTarget({
+      ...emptyTargetRow('app-place-outside', 2, 3),
+      applied_generation_id: 'gen-place',
+      intent_revision_id: 'ir-place-set',
+      interruption_stage: 'blueprint_withdraw_started',
+      interruption_at: 3,
+    });
+    const interrupted = projectionWithRollout('app-place-outside', {
+      kind: 'configuration_converged_artifact_qualified',
+      rolloutGenerationId: 'rg-place',
+    });
+    if (interrupted.targetMode === 'not_applicable') throw new Error('expected application');
+    expect(interrupted.drift.filter((entry) => entry.class === 'placement')).toEqual([]);
+  });
+
+  it('does not guess placement drift without a candidate that names the required set', () => {
+    const store = GitOpsStore.getInstance();
+    store.insertApplication(gitManagedApp('app-place-unknown', 73, {
+      intent_revision_id: 'ir-place-unknown',
+      placement_approval_ref: 'place-missing',
+    }));
+    store.insertIntentRevision(intentRev('ir-place-unknown', 'app-place-unknown', 'd'.repeat(64)));
+    store.upsertTarget({
+      ...emptyTargetRow('app-place-unknown', 2, 1),
+      applied_generation_id: 'gen-place',
+    });
+
+    const projection = projectApplication('app-place-unknown', false);
+    if (projection.targetMode === 'not_applicable') throw new Error('expected application');
+    expect(projection.drift.filter((entry) => entry.class === 'placement')).toEqual([]);
+  });
+
+  it('reports health drift only for a failed run bound to the deployed generation', () => {
+    const store = GitOpsStore.getInstance();
+    const db = DatabaseService.getInstance();
+    store.insertApplication(rawApp('app-health-drift', { stack_name: 'health-drift-web' }));
+    store.insertGeneration(gen('gen-health', 'app-health-drift'));
+    store.upsertTarget({
+      ...emptyTargetRow('app-health-drift', 1, 1),
+      desired_generation_id: 'gen-health',
+      applied_generation_id: 'gen-health',
+      deployed_generation_id: 'gen-health',
+    });
+    db.insertHealthGateRun({
+      id: 'run-health-failed',
+      node_id: 1,
+      stack_name: 'health-drift-web',
+      trigger_action: 'deploy',
+      status: 'failed',
+      reason: 'container exited',
+      window_seconds: 30,
+      containers_json: '[]',
+      started_at: 10,
+      ended_at: 20,
+      created_by: 'tester',
+      target_scope: 'stack',
+      service_name: null,
+      failure_source: null,
+      deployed_generation_id: 'gen-health',
+    });
+
+    let projection = projectApplication('app-health-drift', false);
+    if (projection.targetMode === 'not_applicable') throw new Error('expected application');
+    const items = projection.drift.filter((entry) => entry.class === 'health');
+    expect(items).toHaveLength(1);
+    expect(items[0]).toMatchObject({
+      expected: { kind: 'generation', id: 'gen-health' },
+      observed: { kind: 'health_run', runId: 'run-health-failed', deployedGenerationId: 'gen-health' },
+      freshnessAt: 20,
+      owner: 'HealthGateService',
+      affectedTargets: [{ nodeId: 1, stackName: 'health-drift-web' }],
+      action: 'none',
+    });
+
+    // Health disabled: the operator opted out, so the failed run claims nothing.
+    const disabled = projectApplication('app-health-drift', true);
+    if (disabled.targetMode === 'not_applicable') throw new Error('expected application');
+    expect(disabled.drift.filter((entry) => entry.class === 'health')).toEqual([]);
+
+    // A failed run bound to an older generation was superseded by the redeploy.
+    db.getDb().prepare('DELETE FROM health_gate_runs').run();
+    db.insertHealthGateRun({
+      id: 'run-health-old',
+      node_id: 1,
+      stack_name: 'health-drift-web',
+      trigger_action: 'deploy',
+      status: 'failed',
+      reason: 'container exited',
+      window_seconds: 30,
+      containers_json: '[]',
+      started_at: 30,
+      ended_at: 40,
+      created_by: 'tester',
+      target_scope: 'stack',
+      service_name: null,
+      failure_source: null,
+      deployed_generation_id: 'gen-old',
+    });
+    projection = projectApplication('app-health-drift', false);
+    if (projection.targetMode === 'not_applicable') throw new Error('expected application');
+    expect(projection.drift.filter((entry) => entry.class === 'health')).toEqual([]);
+
+    // A target mid-deploy has no verdict to read yet.
+    store.upsertTarget({
+      ...emptyTargetRow('app-health-drift', 1, 2),
+      desired_generation_id: 'gen-health',
+      applied_generation_id: 'gen-health',
+      deployed_generation_id: 'gen-health',
+      active_operation_stage: 'deploy_started',
+    });
+    db.getDb().prepare('DELETE FROM health_gate_runs').run();
+    db.insertHealthGateRun({
+      id: 'run-health-failed-2',
+      node_id: 1,
+      stack_name: 'health-drift-web',
+      trigger_action: 'deploy',
+      status: 'failed',
+      reason: 'container exited',
+      window_seconds: 30,
+      containers_json: '[]',
+      started_at: 50,
+      ended_at: 60,
+      created_by: 'tester',
+      target_scope: 'stack',
+      service_name: null,
+      failure_source: null,
+      deployed_generation_id: 'gen-health',
+    });
+    projection = projectApplication('app-health-drift', false);
+    if (projection.targetMode === 'not_applicable') throw new Error('expected application');
+    expect(projection.drift.filter((entry) => entry.class === 'health')).toEqual([]);
+  });
+
+  it('says why it cannot compare placement when the required targets are unreadable', () => {
+    const store = GitOpsStore.getInstance();
+    store.insertApplication(gitManagedApp('app-place-corrupt', 75, {
+      intent_revision_id: 'ir-place-corrupt',
+      rollout_candidate_id: 'cand-place-corrupt',
+      placement_approval_ref: 'place-corrupt',
+    }));
+    store.insertIntentRevision(intentRev('ir-place-corrupt', 'app-place-corrupt', 'f'.repeat(64)));
+    store.insertApproval({
+      id: 'place-corrupt',
+      kind: 'placement_approval',
+      authority: 'operator',
+      authoritative: 1,
+      application_id: 'app-place-corrupt',
+      generation_id: null,
+      intent_revision_id: 'ir-place-corrupt',
+      artifact_set_id: null,
+      rollout_candidate_id: null,
+      rollout_generation_id: null,
+      source_acceptance_ref: null,
+      placement_approval_ref: null,
+      required_targets_json: '{"nodeIds":[1]}',
+      preflight_fingerprint: null,
+      fingerprint: null,
+      blast_json: '[]',
+      policy_provenance_json: null,
+      actor: 'tester',
+      created_at: 1,
+    });
+    store.insertRolloutCandidate({
+      id: 'cand-place-corrupt',
+      application_id: 'app-place-corrupt',
+      intent_revision_id: 'ir-place-corrupt',
+      compose_content_sha256: 'f'.repeat(64),
+      accepted_generation_id: null,
+      artifact_set_id: null,
+      required_targets_json: '{"nodeIds":[1]}',
+      authoritative: 1,
+      provenance: 'intent_change',
+      operation_id: 'op-cand-place-corrupt',
+      created_at: 1,
+    });
+    // The store refuses this on write, so a row like it can only predate that
+    // validation or arrive with a migration.
+    DatabaseService.getInstance().getDb().prepare(
+      "UPDATE gitops_rollout_candidates SET required_targets_json = 'not json' WHERE id = ?",
+    ).run('cand-place-corrupt');
+    store.upsertTarget({
+      ...emptyTargetRow('app-place-corrupt', 2, 1),
+      applied_generation_id: 'gen-place',
+    });
+
+    const projection = projectionWithRollout('app-place-corrupt', {
+      kind: 'configuration_converged_artifact_qualified',
+      rolloutGenerationId: 'rg-corrupt',
+    });
+    if (projection.targetMode === 'not_applicable') throw new Error('expected application');
+    expect(projection.drift.filter((entry) => entry.class === 'placement')).toEqual([]);
+    expect(projection.limitations).toEqual(expect.arrayContaining([
+      expect.objectContaining({ code: 'placement_required_targets_invalid' }),
+    ]));
+  });
+
+  it('describes the observed source commit with the repository it was built from', () => {
+    const store = GitOpsStore.getInstance();
+    // The application has been rebound to a new repository and ref since the
+    // accepted generation was built, so the old commit is not this repo's.
+    store.insertApplication(rawApp('app-rebound', {
+      stack_name: 'rebound-web',
+      configured_repo_url: 'https://github.com/org/new.git',
+      configured_ref: 'release',
+      desired_commit_sha: 'newsha',
+      accepted_generation_id: 'gen-rebound',
+    }));
+    store.insertGeneration({
+      ...gen('gen-rebound', 'app-rebound'),
+      commit_sha: 'oldsha',
+      repo_url: 'https://github.com/org/old.git',
+      configured_ref: 'main',
+    });
+
+    const projection = projectApplication('app-rebound', false);
+    if (projection.targetMode === 'not_applicable') throw new Error('expected application');
+    const item = projection.drift.find((entry) => entry.class === 'source');
+    expect(item?.expected).toEqual({
+      kind: 'commit',
+      sha: 'newsha',
+      repoUrl: 'https://github.com/org/new.git',
+      ref: 'release',
+    });
+    expect(item?.observed).toEqual({
+      kind: 'commit',
+      sha: 'oldsha',
+      repoUrl: 'https://github.com/org/old.git',
+      ref: 'main',
+    });
+  });
+
+  it('finds a health failure on the stack a converted application retained', () => {
+    const store = GitOpsStore.getInstance();
+    const db = DatabaseService.getInstance();
+    // A Direct application converted to Blueprint mode keeps the stack it was
+    // running under, and its target has no intent revision until the first
+    // Blueprint rollout gives it one. That stack's deploys still open gates,
+    // so its failed run is real evidence even though the application is no
+    // longer Direct.
+    store.insertApplication(gitManagedApp('app-converted', 74, {
+      configured_source_stack_name: 'converted-web',
+      intent_revision_id: 'ir-converted',
+    }));
+    store.insertIntentRevision(intentRev('ir-converted', 'app-converted', 'e'.repeat(64)));
+    store.insertGeneration(gen('gen-converted', 'app-converted'));
+    store.upsertTarget({
+      ...emptyTargetRow('app-converted', 1, 1),
+      applied_generation_id: 'gen-converted',
+      deployed_generation_id: 'gen-converted',
+    });
+    db.insertHealthGateRun({
+      id: 'run-converted',
+      node_id: 1,
+      stack_name: 'converted-web',
+      trigger_action: 'deploy',
+      status: 'failed',
+      reason: 'container exited',
+      window_seconds: 30,
+      containers_json: '[]',
+      started_at: 10,
+      ended_at: 20,
+      created_by: 'tester',
+      target_scope: 'stack',
+      service_name: null,
+      failure_source: null,
+      deployed_generation_id: 'gen-converted',
+    });
+
+    const projection = projectApplication('app-converted', false);
+    if (projection.targetMode === 'not_applicable') throw new Error('expected application');
+    const items = projection.drift.filter((entry) => entry.class === 'health');
+    expect(items).toHaveLength(1);
+    expect(items[0].affectedTargets).toEqual([{ nodeId: 1, stackName: 'converted-web' }]);
+  });
+
+  it('reports managed-project drift from the manifest cache and stays quiet when it agrees', () => {
+    const store = GitOpsStore.getInstance();
+    seedGitSource('mp-web');
+    store.insertApplication(rawApp('app-mp', {
+      stack_name: 'mp-web',
+      desired_commit_sha: 'abc123',
+      accepted_generation_id: 'gen-mp',
+    }));
+    store.insertGeneration({
+      ...gen('gen-mp', 'app-mp'),
+      manifest_version: 3,
+      applied_dir: 'generations/applied-gen-mp-3',
+    });
+    store.upsertTarget({
+      ...emptyTargetRow('app-mp', 1, 1),
+      desired_generation_id: 'gen-mp',
+      applied_generation_id: 'gen-mp',
+      deployed_generation_id: 'gen-mp',
+    });
+
+    // Agreement: no item.
+    setManifestCache('mp-web', {
+      version: 3,
+      state: 'active',
+      generation: 'generations/applied-gen-mp-3',
+      commit: 'abc123',
+    });
+    let projection = projectApplication('app-mp', false);
+    if (projection.targetMode === 'not_applicable') throw new Error('expected application');
+    expect(projection.drift.filter((entry) => entry.class === 'managed_project')).toEqual([]);
+
+    // The applied project belongs to a different commit than the accepted one.
+    setManifestCache('mp-web', {
+      version: 3,
+      state: 'active',
+      generation: 'generations/applied-gen-mp-3',
+      commit: 'othersha',
+      updatedAt: 77,
+    });
+    projection = projectApplication('app-mp', false);
+    if (projection.targetMode === 'not_applicable') throw new Error('expected application');
+    const items = projection.drift.filter((entry) => entry.class === 'managed_project');
+    expect(items).toHaveLength(1);
+    expect(items[0]).toMatchObject({
+      expected: { kind: 'generation', id: 'gen-mp' },
+      observed: { kind: 'commit', sha: 'othersha' },
+      freshnessAt: 77,
+      owner: 'GitProjectManifestService',
+      action: 'none',
+    });
+
+    // A managed generation whose manifest went missing on disk is drift even
+    // though the cache still names a version.
+    setManifestCache('mp-web', {
+      version: 3,
+      state: 'absent',
+      generation: 'generations/applied-gen-mp-3',
+      commit: 'abc123',
+    });
+    projection = projectApplication('app-mp', false);
+    if (projection.targetMode === 'not_applicable') throw new Error('expected application');
+    const missing = projection.drift.filter((entry) => entry.class === 'managed_project');
+    expect(missing).toHaveLength(1);
+    expect(missing[0].reason).toContain('no usable manifest');
+    expect(missing[0].observed).toEqual({ kind: 'unknown' });
+
+    // A manifest this build cannot interpret proves nothing about the
+    // generation, so it is the same claim as a missing one.
+    setManifestCache('mp-web', {
+      version: 3,
+      state: 'unsupported',
+      generation: 'generations/applied-gen-mp-3',
+      commit: 'abc123',
+    });
+    projection = projectApplication('app-mp', false);
+    if (projection.targetMode === 'not_applicable') throw new Error('expected application');
+    const unsupported = projection.drift.filter((entry) => entry.class === 'managed_project');
+    expect(unsupported).toHaveLength(1);
+    expect(unsupported[0].reason).toContain('unsupported');
+
+    // A generation with no managed manifest expected carries no comparison.
+    store.insertApplication(rawApp('app-mp-none', {
+      stack_name: 'mp-none-web',
+      accepted_generation_id: 'gen-mp-none',
+    }));
+    store.insertGeneration(gen('gen-mp-none', 'app-mp-none'));
+    seedGitSource('mp-none-web');
+    setManifestCache('mp-none-web', { version: 1, state: 'absent', generation: null, commit: null });
+    projection = projectApplication('app-mp-none', false);
+    if (projection.targetMode === 'not_applicable') throw new Error('expected application');
+    expect(projection.drift.filter((entry) => entry.class === 'managed_project')).toEqual([]);
+
+    // Version and generation identity each prove a mismatch on their own.
+    setManifestCache('mp-web', {
+      version: 2,
+      state: 'active',
+      generation: 'generations/applied-gen-mp-3',
+      commit: 'abc123',
+    });
+    projection = projectApplication('app-mp', false);
+    if (projection.targetMode === 'not_applicable') throw new Error('expected application');
+    const versionDrift = projection.drift.filter((entry) => entry.class === 'managed_project');
+    expect(versionDrift).toHaveLength(1);
+    expect(versionDrift[0].observed).toEqual({ kind: 'unknown' });
+
+    setManifestCache('mp-web', {
+      version: 3,
+      state: 'active',
+      generation: 'generations/applied-somewhere-else',
+      commit: 'abc123',
+    });
+    projection = projectApplication('app-mp', false);
+    if (projection.targetMode === 'not_applicable') throw new Error('expected application');
+    expect(projection.drift.filter((entry) => entry.class === 'managed_project')).toHaveLength(1);
+
+    // Mid-apply the cache legitimately leads the accepted generation: the
+    // manifest is written at promotion, the acceptance lands after it.
+    seedGitSource('mp-applying-web');
+    store.insertApplication(rawApp('app-mp-applying', {
+      stack_name: 'mp-applying-web',
+      desired_commit_sha: 'abc123',
+      accepted_generation_id: 'gen-mp-applying',
+      active_operation_id: 'op-mp',
+      active_operation_stage: 'apply_started',
+      active_operation_at: 90,
+    }));
+    store.insertGeneration({
+      ...gen('gen-mp-applying', 'app-mp-applying'),
+      manifest_version: 3,
+      applied_dir: 'generations/applied-gen-mp-applying-3',
+    });
+    setManifestCache('mp-applying-web', {
+      version: 4,
+      state: 'active',
+      generation: 'generations/applied-gen-mp-applying-4',
+      commit: 'abc123',
+    });
+    projection = projectApplication('app-mp-applying', false);
+    if (projection.targetMode === 'not_applicable') throw new Error('expected application');
+    expect(projection.drift.filter((entry) => entry.class === 'managed_project')).toEqual([]);
+
+    // Acceptance lands before the apply reaches the node, so a cache still on
+    // the previous generation is behind rather than divergent.
+    seedGitSource('mp-pending-web');
+    store.insertApplication(rawApp('app-mp-pending', {
+      stack_name: 'mp-pending-web',
+      desired_commit_sha: 'abc123',
+      accepted_generation_id: 'gen-mp-pending',
+    }));
+    store.insertGeneration({
+      ...gen('gen-mp-pending', 'app-mp-pending'),
+      manifest_version: 3,
+      applied_dir: 'generations/applied-gen-mp-pending-3',
+    });
+    store.upsertTarget({
+      ...emptyTargetRow('app-mp-pending', 1, 1),
+      desired_generation_id: 'gen-mp-pending',
+    });
+    setManifestCache('mp-pending-web', {
+      version: 2,
+      state: 'active',
+      generation: 'generations/applied-gen-mp-pending-2',
+      commit: 'oldsha',
+    });
+    projection = projectApplication('app-mp-pending', false);
+    if (projection.targetMode === 'not_applicable') throw new Error('expected application');
+    expect(projection.drift.filter((entry) => entry.class === 'managed_project')).toEqual([]);
+
+    // A Blueprint deploy runs on the target while the application sits idle.
+    store.upsertTarget({
+      ...emptyTargetRow('app-mp-pending', 1, 4),
+      desired_generation_id: 'gen-mp-pending',
+      applied_generation_id: 'gen-mp-pending',
+      active_operation_stage: 'blueprint_deploy_started',
+    });
+    projection = projectApplication('app-mp-pending', false);
+    if (projection.targetMode === 'not_applicable') throw new Error('expected application');
+    expect(projection.drift.filter((entry) => entry.class === 'managed_project')).toEqual([]);
+  });
+
   it('carries the expected per-service digests so a reader can compare service by service', () => {
     const store = GitOpsStore.getInstance();
     const tx = GitOpsTransitions.getInstance();
@@ -1484,6 +2287,7 @@ function app(id: string, stackName: string): GitOpsApplicationRow {
     accepted_generation_id: null,
     candidate_plan_blocked: 0,
     review_required: 0,
+    review_block_reason: null,
     artifact_set_id: null,
     latest_artifact_set_id: null,
     intent_revision_id: null,

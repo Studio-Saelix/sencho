@@ -1,19 +1,17 @@
 import { randomUUID } from 'crypto';
-import * as fs from 'fs';
-import * as path from 'path';
 import { GitOpsStore } from './store';
 import { GitOpsTransitions } from './transitions';
 import { GitSourceService } from '../GitSourceService';
 import { buildAcceptedGeneration } from './handoff';
+import { checkStatefulWithdrawal, holdForStatefulReview, readStagedGeneration } from './statefulGuard';
 import { DatabaseService } from '../DatabaseService';
 import type { GitOpsApplicationRow, GitOpsGenerationRow } from './types';
 import { classifyFailure, nextRetryAt, isGitSourceErrorCode, effectivePollIntervalSecs } from './backoff';
 import { evaluateCandidatePolicy } from '../PolicyEnforcement';
 import { buildSystemPolicyGateOptions } from '../../helpers/policyGate';
-import { stackManagedRoot, newGitOpsId } from './directApplication';
+import { newGitOpsId } from './directApplication';
 import { NodeRegistry } from '../NodeRegistry';
-import { gitSourceLocalComposeFiles } from '../../utils/gitComposeFiles';
-import { extractImagesFromCompose, loadDotEnv } from '../ImageUpdateService';
+import { extractImagesFromCompose } from '../ImageUpdateService';
 import type { ReconcileOutcome } from './outcomes';
 import type { ReconcileTrigger } from './triggers';
 import { redactSensitiveText, sanitizeForLog } from '../../utils/safeLog';
@@ -440,6 +438,12 @@ export class SourceController {
         trigger: ReconcileTrigger,
     ): Promise<void> {
         if (app.source_policy !== 'automatic') return;
+        // A source that already fell back to review under a safety refusal
+        // waits for the operator: re-evaluating every tick would repeat the
+        // refusal without changing anything. The reason field, not the plain
+        // review flag, is the marker: a review-policy candidate later switched
+        // to automatic has no refusal to honor and must evaluate normally.
+        if (app.review_block_reason !== null) return;
         if (!app.candidate_generation_id || app.accepted_generation_id === app.candidate_generation_id) return;
         const generation = GitOpsStore.getInstance().getGeneration(app.candidate_generation_id);
         if (!generation) return;
@@ -491,6 +495,27 @@ export class SourceController {
             this.warnSkipped(app.id, 'source revalidation failed', e);
             return;
         }
+        // Stateful safety: this acceptance route has no human in the loop, so
+        // it must prove the candidate does not withdraw or rename a stateful
+        // workload relative to the generation in force. Unprovable evidence is
+        // a hold, never an acceptance.
+        const withdrawal = checkStatefulWithdrawal(stackName, app, acceptGeneration);
+        if (withdrawal.status !== 'clear') {
+            const recorded = holdForStatefulReview(app, acceptGeneration, {
+                operationId: randomUUID(),
+                actor: 'system:source-controller',
+                trigger,
+                at: Date.now(),
+            });
+            const detail = withdrawal.status === 'withdrawn'
+                ? `the candidate withdraws or renames stateful services (${withdrawal.services.map((name) => sanitizeForLog(name)).join(', ')})`
+                : `a stateful withdrawal cannot be ruled out (${withdrawal.reason})`;
+            const unrecorded = recorded ? '' : ' (the block could not be recorded; see server logs)';
+            console.warn(
+                `[SourceController] automatic candidate held for ${sanitizeForLog(app.id)}: ${detail}; an operator must accept explicitly${unrecorded}`,
+            );
+            return;
+        }
         try {
             GitOpsTransitions.getInstance().sourceAccepted({
                 applicationId: app.id,
@@ -539,62 +564,22 @@ export class SourceController {
     }
 
     /**
-     * Read the candidate's image refs off disk for policy evaluation: the
-     * candidate's compose files (paths come from the application row, mapped
-     * the same way staging laid them out) with its staged .env merged under
-     * process.env, exactly as the update scanner resolves them. Returns null
-     * when the evidence cannot be read (missing staging directory, unreadable
-     * compose file, a .env that exists but cannot be read; an absent .env is
-     * normal and interpolates compose-only): the caller then holds the
-     * candidate rather than evaluating against an empty ref set.
+     * Read the candidate's image refs off disk for policy evaluation. Null
+     * means the evidence could not be read, so the caller holds the candidate
+     * rather than evaluating against an empty ref set.
      */
     private candidateImageRefs(
         stackName: string,
         app: GitOpsApplicationRow,
         generation: GitOpsGenerationRow,
     ): string[] | null {
-        try {
-            const candidateDir = path.join(stackManagedRoot(stackName), generation.candidate_dir);
-            const composePaths: string[] = app.compose_paths_json ? JSON.parse(app.compose_paths_json) : [];
-            if (composePaths.length === 0) return null;
-            const contents: string[] = [];
-            for (const local of gitSourceLocalComposeFiles(composePaths)) {
-                contents.push(fs.readFileSync(path.join(candidateDir, local), 'utf8'));
-            }
-            let envVars: Record<string, string> = {};
-            try {
-                envVars = loadDotEnv(fs.readFileSync(path.join(candidateDir, '.env'), 'utf8'));
-            } catch (e) {
-                // A missing .env is normal (the staging step only writes one
-                // when sync_env produced it), but a present-yet-unreadable one
-                // would silently narrow the interpolation inputs the policy
-                // sees, so surface it and hold rather than evaluate on
-                // incomplete evidence.
-                const missing = (e as NodeJS.ErrnoException).code === 'ENOENT';
-                if (!missing) {
-                    console.warn(
-                        `[SourceController] staged .env unreadable for ${sanitizeForLog(stackName)} (generation ${sanitizeForLog(generation.id)}); holding candidate:`,
-                        e instanceof Error ? e.message : String(e),
-                    );
-                    return null;
-                }
-            }
-            const merged: Record<string, string> = { ...envVars };
-            for (const [k, v] of Object.entries(process.env)) {
-                if (v !== undefined) merged[k] = v;
-            }
-            const refs = new Set<string>();
-            for (const content of contents) {
-                for (const img of extractImagesFromCompose(content, merged)) refs.add(img);
-            }
-            return [...refs];
-        } catch (e) {
-            console.warn(
-                `[SourceController] candidate evidence unreadable for ${sanitizeForLog(stackName)} (generation ${sanitizeForLog(generation.id)}):`,
-                e instanceof Error ? e.message : String(e),
-            );
-            return null;
+        const staged = readStagedGeneration(stackName, app, generation);
+        if (!staged) return null;
+        const refs = new Set<string>();
+        for (const content of staged.contents) {
+            for (const img of extractImagesFromCompose(content, staged.mergedEnv)) refs.add(img);
         }
+        return [...refs];
     }
 
     private warnSkipped(appId: string, what: string, e: unknown): void {

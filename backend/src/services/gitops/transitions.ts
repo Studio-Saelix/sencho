@@ -29,6 +29,7 @@ import type {
   GitOpsRolloutGenerationRow,
   GitOpsTargetCurrentRow,
   SourcePolicy,
+  SourceReviewBlockReason,
 } from './types';
 
 export type EventEnvelope = {
@@ -407,6 +408,7 @@ export class GitOpsTransitions {
       this.supersedeCandidate(app, generationId, envelope, extras);
       app.candidate_generation_id = generationId;
       app.candidate_plan_blocked = 1;
+      app.review_block_reason = null;
       this.forEachLiveDirectTarget(app, (target) => {
         target.candidate_generation_id = generationId;
         this.store().upsertTarget(target);
@@ -430,6 +432,7 @@ export class GitOpsTransitions {
       app.candidate_generation_id = null;
       app.candidate_plan_blocked = 0;
       app.review_required = 0;
+      app.review_block_reason = null;
       this.forEachLiveDirectTarget(app, (target) => {
         target.candidate_generation_id = null;
         this.store().upsertTarget(target);
@@ -482,6 +485,7 @@ export class GitOpsTransitions {
       app.candidate_generation_id = null;
       app.candidate_plan_blocked = 0;
       app.review_required = 0;
+      app.review_block_reason = null;
       this.clearAppFailure(app, ['fetch', 'validation']);
       this.forEachLiveDirectTarget(app, (target) => {
         target.candidate_generation_id = null;
@@ -506,12 +510,43 @@ export class GitOpsTransitions {
       app.candidate_generation_id = generationId;
       app.candidate_plan_blocked = 0;
       app.review_required = reviewRequired ? 1 : 0;
+      app.review_block_reason = null;
       this.clearAppFailure(app, ['validation']);
       this.forEachLiveDirectTarget(app, (target) => {
         target.candidate_generation_id = generationId;
         this.store().upsertTarget(target);
       });
     }, { generationId });
+  }
+
+  /**
+   * An automatic acceptance refused for safety and fell back to review.
+   *
+   * The candidate stays staged exactly as `candidateReady` left it; this
+   * records that the source policy's automatic path declined it, and why, so
+   * the projection names the block instead of reporting an unexplained review
+   * (or, worse, no state at all). Operator acceptance, dismissal, or a newer
+   * candidate clears it.
+   */
+  sourceReviewBlocked(args: {
+    applicationId: string;
+    generationId: string;
+    reason: SourceReviewBlockReason;
+    envelope: EventEnvelope;
+  }): TransitionResult {
+    return this.mutateApp(args.applicationId, args.envelope, 'source_review_blocked', 'committed', (app) => {
+      if (app.candidate_generation_id !== args.generationId) {
+        throw new GitOpsTransitionError('blocked generation is not the current candidate');
+      }
+      if (app.candidate_plan_blocked === 1) {
+        throw new GitOpsTransitionError('candidate is blocked by its plan, not by acceptance');
+      }
+      if (app.active_operation_stage === 'apply_started') {
+        throw new GitOpsTransitionError('cannot hold acceptance while an apply is in flight');
+      }
+      app.review_required = 1;
+      app.review_block_reason = args.reason;
+    }, { generationId: args.generationId });
   }
 
   applyStarted(applicationId: string, generationId: string, envelope: EventEnvelope): TransitionResult {
@@ -702,6 +737,7 @@ export class GitOpsTransitions {
       app.candidate_generation_id = args.generation.id;
       app.candidate_plan_blocked = 0;
       app.review_required = 0;
+      app.review_block_reason = null;
       app.latest_operation_id = args.envelope.operationId;
       app.updated_at = args.envelope.at;
       this.writeApplication(app);
@@ -1113,6 +1149,12 @@ export class GitOpsTransitions {
         throw new GitOpsTransitionError('cannot change the source policy while an operation is in flight');
       }
       app.source_policy = sourcePolicy;
+      // The block reason explains why the automatic path refused; once the
+      // policy is no longer automatic, the generic review state is the
+      // truthful one. Review_required stays for the derivation to interpret.
+      if (sourcePolicy !== 'automatic') {
+        app.review_block_reason = null;
+      }
       if (sourcePolicy === 'manual') {
         app.next_poll_at = null;
         app.retry_at = null;
@@ -2976,6 +3018,7 @@ export class GitOpsTransitions {
     app.candidate_generation_id = null;
     app.candidate_plan_blocked = 0;
     app.review_required = 0;
+    app.review_block_reason = null;
     if (args.activateCreating && app.lifecycle_status === 'creating') {
       app.lifecycle_status = 'active';
     }
@@ -3514,7 +3557,7 @@ export class GitOpsTransitions {
         compose_paths_json=?, context_dir=?, sync_env=?, env_path=?,
         materialization_fingerprint=?, desired_commit_sha=?, fetched_commit_sha=?,
         fetched_resolved_ref_kind=?, candidate_generation_id=?, accepted_generation_id=?, candidate_plan_blocked=?,
-        review_required=?, artifact_set_id=?, latest_artifact_set_id=?,
+        review_required=?, review_block_reason=?, artifact_set_id=?, latest_artifact_set_id=?,
         intent_revision_id=?, rollout_candidate_id=?, rollout_generation_id=?,
         source_acceptance_ref=?, placement_approval_ref=?, rollout_authorization_ref=?,
         legacy_combined_approval_ref=?, preflight_fingerprint=?, latest_preflight_evidence_json=?,
@@ -3532,7 +3575,7 @@ export class GitOpsTransitions {
       app.compose_paths_json, app.context_dir, app.sync_env, app.env_path,
       app.materialization_fingerprint, app.desired_commit_sha, app.fetched_commit_sha,
       app.fetched_resolved_ref_kind, app.candidate_generation_id, app.accepted_generation_id, app.candidate_plan_blocked,
-      app.review_required, app.artifact_set_id, app.latest_artifact_set_id,
+      app.review_required, app.review_block_reason, app.artifact_set_id, app.latest_artifact_set_id,
       app.intent_revision_id, app.rollout_candidate_id, app.rollout_generation_id,
       app.source_acceptance_ref, app.placement_approval_ref, app.rollout_authorization_ref,
       app.legacy_combined_approval_ref, app.preflight_fingerprint, app.latest_preflight_evidence_json,

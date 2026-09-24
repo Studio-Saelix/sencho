@@ -755,6 +755,27 @@ export function liveCaveats(revision: GitOpsRevisionProjection): readonly GitOps
   return revision.targetMode === 'not_applicable' ? [] : revision.limitations;
 }
 
+/**
+ * The class name a drift item is shown under. The backend class is an
+ * identifier, and one of them is not a word a reader should have to decode, so
+ * every surface that prints a class reads it from here. The map is keyed by
+ * string because the classes arrive over the wire: a class this build does not
+ * know is shown as itself rather than hidden.
+ */
+const DRIFT_CLASS_LABELS: Record<string, string> = {
+  source: 'source',
+  managed_project: 'managed project',
+  invocation: 'invocation',
+  placement: 'placement',
+  rollout: 'rollout',
+  runtime: 'runtime',
+  health: 'health',
+};
+
+export function driftClassLabel(className: string): string {
+  return DRIFT_CLASS_LABELS[className] ?? className;
+}
+
 /** One short line naming what an identity reference points at, for a drift comparison row. */
 export function identityRefLabel(ref: GitOpsIdentityRef): string {
   switch (ref.kind) {

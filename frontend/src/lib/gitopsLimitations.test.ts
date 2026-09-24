@@ -31,6 +31,7 @@ const LIVE_ARM_CODES = [
   'evidence_limitations_invalid',
   'artifact_observation_invalid',
   'artifact_observation_decode_failed',
+  'placement_required_targets_invalid',
   'recovery_unproven',
   'lkg_artifact_unprovable',
   'source_acceptance_unprovable',

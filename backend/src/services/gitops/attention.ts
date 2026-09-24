@@ -36,6 +36,7 @@ export type GitOpsAttentionReason =
   | 'deploy_failed'
   | 'placement_review_pending'
   | 'stateful_confirmation_required'
+  | 'stateful_withdrawal_blocked'
   | 'rollout_authorization_pending'
   | 'rollout_authorization_stale'
   | 'preflight_blocked'
@@ -72,6 +73,7 @@ export const ATTENTION_TONE: Readonly<Record<GitOpsAttentionReason, 'failure' | 
   deploy_failed: 'failure',
   placement_review_pending: 'pending',
   stateful_confirmation_required: 'pending',
+  stateful_withdrawal_blocked: 'pending',
   rollout_authorization_pending: 'pending',
   rollout_authorization_stale: 'pending',
   preflight_blocked: 'pending',
@@ -111,7 +113,14 @@ export function attentionReasons(projection: GitOpsRevisionProjection): GitOpsAt
       reasons.add('source_unknown_outcome');
       break;
     case 'source_review_pending':
-      reasons.add('source_review_pending');
+      // One reason, not both: when an automatic acceptance refused for safety
+      // the specific block is the actionable fact, and the queue must not spend
+      // two codes on one waiting decision.
+      reasons.add(
+        source.reviewBlockReason === 'stateful_withdrawal'
+          ? 'stateful_withdrawal_blocked'
+          : 'source_review_pending',
+      );
       break;
     case 'source_conflict_blocker':
       reasons.add('source_conflict_blocker');

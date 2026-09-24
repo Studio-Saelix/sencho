@@ -37,6 +37,7 @@ export const ATTENTION_LABEL: Partial<Record<GitOpsAttentionReason, PortfolioLab
   source_suspended: { label: 'source suspended', tone: 'neutral', line: 'Reconciliation is suspended for this source.' },
   placement_review_pending: { label: 'placement review', tone: 'warning', line: 'A target placement decision is waiting for review.' },
   stateful_confirmation_required: { label: 'stateful confirmation', tone: 'warning', line: 'Stateful changes need explicit confirmation before proceeding.' },
+  stateful_withdrawal_blocked: { label: 'stateful change blocked', tone: 'warning', line: 'An automatic acceptance was held for review because the candidate removes or renames a stateful service, or that cannot be ruled out.' },
   rollout_authorization_pending: { label: 'rollout authorization', tone: 'warning', line: 'The rollout is waiting for authorization.' },
   rollout_authorization_stale: { label: 'authorization stale', tone: 'warning', line: 'The rollout authorization no longer matches the current intent; re-authorize to proceed.' },
   preflight_blocked: { label: 'preflight blocked', tone: 'warning', line: 'Preflight evidence blocks this rollout (for example an unready private-registry target).' },

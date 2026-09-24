@@ -5,6 +5,7 @@ import { Button } from '@/components/ui/button';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import {
+  driftClassLabel,
   ROLLOUT_STATE_LOOKUP,
   RUNTIME_STATE_LOOKUP,
   SOURCE_STATE_LOOKUP,
@@ -235,7 +236,9 @@ function ApplicationRow({ row, onOpen, canOpenFleet }: { row: GitOpsPortfolioRow
             <span className="font-mono text-[11px] text-warning">
               {row.drift.count} {row.drift.count === 1 ? 'item' : 'items'}
             </span>
-            <span className="block truncate text-[10px] text-stat-subtitle">{row.drift.classes.join(' · ')}</span>
+            <span className="block truncate text-[10px] text-stat-subtitle">
+              {row.drift.classes.map(driftClassLabel).join(' · ')}
+            </span>
           </div>
         ) : (
           <span className="font-mono text-[11px] text-stat-icon">none</span>
