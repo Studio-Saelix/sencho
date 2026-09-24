@@ -3570,6 +3570,45 @@ describe('GitSourceService.createStackFromGit', () => {
 
         saveSpy.mockRestore();
     });
+
+    it('keeps the git source row when a step after the commit boundary fails', async () => {
+        mockSuccessfulClone({
+            compose: 'services:\n  web:\n    image: nginx\n',
+        });
+        const svc = GitSourceService.getInstance();
+        const validateSpy = vi.spyOn(svc, 'validateCompose').mockResolvedValue({ ok: true });
+        const db = DatabaseService.getInstance();
+        const lastPlanSpy = vi.spyOn(db, 'setGitSourceLastPlan')
+            .mockImplementationOnce(() => { throw new Error('simulated post-commit failure'); });
+        const deleteSpy = vi.spyOn(db, 'deleteGitSource');
+
+        try {
+            await expect(svc.createStackFromGit({
+                stackName: 'create-post-commit-fail',
+                repoUrl: 'https://github.com/example/repo.git',
+                branch: 'main',
+                composePaths: ['compose.yaml'],
+                contextDir: null,
+                syncEnv: false,
+                envPath: null,
+                authType: 'none',
+                token: null,
+                autoApplyOnWebhook: false,
+                autoDeployOnApply: false,
+            })).rejects.toThrow(/stack was created from Git, but a follow-up step failed/);
+
+            // The stack is live past the commit boundary: the row stays and no
+            // rollback delete (which would skip webhook endpoint pruning) runs.
+            expect(deleteSpy).not.toHaveBeenCalledWith('create-post-commit-fail');
+            expect(db.getGitSource('create-post-commit-fail')).toBeDefined();
+        } finally {
+            lastPlanSpy.mockRestore();
+            deleteSpy.mockRestore();
+            validateSpy.mockRestore();
+            db.deleteGitSource('create-post-commit-fail');
+            await cleanupStackDir('create-post-commit-fail');
+        }
+    });
 });
 
 describe('GitSourceService.apply', () => {

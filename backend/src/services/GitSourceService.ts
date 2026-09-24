@@ -6482,7 +6482,6 @@ export class GitSourceService {
             //    does not exist yet), then create the stack and promote.
             //    createStack() throws if the directory already exists.
             let stackCreated = false;
-            let rowInserted = false;
             // Promotion persists the manifest cache columns BEFORE the row
             // exists (zero rows updated); the cache is written again after the
             // insert below so list and immediate projections report the real
@@ -6804,7 +6803,6 @@ export class GitSourceService {
                     GitOpsStore.getInstance().deleteCreateCheckpoint(gitopsApplicationId);
                 }
 
-                rowInserted = true;
                 if (gitopsApplicationId && acceptedGenerationId && completeProjectManifest) {
                     await resolveAndRecordArtifactSet({
                         stackName: input.stackName,
@@ -6912,9 +6910,11 @@ export class GitSourceService {
                     );
                     await fsPromises.rm(stagedCandidate, { recursive: true, force: true });
                 }
-                if (rowInserted) {
-                    db.deleteGitSource(input.stackName);
-                }
+                // No git-source row delete here: the row is inserted by
+                // commitCreate(), which is also the gitopsCommitted boundary
+                // handled above. Any future pre-commit insert+rollback path
+                // must prune provider webhook endpoints and deliveries in the
+                // same transaction as deleteGitSource, as detach does.
                 // Filesystem cleanup has to succeed before the tombstone, so a
                 // create whose files could not be removed keeps its checkpoint
                 // and is retried by the next boot rather than being recorded as
