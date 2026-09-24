@@ -3,6 +3,7 @@ import { Button } from '@/components/ui/button';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import {
+  ROLLOUT_STATE_LOOKUP,
   RUNTIME_STATE_LOOKUP,
   SOURCE_STATE_LOOKUP,
   type GitOpsStateMeta,
@@ -211,7 +212,7 @@ function ApplicationRow({ row, onOpen }: { row: GitOpsPortfolioRow; onOpen: () =
       </TableCell>
 
       <TableCell className="align-top"><FacetChip status={row.sourceStatus} lookup={SOURCE_STATE_LOOKUP} /></TableCell>
-      <TableCell className="align-top"><FacetChip status={row.rolloutStatus} lookup={RUNTIME_STATE_LOOKUP} /></TableCell>
+      <TableCell className="align-top"><FacetChip status={row.rolloutStatus} lookup={ROLLOUT_STATE_LOOKUP} /></TableCell>
       <TableCell className="align-top"><FacetChip status={row.runtimeStatus} lookup={RUNTIME_STATE_LOOKUP} /></TableCell>
       <TableCell className="align-top"><FacetChip status={row.healthStatus} lookup={HEALTH_STATE} /></TableCell>
 
