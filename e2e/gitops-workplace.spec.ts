@@ -61,7 +61,12 @@ test.describe('GitOps workplace', () => {
     await expect(input).toBeVisible();
     await input.fill('no-such-application-anywhere');
     await expect(page).toHaveURL(/q=no-such-application-anywhere/);
-    await expect(page.getByText('No GitOps application matches the current filters.')).toBeVisible({ timeout: 10_000 });
+    // Which empty state shows depends on whether earlier specs left Git
+    // sources behind: an empty portfolio says so, a populated one says the
+    // search matched nothing. Either way the list must be empty.
+    await expect(
+      page.getByText(/No GitOps applications yet|No GitOps application matches the current filters/),
+    ).toBeVisible({ timeout: 10_000 });
 
     await input.fill('');
     await input.blur();

@@ -61,9 +61,11 @@ To act on the application, use the outstanding authority action in the state sec
 
 Search matches application names, repositories, and refs. Filter chips narrow the list to applications requiring attention, to a target mode (Direct or Blueprint), or combine with a node, drift class, or evidence-state filter (stale, unreachable, unknown). The node filter means involvement: a Blueprint application spans every node it targets and stays visible under each of them.
 
+A stack connected to Git that has no GitOps application behind it (for example, one connected before GitOps tracking existed) still appears, with every state reading **unknown**, so its Git indicator never leads to a portfolio without it.
+
 Filter state is part of the URL, so a narrowed view can be bookmarked or shared.
 
-The Git indicator on a stack (the pending icon in the sidebar, or the source badge in the dashboard's Stack Health table) opens the portfolio narrowed to that one stack on its node. The narrowing shows as a stack chip in the filter row; remove the chip, or use **Clear filters**, to return to the whole portfolio. **Clear filters** resets every filter at once, including ones that arrived through a shared link.
+The Git indicator on a stack (the pending icon in the sidebar, or the source badge in the dashboard's Stack Health table) opens the portfolio narrowed to that one stack on its node. The narrowing shows as a stack chip in the filter row; remove the chip, or use **Clear filters**, to return to the whole portfolio. The portfolio lives on the hub, so an indicator clicked while a remote node is active switches to the hub first and opens the portfolio there. **Clear filters** resets every filter at once, including ones that arrived through a shared link.
 
 ## Freshness and honesty
 

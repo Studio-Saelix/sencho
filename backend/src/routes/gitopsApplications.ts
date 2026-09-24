@@ -23,7 +23,7 @@ import { BlueprintReconciler } from '../services/BlueprintReconciler';
 import { projectApplication } from '../services/gitops/derive';
 import { latestTransitionByApplication } from '../services/gitops/history';
 import { classifySourceRow, satisfiesGitOpsRead } from '../services/gitops/readAuth';
-import { healthGateDisabled, NOT_APPLICABLE_REVISION, stackResourceSet } from '../helpers/gitopsResponse';
+import { healthGateDisabled, NOT_APPLICABLE_REVISION, projectStackRevision, stackResourceSet } from '../helpers/gitopsResponse';
 import { buildBlueprintPreview, type BlueprintPreviewResult } from '../services/blueprintPreviewProjection';
 import {
   confirmableActionsEqual,
@@ -357,6 +357,33 @@ function nodeNameMap(db: DatabaseService, maySeeNodeNames: boolean): Map<number,
   return new Map(db.getNodes().map(node => [node.id, maySeeNodeNames ? node.name ?? null : null]));
 }
 
+/** Detail for a legacy id, local or remote: the row predates the revision model, so it reports the not-applicable projection. */
+function legacyDetailResponse(
+  id: string,
+  stackName: string,
+  nodeId: number,
+  nodeNames: Map<number, string | null>,
+  updatedAt: number | null,
+): GitOpsPortfolioDetailResponse {
+  return {
+    schemaVersion: 1,
+    generatedAt: Date.now(),
+    application: rowFromProjection({
+      id,
+      projection: NOT_APPLICABLE_REVISION,
+      name: stackName,
+      stackName,
+      blueprintId: null,
+      nodeId,
+      nodeName: nodeNames.get(nodeId) ?? null,
+      lastActivityAt: updatedAt,
+      partialNodes: [],
+      nodeNames,
+    }),
+    projection: NOT_APPLICABLE_REVISION,
+  };
+}
+
 type AuthorityTarget = { application: GitOpsApplicationRow; blueprint: Blueprint };
 
 const NOT_GIT_MANAGED = {
@@ -518,6 +545,28 @@ gitopsApplicationsRouter.get('/:id', async (req: Request, res: Response): Promis
     }
 
     const localNodeId = NodeRegistry.getInstance().getDefaultNodeId();
+    if (parsedId.nodeId === localNodeId && parsedId.applicationId.startsWith('legacy:')) {
+      // The hub's own legacy row: a Git source with no application behind it.
+      // Same resolution and authorization as the list, and the same
+      // not-applicable projection the remote legacy branch reports.
+      const legacyStack = parsedId.applicationId.slice('legacy:'.length);
+      const source = db.getGitSource(legacyStack);
+      if (
+        !source
+        || projectStackRevision(legacyStack) !== NOT_APPLICABLE_REVISION
+        || !satisfiesGitOpsRead(req, classifySourceRow({
+          stackName: legacyStack,
+          gitopsRevision: NOT_APPLICABLE_REVISION,
+          stackResourcePresent: (await stackResourceSet(req.nodeId)).has(legacyStack),
+        }))
+      ) {
+        res.status(404).json({ error: 'Application not found' });
+        return;
+      }
+      res.json(legacyDetailResponse(id, legacyStack, localNodeId, nodeNames, source.updated_at));
+      return;
+    }
+
     if (parsedId.nodeId === localNodeId) {
       const application = store.getApplication(parsedId.applicationId);
       const stackName = application?.stack_name ?? null;
@@ -598,24 +647,10 @@ gitopsApplicationsRouter.get('/:id', async (req: Request, res: Response): Promis
         res.status(404).json({ error: 'Application not found' });
         return;
       }
-      const response: GitOpsPortfolioDetailResponse = {
-        schemaVersion: 1,
-        generatedAt: Date.now(),
-        application: rowFromProjection({
-          id,
-          projection: NOT_APPLICABLE_REVISION,
-          name: legacyStack,
-          stackName: legacyStack,
-          blueprintId: null,
-          nodeId: parsedId.nodeId,
-          nodeName,
-          lastActivityAt: typeof match.updated_at === 'number' ? match.updated_at : null,
-          partialNodes: [],
-          nodeNames,
-        }),
-        projection: NOT_APPLICABLE_REVISION,
-      };
-      res.json(response);
+      res.json(legacyDetailResponse(
+        id, legacyStack, parsedId.nodeId, nodeNames,
+        typeof match.updated_at === 'number' ? match.updated_at : null,
+      ));
       return;
     }
 

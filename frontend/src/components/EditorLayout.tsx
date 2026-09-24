@@ -264,9 +264,12 @@ export default function EditorLayout() {
   // pendingDetailStack / mobileView exist so delete-of-open-stack can flip to
   // the list surface without reordering the hook graph.
   const onDeletedOpenStackRef = useRef<() => void>(() => {});
+  // openViewOnNode is declared further down; assigned once it exists.
+  const hubOnlyFromRemoteRef = useRef<(apply: () => void) => void>(() => {});
 
   const navState = useViewNavigationState({
     onNavigateToDashboard: () => resetEditorStateRef.current(),
+    onHubOnlyFromRemote: (apply) => hubOnlyFromRemoteRef.current(apply),
     hasFleetCapability: hasCapability('fleet'),
     containerLabelsEnabled: hasCapability('container-label-inventory'),
   });
@@ -673,6 +676,23 @@ export default function EditorLayout() {
     pendingNodeViewRef.current = { nodeId, open };
     setActiveNode(node);
   };
+  // A hub-only destination (GitOps, Fleet, ...) asked for from a remote node,
+  // e.g. a stack's Git indicator: switch to the hub, then open it there, the
+  // same way Home reaches Fleet from a remote node.
+  useEffect(() => {
+    hubOnlyFromRemoteRef.current = (apply) => {
+      const hub = nodes.find(n => n.type === 'local');
+      if (!hub) {
+        toast.error('This view lives on the hub, which is not available yet.');
+        return;
+      }
+      // Announced once the switch lands: an unsaved-changes guard can revert it.
+      openViewOnNode(hub.id, () => {
+        apply();
+        toast.info(`Switched to ${hub.name}: this view lives on the hub.`);
+      });
+    };
+  });
   const handleOpenNodeNetworking = (nodeId: number) => {
     openViewOnNode(nodeId, () => setActiveView('networking'));
   };
@@ -878,6 +898,9 @@ export default function EditorLayout() {
     if (isRealSwitch && overlayState.pendingUnsavedLoad === NODE_SWITCH_PENDING_TOKEN) {
       const previousNode = nodes.find(n => n.id === previousId);
       if (previousNode) {
+        // A reverted switch never lands, so a view queued for it must not
+        // fire on some later, unrelated arrival at that node.
+        pendingNodeViewRef.current = null;
         revertingNodeSwitchRef.current = true;
         setActiveNode(previousNode);
       }
@@ -894,6 +917,9 @@ export default function EditorLayout() {
         overlayState.setPendingUnsavedNode(activeNode);
         overlayState.setPendingUnsavedLoad(NODE_SWITCH_PENDING_TOKEN);
         overlayState.setPendingLoadOptions(null);
+        // A reverted switch never lands, so a view queued for it must not
+        // fire on some later, unrelated arrival at that node.
+        pendingNodeViewRef.current = null;
         revertingNodeSwitchRef.current = true;
         setActiveNode(previousNode);
         return;
