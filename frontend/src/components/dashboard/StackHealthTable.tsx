@@ -50,8 +50,10 @@ function SortHeader({ label, k, sortKey, sortDir, onSort, align = 'left' }: {
       <button
         type="button"
         onClick={() => onSort(k)}
+        aria-label={`Sort by ${label.toLowerCase()}${sortKey === k ? `, ${sortDir === 'asc' ? 'ascending' : 'descending'}` : ''}`}
         className={cn(
-          'inline-flex items-center gap-1 uppercase tracking-[0.22em] hover:text-stat-value',
+          'inline-flex items-center gap-1 rounded-sm uppercase tracking-[0.22em] transition-colors hover:text-stat-value focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand/50',
+          sortKey === k && 'text-stat-value',
           align === 'right' && 'flex-row-reverse',
         )}
       >
@@ -231,7 +233,7 @@ export function StackHealthTable({
   if (view === 'empty') {
     return panel(
       <div className="flex flex-col items-center justify-center gap-2 py-10 text-stat-subtitle">
-        <Layers className="h-8 w-8 text-stat-icon" strokeWidth={1.5} />
+        <Layers className="h-8 w-8 text-stat-icon" strokeWidth={1.5} aria-hidden />
         <p className="text-sm">No stacks found. Create one from the sidebar.</p>
       </div>
     );
@@ -259,25 +261,22 @@ export function StackHealthTable({
           return (
             <li
               key={row.key}
-              role="button"
-              tabIndex={0}
               data-node-id={row.node.id}
               onClick={openStack}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter' || e.key === ' ') {
-                  e.preventDefault();
-                  openStack();
-                }
-              }}
               title={row.freshness === 'stale' ? 'Status data is stale' : undefined}
               className={cn(
-                `grid ${grid} cursor-pointer items-center gap-4 px-[var(--density-row-x)] py-[var(--density-row-y)] transition-colors hover:bg-accent/5`,
+                `grid ${grid} cursor-pointer items-center gap-4 px-[var(--density-row-x)] py-[var(--density-row-y)] transition-colors hover:bg-accent/5 focus-within:bg-accent/5`,
                 rowTint[row.state],
                 row.freshness === 'stale' && 'opacity-50',
               )}
             >
               <span className="flex min-w-0 items-center gap-1.5">
-                <span className="min-w-0 truncate font-mono text-sm text-stat-value">{row.name}</span>
+                <button
+                  type="button"
+                  className="min-w-0 truncate rounded-sm text-left font-mono text-sm text-stat-value focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand/50"
+                >
+                  {row.name}
+                </button>
                 {updateLabel && (
                   <span className="shrink-0" title={updateLabel}>
                     <CircleArrowUp
@@ -341,8 +340,8 @@ export function StackHealthTable({
                   <span className="block h-full w-full border-b border-dashed border-border/60" />
                 )}
               </span>
-              <span title="Open in Editor">
-                <ChevronRight className="h-3.5 w-3.5 text-stat-icon" strokeWidth={1.5} aria-label="Open in Editor" />
+              <span title="Open in Editor" aria-hidden>
+                <ChevronRight className="h-3.5 w-3.5 text-stat-icon" strokeWidth={1.5} />
               </span>
             </li>
           );

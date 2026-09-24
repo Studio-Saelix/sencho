@@ -291,4 +291,21 @@ describe('SidebarResizePane', () => {
     fireEvent.pointerUp(sep, { pointerId: 1, clientX: 340 });
     expect(commits).toEqual([320]);
   });
+
+  it('double-click on the separator restores the default width', () => {
+    localStorage.setItem(SIDEBAR_WIDTH_KEY, '400');
+    const commits: number[] = [];
+    setup((w) => commits.push(w));
+    fireEvent.doubleClick(separator());
+    expect(commits).toEqual([SIDEBAR_WIDTH.default]);
+  });
+
+  it('marks the separator while a drag is active', () => {
+    setup(() => {});
+    const sep = separator();
+    fireEvent.pointerDown(sep, { pointerId: 1, clientX: 300 });
+    expect(sep).toHaveAttribute('data-dragging');
+    fireEvent.pointerUp(sep, { pointerId: 1, clientX: 300 });
+    expect(sep).not.toHaveAttribute('data-dragging');
+  });
 });
