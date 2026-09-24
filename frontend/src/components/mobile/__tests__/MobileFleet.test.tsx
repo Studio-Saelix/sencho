@@ -109,6 +109,22 @@ describe('MobileFleet dev-build capability', () => {
     expect(screen.queryByRole('button', { name: /Update dev build/i })).not.toBeInTheDocument();
   });
 
+  it('hides the dev-build update action while an update is already in flight', async () => {
+    setupFetch([makeNode()], [makeUpdateStatus({ isDevImage: true, devBuildUpdateAvailable: true, updateStatus: 'updating' })]);
+    render(<MobileFleet headerActions={null} onInspectNode={vi.fn()} onInspectStack={vi.fn()} />);
+
+    await screen.findByText(/integration/i);
+    expect(screen.queryByRole('button', { name: /Update dev build/i })).not.toBeInTheDocument();
+  });
+
+  it('hides the dev-build update action for an offline node', async () => {
+    setupFetch([makeNode({ status: 'offline' })], [makeUpdateStatus({ isDevImage: true, devBuildUpdateAvailable: true })]);
+    render(<MobileFleet headerActions={null} onInspectNode={vi.fn()} onInspectStack={vi.fn()} />);
+
+    await screen.findByText(/integration/i);
+    expect(screen.queryByRole('button', { name: /Update dev build/i })).not.toBeInTheDocument();
+  });
+
   it('tapping the update action opens the shared confirm dialog with dev copy', async () => {
     setupFetch([makeNode()], [makeUpdateStatus({ isDevImage: true, devBuildUpdateAvailable: true })]);
     render(<MobileFleet headerActions={null} onInspectNode={vi.fn()} onInspectStack={vi.fn()} />);

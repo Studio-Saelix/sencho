@@ -1481,6 +1481,7 @@ describe('MonitorService - Sencho dev build check', () => {
     expect(devBuildCalls()).toHaveLength(1);
     expect(devBuildCalls()[0][2]).toContain('ghcr.io/studio-saelix/sencho-dev:dev');
     expect(store.sencho_dev_build_available_digest).toBe('sha256:d1');
+    expect(store.sencho_dev_build_available_image_id).toBe('deadbeefcafe0000');
     expect(store.last_sencho_dev_build_notified_digest).toBe('sha256:d1');
   });
 

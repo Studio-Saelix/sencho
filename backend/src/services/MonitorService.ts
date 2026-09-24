@@ -211,9 +211,13 @@ export class MonitorService {
     // exits; see backend/src/services/DockerEventService.ts.
 
     private static readonly SENCHO_UPDATE_NOTIFIED_KEY = 'last_sencho_update_notified_version';
-    // Public: the Fleet route reads this same key to derive devBuildUpdateAvailable
-    // without a second polling loop.
+    // Public so tests can seed availability; the Fleet route reads it through
+    // isDevBuildUpdateAvailable() rather than a second polling loop.
     static readonly SENCHO_DEV_BUILD_AVAILABLE_KEY = 'sencho_dev_build_available_digest';
+    // The running image id the availability digest was measured against. A
+    // dev update recreates the container on a new image, so a digest recorded
+    // for the previous image must not keep advertising an update.
+    static readonly SENCHO_DEV_BUILD_AVAILABLE_IMAGE_KEY = 'sencho_dev_build_available_image_id';
     private static readonly SENCHO_DEV_BUILD_NOTIFIED_KEY = 'last_sencho_dev_build_notified_digest';
 
     // Cadence gate for checkSenchoDevBuild(): 30 minutes after a conclusive
@@ -223,6 +227,20 @@ export class MonitorService {
     private lastDevBuildCheckGateMs = 30 * 60 * 1000;
 
     private constructor() { }
+
+    /**
+     * True when the last conclusive dev-build check found a newer build for the
+     * image this container is running now. Ignores a digest recorded against a
+     * different image (the container was recreated since), so a node that just
+     * updated does not advertise the update it already applied while the next
+     * check is pending or inconclusive.
+     */
+    static isDevBuildUpdateAvailable(db: DatabaseService): boolean {
+        const imageId = SelfIdentityService.getInstance().getIdentity().imageId;
+        return Boolean(imageId)
+            && Boolean(db.getSystemState(MonitorService.SENCHO_DEV_BUILD_AVAILABLE_KEY))
+            && db.getSystemState(MonitorService.SENCHO_DEV_BUILD_AVAILABLE_IMAGE_KEY) === imageId;
+    }
 
     public static getInstance(): MonitorService {
         if (!MonitorService.instance) {
@@ -719,6 +737,7 @@ export class MonitorService {
             // result.kind === 'update': availability reflects reality regardless
             // of whether the notification itself lands.
             db.setSystemState(MonitorService.SENCHO_DEV_BUILD_AVAILABLE_KEY, result.digest);
+            db.setSystemState(MonitorService.SENCHO_DEV_BUILD_AVAILABLE_IMAGE_KEY, imageId);
 
             if (db.getSystemState(MonitorService.SENCHO_DEV_BUILD_NOTIFIED_KEY) === result.digest) {
                 if (isDebugEnabled()) console.debug('[Monitor:diag] Already notified for this Sencho dev build digest');
