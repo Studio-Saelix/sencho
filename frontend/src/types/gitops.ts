@@ -394,8 +394,10 @@ export type ConfiguredPolicy =
 /**
  * A classified divergence between what was intended and what was observed.
  *
- * The backend currently emits one class of item on its own evidence, a runtime
- * artifact mismatch; every other class still needs a producer. An empty list
+ * The backend emits a class only where persisted evidence proves a mismatch:
+ * source, managed project, placement, health, and the runtime family. The
+ * invocation class has no producer yet, because the observed invocation is
+ * never persisted, so it is absent rather than fabricated. An empty list
  * therefore means "no confirmed drift", never "in sync": a state the model was
  * never asked about also answers empty.
  */

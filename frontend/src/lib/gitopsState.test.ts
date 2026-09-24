@@ -21,6 +21,7 @@ import {
   SOURCE_STATE,
   SOURCE_STATE_LOOKUP,
   absentFault,
+  driftClassLabel,
   identityRefLabel,
   livePlacementFacet,
   liveRolloutFacet,
@@ -404,5 +405,25 @@ describe('identityRefLabel', () => {
         authored: { composeFileOrder: [], projectName: null, projectDirectory: null, envFileOrder: [] },
       }),
     ).toBe('no compose files');
+  });
+});
+
+describe('driftClassLabel', () => {
+  const cases: [string, string][] = [
+    ['source', 'source'],
+    ['managed_project', 'managed project'],
+    ['invocation', 'invocation'],
+    ['placement', 'placement'],
+    ['rollout', 'rollout'],
+    ['runtime', 'runtime'],
+    ['health', 'health'],
+  ];
+
+  it.each(cases)('names %s', (className, expected) => {
+    expect(driftClassLabel(className)).toBe(expected);
+  });
+
+  it('shows a class this build does not know as itself', () => {
+    expect(driftClassLabel('future_class')).toBe('future_class');
   });
 });

@@ -92,9 +92,9 @@ export function target(overrides: Partial<GitOpsTargetProjection> = {}): GitOpsT
 }
 
 /**
- * One classified divergence. The backend emits the runtime class from a
- * comparable artifact mismatch, so this fixture shapes itself after that item;
- * the other classes still have no producer.
+ * One classified divergence. The fixture shapes itself after the runtime
+ * artifact mismatch the backend has always emitted, so it stays the simplest
+ * complete item; every class shares the same shape.
  */
 export function driftItem(overrides: Partial<GitOpsDriftItem> = {}): GitOpsDriftItem {
   return {

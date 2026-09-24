@@ -1,6 +1,7 @@
 import {
   decodeArtifactEvidenceJson,
   decodeGitOpsEvidenceLimitations,
+  decodeGitOpsRequiredTargetsJson,
   decodeObservedArtifactIdentity,
   GitOpsJsonError,
   type ObservedArtifactIdentity,
@@ -24,9 +25,12 @@ import type {
   ArtifactFacet,
   ArtifactLatestEvidence,
   ArtifactQualification,
+  ConfiguredPolicy,
   FutureGitOpsEvidence,
   GitOpsApplicationRow,
   GitOpsAvailableAction,
+  GitOpsIdentityRef,
+  GitOpsIntentRevisionRow,
   GitOpsLimitation,
   GitOpsRevisionProjection,
   GitOpsDriftItem,
@@ -114,17 +118,64 @@ export function deriveGitOpsRevision(
     },
     facets: { source, artifact, placement, rollout },
     targets,
-    drift: collectRuntimeDrift(app, targets),
+    drift: collectDrift(app, facts.targets, targets, availableActions, {
+      healthDisabled: facts.healthDisabled,
+      source,
+      placement,
+      rollout,
+    }, limitations),
     limitations,
     availableActions,
   };
 }
 
 /**
- * The two drift classes current evidence can confirm on its own.
+ * Every confirmed divergence the rows can prove, in a stable class order.
  *
- * Most of the seven classes need producers this model deliberately defers, but
- * a comparable runtime artifact mismatch and a desired-versus-deployed
+ * Items are derived state: nothing here is ever written into
+ * `stack_drift_findings` (that table belongs to the spatial Docker drift
+ * engine, a different question). The order below is deliberate: the per-target
+ * runtime and rollout items first, in target order, then the application-level
+ * classes. Waiting states are not drift: a staged candidate, a pending review,
+ * a queued rollout, and a deployed target still awaiting its health verdict are
+ * progress, and the attention queue stays for exceptions.
+ *
+ * The application-level classes key off the facets this same projection shows,
+ * so an item can never claim a divergence the facet calls settled progress, and
+ * every facet status that means progress or waiting suppresses its class.
+ *
+ * The `invocation` class has no producer here: the observed invocation is not
+ * persisted anywhere derive can read (no column, no history field), and
+ * emitting the authored invocation against a permanent `unknown` would be
+ * constant fabricated drift. It lands once an apply-time observation is
+ * recorded.
+ */
+function collectDrift(
+  app: GitOpsApplicationRow,
+  rawTargets: GitOpsTargetCurrentRow[],
+  targets: GitOpsTargetProjection[],
+  availableActions: GitOpsAvailableAction[],
+  facts: {
+    healthDisabled: boolean;
+    source: SourceFacet;
+    placement: PlacementFacet;
+    rollout: RolloutFacet;
+  },
+  limitations: GitOpsLimitation[],
+): GitOpsDriftItem[] {
+  return [
+    ...collectRuntimeDrift(app, targets),
+    ...collectSourceDrift(app, facts.source, availableActions),
+    ...collectPlacementDrift(app, rawTargets, facts.placement, facts.rollout, limitations),
+    ...collectManagedProjectDrift(app, rawTargets),
+    ...collectHealthDrift(app, rawTargets, facts.healthDisabled),
+  ];
+}
+
+/**
+ * The two runtime-family classes.
+ *
+ * A comparable runtime artifact mismatch and a desired-versus-deployed
  * generation mismatch rest entirely on rows that exist now. Leaving `drift`
  * empty while a facet says `runtime_artifact_drift` would report one fault
  * twice with only one copy readable; the same holds whenever the known
@@ -212,6 +263,371 @@ function collectRuntimeDrift(
     });
   }
   return items;
+}
+
+/**
+ * Source drift: the accepted generation is not the commit the configured ref
+ * names, or the last fetch/validation failed so no revision is established.
+ *
+ * Both items key off the derived source facet, never off the raw pointers. A
+ * fetch advances `desired_commit_sha` before any candidate is accepted, so the
+ * pointer comparison alone would report a staged candidate (`candidate_ready`,
+ * `source_review_pending`, `source_conflict_blocker`), a scheduled retry, an
+ * apply in flight, or a suspended source as drift. The facet says which of
+ * those is progress and which is a reconcile problem, and only
+ * `source_reconcile_required` and a fetch or validation `source_failed` are
+ * divergence. Inline Blueprint has no Git source to drift from.
+ */
+function collectSourceDrift(
+  app: GitOpsApplicationRow,
+  source: SourceFacet,
+  availableActions: GitOpsAvailableAction[],
+): GitOpsDriftItem[] {
+  if (app.target_mode === 'inline_blueprint') return [];
+  const policy = configuredGitSourcePolicy(app);
+  const affectedTargets = [{ nodeId: null, stackName: app.stack_name ?? app.configured_source_stack_name }];
+  const action: GitOpsAvailableAction = availableActions.includes('fetch') ? 'fetch' : 'none';
+  const items: GitOpsDriftItem[] = [];
+
+  if (source.status === 'source_reconcile_required' && app.desired_commit_sha && app.accepted_generation_id) {
+    const store = GitOpsStore.getInstance();
+    const accepted = store.getGeneration(app.accepted_generation_id);
+    if (accepted && accepted.application_id === app.id && accepted.commit_sha !== app.desired_commit_sha) {
+      items.push({
+        class: 'source',
+        expected: commitRef(app, app.desired_commit_sha),
+        // The accepted generation carries the identity it was built from, so
+        // after a rebind the old commit is still described by the old repo and
+        // ref rather than the ones the application points at now.
+        observed: commitRef(app, accepted.commit_sha, {
+          repoUrl: accepted.repo_url,
+          configuredRef: accepted.configured_ref,
+        }),
+        freshnessAt: null,
+        owner: 'GitSourceService',
+        reason: 'the accepted generation was built from a commit other than the one the configured ref names',
+        configuredPolicy: policy,
+        affectedTargets,
+        action,
+      });
+    }
+  }
+
+  if (source.status === 'source_failed' && (source.failureStage === 'fetch' || source.failureStage === 'validation')) {
+    items.push({
+      class: 'source',
+      expected: commitRef(app, app.desired_commit_sha),
+      observed: app.fetched_commit_sha ? commitRef(app, app.fetched_commit_sha) : { kind: 'unknown' },
+      freshnessAt: source.failureAt,
+      owner: 'GitSourceService',
+      reason: 'the last fetch or validation failed, so the configured ref content is not established',
+      configuredPolicy: policy,
+      affectedTargets,
+      action,
+    });
+  }
+  return items;
+}
+
+/**
+ * Placement drift: a recorded placement approval that no longer binds the
+ * current intent, or a live target that applied authority outside the
+ * currently required target set.
+ *
+ * Git-managed Blueprint applications only: Direct has no placement model to
+ * drift from, and Inline applies without a placement decision.
+ *
+ * Both items are gated on a settled application. The placement facet has to be
+ * `blueprint_bound`, which is the only status that says no decision is
+ * outstanding (acceptance, placement review, authorization, and preflight all
+ * have their own statuses), and no operation may be in flight or interrupted:
+ * while a decision is pending or a rollout is moving, an extra target or an
+ * approval the current candidate no longer matches is the expected shape of
+ * that work, not divergence. The extra-target branch additionally requires the
+ * rollout to have settled as converged, because until it does the previous
+ * target set is still the one serving.
+ */
+function collectPlacementDrift(
+  app: GitOpsApplicationRow,
+  rawTargets: GitOpsTargetCurrentRow[],
+  placement: PlacementFacet,
+  rollout: RolloutFacet,
+  limitations: GitOpsLimitation[],
+): GitOpsDriftItem[] {
+  if (app.target_mode !== 'blueprint') return [];
+  if (placement.status !== 'blueprint_bound') return [];
+  if (app.active_operation_stage !== null || app.interruption_stage !== null) return [];
+  if (recoveryInProgress(app.recovery_phase)) return [];
+  const store = GitOpsStore.getInstance();
+  const intent = app.intent_revision_id ? store.getIntentRevision(app.intent_revision_id) : undefined;
+  if (!intent || intent.application_id !== app.id) return [];
+  const policy = blueprintDriftPolicy(intent);
+  const candidate = app.rollout_candidate_id ? store.getRolloutCandidate(app.rollout_candidate_id) : undefined;
+  const candidateBelongs = candidate && candidate.application_id === app.id
+    && candidate.intent_revision_id === app.intent_revision_id;
+  let requiredNodeIds: number[] | null = null;
+  if (candidateBelongs) {
+    try {
+      requiredNodeIds = decodeGitOpsRequiredTargetsJson(candidate.required_targets_json).nodeIds;
+    } catch {
+      // Without a readable required set there is no comparison to make, and
+      // saying nothing quietly would read as agreement. Record why instead.
+      limitations.push({
+        code: 'placement_required_targets_invalid',
+        message: 'rollout candidate required targets json is invalid',
+        evidence: candidate.required_targets_json,
+      });
+    }
+  }
+  const items: GitOpsDriftItem[] = [];
+
+  // A recorded approval that a live transition wrote but that no longer
+  // resolves is stale. A ref with no row at all is a dangling pointer, which
+  // approval resolution already refuses; it is not a stale approval.
+  if (app.placement_approval_ref && requiredNodeIds) {
+    const approval = store.getApproval(app.placement_approval_ref);
+    const resolves = approval !== undefined && store.resolveApprovalRef(app.placement_approval_ref, {
+      kind: 'placement_approval',
+      applicationId: app.id,
+      intentRevisionId: intent.id,
+      requiredNodeIds,
+    }) !== null;
+    if (approval && !resolves) {
+      const approvalIntent = approval.intent_revision_id
+        ? store.getIntentRevision(approval.intent_revision_id)
+        : undefined;
+      items.push({
+        class: 'placement',
+        expected: intentRef(intent),
+        observed: approvalIntent ? intentRef(approvalIntent) : { kind: 'unknown' },
+        freshnessAt: approval.created_at,
+        owner: 'BlueprintReconciler',
+        reason: 'the recorded placement approval no longer binds the current intent and target set',
+        configuredPolicy: policy,
+        affectedTargets: [{ nodeId: null, stackName: intent.deploy_stack_name }],
+        action: 'none',
+      });
+    }
+  }
+
+  // Acked authority outside the current required set, once the rollout that
+  // should have withdrawn it has settled. Each target is judged under its own
+  // intent, so a renamed stack reports the name the target actually runs.
+  const settled = rollout.status === 'exactly_converged_healthy'
+    || rollout.status === 'configuration_converged_artifact_qualified';
+  if (requiredNodeIds && settled) {
+    const required = new Set(requiredNodeIds);
+    for (const target of rawTargets) {
+      if (target.target_status !== 'active') continue;
+      if (target.applied_generation_id === null) continue;
+      if (required.has(target.node_id)) continue;
+      if (target.active_operation_stage || target.interruption_stage) continue;
+      if (recoveryInProgress(target.recovery_phase)) continue;
+      const targetIntent = target.intent_revision_id
+        ? store.getIntentRevision(target.intent_revision_id)
+        : undefined;
+      items.push({
+        class: 'placement',
+        expected: intentRef(intent),
+        observed: targetIntent ? intentRef(targetIntent) : { kind: 'unknown' },
+        freshnessAt: target.updated_at,
+        owner: 'BlueprintReconciler',
+        reason: 'the node holds placement authority outside the current required target set',
+        configuredPolicy: policy,
+        affectedTargets: [{ nodeId: target.node_id, stackName: targetStackName(app, intent, target) }],
+        action: 'none',
+      });
+    }
+  }
+  return items;
+}
+
+/**
+ * Managed-project drift: the applied managed project no longer matches the
+ * accepted generation that owns it, per the stack's manifest cache.
+ *
+ * The manifest file is the source of truth and the cache columns are a cheap
+ * projection of it, written after the promotion lands. So a null cache field
+ * is unknown rather than disagreement and is skipped, and an apply, an
+ * interrupted apply, or a recovery makes no claim at all: those windows
+ * legitimately hold a new manifest with the previous commit, or the reverse,
+ * until the writers finish. A Blueprint deploy or withdrawal runs on the
+ * target while the application sits idle, so the targets are checked too.
+ * Only a settled application whose every live target has applied the accepted
+ * generation is compared, because acceptance lands before the apply reaches
+ * the node.
+ */
+function collectManagedProjectDrift(
+  app: GitOpsApplicationRow,
+  rawTargets: GitOpsTargetCurrentRow[],
+): GitOpsDriftItem[] {
+  if (!app.accepted_generation_id) return [];
+  if (app.active_operation_stage !== null || app.interruption_stage !== null) return [];
+  if (recoveryInProgress(app.recovery_phase)) return [];
+  const stackName = app.stack_name ?? app.configured_source_stack_name;
+  if (!stackName) return [];
+  const store = GitOpsStore.getInstance();
+  const source = store.getStackGitSource(stackName);
+  if (!source) return [];
+  const generation = store.getGeneration(app.accepted_generation_id);
+  if (!generation || generation.application_id !== app.id) return [];
+  if (generation.manifest_version <= 0) return [];
+  // Acceptance lands before the apply that promotes the project reaches the
+  // node, so the cache still describes the previous generation until every
+  // live target has applied this one. Until then the cache is behind, not
+  // divergent. A target mid-deploy, interrupted, or recovering is the same
+  // story one level down: a Blueprint deploy runs on the target alone.
+  const live = rawTargets.filter((target) => target.target_status !== 'tombstoned');
+  const settled = live.every((target) => target.applied_generation_id === generation.id
+    && !target.active_operation_stage
+    && !target.interruption_stage
+    && !recoveryInProgress(target.recovery_phase));
+  if (!settled) return [];
+
+  const unusableManifest = source.manifest_state === 'absent'
+    || source.manifest_state === 'migration_required'
+    || source.manifest_state === 'unsupported';
+  const versionMismatch = source.manifest_version !== null && source.manifest_version !== generation.manifest_version;
+  const generationMismatch = source.manifest_generation !== null && source.manifest_generation !== generation.applied_dir;
+  const commitMismatch = source.last_applied_commit_sha !== null && source.last_applied_commit_sha !== generation.commit_sha;
+  if (!unusableManifest && !versionMismatch && !generationMismatch && !commitMismatch) return [];
+
+  return [{
+    class: 'managed_project',
+    expected: { kind: 'generation', id: generation.id },
+    observed: commitMismatch ? commitRef(app, source.last_applied_commit_sha) : { kind: 'unknown' },
+    freshnessAt: source.updated_at,
+    owner: 'GitProjectManifestService',
+    reason: unusableManifest
+      ? `the applied managed project has no usable manifest (state ${source.manifest_state})`
+      : commitMismatch
+        ? 'the applied managed project belongs to a commit other than the accepted generation'
+        : 'the applied managed project does not match the manifest of the accepted generation',
+    configuredPolicy: null,
+    affectedTargets: [{ nodeId: null, stackName }],
+    action: 'none',
+  }];
+}
+
+/**
+ * Health drift: the latest stack-scoped health run on a node failed for
+ * exactly the generation that node is deployed on.
+ *
+ * A failed run bound to an older generation was superseded by the redeploy and
+ * is not divergence, an observing or unknown run is uncertainty rather than
+ * evidence, and a target mid-deploy or mid-recovery has no verdict to read yet.
+ * The run is read from this instance's own `health_gate_runs`, which is where a
+ * generation-bound stack gate is recorded: a target on a node this instance
+ * does not host has no run row here, and a Git-managed Blueprint deployment
+ * opens no generation-bound stack gate at all, so the class stays silent for
+ * those rather than claiming a verdict nobody wrote. Each target is queried
+ * under the stack name its own intent deployed, so a renamed stack reads its
+ * real runs.
+ */
+function collectHealthDrift(
+  app: GitOpsApplicationRow,
+  rawTargets: GitOpsTargetCurrentRow[],
+  healthDisabled: boolean,
+): GitOpsDriftItem[] {
+  if (healthDisabled) return [];
+  if (app.active_operation_stage !== null || app.interruption_stage !== null) return [];
+  if (recoveryInProgress(app.recovery_phase)) return [];
+  const store = GitOpsStore.getInstance();
+  const intent = app.intent_revision_id ? store.getIntentRevision(app.intent_revision_id) : undefined;
+  const items: GitOpsDriftItem[] = [];
+  for (const target of rawTargets) {
+    if (target.target_status !== 'active') continue;
+    if (!target.deployed_generation_id) continue;
+    if (target.active_operation_stage || target.interruption_stage) continue;
+    if (recoveryInProgress(target.recovery_phase)) continue;
+    const stackName = targetStackName(app, intent, target);
+    if (!stackName) continue;
+    const run = store.getLatestStackHealthRun(target.node_id, stackName);
+    if (!run || run.status !== 'failed' || run.deployed_generation_id !== target.deployed_generation_id) continue;
+    items.push({
+      class: 'health',
+      expected: { kind: 'generation', id: target.deployed_generation_id },
+      observed: { kind: 'health_run', runId: run.id, deployedGenerationId: run.deployed_generation_id ?? null },
+      freshnessAt: run.ended_at ?? run.started_at,
+      owner: 'HealthGateService',
+      reason: 'the stack-scoped health run for the deployed generation failed',
+      configuredPolicy: null,
+      affectedTargets: [{ nodeId: target.node_id, stackName }],
+      action: 'none',
+    });
+  }
+  return items;
+}
+
+/**
+ * The stack a target is running under.
+ *
+ * A Direct target keeps the application's stack. A Blueprint target is named by
+ * the intent that deployed it, and an application converted from Direct to
+ * Blueprint keeps the stack it was running under as its retained source stack
+ * until the first Blueprint rollout gives the target an intent of its own, so
+ * that retained identity outranks the current intent's stack.
+ */
+function targetStackName(
+  app: GitOpsApplicationRow,
+  currentIntent: GitOpsIntentRevisionRow | undefined,
+  target: GitOpsTargetCurrentRow,
+): string | null {
+  if (app.target_mode === 'direct') return app.stack_name;
+  const targetIntent = target.intent_revision_id
+    ? GitOpsStore.getInstance().getIntentRevision(target.intent_revision_id)
+    : undefined;
+  return targetIntent?.deploy_stack_name
+    ?? app.configured_source_stack_name
+    ?? currentIntent?.deploy_stack_name
+    ?? null;
+}
+
+/**
+ * Whether a recovery is still moving. A recovery that finished, or that failed
+ * and is waiting for an operator, is a terminal state the runtime facet
+ * already reports, so it does not hold back the application-level classes.
+ */
+function recoveryInProgress(phase: string | null): boolean {
+  return phase === 'capturing' || phase === 'restoring' || phase === 'compensating';
+}
+
+function commitRef(
+  app: GitOpsApplicationRow,
+  sha: string | null,
+  identity?: { repoUrl: string; configuredRef: string },
+): GitOpsIdentityRef {
+  if (!sha) return { kind: 'none' };
+  return {
+    kind: 'commit',
+    sha,
+    repoUrl: identity?.repoUrl ?? app.configured_repo_url ?? '',
+    ref: identity?.configuredRef ?? app.configured_ref ?? '',
+  };
+}
+
+function intentRef(intent: GitOpsIntentRevisionRow): GitOpsIdentityRef {
+  return { kind: 'intent', id: intent.id, composeContentSha256: intent.compose_content_sha256 };
+}
+
+function configuredGitSourcePolicy(app: GitOpsApplicationRow): ConfiguredPolicy {
+  const stackName = app.stack_name ?? app.configured_source_stack_name;
+  if (!stackName) return null;
+  const source = GitOpsStore.getInstance().getStackGitSource(stackName);
+  if (!source) return null;
+  return {
+    kind: 'git_source',
+    autoApplyOnWebhook: source.auto_apply_on_webhook,
+    autoDeployOnApply: source.auto_deploy_on_apply,
+  };
+}
+
+function blueprintDriftPolicy(intent: GitOpsIntentRevisionRow): ConfiguredPolicy {
+  const mode = intent.runtime_drift_policy;
+  if (mode === 'observe' || mode === 'suggest' || mode === 'enforce') {
+    return { kind: 'blueprint_drift', driftMode: mode };
+  }
+  return null;
 }
 
 /**

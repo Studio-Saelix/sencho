@@ -60,6 +60,8 @@ export const GITOPS_LIMITATION_COPY: Record<string, string | undefined> = {
     'What is running on this node could not be read, so it is reported as unidentified rather than as matching.',
   artifact_observation_decode_failed:
     'What is running on this node could not be read, so it is reported as unidentified rather than as matching.',
+  placement_required_targets_invalid:
+    'The nodes this rollout should cover could not be read, so Sencho cannot say whether the placement still matches what this Blueprint asks for.',
 
   // --- recorded at write time, merged in later ------------------------------
   recovery_unproven:
