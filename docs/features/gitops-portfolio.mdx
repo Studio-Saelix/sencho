@@ -50,7 +50,7 @@ Selecting an application name in the list, or an entry in the attention queue, o
 - **Attention**: every reason the application is waiting on an operator, each with its one-line explanation.
 - **Application state**: the three authority steps as separate chips (**source accepted**, **placement approved**, **rollout authorized**, plus a **legacy combined approval** chip when one was recorded), then the source, artifact, placement, and rollout state cards. For a Git-managed Blueprint application, the step that is outstanding appears here as an action: **Accept source**, **Review and approve placement**, or **Authorize rollout**. A live rollout also offers **Pause rollout** or **Resume rollout**, with replan, supersede, and rollback in the overflow menu.
 - **Targets**: one card per node, with its runtime state, health, connectivity, last known good state, the deployed generation, and the artifact identity observed running there. A target is never folded into an aggregate; a node reporting a state this Sencho build does not recognize still gets a card that says so.
-- **Drift**: each confirmed divergence, expected versus observed.
+- **Drift**: each confirmed divergence, expected versus observed, classified as source, managed project, placement, health, rollout, or runtime. Work that is merely in progress (a staged candidate, a queued rollout, a deployed target still awaiting its health verdict) is not drift.
 - Anything Sencho could not prove about the state shown, stated last.
 
 When some targets could not be reached, a notice names them so their cards are not read as current. The view's URL carries the application, so it can be bookmarked or shared, and the browser's Back button (or **All applications**) returns to the list with its filters intact.

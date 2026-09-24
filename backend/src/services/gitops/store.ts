@@ -1,5 +1,5 @@
 import type Database from 'better-sqlite3';
-import { DatabaseService } from '../DatabaseService';
+import { DatabaseService, type HealthGateRunRow, type StackGitSource } from '../DatabaseService';
 import type { GitOpsHistoryCursor, GitOpsHistoryStage } from './history';
 import {
   decodeArtifactEvidenceJson,
@@ -307,6 +307,19 @@ export class GitOpsStore {
 
   getGeneration(id: string): GitOpsGenerationRow | undefined {
     return this.db().prepare('SELECT * FROM gitops_generations WHERE id = ?').get(id) as GitOpsGenerationRow | undefined;
+  }
+
+  /**
+   * The stack's Git source row, for evidence that lives outside the GitOps
+   * tables (the manifest cache and the configured source policy). Read-only.
+   */
+  getStackGitSource(stackName: string): StackGitSource | undefined {
+    return DatabaseService.getInstance().getGitSource(stackName);
+  }
+
+  /** Latest stack-scoped health gate run on one node, for health drift. Read-only. */
+  getLatestStackHealthRun(nodeId: number, stackName: string): HealthGateRunRow | undefined {
+    return DatabaseService.getInstance().getLatestStackHealthGateRun(nodeId, stackName);
   }
 
   listGenerationsForApplication(applicationId: string): GitOpsGenerationRow[] {

@@ -1,4 +1,4 @@
-import { identityRefLabel } from '@/lib/gitopsState';
+import { driftClassLabel, identityRefLabel } from '@/lib/gitopsState';
 import type { GitOpsDriftItem } from '@/types/gitops';
 
 /**
@@ -11,7 +11,7 @@ export default function GitOpsDriftRow({ item }: { item: GitOpsDriftItem }) {
   return (
     <div className="border-t border-muted py-2 first:border-t-0">
       <div className="flex flex-wrap items-center gap-2">
-        <span className="rounded-md bg-brand/15 px-1.5 py-0.5 font-mono text-[11px] text-brand">{item.class}</span>
+        <span className="rounded-md bg-brand/15 px-1.5 py-0.5 font-mono text-[11px] text-brand">{driftClassLabel(item.class)}</span>
         <span className="font-mono text-[10px] uppercase tracking-wide text-stat-subtitle">{item.owner}</span>
       </div>
       <div className="mt-1 text-[12px] text-foreground/90">{item.reason}</div>
