@@ -1,4 +1,5 @@
 import { decodeGitOpsJson, encodeGitOpsJson, isRecord } from './json';
+import { isNotifiableGitOpsStage, type NotifiableGitOpsStage } from './notifications';
 
 export const SETTLED_ATTEMPT_PAYLOAD_VERSION = 1;
 
@@ -19,9 +20,12 @@ export type SettledAttemptPayloadV1 = {
 
 export type SettledAttemptPayload = SettledAttemptPayloadV1;
 
-export type SettledAttemptDecode =
-  | { ok: true; payload: SettledAttemptPayload }
+/** The one decode result shape both payload kinds return. */
+export type GitOpsDecodeResult<T> =
+  | { ok: true; payload: T }
   | { ok: false; limitation: string };
+
+export type SettledAttemptDecode = GitOpsDecodeResult<SettledAttemptPayload>;
 
 function isNonEmptyString(value: unknown): value is string {
   return typeof value === 'string' && value.length > 0;
@@ -85,6 +89,101 @@ export function decodeSettledAttemptPayload(raw: string, version: number): Settl
       reason: decoded.reason,
       trigger: decoded.trigger,
       actor: decoded.actor,
+      at: decoded.at,
+    },
+  };
+}
+
+export const GITOPS_EVENT_PAYLOAD_VERSION = 2;
+
+/**
+ * Payload of a v2 outbox row: one notifiable authority, lifecycle, or
+ * stateful-confirmation decision.
+ *
+ * Carries identities and the recorded operator reason only. Source content,
+ * diffs, digests, and secret values never reach this payload. The drain takes
+ * the notification's fixed text from the stage mapping, with the payload
+ * contributing only the reason suffix and a stack name the classifier may
+ * label with, so a rewritten payload cannot produce a phrase the mapping does
+ * not define.
+ */
+export type GitOpsEventPayloadV2 = {
+  version: 2;
+  historyId: string;
+  applicationId: string;
+  operationId: string;
+  stage: NotifiableGitOpsStage;
+  stackName: string | null;
+  nodeId: number | null;
+  actor: string | null;
+  reason: string | null;
+  at: number;
+};
+
+export type GitOpsEventPayload = GitOpsEventPayloadV2;
+
+export type GitOpsEventDecode = GitOpsDecodeResult<GitOpsEventPayload>;
+
+export function encodeGitOpsEventPayload(payload: GitOpsEventPayload): string {
+  return encodeGitOpsJson(payload);
+}
+
+/**
+ * Decode one v2 outbox row, failing closed on anything the writer could not
+ * have produced.
+ *
+ * A stage that is no longer in the notifiable set stays undrained rather than
+ * being dropped or mapped to a guess, which is the same bargain the v1 decoder
+ * makes for unknown versions: a payload nobody can prove is a payload nobody
+ * notifies from.
+ */
+export function decodeGitOpsEventPayload(raw: string, version: number): GitOpsEventDecode {
+  if (version !== GITOPS_EVENT_PAYLOAD_VERSION) {
+    return { ok: false, limitation: `gitops_event_payload_version_unsupported:${version}` };
+  }
+  let decoded: unknown;
+  try {
+    decoded = decodeGitOpsJson(raw);
+  } catch {
+    return { ok: false, limitation: 'gitops_event_payload_unparseable' };
+  }
+  if (!isRecord(decoded) || decoded.version !== GITOPS_EVENT_PAYLOAD_VERSION) {
+    return { ok: false, limitation: 'gitops_event_payload_invalid' };
+  }
+  if (
+    !isNonEmptyString(decoded.historyId)
+    || !isNonEmptyString(decoded.applicationId)
+    || !isNonEmptyString(decoded.operationId)
+    || typeof decoded.stage !== 'string'
+    || !isNotifiableGitOpsStage(decoded.stage)
+    || typeof decoded.at !== 'number'
+  ) {
+    return { ok: false, limitation: 'gitops_event_payload_invalid' };
+  }
+  if (decoded.stackName !== null && typeof decoded.stackName !== 'string') {
+    return { ok: false, limitation: 'gitops_event_payload_invalid' };
+  }
+  if (decoded.nodeId !== null && typeof decoded.nodeId !== 'number') {
+    return { ok: false, limitation: 'gitops_event_payload_invalid' };
+  }
+  if (decoded.actor !== null && typeof decoded.actor !== 'string') {
+    return { ok: false, limitation: 'gitops_event_payload_invalid' };
+  }
+  if (decoded.reason !== null && typeof decoded.reason !== 'string') {
+    return { ok: false, limitation: 'gitops_event_payload_invalid' };
+  }
+  return {
+    ok: true,
+    payload: {
+      version: 2,
+      historyId: decoded.historyId,
+      applicationId: decoded.applicationId,
+      operationId: decoded.operationId,
+      stage: decoded.stage,
+      stackName: decoded.stackName,
+      nodeId: decoded.nodeId,
+      actor: decoded.actor,
+      reason: decoded.reason,
       at: decoded.at,
     },
   };

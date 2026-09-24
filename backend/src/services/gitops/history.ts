@@ -2,8 +2,9 @@ import { randomUUID } from 'crypto';
 import type Database from 'better-sqlite3';
 import { decodeGitOpsJson, encodeGitOpsJson, isRecord, GitOpsJsonError } from './json';
 import { enqueueHistoryPublication } from './publish';
-import { insertSettledOutbox } from './outbox';
-import { SETTLED_ATTEMPT_PAYLOAD_VERSION } from './attemptPayload';
+import { insertSettledOutbox, insertGitOpsEventOutbox } from './outbox';
+import { GITOPS_EVENT_PAYLOAD_VERSION, SETTLED_ATTEMPT_PAYLOAD_VERSION } from './attemptPayload';
+import { gitOpsOutboxPlan, gitOpsPauseReason } from './notifications';
 import { sanitizeForLog } from '../../utils/safeLog';
 import type {
   GitOpsApplicationRow,
@@ -232,7 +233,8 @@ export function insertHistory(db: Database.Database, row: HistoryInsert): string
     row.redactedReasonClass ?? null,
   );
   if (result.changes !== 1) return null;
-  if (row.stage === 'source_reconcile_settled') {
+  const outboxPlan = gitOpsOutboxPlan(row.stage, row.application.target_mode);
+  if (outboxPlan?.kind === 'settled') {
     insertSettledOutbox(db, {
       version: SETTLED_ATTEMPT_PAYLOAD_VERSION,
       settledHistoryId: id,
@@ -245,6 +247,19 @@ export function insertHistory(db: Database.Database, row: HistoryInsert): string
       reason: typeof row.after.reason === 'string' ? row.after.reason : null,
       trigger: row.trigger,
       actor: row.actor,
+      at: row.at,
+    });
+  } else if (outboxPlan?.kind === 'event') {
+    insertGitOpsEventOutbox(db, {
+      version: GITOPS_EVENT_PAYLOAD_VERSION,
+      historyId: id,
+      applicationId: row.application.id,
+      operationId: row.operationId,
+      stage: outboxPlan.stage,
+      stackName: row.application.stack_name,
+      nodeId: row.nodeId,
+      actor: row.actor,
+      reason: gitOpsPauseReason(row.after),
       at: row.at,
     });
   }

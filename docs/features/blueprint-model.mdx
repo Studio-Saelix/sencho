@@ -311,6 +311,15 @@ Two notification events fire from the reconciler:
 
 Both events route through the standard alert pipeline. Configure delivery channels under [Notification routing](/features/alerts-notifications#notification-routing).
 
+GitOps authority and rollout lifecycle decisions are also recorded in the notification history as they happen:
+
+- source acceptance and rollout authorization for a Git-managed Blueprint, and placement approval for any Blueprint, including an Inline apply;
+- rollout pause (with the reason you entered), resume, and supersede, including the automatic supersede of the previous rollout generation when a new one is authorized;
+- rollout rollback start, completion, and partial failure;
+- a stateful deployment held for its first-deploy confirmation, or for confirmation of a stateful revision change.
+
+Each entry names the Blueprint and records the GitOps operation it came from. These categories are history-only: they appear in the bell, and they are not sent to your configured delivery channels.
+
 ## Security and trust boundaries
 
 **Who can do what.** The user role determines the available actions. Reading the catalog, the detail sheet, and the deployment status is open to every role. Creating, editing, withdrawing, accepting a stateful deploy, and applying on demand require the admin role. Pinning a blueprint requires the admin role.

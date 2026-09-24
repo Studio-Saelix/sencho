@@ -12,6 +12,7 @@ import { setupTestDb, cleanupTestDb } from './helpers/setupTestDb';
 import { directApplicationFixture } from './helpers/gitopsFixtures';
 import { DatabaseService } from '../services/DatabaseService';
 import { GitOpsMetricsService } from '../services/GitOpsMetricsService';
+import { GitOpsStore } from '../services/gitops/store';
 import { insertHistory } from '../services/gitops/history';
 import {
   enqueueHistoryPublication,
@@ -19,8 +20,23 @@ import {
   setGitOpsEventSink,
   type GitOpsInvalidateEvent,
 } from '../services/gitops/publish';
-import { drainSettledOutboxRow, repairGitOpsSettledOutbox, settledNotificationDedupeKey } from '../services/gitops/outbox';
-import { decodeSettledAttemptPayload, encodeSettledAttemptPayload } from '../services/gitops/attemptPayload';
+import {
+  drainGitOpsOutboxRow,
+  gitOpsEventNotificationDedupeKey,
+  repairGitOpsOutbox,
+  settledNotificationDedupeKey,
+} from '../services/gitops/outbox';
+import {
+  GITOPS_EVENT_PAYLOAD_VERSION,
+  decodeGitOpsEventPayload,
+  decodeSettledAttemptPayload,
+  encodeSettledAttemptPayload,
+} from '../services/gitops/attemptPayload';
+import {
+  GITOPS_NOTIFICATION_META,
+  gitOpsPauseReason,
+} from '../services/gitops/notifications';
+import type { GitOpsApplicationRow } from '../services/gitops/types';
 
 /**
  * The real module, with the enqueue entry point wrapped in a spy.
@@ -233,7 +249,7 @@ describe('gitops transition announcements', () => {
   it('drains a settled row once and a second repair is a no-op', async () => {
     const historyId = writeSettled('op-outbox-repair');
     resetGitOpsPublicationsForTests();
-    repairGitOpsSettledOutbox();
+    repairGitOpsOutbox();
     const first = db().prepare(
       'SELECT COUNT(*) AS n FROM notification_history WHERE dedupe_key = ?',
     ).get(`gitops:settled:${historyId}`) as { n: number };
@@ -242,7 +258,7 @@ describe('gitops transition announcements', () => {
       'SELECT drained_at FROM gitops_settled_outbox WHERE settled_history_id = ?',
     ).get(historyId) as { drained_at: number | null };
     expect(drained.drained_at).not.toBeNull();
-    repairGitOpsSettledOutbox();
+    repairGitOpsOutbox();
     const second = db().prepare(
       'SELECT COUNT(*) AS n FROM notification_history WHERE dedupe_key = ?',
     ).get(`gitops:settled:${historyId}`) as { n: number };
@@ -260,7 +276,7 @@ describe('gitops transition announcements', () => {
       gitops_operation_id: 'op-outbox-dedupe',
       dedupe_key: settledNotificationDedupeKey(historyId),
     });
-    drainSettledOutboxRow(db(), historyId);
+    drainGitOpsOutboxRow(db(), historyId);
     const count = db().prepare(
       'SELECT COUNT(*) AS n FROM notification_history WHERE dedupe_key = ?',
     ).get(settledNotificationDedupeKey(historyId)) as { n: number };
@@ -294,7 +310,7 @@ describe('gitops transition announcements', () => {
       actor: 'system:source-controller',
       at: 4242,
     }), historyId);
-    drainSettledOutboxRow(db(), historyId);
+    drainGitOpsOutboxRow(db(), historyId);
     const note = db().prepare(
       'SELECT message, category FROM notification_history WHERE dedupe_key = ?',
     ).get(settledNotificationDedupeKey(historyId)) as { message: string; category: string };
@@ -309,7 +325,7 @@ describe('gitops transition announcements', () => {
       'UPDATE gitops_settled_outbox SET payload_version = 99, drained_at = NULL WHERE settled_history_id = ?',
     ).run(historyId);
     db().prepare('DELETE FROM notification_history WHERE gitops_operation_id = ?').run('op-outbox-version');
-    drainSettledOutboxRow(db(), historyId);
+    drainGitOpsOutboxRow(db(), historyId);
     expect(decodeSettledAttemptPayload('{"version":99}', 99)).toEqual({
       ok: false,
       limitation: expect.stringContaining('version_unsupported'),
@@ -322,6 +338,279 @@ describe('gitops transition announcements', () => {
       'SELECT drained_at FROM gitops_settled_outbox WHERE settled_history_id = ?',
     ).get(historyId) as { drained_at: number | null };
     expect(undrained.drained_at).toBeNull();
+  });
+
+  /** A live Blueprint application backed by a real Blueprint row. */
+  const seedBlueprintApplication = (name: string): { application: GitOpsApplicationRow; blueprintName: string } => {
+    const blueprint = DatabaseService.getInstance().createBlueprint({
+      name,
+      description: null,
+      compose_content: 'services:\n  app:\n    image: nginx:1.27\n',
+      selector: { type: 'nodes', ids: [] },
+      drift_mode: 'suggest',
+      classification: 'stateless',
+      classification_reasons: [],
+      enabled: true,
+      created_by: 'tester',
+    });
+    const applicationId = `app-${blueprint.id}`;
+    const application = directApplicationFixture(applicationId, `src-${applicationId}`);
+    application.target_mode = 'blueprint';
+    application.lifecycle_key = `blueprint:${blueprint.id}`;
+    application.blueprint_id = blueprint.id;
+    application.stack_name = null;
+    GitOpsStore.getInstance().insertApplication(application);
+    return { application, blueprintName: blueprint.name };
+  };
+
+  it('writes a v2 outbox row for a notifiable lifecycle stage and none for an ordinary one', () => {
+    const pausedId = write('op-event-pause', 'rollout_paused', 'committed', {
+      after: { pauseAt: 4242, pauseReason: 'maintenance window' },
+    });
+    expect(pausedId).not.toBeNull();
+    const paused = db().prepare(
+      'SELECT payload_version, drained_at FROM gitops_settled_outbox WHERE settled_history_id = ?',
+    ).get(pausedId) as { payload_version: number; drained_at: number | null };
+    expect(paused.payload_version).toBe(GITOPS_EVENT_PAYLOAD_VERSION);
+    expect(paused.drained_at).toBeNull();
+
+    const appliedId = write('op-event-applied', 'applied');
+    expect(db().prepare(
+      'SELECT COUNT(*) AS n FROM gitops_settled_outbox WHERE settled_history_id = ?',
+    ).get(appliedId)).toEqual({ n: 0 });
+  });
+
+  it('notifies a Blueprint source acceptance but not a Direct one', () => {
+    // A Direct acceptance is the source controller's automatic bookkeeping,
+    // and the settled attempt already notifies the operator of the change.
+    const directId = write('op-accept-direct', 'source_accepted');
+    expect(db().prepare(
+      'SELECT COUNT(*) AS n FROM gitops_settled_outbox WHERE settled_history_id = ?',
+    ).get(directId)).toEqual({ n: 0 });
+
+    const { application } = seedBlueprintApplication('bp-notify-accept');
+    const historyId = insertHistory(db(), {
+      application,
+      nodeId: null,
+      dedupeTarget: 'app',
+      operationId: `op-accept-bp-${application.id}`,
+      stage: 'source_accepted',
+      outcome: 'committed',
+      trigger: 'manual',
+      actor: 'operator-1',
+      before: {},
+      after: {},
+      at: 4242,
+    });
+    if (!historyId) throw new Error('expected event history insert');
+    const row = db().prepare(
+      'SELECT payload_version FROM gitops_settled_outbox WHERE settled_history_id = ?',
+    ).get(historyId) as { payload_version: number };
+    expect(row.payload_version).toBe(GITOPS_EVENT_PAYLOAD_VERSION);
+  });
+
+  it('drains a lifecycle event once, on the node it names, with its mapped category and level', () => {
+    const historyId = write('op-event-drain', 'rollback_partial_failed', 'failed', {
+      actor: 'operator-2',
+      after: { failureClass: 'partial' },
+      dedupeTarget: 'node:7',
+      nodeId: 7,
+    });
+    if (!historyId) throw new Error('expected event history insert');
+    resetGitOpsPublicationsForTests();
+    repairGitOpsOutbox();
+
+    const meta = GITOPS_NOTIFICATION_META.rollback_partial_failed;
+    const note = db().prepare(
+      'SELECT node_id, category, level, message, actor_username, gitops_operation_id FROM notification_history WHERE dedupe_key = ?',
+    ).get(gitOpsEventNotificationDedupeKey(historyId)) as {
+      node_id: number;
+      category: string;
+      level: string;
+      message: string;
+      actor_username: string;
+      gitops_operation_id: string;
+    };
+    expect(note).toEqual({
+      node_id: 7,
+      category: meta.category,
+      level: meta.level,
+      message: expect.stringContaining('rollback partially failed'),
+      actor_username: 'operator-2',
+      gitops_operation_id: 'op-event-drain',
+    });
+    const drained = db().prepare(
+      'SELECT drained_at FROM gitops_settled_outbox WHERE settled_history_id = ?',
+    ).get(historyId) as { drained_at: number | null };
+    expect(drained.drained_at).not.toBeNull();
+
+    repairGitOpsOutbox();
+    const count = db().prepare(
+      'SELECT COUNT(*) AS n FROM notification_history WHERE dedupe_key = ?',
+    ).get(gitOpsEventNotificationDedupeKey(historyId)) as { n: number };
+    expect(count.n).toBe(1);
+  });
+
+  it('drains a v2 row through the live publisher, not only the startup repair', async () => {
+    listen();
+    const historyId = write('op-event-live', 'rollout_authorized');
+    if (!historyId) throw new Error('expected event history insert');
+    await settle();
+
+    const note = db().prepare(
+      'SELECT category FROM notification_history WHERE dedupe_key = ?',
+    ).get(gitOpsEventNotificationDedupeKey(historyId)) as { category: string } | undefined;
+    expect(note?.category).toBe('gitops_rollout_authorized');
+    const drained = db().prepare(
+      'SELECT drained_at FROM gitops_settled_outbox WHERE settled_history_id = ?',
+    ).get(historyId) as { drained_at: number | null };
+    expect(drained.drained_at).not.toBeNull();
+  });
+
+  it('rolls the v2 outbox row back with its history row and queues one row per replay', async () => {
+    expect(() => db().transaction(() => {
+      write('op-event-rollback', 'rollout_paused', 'committed', { after: { pauseReason: 'x' } });
+      throw new Error('transition rejected');
+    })()).toThrow('transition rejected');
+    await settle();
+    const rolledBack = db().prepare(
+      "SELECT COUNT(*) AS n FROM gitops_settled_outbox WHERE settled_history_id IN (SELECT id FROM gitops_history WHERE operation_id = 'op-event-rollback')",
+    ).get() as { n: number };
+    expect(rolledBack.n).toBe(0);
+
+    const first = write('op-event-replay', 'rollout_paused', 'committed', { after: { pauseReason: 'x' } });
+    expect(first).not.toBeNull();
+    // Same application, operation, stage and dedupe target: no row, no queue.
+    expect(write('op-event-replay', 'rollout_paused', 'committed', { after: { pauseReason: 'x' } })).toBeNull();
+    await settle();
+    const replayRows = db().prepare(
+      "SELECT COUNT(*) AS n FROM gitops_settled_outbox WHERE settled_history_id IN (SELECT id FROM gitops_history WHERE operation_id = 'op-event-replay')",
+    ).get() as { n: number };
+    expect(replayRows.n).toBe(1);
+  });
+
+  it('names the Blueprint when a Git-managed application has no stack name', () => {
+    const { application, blueprintName } = seedBlueprintApplication('bp-notify-label');
+    const historyId = insertHistory(db(), {
+      application,
+      nodeId: null,
+      dedupeTarget: 'app',
+      operationId: `op-bp-label-${application.id}`,
+      stage: 'rollout_paused',
+      outcome: 'committed',
+      trigger: 'manual',
+      actor: 'operator-1',
+      before: {},
+      after: { pauseReason: 'window' },
+      at: 4242,
+    });
+    if (!historyId) throw new Error('expected event history insert');
+    resetGitOpsPublicationsForTests();
+    repairGitOpsOutbox();
+
+    const note = db().prepare(
+      'SELECT message FROM notification_history WHERE dedupe_key = ?',
+    ).get(gitOpsEventNotificationDedupeKey(historyId)) as { message: string };
+    expect(note.message).toContain(`Blueprint "${blueprintName}"`);
+    expect(note.message).not.toContain(application.id);
+  });
+
+  it('echoes a reason the transition recorded', () => {
+    const historyId = write('op-event-pause-reason', 'rollout_paused', 'committed', {
+      after: { pauseAt: 4242, pauseReason: 'maintenance window' },
+    });
+    if (!historyId) throw new Error('expected event history insert');
+    resetGitOpsPublicationsForTests();
+    repairGitOpsOutbox();
+    const note = db().prepare(
+      'SELECT message FROM notification_history WHERE dedupe_key = ?',
+    ).get(gitOpsEventNotificationDedupeKey(historyId)) as { message: string };
+    expect(note.message).toContain('rollout paused');
+    expect(note.message).toContain('maintenance window');
+  });
+
+  it('leaves a v2 payload naming a non-notifiable stage undrained', () => {
+    const historyId = write('op-event-tamper', 'rollout_paused', 'committed', {
+      after: { pauseAt: 4242, pauseReason: 'window' },
+    });
+    if (!historyId) throw new Error('expected event history insert');
+    resetGitOpsPublicationsForTests();
+    // `applied` is a real history stage and not a notifiable one, so the
+    // decoder must refuse it rather than map it to another stage's event.
+    const tampered = {
+      version: 2,
+      historyId,
+      applicationId: 'app-op-event-tamper',
+      operationId: 'op-event-tamper',
+      stage: 'applied',
+      stackName: null,
+      nodeId: 3,
+      actor: null,
+      reason: null,
+      at: 4242,
+    };
+    db().prepare(
+      'UPDATE gitops_settled_outbox SET payload_json = ? WHERE settled_history_id = ?',
+    ).run(JSON.stringify(tampered), historyId);
+    drainGitOpsOutboxRow(db(), historyId);
+    expect(decodeGitOpsEventPayload(JSON.stringify(tampered), 2)).toEqual({
+      ok: false,
+      limitation: 'gitops_event_payload_invalid',
+    });
+    const count = db().prepare(
+      'SELECT COUNT(*) AS n FROM notification_history WHERE gitops_operation_id = ?',
+    ).get('op-event-tamper') as { n: number };
+    expect(count.n).toBe(0);
+    const undrained = db().prepare(
+      'SELECT drained_at FROM gitops_settled_outbox WHERE settled_history_id = ?',
+    ).get(historyId) as { drained_at: number | null };
+    expect(undrained.drained_at).toBeNull();
+  });
+});
+
+describe('GitOps notification mapping', () => {
+  it('maps every notifiable stage to its exact category, level, and phrase', () => {
+    expect(GITOPS_NOTIFICATION_META).toEqual({
+      source_accepted: { category: 'gitops_source_accepted', level: 'info', phrase: 'source accepted' },
+      placement_approved: { category: 'gitops_placement_approved', level: 'info', phrase: 'placement approved' },
+      rollout_authorized: { category: 'gitops_rollout_authorized', level: 'info', phrase: 'rollout authorized' },
+      rollout_paused: { category: 'gitops_rollout_paused', level: 'warning', phrase: 'rollout paused' },
+      rollout_unpaused: { category: 'gitops_rollout_resumed', level: 'info', phrase: 'rollout resumed' },
+      rollout_generation_superseded: { category: 'gitops_rollout_superseded', level: 'warning', phrase: 'rollout superseded' },
+      rollback_in_progress: { category: 'gitops_rollback_started', level: 'warning', phrase: 'rollback started' },
+      rollback_completed: { category: 'gitops_rollback_completed', level: 'info', phrase: 'rollback completed' },
+      rollback_partial_failed: { category: 'gitops_rollback_partial_failed', level: 'error', phrase: 'rollback partially failed' },
+      blueprint_state_review: { category: 'gitops_stateful_confirmation', level: 'warning', phrase: 'stateful deploy awaiting confirmation' },
+    });
+  });
+
+  it('fails the v2 decoder closed on an unsupported version, bad JSON, or a missing field', () => {
+    expect(decodeGitOpsEventPayload('{"version":3}', 3)).toEqual({
+      ok: false,
+      limitation: expect.stringContaining('version_unsupported'),
+    });
+    expect(decodeGitOpsEventPayload('not json', 2)).toEqual({
+      ok: false,
+      limitation: 'gitops_event_payload_unparseable',
+    });
+    expect(decodeGitOpsEventPayload(JSON.stringify({
+      version: 2,
+      applicationId: 'a',
+      operationId: 'o',
+      stage: 'rollout_paused',
+      stackName: null,
+      nodeId: null,
+      actor: null,
+      reason: null,
+      at: 1,
+    }), 2)).toEqual({ ok: false, limitation: 'gitops_event_payload_invalid' });
+  });
+
+  it('reads the pause reason a transition recorded, and ignores an empty one', () => {
+    expect(gitOpsPauseReason({})).toBeNull();
+    expect(gitOpsPauseReason({ pauseReason: 'window' })).toBe('window');
+    expect(gitOpsPauseReason({ pauseReason: '' })).toBeNull();
+    expect(gitOpsPauseReason({ pauseReason: 7 })).toBeNull();
   });
 });
 
@@ -355,5 +644,13 @@ describe('GitOpsMetricsService', () => {
     first[0].count = 99;
 
     expect(metrics.snapshot()).toEqual([{ stage: 'applied', outcome: 'committed', count: 1 }]);
+  });
+
+  it('keeps the snapshot keys to the bounded stage, outcome, and count', () => {
+    const metrics = GitOpsMetricsService.getInstance();
+    metrics.record('rollout_paused', 'committed');
+
+    const [entry] = metrics.snapshot();
+    expect(Object.keys(entry).sort()).toEqual(['count', 'outcome', 'stage']);
   });
 });

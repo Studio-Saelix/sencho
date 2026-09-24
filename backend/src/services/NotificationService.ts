@@ -62,6 +62,21 @@ export type NotificationCategory =
     | 'git_apply_failed'
     | 'git_apply_rolled_back'
     | 'git_create'
+    // GitOps decomposed authority and rollout lifecycle decisions. History-only
+    // (bell and Activity timeline), mapped from committed transitions in
+    // `services/gitops/notifications.ts`. Each names one decision so an
+    // operator can tell acceptance from approval from authorization, and a
+    // pause from a rollback.
+    | 'gitops_source_accepted'
+    | 'gitops_placement_approved'
+    | 'gitops_rollout_authorized'
+    | 'gitops_rollout_paused'
+    | 'gitops_rollout_resumed'
+    | 'gitops_rollout_superseded'
+    | 'gitops_rollback_started'
+    | 'gitops_rollback_completed'
+    | 'gitops_rollback_partial_failed'
+    | 'gitops_stateful_confirmation'
     | 'node_update_available'
     | 'dev_build_update_available'
     | 'system';
@@ -83,6 +98,10 @@ export const ALL_SUPPRESSIBLE_CATEGORIES: readonly NotificationCategory[] = [
     'network_auto_created', 'rollback_generation_released',
     'git_pull_ready', 'git_plan_blocked', 'git_pull_failed',
     'git_apply', 'git_apply_failed', 'git_apply_rolled_back', 'git_create',
+    'gitops_source_accepted', 'gitops_placement_approved', 'gitops_rollout_authorized',
+    'gitops_rollout_paused', 'gitops_rollout_resumed', 'gitops_rollout_superseded',
+    'gitops_rollback_started', 'gitops_rollback_completed', 'gitops_rollback_partial_failed',
+    'gitops_stateful_confirmation',
 ];
 
 /** Webhook timeout: 10 seconds per external dispatch call. */
