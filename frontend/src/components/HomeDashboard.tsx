@@ -59,7 +59,7 @@ export default function HomeDashboard({ notifications, unreportedNodeIds, naviga
   // deployer, Recent alerts takes the full width.
   const showFleetHeartbeat = nodes.some(n => n.type === 'remote') && can('node:read');
 
-  const recentAlerts = (className?: string) => (
+  const recentAlerts = (className?: string, reserveHeight = false) => (
     <RecentAlerts
       notifications={notifications}
       nodes={nodes}
@@ -67,6 +67,7 @@ export default function HomeDashboard({ notifications, unreportedNodeIds, naviga
       unreportedNodeIds={unreportedNodeIds}
       navigation={navigation.alerts}
       className={className}
+      reserveHeight={reserveHeight}
     />
   );
 
@@ -110,7 +111,7 @@ export default function HomeDashboard({ notifications, unreportedNodeIds, naviga
           cards stack in the same order at their natural heights. */}
       {showFleetHeartbeat ? (
         <div className="grid grid-cols-1 gap-4 xl:grid-cols-5">
-          {recentAlerts('xl:col-span-3')}
+          {recentAlerts('xl:col-span-3', true)}
           <div className="xl:relative xl:col-span-2">
             <FleetHeartbeat onOpenNode={navigation.toFleetNode} className="xl:absolute xl:inset-0" />
           </div>

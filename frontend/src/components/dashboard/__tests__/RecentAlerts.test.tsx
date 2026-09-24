@@ -42,6 +42,7 @@ function renderAlerts(props: {
   activeNodeId?: number | null;
   unreportedNodeIds?: ReadonlySet<number>;
   navigation?: AlertNavigation;
+  reserveHeight?: boolean;
 }) {
   const nodes = props.nodes ?? SINGLE;
   const navigation = props.navigation ?? makeNavigation(nodes);
@@ -52,6 +53,7 @@ function renderAlerts(props: {
       activeNodeId={props.activeNodeId === undefined ? 1 : props.activeNodeId}
       unreportedNodeIds={props.unreportedNodeIds ?? new Set()}
       navigation={navigation}
+      reserveHeight={props.reserveHeight}
     />,
   );
   return { ...view, navigation };
@@ -280,19 +282,28 @@ describe('RecentAlerts row identity', () => {
 describe('RecentAlerts fixed height', () => {
   const body = () => screen.getByText('Recent alerts').closest('section')!.querySelector('div.overflow-hidden')!;
 
-  it('keeps the full-preview body height whether it holds eight rows, one row, or none', () => {
+  it('keeps the full-preview body height whether it holds eight rows, one row, or none when reserving height', () => {
     const full = Array.from({ length: RECENT_ALERTS_PREVIEW_SIZE }, (_, i) => notif({ id: i + 1, timestamp: i }));
-    const { unmount } = renderAlerts({ notifications: full });
+    const { unmount } = renderAlerts({ notifications: full, reserveHeight: true });
     const fullClass = body().className;
     unmount();
 
-    const one = renderAlerts({ notifications: [notif()] });
+    const one = renderAlerts({ notifications: [notif()], reserveHeight: true });
     expect(body().className).toBe(fullClass);
     one.unmount();
 
-    renderAlerts({ notifications: [] });
+    renderAlerts({ notifications: [], reserveHeight: true });
     expect(screen.getByText('No recent alerts.')).toBeInTheDocument();
     expect(body().className).toBe(fullClass);
+  });
+
+  it('collapses the empty state to its natural height when not reserving height', () => {
+    const one = renderAlerts({ notifications: [notif()] });
+    const rowsClass = body().className;
+    one.unmount();
+
+    renderAlerts({ notifications: [] });
+    expect(body().className).not.toBe(rowsClass);
   });
 
   it('puts the silent-node notice in the footer so it never changes the card height', () => {
