@@ -256,7 +256,7 @@ Sencho tries `/bin/bash` first and transparently falls back to `/bin/sh` if bash
     The PUT to write the compose file failed (most often a permission or disk-space issue on the node). Save & Deploy stops at the save step in this case, so no deploy is attempted and your editor still holds the unsaved version. Resolve the underlying error on the node, then retry.
   </Accordion>
   <Accordion title='"Image pull failed" toast appears when I click Save & Pull Images'>
-    Both halves are reported separately, so this toast means the file **was** written and your edits are safe on disk; the download of its registry images is what failed, usually because a registry is unreachable or a credential was rejected. No running container was touched. The progress panel streams the output image by image, so you can see which ones did arrive; fix the registry problem and run **Save & Pull Images** again.
+    Both halves are reported separately, so this toast means the file **was** written and your edits are safe on disk; the download of its registry images is what failed, usually because a registry is unreachable or a credential was rejected. No running container was touched. The toast quotes the error lines Compose reported, which usually name the service whose image failed, and the progress panel streams the full output image by image, so you can see which ones did arrive; fix the registry problem and run **Save & Pull Images** again.
   </Accordion>
   <Accordion title="Switching nodes prompts me to discard unsaved changes">
     The editor blocks a silent loss of in-progress edits. Click **Cancel** to return to the original node with your edits intact; click **Discard** to abandon them and proceed to the other node.

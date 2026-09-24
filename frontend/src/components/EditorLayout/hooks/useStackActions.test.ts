@@ -307,6 +307,9 @@ describe('useStackActions.handleSaveAndPullImages', () => {
     return (call![1] ?? {}) as RequestInit & { nodeId?: number | null };
   }
 
+  const pullFailure = (error: string) =>
+    new Response(JSON.stringify({ error }), { status: 500, headers: { 'Content-Type': 'application/json' } });
+
   const successTexts = () => vi.mocked(toast.success).mock.calls.map(c => String(c[0]));
   const errorTexts = () => vi.mocked(toast.error).mock.calls.map(c => String(c[0]));
 
@@ -384,6 +387,57 @@ describe('useStackActions.handleSaveAndPullImages', () => {
     expect(successTexts()).toEqual(['File saved successfully!']);
     expect(errorTexts()).toHaveLength(1);
     expect(errorTexts()[0]).toContain('Image pull failed');
+  });
+
+  it('condenses a multi-line compose failure to its error lines in the toast', async () => {
+    const output = [
+      ' db Pulling',
+      ' web Pulling',
+      ' 4f4fb700ef54 Pulling fs layer',
+      ' 4f4fb700ef54 Download complete',
+      ' db Pulled',
+      ' web Error manifest for nginx:nope not found: manifest unknown',
+      'Error response from daemon: manifest for nginx:nope not found: manifest unknown',
+    ].join('\n');
+    mockPullChain({
+      pull: pullFailure(output),
+    });
+    const { result } = setup();
+    await result.current.handleSaveAndPullImages(pullEvent());
+    expect(errorTexts()).toEqual([
+      'Image pull failed: web Error manifest for nginx:nope not found: manifest unknown; ' +
+        'Error response from daemon: manifest for nginx:nope not found: manifest unknown',
+    ]);
+  });
+
+  it('keeps the last three distinct error lines and counts the rest', async () => {
+    const output = ['a Error x', 'a Error x', 'b Error y', 'c Error z', 'd Error w', 'd Error w'].join('\n');
+    mockPullChain({
+      pull: pullFailure(output),
+    });
+    const { result } = setup();
+    await result.current.handleSaveAndPullImages(pullEvent());
+    expect(errorTexts()).toEqual([
+      'Image pull failed: b Error y; c Error z; d Error w (+1 more in the progress output)',
+    ]);
+  });
+
+  it('ignores progress lines that merely contain the word error', async () => {
+    mockPullChain({
+      pull: pullFailure(' error-reporter Pulling\n error-reporter Pulled\n pull access denied for private/app'),
+    });
+    const { result } = setup();
+    await result.current.handleSaveAndPullImages(pullEvent());
+    expect(errorTexts()).toEqual(['Image pull failed: pull access denied for private/app']);
+  });
+
+  it('falls back to the last output line when no line names an error', async () => {
+    mockPullChain({
+      pull: pullFailure(' web Pulling\n\n denied: access forbidden\n'),
+    });
+    const { result } = setup();
+    await result.current.handleSaveAndPullImages(pullEvent());
+    expect(errorTexts()).toEqual(['Image pull failed: denied: access forbidden']);
   });
 
   it('names the build-backed services the pull skipped', async () => {

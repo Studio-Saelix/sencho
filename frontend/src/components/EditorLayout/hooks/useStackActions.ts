@@ -422,6 +422,23 @@ const pullSuccessMessage = (body: unknown): string => {
   return `${message || 'Pulled registry images'}. Skipped ${skipped.length} build-backed ${noun}: ${skipped.join(', ')}.`;
 };
 
+/**
+ * A failed pull reports the whole compose output, layer progress included, which
+ * floods a toast. Keep the last few failure lines, which compose writes as
+ * `<service> Error ...` or `Error ...`, and count the rest; with none, keep the
+ * last line. The progress panel, when on, still streams the full output.
+ */
+const PULL_FAILURE_LINE = /^(\S+\s+)?error[\s:]/i;
+const MAX_PULL_FAILURE_LINES = 3;
+const summarizePullFailure = (detail: string): string => {
+  const lines = detail.split(/\r?\n/).map(line => line.trim()).filter(Boolean);
+  const failures = [...new Set(lines.filter(line => PULL_FAILURE_LINE.test(line)))];
+  if (failures.length === 0) return lines.at(-1) ?? detail;
+  const shown = failures.slice(-MAX_PULL_FAILURE_LINES).join('; ');
+  const hidden = failures.length - MAX_PULL_FAILURE_LINES;
+  return hidden > 0 ? `${shown} (+${hidden} more in the progress output)` : shown;
+};
+
 const parseStackActionError = (rawBody: string, fallback: string, status?: number): StackActionError => {
   let message = rawBody || fallback;
   let rolledBack = false;
@@ -1604,7 +1621,7 @@ export function useStackActions(options: UseStackActionsOptions) {
       return { ok: true };
     } catch (error) {
       console.error('Failed to pull images:', error);
-      const detail = (error as Error).message || 'no detail was returned';
+      const detail = summarizePullFailure((error as Error).message || 'no detail was returned');
       // The save half already confirmed itself with its own toast, so this one
       // reports only the half that failed and never re-states the save.
       toast.error(`Image pull failed: ${detail}`);
