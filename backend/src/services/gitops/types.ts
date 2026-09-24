@@ -1,4 +1,4 @@
-import type { ArtifactEvidenceJson, ObservedArtifactIdentity } from './json';
+import type { ArtifactEvidenceJson, ObservedArtifactIdentity, ServiceArtifactEvidence } from './json';
 import type { RepoIdentity } from './repoIdentity';
 import type { RefKind } from '../git/types';
 
@@ -511,6 +511,13 @@ export type ArtifactExpectedIdentity = {
   evidenceVersion: number;
   qualification: ArtifactQualification;
   identity: string | null;
+  /**
+   * Per-service evidence, when the frozen set recorded any. This is what makes
+   * a per-service digest comparison possible for a reader: the aggregate
+   * identity says the sets differ, the per-service list says which service and
+   * which digest. Omitted when the set recorded no per-service evidence.
+   */
+  services?: ServiceArtifactEvidence[];
 };
 
 export type ArtifactLatestEvidence = {

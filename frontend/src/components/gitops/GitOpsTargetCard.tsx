@@ -1,4 +1,5 @@
 import GitOpsStateCard from '@/components/gitops/GitOpsStateCard';
+import { GitOpsDigestDetail } from '@/components/gitops/GitOpsDigestDetail';
 import { ShortId } from '@/components/gitops/GitOpsShortId';
 import { RUNTIME_STATE_LOOKUP, stateOrUnrecognized } from '@/lib/gitopsState';
 import type { GitOpsTargetProjection, ObservedArtifactIdentity } from '@/types/gitops';
@@ -49,6 +50,7 @@ export function GitOpsTargetCard({ target, nodeName }: { target: GitOpsTargetPro
           deployed <ShortId value={target.deployedGenerationId} /> · {observedArtifactLine(target.observedArtifactIdentity)}
         </div>
       </div>
+      <GitOpsDigestDetail target={target} />
     </GitOpsStateCard>
   );
 }
