@@ -259,6 +259,40 @@ describe('service_update_recovery accessors', () => {
       expect(rows.map(r => r.id)).toEqual(['rec-new', 'rec-old']);
     });
 
+    it('returns only the newest active row per service', () => {
+      const now = Date.now();
+      // Same service updated twice: the older failed row must not surface
+      // alongside the newer one, or a Restore offer could target a stale snapshot.
+      db().insertServiceUpdateRecovery(makeRow({ id: 'rec-older', created_at: now - 10_000, expires_at: now + 60_000, service_name: 'api' }));
+      db().insertServiceUpdateRecovery(makeRow({ id: 'rec-newer', created_at: now - 1_000, expires_at: now + 60_000, service_name: 'api' }));
+      db().insertServiceUpdateRecovery(makeRow({ id: 'rec-db', created_at: now - 5_000, expires_at: now + 60_000, service_name: 'db' }));
+
+      const rows = db().listActiveServiceUpdateRecoveriesForStack(NODE, 'web', now);
+      expect(rows.map(r => r.id)).toEqual(['rec-newer', 'rec-db']);
+    });
+
+    it('breaks a created_at tie by insertion order, keeping only the later row', () => {
+      const now = Date.now();
+      db().insertServiceUpdateRecovery(makeRow({ id: 'rec-first', created_at: now, expires_at: now + 60_000, service_name: 'api' }));
+      db().insertServiceUpdateRecovery(makeRow({ id: 'rec-second', created_at: now, expires_at: now + 60_000, service_name: 'api' }));
+
+      const rows = db().listActiveServiceUpdateRecoveriesForStack(NODE, 'web', now);
+      expect(rows.map(r => r.id)).toEqual(['rec-second']);
+    });
+
+    it('still returns an older active row when the only newer row is terminal or expired', () => {
+      const now = Date.now();
+      // A newer consumed row must not suppress the older still-active row, or a
+      // valid Restore offer would silently disappear.
+      db().insertServiceUpdateRecovery(makeRow({ id: 'rec-old-active', created_at: now - 10_000, expires_at: now + 60_000, service_name: 'api' }));
+      db().insertServiceUpdateRecovery(makeRow({ id: 'rec-new-consumed', created_at: now - 1_000, expires_at: now + 60_000, service_name: 'api', status: 'consumed' }));
+      db().insertServiceUpdateRecovery(makeRow({ id: 'rec-db-old', created_at: now - 10_000, expires_at: now + 60_000, service_name: 'db' }));
+      db().insertServiceUpdateRecovery(makeRow({ id: 'rec-db-new-expired', created_at: now - 1_000, expires_at: now - 500, service_name: 'db' }));
+
+      const rows = db().listActiveServiceUpdateRecoveriesForStack(NODE, 'web', now);
+      expect(rows.map(r => r.id).sort()).toEqual(['rec-db-old', 'rec-old-active']);
+    });
+
     it('excludes expired, terminal, and other-node rows', () => {
       const now = Date.now();
       db().insertServiceUpdateRecovery(makeRow({ id: 'rec-active', node_id: NODE, stack_name: 'web', status: 'active', expires_at: now + 60_000, service_name: 'api' }));
