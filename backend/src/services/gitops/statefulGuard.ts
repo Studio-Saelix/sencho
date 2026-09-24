@@ -51,12 +51,21 @@ export function readStagedGeneration(
     generation: GitOpsGenerationRow,
 ): { contents: string[]; mergedEnv: Record<string, string> } | null {
     try {
-        const candidateDir = path.join(stackManagedRoot(stackName), generation.candidate_dir);
+        // The directory name arrives from a generation row, so it is contained
+        // under the managed root before any file inside is read.
+        const managedRoot = path.resolve(stackManagedRoot(stackName));
+        const candidateDir = path.resolve(managedRoot, generation.candidate_dir);
+        if (!candidateDir.startsWith(managedRoot + path.sep)) return null;
         const composePaths = parseComposePaths(app);
         if (composePaths === null || composePaths.length === 0) return null;
         const contents: string[] = [];
         for (const local of gitSourceLocalComposeFiles(composePaths)) {
-            contents.push(fs.readFileSync(path.join(candidateDir, local), 'utf8'));
+            // Inline containment at the read sink: the analyzer credits the
+            // guard only where it can see it at the call, so each read is
+            // resolved and checked right here rather than through a helper.
+            const abs = path.resolve(candidateDir, local.replace(/\\/g, '/'));
+            if (!abs.startsWith(candidateDir + path.sep)) return null;
+            contents.push(fs.readFileSync(abs, 'utf8'));
         }
         const envVars = readStagedEnv(candidateDir, stackName, generation.id);
         if (envVars === null) return null;
@@ -86,7 +95,11 @@ function readStagedEnv(
     generationId: string,
 ): Record<string, string> | null {
     try {
-        return loadDotEnv(fs.readFileSync(path.join(candidateDir, '.env'), 'utf8'));
+        // Same inline containment the compose reads carry, so the analyzer
+        // sees the sink guarded in this function too.
+        const envPath = path.resolve(candidateDir, '.env');
+        if (!envPath.startsWith(path.resolve(candidateDir) + path.sep)) return null;
+        return loadDotEnv(fs.readFileSync(envPath, 'utf8'));
     } catch (e) {
         const missing = (e as NodeJS.ErrnoException).code === 'ENOENT';
         if (missing) return {};
@@ -174,10 +187,18 @@ function readAppliedGenerationContents(
     app: GitOpsApplicationRow,
     generation: GitOpsGenerationRow,
 ): { contents: string[] } | null {
+    const managedRoot = path.resolve(stackManagedRoot(stackName));
     const dirs = [generation.applied_dir, generation.candidate_dir].filter((dir) => dir.trim() !== '');
     const failures: string[] = [];
     for (const dir of dirs) {
-        const read = readComposeContents(path.join(stackManagedRoot(stackName), dir), app);
+        // The directory names arrive from generation rows, so they are
+        // contained under the managed root before anything inside is read.
+        const resolvedDir = path.resolve(managedRoot, dir);
+        if (!resolvedDir.startsWith(managedRoot + path.sep)) {
+            failures.push(`${dir}: the generation directory escapes the managed root`);
+            continue;
+        }
+        const read = readComposeContents(resolvedDir, app);
         if (read.ok) return { contents: read.contents };
         failures.push(`${dir}: ${read.error}`);
     }
@@ -193,12 +214,16 @@ type ComposeContentsRead =
 
 function readComposeContents(dir: string, app: GitOpsApplicationRow): ComposeContentsRead {
     try {
+        const base = path.resolve(dir);
         const composePaths = parseComposePaths(app);
         if (composePaths === null) return { ok: false, error: 'the compose path list is not valid json' };
         if (composePaths.length === 0) return { ok: false, error: 'the application has no compose paths' };
         const contents: string[] = [];
         for (const local of gitSourceLocalComposeFiles(composePaths)) {
-            contents.push(fs.readFileSync(path.join(dir, local), 'utf8'));
+            // Inline containment at the read sink, as in readStagedGeneration.
+            const abs = path.resolve(base, local.replace(/\\/g, '/'));
+            if (!abs.startsWith(base + path.sep)) return { ok: false, error: 'a compose path escapes the generation directory' };
+            contents.push(fs.readFileSync(abs, 'utf8'));
         }
         return { ok: true, contents };
     } catch (e) {
