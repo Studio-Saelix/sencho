@@ -63,10 +63,12 @@ export function GitOpsWorkplaceView() {
               nodes={data.coverage.map(entry => ({ id: entry.nodeId, name: entry.nodeName ?? `node ${entry.nodeId}` }))}
               onChange={portfolio.setFilters}
               onQueryChange={portfolio.setQuery}
+              onClear={portfolio.clearFilters}
             />
 
             <ApplicationsTable
               rows={data.applications}
+              portfolioEmpty={data.summary.applications === 0}
               nextCursor={data.nextCursor}
               pageLoaded={portfolio.pageLoaded}
               onPrevPage={portfolio.prevPage}
@@ -118,7 +120,7 @@ function CoverageNotices({ data }: { data: NonNullable<ReturnType<typeof useGitO
         {degraded.length === 1 ? 'One node' : `${degraded.length} nodes`} could not contribute:
         {' '}
         {degraded.map(entry => entry.nodeName ?? `node ${entry.nodeId}`).join(', ')}.
-        {' '}Its applications are absent below rather than reported with evidence this instance does not have.
+        {' '}{degraded.length === 1 ? 'Its' : 'Their'} applications are absent below rather than reported with evidence this instance does not have.
       </p>
     </div>
   );

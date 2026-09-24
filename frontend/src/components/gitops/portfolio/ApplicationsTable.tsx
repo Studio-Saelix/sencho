@@ -9,7 +9,7 @@ import {
   type GitOpsStateMeta,
   type GitOpsTone,
 } from '@/lib/gitopsState';
-import { attentionLabel, POSTURE_TONE_CLASS } from '@/lib/gitopsPortfolio';
+import { attentionLabel, PORTFOLIO_EMPTY_COPY, POSTURE_TONE_CLASS } from '@/lib/gitopsPortfolio';
 import { cn, formatRelativeTime } from '@/lib/utils';
 import type { GitOpsPortfolioRow } from '@/types/gitopsPortfolio';
 import { openPortfolioApplication } from './portfolioNavigation';
@@ -69,9 +69,12 @@ export function ApplicationsTable({
   onPrevPage,
   onNextPage,
   pageLoaded,
+  portfolioEmpty,
   onDrillDown,
 }: {
   rows: GitOpsPortfolioRow[];
+  /** No application exists at all, as opposed to none matching the filters. */
+  portfolioEmpty: boolean;
   nextCursor: string | null;
   onPrevPage: () => void;
   onNextPage: () => void;
@@ -108,7 +111,7 @@ export function ApplicationsTable({
           </Table>
           {rows.length === 0 && (
             <div className="py-12 text-center text-sm text-muted-foreground">
-              No GitOps application matches the current filters.
+              {portfolioEmpty ? PORTFOLIO_EMPTY_COPY : 'No GitOps application matches the current filters.'}
             </div>
           )}
         </ScrollArea>

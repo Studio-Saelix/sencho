@@ -164,6 +164,20 @@ describe('GET /api/gitops/applications', () => {
     expect((res.body as GitOpsPortfolioResponse).applications.map(row => row.name)).toEqual(['route-local-web']);
   });
 
+  it('matches the stack filter exactly, not as a substring', async () => {
+    const exact = await request(app)
+      .get('/api/gitops/applications?stack=route-local-web')
+      .set('Cookie', adminCookie);
+    expect(exact.status).toBe(200);
+    expect((exact.body as GitOpsPortfolioResponse).applications.map(row => row.name)).toEqual(['route-local-web']);
+
+    const partial = await request(app)
+      .get('/api/gitops/applications?stack=route-local')
+      .set('Cookie', adminCookie);
+    expect(partial.status).toBe(200);
+    expect((partial.body as GitOpsPortfolioResponse).applications).toEqual([]);
+  });
+
   it('rejects unknown filter values instead of answering with a superset', async () => {
     const res = await request(app)
       .get('/api/gitops/applications?mode=cryptic')
@@ -232,5 +246,75 @@ describe('GET /api/gitops/applications/:id', () => {
     expect(res.status).toBe(200);
     expect(res.body.application.id).toBe(blueprintRow.id);
     expect(res.body.projection.targetMode).toBe('blueprint');
+  });
+});
+
+describe('hub-local Git sources without an application', () => {
+  function seedGitSource(stackName: string): void {
+    DatabaseService.getInstance().upsertGitSource({
+      stack_name: stackName,
+      repo_url: 'https://github.com/example/repo.git',
+      branch: 'main',
+      compose_path: 'compose.yaml',
+      compose_paths: ['compose.yaml'],
+      context_dir: null,
+      sync_env: false,
+      env_path: null,
+      auth_type: 'none',
+      encrypted_token: null, encrypted_deploy_key: null, ssh_known_hosts_entry: null, ssh_host_key_fingerprint: null,
+      encrypted_ca_bundle: null,
+      auto_apply_on_webhook: false,
+      auto_deploy_on_apply: false,
+      last_applied_commit_sha: null,
+      last_applied_content_hash: null,
+      pending_commit_sha: null,
+      pending_compose_content: null,
+      pending_env_content: null,
+      pending_fetched_at: null,
+      last_debounce_at: null,
+    });
+  }
+
+  beforeAll(() => {
+    seedGitSource('route-legacy-web');
+    // A source whose stack has a live application must not also list as legacy.
+    seedGitSource('route-local-web');
+    makeStackDir('route-legacy-web');
+  });
+
+  it('lists the legacy source as an unknown, partial-evidence row', async () => {
+    const res = await request(app)
+      .get('/api/gitops/applications?stack=route-legacy-web')
+      .set('Cookie', adminCookie);
+    expect(res.status).toBe(200);
+    const [row] = (res.body as GitOpsPortfolioResponse).applications;
+    expect(row?.id).toBe(`${localNodeId}:legacy:route-legacy-web`);
+    expect(row?.posture).toBe('unknown');
+    expect(row?.evidence.partial).toBe(true);
+  });
+
+  it('never lists a stack with a live application as legacy too', async () => {
+    const res = await request(app)
+      .get('/api/gitops/applications?stack=route-local-web')
+      .set('Cookie', adminCookie);
+    const ids = (res.body as GitOpsPortfolioResponse).applications.map(row => row.id);
+    expect(ids).toHaveLength(1);
+    expect(ids[0]).not.toContain('legacy:');
+  });
+
+  it('resolves the legacy id to its detail', async () => {
+    const res = await request(app)
+      .get(`/api/gitops/applications/${encodeURIComponent(`${localNodeId}:legacy:route-legacy-web`)}`)
+      .set('Cookie', adminCookie);
+    expect(res.status).toBe(200);
+    expect(res.body.application.stackName).toBe('route-legacy-web');
+    expect(res.body.projection.targetMode).toBe('not_applicable');
+  });
+
+  it('answers 404 for a legacy id with no Git source', async () => {
+    const res = await request(app)
+      .get(`/api/gitops/applications/${encodeURIComponent(`${localNodeId}:legacy:no-such-stack`)}`)
+      .set('Cookie', adminCookie);
+    expect(res.status).toBe(404);
   });
 });

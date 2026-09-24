@@ -20,7 +20,7 @@ import { DatabaseService } from '../DatabaseService';
 import { NodeRegistry } from '../NodeRegistry';
 import { checkPermission } from '../../middleware/permissions';
 import { safeRemoteFetch } from '../../utils/outboundTarget';
-import { stackResourceSet, healthGateDisabled } from '../../helpers/gitopsResponse';
+import { NOT_APPLICABLE_REVISION, projectStackRevision, stackResourceSet, healthGateDisabled } from '../../helpers/gitopsResponse';
 import { filterRemoteIdentityPayload, rewriteIdentityPayload } from '../../proxy/gitopsIdentityProxy';
 import { projectApplication } from './derive';
 import { latestTransitionByApplication } from './history';
@@ -43,6 +43,16 @@ const REMOTE_PROBE_TIMEOUT_MS = 3000;
 
 /** Merge bound across all contributors. Beyond this the response reports `truncated`. */
 export const PORTFOLIO_MERGE_CAP = 1000;
+
+/** Triage order of postures, most urgent first. Shared by the merge cap and the attention sort. */
+export const POSTURE_RANK: Readonly<Record<GitOpsPortfolioPosture, number>> = {
+  failed: 0,
+  attention: 1,
+  in_progress: 2,
+  unknown: 3,
+  converged_qualified: 4,
+  converged: 5,
+};
 
 /** Runtime facet statuses grouped from worst to best, for the row's worst-target summary. */
 const RUNTIME_SEVERITY: readonly string[] = [
@@ -431,6 +441,22 @@ export async function aggregateGitOpsPortfolio(req: Request, options: AggregateO
     }));
   }
 
+  // Hub-local Git sources with no application behind them (they predate the
+  // revision model, or their application write failed). Remote nodes report
+  // these through their `/git-sources` rows; the hub reports its own the same
+  // way, so a stack's Git indicator never leads to a portfolio without it.
+  for (const source of db.getGitSources()) {
+    const projection = projectStackRevision(source.stack_name);
+    if (projection !== NOT_APPLICABLE_REVISION) continue;
+    const requirement = classifySourceRow({
+      stackName: source.stack_name,
+      gitopsRevision: projection,
+      stackResourcePresent: stackPresent.has(source.stack_name),
+    });
+    if (!satisfiesGitOpsRead(req, requirement)) continue;
+    rows.push(legacyPortfolioRow(localNodeId, nodeNames.get(localNodeId) ?? null, source.stack_name, source.updated_at));
+  }
+
   // Hub-local Blueprint applications are read like the Blueprint catalog: the
   // fleet-wide read grant (`node:read`) is what that surface uses, so the
   // portfolio shows the same subset the catalog would.
@@ -504,7 +530,10 @@ export async function aggregateGitOpsPortfolio(req: Request, options: AggregateO
     }
   }));
 
-  rows.sort((a, b) => a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
+  // Most urgent first, then id for a stable order, so the merge cap drops
+  // settled rows before it drops a failure the operator must see.
+  rows.sort((a, b) => POSTURE_RANK[a.posture] - POSTURE_RANK[b.posture]
+    || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
   coverage.sort((a, b) => a.nodeId - b.nodeId);
   if (rows.length > PORTFOLIO_MERGE_CAP) {
     return { rows: rows.slice(0, PORTFOLIO_MERGE_CAP), coverage, truncated: true };
@@ -559,6 +588,50 @@ export function isUsableRevision(value: unknown): value is Extract<GitOpsRevisio
 }
 
 /**
+ * The row for a Git source with no live application behind it, on any node.
+ *
+ * Every facet reads `unknown` and the evidence is partial: nobody derived a
+ * state for it, so it must not read as converged. The `legacy:` id segment is
+ * resolved by the detail route by stack name, so the id is routable.
+ */
+export function legacyPortfolioRow(
+  nodeId: number,
+  nodeName: string | null,
+  stackName: string,
+  updatedAt: number | null,
+): GitOpsPortfolioRow {
+  return {
+    id: `${nodeId}:legacy:${stackName}`,
+    targetMode: 'direct',
+    name: stackName,
+    stackName,
+    blueprintId: null,
+    nodeId,
+    nodeName,
+    repository: null,
+    desiredCommitSha: null,
+    fetchedCommitSha: null,
+    candidateGenerationId: null,
+    acceptedGenerationId: null,
+    sourceStatus: 'unknown',
+    artifactStatus: 'unknown',
+    artifactQualification: null,
+    placementStatus: 'unknown',
+    rolloutStatus: 'unknown',
+    runtimeStatus: 'unknown',
+    healthStatus: 'unknown',
+    targets: [],
+    drift: { count: 0, classes: [] },
+    attention: [],
+    posture: 'unknown',
+    availableActions: [],
+    limitations: [],
+    lastActivityAt: finiteTimestamp(updatedAt),
+    evidence: { partial: true, unreachableNodes: [], unknown: true },
+  };
+}
+
+/**
  * One portfolio row from a remote, already rewritten + re-authorized row.
  *
  * The row's `gitopsRevision` is the owning instance's projection; statuses this
@@ -580,38 +653,7 @@ function remotePortfolioRow(
   const stackName = typeof row.stack_name === 'string' ? row.stack_name : null;
   if (revision === null) {
     if (stackName === null) return null;
-    return {
-      // The `legacy:` segment is resolved by the detail route against the
-      // remote's source rows by stack name, so the id a list hands out is
-      // routable rather than a dead end.
-      id: `${nodeId}:legacy:${stackName}`,
-      targetMode: 'direct',
-      name: stackName,
-      stackName,
-      blueprintId: null,
-      nodeId,
-      nodeName,
-      repository: null,
-      desiredCommitSha: null,
-      fetchedCommitSha: null,
-      candidateGenerationId: null,
-      acceptedGenerationId: null,
-      sourceStatus: 'unknown',
-      artifactStatus: 'unknown',
-      artifactQualification: null,
-      placementStatus: 'unknown',
-      rolloutStatus: 'unknown',
-      runtimeStatus: 'unknown',
-      healthStatus: 'unknown',
-      targets: [],
-      drift: { count: 0, classes: [] },
-      attention: [],
-      posture: 'unknown',
-      availableActions: [],
-      limitations: [],
-      lastActivityAt: finiteTimestamp(typeof row.updated_at === 'number' ? row.updated_at : null),
-      evidence: { partial: true, unreachableNodes: [], unknown: true },
-    };
+    return legacyPortfolioRow(nodeId, nodeName, stackName, typeof row.updated_at === 'number' ? row.updated_at : null);
   }
   const displayName = revision.stackName ?? stackName ?? `application ${revision.applicationId}`;
   return rowFromProjection({
