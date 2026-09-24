@@ -1500,6 +1500,33 @@ describe('gitops derivation', () => {
     });
   });
 
+  it('does not call a settings-only change source drift, and asks for a reconcile instead', () => {
+    const store = GitOpsStore.getInstance();
+    seedGitSource('src-drift-fp', { autoApplyOnWebhook: true });
+    // The accepted commit is still the commit the ref names, and only the
+    // materialization settings moved on. Source drift compares commits, so there
+    // is no expected-versus-observed pair of commits to report, and the shape is
+    // an attention item instead. This is the decided behavior, pinned here so it
+    // cannot drift silently in either direction.
+    store.insertApplication(rawApp('app-src-drift-fp', {
+      stack_name: 'src-drift-fp',
+      desired_commit_sha: 'oldsha',
+      accepted_generation_id: 'gen-src-drift-fp',
+      materialization_fingerprint: 'f'.repeat(64),
+    }));
+    store.insertGeneration({
+      ...gen('gen-src-drift-fp', 'app-src-drift-fp'),
+      commit_sha: 'oldsha',
+      materialization_fingerprint: 'e'.repeat(64),
+    });
+
+    const projection = projectApplication('app-src-drift-fp', false);
+    if (projection.targetMode === 'not_applicable') throw new Error('expected application');
+    expect(projection.drift.filter((entry) => entry.class === 'source')).toEqual([]);
+    expect(projection.facets.source.status).toBe('source_reconcile_required');
+    expect(projection.availableActions).toContain('fetch');
+  });
+
   it('does not call a staged or held candidate source drift', () => {
     const store = GitOpsStore.getInstance();
     // The ref has already advanced to a commit nobody accepted, which is
