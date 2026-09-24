@@ -71,6 +71,8 @@ Work in progress is not drift, and the classes above stay silent while it happen
 
 Those states have their own surfaces, and each one names the next step. A node running a different generation than the one it was asked for is a separate class of its own, and is reported whether or not something else about that node is in flight.
 
+One more case sits here by decision rather than by accident. Source drift compares the accepted commit against the commit the ref names. When those still agree but the materialization settings changed, for example a compose path, an env path, or a context directory, there is no expected-versus-observed pair of commits to report, so no source drift item is created. Instead the source shows as **reconcile required** in the attention queue, and for a Direct application that is where you fetch again: the fetch rebuilds the candidate under the settings now in force, and accepting that candidate produces the new generation. This is a choice about what the word drift means, not a claim that the materialized content was proven unchanged. Changing where Compose is read from can change the content, which is why Sencho asks rather than assumes.
+
 ## What Sencho cannot prove
 
 Drift is derived from what Sencho has recorded, so missing evidence is never rounded up to agreement. A few cases worth knowing:
