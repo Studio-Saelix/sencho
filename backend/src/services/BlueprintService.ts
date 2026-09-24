@@ -25,6 +25,8 @@ import {
     throwRegistryDeliveryRefusal,
 } from '../helpers/registryDeliveryOutbound';
 import { getRegistryDeliveryLockContext } from '../helpers/registryDeliveryContext';
+import { probeRemoteCapability } from '../helpers/remoteCapabilities';
+import { BLUEPRINT_DIGEST_PINS_V1_CAPABILITY } from './CapabilityRegistry';
 import { enforcePolicyForImageRefs } from './PolicyEnforcement';
 import { BlueprintAnalyzer } from './BlueprintAnalyzer';
 import { sanitizeForLog } from '../utils/safeLog';
@@ -373,6 +375,24 @@ export class BlueprintService {
         }
     }
 
+    /**
+     * Refuses a digest-pinned apply unless the leaf advertises digestPins
+     * support. An older leaf ignores the field and redeploys by tag, which can
+     * re-pull the drifted image, so Enforce must fail explicitly instead.
+     */
+    private async assertRemoteSupportsDigestPins(node: Node): Promise<void> {
+        const probe = await probeRemoteCapability(node.id, BLUEPRINT_DIGEST_PINS_V1_CAPABILITY);
+        if (probe.kind === 'supported') return;
+        if (probe.kind === 'unsupported') {
+            throw new BlueprintRemoteUpgradeRequiredError(
+                `Remote node "${node.name}" does not support digest-pinned blueprint apply. Upgrade that Sencho instance, then retry.`,
+            );
+        }
+        throw new Error(
+            `Could not verify digest-pinned apply support on remote node "${node.name}" (${probe.detail}); refusing to redeploy by tag.`,
+        );
+    }
+
     private async deployRemoteMaterialization(
         blueprint: Blueprint,
         node: Node,
@@ -393,6 +413,7 @@ export class BlueprintService {
             allowGitManagedContent: true,
         };
         if (digestPins) {
+            await this.assertRemoteSupportsDigestPins(node);
             applyBody.digestPins = digestPins;
         }
         if (captureRecovery) {

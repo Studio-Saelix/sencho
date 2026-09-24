@@ -73,6 +73,7 @@ export const CAPABILITIES = [
   'remote-auto-update-checked-v1',
   'gitops-source-controller',
   'fleet-readiness-v1',
+  'blueprint-digest-pins-v1',
 ] as const;
 
 /**
@@ -172,6 +173,15 @@ export const GITOPS_SOURCE_CONTROLLER_CAPABILITY =
  * surface it feeds.
  */
 export const FLEET_READINESS_V1_CAPABILITY = 'fleet-readiness-v1' as const satisfies Capability;
+
+/**
+ * Leaves whose `/api/blueprints/apply-local` honors `digestPins` (deploys each
+ * service at the pinned digest instead of its tag). Hubs refuse to send a
+ * digest-pinned apply to a leaf lacking this flag, because an older leaf
+ * silently drops the field and redeploys with tag semantics.
+ */
+export const BLUEPRINT_DIGEST_PINS_V1_CAPABILITY =
+  'blueprint-digest-pins-v1' as const satisfies Capability;
 
 /** Contract version the hub and target negotiate for exact-ref proof. */
 export const REMOTE_REGISTRY_EXACT_REF_CONTRACT_VERSION = 1;

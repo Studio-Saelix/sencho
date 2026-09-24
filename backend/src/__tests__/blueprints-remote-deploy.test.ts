@@ -446,3 +446,52 @@ describe('BlueprintService remote deploy', () => {
         expect(dep?.last_error).toContain('[REGISTRY_DELIVERY_CREDENTIAL_UNAVAILABLE]');
     });
 });
+
+describe('BlueprintService remote digest-pinned apply capability gate', () => {
+    const pins = { app: 'nginx@sha256:' + 'a'.repeat(64) };
+
+    async function setup(capabilities: string[] | null) {
+        const node = seedRemoteNode();
+        const bp = seedBlueprint([node.id]);
+        const nodeObj = DatabaseService.getInstance().getNode(node.id)!;
+        const bpObj = DatabaseService.getInstance().getBlueprint(bp.id)!;
+        const { OFFLINE_META } = await import('../services/CapabilityRegistry');
+        vi.spyOn(NodeRegistry.getInstance(), 'probeRemoteMeta').mockResolvedValue(
+            capabilities === null
+                ? { kind: 'transport_failure' } as never
+                : { kind: 'ok', meta: { ...OFFLINE_META, online: true, capabilities } },
+        );
+        const postSpy = vi.spyOn(axios, 'post').mockResolvedValue({ status: 200, data: { deployed: true } });
+        const deploy = (digestPins?: Record<string, string>) =>
+            (BlueprintService.getInstance() as unknown as {
+                deployRemoteMaterialization: (...a: unknown[]) => Promise<void>;
+            }).deployRemoteMaterialization(bpObj, nodeObj, 'services: {}\n', '{}', digestPins);
+        return { postSpy, deploy };
+    }
+
+    it('sends digestPins when the leaf advertises blueprint-digest-pins-v1', async () => {
+        const { postSpy, deploy } = await setup(['blueprint-digest-pins-v1']);
+        await deploy(pins);
+        expect(postSpy).toHaveBeenCalledTimes(1);
+        expect((postSpy.mock.calls[0][1] as { digestPins?: unknown }).digestPins).toEqual(pins);
+    });
+
+    it('fails with remote_upgrade_required and never posts when the leaf lacks the capability', async () => {
+        const { postSpy, deploy } = await setup([]);
+        await expect(deploy(pins)).rejects.toMatchObject({ code: 'remote_upgrade_required' });
+        expect(postSpy).not.toHaveBeenCalled();
+    });
+
+    it('fails closed and never posts when the leaf capability probe is unreachable', async () => {
+        const { postSpy, deploy } = await setup(null);
+        await expect(deploy(pins)).rejects.toThrow(/refusing to redeploy by tag/);
+        expect(postSpy).not.toHaveBeenCalled();
+    });
+
+    it('does not gate plain (non-digest) applies on the capability', async () => {
+        const { postSpy, deploy } = await setup([]);
+        await deploy(undefined);
+        expect(postSpy).toHaveBeenCalledTimes(1);
+        expect((postSpy.mock.calls[0][1] as { digestPins?: unknown }).digestPins).toBeUndefined();
+    });
+});
