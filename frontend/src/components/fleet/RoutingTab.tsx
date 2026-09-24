@@ -13,6 +13,7 @@ import { MeshActivitySheet } from './MeshActivitySheet';
 import { MeshTopologyGraph, type MeshGraphEdgeMode } from './MeshTopologyGraph';
 import { SegmentedControl } from '@/components/ui/segmented-control';
 import { FleetTabHeading, FleetEmptyState, FleetEmptyCard } from './FleetEmptyState';
+import { describeProbeFailure, fixActionLabel } from './meshMessages';
 import type { MeshAlias, MeshDataPlaneStatus, MeshNodeStatus, MeshProbeResult } from '@/types/mesh';
 
 type RoutingViewMode = 'table' | 'graph';
@@ -97,21 +98,32 @@ export function RoutingTab({ canManageNode, canManageMembership }: {
         try { localStorage.setItem(EDGE_MODE_KEY, mode); } catch { /* localStorage unavailable */ }
     }, []);
 
+    // Throws on a failed probe so the alias row marks the test red.
     const testUpstream = useCallback(async (alias: string): Promise<void> => {
+        let body: MeshProbeResult;
         try {
             const res = await apiFetch(`/mesh/aliases/${encodeURIComponent(alias)}/test`, {
                 method: 'POST', localOnly: true,
             });
-            const body = await res.json() as MeshProbeResult;
-            if (body.ok) {
-                toast.success(`${alias} ok (${body.latencyMs}ms)`);
-            } else {
-                toast.error(`${alias} ${body.where ?? 'fail'}: ${body.code ?? 'error'}`);
-            }
+            body = await res.json() as MeshProbeResult;
         } catch (err) {
-            toast.error(`Probe failed: ${(err as Error).message}`);
+            toast.error(`Could not run the test for ${alias}: ${(err as Error).message}`);
+            throw err;
         }
-    }, []);
+        if (body.ok) {
+            toast.success(`${alias} is reachable (${body.latencyMs}ms)`);
+            return;
+        }
+        const target = aliases.find((a) => a.host === alias);
+        const human = describeProbeFailure(alias, body, { nodeName: target?.nodeName, port: target?.port });
+        const openFix = (): void => {
+            if (human.fix === 'diagnostics' && target) setDiagnosticsNode({ id: target.nodeId, name: target.nodeName });
+            else if (human.fix === 'route') setRouteDetailAlias(alias);
+            else setActivityOpen(true);
+        };
+        toast.error(human.message, human.fix ? { action: { label: fixActionLabel(human.fix), onClick: openFix } } : undefined);
+        throw new Error(human.message);
+    }, [aliases]);
 
     const handleGraphNodeClick = useCallback((nodeId: number) => {
         const target = status.find((s) => s.nodeId === nodeId);
@@ -179,6 +191,7 @@ export function RoutingTab({ canManageNode, canManageMembership }: {
                                 onShowDiagnostics={() => setDiagnosticsNode({ id: s.nodeId, name: s.nodeName })}
                                 onShowAlias={(alias) => setRouteDetailAlias(alias)}
                                 onTestUpstream={testUpstream}
+                                fleetStatus={status}
                                 onChanged={() => { void refresh(); }}
                                 canManage={canManageNode(s.nodeId)}
                                 canManageMembership={canManageMembership}
@@ -237,6 +250,7 @@ export function RoutingTab({ canManageNode, canManageMembership }: {
                             onShowDiagnostics={() => setDiagnosticsNode({ id: s.nodeId, name: s.nodeName })}
                             onShowAlias={(alias) => setRouteDetailAlias(alias)}
                             onTestUpstream={testUpstream}
+                            fleetStatus={status}
                             onChanged={() => { void refresh(); }}
                             canManage={canManageNode(s.nodeId)}
                             canManageMembership={canManageMembership}
@@ -318,6 +332,7 @@ function SheetsRoot(props: {
                     onOpenChange={(open) => { if (!open) props.setOptInNode(null); }}
                     nodeId={optInNode.id}
                     nodeName={optInNode.name}
+                    status={props.status}
                     canManage={props.canManageMembership}
                     onChanged={props.onChanged}
                 />

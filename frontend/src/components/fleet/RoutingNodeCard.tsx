@@ -9,7 +9,10 @@ import {
     type RoutingNodeCardMeta,
     type RoutingNodeState,
 } from '@/components/ui/routing-node-card';
+import { ConfirmModal } from '@/components/ui/modal';
 import { deriveNodeState } from './routingNodeState';
+import { computeMeshMembershipImpact, describeMeshMembershipImpact } from './meshImpact';
+import { describeMembershipError } from './meshMessages';
 
 interface Props {
     status: MeshNodeStatus;
@@ -21,6 +24,8 @@ interface Props {
     onChanged: () => void;
     canManage: boolean;
     canManageMembership?: boolean;
+    /** Every node's mesh status, used to show what turning mesh off restarts. */
+    fleetStatus?: MeshNodeStatus[];
 }
 
 const REVERSE_BRIDGE: Record<MeshNodeStatus['reverseCallbackStatus'], RoutingNodeCardMeta['reverseBridge']> = {
@@ -62,8 +67,10 @@ function buildFooterContext(
 
 export function RoutingNodeCard({
     status, aliases, onAddStack, onShowDiagnostics, onShowAlias, onTestUpstream, onChanged, canManage, canManageMembership = canManage,
+    fleetStatus,
 }: Props) {
     const [toggling, setToggling] = useState(false);
+    const [confirmDisable, setConfirmDisable] = useState(false);
     const [testingAlias, setTestingAlias] = useState<string | null>(null);
     const [lastTestedByHost, setLastTestedByHost] = useState<Map<string, { at: number; ok: boolean }>>(() => new Map());
     const lastSeenRef = useRef<number>(Date.now());
@@ -142,7 +149,10 @@ export function RoutingNodeCard({
             const res = await apiFetch(`/mesh/nodes/${status.nodeId}/${action}`, {
                 method: 'POST', localOnly: true,
             });
-            if (!res.ok) throw new Error(`status ${res.status}`);
+            if (!res.ok) {
+                const body = await res.json().catch(() => ({})) as { error?: string };
+                throw new Error(describeMembershipError(res.status, body.error));
+            }
             // The request can resolve after the card unmounts; bail before any
             // toast, refresh, or timer scheduling so nothing fires post-unmount.
             if (!mountedRef.current) return;
@@ -157,7 +167,7 @@ export function RoutingNodeCard({
             }
         } catch (err) {
             if (!mountedRef.current) return;
-            toast.error(`Failed to ${next ? 'enable' : 'disable'} mesh: ${(err as Error).message}`);
+            toast.error((err as Error).message);
         } finally {
             if (mountedRef.current) setToggling(false);
         }
@@ -184,7 +194,21 @@ export function RoutingNodeCard({
         }
     };
 
+    const disableImpact = computeMeshMembershipImpact(fleetStatus ?? [status], { kind: 'disable-node', nodeId: status.nodeId });
+    // Turning mesh off removes this node's stacks and the backend restarts
+    // every other meshed stack in the fleet, so confirm first whenever any
+    // stack anywhere is meshed.
+    // Turning it on restarts nothing and needs no confirmation.
+    const requestToggle = (next: boolean): void => {
+        if (!next && (disableImpact.direct.length > 0 || disableImpact.others.length > 0)) {
+            setConfirmDisable(true);
+            return;
+        }
+        void toggleEnabled(next);
+    };
+
     return (
+        <>
         <RoutingNodeCardPrimitive
             crumb={['Routing', 'Node', status.nodeName]}
             name={status.nodeName}
@@ -192,7 +216,7 @@ export function RoutingNodeCard({
             nodeState={nodeState}
             meta={meta}
             aliases={rows}
-            onToggleEnabled={(next) => { void toggleEnabled(next); }}
+            onToggleEnabled={requestToggle}
             onShowDiagnostics={onShowDiagnostics}
             onShowAlias={onShowAlias}
             onTestAlias={(host) => { void handleTestAlias(host); }}
@@ -203,5 +227,17 @@ export function RoutingNodeCard({
             canManage={canManage}
             canManageMembership={canManageMembership}
         />
+        <ConfirmModal
+            open={confirmDisable}
+            onOpenChange={(o) => { if (!o) setConfirmDisable(false); }}
+            variant="destructive"
+            kicker={`Mesh / ${status.nodeName}`}
+            title={`Turn off mesh on ${status.nodeName}?`}
+            description={describeMeshMembershipImpact(disableImpact, { kind: 'disable-node', nodeId: status.nodeId })}
+            confirmLabel="Turn off and restart"
+            onConfirm={() => { setConfirmDisable(false); void toggleEnabled(false); }}
+            onCancel={() => setConfirmDisable(false)}
+        />
+        </>
     );
 }

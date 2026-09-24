@@ -127,3 +127,53 @@ describe('RoutingNodeCard enable auto-converge', () => {
         expect(onChanged).not.toHaveBeenCalled();
     });
 });
+
+describe('RoutingNodeCard disable confirmation', () => {
+    beforeEach(() => {
+        vi.mocked(apiFetch).mockResolvedValue({ ok: true, status: 200, json: async () => ({}) } as unknown as Response);
+    });
+    afterEach(() => { vi.clearAllMocks(); });
+
+    it('asks before turning mesh off and states what restarts', async () => {
+        const status = node({ enabled: true, optedInStacks: [{ stackName: 'pg', currentlyResolvable: true }] });
+        const other = node({ nodeId: 2, nodeName: 'node-beta', optedInStacks: [{ stackName: 'app', currentlyResolvable: true }] });
+        render(
+            <RoutingNodeCard
+                status={status}
+                fleetStatus={[status, other]}
+                aliases={[]}
+                onAddStack={vi.fn()}
+                onShowDiagnostics={vi.fn()}
+                onShowAlias={vi.fn()}
+                onTestUpstream={async () => {}}
+                onChanged={vi.fn()}
+                canManage
+            />,
+        );
+        await act(async () => { fireEvent.click(screen.getByRole('switch')); });
+        expect(apiFetch).not.toHaveBeenCalled();
+        expect(await screen.findByText(/1 meshed stack on this node leaves the mesh and restarts\. 1 other meshed stack on 1 node also restarts/)).toBeTruthy();
+
+        await act(async () => { fireEvent.click(screen.getByRole('button', { name: /Turn off and restart/i })); });
+        expect(apiFetch).toHaveBeenCalledWith('/mesh/nodes/1/disable', expect.objectContaining({ method: 'POST' }));
+    });
+
+    it('turns mesh off without a prompt when nothing in the fleet is meshed', async () => {
+        const status = node({ enabled: true });
+        render(
+            <RoutingNodeCard
+                status={status}
+                fleetStatus={[status]}
+                aliases={[]}
+                onAddStack={vi.fn()}
+                onShowDiagnostics={vi.fn()}
+                onShowAlias={vi.fn()}
+                onTestUpstream={async () => {}}
+                onChanged={vi.fn()}
+                canManage
+            />,
+        );
+        await act(async () => { fireEvent.click(screen.getByRole('switch')); });
+        expect(apiFetch).toHaveBeenCalledWith('/mesh/nodes/1/disable', expect.objectContaining({ method: 'POST' }));
+    });
+});

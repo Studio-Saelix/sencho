@@ -60,7 +60,9 @@ When Mesh is enabled, it lives under **Fleet → Routing**. Managing it (the per
   <img src="/images/sencho-mesh/opt-in-sheet.png" alt="Mesh opt-in sheet listing stacks on a node" />
 </Frame>
 
-Each opt-in and opt-out triggers a redeploy of the affected stack so its `/etc/hosts` entries and `sencho_mesh` network attachment refresh. The confirmation modal makes this explicit (`Add and redeploy` / `Remove and redeploy`) and the post-action toast says `<stack> added to mesh, redeploying`.
+Each opt-in and opt-out restarts the affected stack so its `/etc/hosts` entries and `sencho_mesh` network attachment refresh, and also restarts every other meshed stack in the fleet so they learn the new hostnames. The confirmation says exactly what will restart before you commit, for example: `api on vps restarts now. 4 other meshed stacks on 3 nodes also restart to refresh their hostnames, so expect brief connection drops.` Turning mesh off on a node asks for the same confirmation, because it restarts that node's meshed stacks and the rest of the fleet.
+
+Every hostname on a node card and in the route detail sheet has a copy button that copies `host:port`, ready to paste into a connection string.
 
 ## Lifecycle and behavior
 
@@ -148,8 +150,8 @@ The graph is designed for fleet sizes typical of self-hosted Compose setups (up 
 
 Every alias row has a one-click test that runs a real probe along the same code path traffic uses. The result appears as a toast:
 
-- **Success.** `<alias> ok (<rtt>ms)`.
-- **Failure.** `<alias> <stage>: <code>`, where `<stage>` is one of:
+- **Success.** `<alias> is reachable (<rtt>ms)`.
+- **Failure.** A sentence that says what went wrong, with a button to the place to fix it (for example **Open diagnostics** when the connection to the node is down). The route detail sheet shows the same sentence. Internally the probe reports the stage it failed at:
   - `no_route`: the alias does not resolve on central. The destination stack is not opted in, or its opt-in is sticky and the stack is currently stopped.
   - `pilot_tunnel`: no bridge to the destination node could be opened. The Pilot Agent tunnel is down, or the proxy-mode dial failed.
   - `agent_resolve`: the bridge is up but the remote refuses the alias. The destination stack is not opted in on its home node.
@@ -206,7 +208,7 @@ These are the explicit boundaries of the v1 mesh.
 
 **Two cloud nodes, blue and green.** Two VPSes each run a copy of a stateless app; both pull from a shared Redis stack on a third "infra" node. All three nodes are meshed. The two app nodes opt their app stacks in; the infra node opts its Redis stack in. Either app reaches Redis as `cache.redis.infra.sencho`. Promoting blue → green is a redeploy on the app node; nothing about the mesh changes.
 
-**Triage a "my app can't connect."** A developer reports their app stack can't reach `db.api.opsix.sencho`. Open Fleet → Routing and click the Test button on the alias row. A green toast confirms the mesh path is healthy and the issue is inside the application. A red toast with `pilot_tunnel: ...` pushes you to the Diagnostics sheet on `opsix` and the Mesh activity log to chase the tunnel state.
+**Triage a "my app can't connect."** A developer reports their app stack can't reach `db.api.opsix.sencho`. Open Fleet → Routing and click the Test button on the alias row. A green toast confirms the mesh path is healthy and the issue is inside the application. A red toast saying the connection to `opsix` is down offers **Open diagnostics** for that node; use it with the Mesh activity log to chase the tunnel state.
 
 ## Troubleshooting
 
