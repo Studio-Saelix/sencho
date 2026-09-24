@@ -205,7 +205,7 @@ describe('TopBar smart and compact modes', () => {
     expect(onNavigate).toHaveBeenCalledWith('dashboard');
 
     await user.pointer({ keys: '[MouseRight]', target: screen.getByRole('button', { name: 'Home' }) });
-    await user.click(await screen.findByRole('menuitem', { name: /^Remove$/i }));
+    await user.click(await screen.findByRole('menuitem', { name: /^Remove from quick links$/i }));
     expect(onRemoveQuickLink).toHaveBeenCalledWith('dashboard');
     expect(onNavigate).toHaveBeenCalledTimes(1);
 
