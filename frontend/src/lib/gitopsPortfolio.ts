@@ -99,3 +99,7 @@ export function portfolioMastheadState(summary: {
   }
   return { state: 'Converged', tone: 'live' };
 }
+
+/** Empty-portfolio copy, shared by the desktop table and the phone screen. */
+export const PORTFOLIO_EMPTY_COPY =
+  'No GitOps applications yet. Connect a stack to a Git repository, or deploy a Git-managed Blueprint, and it appears here.';

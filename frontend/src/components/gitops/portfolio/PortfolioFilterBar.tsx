@@ -62,12 +62,15 @@ export function PortfolioFilterBar({
   nodes,
   onChange,
   onQueryChange,
+  onClear,
 }: {
   filters: GitOpsPortfolioFilters;
   nodes: NodeOption[];
   onChange: (next: GitOpsPortfolioFilters) => void;
   /** Typed search, debounced by the caller. */
   onQueryChange: (query: string) => void;
+  /** Resets every filter, including ones only a deep link can set (source, rollout, health). */
+  onClear: () => void;
 }) {
   const [searchExpanded, setSearchExpanded] = useState(false);
   const searchInputRef = useRef<HTMLInputElement>(null);
@@ -179,6 +182,20 @@ export function PortfolioFilterBar({
         }}
         className={FILTER_CLASS}
       />
+      {(Object.keys(filters).length > 0 || query !== '') && (
+        <Button
+          variant="ghost"
+          size="sm"
+          className="h-9 text-xs text-muted-foreground"
+          onClick={() => {
+            setQuery('');
+            setSearchExpanded(false);
+            onClear();
+          }}
+        >
+          Clear filters
+        </Button>
+      )}
     </div>
   );
 }

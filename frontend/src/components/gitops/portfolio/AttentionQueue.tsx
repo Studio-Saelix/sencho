@@ -33,11 +33,13 @@ export function AttentionQueue({
   });
 
   return (
-    <section aria-label="Attention required" className="space-y-2">
+    <section aria-label="Attention required" className="shrink-0 space-y-2">
       <h2 className="font-mono text-[10px] uppercase tracking-[0.18em] text-stat-subtitle">
         Attention required · {entries.length}
       </h2>
-      <ul className="divide-y divide-card-border/60 rounded-lg border border-card-border border-t-card-border-top bg-card shadow-card-bevel">
+      {/* Bounded so a long queue scrolls inside its card instead of pushing
+          the application table out of the non-scrolling page. */}
+      <ul className="max-h-56 divide-y divide-card-border/60 overflow-y-auto rounded-lg border border-card-border border-t-card-border-top bg-card shadow-card-bevel">
         {failuresFirst.map(({ reason, row }) => {
           const label = attentionLabel(reason);
           return (

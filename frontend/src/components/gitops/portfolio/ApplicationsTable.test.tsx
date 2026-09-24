@@ -12,7 +12,7 @@ import { ROLLOUT_STATE, RUNTIME_STATE } from '@/lib/gitopsState';
 function rolloutCell(rolloutStatus: string): HTMLElement {
   const row = portfolioRow({ rolloutStatus });
   render(
-    <ApplicationsTable rows={[row]} nextCursor={null} onPrevPage={() => {}} onNextPage={() => {}} pageLoaded={1} onDrillDown={() => {}} />,
+    <ApplicationsTable rows={[row]} nextCursor={null} onPrevPage={() => {}} onNextPage={() => {}} pageLoaded={1} portfolioEmpty={false} onDrillDown={() => {}} />,
   );
   const headers = screen.getAllByRole('columnheader');
   const index = headers.findIndex(h => h.textContent === 'Rollout');

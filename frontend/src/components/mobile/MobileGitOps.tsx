@@ -1,6 +1,7 @@
-import { RefreshCw, Search } from 'lucide-react';
+import { ChevronLeft, ChevronRight, RefreshCw, Search } from 'lucide-react';
+import { useEffect, useState, type ReactNode } from 'react';
 import { Masthead, SectionHead, StateDot } from '@/components/mobile/mobile-ui';
-import { attentionLabel, portfolioMastheadState, POSTURE_TONE_CLASS } from '@/lib/gitopsPortfolio';
+import { attentionLabel, PORTFOLIO_EMPTY_COPY, portfolioMastheadState, POSTURE_TONE_CLASS } from '@/lib/gitopsPortfolio';
 import { cn } from '@/lib/utils';
 import { formatRelativeTime } from '@/lib/utils';
 import type { GitOpsPortfolioRow } from '@/types/gitopsPortfolio';
@@ -8,7 +9,6 @@ import { openPortfolioApplication } from '../gitops/portfolio/portfolioNavigatio
 import { useGitOpsPortfolio } from '../gitops/portfolio/useGitOpsPortfolio';
 import { GitOpsApplicationView } from '../gitops/application/GitOpsApplicationView';
 import { useGitOpsApplicationSelection } from '../gitops/application/useGitOpsApplicationSelection';
-import type { ReactNode } from 'react';
 
 /**
  * The GitOps portfolio on a phone: the operate loop's review-and-triage face
@@ -45,6 +45,13 @@ export function MobileGitOps({ headerActions }: { headerActions?: ReactNode }) {
     : '';
 
   const filters = portfolio.filters;
+  // Locally controlled so typing is immediate; the fetch and URL write stay
+  // debounced in the hook, and external resets (the All chip) sync back down.
+  const [query, setQuery] = useState(filters.q ?? '');
+  useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setQuery(filters.q ?? '');
+  }, [filters.q]);
   const modeChips: Array<{ value: 'all' | 'attention' | 'direct' | 'blueprint'; label: string }> = [
     { value: 'all', label: 'All' },
     { value: 'attention', label: 'Attention' },
@@ -86,8 +93,11 @@ export function MobileGitOps({ headerActions }: { headerActions?: ReactNode }) {
           <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-stat-icon" strokeWidth={1.5} />
           <input
             type="search"
-            value={filters.q ?? ''}
-            onChange={event => portfolio.setQuery(event.target.value)}
+            value={query}
+            onChange={event => {
+              setQuery(event.target.value);
+              portfolio.setQuery(event.target.value);
+            }}
             placeholder="Search applications"
             aria-label="Search GitOps applications"
             className="h-11 w-full rounded-md border border-card-border bg-card pl-8 pr-3 font-mono text-sm text-stat-value placeholder:text-stat-icon focus:outline-none focus-visible:ring-2 focus-visible:ring-brand/50"
@@ -103,6 +113,7 @@ export function MobileGitOps({ headerActions }: { headerActions?: ReactNode }) {
                 // affordance on a narrow layout, so it must clear every filter
                 // a deep link could have brought in, not only this row's.
                 if (chip.value === 'all') {
+                  setQuery('');
                   portfolio.clearFilters();
                   return;
                 }
@@ -148,8 +159,12 @@ export function MobileGitOps({ headerActions }: { headerActions?: ReactNode }) {
           </div>
         ) : data && data.applications.length === 0 ? (
           <div className="pt-6 text-center">
-            <p className="font-heading text-xl text-stat-value">Nothing matches</p>
-            <p className="mt-1 font-mono text-xs text-stat-subtitle">No GitOps application matches the current filters.</p>
+            <p className="font-heading text-xl text-stat-value">
+              {data.summary.applications === 0 ? 'No applications yet' : 'Nothing matches'}
+            </p>
+            <p className="mt-1 font-mono text-xs text-stat-subtitle">
+              {data.summary.applications === 0 ? PORTFOLIO_EMPTY_COPY : 'No GitOps application matches the current filters.'}
+            </p>
           </div>
         ) : data ? (
           <>
@@ -159,14 +174,32 @@ export function MobileGitOps({ headerActions }: { headerActions?: ReactNode }) {
                 <MobileGitOpsRow key={row.id} row={row} />
               ))}
             </ul>
-            {portfolio.data?.nextCursor && (
-              <button
-                type="button"
-                onClick={portfolio.nextPage}
-                className="mt-3 min-h-11 w-full rounded-md border border-card-border bg-card font-mono text-[11px] uppercase tracking-[0.14em] text-stat-value"
-              >
-                Load more
-              </button>
+            {(data.nextCursor !== null || portfolio.pageLoaded > 1) && (
+              // Pages replace each other (server cursor), so the controls say
+              // so rather than implying an appended "load more" list.
+              <div className="mt-3 flex items-center justify-between gap-2">
+                <button
+                  type="button"
+                  onClick={portfolio.prevPage}
+                  disabled={portfolio.pageLoaded <= 1}
+                  aria-label="Previous page"
+                  className="flex min-h-11 min-w-11 items-center justify-center rounded-md border border-card-border bg-card text-stat-value disabled:opacity-40"
+                >
+                  <ChevronLeft className="h-4 w-4" strokeWidth={1.5} />
+                </button>
+                <span className="font-mono text-[11px] uppercase tracking-[0.14em] text-stat-subtitle">
+                  Page {portfolio.pageLoaded}
+                </span>
+                <button
+                  type="button"
+                  onClick={portfolio.nextPage}
+                  disabled={data.nextCursor === null}
+                  aria-label="Next page"
+                  className="flex min-h-11 min-w-11 items-center justify-center rounded-md border border-card-border bg-card text-stat-value disabled:opacity-40"
+                >
+                  <ChevronRight className="h-4 w-4" strokeWidth={1.5} />
+                </button>
+              </div>
             )}
           </>
         ) : null}
