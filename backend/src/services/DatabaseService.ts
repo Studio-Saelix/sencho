@@ -1950,9 +1950,14 @@ export class DatabaseService {
 
         this.db.exec(GITOPS_SCHEMA_SQL);
 
-        // Apply migrations safely (ignore if columns already exist)
+        // Apply migrations safely (ignore if columns already exist, log anything else)
         const maybeAddCol = (table: string, col: string, def: string) => {
-            try { this.db.prepare(`ALTER TABLE ${table} ADD COLUMN ${col} ${def}`).run(); } catch (e) { /* ignore */ }
+            try { this.db.prepare(`ALTER TABLE ${table} ADD COLUMN ${col} ${def}`).run(); } catch (e) {
+                const message = e instanceof Error ? e.message : String(e);
+                if (!message.includes('duplicate column')) {
+                    console.error(`[DatabaseService] Failed to add column "${col}" to "${table}":`, message);
+                }
+            }
         };
 
         // Remote Host Console bridges record the hub operator separately from
