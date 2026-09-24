@@ -6,6 +6,7 @@ import { loadXtermModules, type Terminal, type FitAddon, type SerializeAddon } f
 import { buildXtermMinimalTheme } from '@/lib/terminalTheme';
 import { useNodes } from '@/context/NodeContext';
 import { copyToClipboard } from '@/lib/clipboard';
+import { attachTerminalClipboard } from '@/lib/terminalClipboard';
 
 interface HostConsoleProps {
     /** Resolved active node id; WebSocket must target this id, not localStorage. */
@@ -62,6 +63,7 @@ export default function HostConsole({ nodeId, stackName, onClose }: HostConsoleP
         let mounted = true;
         let resizeObserver: ResizeObserver | null = null;
         let resizeTimeout: ReturnType<typeof setTimeout> | undefined;
+        let detachClipboard: (() => void) | null = null;
 
         void loadXtermModules().then((mods) => {
             if (!mounted) return;
@@ -78,6 +80,7 @@ export default function HostConsole({ nodeId, stackName, onClose }: HostConsoleP
             term.loadAddon(fitAddon);
             term.loadAddon(serializeAddon);
             term.open(container);
+            detachClipboard = attachTerminalClipboard(term, container);
 
             xtermRef.current = term;
             fitAddonRef.current = fitAddon;
@@ -185,6 +188,7 @@ export default function HostConsole({ nodeId, stackName, onClose }: HostConsoleP
             mounted = false;
             if (resizeObserver) resizeObserver.disconnect();
             if (resizeTimeout) clearTimeout(resizeTimeout);
+            if (detachClipboard) detachClipboard();
             if (wsRef.current) {
                 wsRef.current.close();
                 wsRef.current = null;

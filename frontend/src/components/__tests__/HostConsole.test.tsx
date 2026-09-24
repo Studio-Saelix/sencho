@@ -16,6 +16,10 @@ vi.mock('@/lib/xtermLoader', () => {
     clear = vi.fn();
     dispose = vi.fn();
     getSelection = vi.fn(() => '');
+    hasSelection = vi.fn(() => false);
+    clearSelection = vi.fn();
+    paste = vi.fn();
+    attachCustomKeyEventHandler = vi.fn();
     loadAddon = vi.fn();
     onData = vi.fn();
   }
