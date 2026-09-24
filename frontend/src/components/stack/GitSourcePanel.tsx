@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback } from 'react';
 import { Loader2, Trash2, RefreshCw, Save, Pause, Play, GitBranch } from 'lucide-react';
 import { ConfirmModal } from '@/components/ui/modal';
 import { Button } from '@/components/ui/button';
+import { openGitOpsWorkplace } from '@/components/gitops/portfolio/portfolioNavigation';
 import { Skeleton } from '@/components/ui/skeleton';
 import { SystemSheet, SheetSection, type SystemSheetAction } from '@/components/ui/system-sheet';
 import { apiFetch } from '@/lib/api';
@@ -773,6 +774,22 @@ export function GitSourcePanel({
               )}
 
               <GitOpsCaveats revision={revision} />
+
+              {source && activeNode && (
+                // The portfolio view of this one application, next to every
+                // other GitOps application and its attention queue.
+                <Button
+                  variant="link"
+                  size="sm"
+                  className="h-auto p-0 text-xs"
+                  onClick={() => {
+                    onOpenChange(false);
+                    openGitOpsWorkplace({ nodeId: activeNode.id, stack: stackName });
+                  }}
+                >
+                  Open in GitOps portfolio
+                </Button>
+              )}
 
               {source && (
                 <div className="text-[11px] text-stat-subtitle space-y-0.5">

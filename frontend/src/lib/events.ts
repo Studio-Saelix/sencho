@@ -42,6 +42,13 @@ export interface SenchoOpenStackDetail {
   destination?: 'stack' | 'editor' | 'anatomy-networking' | 'doctor' | 'dossier' | 'drift' | 'git';
 }
 
+/** Open the Create Stack dialog from elsewhere in the app (e.g. the GitOps workplace's "Connect a stack to Git"). */
+export const SENCHO_OPEN_CREATE_STACK_EVENT = 'sencho-open-create-stack';
+
+export interface SenchoOpenCreateStackDetail {
+  mode: 'empty' | 'git' | 'docker-run';
+}
+
 /** Tabs of the top-level Security view. Used by the nav state and by
  *  cross-component navigate events that deep-link into a specific tab. */
 export type SecurityTab =

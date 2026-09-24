@@ -5,7 +5,10 @@ import { ApplicationsTable } from './ApplicationsTable';
 import { PortfolioFilterBar } from './PortfolioFilterBar';
 import { PortfolioMasthead } from './PortfolioMasthead';
 import { useGitOpsPortfolio } from './useGitOpsPortfolio';
+import { useWorkplaceCapabilities } from './useWorkplaceCapabilities';
+import { WorkplaceActions } from './WorkplaceActions';
 import { GitOpsApplicationView } from '../application/GitOpsApplicationView';
+import type { GitOpsPortfolioResponse } from '@/types/gitopsPortfolio';
 import { useGitOpsApplicationSelection } from '../application/useGitOpsApplicationSelection';
 
 /**
@@ -29,6 +32,7 @@ export function GitOpsWorkplaceView() {
   const portfolio = useGitOpsPortfolio();
   const { data, loading, error, staleSince, refreshing } = portfolio;
   const selectedApplication = useGitOpsApplicationSelection();
+  const { canOpenFleet } = useWorkplaceCapabilities();
 
   if (selectedApplication !== null) return <GitOpsApplicationView key={selectedApplication} id={selectedApplication} />;
 
@@ -58,17 +62,23 @@ export function GitOpsWorkplaceView() {
               </p>
             )}
 
+            <div className="flex flex-wrap items-start justify-between gap-2">
             <PortfolioFilterBar
               filters={portfolio.filters}
               nodes={data.coverage.map(entry => ({ id: entry.nodeId, name: entry.nodeName ?? `node ${entry.nodeId}` }))}
               onChange={portfolio.setFilters}
               onQueryChange={portfolio.setQuery}
               onClear={portfolio.clearFilters}
+              blueprintLabel={blueprintLabel(data, portfolio.filters.blueprintId)}
             />
+            <WorkplaceActions />
+            </div>
 
             <ApplicationsTable
               rows={data.applications}
               portfolioEmpty={data.summary.applications === 0}
+              emptyActions={<WorkplaceActions className="justify-center" />}
+              canOpenFleet={canOpenFleet}
               nextCursor={data.nextCursor}
               pageLoaded={portfolio.pageLoaded}
               onPrevPage={portfolio.prevPage}
@@ -92,6 +102,12 @@ export function GitOpsWorkplaceView() {
       )}
     </div>
   );
+}
+
+/** The chip label for a Blueprint scope: its name when a listed row carries it. */
+function blueprintLabel(data: GitOpsPortfolioResponse, blueprintId: number | undefined): string | undefined {
+  if (blueprintId === undefined) return undefined;
+  return data.applications.find(row => row.blueprintId === blueprintId)?.name ?? `#${blueprintId}`;
 }
 
 function PortfolioLoadError({ message, onRetry }: { message: string; onRetry: () => void }) {

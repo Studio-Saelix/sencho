@@ -83,6 +83,8 @@ export interface GitOpsPortfolioSummary {
   unknown: number;
   drifted: number;
   byReason: Partial<Record<string, number>>;
+  /** Applications requiring attention per involved node id (hub numbering). */
+  attentionByNode: Record<string, number>;
 }
 
 export interface GitOpsPortfolioNodeCoverage {

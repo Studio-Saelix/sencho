@@ -11,7 +11,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { StrictMode } from 'react';
 import { act, renderHook, waitFor } from '@testing-library/react';
 import { apiFetch } from '@/lib/api';
-import { useGitOpsPortfolio } from '@/components/gitops/portfolio/useGitOpsPortfolio';
+import { filtersFromSearch, useGitOpsPortfolio } from '@/components/gitops/portfolio/useGitOpsPortfolio';
 import {
   applicationIdFromSearch,
   closeGitOpsApplication,
@@ -41,6 +41,7 @@ function response(overrides: Partial<GitOpsPortfolioResponse> = {}): GitOpsPortf
       unknown: 0,
       drifted: 0,
       byReason: {},
+    attentionByNode: {},
     },
     coverage: [],
     attentionQueue: [],
@@ -259,6 +260,27 @@ describe('stack-scoped entry (openGitOpsWorkplace)', () => {
     expect(result.current.filters).toEqual({ attention: '1' });
   });
 
+  it('opens on one Blueprint application from its detail sheet', async () => {
+    window.history.replaceState({ senchoIdx: 1 }, '', '/nodes/local/gitops?attention=1');
+    mockFetch.mockResolvedValue(ok(response()));
+    const { result } = renderHook(() => useGitOpsPortfolio());
+    await waitFor(() => expect(result.current.data).not.toBeNull());
+    act(() => openGitOpsWorkplace({ blueprintId: 7 }));
+    expect(result.current.filters).toEqual({ blueprintId: 7 });
+    await waitFor(() => expect(lastUrl()).toContain('blueprintId=7'));
+    expect(window.location.search).toBe('?blueprintId=7');
+  });
+
+  it('opens on the applications needing attention on one node from a Fleet card', async () => {
+    window.history.replaceState({ senchoIdx: 1 }, '', '/nodes/local/gitops');
+    mockFetch.mockResolvedValue(ok(response()));
+    const { result } = renderHook(() => useGitOpsPortfolio());
+    await waitFor(() => expect(result.current.data).not.toBeNull());
+    act(() => openGitOpsWorkplace({ nodeId: 4, attention: true }));
+    expect(result.current.filters).toEqual({ nodeId: 4, attention: '1' });
+    await waitFor(() => expect(lastUrl()).toMatch(/attention=1.*nodeId=4/));
+  });
+
   it('keeps the current question when opened without a scope', async () => {
     window.history.replaceState({ senchoIdx: 1 }, '', '/nodes/local/gitops?attention=1');
     mockFetch.mockResolvedValue(ok(response()));
@@ -270,6 +292,11 @@ describe('stack-scoped entry (openGitOpsWorkplace)', () => {
 });
 
 describe('filtersFromSearch (URL round-trip)', () => {
+  it('round-trips a Blueprint scope', () => {
+    expect(filtersFromSearch('?blueprintId=7')).toEqual({ blueprintId: 7 });
+    expect(filtersFromSearch('?blueprintId=-1')).toEqual({});
+  });
+
   it('parses an empty query as no filters', async () => {
     const { filtersFromSearch } = await import('@/components/gitops/portfolio/useGitOpsPortfolio');
     expect(filtersFromSearch('')).toEqual({});

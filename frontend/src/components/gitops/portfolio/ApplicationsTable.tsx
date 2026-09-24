@@ -1,4 +1,6 @@
-import { Activity, Check, ChevronLeft, ChevronRight, CircleHelp, CircleSlash, Clock, XCircle } from 'lucide-react';
+import type { ReactNode } from 'react';
+import { Activity, Check, ChevronLeft, ChevronRight, CircleHelp, CircleSlash, Clock, MoreHorizontal, XCircle } from 'lucide-react';
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from '@/components/ui/dropdown-menu';
 import { Button } from '@/components/ui/button';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
@@ -12,7 +14,7 @@ import {
 import { attentionLabel, PORTFOLIO_EMPTY_COPY, POSTURE_TONE_CLASS } from '@/lib/gitopsPortfolio';
 import { cn, formatRelativeTime } from '@/lib/utils';
 import type { GitOpsPortfolioRow } from '@/types/gitopsPortfolio';
-import { openPortfolioApplication } from './portfolioNavigation';
+import { openPortfolioApplication, portfolioRowActions } from './portfolioNavigation';
 
 /** Health facet words, which predate the gitopsState vocabulary and have no lookup there. */
 const HEALTH_STATE: Partial<Record<string, GitOpsStateMeta>> = {
@@ -70,11 +72,17 @@ export function ApplicationsTable({
   onNextPage,
   pageLoaded,
   portfolioEmpty,
+  emptyActions,
+  canOpenFleet = false,
   onDrillDown,
 }: {
   rows: GitOpsPortfolioRow[];
   /** No application exists at all, as opposed to none matching the filters. */
   portfolioEmpty: boolean;
+  /** Ways into GitOps, shown under the empty-portfolio copy. */
+  emptyActions?: ReactNode;
+  /** Whether the Fleet view (and so a Blueprint's detail) is reachable for this role. */
+  canOpenFleet?: boolean;
   nextCursor: string | null;
   onPrevPage: () => void;
   onNextPage: () => void;
@@ -101,17 +109,19 @@ export function ApplicationsTable({
                 <TableHead className="text-[10px] uppercase tracking-[0.18em]">Drift</TableHead>
                 <TableHead className="text-[10px] uppercase tracking-[0.18em]">Attention</TableHead>
                 <TableHead className="text-[10px] uppercase tracking-[0.18em]">Last activity</TableHead>
+                <TableHead className="w-10" aria-label="Actions" />
               </TableRow>
             </TableHeader>
             <TableBody>
               {rows.map(row => (
-                <ApplicationRow key={row.id} row={row} onOpen={() => open(row)} />
+                <ApplicationRow key={row.id} row={row} onOpen={() => open(row)} canOpenFleet={canOpenFleet} />
               ))}
             </TableBody>
           </Table>
           {rows.length === 0 && (
-            <div className="py-12 text-center text-sm text-muted-foreground">
+            <div className="flex flex-col items-center gap-3 py-12 text-center text-sm text-muted-foreground">
               {portfolioEmpty ? PORTFOLIO_EMPTY_COPY : 'No GitOps application matches the current filters.'}
+              {portfolioEmpty && emptyActions}
             </div>
           )}
         </ScrollArea>
@@ -144,7 +154,7 @@ export function ApplicationsTable({
   );
 }
 
-function ApplicationRow({ row, onOpen }: { row: GitOpsPortfolioRow; onOpen: () => void }) {
+function ApplicationRow({ row, onOpen, canOpenFleet }: { row: GitOpsPortfolioRow; onOpen: () => void; canOpenFleet: boolean }) {
   const failureAttention = row.attention.some(reason => attentionLabel(reason).tone === 'destructive');
   const rowTint = row.attention.length === 0
     ? ''
@@ -264,6 +274,30 @@ function ApplicationRow({ row, onOpen }: { row: GitOpsPortfolioRow; onOpen: () =
         </span>
         {row.evidence.unknown && <span className="block font-mono text-[10px] text-warning">evidence partial</span>}
       </TableCell>
+
+      <TableCell className="align-top">
+        <RowActionsMenu row={row} canOpenFleet={canOpenFleet} />
+      </TableCell>
     </TableRow>
+  );
+}
+
+/** Every place a row leads (its application, stack, Git source, Blueprint), in one menu. */
+function RowActionsMenu({ row, canOpenFleet }: { row: GitOpsPortfolioRow; canOpenFleet: boolean }) {
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <Button variant="ghost" size="icon" className="h-7 w-7" aria-label={`Actions for ${row.name}`}>
+          <MoreHorizontal className="h-4 w-4" strokeWidth={1.5} />
+        </Button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="end" className="w-48">
+        {portfolioRowActions(row, { canOpenFleet }).map(action => (
+          <DropdownMenuItem key={action.label} onSelect={action.run}>
+            {action.label}
+          </DropdownMenuItem>
+        ))}
+      </DropdownMenuContent>
+    </DropdownMenu>
   );
 }

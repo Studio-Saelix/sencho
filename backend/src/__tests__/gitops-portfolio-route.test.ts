@@ -164,6 +164,17 @@ describe('GET /api/gitops/applications', () => {
     expect((res.body as GitOpsPortfolioResponse).applications.map(row => row.name)).toEqual(['route-local-web']);
   });
 
+  it('counts attention per involved node, matching the node filter', async () => {
+    const all = await request(app).get('/api/gitops/applications').set('Cookie', adminCookie);
+    const summary = (all.body as GitOpsPortfolioResponse).summary;
+    const scoped = await request(app)
+      .get(`/api/gitops/applications?attention=1&nodeId=${localNodeId}`)
+      .set('Cookie', adminCookie);
+    const listed = (scoped.body as GitOpsPortfolioResponse).applications.length;
+    expect(listed).toBeGreaterThan(0);
+    expect(summary.attentionByNode[String(localNodeId)]).toBe(listed);
+  });
+
   it('matches the stack filter exactly, not as a substring', async () => {
     const exact = await request(app)
       .get('/api/gitops/applications?stack=route-local-web')

@@ -63,6 +63,7 @@ export function PortfolioFilterBar({
   onChange,
   onQueryChange,
   onClear,
+  blueprintLabel,
 }: {
   filters: GitOpsPortfolioFilters;
   nodes: NodeOption[];
@@ -71,7 +72,15 @@ export function PortfolioFilterBar({
   onQueryChange: (query: string) => void;
   /** Resets every filter, including ones only a deep link can set (source, rollout, health). */
   onClear: () => void;
+  /** Display name for a Blueprint scope chip (the filter carries only the id). */
+  blueprintLabel?: string;
 }) {
+  const without = (key: 'stack' | 'blueprintId') => () => {
+    const next = { ...filters };
+    delete next[key];
+    onChange(next);
+  };
+
   const [searchExpanded, setSearchExpanded] = useState(false);
   const searchInputRef = useRef<HTMLInputElement>(null);
   // The input is locally controlled so typing stays immediate while the fetch
@@ -130,24 +139,18 @@ export function PortfolioFilterBar({
         </TooltipProvider>
       )}
 
+      {/* Scopes set by another surface (a stack's Git indicator, a
+          Blueprint's detail); they have no combobox, so they show as
+          removable chips rather than as an invisible narrowing. */}
       {filters.stack !== undefined && (
-        // Set by a stack's GitOps indicator; it has no combobox, so it shows
-        // as a removable chip rather than as an invisible narrowing.
-        <span className="inline-flex h-9 items-center gap-1.5 rounded-md border border-brand/40 bg-brand/[0.06] pl-2.5 pr-1 font-mono text-xs text-brand">
-          stack: {filters.stack}
-          <button
-            type="button"
-            onClick={() => {
-              const next = { ...filters };
-              delete next.stack;
-              onChange(next);
-            }}
-            aria-label="Remove stack filter"
-            className="flex h-6 w-6 items-center justify-center rounded-sm hover:bg-brand/10"
-          >
-            <X className="h-3.5 w-3.5" strokeWidth={1.5} />
-          </button>
-        </span>
+        <ScopeChip label={`stack: ${filters.stack}`} removeLabel="Remove stack filter" onRemove={without('stack')} />
+      )}
+      {filters.blueprintId !== undefined && (
+        <ScopeChip
+          label={`blueprint: ${blueprintLabel ?? `#${filters.blueprintId}`}`}
+          removeLabel="Remove blueprint filter"
+          onRemove={without('blueprintId')}
+        />
       )}
       <Combobox
         options={ATTENTION_OPTIONS}
@@ -216,5 +219,21 @@ export function PortfolioFilterBar({
         </Button>
       )}
     </div>
+  );
+}
+
+function ScopeChip({ label, removeLabel, onRemove }: { label: string; removeLabel: string; onRemove: () => void }) {
+  return (
+    <span className="inline-flex h-9 items-center gap-1.5 rounded-md border border-brand/40 bg-brand/[0.06] pl-2.5 pr-1 font-mono text-xs text-brand">
+      {label}
+      <button
+        type="button"
+        onClick={onRemove}
+        aria-label={removeLabel}
+        className="flex h-6 w-6 items-center justify-center rounded-sm hover:bg-brand/10"
+      >
+        <X className="h-3.5 w-3.5" strokeWidth={1.5} />
+      </button>
+    </span>
   );
 }

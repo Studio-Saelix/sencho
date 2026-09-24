@@ -8,9 +8,14 @@ import {
   APPLICATION_QUERY_PARAM,
   GITOPS_APPLICATION_EVENT,
   applicationIdFromSearch,
+  attentionNextStep,
   closeGitOpsApplication,
   openGitOpsApplication,
+  portfolioRowActions,
 } from './portfolioNavigation';
+import { portfolioRow } from '../application/applicationFixtures';
+import { BLUEPRINT_INTENT_EVENT, type BlueprintIntent } from '@/lib/blueprintIntent';
+import { SENCHO_OPEN_STACK_EVENT, type SenchoOpenStackDetail } from '@/lib/events';
 
 beforeEach(() => {
   window.history.replaceState({ senchoIdx: 4 }, '', '/nodes/local/gitops?mode=direct');
@@ -71,5 +76,49 @@ describe('closeGitOpsApplication', () => {
     expect((window.history.state as { senchoIdx?: number }).senchoIdx).toBe(2);
     expect(listener).toHaveBeenCalledTimes(1);
     window.removeEventListener(GITOPS_APPLICATION_EVENT, listener);
+  });
+});
+
+describe('portfolio row actions and attention next steps', () => {
+  const direct = portfolioRow();
+  const blueprint = portfolioRow({ id: 'bp:3', targetMode: 'blueprint', nodeId: null, stackName: null, blueprintId: 3 });
+
+  function captured<T>(event: string, run: () => void): T[] {
+    const seen: T[] = [];
+    const onEvent = (e: Event) => seen.push((e as CustomEvent<T>).detail);
+    window.addEventListener(event, onEvent);
+    try { run(); } finally { window.removeEventListener(event, onEvent); }
+    return seen;
+  }
+
+  it('offers a Direct row its application, stack, and Git source', () => {
+    const labels = portfolioRowActions(direct, { canOpenFleet: true }).map(action => action.label);
+    expect(labels).toEqual(['Open application', 'Open stack', 'Open Git source']);
+    const git = portfolioRowActions(direct, { canOpenFleet: true }).find(action => action.label === 'Open Git source')!;
+    expect(captured<SenchoOpenStackDetail>(SENCHO_OPEN_STACK_EVENT, git.run))
+      .toEqual([{ nodeId: direct.nodeId, stackName: direct.stackName, destination: 'git' }]);
+  });
+
+  it('offers a Blueprint row its Blueprint only when Fleet is reachable', () => {
+    expect(portfolioRowActions(blueprint, { canOpenFleet: false }).map(action => action.label)).toEqual(['Open application']);
+    const open = portfolioRowActions(blueprint, { canOpenFleet: true }).find(action => action.label === 'Open Blueprint')!;
+    expect(captured<BlueprintIntent>(BLUEPRINT_INTENT_EVENT, open.run)).toEqual([{ kind: 'open', blueprintId: 3 }]);
+  });
+
+  it('sends a pending decision to the application view, where the authority actions live', () => {
+    const step = attentionNextStep('rollout_authorization_pending', blueprint);
+    expect(step.label).toBe('Review');
+    step.run();
+    expect(applicationIdFromSearch(window.location.search)).toBe('bp:3');
+  });
+
+  it('sends a Direct runtime failure to the stack and a source failure to its Git source', () => {
+    expect(attentionNextStep('deploy_failed', direct).label).toBe('Open stack');
+    expect(captured<SenchoOpenStackDetail>(SENCHO_OPEN_STACK_EVENT, attentionNextStep('health_failed', direct).run)[0]?.destination).toBe('stack');
+    expect(attentionNextStep('source_failed', direct).label).toBe('Open Git source');
+  });
+
+  it('opens the application for a Blueprint failure, which has no single stack', () => {
+    expect(attentionNextStep('deploy_failed', blueprint).label).toBe('Open');
   });
 });
