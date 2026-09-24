@@ -15,7 +15,7 @@ The audience is operators running a small fleet of Docker Compose hosts (homelab
 
 Three moving parts cooperate per node.
 
-1. **The `sencho_mesh` Docker bridge.** Each Sencho instance creates an internal Docker network on first boot (default `172.30.0.0/24`) and pins itself to the first usable host address on it. This is the lane every meshed container uses to talk to the local Sencho.
+1. **The `sencho_mesh` Docker bridge.** Each Sencho instance creates a Docker bridge network on first boot (default `172.30.0.0/24`) and pins itself to the first usable host address on it. This is the lane every meshed container uses to talk to the local Sencho.
 2. **The alias registry.** When a stack opts in, Sencho publishes a hostname for every service port: `<service>.<stack>.<node>.sencho`. A Postgres `db` service in a stack called `api` on a node called `opsix` is `db.api.opsix.sencho`. The registry is fleet-wide; every Sencho knows the full set.
 3. **The cross-node transport.** Sencho terminates the alias on the destination node's `sencho_mesh` bridge and carries TCP bytes over the channel between the two Sencho instances. On Pilot Agent nodes that is the existing agent tunnel. On Distributed API Proxy nodes it is a separate authenticated WebSocket bridge that central dials on demand using the node's API token.
 
@@ -70,7 +70,7 @@ Each opt-in and opt-out triggers a redeploy of the affected stack so its `/etc/h
 
 **Stack stopped.** The opt-in record is sticky. A stack that opts in and then stops continues to show on the node card with a `suspended` pill and the caption `Stack stopped, alias resumes when services start.` Aliases republish on the next alias-refresh tick (within roughly one minute) when the stack starts again. No need to opt out and back in.
 
-**Peer reconnect.** On every alias-refresh tick (60 s), and immediately on a tunnel-up event, central recomputes the global alias set and pushes refreshed overrides to any node whose set drifted. Stack redeploys are skipped if the override content is unchanged.
+**Peer reconnect.** On every alias-refresh tick (60 s), and immediately on a tunnel-up event, central recomputes the global alias set and rewrites the override files on the reconnected node. Running containers are not recreated by this: `/etc/hosts` entries are read when a container is created, so they pick up a changed alias set on the stack's next redeploy, or on the next opt-in or opt-out anywhere in the fleet (which redeploys every meshed stack).
 
 **Proxy-mode bridge.** When central needs to forward TCP to a Distributed API Proxy node, it dials `/api/mesh/proxy-tunnel` on the remote using the node's API token, opens a persistent bidirectional WebSocket, and multiplexes TCP frames over it. The bridge stays open by default; central reconciles missing bridges every 60 s and reactively redials on any non-terminal teardown. Auth failures are terminal and skip redial. Recent dial failures are cached for 60 s so a misconfigured remote does not see a redial storm.
 
@@ -181,7 +181,7 @@ Sencho re-checks the mesh data plane every 10 seconds and updates `/api/health` 
 
 **Inbound exposure.** Mesh adds no new inbound port to central. A Pilot Agent node's outbound tunnel carries mesh traffic in both directions. A Distributed API Proxy node only needs the inbound port Sencho already listens on for fleet operations (so it can be dialed by central). Aliases themselves are not internet-reachable; they only resolve inside the `sencho_mesh` Docker bridge on each participating node.
 
-**Encryption in transit.** The WebSocket between Sencho instances is whatever TLS posture you already configured for fleet management. If you front Sencho with a TLS-terminating reverse proxy, mesh inherits that. If you use a private CA, see Pilot Agent's [`SENCHO_PILOT_CA_FILE`](/features/pilot-agent#environment-variables) for the supported trust-store override.
+**Encryption in transit.** The WebSocket between Sencho instances is whatever TLS posture you already configured for fleet management. If you front Sencho with a TLS-terminating reverse proxy, mesh inherits that. If you use a private CA: for Pilot Agent nodes set [`SENCHO_PILOT_CA_FILE`](/features/pilot-agent#environment-variables) on the agent; for Distributed API Proxy nodes set `SENCHO_MESH_PROXY_CA_FILE` on central (see [Reverse proxies, tunnels, and VPNs](#reverse-proxies-tunnels-and-vpns)).
 
 **Audit trail.** Opt-in and opt-out events write durable rows to the audit log with the actor's identity. Lower-level events (tunnel state changes, alias publishes, route resolutions, probe results) land in the mesh activity log described above, which is in-memory only.
 
@@ -198,7 +198,37 @@ These are the explicit boundaries of the v1 mesh.
 - **No TLS termination, no L7 features.** Mesh is L4. There is no built-in HTTPS, no host-based routing, no header rewriting, no blue/green cutover. Run those at your existing reverse proxy.
 - **No application authentication.** Mesh does not add a credential layer to the transported protocol. Your services still authenticate their callers themselves.
 - **`network_mode: host` services cannot join.** A service that runs on the host network namespace cannot attach to `sencho_mesh` and therefore cannot publish an alias. The rest of the stack can still mesh; the host-network service stays out.
+- **Idle connections close after 10 minutes.** A mesh TCP connection with no traffic in either direction for 10 minutes is closed. Database pools and long-lived subscriptions (Redis pub/sub, MQTT) should use keepalives or reconnect on their own.
+- **Connections do not survive a transport restart.** When a tunnel reconnects or central restarts, open mesh connections are reset and applications must reconnect. Traffic between two remote nodes is relayed through central, so central being down stops it.
 - **Mesh activity log is in-memory.** The fleet-wide log resets when Sencho restarts. For long-term retention rely on the audit log (opt-in / opt-out) or export from your reverse proxy.
+
+## Reverse proxies, tunnels, and VPNs
+
+Mesh does not care how the nodes reach each other, as long as the path carries a WebSocket.
+
+- **Pilot Agent nodes** open an outbound WebSocket to central, so the agent side needs no inbound port, tunnel, or proxy route. The path to central must allow WebSocket upgrades on `/api/pilot/tunnel`.
+- **Distributed API Proxy nodes** are dialed by central at `/api/mesh/proxy-tunnel` on the node's API URL. That route must reach the remote Sencho with the `Upgrade` and `Connection` headers intact.
+
+**Reverse proxies (nginx, Traefik, Caddy, NPM).** Enable WebSocket proxying for the Sencho host. Traefik and Caddy do this automatically; for nginx, set `proxy_http_version 1.1` and forward the `Upgrade` and `Connection` headers. Both ends send a ping every 30 seconds, so default proxy idle timeouts (60 s and up) are enough.
+
+**Cloudflare Tunnel and proxied DNS.** WebSockets work through Cloudflare without extra settings, and the 30-second pings keep the connection inside Cloudflare's 100-second idle limit. If a Cloudflare Tunnel or edge connection restarts, the dead connection is detected within about a minute and central reconnects on its own. Mesh TCP connections that were open at that moment are reset, so applications reconnect.
+
+**Access gateways (Cloudflare Access, Authelia, Authentik).** A gateway that demands its own login blocks central's dial; the node card shows `blocked by an access proxy`. Either exempt `/api/mesh/proxy-tunnel` (and the rest of `/api/`, which fleet management also uses) from the gateway, or give central a service credential. For Cloudflare Access service tokens:
+
+```yaml
+services:
+  sencho:
+    environment:
+      - 'SENCHO_MESH_PROXY_HEADERS={"CF-Access-Client-Id":"<id>","CF-Access-Client-Secret":"<secret>"}'
+```
+
+The value is a JSON object of header names to values, applied to every proxy-mode node. For different credentials per node, key the object by node name, with `"*"` as the fallback: `{"*": {...}, "edge": {...}}`. Headers that Sencho manages (`Authorization`, `Host`, `Upgrade`, `Connection`, `Sec-WebSocket-*`) cannot be overridden. The headers apply to the mesh connection only, not to other fleet management requests.
+
+**Private certificate authorities.** When a remote serves a certificate from an internal CA, mount the CA bundle into central and set `SENCHO_MESH_PROXY_CA_FILE` to its path inside the container. The bundle is trusted in addition to the default roots (and `NODE_EXTRA_CA_CERTS`). Certificate verification is never disabled.
+
+**VPNs (Tailscale, WireGuard, ZeroTier).** Point the node's API URL at the VPN address or MagicDNS name. Private and CGNAT ranges (`10/8`, `172.16/12`, `192.168/16`, `100.64/10`) are allowed. Loopback, link-local, and reserved ranges (including the `198.18/15` range some proxy tools use for fake IPs) are refused, so do not use an SSH tunnel to `localhost` as a node URL. If a VPN reconnects or changes address, the old connection is detected dead within about a minute and central redials.
+
+**Mesh subnet and VPN routes.** Docker does not check a mesh subnet against the host's routes. If the host routes a VPN, Kubernetes (k3s uses `10.42.0.0/16` and `10.43.0.0/16`), or cloud VPC range that overlaps the chosen `/24`, traffic from the host to that range goes to the mesh bridge instead. On AWS, `172.31.0.0/24` falls inside the default VPC. Check `ip route` on the host and set `SENCHO_MESH_SUBNET` to a range nothing else uses.
 
 ## Example workflows
 
@@ -247,7 +277,15 @@ These are the explicit boundaries of the v1 mesh.
 
     - `api token rejected by remote`: the credential central uses to dial this node is not accepted. Open the remote Sencho, generate a fresh Node Token via **Settings → Nodes → Generate Token**, and paste it back into the node's credentials in central's **Settings → Nodes**.
     - `remote does not support proxy mesh`: the remote Sencho is on a version that does not implement proxy-mode mesh. Update the remote to the same build as central and the badge clears on the next refresh.
-    - `TLS handshake failed`: the remote serves a certificate Node's default trust store does not accept. Use a certificate issued by a trusted authority on the remote.
+    - `node token is not full-admin`: the remote accepted the token but its scope cannot carry mesh traffic. Generate a full-admin Node Token on the remote.
+    - `license tier does not include mesh`: the remote refused because mesh is not included in the tier.
+    - `TLS certificate not trusted`: the remote serves a certificate central does not trust. Use a publicly trusted certificate, or mount your CA bundle into central and set `SENCHO_MESH_PROXY_CA_FILE`.
+    - `blocked by an access proxy in front of the remote`: something in front of the remote Sencho (Cloudflare Access, Authelia, Authentik, a WAF) refused or redirected the request before it reached Sencho. Add a bypass for `/api/mesh/proxy-tunnel`, or send the gateway's credential with `SENCHO_MESH_PROXY_HEADERS`. See [Reverse proxies, tunnels, and VPNs](#reverse-proxies-tunnels-and-vpns).
+    - `WebSocket upgrade refused`: the path answered with plain HTTP instead of a WebSocket upgrade. The reverse proxy is not forwarding the `Upgrade` and `Connection` headers, or the URL points at the wrong port.
+    - `reverse proxy or tunnel in front of the remote cannot reach Sencho`: the proxy or tunnel answered with a 502, 503, 504, or a Cloudflare 52x error. Check that the Sencho container is running and that the proxy's upstream address is correct.
+    - `remote hostname does not resolve`, `connection refused by remote host`, `remote did not answer in time`: DNS, port, or firewall problems between central and the remote.
+    - `remote address is loopback or reserved and cannot be dialed`: the node URL resolves to a loopback, link-local, or reserved address, which Sencho never dials. Use an address central can route to (LAN, VPN, or public).
+    - `mesh dial settings are invalid`: `SENCHO_MESH_PROXY_HEADERS` or `SENCHO_MESH_PROXY_CA_FILE` could not be parsed. The mesh activity log names the problem.
     - `api_url not set` or `api token missing`: the node was added without credentials. Edit the node in **Settings → Nodes** and supply the URL and token.
     - `remote unreachable`: central could not establish a TCP connection to the remote Sencho. Check that the remote is running and that the URL in **Settings → Nodes** is reachable from central.
   </Accordion>
