@@ -201,6 +201,8 @@ The **View logs** button on a container row opens a dedicated modal that streams
 
 The **Open bash shell** icon button opens an interactive shell inside a single running container, equivalent to `docker exec -it <id> bash`. The modal uses xterm.js with color, tab completion, and resize handling.
 
+Right-click copies the selected text, or pastes from the clipboard when nothing is selected. Ctrl+V, Ctrl+Shift+V, and Shift+Insert also paste (Cmd+V on macOS). When Sencho is served over plain HTTP, the browser does not let pages read the clipboard, so right-click opens the browser's own menu instead; choose **Paste** there or use the keyboard shortcut.
+
 <Frame>
   <img src="/images/editor/container-exec-modal.png" alt="Bash session modal connected to the plex container running cat slash etc slash os release with a Connected status pill" />
 </Frame>
