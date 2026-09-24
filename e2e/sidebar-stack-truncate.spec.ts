@@ -28,17 +28,60 @@ interface RowLayoutMetrics {
   trailingKind: 'update' | 'failed' | 'git' | 'none';
 }
 
+/**
+ * The suite shares the app's per-minute API rate limiter with every other
+ * spec, so a late-run burst can answer 429. A rate-limited bootstrap leaves
+ * the shell without its data and it does not recover on its own, so the setup
+ * retries the window out instead of failing a layout assertion for a
+ * condition the app deliberately applies.
+ */
+const RATE_LIMIT_RETRY_ATTEMPTS = 3;
+const RATE_LIMIT_RETRY_WAIT_MS = 15_000;
+
+async function loginAndLoadStacks(page: Page): Promise<void> {
+  for (let attempt = 1; attempt <= RATE_LIMIT_RETRY_ATTEMPTS; attempt += 1) {
+    try {
+      await loginAs(page);
+      await waitForStacksLoaded(page);
+      return;
+    } catch (error) {
+      if (attempt === RATE_LIMIT_RETRY_ATTEMPTS) throw error;
+      await page.waitForTimeout(RATE_LIMIT_RETRY_WAIT_MS);
+    }
+  }
+}
+
 async function createStack(page: Page, stackName: string): Promise<void> {
-  const res = await page.evaluate(async (name) => {
-    const response = await fetch('/api/stacks', {
-      method: 'POST',
-      credentials: 'include',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ stackName: name }),
-    });
-    return { ok: response.ok, status: response.status };
-  }, stackName);
-  expect(res.ok || res.status === 409, `create ${stackName} failed: ${res.status}`).toBeTruthy();
+  for (let attempt = 1; attempt <= RATE_LIMIT_RETRY_ATTEMPTS; attempt += 1) {
+    const res = await page.evaluate(async (name) => {
+      const response = await fetch('/api/stacks', {
+        method: 'POST',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ stackName: name }),
+      });
+      return { ok: response.ok, status: response.status };
+    }, stackName);
+    if (res.ok || res.status === 409) return;
+    if (res.status !== 429 || attempt === RATE_LIMIT_RETRY_ATTEMPTS) {
+      expect(res.ok || res.status === 409, `create ${stackName} failed: ${res.status}`).toBeTruthy();
+      return;
+    }
+    await page.waitForTimeout(10_000);
+  }
+}
+
+async function reloadAndWaitForStacks(page: Page): Promise<void> {
+  for (let attempt = 1; attempt <= RATE_LIMIT_RETRY_ATTEMPTS; attempt += 1) {
+    await page.reload();
+    try {
+      await waitForStacksLoaded(page);
+      return;
+    } catch (error) {
+      if (attempt === RATE_LIMIT_RETRY_ATTEMPTS) throw error;
+      await page.waitForTimeout(RATE_LIMIT_RETRY_WAIT_MS);
+    }
+  }
 }
 
 async function deleteStack(page: Page, stackName: string): Promise<void> {
@@ -61,8 +104,7 @@ async function ensureTestStacks(page: Page): Promise<void> {
   for (const name of TEST_STACKS) {
     await createStack(page, name);
   }
-  await page.reload();
-  await waitForStacksLoaded(page);
+  await reloadAndWaitForStacks(page);
 }
 
 function sidebarLocator(page: Page) {
@@ -127,9 +169,12 @@ async function assertRowLayout(
 }
 
 test.describe('Sidebar stack name truncation', () => {
+  // The retries above can wait out most of one shared-limiter window; the
+  // longer budget keeps a saturated minute from timing the test out.
+  test.describe.configure({ timeout: 120_000 });
+
   test.beforeEach(async ({ page }) => {
-    await loginAs(page);
-    await waitForStacksLoaded(page);
+    await loginAndLoadStacks(page);
     await ensureTestStacks(page);
   });
 

@@ -18,7 +18,7 @@ import { useAuth } from '@/context/AuthContext';
 import { useNodeActions, type NodeTestInfo } from './nodes/useNodeActions';
 import { useFleetSyncStatus } from '@/hooks/useFleetSyncStatus';
 import { resetFleetSyncAnchor, STICKY_CONTROL_IDENTITY_MISMATCH } from '@/lib/fleetSyncApi';
-import type { SecurityTab, FleetTab } from '@/lib/events';
+import { SENCHO_NAVIGATE_EVENT, type SenchoNavigateDetail } from '@/lib/events';
 
 interface NodeSchedulingSummary {
   active_tasks: number;
@@ -27,15 +27,11 @@ interface NodeSchedulingSummary {
   stacks_with_updates: number;
 }
 
-export const SENCHO_NAVIGATE_EVENT = 'sencho-navigate';
-export interface SenchoNavigateDetail {
-  view: 'scheduled-ops' | 'auto-updates' | 'security' | 'fleet' | 'networking' | 'resources';
-  nodeId?: number;
-  /** Target tab when navigating to the Security view. */
-  tab?: SecurityTab;
-  /** Target tab when navigating to the Fleet view (e.g. 'snapshots'). */
-  fleetTab?: FleetTab;
-}
+// The navigate event and its detail type live in lib/events.ts (lib-level
+// callers need them without importing this page component); re-exported here
+// so existing import sites keep working.
+export { SENCHO_NAVIGATE_EVENT } from '@/lib/events';
+export type { SenchoNavigateDetail } from '@/lib/events';
 
 export function NodeManager() {
   const { isAdmin, can } = useAuth();

@@ -155,6 +155,67 @@ describe('BlueprintService remote deploy', () => {
         expect(dep?.applied_revision).toBe(bpObj.revision);
     });
 
+    it('asks the remote to capture a recovery point when the rollout requests one', async () => {
+        const node = seedRemoteNode();
+        const bp = seedBlueprint([node.id]);
+        const nodeObj = DatabaseService.getInstance().getNode(node.id)!;
+        const bpObj = DatabaseService.getInstance().getBlueprint(bp.id)!;
+
+        vi.spyOn(axios, 'get').mockResolvedValue({ status: 200, data: [] });
+        const postSpy = vi.spyOn(axios, 'post').mockResolvedValue({ status: 200, data: { deployed: true } });
+
+        const result = await BlueprintService.getInstance().deployAuthorizedMaterialization({
+            blueprint: bpObj,
+            node: nodeObj,
+            composeContent: bpObj.compose_content,
+            marker: {
+                blueprintId: bpObj.id,
+                revision: bpObj.revision,
+                lastApplied: Date.now(),
+                applicationId: 'app-1',
+                bindingRevision: 'intent-1',
+            },
+            auditPath: `/api/blueprints/${bpObj.id}/rollout/app-1`,
+            captureRecovery: true,
+            recoveryBinding: {
+                gitops_generation_id: 'gen-prior',
+                gitops_artifact_set_id: 'art-prior',
+                gitops_source_acceptance_ref: 'acc-prior',
+            },
+        });
+
+        expect(result.status).toBe('active');
+        const payload = postSpy.mock.calls[0][1] as {
+            captureRecovery?: boolean;
+            recoveryBinding?: Record<string, unknown>;
+        };
+        expect(payload.captureRecovery).toBe(true);
+        expect(payload.recoveryBinding).toEqual({
+            generationId: 'gen-prior',
+            artifactSetId: 'art-prior',
+            sourceAcceptanceRef: 'acc-prior',
+        });
+
+        // A rollout that did not ask for a capture sends neither field.
+        postSpy.mockClear();
+        await BlueprintService.getInstance().deployAuthorizedMaterialization({
+            blueprint: bpObj,
+            node: nodeObj,
+            composeContent: bpObj.compose_content,
+            marker: {
+                blueprintId: bpObj.id,
+                revision: bpObj.revision,
+                lastApplied: Date.now(),
+                applicationId: 'app-1',
+                bindingRevision: 'intent-1',
+            },
+            auditPath: `/api/blueprints/${bpObj.id}/rollout/app-1`,
+        });
+        const plainPayload = postSpy.mock.calls[0][1] as Record<string, unknown>;
+        expect(plainPayload.captureRecovery).toBeUndefined();
+        expect(plainPayload.recoveryBinding).toBeUndefined();
+    });
+
     it('fails closed when the remote lacks apply-local (404); no legacy mutations', async () => {
         const node = seedRemoteNode();
         const bp = seedBlueprint([node.id]);

@@ -93,4 +93,6 @@ export interface Agent {
     config?: { mode?: 'keyed' | 'stateless'; tags?: string; urls?: string; has_urls?: boolean; providers?: string[]; url_count?: number } | null;
     /** Optional user-authored JSON payload template; null/blank = built-in payload. */
     payload_template?: string | null;
+    /** True when the API withheld credential material from this payload. */
+    secrets_redacted?: boolean;
 }

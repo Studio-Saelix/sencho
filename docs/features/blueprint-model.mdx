@@ -24,8 +24,8 @@ Four moving parts cooperate per blueprint.
    - **Source acceptance** proves a specific accepted generation (Git SHA and materialization) is the content to run.
    - **Placement approval** freezes the node place/remove blast the operator confirmed (selector, pin, cordon outcomes).
    - **Rollout authorization** binds that accepted generation, its artifact set, and the current placement, and opens an immutable rollout generation before any place runs.
-   Inline Confirm Apply writes placement approval (and an Inline rollout generation). Git-managed place additionally requires source acceptance and rollout authorization for the accepted generation.
-   Git-managed place also runs registry preflight before rollout authorization; a blocked result appears on the detail sheet until you fix registry readiness and place again.
+   Inline Confirm Apply writes placement approval (and an Inline rollout generation). Git-managed place additionally requires source acceptance and rollout authorization for the accepted generation, and each step is a separate action: **Accept source**, **Review and approve placement**, and **Authorize rollout** appear on the Blueprint sheet's GitOps section and on the application's page in GitOps, while that step is outstanding.
+   Git-managed place also runs registry preflight before rollout authorization; a blocked result appears on the detail sheet until you fix registry readiness and authorize again.
 3. **The reconciler.** A background loop on the controlling Sencho ticks every 60 seconds (with a 5-second initial delay after startup) and on demand after **Confirm Apply**. Each tick only mutates the fleet when the live placement approval still matches the resolved targets. The tick resolves the selector, compares every desired-vs-live node, and runs only the place or remove outcomes already approved.
 4. **The executor.** Per-node deploy and withdraw run against the local Docker socket on local nodes, and through the authenticated proxy to `/api/blueprints/apply-local` and `/api/blueprints/withdraw-local` on remote nodes (older remotes fail closed until upgraded). Every blueprint deployment writes a `.blueprint.json` marker into the stack directory; the marker carries the blueprint ID, the revision, the last-applied timestamp, and, when Git-managed, the application and binding revision that produced the place.
 
@@ -140,11 +140,11 @@ The three policy cards in the editor map exactly to the three modes the reconcil
 
 Even **Observe** keeps Sencho honest about what it found: the deployment row shows "drifted 3h ago: service caddy exited code 1". Silence would forfeit Sencho's authority over your fleet.
 
-Enforce's auto-fix only ever redeploys the blueprint's *current* revision to correct container-level drift (a stopped or crashed container, for example). A compose edit never reaches that auto-fix path on a stateful or state-unknown blueprint: any revision change re-enters **Awaiting confirmation** on every targeted node first, regardless of drift mode, so a human always signs off before a new revision touches existing data. See [Lifecycle: status transitions](#lifecycle-status-transitions).
+Enforce's auto-fix only ever redeploys the blueprint's *current* revision. Container-level drift (a stopped or crashed container) uses the ordinary deploy path. Frozen image-digest disagreement uses a digest-pinned overlay with `--pull never`, so authored tags on disk stay unchanged. For a remote target, Sencho freezes and repairs against that node's own rendered Compose model and Docker platform (fetched over the authenticated proxy), not the controlling instance's local filesystem. A compose edit never reaches that auto-fix path on a stateful or state-unknown blueprint: any revision change re-enters **Awaiting confirmation** on every targeted node first, regardless of drift mode, so a human always signs off before a new revision touches existing data. See [Lifecycle: status transitions](#lifecycle-status-transitions).
 
 ## The detail sheet
 
-Click any tile in the catalog to open the blueprint detail sheet on the right. The sheet header shows the name, the meta line (`<selector> · <drift mode> · rev <n>`), the action bar, the Inline or Git-managed badge, the description, the deployment table, and a collapsible compose source. Inline Blueprints offer **Apply now**, **Edit**, **Convert to Git**, **Disable**, and **Delete**. Git-managed Blueprints offer **Edit**, **Detach Git**, **Retire to Direct** (when no live deployments remain), and **Disable**. **Apply now** is withheld because place for Git-managed content runs from an authorized accepted generation, not from Confirm Apply on the detach snapshot. **Delete** waits until you Detach Git or Retire to Direct, because the Git source still belongs to this Blueprint.
+Click any tile in the catalog to open the blueprint detail sheet on the right. The sheet header shows the name, the meta line (`<selector> · <drift mode> · rev <n>`), the action bar, the Inline or Git-managed badge, the description, the deployment table, and a collapsible compose source. Inline Blueprints offer **Apply now**, **Edit**, **Convert to Git**, **Disable**, and **Delete**. Git-managed Blueprints offer **Edit**, **Detach Git**, **Retire to Direct** (when no live deployments remain), and **Disable**, and the sheet's GitOps section carries the outstanding authority action. **Apply now** is withheld because place for Git-managed content runs from an authorized accepted generation, not from Confirm Apply on the detach snapshot. **Delete** waits until you Detach Git or Retire to Direct, because the Git source still belongs to this Blueprint.
 
 <Frame caption="An Inline Blueprint detail sheet. Header carries the selector and revision; the action bar offers Apply now, Edit, Convert to Git, Disable, and Delete; the deployment table lists one row per resolved node.">
   <img src="/images/blueprint-model/detail-sheet.png" alt="Blueprint detail sheet showing header, action bar, and deployment table" />
@@ -159,8 +159,8 @@ Possible status values:
 | **Pending** | The reconciler has acquired the deployment lock and is about to start. |
 | **Awaiting confirmation** | A stateful blueprint reached a new node. The reconciler refuses to deploy until you click **Confirm deploy** in the action column. |
 | **Deploying** | The compose action is in flight on this node. |
-| **Active** | The container set matches the blueprint's revision. |
-| **Drifted** | The reconciler detected a difference between the live state and the desired one. |
+| **Active** | The deployment is placed and its containers are running for this blueprint revision. Exact image identity is a separate GitOps / Drift proof; a row can read Active while Drift shows runtime artifact disagreement. |
+| **Drifted** | The reconciler detected a difference between the live state and the desired one (marker, revision, container health, or frozen image digest). |
 | **Correcting** | An Enforce-mode auto-fix is in flight. |
 | **Failed** | The deployment or withdrawal errored. The notes column carries the message. |
 | **Withdrawing** | A withdraw is in flight. |
@@ -201,7 +201,9 @@ If the YAML is malformed or larger than 96 KiB, Sencho rejects the save before c
 
 The reconciler runs every minute, but only for Inline blueprints whose live placement approval still matches the resolved targets. To authorize or re-authorize a placement, click **Apply now** on the detail sheet (or **Retry** on a failed row). Sencho opens a rollout preview that lists place and remove outcomes, requirements, and health notes. **Confirm Apply** stores that placement approval and runs the confirmed executor actions. If some nodes fail (for example a remote host is unreachable) or an unmanaged same-name stack blocks placement, Confirm still records approval, but the response and toast report those per-node outcomes instead of a clean success. Changing the compose, selector, name, pin, drift mode, or enabled flag clears placement approval back to pending. Catalog tiles show **pending** or **reapproval required** when confirmation is needed again (for example after a label change adds a new target node).
 
-Raw `POST /api/blueprints/:id/apply` clients must send `{ planFingerprint, actions }` from a fresh `GET .../preview`. A body without that confirmation is rejected.
+The preview also reads out the application's recorded GitOps authority: the **Source accepted**, **Placement approved**, and **Rollout authorized** steps as separate chips, the source and executable artifact evidence behind them, the placement and rollout state, and the per-target observations. An approval recorded as a single combined decision rather than as separate authority steps is labelled a legacy combined approval and is never merged into those steps. An Inline Blueprint has no Git source or executable artifact set, so those two facets are omitted as not applicable while placement and rollout still report what is on record. Confirming binds to the evidence shown: if any recorded authority fact changes before the confirmation is stored, the apply is refused as stale and the dialog refreshes with the new evidence.
+
+Raw `POST /api/blueprints/:id/apply` clients must send `{ planFingerprint, gitopsFingerprint, actions }` from a fresh `GET .../preview`. `gitopsFingerprint` is the evidence digest carried by that preview, and it is `null` only when there is no application evidence to bind. Both fingerprints must still match when the apply is processed; a body whose values no longer match, or that omits `gitopsFingerprint` when the preview carried one, is rejected.
 
 ### Edit
 
@@ -212,6 +214,39 @@ Click **Edit** on the detail sheet. On an Inline Blueprint, editing the compose 
 **Convert to Git** moves an existing live Git source onto this Blueprint. Pick the source, review the preview, and confirm. The Blueprint becomes Git-managed: Git is the content authority, and the previous YAML is stored as a frozen detach snapshot only. Place never runs from that snapshot. When an accepted generation is ready, Sencho authorizes a rollout generation and places the materialized project from that generation onto the approved targets. Credentials stay with the Git source. Conversion also returns placement approval to pending.
 
 The Git Source sheet for that stack becomes read-only until you **Detach Git** or **Retire to Direct**. Save, Remove, and Pull now are blocked there.
+
+### Accept source, approve placement, authorize rollout
+
+A Git-managed Blueprint takes each authority step as its own action. The GitOps section of the Blueprint detail sheet, and the application's page in GitOps, offer the step that is outstanding; once every step is recorded they offer nothing.
+
+- **Accept source** records that a fetched candidate generation is the content to run. It appears when the source policy holds a candidate for review, which is always the case for a source whose policy is not automatic.
+- **Review and approve placement** opens the rollout preview, the same reviewed plan the Inline flow shows: every node to place or remove, with its reachability. Confirming records the placement approval and freezes that blast for the current intent, so a later edit or roster change requires a fresh review. The button appears once source is accepted and the current candidate has no placement approval.
+- **Authorize rollout** evaluates registry preflight, records the rollout authorization, and starts the sequential rollout across the approved targets. It appears while the rollout is not authorized or while the recorded authorization was granted against earlier inputs. Authorization needs resolved executable artifact evidence for the accepted generation, which the artifact card reports: while that evidence is unresolved or unavailable, the authorization is refused with the artifact identity as the reason, and a blocked registry preflight refuses it with the registry reason. When a target cannot start, the authorization is recorded and the surface reports what stopped the rollout.
+
+A disabled Blueprint withholds placement approval and rollout authorization until you enable it again, the same way **Apply now** waits for an Inline Blueprint to be enabled. Accepting source stays available while a Blueprint is disabled, because reviewing content changes nothing on the fleet.
+
+The **Apply now** flow stays Inline-only. For a Git-managed Blueprint the rollout preview is a placement review: its confirm writes the placement approval instead of applying the frozen snapshot.
+
+### Pause, resume, replan, or supersede a rollout
+
+A live rollout also offers lifecycle controls on the same GitOps section, on the **Rollout controls** row:
+
+- **Pause rollout** stops the rollout from advancing and asks for a reason. Nodes keep running what they already deployed, and a paused rollout never reads as converged.
+- **Resume rollout** clears the pause and continues the sequential rollout when it is still authorized. If the authorization is no longer live, the surface says so instead of starting anything.
+- **Replan placement** re-derives the Blueprint's target nodes and opens a fresh placement review, which withdraws the existing placement approval and rollout authorization. It appears in the overflow menu and refuses when the current placement already matches the Blueprint, so a review that is still accurate is not invalidated for nothing.
+- **Supersede rollout** withdraws the rollout authorization and marks that rollout generation superseded. Nodes that already received it keep running it; the rollout reads as superseded until you authorize a new one.
+
+Rollout authorization needs resolved executable artifact evidence for the accepted generation. While that evidence is unresolved, the authorization is refused with the artifact identity as the reason, and the lifecycle controls do not work around it.
+
+### Roll back a rollout
+
+Every Git-managed rollout deploy captures the node's previous project as a recovery generation before it applies anything, which is what a later rollback restores from. **Roll back rollout** lists the application's earlier generations, newest first, and asks for the scope: one target, the targets recorded as failed, unreachable, or stale, or every changed target in the rollout. A target already running the selected generation is skipped.
+
+Each node in the scope must hold a recovery generation that names the selected application generation. A node keeps the generation captured immediately before its latest rollout, so an older selection has no recovery generation to restore from and is reported as a failed target; the rollout then reads as a partially failed rollback rather than a completion.
+
+Rollback restores the authored project. It does not restore application data, and a locally built image is rebuilt from its authored inputs unless the node's recovery generation still holds the previous image. The per-target result states what actually happened.
+
+A Blueprint with drift mode **enforce** keeps enforcing its current revision, so it will re-apply the accepted generation on the next reconciliation after a rollback. Switch that Blueprint to observe or suggest while a rollback should stand.
 
 ### Detach Git-managed content
 
@@ -275,6 +310,15 @@ Two notification events fire from the reconciler:
 - `blueprint_drift_correction_failed` (error severity), in Enforce mode when an auto-fix attempt fails.
 
 Both events route through the standard alert pipeline. Configure delivery channels under [Notification routing](/features/alerts-notifications#notification-routing).
+
+GitOps authority and rollout lifecycle decisions are also recorded in the notification history as they happen:
+
+- source acceptance and rollout authorization for a Git-managed Blueprint, and placement approval for any Blueprint, including an Inline apply;
+- rollout pause (with the reason you entered), resume, and supersede, including the automatic supersede of the previous rollout generation when a new one is authorized;
+- rollout rollback start, completion, and partial failure;
+- a stateful deployment held for its first-deploy confirmation, or for confirmation of a stateful revision change.
+
+Each entry names the Blueprint and records the GitOps operation it came from. These categories are history-only: they appear in the bell, and they are not sent to your configured delivery channels.
 
 ## Security and trust boundaries
 
@@ -355,7 +399,7 @@ A future Volume Migration feature will automate this with app-aware backup tooli
     The deployment row moves to **Failed** and records the Docker or registry error. Resolve the daemon, socket, registry credentials, rate limit, disk, or volume-permission issue on the affected node, then click **Apply now**. Watch that node's stack activity and security scan status after retry.
   </Accordion>
   <Accordion title="Drift is reported but never gets corrected">
-    Confirm the drift policy is **Enforce** and that **Reconciler enabled** is on. Open the detail sheet to check the row's status and the most recent drift summary. If the row is sitting in **Awaiting confirmation** instead of **Drifted**, that is expected: a compose edit on a stateful or state-unknown blueprint never auto-corrects under any drift mode, including Enforce. It always waits for an explicit **Confirm deploy** so a human signs off before the new revision touches that node's data. Enforce's auto-fix only applies to container-level drift (a stopped or crashed container) on a deployment that is already **Active**.
+    Confirm the drift policy is **Enforce** and that **Reconciler enabled** is on. Open the detail sheet to check the row's status and the most recent drift summary. If the row is sitting in **Awaiting confirmation** instead of **Drifted**, that is expected: a compose edit on a stateful or state-unknown blueprint never auto-corrects under any drift mode, including Enforce. It always waits for an explicit **Confirm deploy** so a human signs off before the new revision touches that node's data. Enforce's auto-fix applies to container-level drift (a stopped or crashed container) and to frozen image-digest disagreement on a deployment that is already **Active**. Unreachable nodes and missing digest evidence stay unverified and never auto-correct.
   </Accordion>
   <Accordion title="'Apply now' is greyed out">
     **Apply now** requires the blueprint to be enabled and Inline. Open the detail sheet, click **Enable** to flip the reconciler back on, then click **Apply now**. The button is also disabled while the detail sheet is in edit mode; save or cancel the edit first. Git-managed Blueprints do not offer Apply now: content comes from Git, and place runs from an authorized accepted generation rather than from the editor or the detach snapshot. Use **Detach Git** if you need Inline editing and Confirm Apply again.
@@ -393,7 +437,7 @@ A future Volume Migration feature will automate this with app-aware backup tooli
     Not through a one-click history. Blueprints intentionally do not keep a versioned revision history. To revert an Inline Blueprint, paste the prior compose into the editor and save; the reconciler treats the change as a new revision and redeploys. Git-managed Blueprints place from an authorized accepted generation, not from the detach snapshot. Detach Git first if you need Inline paste-and-apply.
   </Accordion>
   <Accordion title="Can a Git-managed Blueprint deploy?">
-    Yes, from an authorized accepted Git generation. Place never uses the frozen detach snapshot on the Blueprint row. Convert and Adopt bind the live Git source; Detach restores Inline editing when a snapshot exists.
+    Yes, from an authorized accepted Git generation. Accept the source, approve the placement, then authorize the rollout; each step is its own action on the Blueprint sheet's GitOps section and on the application's page in GitOps. Authorization requires resolved executable artifact evidence for the accepted generation, so the artifact card decides whether the rollout can be authorized; place never uses the frozen detach snapshot on the Blueprint row. Convert and Adopt bind the live Git source; Detach restores Inline editing when a snapshot exists.
   </Accordion>
   <Accordion title="Does the snapshot in 'Snapshot, then evict' contain my database?">
     No. The snapshot captures the compose YAML only, so you can redeploy the same definition elsewhere. Volume bytes (the database files, the cached state, the uploads directory) are removed by `docker compose down` along with the named volumes. To preserve data across an eviction, capture the volume by hand before withdrawing.

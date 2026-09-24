@@ -123,6 +123,101 @@ describe('NotificationRoutingSection', () => {
         expect(JSON.stringify(body)).not.toContain('providers');
     });
 
+    it('omits a redacted Discord channel_url on edit save when the endpoint is not dirty', async () => {
+        const discordRoute = {
+            id: 42,
+            name: 'Ops Discord',
+            node_id: null,
+            stack_patterns: ['app'],
+            label_ids: null,
+            categories: null,
+            levels: null,
+            channel_type: 'discord' as const,
+            channel_url: 'https://discord.com/<redacted>',
+            config: null,
+            secrets_redacted: true,
+            priority: 0,
+            enabled: true,
+            created_at: 1,
+            updated_at: 1,
+        };
+        mockedFetch.mockImplementation(async (url: string, opts?: { method?: string }) => {
+            if (url === '/notification-routes' && !opts?.method) {
+                return { ok: true, json: async () => [discordRoute] };
+            }
+            if (url === '/stacks') return { ok: true, json: async () => ['app'] };
+            if (url === '/labels') return { ok: true, json: async () => [] };
+            if (url === '/notification-routes/42' && opts?.method === 'PUT') {
+                return { ok: true, json: async () => discordRoute };
+            }
+            return { ok: true, json: async () => ([]) };
+        });
+
+        render(<NotificationRoutingSection />);
+        await waitFor(() => expect(screen.getByText('Ops Discord')).toBeInTheDocument());
+        const card = screen.getByText('Ops Discord').closest('.rounded-lg');
+        await userEvent.click(card!.querySelector('svg.lucide-pencil')!.closest('button')!);
+
+        const nameInput = await screen.findByPlaceholderText('e.g. Production alerts');
+        expect(screen.getByDisplayValue('https://discord.com/<redacted>')).toBeInTheDocument();
+        await userEvent.clear(nameInput);
+        await userEvent.type(nameInput, 'Ops Discord renamed');
+        await userEvent.click(screen.getByRole('button', { name: 'Update' }));
+
+        await waitFor(() => expect(findRoutePut()).toBeTruthy());
+        const body = JSON.parse((findRoutePut()![1] as { body: string }).body);
+        expect(body.name).toBe('Ops Discord renamed');
+        expect(body.channel_type).toBe('discord');
+        expect(body).not.toHaveProperty('channel_url');
+        expect(JSON.stringify(body)).not.toContain('<redacted>');
+    });
+
+    it('sends a replaced Discord channel_url on edit save', async () => {
+        const discordRoute = {
+            id: 42,
+            name: 'Ops Discord',
+            node_id: null,
+            stack_patterns: ['app'],
+            label_ids: null,
+            categories: null,
+            levels: null,
+            channel_type: 'discord' as const,
+            channel_url: 'https://discord.com/<redacted>',
+            config: null,
+            secrets_redacted: true,
+            priority: 0,
+            enabled: true,
+            created_at: 1,
+            updated_at: 1,
+        };
+        mockedFetch.mockImplementation(async (url: string, opts?: { method?: string }) => {
+            if (url === '/notification-routes' && !opts?.method) {
+                return { ok: true, json: async () => [discordRoute] };
+            }
+            if (url === '/stacks') return { ok: true, json: async () => ['app'] };
+            if (url === '/labels') return { ok: true, json: async () => [] };
+            if (url === '/notification-routes/42' && opts?.method === 'PUT') {
+                return { ok: true, json: async () => discordRoute };
+            }
+            return { ok: true, json: async () => ([]) };
+        });
+
+        render(<NotificationRoutingSection />);
+        await waitFor(() => expect(screen.getByText('Ops Discord')).toBeInTheDocument());
+        const card = screen.getByText('Ops Discord').closest('.rounded-lg');
+        await userEvent.click(card!.querySelector('svg.lucide-pencil')!.closest('button')!);
+
+        const urlInput = await screen.findByDisplayValue('https://discord.com/<redacted>');
+        await userEvent.clear(urlInput);
+        await userEvent.type(urlInput, 'https://discord.com/api/webhooks/9/new-token');
+        await userEvent.click(screen.getByRole('button', { name: 'Update' }));
+
+        await waitFor(() => expect(findRoutePut()).toBeTruthy());
+        const body = JSON.parse((findRoutePut()![1] as { body: string }).body);
+        expect(body.channel_url).toBe('https://discord.com/api/webhooks/9/new-token');
+        expect(JSON.stringify(body)).not.toContain('<redacted>');
+    });
+
     it('sends empty keyed config when switching a stateless route to keyed', async () => {
         const statelessRoute = {
             ...APPRISE_ROUTE,

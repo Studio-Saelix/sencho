@@ -1,4 +1,6 @@
 import type { MissingExternalNetwork } from '../network/missingExternalNetworks';
+import type { DigestPinsMap } from '../gitops/digestPins';
+import type { OverlayBinding } from '../gitops/sops/types';
 
 export type MissingExternalNetworksKind =
   | 'prompt'
@@ -65,5 +67,12 @@ export interface DeployInvocationContext {
   gitopsDeployOperationId?: string;
   /** GitOps decrypt overlay directory; only valid for Git-sourced deploy/recovery arms. */
   overlayDir?: string;
-  overlayBinding?: import('../gitops/sops/types').OverlayBinding;
+  overlayBinding?: OverlayBinding;
+  /**
+   * Ephemeral per-service image pins (`serviceName → name@sha256:…`) used by
+   * Blueprint Enforce digest repair and remote apply when pins are supplied.
+   * Authored compose on disk stays tag/syntax unchanged; Compose layers a
+   * temp overlay and uses `--pull never`.
+   */
+  digestPins?: DigestPinsMap;
 }

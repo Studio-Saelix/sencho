@@ -144,6 +144,25 @@ export class GitOpsStore {
   }
 
   /**
+   * The live Blueprint application whose current intent deploys this stack.
+   *
+   * A Blueprint-managed stack carries no application id on disk, so the stack
+   * name is the only identity the owning node has. The lookup joins through the
+   * current intent, which is where the deploy stack name is frozen, so a stack
+   * left behind by a superseded intent does not resolve to the application that
+   * no longer asks for it.
+   */
+  getLiveBlueprintApplicationByDeployStack(stackName: string): GitOpsApplicationRow | undefined {
+    return this.db().prepare(
+      `SELECT a.* FROM gitops_applications a
+       JOIN gitops_intent_revisions i ON i.id = a.intent_revision_id
+       WHERE i.deploy_stack_name = ?
+         AND a.target_mode IN ('inline_blueprint','blueprint')
+         AND a.lifecycle_status IN ('active','creating')`,
+    ).get(stackName) as GitOpsApplicationRow | undefined;
+  }
+
+  /**
    * The live Blueprint-mode (or demoted inline) application that still holds
    * the original Direct stack as its credential carrier.
    */
@@ -319,6 +338,22 @@ export class GitOpsStore {
     return this.db().prepare('SELECT * FROM gitops_artifact_sets WHERE id = ?').get(id) as GitOpsArtifactSetRow | undefined;
   }
 
+  /**
+   * The newest artifact evidence recorded for one generation, if any.
+   *
+   * Used when a restore has to rebind an expectation to a generation that is
+   * no longer the application's current one. The reader decides whether the row
+   * is usable for that generation; this only answers what exists.
+   */
+  newestArtifactSetIdForGeneration(generationId: string): string | null {
+    const row = this.db().prepare(
+      `SELECT id FROM gitops_artifact_sets
+       WHERE generation_id = ?
+       ORDER BY evidence_version DESC LIMIT 1`,
+    ).get(generationId) as { id: string } | undefined;
+    return row?.id ?? null;
+  }
+
   getIntentRevision(id: string): GitOpsIntentRevisionRow | undefined {
     return this.db().prepare('SELECT * FROM gitops_intent_revisions WHERE id = ?').get(id) as GitOpsIntentRevisionRow | undefined;
   }
@@ -329,6 +364,13 @@ export class GitOpsStore {
 
   getRolloutGeneration(id: string): GitOpsRolloutGenerationRow | undefined {
     return this.db().prepare('SELECT * FROM gitops_rollout_generations WHERE id = ?').get(id) as GitOpsRolloutGenerationRow | undefined;
+  }
+
+  /** Every rollout generation the application ever opened, newest first. */
+  listRolloutGenerationsForApplication(applicationId: string): GitOpsRolloutGenerationRow[] {
+    return this.db().prepare(
+      'SELECT * FROM gitops_rollout_generations WHERE application_id = ? ORDER BY created_at DESC',
+    ).all(applicationId) as GitOpsRolloutGenerationRow[];
   }
 
   getApproval(id: string): GitOpsApprovalRow | undefined {
@@ -975,6 +1017,23 @@ export class GitOpsStore {
       placementApprovalRef: row.placement_approval_ref,
       preflightFingerprint: row.preflight_fingerprint,
     };
+  }
+
+  /**
+   * Every live Blueprint-mode application, in both blueprint modes.
+   *
+   * The portfolio workplace aggregates these alongside Direct applications.
+   * `listAuthorizedBlueprintApplications` is not this: it holds the narrower
+   * restart-reconstruction set (rollout authorization already minted), which
+   * would hide every Blueprint still waiting for its first rollout decision.
+   */
+  listLiveBlueprintApplications(): GitOpsApplicationRow[] {
+    return this.db().prepare(
+      `SELECT * FROM gitops_applications
+       WHERE target_mode IN ('inline_blueprint','blueprint')
+         AND lifecycle_status = 'active'
+       ORDER BY blueprint_id ASC`,
+    ).all() as GitOpsApplicationRow[];
   }
 
   /**

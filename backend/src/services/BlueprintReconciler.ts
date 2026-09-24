@@ -4,7 +4,7 @@ import {
     type BlueprintDeployment,
     type Node,
 } from './DatabaseService';
-import { BlueprintService, type DeployOutcome } from './BlueprintService';
+import { BlueprintService, type DeployOutcome, type DriftCause } from './BlueprintService';
 import { BlueprintAnalyzer } from './BlueprintAnalyzer';
 import { NodeLabelService } from './NodeLabelService';
 import { NotificationService } from './NotificationService';
@@ -277,7 +277,9 @@ export class BlueprintReconciler {
 
     private async reconcileBlueprint(blueprint: Blueprint, allNodes: Node[]): Promise<void> {
         if (isGitManagedBlueprint(blueprint)) {
-            diagnosticLog('reconcile skipped: git-managed content', { blueprintId: blueprint.id });
+            // Skip place/withdraw/content apply; still observe runtime identity
+            // and run Observe/Suggest/Enforce against the authorized generation.
+            await this.reconcileGitManagedDriftObservation(blueprint, allNodes);
             return;
         }
         const preview = await buildBlueprintPreview(blueprint.id);
@@ -395,8 +397,18 @@ export class BlueprintReconciler {
             case 'check_observe':
             case 'check_enforce': {
                 const driftResult = await svc.checkForDrift(blueprint, node);
-                if (!driftResult.drifted) return { ...base, status: 'ok' };
-                const reason = driftResult.reason ?? 'unknown drift';
+                if (driftResult.kind === 'matched') return { ...base, status: 'ok' };
+                if (driftResult.kind === 'unverified') {
+                    // Record nothing as drifted and never Enforce: unreachable
+                    // or missing evidence must not look like a corrective target.
+                    diagnosticLog('drift unverified', {
+                        blueprintId: blueprint.id,
+                        nodeId: node.id,
+                        reason: driftResult.reason ?? 'unverified',
+                    });
+                    return { ...base, status: 'ok' };
+                }
+                const reason = driftResult.reason;
                 commitBlueprintDeploymentCause('drift_observed', blueprint.id, node.id, {
                     status: 'drifted',
                     last_checked_at: Date.now(),
@@ -404,7 +416,7 @@ export class BlueprintReconciler {
                     drift_summary: reason,
                 }, null);
                 // observe/suggest/enforce: notify path via handleDrift still respects drift_mode
-                await this.handleDrift(blueprint, node, reason);
+                await this.handleDrift(blueprint, node, reason, driftResult.cause);
                 return { ...base, status: 'ok' };
             }
             default:
@@ -756,7 +768,12 @@ export class BlueprintReconciler {
         return decision;
     }
 
-    private async handleDrift(blueprint: Blueprint, node: Node, reason: string): Promise<void> {
+    private async handleDrift(
+        blueprint: Blueprint,
+        node: Node,
+        reason: string,
+        cause: DriftCause,
+    ): Promise<void> {
         const notifications = NotificationService.getInstance();
         switch (blueprint.drift_mode) {
             case 'observe':
@@ -790,7 +807,11 @@ export class BlueprintReconciler {
                     status: 'correcting',
                     last_checked_at: Date.now(),
                 }, null);
-                const result = await BlueprintService.getInstance().deployToNode(blueprint, node);
+                const result = cause === 'digest'
+                    ? await BlueprintService.getInstance().enforceDigestRepair(blueprint, node)
+                    : isGitManagedBlueprint(blueprint)
+                        ? await BlueprintService.getInstance().reapplyAuthorizedMaterialization(blueprint, node)
+                        : await BlueprintService.getInstance().deployToNode(blueprint, node);
                 if (result.status !== 'active') {
                     notifications.dispatchAlert(
                         'error',
@@ -801,6 +822,49 @@ export class BlueprintReconciler {
                 }
                 return;
             }
+        }
+    }
+
+    /**
+     * Git-managed Blueprints skip place/withdraw/content apply on the tick, but
+     * still re-observe runtime identity against the already-authorized generation
+     * and apply Observe/Suggest/Enforce from `drift_mode`.
+     */
+    private async reconcileGitManagedDriftObservation(
+        blueprint: Blueprint,
+        allNodes: Node[],
+    ): Promise<void> {
+        const deployments = DatabaseService.getInstance().listDeployments(blueprint.id);
+        if (deployments.length === 0) {
+            diagnosticLog('git-managed drift skipped: no deployments', { blueprintId: blueprint.id });
+            return;
+        }
+        const byId = new Map(allNodes.map((n) => [n.id, n]));
+        const svc = BlueprintService.getInstance();
+        for (const dep of deployments) {
+            if (dep.status !== 'active' && dep.status !== 'drifted' && dep.status !== 'correcting') {
+                continue;
+            }
+            const node = byId.get(dep.node_id);
+            if (!node) continue;
+            const driftResult = await svc.checkForDrift(blueprint, node);
+            if (driftResult.kind === 'matched') continue;
+            if (driftResult.kind === 'unverified') {
+                diagnosticLog('git-managed drift unverified', {
+                    blueprintId: blueprint.id,
+                    nodeId: node.id,
+                    reason: driftResult.reason ?? 'unverified',
+                });
+                continue;
+            }
+            const reason = driftResult.reason;
+            commitBlueprintDeploymentCause('drift_observed', blueprint.id, node.id, {
+                status: 'drifted',
+                last_checked_at: Date.now(),
+                last_drift_at: Date.now(),
+                drift_summary: reason,
+            }, null);
+            await this.handleDrift(blueprint, node, reason, driftResult.cause);
         }
     }
 

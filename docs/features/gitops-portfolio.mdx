@@ -1,0 +1,76 @@
+---
+title: GitOps Portfolio
+description: A hub-wide workplace listing every Git-managed application, its canonical source/rollout/runtime evidence, and a triage queue of everything waiting on an operator.
+---
+
+The GitOps portfolio answers one question for the whole control plane: what is GitOps doing across every node right now, and what needs attention. It aggregates Direct Git sources and Blueprint-managed applications into a single hub-owned view, so reconciliation failures, pending reviews, drift, and unreachable targets surface in one place without visiting each node or stack.
+
+<Note>
+  The GitOps portfolio is available on every tier, including Community.
+</Note>
+
+## Open it
+
+Select **GitOps** in the main navigation (next to Fleet), or navigate to `/nodes/local/gitops`. The page lives on the hub: the active-node switcher does not change what it covers, and the entry is hidden while a remote node is selected.
+
+## Reading the page
+
+<Frame>
+  <img src="/images/gitops-portfolio/workplace.png" alt="The GitOps portfolio: a masthead reading Needs action with application and attention counts, a coverage notice naming an unreachable node, a filter bar, an Attention required list of source failed and review required entries, and an application table with source, runtime, health, drift, and attention columns" />
+</Frame>
+
+The masthead leads with the portfolio's verdict (`Converged`, `In progress`, `Needs attention`, `Needs action`, or `Unknown` when evidence is missing), followed by counts for applications, attention-required, drifted, in-progress, and converged applications. Qualified convergence counts separately from exact convergence: an application whose runtime matches its intent but whose executable artifact could not be proven bit-identical is shown as `Converged · qualified`, never as fully exact.
+
+The application list shows, per application:
+
+- the application name and target (**Direct** node or **Blueprint** with its target count)
+- the repository host/path and configured ref (secret-safe; credentials never appear)
+- canonical source, placement/rollout, runtime, and health states, using the same words as the Git Source sheet everywhere else in Sencho
+- confirmed drift, with its class (source, runtime, placement, and so on)
+- the freshest activity timestamp Sencho holds for it
+- attention chips when something is waiting on an operator
+
+Rows with pending or failed items are tinted so the list reads as a signal, not a spreadsheet. Statuses that arrived from a node running a newer Sencho build are shown with their raw state and flagged as unknown evidence rather than being reinterpreted as something else.
+
+## The attention queue
+
+Above the list, the **Attention required** section groups everything currently waiting: failed reconciliations, pending reviews or authorizations, preflight blocks like an unready private registry, partial or paused rollouts, drift, stale or unreachable targets, and recovery states. Each entry names the application and states the reason in one inline line, so it is readable without hovering anything. Opening an entry shows that application's full state (see [One application](#one-application) below).
+
+Failure-toned entries (failures, unreachable targets, failed rollbacks or recovery) sort ahead of pending decisions.
+
+## One application
+
+Selecting an application name in the list, or an entry in the attention queue, opens that application's view without leaving the portfolio. It is read-only and shows, in order:
+
+<Frame>
+  <img src="/images/gitops-portfolio/application-view.png" alt="The application view for a Direct Git application: an identity card with repository, ref, commits and generations, an attention entry reading artifact unverified, source accepted, placement n/a and rollout n/a chips above the source, artifact and placement state cards, and one target card reading applied not deployed" />
+</Frame>
+
+- **Identity**: the target (Direct node or Blueprint), the repository and ref, the desired and fetched commits, the candidate and accepted source generations, and for a Blueprint application the rollout generation.
+- **Attention**: every reason the application is waiting on an operator, each with its one-line explanation.
+- **Application state**: the three authority steps as separate chips (**source accepted**, **placement approved**, **rollout authorized**, plus a **legacy combined approval** chip when one was recorded), then the source, artifact, placement, and rollout state cards. For a Git-managed Blueprint application, the step that is outstanding appears here as an action: **Accept source**, **Review and approve placement**, or **Authorize rollout**. A live rollout also offers **Pause rollout** or **Resume rollout**, with replan, supersede, and rollback in the overflow menu.
+- **Targets**: one card per node, with its runtime state, health, connectivity, last known good state, the deployed generation, and the artifact identity observed running there. A target is never folded into an aggregate; a node reporting a state this Sencho build does not recognize still gets a card that says so.
+- **Drift**: each confirmed divergence, expected versus observed.
+- Anything Sencho could not prove about the state shown, stated last.
+
+When some targets could not be reached, a notice names them so their cards are not read as current. The view's URL carries the application, so it can be bookmarked or shared, and the browser's Back button (or **All applications**) returns to the list with its filters intact.
+
+To act on the application, use the outstanding authority action in the state section when one is offered, or the button in the view's header: **Open stack** takes a Direct application to its stack's Git Source sheet, and **Open Blueprint deployments** takes a Blueprint application to the Fleet deployments tab.
+
+## Filtering and search
+
+Search matches application names, repositories, and refs. Filter chips narrow the list to applications requiring attention, to a target mode (Direct or Blueprint), or combine with a node, drift class, or evidence-state filter (stale, unreachable, unknown). The node filter means involvement: a Blueprint application spans every node it targets and stays visible under each of them.
+
+Filter state is part of the URL, so a narrowed view can be bookmarked or shared.
+
+## Freshness and honesty
+
+The portfolio refreshes on GitOps transitions, not on a timer. When a node cannot be reached, it is named in a coverage banner and its applications stay absent from the list rather than being reported with evidence Sencho does not hold. When a refresh fails after a good read, the page keeps the previous data and says it is showing last-known evidence and when it came from.
+
+## What it is for
+
+- An operator's daily sweep: open GitOps, read the masthead verdict, and work the attention queue top to bottom.
+- Verifying a rollout or webhook pipeline end to end, across stacks and nodes.
+- Finding drift concentrated on a node or in one class, for example all runtime drift across the fleet at once.
+
+A Git-managed Blueprint application can be acted on in place from its state section: the outstanding authority step, the rollout lifecycle controls, and rollout rollback. Everything else keeps its home on the owning stack or Blueprint surface, and the view links there instead of duplicating it.

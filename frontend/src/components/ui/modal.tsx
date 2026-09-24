@@ -95,7 +95,7 @@ function HeaderShell({
         {kicker}
       </div>
       <TitleComponent
-        className="mt-1 font-heading text-[1.75rem] leading-tight text-stat-value break-all line-clamp-3"
+        className="mt-1 font-heading text-[1.75rem] leading-tight text-stat-value break-words text-balance"
         title={typeof title === 'string' ? title : undefined}
       >
         {title}
@@ -161,7 +161,7 @@ export function ModalBody({ className, fill, ...props }: ModalBodyProps) {
     <div
       className={cn(
         'px-6 py-5 space-y-4 overflow-y-auto',
-        fill ? 'min-h-0 flex-1' : 'max-h-[calc(85vh-12rem)]',
+        fill ? 'min-h-0 flex-1' : 'max-h-[calc(85dvh-12rem)]',
         className,
       )}
       {...props}

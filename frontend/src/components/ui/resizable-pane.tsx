@@ -124,6 +124,13 @@ export function ResizablePane({ width, onCommitWidth, config, children }: Resiza
     onCommitWidth(nextWidth);
   }, [applyPaneWidth, config.bounds.min, config.keyboardStep, config.side, effectiveMax, effectiveWidth, onCommitWidth]);
 
+  // Double-click the handle to restore the default width, matching common split-pane editors.
+  const onDoubleClick = useCallback(() => {
+    const nextWidth = Math.min(effectiveMax, config.bounds.default);
+    applyPaneWidth(nextWidth);
+    onCommitWidth(nextWidth);
+  }, [applyPaneWidth, config.bounds.default, effectiveMax, onCommitWidth]);
+
   const pane = (
     <div ref={paneRef} id={paneId} data-testid={`${config.testId}-pane`} className={config.paneClassName} style={{ width: effectiveWidth }}>
       {children}
@@ -142,6 +149,8 @@ export function ResizablePane({ width, onCommitWidth, config, children }: Resiza
       aria-valuetext={`${effectiveWidth} pixels`}
       tabIndex={0}
       data-testid={`${config.testId}-separator`}
+      data-dragging={dragging ? '' : undefined}
+      title="Drag to resize, double-click to reset"
       className={config.separatorClassName}
       style={{ width: config.separatorSize }}
       onPointerDown={onPointerDown}
@@ -150,13 +159,14 @@ export function ResizablePane({ width, onCommitWidth, config, children }: Resiza
       onPointerCancel={endDrag}
       onLostPointerCapture={endDrag}
       onKeyDown={onKeyDown}
+      onDoubleClick={onDoubleClick}
     >
       <span
         className="absolute inset-y-0 left-1/2 -translate-x-1/2"
         style={{ width: config.boundsFootprint }}
         aria-hidden
       >
-        <span className="absolute inset-y-0 left-1/2 w-px -translate-x-1/2 bg-glass-border transition-colors group-hover:bg-brand group-focus-visible:bg-brand" />
+        <span className="absolute inset-y-0 left-1/2 w-px -translate-x-1/2 bg-glass-border transition-colors group-hover:bg-brand group-focus-visible:bg-brand group-data-[dragging]:bg-brand" />
       </span>
     </div>
   );

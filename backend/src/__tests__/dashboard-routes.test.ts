@@ -2,15 +2,13 @@
  * Integration tests for the dashboard router.
  *
  * Covers:
- *  - Both endpoints reject unauthenticated requests (global authGate).
+ *  - The endpoint rejects unauthenticated requests (global authGate).
  *  - GET /api/dashboard/configuration returns the documented shape and
  *    applies tier-correct `locked` flags for the Community and paid
  *    personas (toggled via LicenseService spies).
  *  - Alert-rule counts are scoped to stacks present on the active node
  *    (dashboard and fleet local-node row agree on exact cardinality).
- *  - GET /api/dashboard/stack-restarts clamps the `days` query parameter
- *    to [1, 30] and falls back to 7 for invalid inputs.
- *  - Neither endpoint leaks secret material (agent URLs, tokens) in the
+ *  - The endpoint does not leak secret material (agent URLs, tokens) in the
  *    response payload.
  */
 import fs from 'fs';
@@ -198,7 +196,7 @@ describe('GET /api/dashboard/configuration', () => {
     }
   });
 
-  it('scopes alertRules to stacks on the active node for dashboard and fleet local row', async () => {
+  it('scopes alertRules to stacks on the active node', async () => {
     const db = DatabaseService.getInstance();
     const composeDir = process.env.COMPOSE_DIR as string;
     const stackName = 'cfg-alert-scope';
@@ -231,55 +229,11 @@ describe('GET /api/dashboard/configuration', () => {
       const dash = await request(app).get('/api/dashboard/configuration').set('Cookie', adminCookie);
       expect(dash.status).toBe(200);
       expect(dash.body.notifications.alertRules).toBe(2);
-
-      const fleet = await request(app).get('/api/fleet/configuration').set('Cookie', adminCookie);
-      expect(fleet.status).toBe(200);
-      expect(Array.isArray(fleet.body)).toBe(true);
-      const localRow = fleet.body.find(
-        (row: { type: string; configuration: { notifications: { alertRules: number } } | null }) =>
-          row.type === 'local' && row.configuration != null,
-      );
-      expect(localRow).toBeDefined();
-      expect(localRow.configuration.notifications.alertRules).toBe(2);
     } finally {
       for (const id of alertIds) {
         db.deleteStackAlert(id);
       }
       fs.rmSync(stackDir, { recursive: true, force: true });
     }
-  });
-});
-
-describe('GET /api/dashboard/stack-restarts', () => {
-  it('rejects unauthenticated requests with 401', async () => {
-    const res = await request(app).get('/api/dashboard/stack-restarts');
-    expect(res.status).toBe(401);
-  });
-
-  it('returns an array for authenticated requests', async () => {
-    const res = await request(app).get('/api/dashboard/stack-restarts').set('Cookie', adminCookie);
-    expect(res.status).toBe(200);
-    expect(Array.isArray(res.body)).toBe(true);
-  });
-
-  it('clamps days=0 to the 7-day default', async () => {
-    const res = await request(app).get('/api/dashboard/stack-restarts?days=0').set('Cookie', adminCookie);
-    expect(res.status).toBe(200);
-    // Cannot easily observe the clamped value from the response shape, but
-    // a 200 with an array proves the route did not bail on the invalid
-    // input.
-    expect(Array.isArray(res.body)).toBe(true);
-  });
-
-  it('clamps days=999 to the 30-day ceiling', async () => {
-    const res = await request(app).get('/api/dashboard/stack-restarts?days=999').set('Cookie', adminCookie);
-    expect(res.status).toBe(200);
-    expect(Array.isArray(res.body)).toBe(true);
-  });
-
-  it('falls back to the 7-day default for a non-numeric days value', async () => {
-    const res = await request(app).get('/api/dashboard/stack-restarts?days=banana').set('Cookie', adminCookie);
-    expect(res.status).toBe(200);
-    expect(Array.isArray(res.body)).toBe(true);
   });
 });

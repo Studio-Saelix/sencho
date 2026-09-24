@@ -347,6 +347,8 @@ notificationsRouter.post('/test', authMiddleware, async (req: Request, res: Resp
       res.status(400).json({ error: `type must be ${NOTIFICATION_CHANNEL_TYPES.join(', ')}` });
       return;
     }
+    const redactedErr = redactedChannelWriteError(type, url, config, config);
+    if (redactedErr) { res.status(400).json({ error: redactedErr }); return; }
     const channelErr = validateNotificationChannel(type, url, config);
     if (channelErr) { res.status(400).json({ error: `url ${channelErr}` }); return; }
     const resolvedTemplate = resolvePayloadTemplate(payload_template, null, type);
@@ -398,6 +400,8 @@ notificationRoutesRouter.post('/', authMiddleware, async (req: Request, res: Res
       res.status(400).json({ error: `channel_type must be ${NOTIFICATION_CHANNEL_TYPES.join(', ')}` });
       return;
     }
+    const redactedErr = redactedChannelWriteError(channel_type, channel_url, config, config);
+    if (redactedErr) { res.status(400).json({ error: redactedErr }); return; }
     const channelUrlErr = validateNotificationChannel(channel_type, channel_url, config);
     if (channelUrlErr) { res.status(400).json({ error: `channel_url ${channelUrlErr}` }); return; }
     if (priority !== undefined && (typeof priority !== 'number' || !Number.isFinite(priority))) {

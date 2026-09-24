@@ -72,6 +72,8 @@ describe('gitops json codecs', () => {
       platform: 'linux/amd64',
       indexDigest: 'sha256:aaa',
       platformDigest: 'sha256:aaa',
+      platformVariants: null,
+      localDigests: null,
       buildContextFingerprint: null,
       producedImageId: null,
       failureClass: null,

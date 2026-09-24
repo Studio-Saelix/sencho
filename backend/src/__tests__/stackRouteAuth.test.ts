@@ -30,6 +30,14 @@ describe('classifyStackApiPath', () => {
       expect(classifyStackApiPath('GET', '/stacks/web/git-source/manifest')).toEqual({
         kind: 'named-stack', stackName: 'web', action: 'stack:read',
       });
+      // Hub-to-remote Blueprint digest observation; missing this rule fails
+      // closed as unknown-named and 403s proxied callers (and non-admin hub callers).
+      expect(classifyStackApiPath('GET', '/stacks/web/runtime-artifact-identity')).toEqual({
+        kind: 'named-stack', stackName: 'web', action: 'stack:read',
+      });
+      expect(classifyStackApiPath('GET', '/stacks/web/effective-artifact-context')).toEqual({
+        kind: 'named-stack', stackName: 'web', action: 'stack:read',
+      });
       expect(classifyStackApiPath('POST', '/stacks/web/drift/recheck')).toEqual({
         kind: 'named-stack', stackName: 'web', action: 'stack:read',
       });
@@ -130,6 +138,7 @@ describe('classifyStackApiPath', () => {
       expect(classifyStackApiPath('GET', '/stacks/')).toEqual({ kind: 'static' });
       expect(classifyStackApiPath('POST', '/stacks')).toEqual({ kind: 'static' });
       expect(classifyStackApiPath('GET', '/stacks/statuses')).toEqual({ kind: 'static' });
+      expect(classifyStackApiPath('GET', '/stacks/readiness-summary')).toEqual({ kind: 'static' });
       expect(classifyStackApiPath('GET', '/stacks/discovery')).toEqual({ kind: 'static' });
       expect(classifyStackApiPath('POST', '/stacks/import/scan')).toEqual({ kind: 'static' });
       expect(classifyStackApiPath('POST', '/stacks/import/move')).toEqual({ kind: 'static' });

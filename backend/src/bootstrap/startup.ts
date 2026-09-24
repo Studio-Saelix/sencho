@@ -38,6 +38,7 @@ import { sanitizeForLog } from '../utils/safeLog';
 import { PORT } from '../helpers/constants';
 import { isNativeTlsEnabled } from '../helpers/nativeTls';
 import { sweepDockerAuthTempDirs, classifyDockerAuthChildName } from '../helpers/dockerAuthTempDir';
+import { sweepStaleDigestPinDirs } from '../helpers/digestPinTempDir';
 import { recordRegistryDeliveryEvent } from '../helpers/registryDeliveryEvidence';
 import { PreparedSourceStore } from '../services/preparedSourceStore';
 import { RegistryDeliveryService } from '../services/RegistryDeliveryService';
@@ -127,10 +128,10 @@ export async function runGitOpsSourceRecovery(): Promise<void> {
   }
 
   try {
-    const { repairGitOpsSettledOutbox } = await import('../services/gitops/outbox');
-    repairGitOpsSettledOutbox();
+    const { repairGitOpsOutbox } = await import('../services/gitops/outbox');
+    repairGitOpsOutbox();
   } catch (err) {
-    console.error('[GitOps] Settled-outbox repair failed:', err instanceof Error ? err.stack ?? err.message : String(err));
+    console.error('[GitOps] Outbox repair failed:', err instanceof Error ? err.stack ?? err.message : String(err));
   }
 }
 
@@ -378,6 +379,9 @@ export async function startServer(server: Server): Promise<void> {
   );
   sweepStaleTrivyTempDirs().catch((err) => {
     console.warn('[Trivy] Temp dir sweep failed:', (err as Error).message);
+  });
+  sweepStaleDigestPinDirs().catch((err) => {
+    console.warn('[Compose] Digest-pin temp dir sweep failed:', (err as Error).message);
   });
 
   const isPilotAgent = isPilotMode();

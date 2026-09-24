@@ -28,6 +28,8 @@ import { useNotifications } from './EditorLayout/hooks/useNotifications';
 import { useContainerStats } from './EditorLayout/hooks/useContainerStats';
 import { useSidebarContextMenu } from './EditorLayout/hooks/useSidebarContextMenu';
 import { useActiveNodeReapplyEligibility } from './EditorLayout/hooks/useActiveNodeReapplyEligibility';
+import { useHomeNavigation } from './EditorLayout/hooks/useHomeNavigation';
+import { resolveNodeSettleAction } from './EditorLayout/resolveNodeSettleAction';
 import { resolveCanSaveAndReapply } from './EditorLayout/resolveCanSaveAndReapply';
 import { useComposeReapplyAction } from './FleetView/hooks/useComposeReapplyAction';
 import { NodeSwitcher } from './NodeSwitcher';
@@ -37,7 +39,7 @@ import {
     GlobalCommandPaletteTrigger,
 } from './GlobalCommandPalette';
 import { SENCHO_OPEN_LOGS_EVENT, SENCHO_OPEN_STACK_EVENT } from '@/lib/events';
-import type { SenchoOpenLogsDetail, SenchoOpenStackDetail } from '@/lib/events';
+import type { SecurityTab, SenchoOpenLogsDetail, SenchoOpenStackDetail } from '@/lib/events';
 import { useNodes, type Node } from '@/context/NodeContext';
 import type { StackHealthNavTarget } from './dashboard/useStackHealthScope';
 import { applyStackHealthNavigate } from './dashboard/planStackHealthNavigate';
@@ -68,6 +70,7 @@ import { MobileMoreMenu } from './MobileMoreMenu';
 import { Masthead, type Tone } from './mobile/mobile-ui';
 import { MobileDashboard } from './mobile/MobileDashboard';
 import { MobileFleet } from './mobile/MobileFleet';
+import { MobileGitOps } from './mobile/MobileGitOps';
 import { MobileSchedules } from './mobile/MobileSchedules';
 import { MobileSettings } from './mobile/MobileSettings';
 import { deriveMobileSurface, type MobileView } from './EditorLayout/mobile-surface';
@@ -323,6 +326,7 @@ export default function EditorLayout() {
 
   const {
     notifications,
+    unreportedNodeIds,
     tickerConnected,
     markAllRead,
     deleteNotification,
@@ -434,12 +438,12 @@ export default function EditorLayout() {
     pendingStackLoadRef,
     pendingLogsRef,
   } = stackActions;
-  // Pending-intent target for a cross-node "open this node's Networking page"
-  // request (e.g. a Fleet networking signal). Mirrors pendingStackLoadRef:
-  // setActiveNode first, then the node-settled effect below navigates once
-  // activeNode actually reflects the target, so Networking never briefly
-  // mounts and fetches against the previous node.
-  const pendingNetworkingNodeRef = useRef<number | null>(null);
+  // Pending-intent target for a cross-node "open this node's <view>" request
+  // (a Fleet networking signal, a Readiness security finding). Mirrors
+  // pendingStackLoadRef: setActiveNode first, then the node-settled effect below
+  // opens the view once activeNode actually reflects the target, so the view
+  // never briefly mounts and fetches against the previous node.
+  const pendingNodeViewRef = useRef<{ nodeId: number; open: () => void } | null>(null);
 
   const panelStartedAt = usePanelSessionStartedAt(panelState);
 
@@ -473,13 +477,18 @@ export default function EditorLayout() {
   // before loadFile's fetch resolves selectedFile; cleared once it settles.
   const [pendingDetailStack, setPendingDetailStack] = useState<string | null>(null);
   const [pendingAnatomyTab, setPendingAnatomyTab] = useState<'networking' | 'doctor' | 'dossier' | 'drift' | undefined>();
-  const [fleetUpdatesIntent, setFleetUpdatesIntent] = useState<{ tab: 'nodes' | 'changelog' } | null>(null);
+  // Set by the 'git' open-stack destination; the panel opens only once the
+  // requested stack has actually loaded, so a cross-node hop (or a canceled
+  // dirty-editor switch) never opens it against the stack that was selected
+  // before the request.
+  const [pendingGitPanelStack, setPendingGitPanelStack] = useState<string | null>(null);
+  // The notification bell popover is shell-owned so the Home alert preview can
+  // open the same canonical surface.
+  const [notificationsOpen, setNotificationsOpen] = useState(false);
   onDeletedOpenStackRef.current = () => {
     setPendingDetailStack(null);
     setMobileView('list');
   };
-
-  const handleFleetUpdatesIntentConsumed = useCallback(() => setFleetUpdatesIntent(null), []);
 
   const { surface: mobileSurface, detailReady, detailOpen } = deriveMobileSurface({
     activeView,
@@ -554,6 +563,15 @@ export default function EditorLayout() {
     return undefined;
   }, [isFileLoading, pendingAnatomyTab, selectedFile]);
 
+  useEffect(() => {
+    if (pendingGitPanelStack === null || selectedFile !== pendingGitPanelStack || isFileLoading) return undefined;
+    const timer = window.setTimeout(() => {
+      setPendingGitPanelStack(null);
+      setGitSourceOpen(true);
+    }, 0);
+    return () => window.clearTimeout(timer);
+  }, [pendingGitPanelStack, selectedFile, isFileLoading, setGitSourceOpen]);
+
   // A phone shows one surface at a time, so every mobile navigation tears down
   // the current detail and switches surfaces, guarding a dirty editor first.
   // `then` runs the destination-specific work (navigate to a view, open
@@ -615,6 +633,7 @@ export default function EditorLayout() {
         : destination === 'drift' ? 'drift'
         : undefined,
     );
+    if (destination === 'git') setPendingGitPanelStack(stackName);
     if (isMobile) setPendingDetailStack(stackName);
     if (activeNode?.id === nodeId) {
       void stackActions.loadFile(stackName);
@@ -639,20 +658,29 @@ export default function EditorLayout() {
     return () => window.removeEventListener(SENCHO_OPEN_STACK_EVENT, handler);
   }, []);
 
-  // Open a node's Networking page from a Fleet card's networking signal.
-  // Pending-intent gated (see pendingNetworkingNodeRef above): if the node is
-  // already active, navigate immediately; otherwise switch nodes first and let
-  // the node-settled effect complete the navigation once activeNode reflects
-  // the switch.
-  const handleOpenNodeNetworking = (nodeId: number) => {
+  // Open a node-scoped view (Networking from a Fleet card's networking signal,
+  // Security from a Readiness finding). Pending-intent gated (see
+  // pendingNodeViewRef above): if the node is already active, navigate
+  // immediately; otherwise switch nodes first and let the node-settled effect
+  // complete the navigation once activeNode reflects the switch.
+  const openViewOnNode = (nodeId: number, open: () => void) => {
     const node = nodes.find(n => n.id === nodeId);
     if (!node) return;
     if (activeNode?.id === nodeId) {
-      setActiveView('networking');
+      open();
       return;
     }
-    pendingNetworkingNodeRef.current = nodeId;
+    pendingNodeViewRef.current = { nodeId, open };
     setActiveNode(node);
+  };
+  const handleOpenNodeNetworking = (nodeId: number) => {
+    openViewOnNode(nodeId, () => setActiveView('networking'));
+  };
+  const handleOpenNodeSecurity = (nodeId: number, tab: SecurityTab | null) => {
+    openViewOnNode(nodeId, () => {
+      setSecurityTab(tab ?? 'overview');
+      setActiveView('security');
+    });
   };
 
   // "Inspect" a node from the mobile Fleet screen: switch to it and land on its
@@ -689,31 +717,51 @@ export default function EditorLayout() {
     }
   }, [stackActions, setActiveView, isMobile, navigateMobileAware]);
 
+  // Every hand-off out of Home (stack, alert, heartbeat, restart, and
+  // configuration rows) plus the Fleet update sheet, which the bell and the
+  // stack view also open. Fleet and Security hops to another node arm a pending
+  // intent that the node-settled effect runs; stack rows use the pending stack load.
+  const {
+    homeNavigation,
+    openFleetUpdates,
+    fleetNodeIntent,
+    onFleetNodeIntentConsumed,
+    fleetUpdatesIntent,
+    onFleetUpdatesIntentConsumed,
+    takePendingNodeIntent,
+  } = useHomeNavigation({
+    nodes,
+    activeNode,
+    setActiveNode,
+    reachCtx,
+    can,
+    isMobile,
+    navigateMobileAware,
+    handleNavigate,
+    setActiveView,
+    setSecurityTab,
+    openSettings,
+    toStack: handleStackHealthNavigate,
+    openStackOnNode: handleFleetNavigateToNode,
+    pendingLogsRef,
+    openNotifications: () => setNotificationsOpen(true),
+  });
+
   // Notification navigation: node_update_available notifications route to the
-  // Fleet view and open the Node Updates sheet (desktop only). The intent state
-  // handles both cross-view navigation and same-view re-entry (handleNavigate
-  // returns early when already on Fleet, but the state change triggers render).
+  // Fleet view (switching to the hub first when a remote node is active) and
+  // open the Node Updates sheet on desktop.
   const handleNotificationNavigate = useCallback((notif: NotificationItem) => {
     if (notif.category === 'node_update_available') {
-      if (isMobile) {
-        navigateMobileAware('fleet');
-      } else {
-        setFleetUpdatesIntent({ tab: 'nodes' });
-        handleNavigate('fleet');
-      }
+      openFleetUpdates('nodes');
       return;
     }
     stackActions.navigateToNotification(notif);
-  }, [isMobile, navigateMobileAware, handleNavigate, stackActions]);
+  }, [openFleetUpdates, stackActions]);
 
-  const handleNotificationNavigateChangelog = useCallback(() => {
-    if (isMobile) {
-      navigateMobileAware('fleet');
-    } else {
-      setFleetUpdatesIntent({ tab: 'changelog' });
-      handleNavigate('fleet');
-    }
-  }, [isMobile, navigateMobileAware, handleNavigate]);
+  const handleNotificationNavigateChangelog = useCallback(
+    () => openFleetUpdates('changelog'),
+    [openFleetUpdates],
+  );
 
   const renderEditor = (headerActions?: ReactNode) => (
     <EditorView
@@ -862,20 +910,27 @@ export default function EditorLayout() {
 
     const pendingStack = pendingStackLoadRef.current;
     pendingStackLoadRef.current = null;
-    const pendingNetworkingNodeId = pendingNetworkingNodeRef.current;
-    pendingNetworkingNodeRef.current = null;
+    const pendingNodeView = pendingNodeViewRef.current;
+    pendingNodeViewRef.current = null;
 
     stackActions.resetEditorState();
     // Stack filenames can repeat across nodes; drop the previous node's failure
     // records so a stale recovery panel cannot surface on the new node.
     clearActionRecords();
 
-    if (pendingStack) {
-      void stackActions.loadFile(pendingStack);
-    } else if (pendingNetworkingNodeId === activeNode.id) {
-      setActiveView('networking');
-    } else if (isRealSwitch) {
-      setActiveView('dashboard');
+    const settle = resolveNodeSettleAction({
+      settledNodeId: activeNode.id,
+      isRealSwitch,
+      pendingStack,
+      pendingNodeIntent: takePendingNodeIntent(activeNode.id),
+      pendingNodeView,
+    });
+    switch (settle.kind) {
+      case 'load-stack': void stackActions.loadFile(settle.stackName); break;
+      case 'run-intent': settle.run(); break;
+      case 'open-node-view': settle.open(); break;
+      case 'go-home': setActiveView('dashboard'); break;
+      case 'none': break;
     }
 
     refreshStacks();
@@ -1081,6 +1136,8 @@ export default function EditorLayout() {
           onDelete={deleteNotification}
           onNavigate={handleNotificationNavigate}
           onNavigateChangelog={handleNotificationNavigateChangelog}
+          open={notificationsOpen}
+          onOpenChange={setNotificationsOpen}
         />
       );
       const themeSwitchEl = <ThemeQuickSwitch onOpenAppearance={() => openSettings('appearance')} />;
@@ -1140,6 +1197,7 @@ export default function EditorLayout() {
             onHostConsoleClose={() => setActiveView(selectedFile ? 'editor' : 'dashboard')}
             onFleetNavigateToNode={handleFleetNavigateToNode}
             onOpenNodeNetworking={handleOpenNodeNetworking}
+            onOpenNodeSecurity={handleOpenNodeSecurity}
             filterNodeId={filterNodeId}
             onClearScheduledOpsFilter={() => setFilterNodeId(null)}
             schedulePrefill={schedulePrefill}
@@ -1147,12 +1205,14 @@ export default function EditorLayout() {
             muteRulePrefill={muteRulePrefill}
             onMutePrefillConsumed={handleMutePrefillConsumed}
             notifications={notifications}
-            onNavigateToStack={handleStackHealthNavigate}
             onOpenSettingsSection={(section) => openSettings(section)}
             onOpenMuteRulesWithPrefill={openMuteRulesWithPrefill}
-            onClearNotifications={clearAllNotifications}
             fleetUpdatesIntent={fleetUpdatesIntent}
-            onFleetUpdatesIntentConsumed={handleFleetUpdatesIntentConsumed}
+            onFleetUpdatesIntentConsumed={onFleetUpdatesIntentConsumed}
+            homeNavigation={homeNavigation}
+            unreportedNotificationNodeIds={unreportedNodeIds}
+            fleetNodeIntent={fleetNodeIntent}
+            onFleetNodeIntentConsumed={onFleetNodeIntentConsumed}
             securityTab={securityTab}
             onSecurityTabChange={setSecurityTab}
             fleetActiveTab={fleetActiveTab}
@@ -1186,14 +1246,7 @@ export default function EditorLayout() {
           canSaveAndReapply={canSaveAndReapply}
           canOfferVolumeRemoval={canOfferVolumeRemoval}
           deleteVolumePreservation={deleteVolumePreservation}
-          onOpenFleetNodeUpdates={() => {
-            if (isMobile) {
-              navigateMobileAware('fleet');
-            } else {
-              setFleetUpdatesIntent({ tab: 'nodes' });
-              handleNavigate('fleet');
-            }
-          }}
+          onOpenFleetNodeUpdates={() => openFleetUpdates('nodes')}
           hydrationReady={hydrationReady}
         />
       );
@@ -1289,6 +1342,14 @@ export default function EditorLayout() {
                     <AuditLogView headerActions={mobileMastheadActions} />
                   </Suspense>
                 </CapabilityGate>
+              </HubOnlyGate>
+            );
+          case 'gitops':
+            // Hub-only like the desktop path (ViewRouter); Community surface,
+            // reuses the desktop hook through the bespoke phone screen.
+            return (
+              <HubOnlyGate>
+                <MobileGitOps headerActions={mobileMastheadActions} />
               </HubOnlyGate>
             );
           case 'resources':

@@ -48,6 +48,7 @@ export const CAPABILITIES = [
   'remote-image-inspect-v1',
   'remote-auto-update-checked-v1',
   'gitops-source-controller',
+  'fleet-readiness-v1',
 ] as const;
 
 export type Capability = (typeof CAPABILITIES)[number];
@@ -70,3 +71,4 @@ export const REMOTE_REGISTRY_SEALED_ENVELOPE_V1_CAPABILITY =
 export const REMOTE_IMAGE_INSPECT_V1_CAPABILITY = 'remote-image-inspect-v1' as const satisfies Capability;
 export const REMOTE_AUTO_UPDATE_CHECKED_V1_CAPABILITY = 'remote-auto-update-checked-v1' as const satisfies Capability;
 export const GITOPS_SOURCE_CONTROLLER_CAPABILITY = 'gitops-source-controller' as const satisfies Capability;
+export const FLEET_READINESS_V1_CAPABILITY = 'fleet-readiness-v1' as const satisfies Capability;

@@ -25,6 +25,7 @@ describe('buildNavigationModel', () => {
     expect(model.allPageItems.map((item) => item.value)).toEqual([
       'dashboard',
       'fleet',
+      'gitops',
       'resources',
       'networking',
       'security',
@@ -45,6 +46,7 @@ describe('buildNavigationModel', () => {
     expect(primary).toEqual([
       'dashboard',
       'fleet',
+      'gitops',
       'resources',
       'networking',
       'security',
@@ -72,6 +74,7 @@ describe('buildNavigationModel', () => {
     expect(values).toContain('security');
     expect(values).toContain('templates');
     expect(values).not.toContain('fleet');
+    expect(values).not.toContain('gitops');
     expect(values).not.toContain('global-observability');
     expect(values).not.toContain('auto-updates');
     expect(values).not.toContain('scheduled-ops');

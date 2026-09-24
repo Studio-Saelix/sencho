@@ -16,6 +16,10 @@ import { DatabaseService, type BlueprintDeployment } from '../DatabaseService';
 import { GitOpsStore, emptyTargetRow } from './store';
 import { GitOpsTransitions, GitOpsTransitionError } from './transitions';
 import { envelopeFor, recordableApplication } from './blueprintProducers';
+import { resolveAndRecordArtifactSet } from './artifactResolve';
+import { newGitOpsId } from './directApplication';
+import type { GitOpsGenerationRow } from './types';
+import { sanitizeForLog } from '../../utils/safeLog';
 
 /** Why a deployment row moved. */
 export type BlueprintDeploymentCause =
@@ -242,4 +246,118 @@ export function commitBlueprintDeploymentRemoved(
       );
     }
   })();
+}
+
+/**
+ * After the first successful Inline deploy of a revision, freeze executable identity.
+ *
+ * Mints an inline-owned generation and unresolved expected set, then resolves
+ * registry digests against the target node. Git-managed Blueprint applications
+ * already freeze at authorization and are skipped. Same-revision re-ticks
+ * no-op in this producer when the freeze set is already exact/qualified (and
+ * again inside `inlineRevisionFrozen` if called). A frozen but unresolved set
+ * still retries registry resolve.
+ */
+export async function freezeInlineRevisionAfterDeploy(args: {
+  blueprintId: number;
+  nodeId: number;
+  actor: string | null;
+}): Promise<void> {
+  const store = GitOpsStore.getInstance();
+  const app = store.getLiveBlueprintApplication(args.blueprintId);
+  if (!recordableApplication(app) || app.target_mode !== 'inline_blueprint') return;
+
+  const intent = app.intent_revision_id
+    ? store.getIntentRevision(app.intent_revision_id)
+    : undefined;
+  const blueprint = DatabaseService.getInstance().getBlueprint(args.blueprintId);
+  const stackName = intent?.deploy_stack_name ?? blueprint?.name;
+  if (!stackName) {
+    console.error(
+      '[GitOps] Inline freeze skipped for blueprint %s: no stack name on intent or blueprint',
+      sanitizeForLog(String(args.blueprintId)),
+    );
+    return;
+  }
+
+  const envelope = envelopeFor(args.actor, 'inline_revision_frozen');
+
+  const resolveFreezeSet = (generationId: string) => resolveAndRecordArtifactSet({
+    stackName,
+    nodeId: args.nodeId,
+    applicationId: app.id,
+    generationId,
+    buildContexts: [],
+    envelope,
+  });
+
+  if (app.accepted_generation_id && app.artifact_set_id) {
+    const existing = store.getArtifactSet(app.artifact_set_id);
+    if (
+      existing
+      && (existing.qualification === 'exact' || existing.qualification === 'qualified')
+    ) {
+      return;
+    }
+    await resolveFreezeSet(app.accepted_generation_id);
+    return;
+  }
+
+  const fingerprint = intent?.compose_content_sha256
+    ?? `inline-unversioned:${app.id}`;
+  const generationId = newGitOpsId();
+  const artifactSetId = newGitOpsId();
+  const generation: GitOpsGenerationRow = {
+    id: generationId,
+    application_id: app.id,
+    commit_sha: fingerprint.length >= 40 ? fingerprint.slice(0, 40) : fingerprint.padEnd(40, '0'),
+    repo_url: `inline://blueprint/${args.blueprintId}`,
+    configured_ref: intent ? `intent/${intent.id}` : 'inline',
+    resolved_ref_kind: null,
+    repo_identity_json: JSON.stringify({
+      host: 'inline',
+      pathname: `/blueprint/${args.blueprintId}`,
+    }),
+    manifest_version: 1,
+    candidate_dir: `generations/inline-${generationId}`,
+    applied_dir: `generations/inline-${generationId}-applied`,
+    expected_invocation_json: '{}',
+    materialization_fingerprint: fingerprint.length === 64 ? fingerprint : fingerprint.padEnd(64, '0').slice(0, 64),
+    validation_ok: 1,
+    plan_blocked: 0,
+    change_plan_fingerprint: null,
+    operation_id: envelope.operationId,
+    trigger: envelope.trigger,
+    actor: envelope.actor,
+    previous_generation_id: null,
+    redacted_limitations_json: '[]',
+    portable_manifest_json: null,
+    compose_inputs_json: null,
+    source_policy_evidence_json: null,
+    security_policy_evidence_json: null,
+    support_requirements_json: null,
+    compatibility_requirements_json: null,
+    secret_capability_json: null,
+    created_at: envelope.at,
+  };
+
+  try {
+    const result = GitOpsTransitions.getInstance().inlineRevisionFrozen({
+      applicationId: app.id,
+      generation,
+      artifactSetId,
+      envelope,
+    });
+    if (result.replayed) return;
+  } catch (error) {
+    console.error(
+      '[GitOps] Inline freeze failed for blueprint %s on node %d:',
+      sanitizeForLog(String(args.blueprintId)),
+      args.nodeId,
+      error instanceof Error ? error.stack ?? error.message : String(error),
+    );
+    return;
+  }
+
+  await resolveFreezeSet(generationId);
 }

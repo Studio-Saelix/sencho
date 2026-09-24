@@ -42,10 +42,13 @@ import type {
   GitOpsArtifactStatus,
   GitOpsIdentityRef,
   GitOpsLimitation,
+  GitOpsPlacementStatus,
   GitOpsRevisionProjection,
+  GitOpsRolloutStatus,
   GitOpsRuntimeStatus,
   GitOpsSourceStatus,
   PlacementFacet,
+  RolloutFacet,
   SourceFacet,
 } from '@/types/gitops';
 
@@ -247,8 +250,6 @@ export const SOURCE_STATE: Record<GitOpsSourceStatus, GitOpsStateMeta> = {
   },
 };
 
-export type GitOpsPlacementStatus = PlacementFacet['status'];
-
 export const PLACEMENT_STATE: Record<GitOpsPlacementStatus, GitOpsStateMeta> = {
   not_applicable: {
     label: 'no placement',
@@ -289,7 +290,9 @@ export const PLACEMENT_STATE: Record<GitOpsPlacementStatus, GitOpsStateMeta> = {
   rollout_authorization_stale: {
     label: 'rollout authorization stale',
     tone: 'warning',
-    line: 'Rollout authorization no longer matches the current placement or preflight fingerprint.',
+    // Granted, then outlived by its inputs. Never "expired" or "invalid": the
+    // authorization was real, the placement or preflight it was bound to moved.
+    line: 'The rollout authorization was granted against earlier inputs and no longer matches the current placement or preflight fingerprint.',
     icon: RefreshCw,
   },
   stateful_confirmation_required: {
@@ -306,9 +309,133 @@ export const PLACEMENT_STATE: Record<GitOpsPlacementStatus, GitOpsStateMeta> = {
   },
   blueprint_bound: {
     label: 'blueprint bound',
-    tone: 'success',
-    line: 'Placement is bound to this Blueprint; fleet completion is reported separately.',
+    // Neutral, not success: bound is a fact about which model owns placement,
+    // not a proven outcome. Sencho does not derive convergence for it.
+    tone: 'neutral',
+    line: 'Placement is bound to a Blueprint; Sencho does not derive its placement convergence.',
     icon: MapPin,
+  },
+};
+
+// The fleet-wide reading of a rollout. Per-node wording stays in RUNTIME_STATE:
+// lines here say "the fleet" or "the rollout", never "this node".
+export const ROLLOUT_STATE: Record<GitOpsRolloutStatus, GitOpsStateMeta> = {
+  not_applicable: {
+    label: 'no rollout',
+    tone: 'neutral',
+    // Two derivations land here: a Direct application, and a Blueprint
+    // application with no rollout candidate and no authorized generation binding.
+    line: 'No rollout applies to this application.',
+    icon: CircleSlash,
+  },
+  rollout_not_executable: {
+    label: 'rollout not executable',
+    tone: 'warning',
+    line: 'A rollout candidate exists, but no authorized rollout is bound to the current inputs.',
+    icon: Ban,
+  },
+  rollout_queued: {
+    label: 'rollout queued',
+    tone: 'brand',
+    // Also the authorized-but-unacknowledged reading: not every required node
+    // has confirmed the authorized generation yet.
+    line: 'The rollout is authorized and waiting for the fleet to pick it up.',
+    icon: Hourglass,
+  },
+  canary_in_progress: {
+    label: 'canary in progress',
+    tone: 'brand',
+    line: 'The rollout is deploying to a canary subset of the fleet.',
+    icon: Rocket,
+  },
+  batch_in_progress: {
+    label: 'batch in progress',
+    tone: 'brand',
+    line: 'The rollout is deploying across the fleet in batches.',
+    icon: Rocket,
+  },
+  rollout_paused: {
+    label: 'rollout paused',
+    tone: 'warning',
+    line: 'The rollout is paused.',
+    icon: CirclePause,
+  },
+  partially_rolled_out: {
+    label: 'partially rolled out',
+    tone: 'warning',
+    // Fleet reading only. The stored partial payload is undecoded JSON, so the
+    // line must not claim to know which nodes are behind or why.
+    line: 'The rollout has reached only part of the fleet.',
+    icon: CircleDashed,
+  },
+  fully_deployed_health_pending: {
+    label: 'health pending',
+    tone: 'brand',
+    line: 'Every required node runs the rollout; health verdicts are still pending.',
+    icon: Hourglass,
+  },
+  configuration_converged_artifact_qualified: {
+    label: 'configuration converged',
+    tone: 'success',
+    // Configuration convergence with per-platform artifact proof, reached when
+    // the artifact facet is qualified rather than exact. Not executable
+    // convergence: exactly_converged_healthy is the only terminal success.
+    line: 'The fleet runs the authorized configuration, proven with per-platform artifact evidence.',
+    icon: Fingerprint,
+  },
+  exactly_converged_healthy: {
+    label: 'exactly converged',
+    tone: 'success',
+    line: 'Every required node runs the authorized generation with matching exact digests and passing health.',
+    icon: Check,
+  },
+  rollout_superseded: {
+    label: 'superseded',
+    tone: 'neutral',
+    // Covers both producers: a newer generation replaced it, or an operator
+    // withdrew it (supersede, or a rollback that abandoned it).
+    line: 'This rollout generation is no longer active: an operator withdrew it or a newer generation replaced it.',
+    icon: ArchiveX,
+  },
+  target_stale: {
+    label: 'target stale',
+    tone: 'warning',
+    line: 'A rollout target has not reported recently, so the fleet picture may be behind.',
+    icon: Clock,
+  },
+  target_unreachable: {
+    label: 'target unreachable',
+    tone: 'warning',
+    line: 'A rollout target is unreachable, so the fleet state cannot be fully confirmed.',
+    icon: TriangleAlert,
+  },
+  rollback_in_progress: {
+    label: 'rollback in progress',
+    tone: 'brand',
+    line: 'A rollback is running across the fleet.',
+    icon: Undo2,
+  },
+  rollback_partial_failed: {
+    label: 'rollback partially failed',
+    tone: 'destructive',
+    line: 'The rollback failed on part of the fleet.',
+    icon: ShieldAlert,
+  },
+  recovery_required: {
+    label: 'recovery required',
+    tone: 'warning',
+    // Needs recovery first, not in flight: source and runtime use this status
+    // for a recovery phase that is running, while the rollout vocabulary
+    // reserves it for a rollout that cannot proceed until one has happened.
+    // Nothing derives it yet; the entry exists so the union stays total.
+    line: 'The rollout needs recovery before it can proceed.',
+    icon: Undo2,
+  },
+  completion_unknown: {
+    label: 'completion unknown',
+    tone: 'warning',
+    line: 'An interruption left the outcome of the rollout unconfirmed.',
+    icon: CircleHelp,
   },
 };
 
@@ -397,16 +524,16 @@ export const RUNTIME_STATE: Record<GitOpsRuntimeStatus, GitOpsStateMeta> = {
     line: 'The files on disk no longer match the invocation that deployed them.',
     icon: TriangleAlert,
   },
-  rollout_artifact_drift: {
-    label: 'rollout artifact drift',
-    tone: 'warning',
-    line: 'The planned rollout artifact differs from the one this node holds.',
-    icon: TriangleAlert,
-  },
   runtime_artifact_drift: {
     label: 'runtime artifact drift',
     tone: 'warning',
-    line: 'The running image differs from the expected artifact for this node.',
+    line: 'The running image digest differs from the frozen expected artifact for this node.',
+    icon: TriangleAlert,
+  },
+  rollout_artifact_drift: {
+    label: 'rollout artifact drift',
+    tone: 'warning',
+    line: 'A required rollout target holds a different image digest than the approved set.',
     icon: TriangleAlert,
   },
   stale_acknowledgement: {
@@ -487,7 +614,7 @@ export const RUNTIME_STATE: Record<GitOpsRuntimeStatus, GitOpsStateMeta> = {
 };
 
 /**
- * Read views over the two maps for a status that crossed the wire.
+ * Read views over the maps for a status that crossed the wire.
  *
  * The maps above are total over the closed unions, so indexing them yields a
  * non-optional value and a miss is invisible to the compiler. That is right
@@ -502,6 +629,7 @@ export const RUNTIME_STATE: Record<GitOpsRuntimeStatus, GitOpsStateMeta> = {
 export const SOURCE_STATE_LOOKUP: Partial<Record<string, GitOpsStateMeta>> = SOURCE_STATE;
 export const ARTIFACT_STATE_LOOKUP: Partial<Record<string, GitOpsStateMeta>> = ARTIFACT_STATE;
 export const PLACEMENT_STATE_LOOKUP: Partial<Record<string, GitOpsStateMeta>> = PLACEMENT_STATE;
+export const ROLLOUT_STATE_LOOKUP: Partial<Record<string, GitOpsStateMeta>> = ROLLOUT_STATE;
 export const RUNTIME_STATE_LOOKUP: Partial<Record<string, GitOpsStateMeta>> = RUNTIME_STATE;
 
 /** Card copy for a placement facet. Preflight blocked uses the redacted server reason as the line. */
@@ -512,6 +640,22 @@ export function placementStateMeta(facet: PlacementFacet): GitOpsStateMeta | und
     return { ...base, line: facet.reason };
   }
   return base;
+}
+
+/**
+ * The state for a status, or an explicit unrecognized state when this build
+ * does not know it. The shared card renders nothing for an unknown status,
+ * which suits a list row; on an evidence surface the whole point is that no
+ * facet and no target disappears, so a status from a newer node still gets a
+ * card that says so.
+ */
+export function stateOrUnrecognized(state: GitOpsStateMeta | undefined, status: string): GitOpsStateMeta {
+  return state ?? {
+    label: 'unrecognized state',
+    tone: 'neutral',
+    line: `Reported as "${status}", a state this version of Sencho does not recognize.`,
+    icon: CircleHelp,
+  };
 }
 
 /**
@@ -530,10 +674,11 @@ export type LiveSourceFacet = Exclude<SourceFacet, { status: 'not_applicable' }>
  * Two exclusions, and both mean "this surface has nothing to say", not "an
  * error": the absent arm carries no facets at all, and a live application whose
  * source facet is `not_applicable` is Blueprint-owned, where naming a source
- * state would be a claim the model never made.
+ * state would be a claim the model never made. Defensively, a live payload
+ * missing its facets (a malformed remote answer) also reads as nothing to show.
  */
 export function liveSourceFacet(revision: GitOpsRevisionProjection | null): LiveSourceFacet | null {
-  if (!revision || revision.targetMode === 'not_applicable') return null;
+  if (!revision || revision.targetMode === 'not_applicable' || !revision.facets) return null;
   const source = revision.facets.source;
   return source.status === 'not_applicable' ? null : source;
 }
@@ -545,6 +690,24 @@ export function liveArtifactFacet(revision: GitOpsRevisionProjection | null): Li
   if (!revision || revision.targetMode === 'not_applicable' || !revision.facets) return null;
   const artifact = revision.facets.artifact;
   return artifact.status === 'not_applicable' ? null : artifact;
+}
+
+/** Placement facet for a live application, or null when there is none to show. */
+export type LivePlacementFacet = Exclude<PlacementFacet, { status: 'not_applicable' }>;
+
+export function livePlacementFacet(revision: GitOpsRevisionProjection | null): LivePlacementFacet | null {
+  if (!revision || revision.targetMode === 'not_applicable' || !revision.facets) return null;
+  const placement = revision.facets.placement;
+  return placement.status === 'not_applicable' ? null : placement;
+}
+
+/** Rollout facet for a live application, or null when there is none to show. */
+export type LiveRolloutFacet = Exclude<RolloutFacet, { status: 'not_applicable' }>;
+
+export function liveRolloutFacet(revision: GitOpsRevisionProjection | null): LiveRolloutFacet | null {
+  if (!revision || revision.targetMode === 'not_applicable' || !revision.facets) return null;
+  const rollout = revision.facets.rollout;
+  return rollout.status === 'not_applicable' ? null : rollout;
 }
 
 /**

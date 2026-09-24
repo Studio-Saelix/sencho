@@ -2,8 +2,9 @@ import { randomUUID } from 'crypto';
 import type Database from 'better-sqlite3';
 import { decodeGitOpsJson, encodeGitOpsJson, isRecord, GitOpsJsonError } from './json';
 import { enqueueHistoryPublication } from './publish';
-import { insertSettledOutbox } from './outbox';
-import { SETTLED_ATTEMPT_PAYLOAD_VERSION } from './attemptPayload';
+import { insertSettledOutbox, insertGitOpsEventOutbox } from './outbox';
+import { GITOPS_EVENT_PAYLOAD_VERSION, SETTLED_ATTEMPT_PAYLOAD_VERSION } from './attemptPayload';
+import { gitOpsOutboxPlan, gitOpsPauseReason } from './notifications';
 import { sanitizeForLog } from '../../utils/safeLog';
 import type {
   GitOpsApplicationRow,
@@ -61,6 +62,7 @@ export type GitOpsHistoryStage =
   | 'fetched'
   | 'fetched_invalid'
   | 'health_finalized'
+  | 'inline_revision_frozen'
   | 'intent_revised'
   | 'legacy_combined_appended'
   | 'operation_interrupted'
@@ -231,7 +233,8 @@ export function insertHistory(db: Database.Database, row: HistoryInsert): string
     row.redactedReasonClass ?? null,
   );
   if (result.changes !== 1) return null;
-  if (row.stage === 'source_reconcile_settled') {
+  const outboxPlan = gitOpsOutboxPlan(row.stage, row.application.target_mode);
+  if (outboxPlan?.kind === 'settled') {
     insertSettledOutbox(db, {
       version: SETTLED_ATTEMPT_PAYLOAD_VERSION,
       settledHistoryId: id,
@@ -244,6 +247,19 @@ export function insertHistory(db: Database.Database, row: HistoryInsert): string
       reason: typeof row.after.reason === 'string' ? row.after.reason : null,
       trigger: row.trigger,
       actor: row.actor,
+      at: row.at,
+    });
+  } else if (outboxPlan?.kind === 'event') {
+    insertGitOpsEventOutbox(db, {
+      version: GITOPS_EVENT_PAYLOAD_VERSION,
+      historyId: id,
+      applicationId: row.application.id,
+      operationId: row.operationId,
+      stage: outboxPlan.stage,
+      stackName: row.application.stack_name,
+      nodeId: row.nodeId,
+      actor: row.actor,
+      reason: gitOpsPauseReason(row.after),
       at: row.at,
     });
   }
@@ -453,6 +469,39 @@ export function toHistoryItem(row: GitOpsHistoryRow): GitOpsHistoryItem {
     after,
     limitations,
   };
+}
+
+/**
+ * Latest recorded transition timestamp per application.
+ *
+ * The portfolio workplace uses this for each row's "last activity" fact. One
+ * grouped query over the caller's id list rather than one query per row, since
+ * the list route already projected every application it is about to render.
+ * Applications with no history yet are absent from the map rather than
+ * timestamped null, so "no transitions" stays distinguishable from "transitions
+ * exist, none read".
+ *
+ * Ids are bound in chunks under SQLite's variable limit; the chunks are merged
+ * before returning so the caller sees one map for the whole list.
+ */
+export function latestTransitionByApplication(
+  db: Database.Database,
+  applicationIds: readonly string[],
+): Map<string, number> {
+  const latest = new Map<string, number>();
+  const CHUNK = 500;
+  for (let i = 0; i < applicationIds.length; i += CHUNK) {
+    const chunk = applicationIds.slice(i, i + CHUNK);
+    const placeholders = chunk.map(() => '?').join(',');
+    const rows = db.prepare(
+      `SELECT application_id, MAX(created_at) AS latest
+       FROM gitops_history
+       WHERE application_id IN (${placeholders})
+       GROUP BY application_id`,
+    ).all(...chunk) as Array<{ application_id: string; latest: number }>;
+    for (const row of rows) latest.set(row.application_id, row.latest);
+  }
+  return latest;
 }
 
 /**

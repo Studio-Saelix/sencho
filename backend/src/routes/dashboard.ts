@@ -1,5 +1,5 @@
 import { Router, type Request, type Response } from 'express';
-import { DatabaseService, type StackRestartSummary } from '../services/DatabaseService';
+import { DatabaseService } from '../services/DatabaseService';
 import { CloudBackupService } from '../services/CloudBackupService';
 import { FileSystemService } from '../services/FileSystemService';
 import TrivyService from '../services/TrivyService';
@@ -50,7 +50,7 @@ export interface ConfigurationStatus {
   };
 }
 
-export async function buildLocalConfigurationStatus(
+async function buildLocalConfigurationStatus(
   nodeId: number,
   userId: number,
   tier: LicenseTier,
@@ -188,27 +188,5 @@ dashboardRouter.get('/configuration', async (req: Request, res: Response): Promi
   } catch (error) {
     console.error('[Dashboard] Failed to build configuration status:', error);
     res.status(500).json({ error: 'Failed to fetch configuration status' });
-  }
-});
-
-dashboardRouter.get('/stack-restarts', (req: Request, res: Response): void => {
-  try {
-    const debug = isDebugEnabled();
-    const startedAt = debug ? Date.now() : 0;
-    const db = DatabaseService.getInstance();
-    const nodeId = req.nodeId ?? 0;
-    const rawDays = parseInt(String(req.query['days'] ?? '7'), 10);
-    const days = isNaN(rawDays) || rawDays < 1 ? 7 : Math.min(rawDays, 30);
-
-    const result: StackRestartSummary[] = db.getStackRestartSummary(nodeId, days);
-    if (debug) {
-      console.debug(
-        `[Dashboard:debug] /stack-restarts returned ${result.length} rows for nodeId=${nodeId} over ${days}d in ${Date.now() - startedAt} ms`,
-      );
-    }
-    res.json(result);
-  } catch (error) {
-    console.error('[Dashboard] Failed to fetch stack restarts:', error);
-    res.status(500).json({ error: 'Failed to fetch stack restarts' });
   }
 });

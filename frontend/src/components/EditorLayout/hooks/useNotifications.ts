@@ -27,6 +27,14 @@ function isImageUpdatesRefreshAction(action: unknown): boolean {
 export function useNotifications({ nodes, onStateInvalidate, onImageUpdatesChange, onGitOpsChange }: UseNotificationsOptions) {
   const [notifications, setNotifications] = useState<NotificationItem[]>([]);
   const [tickerConnected, setTickerConnected] = useState(false);
+  // Nodes whose latest feed leg did not land (fetch failed, non-OK, undecodable,
+  // or skipped because the node is offline). Their rows, if any, are retained
+  // from an earlier fetch, so an absence of rows from them is not an all-clear.
+  // Null until the first fetch settles: before then nothing has reported.
+  const [unreportedNodeIds, setUnreportedNodeIds] = useState<ReadonlySet<number> | null>(null);
+  const markUnreported = (ids: number[]) => setUnreportedNodeIds(prev => (
+    prev !== null && prev.size === ids.length && ids.every(id => prev.has(id)) ? prev : new Set(ids)
+  ));
 
   // Stable refs so long-lived WS callbacks always read the latest values
   // without needing them in the zero-dep effect dependency arrays.
@@ -122,6 +130,7 @@ export function useNotifications({ nodes, onStateInvalidate, onImageUpdatesChang
       }
 
       if (generation !== notificationFetchGeneration.current) return;
+      markUnreported(currentNodes.filter(n => !successfulSlices.has(n.id)).map(n => n.id));
       // Keep failed/offline node slices; drop rows for nodes no longer in the roster.
       const activeNodeIds = new Set(currentNodes.map(n => n.id));
       setNotifications(prev => {
@@ -134,6 +143,10 @@ export function useNotifications({ nodes, onStateInvalidate, onImageUpdatesChang
       });
     } catch (e) {
       console.error('[Notifications] fetch error:', e);
+      // Nothing is known to have landed, so no node's silence may read as clear.
+      if (generation === notificationFetchGeneration.current) {
+        markUnreported(nodesRef.current.map(n => n.id));
+      }
     }
   };
 
@@ -415,6 +428,7 @@ export function useNotifications({ nodes, onStateInvalidate, onImageUpdatesChang
 
   return {
     notifications,
+    unreportedNodeIds,
     tickerConnected,
     markAllRead,
     deleteNotification,

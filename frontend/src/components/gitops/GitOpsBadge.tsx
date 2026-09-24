@@ -1,18 +1,34 @@
-import { ARTIFACT_STATE_LOOKUP, GITOPS_TONE_CLASS, RUNTIME_STATE_LOOKUP, SOURCE_STATE_LOOKUP } from '@/lib/gitopsState';
-import type { GitOpsArtifactStatus, GitOpsRuntimeStatus, GitOpsSourceStatus } from '@/types/gitops';
+import {
+  ARTIFACT_STATE_LOOKUP,
+  GITOPS_TONE_CLASS,
+  PLACEMENT_STATE_LOOKUP,
+  ROLLOUT_STATE_LOOKUP,
+  RUNTIME_STATE_LOOKUP,
+  SOURCE_STATE_LOOKUP,
+} from '@/lib/gitopsState';
+import type {
+  GitOpsArtifactStatus,
+  GitOpsPlacementStatus,
+  GitOpsRolloutStatus,
+  GitOpsRuntimeStatus,
+  GitOpsSourceStatus,
+} from '@/types/gitops';
 import { cn } from '@/lib/utils';
 
 /**
  * Which vocabulary the status belongs to, paired with a status from it.
  *
- * A discriminated union rather than two loose fields: the two status unions
- * overlap on several names (`recovery_required`, `recovery_failed`) with
- * different copy, so pairing them at the type level is what stops a runtime
- * status being rendered with source wording.
+ * A discriminated union rather than two loose fields: the five status unions
+ * overlap on several names (`recovery_required`, `partially_rolled_out`,
+ * `completion_unknown`) with different copy per vocabulary, so pairing them at
+ * the type level is what stops a runtime status being rendered with rollout
+ * wording.
  */
 type GitOpsBadgeFacet =
   | { facet: 'source'; status: GitOpsSourceStatus }
   | { facet: 'artifact'; status: GitOpsArtifactStatus }
+  | { facet: 'placement'; status: GitOpsPlacementStatus }
+  | { facet: 'rollout'; status: GitOpsRolloutStatus }
   | { facet: 'runtime'; status: GitOpsRuntimeStatus };
 
 type GitOpsBadgeProps = GitOpsBadgeFacet & {
@@ -46,11 +62,24 @@ export default function GitOpsBadge(props: GitOpsBadgeProps) {
   // rather than annotating the result means the miss is a fact the compiler
   // derives, so this guard cannot read as dead code. Rendering nothing matches
   // what the join already does for a stack it has no state for.
-  const state = props.facet === 'source'
-    ? SOURCE_STATE_LOOKUP[props.status]
-    : props.facet === 'artifact'
-      ? ARTIFACT_STATE_LOOKUP[props.status]
-      : RUNTIME_STATE_LOOKUP[props.status];
+  let state;
+  switch (props.facet) {
+    case 'source':
+      state = SOURCE_STATE_LOOKUP[props.status];
+      break;
+    case 'artifact':
+      state = ARTIFACT_STATE_LOOKUP[props.status];
+      break;
+    case 'placement':
+      state = PLACEMENT_STATE_LOOKUP[props.status];
+      break;
+    case 'rollout':
+      state = ROLLOUT_STATE_LOOKUP[props.status];
+      break;
+    case 'runtime':
+      state = RUNTIME_STATE_LOOKUP[props.status];
+      break;
+  }
   if (!state) return null;
   const Icon = state.icon;
 

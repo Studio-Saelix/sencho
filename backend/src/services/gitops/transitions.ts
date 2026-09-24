@@ -835,15 +835,20 @@ export class GitOpsTransitions {
           app.artifact_set_id = args.artifactSetId;
         }
       }
-      this.forEachLiveDirectTarget(app, (target) => {
-        if (target.desired_generation_id !== args.generationId) return;
+      // Advance live targets in every mode. Direct already needed this for
+      // apply; Inline freeze binds desired_generation_id the same way, and
+      // without this the resolve that follows freeze would leave Blueprint
+      // targets stuck on the unresolved placeholder.
+      for (const target of this.store().listTargets(app.id)) {
+        if (target.target_status !== 'active') continue;
+        if (target.desired_generation_id !== args.generationId) continue;
         const loadedExpected = target.expected_artifact_set_id;
         target.latest_artifact_set_id = args.artifactSetId;
         if (this.allowedExpectedAdvance(loadedExpected, args.qualification)) {
           target.expected_artifact_set_id = args.artifactSetId;
         }
         this.store().upsertTarget(target);
-      });
+      }
     }, { generationId: args.generationId, artifactSetId: args.artifactSetId });
   }
 
@@ -1413,6 +1418,11 @@ export class GitOpsTransitions {
         if (app.lifecycle_status !== 'active') throw new GitOpsTransitionError('application is not live');
         app.pause_at = envelope.at;
         app.pause_reason = reason;
+      }, {
+        // The reason is operator-authored evidence for the hold. The compact
+        // app snapshot omits it, so it is merged into the delta explicitly and
+        // the notification carries it.
+        historyAfter: { pauseReason: reason },
       });
     }
     return this.mutateTarget(applicationId, nodeId, envelope, 'rollout_paused', null, (target) => {
@@ -1486,6 +1496,11 @@ export class GitOpsTransitions {
       }
       this.store().insertIntentRevision(args.intent);
       app.intent_revision_id = args.intent.id;
+      // Inline freeze is per intent revision. A new intent must drop the prior
+      // freeze so the next successful deploy binds digests for this compose.
+      if (app.target_mode === 'inline_blueprint') {
+        this.clearInlineFreezePointers(app);
+      }
       this.invalidatePlacementOnMaterialChange(app, args.envelope, extras);
     });
   }
@@ -1561,10 +1576,13 @@ export class GitOpsTransitions {
    * Operator placement approval opens a rollout generation for the current
    * intent and candidate.
    *
-   * This transition always opens a `legacy_inline` generation. History
-   * order is placement_approved, then rollout_generation_opened, so a
+   * History order is placement_approved, then rollout_generation_opened, so a
    * reader can tell the approval happened before the generation pointer
-   * moved.
+   * moved. The generation's provenance names the path that opened it:
+   * `legacy_inline` for the combined Inline Apply (which passes nothing and
+   * gets the default), `placement_approval` for the decomposed Git-managed
+   * action, where the generation is a placement-only placeholder until a
+   * rollout authorization supersedes it.
    */
   placementApproved(args: {
     applicationId: string;
@@ -1578,6 +1596,7 @@ export class GitOpsTransitions {
     rolloutGenerationId: string;
     candidateId: string;
     strategyJson?: string;
+    provenance?: 'legacy_inline' | 'placement_approval';
   }): TransitionResult {
     return this.mutateApp(
       args.applicationId,
@@ -1653,7 +1672,7 @@ export class GitOpsTransitions {
           preflight_fingerprint: null,
           preflight_evidence_json: null,
           rollout_strategy_json: args.strategyJson ?? '{}',
-          provenance: 'legacy_inline',
+          provenance: args.provenance ?? 'legacy_inline',
           supersedes_generation_id: previousGenerationId,
           superseded_at: null,
           operation_id: args.envelope.operationId,
@@ -1693,6 +1712,10 @@ export class GitOpsTransitions {
    * set, and source acceptance. Exact artifact qualification is not required
    * to authorize (config deploy may proceed under a qualified claim); exact
    * convergence is derived later only when qualification is exact.
+   *
+   * Authority defaults to `configured_policy` (the automatic handoff minting
+   * on the configured policy's behalf). An explicit operator authorization
+   * passes `operator`, so the approval row records who actually decided.
    */
   rolloutAuthorized(args: {
     applicationId: string;
@@ -1703,6 +1726,7 @@ export class GitOpsTransitions {
     actor: string | null;
     envelope: EventEnvelope;
     strategyJson?: string;
+    authority?: 'operator' | 'configured_policy';
   }): TransitionResult {
     return this.mutateApp(
       args.applicationId,
@@ -1746,7 +1770,7 @@ export class GitOpsTransitions {
         this.store().insertApproval({
           id: args.approvalId,
           kind: 'rollout_authorization',
-          authority: 'configured_policy',
+          authority: args.authority ?? 'configured_policy',
           authoritative: 1,
           application_id: args.applicationId,
           generation_id: ingredients.acceptedGenerationId,
@@ -1824,6 +1848,50 @@ export class GitOpsTransitions {
         });
         if (authorized) extras.historyIds.push(authorized);
       },
+    );
+  }
+
+  /**
+   * Withdraw a live rollout authorization on the operator's decision.
+   *
+   * The generation stays on the application as the record that a rollout was
+   * abandoned, while the authorization itself is cleared: a superseded
+   * generation whose authorization still resolved would let the dispatch
+   * boundary start it again. A later authorization mints a new generation over
+   * the same placement and accepted source, which is the only way forward from
+   * here.
+   */
+  rolloutSuperseded(args: {
+    applicationId: string;
+    envelope: EventEnvelope;
+  }): TransitionResult {
+    // Read before the transaction only to annotate the history row; the
+    // guards below re-read and remain authoritative if the row moved.
+    const named = this.store().getApplication(args.applicationId)?.rollout_generation_id ?? null;
+    return this.mutateApp(
+      args.applicationId,
+      args.envelope,
+      'rollout_generation_superseded',
+      'superseded',
+      (app) => {
+        if (app.lifecycle_status !== 'active') throw new GitOpsTransitionError('application is not live');
+        if (!app.rollout_generation_id) {
+          throw new GitOpsTransitionError('there is no live rollout generation to supersede');
+        }
+        const live = this.store().getRolloutGeneration(app.rollout_generation_id);
+        if (!live || live.application_id !== app.id) {
+          throw new GitOpsTransitionError('the live rollout generation could not be read');
+        }
+        if (live.provenance !== 'rollout_authorization') {
+          throw new GitOpsTransitionError('only an authorized rollout can be superseded');
+        }
+        app.rollout_authorization_ref = null;
+        app.preflight_fingerprint = null;
+        // The generation pointer stays: the projection reports the abandoned
+        // rollout rather than pretending the application never had one.
+        this.store().markRolloutGenerationSuperseded(app.rollout_generation_id, args.envelope.at);
+      },
+      named ? { rolloutGenerationId: named } : {},
     );
   }
 
@@ -1948,6 +2016,89 @@ export class GitOpsTransitions {
         return { before, after: { intentRevisionId: args.intentRevisionId } };
       },
     );
+  }
+
+  /**
+   * Freeze the exact artifact identity for an Inline Blueprint after its first
+   * successful deploy of a revision.
+   *
+   * This is not source acceptance: it mints an inline-owned generation and an
+   * unresolved expected artifact set, then binds those pointers onto the
+   * application and any placed targets that still lack them. Callers resolve
+   * the set afterward via `resolveAndRecordArtifactSet`; that advance never
+   * replaces an already exact/qualified expectation.
+   *
+   * No-op when accepted_generation_id and artifact_set_id are already set, so
+   * same-revision re-ticks and tag movement cannot overwrite the freeze.
+   * A new intent clears those pointers in `intentRevised` before the next deploy.
+   */
+  inlineRevisionFrozen(args: {
+    applicationId: string;
+    generation: GitOpsGenerationRow;
+    artifactSetId: string;
+    envelope: EventEnvelope;
+  }): TransitionResult {
+    const existingApp = this.store().getApplication(args.applicationId);
+    if (!existingApp) throw new GitOpsTransitionError('application not found');
+    if (existingApp.target_mode !== 'inline_blueprint') {
+      throw new GitOpsTransitionError('inline freeze requires an inline_blueprint application');
+    }
+    // Same-revision re-tick / tag movement: never replace an already-bound freeze set.
+    if (existingApp.accepted_generation_id && existingApp.artifact_set_id) {
+      return { historyIds: [], replayed: true };
+    }
+    return this.mutateApp(args.applicationId, args.envelope, 'inline_revision_frozen', 'committed', (app) => {
+      // Re-check under the write lock: a concurrent freeze must stay a no-op.
+      if (app.accepted_generation_id && app.artifact_set_id) {
+        return;
+      }
+      if (args.generation.application_id !== app.id) {
+        throw new GitOpsTransitionError('generation does not belong to the application');
+      }
+      if (this.store().getGeneration(args.generation.id)) {
+        throw new GitOpsTransitionError('generation already exists');
+      }
+      if (this.store().getArtifactSet(args.artifactSetId)) {
+        throw new GitOpsTransitionError('artifact set already exists');
+      }
+
+      this.store().insertGeneration(args.generation);
+      this.store().insertArtifactSet({
+        id: args.artifactSetId,
+        generation_id: args.generation.id,
+        evidence_version: 1,
+        authoritative: 0,
+        qualification: 'unresolved',
+        evidence_json: encodeArtifactEvidenceJson({ kind: 'unresolved' }),
+        created_at: args.envelope.at,
+      });
+
+      app.accepted_generation_id = args.generation.id;
+      app.artifact_set_id = args.artifactSetId;
+      app.latest_artifact_set_id = args.artifactSetId;
+
+      for (const target of this.store().listTargets(app.id)) {
+        if (target.target_status !== 'active') continue;
+        // Only fill nulls: an ack that already copied app pointers, or a prior
+        // freeze, must not be overwritten here.
+        if (target.desired_generation_id !== null && target.expected_artifact_set_id !== null) {
+          continue;
+        }
+        if (target.desired_generation_id === null) {
+          target.desired_generation_id = args.generation.id;
+        }
+        if (target.desired_generation_id !== args.generation.id) {
+          throw new GitOpsTransitionError('target desired generation does not match the frozen generation');
+        }
+        if (target.expected_artifact_set_id === null) {
+          target.expected_artifact_set_id = args.artifactSetId;
+        }
+        if (target.latest_artifact_set_id === null) {
+          target.latest_artifact_set_id = args.artifactSetId;
+        }
+        this.store().upsertTarget(target);
+      }
+    }, { generationId: args.generation.id, artifactSetId: args.artifactSetId });
   }
 
   /** A Blueprint deploy failed. Acknowledgement pointers stay where they were. */
@@ -2140,8 +2291,9 @@ export class GitOpsTransitions {
    * A rollout-scoped rollback started.
    *
    * The same columns and the same rules as `recovery_started`; only the trigger
-   * differs. Direct Git recovery emits the `recovery_*` names, and a later
-   * rollout producer emits these. Nothing in this PR writes them.
+   * differs. Direct Git recovery emits the `recovery_*` names; the rollout
+   * rollback route emits these, because a rollout recovery is not a stack
+   * update recovery even when it restores the same kind of state.
    */
   rollbackInProgress(args: {
     applicationId: string;
@@ -2242,6 +2394,7 @@ export class GitOpsTransitions {
     applicationId: string;
     nodeId: number;
     recoveryRef: string;
+    recoveryGenerationId: string;
     capturedArtifactSetId: string | null;
     capturedSourceAcceptanceRef: string | null;
     envelope: EventEnvelope;
@@ -2251,7 +2404,7 @@ export class GitOpsTransitions {
       args.nodeId,
       args.envelope,
       'rollback_completed',
-      null,
+      args.recoveryGenerationId,
       (target) => {
         const restored = target.recovery_generation_id;
         if (!restored) {
@@ -2547,11 +2700,13 @@ export class GitOpsTransitions {
   /**
    * Rebind the artifact expectation to the restored generation.
    *
-   * The expectation comes from what the recovery point captured, never from
-   * what the application expects now: those describe different generations
-   * after a restore. Latest becomes the newest evidence for the restored
-   * generation, which is a statement about what has been seen, not an
-   * acceptance of it.
+   * The expectation is the captured set when the caller has it (a node
+   * recovery point), otherwise the strongest set recorded for the restored
+   * generation. Either way it is never what the application expects now: those
+   * describe different generations after a restore. A set the generation does
+   * not own is dropped with a limitation. Latest becomes the newest evidence
+   * for the restored generation, which is a statement about what has been
+   * seen, not an acceptance of it.
    */
   private restoreArtifactPointers(
     target: GitOpsTargetCurrentRow,
@@ -2570,12 +2725,8 @@ export class GitOpsTransitions {
       capturedArtifactSetId && !usable ? capturedArtifactSetId : null,
     );
 
-    const newest = this.raw().prepare(
-      `SELECT id FROM gitops_artifact_sets
-       WHERE generation_id = ?
-       ORDER BY evidence_version DESC LIMIT 1`,
-    ).get(generationId) as { id: string } | undefined;
-    target.latest_artifact_set_id = newest?.id ?? target.expected_artifact_set_id;
+    target.latest_artifact_set_id = this.store().newestArtifactSetIdForGeneration(generationId)
+      ?? target.expected_artifact_set_id;
   }
 
   /**
@@ -2939,6 +3090,24 @@ export class GitOpsTransitions {
   }
 
   /**
+   * Drop Inline freeze pointers so the next successful deploy can mint a new
+   * generation and expected set for the current intent. Does not delete the
+   * prior generation/artifact rows (history stays).
+   */
+  private clearInlineFreezePointers(app: GitOpsApplicationRow): void {
+    app.accepted_generation_id = null;
+    app.artifact_set_id = null;
+    app.latest_artifact_set_id = null;
+    for (const target of this.store().listTargets(app.id)) {
+      if (target.target_status !== 'active') continue;
+      target.desired_generation_id = null;
+      target.expected_artifact_set_id = null;
+      target.latest_artifact_set_id = null;
+      this.store().upsertTarget(target);
+    }
+  }
+
+  /**
    * Source acceptance for a Blueprint keeps placement, but a new generation
    * or artifact identity cannot reuse the prior rollout authorization.
    */
@@ -3106,6 +3275,14 @@ export class GitOpsTransitions {
       generationId?: string;
       artifactSetId?: string;
       sourceAcceptanceRef?: string;
+      rolloutGenerationId?: string;
+      /**
+       * Fields added to the recorded `after` delta. The compact application
+       * snapshot wins every key it carries, so this can only contribute an
+       * operator-authored value the snapshot omits (a pause reason) and never
+       * rewrite the audit fields the snapshot exists to record.
+       */
+      historyAfter?: Record<string, unknown>;
     } = {},
   ): TransitionResult {
     return this.raw().transaction(() => {
@@ -3123,8 +3300,9 @@ export class GitOpsTransitions {
         generationId: extraHistory.generationId,
         artifactSetId: extraHistory.artifactSetId,
         sourceAcceptanceRef: extraHistory.sourceAcceptanceRef,
+        rolloutGenerationId: extraHistory.rolloutGenerationId,
         before,
-        after: snapshotApp(app),
+        after: { ...extraHistory.historyAfter, ...snapshotApp(app) },
       });
       if (historyId) extras.historyIds.push(historyId);
       return { historyIds: extras.historyIds, replayed: extras.historyIds.length === 0 };

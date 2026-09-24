@@ -120,6 +120,7 @@ describe('Blueprints on Community tier', () => {
             .set('Cookie', adminCookie)
             .send({
                 planFingerprint: preview.body.planFingerprint,
+                gitopsFingerprint: preview.body.gitopsFingerprint,
                 actions: preview.body.confirmableActions,
             });
         expect(res.status).toBe(200);

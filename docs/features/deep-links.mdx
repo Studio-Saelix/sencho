@@ -32,7 +32,7 @@ Sencho encodes the active node, the view you are on, and the deep state that vie
 
 Fleet, Logs, Update, Schedules, and Audit are gated by role or license tier and are hub-only: their URLs redirect to the dashboard while a remote node is active. Console is also gated, but is reachable against any node, remote included. See [Multi-Node Fleet](/features/multi-node#what-top-level-views-show-when-a-remote-node-is-active) for the hub-only list and [RBAC & User Management](/features/rbac) for the full permission matrix.
 
-Fleet tab URLs are stable slugs that do not always match the tab's on-screen label. For example the **Status** tab uses the `configuration` segment and the **Map** tab uses the `dependencies` segment.
+Fleet tab URLs are stable slugs that do not always match the tab's on-screen label. For example the **Readiness** tab uses the `readiness` segment and the **Map** tab uses the `dependencies` segment. The `configuration` segment also resolves to **Readiness**.
 
 Remote nodes use a slug derived from the node name and id (for example `/nodes/nas-box-42/dashboard`). The default local node keeps the short `local` slug.
 

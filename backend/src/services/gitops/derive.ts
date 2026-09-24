@@ -3,13 +3,16 @@ import {
   decodeGitOpsEvidenceLimitations,
   decodeObservedArtifactIdentity,
   GitOpsJsonError,
+  type ObservedArtifactIdentity,
 } from './json';
 import { GitOpsStore } from './store';
+import { comparableObservationMatches } from './artifactIdentity';
 import { parseSecretCapabilityFromJson } from './sops/capability';
 import { SopsIdentityStore } from './sops/identityStore';
 import {
   buildPreflightEvidence,
   decodePreflightEvidenceJson,
+  executableArtifactRefusalReason,
   fingerprintPreflightEvidence,
   isPreflightBlocked,
   REGISTRY_PREFLIGHT_UNEVALUATED_REASON,
@@ -174,17 +177,22 @@ function collectRuntimeDrift(
       });
     }
     // Artifact mismatch: comparable exact/qualified expectation vs observation.
-    if (target.runtime.status !== 'runtime_artifact_drift') continue;
+    // Per-node Direct (and unbound) mismatch stays runtime class;
+    // authorized-rollout disagreement is rollout class.
+    const driftClass =
+      target.runtime.status === 'rollout_artifact_drift' ? 'rollout'
+        : target.runtime.status === 'runtime_artifact_drift' ? 'runtime'
+          : null;
+    if (!driftClass) continue;
     const expected = target.artifact.status !== 'not_applicable' && 'expected' in target.artifact
       ? target.artifact.expected
       : null;
     if (!expected || expected.identity === null) continue;
     const observed = target.observedArtifactIdentity;
-    if ((observed.kind !== 'exact' && observed.kind !== 'qualified') || observed.identity === expected.identity) {
-      continue;
-    }
+    if (observed.kind !== 'exact' && observed.kind !== 'qualified') continue;
+    if (expectedSetAgreesWithObservation(expected.artifactSetId, observed, expected.identity)) continue;
     items.push({
-      class: 'runtime',
+      class: driftClass,
       expected: {
         kind: 'artifact_set',
         id: expected.artifactSetId,
@@ -194,13 +202,51 @@ function collectRuntimeDrift(
       observed: { kind: 'runtime_artifact', identity: observed.identity, observedAt: observed.observedAt },
       freshnessAt: observed.observedAt,
       owner: 'observed_artifact_identity',
-      reason: 'the running workload reports an artifact identity other than the expected artifact set',
+      reason: driftClass === 'rollout'
+        ? 'a required rollout target reports an artifact identity other than the approved rollout set'
+        : 'the running workload reports an artifact identity other than the expected artifact set',
       configuredPolicy: null,
       affectedTargets: [{ nodeId: target.nodeId, stackName: app.stack_name }],
       action: 'none',
     });
   }
   return items;
+}
+
+/**
+ * True when a target's observed identity is exact or qualified and matches
+ * the expected set by per-service membership (platform child or index),
+ * falling back to identity-string equality only when the set has no services.
+ * Used to withhold exactly_converged_healthy until every required live target
+ * has digest proof, not only applied/healthy pointers.
+ */
+function expectedSetAgreesWithObservation(
+  expectedSetId: string,
+  observed: ObservedArtifactIdentity,
+  identityFallback: string | null,
+): boolean {
+  if (observed.kind !== 'exact' && observed.kind !== 'qualified') return false;
+  const expectedRow = GitOpsStore.getInstance().getArtifactSet(expectedSetId);
+  if (expectedRow) {
+    try {
+      const decoded = decodeArtifactEvidenceJson(expectedRow.evidence_json);
+      if (decoded.services && decoded.services.length > 0) {
+        return comparableObservationMatches(decoded.services, observed);
+      }
+    } catch {
+      return false;
+    }
+  }
+  return identityFallback !== null && observed.identity === identityFallback;
+}
+
+function targetObservationMatchesExpected(target: GitOpsTargetProjection): boolean {
+  const expected = target.artifact.status !== 'not_applicable' && 'expected' in target.artifact
+    ? target.artifact.expected
+    : null;
+  if (!expected || expected.identity === null) return false;
+  if (expected.qualification !== 'exact' && expected.qualification !== 'qualified') return false;
+  return expectedSetAgreesWithObservation(expected.artifactSetId, target.observedArtifactIdentity, expected.identity);
 }
 
 function deriveSource(app: GitOpsApplicationRow, limitations: GitOpsLimitation[]): SourceFacet {
@@ -352,7 +398,12 @@ function deriveArtifact(
   latestId: string | null,
   limitations: GitOpsLimitation[],
 ): ArtifactFacet {
-  if (app.target_mode === 'inline_blueprint' || !generationId) return { status: 'not_applicable' };
+  // Inline without a frozen generation stays not_applicable (no fabricated
+  // exact convergence). Once freeze binds generation + expected set pointers,
+  // Inline derives the same way as Git-managed. Direct with a null
+  // generationId is likewise not_applicable.
+  if (app.target_mode === 'inline_blueprint' && !generationId) return { status: 'not_applicable' };
+  if (!generationId) return { status: 'not_applicable' };
   const store = GitOpsStore.getInstance();
   const expected = expectedId ? toExpected(store, expectedId, limitations) : null;
   if (!latestId) {
@@ -513,12 +564,34 @@ function derivePlacement(
     ?? (app.rollout_candidate_id
       ? store.getRolloutCandidate(app.rollout_candidate_id)?.accepted_generation_id
       : null);
-  if (candidateGenerationId && !app.source_acceptance_ref) {
+  // A Git-managed application takes every generation through its own
+  // acceptance, so a staged generation that is not the accepted one leaves
+  // source acceptance outstanding even when an earlier generation was already
+  // accepted. Only a live staged generation asks for that decision: the
+  // candidate's own binding names the generation an earlier rollout
+  // authorized, and after a source-only update it names the previous one, so
+  // treating it as pending would report a review no generation is waiting for.
+  // The other modes keep the original ref-based test: their staged candidate is
+  // the Inline Apply review, not a source decision.
+  const sourceAcceptanceOutstanding = app.target_mode === 'blueprint'
+    ? app.candidate_generation_id !== null && app.candidate_generation_id !== app.accepted_generation_id
+    : candidateGenerationId !== null && !app.source_acceptance_ref;
+  if (sourceAcceptanceOutstanding && candidateGenerationId != null) {
     return {
       status: 'source_acceptance_pending',
-      sourceAcceptanceRef: null,
+      sourceAcceptanceRef: app.source_acceptance_ref,
       candidateGenerationId,
     };
+  }
+
+  // Git-managed placement decision. A current candidate with no recorded
+  // placement approval means an operator approval is the next authority step.
+  // This does not depend on the accepted generation or artifact set: the
+  // approval binds the intent plus the frozen blast, and the earlier
+  // source_acceptance_pending branch above already speaks for a candidate
+  // whose source has not been accepted.
+  if (app.target_mode === 'blueprint' && app.rollout_candidate_id && !app.placement_approval_ref) {
+    return { status: 'placement_review_pending' };
   }
 
   const ingredients = store.authorizationIngredients(app);
@@ -551,6 +624,16 @@ function derivePlacement(
       targets: [],
     }));
   const binding = { ...ingredients, preflightFingerprint: fingerprint };
+
+  // 2a. Executable artifact evidence must exist before registry readiness is a
+  // question: naming the artifact identity keeps the operator off a registry
+  // hunt when the set was never resolved.
+  const artifactRefusal = executableArtifactRefusalReason(
+    store.getArtifactSet(ingredients.artifactSetId)?.qualification,
+  );
+  if (artifactRefusal) {
+    return { status: 'preflight_blocked', reason: artifactRefusal, binding };
+  }
 
   // 2. Stored blocked/unknown outranks live pointers.
   if (stored && isPreflightBlocked(stored)) {
@@ -703,6 +786,19 @@ function deriveRollout(
 
       if (artifact.status !== 'artifact_exact') {
         return { status: 'configuration_converged_artifact_qualified', rolloutGenerationId };
+      }
+      // Exact convergence also needs per-target digest proof. Pointers and
+      // health alone must not claim exactly_converged_healthy while any
+      // required live target lacks a matching exact/qualified observation.
+      const allDigestMatched = required.every((nodeId) => {
+        const target = liveTarget(nodeId);
+        return !!target && targetObservationMatchesExpected(target);
+      });
+      if (!allDigestMatched) {
+        return {
+          status: 'partially_rolled_out',
+          partial: app.partial_json ?? { reason: 'runtime_artifact_divergence' },
+        };
       }
       return { status: 'exactly_converged_healthy', rolloutGenerationId };
     }
@@ -877,8 +973,11 @@ function deriveRuntime(
     if (
       (observed.kind === 'exact' || observed.kind === 'qualified')
       && artifact.expected.identity
-      && observed.identity !== artifact.expected.identity
+      && !expectedSetAgreesWithObservation(artifact.expected.artifactSetId, observed, artifact.expected.identity)
     ) {
+      if (target.rollout_authorization_ref || target.rollout_generation_id) {
+        return { status: 'rollout_artifact_drift' };
+      }
       return { status: 'runtime_artifact_drift' };
     }
   }
@@ -1057,7 +1156,13 @@ function deriveActions(
   }
   if (app.candidate_generation_id && !app.active_operation_stage) actions.add('dismiss');
   if (targets.some((target) => targetDeployLegal(app, target))) actions.add('deploy');
-  if (placement.status === 'placement_review_pending') actions.add('approve_legacy');
+  // The combined Apply is the Inline placement decision. A Git-managed
+  // placement review is the decomposed approval action, which is not this
+  // action vocabulary; offering `approve_legacy` there would name a flow the
+  // application refuses.
+  if (placement.status === 'placement_review_pending' && app.target_mode === 'inline_blueprint') {
+    actions.add('approve_legacy');
+  }
   // Controller controls are Direct-only. In-flight and recovery statuses
   // already returned ['none'] above, so those never offer suspend/resume/retry.
   if (app.target_mode === 'direct') {

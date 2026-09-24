@@ -35,15 +35,44 @@ import {
     type BlueprintMarker,
 } from '../helpers/blueprintMarker';
 import { throwIfGitManagedDeploy } from './gitops/gitManaged';
+import type { GitOpsRecoveryCapture } from './gitops/recoveryCapture';
 import {
     commitBlueprintDeploymentCause,
     commitBlueprintDeploymentRemoved,
+    freezeInlineRevisionAfterDeploy,
     type BlueprintDeploymentCause,
 } from './gitops/blueprintDeploymentProducers';
+import { observeStackRuntimeArtifact, resolvePlatformLabelForNode } from './gitops/artifactResolve';
+import { stackManagedRoot } from './gitops/directApplication';
+import {
+    buildDigestPinsFromArtifactSet,
+    DigestPinsMismatchError,
+    digestPinsMatchServiceNames,
+    type DigestPinsMap,
+} from './gitops/digestPins';
+import { buildEffectiveServiceModel } from './effectiveServiceModel';
+import { comparableObservationMatches } from './gitops/artifactIdentity';
+import {
+    decodeArtifactEvidenceJson,
+    decodeObservedArtifactIdentity,
+    type ObservedArtifactIdentity,
+    type ServiceArtifactEvidence,
+} from './gitops/json';
+import { GitOpsStore } from './gitops/store';
+import { GitOpsTransitions } from './gitops/transitions';
+import { envelopeFor, recordableApplication } from './gitops/blueprintProducers';
+import type { GitOpsApplicationRow, GitOpsGenerationRow } from './gitops/types';
 
 /** On-disk compose name for Blueprint applies. Must match createStack scaffold and Sencho discovery priority. */
 const COMPOSE_FILENAME = 'compose.yaml';
 const REMOTE_HTTP_TIMEOUT_MS = 30_000;
+
+export type DriftCause = 'revision' | 'container' | 'digest';
+
+export type DriftCheckResult =
+    | { kind: 'matched' }
+    | { kind: 'drifted'; reason: string; cause: DriftCause }
+    | { kind: 'unverified'; reason: string };
 
 function isDeveloperModeEnabled(): boolean {
     try {
@@ -159,6 +188,90 @@ export class BlueprintService {
     }
 
     /**
+     * Digest-pinned Enforce repair: restore the frozen expected identity without
+     * rewriting authored compose tags on disk. Fails closed when the approved
+     * digest cannot be retrieved; LKG/expected pointers stay untouched.
+     */
+    async enforceDigestRepair(blueprint: Blueprint, node: Node): Promise<DeployOutcome> {
+        const store = GitOpsStore.getInstance();
+        const app = store.getLiveBlueprintApplication(blueprint.id);
+        if (!recordableApplication(app)) {
+            return { status: 'failed', error: 'no recordable GitOps application for digest repair' };
+        }
+        const target = store.getTarget(app.id, node.id);
+        const expectedSetId = target?.expected_artifact_set_id ?? app.artifact_set_id;
+        if (!expectedSetId) {
+            return { status: 'failed', error: 'no expected artifact set for digest repair' };
+        }
+        const platformLabel = await resolvePlatformLabelForNode(node.id, blueprint.name);
+        const digestPins = buildDigestPinsFromArtifactSet(expectedSetId, platformLabel);
+        if (!digestPins) {
+            return { status: 'failed', error: 'approved digest unavailable for digest repair' };
+        }
+        return this.reapplyAuthorizedMaterialization(blueprint, node, digestPins);
+    }
+
+    /**
+     * Re-apply already-authorized compose without rewriting authored tags.
+     * Used by Enforce for git-managed container/revision drift, where
+     * deployToNode would refuse Git-managed content.
+     */
+    async reapplyAuthorizedMaterialization(
+        blueprint: Blueprint,
+        node: Node,
+        digestPins?: DigestPinsMap,
+    ): Promise<DeployOutcome> {
+        const store = GitOpsStore.getInstance();
+        const app = store.getLiveBlueprintApplication(blueprint.id);
+        if (!recordableApplication(app)) {
+            return { status: 'failed', error: 'no recordable GitOps application for authorized reapply' };
+        }
+        let composeContent = blueprint.compose_content;
+        if (app.target_mode === 'blueprint' && app.accepted_generation_id) {
+            const generation = store.getGeneration(app.accepted_generation_id);
+            if (!generation) {
+                return { status: 'failed', error: 'accepted generation missing for authorized reapply' };
+            }
+            try {
+                composeContent = await this.readGitManagedAppliedCompose(app, generation);
+            } catch (err) {
+                return { status: 'failed', error: BlueprintService.formatError(err) };
+            }
+        }
+        return this.deployAuthorizedMaterialization({
+            blueprint,
+            node,
+            composeContent,
+            marker: this.buildMarker(blueprint),
+            auditPath: `/api/blueprints/${blueprint.id}/enforce-reapply`,
+            digestPins,
+        });
+    }
+
+    private async readGitManagedAppliedCompose(
+        app: GitOpsApplicationRow,
+        generation: GitOpsGenerationRow,
+    ): Promise<string> {
+        const stackName = app.configured_source_stack_name;
+        if (!stackName) {
+            throw new Error('bound application has no retained source stack identity');
+        }
+        if (!generation.applied_dir || generation.applied_dir.trim() === '') {
+            throw new Error('accepted generation has no applied materialization directory');
+        }
+        const managedRoot = stackManagedRoot(stackName);
+        const appliedAbs = path.resolve(managedRoot, generation.applied_dir);
+        if (!appliedAbs.startsWith(managedRoot + path.sep)) {
+            throw new Error('applied materialization path escapes the managed root');
+        }
+        const composePath = path.resolve(appliedAbs, 'compose.yaml');
+        if (!composePath.startsWith(appliedAbs + path.sep)) {
+            throw new Error('compose path escapes the applied materialization directory');
+        }
+        return fsPromises.readFile(composePath, 'utf8');
+    }
+
+    /**
      * Deploy already-authorized materialized compose bytes to one node.
      *
      * Used by Git-managed Blueprint rollout after rollout_authorization resolves.
@@ -169,6 +282,13 @@ export class BlueprintService {
      * Pass `lockHeld: true` when the caller already acquired the lock (so
      * deploy-started is not recorded before the lock is held). The caller
      * releases in that case; otherwise this method acquires and releases.
+     *
+     * `captureRecovery` asks the node to capture a recovery generation of the
+     * pre-deploy state before it deploys, which is what lets a Git-managed
+     * rollout be rolled back later. `recoveryBinding` names the GitOps
+     * generation that state belongs to, because a remote node cannot resolve a
+     * hub-owned GitOps application itself. Both travel to the remote in the
+     * apply-local request so the capture happens where the files are.
      */
     async deployAuthorizedMaterialization(args: {
         blueprint: Blueprint;
@@ -177,6 +297,9 @@ export class BlueprintService {
         marker: BlueprintMarker;
         auditPath: string;
         lockHeld?: boolean;
+        digestPins?: DigestPinsMap;
+        captureRecovery?: boolean;
+        recoveryBinding?: GitOpsRecoveryCapture;
     }): Promise<DeployOutcome> {
         const manageLock = !args.lockHeld;
         if (manageLock && !this.acquireLock(args.blueprint.id, args.node.id)) {
@@ -198,13 +321,26 @@ export class BlueprintService {
                     args.composeContent,
                     markerContent,
                     args.auditPath,
-                    { allowGitManaged: true },
+                    {
+                        allowGitManaged: true,
+                        digestPins: args.digestPins,
+                        captureRecovery: args.captureRecovery,
+                        recoveryBinding: args.recoveryBinding,
+                    },
                 );
                 if (!outcome.ran) {
                     throw new Error(stackOpSkipMessage(args.blueprint.name, outcome.existingAction));
                 }
             } else {
-                await this.deployRemoteMaterialization(args.blueprint, args.node, args.composeContent, markerContent);
+                await this.deployRemoteMaterialization(
+                    args.blueprint,
+                    args.node,
+                    args.composeContent,
+                    markerContent,
+                    args.digestPins,
+                    args.captureRecovery === true,
+                    args.recoveryBinding,
+                );
             }
             this.setStatus(args.blueprint.id, args.node.id, 'active', 'deploy_ack', {
                 applied_revision: args.blueprint.revision,
@@ -212,6 +348,11 @@ export class BlueprintService {
                 last_drift_at: null,
                 drift_summary: null,
                 last_error: null,
+            });
+            await freezeInlineRevisionAfterDeploy({
+                blueprintId: args.blueprint.id,
+                nodeId: args.node.id,
+                actor: null,
             });
             return { status: 'active' };
         } catch (err) {
@@ -237,17 +378,33 @@ export class BlueprintService {
         node: Node,
         composeContent: string,
         markerContent: string,
+        digestPins?: DigestPinsMap,
+        captureRecovery = false,
+        recoveryBinding?: GitOpsRecoveryCapture,
     ): Promise<void> {
         const target = NodeRegistry.getInstance().getProxyTarget(node.id);
         if (!target) throw new Error(`Remote node "${node.name}" has no proxy target configured`);
         const baseUrl = target.apiUrl.replace(/\/$/, '');
         const headers = this.remoteHeaders(target.apiToken);
-        const applyBody = {
+        const applyBody: Record<string, unknown> = {
             stackName: blueprint.name,
             composeContent,
             markerContent,
             allowGitManagedContent: true,
         };
+        if (digestPins) {
+            applyBody.digestPins = digestPins;
+        }
+        if (captureRecovery) {
+            applyBody.captureRecovery = true;
+            if (recoveryBinding) {
+                applyBody.recoveryBinding = {
+                    generationId: recoveryBinding.gitops_generation_id,
+                    artifactSetId: recoveryBinding.gitops_artifact_set_id,
+                    sourceAcceptanceRef: recoveryBinding.gitops_source_acceptance_ref,
+                };
+            }
+        }
         const augmented = await prepareOutboundRegistryDeliveryBody({
             method: 'POST',
             apiPath: '/api/blueprints/apply-local',
@@ -468,6 +625,11 @@ export class BlueprintService {
                 drift_summary: null,
                 last_error: null,
             });
+            await freezeInlineRevisionAfterDeploy({
+                blueprintId: blueprint.id,
+                nodeId: node.id,
+                actor: null,
+            });
             console.info('[BlueprintService] deploy complete blueprint=%s node=%s durationMs=%s',
                 sanitizeForLog(blueprint.name), node.id, Date.now() - started);
             return { status: 'active' };
@@ -541,34 +703,158 @@ export class BlueprintService {
     }
 
     /**
-     * Inspect the actual state of a deployment on its node and report
-     * whether it has drifted from the desired state. The reconciler decides
-     * what to do with the result based on drift_mode.
+     * Inspect deployment state on a node and classify drift for the reconciler.
+     *
+     * `matched` means marker + running containers + a comparable exact/qualified
+     * expected set whose identity matches the observation. `drifted` means a
+     * restorable divergence (marker/revision/not-running/digest mismatch).
+     * `unverified` means the check could not prove either side (no application
+     * row, unreachable node, missing expected set, or non-comparable observation)
+     * and must never trigger Enforce.
      */
-    async checkForDrift(blueprint: Blueprint, node: Node): Promise<{ drifted: boolean; reason?: string }> {
+    async checkForDrift(blueprint: Blueprint, node: Node): Promise<DriftCheckResult> {
         try {
+            const store = GitOpsStore.getInstance();
+            const app = store.getLiveBlueprintApplication(blueprint.id);
+            if (!recordableApplication(app)) {
+                return { kind: 'unverified', reason: 'no recordable GitOps application' };
+            }
+
             const marker = await this.readMarker(blueprint.name, node);
             if (!marker) {
-                return { drifted: true, reason: 'marker file missing on node' };
+                return { kind: 'drifted', reason: 'marker file missing on node', cause: 'revision' };
             }
             if (marker.blueprintId !== blueprint.id) {
-                return { drifted: true, reason: 'marker references a different blueprint' };
+                return { kind: 'drifted', reason: 'marker references a different blueprint', cause: 'revision' };
             }
             if (marker.revision !== blueprint.revision) {
-                return { drifted: true, reason: `revision drift (node has ${marker.revision}, blueprint is ${blueprint.revision})` };
+                return {
+                    kind: 'drifted',
+                    reason: `revision drift (node has ${marker.revision}, blueprint is ${blueprint.revision})`,
+                    cause: 'revision',
+                };
             }
-            // Check container state
+
             const containerState = await this.containerHealth(blueprint.name, node);
-            if (!containerState.allRunning) {
-                return { drifted: true, reason: containerState.detail };
+            if (containerState.kind === 'unreachable') {
+                return { kind: 'unverified', reason: containerState.detail };
             }
-            return { drifted: false };
+            if (containerState.kind === 'not_running') {
+                return { kind: 'drifted', reason: containerState.detail, cause: 'container' };
+            }
+
+            const observed = await this.observeRuntimeIdentity(blueprint.name, node);
+            if (!observed) {
+                return { kind: 'unverified', reason: 'runtime identity could not be collected' };
+            }
+
+            const target = store.getTarget(app.id, node.id);
+            if (target) {
+                try {
+                    GitOpsTransitions.getInstance().recordObservedRuntimeArtifact({
+                        applicationId: app.id,
+                        nodeId: node.id,
+                        observed,
+                        envelope: envelopeFor(null, 'blueprint_drift_observe'),
+                    });
+                } catch (error) {
+                    console.error(
+                        '[BlueprintService] Failed to record runtime observation for blueprint %s node %d:',
+                        sanitizeForLog(blueprint.name),
+                        node.id,
+                        error instanceof Error ? error.message : String(error),
+                    );
+                }
+            }
+
+            const expectedSetId = target?.expected_artifact_set_id ?? app.artifact_set_id;
+            if (!expectedSetId) {
+                return { kind: 'unverified', reason: 'no expected artifact set' };
+            }
+            const expectedRow = store.getArtifactSet(expectedSetId);
+            if (
+                !expectedRow
+                || (expectedRow.qualification !== 'exact' && expectedRow.qualification !== 'qualified')
+            ) {
+                return { kind: 'unverified', reason: 'expected artifact set is not comparable' };
+            }
+            let expectedIdentity: string | null = null;
+            let expectedServices: ServiceArtifactEvidence[] | undefined;
+            try {
+                const decoded = decodeArtifactEvidenceJson(expectedRow.evidence_json);
+                expectedIdentity = 'identity' in decoded ? decoded.identity : null;
+                expectedServices = 'services' in decoded ? decoded.services : undefined;
+            } catch {
+                return { kind: 'unverified', reason: 'expected artifact evidence is invalid' };
+            }
+            if (!expectedIdentity) {
+                return { kind: 'unverified', reason: 'expected artifact identity missing' };
+            }
+
+            if (observed.kind !== 'exact' && observed.kind !== 'qualified') {
+                return { kind: 'unverified', reason: `observation is ${observed.kind}` };
+            }
+            if (expectedServices && expectedServices.length > 0) {
+                if (!observed.services || observed.services.length === 0) {
+                    return { kind: 'unverified', reason: 'observation has no per-service digest evidence' };
+                }
+                if (comparableObservationMatches(expectedServices, observed)) {
+                    return { kind: 'matched' };
+                }
+                return {
+                    kind: 'drifted',
+                    reason: 'runtime artifact identity differs from the expected artifact set',
+                    cause: 'digest',
+                };
+            }
+            if (observed.identity !== expectedIdentity) {
+                return {
+                    kind: 'drifted',
+                    reason: 'runtime artifact identity differs from the expected artifact set',
+                    cause: 'digest',
+                };
+            }
+            return { kind: 'matched' };
         } catch (err) {
-            return { drifted: true, reason: BlueprintService.formatError(err) };
+            // Prefer unverified over drifted so a transport failure cannot
+            // trigger Enforce against an unreachable or half-observed node.
+            return { kind: 'unverified', reason: BlueprintService.formatError(err) };
         }
     }
 
-    private async containerHealth(blueprintName: string, node: Node): Promise<{ allRunning: boolean; detail: string }> {
+    private async observeRuntimeIdentity(
+        blueprintName: string,
+        node: Node,
+    ): Promise<ObservedArtifactIdentity | null> {
+        if (node.type === 'local') {
+            return observeStackRuntimeArtifact({ stackName: blueprintName, nodeId: node.id });
+        }
+        const target = NodeRegistry.getInstance().getProxyTarget(node.id);
+        if (!target) return null;
+        const url = `${target.apiUrl.replace(/\/$/, '')}/api/stacks/${encodeURIComponent(blueprintName)}/runtime-artifact-identity`;
+        try {
+            const res = await axios.get(url, {
+                ...safeAxiosTransport(target.trustedLoopback),
+                headers: this.remoteHeaders(target.apiToken),
+                timeout: REMOTE_HTTP_TIMEOUT_MS,
+                validateStatus: () => true,
+            });
+            if (res.status !== 200) return null;
+            return decodeObservedArtifactIdentity(JSON.stringify(res.data));
+        } catch (error) {
+            console.error(
+                '[BlueprintService] Remote runtime identity observation failed for %s:',
+                sanitizeForLog(blueprintName),
+                error instanceof Error ? error.message : String(error),
+            );
+            return null;
+        }
+    }
+
+    private async containerHealth(
+        blueprintName: string,
+        node: Node,
+    ): Promise<{ kind: 'running' } | { kind: 'not_running'; detail: string } | { kind: 'unreachable'; detail: string }> {
         try {
             // Docker Compose normalizes the project name to lowercase. Match the same canonical form.
             const projectName = blueprintName.toLowerCase();
@@ -578,16 +864,23 @@ export class BlueprintService {
                     all: true,
                     filters: { label: [`com.docker.compose.project=${projectName}`] },
                 });
-                if (containers.length === 0) return { allRunning: false, detail: 'no containers running for this blueprint' };
+                if (containers.length === 0) {
+                    return { kind: 'not_running', detail: 'no containers running for this blueprint' };
+                }
                 const notRunning = containers.filter(c => c.State !== 'running');
                 if (notRunning.length > 0) {
                     const first = notRunning[0];
-                    return { allRunning: false, detail: `container "${first.Names[0] ?? first.Id.slice(0, 12)}" is ${first.State}` };
+                    return {
+                        kind: 'not_running',
+                        detail: `container "${first.Names[0] ?? first.Id.slice(0, 12)}" is ${first.State}`,
+                    };
                 }
-                return { allRunning: true, detail: '' };
+                return { kind: 'running' };
             }
             const target = NodeRegistry.getInstance().getProxyTarget(node.id);
-            if (!target) return { allRunning: false, detail: 'remote node not reachable (no proxy target)' };
+            if (!target) {
+                return { kind: 'unreachable', detail: 'remote node not reachable (no proxy target)' };
+            }
             const url = `${target.apiUrl.replace(/\/$/, '')}/api/stacks/${encodeURIComponent(blueprintName)}/containers`;
             const res = await axios.get(url, {
                 ...safeAxiosTransport(target.trustedLoopback),
@@ -596,18 +889,23 @@ export class BlueprintService {
                 validateStatus: () => true,
             });
             if (res.status !== 200) {
-                return { allRunning: false, detail: `remote stack lookup returned HTTP ${res.status}` };
+                return { kind: 'unreachable', detail: `remote stack lookup returned HTTP ${res.status}` };
             }
             const list = Array.isArray(res.data) ? res.data as Array<{ State?: string; Names?: string[]; Id?: string }> : [];
-            if (list.length === 0) return { allRunning: false, detail: 'remote stack has no containers' };
+            if (list.length === 0) {
+                return { kind: 'not_running', detail: 'remote stack has no containers' };
+            }
             const notRunning = list.filter(c => (c.State ?? '') !== 'running');
             if (notRunning.length > 0) {
                 const first = notRunning[0];
-                return { allRunning: false, detail: `remote container "${first.Names?.[0] ?? first.Id?.slice(0, 12)}" is ${first.State}` };
+                return {
+                    kind: 'not_running',
+                    detail: `remote container "${first.Names?.[0] ?? first.Id?.slice(0, 12)}" is ${first.State}`,
+                };
             }
-            return { allRunning: true, detail: '' };
+            return { kind: 'running' };
         } catch (err) {
-            return { allRunning: false, detail: BlueprintService.formatError(err) };
+            return { kind: 'unreachable', detail: BlueprintService.formatError(err) };
         }
     }
 
@@ -679,7 +977,14 @@ export class BlueprintService {
         composeContent: string,
         markerContent: string,
         auditPath: string,
-        options: { allowGitManaged?: boolean } = {},
+        options: {
+            allowGitManaged?: boolean;
+            digestPins?: DigestPinsMap;
+            /** Capture a recovery generation of the pre-deploy state (atomic deploy). */
+            captureRecovery?: boolean;
+            /** GitOps binding to record on that recovery generation, when known. */
+            recoveryBinding?: GitOpsRecoveryCapture;
+        } = {},
     ): Promise<{ ran: true } | { ran: false; existingAction: StackOpAction }> {
         const expected = parseBlueprintMarker(markerContent);
         if (!expected) {
@@ -719,10 +1024,59 @@ export class BlueprintService {
                     }
                     previousComposeContent = prior.content;
                 }
-                await fs.writeStackFile(stackName, COMPOSE_FILENAME, composeContent);
-                // Clear lower-priority compose siblings so discovery cannot shadow compose.yaml.
-                await fs.removeAlternateRootComposeFiles(stackName);
+                // The recovery point must describe the project as it stands
+                // before this apply, so it is captured before the new compose
+                // is written. A newly created stack has no prior state and no
+                // rollback to offer.
+                let recoveryId: string | null = null;
+                if (options.captureRecovery === true && !createdStack) {
+                    const { StackUpdateRecoveryService } = await import('./StackUpdateRecoveryService');
+                    const recoverySvc = StackUpdateRecoveryService.getInstance();
+                    const candidate = await recoverySvc.captureCandidate({
+                        nodeId,
+                        stackName,
+                        createdBy: 'blueprint-rollout',
+                        operationKind: 'deployment',
+                        gitopsBinding: options.recoveryBinding,
+                    });
+                    if (!recoverySvc.markAcquired(candidate.id)) {
+                        await recoverySvc.abandon(candidate.id);
+                        throw new Error('Failed to acquire the recovery generation for this Blueprint apply');
+                    }
+                    if (!recoverySvc.handoff(candidate.id, nodeId, stackName)) {
+                        await recoverySvc.abandon(candidate.id);
+                        throw new Error('Failed to hand off the recovery generation for this Blueprint apply');
+                    }
+                    // From here the row is the stack's current recovery point,
+                    // so every later failure path must settle it: the catch
+                    // below compensates it rather than leaving a current row
+                    // nothing owns.
+                    recoveryId = candidate.id;
+                }
                 try {
+                    if (recoveryId !== null) {
+                        const { StackUpdateRecoveryService } = await import('./StackUpdateRecoveryService');
+                        if (!StackUpdateRecoveryService.getInstance().markReconciling(recoveryId)) {
+                            throw new Error('Failed to mark the recovery generation reconciling for this Blueprint apply');
+                        }
+                    }
+                    await fs.writeStackFile(stackName, COMPOSE_FILENAME, composeContent);
+                    // Clear lower-priority compose siblings so discovery cannot shadow compose.yaml.
+                    await fs.removeAlternateRootComposeFiles(stackName);
+                    if (options.digestPins) {
+                        const model = await buildEffectiveServiceModel(nodeId, stackName);
+                        if (!model.renderable) {
+                            throw new Error(
+                                `Cannot validate digestPins: composed model is not renderable (${model.error})`,
+                            );
+                        }
+                        if (!digestPinsMatchServiceNames(
+                            options.digestPins,
+                            model.services.map((service) => service.name),
+                        )) {
+                            throw new DigestPinsMismatchError();
+                        }
+                    }
                     await assertPolicyGateAllows(
                         stackName,
                         nodeId,
@@ -732,10 +1086,50 @@ export class BlueprintService {
                         stackName,
                         undefined,
                         false,
-                        { source: 'blueprint', actor: 'system:blueprint' },
+                        {
+                            source: 'blueprint',
+                            actor: 'system:blueprint',
+                            digestPins: options.digestPins,
+                        },
                     );
+                    if (recoveryId !== null) {
+                        const { StackUpdateRecoveryService } = await import('./StackUpdateRecoveryService');
+                        if (!StackUpdateRecoveryService.getInstance().markImmediateVerified(recoveryId)) {
+                            console.warn(
+                                '[BlueprintService] Could not mark recovery %s immediate_verified',
+                                sanitizeForLog(recoveryId),
+                            );
+                        }
+                    }
                     await fs.writeStackFile(stackName, BLUEPRINT_MARKER_FILENAME, markerContent);
                 } catch (err) {
+                    // A failed apply attempts to restore the project and the
+                    // runtime the recovery point captured, so the node is not
+                    // left running a half-applied generation. A restore that
+                    // cannot complete is logged and the original failure still
+                    // surfaces.
+                    if (recoveryId !== null) {
+                        try {
+                            const { StackUpdateRecoveryService } = await import('./StackUpdateRecoveryService');
+                            const recovered = await StackUpdateRecoveryService.getInstance().compensateWithCandidate(
+                                recoveryId,
+                                (overridePath, invocation, overlay) => ComposeService.getInstance(nodeId)
+                                    .composeUpWithRecoveryOverride(stackName, overridePath, undefined, invocation, overlay),
+                            );
+                            if (!recovered) {
+                                console.warn(
+                                    '[BlueprintService] Recovery compensation did not complete for "%s"',
+                                    sanitizeForLog(stackName),
+                                );
+                            }
+                        } catch (compError) {
+                            console.error(
+                                '[BlueprintService] Recovery compensation failed for "%s": %s',
+                                sanitizeForLog(stackName),
+                                sanitizeForLog(BlueprintService.formatError(compError)),
+                            );
+                        }
+                    }
                     if (createdStack) {
                         try {
                             await fs.deleteStack(stackName);

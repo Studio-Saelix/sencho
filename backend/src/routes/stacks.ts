@@ -14,9 +14,11 @@ import { StackFileRootsService, STACK_SOURCE_ROOT_ID, stackSourceFileRoot, type 
 import { FileRootGateway } from '../services/FileRootGateway';
 import { ComposeService, getComposeRollbackInfo } from '../services/ComposeService';
 import { StackUpdateOrchestrator, shortImageId, type OrchestratorResult } from '../services/StackUpdateOrchestrator';
-import DockerController, { type BulkStackInfo } from '../services/DockerController';
+import DockerController from '../services/DockerController';
 import { DatabaseService, type StackDossierFields } from '../services/DatabaseService';
-import { CacheService, type CacheFetchOutcome } from '../services/CacheService';
+import { type CacheFetchOutcome } from '../services/CacheService';
+import { buildStackStatusesEvidence } from '../services/stackStatusesEvidence';
+import { buildStackReadinessSummary } from '../services/readiness/stackReadinessSummary';
 import {
   UpdatePreviewService,
   isAuthoritativeNegativePreview,
@@ -24,6 +26,9 @@ import {
 } from '../services/UpdatePreviewService';
 import { GitSourceService, GitSourceError, repoHost as gitRepoHost, type SourcePolicy } from '../services/GitSourceService';
 import { repoUrlRejectionMessage } from '../services/gitops/repoIdentity';
+import { observeStackRuntimeArtifact } from '../services/gitops/artifactResolve';
+import { loadEffectiveArtifactContext } from '../services/gitops/effectiveArtifactContext';
+import { encodeObservedArtifactIdentity } from '../services/gitops/json';
 import { REF_MAX_LEN } from '../services/git/nativeGitTransport';
 import { validateCaBundlePem } from '../services/git/caBundle';
 import { enforcePolicyPreDeploy } from '../services/PolicyEnforcement';
@@ -57,7 +62,7 @@ import { isValidGitSourcePath, isValidStackName, isValidServiceName, isValidRela
 import { normalizeBulkPaths, destWithinAnySource } from '../utils/bulkPaths';
 import { getErrorMessage } from '../utils/errors';
 import { isDebugEnabled } from '../utils/debug';
-import { sanitizeForLog } from '../utils/safeLog';
+import { errorMessageForLog, sanitizeForLog } from '../utils/safeLog';
 import { logDebugTiming } from '../utils/requestTiming';
 import { sendGitSourceError } from '../utils/gitSourceHttp';
 import { buildPolicyGateOptions, runPolicyGate, triggerPostDeployScan, describePolicyBlock } from '../helpers/policyGate';
@@ -78,15 +83,11 @@ import {
   selectFleetSnapshotApplyFiles,
 } from '../helpers/applyFleetSnapshotFiles';
 import { resolveStackEnvSources, discoverStackLocalEnvFiles } from '../helpers/envFileResolution';
-import { STACK_STATUSES_CACHE_TTL_MS } from '../helpers/constants';
 import { getTerminalWs, DEPLOY_SESSION_HEADER } from '../websocket/generic';
 import {
   isSelfStack,
-  isSelfStackByIdentity,
   refuseIfSelfStack,
-  resolveSelfStackIdentity,
   selfStackProtectedBulkResult,
-  UNRESOLVED_SELF_STACK_IDENTITY,
 } from '../helpers/selfStackGuard';
 import { getActiveCapabilities, STACK_DOWN_REMOVE_VOLUMES_CAPABILITY, SERVICE_SCOPED_UPDATE_CAPABILITY } from '../services/CapabilityRegistry';
 import { ServiceUpdateRecoveryService } from '../services/ServiceUpdateRecoveryService';
@@ -367,73 +368,12 @@ stacksRouter.get('/statuses', async (req: Request, res: Response) => {
   let enrichmentMs: number | null = null;
   let count = 0;
   try {
-    // Enrichment (git-source labels, self identity) is part of the cached
-    // payload so cache hits serve fully decorated statuses with no per-request
-    // work. The git label lookup failure still falls back to 'local' and must
-    // not take down the primary status payload.
-    const { value: result, outcome: fetchOutcome } = await CacheService.getInstance().getOrFetchWithMeta(
-      `stack-statuses:${req.nodeId}`,
-      STACK_STATUSES_CACHE_TTL_MS,
-      async () => {
-        const stacks = await FileSystemService.getInstance(req.nodeId).getStacks();
-        const stackNames = stacks.map((s: string) => s.replace(/\.(yml|yaml)$/, ''));
-        const dockerController = DockerController.getInstance(req.nodeId);
-        const dockerStartedAt = Date.now();
-        const bulkInfo = await dockerController.getBulkStackStatuses(stackNames);
-        dockerMs = Date.now() - dockerStartedAt;
-        const data: Record<string, BulkStackInfo> = {};
-        for (const stack of stacks) {
-          const name = stack.replace(/\.(yml|yaml)$/, '');
-          data[stack] = bulkInfo[name] ?? { status: 'unknown' };
-        }
-        const enrichmentStartedAt = Date.now();
-        let gitStackNames = new Set<string>();
-        let gitSourcesDegraded = false;
-        try {
-          gitStackNames = new Set(GitSourceService.getInstance().list().map((s) => s.stack_name));
-        } catch (sourceError) {
-          console.error(`Failed to load git sources for status labels on node ${req.nodeId}; defaulting to local:`, sourceError);
-          gitSourcesDegraded = true;
-        }
-        // Self-stack identity is resolved once per request instead of once per
-        // stack, so cache misses pay a single container-list call, not N.
-        const selfIdentity = stackNames.length > 0
-          ? await resolveSelfStackIdentity()
-          : UNRESOLVED_SELF_STACK_IDENTITY;
-        const withSource: Record<string, BulkStackInfo & { source: 'local' | 'git'; isSelf: boolean }> = {};
-        const composeDir = FileSystemService.getInstance(req.nodeId).getBaseDir();
-        for (const [stack, info] of Object.entries(data)) {
-          const name = stack.replace(/\.(yml|yaml)$/, '');
-          withSource[stack] = {
-            ...info,
-            source: gitStackNames.has(name) ? 'git' : 'local',
-            isSelf: isSelfStackByIdentity(selfIdentity, name, composeDir),
-          };
-        }
-        enrichmentMs = Date.now() - enrichmentStartedAt;
-        // The payload is flagged degraded when any enrichment source failed
-        // (Docker socket unreachable, git-source scan failure) so the route
-        // can refuse to let a mislabeled payload persist.
-        return { data: withSource, degraded: selfIdentity.degraded || gitSourcesDegraded };
-      },
-    );
-    cacheOutcome = fetchOutcome;
-    const { data, degraded } = result;
-    count = Object.keys(data).length;
-    // A degraded identity resolution (Docker socket unreachable) cannot be
-    // trusted to classify every stack, which un-gates destructive UI
-    // affordances on the Sencho stack itself, and a failed git-source scan
-    // mislabels every source badge as 'local'. Never let either mislabel
-    // persist for a full TTL: serve the live result, drop the cache entry,
-    // and let the next request re-resolve. Everything between the fetch and
-    // this invalidate is synchronous, so no concurrent reader can observe
-    // the degraded entry. Running outside Docker is not degraded (both
-    // identity sources legitimately resolve to null there), and an empty
-    // fleet skips resolution entirely; both are cached as-is.
-    if (fetchOutcome === 'computed' && count > 0 && degraded) {
-      CacheService.getInstance().invalidate(`stack-statuses:${req.nodeId}`);
-    }
-    res.json(data);
+    const result = await buildStackStatusesEvidence(req.nodeId);
+    cacheOutcome = result.cacheOutcome;
+    dockerMs = result.dockerMs;
+    enrichmentMs = result.enrichmentMs;
+    count = Object.keys(result.evidence.data).length;
+    res.json(result.evidence.data);
   } catch (error) {
     outcome = 'error';
     console.error('Failed to fetch stack statuses:', error);
@@ -449,6 +389,22 @@ stacksRouter.get('/statuses', async (req: Request, res: Response) => {
       elapsedMs: Date.now() - startedAt,
       outcome,
     });
+  }
+});
+
+// Per-stack update and rollback verdicts for the fleet readiness surface,
+// computed by this node because the Docker socket is here: the update preview's
+// remote path aborts at a hard 90s ceiling per stack, which a fleet fan-out
+// cannot wait on. Registered ahead of the `/:stackName` catch-all, like
+// `/statuses` above, or the request would resolve as a stack named
+// `readiness-summary`.
+stacksRouter.get('/readiness-summary', async (req: Request, res: Response) => {
+  if (!requirePermission(req, res, 'stack:read')) return;
+  try {
+    res.json(await buildStackReadinessSummary(req.nodeId));
+  } catch (error) {
+    console.error('Failed to build stack readiness summary:', errorMessageForLog(error));
+    res.status(500).json({ error: 'Failed to build stack readiness summary' });
   }
 });
 
@@ -1348,6 +1304,42 @@ stacksRouter.get('/:stackName/containers', async (req: Request, res: Response) =
       elapsedMs: Date.now() - startedAt,
       outcome,
     });
+  }
+});
+
+stacksRouter.get('/:stackName/runtime-artifact-identity', async (req: Request, res: Response) => {
+  const stackName = req.params.stackName as string;
+  if (!(await requireStackExists(req.nodeId, stackName, res))) return;
+  try {
+    const observed = await observeStackRuntimeArtifact({
+      stackName,
+      nodeId: req.nodeId,
+    });
+    // Encode then parse so the response matches the persisted JSON contract.
+    res.json(JSON.parse(encodeObservedArtifactIdentity(observed)));
+  } catch (error) {
+    console.error(
+      '[Stacks] Failed to observe runtime artifact identity for %s:',
+      sanitizeForLog(stackName),
+      error,
+    );
+    res.status(500).json({ error: 'Failed to observe runtime artifact identity' });
+  }
+});
+
+stacksRouter.get('/:stackName/effective-artifact-context', async (req: Request, res: Response) => {
+  const stackName = req.params.stackName as string;
+  if (!(await requireStackExists(req.nodeId, stackName, res))) return;
+  try {
+    const context = await loadEffectiveArtifactContext(req.nodeId, stackName);
+    res.json(context);
+  } catch (error) {
+    console.error(
+      '[Stacks] Failed to load effective artifact context for %s:',
+      sanitizeForLog(stackName),
+      error,
+    );
+    res.status(500).json({ error: 'Failed to load effective artifact context' });
   }
 });
 
@@ -2612,6 +2604,30 @@ stacksRouter.post('/:stackName/rollback', async (req: Request, res: Response) =>
     const { StackUpdateRecoveryService } = await import('../services/StackUpdateRecoveryService');
     const recoverySvc = StackUpdateRecoveryService.getInstance();
     const currentGen = recoverySvc.getCurrent(req.nodeId, stackName);
+    // A caller that names the application generation it means to restore
+    // (the GitOps rollout rollback path) must be answered against that
+    // generation, never against whatever recovery point happens to be current.
+    // Restoring the wrong point under a rollback claim would report a rollout
+    // recovery that never happened.
+    const expectedGitopsGenerationId = typeof req.body?.expectedGitopsGenerationId === 'string'
+      && req.body.expectedGitopsGenerationId.length > 0
+      ? req.body.expectedGitopsGenerationId
+      : null;
+    if (expectedGitopsGenerationId !== null && !currentGen) {
+      res.status(409).json({
+        error: 'This stack has no recovery point to restore.',
+        code: 'NO_RECOVERY_POINT',
+      });
+      return;
+    }
+    if (expectedGitopsGenerationId !== null && currentGen
+      && currentGen.gitops_generation_id !== expectedGitopsGenerationId) {
+      res.status(409).json({
+        error: 'The current recovery point does not restore the requested application generation.',
+        code: 'RECOVERY_POINT_MISMATCH',
+      });
+      return;
+    }
     // Any current recovery row uses compensateWithCandidate. Policy is evaluated
     // against the restored target inside compensate, not the live pre-restore project.
     if (currentGen) {
@@ -2664,7 +2680,14 @@ stacksRouter.post('/:stackName/rollback', async (req: Request, res: Response) =>
       }
       invalidateNodeCaches(req.nodeId);
       dlog(`[Stacks] Rollback completed: ${sanitizeForLog(stackName)}`);
-      res.json({ message: 'Stack rolled back from recovery generation.', recoveryId: currentGen.id });
+      // Echo the generation the point was bound to. A hub-driven rollout
+      // rollback requires this to equal the generation it asked for, so a
+      // node that ignored the request cannot be reported as a restore.
+      res.json({
+        message: 'Stack rolled back from recovery generation.',
+        recoveryId: currentGen.id,
+        gitopsGenerationId: currentGen.gitops_generation_id ?? null,
+      });
       notifyActionSuccess('deploy_success', `${stackName} rolled back`, stackName, req.user?.username ?? 'system');
       return;
     }

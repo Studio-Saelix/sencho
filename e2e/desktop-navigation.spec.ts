@@ -197,10 +197,6 @@ test.describe('Desktop navigation styles', () => {
   test('the launcher hamburger morphs open/closed and does not animate under Reduced motion', async ({ page }) => {
     const trigger = page.getByRole('button', { name: 'Open navigation launcher' });
     await expect(trigger).toHaveAttribute('data-state', 'closed');
-    await trigger.click();
-    await expect(trigger).toHaveAttribute('data-state', 'open');
-    await page.keyboard.press('Escape');
-    await expect(trigger).toHaveAttribute('data-state', 'closed');
 
     // The bar actually moves open vs. closed, not just a duration-clamp check.
     // Read translate and rotate alongside transform: Tailwind v4 compiles these
@@ -212,9 +208,21 @@ test.describe('Desktop navigation styles', () => {
       const s = getComputedStyle(el);
       return `${s.translate}|${s.rotate}|${s.transform}`;
     };
+    // Read the closed bar while it is at rest, before anything has animated.
     const closedMorph = await bar.evaluate(morphState);
+
     await trigger.click();
     await expect(trigger).toHaveAttribute('data-state', 'open');
+    await page.keyboard.press('Escape');
+    await expect(trigger).toHaveAttribute('data-state', 'closed');
+
+    await trigger.click();
+    await expect(trigger).toHaveAttribute('data-state', 'open');
+    // The bars move through a CSS transition (150ms, clamped under Reduced
+    // motion), so a computed-style read right after the data-state flip can
+    // land before the transition settles and report the closed values. Poll
+    // until the morph differs instead of sampling once.
+    await expect.poll(() => bar.evaluate(morphState), { timeout: 5_000 }).not.toBe(closedMorph);
     const openMorph = await bar.evaluate(morphState);
     expect(openMorph).not.toBe(closedMorph);
     await page.keyboard.press('Escape');
@@ -346,10 +354,10 @@ test.describe('Desktop navigation styles', () => {
     await expect(viewport).toBeVisible();
 
     // Content fits without being clipped when the viewport is roomy enough.
-    const metrics = await viewport.evaluate((el) => ({
-      clientHeight: el.clientHeight,
-      scrollHeight: el.scrollHeight,
-    }));
-    expect(metrics.scrollHeight).toBeLessThanOrEqual(metrics.clientHeight + 1);
+    // Polled rather than read once: the popper's available-height variable is
+    // applied after the panel opens, so a single immediate read can observe the
+    // pre-positioning clamp and misreport a settled panel as clipped.
+    await expect.poll(async () => viewport.evaluate((el) => el.scrollHeight - el.clientHeight))
+      .toBeLessThanOrEqual(1);
   });
 });

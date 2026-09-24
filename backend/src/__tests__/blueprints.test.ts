@@ -399,6 +399,187 @@ describe('BlueprintReconciler developer-mode diagnostics', () => {
 });
 
 describe('BlueprintService per-stack lock', () => {
+    it('captures the recovery point before the new compose reaches disk', async () => {
+        const nodeId = seedNode();
+        const bp = seedBlueprint({ classification: 'stateless', nodeIds: [nodeId] });
+        const { FileSystemService } = await import('../services/FileSystemService');
+        const { ComposeService } = await import('../services/ComposeService');
+        const { StackUpdateRecoveryService } = await import('../services/StackUpdateRecoveryService');
+
+        const svc = BlueprintService.getInstance();
+        type PrivateProbe = {
+            stackDirExists: (nodeId: number, stackName: string) => Promise<boolean>;
+            readLocalMarkerFromDisk: (nodeId: number, stackName: string) => Promise<unknown>;
+        };
+        vi.spyOn(svc as unknown as PrivateProbe, 'stackDirExists').mockResolvedValue(true);
+        vi.spyOn(svc as unknown as PrivateProbe, 'readLocalMarkerFromDisk').mockResolvedValue({
+            kind: 'ok',
+            marker: { blueprintId: bp.id, revision: bp.revision, lastApplied: 1 },
+        });
+        vi.spyOn(FileSystemService.prototype, 'readStackFile').mockResolvedValue({
+            content: 'services:\n  app:\n    image: nginx:previous\n',
+            oversized: false,
+            binary: false,
+        } as never);
+        const writeSpy = vi.spyOn(FileSystemService.prototype, 'writeStackFile').mockResolvedValue(undefined);
+        vi.spyOn(FileSystemService.prototype, 'removeAlternateRootComposeFiles').mockResolvedValue(undefined);
+        vi.spyOn(ComposeService.prototype, 'deployStack').mockResolvedValue({ recoveryId: null, deployedGenerationId: null, gitopsOperationId: null });
+
+        const recovery = StackUpdateRecoveryService.getInstance();
+        const captureSpy = vi.spyOn(recovery, 'captureCandidate').mockResolvedValue({ id: 'rec-1' } as never);
+        vi.spyOn(recovery, 'markAcquired').mockReturnValue(true);
+        vi.spyOn(recovery, 'handoff').mockReturnValue(true);
+        vi.spyOn(recovery, 'markReconciling').mockReturnValue(true);
+        vi.spyOn(recovery, 'markImmediateVerified').mockReturnValue(true);
+
+        const outcome = await svc.applyLocalUnderLock(
+            nodeId,
+            bp.name,
+            'services:\n  app:\n    image: nginx:next\n',
+            JSON.stringify({ blueprintId: bp.id, revision: bp.revision, lastApplied: Date.now() }),
+            `/api/blueprints/${bp.id}/rollout/app-1`,
+            {
+                captureRecovery: true,
+                recoveryBinding: {
+                    gitops_generation_id: 'gen-prior',
+                    gitops_artifact_set_id: null,
+                    gitops_source_acceptance_ref: null,
+                },
+            },
+        );
+
+        expect(outcome).toEqual({ ran: true });
+        expect(captureSpy).toHaveBeenCalledWith(expect.objectContaining({
+            gitopsBinding: {
+                gitops_generation_id: 'gen-prior',
+                gitops_artifact_set_id: null,
+                gitops_source_acceptance_ref: null,
+            },
+        }));
+        // The capture must see the project as it was: before compose.yaml is
+        // overwritten with the generation being deployed.
+        const composeWrite = writeSpy.mock.calls.findIndex(([name, file]) => name === bp.name && file === 'compose.yaml');
+        expect(composeWrite).toBeGreaterThanOrEqual(0);
+        const captureOrder = captureSpy.mock.invocationCallOrder[0];
+        const composeWriteOrder = writeSpy.mock.invocationCallOrder[composeWrite];
+        expect(captureOrder).toBeLessThan(composeWriteOrder);
+    });
+
+    type CaptureApply = {
+        apply: () => Promise<unknown>;
+        captureSpy: ReturnType<typeof vi.spyOn>;
+        abandonSpy: ReturnType<typeof vi.spyOn>;
+        deploySpy: ReturnType<typeof vi.spyOn>;
+        compensateSpy: ReturnType<typeof vi.spyOn>;
+    };
+
+    /** A Blueprint apply with capture requested and every primitive mocked. */
+    async function setupCaptureApply(opts: { stackExists?: boolean } = {}): Promise<CaptureApply> {
+        const nodeId = seedNode();
+        const bp = seedBlueprint({ classification: 'stateless', nodeIds: [nodeId] });
+        const { FileSystemService } = await import('../services/FileSystemService');
+        const { ComposeService } = await import('../services/ComposeService');
+        const { StackUpdateRecoveryService } = await import('../services/StackUpdateRecoveryService');
+        const svc = BlueprintService.getInstance();
+        type PrivateProbe = {
+            stackDirExists: (nodeId: number, stackName: string) => Promise<boolean>;
+            readLocalMarkerFromDisk: (nodeId: number, stackName: string) => Promise<unknown>;
+        };
+        vi.spyOn(svc as unknown as PrivateProbe, 'stackDirExists').mockResolvedValue(opts.stackExists ?? true);
+        vi.spyOn(svc as unknown as PrivateProbe, 'readLocalMarkerFromDisk').mockResolvedValue({
+            kind: 'ok',
+            marker: { blueprintId: bp.id, revision: bp.revision, lastApplied: 1 },
+        });
+        vi.spyOn(FileSystemService.prototype, 'createStack').mockResolvedValue(undefined);
+        vi.spyOn(FileSystemService.prototype, 'readStackFile').mockResolvedValue({
+            content: 'services:\n  app:\n    image: nginx:previous\n',
+            oversized: false,
+            binary: false,
+        } as never);
+        vi.spyOn(FileSystemService.prototype, 'writeStackFile').mockResolvedValue(undefined);
+        vi.spyOn(FileSystemService.prototype, 'removeAlternateRootComposeFiles').mockResolvedValue(undefined);
+        const deploySpy = vi.spyOn(ComposeService.prototype, 'deployStack').mockResolvedValue({
+            recoveryId: null,
+            deployedGenerationId: null,
+            gitopsOperationId: null,
+        });
+        const recovery = StackUpdateRecoveryService.getInstance();
+        const captureSpy = vi.spyOn(recovery, 'captureCandidate').mockResolvedValue({ id: 'rec-1' } as never);
+        const abandonSpy = vi.spyOn(recovery, 'abandon').mockResolvedValue(true);
+        vi.spyOn(recovery, 'markAcquired').mockReturnValue(true);
+        vi.spyOn(recovery, 'handoff').mockReturnValue(true);
+        vi.spyOn(recovery, 'markReconciling').mockReturnValue(true);
+        vi.spyOn(recovery, 'markImmediateVerified').mockReturnValue(true);
+        const compensateSpy = vi.spyOn(recovery, 'compensateWithCandidate').mockResolvedValue(true);
+        const apply = (): Promise<unknown> => svc.applyLocalUnderLock(
+            nodeId,
+            bp.name,
+            'services:\n  app:\n    image: nginx:next\n',
+            JSON.stringify({ blueprintId: bp.id, revision: bp.revision, lastApplied: Date.now() }),
+            `/api/blueprints/${bp.id}/rollout/app-1`,
+            {
+                captureRecovery: true,
+                recoveryBinding: {
+                    gitops_generation_id: 'gen-prior',
+                    gitops_artifact_set_id: null,
+                    gitops_source_acceptance_ref: null,
+                },
+            },
+        );
+        return { apply, captureSpy, abandonSpy, deploySpy, compensateSpy };
+    }
+
+    it('fails the apply before any mutation when the capture rejects', async () => {
+        const { apply, captureSpy, deploySpy } = await setupCaptureApply();
+        captureSpy.mockRejectedValue(new Error('capture refused: mixed replica images'));
+        await expect(apply()).rejects.toThrow(/capture refused/);
+        expect(deploySpy).not.toHaveBeenCalled();
+    });
+
+    it('abandons the recovery row when it cannot be acquired or handed off', async () => {
+        const { apply, abandonSpy } = await setupCaptureApply();
+        const { StackUpdateRecoveryService } = await import('../services/StackUpdateRecoveryService');
+        vi.spyOn(StackUpdateRecoveryService.getInstance(), 'markAcquired').mockReturnValue(false);
+        await expect(apply()).rejects.toThrow(/Failed to acquire/);
+        expect(abandonSpy).toHaveBeenCalledWith('rec-1');
+    });
+
+    it('abandons the recovery row when the handoff fails', async () => {
+        const { apply, abandonSpy } = await setupCaptureApply();
+        const { StackUpdateRecoveryService } = await import('../services/StackUpdateRecoveryService');
+        vi.spyOn(StackUpdateRecoveryService.getInstance(), 'handoff').mockReturnValue(false);
+        await expect(apply()).rejects.toThrow(/Failed to hand off/);
+        expect(abandonSpy).toHaveBeenCalledWith('rec-1');
+    });
+
+    it('compensates a handed-off recovery row when the deploy fails', async () => {
+        const { apply, deploySpy, compensateSpy } = await setupCaptureApply();
+        deploySpy.mockRejectedValue(new Error('compose up failed'));
+        await expect(apply()).rejects.toThrow(/compose up failed/);
+        expect(compensateSpy).toHaveBeenCalledWith('rec-1', expect.any(Function));
+    });
+
+    it('compensates when the recovery row cannot be marked reconciling', async () => {
+        const { apply, compensateSpy } = await setupCaptureApply();
+        const { StackUpdateRecoveryService } = await import('../services/StackUpdateRecoveryService');
+        vi.spyOn(StackUpdateRecoveryService.getInstance(), 'markReconciling').mockReturnValue(false);
+        await expect(apply()).rejects.toThrow(/reconciling/);
+        expect(compensateSpy).toHaveBeenCalledWith('rec-1', expect.any(Function));
+    });
+
+    it('still surfaces the original failure when compensation cannot complete', async () => {
+        const { apply, deploySpy, compensateSpy } = await setupCaptureApply();
+        deploySpy.mockRejectedValue(new Error('compose up failed'));
+        compensateSpy.mockResolvedValue(false);
+        await expect(apply()).rejects.toThrow(/compose up failed/);
+    });
+
+    it('does not capture for a newly created stack', async () => {
+        const { apply, captureSpy } = await setupCaptureApply({ stackExists: false });
+        await expect(apply()).resolves.toEqual({ ran: true });
+        expect(captureSpy).not.toHaveBeenCalled();
+    });
+
     it('deploy under a free lock writes compose, cleans siblings, deploys, then writes the marker', async () => {
         const nodeId = seedNode();
         const bp = seedBlueprint({ classification: 'stateless', nodeIds: [nodeId] });
@@ -607,7 +788,7 @@ describe('BlueprintService marker parsing + name-conflict guard', () => {
 
 describe('BlueprintReconciler drift alert node wording', () => {
     type ReconcilerWithDrift = {
-        handleDrift: (blueprint: Blueprint, node: Node, reason: string) => Promise<void>;
+        handleDrift: (blueprint: Blueprint, node: Node, reason: string, cause: 'revision' | 'container' | 'digest') => Promise<void>;
     };
 
     function seedRemoteNode(name: string): number {
@@ -628,7 +809,7 @@ describe('BlueprintReconciler drift alert node wording', () => {
         const node = DatabaseService.getInstance().getNode(nodeId)!;
         const reconciler = BlueprintReconciler.getInstance() as unknown as ReconcilerWithDrift;
 
-        await reconciler.handleDrift(bp, node, 'compose changed');
+        await reconciler.handleDrift(bp, node, 'compose changed', 'revision');
 
         expect(dispatchSpy).toHaveBeenCalledWith(
             'warning',
@@ -646,7 +827,7 @@ describe('BlueprintReconciler drift alert node wording', () => {
         const node = DatabaseService.getInstance().getNode(nodeId)!;
         const reconciler = BlueprintReconciler.getInstance() as unknown as ReconcilerWithDrift;
 
-        await reconciler.handleDrift(bp, node, 'compose changed');
+        await reconciler.handleDrift(bp, node, 'compose changed', 'revision');
 
         expect(dispatchSpy).toHaveBeenCalledWith(
             'warning',
@@ -670,7 +851,7 @@ describe('BlueprintReconciler drift alert node wording', () => {
         const node = DatabaseService.getInstance().getNode(nodeId)!;
         const reconciler = BlueprintReconciler.getInstance() as unknown as ReconcilerWithDrift;
 
-        await reconciler.handleDrift(bp, node, 'volumes diverged');
+        await reconciler.handleDrift(bp, node, 'volumes diverged', 'revision');
 
         expect(dispatchSpy).toHaveBeenCalledWith(
             'warning',
@@ -683,10 +864,10 @@ describe('BlueprintReconciler drift alert node wording', () => {
     it('enforce correction-failure on local uses on this node', async () => {
         const { NotificationService } = await import('../services/NotificationService');
         const dispatchSpy = vi.spyOn(NotificationService.getInstance(), 'dispatchAlert').mockResolvedValue({ persisted: true });
-        vi.spyOn(BlueprintService.getInstance(), 'deployToNode').mockResolvedValue({
+        vi.spyOn(BlueprintService.getInstance(), 'enforceDigestRepair').mockResolvedValue({
             status: 'failed',
             error: 'compose up failed',
-        } as Awaited<ReturnType<typeof BlueprintService.prototype.deployToNode>>);
+        } as Awaited<ReturnType<typeof BlueprintService.prototype.enforceDigestRepair>>);
         const nodeId = seedNode();
         const bp = seedBlueprint({
             name: 'fix-local',
@@ -697,7 +878,7 @@ describe('BlueprintReconciler drift alert node wording', () => {
         const node = DatabaseService.getInstance().getNode(nodeId)!;
         const reconciler = BlueprintReconciler.getInstance() as unknown as ReconcilerWithDrift;
 
-        await reconciler.handleDrift(bp, node, 'compose changed');
+        await reconciler.handleDrift(bp, node, 'compose changed', 'digest');
 
         expect(dispatchSpy).toHaveBeenCalledWith(
             'error',
@@ -705,5 +886,98 @@ describe('BlueprintReconciler drift alert node wording', () => {
             'Auto-fix for "fix-local" on this node failed: compose up failed',
             { stackName: 'fix-local', actor: 'system:blueprint' },
         );
+    });
+
+    it('enforce container-level drift uses deployToNode even without a comparable artifact set', async () => {
+        const { NotificationService } = await import('../services/NotificationService');
+        const dispatchSpy = vi.spyOn(NotificationService.getInstance(), 'dispatchAlert').mockResolvedValue({ persisted: true });
+        const deploySpy = vi.spyOn(BlueprintService.getInstance(), 'deployToNode').mockResolvedValue({
+            status: 'active',
+        } as Awaited<ReturnType<typeof BlueprintService.prototype.deployToNode>>);
+        const digestSpy = vi.spyOn(BlueprintService.getInstance(), 'enforceDigestRepair');
+        const nodeId = seedNode();
+        const bp = seedBlueprint({
+            name: 'fix-container',
+            drift_mode: 'enforce',
+            classification: 'stateless',
+            nodeIds: [nodeId],
+        });
+        const node = DatabaseService.getInstance().getNode(nodeId)!;
+        const reconciler = BlueprintReconciler.getInstance() as unknown as ReconcilerWithDrift;
+
+        await reconciler.handleDrift(bp, node, 'no containers running for this blueprint', 'container');
+
+        expect(deploySpy).toHaveBeenCalledTimes(1);
+        expect(digestSpy).not.toHaveBeenCalled();
+        expect(dispatchSpy).not.toHaveBeenCalled();
+    });
+
+    it('enforce container-level drift on a git-managed Blueprint reapplies authorized compose', async () => {
+        const { NotificationService } = await import('../services/NotificationService');
+        const dispatchSpy = vi.spyOn(NotificationService.getInstance(), 'dispatchAlert').mockResolvedValue({ persisted: true });
+        const deploySpy = vi.spyOn(BlueprintService.getInstance(), 'deployToNode');
+        const reapplySpy = vi.spyOn(BlueprintService.getInstance(), 'reapplyAuthorizedMaterialization').mockResolvedValue({
+            status: 'active',
+        } as Awaited<ReturnType<typeof BlueprintService.prototype.reapplyAuthorizedMaterialization>>);
+        const nodeId = seedNode();
+        const bp = seedBlueprint({
+            name: 'fix-git-container',
+            drift_mode: 'enforce',
+            classification: 'stateless',
+            nodeIds: [nodeId],
+        });
+        DatabaseService.getInstance().updateBlueprintContentOrigin(bp.id, 'git', 'app-git-container');
+        const gitBp = DatabaseService.getInstance().getBlueprint(bp.id)!;
+        const node = DatabaseService.getInstance().getNode(nodeId)!;
+        const reconciler = BlueprintReconciler.getInstance() as unknown as ReconcilerWithDrift;
+
+        await reconciler.handleDrift(gitBp, node, 'no containers running for this blueprint', 'container');
+
+        expect(reapplySpy).toHaveBeenCalledTimes(1);
+        expect(deploySpy).not.toHaveBeenCalled();
+        expect(dispatchSpy).not.toHaveBeenCalled();
+    });
+
+    it('unverified drift never calls Enforce digest repair', async () => {
+        const enforceSpy = vi.spyOn(BlueprintService.getInstance(), 'enforceDigestRepair');
+        vi.spyOn(BlueprintService.getInstance(), 'checkForDrift').mockResolvedValue({
+            kind: 'unverified',
+            reason: 'runtime identity could not be collected',
+        });
+        const nodeId = seedNode();
+        const bp = seedBlueprint({
+            name: 'unverified-local',
+            drift_mode: 'enforce',
+            classification: 'stateless',
+            nodeIds: [nodeId],
+        });
+        const node = DatabaseService.getInstance().getNode(nodeId)!;
+        DatabaseService.getInstance().upsertDeployment({
+            blueprint_id: bp.id,
+            node_id: nodeId,
+            status: 'active',
+            applied_revision: bp.revision,
+            last_deployed_at: Date.now(),
+        });
+        const reconciler = BlueprintReconciler.getInstance() as unknown as {
+            executeOneAction: (
+                blueprint: Blueprint,
+                node: Node,
+                action: string,
+                svc: typeof BlueprintService.prototype,
+            ) => Promise<{ status: string }>;
+        };
+
+        const outcome = await reconciler.executeOneAction(
+            bp,
+            node,
+            'check_enforce',
+            BlueprintService.getInstance(),
+        );
+
+        expect(outcome.status).toBe('ok');
+        expect(enforceSpy).not.toHaveBeenCalled();
+        const dep = DatabaseService.getInstance().getDeployment(bp.id, nodeId);
+        expect(dep?.status).toBe('active');
     });
 });

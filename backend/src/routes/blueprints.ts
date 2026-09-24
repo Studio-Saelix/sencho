@@ -34,6 +34,7 @@ import {
     commitBlueprintUpdate,
 } from '../services/gitops/blueprintProducers';
 import { projectBlueprintRevision, projectCommittedRevision } from '../helpers/gitopsResponse';
+import { rollbackCandidatesForApplication } from '../services/gitops/rolloutRecovery';
 import { isValidStackName } from '../utils/validation';
 import { parseIntParam } from '../utils/parseIntParam';
 import { auditActorUsername } from '../helpers/auditActor';
@@ -48,11 +49,17 @@ import { isDebugEnabled } from '../utils/debug';
 import { sanitizeForLog } from '../utils/safeLog';
 import { isSqliteUniqueViolation, getErrorMessage } from '../utils/errors';
 import {
+    isDigestPinsMap,
+    DigestPinsMismatchError,
+    type DigestPinsMap,
+} from '../services/gitops/digestPins';
+import {
     GitManagedContentError,
     GitOpsBindingError,
     GitOpsBindingService,
     isGitManagedBlueprint,
 } from '../services/gitops/binding';
+import type { GitOpsRecoveryCapture } from '../services/gitops/recoveryCapture';
 
 export const blueprintsRouter = Router();
 
@@ -112,6 +119,31 @@ function respondBindingFailure(res: Response, error: unknown, context: string, c
     }
     console.error(`[Blueprints] ${context}:`, error);
     res.status(500).json({ error: clientMessage });
+}
+
+/**
+ * A GitOps recovery binding as the hub sends it to a leaf on apply-local.
+ *
+ * Strict on shape so a malformed binding cannot reach the recovery row: each
+ * field may be absent, null, or a non-empty string, and nothing else is
+ * carried.
+ */
+function parseRecoveryBinding(value: unknown): GitOpsRecoveryCapture | null {
+    if (typeof value !== 'object' || value === null) return null;
+    const raw = value as { generationId?: unknown; artifactSetId?: unknown; sourceAcceptanceRef?: unknown };
+    const field = (candidate: unknown): string | null | undefined => {
+        if (candidate === null || candidate === undefined) return null;
+        return typeof candidate === 'string' && candidate.length > 0 ? candidate : undefined;
+    };
+    const generationId = field(raw.generationId);
+    const artifactSetId = field(raw.artifactSetId);
+    const sourceAcceptanceRef = field(raw.sourceAcceptanceRef);
+    if (generationId === undefined || artifactSetId === undefined || sourceAcceptanceRef === undefined) return null;
+    return {
+        gitops_generation_id: generationId,
+        gitops_artifact_set_id: artifactSetId,
+        gitops_source_acceptance_ref: sourceAcceptanceRef,
+    };
 }
 
 async function respondBindingPreview(
@@ -240,6 +272,7 @@ function summarizeBlueprint(blueprintId: number) {
         counts[dep.status] = (counts[dep.status] ?? 0) + 1;
     }
     const auth = evaluateLightweightEffectiveApproval(blueprintId);
+    const application = GitOpsStore.getInstance().getLiveBlueprintApplication(blueprintId);
     return {
         blueprint,
         deployments,
@@ -247,6 +280,10 @@ function summarizeBlueprint(blueprintId: number) {
         effectiveApproval: auth?.effectiveApproval ?? 'pending',
         unauthorizedActions: auth?.unauthorizedActions ?? [],
         gitopsRevision: projectBlueprintRevision(blueprintId),
+        // The prior generations a rollout rollback can select. Read from the
+        // hub's own rollout-generation history: the projection has no
+        // generation list, and the node's recovery points live on the node.
+        rollbackCandidates: application ? rollbackCandidatesForApplication(application.id) : [],
     };
 }
 
@@ -494,6 +531,9 @@ blueprintsRouter.post('/apply-local', async (req: Request, res: Response): Promi
         composeContent?: unknown;
         markerContent?: unknown;
         allowGitManagedContent?: unknown;
+        digestPins?: unknown;
+        captureRecovery?: unknown;
+        recoveryBinding?: unknown;
     };
     if (typeof body.stackName !== 'string' || !isValidStackName(body.stackName)) {
         res.status(400).json({ error: 'Invalid stack name' });
@@ -515,11 +555,40 @@ blueprintsRouter.post('/apply-local', async (req: Request, res: Response): Promi
         res.status(400).json({ error: 'Invalid blueprint marker' });
         return;
     }
+    if (body.captureRecovery !== undefined && typeof body.captureRecovery !== 'boolean') {
+        res.status(400).json({ error: 'captureRecovery must be a boolean' });
+        return;
+    }
+    const recoveryBinding = body.recoveryBinding === undefined
+        ? null
+        : parseRecoveryBinding(body.recoveryBinding);
+    if (body.recoveryBinding !== undefined && recoveryBinding === null) {
+        res.status(400).json({
+            error: 'recoveryBinding must be an object of generationId, artifactSetId, and sourceAcceptanceRef, each absent, null, or a non-empty string',
+        });
+        return;
+    }
+    let digestPins: DigestPinsMap | undefined;
+    if (body.digestPins !== undefined) {
+        if (!isDigestPinsMap(body.digestPins)) {
+            res.status(400).json({ error: 'digestPins must be an object of serviceName to image@digest strings' });
+            return;
+        }
+        // Authoritative key check runs after compose is written, against the
+        // leaf's rendered model (compose + override + multi-file specs).
+        digestPins = body.digestPins;
+    }
     const allowGitManaged = body.allowGitManagedContent === true
         && typeof marker.applicationId === 'string'
         && marker.applicationId.length > 0
         // Hub-to-leaf proxy only. Browser sessions and opaque API tokens must
         // not opt a git-managed Blueprint into snapshot compose writes.
+        && req.machineAuthScope === 'node_proxy';
+    // A recovery capture on a Blueprint apply is a hub-driven rollout feature:
+    // a leaf has no GitOps rows of its own, so the hub both asks for the
+    // capture and supplies the binding it should record. Only the machine-auth
+    // hub hop may request it, on the same rule as git-managed content.
+    const captureRecovery = body.captureRecovery === true
         && req.machineAuthScope === 'node_proxy';
     try {
         const outcome = await BlueprintService.getInstance().applyLocalUnderLock(
@@ -528,7 +597,12 @@ blueprintsRouter.post('/apply-local', async (req: Request, res: Response): Promi
             body.composeContent,
             body.markerContent,
             '/api/blueprints/apply-local',
-            { allowGitManaged },
+            {
+                allowGitManaged,
+                digestPins,
+                captureRecovery,
+                recoveryBinding: recoveryBinding ?? undefined,
+            },
         );
         if (!outcome.ran) {
             res.status(409).json({
@@ -540,6 +614,10 @@ blueprintsRouter.post('/apply-local', async (req: Request, res: Response): Promi
         }
         res.json({ deployed: true });
     } catch (error) {
+        if (error instanceof DigestPinsMismatchError) {
+            res.status(400).json({ error: error.message });
+            return;
+        }
         if (error instanceof BlueprintNameConflictError) {
             res.status(409).json({ error: error.message, code: 'name_conflict' });
             return;
@@ -617,11 +695,17 @@ blueprintsRouter.post('/:id/apply', async (req: Request, res: Response): Promise
             return;
         }
 
-        const body = (req.body ?? {}) as { planFingerprint?: unknown; actions?: unknown };
+        const body = (req.body ?? {}) as { planFingerprint?: unknown; actions?: unknown; gitopsFingerprint?: unknown };
         if (typeof body.planFingerprint !== 'string' || body.planFingerprint.length === 0) {
             res.status(400).json({ error: 'planFingerprint is required', code: 'CONFIRM_REQUIRED' });
             return;
         }
+        // The intent fingerprint covers compose content and selector intent. The
+        // evidence fingerprint covers the GitOps authority facts the unified
+        // preview displays (acceptance, artifact identity, placement approval,
+        // rollout authorization). A Git-bound Blueprint must echo both; a
+        // Blueprint with no live application has neither and stays unchanged.
+        const gitopsFingerprint = typeof body.gitopsFingerprint === 'string' ? body.gitopsFingerprint : null;
         const parsedActions = parseConfirmableActionsBody(body.actions);
         if (!parsedActions.ok) {
             res.status(400).json({ error: `Invalid actions: ${parsedActions.reason}`, code: 'CONFIRM_REQUIRED' });
@@ -639,6 +723,7 @@ blueprintsRouter.post('/:id/apply', async (req: Request, res: Response): Promise
         }
         if (
             body.planFingerprint !== preview.planFingerprint
+            || gitopsFingerprint !== preview.gitopsFingerprint
             || !confirmableActionsEqual(parsedActions.actions, preview.confirmableActions)
         ) {
             res.status(409).json({ error: 'Preview is stale; refresh and confirm again', code: 'PREVIEW_STALE', preview });
