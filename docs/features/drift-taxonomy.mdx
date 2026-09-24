@@ -1,0 +1,49 @@
+---
+title: "Drift Taxonomy"
+description: "The seven GitOps drift classes, which ones Sencho reports today, and the policy domains that decide how each divergence is handled."
+---
+
+Sencho reports GitOps drift as classified items. Each item names a class, the expected identity, the observed identity, the component that owns the comparison, a reason, and the action available for it. The **Drift** tab of a stack and the GitOps Portfolio both render these items in an expected to observed layout.
+
+Drift items are read-only reports. Only the Blueprint drift policy can act on drift automatically, and only for Blueprint targets.
+
+## Drift classes
+
+Sencho emits a class only when persisted evidence proves a mismatch. A class with no evidence stays absent rather than being guessed.
+
+| Class | What diverged | Owner | Reported today |
+|---|---|---|---|
+| **Source** | The accepted generation was built from a commit other than the one the configured ref names, or the last fetch or validation failed so no revision is established. | Git source | Yes, for Git-backed applications |
+| **Managed project** | The applied managed project on disk does not match the manifest or commit of the accepted generation, or has no usable manifest. | Git project manifest | Yes, for Git-backed applications |
+| **Invocation** | The Compose invocation (files, profiles, project name) that ran differs from the authored one. | Compose | No. The observed invocation is not persisted, so this class is never produced. |
+| **Placement** | A recorded placement approval no longer binds the current intent and target set, or a node holds placement authority outside the required target set. | Placement | Yes |
+| **Rollout** | A required rollout target reports an artifact identity other than the approved rollout set. | Observed artifact identity | Yes, for authorized rollouts |
+| **Runtime** | A target runs a different generation than the one it was asked to run, or its running workload reports an artifact identity other than the expected artifact set. | Compose / observed artifact identity | Yes |
+| **Health** | The stack-scoped health run for the deployed generation failed. | Health | Yes |
+
+Artifact identity disagreement is reported as **Rollout** when the target is part of an authorized rollout and as **Runtime** otherwise. See [Digest drift](/features/blueprint-model#digest-drift) for how Blueprints compare and repair image digests.
+
+## Unverified is not converged
+
+An artifact comparison needs two comparable sides: an approved identity with exact or qualified evidence, and an exact or qualified observation from the running workload. When either side is missing, stale, or unavailable, or the image was built locally, Sencho reports the target as **unverified**. It never emits a drift item for an unverified target and never reports it as matching either.
+
+The **Drift** tab shows a per-target digest line under each GitOps target card:
+
+| Verdict | Meaning |
+|---|---|
+| **matches** | An approved digest exists and the target's exact or qualified observation agrees with it. |
+| **diverged** | The target reports artifact drift: it runs a digest other than the approved one. Expected and observed digests are shown side by side. |
+| **unverified** | No approved digest exists, or the observation cannot prove identity. The line states why (no observation yet, no running workload, stale observation, identity unavailable, or a locally built image). |
+
+## Policy domains
+
+Four policy domains decide what happens around drift. Each one is configured in a single place.
+
+| Domain | Where it is configured | Options |
+|---|---|---|
+| **Source policy** | The Git source of a stack or Blueprint. See [Git Sources](/features/git-sources). | Auto-apply on webhook, auto-deploy on apply. Both off means every new commit waits for an operator. |
+| **Blueprint drift mode** | The Blueprint editor. See [Drift policy](/features/blueprint-model#drift-policy). | Observe, Suggest, or Enforce. |
+| **Placement approval** | Accept source, approve placement, and authorize rollout on a Git-managed Blueprint. See [Blueprints](/features/blueprint-model#accept-source-approve-placement-authorize-rollout). | Explicit operator approval. Not configurable to automatic. |
+| **Health and rollout** | Health checks after deploy and rollout gating. See [Health-Gated Updates](/features/health-gated-updates). | Health runs follow the deployed generation; rollout batches wait on them. |
+
+Drift items carry the policy that applies to them when one exists: the Git source policy for source drift and the Blueprint drift mode for Blueprint drift. Items with no configured policy carry none rather than a default nothing wrote.

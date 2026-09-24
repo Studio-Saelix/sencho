@@ -142,6 +142,18 @@ Even **Observe** keeps Sencho honest about what it found: the deployment row sho
 
 Enforce's auto-fix only ever redeploys the blueprint's *current* revision. Container-level drift (a stopped or crashed container) uses the ordinary deploy path. Frozen image-digest disagreement uses a digest-pinned overlay with `--pull never`, so authored tags on disk stay unchanged. For a remote target, Sencho freezes and repairs against that node's own rendered Compose model and Docker platform (fetched over the authenticated proxy), not the controlling instance's local filesystem. A compose edit never reaches that auto-fix path on a stateful or state-unknown blueprint: any revision change re-enters **Awaiting confirmation** on every targeted node first, regardless of drift mode, so a human always signs off before a new revision touches existing data. See [Lifecycle: status transitions](#lifecycle-status-transitions).
 
+### Digest drift
+
+Digest drift means a target runs an image digest other than the one in the approved artifact set. Sencho checks it on every reconciler tick, after the marker, revision, and container checks pass.
+
+**What triggers it.** Sencho records the runtime image identity of each targeted node and compares it with the target's expected artifact set. When the expected set carries per-service digests, each service is compared. A digest drift is reported only when both sides are comparable: the approved set has exact or qualified evidence, and the observation is exact or qualified.
+
+**What unverified means.** When the comparison cannot be proven, the result is unverified instead of drifted or matched. This happens when the node is unreachable, the runtime identity could not be collected, the observation is stale or comes from a locally built image, the observation has no per-service digests, or no approved artifact set exists. Unverified never triggers Enforce and never counts as converged. The **Drift** tab labels such a target **unverified** and states the reason.
+
+**What Enforce does.** On a digest drift, Enforce redeploys with the approved artifact set pinned: a digest-pinned overlay with `--pull never`. It never pulls the latest tag, and authored tags on disk stay unchanged. If the approved digest cannot be resolved for the node's platform, the repair fails closed: nothing is deployed and a `blueprint_drift_correction_failed` notification fires. Expected and last-known-good pointers are never moved by a repair. After a successful repair the next observation reports the approved digest again.
+
+Observe and Suggest report the same digest drift without repairing it. The **Drift** tab of the stack shows the expected and observed digest for each target. See [Drift Taxonomy](/features/drift-taxonomy) for how digest drift fits among the other drift classes.
+
 ## The detail sheet
 
 Click any tile in the catalog to open the blueprint detail sheet on the right. The sheet header shows the name, the meta line (`<selector> · <drift mode> · rev <n>`), the action bar, the Inline or Git-managed badge, the description, the deployment table, and a collapsible compose source. Inline Blueprints offer **Apply now**, **Edit**, **Convert to Git**, **Disable**, and **Delete**. Git-managed Blueprints offer **Edit**, **Detach Git**, **Retire to Direct** (when no live deployments remain), and **Disable**, and the sheet's GitOps section carries the outstanding authority action. **Apply now** is withheld because place for Git-managed content runs from an authorized accepted generation, not from Confirm Apply on the detach snapshot. **Delete** waits until you Detach Git or Retire to Direct, because the Git source still belongs to this Blueprint.

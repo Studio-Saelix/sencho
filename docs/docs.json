@@ -118,6 +118,7 @@
                   "features/stack-activity",
                   "features/stack-dossier",
                   "features/stack-drift",
+                  "features/drift-taxonomy",
                   "features/compose-doctor",
                   "features/compose-networking",
                   "features/environment-guardrails",

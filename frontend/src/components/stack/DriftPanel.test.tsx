@@ -460,3 +460,84 @@ describe('DriftPanel GitOps state', () => {
     expect(within(chips).queryByText(/rollout/)).not.toBeInTheDocument();
   });
 });
+
+describe('DriftPanel per-target digest', () => {
+  const approved = 'nginx@sha256:aaaa';
+  const withArtifact = (overrides: Parameters<typeof target>[0]) =>
+    target({ artifact: liveArtifact({ expected: { artifactSetId: 'art-1', evidenceVersion: 1, qualification: 'exact', identity: approved } }), ...overrides });
+
+  it('omits the digest row when artifact identity does not apply', async () => {
+    vi.mocked(apiFetch).mockResolvedValue(jsonRes(report({ gitopsRevision: liveRevision({ targets: [target()] }) })));
+    render(<DriftPanel stackName="web" />);
+    await screen.findAllByTestId('gitops-target');
+    expect(screen.queryByTestId('gitops-target-digest')).not.toBeInTheDocument();
+  });
+
+  it('shows expected vs observed digest per target and marks the diverged one', async () => {
+    vi.mocked(apiFetch).mockResolvedValue(jsonRes(report({
+      gitopsRevision: liveRevision({
+        targets: [
+          withArtifact({ nodeId: 1, observedArtifactIdentity: { kind: 'exact', identity: approved, observedAt: 1 } }),
+          withArtifact({
+            nodeId: 2,
+            runtime: { status: 'runtime_artifact_drift' },
+            observedArtifactIdentity: { kind: 'exact', identity: 'nginx@sha256:bbbb', observedAt: 1 },
+          }),
+        ],
+      }),
+    })));
+    render(<DriftPanel stackName="web" />);
+    const rows = await screen.findAllByTestId('gitops-target-digest');
+    expect(rows).toHaveLength(2);
+    expect(rows[0]).toHaveAttribute('data-verdict', 'matches');
+    expect(rows[1]).toHaveAttribute('data-verdict', 'diverged');
+    expect(rows[1]).toHaveTextContent(approved);
+    expect(rows[1]).toHaveTextContent('nginx@sha256:bbbb');
+  });
+
+  it('marks a target diverged when an exact observation names another digest, even before the runtime facet reports drift', async () => {
+    vi.mocked(apiFetch).mockResolvedValue(jsonRes(report({
+      gitopsRevision: liveRevision({
+        targets: [withArtifact({
+          runtime: { status: 'drifted' },
+          observedArtifactIdentity: { kind: 'exact', identity: 'nginx@sha256:cccc', observedAt: 1 },
+        })],
+      }),
+    })));
+    render(<DriftPanel stackName="web" />);
+    const row = await screen.findByTestId('gitops-target-digest');
+    expect(row).toHaveAttribute('data-verdict', 'diverged');
+  });
+
+  it('renders unverified rather than a match when the observation is not comparable', async () => {
+    vi.mocked(apiFetch).mockResolvedValue(jsonRes(report({
+      gitopsRevision: liveRevision({
+        targets: [
+          withArtifact({ nodeId: 1, observedArtifactIdentity: { kind: 'unknown' } }),
+          withArtifact({ nodeId: 2, observedArtifactIdentity: { kind: 'local_build_unverified', identity: 'local:web', observedAt: 1 } }),
+        ],
+      }),
+    })));
+    render(<DriftPanel stackName="web" />);
+    const rows = await screen.findAllByTestId('gitops-target-digest');
+    expect(rows[0]).toHaveAttribute('data-verdict', 'unverified');
+    expect(rows[0]).toHaveTextContent('no runtime observation recorded yet');
+    expect(rows[1]).toHaveAttribute('data-verdict', 'unverified');
+    expect(rows[1]).toHaveTextContent('locally built image');
+  });
+
+  it('renders unverified when no approved digest exists even with an exact observation', async () => {
+    vi.mocked(apiFetch).mockResolvedValue(jsonRes(report({
+      gitopsRevision: liveRevision({
+        targets: [target({
+          artifact: liveArtifact({ expected: null }),
+          observedArtifactIdentity: { kind: 'exact', identity: approved, observedAt: 1 },
+        })],
+      }),
+    })));
+    render(<DriftPanel stackName="web" />);
+    const row = await screen.findByTestId('gitops-target-digest');
+    expect(row).toHaveAttribute('data-verdict', 'unverified');
+    expect(row).toHaveTextContent('no approved digest');
+  });
+});
