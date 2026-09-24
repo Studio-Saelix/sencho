@@ -936,4 +936,189 @@ describe('SourceController stateful withdrawal guard', () => {
         expect(getApp('app-unreadable').review_block_reason).toBe('stateful_withdrawal');
         expect(dispatch).not.toHaveBeenCalled();
     });
+
+    it('holds a candidate that keeps a stateful service name but strips its volumes', async () => {
+        stageCandidate('app-strip', 'strip-web', 'st-prev', 'automatic', { compose: STATEFUL_COMPOSE });
+        acceptAndApply('app-strip', 'strip-web', 'st-prev', STATEFUL_COMPOSE);
+        // Same service name, no mount: the data the service owned is left
+        // behind, which is a withdrawal even though the name survives.
+        stageFollowUp('app-strip', 'strip-web', 'st-next', 'services:\n  db:\n    image: postgres:17\n');
+        mockDue([armDuePoll('app-strip')]);
+        evaluateCandidatePolicy.mockResolvedValue({ status: 'allowed' });
+        spyOnReconcile().mockResolvedValue(fetchedResult);
+        const dispatch = spyOnDispatch();
+        const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+
+        controller.start();
+        await advanceOneTick();
+
+        // The withdrawal branch, not an unreadable-evidence hold.
+        expect(warnSpy.mock.calls.some((args) =>
+            String(args[0]).includes('withdraws or renames stateful services (db)'))).toBe(true);
+        expect(getApp('app-strip').accepted_generation_id).toBe('st-prev');
+        expect(getApp('app-strip').review_block_reason).toBe('stateful_withdrawal');
+        expect(dispatch).not.toHaveBeenCalled();
+    });
+
+    it('holds when the candidate compose does not parse', async () => {
+        // A stateless baseline, so no withdrawal is possible: only the parse
+        // failure itself can hold. It must read as missing evidence, never as
+        // "nothing stateful here".
+        stageCandidate('app-badyaml', 'badyaml-web', 'by-prev', 'automatic', { compose: WITHDRAWN_COMPOSE });
+        acceptAndApply('app-badyaml', 'badyaml-web', 'by-prev', WITHDRAWN_COMPOSE);
+        stageFollowUp('app-badyaml', 'badyaml-web', 'by-next', 'services:\n  db: [unclosed\n');
+        mockDue([armDuePoll('app-badyaml')]);
+        evaluateCandidatePolicy.mockResolvedValue({ status: 'allowed' });
+        spyOnReconcile().mockResolvedValue(fetchedResult);
+        const dispatch = spyOnDispatch();
+        const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+
+        controller.start();
+        await advanceOneTick();
+
+        expect(warnSpy.mock.calls.some((args) => String(args[0]).includes('compose does not parse'))).toBe(true);
+        expect(getApp('app-badyaml').accepted_generation_id).toBe('by-prev');
+        expect(getApp('app-badyaml').review_block_reason).toBe('stateful_withdrawal');
+        expect(dispatch).not.toHaveBeenCalled();
+    });
+
+    it('accepts the first candidate when no generation is in force yet', async () => {
+        // No managed baseline exists, so the first acceptance defines it,
+        // even for a stateful compose.
+        stageCandidate('app-first', 'first-web', 'fi-first', 'automatic', { compose: STATEFUL_COMPOSE });
+        mockDue([armDuePoll('app-first')]);
+        evaluateCandidatePolicy.mockResolvedValue({ status: 'allowed' });
+        spyOnReconcile().mockResolvedValue(fetchedResult);
+        const dispatch = spyOnDispatch();
+
+        controller.start();
+        await advanceOneTick();
+
+        expect(getApp('app-first').accepted_generation_id).toBe('fi-first');
+        expect(getApp('app-first').review_block_reason).toBeNull();
+        expect(dispatch).toHaveBeenCalledTimes(1);
+    });
+});
+
+/**
+ * The durable block makes the controller skip the source on every tick, so
+ * every exit from the held state must clear the reason. A reason left behind
+ * would silently stop automatic acceptance for that application forever.
+ */
+describe('stateful review block lifecycle', () => {
+    function envelope(id: string) {
+        return { operationId: id, actor: 'operator', trigger: 'manual' as const, at: Date.now() };
+    }
+
+    /** Stage an accepted baseline plus a follow-up candidate, then record the block. */
+    function blocked(appId: string, stackName: string): void {
+        stageCandidate(appId, stackName, `${appId}-prev`, 'automatic');
+        GitOpsTransitions.getInstance().sourceAccepted({
+            applicationId: appId,
+            generationId: `${appId}-prev`,
+            artifactSetId: `as-${appId}-prev`,
+            sourceAcceptanceId: `sa-${appId}-prev`,
+            authority: 'operator',
+            envelope: envelope(`accept-${appId}-prev`),
+        });
+        insertAndStageGeneration(getApp(appId), stackName, `${appId}-next`);
+        GitOpsTransitions.getInstance().sourceReviewBlocked({
+            applicationId: appId,
+            generationId: `${appId}-next`,
+            reason: 'stateful_withdrawal',
+            envelope: envelope(`block-${appId}`),
+        });
+        expect(getApp(appId).review_block_reason).toBe('stateful_withdrawal');
+        expect(getApp(appId).review_required).toBe(1);
+    }
+
+    it('clears on explicit operator acceptance', () => {
+        blocked('blk-accept', 'blk-accept-web');
+        GitOpsTransitions.getInstance().sourceAccepted({
+            applicationId: 'blk-accept',
+            generationId: 'blk-accept-next',
+            artifactSetId: 'as-blk-accept-next',
+            sourceAcceptanceId: 'sa-blk-accept-next',
+            authority: 'operator',
+            envelope: envelope('accept-blk-accept-next'),
+        });
+        const row = getApp('blk-accept');
+        expect(row.accepted_generation_id).toBe('blk-accept-next');
+        expect(row.review_block_reason).toBeNull();
+        expect(row.review_required).toBe(0);
+    });
+
+    it('clears on dismissal', () => {
+        blocked('blk-dismiss', 'blk-dismiss-web');
+        GitOpsTransitions.getInstance().dismissed('blk-dismiss', envelope('dismiss-blk'));
+        const row = getApp('blk-dismiss');
+        expect(row.candidate_generation_id).toBeNull();
+        expect(row.review_block_reason).toBeNull();
+    });
+
+    it('clears when a newer candidate is staged', () => {
+        blocked('blk-newer', 'blk-newer-web');
+        insertAndStageGeneration(getApp('blk-newer'), 'blk-newer-web', 'blk-newer-third');
+        const row = getApp('blk-newer');
+        expect(row.candidate_generation_id).toBe('blk-newer-third');
+        expect(row.review_block_reason).toBeNull();
+        expect(row.review_required).toBe(0);
+    });
+
+    it.each(['review', 'manual'] as const)('clears when the policy moves to %s', (policy) => {
+        const id = `blk-policy-${policy}`;
+        blocked(id, `${id}-web`);
+        GitOpsTransitions.getInstance().sourcePolicyChanged(id, policy, envelope(`policy-${id}`));
+        const row = getApp(id);
+        expect(row.review_block_reason).toBeNull();
+        // The candidate still needs a decision; only the automatic refusal
+        // label goes away, leaving the generic review state.
+        expect(row.review_required).toBe(1);
+        expect(attentionReasons(projectApplication(id, false))).not.toContain('stateful_withdrawal_blocked');
+    });
+
+    it('resumes automatic acceptance once a newer candidate clears the block', async () => {
+        blocked('blk-resume', 'blk-resume-web');
+        insertAndStageGeneration(getApp('blk-resume'), 'blk-resume-web', 'blk-resume-third');
+        mockDue([armDuePoll('blk-resume')]);
+        evaluateCandidatePolicy.mockResolvedValue({ status: 'allowed' });
+        spyOnReconcile().mockResolvedValue(fetchedResult);
+        const dispatch = spyOnDispatch();
+
+        controller.start();
+        await advanceOneTick();
+
+        expect(getApp('blk-resume').accepted_generation_id).toBe('blk-resume-third');
+        expect(dispatch).toHaveBeenCalledTimes(1);
+    });
+
+    it('keeps the block when the policy is re-saved as automatic', () => {
+        blocked('blk-auto', 'blk-auto-web');
+        GitOpsTransitions.getInstance().sourcePolicyChanged('blk-auto', 'automatic', envelope('policy-blk-auto'));
+        expect(getApp('blk-auto').review_block_reason).toBe('stateful_withdrawal');
+    });
+
+    it('refuses to record a block while an apply is in flight', () => {
+        stageCandidate('blk-inflight', 'blk-inflight-web', 'blk-inflight-gen', 'automatic');
+        GitOpsTransitions.getInstance().applyStarted('blk-inflight', 'blk-inflight-gen', envelope('apply-blk-inflight'));
+        expect(() => GitOpsTransitions.getInstance().sourceReviewBlocked({
+            applicationId: 'blk-inflight',
+            generationId: 'blk-inflight-gen',
+            reason: 'stateful_withdrawal',
+            envelope: envelope('block-blk-inflight'),
+        })).toThrow('cannot hold acceptance while an apply is in flight');
+        expect(getApp('blk-inflight').review_block_reason).toBeNull();
+    });
+
+    it('projects an unknown stored reason as the plain review state', () => {
+        blocked('blk-unknown', 'blk-unknown-web');
+        // A value written by a newer build this one does not know.
+        DatabaseService.getInstance().getDb().prepare(
+            'UPDATE gitops_applications SET review_block_reason = ? WHERE id = ?',
+        ).run('future_reason', 'blk-unknown');
+        const projection = projectApplication('blk-unknown', false);
+        const reasons = attentionReasons(projection);
+        expect(reasons).toContain('source_review_pending');
+        expect(reasons).not.toContain('stateful_withdrawal_blocked');
+    });
 });
