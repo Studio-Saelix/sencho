@@ -17,7 +17,7 @@ import { setupTestDb, cleanupTestDb } from './helpers/setupTestDb';
 import { DatabaseService } from '../services/DatabaseService';
 import { GitOpsStore } from '../services/gitops/store';
 import { GitOpsTransitions, type EventEnvelope } from '../services/gitops/transitions';
-import { aggregateGitOpsPortfolio, postureOf } from '../services/gitops/portfolioAggregator';
+import { aggregateGitOpsPortfolio, PORTFOLIO_MERGE_CAP, postureOf } from '../services/gitops/portfolioAggregator';
 import { directApplicationFixture } from './helpers/gitopsFixtures';
 import type { GitOpsRevisionProjection } from '../services/gitops/types';
 import type { ArtifactFacet } from '../services/gitops/types';
@@ -238,6 +238,38 @@ describe('aggregateGitOpsPortfolio', () => {
     expect(remote!.nodeName).toBe('port-remote');
     expect(remote!.repository?.host).toBe('github.com');
     expect(coverage.find(candidate => candidate.nodeId === remoteId)?.state).toBe('ok');
+  });
+
+  it('keeps failures inside the merge cap, dropping settled rows first', async () => {
+    const db = DatabaseService.getInstance();
+    const localNodeId = db.getNodes()[0]!.id;
+    const remoteId = db.addNode({
+      name: 'port-remote-cap',
+      type: 'remote',
+      api_url: 'http://127.0.0.1:29998',
+      api_token: 'tok',
+      compose_dir: '/app/compose',
+      is_default: false,
+    });
+    // One more row than the cap; the failing one sorts last by id, so an
+    // id-ordered cap would drop exactly the row triage needs.
+    const payload: unknown[] = [];
+    for (let i = 0; i < PORTFOLIO_MERGE_CAP; i++) {
+      const appId = `app-cap-${String(i).padStart(4, '0')}`;
+      payload.push(...remoteSourceRow(appId, `cap-${i}`, remoteProjection(appId, `cap-${i}`)));
+    }
+    const failing = remoteProjection('app-cap-zzzz', 'cap-failing');
+    failing.facets!.rollout = { status: 'rollback_partial_failed', recoveryRef: 'r', recoveryGenerationId: null, failureClass: 'x', failureAt: 1 } as never;
+    payload.push(...remoteSourceRow('app-cap-zzzz', 'cap-failing', failing));
+
+    const { rows, truncated } = await aggregateGitOpsPortfolio(adminReq(localNodeId), {
+      fetchRows: async (nodeId: number) => (nodeId === remoteId ? payload : null),
+    });
+
+    expect(truncated).toBe(true);
+    expect(rows).toHaveLength(PORTFOLIO_MERGE_CAP);
+    expect(rows[0]!.id).toBe(`${remoteId}:app-cap-zzzz`);
+    expect(rows[0]!.posture).toBe('failed');
   });
 
   it('marks an unreachable remote in coverage and fabricates no rows for it', async () => {

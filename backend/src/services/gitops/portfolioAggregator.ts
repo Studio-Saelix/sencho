@@ -44,6 +44,16 @@ const REMOTE_PROBE_TIMEOUT_MS = 3000;
 /** Merge bound across all contributors. Beyond this the response reports `truncated`. */
 export const PORTFOLIO_MERGE_CAP = 1000;
 
+/** Triage order of postures, most urgent first. Shared by the merge cap and the attention sort. */
+export const POSTURE_RANK: Readonly<Record<GitOpsPortfolioPosture, number>> = {
+  failed: 0,
+  attention: 1,
+  in_progress: 2,
+  unknown: 3,
+  converged_qualified: 4,
+  converged: 5,
+};
+
 /** Runtime facet statuses grouped from worst to best, for the row's worst-target summary. */
 const RUNTIME_SEVERITY: readonly string[] = [
   'failed_after_mutation',
@@ -504,7 +514,10 @@ export async function aggregateGitOpsPortfolio(req: Request, options: AggregateO
     }
   }));
 
-  rows.sort((a, b) => a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
+  // Most urgent first, then id for a stable order, so the merge cap drops
+  // settled rows before it drops a failure the operator must see.
+  rows.sort((a, b) => POSTURE_RANK[a.posture] - POSTURE_RANK[b.posture]
+    || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
   coverage.sort((a, b) => a.nodeId - b.nodeId);
   if (rows.length > PORTFOLIO_MERGE_CAP) {
     return { rows: rows.slice(0, PORTFOLIO_MERGE_CAP), coverage, truncated: true };

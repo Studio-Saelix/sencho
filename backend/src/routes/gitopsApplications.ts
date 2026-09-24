@@ -59,6 +59,7 @@ import {
   fetchRemoteSourceRows,
   freshestFacetTimestamp,
   isUsableRevision,
+  POSTURE_RANK,
   rowFromProjection,
 } from '../services/gitops/portfolioAggregator';
 import { filterRemoteIdentityPayload, rewriteIdentityPayload } from '../proxy/gitopsIdentityProxy';
@@ -224,15 +225,6 @@ function matchesFilters(row: GitOpsPortfolioRow, filters: GitOpsPortfolioFilters
   }
   return true;
 }
-
-const POSTURE_RANK: Record<GitOpsPortfolioRow['posture'], number> = {
-  failed: 0,
-  attention: 1,
-  in_progress: 2,
-  unknown: 3,
-  converged_qualified: 4,
-  converged: 5,
-};
 
 function sortRows(rows: GitOpsPortfolioRow[], filters: GitOpsPortfolioFilters): GitOpsPortfolioRow[] {
   const sign = filters.dir === 'desc' ? -1 : 1;
