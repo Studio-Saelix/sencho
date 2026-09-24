@@ -71,7 +71,7 @@ describe('StackHealthTable expansion and navigation', () => {
         })}
       />,
     );
-    const row = screen.getByRole('button', { name: /web/i });
+    const row = screen.getByRole('button', { name: /web/i }).closest('li')!;
     expect(row.className).toMatch(/168px/);
     expect(row.className).not.toMatch(/88px/);
     const networkName = screen.getByText('this-is-a-very-long-compose-network-name');
@@ -91,7 +91,7 @@ describe('StackHealthTable expansion and navigation', () => {
         })}
       />,
     );
-    const row = screen.getByRole('button', { name: /web/i });
+    const row = screen.getByRole('button', { name: /web/i }).closest('li')!;
     expect(row.className).toMatch(/168px_56px/);
     const networkName = screen.getByText('this-is-a-very-long-compose-network-name');
     expect(networkName).toHaveClass('truncate');

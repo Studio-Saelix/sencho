@@ -161,7 +161,7 @@ export function ModalBody({ className, fill, ...props }: ModalBodyProps) {
     <div
       className={cn(
         'px-6 py-5 space-y-4 overflow-y-auto',
-        fill ? 'min-h-0 flex-1' : 'max-h-[calc(85vh-12rem)]',
+        fill ? 'min-h-0 flex-1' : 'max-h-[calc(85dvh-12rem)]',
         className,
       )}
       {...props}
