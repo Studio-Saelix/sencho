@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { Search } from 'lucide-react';
+import { Search, X } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Combobox } from '@/components/ui/combobox';
 import { Input } from '@/components/ui/input';
@@ -130,6 +130,25 @@ export function PortfolioFilterBar({
         </TooltipProvider>
       )}
 
+      {filters.stack !== undefined && (
+        // Set by a stack's GitOps indicator; it has no combobox, so it shows
+        // as a removable chip rather than as an invisible narrowing.
+        <span className="inline-flex h-9 items-center gap-1.5 rounded-md border border-brand/40 bg-brand/[0.06] pl-2.5 pr-1 font-mono text-xs text-brand">
+          stack: {filters.stack}
+          <button
+            type="button"
+            onClick={() => {
+              const next = { ...filters };
+              delete next.stack;
+              onChange(next);
+            }}
+            aria-label="Remove stack filter"
+            className="flex h-6 w-6 items-center justify-center rounded-sm hover:bg-brand/10"
+          >
+            <X className="h-3.5 w-3.5" strokeWidth={1.5} />
+          </button>
+        </span>
+      )}
       <Combobox
         options={ATTENTION_OPTIONS}
         value={attentionValue}

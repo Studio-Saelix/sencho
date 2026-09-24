@@ -203,6 +203,8 @@ export type GitOpsPortfolioDetailResponse = {
 /** Query filters accepted by the list route. Unknown values are rejected, not dropped. */
 export type GitOpsPortfolioFilters = {
   q?: string;
+  /** Exact stack name, for contextual entry points scoped to one stack. */
+  stack?: string;
   attentionOnly: boolean;
   targetMode?: 'direct' | 'blueprint';
   nodeId?: number;

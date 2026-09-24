@@ -11,7 +11,14 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { apiFetch } from '@/lib/api';
 import type { GitOpsPortfolioFilters, GitOpsPortfolioResponse } from '@/types/gitopsPortfolio';
-import { applicationIdFromSearch } from './portfolioNavigation';
+import {
+  applicationIdFromSearch,
+  clearPendingPortfolioScope,
+  GITOPS_APPLICATION_EVENT,
+  GITOPS_PORTFOLIO_SCOPE_EVENT,
+  peekPendingPortfolioScope,
+  type GitOpsStackScope,
+} from './portfolioNavigation';
 
 const INVALIDATE_DEBOUNCE_MS = 250;
 const QUERY_DEBOUNCE_MS = 250;
@@ -50,6 +57,7 @@ export interface GitOpsPortfolioState {
 function buildQueryString(filters: GitOpsPortfolioFilters, cursor: string | null): string {
   const params = new URLSearchParams();
   if (filters.q) params.set('q', filters.q);
+  if (filters.stack) params.set('stack', filters.stack);
   if (filters.attention === '1') params.set('attention', '1');
   if (filters.mode) params.set('mode', filters.mode);
   if (filters.nodeId !== undefined) params.set('nodeId', String(filters.nodeId));
@@ -70,6 +78,8 @@ export function filtersFromSearch(search: string): GitOpsPortfolioFilters {
   const filters: GitOpsPortfolioFilters = {};
   const q = params.get('q');
   if (q) filters.q = q;
+  const stack = params.get('stack');
+  if (stack) filters.stack = stack;
   if (params.get('attention') === '1') filters.attention = '1';
   const mode = params.get('mode');
   if (mode === 'direct' || mode === 'blueprint') filters.mode = mode;
@@ -88,10 +98,46 @@ export function filtersFromSearch(search: string): GitOpsPortfolioFilters {
   return filters;
 }
 
+/** A stack scope is a fresh question: it replaces every other filter. */
+function filtersForScope(scope: GitOpsStackScope): GitOpsPortfolioFilters {
+  return { nodeId: scope.nodeId, stack: scope.stack };
+}
+
+/** True when the address bar is on the GitOps view's path. */
+function isGitOpsPath(pathname: string): boolean {
+  return pathname.split('/').filter(Boolean).at(-1) === 'gitops';
+}
+
+/** Bound on waiting for the router to reach the GitOps path after a scoped mount (about 5 s). */
+const SCOPED_URL_WRITE_ATTEMPTS = 50;
+const SCOPED_URL_WRITE_INTERVAL_MS = 100;
+
+/**
+ * Write the filter set into the address bar, but only once the bar shows the
+ * portfolio list itself: not while an application view owns it, and not
+ * before the router has moved onto the GitOps path (writing then would attach
+ * the query to the page being left).
+ */
+function writeFiltersToUrl(filters: GitOpsPortfolioFilters): void {
+  if (typeof window === 'undefined' || typeof window.history?.replaceState !== 'function') return;
+  const { pathname, search } = window.location;
+  if (!isGitOpsPath(pathname)) return;
+  if (applicationIdFromSearch(search) !== null) return;
+  const qs = buildQueryString(filters, null).replace(/[?&]limit=\d+/, '');
+  const next = qs.startsWith('?') ? qs : '';
+  if (next === search) return;
+  // Keep the existing history state: the router stores its own index marker
+  // in it, and wiping it would corrupt its back/forward deltas.
+  window.history.replaceState(window.history.state, '', `${pathname}${next}`);
+}
+
 export function useGitOpsPortfolio(): GitOpsPortfolioState {
+  // Read once, at first render: StrictMode re-runs effects, and the second
+  // run must still know this mount came from a scope.
+  const [initialScope] = useState(peekPendingPortfolioScope);
   const [filters, setFiltersState] = useState<GitOpsPortfolioFilters>(() => {
     if (typeof window === 'undefined') return {};
-    return filtersFromSearch(window.location.search);
+    return initialScope ? filtersForScope(initialScope) : filtersFromSearch(window.location.search);
   });
   const [data, setData] = useState<GitOpsPortfolioResponse | null>(null);
   const [loading, setLoading] = useState(true);
@@ -176,16 +222,8 @@ export function useGitOpsPortfolio(): GitOpsPortfolioState {
   const applyFilters = useCallback((next: GitOpsPortfolioFilters) => {
     setCursorStack([]);
     setFiltersState(next);
-    // While an application view is open the address bar is its link, not the
-    // list's: a search debounce that fires after a row was opened must not
-    // replace it.
-    if (typeof window === 'undefined' || applicationIdFromSearch(window.location.search) !== null) return;
-    if (typeof window.history?.replaceState === 'function') {
-      const qs = buildQueryString(next, null).replace(/[?&]limit=\d+/, '');
-      // Keep the existing history state: the router stores its own index
-      // marker in it, and wiping it would corrupt its back/forward deltas.
-      window.history.replaceState(window.history.state, '', `${window.location.pathname}${qs.startsWith('?') ? qs : ''}`);
-    }
+    filtersRef.current = next;
+    writeFiltersToUrl(next);
   }, []);
 
   const setFilters = useCallback((next: GitOpsPortfolioFilters) => {
@@ -212,6 +250,60 @@ export function useGitOpsPortfolio(): GitOpsPortfolioState {
   }, []);
 
   const clearFilters = useCallback(() => setFilters({}), [setFilters]);
+
+  // Stack-scoped entry points (see openGitOpsWorkplace). A workplace mounted
+  // by the navigation took the scope in its state initializer; its URL write
+  // waits until the router has moved onto the GitOps path (the view is
+  // lazy-loaded, so that can trail the mount), bounded so a navigation that
+  // never lands stops trying. A workplace already mounted hears the scope as
+  // an event instead.
+  useEffect(() => {
+    clearPendingPortfolioScope();
+    let attempts = 0;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const writeWhenOnPath = () => {
+      timer = null;
+      if (isGitOpsPath(window.location.pathname)) {
+        writeFiltersToUrl(filtersRef.current);
+      } else if (++attempts < SCOPED_URL_WRITE_ATTEMPTS) {
+        timer = setTimeout(writeWhenOnPath, SCOPED_URL_WRITE_INTERVAL_MS);
+      }
+    };
+    if (initialScope !== null) timer = setTimeout(writeWhenOnPath, 0);
+
+    const onScope = (e: Event) => {
+      clearPendingPortfolioScope();
+      setFilters(filtersForScope((e as CustomEvent<GitOpsStackScope>).detail));
+    };
+
+    // Address changes while mounted. Closing an application view lands on the
+    // list, where this hook's filters are the truth (a scope may have arrived
+    // while the view was open), so they are written back. Any other Back or
+    // Forward onto a list entry is the user choosing that entry's question,
+    // so the list adopts it instead of overwriting their history.
+    let applicationOpen = applicationIdFromSearch(window.location.search) !== null;
+    const onAddressChange = () => {
+      const { pathname, search } = window.location;
+      const wasOpen = applicationOpen;
+      applicationOpen = applicationIdFromSearch(search) !== null;
+      if (applicationOpen || !isGitOpsPath(pathname)) return;
+      if (wasOpen) {
+        writeFiltersToUrl(filtersRef.current);
+        return;
+      }
+      const fromUrl = filtersFromSearch(search);
+      if (buildQueryString(fromUrl, null) !== buildQueryString(filtersRef.current, null)) setFilters(fromUrl);
+    };
+    window.addEventListener(GITOPS_PORTFOLIO_SCOPE_EVENT, onScope);
+    window.addEventListener('popstate', onAddressChange);
+    window.addEventListener(GITOPS_APPLICATION_EVENT, onAddressChange);
+    return () => {
+      if (timer !== null) clearTimeout(timer);
+      window.removeEventListener(GITOPS_PORTFOLIO_SCOPE_EVENT, onScope);
+      window.removeEventListener('popstate', onAddressChange);
+      window.removeEventListener(GITOPS_APPLICATION_EVENT, onAddressChange);
+    };
+  }, [initialScope, setFilters]);
 
   // Initial + on-change fetch. Filters and pagination reset together: a new
   // filter set applies to page 1, never to a cursor from the old question.

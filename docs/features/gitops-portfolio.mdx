@@ -63,6 +63,8 @@ Search matches application names, repositories, and refs. Filter chips narrow th
 
 Filter state is part of the URL, so a narrowed view can be bookmarked or shared.
 
+The Git indicator on a stack (the pending icon in the sidebar, or the source badge in the dashboard's Stack Health table) opens the portfolio narrowed to that one stack on its node. The narrowing shows as a stack chip in the filter row; remove the chip, or use **Clear filters**, to return to the whole portfolio. **Clear filters** resets every filter at once, including ones that arrived through a shared link.
+
 ## Freshness and honesty
 
 The portfolio refreshes on GitOps transitions, not on a timer. When a node cannot be reached, it is named in a coverage banner and its applications stay absent from the list rather than being reported with evidence Sencho does not hold. When a refresh fails after a good read, the page keeps the previous data and says it is showing last-known evidence and when it came from.

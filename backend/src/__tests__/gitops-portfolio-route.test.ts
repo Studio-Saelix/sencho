@@ -164,6 +164,20 @@ describe('GET /api/gitops/applications', () => {
     expect((res.body as GitOpsPortfolioResponse).applications.map(row => row.name)).toEqual(['route-local-web']);
   });
 
+  it('matches the stack filter exactly, not as a substring', async () => {
+    const exact = await request(app)
+      .get('/api/gitops/applications?stack=route-local-web')
+      .set('Cookie', adminCookie);
+    expect(exact.status).toBe(200);
+    expect((exact.body as GitOpsPortfolioResponse).applications.map(row => row.name)).toEqual(['route-local-web']);
+
+    const partial = await request(app)
+      .get('/api/gitops/applications?stack=route-local')
+      .set('Cookie', adminCookie);
+    expect(partial.status).toBe(200);
+    expect((partial.body as GitOpsPortfolioResponse).applications).toEqual([]);
+  });
+
   it('rejects unknown filter values instead of answering with a superset', async () => {
     const res = await request(app)
       .get('/api/gitops/applications?mode=cryptic')

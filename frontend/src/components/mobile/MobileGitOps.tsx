@@ -1,4 +1,4 @@
-import { ChevronLeft, ChevronRight, RefreshCw, Search } from 'lucide-react';
+import { ChevronLeft, ChevronRight, RefreshCw, Search, X } from 'lucide-react';
 import { useEffect, useState, type ReactNode } from 'react';
 import { Masthead, SectionHead, StateDot } from '@/components/mobile/mobile-ui';
 import { attentionLabel, PORTFOLIO_EMPTY_COPY, portfolioMastheadState, POSTURE_TONE_CLASS } from '@/lib/gitopsPortfolio';
@@ -58,8 +58,10 @@ export function MobileGitOps({ headerActions }: { headerActions?: ReactNode }) {
     { value: 'direct', label: 'Direct' },
     { value: 'blueprint', label: 'Blueprint' },
   ];
-  const activeChip: typeof modeChips[number]['value'] =
-    filters.attention === '1' ? 'attention' : filters.mode === 'direct' ? 'direct' : filters.mode === 'blueprint' ? 'blueprint' : 'all';
+  const activeChip: typeof modeChips[number]['value'] | null =
+    filters.attention === '1' ? 'attention' : filters.mode === 'direct' ? 'direct' : filters.mode === 'blueprint' ? 'blueprint'
+      // "All" reads as pressed only when nothing narrows the list.
+      : Object.keys(filters).length === 0 ? 'all' : null;
 
   if (selectedApplication !== null) {
     return <GitOpsApplicationView key={selectedApplication} id={selectedApplication} className="p-4" headerActions={headerActions} />;
@@ -104,6 +106,21 @@ export function MobileGitOps({ headerActions }: { headerActions?: ReactNode }) {
           />
         </div>
         <div className="mt-2 flex gap-1.5 overflow-x-auto pb-1" role="group" aria-label="Filter by triage dimension">
+          {filters.stack !== undefined && (
+            <button
+              type="button"
+              onClick={() => {
+                const next = { ...filters };
+                delete next.stack;
+                portfolio.setFilters(next);
+              }}
+              aria-label="Remove stack filter"
+              className="flex min-h-11 shrink-0 items-center gap-1.5 rounded-md border border-brand/50 bg-brand/10 px-3 font-mono text-[11px] tracking-[0.04em] text-brand"
+            >
+              {filters.stack}
+              <X className="h-3.5 w-3.5" strokeWidth={1.5} />
+            </button>
+          )}
           {modeChips.map(chip => (
             <button
               key={chip.value}

@@ -174,6 +174,7 @@ function parseFilters(query: Request['query']): ParseResult {
     ok: true,
     filters: {
       q: stringParam(query.q),
+      stack: stringParam(query.stack),
       attentionOnly: stringParam(query.attention) === '1',
       targetMode: targetModeRaw as GitOpsPortfolioFilters['targetMode'],
       nodeId: nodeId ?? undefined,
@@ -201,6 +202,8 @@ function matchesFilters(row: GitOpsPortfolioRow, filters: GitOpsPortfolioFilters
     if (!involved) return false;
   }
   if (filters.blueprintId !== undefined && row.blueprintId !== filters.blueprintId) return false;
+  // Exact, unlike `q`: a stack-scoped entry point must not also match `web2` for `web`.
+  if (filters.stack !== undefined && row.stackName !== filters.stack) return false;
   if (filters.sourceStatus !== undefined && row.sourceStatus !== filters.sourceStatus) return false;
   if (filters.rolloutStatus !== undefined && row.rolloutStatus !== filters.rolloutStatus) return false;
   if (filters.healthStatus !== undefined && row.healthStatus !== filters.healthStatus) return false;

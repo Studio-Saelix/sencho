@@ -8,10 +8,17 @@
  * file so the read and write halves of the filter contract stay together.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { StrictMode } from 'react';
 import { act, renderHook, waitFor } from '@testing-library/react';
 import { apiFetch } from '@/lib/api';
 import { useGitOpsPortfolio } from '@/components/gitops/portfolio/useGitOpsPortfolio';
-import { applicationIdFromSearch, openGitOpsApplication } from '@/components/gitops/portfolio/portfolioNavigation';
+import {
+  applicationIdFromSearch,
+  closeGitOpsApplication,
+  openGitOpsApplication,
+  openGitOpsWorkplace,
+  peekPendingPortfolioScope,
+} from '@/components/gitops/portfolio/portfolioNavigation';
 import type { GitOpsPortfolioResponse } from '@/types/gitopsPortfolio';
 
 vi.mock('@/lib/api', () => ({
@@ -135,6 +142,7 @@ describe('useGitOpsPortfolio', () => {
   });
 
   it('preserves the router history marker when syncing the URL', async () => {
+    window.history.replaceState({ senchoIdx: 2 }, '', '/nodes/local/gitops');
     mockFetch.mockResolvedValue(ok(response()));
     const replaceState = vi.spyOn(window.history, 'replaceState');
     const { result } = renderHook(() => useGitOpsPortfolio());
@@ -147,6 +155,117 @@ describe('useGitOpsPortfolio', () => {
     // The state argument is passed through, not nulled: the router stores its
     // back/forward index there.
     expect(replaceState.mock.calls.at(-1)![0]).toBe(window.history.state);
+  });
+});
+
+describe('stack-scoped entry (openGitOpsWorkplace)', () => {
+  const lastUrl = () => String(mockFetch.mock.calls.at(-1)?.[0]);
+
+  it('opens a mounting workplace on the scope and writes it once the router is on the GitOps path', async () => {
+    window.history.replaceState({ senchoIdx: 0 }, '', '/nodes/local/stacks/web');
+    mockFetch.mockResolvedValue(ok(response()));
+    // The indicator fires before the workplace mounts, as a view switch does.
+    act(() => openGitOpsWorkplace({ nodeId: 3, stack: 'web' }));
+    // The router moves onto the GitOps path in the same commit as the mount.
+    window.history.pushState({ senchoIdx: 1 }, '', '/nodes/local/gitops');
+    const { result } = renderHook(() => useGitOpsPortfolio());
+
+    expect(result.current.filters).toEqual({ nodeId: 3, stack: 'web' });
+    await waitFor(() => expect(lastUrl()).toContain('stack=web'));
+    expect(lastUrl()).toContain('nodeId=3');
+    await waitFor(() => expect(window.location.search).toBe('?stack=web&nodeId=3'));
+    expect(peekPendingPortfolioScope()).toBeNull();
+  });
+
+  it('waits for the router to reach the GitOps path before writing the scope', async () => {
+    window.history.replaceState({ senchoIdx: 0 }, '', '/nodes/local/stacks/web');
+    mockFetch.mockResolvedValue(ok(response()));
+    act(() => openGitOpsWorkplace({ nodeId: 3, stack: 'web' }));
+    renderHook(() => useGitOpsPortfolio());
+    await waitFor(() => expect(lastUrl()).toContain('stack=web'));
+    // Still on the page being left: the scope must not attach to it.
+    await new Promise(resolve => setTimeout(resolve, 150));
+    expect(window.location.search).toBe('');
+
+    // The lazy view's route lands later; the write follows it.
+    window.history.pushState({ senchoIdx: 1 }, '', '/nodes/local/gitops');
+    await waitFor(() => expect(window.location.search).toBe('?stack=web&nodeId=3'));
+  });
+
+  it('survives StrictMode effect replay on a scoped mount', async () => {
+    window.history.replaceState({ senchoIdx: 1 }, '', '/nodes/local/gitops');
+    mockFetch.mockResolvedValue(ok(response()));
+    act(() => openGitOpsWorkplace({ nodeId: 3, stack: 'web' }));
+    const { result } = renderHook(() => useGitOpsPortfolio(), { wrapper: StrictMode });
+    expect(result.current.filters).toEqual({ nodeId: 3, stack: 'web' });
+    await waitFor(() => expect(window.location.search).toBe('?stack=web&nodeId=3'));
+  });
+
+  it('replaces the question of an already mounted workplace', async () => {
+    window.history.replaceState({ senchoIdx: 1 }, '', '/nodes/local/gitops?attention=1&q=api');
+    mockFetch.mockResolvedValue(ok(response()));
+    const { result } = renderHook(() => useGitOpsPortfolio());
+    await waitFor(() => expect(result.current.data).not.toBeNull());
+
+    act(() => openGitOpsWorkplace({ nodeId: 2, stack: 'db' }));
+
+    expect(result.current.filters).toEqual({ nodeId: 2, stack: 'db' });
+    await waitFor(() => expect(lastUrl()).toContain('stack=db'));
+    expect(window.location.search).toBe('?stack=db&nodeId=2');
+  });
+
+  it('writes the scope to the list URL once an open application view closes', async () => {
+    window.history.replaceState({ senchoIdx: 1 }, '', '/nodes/local/gitops?attention=1');
+    mockFetch.mockResolvedValue(ok(response()));
+    const { result } = renderHook(() => useGitOpsPortfolio());
+    await waitFor(() => expect(result.current.data).not.toBeNull());
+    act(() => openGitOpsApplication('1:a'));
+
+    act(() => openGitOpsWorkplace({ nodeId: 2, stack: 'db' }));
+    // The application URL is left alone while the view owns it.
+    expect(applicationIdFromSearch(window.location.search)).toBe('1:a');
+
+    // The real close path: Back pops the pushed application entry.
+    await act(async () => {
+      closeGitOpsApplication();
+      await new Promise<void>(resolve => window.addEventListener('popstate', () => resolve(), { once: true }));
+    });
+    await waitFor(() => expect(window.location.search).toBe('?stack=db&nodeId=2'));
+    expect(result.current.filters).toEqual({ nodeId: 2, stack: 'db' });
+  });
+
+  it('adopts a list entry the user reaches with Back instead of overwriting it', async () => {
+    window.history.replaceState({ senchoIdx: 1 }, '', '/nodes/local/gitops?attention=1');
+    mockFetch.mockResolvedValue(ok(response()));
+    const { result } = renderHook(() => useGitOpsPortfolio());
+    await waitFor(() => expect(result.current.data).not.toBeNull());
+
+    act(() => {
+      window.history.replaceState(window.history.state, '', '/nodes/local/gitops?mode=direct');
+      window.dispatchEvent(new PopStateEvent('popstate'));
+    });
+    expect(window.location.search).toBe('?mode=direct');
+    await waitFor(() => expect(result.current.filters).toEqual({ mode: 'direct' }));
+  });
+
+  it('drops a scope whose navigation never mounted the workplace', async () => {
+    window.history.replaceState({ senchoIdx: 1 }, '', '/nodes/local/gitops?attention=1');
+    mockFetch.mockResolvedValue(ok(response()));
+    const now = Date.now();
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(now);
+    openGitOpsWorkplace({ nodeId: 3, stack: 'web' });
+    clock.mockReturnValue(now + 60_000);
+    const { result } = renderHook(() => useGitOpsPortfolio());
+    expect(result.current.filters).toEqual({ attention: '1' });
+  });
+
+  it('keeps the current question when opened without a scope', async () => {
+    window.history.replaceState({ senchoIdx: 1 }, '', '/nodes/local/gitops?attention=1');
+    mockFetch.mockResolvedValue(ok(response()));
+    const { result } = renderHook(() => useGitOpsPortfolio());
+    await waitFor(() => expect(result.current.data).not.toBeNull());
+    act(() => openGitOpsWorkplace());
+    expect(result.current.filters).toEqual({ attention: '1' });
   });
 });
 

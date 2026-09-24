@@ -87,4 +87,16 @@ describe('GitOpsWorkplaceView', () => {
     expect(window.location.search).toBe('');
     expect(screen.queryByRole('button', { name: 'Clear filters' })).toBeNull();
   });
+
+  it('shows a stack scope as a removable chip', async () => {
+    window.history.replaceState({ senchoIdx: 0 }, '', '/nodes/local/gitops?stack=web&nodeId=1');
+    mockFetch.mockResolvedValue(ok(list));
+    render(<GitOpsWorkplaceView />);
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Remove stack filter' }));
+
+    await waitFor(() => expect(String(mockFetch.mock.calls.at(-1)?.[0])).not.toContain('stack='));
+    expect(String(mockFetch.mock.calls.at(-1)?.[0])).toContain('nodeId=1');
+    expect(window.location.search).toBe('?nodeId=1');
+  });
 });

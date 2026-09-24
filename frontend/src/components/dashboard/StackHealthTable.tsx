@@ -291,9 +291,9 @@ export function StackHealthTable({
                     type="button"
                     onClick={(e) => {
                       e.stopPropagation();
-                      openGitOpsWorkplace();
+                      openGitOpsWorkplace({ nodeId: row.node.id, stack: row.name });
                     }}
-                    aria-label="Open the GitOps portfolio"
+                    aria-label="Open this stack in the GitOps portfolio"
                     className="shrink-0 cursor-pointer"
                   >
                     <GitOpsBadge facet="source" status={row.gitopsSourceState} />

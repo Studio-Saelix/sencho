@@ -135,6 +135,8 @@ export interface GitOpsRollbackCandidate {
 /** Filter set the list route accepts; mirrored from the backend contract. */
 export interface GitOpsPortfolioFilters {
   q?: string;
+  /** Exact stack name (set by the stack-scoped GitOps indicators). */
+  stack?: string;
   attention?: '1';
   mode?: 'direct' | 'blueprint';
   nodeId?: number;

@@ -134,11 +134,55 @@ export function owningSurfaceHandoff(row: GitOpsPortfolioRow): OwningSurfaceHand
   }
 }
 
-/** Where every contextual GitOps indicator (dashboard badge, sidebar pending icon) leads. */
-export function openGitOpsWorkplace(): void {
+/** Carries a stack scope to a workplace that is already mounted. */
+export const GITOPS_PORTFOLIO_SCOPE_EVENT = 'sencho:gitops-portfolio-scope';
+
+/** One Direct application's identity, as a stack-scoped indicator knows it. */
+export interface GitOpsStackScope {
+  nodeId: number;
+  stack: string;
+}
+
+/**
+ * How long a requested scope waits for the workplace to mount. The view is
+ * lazy-loaded, so the mount can trail the click by a chunk fetch; a navigation
+ * that never lands (GitOps is hub-only, so a remote node cannot show it) must
+ * not leave the scope behind to narrow a later, unrelated visit.
+ */
+const PENDING_SCOPE_TTL_MS = 10_000;
+
+let pendingScope: { scope: GitOpsStackScope; at: number } | null = null;
+
+/**
+ * The scope a just-requested navigation carries, for a workplace mounting
+ * because of it. Read-only so a double-invoked state initializer stays pure;
+ * the mounted hook clears it with `clearPendingPortfolioScope`.
+ */
+export function peekPendingPortfolioScope(): GitOpsStackScope | null {
+  if (pendingScope === null || Date.now() - pendingScope.at > PENDING_SCOPE_TTL_MS) return null;
+  return pendingScope.scope;
+}
+
+export function clearPendingPortfolioScope(): void {
+  pendingScope = null;
+}
+
+/**
+ * Where every contextual GitOps indicator (dashboard badge, sidebar pending
+ * icon) leads. With a scope, the workplace opens filtered to that one stack on
+ * that node; without one, it opens on whatever question it last held.
+ *
+ * The scope travels two ways because the workplace may or may not be mounted:
+ * a mounted hook hears the event, a mounting one reads the pending value.
+ */
+export function openGitOpsWorkplace(scope?: GitOpsStackScope): void {
+  pendingScope = scope ? { scope, at: Date.now() } : null;
   window.dispatchEvent(new CustomEvent<SenchoNavigateDetail>(SENCHO_NAVIGATE_EVENT, {
     detail: { view: 'gitops' },
   }));
+  if (scope) {
+    window.dispatchEvent(new CustomEvent<GitOpsStackScope>(GITOPS_PORTFOLIO_SCOPE_EVENT, { detail: scope }));
+  }
 }
 
 /** The drill-down for one row: its application view, keyed by the row's portfolio id. */
