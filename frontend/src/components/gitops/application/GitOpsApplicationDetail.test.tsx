@@ -1,3 +1,4 @@
+import { BLUEPRINT_INTENT_EVENT } from '@/lib/blueprintIntent';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import {
@@ -25,6 +26,11 @@ vi.mock('@/lib/api', () => ({
 // actions; these suites drive rendering, not authorization.
 vi.mock('@/context/AuthContext', () => ({
   useAuth: () => ({ can: () => false }),
+}));
+
+const fleet = { reachable: true };
+vi.mock('../portfolio/useWorkplaceCapabilities', () => ({
+  useWorkplaceCapabilities: () => ({ canConnectStack: false, canCreateBlueprint: false, canOpenFleet: fleet.reachable }),
 }));
 
 const mockFetch = vi.mocked(apiFetch);
@@ -173,7 +179,7 @@ describe('GitOpsApplicationView', () => {
     window.addEventListener(SENCHO_OPEN_STACK_EVENT, listener);
 
     render(<GitOpsApplicationView id="1:app-1" />);
-    fireEvent.click(await screen.findByRole('button', { name: /open stack/i }));
+    fireEvent.click(await screen.findByRole('button', { name: /open git source/i }));
 
     expect(screen.getByRole('heading', { name: 'bookstack' })).toBeInTheDocument();
     expect(screen.getByTestId('gitops-application-posture')).toHaveTextContent('converged');
@@ -181,16 +187,32 @@ describe('GitOpsApplicationView', () => {
     window.removeEventListener(SENCHO_OPEN_STACK_EVENT, listener);
   });
 
-  it('hands a Blueprint application off to the Fleet deployments tab', async () => {
+  it('hands a Blueprint application off to its own Blueprint on the Fleet deployments tab', async () => {
     mockFetch.mockResolvedValueOnce(ok(detailResponse(blueprintRow, blueprintProjection)));
-    const listener = vi.fn();
-    window.addEventListener(SENCHO_NAVIGATE_EVENT, listener);
+    const navigate = vi.fn();
+    const intent = vi.fn();
+    window.addEventListener(SENCHO_NAVIGATE_EVENT, navigate);
+    window.addEventListener(BLUEPRINT_INTENT_EVENT, intent);
 
     render(<GitOpsApplicationView id="bp:3" />);
-    fireEvent.click(await screen.findByRole('button', { name: /open blueprint deployments/i }));
+    fireEvent.click(await screen.findByRole('button', { name: /open blueprint/i }));
 
-    expect((listener.mock.calls[0][0] as CustomEvent).detail).toEqual({ view: 'fleet', fleetTab: 'deployments' });
-    window.removeEventListener(SENCHO_NAVIGATE_EVENT, listener);
+    expect((navigate.mock.calls[0][0] as CustomEvent).detail).toEqual({ view: 'fleet', fleetTab: 'deployments' });
+    expect((intent.mock.calls[0][0] as CustomEvent).detail).toEqual({ kind: 'open', blueprintId: blueprintRow.blueprintId });
+    window.removeEventListener(SENCHO_NAVIGATE_EVENT, navigate);
+    window.removeEventListener(BLUEPRINT_INTENT_EVENT, intent);
+  });
+
+  it('offers no Blueprint hand-off to a role that cannot open Fleet', async () => {
+    fleet.reachable = false;
+    try {
+      mockFetch.mockResolvedValueOnce(ok(detailResponse(blueprintRow, blueprintProjection)));
+      render(<GitOpsApplicationView id="bp:3" />);
+      await screen.findByTestId('gitops-application-posture');
+      expect(screen.queryByRole('button', { name: /open blueprint/i })).toBeNull();
+    } finally {
+      fleet.reachable = true;
+    }
   });
 
   it('explains an unreadable application and still offers a retry, since a node may be mid-transition', async () => {

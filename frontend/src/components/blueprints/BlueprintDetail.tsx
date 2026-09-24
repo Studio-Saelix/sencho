@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
+import { openGitOpsWorkplace } from '@/components/gitops/portfolio/portfolioNavigation';
 import { Pencil, Pin, Play, Power, Trash2, GitBranch, Unlink, CornerDownLeft } from 'lucide-react';
 import { SystemSheet, SheetSection } from '@/components/ui/system-sheet';
 import GitOpsStateCard, { GitOpsFaultCard } from '@/components/gitops/GitOpsStateCard';
@@ -356,6 +357,19 @@ export function BlueprintDetail({ blueprintId, open, onOpenChange, onChanged, ca
                         {showGitops && (
                             <SheetSection title="GitOps">
                                 <div className="space-y-2">
+                                    {/* This Blueprint's application in the portfolio, beside
+                                        every other GitOps application and the attention queue. */}
+                                    <Button
+                                        variant="link"
+                                        size="sm"
+                                        className="h-auto p-0 text-xs"
+                                        onClick={() => {
+                                            onOpenChange(false);
+                                            openGitOpsWorkplace({ blueprintId: blueprint.id });
+                                        }}
+                                    >
+                                        Open in GitOps portfolio
+                                    </Button>
                                     <GitOpsApprovalChips
                                         approvals={gitopsApprovals}
                                         placement={gitopsPlacement}

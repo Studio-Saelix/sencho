@@ -17,7 +17,7 @@ import {
   GITOPS_APPLICATION_EVENT,
   GITOPS_PORTFOLIO_SCOPE_EVENT,
   peekPendingPortfolioScope,
-  type GitOpsStackScope,
+  type GitOpsPortfolioScope,
 } from './portfolioNavigation';
 
 const INVALIDATE_DEBOUNCE_MS = 250;
@@ -61,6 +61,7 @@ function buildQueryString(filters: GitOpsPortfolioFilters, cursor: string | null
   if (filters.attention === '1') params.set('attention', '1');
   if (filters.mode) params.set('mode', filters.mode);
   if (filters.nodeId !== undefined) params.set('nodeId', String(filters.nodeId));
+  if (filters.blueprintId !== undefined) params.set('blueprintId', String(filters.blueprintId));
   if (filters.source) params.set('source', filters.source);
   if (filters.rollout) params.set('rollout', filters.rollout);
   if (filters.health) params.set('health', filters.health);
@@ -85,6 +86,8 @@ export function filtersFromSearch(search: string): GitOpsPortfolioFilters {
   if (mode === 'direct' || mode === 'blueprint') filters.mode = mode;
   const nodeId = Number(params.get('nodeId'));
   if (Number.isSafeInteger(nodeId) && nodeId > 0) filters.nodeId = nodeId;
+  const blueprintId = Number(params.get('blueprintId'));
+  if (Number.isSafeInteger(blueprintId) && blueprintId > 0) filters.blueprintId = blueprintId;
   const evidence = params.get('evidence');
   if (evidence === 'stale' || evidence === 'unreachable' || evidence === 'unknown') filters.evidence = evidence;
   const source = params.get('source');
@@ -98,9 +101,11 @@ export function filtersFromSearch(search: string): GitOpsPortfolioFilters {
   return filters;
 }
 
-/** A stack scope is a fresh question: it replaces every other filter. */
-function filtersForScope(scope: GitOpsStackScope): GitOpsPortfolioFilters {
-  return { nodeId: scope.nodeId, stack: scope.stack };
+/** A scope is a fresh question: it replaces every other filter. */
+function filtersForScope(scope: GitOpsPortfolioScope): GitOpsPortfolioFilters {
+  if ('blueprintId' in scope) return { blueprintId: scope.blueprintId };
+  if ('stack' in scope) return { nodeId: scope.nodeId, stack: scope.stack };
+  return { nodeId: scope.nodeId, attention: '1' };
 }
 
 /** True when the address bar is on the GitOps view's path. */
@@ -273,7 +278,7 @@ export function useGitOpsPortfolio(): GitOpsPortfolioState {
 
     const onScope = (e: Event) => {
       clearPendingPortfolioScope();
-      setFilters(filtersForScope((e as CustomEvent<GitOpsStackScope>).detail));
+      setFilters(filtersForScope((e as CustomEvent<GitOpsPortfolioScope>).detail));
     };
 
     // Address changes while mounted. Closing an application view lands on the

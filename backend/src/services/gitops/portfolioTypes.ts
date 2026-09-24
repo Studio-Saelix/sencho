@@ -142,6 +142,12 @@ export type GitOpsPortfolioSummary = {
   drifted: number;
   /** Count of applications carrying each attention reason. */
   byReason: Partial<Record<GitOpsAttentionReason, number>>;
+  /**
+   * Applications requiring attention per involved node (hub numbering): a
+   * Direct application counts on its owning node, a Blueprint application on
+   * every node its targets name. Keys are node ids as strings (JSON).
+   */
+  attentionByNode: Record<string, number>;
 };
 
 /** How one contributing node's read went. An unreachable node is named, never silently absent. */

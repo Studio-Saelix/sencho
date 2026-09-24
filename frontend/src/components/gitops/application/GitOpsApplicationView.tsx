@@ -6,6 +6,8 @@ import { Skeleton } from '@/components/ui/skeleton';
 import { POSTURE_LABEL, POSTURE_TONE_CLASS } from '@/lib/gitopsPortfolio';
 import { useAuth } from '@/context/AuthContext';
 import { cn } from '@/lib/utils';
+import { useIsMobile } from '@/hooks/use-is-mobile';
+import { useWorkplaceCapabilities } from '../portfolio/useWorkplaceCapabilities';
 import { closeGitOpsApplication, owningSurfaceHandoff } from '../portfolio/portfolioNavigation';
 import GitOpsApplicationDetail from './GitOpsApplicationDetail';
 import GitOpsAuthorityActions from '@/components/gitops/GitOpsAuthorityActions';
@@ -32,7 +34,9 @@ export function GitOpsApplicationView({ id, className, headerActions }: {
   const { data, loading, error, staleSince, refreshing, refresh } = useGitOpsApplication(id);
   const { can } = useAuth();
   const row = data?.application ?? null;
-  const handoff = row ? owningSurfaceHandoff(row) : null;
+  const { canOpenFleet } = useWorkplaceCapabilities();
+  const isMobile = useIsMobile();
+  const handoff = row ? owningSurfaceHandoff(row, { canOpenBlueprint: canOpenFleet && !isMobile }) : null;
   // A posture from a newer build still renders, as an explicit unknown.
   const posture = row ? (POSTURE_LABEL[row.posture] ?? { label: `unrecognized (${row.posture})`, tone: 'neutral' as const }) : null;
 

@@ -21,6 +21,7 @@ const list: GitOpsPortfolioResponse = {
   summary: {
     applications: 60, attentionRequired: 0, failed: 0, inProgress: 0, converged: 60,
     convergedQualified: 0, unknown: 0, drifted: 0, byReason: {},
+    attentionByNode: {},
   },
   coverage: [{ nodeId: 1, nodeName: 'local', state: 'ok' }],
   attentionQueue: [],

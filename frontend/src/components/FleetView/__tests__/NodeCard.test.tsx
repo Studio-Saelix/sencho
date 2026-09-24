@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { render, screen } from '@testing-library/react';
+import { fireEvent, render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 
 const useAuthMock = vi.fn();
@@ -12,6 +12,7 @@ vi.mock('@/lib/nodesApi', () => ({ cordonNode: vi.fn(), uncordonNode: vi.fn() })
 vi.mock('@/components/ui/toast-store', () => ({ toast: { success: vi.fn(), error: vi.fn() } }));
 
 import { NodeCard } from '../NodeCard';
+import { GITOPS_PORTFOLIO_SCOPE_EVENT } from '@/components/gitops/portfolio/portfolioNavigation';
 import type { FleetNode } from '../types';
 
 function onlineNode(): FleetNode {
@@ -43,6 +44,26 @@ describe('NodeCard', () => {
     expect(screen.getByText('Online')).toBeInTheDocument();
     expect(screen.getByText('Running')).toBeInTheDocument();
     expect(screen.queryByText('Node unreachable')).not.toBeInTheDocument();
+  });
+
+  it('opens the GitOps applications needing attention on this node, without opening the card', () => {
+    const props = baseProps(onlineNode());
+    const scopes: unknown[] = [];
+    const onScope = (e: Event) => scopes.push((e as CustomEvent).detail);
+    window.addEventListener(GITOPS_PORTFOLIO_SCOPE_EVENT, onScope);
+    try {
+      render(<NodeCard {...props} gitopsAttention={2} />);
+      fireEvent.click(screen.getByText('GitOps · 2 attention'));
+    } finally {
+      window.removeEventListener(GITOPS_PORTFOLIO_SCOPE_EVENT, onScope);
+    }
+    expect(scopes).toEqual([{ nodeId: 2, attention: true }]);
+    expect(props.onOpenDetails).not.toHaveBeenCalled();
+  });
+
+  it('shows no GitOps chip when nothing on the node needs attention', () => {
+    render(<NodeCard {...baseProps(onlineNode())} gitopsAttention={0} />);
+    expect(screen.queryByText(/GitOps ·/)).not.toBeInTheDocument();
   });
 
   it('shows the unreachable placeholder and hides stats for an offline node', () => {

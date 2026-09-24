@@ -7,6 +7,7 @@ import { formatRelativeTime } from '@/lib/utils';
 import type { GitOpsPortfolioRow } from '@/types/gitopsPortfolio';
 import { openPortfolioApplication } from '../gitops/portfolio/portfolioNavigation';
 import { useGitOpsPortfolio } from '../gitops/portfolio/useGitOpsPortfolio';
+import { WorkplaceActions } from '../gitops/portfolio/WorkplaceActions';
 import { GitOpsApplicationView } from '../gitops/application/GitOpsApplicationView';
 import { useGitOpsApplicationSelection } from '../gitops/application/useGitOpsApplicationSelection';
 
@@ -182,6 +183,7 @@ export function MobileGitOps({ headerActions }: { headerActions?: ReactNode }) {
             <p className="mt-1 font-mono text-xs text-stat-subtitle">
               {data.summary.applications === 0 ? PORTFOLIO_EMPTY_COPY : 'No GitOps application matches the current filters.'}
             </p>
+            {data.summary.applications === 0 && <WorkplaceActions className="mt-4 justify-center" includeBlueprint={false} />}
           </div>
         ) : data ? (
           <>

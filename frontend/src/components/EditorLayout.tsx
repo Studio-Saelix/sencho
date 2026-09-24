@@ -38,7 +38,12 @@ import {
     GlobalCommandPaletteProvider,
     GlobalCommandPaletteTrigger,
 } from './GlobalCommandPalette';
-import { SENCHO_OPEN_LOGS_EVENT, SENCHO_OPEN_STACK_EVENT } from '@/lib/events';
+import {
+  SENCHO_OPEN_CREATE_STACK_EVENT,
+  SENCHO_OPEN_LOGS_EVENT,
+  SENCHO_OPEN_STACK_EVENT,
+  type SenchoOpenCreateStackDetail,
+} from '@/lib/events';
 import type { SecurityTab, SenchoOpenLogsDetail, SenchoOpenStackDetail } from '@/lib/events';
 import { useNodes, type Node } from '@/context/NodeContext';
 import type { StackHealthNavTarget } from './dashboard/useStackHealthScope';
@@ -245,6 +250,22 @@ export default function EditorLayout() {
     setCreateDialogInitialMode(mode);
     setCreateDialogOpen(true);
   }, [setCreateDialogOpen]);
+
+  // Other surfaces (the GitOps workplace's "Connect a stack to Git") open the
+  // same dialog rather than a second create path. The grant is re-checked
+  // here because the event can come from anywhere.
+  const canCreateStackRef = useRef(false);
+  useEffect(() => {
+    canCreateStackRef.current = can('stack:create');
+  });
+  useEffect(() => {
+    const handler = (e: Event) => {
+      if (!canCreateStackRef.current) return;
+      openCreateDialog((e as CustomEvent<SenchoOpenCreateStackDetail>).detail?.mode ?? 'empty');
+    };
+    window.addEventListener(SENCHO_OPEN_CREATE_STACK_EVENT, handler);
+    return () => window.removeEventListener(SENCHO_OPEN_CREATE_STACK_EVENT, handler);
+  }, [openCreateDialog]);
 
   const openAdoptDialog = useCallback(() => {
     setCreateDialogOpen(false);
@@ -1002,41 +1023,44 @@ export default function EditorLayout() {
 
   const canCreateStack = can('stack:create');
   const createStackSlot = (canCreateStack || permissionsStatus === 'loading') ? (
-    <>
-      <Button
-        variant="outline"
-        className="rounded-lg w-full"
-        onClick={() => openCreateDialog('empty')}
-        disabled={!canCreateStack}
-      >
-        <Plus className="w-4 h-4" />
-        Create Stack
-      </Button>
-      <CreateStackDialog
-        open={createDialogOpen}
-        onOpenChange={setCreateDialogOpen}
-        initialMode={createDialogInitialMode}
-        onStackCreated={async (sName, sourceNodeId, meta) => {
-          await refreshStacks();
-          // loadFile keeps its own unsaved-changes overlay (intentional safety,
-          // shared with every other "switch to a different stack" code path).
-          // Skip the load if the user switched nodes mid-create so we do not
-          // 404 against a stack name that lives on the previous node.
-          if (sourceNodeId != null && activeNodeIdRef.current !== sourceNodeId) {
-            toast.info(`Stack "${sName}" created on the previous node.`);
-            return;
-          }
-          // Empty creates land in an editable compose workspace. Other modes
-          // (git, docker-run, import) stay browse-first on Anatomy.
-          await stackActions.loadFile(
-            sName,
-            meta?.mode === 'empty' ? { startInComposeEdit: true } : undefined,
-          );
-        }}
-        onStacksChanged={async () => { await refreshStacks(); }}
-        onOpenAdopt={openAdoptDialog}
-      />
-    </>
+    <Button
+      variant="outline"
+      className="rounded-lg w-full"
+      onClick={() => openCreateDialog('empty')}
+      disabled={!canCreateStack}
+    >
+      <Plus className="w-4 h-4" />
+      Create Stack
+    </Button>
+  ) : null;
+
+  // Rendered at the shell, not inside the sidebar slot: other surfaces (the
+  // GitOps workplace, phone screens without the sidebar) open the same dialog.
+  const createDialogEl = canCreateStack ? (
+    <CreateStackDialog
+      open={createDialogOpen}
+      onOpenChange={setCreateDialogOpen}
+      initialMode={createDialogInitialMode}
+      onStackCreated={async (sName, sourceNodeId, meta) => {
+        await refreshStacks();
+        // loadFile keeps its own unsaved-changes overlay (intentional safety,
+        // shared with every other "switch to a different stack" code path).
+        // Skip the load if the user switched nodes mid-create so we do not
+        // 404 against a stack name that lives on the previous node.
+        if (sourceNodeId != null && activeNodeIdRef.current !== sourceNodeId) {
+          toast.info(`Stack "${sName}" created on the previous node.`);
+          return;
+        }
+        // Empty creates land in an editable compose workspace. Other modes
+        // (git, docker-run, import) stay browse-first on Anatomy.
+        await stackActions.loadFile(
+          sName,
+          meta?.mode === 'empty' ? { startInComposeEdit: true } : undefined,
+        );
+      }}
+      onStacksChanged={async () => { await refreshStacks(); }}
+      onOpenAdopt={openAdoptDialog}
+    />
   ) : null;
 
   const adoptDialogEl = (
@@ -1486,6 +1510,7 @@ export default function EditorLayout() {
               onNavigate={navigateMobileAware}
               onSettings={openSettingsMobileAware}
             />
+            {createDialogEl}
             {adoptDialogEl}
             {shellOverlaysEl}
             {hydrationOverlay}
@@ -1504,6 +1529,7 @@ export default function EditorLayout() {
             {/* Main Workspace */}
             {workspaceEl}
           </div>
+          {createDialogEl}
           {adoptDialogEl}
           {whatsNewModalEl}
           {shellOverlaysEl}

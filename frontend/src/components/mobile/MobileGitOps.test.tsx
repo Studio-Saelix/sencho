@@ -14,6 +14,10 @@ vi.mock('@/context/AuthContext', () => ({
   useAuth: () => ({ can: () => false }),
 }));
 
+vi.mock('../gitops/portfolio/useWorkplaceCapabilities', () => ({
+  useWorkplaceCapabilities: () => ({ canConnectStack: false, canCreateBlueprint: false, canOpenFleet: false }),
+}));
+
 const mockFetch = vi.mocked(apiFetch);
 
 const emptyList = {

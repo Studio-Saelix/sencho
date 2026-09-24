@@ -11,13 +11,14 @@
  * GitOps path, a parameter the view owns (see VIEW_OWNED_QUERY in useUrlSync),
  * so an application view is a shareable link and Back returns to the list.
  */
+import { openBlueprintIntent } from '@/lib/blueprintIntent';
 import {
   SENCHO_NAVIGATE_EVENT,
   SENCHO_OPEN_STACK_EVENT,
   type SenchoNavigateDetail,
   type SenchoOpenStackDetail,
 } from '@/lib/events';
-import type { GitOpsPortfolioRow } from '@/types/gitopsPortfolio';
+import type { GitOpsAttentionReason, GitOpsPortfolioRow } from '@/types/gitopsPortfolio';
 
 export const APPLICATION_QUERY_PARAM = 'application';
 
@@ -94,19 +95,17 @@ export function closeGitOpsApplicationIfOpen(): void {
  * panel. The shell consumes the event; a missing node or stack leaves the
  * operator wherever they were (the caller survives navigation failure).
  */
-function openDirectGitApplication(row: GitOpsPortfolioRow): void {
+function openDirectStack(row: GitOpsPortfolioRow, destination: 'stack' | 'git'): void {
   if (row.nodeId === null || row.stackName === null) return;
   window.dispatchEvent(new CustomEvent<SenchoOpenStackDetail>(SENCHO_OPEN_STACK_EVENT, {
-    detail: { nodeId: row.nodeId, stackName: row.stackName, destination: 'git' },
+    detail: { nodeId: row.nodeId, stackName: row.stackName, destination },
   }));
 }
 
-/** Open the Blueprint-backed application's rollout surface on the Fleet view. */
-function openBlueprintGitApplication(row: GitOpsPortfolioRow): void {
+/** Open the Blueprint-backed application's own Blueprint detail on the Fleet view. */
+function openBlueprint(row: GitOpsPortfolioRow): void {
   if (row.blueprintId === null) return;
-  window.dispatchEvent(new CustomEvent<SenchoNavigateDetail>(SENCHO_NAVIGATE_EVENT, {
-    detail: { view: 'fleet', fleetTab: 'deployments' },
-  }));
+  openBlueprintIntent({ kind: 'open', blueprintId: row.blueprintId });
 }
 
 export interface OwningSurfaceHandoff {
@@ -116,17 +115,19 @@ export interface OwningSurfaceHandoff {
 
 /**
  * The owning surface for an application, by target mode, or null when the
- * row carries no identity that surface could open.
+ * row carries no identity that surface could open, or the caller cannot
+ * reach it (a Blueprint lives in Fleet, which needs the fleet read grant and
+ * has no Blueprints tab on a phone).
  */
-export function owningSurfaceHandoff(row: GitOpsPortfolioRow): OwningSurfaceHandoff | null {
+export function owningSurfaceHandoff(row: GitOpsPortfolioRow, opts: { canOpenBlueprint: boolean }): OwningSurfaceHandoff | null {
   switch (row.targetMode) {
     case 'direct':
       if (row.nodeId === null || row.stackName === null) return null;
-      return { label: 'Open stack', open: () => openDirectGitApplication(row) };
+      return { label: 'Open Git source', open: () => openDirectStack(row, 'git') };
     case 'blueprint':
     case 'inline_blueprint':
-      if (row.blueprintId === null) return null;
-      return { label: 'Open Blueprint deployments', open: () => openBlueprintGitApplication(row) };
+      if (row.blueprintId === null || !opts.canOpenBlueprint) return null;
+      return { label: 'Open Blueprint', open: () => openBlueprint(row) };
     default: {
       const unhandled: never = row.targetMode;
       return unhandled;
@@ -137,11 +138,15 @@ export function owningSurfaceHandoff(row: GitOpsPortfolioRow): OwningSurfaceHand
 /** Carries a stack scope to a workplace that is already mounted. */
 export const GITOPS_PORTFOLIO_SCOPE_EVENT = 'sencho:gitops-portfolio-scope';
 
-/** One Direct application's identity, as a stack-scoped indicator knows it. */
-export interface GitOpsStackScope {
-  nodeId: number;
-  stack: string;
-}
+/**
+ * A question another surface can open the workplace on: one Direct
+ * application (a stack's Git indicator), one Blueprint application (its detail
+ * sheet), or the applications needing attention on one node (a Fleet card).
+ */
+export type GitOpsPortfolioScope =
+  | { nodeId: number; stack: string }
+  | { blueprintId: number }
+  | { nodeId: number; attention: true };
 
 /**
  * How long a requested scope waits for the workplace to mount. The view is
@@ -151,14 +156,14 @@ export interface GitOpsStackScope {
  */
 const PENDING_SCOPE_TTL_MS = 10_000;
 
-let pendingScope: { scope: GitOpsStackScope; at: number } | null = null;
+let pendingScope: { scope: GitOpsPortfolioScope; at: number } | null = null;
 
 /**
  * The scope a just-requested navigation carries, for a workplace mounting
  * because of it. Read-only so a double-invoked state initializer stays pure;
  * the mounted hook clears it with `clearPendingPortfolioScope`.
  */
-export function peekPendingPortfolioScope(): GitOpsStackScope | null {
+export function peekPendingPortfolioScope(): GitOpsPortfolioScope | null {
   if (pendingScope === null || Date.now() - pendingScope.at > PENDING_SCOPE_TTL_MS) return null;
   return pendingScope.scope;
 }
@@ -175,14 +180,79 @@ export function clearPendingPortfolioScope(): void {
  * The scope travels two ways because the workplace may or may not be mounted:
  * a mounted hook hears the event, a mounting one reads the pending value.
  */
-export function openGitOpsWorkplace(scope?: GitOpsStackScope): void {
+export function openGitOpsWorkplace(scope?: GitOpsPortfolioScope): void {
   pendingScope = scope ? { scope, at: Date.now() } : null;
   window.dispatchEvent(new CustomEvent<SenchoNavigateDetail>(SENCHO_NAVIGATE_EVENT, {
     detail: { view: 'gitops' },
   }));
   if (scope) {
-    window.dispatchEvent(new CustomEvent<GitOpsStackScope>(GITOPS_PORTFOLIO_SCOPE_EVENT, { detail: scope }));
+    window.dispatchEvent(new CustomEvent<GitOpsPortfolioScope>(GITOPS_PORTFOLIO_SCOPE_EVENT, { detail: scope }));
   }
+}
+
+export interface PortfolioRowAction {
+  label: string;
+  run: () => void;
+}
+
+/**
+ * Every place a row can take the operator, for its action menu. All are
+ * navigations: decisions (accept, approve, authorize) stay in the application
+ * view, where the authority actions own their permission and confirmation.
+ */
+export function portfolioRowActions(row: GitOpsPortfolioRow, opts: { canOpenFleet: boolean }): PortfolioRowAction[] {
+  const actions: PortfolioRowAction[] = [{ label: 'Open application', run: () => openPortfolioApplication(row) }];
+  if (row.targetMode === 'direct' && row.nodeId !== null && row.stackName !== null) {
+    actions.push({ label: 'Open stack', run: () => openDirectStack(row, 'stack') });
+    actions.push({ label: 'Open Git source', run: () => openDirectStack(row, 'git') });
+  }
+  if (row.targetMode !== 'direct' && row.blueprintId !== null && opts.canOpenFleet) {
+    actions.push({ label: 'Open Blueprint', run: () => openBlueprint(row) });
+  }
+  return actions;
+}
+
+/** Reasons that wait on an operator decision the application view's authority actions record. */
+const DECISION_REASONS: ReadonlySet<GitOpsAttentionReason> = new Set<GitOpsAttentionReason>([
+  'source_review_pending',
+  'source_conflict_blocker',
+  'source_reconcile_required',
+  'placement_review_pending',
+  'stateful_confirmation_required',
+  'rollout_authorization_pending',
+  'rollout_authorization_stale',
+  'rollout_paused',
+  'recovery_required',
+]);
+
+/** Failures best investigated on the stack itself (containers, logs, health). */
+const RUNTIME_FAILURE_REASONS: ReadonlySet<GitOpsAttentionReason> = new Set<GitOpsAttentionReason>([
+  'deploy_failed',
+  'health_failed',
+  'recovery_failed',
+  'rollback_failed',
+]);
+
+/** Failures of the Git source itself (fetch, auth, suspension). */
+const SOURCE_FAILURE_REASONS: ReadonlySet<GitOpsAttentionReason> = new Set<GitOpsAttentionReason>([
+  'source_failed',
+  'source_unknown_outcome',
+  'source_suspended',
+]);
+
+/**
+ * The single most useful next step for one attention entry. A decision goes
+ * to the application view (the authority actions live there); a Direct
+ * application's runtime or source failure goes straight to the stack or its
+ * Git source; everything else opens the application view.
+ */
+export function attentionNextStep(reason: GitOpsAttentionReason, row: GitOpsPortfolioRow): PortfolioRowAction {
+  const review = { label: 'Review', run: () => openPortfolioApplication(row) };
+  if (DECISION_REASONS.has(reason)) return review;
+  const direct = row.targetMode === 'direct' && row.nodeId !== null && row.stackName !== null;
+  if (direct && RUNTIME_FAILURE_REASONS.has(reason)) return { label: 'Open stack', run: () => openDirectStack(row, 'stack') };
+  if (direct && SOURCE_FAILURE_REASONS.has(reason)) return { label: 'Open Git source', run: () => openDirectStack(row, 'git') };
+  return { label: 'Open', run: () => openPortfolioApplication(row) };
 }
 
 /** The drill-down for one row: its application view, keyed by the row's portfolio id. */

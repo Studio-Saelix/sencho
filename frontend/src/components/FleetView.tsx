@@ -300,6 +300,7 @@ export function FleetView({
                         onNavigateToNode={onNavigateToNode}
                         onOpenNodeNetworking={onOpenNodeNetworking}
                         networkingByNode={overview.networkingByNode}
+                        gitopsAttentionByNode={overview.gitopsAttentionByNode}
                         onUpdate={updateStatus.triggerNodeUpdate}
                         updatingNodeId={updateStatus.updatingNodeId}
                         onRetryUpdate={updateStatus.retryNodeUpdate}

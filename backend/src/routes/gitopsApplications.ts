@@ -255,6 +255,7 @@ function sortRows(rows: GitOpsPortfolioRow[], filters: GitOpsPortfolioFilters): 
  */
 function summarize(rows: GitOpsPortfolioRow[]): GitOpsPortfolioResponse['summary'] {
   const byReason: GitOpsPortfolioResponse['summary']['byReason'] = {};
+  const attentionByNode: Record<string, number> = {};
   let attentionRequired = 0;
   let failed = 0;
   let inProgress = 0;
@@ -271,6 +272,13 @@ function summarize(rows: GitOpsPortfolioRow[]): GitOpsPortfolioResponse['summary
     else if (row.posture === 'unknown') unknown += 1;
     if (row.drift.count > 0) drifted += 1;
     for (const reason of row.attention) byReason[reason] = (byReason[reason] ?? 0) + 1;
+    if (row.attention.length > 0) {
+      // Same involvement rule as the node filter, so a node's count matches
+      // what the portfolio lists when filtered to that node.
+      const involved = new Set(row.targets.map(target => target.nodeId));
+      if (row.nodeId !== null) involved.add(row.nodeId);
+      for (const nodeId of involved) attentionByNode[nodeId] = (attentionByNode[nodeId] ?? 0) + 1;
+    }
   }
   return {
     applications: rows.length,
@@ -282,6 +290,7 @@ function summarize(rows: GitOpsPortfolioRow[]): GitOpsPortfolioResponse['summary
     unknown,
     drifted,
     byReason,
+    attentionByNode,
   };
 }
 

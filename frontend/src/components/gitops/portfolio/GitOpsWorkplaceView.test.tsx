@@ -20,6 +20,10 @@ vi.mock('@/context/AuthContext', () => ({
   useAuth: () => ({ can: () => false }),
 }));
 
+vi.mock('@/context/NodeContext', () => ({
+  useNodes: () => ({ hasCapability: () => false }),
+}));
+
 const mockFetch = vi.mocked(apiFetch);
 
 const list: GitOpsPortfolioResponse = {
@@ -28,6 +32,7 @@ const list: GitOpsPortfolioResponse = {
   summary: {
     applications: 1, attentionRequired: 0, failed: 0, inProgress: 0, converged: 1,
     convergedQualified: 0, unknown: 0, drifted: 0, byReason: {},
+    attentionByNode: {},
   },
   coverage: [{ nodeId: 1, nodeName: 'local', state: 'ok' }],
   attentionQueue: [],
