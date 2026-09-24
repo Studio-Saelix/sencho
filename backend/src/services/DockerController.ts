@@ -3102,6 +3102,48 @@ class DockerController {
   }
 
   /**
+   * Returns the first of /bin/bash, /bin/sh that runs in the container, or null
+   * when neither exists (exit 126/127). Any other probe failure is thrown so the
+   * caller reports the real cause instead of a misleading "no shell".
+   */
+  private async findContainerShell(container: Docker.Container): Promise<string | null> {
+    let lastError: Error | undefined;
+    for (const shell of ['/bin/bash', '/bin/sh']) {
+      try {
+        const probe = await container.exec({ Cmd: [shell, '-c', 'exit 0'], AttachStdout: true, AttachStderr: true });
+        const output = await probe.start({});
+        try {
+          await new Promise<void>((resolve, reject) => {
+            const timer = setTimeout(() => reject(new Error(`${shell} probe timed out`)), 5000);
+            const done = () => { clearTimeout(timer); resolve(); };
+            output.once('end', done);
+            output.once('close', done);
+            output.once('error', (err: Error) => { clearTimeout(timer); reject(err); });
+            output.resume();
+          });
+        } finally {
+          output.destroy();
+        }
+        let result = await probe.inspect();
+        // The exit code can lag the stream end by a moment.
+        for (let i = 0; result.Running && i < 10; i++) {
+          await new Promise((r) => setTimeout(r, 50));
+          result = await probe.inspect();
+        }
+        if (result.ExitCode === 0) return shell;
+        if (result.Running || (result.ExitCode !== 126 && result.ExitCode !== 127)) {
+          lastError = new Error(`${shell} probe ended with exit ${result.Running ? 'unknown (still running)' : result.ExitCode}`);
+        }
+      } catch (err) {
+        console.warn(`[Exec] Shell probe for ${shell} failed:`, err);
+        lastError = err instanceof Error ? err : new Error(String(err));
+      }
+    }
+    if (lastError) throw lastError;
+    return null;
+  }
+
+  /**
    * Exec into a container with full session isolation.
    * All state (exec instance, stream) lives in this closure - no singleton traps.
    * The WebSocket message handler is registered here to handle input, resize, and cleanup.
@@ -3131,21 +3173,22 @@ class DockerController {
         return;
       }
 
-      // Try bash first, fall back to sh.
-      // Both exec creation AND start must be inside the try/catch because
-      // some runtimes reject unknown binaries at start(), not at creation.
-      const execOpts = { AttachStdin: true, AttachStdout: true, AttachStderr: true, Tty: true } as const;
-      let dockerExec: Docker.Exec;
-      let stream: import('stream').Duplex;
-      let shellType = '/bin/bash';
-      try {
-        dockerExec = await container.exec({ ...execOpts, Cmd: ['/bin/bash'] });
-        stream = await dockerExec.start({ hijack: true, stdin: true });
-      } catch {
-        shellType = '/bin/sh';
-        dockerExec = await container.exec({ ...execOpts, Cmd: ['/bin/sh'] });
-        stream = await dockerExec.start({ hijack: true, stdin: true });
+      // Pick the first shell that actually runs. With Tty: true, Docker accepts
+      // exec creation and start for a missing binary and only reports the
+      // failure as stream output, so probe each shell non-interactively first.
+      const shellType = await this.findContainerShell(container);
+      if (!shellType) {
+        console.warn('[Exec] No usable shell in container:', containerId);
+        if (ws.readyState === WebSocket.OPEN) {
+          ws.send('\r\n\x1b[31mFailed to start shell: this container has no usable /bin/bash or /bin/sh\x1b[0m\r\n');
+          ws.close();
+        }
+        return;
       }
+      const dockerExec = await container.exec({
+        AttachStdin: true, AttachStdout: true, AttachStderr: true, Tty: true, Cmd: [shellType],
+      });
+      const stream = await dockerExec.start({ hijack: true, stdin: true });
 
       if (isDebugEnabled()) console.debug('[Exec:diag] Creating exec', { containerId, shell: shellType });
       if (isDebugEnabled()) console.log('[Exec] Shell session started', { containerId, shell: shellType });
@@ -3216,6 +3259,7 @@ class DockerController {
       console.error('[Exec] Failed to start shell:', err.message, { containerId });
       if (ws.readyState === WebSocket.OPEN) {
         ws.send(`\r\n\x1b[31mFailed to start shell: ${err.message}\x1b[0m\r\n`);
+        ws.close();
       }
     }
   }

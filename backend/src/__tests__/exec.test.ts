@@ -4,6 +4,7 @@
  */
 import { describe, it, expect, vi, beforeAll, beforeEach, afterAll } from 'vitest';
 import { EventEmitter } from 'events';
+import { PassThrough } from 'stream';
 import jwt from 'jsonwebtoken';
 import { setupTestDb, cleanupTestDb, TEST_USERNAME, TEST_JWT_SECRET } from './helpers/setupTestDb';
 
@@ -84,12 +85,37 @@ function createMockWs(): WebSocket {
 
 let mockStream: ReturnType<typeof createMockStream>;
 
+/** Exit code each probed shell returns; a shell absent here exits 127. */
+let shellExitCodes: Record<string, number>;
+
+function createProbeExec(shell: string) {
+  return {
+    start: vi.fn(async () => {
+      const out = new PassThrough();
+      out.end();
+      return out;
+    }),
+    inspect: vi.fn(async () => ({ Running: false, ExitCode: shellExitCodes[shell] ?? 127 })),
+  };
+}
+
+function isProbe(opts: { Cmd: string[] }): boolean {
+  return opts.Cmd[1] === '-c';
+}
+
+function interactiveExecCalls(): Array<{ Cmd: string[] }> {
+  return mockContainer.exec.mock.calls.map((c) => c[0]).filter((o) => !isProbe(o));
+}
+
 beforeEach(() => {
   vi.clearAllMocks();
   mockStream = createMockStream();
   // Reset defaults
   mockContainer.inspect.mockResolvedValue({ State: { Running: true } });
-  mockContainer.exec.mockResolvedValue(mockExecInstance);
+  shellExitCodes = { '/bin/bash': 0, '/bin/sh': 0 };
+  mockContainer.exec.mockImplementation(async (opts: { Cmd: string[] }) =>
+    isProbe(opts) ? createProbeExec(opts.Cmd[0]) : mockExecInstance,
+  );
   mockExecInstance.start.mockResolvedValue(mockStream);
   mockExecInstance.resize.mockResolvedValue(undefined);
 });
@@ -142,52 +168,91 @@ describe('DockerController.execContainer - state validation', () => {
 // ── execContainer: shell fallback ──────────────────────────────────────
 
 describe('DockerController.execContainer - shell fallback', () => {
-  it('falls back to /bin/sh when /bin/bash exec creation fails', async () => {
-    mockContainer.exec
-      .mockRejectedValueOnce(new Error('OCI: bash not found'))
-      .mockResolvedValueOnce(mockExecInstance);
+  it('uses /bin/bash when it is available', async () => {
+    const ws = createMockWs();
+    await DockerController.getInstance(1).execContainer('abc123', ws);
+
+    expect(interactiveExecCalls()).toEqual([expect.objectContaining({ Cmd: ['/bin/bash'], Tty: true })]);
+  });
+
+  it('falls back to /bin/sh when /bin/bash is missing but exec creation succeeds', async () => {
+    // With a TTY, Docker accepts exec for a missing binary; only the exit code tells.
+    shellExitCodes = { '/bin/sh': 0 };
 
     const ws = createMockWs();
-    const dc = DockerController.getInstance(1);
-    await dc.execContainer('abc123', ws);
+    await DockerController.getInstance(1).execContainer('abc123', ws);
 
-    expect(mockContainer.exec).toHaveBeenCalledTimes(2);
-    expect(mockContainer.exec.mock.calls[0][0]).toMatchObject({ Cmd: ['/bin/bash'] });
-    expect(mockContainer.exec.mock.calls[1][0]).toMatchObject({ Cmd: ['/bin/sh'] });
+    expect(interactiveExecCalls()).toEqual([expect.objectContaining({ Cmd: ['/bin/sh'] })]);
     expect(mockExecInstance.start).toHaveBeenCalled();
   });
 
-  it('falls back to /bin/sh when /bin/bash start() fails', async () => {
-    // Exec creation succeeds for bash but start() fails (common Docker behavior)
-    const failingExec = {
-      start: vi.fn().mockRejectedValueOnce(new Error('exec failed: bash not found')),
-      resize: vi.fn(),
-    };
-    mockContainer.exec
-      .mockResolvedValueOnce(failingExec)
-      .mockResolvedValueOnce(mockExecInstance);
+  it('waits for a probe exit code that lags the stream end', async () => {
+    const lagging = createProbeExec('/bin/bash');
+    lagging.inspect
+      .mockResolvedValueOnce({ Running: true, ExitCode: null } as unknown as { Running: boolean; ExitCode: number })
+      .mockResolvedValueOnce({ Running: false, ExitCode: 0 });
+    mockContainer.exec.mockImplementationOnce(async () => lagging);
 
     const ws = createMockWs();
-    const dc = DockerController.getInstance(1);
-    await dc.execContainer('abc123', ws);
+    await DockerController.getInstance(1).execContainer('abc123', ws);
 
-    expect(mockContainer.exec).toHaveBeenCalledTimes(2);
-    expect(failingExec.start).toHaveBeenCalled();
-    expect(mockExecInstance.start).toHaveBeenCalled();
+    expect(lagging.inspect).toHaveBeenCalledTimes(2);
+    expect(interactiveExecCalls()).toEqual([expect.objectContaining({ Cmd: ['/bin/bash'] })]);
   });
 
-  it('sends error to client when both shells fail', async () => {
-    mockContainer.exec
-      .mockRejectedValueOnce(new Error('bash not found'))
-      .mockRejectedValueOnce(new Error('sh not found'));
+  it('falls back to /bin/sh when the /bin/bash probe throws', async () => {
+    mockContainer.exec.mockImplementationOnce(async () => {
+      throw new Error('OCI: bash not found');
+    });
 
     const ws = createMockWs();
-    const dc = DockerController.getInstance(1);
-    await dc.execContainer('abc123', ws);
+    await DockerController.getInstance(1).execContainer('abc123', ws);
 
-    expect(ws.send).toHaveBeenCalledWith(
-      expect.stringContaining('Failed to start shell'),
-    );
+    expect(interactiveExecCalls()).toEqual([expect.objectContaining({ Cmd: ['/bin/sh'] })]);
+  });
+
+  it('reports the real error, not "no shell", when probes fail for another reason', async () => {
+    mockContainer.exec.mockImplementation(async () => {
+      throw new Error('container is restarting');
+    });
+
+    const ws = createMockWs();
+    await DockerController.getInstance(1).execContainer('abc123', ws);
+
+    expect(ws.send).toHaveBeenCalledWith(expect.stringContaining('container is restarting'));
+    expect(ws.send).not.toHaveBeenCalledWith(expect.stringContaining('no usable'));
+    expect(ws.close).toHaveBeenCalled();
+  });
+
+  it('times out a probe whose output never ends', async () => {
+    vi.useFakeTimers();
+    try {
+      mockContainer.exec.mockImplementation(async (opts: { Cmd: string[] }) =>
+        isProbe(opts) ? { start: vi.fn(async () => new PassThrough()), inspect: vi.fn() } : mockExecInstance,
+      );
+
+      const ws = createMockWs();
+      const pending = DockerController.getInstance(1).execContainer('abc123', ws);
+      await vi.advanceTimersByTimeAsync(10_000);
+      await pending;
+
+      expect(ws.send).toHaveBeenCalledWith(expect.stringContaining('probe timed out'));
+      expect(ws.close).toHaveBeenCalled();
+      expect(interactiveExecCalls()).toEqual([]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('reports a clear error and closes when no shell exists', async () => {
+    shellExitCodes = {};
+
+    const ws = createMockWs();
+    await DockerController.getInstance(1).execContainer('abc123', ws);
+
+    expect(ws.send).toHaveBeenCalledWith(expect.stringContaining('no usable /bin/bash or /bin/sh'));
+    expect(ws.close).toHaveBeenCalled();
+    expect(interactiveExecCalls()).toEqual([]);
   });
 });
 

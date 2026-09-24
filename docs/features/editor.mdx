@@ -199,7 +199,7 @@ The **View logs** button on a container row opens a dedicated modal that streams
 
 ## Container exec (bash session)
 
-The **Open bash shell** icon button opens an interactive shell inside a single running container, equivalent to `docker exec -it <id> bash`. The modal uses xterm.js with color, tab completion, and resize handling.
+The **Open bash shell** icon button opens an interactive shell inside a single running container, equivalent to `docker exec -it <id> bash` (or `sh` when the image has no bash). The modal uses xterm.js with color, tab completion, and resize handling.
 
 Right-click copies the selected text, or pastes from the clipboard when nothing is selected. Ctrl+V, Ctrl+Shift+V, and Shift+Insert also paste (Cmd+V on macOS). When Sencho is served over plain HTTP, the browser does not let pages read the clipboard, so right-click opens the browser's own menu instead; choose **Paste** there or use the keyboard shortcut.
 
@@ -243,7 +243,7 @@ Sencho tries `/bin/bash` first and transparently falls back to `/bin/sh` if bash
     The container stopped between clicking the button and the exec starting. Start the container from the action bar (or the row's **Start service** option) and try again.
   </Accordion>
   <Accordion title='"Failed to start shell" error when opening a bash session'>
-    The container image has no shell binary at `/bin/bash` or `/bin/sh`. Use an image that includes a shell, or install one in your Dockerfile.
+    The container has no usable shell at `/bin/bash` or `/bin/sh`. Use an image that includes a shell, or install one in your Dockerfile.
   </Accordion>
   <Accordion title='Bash session connects but immediately shows "Session ended"'>
     The shell process inside the container exited as soon as it started. Check the container logs (the **View logs** button on the same row) for errors; the container's entrypoint may be overriding the shell, or the container itself may be in a crash loop.

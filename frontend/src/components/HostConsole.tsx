@@ -6,6 +6,7 @@ import { loadXtermModules, type Terminal, type FitAddon, type SerializeAddon } f
 import { buildXtermMinimalTheme } from '@/lib/terminalTheme';
 import { useNodes } from '@/context/NodeContext';
 import { copyToClipboard } from '@/lib/clipboard';
+import { toast } from '@/components/ui/toast-store';
 import { attachTerminalClipboard } from '@/lib/terminalClipboard';
 
 interface HostConsoleProps {
@@ -210,7 +211,10 @@ export default function HostConsole({ nodeId, stackName, onClose }: HostConsoleP
         if (!term) return;
         const selection = term.getSelection();
         if (!selection) return;
-        void copyToClipboard(selection).catch(() => { /* ignore */ });
+        copyToClipboard(selection).catch((err) => {
+            console.warn('Host console copy failed:', err);
+            toast.error('Could not copy the selection to the clipboard.');
+        });
     }, []);
 
     const handleClear = useCallback(() => {
