@@ -75,6 +75,7 @@ CREATE TABLE IF NOT EXISTS gitops_applications (
   accepted_generation_id TEXT NULL,
   candidate_plan_blocked INTEGER NOT NULL DEFAULT 0,
   review_required INTEGER NOT NULL DEFAULT 0,
+  review_block_reason TEXT NULL,
   artifact_set_id TEXT NULL,
   latest_artifact_set_id TEXT NULL,
   intent_revision_id TEXT NULL,

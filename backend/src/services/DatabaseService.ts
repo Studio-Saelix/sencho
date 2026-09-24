@@ -1994,6 +1994,10 @@ export class DatabaseService {
         // existing installs already have. New installs get it from the
         // CREATE TABLE; older DBs need the additive column here.
         maybeAddCol('gitops_applications', 'source_suspended_reason', 'TEXT NULL');
+        // Why an automatic acceptance fell back to review (for example a
+        // candidate that withdraws a stateful service). New installs get it
+        // from the CREATE TABLE; older DBs need the additive column here.
+        maybeAddCol('gitops_applications', 'review_block_reason', 'TEXT NULL');
         // Portable accepted-generation contract fields. Additive and
         // nullable: existing generation rows decode these as an explicit
         // limitation rather than invented evidence.

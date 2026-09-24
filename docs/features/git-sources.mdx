@@ -143,6 +143,8 @@ You can always override on the spot: when you click **Apply** in the change plan
 
 **Review only** maps to review policy. **Auto-write files** and **Auto-deploy** map to automatic policy. Suspend is the operator stop; there is no fourth Manual radio on the sheet.
 
+Automatic modes carry one built-in safety check: when the incoming commit withdraws or renames a service that persists data (named volumes or bind mounts), or when Sencho cannot prove it does not, the change is held for review instead of being accepted or applied, and the stack shows a **stateful change blocked** attention state. The hold clears when you accept the change explicitly, dismiss it, or a newer commit is staged. Nothing is written or redeployed while it is held, so withdrawing a stateful service is always a deliberate choice.
+
 Git Sources apply to stacks you link from the editor. Blueprint deployments do not evaluate a Git source.
 
 ## Polling

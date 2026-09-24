@@ -32,7 +32,7 @@ describe('outcomeFromSourceFacet', () => {
   });
 
   it('reports pending_review with a review next action', () => {
-    const facet: SourceFacet = { ...identity, status: 'source_review_pending' };
+    const facet: SourceFacet = { ...identity, status: 'source_review_pending', reviewBlockReason: null };
     const result = outcomeFromSourceFacet(facet);
     expect(result.outcome).toBe('pending_review');
     expect(result.nextAction).toBe('review');

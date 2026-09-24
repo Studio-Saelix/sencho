@@ -23,12 +23,15 @@ import { stackManagedRoot } from '../services/gitops/directApplication';
 import { candidateContentFingerprint } from '../services/gitops/fingerprint';
 import { GitSourceService } from '../services/GitSourceService';
 import { SourceController } from '../services/gitops/SourceController';
+import { attentionReasons } from '../services/gitops/attention';
+import { projectApplication } from '../services/gitops/derive';
 import { DatabaseService } from '../services/DatabaseService';
 import type { GitOpsApplicationRow } from '../services/gitops/types';
 import type { ReconcileResult } from '../services/gitops/outcomes';
 
 const TICK_MS = 60_000;
 const okResult: ReconcileResult = { outcome: 'no_source_change', reason: 'ok', nextAction: 'none' };
+const fetchedResult: ReconcileResult = { outcome: 'candidate_already_fetched', reason: 'ok', nextAction: 'none' };
 
 type EvaluateCandidatePolicy = typeof import('../services/PolicyEnforcement')['evaluateCandidatePolicy'];
 
@@ -75,18 +78,32 @@ function getApp(id: string): GitOpsApplicationRow {
 }
 
 const STAGED_COMPOSE = 'services:\n  web:\n    image: nginx:1.27\n';
-const STAGED_CONTENT_SHA = candidateContentFingerprint([{ path: 'compose.yaml', content: STAGED_COMPOSE }]);
 
 /** Write the compose file the controller reads as candidate evidence. */
-function stageCandidateComposeFile(stackName: string, generationId: string): void {
+function writeCandidateCompose(stackName: string, generationId: string, compose: string): void {
     const dir = path.join(stackManagedRoot(stackName), 'generations', `candidate-${generationId}`);
     fs.mkdirSync(dir, { recursive: true });
-    fs.writeFileSync(path.join(dir, 'compose.yaml'), STAGED_COMPOSE);
+    fs.writeFileSync(path.join(dir, 'compose.yaml'), compose);
 }
 
+/** Write the applied copy of a generation, the content the guard diffs against. */
+function writeAppliedCompose(stackName: string, generationId: string, compose: string): void {
+    const dir = path.join(stackManagedRoot(stackName), 'generations', `applied-${generationId}-0`);
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, 'compose.yaml'), compose);
+}
+
+type StageOpts = {
+    blocked?: boolean;
+    sourceEvidence?: string | null;
+    securityEvidence?: string | null;
+    composeInputs?: string | null;
+    compose?: string;
+};
+
 /**
- * Stage a live candidate through the real transitions, mirroring the fetch
- * success sequence GitSourceService drives: fetch opens, generation is
+ * Insert a generation and drive it through the real fetch transitions,
+ * mirroring the sequence GitSourceService drives: fetch opens, generation is
  * inserted, the commit lands, the candidate passes validation. reviewRequired
  * follows the production rule (anything not automatic needs a human sign-off).
  *
@@ -95,24 +112,16 @@ function stageCandidateComposeFile(stackName: string, generationId: string): voi
  * conflict-blocked candidate, which the acceptance boundary must refuse no
  * matter what the policy evaluator says.
  */
-function stageCandidate(
-    appId: string,
+function insertAndStageGeneration(
+    app: GitOpsApplicationRow,
     stackName: string,
     generationId: string,
-    policy: 'manual' | 'review' | 'automatic' = 'automatic',
-    opts: {
-        blocked?: boolean;
-        sourceEvidence?: string | null;
-        securityEvidence?: string | null;
-        composeInputs?: string | null;
-    } = {},
+    opts: StageOpts = {},
 ): void {
-    const app = { ...directApplicationFixture(appId, stackName), source_policy: policy };
-    GitOpsTransitions.getInstance().activateDirect({
-        application: app,
-        nodeId: 1,
-        envelope: { operationId: `seed-${appId}`, actor: 'test', trigger: 'config_change', at: Date.now() },
-    });
+    const appId = app.id;
+    const policy = app.source_policy;
+    const compose = opts.compose ?? STAGED_COMPOSE;
+    const contentSha = candidateContentFingerprint([{ path: 'compose.yaml', content: compose }]);
     GitOpsStore.getInstance().insertGeneration({
         id: generationId,
         application_id: appId,
@@ -136,7 +145,7 @@ function stageCandidate(
         redacted_limitations_json: '[]',
         portable_manifest_json: null,
         compose_inputs_json: opts.composeInputs === undefined
-            ? JSON.stringify({ candidateContentSha256: STAGED_CONTENT_SHA })
+            ? JSON.stringify({ candidateContentSha256: contentSha })
             : opts.composeInputs,
         source_policy_evidence_json: opts.sourceEvidence === undefined
             ? JSON.stringify({ sourcePolicy: policy })
@@ -157,7 +166,24 @@ function stageCandidate(
     } else {
         GitOpsTransitions.getInstance().candidateReady(appId, generationId, policy !== 'automatic', env);
     }
-    stageCandidateComposeFile(stackName, generationId);
+    writeCandidateCompose(stackName, generationId, compose);
+}
+
+/** Activate a fresh Direct application and stage its first candidate. */
+function stageCandidate(
+    appId: string,
+    stackName: string,
+    generationId: string,
+    policy: 'manual' | 'review' | 'automatic' = 'automatic',
+    opts: StageOpts = {},
+): void {
+    const app = { ...directApplicationFixture(appId, stackName), source_policy: policy };
+    GitOpsTransitions.getInstance().activateDirect({
+        application: app,
+        nodeId: 1,
+        envelope: { operationId: `seed-${appId}`, actor: 'test', trigger: 'config_change', at: Date.now() },
+    });
+    insertAndStageGeneration(app, stackName, generationId, opts);
 }
 
 /** Arm the poll cursor in the past through the real transition, making the row poll-due. */
@@ -731,5 +757,368 @@ describe('SourceController automatic acceptance', () => {
         // policy verdict it does not have.
         expect(getApp('app-ev-held').accepted_generation_id).toBeNull();
         expect(GitOpsStore.getInstance().getGeneration('gen-ev-held')?.security_policy_evidence_json).toBeNull();
+    });
+});
+
+/**
+ * The automatic path is the only acceptance route with no human in the loop,
+ * so it must never withdraw a stateful workload on its own. Each test stages a
+ * real accepted generation with a stateful service on disk, then drives the
+ * controller against a follow-up candidate that either preserves or withdraws
+ * it. The block falls back to the review behavior and must be visible as a
+ * canonical attention state, never a silent skip.
+ */
+describe('SourceController stateful withdrawal guard', () => {
+    const STATEFUL_COMPOSE = [
+        'services:',
+        '  db:',
+        '    image: postgres:16',
+        '    volumes:',
+        '      - pgdata:/var/lib/postgresql/data',
+        'volumes:',
+        '  pgdata:',
+        '',
+    ].join('\n');
+    const KEEPS_STATEFUL_COMPOSE = [
+        'services:',
+        '  db:',
+        '    image: postgres:17',
+        '    volumes:',
+        '      - pgdata:/var/lib/postgresql/data',
+        '  cache:',
+        '    image: redis:7',
+        'volumes:',
+        '  pgdata:',
+        '',
+    ].join('\n');
+    const WITHDRAWN_COMPOSE = 'services:\n  web:\n    image: nginx:1.27\n';
+
+    /** Accept the staged candidate through the real transition and lay down the applied copy. */
+    function acceptAndApply(appId: string, stackName: string, generationId: string, compose: string): void {
+        GitOpsTransitions.getInstance().sourceAccepted({
+            applicationId: appId,
+            generationId,
+            artifactSetId: `as-${generationId}`,
+            sourceAcceptanceId: `sa-${generationId}`,
+            authority: 'operator',
+            envelope: { operationId: `accept-${generationId}`, actor: 'operator', trigger: 'manual', at: Date.now() },
+        });
+        writeAppliedCompose(stackName, generationId, compose);
+    }
+
+    function stageFollowUp(
+        appId: string,
+        stackName: string,
+        generationId: string,
+        compose: string,
+    ): void {
+        insertAndStageGeneration(getApp(appId), stackName, generationId, { compose });
+    }
+
+    it('holds a candidate that withdraws a stateful service instead of auto-accepting', async () => {
+        stageCandidate('app-withdraw', 'withdraw-web', 'wd-prev', 'automatic', { compose: STATEFUL_COMPOSE });
+        acceptAndApply('app-withdraw', 'withdraw-web', 'wd-prev', STATEFUL_COMPOSE);
+        stageFollowUp('app-withdraw', 'withdraw-web', 'wd-next', WITHDRAWN_COMPOSE);
+        mockDue([armDuePoll('app-withdraw')]);
+        evaluateCandidatePolicy.mockResolvedValue({ status: 'allowed' });
+        spyOnReconcile().mockResolvedValue(fetchedResult);
+        const dispatch = spyOnDispatch();
+        const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+
+        controller.start();
+        await advanceOneTick();
+
+        const row = getApp('app-withdraw');
+        // The refusal falls back to review exactly as if the policy were
+        // 'review': the candidate stays staged, nothing is accepted or
+        // dispatched, and the reason names the stateful block.
+        expect(row.accepted_generation_id).toBe('wd-prev');
+        expect(row.candidate_generation_id).toBe('wd-next');
+        expect(row.review_required).toBe(1);
+        expect(row.review_block_reason).toBe('stateful_withdrawal');
+        expect(dispatch).not.toHaveBeenCalled();
+        expect(warnSpy.mock.calls.some((args) =>
+            String(args[0]).includes('[SourceController] automatic candidate held for app-withdraw')
+            && String(args[0]).includes('withdraws or renames stateful services')
+            && String(args[0]).includes('db'))).toBe(true);
+
+        // The block reaches the hub-side classifier as its own named reason.
+        const projection = projectApplication('app-withdraw', false);
+        expect(attentionReasons(projection)).toContain('stateful_withdrawal_blocked');
+    });
+
+    it('blocks a renamed stateful service the same as a removed one', async () => {
+        stageCandidate('app-rename', 'rename-web', 'rn-prev', 'automatic', { compose: STATEFUL_COMPOSE });
+        acceptAndApply('app-rename', 'rename-web', 'rn-prev', STATEFUL_COMPOSE);
+        // The same data-bearing service under a new name: the old name leaves
+        // the stateful set, so the data it owned is orphaned by the rename.
+        stageFollowUp('app-rename', 'rename-web', 'rn-next', [
+            'services:',
+            '  database:',
+            '    image: postgres:17',
+            '    volumes:',
+            '      - pgdata:/var/lib/postgresql/data',
+            'volumes:',
+            '  pgdata:',
+            '',
+        ].join('\n'));
+        mockDue([armDuePoll('app-rename')]);
+        evaluateCandidatePolicy.mockResolvedValue({ status: 'allowed' });
+        spyOnReconcile().mockResolvedValue(fetchedResult);
+        const dispatch = spyOnDispatch();
+
+        controller.start();
+        await advanceOneTick();
+
+        expect(getApp('app-rename').review_block_reason).toBe('stateful_withdrawal');
+        expect(getApp('app-rename').accepted_generation_id).toBe('rn-prev');
+        expect(dispatch).not.toHaveBeenCalled();
+    });
+
+    it('still auto-accepts a change that keeps every stateful service', async () => {
+        stageCandidate('app-additive', 'additive-web', 'ad-prev', 'automatic', { compose: STATEFUL_COMPOSE });
+        acceptAndApply('app-additive', 'additive-web', 'ad-prev', STATEFUL_COMPOSE);
+        stageFollowUp('app-additive', 'additive-web', 'ad-next', KEEPS_STATEFUL_COMPOSE);
+        mockDue([armDuePoll('app-additive')]);
+        evaluateCandidatePolicy.mockResolvedValue({ status: 'allowed' });
+        spyOnReconcile().mockResolvedValue(fetchedResult);
+        const dispatch = spyOnDispatch();
+
+        controller.start();
+        await advanceOneTick();
+
+        const row = getApp('app-additive');
+        expect(row.accepted_generation_id).toBe('ad-next');
+        expect(row.review_required).toBe(0);
+        expect(row.review_block_reason).toBeNull();
+        expect(dispatch).toHaveBeenCalledTimes(1);
+    });
+
+    it('does not re-evaluate a source that already fell back to review', async () => {
+        stageCandidate('app-once', 'once-web', 'on-prev', 'automatic', { compose: STATEFUL_COMPOSE });
+        acceptAndApply('app-once', 'once-web', 'on-prev', STATEFUL_COMPOSE);
+        stageFollowUp('app-once', 'once-web', 'on-next', WITHDRAWN_COMPOSE);
+        mockDue([armDuePoll('app-once')]);
+        evaluateCandidatePolicy.mockResolvedValue({ status: 'allowed' });
+        spyOnReconcile().mockResolvedValue(fetchedResult);
+        spyOnDispatch();
+
+        controller.start();
+        await advanceOneTick();
+        await advanceOneTick();
+
+        // The refusal is durable: the next tick re-runs the fetch mock but
+        // never re-evaluates the policy, so the block cannot turn into a
+        // retry loop that eventually slips an acceptance through.
+        expect(evaluateCandidatePolicy).toHaveBeenCalledTimes(1);
+        expect(getApp('app-once').review_block_reason).toBe('stateful_withdrawal');
+    });
+
+    it('holds when the generation in force cannot be read', async () => {
+        stageCandidate('app-unreadable', 'unreadable-web', 'un-prev', 'automatic', { compose: STATEFUL_COMPOSE });
+        acceptAndApply('app-unreadable', 'unreadable-web', 'un-prev', STATEFUL_COMPOSE);
+        // Both copies of the generation in force disappear (an operator pruned
+        // the managed area by hand): the guard cannot prove the stateful
+        // services survive, so it holds rather than guess.
+        fs.rmSync(path.join(stackManagedRoot('unreadable-web'), 'generations', 'applied-un-prev-0'), { recursive: true, force: true });
+        fs.rmSync(path.join(stackManagedRoot('unreadable-web'), 'generations', 'candidate-un-prev'), { recursive: true, force: true });
+        stageFollowUp('app-unreadable', 'unreadable-web', 'un-next', KEEPS_STATEFUL_COMPOSE);
+        mockDue([armDuePoll('app-unreadable')]);
+        evaluateCandidatePolicy.mockResolvedValue({ status: 'allowed' });
+        spyOnReconcile().mockResolvedValue(fetchedResult);
+        const dispatch = spyOnDispatch();
+        vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+
+        controller.start();
+        await advanceOneTick();
+
+        expect(getApp('app-unreadable').accepted_generation_id).toBe('un-prev');
+        expect(getApp('app-unreadable').review_block_reason).toBe('stateful_withdrawal');
+        expect(dispatch).not.toHaveBeenCalled();
+    });
+
+    it('holds a candidate that keeps a stateful service name but strips its volumes', async () => {
+        stageCandidate('app-strip', 'strip-web', 'st-prev', 'automatic', { compose: STATEFUL_COMPOSE });
+        acceptAndApply('app-strip', 'strip-web', 'st-prev', STATEFUL_COMPOSE);
+        // Same service name, no mount: the data the service owned is left
+        // behind, which is a withdrawal even though the name survives.
+        stageFollowUp('app-strip', 'strip-web', 'st-next', 'services:\n  db:\n    image: postgres:17\n');
+        mockDue([armDuePoll('app-strip')]);
+        evaluateCandidatePolicy.mockResolvedValue({ status: 'allowed' });
+        spyOnReconcile().mockResolvedValue(fetchedResult);
+        const dispatch = spyOnDispatch();
+        const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+
+        controller.start();
+        await advanceOneTick();
+
+        // The withdrawal branch, not an unreadable-evidence hold.
+        expect(warnSpy.mock.calls.some((args) =>
+            String(args[0]).includes('withdraws or renames stateful services (db)'))).toBe(true);
+        expect(getApp('app-strip').accepted_generation_id).toBe('st-prev');
+        expect(getApp('app-strip').review_block_reason).toBe('stateful_withdrawal');
+        expect(dispatch).not.toHaveBeenCalled();
+    });
+
+    it('holds when the candidate compose does not parse', async () => {
+        // A stateless baseline, so no withdrawal is possible: only the parse
+        // failure itself can hold. It must read as missing evidence, never as
+        // "nothing stateful here".
+        stageCandidate('app-badyaml', 'badyaml-web', 'by-prev', 'automatic', { compose: WITHDRAWN_COMPOSE });
+        acceptAndApply('app-badyaml', 'badyaml-web', 'by-prev', WITHDRAWN_COMPOSE);
+        stageFollowUp('app-badyaml', 'badyaml-web', 'by-next', 'services:\n  db: [unclosed\n');
+        mockDue([armDuePoll('app-badyaml')]);
+        evaluateCandidatePolicy.mockResolvedValue({ status: 'allowed' });
+        spyOnReconcile().mockResolvedValue(fetchedResult);
+        const dispatch = spyOnDispatch();
+        const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+
+        controller.start();
+        await advanceOneTick();
+
+        expect(warnSpy.mock.calls.some((args) => String(args[0]).includes('compose does not parse'))).toBe(true);
+        expect(getApp('app-badyaml').accepted_generation_id).toBe('by-prev');
+        expect(getApp('app-badyaml').review_block_reason).toBe('stateful_withdrawal');
+        expect(dispatch).not.toHaveBeenCalled();
+    });
+
+    it('accepts the first candidate when no generation is in force yet', async () => {
+        // No managed baseline exists, so the first acceptance defines it,
+        // even for a stateful compose.
+        stageCandidate('app-first', 'first-web', 'fi-first', 'automatic', { compose: STATEFUL_COMPOSE });
+        mockDue([armDuePoll('app-first')]);
+        evaluateCandidatePolicy.mockResolvedValue({ status: 'allowed' });
+        spyOnReconcile().mockResolvedValue(fetchedResult);
+        const dispatch = spyOnDispatch();
+
+        controller.start();
+        await advanceOneTick();
+
+        expect(getApp('app-first').accepted_generation_id).toBe('fi-first');
+        expect(getApp('app-first').review_block_reason).toBeNull();
+        expect(dispatch).toHaveBeenCalledTimes(1);
+    });
+});
+
+/**
+ * The durable block makes the controller skip the source on every tick, so
+ * every exit from the held state must clear the reason. A reason left behind
+ * would silently stop automatic acceptance for that application forever.
+ */
+describe('stateful review block lifecycle', () => {
+    function envelope(id: string) {
+        return { operationId: id, actor: 'operator', trigger: 'manual' as const, at: Date.now() };
+    }
+
+    /** Stage an accepted baseline plus a follow-up candidate, then record the block. */
+    function blocked(appId: string, stackName: string): void {
+        stageCandidate(appId, stackName, `${appId}-prev`, 'automatic');
+        GitOpsTransitions.getInstance().sourceAccepted({
+            applicationId: appId,
+            generationId: `${appId}-prev`,
+            artifactSetId: `as-${appId}-prev`,
+            sourceAcceptanceId: `sa-${appId}-prev`,
+            authority: 'operator',
+            envelope: envelope(`accept-${appId}-prev`),
+        });
+        insertAndStageGeneration(getApp(appId), stackName, `${appId}-next`);
+        GitOpsTransitions.getInstance().sourceReviewBlocked({
+            applicationId: appId,
+            generationId: `${appId}-next`,
+            reason: 'stateful_withdrawal',
+            envelope: envelope(`block-${appId}`),
+        });
+        expect(getApp(appId).review_block_reason).toBe('stateful_withdrawal');
+        expect(getApp(appId).review_required).toBe(1);
+    }
+
+    it('clears on explicit operator acceptance', () => {
+        blocked('blk-accept', 'blk-accept-web');
+        GitOpsTransitions.getInstance().sourceAccepted({
+            applicationId: 'blk-accept',
+            generationId: 'blk-accept-next',
+            artifactSetId: 'as-blk-accept-next',
+            sourceAcceptanceId: 'sa-blk-accept-next',
+            authority: 'operator',
+            envelope: envelope('accept-blk-accept-next'),
+        });
+        const row = getApp('blk-accept');
+        expect(row.accepted_generation_id).toBe('blk-accept-next');
+        expect(row.review_block_reason).toBeNull();
+        expect(row.review_required).toBe(0);
+    });
+
+    it('clears on dismissal', () => {
+        blocked('blk-dismiss', 'blk-dismiss-web');
+        GitOpsTransitions.getInstance().dismissed('blk-dismiss', envelope('dismiss-blk'));
+        const row = getApp('blk-dismiss');
+        expect(row.candidate_generation_id).toBeNull();
+        expect(row.review_block_reason).toBeNull();
+    });
+
+    it('clears when a newer candidate is staged', () => {
+        blocked('blk-newer', 'blk-newer-web');
+        insertAndStageGeneration(getApp('blk-newer'), 'blk-newer-web', 'blk-newer-third');
+        const row = getApp('blk-newer');
+        expect(row.candidate_generation_id).toBe('blk-newer-third');
+        expect(row.review_block_reason).toBeNull();
+        expect(row.review_required).toBe(0);
+    });
+
+    it.each(['review', 'manual'] as const)('clears when the policy moves to %s', (policy) => {
+        const id = `blk-policy-${policy}`;
+        blocked(id, `${id}-web`);
+        GitOpsTransitions.getInstance().sourcePolicyChanged(id, policy, envelope(`policy-${id}`));
+        const row = getApp(id);
+        expect(row.review_block_reason).toBeNull();
+        // The candidate still needs a decision; only the automatic refusal
+        // label goes away, leaving the generic review state.
+        expect(row.review_required).toBe(1);
+        expect(attentionReasons(projectApplication(id, false))).not.toContain('stateful_withdrawal_blocked');
+    });
+
+    it('resumes automatic acceptance once a newer candidate clears the block', async () => {
+        blocked('blk-resume', 'blk-resume-web');
+        insertAndStageGeneration(getApp('blk-resume'), 'blk-resume-web', 'blk-resume-third');
+        mockDue([armDuePoll('blk-resume')]);
+        evaluateCandidatePolicy.mockResolvedValue({ status: 'allowed' });
+        spyOnReconcile().mockResolvedValue(fetchedResult);
+        const dispatch = spyOnDispatch();
+
+        controller.start();
+        await advanceOneTick();
+
+        expect(getApp('blk-resume').accepted_generation_id).toBe('blk-resume-third');
+        expect(dispatch).toHaveBeenCalledTimes(1);
+    });
+
+    it('keeps the block when the policy is re-saved as automatic', () => {
+        blocked('blk-auto', 'blk-auto-web');
+        GitOpsTransitions.getInstance().sourcePolicyChanged('blk-auto', 'automatic', envelope('policy-blk-auto'));
+        expect(getApp('blk-auto').review_block_reason).toBe('stateful_withdrawal');
+    });
+
+    it('refuses to record a block while an apply is in flight', () => {
+        stageCandidate('blk-inflight', 'blk-inflight-web', 'blk-inflight-gen', 'automatic');
+        GitOpsTransitions.getInstance().applyStarted('blk-inflight', 'blk-inflight-gen', envelope('apply-blk-inflight'));
+        expect(() => GitOpsTransitions.getInstance().sourceReviewBlocked({
+            applicationId: 'blk-inflight',
+            generationId: 'blk-inflight-gen',
+            reason: 'stateful_withdrawal',
+            envelope: envelope('block-blk-inflight'),
+        })).toThrow('cannot hold acceptance while an apply is in flight');
+        expect(getApp('blk-inflight').review_block_reason).toBeNull();
+    });
+
+    it('projects an unknown stored reason as the plain review state', () => {
+        blocked('blk-unknown', 'blk-unknown-web');
+        // A value written by a newer build this one does not know.
+        DatabaseService.getInstance().getDb().prepare(
+            'UPDATE gitops_applications SET review_block_reason = ? WHERE id = ?',
+        ).run('future_reason', 'blk-unknown');
+        const projection = projectApplication('blk-unknown', false);
+        const reasons = attentionReasons(projection);
+        expect(reasons).toContain('source_review_pending');
+        expect(reasons).not.toContain('stateful_withdrawal_blocked');
     });
 });

@@ -468,6 +468,7 @@ function app(id: string, stackName: string): GitOpsApplicationRow {
     accepted_generation_id: null,
     candidate_plan_blocked: 0,
     review_required: 0,
+    review_block_reason: null,
     artifact_set_id: null,
     latest_artifact_set_id: null,
     intent_revision_id: null,

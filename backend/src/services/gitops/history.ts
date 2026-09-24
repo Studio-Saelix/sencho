@@ -90,6 +90,7 @@ export type GitOpsHistoryStage =
   | 'source_reconcile_started'
   | 'source_reconcile_settled'
   | 'source_retry_scheduled'
+  | 'source_review_blocked'
   | 'source_suspended'
   | 'source_unsuspended'
   | 'target_applied'

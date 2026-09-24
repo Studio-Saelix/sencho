@@ -175,8 +175,9 @@ describe('attentionReasons', () => {
   });
 
   it('flags review, conflict, reconcile, retry, and suspension source states', () => {
-    expect(attentionReasons(liveProjection({ source: { ...RESTING_SOURCE, status: 'source_review_pending' } })))
-      .toContain('source_review_pending');
+    expect(attentionReasons(liveProjection({
+      source: { ...RESTING_SOURCE, status: 'source_review_pending', reviewBlockReason: null },
+    }))).toContain('source_review_pending');
     expect(attentionReasons(liveProjection({ source: { ...RESTING_SOURCE, status: 'source_conflict_blocker' } })))
       .toContain('source_conflict_blocker');
     expect(attentionReasons(liveProjection({ source: { ...RESTING_SOURCE, status: 'source_reconcile_required' } })))
@@ -187,6 +188,20 @@ describe('attentionReasons', () => {
     expect(attentionReasons(liveProjection({
       source: { ...RESTING_SOURCE, status: 'source_suspended', suspendedAt: 900, suspendedReason: null },
     }))).toContain('source_suspended');
+  });
+
+  it('names a stateful-withdrawal block instead of the generic review state', () => {
+    const blocked = attentionReasons(liveProjection({
+      source: {
+        ...RESTING_SOURCE,
+        status: 'source_review_pending',
+        reviewBlockReason: 'stateful_withdrawal',
+      },
+    }));
+    expect(blocked).toEqual(['stateful_withdrawal_blocked']);
+    // The block is a pending operator decision, not damage: the posture stays
+    // `attention`, never `failed`.
+    expect(hasFailureReason(blocked)).toBe(false);
   });
 
   it('does not flag a pending-but-normal candidate as attention', () => {
@@ -363,6 +378,7 @@ describe('attentionReasons', () => {
       'source_suspended',
       'source_unknown_outcome',
       'stateful_confirmation_required',
+      'stateful_withdrawal_blocked',
       'target_stale',
       'target_unreachable',
     ]);
