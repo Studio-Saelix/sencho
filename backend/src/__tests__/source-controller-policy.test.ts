@@ -527,9 +527,11 @@ describe('SourceController automatic acceptance', () => {
 
         // Acceptance moves the application pointer only. The generation row
         // is immutable candidate-time evidence: rewriting it to record the
-        // acceptance verdict would break that contract, so the verdict lives
-        // in the audit history instead and the row is left exactly as
-        // inserted.
+        // acceptance would break that contract, so the row is left exactly
+        // as inserted. What is durable is the acceptance transition itself
+        // (authority `configured_policy`); the evaluated policy identity and
+        // inputs are not retained anywhere durable, which is what the
+        // `security_policy_evidence_missing` limitation discloses.
         expect(getApp('app-evidence').accepted_generation_id).toBe('gen-evidence');
         expect(GitOpsStore.getInstance().getGeneration('gen-evidence')).toEqual(before);
     });
