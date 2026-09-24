@@ -28,6 +28,7 @@ beforeEach(() => {
     const svc = MeshService.getInstance() as unknown as {
         aliasCache: Map<string, unknown>;
         aliasByPort: Map<number, unknown>;
+        reservedPorts: Map<number, unknown>;
         activity: unknown[];
         activeStreams: Map<number, unknown>;
         routeErrorMap: Map<string, unknown>;
@@ -40,6 +41,7 @@ beforeEach(() => {
     };
     svc.aliasCache = new Map();
     svc.aliasByPort = new Map();
+    svc.reservedPorts = new Map();
     svc.activity = [];
     svc.activeStreams = new Map();
     svc.routeErrorMap = new Map();

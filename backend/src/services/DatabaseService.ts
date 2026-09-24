@@ -31,6 +31,16 @@ function isPilotMode(): boolean {
     return process.env.SENCHO_MODE === 'pilot';
 }
 
+export interface MeshStackRow {
+    id: number;
+    node_id: number;
+    stack_name: string;
+    created_at: number;
+    created_by: string | null;
+    /** JSON array of `{ service, ports }` last seen while the node was reachable. */
+    last_known_services?: string | null;
+}
+
 export interface Agent {
     id?: number;
     type: 'discord' | 'slack' | 'webhook' | 'apprise' | 'ntfy';
@@ -2947,6 +2957,10 @@ stmt.run('gitops_schema_version', '1');
                     )
                 `).run();
                 this.db.prepare('CREATE INDEX IF NOT EXISTS idx_mesh_stacks_node ON mesh_stacks(node_id)').run();
+                // Last services (JSON) seen for the stack while its node was
+                // reachable. Keeps aliases and port reservations stable while
+                // the node is offline.
+                this.tryAddColumn('mesh_stacks', 'last_known_services', 'TEXT');
             }
         } catch (e) {
             console.warn('[DatabaseService] mesh_stacks migration:', (e as Error).message);
@@ -3182,15 +3196,26 @@ stmt.run('gitops_schema_version', '1');
 
     // --- Sencho Mesh ---
 
-    public listMeshStacks(nodeId?: number): Array<{ id: number; node_id: number; stack_name: string; created_at: number; created_by: string | null }> {
+    /**
+     * Rows come back in opt-in order (oldest first), so the earliest opt-in
+     * deterministically owns a port if two rows ever claim the same one.
+     */
+    public listMeshStacks(nodeId?: number): MeshStackRow[] {
         if (isPilotMode()) return [];
+        const cols = 'id, node_id, stack_name, created_at, created_by, last_known_services';
         const sql = nodeId !== undefined
-            ? 'SELECT id, node_id, stack_name, created_at, created_by FROM mesh_stacks WHERE node_id = ?'
-            : 'SELECT id, node_id, stack_name, created_at, created_by FROM mesh_stacks';
+            ? `SELECT ${cols} FROM mesh_stacks WHERE node_id = ? ORDER BY id`
+            : `SELECT ${cols} FROM mesh_stacks ORDER BY id`;
         const rows = nodeId !== undefined
             ? this.db.prepare(sql).all(nodeId)
             : this.db.prepare(sql).all();
-        return rows as Array<{ id: number; node_id: number; stack_name: string; created_at: number; created_by: string | null }>;
+        return rows as MeshStackRow[];
+    }
+
+    public setMeshStackLastKnownServices(nodeId: number, stackName: string, servicesJson: string): void {
+        if (isPilotMode()) return;
+        this.db.prepare('UPDATE mesh_stacks SET last_known_services = ? WHERE node_id = ? AND stack_name = ?')
+            .run(servicesJson, nodeId, stackName);
     }
 
     public isMeshStackEnabled(nodeId: number, stackName: string): boolean {
