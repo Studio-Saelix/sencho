@@ -9,7 +9,9 @@ import { act, renderHook, waitFor } from '@testing-library/react';
 import { apiFetch } from '@/lib/api';
 import { useGitOpsApplication } from './useGitOpsApplication';
 import { detailResponse } from './applicationFixtures';
+import { liveArtifact, liveRevision } from '@/__tests__/gitopsFixtures';
 import type { GitOpsPortfolioDetailResponse } from '@/types/gitopsPortfolio';
+import type { ArtifactFacet } from '@/types/gitops';
 
 vi.mock('@/lib/api', () => ({
   apiFetch: vi.fn(),
@@ -17,7 +19,7 @@ vi.mock('@/lib/api', () => ({
 
 const mockFetch = vi.mocked(apiFetch);
 
-function ok(body: GitOpsPortfolioDetailResponse): Response {
+function ok(body: unknown): Response {
   return { ok: true, status: 200, json: async () => body } as unknown as Response;
 }
 
@@ -37,9 +39,9 @@ afterEach(() => {
 describe('useGitOpsApplication', () => {
   it('reads the encoded id from the hub, never through the node proxy', async () => {
     mockFetch.mockResolvedValueOnce(ok(detailResponse()));
-    const { result } = renderHook(() => useGitOpsApplication('2:legacy:media stack'));
+    const { result } = renderHook(() => useGitOpsApplication('1:app-1'));
     await waitFor(() => expect(result.current.loading).toBe(false));
-    expect(mockFetch).toHaveBeenCalledWith('/gitops/applications/2%3Alegacy%3Amedia%20stack', { localOnly: true });
+    expect(mockFetch).toHaveBeenCalledWith('/gitops/applications/1%3Aapp-1', { localOnly: true });
     expect(result.current.data?.application.name).toBe('bookstack');
     expect(result.current.error).toBeNull();
   });
@@ -73,6 +75,225 @@ describe('useGitOpsApplication', () => {
     const { result } = renderHook(() => useGitOpsApplication('2:app'));
     await waitFor(() => expect(result.current.loading).toBe(false));
     expect(result.current.error).toEqual({ kind: 'unreachable', message: 'Bad Gateway' });
+  });
+
+  it('reports a matched application without usable evidence separately from an unreachable node', async () => {
+    mockFetch.mockResolvedValueOnce({
+      ok: false, status: 503, json: async () => ({ error: 'no usable evidence', code: 'evidence_unavailable' }),
+    } as unknown as Response);
+    const { result } = renderHook(() => useGitOpsApplication('2:app'));
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    expect(result.current.error).toEqual({ kind: 'evidence_unavailable', message: 'no usable evidence' });
+    expect(result.current.data).toBeNull();
+  });
+
+  it.each([
+    ['application targets', (body: GitOpsPortfolioDetailResponse) => ({ ...body, application: { ...body.application, targets: null } })],
+    ['application attention', (body: GitOpsPortfolioDetailResponse) => ({ ...body, application: { ...body.application, attention: 'x' } })],
+    ['application evidence', (body: GitOpsPortfolioDetailResponse) => ({ ...body, application: { ...body.application, evidence: null } })],
+    ['generated timestamp', (body: GitOpsPortfolioDetailResponse) => ({ ...body, generatedAt: undefined })],
+    ['projection schema version', (body: GitOpsPortfolioDetailResponse) => ({ ...body, projection: { ...body.projection, schemaVersion: 2 } })],
+    ['projection limitations', (body: GitOpsPortfolioDetailResponse) => ({ ...body, projection: { ...body.projection, limitations: null } })],
+    ['projection facets', (body: GitOpsPortfolioDetailResponse) => ({ ...body, projection: { ...body.projection, facets: null } })],
+    ['projection source status', (body: GitOpsPortfolioDetailResponse) => {
+      if (body.projection.targetMode === 'not_applicable') throw new Error('fixture must be live');
+      return {
+        ...body,
+        projection: {
+          ...body.projection,
+          facets: {
+            ...body.projection.facets,
+            source: { ...body.projection.facets.source, status: 'source_failed' },
+          },
+        },
+      };
+    }],
+    ['projection targets', (body: GitOpsPortfolioDetailResponse) => ({ ...body, projection: { ...body.projection, targets: null } })],
+    ['projection drift', (body: GitOpsPortfolioDetailResponse) => ({ ...body, projection: { ...body.projection, drift: null } })],
+    ['projection drift item', (body: GitOpsPortfolioDetailResponse) => ({
+      ...body,
+      projection: {
+        ...body.projection,
+        drift: [{
+          class: 'runtime',
+          observed: { kind: 'unknown' },
+          freshnessAt: null,
+          owner: 'operator',
+          reason: 'missing expected identity',
+          configuredPolicy: null,
+          affectedTargets: [],
+          action: 'none',
+        }],
+      },
+    })],
+    ['absent projection approvals', (body: GitOpsPortfolioDetailResponse) => ({
+      ...body,
+      projection: {
+        ...body.projection,
+        targetMode: 'not_applicable',
+        applicationId: null,
+        facets: null,
+        targets: [],
+        drift: [],
+        limitations: [],
+        availableActions: [],
+        approvals: {},
+      },
+    })],
+    ['target observed artifact identity', (body: GitOpsPortfolioDetailResponse) => ({
+      ...body,
+      projection: {
+        ...body.projection,
+        targets: body.projection.targets.map(target => ({
+          ...target,
+          observedArtifactIdentity: { kind: 'exact' },
+        })),
+      },
+    })],
+    ['rollback candidates', (body: GitOpsPortfolioDetailResponse) => ({ ...body, rollbackCandidates: {} })],
+  ])('rejects a successful answer with malformed %s', async (_label, mutate) => {
+    mockFetch.mockResolvedValueOnce(ok(mutate(detailResponse())));
+    const { result } = renderHook(() => useGitOpsApplication('1:app-1'));
+    await waitFor(() => expect(result.current.error?.kind).toBe('failed'));
+    expect(result.current.data).toBeNull();
+  });
+
+  it('rejects a successful answer for another application', async () => {
+    mockFetch.mockResolvedValueOnce(ok(detailResponse({ id: '1:other' })));
+    const { result } = renderHook(() => useGitOpsApplication('1:app-1'));
+    await waitFor(() => expect(result.current.error?.kind).toBe('failed'));
+    expect(result.current.data).toBeNull();
+  });
+
+  it('keeps a future observed artifact kind readable for the renderer fallback', async () => {
+    const base = detailResponse();
+    const body = {
+      ...base,
+      projection: {
+        ...base.projection,
+        targets: base.projection.targets.map(target => ({
+          ...target,
+          observedArtifactIdentity: { kind: 'future_kind' },
+        })),
+      },
+    };
+    mockFetch.mockResolvedValueOnce(ok(body));
+    const { result } = renderHook(() => useGitOpsApplication('1:app-1'));
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    expect(result.current.error).toBeNull();
+    expect(result.current.data).not.toBeNull();
+  });
+
+  it('rejects an exact claim whose expected identity disagrees with the latest evidence', async () => {
+    const base = liveRevision();
+    const projection = liveRevision({
+      facets: {
+        ...base.facets,
+        artifact: liveArtifact({
+          expected: {
+            artifactSetId: 'art-1',
+            evidenceVersion: 1,
+            qualification: 'exact',
+            identity: 'sha256:something-else',
+          },
+        }),
+      },
+    });
+    mockFetch.mockResolvedValueOnce(ok(detailResponse(undefined, projection)));
+    const { result } = renderHook(() => useGitOpsApplication('1:app-1'));
+    await waitFor(() => expect(result.current.error?.kind).toBe('failed'));
+    expect(result.current.data).toBeNull();
+  });
+
+  it('accepts an artifact verdict and qualification this build does not know', async () => {
+    const base = liveRevision();
+    const future = {
+      status: 'artifact_future_verdict',
+      artifactSetId: 'art-1',
+      generationId: 'gen-accepted',
+      evidenceVersion: 1,
+      qualification: 'future_qualification',
+      freshnessAt: 1,
+      expected: null,
+      latestEvidence: {
+        artifactSetId: 'art-1',
+        evidenceVersion: 1,
+        qualification: 'future_qualification',
+        identity: 'sha256:future',
+      },
+    };
+    const projection = liveRevision({
+      facets: { ...base.facets, artifact: future as unknown as ArtifactFacet },
+    });
+    mockFetch.mockResolvedValueOnce(ok(detailResponse(undefined, projection)));
+    const { result } = renderHook(() => useGitOpsApplication('1:app-1'));
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    expect(result.current.error).toBeNull();
+    expect(result.current.data).not.toBeNull();
+  });
+
+  it('accepts a canonical rollout authorization binding', async () => {
+    const base = liveRevision();
+    const projection = liveRevision({
+      targetMode: 'blueprint',
+      applicationId: 'app-bp',
+      blueprintId: 3,
+      facets: {
+        ...base.facets,
+        placement: {
+          status: 'rollout_authorization_pending',
+          rolloutAuthorizationRef: null,
+          binding: {
+            rolloutCandidateId: 'candidate-1',
+            acceptedGenerationId: 'generation-1',
+            artifactSetId: 'artifact-1',
+            intentRevisionId: 'intent-1',
+            requiredNodeIds: [1],
+            sourceAcceptanceRef: 'source-1',
+            placementApprovalRef: 'placement-1',
+            preflightFingerprint: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+          },
+        },
+      },
+    });
+    const body = {
+      ...detailResponse({ id: 'bp:3', targetMode: 'blueprint', blueprintId: 3, nodeId: null }, projection),
+      blueprintEnabled: true,
+    };
+    mockFetch.mockResolvedValueOnce(ok(body));
+    const { result } = renderHook(() => useGitOpsApplication('bp:3'));
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    expect(result.current.error).toBeNull();
+    expect(result.current.data).not.toBeNull();
+  });
+
+  it('accepts an inline Blueprint identity without requiring a Git-managed enabled flag', async () => {
+    const projection = liveRevision({ targetMode: 'inline_blueprint', applicationId: 'app-inline', blueprintId: 3, stackName: null });
+    const body = detailResponse(
+      { id: 'bp:3', targetMode: 'inline_blueprint', blueprintId: 3, nodeId: null, stackName: null },
+      projection,
+    );
+    mockFetch.mockResolvedValueOnce(ok(body));
+    const { result } = renderHook(() => useGitOpsApplication('bp:3'));
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    expect(result.current.error).toBeNull();
+    expect(result.current.data).not.toBeNull();
+  });
+
+  it('accepts a node-scoped remote Blueprint identity', async () => {
+    const projection = liveRevision({ targetMode: 'blueprint', applicationId: 'app-remote-bp', blueprintId: 3, stackName: null });
+    const body = {
+      ...detailResponse(
+        { id: '2:app-remote-bp', targetMode: 'blueprint', blueprintId: 3, nodeId: 2, stackName: null },
+        projection,
+      ),
+      blueprintEnabled: true,
+    };
+    mockFetch.mockResolvedValueOnce(ok(body));
+    const { result } = renderHook(() => useGitOpsApplication('2:app-remote-bp'));
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    expect(result.current.error).toBeNull();
+    expect(result.current.data).not.toBeNull();
   });
 
   it('reports a server failure and a thrown first load as failed, with no data', async () => {

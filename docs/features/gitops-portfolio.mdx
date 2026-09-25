@@ -34,7 +34,7 @@ Rows with pending or failed items are tinted so the list reads as a signal, not 
 
 ## The attention queue
 
-Above the list, the **Attention required** section groups everything currently waiting: failed reconciliations, pending reviews or authorizations, preflight blocks like an unready private registry, partial or paused rollouts, drift, stale or unreachable targets, and recovery states. Each entry names the application and states the reason in one inline line, so it is readable without hovering anything. Opening an entry shows that application's full state (see [One application](#one-application) below). Each entry also carries its next step: **Review** for a decision waiting on you (it opens the application, where the accept, approve, and authorize actions live), **Open stack** for a failed deploy or health check on a stack, and **Open Git source** for a source that failed to fetch.
+Above the list, the **Attention required** section groups everything currently waiting: failed reconciliations, pending reviews or authorizations, preflight blocks like an unready private registry, partial or paused rollouts, drift, stale or unreachable targets, and recovery states. Each entry names the application and states the reason in one inline line, so it is readable without hovering anything. Opening an entry shows that application's full state (see [One application](#one-application) below). Each entry also carries its next step: **Review** for a decision waiting on you on a hub-local Git-managed Blueprint (it opens the application, where the accept, approve, and authorize actions live), **Inspect** for a node-scoped remote Blueprint, **Open stack** for a failed deploy or health check on a stack, and **Open Git source** for a source that failed to fetch.
 
 Failure-toned entries (failures, unreachable targets, failed rollbacks or recovery) sort ahead of pending decisions.
 
@@ -53,7 +53,7 @@ Selecting an application name in the list, or an entry in the attention queue, o
 - **Drift**: each confirmed divergence, expected versus observed, classified as source, managed project, placement, health, rollout, or runtime. Work that is merely in progress (a staged candidate, a queued rollout, a deployed target still awaiting its health verdict) is not drift.
 - Anything Sencho could not prove about the state shown, stated last.
 
-When some targets could not be reached, a notice names them so their cards are not read as current. The view's URL carries the application, so it can be bookmarked or shared, and the browser's Back button (or **All applications**) returns to the list with its filters intact.
+When some targets could not be reached, a notice names them so their cards are not read as current. The view's URL carries the application, so it can be bookmarked or shared, and the browser's Back button (or **All applications**) returns to the list with its filters intact. If the owning node reports an application without evidence this hub can read yet, the view says evidence is unavailable and offers **Retry** instead of reporting the application as missing.
 
 To act on the application, use the outstanding authority action in the state section when one is offered, or the button in the view's header: **Open stack** takes a Direct application to its stack's Git Source sheet, and **Open Blueprint deployments** takes a Blueprint application to the Fleet deployments tab.
 

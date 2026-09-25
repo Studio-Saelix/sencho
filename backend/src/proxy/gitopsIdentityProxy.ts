@@ -252,13 +252,13 @@ export function hubNodeIdFor(req: Request): number | undefined {
 export function filterRemoteIdentityPayload(
   pathname: string,
   payload: unknown,
-  canRead: (requirement: GitOpsReadRequirement) => boolean,
+  canRead: (requirement: GitOpsReadRequirement, nodeId: number) => boolean,
   nodeId: number,
 ): unknown {
   // Only the two cross-stack collections are filtered here.
   if (!/^\/git-sources(\/history)?\/?$/.test(pathname)) return payload;
 
-  const filtered = filterRows(canRead, payload);
+  const filtered = filterRows(canRead, payload, nodeId);
   const received = countRows(payload);
   const kept = countRows(filtered);
   // Keeping nothing from a page that had rows is the signature of a remote
@@ -282,8 +282,9 @@ function countRows(payload: unknown): number {
 }
 
 function filterRows(
-  canRead: (requirement: GitOpsReadRequirement) => boolean,
+  canRead: (requirement: GitOpsReadRequirement, nodeId: number) => boolean,
   payload: unknown,
+  nodeId: number,
 ): unknown {
   return filterIdentityCollection(
     payload,
@@ -291,12 +292,12 @@ function filterRows(
       stackName: row.stack_name,
       gitopsRevision: row.gitopsRevision,
       stackResourcePresent: row.stackResourcePresent,
-    })),
+    }), nodeId),
     (item) => isRecord(item) && canRead(classifyHistoryRow({
       stackName: item.stackName,
       applicationLifecycleStatus: item.applicationLifecycleStatus,
       stackResourcePresent: item.stackResourcePresent,
-    })),
+    }), nodeId),
   );
 }
 

@@ -19,7 +19,7 @@ import {
 } from '@/lib/gitopsAuthorityApi';
 import { livePlacementFacet, liveRolloutFacet } from '@/lib/gitopsState';
 import type { PermissionAction } from '@/context/AuthContext';
-import type { GitOpsRevisionProjection, GitOpsTargetProjection } from '@/types/gitops';
+import type { GitOpsPlacementStatus, GitOpsRevisionProjection, GitOpsRolloutStatus, GitOpsRuntimeStatus, GitOpsTargetProjection } from '@/types/gitops';
 
 interface GitOpsRolloutControlsProps {
   /** The portfolio identity (`bp:<blueprintId>`) the controls write to. */
@@ -48,14 +48,14 @@ interface GitOpsRolloutControlsProps {
 
 type PendingAction = 'pause' | 'resume';
 
-const PAUSABLE_ROLLOUT_STATES = new Set([
+const PAUSABLE_ROLLOUT_STATES: ReadonlySet<GitOpsRolloutStatus> = new Set([
   'rollout_queued',
   'canary_in_progress',
   'batch_in_progress',
   'partially_rolled_out',
 ]);
 
-const SUPERSEDABLE_ROLLOUT_STATES = new Set([
+const SUPERSEDABLE_ROLLOUT_STATES: ReadonlySet<GitOpsRolloutStatus> = new Set([
   'rollout_queued',
   'canary_in_progress',
   'batch_in_progress',
@@ -63,12 +63,40 @@ const SUPERSEDABLE_ROLLOUT_STATES = new Set([
   'rollout_paused',
 ]);
 
-/** Runtime states that read as a failed target rather than a result. */
-const FAILED_RUNTIME_STATES = new Set([
-  'recovery_failed',
+const REPLANNABLE_PLACEMENT_STATES: ReadonlySet<GitOpsPlacementStatus> = new Set([
+  'source_acceptance_pending',
+  'unknown',
+  'placement_review_pending',
+  'stateful_confirmation_required',
+  'rollout_authorization_pending',
+  'rollout_authorization_stale',
+  'preflight_blocked',
+  'blueprint_bound',
+]);
+
+const ROLLBACKABLE_ROLLOUT_STATES: ReadonlySet<GitOpsRolloutStatus> = new Set([
+  'rollout_not_executable',
+  'rollout_queued',
+  'canary_in_progress',
+  'batch_in_progress',
+  'rollout_paused',
+  'partially_rolled_out',
+  'fully_deployed_health_pending',
+  'configuration_converged_artifact_qualified',
+  'exactly_converged_healthy',
+  'target_stale',
+  'target_unreachable',
+  'rollback_partial_failed',
   'recovery_required',
+  'completion_unknown',
+  'rollout_superseded',
+]);
+
+/** Runtime states that read as a failed target rather than a result. */
+const FAILED_RUNTIME_STATES: ReadonlySet<GitOpsRuntimeStatus> = new Set([
   'failed_previous_workload_intact',
   'failed_after_mutation',
+  'recovery_failed',
 ]);
 
 function errorMessage(error: unknown, fallback: string): string {
@@ -121,7 +149,7 @@ export default function GitOpsRolloutControls({
     && allowed('stack:deploy');
   const canReplan = !!live
     && placement !== null
-    && placement.status !== 'unbound_direct'
+    && REPLANNABLE_PLACEMENT_STATES.has(placement.status)
     && allowed('stack:create');
   const canSupersede = !!live
     && blueprintEnabled
@@ -134,6 +162,8 @@ export default function GitOpsRolloutControls({
   );
   const canRollback = !!live
     && blueprintEnabled
+    && rollout !== null
+    && ROLLBACKABLE_ROLLOUT_STATES.has(rollout.status)
     && generations.length > 0
     && allowed('stack:deploy');
 

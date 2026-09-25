@@ -8,6 +8,7 @@
  */
 import { describe, expect, it } from 'vitest';
 import { attentionLabel, portfolioMastheadState } from './gitopsPortfolio';
+import { limitationCaveat } from './gitopsLimitations';
 
 describe('portfolioMastheadState', () => {
   const summary = {
@@ -38,6 +39,7 @@ describe('portfolioMastheadState', () => {
 
   it('reads unknown evidence as Partially known, not healthy', () => {
     expect(portfolioMastheadState({ ...summary, unknown: 1 }, false).state).toBe('Partially known');
+    expect(portfolioMastheadState(summary, true).state).toBe('Partially known');
   });
 
   it('reads pending decisions before progress', () => {
@@ -65,5 +67,14 @@ describe('attentionLabel', () => {
     expect(future.label).toBe('quantum entanglement required');
     expect(future.tone).toBe('warning');
     expect(future.line).toContain('does not know');
+  });
+
+  it('falls back for a code that is an inherited object property rather than a known code', () => {
+    // `Object.hasOwn` is what keeps `toString` from resolving to a function.
+    const inherited = attentionLabel('toString' as never);
+    expect(inherited.label).toBe('toString');
+    expect(inherited.line).toContain('does not know');
+    const limitation = limitationCaveat({ code: 'constructor', message: 'x' } as never);
+    expect(limitation).toContain('constructor');
   });
 });

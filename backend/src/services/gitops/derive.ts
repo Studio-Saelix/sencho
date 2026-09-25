@@ -1173,8 +1173,8 @@ function deriveRollout(
       failureAt: failed.runtime.failureAt,
     };
   }
-  if (targets.some((target) => target.connectivity === 'unreachable')) return { status: 'target_unreachable' };
-  if (targets.some((target) => target.connectivity === 'stale')) return { status: 'target_stale' };
+  if (targets.some(target => !target.tombstoned && target.connectivity === 'unreachable')) return { status: 'target_unreachable' };
+  if (targets.some(target => !target.tombstoned && target.connectivity === 'stale')) return { status: 'target_stale' };
   if (app.pause_at) return { status: 'rollout_paused', pauseAt: app.pause_at, pauseReason: app.pause_reason };
   if (app.partial_json) return { status: 'partially_rolled_out', partial: app.partial_json };
   if (app.target_mode === 'direct') return { status: 'not_applicable' };

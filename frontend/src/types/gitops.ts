@@ -123,19 +123,22 @@ export type SourceFacet =
         | 'never_reconciled'
         | 'checking_fetching'
         | 'application_generation_accepted'
-        | 'candidate_ready'
-        | 'source_review_pending'
-        | 'source_conflict_blocker'
+         | 'candidate_ready'
+         | 'source_conflict_blocker'
         | 'source_reconcile_required';
-    })
-  | (SourceIdentityFields & { status: 'source_superseded'; supersededGenerationId: string })
+     })
+   | (SourceIdentityFields & {
+       status: 'source_review_pending';
+       reviewBlockReason: 'stateful_withdrawal' | null;
+     })
+   | (SourceIdentityFields & { status: 'source_superseded'; supersededGenerationId: string })
   | (SourceIdentityFields & { status: 'applying'; activeOperationId: string; activeGenerationId: string })
   | (SourceIdentityFields & { status: 'source_poll_scheduled'; nextPollAt: number })
   | (SourceIdentityFields & { status: 'source_retry_scheduled'; retryAt: number; retryCount: number })
   | (SourceIdentityFields & { status: 'source_suspended'; suspendedAt: number; suspendedReason: string | null })
   | (SourceIdentityFields & {
       status: 'source_failed';
-      failureStage: 'fetch' | 'validation' | 'apply' | 'create';
+       failureStage: 'fetch' | 'validation' | 'apply' | 'create';
       failureClass: string;
       failureAt: number;
       retryAt: number | null;

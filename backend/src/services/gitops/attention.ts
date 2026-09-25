@@ -207,7 +207,7 @@ export function attentionReasons(projection: GitOpsRevisionProjection): GitOpsAt
       break;
   }
 
-  for (const target of projection.targets) {
+  for (const target of projection.targets.filter(target => !target.tombstoned)) {
     if (target.connectivity === 'unreachable') reasons.add('target_unreachable');
     if (target.connectivity === 'stale') reasons.add('target_stale');
     switch (target.runtime.status) {
