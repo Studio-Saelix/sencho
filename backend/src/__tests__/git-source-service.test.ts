@@ -10200,7 +10200,7 @@ describe('GitSourceService multi-file create + apply flow', () => {
         await cleanupStackDir('ctx-create');
     });
 
-    it('pulls a multi-file v2 pending blob and applies both files to disk', async () => {
+    it('pulls a multi-file v4 pending blob and applies both files to disk', async () => {
         const sha = '4444ddd4444ddd4444ddd4444ddd4444ddd4444d';
         mockSuccessfulClone({
             compose: 'services:\n  web:\n    image: nginx\n',
