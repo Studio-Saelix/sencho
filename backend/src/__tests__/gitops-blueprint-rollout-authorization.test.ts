@@ -31,6 +31,7 @@ let FACET_EVIDENCE_SOURCE: typeof import('../services/gitops/types').FACET_EVIDE
 let BlueprintTargetAdapter: typeof import('../services/gitops/handoff').BlueprintTargetAdapter;
 let buildAcceptedGeneration: typeof import('../services/gitops/handoff').buildAcceptedGeneration;
 let ensureRolloutAuthorization: typeof import('../services/gitops/handoff').ensureRolloutAuthorization;
+let backfillMissingPreflightEvaluations: typeof import('../services/gitops/handoff').backfillMissingPreflightEvaluations;
 let setRegistryReadinessDepsForTests: typeof import('../services/gitops/handoff').setRegistryReadinessDepsForTests;
 let reconstructBlueprintRolloutQueue: typeof import('../services/gitops/handoff').reconstructBlueprintRolloutQueue;
 let BlueprintService: typeof import('../services/BlueprintService').BlueprintService;
@@ -50,6 +51,7 @@ beforeAll(async () => {
     ensureRolloutAuthorization,
     reconstructBlueprintRolloutQueue,
     setRegistryReadinessDepsForTests,
+    backfillMissingPreflightEvaluations,
   } = await import('../services/gitops/handoff'));
   ({ BlueprintService } = await import('../services/BlueprintService'));
   ({ DatabaseService } = await import('../services/DatabaseService'));
@@ -651,6 +653,42 @@ describe('ensureRolloutAuthorization', () => {
     expect(ref).toBeTruthy();
     expect(() => authorize(fixture.applicationId)).toThrow(/already live/);
     expect(GitOpsStore.getInstance().getApplication(fixture.applicationId)!.rollout_authorization_ref).toBe(ref);
+  });
+});
+
+describe('backfillMissingPreflightEvaluations', () => {
+  it('re-evaluates several legacy apps at once and leaves every authorization live', async () => {
+    const store = GitOpsStore.getInstance();
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const fixtures = Array.from({ length: 5 }, () => seedAuthorizedReadyApp());
+    for (const fixture of fixtures) {
+      expect((await ensureRolloutAuthorization(fixture.applicationId, 'tester')).ok).toBe(true);
+    }
+    // The shape this backfill exists for: live authorization, no stored evidence.
+    // Scoped to these fixtures so applications seeded by earlier cases, which do
+    // hold evidence, stay out of the backfill's candidate set.
+    const placeholders = fixtures.map(() => '?').join(',');
+    DatabaseService.getInstance().getDb().prepare(
+      `UPDATE gitops_applications SET latest_preflight_evidence_json = NULL
+       WHERE id IN (${placeholders})`,
+    ).run(...fixtures.map((f) => f.applicationId));
+    const refsBefore = fixtures.map(
+      (f) => store.getApplication(f.applicationId)!.rollout_authorization_ref,
+    );
+
+    expect(await backfillMissingPreflightEvaluations()).toBe(fixtures.length);
+
+    for (const [index, fixture] of fixtures.entries()) {
+      const app = store.getApplication(fixture.applicationId)!;
+      expect(app.latest_preflight_evidence_json).toBeTruthy();
+      // Same ref, so the concurrent pass re-evaluated rather than reminted.
+      expect(app.rollout_authorization_ref).toBe(refsBefore[index]);
+      const again = await ensureRolloutAuthorization(fixture.applicationId, 'tester');
+      expect(again.ok).toBe(true);
+      expect(store.getApplication(fixture.applicationId)!.rollout_authorization_ref).toBe(refsBefore[index]);
+    }
+    const backfillWarnings = warn.mock.calls.filter((call) => String(call[0]).includes('Preflight backfill'));
+    expect(backfillWarnings).toEqual([]);
   });
 });
 
