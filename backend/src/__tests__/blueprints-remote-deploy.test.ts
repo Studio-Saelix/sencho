@@ -9,6 +9,7 @@
  */
 import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } from 'vitest';
 import axios from 'axios';
+import type { RemoteMetaProbe } from '../services/CapabilityRegistry';
 
 vi.mock('../helpers/registryDeliveryOutbound', async (importOriginal) => {
     const actual = await importOriginal<typeof import('../helpers/registryDeliveryOutbound')>();
@@ -444,5 +445,83 @@ describe('BlueprintService remote deploy', () => {
 
         const dep = db.getDeployment(bp.id, node.id);
         expect(dep?.last_error).toContain('[REGISTRY_DELIVERY_CREDENTIAL_UNAVAILABLE]');
+    });
+});
+
+/**
+ * A digest-pinned apply is only honored by a leaf that advertises
+ * blueprint-digest-pins-v1. A leaf that predates the field drops it and
+ * redeploys by tag, so the hub has to refuse rather than send the request and
+ * assume the pin landed.
+ */
+describe('BlueprintService remote digest-pinned apply capability gate', () => {
+    const pins = { app: 'nginx@sha256:' + 'a'.repeat(64) };
+
+    /** Null capabilities means the /api/meta probe itself failed. */
+    async function setup(capabilities: string[] | null) {
+        const node = seedRemoteNode();
+        const bp = seedBlueprint([node.id]);
+        const db = DatabaseService.getInstance();
+        const nodeObj = db.getNode(node.id)!;
+        const bpObj = db.getBlueprint(bp.id)!;
+        const { OFFLINE_META } = await import('../services/CapabilityRegistry');
+        const probe: RemoteMetaProbe = capabilities === null
+            ? { kind: 'transport_failure', detail: 'timeout' }
+            : { kind: 'ok', meta: { ...OFFLINE_META, online: true, capabilities } };
+        vi.spyOn(NodeRegistry.getInstance(), 'probeRemoteMeta').mockResolvedValue(probe);
+        // hasNameConflict lists the remote stacks before the apply.
+        vi.spyOn(axios, 'get').mockResolvedValue({ status: 200, data: [] });
+        const postSpy = vi.spyOn(axios, 'post').mockResolvedValue({ status: 200, data: { deployed: true } });
+        const deploy = (digestPins?: Record<string, string>) =>
+            BlueprintService.getInstance().deployAuthorizedMaterialization({
+                blueprint: bpObj,
+                node: nodeObj,
+                composeContent: 'services: {}\n',
+                marker: { blueprintId: bp.id, revision: bpObj.revision, lastApplied: Date.now() },
+                auditPath: `/api/blueprints/${bp.id}/enforce-reapply`,
+                digestPins,
+            });
+        return { db, bp, node, postSpy, deploy };
+    }
+
+    it('sends digestPins when the leaf advertises blueprint-digest-pins-v1', async () => {
+        const { db, bp, node, postSpy, deploy } = await setup(['blueprint-digest-pins-v1']);
+        const result = await deploy(pins);
+        expect(result.status).toBe('active');
+        expect(postSpy).toHaveBeenCalledTimes(1);
+        expect((postSpy.mock.calls[0][1] as { digestPins?: unknown }).digestPins).toEqual(pins);
+        expect(db.getDeployment(bp.id, node.id)?.status).toBe('active');
+    });
+
+    it('fails with an upgrade-required error and never posts when the leaf lacks the capability', async () => {
+        const { db, bp, node, postSpy, deploy } = await setup([]);
+        const outbound = await import('../helpers/registryDeliveryOutbound');
+        const result = await deploy(pins);
+        expect(result.status).toBe('failed');
+        expect(result.error).toMatch(/does not support digest-pinned blueprint apply/);
+        // The refusal happens before the delivery contract is even negotiated, so
+        // nothing about this apply reaches the node.
+        expect(vi.mocked(outbound.prepareOutboundRegistryDeliveryBody)).not.toHaveBeenCalled();
+        expect(postSpy).not.toHaveBeenCalled();
+        const dep = db.getDeployment(bp.id, node.id);
+        expect(dep?.status).toBe('failed');
+        expect(dep?.last_error).toMatch(/Upgrade that Sencho instance/);
+    });
+
+    it('fails closed and never posts when the leaf capability probe is unreachable', async () => {
+        const { db, bp, node, postSpy, deploy } = await setup(null);
+        const result = await deploy(pins);
+        expect(result.status).toBe('failed');
+        expect(result.error).toMatch(/Could not confirm that remote node/);
+        expect(postSpy).not.toHaveBeenCalled();
+        expect(db.getDeployment(bp.id, node.id)?.status).toBe('failed');
+    });
+
+    it('does not gate plain (non-digest) applies on the capability', async () => {
+        const { postSpy, deploy } = await setup([]);
+        const result = await deploy(undefined);
+        expect(result.status).toBe('active');
+        expect(postSpy).toHaveBeenCalledTimes(1);
+        expect((postSpy.mock.calls[0][1] as { digestPins?: unknown }).digestPins).toBeUndefined();
     });
 });
