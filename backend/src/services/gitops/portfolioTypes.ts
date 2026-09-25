@@ -69,6 +69,7 @@ export type GitOpsPortfolioTargetSummary = {
   runtime: string;
   health: string;
   connectivity: string;
+  tombstoned: boolean;
   evidence: 'fresh' | 'stale' | 'unknown';
 };
 

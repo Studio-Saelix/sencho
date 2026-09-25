@@ -356,6 +356,31 @@ describe('attentionReasons', () => {
     expect(attentionReasons(liveProjection({ drift: [item, { ...item, class: 'health' }] }))).toEqual(['drift']);
   });
 
+  it('ignores drift scoped only to tombstoned targets', () => {
+    const item = {
+      class: 'runtime' as const,
+      expected: { kind: 'generation' as const, id: 'gen-1' },
+      observed: { kind: 'generation' as const, id: 'gen-old' },
+      freshnessAt: null,
+      owner: 'test',
+      reason: 'test',
+      configuredPolicy: null,
+      affectedTargets: [{ nodeId: 2, stackName: 'historical' }],
+      action: 'none' as const,
+    };
+    const targets = [target({}), target({ nodeId: 2, tombstoned: true })];
+
+    expect(attentionReasons(liveProjection({ targets, drift: [item] }))).toEqual([]);
+    expect(attentionReasons(liveProjection({
+      targets,
+      drift: [{ ...item, affectedTargets: [{ nodeId: 1, stackName: 'current' }] }],
+    }))).toEqual(['drift']);
+    expect(attentionReasons(liveProjection({
+      targets,
+      drift: [{ ...item, affectedTargets: [{ nodeId: null, stackName: null }] }],
+    }))).toEqual(['drift']);
+  });
+
   it('flags a failed health verdict on any target', () => {
     const projection = liveProjection({
       targets: [target({ runtime: runtimeAt('synced_and_healthy'), health: healthAt('failed') })],

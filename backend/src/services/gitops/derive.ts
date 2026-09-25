@@ -1164,7 +1164,8 @@ function deriveRollout(
   if (app.recovery_phase === 'restoring' || app.recovery_phase === 'compensating') {
     return { status: 'rollback_in_progress', recoveryRef: app.recovery_ref ?? '', recoveryGenerationId: null };
   }
-  const failed = targets.find((target) => target.runtime.status === 'recovery_failed');
+  const currentTargets = targets.filter((target) => !target.tombstoned);
+  const failed = currentTargets.find((target) => target.runtime.status === 'recovery_failed');
   if (failed && failed.runtime.status === 'recovery_failed') {
     return {
       status: 'rollback_partial_failed',
@@ -1174,8 +1175,8 @@ function deriveRollout(
       failureAt: failed.runtime.failureAt,
     };
   }
-  if (targets.some((target) => target.connectivity === 'unreachable')) return { status: 'target_unreachable' };
-  if (targets.some((target) => target.connectivity === 'stale')) return { status: 'target_stale' };
+  if (currentTargets.some((target) => target.connectivity === 'unreachable')) return { status: 'target_unreachable' };
+  if (currentTargets.some((target) => target.connectivity === 'stale')) return { status: 'target_stale' };
   if (app.pause_at) return { status: 'rollout_paused', pauseAt: app.pause_at, pauseReason: app.pause_reason };
   if (app.partial_json) return { status: 'partially_rolled_out', partial: app.partial_json };
   if (app.target_mode === 'direct') return { status: 'not_applicable' };

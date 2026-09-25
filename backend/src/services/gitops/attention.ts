@@ -15,7 +15,7 @@
  * reported by the caller as unknown evidence, not as attention.
  */
 
-import type { GitOpsRevisionProjection } from './types';
+import type { GitOpsDriftItem, GitOpsRevisionProjection } from './types';
 
 /**
  * Every reason an application may need an operator, as a closed union.
@@ -91,6 +91,17 @@ export const ATTENTION_TONE: Readonly<Record<GitOpsAttentionReason, 'failure' | 
   artifact_identity_changed: 'pending',
   drift: 'pending',
 };
+
+export function currentDrift(projection: GitOpsRevisionProjection): GitOpsDriftItem[] {
+  if (projection.targetMode === 'not_applicable') return [];
+  const currentNodeIds = new Set(
+    projection.targets.filter(target => !target.tombstoned).map(target => target.nodeId),
+  );
+  return projection.drift.filter(item => (
+    item.affectedTargets.length === 0
+    || item.affectedTargets.some(target => target.nodeId === null || currentNodeIds.has(target.nodeId))
+  ));
+}
 
 /**
  * The attention reasons a projection currently implies.
@@ -235,7 +246,7 @@ export function attentionReasons(projection: GitOpsRevisionProjection): GitOpsAt
   // Confirmed drift is itself a reason. The classes (source, runtime, placement,
   // and so on) ride on the row's drift summary; a bare `drift` here is the
   // triage signal and the classes answer "drifted where".
-  if (projection.drift.length > 0) reasons.add('drift');
+  if (currentDrift(projection).length > 0) reasons.add('drift');
 
   return [...reasons];
 }

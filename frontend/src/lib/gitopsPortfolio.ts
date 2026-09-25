@@ -6,7 +6,7 @@
  * facet statuses, so a reason code a newer server build introduces renders as
  * its raw code rather than crashing the page.
  */
-import type { GitOpsAttentionReason, GitOpsPortfolioPosture } from '@/types/gitopsPortfolio';
+import type { GitOpsAttentionReason, GitOpsPortfolioPosture, GitOpsPortfolioTargetSummary } from '@/types/gitopsPortfolio';
 
 export type PortfolioTone = 'brand' | 'success' | 'warning' | 'destructive' | 'neutral';
 
@@ -99,6 +99,10 @@ export function portfolioMastheadState(summary: {
     return { state: 'Converged · qualified', tone: 'live' };
   }
   return { state: 'Converged', tone: 'live' };
+}
+
+export function countCurrentTargets(targets: readonly GitOpsPortfolioTargetSummary[]): number {
+  return targets.filter(target => !target.tombstoned).length;
 }
 
 /** Empty-portfolio copy, shared by the desktop table and the phone screen. */

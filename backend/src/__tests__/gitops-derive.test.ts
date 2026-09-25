@@ -330,6 +330,90 @@ describe('gitops derivation', () => {
     expect(projection.drift).toHaveLength(0);
   });
 
+  it('ignores tombstoned target connectivity when deriving blueprint rollout', () => {
+    const application = rawApp('app-tomb-connectivity', {
+      target_mode: 'blueprint',
+      blueprint_id: 91,
+      lifecycle_key: 'blueprint:91',
+      stack_name: null,
+      configured_source_stack_name: null,
+    });
+
+    for (const connectivity of ['stale', 'unreachable'] as const) {
+      const projection = deriveGitOpsRevision({
+        application,
+        targets: [
+          { ...emptyTargetRow(application.id, 1, 1), connectivity: 'reachable' },
+          {
+            ...emptyTargetRow(application.id, 2, 1),
+            target_status: 'tombstoned',
+            connectivity,
+          },
+        ],
+        healthDisabled: true,
+      }, null);
+
+      if (projection.targetMode === 'not_applicable') throw new Error('expected application');
+      expect(projection.facets.rollout.status).toBe('not_applicable');
+    }
+
+    const recovery = deriveGitOpsRevision({
+      application,
+      targets: [
+        { ...emptyTargetRow(application.id, 1, 1), connectivity: 'reachable' },
+        {
+          ...emptyTargetRow(application.id, 2, 1),
+          target_status: 'tombstoned',
+          recovery_phase: 'failed',
+          recovery_ref: 'recovery-tombstoned',
+          recovery_generation_id: 'gen-tombstoned',
+          failure_stage: 'recovery',
+          failure_class: 'test',
+          failure_at: 1,
+        },
+      ],
+      healthDisabled: true,
+    }, null);
+    if (recovery.targetMode === 'not_applicable') throw new Error('expected application');
+    expect(recovery.facets.rollout.status).toBe('not_applicable');
+  });
+
+  it('keeps active target connectivity and recovery failures in rollout status', () => {
+    const application = rawApp('app-active-connectivity', {
+      target_mode: 'blueprint',
+      blueprint_id: 92,
+      lifecycle_key: 'blueprint:92',
+      stack_name: null,
+      configured_source_stack_name: null,
+    });
+    const derive = (connectivity: 'stale' | 'unreachable') => deriveGitOpsRevision({
+      application,
+      targets: [{ ...emptyTargetRow(application.id, 1, 1), connectivity }],
+      healthDisabled: true,
+    }, null);
+    const stale = derive('stale');
+    const unreachable = derive('unreachable');
+    if (stale.targetMode === 'not_applicable' || unreachable.targetMode === 'not_applicable') throw new Error('expected application');
+    expect(stale.facets.rollout.status).toBe('target_stale');
+    expect(unreachable.facets.rollout.status).toBe('target_unreachable');
+
+    const recovery = deriveGitOpsRevision({
+      application,
+      targets: [{
+        ...emptyTargetRow(application.id, 2, 1),
+        recovery_phase: 'failed',
+        recovery_ref: 'recovery-1',
+        recovery_generation_id: 'gen-1',
+        failure_stage: 'recovery',
+        failure_class: 'test',
+        failure_at: 1,
+      }],
+      healthDisabled: true,
+    }, null);
+    if (recovery.targetMode === 'not_applicable') throw new Error('expected application');
+    expect(recovery.facets.rollout.status).toBe('rollback_partial_failed');
+  });
+
   it('keeps a failed sibling out of another target\'s deploy action', () => {
     const store = GitOpsStore.getInstance();
     const tx = GitOpsTransitions.getInstance();

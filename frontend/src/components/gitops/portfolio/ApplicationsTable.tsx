@@ -12,7 +12,7 @@ import {
   type GitOpsStateMeta,
   type GitOpsTone,
 } from '@/lib/gitopsState';
-import { attentionLabel, PORTFOLIO_EMPTY_COPY, POSTURE_TONE_CLASS } from '@/lib/gitopsPortfolio';
+import { attentionLabel, countCurrentTargets, PORTFOLIO_EMPTY_COPY, POSTURE_TONE_CLASS } from '@/lib/gitopsPortfolio';
 import { cn, formatRelativeTime } from '@/lib/utils';
 import type { GitOpsPortfolioRow } from '@/types/gitopsPortfolio';
 import { openPortfolioApplication, portfolioRowActions } from './portfolioNavigation';
@@ -156,6 +156,7 @@ export function ApplicationsTable({
 }
 
 function ApplicationRow({ row, onOpen, canOpenFleet }: { row: GitOpsPortfolioRow; onOpen: () => void; canOpenFleet: boolean }) {
+  const currentTargetCount = countCurrentTargets(row.targets);
   const failureAttention = row.attention.some(reason => attentionLabel(reason).tone === 'destructive');
   const rowTint = row.attention.length === 0
     ? ''
@@ -218,7 +219,7 @@ function ApplicationRow({ row, onOpen, canOpenFleet }: { row: GitOpsPortfolioRow
         ) : (
           <div className="min-w-0">
             <span className="block truncate font-mono text-[11px] text-stat-value">
-              {row.targets.length} target{row.targets.length === 1 ? '' : 's'}
+              {currentTargetCount} target{currentTargetCount === 1 ? '' : 's'}
             </span>
             <span className="block font-mono text-[10px] uppercase tracking-[0.1em] text-stat-icon">blueprint</span>
           </div>

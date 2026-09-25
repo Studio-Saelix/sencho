@@ -54,6 +54,26 @@ describe('MobileGitOps', () => {
     expect(input).toHaveValue('bo');
   });
 
+  it('counts current Blueprint targets without tombstoned history', async () => {
+    const current = portfolioRow().targets[0];
+    if (!current) throw new Error('expected target fixture');
+    const row = portfolioRow({
+      targetMode: 'blueprint',
+      nodeId: null,
+      blueprintId: 3,
+      targets: [
+        current,
+        { ...current, nodeId: 2, tombstoned: true },
+      ],
+    });
+    mockFetch.mockResolvedValue(ok({ ...list, applications: [row] }));
+
+    render(<MobileGitOps />);
+
+    expect(await screen.findByText('1t')).toBeInTheDocument();
+    expect(screen.queryByText('2t')).toBeNull();
+  });
+
   it('pages forward and back instead of appending', async () => {
     mockFetch.mockResolvedValue(ok(list));
     render(<MobileGitOps />);

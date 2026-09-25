@@ -23,10 +23,11 @@ import { safeRemoteFetch } from '../../utils/outboundTarget';
 import { NOT_APPLICABLE_REVISION, projectStackRevision, stackResourceSet, healthGateDisabled } from '../../helpers/gitopsResponse';
 import { filterRemoteIdentityPayload, rewriteIdentityPayload } from '../../proxy/gitopsIdentityProxy';
 import { projectApplication } from './derive';
+import { comparableObservationMatches } from './artifactIdentity';
 import { latestTransitionByApplication } from './history';
 import { classifySourceRow, satisfiesGitOpsRead } from './readAuth';
 import { GitOpsStore } from './store';
-import { attentionReasons, hasFailureReason } from './attention';
+import { attentionReasons, currentDrift, hasFailureReason } from './attention';
 import { FACET_EVIDENCE_SOURCE } from './types';
 import type {
   GitOpsPortfolioNodeCoverage,
@@ -36,7 +37,8 @@ import type {
   GitOpsPortfolioTargetSummary,
 } from './portfolioTypes';
 import type { GitOpsRevisionProjection, GitOpsTargetProjection } from './types';
-import { isRecord } from './json';
+import { canonicalizeServiceEvidence, isRecord } from './json';
+import type { ServiceArtifactEvidence } from './json';
 
 /** Per-remote probe budget; mirrors the fleet overview probe so one dead node cannot stall the portfolio. */
 const REMOTE_PROBE_TIMEOUT_MS = 3000;
@@ -97,9 +99,68 @@ const ARTIFACT_QUALIFICATIONS: ReadonlySet<string> = new Set([
   'unavailable',
   'local_build_unverified',
 ]);
+const ARTIFACT_SERVICE_SOURCES: ReadonlySet<string> = new Set(['registry', 'build', 'unsupported']);
+const ARTIFACT_SERVICE_FAILURE_CLASSES: ReadonlySet<string> = new Set([
+  'unresolved',
+  'registry_unavailable',
+  'credential_failure',
+  'unsupported_registry',
+  'platform_ambiguity',
+  'digest_unavailable',
+  'stale_resolution',
+]);
+const DRIFT_CLASSES: ReadonlySet<string> = new Set([
+  'source',
+  'managed_project',
+  'invocation',
+  'placement',
+  'rollout',
+  'runtime',
+  'health',
+]);
+const LIFECYCLE_STATUSES: ReadonlySet<string> = new Set(['active', 'creating', 'detached', 'deleted']);
+const SETTLED_SOURCE_STATUSES: ReadonlySet<string> = new Set(['application_generation_accepted', 'source_poll_scheduled']);
+const SETTLED_ROLLOUT_ARTIFACT: ReadonlyMap<string, 'artifact_exact' | 'artifact_qualified'> = new Map([
+  ['exactly_converged_healthy', 'artifact_exact'],
+  ['configuration_converged_artifact_qualified', 'artifact_qualified'],
+]);
+const OBSERVED_ARTIFACT_KINDS: ReadonlySet<string> = new Set(['exact', 'qualified', 'stale', 'local_build_unverified']);
+const AVAILABLE_ACTIONS: ReadonlySet<string> = new Set([
+  'fetch',
+  'apply',
+  'dismiss',
+  'deploy',
+  'approve_legacy',
+  'suspend',
+  'resume',
+  'retry',
+  'none',
+]);
+const TARGET_GENERATION_FIELDS = [
+  'desiredGenerationId',
+  'candidateGenerationId',
+  'appliedGenerationId',
+  'deployedGenerationId',
+  'healthyGenerationId',
+  'lkgGenerationId',
+  'lkgArtifactSetId',
+  'expectedArtifactSetId',
+  'latestArtifactSetId',
+  'intentRevisionId',
+  'rolloutCandidateId',
+  'rolloutGenerationId',
+] as const;
+const LKG_UNAVAILABLE_REASONS: ReadonlySet<string> = new Set([
+  'generation_missing',
+  'recovery_unretainable',
+]);
 
 function hasFacetStatus(registry: object, status: string): boolean {
   return Object.prototype.hasOwnProperty.call(registry, status);
+}
+
+function isSettledSourceStatus(source: Extract<GitOpsRevisionProjection, { applicationId: string }>['facets']['source']): boolean {
+  return SETTLED_SOURCE_STATUSES.has(source.status);
 }
 
 /**
@@ -149,6 +210,7 @@ function hasUnrecognizedStatus(
   targets: GitOpsTargetProjection[],
 ): boolean {
   if (projection.targetMode === 'not_applicable') return false;
+  if (!LIFECYCLE_STATUSES.has(projection.lifecycleStatus)) return true;
   const { source, artifact, placement, rollout } = projection.facets;
   if (!hasFacetStatus(FACET_EVIDENCE_SOURCE.source, source.status)) return true;
   if (!hasFacetStatus(FACET_EVIDENCE_SOURCE.artifact, artifact.status)) return true;
@@ -168,17 +230,183 @@ function currentTargets(projection: GitOpsRevisionProjection): GitOpsTargetProje
     : projection.targets.filter(target => !target.tombstoned);
 }
 
+function sourceModeIsCompatible(projection: GitOpsRevisionProjection): boolean {
+  if (projection.targetMode === 'not_applicable') return false;
+  return projection.targetMode === 'inline_blueprint'
+    ? projection.facets.source.status === 'not_applicable'
+    : projection.facets.source.status !== 'not_applicable';
+}
+
+function currentTargetSetIsUnique(targets: GitOpsTargetProjection[]): boolean {
+  return new Set(targets.map(target => target.nodeId)).size === targets.length;
+}
+
+function claimsSettledConvergence(projection: GitOpsRevisionProjection): boolean {
+  if (projection.targetMode === 'not_applicable') return false;
+  const { source, rollout } = projection.facets;
+  return SETTLED_ROLLOUT_ARTIFACT.has(rollout.status)
+    || projection.targetMode === 'direct'
+      && isSettledSourceStatus(source);
+}
+
+function targetArtifactMatchesSettledFacet(
+  target: GitOpsTargetProjection,
+  artifact: Extract<GitOpsRevisionProjection, { applicationId: string }>['facets']['artifact'],
+  generationId: string,
+): boolean {
+  if (artifact.status !== 'artifact_exact' && artifact.status !== 'artifact_qualified') return false;
+  const expectedSetId = artifact.expected?.artifactSetId ?? artifact.artifactSetId;
+  if (
+    target.artifact.status !== artifact.status
+    || target.artifact.generationId !== generationId
+    || target.artifact.evidenceVersion !== artifact.evidenceVersion
+    || target.artifact.latestEvidence.evidenceVersion !== artifact.latestEvidence.evidenceVersion
+    || target.artifact.artifactSetId !== artifact.artifactSetId
+    || target.latestArtifactSetId !== artifact.artifactSetId
+    || target.expectedArtifactSetId !== expectedSetId
+  ) return false;
+  const observed = target.observedArtifactIdentity;
+  if (artifact.expected === null) {
+    if (target.artifact.latestEvidence.identity !== artifact.latestEvidence.identity) return false;
+    const targetExpected = 'expected' in target.artifact ? target.artifact.expected : null;
+    if (
+      !targetExpected
+      || targetExpected.artifactSetId !== expectedSetId
+      || targetExpected.evidenceVersion !== artifact.evidenceVersion
+    ) return false;
+    if (observed.kind !== 'exact' && observed.kind !== 'qualified') return false;
+    if (observed.identity !== artifact.latestEvidence.identity) return false;
+    if (
+      targetExpected.qualification !== artifact.qualification
+      || targetExpected.identity !== null && targetExpected.identity !== observed.identity
+    ) return false;
+    return !targetExpected.services?.length || comparableObservationMatches(targetExpected.services, observed);
+  }
+  const expected = 'expected' in target.artifact ? target.artifact.expected : null;
+  if (
+    !expected
+    || expected.artifactSetId !== artifact.expected.artifactSetId
+    || expected.qualification !== artifact.expected.qualification
+    || expected.identity !== artifact.expected.identity
+    || expected.evidenceVersion !== artifact.expected.evidenceVersion
+  ) return false;
+  const topServices = artifact.expected.services ?? [];
+  const targetServices = expected.services ?? [];
+  if (topServices.length > 0 || targetServices.length > 0) {
+    if (topServices.length !== targetServices.length) return false;
+    if (!servicesEquivalent(topServices, targetServices)) return false;
+  }
+  if (observed.kind !== 'exact' && observed.kind !== 'qualified') return false;
+  if (artifact.expected.identity === null) {
+    if (target.artifact.latestEvidence.identity !== artifact.latestEvidence.identity) return false;
+    if (observed.identity !== artifact.latestEvidence.identity) return false;
+    return !expected.services?.length || comparableObservationMatches(expected.services, observed);
+  }
+  if (expected.services && expected.services.length > 0) {
+    return comparableObservationMatches(expected.services, observed);
+  }
+  return observed.identity === artifact.expected.identity;
+}
+
+function hasValidModeShape(projection: {
+  targetMode?: unknown;
+  stackName?: unknown;
+  blueprintId?: unknown;
+}): boolean {
+  if (projection.targetMode === 'direct') {
+    return isNonEmptyString(projection.stackName) && projection.blueprintId === null;
+  }
+  return projection.targetMode === 'blueprint' || projection.targetMode === 'inline_blueprint'
+    ? projection.stackName === null
+      && typeof projection.blueprintId === 'number'
+      && Number.isSafeInteger(projection.blueprintId)
+      && projection.blueprintId > 0
+    : false;
+}
+
+function hasSettledGenerationProof(
+  projection: GitOpsRevisionProjection,
+  targets: GitOpsTargetProjection[],
+): boolean {
+  if (!claimsSettledConvergence(projection)) return true;
+  if (projection.targetMode === 'not_applicable' || projection.lifecycleStatus !== 'active') return false;
+  if (!hasValidModeShape(projection)) return false;
+  const { source, artifact, placement, rollout } = projection.facets;
+  const settledArtifactStatus = SETTLED_ROLLOUT_ARTIFACT.get(rollout.status);
+  if (settledArtifactStatus && artifact.status !== settledArtifactStatus) return false;
+  if (artifact.status !== 'artifact_exact' && artifact.status !== 'artifact_qualified') return false;
+  const generationId = artifact.generationId;
+  if (!isNonEmptyString(generationId) || !isNonEmptyString(artifact.artifactSetId)) return false;
+  if (!sourceModeIsCompatible(projection)) return false;
+  const authorizationRef = projection.approvals.rolloutAuthorizationRef;
+  if (projection.targetMode === 'direct') {
+    if (
+      placement.status !== 'unbound_direct'
+      || projection.rolloutGenerationId !== null
+      || projection.approvals.rolloutAuthorizationRef !== null
+    ) return false;
+  } else if (
+    placement.status !== 'blueprint_bound'
+    || placement.completion !== 'unknown'
+    || !isNonEmptyString(authorizationRef)
+    || !isNonEmptyString(projection.rolloutGenerationId)
+    || !('rolloutGenerationId' in rollout)
+    || !isNonEmptyString(rollout.rolloutGenerationId)
+    || projection.rolloutGenerationId !== rollout.rolloutGenerationId
+  ) return false;
+  if ('candidateGenerationId' in source && source.candidateGenerationId !== null) return false;
+  if (source.status !== 'not_applicable' && (
+    !isSettledSourceStatus(source) || source.acceptedGenerationId !== generationId
+  )) return false;
+  return targets.length > 0
+    && currentTargetSetIsUnique(targets)
+    && targets.every(target => (
+    target.runtime.status === 'synced_and_healthy'
+    && targetArtifactMatchesSettledFacet(target, artifact, generationId)
+    && target.desiredGenerationId === generationId
+    && target.appliedGenerationId === generationId
+    && target.deployedGenerationId === generationId
+    && target.approvals.sourceAcceptanceRef === projection.approvals.sourceAcceptanceRef
+    && target.approvals.placementApprovalRef === projection.approvals.placementApprovalRef
+    && target.approvals.legacyCombinedApprovalRef === projection.approvals.legacyCombinedApprovalRef
+    && (
+      projection.targetMode === 'direct'
+      && target.stackName === projection.stackName
+      && target.candidateGenerationId === null
+      && target.intentRevisionId === null
+      && target.rolloutCandidateId === null
+      && target.rolloutGenerationId === null
+      && target.approvals.rolloutAuthorizationRef === null
+      || (
+        projection.targetMode !== 'direct'
+        && isNonEmptyString(target.intentRevisionId)
+        && target.rolloutGenerationId === projection.rolloutGenerationId
+        && target.approvals.rolloutAuthorizationRef === authorizationRef
+      )
+    )
+    && (
+      target.health.status === 'not_applicable'
+      || target.health.status === 'passed'
+        && target.healthyGenerationId === generationId
+        && target.health.deployedGenerationId === generationId
+    )
+  ));
+}
+
 function targetSetIsCurrent(
   projection: GitOpsRevisionProjection,
   targets: GitOpsTargetProjection[],
 ): boolean {
   if (projection.targetMode === 'not_applicable') return false;
+  if (!currentTargetSetIsUnique(targets)) return false;
   const rollout = projection.facets.rollout;
-  if (rollout.status === 'exactly_converged_healthy' || rollout.status === 'configuration_converged_artifact_qualified') {
+  if (SETTLED_ROLLOUT_ARTIFACT.has(rollout.status)) {
+    if (!('rolloutGenerationId' in rollout)) return false;
     return projection.targetMode !== 'direct'
       && targets.length > 0
       && projection.rolloutGenerationId === rollout.rolloutGenerationId
-      && targets.every(target => target.rolloutGenerationId === rollout.rolloutGenerationId);
+      && targets.every(target => target.rolloutGenerationId === rollout.rolloutGenerationId)
+      && hasSettledGenerationProof(projection, targets);
   }
   if (projection.targetMode === 'direct') return targets.length === 1;
   return true;
@@ -190,7 +418,8 @@ function hasFreshReachableTargets(
 ): boolean {
   return targets.length > 0
     && targetSetIsCurrent(projection, targets)
-    && targets.every(target => target.connectivity === 'reachable');
+    && targets.every(target => target.connectivity === 'reachable')
+    && hasSettledGenerationProof(projection, targets);
 }
 
 /**
@@ -208,6 +437,7 @@ export function postureOf(projection: GitOpsRevisionProjection): GitOpsPortfolio
   const attention = attentionReasons(projection);
   if (hasFailureReason(attention)) return 'failed';
   if (attention.length > 0) return 'attention';
+  if (!currentTargetSetIsUnique(targets) || !sourceModeIsCompatible(projection)) return 'unknown';
 
   const { source, placement, rollout } = projection.facets;
   const targetEvidenceFresh = hasFreshReachableTargets(projection, targets);
@@ -232,8 +462,8 @@ export function postureOf(projection: GitOpsRevisionProjection): GitOpsPortfolio
   if (inFlight) return 'in_progress';
   if (hasUnrecognizedStatus(projection, targets)) return 'unknown';
 
-  if (targetEvidenceFresh && rollout.status === 'exactly_converged_healthy') return 'converged';
-  if (targetEvidenceFresh && rollout.status === 'configuration_converged_artifact_qualified') return 'converged_qualified';
+  if (targetEvidenceFresh && SETTLED_ROLLOUT_ARTIFACT.get(rollout.status) === 'artifact_exact') return 'converged';
+  if (targetEvidenceFresh && SETTLED_ROLLOUT_ARTIFACT.get(rollout.status) === 'artifact_qualified') return 'converged_qualified';
 
   // Direct applications have no rollout facet; their convergence claim is the
   // source settled on an accepted generation, every target reporting its
@@ -247,10 +477,10 @@ export function postureOf(projection: GitOpsRevisionProjection): GitOpsPortfolio
     projection.targetMode === 'direct'
     && targetEvidenceFresh
     && artifactKnown
-    && (source.status === 'application_generation_accepted' || source.status === 'source_poll_scheduled')
+    && isSettledSourceStatus(source)
     && targets.every(target => target.runtime.status === 'synced_and_healthy')
-    && targets.every(target => target.health.status === 'passed' || target.health.status === 'not_applicable' || target.health.status === 'unbound')
-    && projection.drift.length === 0
+    && targets.every(target => target.health.status === 'passed' || target.health.status === 'not_applicable')
+    && currentDrift(projection).length === 0
   ) {
     if (artifact.status === 'artifact_exact') return 'converged';
     return 'converged_qualified';
@@ -281,6 +511,7 @@ function targetSummaries(projection: GitOpsRevisionProjection, nodeNames: Map<nu
     runtime: target.runtime.status,
     health: target.health.status,
     connectivity: target.connectivity,
+    tombstoned: target.tombstoned,
     // Unknown connectivity is its own evidence grade: it means the evidence
     // never arrived, which is not the same as evidence that arrived fresh.
     evidence: target.connectivity === 'reachable'
@@ -361,7 +592,8 @@ export function rowFromProjection(input: RowInput): GitOpsPortfolioRow {
   }
   const source = projection.facets.source;
   const artifact = projection.facets.artifact;
-  const driftClasses = [...new Set(projection.drift.map(item => item.class))];
+  const activeDrift = currentDrift(projection);
+  const driftClasses = [...new Set(activeDrift.map(item => item.class))];
   // Unreachable targets are named per row, from the projection itself: a
   // target whose evidence never arrived is the row-level fact the evidence
   // filter and the UI's "unreachable" qualifier read, independent of which
@@ -376,6 +608,11 @@ export function rowFromProjection(input: RowInput): GitOpsPortfolioRow {
   const targetSetMismatch = !targetSetIsCurrent(projection, requiredTargets);
   const unknownTargetEvidence = requiredTargets.some(target => target.connectivity === 'unknown');
   const staleTargetEvidence = requiredTargets.some(target => target.connectivity === 'stale');
+  const generationProofMissing = claimsSettledConvergence(projection)
+    && requiredTargets.length > 0
+    && requiredTargets.every(target => target.connectivity === 'reachable')
+    && !hasSettledGenerationProof(projection, requiredTargets);
+  const sourceModeMismatch = !sourceModeIsCompatible(projection);
   return {
     id,
     targetMode: projection.targetMode,
@@ -398,16 +635,16 @@ export function rowFromProjection(input: RowInput): GitOpsPortfolioRow {
     runtimeStatus: worstTargetStatus(requiredTargets, 'runtime', RUNTIME_RANK, UNKNOWN_RUNTIME_RANK),
     healthStatus: worstTargetStatus(requiredTargets, 'health', HEALTH_RANK, UNKNOWN_HEALTH_RANK),
     targets: targetSummaries(projection, nodeNames),
-    drift: { count: projection.drift.length, classes: driftClasses },
+    drift: { count: activeDrift.length, classes: driftClasses },
     attention: attentionReasons(projection),
     posture: postureOf(projection),
     availableActions: projection.availableActions,
     limitations: projection.limitations.map(limitation => limitation.code),
     lastActivityAt,
     evidence: {
-      partial: unreachableNodes.length > 0 || missingTargetEvidence || targetSetMismatch || staleTargetEvidence || unknownTargetEvidence || unrecognized,
+      partial: unreachableNodes.length > 0 || missingTargetEvidence || targetSetMismatch || staleTargetEvidence || unknownTargetEvidence || generationProofMissing || sourceModeMismatch || unrecognized,
       unreachableNodes,
-      unknown: missingTargetEvidence || targetSetMismatch || unknownTargetEvidence || unrecognized,
+      unknown: missingTargetEvidence || targetSetMismatch || unknownTargetEvidence || generationProofMissing || sourceModeMismatch || unrecognized,
     },
   };
 }
@@ -614,6 +851,43 @@ export async function fetchRemoteSourceRows(nodeId: number): Promise<unknown[] |
   }
 }
 
+function isFutureRolloutAuthorizationBinding(value: unknown): boolean {
+  return isRecord(value)
+    && isNonEmptyString(value.rolloutCandidateId)
+    && isNonEmptyString(value.acceptedGenerationId)
+    && isNonEmptyString(value.artifactSetId)
+    && isNonEmptyString(value.intentRevisionId)
+    && isNonEmptyString(value.sourceAcceptanceRef)
+    && isNonEmptyString(value.placementApprovalRef)
+    && isNonEmptyString(value.preflightFingerprint)
+    && Array.isArray(value.requiredNodeIds)
+    && value.requiredNodeIds.every(nodeId => typeof nodeId === 'number' && Number.isSafeInteger(nodeId));
+}
+
+function isPlacementFacetRecord(placement: Record<string, unknown>): boolean {
+  switch (placement.status) {
+    case 'not_applicable':
+    case 'unbound_direct':
+    case 'placement_review_pending':
+    case 'stateful_confirmation_required':
+      return true;
+    case 'unknown':
+      return placement.limitation === 'missing_intent';
+    case 'source_acceptance_pending':
+      return isNullableString(placement.sourceAcceptanceRef) && isNonEmptyString(placement.candidateGenerationId);
+    case 'rollout_authorization_pending':
+      return placement.rolloutAuthorizationRef === null && isFutureRolloutAuthorizationBinding(placement.binding);
+    case 'rollout_authorization_stale':
+      return isNonEmptyString(placement.rolloutAuthorizationRef) && isFutureRolloutAuthorizationBinding(placement.bound);
+    case 'preflight_blocked':
+      return typeof placement.reason === 'string' && isFutureRolloutAuthorizationBinding(placement.binding);
+    case 'blueprint_bound':
+      return placement.completion === 'unknown';
+    default:
+      return true;
+  }
+}
+
 function isSourceFacetRecord(source: Record<string, unknown>): boolean {
   if (source.status === 'not_applicable') return true;
   if (
@@ -633,47 +907,305 @@ function isSourceFacetRecord(source: Record<string, unknown>): boolean {
   return source.status !== 'application_generation_accepted' || typeof source.acceptedGenerationId === 'string';
 }
 
+function isNonEmptyString(value: unknown): value is string {
+  return typeof value === 'string' && value.length > 0;
+}
+
+function isNullableString(value: unknown): boolean {
+  return typeof value === 'string' || value === null;
+}
+
+function isFiniteNumberOrNull(value: unknown): boolean {
+  return typeof value === 'number' && Number.isFinite(value) || value === null;
+}
+
+function isApprovalRecord(value: unknown): value is Record<string, unknown> {
+  return isRecord(value)
+    && isNullableString(value.sourceAcceptanceRef)
+    && isNullableString(value.placementApprovalRef)
+    && isNullableString(value.rolloutAuthorizationRef)
+    && isNullableString(value.legacyCombinedApprovalRef);
+}
+
+function isServiceArtifactRecord(value: unknown): value is ServiceArtifactEvidence {
+  if (!isRecord(value) || !isNonEmptyString(value.serviceName) || !isNullableString(value.authoredRef)) return false;
+  if (typeof value.source !== 'string' || !ARTIFACT_SERVICE_SOURCES.has(value.source)) return false;
+  if (!isNullableString(value.platform) || !isNullableString(value.indexDigest) || !isNullableString(value.platformDigest)) return false;
+  if (value.platformVariants !== undefined && value.platformVariants !== null) {
+    if (!Array.isArray(value.platformVariants)) return false;
+    const variants = value.platformVariants;
+    const platforms = new Set<string>();
+    let previousPlatform = '';
+    for (const variant of variants) {
+      if (!isRecord(variant) || !isNonEmptyString(variant.platform) || !isNonEmptyString(variant.digest)) return false;
+      if (platforms.has(variant.platform) || previousPlatform.localeCompare(variant.platform) > 0) return false;
+      platforms.add(variant.platform);
+      previousPlatform = variant.platform;
+    }
+  }
+  if (value.localDigests !== undefined && value.localDigests !== null) {
+    if (!Array.isArray(value.localDigests)) return false;
+    const digests = new Set<string>();
+    let previousDigest = '';
+    for (const digest of value.localDigests) {
+      if (!isNonEmptyString(digest)) return false;
+      const key = digest.toLowerCase();
+      if (digests.has(key) || previousDigest.localeCompare(digest) > 0) return false;
+      digests.add(key);
+      previousDigest = digest;
+    }
+  }
+  return isNullableString(value.buildContextFingerprint)
+    && isNullableString(value.producedImageId)
+    && (value.failureClass === null
+      || typeof value.failureClass === 'string' && ARTIFACT_SERVICE_FAILURE_CLASSES.has(value.failureClass))
+    && isFiniteNumberOrNull(value.resolvedAt);
+}
+
+function serviceEvidenceEquivalent(left: ServiceArtifactEvidence, right: ServiceArtifactEvidence): boolean {
+  const leftVariants = left.platformVariants ?? [];
+  const rightVariants = right.platformVariants ?? [];
+  const leftDigests = left.localDigests ?? [];
+  const rightDigests = right.localDigests ?? [];
+  return left.serviceName === right.serviceName
+    && left.authoredRef === right.authoredRef
+    && left.source === right.source
+    && left.platform === right.platform
+    && left.indexDigest === right.indexDigest
+    && left.platformDigest === right.platformDigest
+    && left.buildContextFingerprint === right.buildContextFingerprint
+    && left.producedImageId === right.producedImageId
+    && left.failureClass === right.failureClass
+    && left.resolvedAt === right.resolvedAt
+    && leftVariants.length === rightVariants.length
+    && leftVariants.every((variant, index) => variant.platform === rightVariants[index]?.platform && variant.digest === rightVariants[index]?.digest)
+    && leftDigests.length === rightDigests.length
+    && leftDigests.every((digest, index) => digest === rightDigests[index]);
+}
+
+function servicesEquivalent(left: readonly ServiceArtifactEvidence[], right: readonly ServiceArtifactEvidence[]): boolean {
+  if (left.length !== right.length) return false;
+  const canonicalLeft = canonicalizeServiceEvidence(left);
+  const canonicalRight = canonicalizeServiceEvidence(right);
+  return canonicalLeft.every((service, index) => serviceEvidenceEquivalent(service, canonicalRight[index]!));
+}
+
+function isServiceEvidenceList(value: unknown): value is ServiceArtifactEvidence[] {
+  if (!Array.isArray(value) || !value.every(isServiceArtifactRecord)) return false;
+  const names = new Set<string>();
+  let previousName = '';
+  for (const service of value) {
+    if (names.has(service.serviceName) || previousName.localeCompare(service.serviceName) > 0) return false;
+    names.add(service.serviceName);
+    previousName = service.serviceName;
+  }
+  return true;
+}
+
+function isArtifactExpectedRecord(value: unknown): value is Record<string, unknown> {
+  return isRecord(value)
+    && isNonEmptyString(value.artifactSetId)
+    && typeof value.evidenceVersion === 'number'
+    && Number.isFinite(value.evidenceVersion)
+    && typeof value.qualification === 'string'
+    && ARTIFACT_QUALIFICATIONS.has(value.qualification)
+    && (value.identity === null || typeof value.identity === 'string' && value.identity.length > 0)
+    && (value.services === undefined || (
+      isServiceEvidenceList(value.services)
+    ));
+}
+
+function isTargetArtifactRecord(value: unknown): value is Record<string, unknown> {
+  return isRecord(value)
+    && typeof value.status === 'string'
+    && Object.prototype.hasOwnProperty.call(FACET_EVIDENCE_SOURCE.artifact, value.status)
+    && (value.expected === undefined || value.expected === null || isArtifactExpectedRecord(value.expected))
+    && isArtifactFacetRecord(value);
+}
+
+function isObservedArtifactIdentityRecord(value: unknown): value is Record<string, unknown> {
+  if (!isRecord(value) || typeof value.kind !== 'string') return false;
+  if (value.services !== undefined && !isServiceEvidenceList(value.services)) return false;
+  if (value.kind === 'unknown' || value.kind === 'missing' || value.kind === 'unavailable') return true;
+  if (!OBSERVED_ARTIFACT_KINDS.has(value.kind)) return false;
+  return typeof value.identity === 'string'
+    && value.identity.length > 0
+    && typeof value.observedAt === 'number'
+    && Number.isFinite(value.observedAt);
+}
+
+function isLkgRecord(value: unknown): value is Record<string, unknown> {
+  if (!isRecord(value) || typeof value.status !== 'string') return false;
+  if (value.status === 'none' || value.status === 'unavailable') return true;
+  if (value.status === 'available') {
+    return isNonEmptyString(value.generationId)
+      && (value.artifactSetId === null || isNonEmptyString(value.artifactSetId));
+  }
+  if (value.status === 'qualified') {
+    return isNonEmptyString(value.generationId) && isNonEmptyString(value.artifactSetId);
+  }
+  return false;
+}
+
+function isHealthRecord(value: unknown): value is Record<string, unknown> {
+  if (!isRecord(value) || typeof value.status !== 'string') return false;
+  if (value.status === 'not_applicable' || value.status === 'unbound') return true;
+  if (value.status === 'pending') return isNullableString(value.runId);
+  if (value.status === 'unknown') {
+    return isNullableString(value.runId) && value.limitation === 'health_unknown';
+  }
+  if (value.status === 'checking' || value.status === 'failed') {
+    return typeof value.runId === 'string' && isNullableString(value.deployedGenerationId);
+  }
+  if (value.status === 'passed') {
+    return typeof value.runId === 'string' && typeof value.deployedGenerationId === 'string';
+  }
+  return true;
+}
+
+function lkgMirrorsAreConsistent(lkg: unknown, value: Record<string, unknown>): boolean {
+  if (!isRecord(lkg)) return false;
+  const unavailableAt = value.lkgUnavailableAt;
+  const unavailableReason = value.lkgUnavailableReason;
+  const generationId = value.lkgGenerationId;
+  const artifactSetId = value.lkgArtifactSetId;
+  if (unavailableAt === null) {
+    if (unavailableReason !== null) return false;
+  } else if (unavailableReason === null || generationId !== null || artifactSetId !== null) {
+    return false;
+  }
+  if (lkg.status === 'none') {
+    return generationId === null && artifactSetId === null && unavailableAt === null;
+  }
+  if (lkg.status === 'unavailable') {
+    return unavailableAt !== null || generationId !== null;
+  }
+  return unavailableAt === null
+    && unavailableReason === null
+    && lkg.generationId === generationId
+    && lkg.artifactSetId === artifactSetId;
+}
+
 function isTargetRecord(value: unknown): value is Record<string, unknown> {
   return isRecord(value)
     && isRecord(value.runtime)
-    && isRecord(value.health)
+    && isHealthRecord(value.health)
+    && isTargetArtifactRecord(value.artifact)
+    && isObservedArtifactIdentityRecord(value.observedArtifactIdentity)
+    && isLkgRecord(value.lkg)
+    && isApprovalRecord(value.approvals)
     && typeof value.nodeId === 'number'
     && Number.isFinite(value.nodeId)
     && (typeof value.stackName === 'string' || value.stackName === null)
     && typeof value.tombstoned === 'boolean'
     && typeof value.connectivity === 'string'
-    && (typeof value.rolloutGenerationId === 'string' || value.rolloutGenerationId === null)
-    && typeof value.runtime.status === 'string'
-    && typeof value.health.status === 'string';
+    && TARGET_GENERATION_FIELDS.every(field => typeof value[field] === 'string' || value[field] === null)
+    && (typeof value.legacyAppliedRevision === 'number' && Number.isFinite(value.legacyAppliedRevision)
+      || value.legacyAppliedRevision === null)
+    && isFiniteNumberOrNull(value.lkgUnavailableAt)
+    && (value.lkgUnavailableReason === null || (
+      typeof value.lkgUnavailableReason === 'string'
+      && LKG_UNAVAILABLE_REASONS.has(value.lkgUnavailableReason)
+    ))
+    && lkgMirrorsAreConsistent(value.lkg, value)
+    && typeof value.runtime.status === 'string';
+}
+
+function isIdentityRefRecord(value: unknown): value is Record<string, unknown> {
+  if (!isRecord(value) || typeof value.kind !== 'string') return false;
+  switch (value.kind) {
+    case 'none':
+    case 'unknown':
+      return true;
+    case 'commit':
+      return isNonEmptyString(value.sha)
+        && isNonEmptyString(value.repoUrl)
+        && isNonEmptyString(value.ref);
+    case 'generation':
+    case 'rollout_candidate':
+    case 'rollout_generation':
+      return isNonEmptyString(value.id);
+    case 'artifact_set':
+      return isNonEmptyString(value.id)
+        && typeof value.qualification === 'string'
+        && ARTIFACT_QUALIFICATIONS.has(value.qualification)
+        && typeof value.evidenceVersion === 'number'
+        && Number.isFinite(value.evidenceVersion);
+    case 'runtime_artifact':
+      return isNonEmptyString(value.identity) && isFiniteNumberOrNull(value.observedAt);
+    case 'intent':
+      return isNonEmptyString(value.id) && isNonEmptyString(value.composeContentSha256);
+    case 'invocation':
+      return isRecord(value.authored)
+        && Array.isArray(value.authored.composeFileOrder)
+        && value.authored.composeFileOrder.every(item => typeof item === 'string')
+        && isNullableString(value.authored.projectName)
+        && isNullableString(value.authored.projectDirectory)
+        && Array.isArray(value.authored.envFileOrder)
+        && value.authored.envFileOrder.every(item => typeof item === 'string');
+    case 'health_run':
+      return isNonEmptyString(value.runId)
+        && (value.deployedGenerationId === null || isNonEmptyString(value.deployedGenerationId));
+    default:
+      return false;
+  }
+}
+
+function isConfiguredPolicyRecord(value: unknown): boolean {
+  if (value === null) return true;
+  if (!isRecord(value)) return false;
+  if (value.kind === 'git_source') {
+    return typeof value.autoApplyOnWebhook === 'boolean' && typeof value.autoDeployOnApply === 'boolean';
+  }
+  if (value.kind === 'blueprint_drift') {
+    return value.driftMode === 'observe' || value.driftMode === 'suggest' || value.driftMode === 'enforce';
+  }
+  return false;
+}
+
+function isDriftItemRecord(value: unknown): value is Record<string, unknown> {
+  return isRecord(value)
+    && typeof value.class === 'string'
+    && DRIFT_CLASSES.has(value.class)
+    && isIdentityRefRecord(value.expected)
+    && isIdentityRefRecord(value.observed)
+    && isFiniteNumberOrNull(value.freshnessAt)
+    && typeof value.owner === 'string'
+    && typeof value.reason === 'string'
+    && isConfiguredPolicyRecord(value.configuredPolicy)
+    && typeof value.action === 'string'
+    && AVAILABLE_ACTIONS.has(value.action)
+    && Array.isArray(value.affectedTargets)
+    && value.affectedTargets.every(target => (
+      isRecord(target)
+      && (typeof target.nodeId === 'number' && Number.isFinite(target.nodeId) || target.nodeId === null)
+      && (typeof target.stackName === 'string' || target.stackName === null)
+    ));
 }
 
 function isArtifactFacetRecord(artifact: Record<string, unknown>): boolean {
   if (artifact.status !== 'artifact_exact' && artifact.status !== 'artifact_qualified') return true;
   const qualification = artifact.status === 'artifact_exact' ? 'exact' : 'qualified';
   if (
-    typeof artifact.artifactSetId !== 'string'
-    || typeof artifact.generationId !== 'string'
+    !isNonEmptyString(artifact.artifactSetId)
+    || !isNonEmptyString(artifact.generationId)
     || typeof artifact.evidenceVersion !== 'number'
+    || !Number.isFinite(artifact.evidenceVersion)
     || artifact.qualification !== qualification
     || typeof artifact.freshnessAt !== 'number'
     || !Number.isFinite(artifact.freshnessAt)
-    || !isRecord(artifact.expected) && artifact.expected !== null
+    || artifact.expected !== null && !isArtifactExpectedRecord(artifact.expected)
     || !isRecord(artifact.latestEvidence)
-    || typeof artifact.latestEvidence.artifactSetId !== 'string'
+    || !isNonEmptyString(artifact.latestEvidence.artifactSetId)
     || artifact.latestEvidence.artifactSetId !== artifact.artifactSetId
     || typeof artifact.latestEvidence.evidenceVersion !== 'number'
+    || !Number.isFinite(artifact.latestEvidence.evidenceVersion)
     || artifact.latestEvidence.evidenceVersion !== artifact.evidenceVersion
     || artifact.latestEvidence.qualification !== qualification
-    || typeof artifact.latestEvidence.identity !== 'string' && artifact.latestEvidence.identity !== null
+    || typeof artifact.latestEvidence.identity !== 'string'
+    || artifact.latestEvidence.identity.length === 0
   ) return false;
   if (artifact.expected === null) return true;
-  if (
-    typeof artifact.expected.artifactSetId !== 'string'
-    || typeof artifact.expected.evidenceVersion !== 'number'
-    || typeof artifact.expected.qualification !== 'string'
-    || !ARTIFACT_QUALIFICATIONS.has(artifact.expected.qualification)
-    || typeof artifact.expected.identity !== 'string' && artifact.expected.identity !== null
-  ) return false;
   return !(
     (artifact.expected.qualification === 'exact' || artifact.expected.qualification === 'qualified')
     && typeof artifact.expected.identity === 'string'
@@ -683,8 +1215,8 @@ function isArtifactFacetRecord(artifact: Record<string, unknown>): boolean {
 }
 
 function isSettledRolloutRecord(rollout: Record<string, unknown>, generationId: unknown): boolean {
-  if (rollout.status !== 'exactly_converged_healthy' && rollout.status !== 'configuration_converged_artifact_qualified') return true;
-  return typeof generationId === 'string' && typeof rollout.rolloutGenerationId === 'string';
+  if (typeof rollout.status !== 'string' || !SETTLED_ROLLOUT_ARTIFACT.has(rollout.status)) return true;
+  return isNonEmptyString(generationId) && isNonEmptyString(rollout.rolloutGenerationId);
 }
 
 /**
@@ -698,12 +1230,13 @@ export function isUsableRevision(value: unknown): value is Extract<GitOpsRevisio
   if (!isRecord(value)) return false;
   const mode = value.targetMode;
   if (mode !== 'direct' && mode !== 'blueprint' && mode !== 'inline_blueprint') return false;
-  if (value.schemaVersion !== 1 || typeof value.applicationId !== 'string') return false;
+  if (value.schemaVersion !== 1 || !isNonEmptyString(value.applicationId)) return false;
   if (
-    (typeof value.stackName !== 'string' && value.stackName !== null)
-    || (typeof value.blueprintId !== 'number' || !Number.isFinite(value.blueprintId))
-      && value.blueprintId !== null
+    !isNonEmptyString(value.lifecycleStatus)
+    || !isApprovalRecord(value.approvals)
+    || value.rolloutGenerationId !== null && !isNonEmptyString(value.rolloutGenerationId)
   ) return false;
+  if (!hasValidModeShape(value)) return false;
   if (
     !Array.isArray(value.targets)
     || !Array.isArray(value.drift)
@@ -722,9 +1255,15 @@ export function isUsableRevision(value: unknown): value is Extract<GitOpsRevisio
   if (![facets.source, facets.artifact, facets.placement, facets.rollout].every(facet => typeof facet.status === 'string')) return false;
   return isSourceFacetRecord(facets.source)
     && value.targets.every(isTargetRecord)
-    && value.drift.every(item => isRecord(item) && typeof item.class === 'string')
-    && value.limitations.every(item => isRecord(item) && typeof item.code === 'string')
-    && value.availableActions.every(item => typeof item === 'string')
+    && isPlacementFacetRecord(facets.placement)
+    && value.drift.every(isDriftItemRecord)
+    && value.limitations.every(item => (
+      isRecord(item)
+      && typeof item.code === 'string'
+      && typeof item.message === 'string'
+      && Object.hasOwn(item, 'evidence')
+    ))
+    && value.availableActions.every(item => typeof item === 'string' && AVAILABLE_ACTIONS.has(item))
     && isArtifactFacetRecord(facets.artifact)
     && isSettledRolloutRecord(facets.rollout, value.rolloutGenerationId);
 }
