@@ -835,6 +835,7 @@ describe('evaluateCandidatePolicy', () => {
     if (result.status === 'unavailable') {
       expect(result.reason).toBeTruthy();
     }
+    expect(dbStub.insertAuditLog).not.toHaveBeenCalled();
   });
 
   it('reports blocked when a scanned image exceeds the policy severity', async () => {
@@ -848,6 +849,7 @@ describe('evaluateCandidatePolicy', () => {
     if (result.status === 'blocked') {
       expect(result.violations).toHaveLength(1);
     }
+    expect(dbStub.insertAuditLog).not.toHaveBeenCalled();
   });
 
   it('reports allowed on an authorized bypass', async () => {

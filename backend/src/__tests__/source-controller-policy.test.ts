@@ -525,12 +525,18 @@ describe('SourceController automatic acceptance', () => {
         controller.start();
         await advanceOneTick();
 
-        // Acceptance moves the application pointer only. The generation row
-        // is immutable candidate-time evidence: rewriting it to record the
-        // acceptance verdict would break that contract, so the verdict lives
-        // in the audit history instead and the row is left exactly as
-        // inserted.
-        expect(getApp('app-evidence').accepted_generation_id).toBe('gen-evidence');
+        // Acceptance records `configured_policy` authority without policy
+        // provenance and leaves the immutable generation row untouched.
+        const accepted = getApp('app-evidence');
+        expect(accepted.source_acceptance_ref).toBeTruthy();
+        const acceptance = GitOpsStore.getInstance().getApproval(accepted.source_acceptance_ref!);
+        expect(accepted.accepted_generation_id).toBe('gen-evidence');
+        expect(acceptance).toMatchObject({
+            kind: 'source_acceptance',
+            authority: 'configured_policy',
+            generation_id: 'gen-evidence',
+            policy_provenance_json: null,
+        });
         expect(GitOpsStore.getInstance().getGeneration('gen-evidence')).toEqual(before);
     });
 
