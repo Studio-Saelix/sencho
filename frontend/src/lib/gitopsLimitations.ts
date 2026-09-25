@@ -36,7 +36,7 @@ import type { GitOpsLimitation } from '@/types/gitops';
  * every miss as a `string` and make the fallback below look like dead code to
  * anything that trusts the types.
  */
-export const GITOPS_LIMITATION_COPY: Record<string, string | undefined> = {
+export const GITOPS_LIMITATION_COPY: Readonly<Record<string, string | undefined>> = {
   // --- derived while projecting -------------------------------------------
   repo_identity_invalid:
     'The stored repository identity could not be read, so this state cannot be tied back to a specific repository.',
@@ -98,8 +98,10 @@ export const GITOPS_LIMITATION_COPY: Record<string, string | undefined> = {
  * outcome this affordance exists to prevent.
  */
 export function limitationCaveat(limitation: GitOpsLimitation): string {
-  return GITOPS_LIMITATION_COPY[limitation.code]
-    ?? `Part of this state could not be proven (${limitation.code}).`;
+  const known = Object.hasOwn(GITOPS_LIMITATION_COPY, limitation.code)
+    ? GITOPS_LIMITATION_COPY[limitation.code]
+    : undefined;
+  return known ?? `Part of this state could not be proven (${limitation.code}).`;
 }
 
 /**

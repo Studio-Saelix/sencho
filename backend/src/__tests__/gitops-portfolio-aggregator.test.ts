@@ -73,7 +73,7 @@ function createBlueprintApplication(id: string, blueprintId: number): void {
 function remoteSourceRow(
   applicationId: string,
   stackName: string,
-  revision: GitOpsRevisionProjection,
+  revision: unknown,
   stackResourcePresent = true,
 ): unknown[] {
   return [{
@@ -108,7 +108,9 @@ function remoteSourceRow(
   }];
 }
 
-function remoteProjection(applicationId: string, stackName: string): GitOpsRevisionProjection {
+type RemoteProjectionFixture = Omit<Extract<GitOpsRevisionProjection, { applicationId: string }>, 'targets'> & { targets: unknown[] };
+
+function remoteProjection(applicationId: string, stackName: string): RemoteProjectionFixture {
   return {
     schemaVersion: 1,
     targetMode: 'direct',
@@ -240,6 +242,32 @@ describe('aggregateGitOpsPortfolio', () => {
     expect(coverage.find(candidate => candidate.nodeId === remoteId)?.state).toBe('ok');
   });
 
+  it('keeps a malformed remote application addressable instead of relabeling it as legacy', async () => {
+    const db = DatabaseService.getInstance();
+    const localNodeId = db.getNodes()[0]!.id;
+    const remoteId = db.addNode({
+      name: 'port-remote-evidence-gap',
+      type: 'remote',
+      api_url: 'http://127.0.0.1:29995',
+      api_token: 'tok',
+      compose_dir: '/app/compose',
+      is_default: false,
+    });
+
+    const { rows } = await aggregateGitOpsPortfolio(adminReq(localNodeId), {
+      fetchRows: async (nodeId: number) => nodeId === remoteId ? [{
+        stack_name: 'remote-gap',
+        stackResourcePresent: true,
+        gitopsRevision: { applicationId: 'app-evidence-gap', targetMode: 'direct' },
+      }] : null,
+    });
+
+    const row = rows.find(candidate => candidate.id === `${remoteId}:app-evidence-gap`);
+    expect(row).toBeDefined();
+    expect(row!.evidence).toEqual({ partial: true, unreachableNodes: [], unknown: true });
+    expect(row!.limitations).toContain('evidence_unavailable');
+  });
+
   it('keeps failures inside the merge cap, dropping settled rows first', async () => {
     const db = DatabaseService.getInstance();
     const localNodeId = db.getNodes()[0]!.id;
@@ -324,21 +352,47 @@ describe('aggregateGitOpsPortfolio', () => {
       is_default: false,
     });
 
-    const newer = remoteProjection('app-remote-new', 'new-stack') as unknown as Record<string, unknown>;
-    (newer.targets as unknown[]).push({
+    const newer = remoteProjection('app-remote-new', 'new-stack');
+    newer.targets.push({
       nodeId: 1,
       stackName: 'new-stack',
-      connectivity: 'reachable',
+      desiredGenerationId: null,
+      candidateGenerationId: null,
+      appliedGenerationId: null,
+      deployedGenerationId: null,
+      healthyGenerationId: null,
+      lkgGenerationId: null,
+      lkgArtifactSetId: null,
+      lkgUnavailableAt: null,
+      lkgUnavailableReason: null,
+      expectedArtifactSetId: null,
+      latestArtifactSetId: null,
+      artifact: { status: 'not_applicable' },
+      observedArtifactIdentity: { kind: 'unknown' },
+      intentRevisionId: null,
+      rolloutCandidateId: null,
+      rolloutGenerationId: null,
+      approvals: {
+        sourceAcceptanceRef: null,
+        placementApprovalRef: null,
+        rolloutAuthorizationRef: null,
+        legacyCombinedApprovalRef: null,
+      },
+      connectivity: 'from_a_newer_node',
+      legacyAppliedRevision: null,
       runtime: { status: 'brand_new_status' },
-      health: { status: 'passed' },
+      health: { status: 'passed', runId: 'health-1', deployedGenerationId: 'gen-1' },
+      lkg: { status: 'none' },
+      tombstoned: false,
     });
     const { rows } = await aggregateGitOpsPortfolio(adminReq(localNodeId), {
       fetchRows: async (nodeId: number) =>
-        nodeId === remoteId ? remoteSourceRow('app-remote-new', 'new-stack', newer as unknown as GitOpsRevisionProjection) : null,
+        nodeId === remoteId ? remoteSourceRow('app-remote-new', 'new-stack', newer) : null,
     });
     const row = rows.find(candidate => candidate.id === `${remoteId}:app-remote-new`);
     expect(row).toBeDefined();
     expect(row!.runtimeStatus).toBe('brand_new_status');
+    expect(row!.targets[0].evidence).toBe('unknown');
     expect(row!.evidence.unknown).toBe(true);
     // A status this build does not know cannot accidentally count as a known
     // bad or good one for the page's sort order.
@@ -390,11 +444,12 @@ describe('aggregateGitOpsPortfolio', () => {
 
 describe('postureOf', () => {
   type LiveFacets = Extract<GitOpsRevisionProjection, { applicationId: string }>['facets'];
+  type LiveProjection = Extract<GitOpsRevisionProjection, { applicationId: string }>;
   function baseFixture(overrides?: {
     source?: LiveFacets['source'];
     rollout?: LiveFacets['rollout'];
     artifact?: ArtifactFacet;
-  }): GitOpsRevisionProjection {
+  }): LiveProjection {
     return {
       schemaVersion: 1,
       targetMode: 'direct',
@@ -431,13 +486,111 @@ describe('postureOf', () => {
     };
   }
 
+  function settledFixture(rollout: LiveFacets['rollout']): LiveProjection {
+    const base = baseFixture({ rollout });
+    const exact = rollout.status === 'exactly_converged_healthy';
+    // One facet, shared: a target reporting a different status than the
+    // application is exactly the disagreement this fixture must not be able to
+    // express.
+    const artifact: ArtifactFacet = {
+      status: exact ? 'artifact_exact' : 'artifact_qualified',
+      artifactSetId: 'artifact-1',
+      generationId: 'gen-1',
+      evidenceVersion: 1,
+      qualification: exact ? 'exact' : 'qualified',
+      freshnessAt: 1,
+      expected: null,
+      latestEvidence: {
+        artifactSetId: 'artifact-1',
+        evidenceVersion: 1,
+        qualification: exact ? 'exact' : 'qualified',
+        identity: 'sha256:artifact',
+      },
+    };
+    return {
+      ...base,
+      targetMode: 'blueprint',
+      blueprintId: 1,
+      stackName: null,
+      rolloutGenerationId: 'rg-1',
+      facets: {
+        ...base.facets,
+        artifact,
+        placement: { status: 'blueprint_bound', completion: 'unknown' },
+      },
+      targets: [{
+        nodeId: 1,
+        stackName: 'p-web',
+        desiredGenerationId: 'gen-1',
+        candidateGenerationId: null,
+        appliedGenerationId: 'gen-1',
+        deployedGenerationId: 'gen-1',
+        healthyGenerationId: 'gen-1',
+        lkgGenerationId: null,
+        lkgArtifactSetId: null,
+        lkgUnavailableAt: null,
+        lkgUnavailableReason: null,
+        expectedArtifactSetId: 'artifact-1',
+        latestArtifactSetId: 'artifact-1',
+        artifact,
+        observedArtifactIdentity: {
+          kind: exact ? 'exact' : 'qualified',
+          identity: 'sha256:artifact',
+          observedAt: 1,
+        },
+        intentRevisionId: 'intent-1',
+        rolloutCandidateId: 'candidate-1',
+        rolloutGenerationId: 'rg-1',
+        approvals: {
+          sourceAcceptanceRef: null,
+          placementApprovalRef: 'placement-1',
+          rolloutAuthorizationRef: 'rollout-1',
+          legacyCombinedApprovalRef: null,
+        },
+        connectivity: 'reachable',
+        legacyAppliedRevision: null,
+        runtime: { status: 'synced_and_healthy' },
+        health: { status: 'passed', runId: 'health-1', deployedGenerationId: 'gen-1' },
+        lkg: { status: 'none' },
+        tombstoned: false,
+      }],
+    };
+  }
+
   it('claims exact convergence only from the rollout proof', () => {
-    const projection = baseFixture({ rollout: { status: 'exactly_converged_healthy', rolloutGenerationId: 'rg-1' } });
+    const projection = settledFixture({ status: 'exactly_converged_healthy', rolloutGenerationId: 'rg-1' });
     expect(postureOf(projection)).toBe('converged');
   });
 
   it('keeps qualified convergence distinct from exact convergence', () => {
-    const projection = baseFixture({ rollout: { status: 'configuration_converged_artifact_qualified', rolloutGenerationId: 'rg-1' } });
+    const projection = settledFixture({ status: 'configuration_converged_artifact_qualified', rolloutGenerationId: 'rg-1' });
+    expect(postureOf(projection)).toBe('converged_qualified');
+  });
+
+  it('does not claim convergence when a target reports another rollout generation', () => {
+    const projection = settledFixture({ status: 'exactly_converged_healthy', rolloutGenerationId: 'rg-1' });
+    projection.targets[0].rolloutGenerationId = 'rg-other';
+    expect(postureOf(projection)).toBe('unknown');
+  });
+
+  it('ignores retired targets when proving convergence', () => {
+    const projection = settledFixture({ status: 'exactly_converged_healthy', rolloutGenerationId: 'rg-1' });
+    projection.targets.push({ ...projection.targets[0], nodeId: 2, tombstoned: true });
+    expect(postureOf(projection)).toBe('converged');
+  });
+
+  it('allows a health-gate-disabled target to keep a stale healthy pointer', () => {
+    const projection = settledFixture({ status: 'exactly_converged_healthy', rolloutGenerationId: 'rg-1' });
+    projection.targets[0].health = { status: 'not_applicable' };
+    projection.targets[0].healthyGenerationId = 'gen-old';
+    expect(postureOf(projection)).toBe('converged');
+  });
+
+  it('accepts an exact observation for a qualified artifact claim', () => {
+    const projection = settledFixture({ status: 'configuration_converged_artifact_qualified', rolloutGenerationId: 'rg-1' });
+    expect(projection.facets.artifact.status).toBe('artifact_qualified');
+    expect(projection.targets[0].observedArtifactIdentity.kind).toBe('qualified');
+    projection.targets[0].observedArtifactIdentity = { kind: 'exact', identity: 'sha256:artifact', observedAt: 1 };
     expect(postureOf(projection)).toBe('converged_qualified');
   });
 
@@ -465,6 +618,129 @@ describe('postureOf', () => {
     const projection = baseFixture({
       artifact: { status: 'artifact_future_unknown' } as unknown as ArtifactFacet,
     });
+    expect(postureOf(projection)).toBe('unknown');
+  });
+
+  it('never claims convergence from a known artifact status carrying an unknown qualification', () => {
+    const projection = settledFixture({ status: 'exactly_converged_healthy', rolloutGenerationId: 'rg-1' });
+    const artifact = projection.facets.artifact as unknown as Record<string, unknown>;
+    artifact.qualification = 'future_qualification';
+    expect(postureOf(projection)).toBe('unknown');
+  });
+
+  it.each([
+    ['the application expected artifact', (projection: LiveProjection) => {
+      const artifact = projection.facets.artifact as unknown as { expected: Record<string, unknown> | null };
+      artifact.expected = { artifactSetId: 'artifact-1', evidenceVersion: 1, qualification: 'future_qualification', identity: 'sha256:artifact' };
+    }],
+    ['the target expected artifact', (projection: LiveProjection) => {
+      const artifact = projection.targets[0].artifact as unknown as { expected: Record<string, unknown> | null };
+      artifact.expected = { artifactSetId: 'artifact-1', evidenceVersion: 1, qualification: 'future_qualification', identity: 'sha256:artifact' };
+    }],
+  ])('never claims convergence from a future qualification in %s', (_label, mutate) => {
+    const projection = settledFixture({ status: 'exactly_converged_healthy', rolloutGenerationId: 'rg-1' });
+    mutate(projection);
+    expect(postureOf(projection)).toBe('unknown');
+  });
+
+  it('never claims convergence from a blank rollout generation', () => {
+    const projection = settledFixture({ status: 'exactly_converged_healthy', rolloutGenerationId: 'rg-1' });
+    projection.rolloutGenerationId = '';
+    projection.facets.rollout = { status: 'exactly_converged_healthy', rolloutGenerationId: '' } as typeof projection.facets.rollout;
+    projection.targets[0].rolloutGenerationId = '';
+    expect(postureOf(projection)).toBe('unknown');
+  });
+
+  it('never claims convergence for an inline Blueprint, which has no rollout facet of its own', () => {
+    const projection = settledFixture({ status: 'exactly_converged_healthy', rolloutGenerationId: 'rg-1' });
+    projection.targetMode = 'inline_blueprint';
+    expect(postureOf(projection)).toBe('unknown');
+  });
+
+  function directSettledFixture(artifactStatus: 'artifact_exact' | 'artifact_qualified'): LiveProjection {
+    const base = baseFixture();
+    const qualification = artifactStatus === 'artifact_exact' ? 'exact' as const : 'qualified' as const;
+    const artifact: ArtifactFacet = {
+      status: artifactStatus,
+      artifactSetId: 'artifact-1',
+      generationId: 'gen-1',
+      evidenceVersion: 1,
+      qualification,
+      freshnessAt: 1,
+      expected: null,
+      latestEvidence: {
+        artifactSetId: 'artifact-1',
+        evidenceVersion: 1,
+        qualification,
+        identity: 'sha256:artifact',
+      },
+    };
+    const target: LiveProjection['targets'][number] = {
+      nodeId: 1,
+      stackName: 'p-web',
+      desiredGenerationId: 'gen-1',
+      candidateGenerationId: null,
+      appliedGenerationId: 'gen-1',
+      deployedGenerationId: 'gen-1',
+      healthyGenerationId: 'gen-1',
+      lkgGenerationId: null,
+      lkgArtifactSetId: null,
+      lkgUnavailableAt: null,
+      lkgUnavailableReason: null,
+      expectedArtifactSetId: 'artifact-1',
+      latestArtifactSetId: 'artifact-1',
+      artifact,
+      observedArtifactIdentity: { kind: 'exact' as const, identity: 'sha256:artifact', observedAt: 1 },
+      intentRevisionId: 'intent-1',
+      rolloutCandidateId: null,
+      rolloutGenerationId: null,
+      approvals: base.approvals,
+      connectivity: 'reachable' as const,
+      legacyAppliedRevision: null,
+      runtime: { status: 'synced_and_healthy' as const },
+      health: { status: 'passed' as const, runId: 'health-1', deployedGenerationId: 'gen-1' },
+      lkg: { status: 'none' as const },
+      tombstoned: false,
+    };
+    return {
+      ...base,
+      facets: {
+        ...base.facets,
+        source: { ...(base.facets.source as Extract<LiveFacets['source'], { status: 'source_poll_scheduled' }>), status: 'source_poll_scheduled', acceptedGenerationId: 'gen-1' },
+        artifact,
+      },
+      targets: [target],
+    };
+  }
+
+  it('claims a settled Direct application converged from its own target evidence', () => {
+    expect(postureOf(directSettledFixture('artifact_exact'))).toBe('converged');
+    expect(postureOf(directSettledFixture('artifact_qualified'))).toBe('converged_qualified');
+  });
+
+  it('never reads a Direct application with an unreachable target as converged', () => {
+    const projection = directSettledFixture('artifact_exact');
+    projection.targets[0].connectivity = 'unreachable';
+    expect(postureOf(projection)).not.toBe('converged');
+    expect(postureOf(projection)).not.toBe('converged_qualified');
+  });
+
+  it.each([
+    ['an unknown target artifact status', (projection: LiveProjection) => {
+      projection.targets[0].artifact = { status: 'artifact_future_verdict' } as unknown as ArtifactFacet;
+    }],
+    ['an unknown LKG status', (projection: LiveProjection) => {
+      projection.targets[0].lkg = { status: 'future_lkg' } as unknown as LiveProjection['targets'][number]['lkg'];
+    }],
+    ['an unknown observed artifact kind', (projection: LiveProjection) => {
+      projection.targets[0].observedArtifactIdentity = { kind: 'future_kind', identity: 'sha256:artifact', observedAt: 1 } as unknown as LiveProjection['targets'][number]['observedArtifactIdentity'];
+    }],
+    ['an unknown connectivity', (projection: LiveProjection) => {
+      projection.targets[0].connectivity = 'future' as 'reachable';
+    }],
+  ])('reports %s as unknown evidence rather than convergence', (_label, mutate) => {
+    const projection = directSettledFixture('artifact_exact');
+    mutate(projection);
     expect(postureOf(projection)).toBe('unknown');
   });
 

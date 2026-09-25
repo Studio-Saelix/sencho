@@ -87,7 +87,7 @@ export type GitOpsPortfolioRow = {
   name: string;
   stackName: string | null;
   blueprintId: number | null;
-  /** Owning node for Direct applications; null on Blueprint applications. */
+  /** Owning node for Direct and remote Blueprint applications; null on hub-local Blueprints. */
   nodeId: number | null;
   nodeName: string | null;
   repository: GitOpsPortfolioRepository | null;

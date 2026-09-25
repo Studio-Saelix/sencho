@@ -189,6 +189,13 @@ describe('GET /api/gitops/applications', () => {
     expect((partial.body as GitOpsPortfolioResponse).applications).toEqual([]);
   });
 
+  it.each(['nodeId=0', 'nodeId=-1', 'blueprintId=0', 'blueprintId=-1'])('rejects non-positive %s filters', async (filter) => {
+    const res = await request(app)
+      .get(`/api/gitops/applications?${filter}`)
+      .set('Cookie', adminCookie);
+    expect(res.status).toBe(400);
+  });
+
   it('rejects unknown filter values instead of answering with a superset', async () => {
     const res = await request(app)
       .get('/api/gitops/applications?mode=cryptic')

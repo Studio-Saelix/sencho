@@ -623,14 +623,21 @@ export const RUNTIME_STATE: Record<GitOpsRuntimeStatus, GitOpsStateMeta> = {
  * makes the miss a fact TypeScript produces, so the guard on it cannot be
  * mistaken for dead code and deleted.
  *
- * Same objects, no copy, no cast: a total record over string-literal keys is
- * assignable to a partial record over `string`.
+ * Each map loses its prototype, so an inherited key such as `toString` reads
+ * as a miss here rather than resolving to a function the caller would treat as
+ * metadata. The maps are module-local and read-only to every consumer, so
+ * mutating them once at construction is safe.
  */
-export const SOURCE_STATE_LOOKUP: Partial<Record<string, GitOpsStateMeta>> = SOURCE_STATE;
-export const ARTIFACT_STATE_LOOKUP: Partial<Record<string, GitOpsStateMeta>> = ARTIFACT_STATE;
-export const PLACEMENT_STATE_LOOKUP: Partial<Record<string, GitOpsStateMeta>> = PLACEMENT_STATE;
-export const ROLLOUT_STATE_LOOKUP: Partial<Record<string, GitOpsStateMeta>> = ROLLOUT_STATE;
-export const RUNTIME_STATE_LOOKUP: Partial<Record<string, GitOpsStateMeta>> = RUNTIME_STATE;
+function stateLookup<T extends Record<string, GitOpsStateMeta>>(states: T): Readonly<Partial<Record<string, GitOpsStateMeta>>> {
+  Object.setPrototypeOf(states, null);
+  return states;
+}
+
+export const SOURCE_STATE_LOOKUP = stateLookup(SOURCE_STATE);
+export const ARTIFACT_STATE_LOOKUP = stateLookup(ARTIFACT_STATE);
+export const PLACEMENT_STATE_LOOKUP = stateLookup(PLACEMENT_STATE);
+export const ROLLOUT_STATE_LOOKUP = stateLookup(ROLLOUT_STATE);
+export const RUNTIME_STATE_LOOKUP = stateLookup(RUNTIME_STATE);
 
 /** Card copy for a placement facet. Preflight blocked uses the redacted server reason as the line. */
 export function placementStateMeta(facet: PlacementFacet): GitOpsStateMeta | undefined {
@@ -762,7 +769,7 @@ export function liveCaveats(revision: GitOpsRevisionProjection): readonly GitOps
  * string because the classes arrive over the wire: a class this build does not
  * know is shown as itself rather than hidden.
  */
-const DRIFT_CLASS_LABELS: Record<string, string> = {
+const DRIFT_CLASS_LABELS: Readonly<Record<string, string>> = {
   source: 'source',
   managed_project: 'managed project',
   invocation: 'invocation',
@@ -773,7 +780,7 @@ const DRIFT_CLASS_LABELS: Record<string, string> = {
 };
 
 export function driftClassLabel(className: string): string {
-  return DRIFT_CLASS_LABELS[className] ?? className;
+  return Object.hasOwn(DRIFT_CLASS_LABELS, className) ? DRIFT_CLASS_LABELS[className] : className;
 }
 
 /** One short line naming what an identity reference points at, for a drift comparison row. */

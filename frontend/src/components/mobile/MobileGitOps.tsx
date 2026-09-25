@@ -1,7 +1,7 @@
 import { ChevronLeft, ChevronRight, RefreshCw, Search, X } from 'lucide-react';
 import { useEffect, useState, type ReactNode } from 'react';
 import { Masthead, SectionHead, StateDot } from '@/components/mobile/mobile-ui';
-import { attentionLabel, PORTFOLIO_EMPTY_COPY, portfolioMastheadState, POSTURE_TONE_CLASS } from '@/lib/gitopsPortfolio';
+import { attentionLabel, hasKnownPosture, PORTFOLIO_EMPTY_COPY, portfolioMastheadState, POSTURE_TONE_CLASS } from '@/lib/gitopsPortfolio';
 import { cn } from '@/lib/utils';
 import { formatRelativeTime } from '@/lib/utils';
 import type { GitOpsPortfolioRow } from '@/types/gitopsPortfolio';
@@ -28,9 +28,12 @@ export function MobileGitOps({ headerActions }: { headerActions?: ReactNode }) {
   const portfolio = useGitOpsPortfolio();
   const { data, loading, error, staleSince } = portfolio;
   const selectedApplication = useGitOpsApplicationSelection();
+  // Rows the merge cap dropped and nodes that failed to answer are the same
+  // fact to an operator: this list does not show everything.
+  const coveragePartial = data?.truncated === true || data?.coverage.some(entry => entry.state !== 'ok') === true;
 
   const masthead = data
-    ? portfolioMastheadState(data.summary, data.coverage.some(entry => entry.state !== 'ok'))
+    ? portfolioMastheadState(data.summary, coveragePartial)
     : { state: 'Loading', tone: 'idle' as const };
   // The mobile Tone set has no neutral: an unproven portfolio reads as brand
   // (data color, no urgency claim), which is also what the schedules masthead
@@ -42,7 +45,7 @@ export function MobileGitOps({ headerActions }: { headerActions?: ReactNode }) {
   const meta = data
     ? `${data.summary.applications} apps · ${data.summary.attentionRequired} attention${
         staleSince ? ' · stale' : ''}${
-        data.coverage.some(entry => entry.state !== 'ok') ? ' · partial' : ''}`
+        coveragePartial ? ' · partial' : ''}`
     : '';
 
   const filters = portfolio.filters;
@@ -228,7 +231,7 @@ export function MobileGitOps({ headerActions }: { headerActions?: ReactNode }) {
 }
 
 function MobileGitOpsRow({ row }: { row: GitOpsPortfolioRow }) {
-  const postureTone = {
+  const postureTone: Readonly<Record<string, 'destructive' | 'warning' | 'brand' | 'success'>> = {
     failed: 'destructive',
     attention: 'warning',
     in_progress: 'brand',
@@ -244,8 +247,8 @@ function MobileGitOpsRow({ row }: { row: GitOpsPortfolioRow }) {
         className="block w-full min-h-11 px-3 py-2.5 text-left"
       >
         <span className="flex items-center gap-2">
-          {row.posture === 'unknown'
-            ? <span className="inline-block h-[7px] w-[7px] shrink-0 rounded-full bg-stat-icon" />
+          {row.posture === 'unknown' || !hasKnownPosture(row.posture)
+            ? <span aria-label={`Unrecognized posture ${row.posture}`} className="inline-block h-[7px] w-[7px] shrink-0 rounded-full bg-stat-icon" />
             : <StateDot tone={postureTone[row.posture]} size={7} glow={row.posture === 'failed'} />}
           <span className="min-w-0 flex-1">
             <span className="block truncate font-mono text-[13px] text-stat-value">{row.name}</span>

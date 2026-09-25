@@ -155,6 +155,13 @@ describe('GitOpsRolloutControls', () => {
     expect(toast.success).toHaveBeenCalledWith('Placement review reopened');
   });
 
+  it('does not offer replan for an unknown placement state', () => {
+    const projection = blueprintRevision({ status: 'not_applicable' });
+    projection.facets.placement = JSON.parse('{"status":"from_a_newer_node"}') as typeof projection.facets.placement;
+    renderControls(projection);
+    expect(screen.queryByTestId('gitops-action-replan')).toBeNull();
+  });
+
   it('supersedes the live rollout through its destructive confirmation', async () => {
     const user = userEvent.setup();
     const onChanged = vi.fn();
@@ -200,6 +207,21 @@ describe('GitOpsRolloutControls', () => {
     expect(onChanged).toHaveBeenCalled();
   });
 
+  it.each([
+    ['a rollback already running', 'rollback_in_progress', false],
+    ['a partially failed rollback', 'rollback_partial_failed', true],
+    ['a target that is unreachable', 'target_unreachable', true],
+  ])('offers rollback for %s', (_label, status, expected) => {
+    renderControls(
+      blueprintRevision({ status: status as never, rolloutGenerationId: 'rgen-1' }),
+      () => true,
+      true,
+      () => {},
+      [{ generationId: 'gen-lkg' }],
+    );
+    expect(screen.queryByTestId('gitops-action-rollback') !== null).toBe(expected);
+  });
+
   it('reports a partial rollback failure truthfully', async () => {
     const user = userEvent.setup();
     vi.mocked(rollbackGitOpsRollout).mockResolvedValue({
@@ -231,13 +253,13 @@ describe('GitOpsRolloutControls', () => {
       blueprintRevision(
         { status: 'rollout_queued', rolloutGenerationId: 'rgen-1' },
         [target({
-          runtime: {
-            status: 'recovery_failed',
-            recoveryRef: 'rec-1',
-            recoveryGenerationId: 'gen-lkg',
-            failureClass: 'partial',
-            failureAt: 1,
-          },
+           runtime: {
+             status: 'recovery_failed',
+             recoveryRef: 'rec-1',
+             recoveryGenerationId: 'gen-lkg',
+             failureClass: 'partial',
+             failureAt: 1,
+           },
         })],
       ),
       () => true,

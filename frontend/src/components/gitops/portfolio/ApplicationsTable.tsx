@@ -12,7 +12,7 @@ import {
   type GitOpsStateMeta,
   type GitOpsTone,
 } from '@/lib/gitopsState';
-import { attentionLabel, PORTFOLIO_EMPTY_COPY, POSTURE_TONE_CLASS } from '@/lib/gitopsPortfolio';
+import { attentionLabel, hasKnownPosture, PORTFOLIO_EMPTY_COPY, POSTURE_TONE_CLASS } from '@/lib/gitopsPortfolio';
 import { cn, formatRelativeTime } from '@/lib/utils';
 import type { GitOpsPortfolioRow } from '@/types/gitopsPortfolio';
 import { openPortfolioApplication, portfolioRowActions } from './portfolioNavigation';
@@ -173,7 +173,7 @@ function ApplicationRow({ row, onOpen, canOpenFleet }: { row: GitOpsPortfolioRow
             row.posture === 'in_progress' && 'bg-brand',
             row.posture === 'converged' && 'bg-success',
             row.posture === 'converged_qualified' && 'bg-success/70',
-            row.posture === 'unknown' && 'bg-stat-icon',
+             !hasKnownPosture(row.posture) && 'bg-stat-icon',
           )}
         />
       </TableCell>
