@@ -25,6 +25,8 @@ import {
     throwRegistryDeliveryRefusal,
 } from '../helpers/registryDeliveryOutbound';
 import { getRegistryDeliveryLockContext } from '../helpers/registryDeliveryContext';
+import { probeRemoteCapability } from '../helpers/remoteCapabilities';
+import { BLUEPRINT_DIGEST_PINS_V1_CAPABILITY } from './CapabilityRegistry';
 import { enforcePolicyForImageRefs } from './PolicyEnforcement';
 import { BlueprintAnalyzer } from './BlueprintAnalyzer';
 import { sanitizeForLog } from '../utils/safeLog';
@@ -373,6 +375,36 @@ export class BlueprintService {
         }
     }
 
+    /**
+     * Refuses a digest-pinned remote apply unless the leaf advertises digestPins
+     * support. A leaf that predates the field drops it and redeploys by tag,
+     * which re-pulls the drifted image the pin exists to keep out, so the
+     * repair must fail rather than quietly lose its pin. An unreachable probe
+     * fails closed for the same reason.
+     */
+    private async assertRemoteSupportsDigestPins(node: Node): Promise<void> {
+        const probe = await probeRemoteCapability(node.id, BLUEPRINT_DIGEST_PINS_V1_CAPABILITY);
+        if (probe.kind === 'supported') return;
+        if (probe.kind === 'unsupported') {
+            console.warn(
+                '[BlueprintService] Refusing digest-pinned apply on node %s: it does not advertise %s',
+                sanitizeForLog(node.name),
+                BLUEPRINT_DIGEST_PINS_V1_CAPABILITY,
+            );
+            throw new BlueprintRemoteUpgradeRequiredError(
+                `Remote node "${node.name}" does not support digest-pinned blueprint apply. Upgrade that Sencho instance, then retry.`,
+            );
+        }
+        console.warn(
+            '[BlueprintService] Could not verify digest-pinned apply support on node %s (probe: %s); refusing to redeploy by tag',
+            sanitizeForLog(node.name),
+            sanitizeForLog(probe.detail),
+        );
+        throw new Error(
+            `Could not confirm that remote node "${node.name}" supports digest-pinned blueprint apply, so the repair was not sent. Check that node is online, then retry.`,
+        );
+    }
+
     private async deployRemoteMaterialization(
         blueprint: Blueprint,
         node: Node,
@@ -393,6 +425,7 @@ export class BlueprintService {
             allowGitManagedContent: true,
         };
         if (digestPins) {
+            await this.assertRemoteSupportsDigestPins(node);
             applyBody.digestPins = digestPins;
         }
         if (captureRecovery) {
