@@ -10297,10 +10297,10 @@ describe('GitSourceService pending blob decode branches', () => {
     type DecodeApi = {
         crypto: { encrypt(s: string): string; decrypt(s: string): string };
         encodePendingCompose(files: { path: string; content: string }[], ctx: string | null, cand: string | null, inv: unknown): string;
-        decodePendingCompose(s: string): { files: { path: string; content: string }[]; contextDir: string | null; candidateRelPath: string | null; inventory: unknown };
+        decodePendingCompose(s: string): { version: 2 | 3 | 4 | 'plaintext'; files: { path: string; content: string }[]; contextDir: string | null; candidateRelPath: string | null; inventory: unknown };
     };
 
-    it('round-trips the v3 blob with candidate path and inventory', () => {
+    it('decodes a v3 blob with candidate path and inventory', () => {
         const s = svc() as unknown as DecodeApi;
         const encoded = s.crypto.encrypt(JSON.stringify({
             v: 3,
@@ -10310,6 +10310,7 @@ describe('GitSourceService pending blob decode branches', () => {
             inventory: { inputs: [], refusals: [], buildContexts: [] },
         }));
         const decoded = s.decodePendingCompose(encoded);
+        expect(decoded.version).toBe(3);
         expect(decoded.candidateRelPath).toBe('generations/candidate-abc');
         expect(decoded.files[0].content).toBe('x');
         expect(decoded.inventory).toEqual({ inputs: [], refusals: [], buildContexts: [] });
