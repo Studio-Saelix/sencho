@@ -10296,7 +10296,6 @@ describe('GitSourceService pending blob decode branches', () => {
     function svc(): unknown { return GitSourceService.getInstance(); }
     type DecodeApi = {
         crypto: { encrypt(s: string): string; decrypt(s: string): string };
-        encodePendingCompose(files: { path: string; content: string }[], ctx: string | null, cand: string | null, inv: unknown): string;
         decodePendingCompose(s: string): { version: 2 | 3 | 4 | 'plaintext'; files: { path: string; content: string }[]; contextDir: string | null; candidateRelPath: string | null; inventory: unknown };
     };
 
@@ -10324,7 +10323,7 @@ describe('GitSourceService pending blob decode branches', () => {
         expect(decoded.files[0].content).toBe('y');
     });
 
-    it('falls back to legacy plaintext for unknown shapes', () => {
+    it('falls back to legacy plaintext when the blob has no version marker', () => {
         const s = svc() as unknown as DecodeApi;
         const decoded = s.decodePendingCompose(s.crypto.encrypt('legacy content'));
         expect(decoded.files).toEqual([{ path: 'compose.yaml', content: 'legacy content' }]);
