@@ -750,7 +750,8 @@ export async function aggregateGitOpsPortfolio(req: Request, options: AggregateO
   // The local node is listed first so the workplace's node dimension always
   // includes the hub itself, even on a fleet of one.
   coverage.push({ nodeId: localNodeId, nodeName: nodeNames.get(localNodeId) ?? null, state: 'ok' });
-  const remoteNodes = nodes.filter(node => node.id !== localNodeId);
+  const probeable = probeableRemoteNodeIds();
+  const remoteNodes = nodes.filter(node => probeable.has(node.id));
   const remoteProbes = new Map<number, { state: GitOpsPortfolioNodeCoverage['state']; rows: unknown[] | null }>();
   await Promise.all(remoteNodes.map(async node => {
     const nodeLabel = maySeeNodeNames ? node.name ?? null : null;
@@ -794,7 +795,7 @@ export async function aggregateGitOpsPortfolio(req: Request, options: AggregateO
   // targets: `unsupported` means the node responded but this build could not
   // read the payload, which is not the same claim as unreachable, and treating
   // it as unreachable would unsettle every Blueprint on an older node.
-  const silentNodeIds = new Set(
+  const silent = new Set(
     [...remoteProbes.entries()].filter(([, probe]) => probe.state === 'unreachable').map(([id]) => id),
   );
 
@@ -811,7 +812,7 @@ export async function aggregateGitOpsPortfolio(req: Request, options: AggregateO
       if (application.blueprint_id === null) continue;
       const projection = withSilentNodes(
         projectApplication(application.id, healthGateDisabled()),
-        silentNodeIds,
+        silent,
       );
       const blueprint = db.getBlueprint(application.blueprint_id);
       rows.push(rowFromProjection({
@@ -834,12 +835,20 @@ export async function aggregateGitOpsPortfolio(req: Request, options: AggregateO
   }
 
   // Remote Direct applications, from the probe results already collected. Every
-  // node has an entry because each probe leg records one before returning, so
-  // a missing entry would mean a leg that skipped its own bookkeeping.
+  // leg records a result, so a missing one would be a bookkeeping bug rather
+  // than a fleet condition. It is degraded rather than thrown so a single node
+  // can never take down the page, which is the same promise the probe legs
+  // make: unreachable and unsupported are coverage entries, not failures.
   for (const node of remoteNodes) {
     const probe = remoteProbes.get(node.id);
     if (probe === undefined) {
-      throw new Error(`GitOps portfolio: node ${node.id} has no probe result`);
+      console.warn(`[GitOps portfolio] Node ${node.id} produced no probe result; treating it as unsupported`);
+      coverage.push({
+        nodeId: node.id,
+        nodeName: maySeeNodeNames ? node.name ?? null : null,
+        state: 'unsupported',
+      });
+      continue;
     }
     if (probe.state !== 'ok' || probe.rows === null) continue;
     const nodeLabel = maySeeNodeNames ? node.name ?? null : null;
@@ -1353,6 +1362,61 @@ export function legacyPortfolioRow(
 }
 
 /**
+ * The nodes this hub probes for reachability: every registered node except the
+ * hub itself.
+ *
+ * Shared so the portfolio list and the application detail panel probe the same
+ * set and cannot disagree. The hub is excluded because it is never asked over
+ * HTTP about itself, so probing it would answer "no proxy target" and read as
+ * a node that did not answer, withdrawing a settled claim on the single most
+ * common shape there is: a Blueprint applied to the hub it runs on.
+ */
+export function probeableRemoteNodeIds(): Set<number> {
+  const localNodeId = NodeRegistry.getInstance().getDefaultNodeId();
+  return new Set(
+    DatabaseService.getInstance().getNodes()
+      .filter(node => node.id !== localNodeId)
+      .map(node => node.id),
+  );
+}
+
+/**
+ * The nodes in `nodeIds` that did not answer a bounded probe.
+ *
+ * Shared with the application detail route so the portfolio list and the
+ * detail panel cannot disagree about whether a target's node is reachable. A
+ * row that says `target_unreachable` while its own detail panel says
+ * `converged` is the contradictory truth this read model exists to avoid, and
+ * the two surfaces previously reached their answers by different routes.
+ *
+ * Only a node that did not answer counts. `unsupported` means it responded but
+ * this build could not read the payload, which is a different claim and would
+ * unsettle every Blueprint on an older node. The probe is bounded to the given
+ * ids and runs concurrently, so a detail read costs one round trip per target
+ * node and never a fleet sweep.
+ */
+export async function probeSilentNodeIds(
+  nodeIds: readonly number[],
+  fetchRows: (nodeId: number) => Promise<unknown[] | null | 'unsupported'> = fetchRemoteSourceRows,
+): Promise<Set<number>> {
+  const unique = [...new Set(nodeIds)];
+  const outcomes = await Promise.all(unique.map(async (nodeId) => {
+    try {
+      return { nodeId, silent: (await fetchRows(nodeId)) === null };
+    } catch (error) {
+      // A leg that throws is a node this build could not read, not a node that
+      // is down, so it is left out of the silent set rather than guessed at.
+      console.warn(
+        `[GitOps portfolio] Reachability probe for node ${nodeId} failed:`,
+        error instanceof Error ? error.message : error,
+      );
+      return { nodeId, silent: false };
+    }
+  }));
+  return new Set(outcomes.filter(outcome => outcome.silent).map(outcome => outcome.nodeId));
+}
+
+/**
  * Overlay the portfolio's own node probe onto a projection the hub derives
  * locally.
  *
@@ -1366,7 +1430,7 @@ export function legacyPortfolioRow(
  * Tombstoned targets are left alone: they are excluded from the current set
  * anyway, and rewriting them would report a withdrawal as a reachability fact.
  */
-function withSilentNodes(
+export function withSilentNodes(
   projection: GitOpsRevisionProjection,
   silentNodeIds: ReadonlySet<number>,
 ): GitOpsRevisionProjection {

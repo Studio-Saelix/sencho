@@ -17,6 +17,7 @@ import { DatabaseService } from '../services/DatabaseService';
 import { GitOpsStore, emptyTargetRow } from '../services/gitops/store';
 import { GitOpsTransitions, type EventEnvelope } from '../services/gitops/transitions';
 import { directApplicationFixture } from './helpers/gitopsFixtures';
+import { encodeObservedArtifactIdentity } from '../services/gitops/json';
 import type { GitOpsPortfolioResponse } from '../services/gitops/portfolioTypes';
 
 let tmpDir: string;
@@ -368,6 +369,83 @@ describe('GET /api/gitops/applications/:id', () => {
     expect(res.body.application.id).toBe(`${localNodeId}:app-route-local`);
     expect(res.body.projection).toBeDefined();
     expect(res.body.projection.applicationId).toBe('app-route-local');
+  });
+
+  it('agrees with the portfolio row for a Blueprint on the hub itself', async () => {
+    // The hub is never probed about itself, so a probe aimed at it would answer
+    // "no proxy target" and read as a node that did not answer. A single-node
+    // install applying a Blueprint to its own hub is the most common shape
+    // there is, so the list and the detail panel must both leave it alone.
+    const list = await request(app).get('/api/gitops/applications').set('Cookie', adminCookie);
+    const listRow = (list.body as GitOpsPortfolioResponse).applications
+      .find(row => row.id === `bp:${portfolioBlueprintId}`);
+    const detail = await request(app)
+      .get(`/api/gitops/applications/bp:${portfolioBlueprintId}`)
+      .set('Cookie', adminCookie);
+    expect(detail.status).toBe(200);
+
+    expect(listRow?.targets[0]?.nodeId).toBe(localNodeId);
+    expect(listRow?.targets[0]?.connectivity).toBe('reachable');
+    expect(detail.body.application.targets[0]?.connectivity).toBe('reachable');
+    expect(detail.body.application.attention).not.toContain('target_unreachable');
+  });
+
+  it('agrees with the portfolio row about a Blueprint whose node is silent', async () => {
+    const db = DatabaseService.getInstance();
+    // A node nothing is listening on, so the real probe reports it silent.
+    const darkNodeId = db.addNode({
+      name: 'route-dark-node',
+      type: 'remote',
+      api_url: 'http://127.0.0.1:29994',
+      api_token: 'tok',
+      compose_dir: '/app/compose',
+      is_default: false,
+    });
+    const blueprint = db.createBlueprint({
+      name: 'route-dark-blueprint',
+      description: null,
+      compose_content: 'services:\n  app:\n    image: nginx\n',
+      selector: { type: 'nodes', ids: [] },
+      drift_mode: 'observe',
+      classification: 'stateless',
+      classification_reasons: [],
+      enabled: true,
+      created_by: 'tester',
+    });
+    GitOpsStore.getInstance().insertApplication({
+      ...directApplicationFixture('app-route-dark', 'source-route-dark'),
+      lifecycle_key: `blueprint:${blueprint.id}`,
+      target_mode: 'blueprint',
+      stack_name: null,
+      configured_source_stack_name: null,
+      blueprint_id: blueprint.id,
+    });
+    // A recorded observation, so the target's baseline is a reachable claim
+    // that the probe then has to withdraw.
+    GitOpsStore.getInstance().upsertTarget({
+      ...emptyTargetRow('app-route-dark', darkNodeId, 1),
+      observed_artifact_identity_json: encodeObservedArtifactIdentity({
+        kind: 'exact',
+        identity: 'sha256:dark',
+        observedAt: 1,
+      }),
+    });
+
+    const list = await request(app).get('/api/gitops/applications').set('Cookie', adminCookie);
+    const listRow = (list.body as GitOpsPortfolioResponse).applications
+      .find(row => row.id === `bp:${blueprint.id}`);
+    const detail = await request(app)
+      .get(`/api/gitops/applications/bp:${blueprint.id}`)
+      .set('Cookie', adminCookie);
+    expect(detail.status).toBe(200);
+
+    // The list and the detail panel must not disagree. A silent node is
+    // reported as unreachable in both, with the attention reason named in
+    // both, rather than the row claiming a failure its own panel denies.
+    expect(listRow?.targets[0]?.connectivity).toBe('unreachable');
+    expect(detail.body.application.targets[0]?.connectivity).toBe('unreachable');
+    expect(listRow?.attention).toContain('target_unreachable');
+    expect(detail.body.application.attention).toContain('target_unreachable');
   });
 
   it('returns the Blueprint detail for a caller holding the fleet read grant', async () => {

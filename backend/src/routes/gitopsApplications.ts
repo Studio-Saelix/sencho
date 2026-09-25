@@ -61,6 +61,9 @@ import {
   isUsableRevision,
   POSTURE_RANK,
   rowFromProjection,
+  probeableRemoteNodeIds,
+  probeSilentNodeIds,
+  withSilentNodes,
 } from '../services/gitops/portfolioAggregator';
 import { filterRemoteIdentityPayload, rewriteIdentityPayload } from '../proxy/gitopsIdentityProxy';
 import { GitOpsStore } from '../services/gitops/store';
@@ -532,7 +535,28 @@ gitopsApplicationsRouter.get('/:id', async (req: Request, res: Response): Promis
         res.status(404).json({ error: 'Application not found' });
         return;
       }
-      const projection = projectApplication(application.id, healthGateDisabled());
+      // A Blueprint target is projected hub-side, and its recorded observation
+      // is a statement about the last time that node answered. Probing the
+      // remote target nodes here is what keeps this panel in step with the
+      // portfolio row: a node that has gone dark withdraws the settled claim in
+      // both places instead of leaving the row and its own detail in
+      // contradiction.
+      //
+      // Only nodes the portfolio also probes are asked, through the same shared
+      // set, so the two surfaces cannot answer differently about the hub itself
+      // or about a target whose node row is gone. The probe is bounded to this
+      // application's remote targets and runs concurrently, so it costs one
+      // round trip's worst case, bounded by the shared probe timeout, rather
+      // than a fleet sweep.
+      const rawProjection = projectApplication(application.id, healthGateDisabled());
+      const probeable = probeableRemoteNodeIds();
+      const silent = await probeSilentNodeIds(
+        rawProjection.targets
+          .filter(target => !target.tombstoned)
+          .map(target => target.nodeId)
+          .filter(nodeId => probeable.has(nodeId)),
+      );
+      const projection = withSilentNodes(rawProjection, silent);
       const blueprint = db.getBlueprint(application.blueprint_id);
       const lastActivityAt = latestTransitionByApplication(db.getDb(), [application.id]).get(application.id) ?? null;
       const response: GitOpsPortfolioDetailResponse = {
