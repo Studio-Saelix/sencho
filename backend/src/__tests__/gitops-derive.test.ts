@@ -405,6 +405,47 @@ describe('gitops derivation', () => {
     expect(recovery.facets.rollout.status).toBe('not_applicable');
   });
 
+  it('projects connectivity for a Blueprint target from its recorded observation', () => {
+    // Blueprint targets record observations on the reconciler's drift check,
+    // which runs for every active deployment on each tick, so a settled
+    // Blueprint target has real evidence to project from. Asserted against a
+    // real target row rather than a hand-built projection, because the
+    // projection is what has to be right for the portfolio to settle.
+    const application = rawApp('app-bp-observed', {
+      target_mode: 'blueprint',
+      blueprint_id: 93,
+      lifecycle_key: 'blueprint:93',
+      stack_name: null,
+      configured_source_stack_name: null,
+    });
+    const observedRow = (identity: string | null) => ({
+      ...emptyTargetRow(application.id, 1, 1),
+      applied_generation_id: 'gen-1',
+      deployed_generation_id: 'gen-1',
+      observed_artifact_identity_json: identity === null
+        ? null
+        : encodeObservedArtifactIdentity({ kind: 'exact', identity, observedAt: 1 }),
+    });
+
+    const observed = deriveGitOpsRevision({
+      application,
+      targets: [observedRow('sha256:bp')],
+      healthDisabled: true,
+    }, null);
+    if (observed.targetMode === 'not_applicable') throw new Error('expected application');
+    expect(observed.targets[0]?.connectivity).toBe('reachable');
+
+    // The same target with no recorded observation is unknown, which is the
+    // case that must never settle.
+    const unobserved = deriveGitOpsRevision({
+      application,
+      targets: [observedRow(null)],
+      healthDisabled: true,
+    }, null);
+    if (unobserved.targetMode === 'not_applicable') throw new Error('expected application');
+    expect(unobserved.targets[0]?.connectivity).toBe('unknown');
+  });
+
   it('keeps active target connectivity and recovery failures in rollout status', () => {
     const application = rawApp('app-active-connectivity', {
       target_mode: 'blueprint',

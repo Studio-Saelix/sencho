@@ -1963,6 +1963,15 @@ export class DatabaseService {
         // Remote Host Console bridges record the hub operator separately from
         // the console_session principal (username stays console_session).
         maybeAddCol('audit_log', 'acting_as', 'TEXT');
+        // The last stack-scope health verdict, bound to the generation it
+        // judged, so a failed check is reported as failed rather than as
+        // "never checked". The CHECK is carried on the ALTER as well as the
+        // fresh-install schema: SQLite accepts a CHECK when adding a column,
+        // so a migrated install is held to the same vocabulary as a new one.
+        maybeAddCol('gitops_target_current', 'last_health_status',
+            "TEXT CHECK (last_health_status IS NULL OR last_health_status IN ('passed','failed','unknown'))");
+        maybeAddCol('gitops_target_current', 'last_health_generation_id', 'TEXT');
+        maybeAddCol('gitops_target_current', 'last_health_run_id', 'TEXT');
         // Cached INSERT may predate the column; rebuild on next flush.
         this.auditLogInsertStmt = null;
 

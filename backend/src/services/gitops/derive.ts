@@ -1489,6 +1489,20 @@ function deriveHealth(target: GitOpsTargetCurrentRow, healthDisabled: boolean): 
   if (target.healthy_generation_id === expectedGeneration) {
     return { status: 'passed', runId: '', deployedGenerationId: target.deployed_generation_id };
   }
+  // A recorded failure about the generation this target is running outranks the
+  // fallback to `pending`. Without it, withdrawing a failed check's promotion
+  // would make a known-bad workload indistinguishable from one that has never
+  // been checked, and the portfolio would show it as work in progress for ever.
+  if (
+    target.last_health_status === 'failed'
+    && target.last_health_generation_id === expectedGeneration
+  ) {
+    return {
+      status: 'failed',
+      runId: target.last_health_run_id ?? '',
+      deployedGenerationId: target.deployed_generation_id,
+    };
+  }
   return { status: 'pending', runId: null };
 }
 

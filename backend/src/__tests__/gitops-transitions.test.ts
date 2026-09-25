@@ -6,6 +6,7 @@ import { GitOpsStore, emptyTargetRow } from '../services/gitops/store';
 import { GitOpsTransitions, type EventEnvelope } from '../services/gitops/transitions';
 import { projectApplication } from '../services/gitops/derive';
 import { postureOf } from '../services/gitops/portfolioAggregator';
+import { attentionReasons } from '../services/gitops/attention';
 import type { GitOpsApplicationRow, GitOpsGenerationRow } from '../services/gitops/types';
 
 describe('gitops transitions', () => {
@@ -1214,12 +1215,79 @@ describe('gitops derive to portfolio posture', () => {
 
     expect(store.getTarget(applicationId, 1)?.healthy_generation_id).toBeNull();
     const projection = projectApplication(applicationId, false);
-    // A withdrawn promotion reads as `pending` health, which the portfolio
-    // reports as in progress. That is pinned deliberately: the settled claim is
-    // gone, which is the point of the fix, and `deriveHealth` collapses an
-    // unchecked target to `pending` rather than reporting a failed verdict.
-    expect(projection.targets[0]?.health.status).toBe('pending');
-    expect(postureOf(projection)).toBe('in_progress');
+    // The recorded verdict survives the withdrawn promotion, so the projection
+    // keeps saying the check failed rather than collapsing to "not checked".
+    // That is what makes the posture a failure an operator can act on instead
+    // of work in progress that never finishes.
+    expect(projection.targets[0]?.health.status).toBe('failed');
+    expect(postureOf(projection)).toBe('failed');
+    expect(attentionReasons(projection)).toContain('health_failed');
+  });
+
+  it('does not let a later unknown verdict erase a recorded failure', () => {
+    const store = GitOpsStore.getInstance();
+    const tx = GitOpsTransitions.getInstance();
+    const applicationId = 'app-posture-failthenunknown';
+    const generationId = 'gen-posture-failthenunknown';
+    driveHealthyDirect(applicationId, 'posture-failthenunknown-web', generationId);
+    tx.healthFinalized({
+      applicationId,
+      nodeId: 1,
+      healthRunId: `run-${applicationId}-fail`,
+      healthStatus: 'failed',
+      deployedGenerationId: generationId,
+      targetScope: 'stack',
+      envelope: envelope(`op-hf-${applicationId}`),
+    });
+    expect(postureOf(projectApplication(applicationId, false))).toBe('failed');
+
+    // A restart, or an update that supersedes the failing run, produces an
+    // unknown verdict for the same generation. That must not paper over the
+    // failure, or the application goes back to in progress for ever with
+    // nothing re-verifying it.
+    tx.healthFinalized({
+      applicationId,
+      nodeId: 1,
+      healthRunId: `run-${applicationId}-unknown`,
+      healthStatus: 'unknown',
+      deployedGenerationId: generationId,
+      targetScope: 'stack',
+      envelope: envelope(`op-hu-${applicationId}`),
+    });
+
+    expect(store.getTarget(applicationId, 1)?.last_health_status).toBe('failed');
+    const projection = projectApplication(applicationId, false);
+    expect(projection.targets[0]?.health.status).toBe('failed');
+    expect(postureOf(projection)).toBe('failed');
+  });
+
+  it('records a first unknown verdict so never-checked stays distinguishable', () => {
+    const store = GitOpsStore.getInstance();
+    const tx = GitOpsTransitions.getInstance();
+    const applicationId = 'app-posture-firstunknown';
+    const generationId = 'gen-posture-firstunknown';
+    driveHealthyDirect(applicationId, 'posture-firstunknown-web', generationId);
+    // A target deployed but never checked: the first verdict it receives is
+    // the unknown one.
+    const target = store.getTarget(applicationId, 1)!;
+    target.last_health_status = null;
+    target.last_health_generation_id = null;
+    target.last_health_run_id = null;
+    store.upsertTarget(target);
+
+    tx.healthFinalized({
+      applicationId,
+      nodeId: 1,
+      healthRunId: `run-${applicationId}-unknown`,
+      healthStatus: 'unknown',
+      deployedGenerationId: generationId,
+      targetScope: 'stack',
+      envelope: envelope(`op-hu2-${applicationId}`),
+    });
+    // Never checked is a real answer, so the first verdict is kept even when it
+    // is unknown. It simply does not read as a failure.
+    expect(store.getTarget(applicationId, 1)?.last_health_status).toBe('unknown');
+    expect(projectApplication(applicationId, false).targets[0]?.health.status).toBe('passed');
   });
 
   it('keeps the settled claim when the verdict is unknown rather than failed', () => {

@@ -736,51 +736,33 @@ export async function aggregateGitOpsPortfolio(req: Request, options: AggregateO
     rows.push(legacyPortfolioRow(localNodeId, nodeNames.get(localNodeId) ?? null, source.stack_name, source.updated_at));
   }
 
-  // Hub-local Blueprint applications are read like the Blueprint catalog: the
-  // fleet-wide read grant (`node:read`) is what that surface uses, so the
-  // portfolio shows the same subset the catalog would.
-  const blueprintRows = store.listLiveBlueprintApplications();
-  if (checkPermission(req, 'node:read')) {
-    const blueprintTransitions = latestTransitionByApplication(
-      db.getDb(),
-      blueprintRows.map(application => application.id),
-    );
-    for (const application of blueprintRows) {
-      if (application.blueprint_id === null) continue;
-      const projection = projectApplication(application.id, healthGateDisabled());
-      const blueprint = db.getBlueprint(application.blueprint_id);
-      rows.push(rowFromProjection({
-        id: `bp:${application.blueprint_id}`,
-        projection,
-        name: blueprint?.name ?? `blueprint #${application.blueprint_id}`,
-        stackName: null,
-        blueprintId: application.blueprint_id,
-        nodeId: null,
-        nodeName: null,
-        lastActivityAt: blueprintTransitions.get(application.id) ?? null,
-        partialNodes: [],
-        nodeNames,
-      }));
-    }
-  }
-
-  // Remote Direct applications. One bounded probe per node, all in flight at
-  // once; each leg degrades to a coverage entry. A leg that throws anyway
-  // (a payload this build cannot walk) is reported as unsupported rather than
-  // rejecting the whole aggregate: one malformed node must never 500 the page.
+  // Remote node probe. One bounded probe per node, all in flight at once; each
+  // leg degrades to a coverage entry. A leg that throws anyway (a payload this
+  // build cannot walk) is reported as unsupported rather than rejecting the
+  // whole aggregate: one malformed node must never 500 the page.
+  //
+  // This runs before the Blueprint rows are built, not after, because a
+  // Blueprint target is projected hub-side from the hub's own rows and would
+  // otherwise never learn that the node holding it stopped answering. The
+  // results are kept so the remote Direct rows below reuse the same probe
+  // instead of asking every node twice.
+  //
   // The local node is listed first so the workplace's node dimension always
   // includes the hub itself, even on a fleet of one.
   coverage.push({ nodeId: localNodeId, nodeName: nodeNames.get(localNodeId) ?? null, state: 'ok' });
   const remoteNodes = nodes.filter(node => node.id !== localNodeId);
+  const remoteProbes = new Map<number, { state: GitOpsPortfolioNodeCoverage['state']; rows: unknown[] | null }>();
   await Promise.all(remoteNodes.map(async node => {
     const nodeLabel = maySeeNodeNames ? node.name ?? null : null;
     try {
       const remoteRows = await fetchRows(node.id);
       if (remoteRows === null) {
+        remoteProbes.set(node.id, { state: 'unreachable', rows: null });
         coverage.push({ nodeId: node.id, nodeName: nodeLabel, state: 'unreachable' });
         return;
       }
       if (remoteRows === 'unsupported') {
+        remoteProbes.set(node.id, { state: 'unsupported', rows: null });
         coverage.push({ nodeId: node.id, nodeName: nodeLabel, state: 'unsupported' });
         return;
       }
@@ -792,22 +774,80 @@ export async function aggregateGitOpsPortfolio(req: Request, options: AggregateO
         node.id,
       );
       if (!Array.isArray(filtered)) {
+        remoteProbes.set(node.id, { state: 'unsupported', rows: null });
         coverage.push({ nodeId: node.id, nodeName: nodeLabel, state: 'unsupported' });
         return;
       }
+      remoteProbes.set(node.id, { state: 'ok', rows: filtered });
       coverage.push({ nodeId: node.id, nodeName: nodeLabel, state: 'ok' });
-      for (const row of filtered) {
-        const portfolioRow = remotePortfolioRow(row, node.id, nodeLabel, nodeNames);
-        if (portfolioRow !== null) rows.push(portfolioRow);
-      }
     } catch (error) {
       console.warn(
         `[GitOps portfolio] Node ${node.id} contributed a payload this build could not read:`,
         error instanceof Error ? error.message : error,
       );
+      remoteProbes.set(node.id, { state: 'unsupported', rows: null });
       coverage.push({ nodeId: node.id, nodeName: nodeLabel, state: 'unsupported' });
     }
   }));
+
+  // Nodes that did not answer at all. Only these are overlaid onto Blueprint
+  // targets: `unsupported` means the node responded but this build could not
+  // read the payload, which is not the same claim as unreachable, and treating
+  // it as unreachable would unsettle every Blueprint on an older node.
+  const silentNodeIds = new Set(
+    [...remoteProbes.entries()].filter(([, probe]) => probe.state === 'unreachable').map(([id]) => id),
+  );
+
+  // Hub-local Blueprint applications are read like the Blueprint catalog: the
+  // fleet-wide read grant (`node:read`) is what that surface uses, so the
+  // portfolio shows the same subset the catalog would.
+  const blueprintRows = store.listLiveBlueprintApplications();
+  if (checkPermission(req, 'node:read')) {
+    const blueprintTransitions = latestTransitionByApplication(
+      db.getDb(),
+      blueprintRows.map(application => application.id),
+    );
+    for (const application of blueprintRows) {
+      if (application.blueprint_id === null) continue;
+      const projection = withSilentNodes(
+        projectApplication(application.id, healthGateDisabled()),
+        silentNodeIds,
+      );
+      const blueprint = db.getBlueprint(application.blueprint_id);
+      rows.push(rowFromProjection({
+        id: `bp:${application.blueprint_id}`,
+        projection,
+        name: blueprint?.name ?? `blueprint #${application.blueprint_id}`,
+        stackName: null,
+        blueprintId: application.blueprint_id,
+        nodeId: null,
+        nodeName: null,
+        lastActivityAt: blueprintTransitions.get(application.id) ?? null,
+        // No partial node list: the overlay above already marked the silent
+        // targets unreachable, and the row derives its own unreachable set from
+        // the current targets. Deriving it twice here would be a second source
+        // of truth for a fact the row already owns.
+        partialNodes: [],
+        nodeNames,
+      }));
+    }
+  }
+
+  // Remote Direct applications, from the probe results already collected. Every
+  // node has an entry because each probe leg records one before returning, so
+  // a missing entry would mean a leg that skipped its own bookkeeping.
+  for (const node of remoteNodes) {
+    const probe = remoteProbes.get(node.id);
+    if (probe === undefined) {
+      throw new Error(`GitOps portfolio: node ${node.id} has no probe result`);
+    }
+    if (probe.state !== 'ok' || probe.rows === null) continue;
+    const nodeLabel = maySeeNodeNames ? node.name ?? null : null;
+    for (const row of probe.rows) {
+      const portfolioRow = remotePortfolioRow(row, node.id, nodeLabel, nodeNames);
+      if (portfolioRow !== null) rows.push(portfolioRow);
+    }
+  }
 
   // Most urgent first, then id for a stable order, so the merge cap drops
   // settled rows before it drops a failure the operator must see.
@@ -1309,6 +1349,37 @@ export function legacyPortfolioRow(
     limitations: [],
     lastActivityAt: finiteTimestamp(updatedAt),
     evidence: { partial: true, unreachableNodes: [], unknown: true },
+  };
+}
+
+/**
+ * Overlay the portfolio's own node probe onto a projection the hub derives
+ * locally.
+ *
+ * A Blueprint application is projected hub-side from the hub's rows, and a
+ * recorded observation is a statement about the last time that node answered.
+ * A node that has since gone dark keeps that observation, so without this the
+ * row would keep claiming it settled for ever. A node the probe could not reach
+ * is real evidence, so the target reads unreachable, which the settled proof
+ * already treats as a reason not to converge.
+ *
+ * Tombstoned targets are left alone: they are excluded from the current set
+ * anyway, and rewriting them would report a withdrawal as a reachability fact.
+ */
+function withSilentNodes(
+  projection: GitOpsRevisionProjection,
+  silentNodeIds: ReadonlySet<number>,
+): GitOpsRevisionProjection {
+  // The not-applicable variant carries an empty target tuple and is a shared
+  // frozen constant, so it is returned untouched rather than copied.
+  if (silentNodeIds.size === 0 || projection.targetMode === 'not_applicable') return projection;
+  return {
+    ...projection,
+    targets: projection.targets.map(target => (
+      !target.tombstoned && silentNodeIds.has(target.nodeId)
+        ? { ...target, connectivity: 'unreachable' as const }
+        : target
+    )),
   };
 }
 

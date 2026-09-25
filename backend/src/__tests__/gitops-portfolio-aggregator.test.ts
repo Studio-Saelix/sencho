@@ -15,8 +15,9 @@ import path from 'path';
 import type { Request } from 'express';
 import { setupTestDb, cleanupTestDb } from './helpers/setupTestDb';
 import { DatabaseService } from '../services/DatabaseService';
-import { GitOpsStore } from '../services/gitops/store';
+import { GitOpsStore, emptyTargetRow } from '../services/gitops/store';
 import { GitOpsTransitions, type EventEnvelope } from '../services/gitops/transitions';
+import { encodeObservedArtifactIdentity } from '../services/gitops/json';
 import { aggregateGitOpsPortfolio, freshestFacetTimestamp, isUsableRevision, PORTFOLIO_MERGE_CAP, postureOf, rowFromProjection } from '../services/gitops/portfolioAggregator';
 import { directApplicationFixture } from './helpers/gitopsFixtures';
 import type { GitOpsIdentityRef, GitOpsRevisionProjection, GitOpsTargetProjection } from '../services/gitops/types';
@@ -367,6 +368,53 @@ describe('aggregateGitOpsPortfolio', () => {
     expect(row!.name).toBe('port-blueprint');
     expect(row!.targetMode).toBe('blueprint');
     expect(row!.nodeId).toBeNull();
+  });
+
+  it('reports a Blueprint target on a node the hub could not reach as unreachable', async () => {
+    const db = DatabaseService.getInstance();
+    const localNodeId = db.getNodes()[0]!.id;
+    const silentId = addRemoteNode('port-silent', 29998);
+    const blueprint = db.createBlueprint({
+      name: 'port-silent-blueprint',
+      description: null,
+      compose_content: 'services:\n  app:\n    image: nginx\n',
+      selector: { type: 'nodes', ids: [] },
+      drift_mode: 'observe',
+      classification: 'stateless',
+      classification_reasons: [],
+      enabled: true,
+      created_by: 'tester',
+    });
+    createBlueprintApplication('app-port-silent', blueprint.id);
+    // The target holds a real observation, which is what makes it reachable.
+    GitOpsStore.getInstance().upsertTarget({
+      ...emptyTargetRow('app-port-silent', silentId, 1),
+      observed_artifact_identity_json: encodeObservedArtifactIdentity({
+        kind: 'exact',
+        identity: 'sha256:bp',
+        observedAt: 1,
+      }),
+    });
+
+    // While the node answers, the observation stands on its own.
+    const answering = await aggregateGitOpsPortfolio(adminReq(localNodeId), {
+      fetchRows: async () => [],
+    });
+    const reachable = answering.rows.find(candidate => candidate.id === `bp:${blueprint.id}`);
+    expect(reachable?.targets[0]?.connectivity).toBe('reachable');
+    expect(reachable?.evidence.partial).toBe(false);
+
+    // Once it goes dark the observation is still on file, so only the probe can
+    // withdraw the claim. This is the reachability transition itself, not a
+    // settled-posture withdrawal: the target carries no deployed generation, so
+    // it reads unknown while healthy and never claims to be settled either way.
+    const silent = await aggregateGitOpsPortfolio(adminReq(localNodeId), {
+      fetchRows: async () => null,
+    });
+    const withdrawn = silent.rows.find(candidate => candidate.id === `bp:${blueprint.id}`);
+    expect(withdrawn?.targets[0]?.connectivity).toBe('unreachable');
+    expect(withdrawn?.evidence.unreachableNodes).toContain(silentId);
+    expect(withdrawn?.evidence.partial).toBe(true);
   });
 
   it('merges remote rows with hub node ids applied', async () => {

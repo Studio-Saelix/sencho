@@ -1007,11 +1007,32 @@ export class GitOpsTransitions {
           healthyGenerationId: target.healthy_generation_id,
           lkgGenerationId: target.lkg_generation_id,
         };
-        const promotable = args.healthStatus === 'passed'
-          && target.target_status === 'active'
+        // The verdict is recorded for stack-scope runs that name the generation
+        // under test, whichever way it went. This is what lets the projection
+        // keep saying `failed` after the promotion is withdrawn, instead of
+        // collapsing a known-bad workload back into "never checked".
+        //
+        // An `unknown` verdict never overwrites what is already recorded. It is
+        // what the gate records for benign conditions (a healthcheck still
+        // starting, a newer operation superseding the run, a restart mid-run),
+        // so letting it clear a `failed` would resurrect the exact
+        // "in progress for ever" state this column exists to end, with nothing
+        // left to re-verify it. A first verdict is always recorded, including
+        // an `unknown` one, because "never checked" is a real answer.
+        const attributable = target.target_status === 'active'
           && args.targetScope === 'stack'
           && !!args.deployedGenerationId
           && target.deployed_generation_id === args.deployedGenerationId;
+        if (
+          attributable
+          && (args.healthStatus !== 'unknown' || target.last_health_status === null)
+        ) {
+          target.last_health_status = args.healthStatus;
+          target.last_health_generation_id = args.deployedGenerationId;
+          target.last_health_run_id = args.healthRunId;
+        }
+        const promotable = args.healthStatus === 'passed'
+          && attributable;
         if (!promotable) {
           // A failed verdict about the generation this target is currently
           // running withdraws the promotion it previously earned. Without this
@@ -1027,15 +1048,10 @@ export class GitOpsTransitions {
           // would move a healthy application out of its settled state with
           // nothing re-verifying it until the next deploy.
           //
-          // The generation and scope conditions mirror promotion exactly, so
-          // promotion stays asymmetric: a verdict that cannot be attributed to
-          // the running stack neither promotes nor demotes.
+          // Attribution is shared with promotion, so a verdict that cannot be
+          // tied to the running stack neither promotes nor demotes.
           const demotes = args.healthStatus === 'failed'
-            && target.healthy_generation_id !== null
-            && target.target_status === 'active'
-            && args.targetScope === 'stack'
-            && !!args.deployedGenerationId
-            && target.deployed_generation_id === args.deployedGenerationId
+            && attributable
             && target.healthy_generation_id === args.deployedGenerationId;
           if (demotes) {
             // `lkg_generation_id` is deliberately left alone. It is a
