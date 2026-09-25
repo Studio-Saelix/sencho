@@ -3570,6 +3570,49 @@ describe('GitSourceService.createStackFromGit', () => {
 
         saveSpy.mockRestore();
     });
+
+    it('keeps the stack and its row when a step after the commit boundary fails', async () => {
+        mockSuccessfulClone({
+            compose: 'services:\n  web:\n    image: nginx\n',
+        });
+        const svc = GitSourceService.getInstance();
+        const db = DatabaseService.getInstance();
+        const lastPlanSpy = vi.spyOn(db, 'setGitSourceLastPlan')
+            .mockImplementationOnce(() => { throw new Error('simulated post-commit failure'); });
+        const deleteSpy = vi.spyOn(db, 'deleteGitSource');
+
+        try {
+            await expect(svc.createStackFromGit({
+                stackName: 'create-post-commit-fail',
+                repoUrl: 'https://github.com/example/repo.git',
+                branch: 'main',
+                composePaths: ['compose.yaml'],
+                contextDir: null,
+                syncEnv: false,
+                envPath: null,
+                authType: 'none',
+                token: null,
+                autoApplyOnWebhook: false,
+                autoDeployOnApply: false,
+            })).rejects.toThrow(/stack was created from Git, but a follow-up step failed/);
+
+            // Past the success boundary nothing is compensated: the row and the
+            // stack both stay, so a rollback delete must not run here.
+            expect(deleteSpy).not.toHaveBeenCalled();
+            expect(db.getGitSource('create-post-commit-fail')).toBeDefined();
+            const { FileSystemService } = await import('../services/FileSystemService');
+            const stacks = await FileSystemService.getInstance().getStacks();
+            expect(stacks).toContain('create-post-commit-fail');
+        } finally {
+            lastPlanSpy.mockRestore();
+            deleteSpy.mockRestore();
+            db.deleteGitSource('create-post-commit-fail');
+            db.getDb()
+                .prepare('DELETE FROM gitops_applications WHERE stack_name = ?')
+                .run('create-post-commit-fail');
+            await cleanupStackDir('create-post-commit-fail');
+        }
+    });
 });
 
 describe('GitSourceService.apply', () => {
