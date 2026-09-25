@@ -35,7 +35,7 @@ import type {
   GitOpsPortfolioRow,
   GitOpsPortfolioTargetSummary,
 } from './portfolioTypes';
-import type { GitOpsRevisionProjection } from './types';
+import type { GitOpsRevisionProjection, GitOpsTargetProjection } from './types';
 import { isRecord } from './json';
 
 /** Per-remote probe budget; mirrors the fleet overview probe so one dead node cannot stall the portfolio. */
@@ -89,6 +89,18 @@ const RUNTIME_RANK = new Map(RUNTIME_SEVERITY.map((status, index) => [status, in
 
 const HEALTH_SEVERITY: readonly string[] = ['failed', 'unknown', 'pending', 'checking', 'passed', 'unbound', 'not_applicable'];
 const HEALTH_RANK = new Map(HEALTH_SEVERITY.map((status, index) => [status, index]));
+const ARTIFACT_QUALIFICATIONS: ReadonlySet<string> = new Set([
+  'unresolved',
+  'exact',
+  'qualified',
+  'stale',
+  'unavailable',
+  'local_build_unverified',
+]);
+
+function hasFacetStatus(registry: object, status: string): boolean {
+  return Object.prototype.hasOwnProperty.call(registry, status);
+}
 
 /**
  * A status this build does not know ranks among the bad-but-not-failed band:
@@ -97,38 +109,27 @@ const HEALTH_RANK = new Map(HEALTH_SEVERITY.map((status, index) => [status, inde
  * proven convergence or a proven failure. It still flags unknown evidence
  * wherever it appears.
  */
-function rankUnknownAware(rank: Map<string, number>, status: string, unknownRank: number): number {
+function rankUnknownAware(rank: ReadonlyMap<string, number>, status: string, unknownRank: number): number {
   return rank.get(status) ?? unknownRank;
 }
 
 const UNKNOWN_RUNTIME_RANK = 17; // at the in-flight boundary, tied with `deploying`
 const UNKNOWN_HEALTH_RANK = 1; // at `unknown`'s rank: unproven, not failed
 
-function worstRuntimeStatus(projection: GitOpsRevisionProjection): string {
-  if (projection.targetMode === 'not_applicable' || projection.targets.length === 0) return 'not_applicable';
+function worstTargetStatus(
+  targets: GitOpsTargetProjection[],
+  facet: 'runtime' | 'health',
+  rank: ReadonlyMap<string, number>,
+  unknownRank: number,
+): string {
   let worst: string | null = null;
   let worstRank = Number.POSITIVE_INFINITY;
-  for (const target of projection.targets) {
-    const status = target.runtime.status;
-    const rank = rankUnknownAware(RUNTIME_RANK, status, UNKNOWN_RUNTIME_RANK);
-    if (rank < worstRank) {
+  for (const target of targets) {
+    const status = facet === 'runtime' ? target.runtime.status : target.health.status;
+    const statusRank = rankUnknownAware(rank, status, unknownRank);
+    if (statusRank < worstRank) {
       worst = status;
-      worstRank = rank;
-    }
-  }
-  return worst ?? 'not_applicable';
-}
-
-function worstHealthStatus(projection: GitOpsRevisionProjection): string {
-  if (projection.targetMode === 'not_applicable' || projection.targets.length === 0) return 'not_applicable';
-  let worst: string | null = null;
-  let worstRank = Number.POSITIVE_INFINITY;
-  for (const target of projection.targets) {
-    const status = target.health.status;
-    const rank = rankUnknownAware(HEALTH_RANK, status, UNKNOWN_HEALTH_RANK);
-    if (rank < worstRank) {
-      worst = status;
-      worstRank = rank;
+      worstRank = statusRank;
     }
   }
   return worst ?? 'not_applicable';
@@ -143,19 +144,53 @@ function worstHealthStatus(projection: GitOpsRevisionProjection): string {
  * an older hub is reported as unknown evidence rather than silently
  * reinterpreted (or, worse, read as a convergence claim).
  */
-function hasUnrecognizedStatus(projection: GitOpsRevisionProjection): boolean {
+function hasUnrecognizedStatus(
+  projection: GitOpsRevisionProjection,
+  targets: GitOpsTargetProjection[],
+): boolean {
   if (projection.targetMode === 'not_applicable') return false;
   const { source, artifact, placement, rollout } = projection.facets;
-  if (!(source.status in FACET_EVIDENCE_SOURCE.source)) return true;
-  if (!(artifact.status in FACET_EVIDENCE_SOURCE.artifact)) return true;
-  if (!(placement.status in FACET_EVIDENCE_SOURCE.placement)) return true;
-  if (!(rollout.status in FACET_EVIDENCE_SOURCE.rollout)) return true;
-  for (const target of projection.targets) {
+  if (!hasFacetStatus(FACET_EVIDENCE_SOURCE.source, source.status)) return true;
+  if (!hasFacetStatus(FACET_EVIDENCE_SOURCE.artifact, artifact.status)) return true;
+  if (!hasFacetStatus(FACET_EVIDENCE_SOURCE.placement, placement.status)) return true;
+  if (!hasFacetStatus(FACET_EVIDENCE_SOURCE.rollout, rollout.status)) return true;
+  for (const target of targets) {
     if (!RUNTIME_RANK.has(target.runtime.status)) return true;
     if (!HEALTH_RANK.has(target.health.status)) return true;
     if (target.connectivity !== 'reachable' && target.connectivity !== 'unreachable' && target.connectivity !== 'stale' && target.connectivity !== 'unknown') return true;
   }
   return false;
+}
+
+function currentTargets(projection: GitOpsRevisionProjection): GitOpsTargetProjection[] {
+  return projection.targetMode === 'not_applicable'
+    ? []
+    : projection.targets.filter(target => !target.tombstoned);
+}
+
+function targetSetIsCurrent(
+  projection: GitOpsRevisionProjection,
+  targets: GitOpsTargetProjection[],
+): boolean {
+  if (projection.targetMode === 'not_applicable') return false;
+  const rollout = projection.facets.rollout;
+  if (rollout.status === 'exactly_converged_healthy' || rollout.status === 'configuration_converged_artifact_qualified') {
+    return projection.targetMode !== 'direct'
+      && targets.length > 0
+      && projection.rolloutGenerationId === rollout.rolloutGenerationId
+      && targets.every(target => target.rolloutGenerationId === rollout.rolloutGenerationId);
+  }
+  if (projection.targetMode === 'direct') return targets.length === 1;
+  return true;
+}
+
+function hasFreshReachableTargets(
+  projection: GitOpsRevisionProjection,
+  targets: GitOpsTargetProjection[],
+): boolean {
+  return targets.length > 0
+    && targetSetIsCurrent(projection, targets)
+    && targets.every(target => target.connectivity === 'reachable');
 }
 
 /**
@@ -169,11 +204,13 @@ function hasUnrecognizedStatus(projection: GitOpsRevisionProjection): boolean {
  */
 export function postureOf(projection: GitOpsRevisionProjection): GitOpsPortfolioPosture {
   if (projection.targetMode === 'not_applicable') return 'unknown';
+  const targets = currentTargets(projection);
   const attention = attentionReasons(projection);
   if (hasFailureReason(attention)) return 'failed';
   if (attention.length > 0) return 'attention';
 
   const { source, placement, rollout } = projection.facets;
+  const targetEvidenceFresh = hasFreshReachableTargets(projection, targets);
   const inFlight =
     source.status === 'checking_fetching'
     || source.status === 'applying'
@@ -183,7 +220,7 @@ export function postureOf(projection: GitOpsRevisionProjection): GitOpsPortfolio
     || rollout.status === 'canary_in_progress'
     || rollout.status === 'batch_in_progress'
     || rollout.status === 'fully_deployed_health_pending'
-    || projection.targets.some(target =>
+    || targets.some(target =>
       target.runtime.status === 'deploying'
       || target.runtime.status === 'withdrawing'
       || target.runtime.status === 'correcting'
@@ -193,9 +230,10 @@ export function postureOf(projection: GitOpsRevisionProjection): GitOpsPortfolio
       || target.health.status === 'pending'
       || target.health.status === 'checking');
   if (inFlight) return 'in_progress';
+  if (hasUnrecognizedStatus(projection, targets)) return 'unknown';
 
-  if (rollout.status === 'exactly_converged_healthy') return 'converged';
-  if (rollout.status === 'configuration_converged_artifact_qualified') return 'converged_qualified';
+  if (targetEvidenceFresh && rollout.status === 'exactly_converged_healthy') return 'converged';
+  if (targetEvidenceFresh && rollout.status === 'configuration_converged_artifact_qualified') return 'converged_qualified';
 
   // Direct applications have no rollout facet; their convergence claim is the
   // source settled on an accepted generation, every target reporting its
@@ -203,13 +241,12 @@ export function postureOf(projection: GitOpsRevisionProjection): GitOpsPortfolio
   // artifact facet must be a status this build knows before either claim is
   // made: an unknown qualification could be anything, and calling it exact or
   // qualified would assert proof nobody has.
-  const targets = projection.targets;
   const artifact = projection.facets.artifact;
-  const artifactKnown = artifact.status in FACET_EVIDENCE_SOURCE.artifact && artifact.status !== 'not_applicable';
+  const artifactKnown = hasFacetStatus(FACET_EVIDENCE_SOURCE.artifact, artifact.status) && artifact.status !== 'not_applicable';
   if (
     projection.targetMode === 'direct'
+    && targetEvidenceFresh
     && artifactKnown
-    && targets.length > 0
     && (source.status === 'application_generation_accepted' || source.status === 'source_poll_scheduled')
     && targets.every(target => target.runtime.status === 'synced_and_healthy')
     && targets.every(target => target.health.status === 'passed' || target.health.status === 'not_applicable' || target.health.status === 'unbound')
@@ -246,9 +283,9 @@ function targetSummaries(projection: GitOpsRevisionProjection, nodeNames: Map<nu
     connectivity: target.connectivity,
     // Unknown connectivity is its own evidence grade: it means the evidence
     // never arrived, which is not the same as evidence that arrived fresh.
-    evidence: target.connectivity === 'unreachable' || target.connectivity === 'unknown'
-      ? 'unknown'
-      : target.connectivity === 'stale' ? 'stale' : 'fresh',
+    evidence: target.connectivity === 'reachable'
+      ? 'fresh'
+      : target.connectivity === 'stale' ? 'stale' : 'unknown',
   }));
 }
 
@@ -267,7 +304,7 @@ export function freshestFacetTimestamp(projection: GitOpsRevisionProjection): nu
   if (source.status === 'source_poll_scheduled') consider(source.nextPollAt);
   if (source.status === 'source_suspended') consider(source.suspendedAt);
   if (source.status === 'source_unknown') consider(source.interruptedAt);
-  for (const target of projection.targets) consider(target.lkgUnavailableAt);
+  for (const target of currentTargets(projection)) consider(target.lkgUnavailableAt);
   return latest;
 }
 
@@ -329,11 +366,16 @@ export function rowFromProjection(input: RowInput): GitOpsPortfolioRow {
   // target whose evidence never arrived is the row-level fact the evidence
   // filter and the UI's "unreachable" qualifier read, independent of which
   // node (if any) failed to answer the aggregate.
+  const requiredTargets = currentTargets(projection);
   const unreachableNodes = [...new Set([
     ...partialNodes,
-    ...projection.targets.filter(target => target.connectivity === 'unreachable').map(target => target.nodeId),
+    ...requiredTargets.filter(target => target.connectivity === 'unreachable').map(target => target.nodeId),
   ])];
-  const unrecognized = hasUnrecognizedStatus(projection);
+  const unrecognized = hasUnrecognizedStatus(projection, requiredTargets);
+  const missingTargetEvidence = requiredTargets.length === 0;
+  const targetSetMismatch = !targetSetIsCurrent(projection, requiredTargets);
+  const unknownTargetEvidence = requiredTargets.some(target => target.connectivity === 'unknown');
+  const staleTargetEvidence = requiredTargets.some(target => target.connectivity === 'stale');
   return {
     id,
     targetMode: projection.targetMode,
@@ -353,8 +395,8 @@ export function rowFromProjection(input: RowInput): GitOpsPortfolioRow {
       : artifact.status.replace(/^artifact_/, ''),
     placementStatus: projection.facets.placement.status,
     rolloutStatus: projection.facets.rollout.status,
-    runtimeStatus: worstRuntimeStatus(projection),
-    healthStatus: worstHealthStatus(projection),
+    runtimeStatus: worstTargetStatus(requiredTargets, 'runtime', RUNTIME_RANK, UNKNOWN_RUNTIME_RANK),
+    healthStatus: worstTargetStatus(requiredTargets, 'health', HEALTH_RANK, UNKNOWN_HEALTH_RANK),
     targets: targetSummaries(projection, nodeNames),
     drift: { count: projection.drift.length, classes: driftClasses },
     attention: attentionReasons(projection),
@@ -363,9 +405,9 @@ export function rowFromProjection(input: RowInput): GitOpsPortfolioRow {
     limitations: projection.limitations.map(limitation => limitation.code),
     lastActivityAt,
     evidence: {
-      partial: unreachableNodes.length > 0 || unrecognized,
+      partial: unreachableNodes.length > 0 || missingTargetEvidence || targetSetMismatch || staleTargetEvidence || unknownTargetEvidence || unrecognized,
       unreachableNodes,
-      unknown: unrecognized,
+      unknown: missingTargetEvidence || targetSetMismatch || unknownTargetEvidence || unrecognized,
     },
   };
 }
@@ -572,6 +614,79 @@ export async function fetchRemoteSourceRows(nodeId: number): Promise<unknown[] |
   }
 }
 
+function isSourceFacetRecord(source: Record<string, unknown>): boolean {
+  if (source.status === 'not_applicable') return true;
+  if (
+    typeof source.configuredRepoUrl !== 'string'
+    || typeof source.configuredRef !== 'string'
+    || !isRecord(source.repoIdentity)
+    || typeof source.repoIdentity.host !== 'string'
+    || typeof source.repoIdentity.pathname !== 'string'
+    || typeof source.desiredCommitSha !== 'string' && source.desiredCommitSha !== null
+    || typeof source.fetchedCommitSha !== 'string' && source.fetchedCommitSha !== null
+    || typeof source.candidateGenerationId !== 'string' && source.candidateGenerationId !== null
+    || typeof source.acceptedGenerationId !== 'string' && source.acceptedGenerationId !== null
+  ) return false;
+  if (source.status === 'source_poll_scheduled') {
+    return typeof source.nextPollAt === 'number' && Number.isFinite(source.nextPollAt);
+  }
+  return source.status !== 'application_generation_accepted' || typeof source.acceptedGenerationId === 'string';
+}
+
+function isTargetRecord(value: unknown): value is Record<string, unknown> {
+  return isRecord(value)
+    && isRecord(value.runtime)
+    && isRecord(value.health)
+    && typeof value.nodeId === 'number'
+    && Number.isFinite(value.nodeId)
+    && (typeof value.stackName === 'string' || value.stackName === null)
+    && typeof value.tombstoned === 'boolean'
+    && typeof value.connectivity === 'string'
+    && (typeof value.rolloutGenerationId === 'string' || value.rolloutGenerationId === null)
+    && typeof value.runtime.status === 'string'
+    && typeof value.health.status === 'string';
+}
+
+function isArtifactFacetRecord(artifact: Record<string, unknown>): boolean {
+  if (artifact.status !== 'artifact_exact' && artifact.status !== 'artifact_qualified') return true;
+  const qualification = artifact.status === 'artifact_exact' ? 'exact' : 'qualified';
+  if (
+    typeof artifact.artifactSetId !== 'string'
+    || typeof artifact.generationId !== 'string'
+    || typeof artifact.evidenceVersion !== 'number'
+    || artifact.qualification !== qualification
+    || typeof artifact.freshnessAt !== 'number'
+    || !Number.isFinite(artifact.freshnessAt)
+    || !isRecord(artifact.expected) && artifact.expected !== null
+    || !isRecord(artifact.latestEvidence)
+    || typeof artifact.latestEvidence.artifactSetId !== 'string'
+    || artifact.latestEvidence.artifactSetId !== artifact.artifactSetId
+    || typeof artifact.latestEvidence.evidenceVersion !== 'number'
+    || artifact.latestEvidence.evidenceVersion !== artifact.evidenceVersion
+    || artifact.latestEvidence.qualification !== qualification
+    || typeof artifact.latestEvidence.identity !== 'string' && artifact.latestEvidence.identity !== null
+  ) return false;
+  if (artifact.expected === null) return true;
+  if (
+    typeof artifact.expected.artifactSetId !== 'string'
+    || typeof artifact.expected.evidenceVersion !== 'number'
+    || typeof artifact.expected.qualification !== 'string'
+    || !ARTIFACT_QUALIFICATIONS.has(artifact.expected.qualification)
+    || typeof artifact.expected.identity !== 'string' && artifact.expected.identity !== null
+  ) return false;
+  return !(
+    (artifact.expected.qualification === 'exact' || artifact.expected.qualification === 'qualified')
+    && typeof artifact.expected.identity === 'string'
+    && typeof artifact.latestEvidence.identity === 'string'
+    && artifact.expected.identity !== artifact.latestEvidence.identity
+  );
+}
+
+function isSettledRolloutRecord(rollout: Record<string, unknown>, generationId: unknown): boolean {
+  if (rollout.status !== 'exactly_converged_healthy' && rollout.status !== 'configuration_converged_artifact_qualified') return true;
+  return typeof generationId === 'string' && typeof rollout.rolloutGenerationId === 'string';
+}
+
 /**
  * Whether a value looks like a walkable live projection.
  *
@@ -583,8 +698,35 @@ export function isUsableRevision(value: unknown): value is Extract<GitOpsRevisio
   if (!isRecord(value)) return false;
   const mode = value.targetMode;
   if (mode !== 'direct' && mode !== 'blueprint' && mode !== 'inline_blueprint') return false;
-  if (!isRecord(value.facets)) return false;
-  return Array.isArray(value.targets) && Array.isArray(value.drift) && Array.isArray(value.limitations);
+  if (value.schemaVersion !== 1 || typeof value.applicationId !== 'string') return false;
+  if (
+    (typeof value.stackName !== 'string' && value.stackName !== null)
+    || (typeof value.blueprintId !== 'number' || !Number.isFinite(value.blueprintId))
+      && value.blueprintId !== null
+  ) return false;
+  if (
+    !Array.isArray(value.targets)
+    || !Array.isArray(value.drift)
+    || !Array.isArray(value.limitations)
+    || !Array.isArray(value.availableActions)
+  ) return false;
+
+  const facets = value.facets;
+  if (
+    !isRecord(facets)
+    || !isRecord(facets.source)
+    || !isRecord(facets.artifact)
+    || !isRecord(facets.placement)
+    || !isRecord(facets.rollout)
+  ) return false;
+  if (![facets.source, facets.artifact, facets.placement, facets.rollout].every(facet => typeof facet.status === 'string')) return false;
+  return isSourceFacetRecord(facets.source)
+    && value.targets.every(isTargetRecord)
+    && value.drift.every(item => isRecord(item) && typeof item.class === 'string')
+    && value.limitations.every(item => isRecord(item) && typeof item.code === 'string')
+    && value.availableActions.every(item => typeof item === 'string')
+    && isArtifactFacetRecord(facets.artifact)
+    && isSettledRolloutRecord(facets.rollout, value.rolloutGenerationId);
 }
 
 /**

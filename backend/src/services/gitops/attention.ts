@@ -103,6 +103,7 @@ export const ATTENTION_TONE: Readonly<Record<GitOpsAttentionReason, 'failure' | 
 export function attentionReasons(projection: GitOpsRevisionProjection): GitOpsAttentionReason[] {
   if (projection.targetMode === 'not_applicable') return [];
   const reasons = new Set<GitOpsAttentionReason>();
+  const currentTargets = projection.targets.filter(target => !target.tombstoned);
   const { source, placement, rollout } = projection.facets;
 
   switch (source.status) {
@@ -177,12 +178,6 @@ export function attentionReasons(projection: GitOpsRevisionProjection): GitOpsAt
     case 'rollback_partial_failed':
       reasons.add('rollback_failed');
       break;
-    case 'target_stale':
-      reasons.add('target_stale');
-      break;
-    case 'target_unreachable':
-      reasons.add('target_unreachable');
-      break;
     case 'recovery_required':
       reasons.add('recovery_required');
       break;
@@ -207,7 +202,7 @@ export function attentionReasons(projection: GitOpsRevisionProjection): GitOpsAt
       break;
   }
 
-  for (const target of projection.targets) {
+  for (const target of currentTargets) {
     if (target.connectivity === 'unreachable') reasons.add('target_unreachable');
     if (target.connectivity === 'stale') reasons.add('target_stale');
     switch (target.runtime.status) {
