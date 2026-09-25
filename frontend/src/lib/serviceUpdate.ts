@@ -170,6 +170,84 @@ export type FetchActiveServiceRecoveryResult =
     | { ok: true; recovery: ActiveServiceRecovery | null }
     | { ok: false; error: string };
 
+/** Wire status after the /recoveries route collapses never-run / missing reports to unknown. */
+export type StackRecoveryGateStatus = 'observing' | 'passed' | 'failed' | 'unknown';
+
+export interface StackRecoveryEntry {
+    serviceName: string;
+    recoveryId: string;
+    healthGateId: string | null;
+    healthGateStatus: StackRecoveryGateStatus;
+    healthGateReason: string | null;
+    healthGateFailureSource: 'primary' | 'collateral' | null;
+    expiresAt: number;
+}
+
+function isStackRecoveryGateStatus(value: unknown): value is StackRecoveryGateStatus {
+    return value === 'observing' || value === 'passed' || value === 'failed' || value === 'unknown';
+}
+
+function isNullableString(value: unknown): value is string | null {
+    return value === null || typeof value === 'string';
+}
+
+function parseStackRecoveryEntry(value: unknown): StackRecoveryEntry | null {
+    if (!isRecord(value)) return null;
+    const { serviceName, recoveryId, healthGateStatus, expiresAt, healthGateId, healthGateReason } = value;
+    const failureSource = value.healthGateFailureSource;
+    if (typeof serviceName !== 'string' || typeof recoveryId !== 'string') return null;
+    if (!isStackRecoveryGateStatus(healthGateStatus)) return null;
+    if (typeof expiresAt !== 'number' || !Number.isFinite(expiresAt)) return null;
+    if (!isNullableString(healthGateId) || !isNullableString(healthGateReason)) return null;
+    if (failureSource !== null && failureSource !== 'primary' && failureSource !== 'collateral') {
+        return null;
+    }
+    return {
+        serviceName,
+        recoveryId,
+        healthGateId,
+        healthGateStatus,
+        healthGateReason,
+        healthGateFailureSource: failureSource,
+        expiresAt,
+    };
+}
+
+export async function fetchStackRecoveries(params: {
+    nodeId: number | null;
+    stackName: string;
+}): Promise<StackRecoveryEntry[]> {
+    const { nodeId, stackName } = params;
+    try {
+        const res = await apiFetch(
+            `/stacks/${encodeURIComponent(stackName)}/recoveries`,
+            { method: 'GET', nodeId },
+        );
+        if (!res.ok) {
+            console.warn('[serviceUpdate] stack recoveries fetch returned', res.status);
+            return [];
+        }
+        const body: unknown = await res.json().catch(() => null);
+        if (!Array.isArray(body)) return [];
+        const parsed = body
+            .map(parseStackRecoveryEntry)
+            .filter((entry): entry is StackRecoveryEntry => entry !== null);
+        // Defensive dedup: the server orders newest-first and already returns one
+        // row per service, but an older node (or a bug) could send several. Keep
+        // only the first entry per service so a superseded row can never produce
+        // a Restore toast pointing at a stale snapshot.
+        const seen = new Set<string>();
+        return parsed.filter((entry) => {
+            if (seen.has(entry.serviceName)) return false;
+            seen.add(entry.serviceName);
+            return true;
+        });
+    } catch {
+        console.warn('[serviceUpdate] stack recoveries fetch failed');
+        return [];
+    }
+}
+
 export async function fetchActiveServiceRecovery(params: {
     nodeId: number | null;
     stackName: string;

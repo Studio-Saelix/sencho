@@ -2359,6 +2359,48 @@ stacksRouter.get('/:stackName/services/:serviceName/recovery', async (req: Reque
   }
 });
 
+/** Active stack recoveries with health-gate status, for overlapping service-update Restore resurfacing. */
+stacksRouter.get('/:stackName/recoveries', async (req: Request, res: Response) => {
+  const stackName = req.params.stackName as string;
+  if (!requirePermission(req, res, 'stack:deploy', 'stack', stackName)) return;
+  if (!(await requireStackExists(req.nodeId, stackName, res))) return;
+  if (!requireServiceScopedUpdateCapability(res)) return;
+  try {
+    const rows = ServiceUpdateRecoveryService.getInstance().listAllActiveForStack(req.nodeId, stackName);
+    const recoveries = rows.map(row => {
+      if (!row.health_gate_id) {
+        return {
+          serviceName: row.service_name,
+          recoveryId: row.id,
+          healthGateId: null,
+          healthGateStatus: 'unknown' as const,
+          healthGateReason: 'no health gate linked',
+          healthGateFailureSource: null,
+          expiresAt: row.expires_at,
+        };
+      }
+      const report = HealthGateService.getInstance().getReport(req.nodeId, stackName, row.health_gate_id);
+      return {
+        serviceName: row.service_name,
+        recoveryId: row.id,
+        healthGateId: row.health_gate_id,
+        healthGateStatus: (report.status === 'never-run' || !report.id) ? 'unknown' : report.status,
+        healthGateReason: report.reason ?? null,
+        healthGateFailureSource: report.failureSource,
+        expiresAt: row.expires_at,
+      };
+    });
+    res.json(recoveries);
+  } catch (error: unknown) {
+    console.error(
+      '[Stacks] Failed to list stack recoveries for %s: %s',
+      sanitizeForLog(stackName),
+      sanitizeForLog(getErrorMessage(error, 'unknown')),
+    );
+    res.status(500).json({ error: 'Failed to load stack recoveries', code: 'stack_recovery_lookup_failed' });
+  }
+});
+
 stacksRouter.post('/:stackName/services/:serviceName/restore', async (req: Request, res: Response) => {
   const recoveryId = typeof req.body?.recoveryId === 'string' ? req.body.recoveryId : '';
   if (!recoveryId) {

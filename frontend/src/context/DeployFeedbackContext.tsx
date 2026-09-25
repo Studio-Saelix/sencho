@@ -4,7 +4,7 @@ import { type ParsedLogRow, parseLogChunk } from '../components/log-rendering/co
 import { useDeployFeedbackEnabled } from '../hooks/use-deploy-feedback-enabled';
 import { readDeployFeedbackStyle } from '../hooks/use-deploy-feedback-style';
 import { toast } from '../components/ui/toast-store';
-import { fetchActiveServiceRecovery, requestServiceRestore } from '../lib/serviceUpdate';
+import { fetchActiveServiceRecovery, fetchStackRecoveries, requestServiceRestore, type StackRecoveryEntry } from '../lib/serviceUpdate';
 
 export type ActionVerb = 'deploy' | 'update' | 'down' | 'restart' | 'stop' | 'install' | 'scan';
 
@@ -188,6 +188,14 @@ export function DeployFeedbackProvider({ children }: { children: React.ReactNode
   const silentGateRef = useRef(false);
   const offerRestoreToastRef = useRef<(gate: HealthGateUiState) => void>(() => {});
 
+  /** Recovery IDs that already had a Restore toast (cleared on session reset / panel abandon). */
+  const watchedRecoveriesRef = useRef<Set<string>>(new Set());
+  /** Sibling recovery IDs still observing; polled alongside the active gate session. */
+  const observingRecoveriesRef = useRef<Set<string>>(new Set());
+  const observingPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  /** Stack/node for sibling observing polls (independent of the primary healthGate record). */
+  const observingContextRef = useRef<{ stackName: string; nodeId: number | null } | null>(null);
+
   useEffect(() => {
     healthGateRef.current = healthGate;
   }, [healthGate]);
@@ -202,8 +210,21 @@ export function DeployFeedbackProvider({ children }: { children: React.ReactNode
     }
   }, []);
 
-  // The provider is app-root today, but do not let the interval depend on it.
-  useEffect(() => stopGatePolling, [stopGatePolling]);
+  /** Clears sibling observing set and its poll interval (session reset / panel abandon). */
+  const clearObservingState = useCallback(() => {
+    observingRecoveriesRef.current.clear();
+    observingContextRef.current = null;
+    if (observingPollRef.current !== null) {
+      clearInterval(observingPollRef.current);
+      observingPollRef.current = null;
+    }
+  }, []);
+
+  // The provider is app-root today, but do not let intervals outlive unmount.
+  useEffect(() => () => {
+    stopGatePolling();
+    clearObservingState();
+  }, [stopGatePolling, clearObservingState]);
 
   // Idempotent resolver for the current session's deployStarted gate. Set at the
   // start of each runWithLog call; called by onTerminalReady (stream connected),
@@ -295,9 +316,65 @@ export function DeployFeedbackProvider({ children }: { children: React.ReactNode
 
     sessionIdRef.current += 1;
     silentGateRef.current = false;
+    clearObservingState();
+    watchedRecoveriesRef.current.clear();
     stopGatePolling();
     setHealthGate(null);
-  }, [stopGatePolling]);
+  }, [stopGatePolling, clearObservingState]);
+
+  /** Build a minimal HealthGateUiState for a failed service recovery toast. */
+  const makeGateState = useCallback((
+    stackName: string,
+    nodeId: number | null,
+    recovery: Pick<
+      StackRecoveryEntry,
+      'serviceName' | 'recoveryId' | 'healthGateId' | 'healthGateReason' | 'healthGateFailureSource'
+    >,
+  ): HealthGateUiState => ({
+    stackName, nodeId,
+    gateId: recovery.healthGateId ?? '', trigger: 'update',
+    status: 'failed', reason: recovery.healthGateReason,
+    windowSeconds: null, startedAt: null,
+    targetScope: 'service', serviceName: recovery.serviceName,
+    failureSource: recovery.healthGateFailureSource,
+    recoveryId: recovery.recoveryId,
+  }), []);
+
+  // Poll /stacks/:stackName/recoveries for still-observing sibling recoveries
+  // discovered when this session started. Handles observing -> failed (toast),
+  // any other non-observing status (discard), and vanished/expired entries.
+  const pollObservingRecoveries = useCallback(async () => {
+    const ctx = observingContextRef.current;
+    if (!ctx) return;
+    const { stackName, nodeId } = ctx;
+    const session = sessionIdRef.current;
+    try {
+      const recoveries = await fetchStackRecoveries({ nodeId, stackName });
+      if (sessionIdRef.current !== session) return;
+
+      for (const recoveryId of [...observingRecoveriesRef.current]) {
+        const found = recoveries.find(r => r.recoveryId === recoveryId);
+        // Drop vanished or expired siblings.
+        if (!found || found.expiresAt <= Date.now()) {
+          observingRecoveriesRef.current.delete(recoveryId);
+          continue;
+        }
+        // Failed and not yet surfaced → Restore toast.
+        if (found.healthGateStatus === 'failed' && !watchedRecoveriesRef.current.has(recoveryId)) {
+          watchedRecoveriesRef.current.add(recoveryId);
+          observingRecoveriesRef.current.delete(recoveryId);
+          offerRestoreToastRef.current(makeGateState(stackName, nodeId, found));
+        } else if (found.healthGateStatus !== 'observing') {
+          observingRecoveriesRef.current.delete(recoveryId);
+        }
+      }
+    } catch (e) {
+      console.warn('[DeployFeedback] sibling recovery poll failed:', e);
+    }
+    if (observingRecoveriesRef.current.size === 0) {
+      clearObservingState();
+    }
+  }, [makeGateState, clearObservingState]);
 
   // Poll the by-id gate endpoint until a terminal status. The id-scoped read
   // means a superseded gate still resolves to its terminal unknown state
@@ -411,75 +488,97 @@ export function DeployFeedbackProvider({ children }: { children: React.ReactNode
     gatePollRef.current = setInterval(() => { void tick(); }, GATE_POLL_INTERVAL_MS);
   }, [stopGatePolling]);
 
-  // Keep the toast helper current without re-creating startGatePolling on every render.
-  useEffect(() => {
-    offerRestoreToastRef.current = (gate: HealthGateUiState) => {
-      const serviceName = gate.serviceName;
-      if (!serviceName) return;
-      toast.error(
-        `Health gate failed for service "${serviceName}"${gate.reason ? `: ${gate.reason}` : ''}.`,
-        {
-          duration: 120_000,
-          action: {
-            label: 'Restore',
-            onClick: () => {
-              void (async () => {
-                let recoveryId = gate.recoveryId ?? null;
-                if (!recoveryId) {
-                  const lookup = await fetchActiveServiceRecovery({
-                    nodeId: gate.nodeId,
-                    stackName: gate.stackName,
-                    serviceName,
-                  });
-                  if (!lookup.ok) {
-                    toast.error(lookup.error);
-                    return;
-                  }
-                  recoveryId = lookup.recovery?.id ?? null;
-                }
-                if (!recoveryId) {
-                  toast.error(`No recovery snapshot is available for "${serviceName}".`);
-                  return;
-                }
-                const loadingId = toast.loading(`Restoring "${serviceName}"...`);
-                try {
-                  const result = await requestServiceRestore({
-                    nodeId: gate.nodeId,
-                    stackName: gate.stackName,
-                    serviceName,
-                    recoveryId,
-                  });
-                  toast.dismiss(loadingId);
-                  if (!result.ok) {
-                    toast.error(result.error);
-                    return;
-                  }
-                  if (result.healthGateId && result.observing) {
-                    toast.info(`Service "${serviceName}" restored. Verifying health...`);
-                    sessionIdRef.current += 1;
-                    startGatePolling(
-                      gate.stackName,
-                      gate.nodeId,
-                      result.healthGateId,
-                      'update',
-                      sessionIdRef.current,
-                      { serviceName, recoveryId: result.recoveryId, silent: true },
-                    );
-                  } else {
-                    toast.success(`Service "${serviceName}" restored successfully`);
-                    setHealthGate(null);
-                  }
-                } catch (error) {
-                  toast.dismiss(loadingId);
-                  toast.error(error instanceof Error ? error.message : `Failed to restore "${serviceName}"`);
-                }
-              })();
-            },
-          },
-        },
-      );
-    };
+  // Restore onClick factory for the toast action.
+  const handleRestoreClick = useCallback((gate: HealthGateUiState) => () => {
+    void (async () => {
+      let recoveryId = gate.recoveryId ?? null;
+      if (!recoveryId) {
+        const lookup = await fetchActiveServiceRecovery({
+          nodeId: gate.nodeId,
+          stackName: gate.stackName,
+          serviceName: gate.serviceName!,
+        });
+        if (!lookup.ok) {
+          toast.error(lookup.error);
+          return;
+        }
+        recoveryId = lookup.recovery?.id ?? null;
+      }
+      if (!recoveryId) {
+        toast.error(`No recovery snapshot is available for "${gate.serviceName}".`);
+        return;
+      }
+      const loadingId = toast.loading(`Restoring "${gate.serviceName}"...`);
+      try {
+        const result = await requestServiceRestore({
+          nodeId: gate.nodeId,
+          stackName: gate.stackName,
+          serviceName: gate.serviceName!,
+          recoveryId,
+        });
+        toast.dismiss(loadingId);
+        if (!result.ok) {
+          toast.error(result.error);
+          return;
+        }
+        if (result.healthGateId && result.observing) {
+          toast.info(`Service "${gate.serviceName}" restored. Verifying health...`);
+          sessionIdRef.current += 1;
+          startGatePolling(
+            gate.stackName,
+            gate.nodeId,
+            result.healthGateId,
+            'update',
+            sessionIdRef.current,
+            { serviceName: gate.serviceName!, recoveryId: result.recoveryId, silent: true },
+          );
+        } else {
+          toast.success(`Service "${gate.serviceName}" restored successfully`);
+          setHealthGate(null);
+        }
+      } catch (error) {
+        toast.dismiss(loadingId);
+        toast.error(error instanceof Error ? error.message : `Failed to restore "${gate.serviceName}"`);
+      }
+    })();
   }, [startGatePolling]);
+
+  offerRestoreToastRef.current = (gate: HealthGateUiState) => {
+    const serviceName = gate.serviceName;
+    if (!serviceName) return;
+
+    const errorMessage = `Health gate failed for service "${serviceName}"${gate.reason ? `: ${gate.reason}` : ''}.`;
+    toast.error(errorMessage, { duration: 120_000, action: { label: 'Restore', onClick: handleRestoreClick(gate) } });
+  };
+
+  // Shared helper to surface sibling recoveries (failed -> toast, observing -> watch).
+  // Used by both the !isEnabled branch and the enabled branch in runWithLog.
+  const surfaceSiblingRecoveries = useCallback(
+    async (stackName: string, nodeId: number | null, currentServiceName: string | undefined) => {
+      // Bail out if a newer session started while the fetch was in flight;
+      // otherwise this stale call would re-arm observing state that the new
+      // session already cleared, pointing sibling polling at the wrong context.
+      const session = sessionIdRef.current;
+      const recoveries = await fetchStackRecoveries({ nodeId, stackName });
+      if (sessionIdRef.current !== session) return;
+      observingContextRef.current = { stackName, nodeId };
+      for (const recovery of recoveries) {
+        if (recovery.serviceName === currentServiceName) continue;
+        if (recovery.healthGateStatus === 'failed' && !watchedRecoveriesRef.current.has(recovery.recoveryId)) {
+          watchedRecoveriesRef.current.add(recovery.recoveryId);
+          offerRestoreToastRef.current(makeGateState(stackName, nodeId, recovery));
+        } else if (recovery.healthGateStatus === 'observing') {
+          observingRecoveriesRef.current.add(recovery.recoveryId);
+        }
+      }
+      if (observingRecoveriesRef.current.size > 0 && observingPollRef.current === null) {
+        observingPollRef.current = setInterval(() => {
+          void pollObservingRecoveries();
+        }, GATE_POLL_INTERVAL_MS);
+      }
+    },
+    [pollObservingRecoveries, makeGateState]
+  );
 
   const runWithLog = useCallback(
     async (
@@ -507,6 +606,8 @@ export function DeployFeedbackProvider({ children }: { children: React.ReactNode
           && (params.action === 'update' || params.action === 'deploy')
         ) {
           sessionIdRef.current += 1;
+          clearObservingState();
+          watchedRecoveriesRef.current.clear();
           startGatePolling(
             params.stackName,
             params.nodeId,
@@ -515,6 +616,9 @@ export function DeployFeedbackProvider({ children }: { children: React.ReactNode
             sessionIdRef.current,
             { serviceName: params.serviceName, recoveryId: result.recoveryId, silent: true },
           );
+          // Re-surface sibling recoveries that may have failed or are
+          // still observing while this new gate runs.
+          void surfaceSiblingRecoveries(params.stackName, params.nodeId, params.serviceName);
         }
         return result;
       }
@@ -532,6 +636,8 @@ export function DeployFeedbackProvider({ children }: { children: React.ReactNode
       const mySession = sessionIdRef.current;
       streamReadyRef.current = false;
       stopGatePolling();
+      clearObservingState();
+      watchedRecoveriesRef.current.clear();
       setHealthGate(null);
       // Inline style starts with the modal hidden (the banner is the surface);
       // modal style starts visible.
@@ -595,12 +701,15 @@ export function DeployFeedbackProvider({ children }: { children: React.ReactNode
             serviceName: params.serviceName,
             recoveryId: result.recoveryId,
           });
+          // Re-surface sibling recoveries that may have failed or are
+          // still observing while this new gate runs.
+          void surfaceSiblingRecoveries(params.stackName, params.nodeId, params.serviceName);
         }
       }
 
       return result;
     },
-    [isEnabled, startGatePolling, stopGatePolling]
+    [isEnabled, startGatePolling, stopGatePolling, clearObservingState, surfaceSiblingRecoveries]
   );
 
   return (

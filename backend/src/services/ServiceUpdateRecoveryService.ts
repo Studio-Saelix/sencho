@@ -153,6 +153,11 @@ export class ServiceUpdateRecoveryService {
     return DatabaseService.getInstance().listActiveServiceUpdateRecoveries(nodeId, stackName, serviceName);
   }
 
+  /** Active, unexpired recovery rows for all services in a stack (drives the /recoveries endpoint). */
+  public listAllActiveForStack(nodeId: number, stackName: string): ServiceUpdateRecoveryRow[] {
+    return DatabaseService.getInstance().listActiveServiceUpdateRecoveriesForStack(nodeId, stackName, Date.now());
+  }
+
   public get(id: string): ServiceUpdateRecoveryRow | undefined {
     return DatabaseService.getInstance().getServiceUpdateRecovery(id);
   }
