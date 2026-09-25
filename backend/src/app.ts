@@ -4,6 +4,7 @@ import cookieParser from 'cookie-parser';
 import compression from 'compression';
 import helmet from 'helmet';
 import { globalApiLimiter, pollingLimiter } from './middleware/rateLimiters';
+import { requestTally } from './middleware/requestTally';
 import { conditionalJsonParser } from './middleware/jsonParser';
 import { nodeContextMiddleware } from './middleware/nodeContext';
 import { isTrustedProxyPeer } from './helpers/trustedProxyCidrs';
@@ -123,6 +124,11 @@ export function createApp(): express.Express {
   // 6. Cookie parser must run before the rate limiters so the hybrid key
   // generator can read req.cookies for per-user rate limit bucketing.
   app.use(cookieParser());
+
+  // TEMPORARY DIAGNOSTIC (SENCHO_REQUEST_TALLY=1). Sits after cookieParser so
+  // the per-user key resolves, and before the limiters so 429s are attributed
+  // to the route that caused them. Remove with middleware/requestTally.ts.
+  app.use('/api/', requestTally);
 
   // 7-8. Tiered rate limiting (see middleware/rateLimiters.ts for the model).
   app.use('/api/', globalApiLimiter);

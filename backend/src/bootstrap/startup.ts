@@ -20,6 +20,7 @@ import { DockerEventManager } from '../services/DockerEventManager';
 import TrivyService, { sweepStaleTrivyTempDirs } from '../services/TrivyService';
 import { ImageUpdateService } from '../services/ImageUpdateService';
 import { SchedulerService } from '../services/SchedulerService';
+import { startRequestTally } from '../middleware/requestTally';
 import { MfaService } from '../services/MfaService';
 import { MeshService } from '../services/MeshService';
 import { BlueprintReconciler } from '../services/BlueprintReconciler';
@@ -341,6 +342,8 @@ export async function startServer(server: Server): Promise<void> {
   });
   BlueprintReconciler.getInstance().start();
   CveIntelService.getInstance().start();
+  // TEMPORARY DIAGNOSTIC (SENCHO_REQUEST_TALLY=1).
+  startRequestTally();
 
   // Drop the cached /api/meta entry on tunnel reconnect so the next
   // /api/nodes/:id/meta refetches fresh capabilities and version through

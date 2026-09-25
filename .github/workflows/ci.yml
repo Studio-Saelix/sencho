@@ -223,7 +223,10 @@ jobs:
         run: npx playwright test --project=chromium
 
       - name: Upload E2E report and service logs
-        if: failure()
+        # TEMPORARY (measurement branch): always() so the request tally is
+        # available even when the run is green. Restore to failure() with the
+        # rest of the instrumentation.
+        if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: playwright-report
