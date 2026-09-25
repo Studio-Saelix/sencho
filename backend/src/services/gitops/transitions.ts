@@ -1013,7 +1013,49 @@ export class GitOpsTransitions {
           && !!args.deployedGenerationId
           && target.deployed_generation_id === args.deployedGenerationId;
         if (!promotable) {
-          return { before, after: { ...before, promoted: false, healthStatus: args.healthStatus } };
+          // A failed verdict about the generation this target is currently
+          // running withdraws the promotion it previously earned. Without this
+          // the pointer survived a later failure, so the projection kept
+          // reporting the target healthy and the portfolio kept claiming
+          // convergence after a check had failed.
+          //
+          // Only `failed` withdraws. An `unknown` verdict is what the gate
+          // records for benign infrastructural conditions (a healthcheck still
+          // starting when the window ended, no containers to observe, a newer
+          // operation superseding the run), and the gate is re-armed against
+          // the already-applied generation on every update. Revoking on those
+          // would move a healthy application out of its settled state with
+          // nothing re-verifying it until the next deploy.
+          //
+          // The generation and scope conditions mirror promotion exactly, so
+          // promotion stays asymmetric: a verdict that cannot be attributed to
+          // the running stack neither promotes nor demotes.
+          const demotes = args.healthStatus === 'failed'
+            && target.healthy_generation_id !== null
+            && target.target_status === 'active'
+            && args.targetScope === 'stack'
+            && !!args.deployedGenerationId
+            && target.deployed_generation_id === args.deployedGenerationId
+            && target.healthy_generation_id === args.deployedGenerationId;
+          if (demotes) {
+            // `lkg_generation_id` is deliberately left alone. It is a
+            // high-water mark of the newest generation that ever passed, and
+            // the rollback paths read it as a restore candidate rather than a
+            // live health claim. Revoking it here would discard a recovery
+            // target on one failed check, which is a separate decision from
+            // withdrawing the claim that this workload is currently healthy.
+            target.healthy_generation_id = null;
+          }
+          return {
+            before,
+            after: {
+              ...before,
+              healthyGenerationId: target.healthy_generation_id,
+              promoted: false,
+              demoted: demotes,
+              healthStatus: args.healthStatus,
+            },
+          };
         }
 
         const generationId = args.deployedGenerationId as string;

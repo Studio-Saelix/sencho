@@ -117,7 +117,14 @@ beforeAll(async () => {
   });
   GitOpsStore.getInstance().upsertTarget({
     ...emptyTargetRow('app-route-blueprint', localNodeId, 1),
-    connectivity: 'reachable',
+  });
+  // Reachability is earned by a real observation now, not asserted by a stored
+  // value, so the current target records that it was seen.
+  tx.recordObservedRuntimeArtifact({
+    applicationId: 'app-route-blueprint',
+    nodeId: localNodeId,
+    observed: { kind: 'exact', identity: 'sha256:bp', observedAt: 1 },
+    envelope: env('op-app-route-blueprint-observe'),
   });
   GitOpsStore.getInstance().upsertTarget({
     ...emptyTargetRow('app-route-blueprint', historicalNodeId, 1),

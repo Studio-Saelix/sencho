@@ -343,7 +343,18 @@ describe('gitops derivation', () => {
       const projection = deriveGitOpsRevision({
         application,
         targets: [
-          { ...emptyTargetRow(application.id, 1, 1), connectivity: 'reachable' },
+          {
+          ...emptyTargetRow(application.id, 1, 1),
+          // Reachable by a real observation, because a stored `reachable` is
+          // not trusted. Without this the live target would also read unknown
+          // and the tombstoned target would have nothing to be ignored
+          // relative to, so the case would pass for the wrong reason.
+          observed_artifact_identity_json: encodeObservedArtifactIdentity({
+            kind: 'exact',
+            identity: 'sha256:active',
+            observedAt: 1,
+          }),
+        },
           {
             ...emptyTargetRow(application.id, 2, 1),
             target_status: 'tombstoned',
@@ -360,7 +371,18 @@ describe('gitops derivation', () => {
     const recovery = deriveGitOpsRevision({
       application,
       targets: [
-        { ...emptyTargetRow(application.id, 1, 1), connectivity: 'reachable' },
+        {
+          ...emptyTargetRow(application.id, 1, 1),
+          // Reachable by a real observation, because a stored `reachable` is
+          // not trusted. Without this the live target would also read unknown
+          // and the tombstoned target would have nothing to be ignored
+          // relative to, so the case would pass for the wrong reason.
+          observed_artifact_identity_json: encodeObservedArtifactIdentity({
+            kind: 'exact',
+            identity: 'sha256:active',
+            observedAt: 1,
+          }),
+        },
         {
           ...emptyTargetRow(application.id, 2, 1),
           target_status: 'tombstoned',
@@ -375,6 +397,11 @@ describe('gitops derivation', () => {
       healthDisabled: true,
     }, null);
     if (recovery.targetMode === 'not_applicable') throw new Error('expected application');
+    // A tombstoned target reports `tombstoned` rather than `recovery_failed`,
+    // because the runtime facet answers the tombstone before it reads any
+    // recovery field. So the rollout lookup's tombstone filter is not what
+    // keeps a withdrawn node's failed recovery out of the status.
+    expect(recovery.targets.find((target) => target.nodeId === 2)?.runtime.status).toBe('tombstoned');
     expect(recovery.facets.rollout.status).toBe('not_applicable');
   });
 

@@ -1247,25 +1247,78 @@ function deriveRollout(
   return { status: 'not_applicable' };
 }
 
+/**
+ * Whether the node holding this target could actually be asked, projected from
+ * the observation that answering left behind.
+ *
+ * The stored `connectivity` column could not answer this. It is seeded to null
+ * and no producer ever wrote it, so every target read it back as `unknown` and
+ * no application could ever settle. The observation is the evidence that does
+ * exist, because recording one requires the node to have been reached and to
+ * have looked at its own runtime.
+ *
+ * A recording is read as a statement about reachability rather than a
+ * timestamp to age out. Nothing re-observes a Direct target on a timer, so a
+ * wall-clock freshness window would quietly turn a healthy, untouched Direct
+ * application unknown again once the window passed. No connectivity value is
+ * derived from elapsed time at all.
+ *
+ * Nothing in production writes a negative connectivity value today, so the
+ * negative branch below honors one verbatim in case a producer is added, and
+ * fails closed when there is nothing to honor. A node that answered but
+ * reported it could not observe its own workload (`unavailable`) is unknown
+ * evidence, which is a different claim from a node that never answered.
+ */
+function connectivityFromObservation(
+  target: GitOpsTargetCurrentRow,
+  observed: ReturnType<typeof decodeObservedSafe>,
+  limitations: GitOpsLimitation[],
+): GitOpsTargetProjection['connectivity'] {
+  if (target.connectivity && !['unknown', 'reachable', 'unreachable', 'stale'].includes(target.connectivity)) {
+    limitations.push({ code: 'connectivity_invalid', message: 'stored connectivity is illegal', evidence: target.connectivity });
+  }
+  if (target.target_status === 'tombstoned') return 'unknown';
+  // A recorded negative claim is honored as written. It can only withhold
+  // convergence, which is the safe direction. The positive claim is the one
+  // that must be earned, because trusting it is what made this unreadable in
+  // the first place.
+  if (target.connectivity === 'unreachable' || target.connectivity === 'stale') {
+    return target.connectivity;
+  }
+  switch (observed.kind) {
+    // The node was reached and reported what it saw, which is all this claims.
+    // `stale` and `local_build_unverified` are arms no current observation
+    // producer emits, and they are handled here so that adding one cannot
+    // silently change what connectivity means: either way the node answered,
+    // and the artifact and runtime facets decide what that evidence settles.
+    case 'exact':
+    case 'qualified':
+    case 'stale':
+    case 'local_build_unverified':
+      return 'reachable';
+    // No observation, or a node reporting it could not look at its own
+    // workload. Nothing here claims the node was unreachable, so the honest
+    // answer is that we do not know.
+    case 'unknown':
+    case 'missing':
+    case 'unavailable':
+      return 'unknown';
+    default: {
+      const exhaustive: never = observed;
+      return exhaustive;
+    }
+  }
+}
+
 function deriveTarget(
   app: GitOpsApplicationRow,
   target: GitOpsTargetCurrentRow,
   healthDisabled: boolean,
   limitations: GitOpsLimitation[],
 ): GitOpsTargetProjection {
-  let connectivity: GitOpsTargetProjection['connectivity'] = 'unknown';
-  if (
-    target.connectivity === 'unknown'
-    || target.connectivity === 'reachable'
-    || target.connectivity === 'unreachable'
-    || target.connectivity === 'stale'
-  ) {
-    connectivity = target.connectivity;
-  } else if (target.connectivity) {
-    limitations.push({ code: 'connectivity_invalid', message: 'stored connectivity is illegal', evidence: target.connectivity });
-  }
   mergePersistedLimitations(target.evidence_limitations_json, limitations);
   const observed = decodeObservedSafe(target.observed_artifact_identity_json, limitations);
+  const connectivity = connectivityFromObservation(target, observed, limitations);
   const artifact = deriveArtifact(app, target.desired_generation_id, target.expected_artifact_set_id, target.latest_artifact_set_id, limitations);
   const runtime = deriveRuntime(target, artifact, observed, healthDisabled);
   return {
