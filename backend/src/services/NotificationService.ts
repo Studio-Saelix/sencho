@@ -78,6 +78,8 @@ export type NotificationCategory =
     | 'gitops_rollback_partial_failed'
     | 'gitops_stateful_confirmation'
     | 'gitops_health_rollout_policy_set'
+    | 'gitops_placement_policy_changed'
+    | 'gitops_rollout_authorization_policy_changed'
     | 'node_update_available'
     | 'dev_build_update_available'
     | 'system';
@@ -103,6 +105,7 @@ export const ALL_SUPPRESSIBLE_CATEGORIES: readonly NotificationCategory[] = [
     'gitops_rollout_paused', 'gitops_rollout_resumed', 'gitops_rollout_superseded',
     'gitops_rollback_started', 'gitops_rollback_completed', 'gitops_rollback_partial_failed',
     'gitops_stateful_confirmation', 'gitops_health_rollout_policy_set',
+    'gitops_placement_policy_changed', 'gitops_rollout_authorization_policy_changed',
 ];
 
 /** Webhook timeout: 10 seconds per external dispatch call. */

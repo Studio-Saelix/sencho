@@ -57,6 +57,8 @@ export const NOTIFIABLE_GITOPS_STAGES = [
   'rollback_partial_failed',
   'blueprint_state_review',
   'health_rollout_policy_set',
+  'placement_policy_changed',
+  'rollout_authorization_policy_changed',
 ] as const satisfies readonly GitOpsHistoryStage[];
 
 export type NotifiableGitOpsStage = (typeof NOTIFIABLE_GITOPS_STAGES)[number];
@@ -139,6 +141,12 @@ export const GITOPS_NOTIFICATION_META: Record<NotifiableGitOpsStage, GitOpsNotif
   // because it decides whether a future rollout can stop or restore work across
   // the fleet, and an audit reader has to see the change and who made it.
   health_rollout_policy_set: { category: 'gitops_health_rollout_policy_set', level: 'info', phrase: 'health rollout policy changed' },
+  // An operator changing what may place or withdraw a workload without one.
+  // Notified for the same reason as the health policy above: it decides in
+  // advance what the system may do to each node, so an audit reader has to
+  // see the change and who made it.
+  placement_policy_changed: { category: 'gitops_placement_policy_changed', level: 'info', phrase: 'placement policy changed' },
+  rollout_authorization_policy_changed: { category: 'gitops_rollout_authorization_policy_changed', level: 'info', phrase: 'rollout authorization policy changed' },
 };
 
 /**

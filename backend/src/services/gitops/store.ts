@@ -390,6 +390,33 @@ export class GitOpsStore {
     return this.db().prepare('SELECT * FROM gitops_approvals WHERE id = ?').get(id) as GitOpsApprovalRow | undefined;
   }
 
+  /**
+   * Whether a placement approval already exists against this intent revision.
+   *
+   * The replay guard. An application pointer only says an approval is stale, so
+   * replaying the *same* current approval passes every currency check and would
+   * otherwise mint a second approval row and supersede the generation the first
+   * one had just opened.
+   *
+   * Keyed on the intent revision rather than the rollout candidate because a
+   * placement approval records no candidate: it is minted by the operator
+   * acting on an intent, and the application pointer moves to the candidate that
+   * intent opened in the same breath. An intent revision opens exactly one
+   * candidate, so the intent is the precise key.
+   */
+  hasPlacementApprovalFor(applicationId: string, intentRevisionId: string): boolean {
+    const row = this.db()
+      .prepare(
+        `SELECT 1 AS found FROM gitops_approvals
+         WHERE application_id = ?
+           AND kind = 'placement_approval'
+           AND intent_revision_id = ?
+         LIMIT 1`,
+      )
+      .get(applicationId, intentRevisionId);
+    return row !== undefined;
+  }
+
   getTarget(applicationId: string, nodeId: number): GitOpsTargetCurrentRow | undefined {
     return this.db().prepare(
       'SELECT * FROM gitops_target_current WHERE application_id = ? AND node_id = ?',

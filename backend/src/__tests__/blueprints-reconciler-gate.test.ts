@@ -120,6 +120,8 @@ async function openGitOpsPlacement(opts: {
         },
         rolloutGenerationId: newGitOpsId(),
         candidateId: gitopsApp.rollout_candidate_id!,
+        authority: 'operator',
+        policyProvenanceJson: null,
     });
     return gitopsApp;
 }

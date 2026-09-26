@@ -523,6 +523,8 @@ describe('POST /api/gitops/applications/:id/rollout/authorize', () => {
       envelope: { operationId: randomUUID(), actor: 'tester', trigger: 'manual', at: Date.now() },
       rolloutGenerationId: `rgen-${randomUUID().slice(0, 8)}`,
       candidateId: seeded.candidateId,
+      authority: 'operator',
+      policyProvenanceJson: null,
       provenance: 'placement_approval',
     });
     // The dispatch is exercised by its own suite; here it stands in for
@@ -578,6 +580,8 @@ describe('POST /api/gitops/applications/:id/rollout/authorize', () => {
       envelope: { operationId: randomUUID(), actor: 'tester', trigger: 'manual', at: Date.now() },
       rolloutGenerationId: `rgen-${randomUUID().slice(0, 8)}`,
       candidateId: seeded.candidateId,
+      authority: 'operator',
+      policyProvenanceJson: null,
       provenance: 'placement_approval',
     });
     vi.spyOn(GitSourceService.getInstance(), 'dispatchAcceptedGeneration')
@@ -622,6 +626,8 @@ describe('POST /api/gitops/applications/:id/rollout/authorize', () => {
       envelope: { operationId: randomUUID(), actor: 'tester', trigger: 'manual', at: Date.now() },
       rolloutGenerationId: `rgen-${randomUUID().slice(0, 8)}`,
       candidateId: seeded.candidateId,
+      authority: 'operator',
+      policyProvenanceJson: null,
       provenance: 'placement_approval',
     });
     // A frozen set the recorded blast no longer covers: the approval places a

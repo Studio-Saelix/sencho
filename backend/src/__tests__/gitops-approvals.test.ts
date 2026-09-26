@@ -242,6 +242,8 @@ describe('gitops approvals', () => {
       envelope: { operationId: 'op-place', actor: 'admin', trigger: 'blueprint_apply', at: 50 },
       rolloutGenerationId: 'rgen-place',
       candidateId: 'cand-place',
+      authority: 'operator',
+      policyProvenanceJson: null,
       strategyJson: '{"driftMode":"observe","enabled":true}',
     });
 

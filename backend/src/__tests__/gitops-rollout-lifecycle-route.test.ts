@@ -257,6 +257,8 @@ async function authorizeRollout(seeded: Seeded): Promise<void> {
     envelope,
     rolloutGenerationId: `rgen-${randomUUID().slice(0, 8)}`,
     candidateId: seeded.candidateId,
+    authority: 'operator',
+    policyProvenanceJson: null,
     provenance: 'placement_approval',
   });
   const result = await ensureRolloutAuthorization(seeded.applicationId, 'tester', 'test', undefined, 'operator');
@@ -539,6 +541,8 @@ describe('POST /api/gitops/applications/:id/rollout/supersede', () => {
       envelope: { operationId: randomUUID(), actor: 'tester', trigger: 'test', at: Date.now() },
       rolloutGenerationId: `rgen-${randomUUID().slice(0, 8)}`,
       candidateId: seeded.candidateId,
+      authority: 'operator',
+      policyProvenanceJson: null,
       provenance: 'placement_approval',
     });
     const res = await request(app)

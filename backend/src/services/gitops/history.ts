@@ -89,6 +89,8 @@ export type GitOpsHistoryStage =
   | 'source_poll_scheduled'
   | 'source_policy_changed'
   | 'health_rollout_policy_set'
+  | 'placement_policy_changed'
+  | 'rollout_authorization_policy_changed'
   | 'source_reconcile_started'
   | 'source_reconcile_settled'
   | 'source_retry_scheduled'

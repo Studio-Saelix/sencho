@@ -18,9 +18,37 @@ import { GitOpsTransitions, type EventEnvelope } from './transitions';
 import type { GitOpsApplicationRow, GitOpsIntentRevisionRow, GitOpsRolloutCandidateRow } from './types';
 import { GitManagedContentError, GitOpsBindingError, isGitManagedBlueprint } from './binding';
 import { carriedHealthPolicyJson } from './healthPolicy';
+import { applyAutomaticPlacement } from './automaticPlacement';
+import { sanitizeForLog } from '../../utils/safeLog';
 
 /** What an operator changed, which decides whether a new intent is minted. */
 export type BlueprintChangeKind = 'operational' | 'metadata_only' | 'none';
+
+/**
+ * Run the bounded automatic placement decision for a candidate this producer
+ * just opened.
+ *
+ * Called after the producer's transaction has committed, never inside it. The
+ * decision reads and writes through its own single-writer transaction, and a
+ * refusal or a defect in it must not be able to roll back the operator's
+ * Blueprint write. Nothing here throws at the caller for the same reason: the
+ * Blueprint edit already succeeded and a 500 would report otherwise.
+ */
+function evaluateAutomaticPlacement(
+    pending: { applicationId: string; envelope: EventEnvelope } | null,
+): void {
+    if (!pending) return;
+    try {
+        applyAutomaticPlacement(pending.applicationId, pending.envelope);
+    } catch (error) {
+        console.error(
+            '[GitOps] automatic placement evaluation failed for',
+            sanitizeForLog(pending.applicationId),
+            ':',
+            sanitizeForLog(error instanceof Error ? error.message : String(error)),
+        );
+    }
+}
 
 function sha256(value: string): string {
   return createHash('sha256').update(value).digest('hex');
@@ -207,7 +235,8 @@ export function commitBlueprintCreate(
   const db = DatabaseService.getInstance();
   const tx = GitOpsTransitions.getInstance();
 
-  return db.getDb().transaction(() => {
+  let pending: { applicationId: string; envelope: EventEnvelope } | null = null;
+  const blueprint = db.getDb().transaction(() => {
     const blueprint = db.createBlueprint(input);
     const envelope = envelopeFor(input.created_by, 'blueprint_create');
     const applicationId = randomUUID();
@@ -226,8 +255,11 @@ export function commitBlueprintCreate(
       ),
       envelope,
     });
+    pending = { applicationId, envelope };
     return blueprint;
   })();
+  evaluateAutomaticPlacement(pending);
+  return blueprint;
 }
 
 /**
@@ -248,7 +280,8 @@ export function commitBlueprintUpdate(
   const store = GitOpsStore.getInstance();
   const tx = GitOpsTransitions.getInstance();
 
-  return db.getDb().transaction(() => {
+  let pending: { applicationId: string; envelope: EventEnvelope } | null = null;
+  const result = db.getDb().transaction(() => {
     const before = db.getBlueprint(blueprintId);
     if (!before) return { blueprint: undefined, change: 'none' as BlueprintChangeKind };
     if (isGitManagedBlueprint(before) && updates.compose_content !== undefined) {
@@ -277,8 +310,11 @@ export function commitBlueprintUpdate(
       ),
       envelope,
     });
+    pending = { applicationId: app.id, envelope };
     return { blueprint, change };
   })();
+  evaluateAutomaticPlacement(pending);
+  return result;
 }
 
 /**
@@ -298,7 +334,8 @@ export function commitBlueprintPin(
   const store = GitOpsStore.getInstance();
   const tx = GitOpsTransitions.getInstance();
 
-  return db.getDb().transaction(() => {
+  let pending: { applicationId: string; envelope: EventEnvelope } | null = null;
+  const result = db.getDb().transaction(() => {
     const before = db.getBlueprint(blueprintId);
     if (!before) return { blueprint: undefined, changed: false };
     if (before.pinned_node_id === nodeId) return { blueprint: before, changed: false };
@@ -319,8 +356,11 @@ export function commitBlueprintPin(
       ),
       envelope,
     });
+    pending = { applicationId: app.id, envelope };
     return { blueprint, changed: true };
   })();
+  evaluateAutomaticPlacement(pending);
+  return result;
 }
 
 /**

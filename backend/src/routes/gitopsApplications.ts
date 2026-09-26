@@ -878,6 +878,10 @@ gitopsApplicationsRouter.post('/:id/placement/approve', async (req: Request, res
       envelope: { operationId: newGitOpsId(), actor, trigger: 'manual', at: Date.now() },
       rolloutGenerationId: newGitOpsId(),
       candidateId: candidate.id,
+      // An operator confirmed this plan in the rollout preview, so the
+      // authority is theirs and no policy decided it.
+      authority: 'operator',
+      policyProvenanceJson: null,
       strategyJson: frozenStrategyFor(GitOpsStore.getInstance(), app, intent.id),
       provenance: 'placement_approval',
     });

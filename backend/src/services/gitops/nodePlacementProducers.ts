@@ -22,6 +22,8 @@ import { sanitizeForLog } from '../../utils/safeLog';
 import { GitOpsStore } from './store';
 import { GitOpsTransitions } from './transitions';
 import { candidateRowFor, envelopeFor, intentRowFor, recordableApplication } from './blueprintProducers';
+import { applyAutomaticPlacement } from './automaticPlacement';
+import type { EventEnvelope } from './transitions';
 
 /** Desired node ids per Blueprint id, as placement currently resolves them. */
 export type PlacementSnapshot = Map<number, number[]>;
@@ -55,6 +57,10 @@ export function recordPlacementShift(
   const store = GitOpsStore.getInstance();
   const tx = GitOpsTransitions.getInstance();
   const moved: number[] = [];
+  // Collected and evaluated after the loop, because this function opens no
+  // transaction of its own: each transition commits on its own, so the decision
+  // runs against durable state rather than against a partially applied shift.
+  const pending: { applicationId: string; envelope: EventEnvelope }[] = [];
 
   for (const [blueprintId, desired] of after) {
     if (sameNodeSet(before.get(blueprintId), desired)) continue;
@@ -83,7 +89,23 @@ export function recordPlacementShift(
       candidate: candidateRowFor(app.id, intent, desired, 'roster_change', envelope.operationId, envelope.at),
       envelope,
     });
+    pending.push({ applicationId: app.id, envelope });
     moved.push(blueprintId);
+  }
+  for (const entry of pending) {
+    try {
+      applyAutomaticPlacement(entry.applicationId, entry.envelope);
+    } catch (e) {
+      // The label change that triggered this already committed. A failure to
+      // evaluate leaves the candidate unapproved, which waits for an operator,
+      // so the safe direction does not depend on this succeeding.
+      console.error(
+        '[GitOps] automatic placement evaluation failed for',
+        sanitizeForLog(entry.applicationId),
+        ':',
+        sanitizeForLog(e instanceof Error ? e.message : String(e)),
+      );
+    }
   }
   return moved;
 }

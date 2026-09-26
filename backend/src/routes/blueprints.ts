@@ -803,6 +803,10 @@ blueprintsRouter.post('/:id/apply', async (req: Request, res: Response): Promise
                     blastJson: encodeGitOpsApprovedTargetEffectJson(blast),
                     requiredNodeIds,
                     fingerprint: preview.planFingerprint,
+                    // An operator applied the Blueprint, so the authority is
+                    // theirs and no policy decided it.
+                    authority: 'operator',
+                    policyProvenanceJson: null,
                     actor: req.user?.username ?? null,
                     envelope: {
                         operationId: newGitOpsId(),
