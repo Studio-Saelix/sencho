@@ -1035,7 +1035,7 @@ describe('MeshService.regenerateAllOverrides (F6: boot-time regen)', () => {
     });
 });
 
-describe('MeshService.getDeclaredStackServiceNames (BUG-1)', () => {
+describe('MeshService.getDeclaredStackServices (BUG-1)', () => {
     function writeStackFile(stack: string, contents: string): void {
         const composeDir = process.env.COMPOSE_DIR as string;
         const dir = path.join(composeDir, stack);
@@ -1054,27 +1054,52 @@ describe('MeshService.getDeclaredStackServiceNames (BUG-1)', () => {
             '    image: busybox:latest',
         ].join('\n'));
 
-        const names = await svc.getDeclaredStackServiceNames('declared-stack');
+        const names = Object.keys(await svc.getDeclaredStackServices('declared-stack'));
         expect(names.sort()).toEqual(['echo', 'prober']);
     });
 
     it('returns [] when the compose file is missing', async () => {
         const svc = MeshService.getInstance();
-        const names = await svc.getDeclaredStackServiceNames('does-not-exist');
-        expect(names).toEqual([]);
+        const names = await svc.getDeclaredStackServices('does-not-exist');
+        expect(names).toEqual({});
     });
 
     it('returns [] for an invalid stack name (path traversal attempt)', async () => {
         const svc = MeshService.getInstance();
-        const names = await svc.getDeclaredStackServiceNames('../etc/passwd');
-        expect(names).toEqual([]);
+        const names = await svc.getDeclaredStackServices('../etc/passwd');
+        expect(names).toEqual({});
     });
 
     it('returns [] when YAML has no services key', async () => {
         const svc = MeshService.getInstance();
         writeStackFile('no-services', 'version: "3.9"\n');
-        const names = await svc.getDeclaredStackServiceNames('no-services');
-        expect(names).toEqual([]);
+        const names = await svc.getDeclaredStackServices('no-services');
+        expect(names).toEqual({});
+    });
+
+    it('reports each service network shape so the override keeps default and skips network_mode', async () => {
+        const svc = MeshService.getInstance();
+        writeStackFile('shaped-stack', [
+            'services:',
+            '  web:',
+            '    image: nginx',
+            '  api:',
+            '    image: busybox',
+            '    networks: [proxy]',
+            '  app:',
+            '    image: busybox',
+            '    network_mode: "service:vpn"',
+            'networks:',
+            '  proxy:',
+            '    external: true',
+        ].join('\n'));
+
+        const shapes = await svc.getDeclaredStackServices('shaped-stack');
+        expect(shapes).toEqual({
+            web: { declaresNetworks: false },
+            api: { declaresNetworks: true },
+            app: { declaresNetworks: false, networkMode: 'service:vpn' },
+        });
     });
 });
 
@@ -1121,7 +1146,7 @@ describe('MeshService.ensureStackOverride (BUG-1 fix)', () => {
         const db = DatabaseService.getInstance();
         const localNodeId = db.getNodes()[0].id;
 
-        // No compose file on disk; getDeclaredStackServiceNames returns [].
+        // No compose file on disk; getDeclaredStackServices returns {}.
         // Pre-seed an existing override file with a populated services map.
         const dataDir = process.env.DATA_DIR as string;
         const overrideDir = path.join(dataDir, 'mesh', 'overrides', String(localNodeId));
@@ -1190,7 +1215,7 @@ describe('MeshService.ensureStackOverride (BUG-1 fix)', () => {
         const svc = MeshService.getInstance();
         const db = DatabaseService.getInstance();
         const localNodeId = db.getNodes()[0].id;
-        vi.spyOn(svc, 'getDeclaredStackServiceNames').mockResolvedValue(['web']);
+        vi.spyOn(svc, 'getDeclaredStackServices').mockResolvedValue({ web: { declaresNetworks: false } });
 
         const file = await svc.applyLocalOverride('proxy-stack', []);
 
@@ -1210,7 +1235,7 @@ describe('MeshService.ensureStackOverride (BUG-1 fix)', () => {
         const svc = MeshService.getInstance();
         const db = DatabaseService.getInstance();
         const localNodeId = db.getNodes()[0].id;
-        vi.spyOn(svc, 'getDeclaredStackServiceNames').mockResolvedValue(['web']);
+        vi.spyOn(svc, 'getDeclaredStackServices').mockResolvedValue({ web: { declaresNetworks: false } });
         vi.spyOn(db, 'insertMeshStack').mockImplementation(() => {
             throw new Error('database unavailable');
         });
@@ -1236,7 +1261,7 @@ describe('MeshService.ensureStackOverride (BUG-1 fix)', () => {
         const overrideFile = path.join(overrideDir, 'db-replacement-failure.override.yml');
         const originalYaml = 'services:\n  prior:\n    networks:\n      - sencho_mesh\n';
         fsSync.writeFileSync(overrideFile, originalYaml, 'utf8');
-        vi.spyOn(svc, 'getDeclaredStackServiceNames').mockResolvedValue(['web']);
+        vi.spyOn(svc, 'getDeclaredStackServices').mockResolvedValue({ web: { declaresNetworks: false } });
         vi.spyOn(db, 'insertMeshStack').mockImplementation(() => {
             throw new Error('database unavailable');
         });
@@ -1252,7 +1277,7 @@ describe('MeshService.ensureStackOverride (BUG-1 fix)', () => {
         const svc = MeshService.getInstance();
         const db = DatabaseService.getInstance();
         const localNodeId = db.getNodes()[0].id;
-        vi.spyOn(svc, 'getDeclaredStackServiceNames').mockResolvedValue(['web']);
+        vi.spyOn(svc, 'getDeclaredStackServices').mockResolvedValue({ web: { declaresNetworks: false } });
         vi.spyOn(fs, 'rename').mockRejectedValue(new Error('rename failed'));
 
         await expect(svc.applyLocalOverride('write-failure', [])).rejects.toThrow('rename failed');
@@ -1273,7 +1298,7 @@ describe('MeshService.ensureStackOverride (BUG-1 fix)', () => {
         const originalYaml = 'services:\n  prior:\n    networks:\n      - sencho_mesh\n';
         fsSync.writeFileSync(overrideFile, originalYaml, 'utf8');
         db.insertMeshStack(localNodeId, 'replacement-failure', 'tester');
-        vi.spyOn(svc, 'getDeclaredStackServiceNames').mockResolvedValue(['web']);
+        vi.spyOn(svc, 'getDeclaredStackServices').mockResolvedValue({ web: { declaresNetworks: false } });
         vi.spyOn(fs, 'rename').mockRejectedValue(new Error('rename failed'));
 
         await expect(svc.applyLocalOverride('replacement-failure', [])).rejects.toThrow('rename failed');
@@ -1286,17 +1311,17 @@ describe('MeshService.ensureStackOverride (BUG-1 fix)', () => {
         const svc = MeshService.getInstance();
         const db = DatabaseService.getInstance();
         const localNodeId = db.getNodes()[0].id;
-        let releaseServices!: (services: string[]) => void;
-        const servicesPending = new Promise<string[]>((resolve) => {
+        let releaseServices!: (services: Record<string, { declaresNetworks: boolean }>) => void;
+        const servicesPending = new Promise<Record<string, { declaresNetworks: boolean }>>((resolve) => {
             releaseServices = resolve;
         });
-        vi.spyOn(svc, 'getDeclaredStackServiceNames').mockReturnValue(servicesPending);
+        vi.spyOn(svc, 'getDeclaredStackServices').mockReturnValue(servicesPending);
 
         const first = svc.applyLocalOverride('concurrent-stack', []);
-        await vi.waitFor(() => expect(svc.getDeclaredStackServiceNames).toHaveBeenCalledTimes(1));
+        await vi.waitFor(() => expect(svc.getDeclaredStackServices).toHaveBeenCalledTimes(1));
 
         await expect(svc.applyLocalOverride('concurrent-stack', [])).rejects.toThrow('another operation');
-        releaseServices(['web']);
+        releaseServices({ web: { declaresNetworks: false } });
         await first;
 
         expect(db.isMeshStackEnabled(localNodeId, 'concurrent-stack')).toBe(true);
@@ -1306,17 +1331,17 @@ describe('MeshService.ensureStackOverride (BUG-1 fix)', () => {
         const svc = MeshService.getInstance();
         const db = DatabaseService.getInstance();
         const localNodeId = db.getNodes()[0].id;
-        let releaseServices!: (services: string[]) => void;
-        const servicesPending = new Promise<string[]>((resolve) => {
+        let releaseServices!: (services: Record<string, { declaresNetworks: boolean }>) => void;
+        const servicesPending = new Promise<Record<string, { declaresNetworks: boolean }>>((resolve) => {
             releaseServices = resolve;
         });
-        vi.spyOn(svc, 'getDeclaredStackServiceNames').mockReturnValue(servicesPending);
+        vi.spyOn(svc, 'getDeclaredStackServices').mockReturnValue(servicesPending);
 
         const apply = svc.applyLocalOverride('apply-remove-stack', []);
-        await vi.waitFor(() => expect(svc.getDeclaredStackServiceNames).toHaveBeenCalledTimes(1));
+        await vi.waitFor(() => expect(svc.getDeclaredStackServices).toHaveBeenCalledTimes(1));
 
         await expect(svc.removeLocalOverride('apply-remove-stack')).rejects.toThrow('another operation');
-        releaseServices(['web']);
+        releaseServices({ web: { declaresNetworks: false } });
         const file = await apply;
 
         expect(file).not.toBeNull();
@@ -1348,7 +1373,7 @@ describe('MeshService.ensureStackOverride (BUG-1 fix)', () => {
         const svc = MeshService.getInstance();
         const db = DatabaseService.getInstance();
         const localNodeId = db.getNodes()[0].id;
-        vi.spyOn(svc, 'getDeclaredStackServiceNames').mockResolvedValue(['web']);
+        vi.spyOn(svc, 'getDeclaredStackServices').mockResolvedValue({ web: { declaresNetworks: false } });
         vi.spyOn(svc as unknown as { refreshAliasCache: () => Promise<void> }, 'refreshAliasCache')
             .mockRejectedValue(new Error('refresh failed'));
         vi.spyOn(console, 'warn').mockImplementation(() => { /* silence */ });
@@ -1577,6 +1602,87 @@ describe('MeshService.openCrossNode (BUG-4)', () => {
         ee.write = vi.fn();
         return ee;
     }
+
+    // Backpressure: a saturated tunnel must stop reading the container's
+    // socket instead of letting bytes pile up in the WS send buffer, and the
+    // pause must be released on every path or the transfer stalls forever.
+    function makeBackpressureSocket() {
+        const ee = new EventEmitter() as EventEmitter & {
+            destroy: ReturnType<typeof vi.fn>;
+            end: ReturnType<typeof vi.fn>;
+            write: ReturnType<typeof vi.fn>;
+            pause: ReturnType<typeof vi.fn>;
+            resume: ReturnType<typeof vi.fn>;
+        };
+        ee.destroy = vi.fn();
+        ee.end = vi.fn();
+        ee.write = vi.fn();
+        ee.pause = vi.fn();
+        ee.resume = vi.fn();
+        return ee;
+    }
+
+    async function dispatchCrossNode(stream: MeshTcpStreamLike, src: EventEmitter): Promise<void> {
+        const svc = MeshService.getInstance();
+        vi.spyOn(
+            svc as unknown as { dialMeshTcpStream: (t: MeshTarget) => MeshTcpStreamLike | null },
+            'dialMeshTcpStream',
+        ).mockReturnValue(stream);
+        await (svc as unknown as { openCrossNode: (t: MeshTarget, s: unknown) => Promise<void> })
+            .openCrossNode({
+                nodeId: 14, stack: 'audit-mesh-pilot', service: 'echo',
+                port: 9001, alias: 'echo.audit-mesh-pilot.sencho-pilot-test.sencho',
+            }, src);
+        (stream as unknown as EventEmitter).emit('open');
+    }
+
+    it('pauses the source socket when the tunnel reports backpressure, and resumes on drain', async () => {
+        const fakeStream = makeFakeStream(60);
+        (fakeStream.write as ReturnType<typeof vi.fn>).mockReturnValue(false);
+        const fakeSrc = makeBackpressureSocket();
+        await dispatchCrossNode(fakeStream, fakeSrc);
+
+        fakeSrc.emit('data', Buffer.from('bulk'));
+        expect(fakeStream.write).toHaveBeenCalled();
+        expect(fakeSrc.pause).toHaveBeenCalledTimes(1);
+        expect(fakeSrc.resume).not.toHaveBeenCalled();
+
+        fakeStream.emit('drain');
+        expect(fakeSrc.resume).toHaveBeenCalledTimes(1);
+        fakeStream.emit('close');
+    });
+
+    it('does not queue duplicate drain listeners while the source is still paused', async () => {
+        const fakeStream = makeFakeStream(61);
+        (fakeStream.write as ReturnType<typeof vi.fn>).mockReturnValue(false);
+        const fakeSrc = makeBackpressureSocket();
+        await dispatchCrossNode(fakeStream, fakeSrc);
+
+        fakeSrc.emit('data', Buffer.from('one'));
+        fakeSrc.emit('data', Buffer.from('two'));
+        fakeSrc.emit('data', Buffer.from('three'));
+        expect(fakeSrc.pause).toHaveBeenCalledTimes(1);
+
+        fakeStream.emit('drain');
+        expect(fakeSrc.resume).toHaveBeenCalledTimes(1);
+        fakeStream.emit('close');
+    });
+
+    it('releases a paused source socket when the tunnel closes before it drains', async () => {
+        const fakeStream = makeFakeStream(62);
+        (fakeStream.write as ReturnType<typeof vi.fn>).mockReturnValue(false);
+        const fakeSrc = makeBackpressureSocket();
+        await dispatchCrossNode(fakeStream, fakeSrc);
+
+        fakeSrc.emit('data', Buffer.from('bulk'));
+        expect(fakeSrc.pause).toHaveBeenCalledTimes(1);
+
+        // Tunnel dies mid-transfer. Without the resume the half-close below
+        // would never flush and the socket would hang for its whole timeout.
+        fakeStream.emit('close');
+        expect(fakeSrc.resume).toHaveBeenCalledTimes(1);
+        expect(fakeSrc.end).toHaveBeenCalled();
+    });
 
     it('src.on(close) deletes activeStreams entry even when tcpStream never emits close', async () => {
         const svc = MeshService.getInstance();

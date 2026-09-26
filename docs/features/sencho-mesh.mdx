@@ -64,7 +64,7 @@ Each opt-in and opt-out triggers a redeploy of the affected stack so its `/etc/h
 
 ## Lifecycle and behavior
 
-**Opt-in.** Sencho writes a Compose override file (`<DATA_DIR>/mesh/overrides/<nodeId>/<stack>.override.yml`) that adds the `sencho_mesh` network attachment to every service in the stack and injects `extra_hosts` lines for every cross-node alias the fleet currently exposes. The stack redeploys with that override applied. Containers come back up with the alias names resolvable in their `/etc/hosts`.
+**Opt-in.** Sencho writes a Compose override file (`<DATA_DIR>/mesh/overrides/<nodeId>/<stack>.override.yml`) that adds the `sencho_mesh` network attachment to every service in the stack and injects `extra_hosts` lines for every cross-node alias the fleet currently exposes. Services keep their existing networks: a service that relies on the stack's implicit `default` network stays on it, so links between services in the stack and routes from your reverse proxy keep working. Services that use `network_mode` (`host`, `none`, `service:<name>`, `container:<name>`) are left out of the override, because Compose does not allow extra networks or hosts entries on them. The stack redeploys with that override applied. Containers come back up with the alias names resolvable in their `/etc/hosts`.
 
 **Opt-out.** The override file is removed and the stack redeploys without it. Containers come back without the mesh network attachment and without the `extra_hosts` lines.
 
@@ -179,7 +179,7 @@ Sencho re-checks the mesh data plane every 10 seconds and updates `/api/health` 
 
 **Authentication.** Cross-node traffic rides an authenticated WebSocket between Sencho instances. Pilot Agent nodes authenticate with the long-lived JWT issued at enrollment (stored at `/app/data/pilot.jwt` on the agent). Distributed API Proxy nodes authenticate with the [Node Token](/features/multi-node#add-a-remote-node-distributed-api-proxy) generated on the remote. Restricted API token scopes (read-only, deploy-only) cannot carry mesh traffic; only a full-admin Node Token can.
 
-**Inbound exposure.** Mesh adds no new inbound port to central. A Pilot Agent node's outbound tunnel carries mesh traffic in both directions. A Distributed API Proxy node only needs the inbound port Sencho already listens on for fleet operations (so it can be dialed by central). Aliases themselves are not internet-reachable; they only resolve inside the `sencho_mesh` Docker bridge on each participating node.
+**Inbound exposure.** Sencho listens for mesh traffic only on its own `sencho_mesh` address, so containers on other networks Sencho is attached to (for example a reverse proxy's network) cannot reach meshed services through it. Mesh adds no new inbound port to central. A Pilot Agent node's outbound tunnel carries mesh traffic in both directions. A Distributed API Proxy node only needs the inbound port Sencho already listens on for fleet operations (so it can be dialed by central). Aliases themselves are not internet-reachable; they only resolve inside the `sencho_mesh` Docker bridge on each participating node.
 
 **Encryption in transit.** The WebSocket between Sencho instances is whatever TLS posture you already configured for fleet management. If you front Sencho with a TLS-terminating reverse proxy, mesh inherits that. If you use a private CA, see Pilot Agent's [`SENCHO_PILOT_CA_FILE`](/features/pilot-agent#environment-variables) for the supported trust-store override.
 
@@ -197,7 +197,7 @@ These are the explicit boundaries of the v1 mesh.
 - **Shared stream pool with the Pilot tunnel.** Each Pilot tunnel multiplexes up to **1024** concurrent streams covering HTTP, WebSocket, and mesh TCP. A heavy mesh workload counts against the same ceiling as ordinary fleet API traffic. See Pilot Agent's [Resource limits](/features/pilot-agent#resource-limits) for the full picture.
 - **No TLS termination, no L7 features.** Mesh is L4. There is no built-in HTTPS, no host-based routing, no header rewriting, no blue/green cutover. Run those at your existing reverse proxy.
 - **No application authentication.** Mesh does not add a credential layer to the transported protocol. Your services still authenticate their callers themselves.
-- **`network_mode: host` services cannot join.** A service that runs on the host network namespace cannot attach to `sencho_mesh` and therefore cannot publish an alias. The rest of the stack can still mesh; the host-network service stays out.
+- **`network_mode` services cannot join.** A service that uses `network_mode` (`host`, `none`, or another container's namespace such as a VPN sidecar with `service:gluetun`) cannot attach to `sencho_mesh`. The rest of the stack still meshes; Sencho leaves those services untouched. Alias discovery reads published ports, so such a service can still show an alias; whether it routes depends on how the rest of the stack exposes that port.
 - **Mesh activity log is in-memory.** The fleet-wide log resets when Sencho restarts. For long-term retention rely on the audit log (opt-in / opt-out) or export from your reverse proxy.
 
 ## Example workflows
@@ -230,8 +230,8 @@ These are the explicit boundaries of the v1 mesh.
     For the container-log view, `docker logs sencho 2>&1 | grep '\[Mesh\]'` shows the boot summary (one line) and any setup failures with the same reason discriminator: `[Mesh] data plane ok, self attached at 172.31.0.2, subnet 172.31.0.0/24` on success, or `[Mesh] data plane unavailable (subnet_overlap, subnet 172.30.0.0/24): Pool overlaps with other one on this address space` on failure.
   </Accordion>
 
-  <Accordion title="Opt-in rejects with 'host-network service'">
-    Stacks whose services declare `network_mode: host` cannot join `sencho_mesh` and therefore cannot publish a mesh alias. Switch the affected service to bridge networking and redeploy, or accept that the stack stays out of the mesh.
+  <Accordion title="A service using network_mode is left untouched">
+    Services that declare `network_mode` (`host`, `none`, `service:<name>`, `container:<name>`) are left out of the mesh override, because Compose rejects extra networks and hosts entries on them. They keep running on the namespace they already use. For a VPN sidecar pattern, the ports come from the sidecar, so reach the stack through the sidecar's service. Otherwise switch the service to bridge networking and redeploy.
   </Accordion>
 
   <Accordion title="Opt-in returns 409 'Port already claimed by another mesh stack'">

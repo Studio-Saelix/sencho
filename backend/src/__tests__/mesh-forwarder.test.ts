@@ -79,7 +79,7 @@ describe('MeshForwarder', () => {
 
     it('binds a listener on the requested port and reports it via getListenerPorts', async () => {
         const { host } = makeRecordingHost();
-        forwarder = new MeshForwarder(host);
+        forwarder = new MeshForwarder(host, () => '127.0.0.1');
         const port = await getEphemeralPort();
         await forwarder.listen(port);
 
@@ -89,7 +89,7 @@ describe('MeshForwarder', () => {
 
     it('hands accepted sockets to the host with the original destination port', async () => {
         const { host, accepts } = makeRecordingHost();
-        forwarder = new MeshForwarder(host);
+        forwarder = new MeshForwarder(host, () => '127.0.0.1');
         const port = await getEphemeralPort();
         await forwarder.listen(port);
 
@@ -104,7 +104,7 @@ describe('MeshForwarder', () => {
 
     it('listen is idempotent (repeated calls on the same port no-op)', async () => {
         const { host } = makeRecordingHost();
-        forwarder = new MeshForwarder(host);
+        forwarder = new MeshForwarder(host, () => '127.0.0.1');
         const port = await getEphemeralPort();
         await forwarder.listen(port);
         await forwarder.listen(port);
@@ -113,7 +113,7 @@ describe('MeshForwarder', () => {
 
     it('two concurrent listen() calls on the same port produce a single bind, not EADDRINUSE', async () => {
         const { host } = makeRecordingHost();
-        forwarder = new MeshForwarder(host);
+        forwarder = new MeshForwarder(host, () => '127.0.0.1');
         const port = await getEphemeralPort();
         // Fire both calls before either resolves. Without the in-flight
         // dedup map, the second call would race past the listeners.has()
@@ -126,7 +126,7 @@ describe('MeshForwarder', () => {
 
     it('unlisten releases the port so a new listener can bind it', async () => {
         const { host } = makeRecordingHost();
-        forwarder = new MeshForwarder(host);
+        forwarder = new MeshForwarder(host, () => '127.0.0.1');
         const port = await getEphemeralPort();
         await forwarder.listen(port);
         await forwarder.unlisten(port);
@@ -142,7 +142,7 @@ describe('MeshForwarder', () => {
 
     it('rejects new connections after shutdown', async () => {
         const { host } = makeRecordingHost();
-        forwarder = new MeshForwarder(host);
+        forwarder = new MeshForwarder(host, () => '127.0.0.1');
         const port = await getEphemeralPort();
         await forwarder.listen(port);
         await forwarder.shutdown();
@@ -155,12 +155,28 @@ describe('MeshForwarder', () => {
         const host: MeshForwarderHost = {
             async handleAccept() { throw new Error('host blew up'); },
         };
-        forwarder = new MeshForwarder(host);
+        forwarder = new MeshForwarder(host, () => '127.0.0.1');
         const port = await getEphemeralPort();
         await forwarder.listen(port);
 
         const client = await dial(port);
         const closed = new Promise<void>((resolve) => client.once('close', () => resolve()));
         await closed;
+    });
+
+    it('binds only on the address the service resolves (the mesh IP), not on every interface', async () => {
+        const { host } = makeRecordingHost();
+        forwarder = new MeshForwarder(host, () => '127.0.0.1');
+        const port = await getEphemeralPort();
+        await forwarder.listen(port);
+        expect(forwarder.boundAddress(port)).toBe('127.0.0.1');
+    });
+
+    it('refuses to bind when no mesh address is available', async () => {
+        const { host } = makeRecordingHost();
+        forwarder = new MeshForwarder(host, () => null);
+        const port = await getEphemeralPort();
+        await expect(forwarder.listen(port)).rejects.toThrow(/no bind address/);
+        expect(forwarder.getListenerPorts()).toEqual([]);
     });
 });
