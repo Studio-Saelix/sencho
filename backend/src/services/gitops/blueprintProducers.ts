@@ -13,6 +13,7 @@
 import { createHash, randomUUID } from 'crypto';
 import { DatabaseService, type Blueprint, type BlueprintSelector } from '../DatabaseService';
 import { GitOpsStore } from './store';
+import { DEFAULT_PLACEMENT_POLICY, DEFAULT_ROLLOUT_AUTHORIZATION_POLICY } from './policyComposition';
 import { GitOpsTransitions, type EventEnvelope } from './transitions';
 import type { GitOpsApplicationRow, GitOpsIntentRevisionRow, GitOpsRolloutCandidateRow } from './types';
 import { GitManagedContentError, GitOpsBindingError, isGitManagedBlueprint } from './binding';
@@ -403,6 +404,11 @@ export function blankInlineApplication(id: string, blueprintId: number, at: numb
     pause_reason: null,
     source_suspended_reason: null,
     source_policy: 'manual',
+    // An Inline Blueprint has no Git source, so source policy is manual by
+    // construction. Placement and rollout authorization are still configured
+    // independently, and both start at their safe defaults.
+    placement_policy: DEFAULT_PLACEMENT_POLICY,
+    rollout_authorization_policy: DEFAULT_ROLLOUT_AUTHORIZATION_POLICY,
     poll_interval_secs: null,
     next_poll_at: null,
     attempt_seq: 0,

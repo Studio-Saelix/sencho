@@ -22,6 +22,7 @@ import type {
   GitOpsCreateCheckpointRow,
   GitOpsGenerationRow,
 } from '../services/gitops/types';
+import { DEFAULT_PLACEMENT_POLICY, DEFAULT_ROLLOUT_AUTHORIZATION_POLICY } from '../services/gitops/policyComposition';
 
 const SHA = 'feed1234';
 
@@ -493,6 +494,8 @@ function creatingApp(id: string, stackName: string): GitOpsApplicationRow {
     pause_reason: null,
     source_suspended_reason: null,
     source_policy: 'manual',
+    placement_policy: DEFAULT_PLACEMENT_POLICY,
+    rollout_authorization_policy: DEFAULT_ROLLOUT_AUTHORIZATION_POLICY,
     poll_interval_secs: null,
     next_poll_at: null,
     attempt_seq: 0,

@@ -8,6 +8,7 @@ import { projectApplication } from '../services/gitops/derive';
 import { postureOf } from '../services/gitops/portfolioAggregator';
 import { attentionReasons } from '../services/gitops/attention';
 import type { GitOpsApplicationRow, GitOpsGenerationRow } from '../services/gitops/types';
+import { DEFAULT_PLACEMENT_POLICY, DEFAULT_ROLLOUT_AUTHORIZATION_POLICY } from '../services/gitops/policyComposition';
 
 describe('gitops transitions', () => {
   let tmpDir: string;
@@ -1471,6 +1472,8 @@ function app(id: string, stackName: string): GitOpsApplicationRow {
     pause_reason: null,
     source_suspended_reason: null,
     source_policy: 'manual',
+    placement_policy: DEFAULT_PLACEMENT_POLICY,
+    rollout_authorization_policy: DEFAULT_ROLLOUT_AUTHORIZATION_POLICY,
     poll_interval_secs: null,
     next_poll_at: null,
     attempt_seq: 0,

@@ -5,6 +5,7 @@ import { captureGitOpsRecoveryBinding } from '../services/gitops/recoveryCapture
 import { emptyTargetRow, GitOpsStore } from '../services/gitops/store';
 import { GitOpsTransitions, type EventEnvelope } from '../services/gitops/transitions';
 import type { GitOpsApplicationRow, GitOpsGenerationRow, GitOpsIntentRevisionRow } from '../services/gitops/types';
+import { DEFAULT_PLACEMENT_POLICY, DEFAULT_ROLLOUT_AUTHORIZATION_POLICY } from '../services/gitops/policyComposition';
 
 describe('gitops recovery capture', () => {
   let tmpDir: string;
@@ -284,6 +285,8 @@ function app(id: string, stackName: string): GitOpsApplicationRow {
     pause_reason: null,
     source_suspended_reason: null,
     source_policy: 'manual',
+    placement_policy: DEFAULT_PLACEMENT_POLICY,
+    rollout_authorization_policy: DEFAULT_ROLLOUT_AUTHORIZATION_POLICY,
     poll_interval_secs: null,
     next_poll_at: null,
     attempt_seq: 0,

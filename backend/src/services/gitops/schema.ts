@@ -112,6 +112,20 @@ CREATE TABLE IF NOT EXISTS gitops_applications (
   source_policy TEXT NOT NULL DEFAULT 'manual' CHECK (
     source_policy IN ('manual','review','automatic')
   ),
+  -- Placement policy, independent of source policy. operator is the only safe
+  -- default: automatic placement moves workloads on nodes, and an install that
+  -- has never asked to be automated must not start.
+  placement_policy TEXT NOT NULL DEFAULT 'operator' CHECK (
+    placement_policy IN ('operator','bounded_auto')
+  ),
+  -- Whether rollout authorization is minted by policy or waits for an operator.
+  -- New installs wait, because an install with no rollout history has no
+  -- evidence that any target can take the generation. Existing installations
+  -- are a separate case, handled by the one-time backfill in the migration,
+  -- because they already authorized themselves.
+  rollout_authorization_policy TEXT NOT NULL DEFAULT 'manual' CHECK (
+    rollout_authorization_policy IN ('manual','automatic')
+  ),
   poll_interval_secs INTEGER NULL,
   next_poll_at INTEGER NULL,
   attempt_seq INTEGER NOT NULL DEFAULT 0,
@@ -302,6 +316,12 @@ CREATE TABLE IF NOT EXISTS gitops_rollout_generations (
   preflight_fingerprint TEXT NULL,
   preflight_evidence_json TEXT NULL,
   rollout_strategy_json TEXT NOT NULL DEFAULT '{}',
+  -- The policy snapshot this generation executes, frozen at the moment the
+  -- generation opened. Nullable with no default on purpose: a row that predates
+  -- the column is SQL NULL, which the decoder reconstructs as the legacy
+  -- behavior those rollouts actually had. An empty-object default would make
+  -- absence impossible and turn every existing generation into a decode failure.
+  policy_snapshot_json TEXT NULL,
   provenance TEXT NOT NULL CHECK (provenance IN (
     'legacy_inline','placement_approval','rollout_authorization'
   )),

@@ -4,6 +4,7 @@ import { isHubOnlyPath } from '../helpers/proxyExemptPaths';
 import { APPLICATIONS_DUE_FOR_RETRY_SQL, GitOpsStore, emptyTargetRow, SOURCES_DUE_FOR_POLL_SQL, SOURCE_APPLICATION_MODE_SQL } from '../services/gitops/store';
 import { encodeArtifactEvidenceJson } from '../services/gitops/json';
 import type { GitOpsApplicationRow, GitOpsGenerationRow } from '../services/gitops/types';
+import { DEFAULT_PLACEMENT_POLICY, DEFAULT_ROLLOUT_AUTHORIZATION_POLICY } from '../services/gitops/policyComposition';
 
 describe('gitops schema', () => {
   let tmpDir: string;
@@ -480,6 +481,8 @@ describe('gitops schema', () => {
     store.insertApplication({
       ...directApp('app-ctrl2', 'ctrl2-web'),
       source_policy: 'automatic',
+      placement_policy: DEFAULT_PLACEMENT_POLICY,
+      rollout_authorization_policy: DEFAULT_ROLLOUT_AUTHORIZATION_POLICY,
       poll_interval_secs: 120,
       next_poll_at: 5000,
       attempt_seq: 3,
@@ -550,6 +553,8 @@ function directApp(id: string, stackName: string): GitOpsApplicationRow {
     pause_reason: null,
     source_suspended_reason: null,
     source_policy: 'manual',
+    placement_policy: DEFAULT_PLACEMENT_POLICY,
+    rollout_authorization_policy: DEFAULT_ROLLOUT_AUTHORIZATION_POLICY,
     poll_interval_secs: null,
     next_poll_at: null,
     attempt_seq: 0,

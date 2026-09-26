@@ -37,6 +37,7 @@ import {
   encodeIntentHealthPolicy,
 } from './healthPolicy';
 import type { HealthPolicyDecision, HealthRolloutPolicy } from './healthPolicy';
+import { configuredSnapshotFor, encodePolicySnapshot } from './policyComposition';
 import { runningGenerationForTarget } from './recoveryCapture';
 
 
@@ -2043,6 +2044,10 @@ export class GitOpsTransitions {
           required_targets_json: requiredTargetsJson,
           preflight_fingerprint: null,
           preflight_evidence_json: null,
+          // Frozen here, at the moment the generation opens. A policy edit later
+          // changes what the NEXT generation may do and leaves this one running
+          // under the snapshot that authorized it.
+          policy_snapshot_json: encodePolicySnapshot(configuredSnapshotFor(app)),
           rollout_strategy_json: args.strategyJson ?? '{}',
           provenance: args.provenance ?? 'legacy_inline',
           supersedes_generation_id: previousGenerationId,
@@ -2186,6 +2191,10 @@ export class GitOpsTransitions {
           preflight_fingerprint: args.preflightFingerprint,
           preflight_evidence_json: args.preflightEvidenceJson,
           rollout_strategy_json: args.strategyJson ?? '{}',
+          // The snapshot this generation executes. Read from the live
+          // application row rather than from the binding, so what is frozen is
+          // what the operator has configured, not a value a caller supplied.
+          policy_snapshot_json: encodePolicySnapshot(configuredSnapshotFor(app)),
           provenance: 'rollout_authorization',
           supersedes_generation_id: previousGenerationId,
           superseded_at: null,
@@ -4039,7 +4048,8 @@ export class GitOpsTransitions {
         latest_operation_id=?, active_operation_id=?,
         active_operation_stage=?, active_operation_at=?, active_generation_id=?,
         pause_at=?, pause_reason=?, source_suspended_reason=?,
-        source_policy=?, poll_interval_secs=?, next_poll_at=?, attempt_seq=?, partial_json=?,
+        source_policy=?, placement_policy=?, rollout_authorization_policy=?,
+        poll_interval_secs=?, next_poll_at=?, attempt_seq=?, partial_json=?,
         failure_stage=?, failure_class=?, failure_at=?, retry_at=?, retry_count=?,
         suspended_at=?, recovery_ref=?, recovery_phase=?,
         interruption_stage=?, interruption_at=?, interruption_operation_id=?,
@@ -4057,7 +4067,8 @@ export class GitOpsTransitions {
       app.latest_operation_id, app.active_operation_id,
       app.active_operation_stage, app.active_operation_at, app.active_generation_id,
       app.pause_at, app.pause_reason, app.source_suspended_reason,
-      app.source_policy, app.poll_interval_secs, app.next_poll_at, app.attempt_seq, app.partial_json,
+      app.source_policy, app.placement_policy, app.rollout_authorization_policy,
+      app.poll_interval_secs, app.next_poll_at, app.attempt_seq, app.partial_json,
       app.failure_stage, app.failure_class, app.failure_at, app.retry_at, app.retry_count,
       app.suspended_at, app.recovery_ref, app.recovery_phase,
       app.interruption_stage, app.interruption_at, app.interruption_operation_id,

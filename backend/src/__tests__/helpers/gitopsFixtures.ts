@@ -6,6 +6,7 @@
  * once setupTestDb has run.
  */
 import type { GitOpsApplicationRow } from '../../services/gitops/types';
+import { DEFAULT_PLACEMENT_POLICY, DEFAULT_ROLLOUT_AUTHORIZATION_POLICY } from '../../services/gitops/policyComposition';
 
 /**
  * A minimal live Direct application row.
@@ -61,6 +62,8 @@ export function directApplicationFixture(id: string, stackName: string): GitOpsA
         pause_reason: null,
         source_suspended_reason: null,
         source_policy: 'manual',
+        placement_policy: DEFAULT_PLACEMENT_POLICY,
+        rollout_authorization_policy: DEFAULT_ROLLOUT_AUTHORIZATION_POLICY,
         poll_interval_secs: null,
         next_poll_at: null,
         attempt_seq: 0,

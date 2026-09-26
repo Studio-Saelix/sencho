@@ -737,12 +737,13 @@ export class GitOpsStore {
         placement_approval_ref, rollout_authorization_ref, legacy_combined_approval_ref,
         preflight_fingerprint, latest_preflight_evidence_json, latest_operation_id, active_operation_id, active_operation_stage,
         active_operation_at, active_generation_id, pause_at, pause_reason, source_suspended_reason,
-        source_policy, poll_interval_secs, next_poll_at, attempt_seq, partial_json,
+        source_policy, placement_policy, rollout_authorization_policy,
+        poll_interval_secs, next_poll_at, attempt_seq, partial_json,
         failure_stage, failure_class, failure_at, retry_at, retry_count, suspended_at,
         recovery_ref, recovery_phase, interruption_stage, interruption_at,
         interruption_operation_id, interruption_generation_id, evidence_fresh_at,
         evidence_limitations_json, created_at, updated_at
-      ) VALUES (${Array(63).fill('?').join(', ')})`,
+      ) VALUES (${Array(65).fill('?').join(', ')})`,
     ).run(
       row.id, row.lifecycle_key, row.lifecycle_status, row.target_mode, row.stack_name,
       row.configured_source_stack_name, row.blueprint_id,
@@ -754,7 +755,8 @@ export class GitOpsStore {
       row.placement_approval_ref, row.rollout_authorization_ref, row.legacy_combined_approval_ref,
       row.preflight_fingerprint, row.latest_preflight_evidence_json, row.latest_operation_id, row.active_operation_id, row.active_operation_stage,
       row.active_operation_at, row.active_generation_id, row.pause_at, row.pause_reason, row.source_suspended_reason,
-      row.source_policy, row.poll_interval_secs, row.next_poll_at, row.attempt_seq, row.partial_json,
+      row.source_policy, row.placement_policy, row.rollout_authorization_policy,
+      row.poll_interval_secs, row.next_poll_at, row.attempt_seq, row.partial_json,
       row.failure_stage, row.failure_class, row.failure_at, row.retry_at, row.retry_count, row.suspended_at,
       row.recovery_ref, row.recovery_phase, row.interruption_stage, row.interruption_at,
       row.interruption_operation_id, row.interruption_generation_id, row.evidence_fresh_at,
@@ -857,13 +859,15 @@ export class GitOpsStore {
         id, application_id, intent_revision_id, rollout_candidate_id, accepted_generation_id,
         artifact_set_id, placement_approval_ref, source_acceptance_ref, rollout_authorization_ref,
         required_targets_json, preflight_fingerprint, preflight_evidence_json, rollout_strategy_json,
+        policy_snapshot_json,
         provenance, supersedes_generation_id, superseded_at, operation_id, actor, trigger, created_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     ).run(
       row.id, row.application_id, row.intent_revision_id, row.rollout_candidate_id,
       row.accepted_generation_id, row.artifact_set_id, row.placement_approval_ref,
       row.source_acceptance_ref, row.rollout_authorization_ref, row.required_targets_json,
       row.preflight_fingerprint, row.preflight_evidence_json, row.rollout_strategy_json,
+      row.policy_snapshot_json,
       row.provenance, row.supersedes_generation_id, row.superseded_at, row.operation_id,
       row.actor, row.trigger, row.created_at,
     );

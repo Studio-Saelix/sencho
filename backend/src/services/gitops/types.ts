@@ -2,6 +2,7 @@ import type { ArtifactEvidenceJson, ObservedArtifactIdentity, ServiceArtifactEvi
 import type { RepoIdentity } from './repoIdentity';
 import type { RefKind } from '../git/types';
 import type { HealthRolloutPolicy } from './healthPolicy';
+import type { PlacementPolicy, RolloutAuthorizationPolicy } from './policyComposition';
 
 export type GitOpsTargetMode = 'direct' | 'inline_blueprint' | 'blueprint';
 export type GitOpsLifecycleStatus = 'active' | 'creating' | 'detached' | 'deleted';
@@ -114,6 +115,18 @@ export type GitOpsApplicationRow = {
   source_suspended_reason: string | null;
   /** Controller-owned. See gitops/SourceController.ts. */
   source_policy: SourcePolicy;
+  /**
+   * Whether a change in Blueprint target intent needs an operator. Configured
+   * independently of `source_policy`: accepting content says nothing about
+   * where it may run.
+   */
+  placement_policy: PlacementPolicy;
+  /**
+   * Whether rollout authorization is minted by policy or waits for an operator.
+   * Configured independently of both other domains, and never satisfied by
+   * either of them.
+   */
+  rollout_authorization_policy: RolloutAuthorizationPolicy;
   poll_interval_secs: number | null;
   next_poll_at: number | null;
   attempt_seq: number;
@@ -278,6 +291,15 @@ export type GitOpsRolloutGenerationRow = {
   preflight_fingerprint: string | null;
   preflight_evidence_json: string | null;
   rollout_strategy_json: string;
+  /**
+   * The policy snapshot this generation executes, frozen when it opened.
+   *
+   * NULL on a generation that predates the column, which is the one case that
+   * reconstructs rather than carrying a recorded value. Never defaulted to an
+   * empty object: that would make absence impossible and turn every existing
+   * generation into a decode failure.
+   */
+  policy_snapshot_json: string | null;
   provenance: GitOpsRolloutGenerationProvenance;
   supersedes_generation_id: string | null;
   superseded_at: number | null;

@@ -1964,13 +1964,23 @@ export class DatabaseService {
         this.db.exec(GITOPS_SCHEMA_SQL);
 
         // Apply migrations safely (ignore if columns already exist, log anything else)
-        const maybeAddCol = (table: string, col: string, def: string) => {
-            try { this.db.prepare(`ALTER TABLE ${table} ADD COLUMN ${col} ${def}`).run(); } catch (e) {
+        const addColIfMissing = (table: string, col: string, def: string): boolean => {
+            try {
+                this.db.prepare(`ALTER TABLE ${table} ADD COLUMN ${col} ${def}`).run();
+                return true;
+            } catch (e) {
                 const message = e instanceof Error ? e.message : String(e);
                 if (!message.includes('duplicate column')) {
                     console.error(`[DatabaseService] Failed to add column "${col}" to "${table}":`, message);
                 }
+                return false;
             }
+        };
+        // Every additive column below runs on every boot, so a caller that needs
+        // to run something exactly once must ask addColIfMissing whether it was
+        // the boot that added the column, rather than assuming it.
+        const maybeAddCol = (table: string, col: string, def: string): void => {
+            addColIfMissing(table, col, def);
         };
 
         // Remote Host Console bridges record the hub operator separately from
@@ -2053,6 +2063,42 @@ export class DatabaseService {
         maybeAddCol('gitops_applications', 'attempt_seq', 'INTEGER NOT NULL DEFAULT 0');
         maybeAddCol('gitops_applications', 'configured_source_stack_name', 'TEXT NULL');
         maybeAddCol('gitops_applications', 'latest_preflight_evidence_json', 'TEXT NULL');
+        // The policy snapshot a rollout generation executes. Added without a
+        // default so a generation that predates it stays SQL NULL, which the
+        // decoder reconstructs as the behavior that generation actually had
+        // rather than as a decode failure.
+        maybeAddCol('gitops_rollout_generations', 'policy_snapshot_json', 'TEXT NULL');
+        // Placement and rollout authorization policy, configured independently of
+        // source policy. placement_policy needs no backfill: automatic placement
+        // never existed, so there is no prior behavior to preserve.
+        //
+        // rollout_authorization_policy does need one, and this is the delicate
+        // part. Blueprint applications already authorized their own rollouts on
+        // the acceptance handoff, so leaving the column at its `manual` default
+        // would silently strip automatic authorization from every existing
+        // install. The backfill therefore restores `automatic` for exactly those
+        // applications, and it runs ONLY on the boot that created the column:
+        // these additions run on every start, so an ungated UPDATE would
+        // re-apply on every restart and reset any row an operator had
+        // deliberately set back to manual. That would be a silent privilege
+        // escalation on each process start.
+        //
+        // Scoped to live Blueprint applications, the only shape that has an
+        // automatic path. Direct, Inline, detached, and closed applications
+        // never auto-authorized, so they keep the safe default.
+        const addedRolloutAuthorizationPolicy = addColIfMissing('gitops_applications', 'rollout_authorization_policy',
+            "TEXT NOT NULL DEFAULT 'manual' CHECK (rollout_authorization_policy IN ('manual','automatic'))");
+        addColIfMissing('gitops_applications', 'placement_policy',
+            "TEXT NOT NULL DEFAULT 'operator' CHECK (placement_policy IN ('operator','bounded_auto'))");
+        if (addedRolloutAuthorizationPolicy) {
+            this.db.prepare(`
+              UPDATE gitops_applications
+              SET rollout_authorization_policy = 'automatic'
+              WHERE rollout_authorization_policy = 'manual'
+                AND target_mode = 'blueprint'
+                AND lifecycle_status = 'active'
+            `).run();
+        }
         this.db.exec(GITOPS_DUE_INDEX_SQL);
 
         // Distributed API model columns

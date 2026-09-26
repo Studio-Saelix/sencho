@@ -20,6 +20,7 @@ import {
   normalizeStackResourcePresent,
 } from '../services/gitops/readAuth';
 import type { GitOpsApplicationRow, GitOpsHistoryRow } from '../services/gitops/types';
+import { DEFAULT_PLACEMENT_POLICY, DEFAULT_ROLLOUT_AUTHORIZATION_POLICY } from '../services/gitops/policyComposition';
 
 describe('gitops history read layer', () => {
   let tmpDir: string;
@@ -535,6 +536,8 @@ function application(): GitOpsApplicationRow {
     pause_reason: null,
     source_suspended_reason: null,
     source_policy: 'manual',
+    placement_policy: DEFAULT_PLACEMENT_POLICY,
+    rollout_authorization_policy: DEFAULT_ROLLOUT_AUTHORIZATION_POLICY,
     poll_interval_secs: null,
     next_poll_at: null,
     attempt_seq: 0,

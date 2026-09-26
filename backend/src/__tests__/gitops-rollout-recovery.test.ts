@@ -115,6 +115,7 @@ function seedRolloutGeneration(app: GitOpsApplicationRow, nodeIds: number[]): Gi
     preflight_fingerprint: null,
     preflight_evidence_json: null,
     rollout_strategy_json: '{}',
+    policy_snapshot_json: null,
     provenance: 'placement_approval',
     supersedes_generation_id: null,
     superseded_at: null,

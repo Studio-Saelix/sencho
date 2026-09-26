@@ -10,6 +10,7 @@ import {
 import { decodeObservedArtifactIdentity, encodeArtifactEvidenceJson } from '../services/gitops/json';
 import { observationMatchesExpected } from '../services/gitops/artifactIdentity';
 import type { GitOpsApplicationRow, GitOpsGenerationRow } from '../services/gitops/types';
+import { DEFAULT_PLACEMENT_POLICY, DEFAULT_ROLLOUT_AUTHORIZATION_POLICY } from '../services/gitops/policyComposition';
 
 const mockBuildEffectiveServiceModel = vi.fn();
 const mockResolveRegistryImageDigestForPlatform = vi.fn();
@@ -404,6 +405,8 @@ function app(
     sync_env: 0,
     env_path: null,
     source_policy: 'manual',
+    placement_policy: DEFAULT_PLACEMENT_POLICY,
+    rollout_authorization_policy: DEFAULT_ROLLOUT_AUTHORIZATION_POLICY,
     poll_interval_secs: null,
     materialization_fingerprint: 'a'.repeat(64),
     desired_commit_sha: 'abc123',
