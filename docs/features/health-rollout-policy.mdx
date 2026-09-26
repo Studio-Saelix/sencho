@@ -50,7 +50,7 @@ Resuming means you have looked and decided to carry on, and it re-drives a targe
 
 **Stop** and **Roll back** are not holds, so resuming does not undo them. A stopped target keeps the generation it was given, and a rolled back target keeps the one it was put back on; the rollout carries on past them to the targets it never reached. Putting the failed generation back on either would just fail and stop again, with the rest of the fleet never reached. The target card reports such a target as *stopped, resumed*, and a restart does not pause the rollout again for it.
 
-A roll back that was decided but has not finished is reported as *roll back pending*, and resuming does not clear it. A restart holds the rollout on it, because the restore still has to happen or be dealt with.
+A roll back that was decided but has not finished is reported as *roll back pending*. Resuming does not clear it and the rollout will not move on: no other target deploys while one is still waiting for its restore, because the fleet would otherwise run past a target sitting on the version that failed. Finish the restore, or undo it from the target's own history.
 
 The hold is also what survives a restart. A rollout held by a policy stays held when Sencho restarts, and a roll back or a stop that already ran is not undone by coming back up. Once you resume, that answer is remembered, so a later restart does not hold the same rollout a second time.
 

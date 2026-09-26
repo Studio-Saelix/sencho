@@ -932,6 +932,25 @@ export class BlueprintTargetAdapter implements TargetAdapter {
       }).slice(0, 1)
       : binding.requiredNodeIds;
 
+    // A roll back that was decided but never finished stops the whole rollout,
+    // not just that one target. Excluding a `rollback_pending` target from the
+    // queue would let the queue step over it and deploy the next one, so the
+    // fleet advances past a target that is still on the generation which failed,
+    // with no restore done and nobody told. It has to be finished or undone
+    // through the manual restore route before anything else runs.
+    if (gated) {
+      const unfinished = binding.requiredNodeIds
+        .map((nodeId) => store.getTarget(liveApp.id, nodeId))
+        .some((row) => row?.health_stop_reason === 'rollback_pending'
+          && row.rollout_generation_id === liveApp.rollout_generation_id);
+      if (unfinished) {
+        return {
+          status: 'blocked',
+          reason: 'A roll back for this rollout has not finished. Finish or undo it before the rollout continues.',
+        };
+      }
+    }
+
     // A gated rollout refuses a target set it cannot observe as a whole, before
     // the first apply rather than at the turn of each target. Refusing per target
     // would let an earlier local target deploy and pass, then refuse a later

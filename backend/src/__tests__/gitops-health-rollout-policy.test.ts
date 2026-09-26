@@ -1105,7 +1105,11 @@ describe('retry, stop, and rollback', () => {
   });
 
   it('a pending rollback survives a crash as a non-resumable fence', async () => {
-    const fixture = await gatedAttempt('rollback');
+    const fixture = await authorizeWithPolicy('rollback', 2);
+    vi.spyOn(BlueprintService.getInstance(), 'deployAuthorizedMaterialization')
+      .mockResolvedValue({ status: 'active' });
+    await dispatch(fixture);
+
     const store = GitOpsStore.getInstance();
     const deploy = vi.spyOn(BlueprintService.getInstance(), 'deployAuthorizedMaterialization')
       .mockResolvedValue({ status: 'active' });
@@ -1140,6 +1144,25 @@ describe('retry, stop, and rollback', () => {
     });
     expect(store.getTarget(fixture.applicationId, nodeId)!.health_stop_reason)
       .toBe('rollback_pending');
+
+    // A resume does not unblock the rollout either. Two nodes, so this can show
+    // that the queue does not simply step over the unfinished target and deploy
+    // the next one.
+    GitOpsTransitions.getInstance().rolloutPaused(fixture.applicationId, null, 'held', {
+      operationId: 'hold-pending-2', actor: 'tester', trigger: 'manual', at: Date.now(),
+    });
+    GitOpsTransitions.getInstance().rolloutUnpaused(fixture.applicationId, null, {
+      operationId: 'resume-pending-2', actor: 'tester', trigger: 'manual', at: Date.now(),
+    });
+    const afterResume = store.getTarget(fixture.applicationId, nodeId)!;
+    expect(afterResume.health_stop_reason).toBe('rollback_pending');
+
+    const resumeCalls = deploy.mock.calls.length;
+    const resumed = await dispatch(fixture);
+    expect(resumed.status).toBe('blocked');
+    if (resumed.status === 'blocked') expect(resumed.reason).toMatch(/roll back/i);
+    // Nothing deployed: neither the unfinished target nor the one after it.
+    expect(deploy.mock.calls.length).toBe(resumeCalls);
 
     // And a restart holds on it, which is what keeps the queue off that target
     // until someone deals with the unfinished restore.

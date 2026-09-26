@@ -408,9 +408,10 @@ CREATE TABLE IF NOT EXISTS gitops_target_current (
   -- retry_once exactly once per target and generation.
   health_attempts INTEGER NOT NULL DEFAULT 0,
   -- Why this rollout stopped advancing, recorded before any external restore is
-  -- attempted. A restart that lands mid-rollback reads this and reconciles the
-  -- rollback instead of resuming the queue and dispatching the targets that
-  -- came after the failed one.
+  -- attempted. A restart that lands mid-rollback reads this and holds the
+  -- rollout rather than resuming the queue and dispatching the targets that came
+  -- after the failed one. It fences the unfinished restore; it does not replay
+  -- it, so the restore has to be finished or undone through the manual route.
   health_stop_reason TEXT NULL CHECK (
     health_stop_reason IS NULL OR health_stop_reason IN (
       'health_failed','health_unknown','health_retry_exhausted','rollout_stopped',
