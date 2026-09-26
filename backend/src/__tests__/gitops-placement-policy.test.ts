@@ -25,7 +25,6 @@ function input(overrides: Partial<BoundedAutoInput> = {}): BoundedAutoInput {
     statelessness: 'stateless',
     pinDriven: false,
     cordonOverride: false,
-    markerConflict: false,
     affectedNodeState: 'reachable',
     conflictingOperation: false,
     evidenceReadable: true,
@@ -194,10 +193,6 @@ describe('node and binding state', () => {
 
   it('refuses placement that moved because a pin moved', () => {
     expect(decideBoundedAutoPlacement(input({ pinDriven: true })).reason).toBe('pin_driven_placement');
-  });
-
-  it('refuses a marker conflict', () => {
-    expect(decideBoundedAutoPlacement(input({ markerConflict: true })).reason).toBe('marker_conflict');
   });
 
   it.each<[AffectedNodeState, string]>([

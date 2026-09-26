@@ -131,21 +131,6 @@ function worstNodeState(store: GitOpsStore, appId: string, nodeIds: readonly num
   return worst;
 }
 
-/** Whether a live content binding or marker already owns an affected node. */
-function hasMarkerConflict(app: GitOpsApplicationRow, nodeIds: readonly number[]): boolean {
-  if (app.target_mode !== 'blueprint' || !app.blueprint_id) return false;
-  const db = DatabaseService.getInstance().getDb();
-  const row = db
-    .prepare(
-      `SELECT 1 AS found FROM gitops_intent_revisions
-       WHERE application_id = ? AND blueprint_id = ?
-         AND pinned_node_id IS NOT NULL AND pinned_node_id IN (${nodeIds.map(() => '?').join(', ') || 'NULL'})
-       LIMIT 1`,
-    )
-    .get(app.id, app.blueprint_id, ...nodeIds);
-  return row !== undefined;
-}
-
 /**
  * Decide, and apply an approval when the decision allows one.
  *
@@ -192,7 +177,6 @@ export function applyAutomaticPlacement(
     // Blueprint is pinned, not that a node is cordoned.
     pinDriven: intent.pinned_node_id !== null,
     cordonOverride: false,
-    markerConflict: hasMarkerConflict(app, candidateNodeIds),
     affectedNodeState: worstNodeState(store, app.id, candidateNodeIds),
     conflictingOperation: app.active_operation_stage !== null,
     evidenceReadable: baseline.ok,

@@ -30,12 +30,21 @@
  * wrote and a repository push that adds a stateful service never updates it.
  * Reading it would approve a stateful placement off a stale label.
  *
- * Directory-name ownership is deliberately absent from the reason union. Whether
- * a stack directory on some node carries this Blueprint's marker is a question
- * about who owns a name, not about whether moving a stateless workload is safe,
- * and the deploy path already refuses an ownership conflict with a named error.
- * Re-probing it per node here would add a remote call to every placement decision
- * and buy a refusal that is already made, later, with better evidence.
+ * Two kinds of check are deliberately absent from the reason union, because
+ * neither can be answered here and an unreachable reason is worse than a missing
+ * one: it advertises a check that does not exist.
+ *
+ * Directory-name ownership, meaning whether a stack directory on some node
+ * carries this Blueprint's marker, is a per-node filesystem question. There is no
+ * database signal for it: Blueprint names are unique and deployments are keyed by
+ * Blueprint, so the only thing that can answer it is the deploy path's own probe
+ * against the node, which already refuses an ownership conflict by name.
+ * Re-probing it here would add a remote call to every placement decision and buy
+ * a refusal that is made later, with better evidence, against the real node.
+ *
+ * Content-binding contention, meaning a live Git source already bound to the same
+ * deploy stack, is refused by the binding service on the convert and adopt paths
+ * rather than here, and placement cannot create the contention it would report.
  */
 
 /** A node leaving the approved set. */
@@ -64,8 +73,6 @@ export type PlacementPolicyReason =
   | 'pin_driven_placement'
   /** A cordon on an affected node would be overridden. */
   | 'cordon_override'
-  /** A live content binding or marker already owns the affected node. */
-  | 'marker_conflict'
   /** An affected node is gone, or was last seen unreachable. */
   | 'stale_node'
   /** An affected node answered but could not be read. */
@@ -108,8 +115,6 @@ export type BoundedAutoInput = {
   pinDriven: boolean;
   /** A cordon on an affected node would be overridden. */
   cordonOverride: boolean;
-  /** A live binding or marker already owns an affected node. */
-  markerConflict: boolean;
   /** The worst state across affected nodes. */
   affectedNodeState: AffectedNodeState;
   /** An operation is in flight for the application or an affected target. */
@@ -194,7 +199,6 @@ export function decideBoundedAutoPlacement(input: BoundedAutoInput): PlacementDe
 
   if (input?.cordonOverride) return review('cordon_override');
   if (input?.pinDriven) return review('pin_driven_placement');
-  if (input?.markerConflict) return review('marker_conflict');
   if (input?.affectedNodeState === 'unreachable') return review('stale_node');
   if (input?.affectedNodeState === 'unknown') return review('unknown_connectivity');
 

@@ -1100,12 +1100,14 @@ function requirePolicyTargetAuthority(
     .map((row) => row.node_id);
 
   if (nodeIds.length === 0) {
-    // Nothing is placed yet, so there is no target to scope an exact grant to.
-    // A stack-scoped assignment is node-qualified, which means it cannot be
-    // resolved for a node that does not exist yet, so authorizing against the
-    // stack name here would pass nobody. The application-wide grant is the only
-    // honest gate, and a stack-scoped operator configures this after the first
-    // placement, when there is a target to be scoped to.
+    // Nothing is placed yet, so the set of nodes this policy could later reach
+    // is unknown, and a stack-scoped assignment is node-qualified so it cannot be
+    // resolved for a node that does not exist. Authorizing against the stack
+    // name here would therefore pass nobody, and a policy about an unknown fleet
+    // is the wrong thing for a narrowly-scoped operator to hold. The
+    // application-wide grant is the conservative answer; once targets exist the
+    // per-target loop above is the gate, and a scoped operator is authorized for
+    // exactly the targets they hold.
     if (checkPermission(req, 'stack:deploy')) return true;
     res.status(403).json({ error: 'Permission denied for this application.', code: 'PERMISSION_DENIED' });
     return false;

@@ -163,12 +163,15 @@ describe('POST /api/gitops/applications/:id/placement-policy', () => {
     expect(GitOpsStore.getInstance().getApplication(seeded.applicationId)!.placement_policy).toBe('operator');
   });
 
-  it('cannot be set by a stack-scoped operator before anything is placed', async () => {
-    // A stack-scoped assignment is node-qualified, so it cannot be resolved for
-    // a node that does not exist yet. Before the first placement there is no
-    // target to scope to, which means the application-wide grant is the only
-    // gate that can be evaluated at all. Pinned as a limitation rather than
-    // worked around: a scoped operator configures this once a target exists.
+  it('needs the application-wide grant before anything is placed', async () => {
+    // A bounded_auto policy authorizes the system to place and withdraw
+    // workloads on whatever nodes the Blueprint's selector matches later, and
+    // that set is not known yet. A stack-scoped assignment is node-qualified,
+    // so it cannot be resolved for a node that does not exist, which means a
+    // narrowly-scoped operator is the wrong authority for a decision about an
+    // unknown fleet. This is the conservative answer rather than a gap: an
+    // operator whose deploy grant is scoped to nodes that all exist is
+    // authorized per target, as the next test shows.
     const seeded = await seedGitManagedBlueprint(0);
     const blueprintName = DatabaseService.getInstance().getBlueprint(seeded.blueprintId)!.name;
     await seedScopedDeployer(blueprintName);
@@ -178,6 +181,21 @@ describe('POST /api/gitops/applications/:id/placement-policy', () => {
       .send({ policy: 'bounded_auto' });
     expect(res.status).toBe(403);
     expect(GitOpsStore.getInstance().getApplication(seeded.applicationId)!.placement_policy).toBe('operator');
+  });
+
+  it('lets a stack-scoped operator set it once every target is one they hold', async () => {
+    // The per-target gate, and the reason it is worth having: a policy that
+    // authorizes work on every target is refused unless the caller is entitled
+    // for all of them, and here they are.
+    const seeded = await seedGitManagedBlueprint(1);
+    const blueprintName = DatabaseService.getInstance().getBlueprint(seeded.blueprintId)!.name;
+    await seedScopedDeployer(blueprintName, seeded.nodeIds[0]);
+    const res = await request(app)
+      .post(`/api/gitops/applications/bp:${seeded.blueprintId}/placement-policy`)
+      .set('Cookie', scopedCookie)
+      .send({ policy: 'bounded_auto' });
+    expect(res.status).toBe(200);
+    expect(GitOpsStore.getInstance().getApplication(seeded.applicationId)!.placement_policy).toBe('bounded_auto');
   });
 
   it('sets the policy with live targets present', async () => {
