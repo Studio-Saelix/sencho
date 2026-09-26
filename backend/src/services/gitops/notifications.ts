@@ -38,6 +38,14 @@ import type { NotificationCategory } from '../NotificationService';
  * outcome-dependent mapping predates this list. `gitOpsOutboxPlan` is the
  * union of the two, and it is the one function both the insert and the drain
  * call, so they cannot disagree about which rows exist.
+ *
+ * `health_finalized` is listed because a recorded failure is the one health
+ * verdict an operator must be told about, and the projection reports it as
+ * `failed` posture with a `health_failed` reason, so a surface that stays
+ * silent leaves the posture with no notification behind it. The stage itself
+ * fires for every verdict, so `gitOpsOutboxPlan` narrows it to the failure
+ * arm; being in this list is what puts the entry in the metadata table, not
+ * what makes it notify.
  */
 export const NOTIFIABLE_GITOPS_STAGES = [
   'source_accepted',
@@ -50,6 +58,7 @@ export const NOTIFIABLE_GITOPS_STAGES = [
   'rollback_completed',
   'rollback_partial_failed',
   'blueprint_state_review',
+  'health_finalized',
 ] as const satisfies readonly GitOpsHistoryStage[];
 
 export type NotifiableGitOpsStage = (typeof NOTIFIABLE_GITOPS_STAGES)[number];
@@ -75,12 +84,31 @@ export type GitOpsOutboxPlan =
  * the insert (`history.ts`) and the drain (`publish.ts`) must agree about
  * which rows exist. A stage that inserts no row is never drained, and a stage
  * that inserts one nobody drains is a notification that never fires.
+ *
+ * `after` is the transition's own `after` record, and it is required rather
+ * than optional because the decision for a health verdict depends on what the
+ * verdict was. Both call sites already hold it, so requiring it keeps the two
+ * from being able to disagree about an outcome-dependent stage, which is the
+ * exact failure this function exists to prevent.
  */
 export function gitOpsOutboxPlan(
   stage: GitOpsHistoryStage,
   targetMode: GitOpsTargetMode,
+  after: Record<string, unknown>,
 ): GitOpsOutboxPlan | null {
   if (stage === 'source_reconcile_settled') return { kind: 'settled' };
+  // Only a recorded failure notifies. `recordedVerdict` is the verdict the
+  // transition actually persisted, not the one it was handed: a verdict that
+  // could not be tied to the running stack is not recorded, and an `unknown`
+  // verdict over an existing one is discarded. Keying this on the incoming
+  // verdict would notify about a failure the projection does not report, since
+  // the projection reads the recorded value too.
+  //
+  // `passed` is the ordinary outcome and would fire on every health update, so
+  // the successful arm is silent on purpose.
+  if (stage === 'health_finalized') {
+    return after.recordedVerdict === 'failed' ? { kind: 'event', stage } : null;
+  }
   if (!isNotifiableGitOpsStage(stage)) return null;
   // A Direct source acceptance is the source controller's automatic
   // bookkeeping, and the settled attempt already tells the operator that a
@@ -114,6 +142,7 @@ export const GITOPS_NOTIFICATION_META: Record<NotifiableGitOpsStage, GitOpsNotif
   rollback_completed: { category: 'gitops_rollback_completed', level: 'info', phrase: 'rollback completed' },
   rollback_partial_failed: { category: 'gitops_rollback_partial_failed', level: 'error', phrase: 'rollback partially failed' },
   blueprint_state_review: { category: 'gitops_stateful_confirmation', level: 'warning', phrase: 'stateful deploy awaiting confirmation' },
+  health_finalized: { category: 'gitops_health_failed', level: 'error', phrase: 'health check failed' },
 };
 
 /**

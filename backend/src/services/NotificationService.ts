@@ -58,6 +58,11 @@ export type NotificationCategory =
     | 'git_pull_ready'
     | 'git_plan_blocked'
     | 'git_pull_failed'
+    // A settled source attempt that proved nothing, routed away from
+    // `git_pull_failed` so the bell and the portfolio cannot disagree about
+    // whether an application failed or is merely unproven. History-only like
+    // the rest of the `git_*` family.
+    | 'git_pull_unproven'
     | 'git_apply'
     | 'git_apply_failed'
     | 'git_apply_rolled_back'
@@ -77,6 +82,11 @@ export type NotificationCategory =
     | 'gitops_rollback_completed'
     | 'gitops_rollback_partial_failed'
     | 'gitops_stateful_confirmation'
+    // A recorded health-verdict failure on a GitOps target. History-only like
+    // the rest of the `gitops_*` family, and separate from the `health_gate_*`
+    // pair above, which marks the post-update gate rather than a GitOps
+    // application's own health contract.
+    | 'gitops_health_failed'
     | 'node_update_available'
     | 'dev_build_update_available'
     | 'system';
@@ -96,12 +106,12 @@ export const ALL_SUPPRESSIBLE_CATEGORIES: readonly NotificationCategory[] = [
     'drift_detected', 'drift_resolved',
     'update_started', 'health_gate_passed', 'health_gate_failed',
     'network_auto_created', 'rollback_generation_released',
-    'git_pull_ready', 'git_plan_blocked', 'git_pull_failed',
+    'git_pull_ready', 'git_plan_blocked', 'git_pull_failed', 'git_pull_unproven',
     'git_apply', 'git_apply_failed', 'git_apply_rolled_back', 'git_create',
     'gitops_source_accepted', 'gitops_placement_approved', 'gitops_rollout_authorized',
     'gitops_rollout_paused', 'gitops_rollout_resumed', 'gitops_rollout_superseded',
     'gitops_rollback_started', 'gitops_rollback_completed', 'gitops_rollback_partial_failed',
-    'gitops_stateful_confirmation',
+    'gitops_stateful_confirmation', 'gitops_health_failed',
 ];
 
 /** Webhook timeout: 10 seconds per external dispatch call. */

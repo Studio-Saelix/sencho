@@ -110,19 +110,32 @@ function markDrained(db: Database.Database, settledHistoryId: string, at: number
   ).run(at, at, settledHistoryId);
 }
 
+/**
+ * The category one settled source attempt notifies under.
+ *
+ * `unknown` is deliberately not a failure. It is what `outcomeFromSourceFacet`
+ * returns for the benign conditions that leave an attempt unproven: a
+ * reconcile still in flight, a source that has never been reconciled, an
+ * application that is no longer live, a newer commit that arrived before the
+ * settle evaluated it. The portfolio reports each of those as in-progress or
+ * unknown, never as a failure, so routing them into `git_pull_failed` at
+ * `error` level had a surface telling an operator a pull had failed for an
+ * application the portfolio says is merely unproven.
+ */
 function categoryForOutcome(outcome: string): NotificationCategory {
   if (outcome === 'blocked') return 'git_plan_blocked';
-  if (outcome === 'failed_previous_intact' || outcome === 'recovery_required' || outcome === 'unknown') {
-    return 'git_pull_failed';
-  }
+  if (outcome === 'unknown') return 'git_pull_unproven';
+  if (outcome === 'failed_previous_intact' || outcome === 'recovery_required') return 'git_pull_failed';
   return 'git_pull_ready';
 }
 
 function levelForOutcome(outcome: string): 'info' | 'warning' | 'error' {
   if (outcome === 'blocked') return 'warning';
-  if (outcome === 'failed_previous_intact' || outcome === 'recovery_required' || outcome === 'unknown') {
-    return 'error';
-  }
+  // Unproven is neither a failure nor a pending decision, so it gets the
+  // neutral level. The bell entry exists to say "this settled without proving
+  // anything", and dressing that as an error is the part that was wrong.
+  if (outcome === 'unknown') return 'info';
+  if (outcome === 'failed_previous_intact' || outcome === 'recovery_required') return 'error';
   return 'info';
 }
 
@@ -162,6 +175,21 @@ function notificationLabel(applicationId: string, stackName: string | null): {
   };
 }
 
+/**
+ * How one settled outcome reads in the bell.
+ *
+ * The outcome name itself is the phrase for every outcome that names a state an
+ * operator can act on, which is why the message has always been able to use it
+ * directly. `unknown` is the exception: "GitOps unknown for web" is the
+ * internal vocabulary rather than a sentence, and now that it has its own
+ * category it also needs to say what actually happened, which is that the
+ * attempt settled without proving anything.
+ */
+function phraseForOutcome(outcome: string): string {
+  if (outcome === 'unknown') return 'attempt settled without proving a result';
+  return outcome;
+}
+
 function fanoutSettledNotification(payload: SettledAttemptPayload): void {
   const { visibleStack, label } = notificationLabel(payload.applicationId, payload.stackName);
   const reason = payload.reason ? `: ${payload.reason}` : '';
@@ -170,7 +198,7 @@ function fanoutSettledNotification(payload: SettledAttemptPayload): void {
     {
       level: levelForOutcome(payload.outcome),
       category: categoryForOutcome(payload.outcome),
-      message: `GitOps ${payload.outcome} for ${label}${reason}`,
+      message: `GitOps ${phraseForOutcome(payload.outcome)} for ${label}${reason}`,
       timestamp: payload.at,
       stack_name: visibleStack ?? undefined,
       actor_username: payload.actor,

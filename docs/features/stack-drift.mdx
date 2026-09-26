@@ -56,11 +56,23 @@ Sencho records two hashes at deploy time: a raw-file hash (catches any text chan
 
 ## GitOps state
 
-For a stack managed by a Git source or a Blueprint, a **gitops** section sits below the deploy signal. For a Git-backed stack it opens with the source state, the same phrase the Git Source panel shows; a Blueprint-delivered stack has no Git source of its own, so it shows only its per-node lines. Those say what Sencho has established about the stack on each node: whether a generation has been applied, whether it is deployed, whether its health verdict is still outstanding, and whether an operation was interrupted without a confirmed outcome.
+For a stack managed by a Git source or a Blueprint, a **gitops** section sits below the deploy signal. Its first line is the application's overall state, then the per-domain states. For a Git-backed stack the source state uses the same phrase the Git Source panel shows; a Blueprint-delivered stack has no Git source of its own, so it shows only its per-node lines. Those say what Sencho has established about the stack on each node: whether a generation has been applied, whether it is deployed, whether its health verdict is still outstanding, and whether an operation was interrupted without a confirmed outcome.
 
-This is a different question from the two signals above it. Those compare files and containers as they are right now. The gitops section reports what Sencho has proven and accepted over time, so a stack can be **In sync** at runtime while its GitOps state reads **outcome unknown**, meaning the containers look right but the operation that produced them was never confirmed.
+The first line, labelled **application**, is the one-line summary the GitOps workplace shows for the same application, and it is the same value in both places. It reads **converged** only when every target was reached and complete, current evidence confirms the intended generation is running. Every other value says Sencho cannot currently claim convergence; **unknown** in particular says nothing more than that, rather than naming a fault.
 
-Anything Sencho could not prove is listed underneath, one line per item, in the same form the Git Source panel uses. A stack with no Git source and no Blueprint shows no gitops section at all.
+This is a different question from the two signals above it. Those compare files and containers as they are right now. The gitops section reports what Sencho has proven and accepted over time, so a stack can be **In sync** at runtime while its application state reads **unknown**, meaning the containers look right but Sencho cannot prove that every target reported for the generation now intended.
+
+Once that summary has loaded, each per-node line also carries an **evidence** note saying how much Sencho could read from that node:
+
+| Evidence | What it means |
+| --- | --- |
+| **evidence current** | The node answered with its own runtime observation. |
+| **evidence stale** | The node has an observation on record, but it is known to be out of date. |
+| **evidence unknown** | Sencho could not read the node's runtime observation, so it cannot say what is running there. |
+
+The note describes the evidence, not the application. Whether the intended generation is actually deployed is the per-node runtime state above it, and whether that is enough to settle the application is the summary.
+
+Anything Sencho could not prove is listed underneath, one line per item, in the same form the Git Source panel uses. A stack with no Git source and no Blueprint shows no gitops section at all. If Sencho can see the application but cannot read its summary, the section says so in place of the summary rather than omitting it, so a moment of lost visibility is never mistaken for a healthy application.
 
 ## Findings
 

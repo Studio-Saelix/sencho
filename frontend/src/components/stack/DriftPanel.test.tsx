@@ -23,6 +23,8 @@ import {
   liveRevision,
   missingApplicationLimitation,
   plainSource,
+  portfolioRow,
+  portfolioTarget,
   target,
 } from '@/__tests__/gitopsFixtures';
 
@@ -47,13 +49,42 @@ function jsonRes(body: unknown, ok = true) {
   return { ok, status: ok ? 200 : 500, json: async () => body, text: async () => '' } as unknown as Response;
 }
 
+/**
+ * Answer the two reads this tab makes, so a test states only the one it cares
+ * about.
+ *
+ * The portfolio read defaults to "this stack has no GitOps application", which
+ * is the ordinary answer for a stack outside GitOps. Every case below that
+ * predates the posture block is such a stack, so that default is what keeps
+ * them asserting about the drift report rather than about a posture they never
+ * set up.
+ */
+function mockDriftReads(
+  drift: unknown,
+  options: { driftOk?: boolean; portfolio?: { application: unknown; ok?: boolean } } = {},
+): void {
+  vi.mocked(apiFetch).mockImplementation(async (path: string) => {
+    // The posture read is the by-id detail route; the list query is not used
+    // here, so anything under /gitops/applications is the posture read.
+    if (String(path).startsWith('/gitops/applications')) {
+      return jsonRes({ application: options.portfolio?.application }, options.portfolio?.ok ?? true);
+    }
+    return jsonRes(drift, options.driftOk ?? true);
+  });
+}
+
+/** The drift read fails outright, and the portfolio read still answers. */
+function mockFailedDriftRead(options: { portfolio?: { application: unknown; ok?: boolean } } = {}): void {
+  mockDriftReads({ error: 'down' }, { driftOk: false, ...options });
+}
+
 beforeEach(() => {
   vi.clearAllMocks();
 });
 
 describe('DriftPanel', () => {
   it('renders the in-sync status', async () => {
-    vi.mocked(apiFetch).mockResolvedValue(jsonRes(report({ status: 'in-sync' })));
+    mockDriftReads(report({ status: 'in-sync' }));
     render(<DriftPanel stackName="web" />);
     const status = await screen.findByTestId('drift-status');
     expect(status).toHaveAttribute('data-status', 'in-sync');
@@ -63,7 +94,7 @@ describe('DriftPanel', () => {
   });
 
   it('renders every finding kind with its label and expected/actual values', async () => {
-    vi.mocked(apiFetch).mockResolvedValue(jsonRes(report({
+    mockDriftReads(report({
       status: 'drifted',
       findings: [
         { kind: 'image-mismatch', service: 'web', detail: 'Service "web" runs a different image than compose declares.', expected: 'nginx:1.25', actual: 'nginx:1.24' },
@@ -71,7 +102,7 @@ describe('DriftPanel', () => {
         { kind: 'service-missing', service: 'db', detail: 'Service "db" is declared in compose but is not running.' },
         { kind: 'service-undeclared', service: 'sidecar', detail: 'Service "sidecar" is running but is not declared in compose.' },
       ],
-    })));
+    }));
     render(<DriftPanel stackName="web" />);
     const status = await screen.findByTestId('drift-status');
     expect(status).toHaveAttribute('data-status', 'drifted');
@@ -89,24 +120,24 @@ describe('DriftPanel', () => {
   });
 
   it('uses the singular noun for a single finding', async () => {
-    vi.mocked(apiFetch).mockResolvedValue(jsonRes(report({
+    mockDriftReads(report({
       status: 'drifted',
       findings: [{ kind: 'service-missing', service: 'db', detail: 'Service "db" is declared in compose but is not running.' }],
-    })));
+    }));
     render(<DriftPanel stackName="web" />);
     await screen.findByTestId('drift-status');
     expect(screen.getByText(/1 finding$/)).toBeInTheDocument();
   });
 
   it('renders the missing-runtime status', async () => {
-    vi.mocked(apiFetch).mockResolvedValue(jsonRes(report({ status: 'missing-runtime', hasContainers: false })));
+    mockDriftReads(report({ status: 'missing-runtime', hasContainers: false }));
     render(<DriftPanel stackName="web" />);
     const status = await screen.findByTestId('drift-status');
     expect(status).toHaveAttribute('data-status', 'missing-runtime');
   });
 
   it('renders the unreachable status', async () => {
-    vi.mocked(apiFetch).mockResolvedValue(jsonRes(report({ status: 'unreachable', hasContainers: false })));
+    mockDriftReads(report({ status: 'unreachable', hasContainers: false }));
     render(<DriftPanel stackName="web" />);
     const status = await screen.findByTestId('drift-status');
     expect(status).toHaveAttribute('data-status', 'unreachable');
@@ -114,16 +145,16 @@ describe('DriftPanel', () => {
   });
 
   it('surfaces a compose parse error', async () => {
-    vi.mocked(apiFetch).mockResolvedValue(jsonRes(report({
-      status: 'drifted', hasComposeFile: false, parseError: 'Could not parse compose file: bad yaml',
-    })));
+    mockDriftReads(report({
+      parseError: 'Could not parse compose file: services.web.image must be a string',
+    }));
     render(<DriftPanel stackName="web" />);
     await screen.findByTestId('drift-status');
     expect(screen.getByText(/Could not parse compose file/i)).toBeInTheDocument();
   });
 
   it('shows a retry state (not a status) when the load fails', async () => {
-    vi.mocked(apiFetch).mockResolvedValue(jsonRes({ error: 'down' }, false));
+    mockFailedDriftRead();
     render(<DriftPanel stackName="web" />);
     await screen.findByTestId('drift-retry-btn');
     expect(screen.queryByTestId('drift-status')).not.toBeInTheDocument();
@@ -139,9 +170,14 @@ describe('DriftPanel', () => {
   });
 
   it('retry refetches and recovers to a status', async () => {
-    vi.mocked(apiFetch)
-      .mockResolvedValueOnce(jsonRes({ error: 'down' }, false))
-      .mockResolvedValueOnce(jsonRes(report({ status: 'in-sync' })));
+    // Routed by path rather than queued, because the tab reads two endpoints
+    // and a positional queue would hand the retry's answer to the wrong one.
+    let attempts = 0;
+    vi.mocked(apiFetch).mockImplementation(async (path: string) => {
+      if (String(path).startsWith('/gitops/applications')) return jsonRes({ application: undefined });
+      attempts += 1;
+      return attempts === 1 ? jsonRes({ error: 'down' }, false) : jsonRes(report({ status: 'in-sync' }));
+    });
     render(<DriftPanel stackName="web" />);
     fireEvent.click(await screen.findByTestId('drift-retry-btn'));
     const status = await screen.findByTestId('drift-status');
@@ -150,38 +186,44 @@ describe('DriftPanel', () => {
   });
 
   it('re-checks on demand via the recheck endpoint (a POST), not the read GET', async () => {
-    vi.mocked(apiFetch).mockResolvedValue(jsonRes(report({ status: 'in-sync' })));
+    mockDriftReads(report({ status: 'in-sync' }));
     render(<DriftPanel stackName="web" />);
     await screen.findByTestId('drift-status');
-    expect(apiFetch).toHaveBeenCalledTimes(1);
-    expect(apiFetch).toHaveBeenLastCalledWith('/stacks/web/drift');
+    // Counted per path rather than in total: the tab also reads the portfolio
+    // for the posture, so a total would stop being about the drift read.
+    const driftReads = () => vi.mocked(apiFetch).mock.calls.filter(([path]) => path === '/stacks/web/drift').length;
+    const recheckPosts = () => vi.mocked(apiFetch).mock.calls.filter(([path]) => path === '/stacks/web/drift/recheck').length;
+    expect(driftReads()).toBe(1);
+    expect(recheckPosts()).toBe(0);
     fireEvent.click(screen.getByTestId('drift-recheck-btn'));
-    await waitFor(() => expect(apiFetch).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(recheckPosts()).toBe(1));
+    // The re-check is the write, so it must not read the passive endpoint again.
+    expect(driftReads()).toBe(1);
     expect(apiFetch).toHaveBeenLastCalledWith('/stacks/web/drift/recheck', { method: 'POST' });
   });
 
   it('omits the temporal card when the report carries no temporal field (older node)', async () => {
-    vi.mocked(apiFetch).mockResolvedValue(jsonRes(report({ status: 'in-sync' }))); // no temporal field
+    mockDriftReads(report({ status: 'in-sync' })); // no temporal field
     render(<DriftPanel stackName="web" />);
     await screen.findByTestId('drift-status');
     expect(screen.queryByTestId('drift-temporal')).not.toBeInTheDocument();
   });
 
   it('shows "no deploy baseline" when the report has no temporal baseline', async () => {
-    vi.mocked(apiFetch).mockResolvedValue(jsonRes(report({
+    mockDriftReads(report({
       status: 'in-sync',
       temporal: { hasBaseline: false, sourceChanged: false, renderedChanged: false },
-    })));
+    }));
     render(<DriftPanel stackName="web" />);
     const temporal = await screen.findByTestId('drift-temporal');
     expect(temporal).toHaveAttribute('data-temporal', 'no-baseline');
   });
 
   it('flags a source change since the last deploy', async () => {
-    vi.mocked(apiFetch).mockResolvedValue(jsonRes(report({
+    mockDriftReads(report({
       status: 'in-sync',
       temporal: { hasBaseline: true, sourceChanged: true, renderedChanged: true },
-    })));
+    }));
     render(<DriftPanel stackName="web" />);
     const temporal = await screen.findByTestId('drift-temporal');
     expect(temporal).toHaveAttribute('data-temporal', 'source-changed');
@@ -189,10 +231,10 @@ describe('DriftPanel', () => {
   });
 
   it('notes a formatting-only change when source changed but the model did not', async () => {
-    vi.mocked(apiFetch).mockResolvedValue(jsonRes(report({
+    mockDriftReads(report({
       status: 'in-sync',
       temporal: { hasBaseline: true, sourceChanged: true, renderedChanged: false },
-    })));
+    }));
     render(<DriftPanel stackName="web" />);
     const temporal = await screen.findByTestId('drift-temporal');
     expect(temporal).toHaveAttribute('data-temporal', 'source-changed');
@@ -200,17 +242,17 @@ describe('DriftPanel', () => {
   });
 
   it('shows "matches last deploy" when the source is unchanged', async () => {
-    vi.mocked(apiFetch).mockResolvedValue(jsonRes(report({
+    mockDriftReads(report({
       status: 'in-sync',
       temporal: { hasBaseline: true, sourceChanged: false, renderedChanged: false },
-    })));
+    }));
     render(<DriftPanel stackName="web" />);
     const temporal = await screen.findByTestId('drift-temporal');
     expect(temporal).toHaveAttribute('data-temporal', 'matches');
   });
 
   it('renders the persisted drift history with open and resolved entries, labelled with when it was checked', async () => {
-    vi.mocked(apiFetch).mockResolvedValue(jsonRes(report({
+    mockDriftReads(report({
       status: 'drifted',
       findings: [{ kind: 'image-mismatch', service: 'web', detail: 'image differs' }],
       lastCheckedAt: Date.now(),
@@ -218,7 +260,7 @@ describe('DriftPanel', () => {
         { service: 'web', kind: 'image-mismatch', message: 'image differs', detectedAt: Date.now(), resolvedAt: null },
         { service: 'db', kind: 'service-missing', message: 'db not running', detectedAt: Date.now() - 1000, resolvedAt: Date.now() },
       ],
-    })));
+    }));
     render(<DriftPanel stackName="web" />);
     await screen.findByTestId('drift-status');
     expect(screen.getByText(/drift history/i)).toBeInTheDocument();
@@ -229,26 +271,26 @@ describe('DriftPanel', () => {
   });
 
   it('omits the last-checked label when the stack has never been reconciled', async () => {
-    vi.mocked(apiFetch).mockResolvedValue(jsonRes(report({
+    mockDriftReads(report({
       status: 'drifted',
       findings: [{ kind: 'image-mismatch', service: 'web', detail: 'image differs' }],
       lastCheckedAt: null,
       ledger: [
         { service: 'web', kind: 'image-mismatch', message: 'image differs', detectedAt: Date.now(), resolvedAt: null },
       ],
-    })));
+    }));
     render(<DriftPanel stackName="web" />);
     await screen.findByTestId('drift-status');
     expect(screen.queryByText(/checked/i)).not.toBeInTheDocument();
   });
 
   it('labels a managed-path conflict without rendering the opaque service key', async () => {
-    vi.mocked(apiFetch).mockResolvedValue(jsonRes(report({
+    mockDriftReads(report({
       status: 'in-sync',
       ledger: [
         { service: 'deadbeefcafebabe', kind: 'managed-path-conflict', message: 'compose-primary local-modified', detectedAt: Date.now(), resolvedAt: null },
       ],
-    })));
+    }));
     render(<DriftPanel stackName="web" />);
     await screen.findByText('managed path');
     expect(screen.queryByText('deadbeefcafebabe')).not.toBeInTheDocument();
@@ -258,12 +300,12 @@ describe('DriftPanel', () => {
 
 describe('DriftPanel GitOps state', () => {
   it('renders the source state and one card per target for a Direct stack', async () => {
-    vi.mocked(apiFetch).mockResolvedValue(jsonRes(report({
+    mockDriftReads(report({
       gitopsRevision: liveRevision({
         facets: facets({ source: plainSource('candidate_ready') }),
         targets: [target({ nodeId: 1, runtime: { status: 'applied_not_deployed' } })],
       }),
-    })));
+    }));
     render(<DriftPanel stackName="web" />);
 
     const source = await screen.findByTestId('gitops-source');
@@ -276,14 +318,14 @@ describe('DriftPanel GitOps state', () => {
   });
 
   it('renders an artifact card for a live artifact facet', async () => {
-    vi.mocked(apiFetch).mockResolvedValue(jsonRes(report({
+    mockDriftReads(report({
       gitopsRevision: liveRevision({
         facets: facets({
           source: plainSource('application_generation_accepted', { candidateGenerationId: null }),
           artifact: liveArtifact(),
         }),
       }),
-    })));
+    }));
     render(<DriftPanel stackName="web" />);
 
     const card = await screen.findByTestId('gitops-artifact');
@@ -291,11 +333,11 @@ describe('DriftPanel GitOps state', () => {
   });
 
   it('omits the artifact card when identity does not apply', async () => {
-    vi.mocked(apiFetch).mockResolvedValue(jsonRes(report({
+    mockDriftReads(report({
       gitopsRevision: liveRevision({
         facets: facets({ source: plainSource('candidate_ready') }),
       }),
-    })));
+    }));
     render(<DriftPanel stackName="web" />);
 
     await screen.findByTestId('gitops-source');
@@ -306,7 +348,7 @@ describe('DriftPanel GitOps state', () => {
     // The drift route resolves through whatever manages the directory. A
     // Blueprint application has no Git source, and inventing one would be a
     // claim the model never made.
-    vi.mocked(apiFetch).mockResolvedValue(jsonRes(report({
+    mockDriftReads(report({
       gitopsRevision: liveRevision({
         targetMode: 'inline_blueprint',
         blueprintId: 7,
@@ -319,7 +361,7 @@ describe('DriftPanel GitOps state', () => {
           target({ nodeId: 2, runtime: { status: 'drifted' } }),
         ],
       }),
-    })));
+    }));
     render(<DriftPanel stackName="web" />);
 
     await waitFor(() => expect(screen.getAllByTestId('gitops-target')).toHaveLength(2));
@@ -328,9 +370,9 @@ describe('DriftPanel GitOps state', () => {
   });
 
   it('reports an application the projection could not reach', async () => {
-    vi.mocked(apiFetch).mockResolvedValue(jsonRes(report({
+    mockDriftReads(report({
       gitopsRevision: absentRevision([missingApplicationLimitation]),
-    })));
+    }));
     render(<DriftPanel stackName="web" />);
 
     expect(await screen.findByTestId('gitops-fault')).toHaveTextContent(missingApplicationLimitation.message);
@@ -339,7 +381,7 @@ describe('DriftPanel GitOps state', () => {
   it('renders nothing new for a stack the model was never asked about', async () => {
     // The common case by far: no Git source, no Blueprint. A section header over
     // an empty block would be worse than silence.
-    vi.mocked(apiFetch).mockResolvedValue(jsonRes(report({ gitopsRevision: absentRevision() })));
+    mockDriftReads(report({ gitopsRevision: absentRevision() }));
     render(<DriftPanel stackName="web" />);
 
     await screen.findByTestId('drift-status');
@@ -349,7 +391,7 @@ describe('DriftPanel GitOps state', () => {
   });
 
   it('renders exactly today output for a report from a node that predates the model', async () => {
-    vi.mocked(apiFetch).mockResolvedValue(jsonRes(report({ status: 'drifted' })));
+    mockDriftReads(report({ status: 'drifted' }));
     render(<DriftPanel stackName="web" />);
 
     expect(await screen.findByTestId('drift-status')).toHaveAttribute('data-status', 'drifted');
@@ -360,11 +402,11 @@ describe('DriftPanel GitOps state', () => {
   it('does not treat a live application caveat as a fault', async () => {
     // Live-arm limitations are caveats on state that is being reported. Reading
     // them as faults would recreate the conflation in the opposite direction.
-    vi.mocked(apiFetch).mockResolvedValue(jsonRes(report({
+    mockDriftReads(report({
       gitopsRevision: liveRevision({
         limitations: [{ code: 'repo_identity_invalid', message: 'Repository identity could not be read.', evidence: null }],
       }),
-    })));
+    }));
     render(<DriftPanel stackName="web" />);
 
     await screen.findByTestId('gitops-source');
@@ -372,9 +414,9 @@ describe('DriftPanel GitOps state', () => {
   });
 
   it('renders a drift item as expected against observed', async () => {
-    vi.mocked(apiFetch).mockResolvedValue(jsonRes(report({
+    mockDriftReads(report({
       gitopsRevision: liveRevision({ drift: [driftItem()] }),
-    })));
+    }));
     render(<DriftPanel stackName="web" />);
 
     expect(await screen.findByText('gitops drift')).toBeInTheDocument();
@@ -388,16 +430,16 @@ describe('DriftPanel GitOps state', () => {
   });
 
   it('names a target on a node this client has no record of', async () => {
-    vi.mocked(apiFetch).mockResolvedValue(jsonRes(report({
+    mockDriftReads(report({
       gitopsRevision: liveRevision({ targets: [target({ nodeId: 9 })] }),
-    })));
+    }));
     render(<DriftPanel stackName="web" />);
 
     expect(await screen.findByTestId('gitops-target')).toHaveTextContent('node 9');
   });
 
   it('renders no drift section while the backend derives no items', async () => {
-    vi.mocked(apiFetch).mockResolvedValue(jsonRes(report({ gitopsRevision: liveRevision({ drift: [] }) })));
+    mockDriftReads(report({ gitopsRevision: liveRevision({ drift: [] }) }));
     render(<DriftPanel stackName="web" />);
 
     await screen.findByTestId('gitops-source');
@@ -405,7 +447,7 @@ describe('DriftPanel GitOps state', () => {
   });
 
   it('renders placement and rollout cards, using the redacted reason as the preflight line', async () => {
-    vi.mocked(apiFetch).mockResolvedValue(jsonRes(report({
+    mockDriftReads(report({
       gitopsRevision: liveRevision({
         facets: facets({
           placement: {
@@ -425,7 +467,7 @@ describe('DriftPanel GitOps state', () => {
           rollout: { status: 'rollout_not_executable', rolloutCandidateId: 'rc-1' },
         }),
       }),
-    })));
+    }));
     render(<DriftPanel stackName="web" />);
 
     const placement = await screen.findByTestId('gitops-placement');
@@ -435,7 +477,7 @@ describe('DriftPanel GitOps state', () => {
   });
 
   it('renders the approval chips from the recorded refs and the facets', async () => {
-    vi.mocked(apiFetch).mockResolvedValue(jsonRes(report({
+    mockDriftReads(report({
       gitopsRevision: liveRevision({
         approvals: {
           sourceAcceptanceRef: 'src-acceptance-1',
@@ -448,7 +490,7 @@ describe('DriftPanel GitOps state', () => {
           rollout: { status: 'rollout_not_executable', rolloutCandidateId: 'rc-1' },
         }),
       }),
-    })));
+    }));
     render(<DriftPanel stackName="web" />);
 
     const chips = await screen.findByTestId('gitops-approvals');
@@ -458,5 +500,190 @@ describe('DriftPanel GitOps state', () => {
     expect(placement.closest('[data-approval]')).toHaveAttribute('data-state', 'pending');
     // No rollout ref and no facet saying it is outstanding: no rollout chip.
     expect(within(chips).queryByText(/rollout/)).not.toBeInTheDocument();
+  });
+});
+
+/**
+ * The tab must not report an application as settled while the portfolio reports
+ * it unsettled.
+ *
+ * Each case drives the two reads the way a real install answers them: a
+ * node-local revision whose facet cards all read healthy, next to a portfolio
+ * row that cannot settle the application. Before the posture was shown here,
+ * the first of these rendered as a clean tab with nothing to look at, which is
+ * the contradiction this suite exists to prevent.
+ */
+describe('DriftPanel shows the canonical posture', () => {
+  const healthyRevision = () => liveRevision({
+    facets: facets({ source: plainSource('application_generation_accepted') }),
+    targets: [target({ nodeId: 1, runtime: { status: 'synced_and_healthy' } })],
+  });
+
+  const renderWith = async (row: unknown) => {
+    mockDriftReads(
+      report({ status: 'in-sync', gitopsRevision: healthyRevision() }),
+      { portfolio: { application: row } },
+    );
+    render(<DriftPanel stackName="web" />);
+    return screen.findByTestId('gitops-posture');
+  };
+
+  it.each([
+    ['converged', 'converged'],
+    ['converged_qualified', 'converged · qualified'],
+    ['failed', 'failed'],
+    ['attention', 'needs attention'],
+    ['in_progress', 'in progress'],
+    ['unknown', 'unknown'],
+  ] as const)('reports the %s posture the portfolio computed', async (posture, label) => {
+    const card = await renderWith(portfolioRow({ posture }));
+    expect(card).toHaveAttribute('data-posture', posture);
+    expect(card).toHaveTextContent(label);
+  });
+
+  it('says converged only when the evidence behind it is current', async () => {
+    // The one combination that may read as settled: every target reached, and
+    // its evidence recorded against the generation now intended.
+    const card = await renderWith(portfolioRow({
+      posture: 'converged',
+      targets: [portfolioTarget({ evidence: 'fresh' })],
+      evidence: { partial: false, unreachableNodes: [], unknown: false },
+    }));
+    expect(card).toHaveAttribute('data-posture', 'converged');
+    expect(card).toHaveTextContent(/complete, and current evidence/i);
+    expect(card).toHaveTextContent('converged');
+  });
+
+  it('never reads as settled while a target holds stale evidence', async () => {
+    const card = await renderWith(portfolioRow({
+      posture: 'unknown',
+      attention: ['target_stale'],
+      targets: [portfolioTarget({ evidence: 'stale' })],
+    }));
+    expect(card).toHaveAttribute('data-posture', 'unknown');
+    expect(card).not.toHaveTextContent('converged');
+    const freshness = await screen.findByTestId('gitops-target-evidence');
+    expect(freshness).toHaveAttribute('data-evidence', 'stale');
+    expect(freshness).toHaveTextContent('evidence stale');
+  });
+
+  it('never reads as settled while a target is unknown', async () => {
+    const card = await renderWith(portfolioRow({
+      posture: 'unknown',
+      targets: [portfolioTarget({ evidence: 'unknown' })],
+    }));
+    expect(card).toHaveAttribute('data-posture', 'unknown');
+    const freshness = await screen.findByTestId('gitops-target-evidence');
+    expect(freshness).toHaveAttribute('data-evidence', 'unknown');
+    expect(freshness).toHaveTextContent('evidence unknown');
+  });
+
+  it('names a target the portfolio could not reach', async () => {
+    const card = await renderWith(portfolioRow({
+      posture: 'attention',
+      attention: ['target_unreachable'],
+      evidence: { partial: true, unreachableNodes: [7], unknown: false },
+      targets: [portfolioTarget({ nodeId: 1, connectivity: 'unreachable', evidence: 'unknown' })],
+    }));
+    expect(card).toHaveTextContent('Not reached: node 7.');
+    expect(card).toHaveTextContent('evidence behind this is incomplete');
+  });
+
+  it('reports a recorded health failure as failed, and the target evidence as fresh', async () => {
+    // The health verdict is current and complete; it simply says the workload
+    // is failing. Fresh evidence plus a failed posture is the case where the
+    // posture, not the evidence quality, is the reason not to call it settled.
+    const card = await renderWith(portfolioRow({
+      posture: 'failed',
+      attention: ['health_failed'],
+      healthStatus: 'failed',
+      targets: [portfolioTarget({ health: 'failed', evidence: 'fresh' })],
+    }));
+    expect(card).toHaveAttribute('data-posture', 'failed');
+    expect(card).toHaveTextContent('Something was proven wrong');
+    const freshness = await screen.findByTestId('gitops-target-evidence');
+    expect(freshness).toHaveAttribute('data-evidence', 'fresh');
+  });
+
+  it('excludes tombstoned target history from the freshness it shows', async () => {
+    // A withdrawn target is not current state. The portfolio excludes it, and
+    // the target card must not resurrect it as an evidence claim.
+    mockDriftReads(
+      report({
+        status: 'in-sync',
+        gitopsRevision: liveRevision({
+          facets: facets({ source: plainSource('application_generation_accepted') }),
+          targets: [target({ nodeId: 1, runtime: { status: 'synced_and_healthy' } })],
+        }),
+      }),
+      { portfolio: { application: portfolioRow({ targets: [portfolioTarget({ tombstoned: true, evidence: 'stale' })] }) } },
+    );
+    render(<DriftPanel stackName="web" />);
+    const card = await screen.findByTestId('gitops-posture');
+    expect(card).toHaveAttribute('data-posture', 'converged');
+    // The live target has no portfolio entry, so it reads as unknown rather
+    // than inheriting the tombstoned target's stale evidence.
+    const freshness = await screen.findByTestId('gitops-target-evidence');
+    expect(freshness).toHaveAttribute('data-evidence', 'unknown');
+  });
+
+  it('says the posture is unreadable rather than showing nothing when the read fails', async () => {
+    // Reporting this as "no GitOps application" would let a clean-looking tab
+    // stand in for an answer Sencho could not give.
+    mockDriftReads(
+      report({ status: 'in-sync', gitopsRevision: healthyRevision() }),
+      { portfolio: { application: undefined, ok: false } },
+    );
+    render(<DriftPanel stackName="web" />);
+    const card = await screen.findByTestId('gitops-posture');
+    expect(card).toHaveAttribute('data-posture', 'unreadable');
+    expect(card).toHaveTextContent('describe one node, not the application');
+    expect(card).not.toHaveTextContent('converged');
+  });
+
+  it('shows no posture at all for a stack with no GitOps application', async () => {
+    mockDriftReads(report({ status: 'in-sync' }));
+    render(<DriftPanel stackName="web" />);
+    await screen.findByTestId('drift-status');
+    expect(screen.queryByTestId('gitops-posture')).not.toBeInTheDocument();
+  });
+
+  it('renders a posture this build has no wording for as an explicit unknown', async () => {
+    // A tab left open across a Sencho upgrade holds this build's JavaScript
+    // against a newer backend, which can report a posture value this build has
+    // never seen. The sibling application view defends against that; the tab
+    // must too, because a throw here takes the whole tab down.
+    const card = await renderWith({
+      ...portfolioRow(),
+      posture: 'settled_by_a_newer_build',
+    } as unknown as ReturnType<typeof portfolioRow>);
+    expect(card).toHaveAttribute('data-posture', 'settled_by_a_newer_build');
+    expect(card).toHaveTextContent('unknown');
+    expect(card).toHaveTextContent('does not know');
+  });
+
+  it('shows the age of the evidence behind each drift item', async () => {    mockDriftReads(
+      report({
+        status: 'drifted',
+        gitopsRevision: liveRevision({
+          drift: [driftItem({ freshnessAt: Date.now() - 3_600_000 })],
+        }),
+      }),
+    );
+    render(<DriftPanel stackName="web" />);
+    const freshness = await screen.findByTestId('gitops-drift-freshness');
+    expect(freshness).toHaveTextContent(/evidence .*ago/);
+  });
+
+  it('says a drift item is undated rather than implying a recent check', async () => {
+    mockDriftReads(
+      report({
+        status: 'drifted',
+        gitopsRevision: liveRevision({ drift: [driftItem({ freshnessAt: null })] }),
+      }),
+    );
+    render(<DriftPanel stackName="web" />);
+    const freshness = await screen.findByTestId('gitops-drift-freshness');
+    expect(freshness).toHaveTextContent('evidence undated');
   });
 });
