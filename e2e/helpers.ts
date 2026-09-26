@@ -76,6 +76,85 @@ export async function waitForShellReady(page: Page): Promise<void> {
   await expect(page.locator('[data-stacks-loaded="true"]')).toBeAttached({ timeout: 15_000 });
 }
 
+/** Selector for the second-factor challenge screen, in any of its states. */
+const MFA_CHALLENGE = '[data-sn-chrome="mfa-challenge"]';
+
+/**
+ * Wait for the shell to become ready, but give up early on the one login
+ * outcome that can never resolve on its own: a second-factor challenge, which
+ * no amount of waiting will carry past. Without this, a cascade pays the full
+ * readiness timeout on every attempt of every later test, which is what turns
+ * a single bad spec into a 30-minute job.
+ *
+ * Everything else stays `ready`'s business, so its assertion messages are
+ * unchanged for genuinely slow or broken dashboards.
+ */
+async function waitForLoginOutcome(page: Page, ready: () => Promise<void>): Promise<void> {
+  // Keep readiness' own failure so it can be rethrown untouched. The handler
+  // is attached immediately, so abandoning this promise when the challenge
+  // wins the race cannot surface later as an unhandled rejection.
+  let readyError: unknown;
+  const settled = ready().catch((err: unknown) => {
+    readyError = err;
+    return 'failed' as const;
+  });
+  const challenge = page
+    .locator(MFA_CHALLENGE)
+    .waitFor({ state: 'visible', timeout: 15_000 })
+    .then(
+      () => 'challenge' as const,
+      () => 'absent' as const,
+    );
+  const outcome = await Promise.race([settled, challenge]);
+  if (outcome === 'ready') return;
+  if (outcome === 'challenge') throw new Error('mfa-challenge');
+  // The challenge never appeared, so the outcome belongs to readiness. Await it
+  // rather than reading readyError now: both waits share the same 15s ceiling,
+  // so the challenge lookup can settle first and the error is not set yet.
+  if ((await settled) === 'ready') return;
+  throw readyError;
+}
+
+/**
+ * Explain why a login that should have produced a session did not, instead of
+ * letting the caller time out on a generic readiness wait.
+ *
+ * Two states are worth naming, and both are shared-suite problems rather than
+ * anything wrong with the test:
+ *   - The second-factor challenge. The account still has MFA enrolled, so every
+ *     login stops here and never reaches the dashboard. E2E tests share one
+ *     account, so one spec that leaves MFA on breaks every spec that runs after
+ *     it.
+ *   - Still on the sign-in form after submitting. The credentials were rejected
+ *     or the request never completed, and the usual suspect under load is the
+ *     shared per-user API rate limit rejecting the login POST.
+ *
+ * When the page is in neither state, the readiness failure that got us here is
+ * the more useful message, so it is carried through rather than discarded.
+ */
+async function explainUnreadyLogin(page: Page, username: string, cause?: unknown): Promise<Error> {
+  if (await page.locator(MFA_CHALLENGE).isVisible().catch(() => false)) {
+    return new Error(
+      `loginAs: login for "${username}" landed on the two-factor challenge, so it can never ` +
+      'reach the dashboard. The shared E2E account still has MFA enrolled, usually because a ' +
+      'previous run aborted before its cleanup ran. Reset it with ' +
+      '`node backend/dist/cli/resetMfa.js ' + username + '` (build the backend first), then re-run.',
+    );
+  }
+  if (await isLoginPage(page)) {
+    return new Error(
+      `loginAs: still on the sign-in form after submitting credentials for "${username}". The ` +
+      'login was rejected or did not complete. Under parallel or sustained load the shared ' +
+      'per-user API rate limit can reject the login POST; check the backend log for 429s.',
+    );
+  }
+  const reason = cause instanceof Error ? cause.message : String(cause ?? 'unknown');
+  return new Error(
+    `loginAs: could not determine page state - expected setup, login, or dashboard. ` +
+    `Check that E2E_USERNAME and E2E_PASSWORD are set correctly. Readiness reported: ${reason}`,
+  );
+}
+
 /** Options for loginAs. */
 export interface LoginAsOptions {
   /**
@@ -133,7 +212,14 @@ export async function loginAs(
       await usernameField.fill(username);
       await page.locator('#password').fill(password);
       await page.locator('button:has-text("Login"), button:has-text("Sign in")').first().click();
-      await ready(page);
+      // Name the reason instead of burning the full readiness timeout: a
+      // challenge screen or a rejected login is a shared-state problem the
+      // reader has to act on, not a slow dashboard.
+      try {
+        await waitForLoginOutcome(page, () => ready(page));
+      } catch (err) {
+        throw await explainUnreadyLogin(page, username, err);
+      }
       return;
     }
     // Fall through to the dashboard check below.
@@ -151,15 +237,13 @@ export async function loginAs(
   }
 
   // Cookie session may still be restoring after a hard reload.
+  let readyError: unknown;
   try {
-    await ready(page);
+    await waitForLoginOutcome(page, () => ready(page));
     return;
-  } catch {
-    // fall through
+  } catch (err) {
+    readyError = err;
   }
 
-  throw new Error(
-    'loginAs: could not determine page state - expected setup, login, or dashboard. ' +
-    'Check that E2E_USERNAME and E2E_PASSWORD are set correctly.',
-  );
+  throw await explainUnreadyLogin(page, username, readyError);
 }

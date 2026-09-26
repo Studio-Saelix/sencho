@@ -13,6 +13,14 @@ export default defineConfig({
   testDir: './e2e',
   // Don't stop on first failure - show all results
   maxFailures: 0,
+  // Bound the whole run in CI so a cascade fails the step instead of running
+  // until the job's timeout kills it. A job cancelled by its own timeout runs
+  // no further steps, so nothing would be uploaded and the next occurrence
+  // would have no evidence; failing here leaves the job alive long enough to
+  // collect the report. Locally the run is left unbounded, since a slow
+  // machine is not a broken build. The job's `timeout-minutes` sits above
+  // this value on purpose as a backstop for a wedged browser process.
+  globalTimeout: process.env.CI ? 28 * 60 * 1000 : 0,
   // How long to wait for a single test
   timeout: 30_000,
   // How long to wait for an expect() assertion

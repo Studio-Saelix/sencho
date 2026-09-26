@@ -182,9 +182,12 @@ jobs:
   e2e:
     name: E2E Tests (Playwright)
     runs-on: ubuntu-latest
-    # 30 minutes: the suite grew with pane-layout journeys and occasional
-    # serial-group retries; 20 minutes was cancelling mid-run on this branch.
-    timeout-minutes: 30
+    # Backstop only. The suite bounds itself with Playwright's `globalTimeout`
+    # (see playwright.config.ts), which fails the test step while the job is
+    # still alive to upload the report. This ceiling stays above that value so
+    # a cascading or wedged run produces evidence instead of a bare
+    # cancellation; a job cancelled by its own timeout runs no further steps.
+    timeout-minutes: 35
     needs: [backend, frontend]
     # See backend job rationale.
     if: >-
@@ -223,7 +226,9 @@ jobs:
         run: npx playwright test --project=chromium
 
       - name: Upload E2E report and service logs
-        if: failure()
+        # `cancelled()` covers a run stopped by the concurrency group, where
+        # GitHub re-evaluates conditions for the job's unfinished steps.
+        if: failure() || cancelled()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: playwright-report
