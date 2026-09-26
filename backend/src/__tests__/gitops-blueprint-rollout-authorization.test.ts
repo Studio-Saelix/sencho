@@ -652,6 +652,43 @@ describe('ensureRolloutAuthorization', () => {
     expect(() => authorize(fixture.applicationId)).toThrow(/already live/);
     expect(GitOpsStore.getInstance().getApplication(fixture.applicationId)!.rollout_authorization_ref).toBe(ref);
   });
+
+  it('refuses while an operation is in flight for the application', async () => {
+    // The pause check only knows about a deliberate pause. Without this guard an
+    // authorization could be minted while a fetch, apply, deploy, or recovery
+    // was still running, and the two would disagree about what the next
+    // operation acts on.
+    const fixture = seedAuthorizedReadyApp();
+    const store = GitOpsStore.getInstance();
+    // Set directly: the pointer writer only covers a subset of the row, and an
+    // in-flight operation is normally opened by the operation transitions.
+    DatabaseService.getInstance().getDb()
+      .prepare("UPDATE gitops_applications SET active_operation_stage = 'deploy_started', active_operation_id = ? WHERE id = ?")
+      .run('op-x', fixture.applicationId);
+
+    const result = await ensureRolloutAuthorization(fixture.applicationId, 'tester');
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.reason).toMatch(/already in flight/);
+    expect(store.getApplication(fixture.applicationId)!.rollout_authorization_ref).toBeNull();
+  });
+
+  it('refuses while a rollout target has an operation in flight', async () => {
+    // A target can be mid-apply while the application itself has nothing
+    // running, so the guard reads the target rows rather than the application
+    // pointer alone.
+    const fixture = seedAuthorizedReadyApp();
+    const store = GitOpsStore.getInstance();
+    const target = store.getTarget(fixture.applicationId, fixture.nodeId)!;
+    void target;
+    DatabaseService.getInstance().getDb()
+      .prepare("UPDATE gitops_target_current SET active_operation_stage = 'deploy_started', active_operation_id = ? WHERE application_id = ? AND node_id = ?")
+      .run('op-y', fixture.applicationId, fixture.nodeId);
+
+    const result = await ensureRolloutAuthorization(fixture.applicationId, 'tester');
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.reason).toMatch(/already in flight/);
+    expect(store.getApplication(fixture.applicationId)!.rollout_authorization_ref).toBeNull();
+  });
 });
 
 function nonBlockingPreflightForApp(applicationId: string) {

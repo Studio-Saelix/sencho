@@ -259,6 +259,19 @@ function liveRolloutBinding(app: GitOpsApplicationRow): FutureRolloutAuthorizati
  * holding. Explicit operator authorizations do not pass it: the operator's own
  * decision is the authority there.
  */
+/**
+ * Whether any live target of this application has an operation in flight.
+ *
+ * Read from the target rows rather than from the application pointer, because a
+ * target can be mid-deploy while the application itself has nothing running: the
+ * two are separate machines and only the target knows about its own apply.
+ */
+function hasTargetOperationInFlight(store: GitOpsStore, applicationId: string): boolean {
+  return store
+    .listTargets(applicationId)
+    .some((target) => target.target_status === 'active' && target.active_operation_stage !== null);
+}
+
 export async function ensureRolloutAuthorization(
   applicationId: string,
   actor: string | null,
@@ -275,6 +288,17 @@ export async function ensureRolloutAuthorization(
       return { ok: false, reason: 'Rollout authorization is only for Blueprint target mode.' };
     }
     if (shouldAbort?.()) return { ok: false, reason: 'The rollout is paused.' };
+    // A conflicting operation is a refusal, not a wait. The pause check above
+    // only knows about a deliberate pause, so without this an authorization
+    // could be minted while a fetch, apply, deploy, or recovery is still running
+    // for the application, and the two would then disagree about what the next
+    // operation acts on.
+    if (app.active_operation_stage) {
+      return { ok: false, reason: 'An operation is already in flight for this application.' };
+    }
+    if (hasTargetOperationInFlight(store, app.id)) {
+      return { ok: false, reason: 'An operation is already in flight for a rollout target.' };
+    }
 
     const ingredients = store.authorizationIngredients(app);
     if (!ingredients) {
