@@ -93,4 +93,20 @@ describe('useDeveloperMode', () => {
     });
     expect(mockedFetch.mock.calls.length).toBe(callsBefore);
   });
+
+  // The client-side preference hooks broadcast with no detail at all, and there
+  // are fourteen such sites. Each one used to pull the whole settings document
+  // over the network for a change with no server-side effect, which is what
+  // drove the shared rate-limit budget to its ceiling during the E2E suite.
+  it('ignores a detail-less settings broadcast from a client-side preference', async () => {
+    mockedFetch.mockResolvedValue(settingsResponse('0'));
+    const { result } = renderHook(() => useDeveloperMode(1));
+    await waitFor(() => expect(result.current).toBe(false));
+
+    const callsBefore = mockedFetch.mock.calls.length;
+    act(() => {
+      window.dispatchEvent(new CustomEvent(SENCHO_SETTINGS_CHANGED));
+    });
+    expect(mockedFetch.mock.calls.length).toBe(callsBefore);
+  });
 });
