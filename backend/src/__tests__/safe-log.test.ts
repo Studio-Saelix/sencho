@@ -62,4 +62,38 @@ describe('redactSensitiveText', () => {
     expect(text).not.toContain('c2VjcmV0OnZhbHVl');
     expect(text).toContain('Basic [redacted]');
   });
+
+  // Compose echoes an image reference back in its own errors, and an image
+  // reference can carry registry credentials with no URL scheme in front.
+  it('redacts scheme-less registry credentials in an image reference', () => {
+    const text = redactSensitiveText(
+      'service "web" refers to registry.example.invalid/user:s3cr3tpass@team/app:latest which could not be pulled',
+    );
+
+    expect(text).not.toContain('s3cr3tpass');
+    expect(text).toContain('registry.example.invalid/[redacted]@team/app:latest');
+  });
+
+  it('redacts scheme-less registry credentials that carry an explicit port', () => {
+    const text = redactSensitiveText('pull failed for 10.0.0.5:5000/dep:pa55word@team/app:1.0');
+
+    expect(text).not.toContain('pa55word');
+    expect(text).toContain('10.0.0.5:5000/[redacted]@team/app:1.0');
+  });
+
+  it('redacts a keyword secret that is quoted on both sides of its separator', () => {
+    const text = redactSensitiveText('config rejected: {"POSTGRES_PASSWORD": "s3cr3tvalue", "port": 5432}');
+
+    expect(text).not.toContain('s3cr3tvalue');
+    expect(text).toContain('[redacted]');
+    // The neighbouring non-secret field survives, so the redaction is targeted.
+    expect(text).toContain('5432');
+  });
+
+  it('redacts a single-quoted keyword secret', () => {
+    const text = redactSensitiveText("config rejected: {'api_key': 'abcd1234efgh'}");
+
+    expect(text).not.toContain('abcd1234efgh');
+    expect(text).toContain('[redacted]');
+  });
 });

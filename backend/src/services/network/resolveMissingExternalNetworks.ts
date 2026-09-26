@@ -26,16 +26,36 @@ export interface MissingExternalNetworksEnvelope {
   /** Count of external network declarations when the model rendered; 0 otherwise. */
   declaredExternalCount: number;
   /**
-   * Present when the model could not be rendered due to a missing required variable or
-   * another compose-config failure. When `env_block_deploy_on_missing_required` is enabled,
-   * contains the exact guardrail message naming the missing variable(s). Otherwise
-   * contains a neutral diagnostic. Undefined when the model rendered successfully or
-   * when the render error was a Docker spawn/timeout failure.
+   * Present when the model could not be rendered. When
+   * `env_block_deploy_on_missing_required` is enabled and a required variable is
+   * missing, contains the exact guardrail message naming the variable(s).
+   * Otherwise contains a diagnostic that quotes Compose's own redacted stderr,
+   * which also carries the timeout and output-cap reasons. Undefined when the
+   * model rendered, including when the Docker runtime snapshot was unavailable.
    */
   renderError?: string;
 }
 
 const MAX_RENDER_ERROR = 600;
+
+/** What to try when Compose's own words are unavailable or unhelpful. */
+const RENDER_GUIDANCE =
+  'Check the compose and env files for a YAML syntax error, an unresolved include or merge, or a required variable with no value.';
+
+/**
+ * Compose's own words for a render failure, redacted and bounded, on one line.
+ *
+ * The guess-list alone cannot name the fault: a malformed port spec, a bad
+ * include path, or a conflicting mount all fail the render without matching any
+ * of its three suggestions, so the operator is sent to check the wrong thing.
+ * Compose already states the cause on stderr, so it is surfaced verbatim
+ * instead. Collapsing whitespace keeps a multi-line diagnostic readable in a
+ * toast, and `renderConfig` reports its timeout and output-cap outcomes on
+ * stderr too, so those two reasons arrive here without a separate branch.
+ */
+function composeStderrDetail(stderr: string): string {
+  return sanitizeForLog(redactSensitiveText(stderr)).replace(/\s+/g, ' ').trim().slice(0, MAX_RENDER_ERROR);
+}
 
 function isAutoCreateEnabled(nodeId: number): boolean {
   try {
@@ -99,9 +119,12 @@ async function renderModel(
         renderError: `Required variable${missing.length > 1 ? 's' : ''} ${missing.join(', ')} ${missing.length > 1 ? 'have' : 'has'} no value, so the effective model cannot be rendered.`,
       };
     }
+    const detail = composeStderrDetail(result.stderr);
     return {
       model: null,
-      renderError: 'Sencho could not render the effective Compose model. Check the compose and env files for a YAML syntax error, an unresolved include or merge, or a required variable with no value.',
+      renderError: detail
+        ? `Sencho could not render the effective Compose model: ${detail} ${RENDER_GUIDANCE}`
+        : `Sencho could not render the effective Compose model. ${RENDER_GUIDANCE}`,
     };
   } catch (err) {
     const msg = redactSensitiveText(getErrorMessage(err, 'docker compose could not be started.'))

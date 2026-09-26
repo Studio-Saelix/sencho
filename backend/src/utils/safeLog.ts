@@ -23,7 +23,17 @@ export function redactSensitiveText(value: unknown): string {
     .replace(/Basic\s+[A-Za-z0-9+/=]+/gi, 'Basic [redacted]')
     .replace(/[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}/g, '[redacted-jwt]')
     .replace(/https?:\/\/[^/\s:@]+:[^/\s@]+@/gi, 'https://[redacted]@')
-    .replace(/((?:authorization|token|password|secret|api[_-]?key)\s*[:=]\s*)[^\s,;]+/gi, '$1[redacted]')
+    // Scheme-less registry credentials, as they appear in an `image:` reference
+    // (registry.example.com/user:password@repo/image:tag). Compose echoes the
+    // reference back in its own errors.
+    .replace(/([A-Za-z0-9.-]+(?::\d+)?)\/[^/\s:@]+:[^/\s@]+@/g, '$1/[redacted]@')
+    // Keyword-led secrets, tolerating a JSON/YAML quoting boundary between the
+    // key and its separator, so `"PASSWORD": "s3cret"` is caught like
+    // `PASSWORD=s3cret`.
+    .replace(
+      /((?:authorization|token|password|secret|api[_-]?key)["']?\s*[:=]\s*["']?)[^\s,;"']+/gi,
+      '$1[redacted]',
+    )
     .replace(/\/home\/[^/\s'"]+/g, '/home/<user>')
     .replace(/\/Users\/[^/\s'"]+/g, '/Users/<user>')
     .replace(/([A-Za-z]):\\Users\\[^\\/\s'"]+/g, '$1:\\Users\\<user>');

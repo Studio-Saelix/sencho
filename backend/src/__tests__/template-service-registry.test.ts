@@ -1,12 +1,19 @@
 /**
- * Registry-fetch tests for TemplateService.getTemplates: the response-size
- * cap surfaces a clean error instead of letting an oversized body propagate,
- * and the fetch is issued with the size-limit axios options.
+ * Registry-fetch tests for TemplateService.getTemplates: the response-size cap
+ * surfaces a clean error instead of letting an oversized body propagate, the
+ * fetch is issued with the size-limit axios options, and both registry formats
+ * reach `compose.yaml` with renderable port specs.
+ *
+ * Port fixtures are verbatim LinuxServer.io payloads. That API sends port values
+ * as strings, never sends a `protocol` key, and for some apps carries the
+ * protocol inside the container value, so a fixture invented to match the
+ * mapper's assumption would pass while real catalogues failed to render.
  */
 import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from 'vitest';
 import axios from 'axios';
 import YAML from 'yaml';
 import { setupTestDb, cleanupTestDb } from './helpers/setupTestDb';
+import { DatabaseService } from '../services/DatabaseService';
 
 vi.mock('axios', () => ({
   default: {
@@ -32,7 +39,22 @@ afterAll(() => {
 
 beforeEach(() => {
   mockedGet.mockReset();
+  DatabaseService.getInstance().updateGlobalSetting('template_registry_url', '');
 });
+
+/**
+ * The LinuxServer.io HTTP body the mapper reads. Returned as the axios `data`,
+ * so it is the body itself: `{ data: { repositories: { linuxserver } } }`.
+ */
+function lsioPayload(apps: Record<string, unknown>): unknown {
+  return { data: { repositories: { linuxserver: apps } } };
+}
+
+/** The single service block of a generated compose file. */
+function serviceOf(yaml: string, name: string): Record<string, unknown> {
+  const parsed = YAML.parse(yaml) as { services: Record<string, Record<string, unknown>> };
+  return parsed.services[name];
+}
 
 describe('TemplateService.getTemplates registry size cap', () => {
   it('issues the fetch with content/body size limits', async () => {
@@ -70,28 +92,22 @@ describe('TemplateService.getTemplates registry size cap', () => {
   it('maps the default LinuxServer.io response shape into templates', async () => {
     const service = new TemplateService();
     service.clearCache();
+    // Real plex payload: it declares no ports at all.
     mockedGet.mockResolvedValueOnce({
-      data: {
-        data: {
-          repositories: {
-            linuxserver: {
-              plex: {
-                name: 'plex',
-                description: 'Media server',
-                stars: 100,
-                arch: ['x86-64'],
-                github: 'https://github.com/linuxserver/docker-plex',
-                readme: 'https://docs.example/plex',
-                config: {
-                  ports: [{ external: 32400, internal: 32400, protocol: 'tcp' }],
-                  volumes: [{ path: '/config' }],
-                  environment: [{ name: 'PUID', desc: 'User ID', default: '1000' }],
-                },
-              },
-            },
+      data: lsioPayload({
+        plex: {
+          name: 'plex',
+          description: 'Media server',
+          stars: 100,
+          arch: ['x86-64'],
+          github: 'https://github.com/linuxserver/docker-plex',
+          readme: 'https://docs.example/plex',
+          config: {
+            volumes: [{ path: '/config' }],
+            environment: [{ name: 'PUID', desc: 'User ID', default: '1000' }],
           },
         },
-      },
+      }),
     });
 
     const templates = await service.getTemplates();
@@ -99,10 +115,170 @@ describe('TemplateService.getTemplates registry size cap', () => {
     expect(plex).toBeDefined();
     expect(plex!.image).toBe('lscr.io/linuxserver/plex:latest');
     expect(plex!.source).toBe('linuxserver');
-    expect(plex!.ports).toEqual(['32400:32400/tcp']);
+    expect(plex!.ports).toEqual([]);
     expect(plex!.volumes).toEqual([{ container: '/config', bind: './config' }]);
     expect(plex!.env).toEqual([{ name: 'PUID', label: 'User ID', default: '1000' }]);
     expect(plex!.categories).toEqual(['Media']);
+  });
+
+  it('gives a port one protocol when LinuxServer.io embeds it in the container value', async () => {
+    const service = new TemplateService();
+    service.clearCache();
+    // Verbatim swag payload. The third entry carries /udp in `internal` and
+    // sends no `protocol` key, which is what produced '443:443/udp/tcp'.
+    mockedGet.mockResolvedValueOnce({
+      data: lsioPayload({
+        swag: {
+          name: 'swag',
+          description: 'An nginx reverse proxy with automatic ACME certs',
+          config: {
+            ports: [
+              { external: '443', internal: '443', desc: 'HTTPS port', optional: false },
+              { external: '80', internal: '80', desc: 'HTTP port', optional: true },
+              { external: '443', internal: '443/udp', desc: 'QUIC (HTTP/3) port', optional: true },
+            ],
+          },
+        },
+      }),
+    });
+
+    const templates = await service.getTemplates();
+    const swag = templates.find(t => t.title === 'swag')!;
+    expect(swag.ports).toEqual(['443:443/tcp', '80:80/tcp', '443:443/udp']);
+    // The generated compose is what Docker Compose will be asked to render.
+    const svc = serviceOf(service.generateComposeFromTemplate(swag, 'swag'), 'swag');
+    expect(svc.ports).toEqual(['443:443/tcp', '80:80/tcp', '443:443/udp']);
+  });
+
+  it('gives a udp-only LinuxServer.io app a single protocol (wireguard)', async () => {
+    const service = new TemplateService();
+    service.clearCache();
+    mockedGet.mockResolvedValueOnce({
+      data: lsioPayload({
+        wireguard: {
+          name: 'wireguard',
+          description: 'A blazingly fast, modern, lightweight VPN',
+          config: { ports: [{ external: '51820', internal: '51820/udp', desc: 'wireguard port' }] },
+        },
+      }),
+    });
+
+    const templates = await service.getTemplates();
+    const wireguard = templates.find(t => t.title === 'wireguard')!;
+    expect(wireguard.ports).toEqual(['51820:51820/udp']);
+  });
+
+  it('normalizes structured ports from a custom registry too', async () => {
+    const service = new TemplateService();
+    DatabaseService.getInstance().updateGlobalSetting(
+      'template_registry_url',
+      'https://templates.example/catalogue.json',
+    );
+    service.clearCache();
+    // A custom registry publishing structured ports, plus a Portainer-style
+    // string. Both must reach compose.yaml as renderable specs.
+    mockedGet.mockResolvedValueOnce({
+      data: {
+        version: '3',
+        templates: [
+          {
+            type: 1,
+            title: 'structured',
+            image: 'example/structured:latest',
+            ports: [{ external: '8443', internal: '443/udp' }],
+          },
+          {
+            type: 1,
+            title: 'stringform',
+            image: 'example/stringform:latest',
+            ports: ['8080:80/udp'],
+          },
+        ],
+      },
+    });
+
+    const templates = await service.getTemplates();
+    expect(templates.map(t => t.title)).toEqual(['structured', 'stringform']);
+    expect(templates.find(t => t.title === 'structured')!.ports).toEqual(['8443:443/udp']);
+    expect(templates.find(t => t.title === 'stringform')!.ports).toEqual(['8080:80/udp']);
+  });
+
+  it('drops a custom-registry port entry it cannot represent and keeps the rest', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const service = new TemplateService();
+    DatabaseService.getInstance().updateGlobalSetting(
+      'template_registry_url',
+      'https://templates.example/catalogue.json',
+    );
+    service.clearCache();
+    mockedGet.mockResolvedValueOnce({
+      data: {
+        version: '3',
+        templates: [{
+          type: 1,
+          title: 'mixed',
+          image: 'example/mixed:latest',
+          ports: [{ note: 'no port here' }, '8080:80'],
+        }],
+      },
+    });
+
+    const templates = await service.getTemplates();
+    expect(templates[0].ports).toEqual(['8080:80']);
+    expect(warn.mock.calls.some(c => c.join(' ').includes('templates.example'))).toBe(true);
+    warn.mockRestore();
+  });
+
+  it('caches per registry URL, so a changed URL is never served a stale catalogue', async () => {
+    const service = new TemplateService();
+    service.clearCache();
+
+    mockedGet.mockResolvedValueOnce({ data: lsioPayload({ plex: { name: 'plex', description: 'p' } }) });
+    const first = await service.getTemplates();
+    expect(first.map(t => t.title)).toEqual(['plex']);
+
+    // Same registry: served from cache, no second fetch.
+    const cached = await service.getTemplates();
+    expect(mockedGet).toHaveBeenCalledTimes(1);
+    expect(cached.map(t => t.title)).toEqual(['plex']);
+
+    // Operator points at a different registry. A shared key would keep serving
+    // the previous catalogue until its 24h TTL expired.
+    DatabaseService.getInstance().updateGlobalSetting(
+      'template_registry_url',
+      'https://templates.example/catalogue.json',
+    );
+    mockedGet.mockResolvedValueOnce({
+      data: { version: '3', templates: [{ type: 1, title: 'other', image: 'example/other:latest' }] },
+    });
+    const switched = await service.getTemplates();
+    expect(mockedGet).toHaveBeenCalledTimes(2);
+    expect(switched.map(t => t.title)).toEqual(['other']);
+
+    // Switching back finds the original entry still cached, not refetched.
+    DatabaseService.getInstance().updateGlobalSetting('template_registry_url', '');
+    const back = await service.getTemplates();
+    expect(mockedGet).toHaveBeenCalledTimes(2);
+    expect(back.map(t => t.title)).toEqual(['plex']);
+  });
+
+  it('clearCache drops every registry, including one that is no longer configured', async () => {
+    const service = new TemplateService();
+    service.clearCache();
+    mockedGet.mockResolvedValueOnce({ data: lsioPayload({ plex: { name: 'plex', description: 'p' } }) });
+    await service.getTemplates();
+
+    DatabaseService.getInstance().updateGlobalSetting(
+      'template_registry_url',
+      'https://templates.example/catalogue.json',
+    );
+    service.clearCache();
+    mockedGet.mockResolvedValueOnce({
+      data: { version: '3', templates: [{ type: 1, title: 'other', image: 'example/other:latest' }] },
+    });
+    const afterClear = await service.getTemplates();
+    expect(mockedGet).toHaveBeenCalledTimes(2);
+    expect(afterClear.map(t => t.title)).toEqual(['other']);
   });
 
   it('maps LSIO :ro volume paths and skips optional volumes (fail2ban)', async () => {
