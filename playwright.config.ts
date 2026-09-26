@@ -19,10 +19,12 @@ export default defineConfig({
   expect: { timeout: 5_000 },
   // Run tests serially - Sencho is a single-user app and tests share DB state
   workers: 1,
-  // Retry only in CI: the deploy/health-gate specs drive real Docker container
-  // runs, so image-pull and gate-window timing varies on shared runners. A retry
-  // absorbs the transient blip; trace: 'on-first-retry' captures the retried run.
-  retries: process.env.CI ? 2 : 0,
+  // Retry once in CI: the deploy/health-gate specs drive real Docker container
+  // runs, so image-pull and gate-window timing varies on shared runners. One
+  // retry absorbs a transient blip without tripling the cost of a real failure;
+  // a test reported as flaky still needs a fix. trace: 'on-first-retry'
+  // captures the retried run.
+  retries: process.env.CI ? 1 : 0,
   reporter: [['list'], ['html', { outputFolder: 'e2e/report', open: 'never' }]],
 
   use: {
@@ -36,23 +38,10 @@ export default defineConfig({
   projects: [
     {
       // Default project (what CI runs via --project=chromium). Skips the manual
-      // screenshot capture spec and the visual-regression gate: the gate needs
-      // committed, platform-matched baselines and runs in its own job, so it
-      // must not fail the functional E2E run on a missing snapshot.
+      // screenshot capture spec.
       name: 'chromium',
       use: { ...devices['Desktop Chrome'] },
-      testIgnore: ['**/screenshots.spec.ts', '**/desktop-visual-regression.spec.ts'],
-    },
-    {
-      // Desktop-unchanged visual gate. Run explicitly (and in the dedicated
-      // Visual Regression workflow):
-      //   npx playwright test --project=visual
-      // Baselines are platform-specific; regenerate with --update-snapshots in
-      // the same environment you compare in (locally, or the workflow's
-      // Playwright container for the CI baselines).
-      name: 'visual',
-      use: { ...devices['Desktop Chrome'] },
-      testMatch: ['**/desktop-visual-regression.spec.ts'],
+      testIgnore: ['**/screenshots.spec.ts'],
     },
     {
       // Manual-only project for capturing docs/images/. Run explicitly:
