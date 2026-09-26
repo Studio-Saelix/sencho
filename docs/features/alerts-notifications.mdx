@@ -217,6 +217,7 @@ The four `blueprint_*` categories are accepted by routing rules but are missing 
 Twenty-four further categories are written to notification history. They are never dispatched to external channels or accepted by a routing rule, and because a mute rule is applied when an alert is dispatched, a rule naming one of them is accepted by the API but does not hide the entry from the bell:
 
 - Lifecycle markers: `drift_detected` (Drift detected), `drift_resolved` (Drift resolved), `update_started` (Update started), `health_gate_passed` (Health gate passed), `health_gate_failed` (Health gate failed), `rollback_generation_released` (Rollback protection released), and `network_auto_created`.
+- A health failure is covered by the single `health_gate_failed` entry rather than by a second GitOps entry. The health gate is what produces a health verdict, and it announces the failure as it records it, so a GitOps-managed stack reports the failure once. A passing check, and a check that could not reach a verdict, are both silent.
 - Git source attempts: `git_pull_ready`, `git_plan_blocked`, `git_pull_failed`, `git_apply`, `git_apply_failed`, `git_apply_rolled_back`, and `git_create`.
 - GitOps authority, rollout, and confirmation decisions: `gitops_source_accepted`, `gitops_placement_approved`, `gitops_rollout_authorized`, `gitops_rollout_paused`, `gitops_rollout_resumed`, `gitops_rollout_superseded`, `gitops_rollback_started`, `gitops_rollback_completed`, `gitops_rollback_partial_failed`, and `gitops_stateful_confirmation`.
 

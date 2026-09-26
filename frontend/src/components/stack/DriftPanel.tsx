@@ -13,8 +13,11 @@ import GitOpsCaveats from '@/components/gitops/GitOpsCaveats';
 import GitOpsApprovalChips from '@/components/gitops/GitOpsApprovalChips';
 import GitOpsDriftRow from '@/components/gitops/GitOpsDriftRow';
 import { GitOpsDigestDetail } from '@/components/gitops/GitOpsDigestDetail';
+import { useGitOpsApplicationPosture, type GitOpsApplicationPosture } from '@/components/gitops/useGitOpsApplicationPosture';
+import { POSTURE_LABEL, POSTURE_TONE_CLASS } from '@/lib/gitopsPortfolio';
 import { ARTIFACT_STATE_LOOKUP, ROLLOUT_STATE_LOOKUP, RUNTIME_STATE_LOOKUP, SOURCE_STATE_LOOKUP, absentFault, liveArtifactFacet, livePlacementFacet, liveRolloutFacet, liveSourceFacet, placementStateMeta } from '@/lib/gitopsState';
 import type { GitOpsRevisionProjection } from '@/types/gitops';
+import type { GitOpsPortfolioRow, GitOpsPortfolioTargetSummary } from '@/types/gitopsPortfolio';
 
 // Mirrors the backend payload shape (the frontend never imports backend).
 type StackDriftStatus = 'in-sync' | 'drifted' | 'missing-runtime' | 'unreachable';
@@ -183,6 +186,176 @@ function LedgerRow({ entry }: { entry: DriftLedgerEntry }) {
   );
 }
 
+/**
+ * How one target's evidence quality reads.
+ *
+ * The grade is what the target's connectivity could prove, not whether its
+ * observation matches the generation now intended, so the wording stays inside
+ * that claim. A generation that has been accepted but not deployed is visible
+ * one line above on the same card, in the runtime state, which is where "the
+ * intended generation is not running yet" belongs.
+ *
+ * `unknown` is not a softer `stale`. Stale means Sencho has an answer and knows
+ * it is no longer current; unknown means it has no answer to offer, which is why
+ * the portfolio will not call the application settled.
+ */
+const EVIDENCE_META: Record<GitOpsPortfolioTargetSummary['evidence'], { label: string; tone: string; line: string }> = {
+  fresh: {
+    label: 'evidence current',
+    tone: 'text-success',
+    line: 'This node answered with its own runtime observation.',
+  },
+  stale: {
+    label: 'evidence stale',
+    tone: 'text-warning',
+    line: 'This node has an observation on record, but it is known to be out of date.',
+  },
+  unknown: {
+    label: 'evidence unknown',
+    tone: 'text-stat-subtitle',
+    line: 'Sencho cannot read this node’s runtime observation, so it cannot say what is running.',
+  },
+};
+
+/**
+ * Fallback for a posture this build has no wording for, so a newer backend's
+ * value renders as an explicit unknown rather than crashing the tab.
+ */
+const UNRECOGNIZED_POSTURE = {
+  label: 'unknown',
+  tone: 'neutral',
+} as const;
+
+/**
+ * One sentence saying what this posture means, in the words the rest of the tab
+ * uses.
+ *
+ * Only the settled states get a positive sentence. Every other value says what
+ * is missing rather than what is wrong, because the whole reason the posture is
+ * fail-closed is that "not proven" and "proven bad" are different facts, and a
+ * generic "needs attention" would erase that distinction on the one surface an
+ * operator opens to find out.
+ */
+function postureLine(row: GitOpsPortfolioRow): string {
+  switch (row.posture) {
+    case 'converged':
+      return 'Every target reached, complete, and current evidence confirms the intended generation is running.';
+    case 'converged_qualified':
+      return 'Every target reached the intended generation, but the executable artifact could not be proven bit-identical.';
+    case 'failed':
+      return 'Something was proven wrong. The lines below show what Sencho established on this node.';
+    case 'attention':
+      return 'A decision or repair is waiting on an operator. The lines below show what Sencho established on this node.';
+    case 'in_progress':
+      return 'Work is still in flight, so this is not a settled answer yet.';
+    case 'unknown':
+      return 'Sencho cannot currently prove any other state for this application.';
+    default:
+      return 'This application reports a state this Sencho build does not know.';
+  }
+}
+
+/**
+ * The portfolio id for the application this revision belongs to.
+ *
+ * The two forms mirror the backend's identity: a Blueprint application is
+ * single-instanced by blueprint id, while a Direct application lives on the
+ * node that owns its stack, so the id names that node. Both are opaque here;
+ * the route parses them back.
+ *
+ * Null when there is no live application to ask about, which is the ordinary
+ * answer for a stack outside GitOps and for a report from a node that predates
+ * the revision model.
+ */
+function portfolioIdFor(revision: GitOpsRevisionProjection | null, nodeId: number | undefined): string | null {
+  if (!revision || revision.targetMode === 'not_applicable') return null;
+  // The portfolio lists live applications only, and its detail route answers 404
+  // for anything else. A detached stack still projects a Direct revision here,
+  // because the tab is useful for reading what a stack was, so without this the
+  // id would be built and the read would 404 into a warning about a state the
+  // portfolio does not even list. Silence is the honest answer: there is no
+  // current application to have a posture.
+  if (revision.lifecycleStatus !== 'active') return null;
+  if (revision.blueprintId != null) return `bp:${revision.blueprintId}`;
+  return nodeId === undefined ? null : `${nodeId}:${revision.applicationId}`;
+}
+
+/**
+ * The canonical posture for this stack's application.
+ *
+ * Everything else on this tab is node-local: the compose-versus-runtime report
+ * and the revision projection both describe one node's own view, and a
+ * projection that cannot prove a state says so through a caveat rather than a
+ * status. The posture is computed once, hub-side, across every node holding a
+ * target, and it is the only answer here that accounts for evidence that is
+ * unknown, stale, or missing from a node that did not answer.
+ *
+ * Rendering it is what stops this tab showing every facet card reading satisfied,
+ * with no drift listed, for an application the portfolio reports as unsettled.
+ */
+function PostureCard(
+  { posture, nodeLabel }: {
+    posture: GitOpsApplicationPosture;
+    nodeLabel: (id: number) => string;
+  },
+) {
+  if (posture.kind === 'loading' || posture.kind === 'absent') return null;
+
+  if (posture.kind === 'unreadable') {
+    return (
+      <div data-testid="gitops-posture" data-posture="unreadable" className={cn(CARD_CLASS, 'border-warning/40 bg-warning/[0.06] text-warning')}>
+        <div className="flex items-center gap-2">
+          <FileQuestion className="h-4 w-4 shrink-0" strokeWidth={1.5} />
+          <span className="font-mono text-[11px] uppercase tracking-wide">posture unreadable</span>
+        </div>
+        <div className="mt-1 font-mono text-[11px] leading-relaxed text-foreground/80">
+          Sencho could not read this application’s overall state. The cards below describe one node, not the application.
+        </div>
+      </div>
+    );
+  }
+
+  const { row } = posture;
+  // A browser tab left open across a Sencho upgrade can hold this build against
+  // a newer backend that reports a posture this build has no wording for. The
+  // sibling application view renders that as an explicit unknown rather than
+  // dereferencing a missing entry, and a Drift tab that threw here would take
+  // the whole tab down, not just this card.
+  const meta = POSTURE_LABEL[row.posture] ?? UNRECOGNIZED_POSTURE;
+  const Icon = meta.tone === 'success' ? FileCheck2 : meta.tone === 'destructive' || meta.tone === 'warning' ? TriangleAlert : FileQuestion;
+
+  return (
+    <div data-testid="gitops-posture" data-posture={row.posture} className={cn(CARD_CLASS, 'border', POSTURE_TONE_CLASS[meta.tone])}>
+      <div className="flex items-center gap-2">
+        <Icon className="h-4 w-4 shrink-0" strokeWidth={1.5} />
+        <span className="font-mono text-[11px] uppercase tracking-wide">application · {meta.label}</span>
+      </div>
+      <div className="mt-1 font-mono text-[11px] leading-relaxed text-foreground/80">
+        {postureLine(row)}
+      </div>
+      {(row.evidence.partial || row.evidence.unknown || row.evidence.unreachableNodes.length > 0) && (
+        <ul className="mt-1.5 space-y-0.5">
+          {row.evidence.unknown && (
+            <li className="font-mono text-[10px] leading-relaxed text-stat-subtitle">
+              Part of this answer could not be read, so it is reported without interpreting it.
+            </li>
+          )}
+          {row.evidence.partial && (
+            <li className="font-mono text-[10px] leading-relaxed text-stat-subtitle">
+              The evidence behind this is incomplete, so this is the best answer available.
+            </li>
+          )}
+          {row.evidence.unreachableNodes.length > 0 && (
+            <li className="font-mono text-[10px] leading-relaxed text-warning">
+              Not reached: {row.evidence.unreachableNodes.map(nodeLabel).join(', ')}.
+            </li>
+          )}
+        </ul>
+      )}
+    </div>
+  );
+}
+
 export default function DriftPanel({ stackName }: { stackName: string }) {
   const { activeNode, nodes } = useNodes();
   const nodeId = activeNode?.id;
@@ -273,6 +446,26 @@ export default function DriftPanel({ stackName }: { stackName: string }) {
   // id rather than rendering an empty cell.
   const nodeLabel = (id: number) => nodes.find(n => n.id === id)?.name ?? `node ${id}`;
 
+  // The application-level posture, from the hub-owned portfolio rather than from
+  // anything on this tab. It is the only answer here that spans every node
+  // holding a target and accounts for evidence that is unknown or missing.
+  const posture = useGitOpsApplicationPosture(portfolioIdFor(revision, nodeId));
+  // Per-target evidence quality, keyed by the node the target runs on, so each
+  // target card can carry the freshness the portfolio computed for it. Only
+  // current targets: a tombstoned target's history is not current state, and
+  // the posture deliberately excludes it.
+  const targetEvidence = new Map<number, GitOpsPortfolioTargetSummary['evidence']>(
+    posture.kind === 'row'
+      ? posture.row.targets
+        .filter(target => !target.tombstoned)
+        .map(target => [target.nodeId, target.evidence])
+      : [],
+  );
+  // A target with no portfolio entry is a target the posture could not see. That
+  // is different from one it saw and found fresh, and the card says so rather
+  // than implying coverage.
+  const unknownEvidence = (nodeId: number): boolean => posture.kind === 'row' && !targetEvidence.has(nodeId);
+
   return (
     <div data-testid="drift-panel" className="flex-1 min-h-0 overflow-y-auto px-3 py-3 flex flex-col gap-4">
       <div className="flex items-center justify-between gap-2">
@@ -331,10 +524,12 @@ export default function DriftPanel({ stackName }: { stackName: string }) {
 
           {gitopsFaults.length > 0 && <GitOpsFaultCard message={gitopsFaults[0].message} />}
 
-          {(gitopsSource || gitopsArtifact || gitopsPlacement || gitopsRollout || gitopsTargets.length > 0) && (
+          {(gitopsSource || gitopsArtifact || gitopsPlacement || gitopsRollout || gitopsTargets.length > 0
+            || posture.kind === 'row' || posture.kind === 'unreadable') && (
             <section>
               <div className={cn(LABEL_CLASS, 'mb-1.5')}>gitops</div>
               <div className="flex flex-col gap-2">
+                <PostureCard posture={posture} nodeLabel={nodeLabel} />
                 <GitOpsApprovalChips approvals={gitopsApprovals} placement={gitopsPlacement} rollout={gitopsRollout} />
                 {gitopsSource && (
                   <GitOpsStateCard
@@ -364,19 +559,41 @@ export default function DriftPanel({ stackName }: { stackName: string }) {
                     state={ROLLOUT_STATE_LOOKUP[gitopsRollout.status]}
                   />
                 )}
-                {gitopsTargets.map(t => (
-                  <GitOpsStateCard
-                    key={t.nodeId}
-                    data-testid="gitops-target"
-                    stateKey={t.runtime.status}
-                    state={RUNTIME_STATE_LOOKUP[t.runtime.status]}
-                  >
-                    <div className="mt-1 font-mono text-[10px] text-stat-subtitle">
-                      {nodeLabel(t.nodeId)}{t.stackName ? ` · ${t.stackName}` : ''}
-                    </div>
-                    <GitOpsDigestDetail target={t} />
-                  </GitOpsStateCard>
-                ))}
+                {gitopsTargets.map(t => {
+                  const evidence = targetEvidence.get(t.nodeId);
+                  // A node the posture never covered reads as unknown, not as
+                  // absent: the runtime card below is a real observation, and
+                  // what is missing is the application-level accounting.
+                  const evidenceMeta = evidence
+                    ? EVIDENCE_META[evidence]
+                    : unknownEvidence(t.nodeId)
+                      ? EVIDENCE_META.unknown
+                      : null;
+                  return (
+                    <GitOpsStateCard
+                      key={t.nodeId}
+                      data-testid="gitops-target"
+                      stateKey={t.runtime.status}
+                      state={RUNTIME_STATE_LOOKUP[t.runtime.status]}
+                    >
+                      <div className="mt-1 font-mono text-[10px] text-stat-subtitle">
+                        {nodeLabel(t.nodeId)}{t.stackName ? ` · ${t.stackName}` : ''}
+                      </div>
+                      {evidenceMeta && (
+                        <div
+                          data-testid="gitops-target-evidence"
+                          data-evidence={evidence ?? 'unknown'}
+                          className="mt-1 font-mono text-[10px] leading-relaxed text-stat-subtitle"
+                        >
+                          <span className={cn('uppercase tracking-wide', evidenceMeta.tone)}>{evidenceMeta.label}</span>
+                          {' · '}
+                          {evidenceMeta.line}
+                        </div>
+                      )}
+                      <GitOpsDigestDetail target={t} />
+                    </GitOpsStateCard>
+                  );
+                })}
                 <GitOpsCaveats revision={revision} />
               </div>
             </section>
