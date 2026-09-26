@@ -647,35 +647,66 @@ describe('GitOps notifications agree with the canonical posture', () => {
       'SELECT category, level, message FROM notification_history WHERE gitops_operation_id = ? ORDER BY timestamp ASC, id ASC',
     ).all(operationId) as Array<{ category: string; level: string; message: string }>;
 
-  it('fires for a recorded health failure, and the portfolio reports that same failure', async () => {
-    seedDeployed('app-health-fail', 'health-fail-web', 'gen-health-fail');
+  it('leaves a recorded health failure to the gate that already announced it', async () => {
+    // The only producer of a recorded GitOps health verdict is the health gate,
+    // and it writes `health_gate_failed` for the same event. A second entry here
+    // would tell an operator the same thing twice, so the GitOps outbox stays out
+    // of it. This pins that the posture's failure reason is covered by exactly one
+    // notification, and names where that notification comes from.
+    seedDeployed('app-health-single', 'health-single-web', 'gen-health-single');
     GitOpsTransitions.getInstance().healthFinalized({
-      applicationId: 'app-health-fail',
+      applicationId: 'app-health-single',
       nodeId: 1,
-      healthRunId: 'run-fail',
+      healthRunId: 'run-single',
       healthStatus: 'failed',
-      deployedGenerationId: 'gen-health-fail',
+      deployedGenerationId: 'gen-health-single',
       targetScope: 'stack',
-      envelope: healthEnvelope('op-health-fail'),
+      envelope: healthEnvelope('op-health-single'),
     });
     await settle();
     resetGitOpsPublicationsForTests();
     repairGitOpsOutbox();
 
-    const notes = notesFor('op-health-fail');
-    expect(notes).toHaveLength(1);
-    expect(notes[0].category).toBe('gitops_health_failed');
-    expect(notes[0].level).toBe('error');
-    expect(notes[0].message).toContain('health check failed');
+    // The GitOps outbox wrote nothing for this transition.
+    const outboxRows = db().prepare(
+      'SELECT COUNT(*) AS n FROM gitops_settled_outbox WHERE settled_history_id IN (SELECT id FROM gitops_history WHERE operation_id = ?)',
+    ).get('op-health-single') as { n: number };
+    expect(outboxRows.n).toBe(0);
+    expect(notesFor('op-health-single')).toEqual([]);
 
-    // The same failure the notification reports is the failure the projection
-    // reports, so the two surfaces cannot be read as disagreeing.
-    const projection = projectApplication('app-health-fail', false);
+    // The projection still reports the failure, which is the fact the gate's own
+    // notification is about. A posture with no notification behind it is the gap
+    // this assertion guards: the gate covers it, and nothing else needs to.
+    const projection = projectApplication('app-health-single', false);
     expect(attentionReasons(projection)).toContain('health_failed');
     expect(postureOf(projection)).toBe('failed');
   });
 
-  it('stays silent for a passed verdict, which is the ordinary case', async () => {
+  it('keeps the gate as the single notification for a failed health run', async () => {
+    // Counts entries rather than asserting one of them, so the assertion is
+    // about "exactly once" and not about which layer produced it.
+    seedDeployed('app-health-count', 'health-count-web', 'gen-health-count');
+    GitOpsTransitions.getInstance().healthFinalized({
+      applicationId: 'app-health-count',
+      nodeId: 1,
+      healthRunId: 'run-count',
+      healthStatus: 'failed',
+      deployedGenerationId: 'gen-health-count',
+      targetScope: 'stack',
+      envelope: healthEnvelope('op-health-count'),
+    });
+    await settle();
+    resetGitOpsPublicationsForTests();
+    repairGitOpsOutbox();
+
+    const fromGitOps = db().prepare(
+      'SELECT COUNT(*) AS n FROM notification_history WHERE gitops_operation_id = ?',
+    ).get('op-health-count') as { n: number };
+    expect(fromGitOps.n).toBe(0);
+  });
+
+  it('does not report a passed verdict at all', async () => {
+    // A health check runs on every update, so a passing verdict must be silent.
     seedDeployed('app-health-pass', 'health-pass-web', 'gen-health-pass');
     GitOpsTransitions.getInstance().healthFinalized({
       applicationId: 'app-health-pass',
@@ -690,37 +721,13 @@ describe('GitOps notifications agree with the canonical posture', () => {
     resetGitOpsPublicationsForTests();
     repairGitOpsOutbox();
 
-    // A health check runs on every update. Notifying each pass would bury the
-    // one failure that matters.
     expect(notesFor('op-health-pass')).toEqual([]);
   });
 
-  it('stays silent for an unknown verdict, which the gate records for benign conditions', async () => {
-    seedDeployed('app-health-unknown', 'health-unknown-web', 'gen-health-unknown');
-    GitOpsTransitions.getInstance().healthFinalized({
-      applicationId: 'app-health-unknown',
-      nodeId: 1,
-      healthRunId: 'run-unknown',
-      healthStatus: 'unknown',
-      deployedGenerationId: 'gen-health-unknown',
-      targetScope: 'stack',
-      envelope: healthEnvelope('op-health-unknown'),
-    });
-    await settle();
-    resetGitOpsPublicationsForTests();
-    repairGitOpsOutbox();
-
-    // `unknown` is what the gate records while a healthcheck is still starting
-    // or a newer operation supersedes the run. The portfolio reports that as
-    // in-progress, never as a failure, so a notification here would put the
-    // bell and the portfolio in contradiction.
-    expect(notesFor('op-health-unknown')).toEqual([]);
-  });
-
-  it('stays silent for a verdict that cannot be attributed to the running stack', async () => {
+  it('does not report a verdict that cannot be tied to the running stack', async () => {
     seedDeployed('app-health-stale', 'health-stale-web', 'gen-health-stale');
-    // A verdict about a generation the target is not running proves nothing,
-    // and the transition records it as `unknown` rather than `failed`.
+    // A verdict about a generation the target is not running proves nothing, so
+    // the transition records nothing the posture can report.
     GitOpsTransitions.getInstance().healthFinalized({
       applicationId: 'app-health-stale',
       nodeId: 1,
@@ -739,59 +746,12 @@ describe('GitOps notifications agree with the canonical posture', () => {
     expect(attentionReasons(projection)).not.toContain('health_failed');
   });
 
-  it('stays silent for a failure on the outgoing generation mid-rollout', async () => {
-    // A newer generation is desired while the previous one is still deployed. The
-    // verdict is a real observation and is recorded, but the projection judges it
-    // against the desired generation and reports the target as work in progress.
-    // Notifying here would put "health check failed" in the bell for an
-    // application the portfolio calls unsettled for a different reason.
-    const store = GitOpsStore.getInstance();
-    const tx = GitOpsTransitions.getInstance();
-    seedDeployed('app-health-rollout', 'health-rollout-web', 'gen-health-rollout');
-    store.insertGeneration(healthGen('gen-health-next', 'app-health-rollout'));
-    tx.fetchStarted('app-health-rollout', healthEnvelope('op-hr-fetch'));
-    tx.fetched('app-health-rollout', 'def456', healthEnvelope('op-hr-fetch'));
-    tx.candidateReady('app-health-rollout', 'gen-health-next', false, healthEnvelope('op-hr-cand'));
-    tx.applied({
-      applicationId: 'app-health-rollout',
-      generationId: 'gen-health-next',
-      artifactSetId: 'art-health-next',
-      sourceAcceptanceId: 'acc-health-next',
-      authority: 'operator',
-      envelope: healthEnvelope('op-hr-apply'),
-    });
-    // The transport ack binds the new generation as desired, but the target is
-    // still running the previous one: the divergence the projection judges against.
-    const before = store.getTarget('app-health-rollout', 1);
-    expect(before?.desired_generation_id).toBe('gen-health-next');
-    expect(before?.deployed_generation_id).toBe('gen-health-rollout');
-
-    tx.healthFinalized({
-      applicationId: 'app-health-rollout',
-      nodeId: 1,
-      healthRunId: 'run-old',
-      healthStatus: 'failed',
-      deployedGenerationId: 'gen-health-rollout',
-      targetScope: 'stack',
-      envelope: healthEnvelope('op-health-rollout'),
-    });
-    await settle();
-    resetGitOpsPublicationsForTests();
-    repairGitOpsOutbox();
-
-    expect(notesFor('op-health-rollout')).toEqual([]);
-
-    // The projection's answer is the one the notification has to match.
-    const projection = projectApplication('app-health-rollout', false);
-    expect(attentionReasons(projection)).not.toContain('health_failed');
-    expect(projection.targets[0]?.health.status).toBe('pending');
-  });
-
-  it('reports an unproven settled attempt as unproven, not as a pull failure', () => {
+  it('does not notify for an attempt that settled without proving anything', () => {
     // `unknown` is what the reconcile vocabulary returns for a run still in
     // flight, a source never reconciled, and an application no longer live. The
-    // portfolio shows all of those as in-progress or unknown, so routing them
-    // into a failed-pull category at error level was a surface contradicting it.
+    // portfolio reports each of those as in-progress or unknown, so a bell entry
+    // would be a surface reporting on evidence it does not have. The portfolio is
+    // where an unproven application is shown; the bell is not.
     const historyId = writeHistory('op-unproven', 'source_reconcile_settled', 'committed', {
       after: {
         outcome: 'unknown',
@@ -803,13 +763,66 @@ describe('GitOps notifications agree with the canonical posture', () => {
     resetGitOpsPublicationsForTests();
     repairGitOpsOutbox();
 
+    // No outbox row was written, so there is nothing to drain into a bell entry.
+    const outbox = db().prepare(
+      'SELECT drained_at FROM gitops_settled_outbox WHERE settled_history_id = ?',
+    ).get(historyId) as { drained_at: number | null } | undefined;
+    expect(outbox).toBeUndefined();
+
+    const any = db().prepare(
+      'SELECT COUNT(*) AS n FROM notification_history WHERE dedupe_key = ?',
+    ).get(settledNotificationDedupeKey(historyId)) as { n: number };
+    expect(any.n).toBe(0);
+  });
+
+  it('delivers a settled notification on the live drain, not only on boot repair', async () => {
+    // Everything else in this suite reaches the bell through
+    // `repairGitOpsOutbox`, which is the crash-repair path. This one asserts the
+    // ordinary path: the publisher's own `setImmediate` drain, with no repair
+    // call afterwards. A change that broke the live drain while leaving the
+    // repair path working would pass every other test here.
+    const historyId = writeHistory('op-live-drain', 'source_reconcile_settled', 'committed', {
+      after: {
+        outcome: 'failed_previous_intact',
+        nextAction: 'retry',
+        reason: 'The fetch stage failed (transient).',
+      },
+    });
+    if (!historyId) throw new Error('expected settled history insert');
+    await settle();
+
     const note = db().prepare(
       'SELECT category, level, message FROM notification_history WHERE dedupe_key = ?',
     ).get(settledNotificationDedupeKey(historyId)) as { category: string; level: string; message: string };
-    expect(note.category).toBe('git_pull_unproven');
-    expect(note.level).toBe('info');
-    expect(note.message).toContain('settled without proving a result');
-    expect(note.message).not.toContain('GitOps unknown for');
+    expect(note.category).toBe('git_pull_failed');
+    expect(note.level).toBe('error');
+    expect(note.message).toContain('The fetch stage failed');
+
+    // Drained on the live path too, so boot repair has nothing left to redo.
+    const drained = db().prepare(
+      'SELECT drained_at FROM gitops_settled_outbox WHERE settled_history_id = ?',
+    ).get(historyId) as { drained_at: number | null };
+    expect(drained.drained_at).not.toBeNull();
+  });
+
+  it('writes no outbox row on the live path for an unproven attempt', async () => {
+    // The same path, the other arm: the decision is made by the live drain too,
+    // and a row that is inserted but never drained would be a silent leak rather
+    // than a missing notification.
+    const historyId = writeHistory('op-live-unproven', 'source_reconcile_settled', 'committed', {
+      after: { outcome: 'unknown', nextAction: 'none', reason: 'Reconcile in flight.' },
+    });
+    if (!historyId) throw new Error('expected settled history insert');
+    await settle();
+
+    const outbox = db().prepare(
+      'SELECT COUNT(*) AS n FROM gitops_settled_outbox WHERE settled_history_id = ?',
+    ).get(historyId) as { n: number };
+    expect(outbox.n).toBe(0);
+    const any = db().prepare(
+      'SELECT COUNT(*) AS n FROM notification_history WHERE dedupe_key = ?',
+    ).get(settledNotificationDedupeKey(historyId)) as { n: number };
+    expect(any.n).toBe(0);
   });
 
   it('still reports a genuinely failed attempt as a failure', () => {
@@ -878,7 +891,6 @@ describe('GitOps notification mapping', () => {
       rollback_completed: { category: 'gitops_rollback_completed', level: 'info', phrase: 'rollback completed' },
       rollback_partial_failed: { category: 'gitops_rollback_partial_failed', level: 'error', phrase: 'rollback partially failed' },
       blueprint_state_review: { category: 'gitops_stateful_confirmation', level: 'warning', phrase: 'stateful deploy awaiting confirmation' },
-      health_finalized: { category: 'gitops_health_failed', level: 'error', phrase: 'health check failed' },
     });
   });
 

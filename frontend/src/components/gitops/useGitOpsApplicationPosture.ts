@@ -32,11 +32,20 @@ const INVALIDATE_DEBOUNCE_MS = 250;
 /**
  * What the read produced.
  *
- * `unreadable` is deliberately distinct from `absent`. A stack with no GitOps
- * application has no posture to show and that is a complete answer; a read that
- * failed is an unknown one, and reporting it as "no application" would let this
- * tab imply an application is unremarkable at the exact moment Sencho cannot
- * tell the operator anything about it.
+ * Three different things can happen, and the tab must not confuse them.
+ *
+ * `absent` covers both "there is no application" and "this caller may not read
+ * one". The portfolio route answers 404 for a missing application and for one the
+ * caller is not granted, on purpose, because a granted-existence check would make
+ * enumerating application ids cheap enough to map the portfolio an unauthorized
+ * reader cannot list. It answers 403 for a Blueprint application the caller lacks
+ * the fleet-wide node read for. Neither is a fault in the state of the world, so
+ * neither earns a warning: the tab keeps the node-local view it always had and
+ * says nothing about what the caller may not see.
+ *
+ * `unreadable` is therefore reserved for the case that really is a fault: the
+ * read was permitted and attempted, and the server could not answer it. That is
+ * the only case where warning the operator tells them something true.
  */
 export type GitOpsApplicationPosture =
   | { kind: 'loading' }
@@ -47,6 +56,13 @@ export type GitOpsApplicationPosture =
 type PortfolioDetailResponse = {
   application?: GitOpsPortfolioRow;
 };
+
+/**
+ * Statuses that mean "there is nothing here for you to see", which is a complete
+ * answer rather than a failure: 403 for a Blueprint the caller cannot read, and
+ * 404 for a missing application or one outside the caller's grants.
+ */
+const NOT_AVAILABLE_STATUSES: ReadonlySet<number> = new Set([403, 404]);
 
 /** A settled read, tagged with the id it answered so a switch cannot show a stale result. */
 type PostureRead = {
@@ -69,8 +85,17 @@ export function useGitOpsApplicationPosture(portfolioId: string | null): GitOpsA
       const res = await apiFetch(`/gitops/applications/${encodeURIComponent(id)}`, { localOnly: true });
       if (current !== generation.current) return;
       if (!res.ok) {
-        // Says which kind of refusal it was, because a 403 and a 500 look
-        // identical on screen and mean different things to an operator.
+        if (NOT_AVAILABLE_STATUSES.has(res.status)) {
+          // Nothing here for this caller. Deliberately not logged as an error: a
+          // 404 is how the route answers both "no such application" and "not
+          // yours", and a 403 is how it answers a Blueprint read without the
+          // fleet-wide grant. Neither is a failure of this read, and neither is
+          // something the tab should render a warning about.
+          setRead({ portfolioId: id, result: { kind: 'absent' } });
+          return;
+        }
+        // The read was permitted and attempted and the server could not answer.
+        // That is the one case where saying so is useful.
         console.error(`[GitOps] application-posture read HTTP ${res.status} for ${id}`);
         setRead({ portfolioId: id, result: { kind: 'unreadable' } });
         return;
