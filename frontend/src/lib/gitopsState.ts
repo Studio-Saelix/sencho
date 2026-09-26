@@ -21,6 +21,7 @@ import {
   CircleHelp,
   CirclePause,
   CircleSlash,
+  Eye,
   CircleX,
   Clock,
   Download,
@@ -34,6 +35,9 @@ import {
   Fingerprint,
   KeyRound,
   MapPin,
+  OctagonX,
+  PauseCircle,
+  RotateCcw,
   type LucideIcon,
 } from 'lucide-react';
 
@@ -47,6 +51,8 @@ import type {
   GitOpsRolloutStatus,
   GitOpsRuntimeStatus,
   GitOpsSourceStatus,
+  HealthRolloutPolicy,
+  HealthStopReason,
   PlacementFacet,
   RolloutFacet,
   SourceFacet,
@@ -775,6 +781,103 @@ const DRIFT_CLASS_LABELS: Record<string, string> = {
 export function driftClassLabel(className: string): string {
   return DRIFT_CLASS_LABELS[className] ?? className;
 }
+
+/**
+ * What each health-and-rollout policy does, in the operator's terms.
+ *
+ * Every entry states the default, because a rollout that has never had a policy
+ * chosen is already running under it, and an operator reading the control needs
+ * to know that choosing nothing is not choosing nothing.
+ */
+export const HEALTH_ROLLOUT_POLICY_STATE: Record<HealthRolloutPolicy, GitOpsStateMeta> = {
+  observe: {
+    label: 'observe',
+    tone: 'neutral',
+    line: 'Record each target\u2019s health outcome and keep deploying the rest regardless. The default.',
+    icon: Eye,
+  },
+  pause: {
+    label: 'pause',
+    tone: 'warning',
+    line: 'Stop before the next target when one fails or its health cannot be confirmed.',
+    icon: PauseCircle,
+  },
+  retry_once: {
+    label: 'retry once',
+    tone: 'brand',
+    line: 'Deploy the same generation to a failed target one more time, then pause.',
+    icon: RotateCcw,
+  },
+  stop: {
+    label: 'stop',
+    tone: 'destructive',
+    line: 'Stop the rest of the rollout when a target fails. Already deployed targets stay as they are.',
+    icon: OctagonX,
+  },
+  rollback: {
+    label: 'rollback',
+    tone: 'destructive',
+    line: 'Restore a failed target to the generation it ran before this rollout, then stop the rest.',
+    icon: Undo2,
+  },
+};
+
+/**
+ * Why a rollout stopped advancing, and what it means for this target.
+ *
+ * A reason nobody can act on is worse than none, so an unknown or a passed
+ * reason is stated as such rather than dressed up.
+ */
+export const HEALTH_STOP_REASON_STATE: Record<HealthStopReason, GitOpsStateMeta> = {
+  health_passed: {
+    label: 'advanced',
+    tone: 'success',
+    line: 'This target passed and the rollout moved on to the next one.',
+    icon: Check,
+  },
+  health_failed: {
+    label: 'health failed',
+    tone: 'destructive',
+    line: 'The health run for this target failed.',
+    icon: CircleX,
+  },
+  health_unknown: {
+    label: 'health unknown',
+    tone: 'warning',
+    line: 'Health could not be confirmed. The rollout paused rather than assume the target is healthy.',
+    icon: CircleHelp,
+  },
+  health_retried: {
+    label: 'retrying',
+    tone: 'brand',
+    line: 'This target failed once and is being deployed again with the same generation.',
+    icon: RotateCcw,
+  },
+  health_retry_exhausted: {
+    label: 'retry exhausted',
+    tone: 'warning',
+    line: 'This target already used its one retry and failed again, so the rollout paused.',
+    icon: PauseCircle,
+  },
+  rollout_stopped: {
+    label: 'rollout stopped',
+    tone: 'destructive',
+    line: 'A target failed and the rest of the rollout was stopped. Already deployed targets are unchanged.',
+    icon: OctagonX,
+  },
+  rollback_completed: {
+    label: 'rolled back',
+    tone: 'neutral',
+    line: 'This target was put back on the generation it ran before this rollout.',
+    icon: RotateCcw,
+  },
+  rollback_unavailable: {
+    label: 'recovery required',
+    tone: 'destructive',
+    line: 'This target failed and no pre-rollout generation was captured, so nothing was restored automatically.',
+    icon: TriangleAlert,
+  },
+};
 
 /** One short line naming what an identity reference points at, for a drift comparison row. */
 export function identityRefLabel(ref: GitOpsIdentityRef): string {

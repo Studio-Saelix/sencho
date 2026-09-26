@@ -1,0 +1,69 @@
+---
+title: "Health rollout policy"
+description: "How a Git-managed Blueprint rollout reacts when a target's health check does not pass: observe, pause, retry once, stop, or roll back that target."
+---
+
+A Git-managed Blueprint rollout deploys an accepted generation to every node in its approved placement, one after another. By default it keeps going: if one target's health check does not pass, the rollout still moves to the next node. The **health rollout policy** changes that. It is a per-application setting, and it is the only thing that decides what a health outcome does to the queue that remains.
+
+The policy never changes what runs. It cannot accept new source content, pull a different image, or move a workload to a different node. It chooses between five things: record and continue, pause, retry the target that failed once, stop, or put that target back the way it was.
+
+## Choosing a policy
+
+The setting lives on the application page in **GitOps**, under **Rollout controls → Health rollout policy**. It needs the same permission as deploying.
+
+| Mode | A target's health fails | Health cannot be confirmed |
+| --- | --- | --- |
+| **Observe** | Recorded; the rollout carries on | Recorded; the rollout carries on |
+| **Pause** | The rollout stops before the next target | The rollout stops before the next target |
+| **Retry once** | The same generation is deployed to that target one more time. If it passes, the rollout carries on; if it fails again, the rollout pauses | The rollout pauses, without a retry |
+| **Stop** | The rest of the rollout is held. Targets already deployed stay as they are | The rollout pauses, without stopping |
+| **Roll back** | That target is restored to the generation it ran before this rollout, then the rest of the rollout is held | The rollout pauses, without rolling back |
+
+**Observe** is the default, and a rollout behaves exactly this way until you choose something else. It records its outcomes while the health gate is turned on; with the gate turned off it keeps deploying without collecting a verdict, exactly as it did before. Three of the other four can stop work or put a target back the way it was, so they are opt-in.
+
+<Note>
+  Health that cannot be confirmed is not health that passed. A missing container, a node that stopped answering, a check that was still starting when the window closed, or a restart part-way through a check all report as unknown. Unknown never triggers a retry, a stop, or a roll back, because acting on missing evidence would put a healthy workload at risk. It pauses the rollout and waits for you.
+</Note>
+
+## What a change applies to
+
+A policy is frozen into the rollout at the moment you authorize it. Changing the setting afterwards does not disturb a rollout that is already running, and it does not cancel targets that are mid-deploy. Your new choice takes effect the next time the rollout is authorized, so a fleet is never left running under two different policies at once.
+
+The setting survives edits to the Blueprint. If you change the compose, the selector, or the drift mode, the health policy you chose carries forward instead of resetting.
+
+## Watching a rollout decide
+
+Each target card in the application page reports what the rollout is doing with that node: the policy in force, whether the target is still waiting for its verdict, how many retries it has used, and why the rollout stopped if it did. A target waiting on its verdict is reported as **health checking** rather than as converged, so a rollout mid-verification never reads as finished.
+
+When the policy needs something Sencho cannot do, it says so rather than reporting success:
+
+- **Recovery required** means the target failed and no pre-rollout generation had been captured for it, so nothing was restored. The target stays where it is, failed, and the rollout pauses.
+- **Rollback partial** means at least one target could not be restored. The ones that were restored are reported individually; the rollout does not claim to have undone it.
+
+A roll back restores only the generation that target was running immediately before this rollout began. It never substitutes a different "last known good" version, because that is a different question from what the node was actually running.
+
+## When a policy holds the rollout
+
+Any mode other than **Observe** can stop the rollout and leave it waiting for you. When that happens the application is paused, the same pause as any other rollout pause, so resuming it is the ordinary **Resume rollout** control rather than a separate action.
+
+Resuming means you have looked and decided to carry on, and it re-drives a target the policy was only *holding*: under **Pause** or **Retry once** that target is deployed again and the policy decides afresh from the new verdict. A resume is your decision, not a policy retry, so **Retry once** still only ever gets one automatic attempt: if the budget was already spent, the next failure pauses the rollout again rather than trying a third time.
+
+**Stop** and **Roll back** are not holds, so resuming does not undo them. A stopped target keeps the generation it was given, and a rolled back target keeps the one it was put back on; the rollout carries on past them to the targets it never reached. Putting the failed generation back on either would just fail and stop again, with the rest of the fleet never reached.
+
+The hold is also what survives a restart. A rollout held by a policy stays held when Sencho restarts, and a roll back or a stop that already ran is not undone by coming back up. Once you resume, that answer is remembered, so a later restart does not hold the same rollout a second time.
+
+## Remote nodes
+
+The health rollout policy applies to nodes this Sencho instance can observe directly. A remote node's Docker daemon is reached over the HTTP proxy rather than a local socket, so a health verdict for a rollout on a remote node is not something this instance can produce today. Choosing any mode other than **Observe** on an application that includes a remote node stops that whole rollout before anything is deployed, and says why in the deployment log.
+
+**Observe** is never blocked this way, so an existing remote rollout keeps working exactly as before.
+
+## Relationship to the other policies
+
+Three policies can apply to the same rollout, and they answer different questions:
+
+- The **drift policy** (Observe / Suggest / Enforce) decides what Sencho does when a deployed Blueprint drifts away from its approved state.
+- The **source policy** (Manual / Review / Automatic) decides when new Git content is accepted.
+- The **health rollout policy** decides what a health outcome does to a rollout that is already running.
+
+They are configured separately, and changing one does not re-open the approvals the others granted. Setting a health policy does not invalidate your placement approval or your rollout authorization.

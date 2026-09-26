@@ -8,6 +8,7 @@
  */
 import { apiFetch } from './api';
 import type { PreviewAction } from './blueprintsApi';
+import type { HealthRolloutPolicy } from '@/types/gitops';
 
 /** The portfolio identity of a Blueprint-backed application. */
 export function blueprintApplicationId(blueprintId: number): string {
@@ -127,6 +128,24 @@ export async function resumeGitOpsRollout(applicationId: string): Promise<Rollou
     dispatched: payload.dispatched === true,
     note: typeof payload.note === 'string' ? payload.note : null,
   };
+}
+
+/**
+ * Set the health-and-rollout policy for an application.
+ *
+ * Takes effect at the next rollout authorization, not immediately: a rollout
+ * already running keeps the policy it was authorized under, so changing this
+ * cannot change what a fleet is doing halfway through.
+ */
+export async function setGitOpsHealthRolloutPolicy(
+  applicationId: string,
+  policy: HealthRolloutPolicy,
+): Promise<void> {
+  await postAuthorityAction(
+    `/gitops/applications/${encodeURIComponent(applicationId)}/rollout/health-policy`,
+    { policy },
+    'Failed to set the health rollout policy',
+  );
 }
 
 /** Re-derive placement for the current Blueprint and open a fresh review. */

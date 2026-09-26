@@ -31,6 +31,14 @@ import type {
   SourcePolicy,
   SourceReviewBlockReason,
 } from './types';
+import {
+  decodeIntentHealthPolicy,
+  decideHealthRolloutAction,
+  encodeIntentHealthPolicy,
+} from './healthPolicy';
+import type { HealthPolicyDecision, HealthRolloutPolicy } from './healthPolicy';
+import { runningGenerationForTarget } from './recoveryCapture';
+
 
 export type EventEnvelope = {
   operationId: string;
@@ -53,9 +61,40 @@ export type AppliedArgs = {
   activateCreating?: boolean;
 };
 
+/**
+ * Fences a resume answers, as opposed to ones it leaves standing.
+ *
+ * A hold is a question ("this did not pass, look at it"), and resuming is an
+ * answer. `stop` and `rollback_completed` are statements: the policy has finished
+ * with that target, and resuming does not put it back.
+ */
+const RESUMABLE_HEALTH_FENCES: ReadonlySet<string> = new Set<string>([
+  // Every fence the `pause` action writes, plus the retry budget. `pause` is the
+  // action behind all three health outcomes and behind `rollback_unavailable`,
+  // which is the same question asked when there was nothing to restore: the target
+  // needs the operator to look at it, so resuming is the answer.
+  'health_failed',
+  'health_unknown',
+  'health_retry_exhausted',
+  'rollback_unavailable',
+]);
+
 export type TransitionResult = {
   historyIds: string[];
   replayed: boolean;
+  /**
+   * What a health-gated verdict decided to do with the rollout queue, present
+   * only when the verdict belonged to a run the rollout executor reserved. The
+   * caller acts on it after the commit; the transition itself only records it.
+   */
+  healthDecision?: HealthPolicyDecision;
+  /**
+   * A health run finished without a decision, and released the pointer the
+   * rollout queue was waiting on. The queue is then free, so the caller has to
+   * drive the live rollout again: a verdict with no decision produces no
+   * follow-up of its own.
+   */
+  healthUnattributable?: boolean;
 };
 
 /**
@@ -994,19 +1033,67 @@ export class GitOpsTransitions {
     healthStatus: 'passed' | 'failed' | 'unknown';
     deployedGenerationId: string | null;
     targetScope: 'stack' | 'service';
+    /**
+     * The rollout binding of a health run reserved by the rollout executor.
+     * Absent for every other run, which is what keeps the health-gated queue
+     * logic out of the direct-mode path it was never written for.
+     */
+    rollout?: { rolloutGenerationId: string; healthPolicy: HealthRolloutPolicy } | null;
     envelope: EventEnvelope;
   }): TransitionResult {
-    return this.mutateTarget(
+    let decision: HealthPolicyDecision | null = null;
+    let unattributable = false;
+    const result = this.mutateTarget(
       args.applicationId,
       args.nodeId,
       args.envelope,
       'health_finalized',
       args.deployedGenerationId,
-      (target) => {
+      (target, app) => {
         const before = {
           healthyGenerationId: target.healthy_generation_id,
           lkgGenerationId: target.lkg_generation_id,
         };
+
+        // A report for a run this target is not currently awaiting is evidence
+        // and nothing more. It may not touch last_health_*, the healthy
+        // pointer, or the LKG: the retry case is a late failure from the
+        // superseded attempt arriving after the replacement attempt passed, and
+        // letting it through would demote a generation that is currently
+        // healthy. Recording it as history is the honest outcome, because the
+        // observation did happen.
+        if (args.rollout && target.pending_health_run_id !== args.healthRunId) {
+          return {
+            before: {},
+            after: { healthRunId: args.healthRunId, healthStale: true },
+          };
+        }
+        if (args.rollout && target.rollout_generation_id !== args.rollout.rolloutGenerationId) {
+          this.releaseSupersededVerdict(args, target);
+          // Re-driven only when the application has genuinely left this rollout.
+          // A target names its rollout generation once it is acked, so this branch
+          // also covers a run whose apply never landed under the rollout the
+          // application is still on, and re-driving there would select the same
+          // unsettled target again: a persistently failing apply would retry for
+          // ever without ever spending the health retry budget. When the
+          // application *has* moved on, nothing else would dispatch its target,
+          // because this verdict is the only thing that was holding the queue.
+          if (app.rollout_generation_id !== args.rollout.rolloutGenerationId) {
+            unattributable = true;
+          }
+          return { before: {}, after: { healthSupersededRollout: true } };
+        }
+        if (args.rollout && app.rollout_generation_id !== args.rollout.rolloutGenerationId) {
+          // The target still names the old generation because it has not been
+          // re-acked yet, but the application has moved on. Deciding here would
+          // run the old policy's pause or rollback against the new rollout, and
+          // the executor acts on the application's current state. The run is
+          // finished either way, so its pointer is still released.
+          if (this.releaseSupersededVerdict(args, target)) {
+            unattributable = true;
+          }
+          return { before: {}, after: { healthSupersededApplication: true } };
+        }
         // The verdict is recorded for stack-scope runs that name the generation
         // under test, whichever way it went. This is what lets the projection
         // keep saying `failed` after the promotion is withdrawn, instead of
@@ -1019,10 +1106,32 @@ export class GitOpsTransitions {
         // "in progress for ever" state this column exists to end, with nothing
         // left to re-verify it. A first verdict is always recorded, including
         // an `unknown` one, because "never checked" is a real answer.
+        //
+        // The running generation is read per target mode. A Blueprint target
+        // has no deploy-bound writer, so its deployed_generation_id is null and
+        // an attribution test read against it would fail for every Blueprint
+        // target: the verdict would be recorded as history and never promote,
+        // never gate, and never reach the projection.
         const attributable = target.target_status === 'active'
           && args.targetScope === 'stack'
           && !!args.deployedGenerationId
-          && target.deployed_generation_id === args.deployedGenerationId;
+          && runningGenerationForTarget(app, target) === args.deployedGenerationId;
+        if (attributable && args.rollout) {
+          decision = this.applyHealthGatedDecision(target, args.rollout.healthPolicy, args.healthStatus);
+        }
+        if (!attributable && args.rollout && target.pending_health_run_id === args.healthRunId) {
+          // The run this target was awaiting has finished, but its verdict
+          // cannot be attributed to what the target is running (a different
+          // generation, a retired target). The queue must still be released:
+          // otherwise the target reads as still observing a run that is already
+          // terminal, and neither dispatch nor reconstruction will ever move it.
+          target.pending_health_run_id = null;
+          unattributable = true;
+          return {
+            before: { pendingHealthRunId: args.healthRunId },
+            after: { pendingHealthRunId: null, healthUnattributable: true },
+          };
+        }
         if (
           attributable
           && (args.healthStatus !== 'unknown' || target.last_health_status === null)
@@ -1101,6 +1210,58 @@ export class GitOpsTransitions {
       },
       args.healthStatus === 'unknown' ? 'unknown' : 'committed',
     );
+    if (decision) return { ...result, healthDecision: decision };
+    return unattributable ? { ...result, healthUnattributable: true } : result;
+  }
+
+  /**
+   * Consume one health-gated attempt and record what the verdict does to the
+   * queue.
+   *
+   * The returned action is deliberately not executed here. This runs inside a
+   * synchronous single-writer transaction, and advancing the queue is async
+   * transport under deploy locks. The caller reads the action off the returned
+   * transition and does that work after the commit, so a decision can never be
+   * visible without the state that justified it.
+   *
+   * `pending_health_run_id` is cleared for every action, including the ones that
+   * stop the rollout: the run was consumed, and leaving it set would make the
+   * target permanently unadvanceable and read as still-observing forever.
+   */
+  private applyHealthGatedDecision(
+    target: GitOpsTargetCurrentRow,
+    policy: HealthRolloutPolicy,
+    verdict: 'passed' | 'failed' | 'unknown',
+  ): HealthPolicyDecision {
+    const decision = decideHealthRolloutAction({
+      policy,
+      verdict,
+      attemptsUsed: target.health_attempts,
+      // The generation is what the restore consumes, and it is the one half the
+      // hub can know for a Blueprint target: the node's recovery row never
+      // leaves the node, so a reference is not something this decision can test.
+      recoveryAvailable: target.recovery_generation_id !== null,
+    });
+    target.pending_health_run_id = null;
+    if (decision.action === 'none') {
+      // Observe, or a verdict the frozen policy does not act on. The run is
+      // consumed and the outcome is recorded, but nothing about the rollout
+      // changes, so no fence is written and no retry budget is spent.
+      return decision;
+    }
+    // The retry budget is spent by the retry itself, not by the failure that
+    // asked for it, so a verdict that is never acted on (because the rollout
+    // stopped first) does not burn the attempt.
+    if (decision.action === 'retry') {
+      target.health_attempts = target.health_attempts + 1;
+    }
+    // A pass hands the queue on and clears any earlier stop, so a resumed
+    // rollout is not held by a fence from a previous attempt. Every action that
+    // reaches here writes a fence, and `none` returned above, so the reason
+    // narrowed here is always a value the column accepts.
+    if (decision.action === 'advance') target.health_stop_reason = null;
+    else target.health_stop_reason = decision.reason;
+    return decision;
   }
 
   /**
@@ -1540,6 +1701,24 @@ export class GitOpsTransitions {
         if (!app.pause_at) throw new GitOpsTransitionError('application is not paused');
         app.pause_at = null;
         app.pause_reason = null;
+        // A resume answers a *hold*: the operator has seen it and wants the
+        // rollout to carry on, so the target the hold was about is deployed again
+        // and the policy decides afresh. `health_attempts` is deliberately kept, so
+        // `retry_once` still only ever gets one automatic attempt.
+        //
+        // It does not answer a *finished* target. `stop` and a completed
+        // `rollback` are not holds: their targets are where the policy put them,
+        // and re-deploying them on a resume would re-apply the generation that
+        // just failed, which for a rollback means failing and rolling back again
+        // for ever with the rest of the fleet never reached. Those fences also
+        // survive, which is what keeps a restart from re-holding a rollout the
+        // operator has already answered for.
+        for (const target of this.store().listTargets(applicationId)) {
+          if (target.rollout_generation_id !== app.rollout_generation_id) continue;
+          if (target.health_stop_reason === null) continue;
+          if (!RESUMABLE_HEALTH_FENCES.has(target.health_stop_reason)) continue;
+          this.store().upsertTarget({ ...target, health_stop_reason: null });
+        }
       });
     }
     return this.mutateTarget(applicationId, nodeId, envelope, 'rollout_unpaused', null, (target) => {
@@ -1603,6 +1782,80 @@ export class GitOpsTransitions {
       }
       this.invalidatePlacementOnMaterialChange(app, args.envelope, extras);
     });
+  }
+
+  /**
+   * Release a target that is awaiting a health run that no longer exists.
+   *
+   * Scoped by compare-and-clear: the pointer has to still be the run in
+   * question, so a verdict that landed in the meantime is not overwritten. This
+   * is separate from `healthFinalized` because that transition reads a verdict,
+   * and there is no verdict to read here: the row is gone, so there is nothing to
+   * attribute and nothing to decide from. Run history is pruned, so this is
+   * reachable rather than theoretical, and without it the target reads as still
+   * observing a run that will never report, which the queue then skips for ever.
+   */
+  healthRunReleased(args: {
+    applicationId: string;
+    nodeId: number;
+    healthRunId: string;
+    envelope: EventEnvelope;
+  }): TransitionResult {
+    return this.mutateTarget(
+      args.applicationId,
+      args.nodeId,
+      args.envelope,
+      'health_run_released',
+      null,
+      (target) => {
+        if (target.pending_health_run_id !== args.healthRunId) {
+          throw new GitOpsTransitionError('the target is no longer awaiting that health run');
+        }
+        const before = { pendingHealthRunId: target.pending_health_run_id };
+        target.pending_health_run_id = null;
+        return { before, after: { pendingHealthRunId: null } };
+      },
+    );
+  }
+
+  /**
+   * Record the operator's health-and-rollout policy selection.
+   *
+   * Written onto the current intent revision in place rather than as a new one,
+   * because this is a health-domain decision and minting an intent revision
+   * would invalidate placement approval, source acceptance, and the rollout
+   * authorization along with it. Those are separate authority domains, and a
+   * health change is only allowed to move its own.
+   *
+   * A rollout already running keeps the policy frozen into its generation. This
+   * write therefore takes effect at the next authorization, not immediately.
+   */
+  healthRolloutPolicySet(args: {
+    applicationId: string;
+    policy: HealthRolloutPolicy;
+    envelope: EventEnvelope;
+  }): TransitionResult {
+    return this.mutateApp(
+      args.applicationId,
+      args.envelope,
+      'health_rollout_policy_set',
+      'committed',
+      (app) => {
+        if (app.lifecycle_status !== 'active') throw new GitOpsTransitionError('application is not live');
+        if (!app.intent_revision_id) {
+          throw new GitOpsTransitionError('the application has no intent revision to carry the policy');
+        }
+        const intent = this.store().getIntentRevision(app.intent_revision_id);
+        if (!intent) {
+          throw new GitOpsTransitionError('the current intent revision could not be read');
+        }
+        const before = {
+          healthPolicy: decodeIntentHealthPolicy(intent.health_failure_rollback_policy_json),
+        };
+        this.store().updateIntentHealthPolicy(intent.id, encodeIntentHealthPolicy(args.policy));
+        return { before, after: { healthPolicy: args.policy } };
+      },
+    );
   }
 
   /**
@@ -2008,6 +2261,14 @@ export class GitOpsTransitions {
     nodeId: number;
     intentRevisionId: string;
     rolloutCandidateId: string | null;
+    /**
+     * The health run reserved for this attempt, when the rollout is health
+     * gated. Written in the same transaction as the deploy start so the queue
+     * cannot pick this target up again between the reservation and the ack, and
+     * so a crash in that window leaves a target that visibly owns a pending run
+     * rather than one that looks merely unacked.
+     */
+    pendingHealthRunId?: string | null;
     envelope: EventEnvelope;
   }): TransitionResult {
     return this.mutateTarget(
@@ -2045,16 +2306,74 @@ export class GitOpsTransitions {
         // This start supersedes an interrupted one, which would otherwise keep
         // matching terminals and report completion_unknown for ever.
         this.clearTargetInterruption(target, 'blueprint_deploy_started');
+        // `undefined` means "this writer did not reserve a run", and leaves the
+        // pointer alone. The rollout adapter reserves a run and writes the
+        // pointer, then the deployment-status producer opens the same stage
+        // again with no run of its own; treating that as "no run" would erase
+        // the pointer the queue's only idempotency key depends on, and the
+        // rollout would never observe a verdict for the attempt it just made.
+        // `null` is the deliberate clear, for a rollout that reserves nothing.
+        if (args.pendingHealthRunId !== undefined) {
+          target.pending_health_run_id = args.pendingHealthRunId;
+        }
         return {
           before,
           after: {
             activeStage: 'blueprint_deploy_started',
             intentRevisionId: args.intentRevisionId,
             targetStatus: 'active',
+            pendingHealthRunId: target.pending_health_run_id,
           },
         };
       },
     );
+  }
+
+  /**
+   * Record a verdict that belongs to a rollout the application has left, and
+   * release the run the target was awaiting.
+   *
+   * Compare-and-clear, so a pointer that has already moved on is left alone. The
+   * release is the point: the run is terminal, and a target still pointing at it
+   * is skipped by the queue for ever.
+   */
+  private releaseSupersededVerdict(
+    args: { healthRunId: string },
+    target: GitOpsTargetCurrentRow,
+  ): boolean {
+    if (target.pending_health_run_id !== args.healthRunId) return false;
+    target.pending_health_run_id = null;
+    return true;
+  }
+
+  /**
+   * Whether this target is already acked to the rollout the application is
+   * currently on.
+   *
+   * The applied pointers, the authorization ref, and the rollout generation all
+   * agreeing is what "converged under this rollout" means, and it is a stronger
+   * statement than the absence of a request: a target with no active request
+   * could equally be one that was never asked, or one whose request a newer
+   * deploy superseded.
+   */
+  private alreadyAckedForThisRollout(
+    target: GitOpsTargetCurrentRow,
+    intentRevisionId: string,
+    rolloutCandidateId: string | null,
+  ): boolean {
+    const app = this.requireApp(target.application_id);
+    // The incoming request has to still be the one the application is on. An
+    // ack whose intent or candidate has been superseded describes an apply this
+    // rollout did not authorize, and taking the shortcut for it would record the
+    // target as converged on the newer generation while the older
+    // materialization is what is actually running.
+    if (app.intent_revision_id !== intentRevisionId) return false;
+    if ((app.rollout_candidate_id ?? null) !== (rolloutCandidateId ?? null)) return false;
+    return app.accepted_generation_id !== null
+      && target.applied_generation_id === app.accepted_generation_id
+      && target.rollout_authorization_ref === app.rollout_authorization_ref
+      && target.rollout_generation_id === app.rollout_generation_id
+      && target.active_operation_stage === null;
   }
 
   /**
@@ -2071,6 +2390,14 @@ export class GitOpsTransitions {
     intentRevisionId: string;
     rolloutCandidateId: string | null;
     legacyAppliedRevision: number | null;
+    /**
+     * The generation this target ran before the apply, when this is the first
+     * attempt. That is what a policy-driven rollback restores, and it is what
+     * makes one possible at all: the node's recovery row is the hub's only other
+     * handle on it, and that row never leaves the node. Absent on a retry, so
+     * the pre-rollout point is not moved to the generation that just failed.
+     */
+    recoveryGenerationId?: string | null;
     envelope: EventEnvelope;
   }): TransitionResult {
     return this.mutateTarget(
@@ -2080,6 +2407,20 @@ export class GitOpsTransitions {
       'blueprint_ack_recorded',
       null,
       (target) => {
+        const app = this.requireApp(args.applicationId);
+        if (this.alreadyAckedForThisRollout(target, args.intentRevisionId, args.rolloutCandidateId)) {
+          // The transport ack is recorded by the deployment-status producer the
+          // moment the apply returns, which is before the rollout adapter records
+          // its own. The request is already consumed by the time this runs, so
+          // matching against it would reject a second ack of the same apply,
+          // failing the dispatch, abandoning the run it had just reserved, and
+          // leaving a healthy target looking unverified. Checked before the match
+          // for that reason: only what the adapter alone knows is applied here.
+          if (args.recoveryGenerationId) {
+            target.recovery_generation_id = args.recoveryGenerationId;
+          }
+          return { before: {}, after: { alreadyAcked: true } };
+        }
         const request = this.matchBlueprintRequest(
           target, 'blueprint_deploy_started', args.intentRevisionId, 'acknowledge',
         );
@@ -2088,7 +2429,24 @@ export class GitOpsTransitions {
         }
         const before = { intentRevisionId: target.intent_revision_id };
         this.clearTargetActive(target);
+        if (args.recoveryGenerationId) {
+          target.recovery_generation_id = args.recoveryGenerationId;
+        }
         this.clearTargetInterruption(target, 'blueprint_deploy_started');
+        // The request was authorized against an intent the application has since
+        // left. The ack is real evidence that the apply landed, so it is recorded
+        // as history, but the convergence pointers below are the application's
+        // current ones: copying them here would record the target as running the
+        // newer generation when the older materialization is what is deployed.
+        // The newer rollout is left unsettled, so it dispatches its own
+        // generation and the attribution is corrected by that apply.
+        // The intent is the signal, not the candidate: a candidate is a
+        // rollout-only field, and a target can legitimately be deploying a
+        // candidate while the application carries none.
+        if (app.intent_revision_id !== args.intentRevisionId) {
+          target.legacy_applied_revision = args.legacyAppliedRevision;
+          return { before, after: { supersededAck: true } };
+        }
         target.intent_revision_id = args.intentRevisionId;
         // From the matched request, never from the payload: the two can name
         // different sides, and pairing one request's intent with another's
@@ -2099,7 +2457,6 @@ export class GitOpsTransitions {
         // Bind the live authorized generation onto the target. Transport ack
         // does not claim healthy, exact-artifact, or converged; those stay
         // derived from later evidence.
-        const app = this.requireApp(args.applicationId);
         target.desired_generation_id = app.accepted_generation_id;
         target.applied_generation_id = app.accepted_generation_id;
         target.expected_artifact_set_id = app.artifact_set_id;
@@ -2107,6 +2464,15 @@ export class GitOpsTransitions {
         target.source_acceptance_ref = app.source_acceptance_ref;
         target.placement_approval_ref = app.placement_approval_ref;
         target.rollout_authorization_ref = app.rollout_authorization_ref;
+        if (target.rollout_generation_id !== app.rollout_generation_id) {
+          // The retry budget and any stop fence belong to one rollout
+          // generation. Carrying them into the next one would let a target that
+          // already burned its single retry under an old rollout arrive at the
+          // new one unable to retry at all, and would hold a rollout the
+          // operator never stopped.
+          target.health_attempts = 0;
+          target.health_stop_reason = null;
+        }
         target.rollout_generation_id = app.rollout_generation_id;
         if (target.failure_stage === 'blueprint_deploy') {
           target.failure_stage = null;
@@ -2215,13 +2581,25 @@ export class GitOpsTransitions {
       'blueprint_deploy_failed',
       null,
       (target) => {
-        const before = { failureStage: target.failure_stage };
+        const before = { failureStage: target.failure_stage, pendingHealthRunId: target.pending_health_run_id };
         this.clearTargetActive(target);
         this.clearTargetInterruption(target, 'blueprint_deploy_started');
         target.failure_stage = 'blueprint_deploy';
         target.failure_class = args.failureClass;
         target.failure_at = args.envelope.at;
-        return { before, after: { failureStage: 'blueprint_deploy', failureClass: args.failureClass } };
+        // The apply never landed, so no verdict will ever arrive for the run
+        // reserved ahead of it. Releasing the pointer here is what keeps the
+        // queue from treating this target as still observing a run whose apply
+        // is already recorded as failed.
+        target.pending_health_run_id = null;
+        return {
+          before,
+          after: {
+            failureStage: 'blueprint_deploy',
+            failureClass: args.failureClass,
+            pendingHealthRunId: null,
+          },
+        };
       },
       'failed',
     );
@@ -2538,6 +2916,10 @@ export class GitOpsTransitions {
         // A restored workload has not been observed healthy yet, whatever the
         // previous generation proved.
         target.healthy_generation_id = null;
+        // Terminal for this rollout, and distinct from a hold. The target is back
+        // on the generation it ran before, which is where the policy wanted it,
+        // so a resume must not put the failed generation back on it.
+        target.health_stop_reason = 'rollback_completed';
 
         this.restoreArtifactPointers(target, restored, args.capturedArtifactSetId);
         this.restoreLastKnownGood(target, args.applicationId, args.envelope.at);
@@ -3421,14 +3803,21 @@ export class GitOpsTransitions {
     envelope: EventEnvelope,
     stage: GitOpsHistoryStage,
     generationId: string | null,
-    mutate: (target: GitOpsTargetCurrentRow) => { before: Record<string, unknown>; after: Record<string, unknown> },
+    // The application is passed so a mutation that has to reason about target
+    // mode can: the running generation differs by mode, and a verdict that
+    // attributed against one pointer while the projection read another would
+    // report a pass the projection then hid.
+    mutate: (
+      target: GitOpsTargetCurrentRow,
+      app: GitOpsApplicationRow,
+    ) => { before: Record<string, unknown>; after: Record<string, unknown> },
     outcome: HistoryOutcome = 'committed',
   ): TransitionResult {
     return this.raw().transaction(() => {
       const app = this.requireApp(applicationId);
       const target = this.store().getTarget(applicationId, nodeId);
       if (!target) throw new GitOpsTransitionError('target not found');
-      const snapshots = mutate(target);
+      const snapshots = mutate(target, app);
       // Stamped for every target mutation, not just the observations that are
       // projected from it. That is what makes an observation stop being the
       // latest thing that happened: a deploy, withdraw or tombstone after it

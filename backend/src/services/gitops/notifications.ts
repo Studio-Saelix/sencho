@@ -50,6 +50,7 @@ export const NOTIFIABLE_GITOPS_STAGES = [
   'rollback_completed',
   'rollback_partial_failed',
   'blueprint_state_review',
+  'health_rollout_policy_set',
 ] as const satisfies readonly GitOpsHistoryStage[];
 
 export type NotifiableGitOpsStage = (typeof NOTIFIABLE_GITOPS_STAGES)[number];
@@ -114,6 +115,10 @@ export const GITOPS_NOTIFICATION_META: Record<NotifiableGitOpsStage, GitOpsNotif
   rollback_completed: { category: 'gitops_rollback_completed', level: 'info', phrase: 'rollback completed' },
   rollback_partial_failed: { category: 'gitops_rollback_partial_failed', level: 'error', phrase: 'rollback partially failed' },
   blueprint_state_review: { category: 'gitops_stateful_confirmation', level: 'warning', phrase: 'stateful deploy awaiting confirmation' },
+  // An operator changing what a health outcome may do to a rollout. Notified
+  // because it decides whether a future rollout can stop or restore work across
+  // the fleet, and an audit reader has to see the change and who made it.
+  health_rollout_policy_set: { category: 'gitops_health_rollout_policy_set', level: 'info', phrase: 'health rollout policy changed' },
 };
 
 /**

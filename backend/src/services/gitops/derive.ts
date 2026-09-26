@@ -8,6 +8,13 @@ import {
 } from './json';
 import { GitOpsStore } from './store';
 import { comparableObservationMatches } from './artifactIdentity';
+import { runningGenerationForTarget } from './recoveryCapture';
+import {
+  DEFAULT_HEALTH_ROLLOUT_POLICY,
+  decodeFrozenRolloutStrategy,
+  decodeIntentHealthPolicy,
+  type HealthRolloutPolicy,
+} from './healthPolicy';
 import { parseSecretCapabilityFromJson } from './sops/capability';
 import { SopsIdentityStore } from './sops/identityStore';
 import {
@@ -36,6 +43,7 @@ import type {
   GitOpsDriftItem,
   GitOpsTargetCurrentRow,
   GitOpsTargetProjection,
+  HealthGateFacet,
   HealthFacet,
   LkgFacet,
   PlacementFacet,
@@ -518,12 +526,38 @@ function collectManagedProjectDrift(
  * evidence, and a target mid-deploy or mid-recovery has no verdict to read yet.
  * The run is read from this instance's own `health_gate_runs`, which is where a
  * generation-bound stack gate is recorded: a target on a node this instance
- * does not host has no run row here, and a Git-managed Blueprint deployment
- * opens no generation-bound stack gate at all, so the class stays silent for
- * those rather than claiming a verdict nobody wrote. Each target is queried
- * under the stack name its own intent deployed, so a renamed stack reads its
- * real runs.
+ * does not host has no run row here, so the class stays silent for those rather
+ * than claiming a verdict nobody wrote. Each target is queried under the stack
+ * name its own intent deployed, so a renamed stack reads its real runs.
+ *
+ * A Git-managed Blueprint deployment does open a generation-bound stack gate,
+ * through the health-gated rollout policy: the run is reserved before the apply
+ * so the verdict survives a lost response. Blueprint targets attribute on their
+ * applied generation, which is the pointer their mode can prove.
  */
+
+/**
+ * The health policy frozen for the rollout a target is running under.
+ *
+ * Null when the target belongs to no authorized rollout, or when the generation
+ * is unreadable. A drift item naming a policy nobody can verify would be worse
+ * than one that says the policy is unknown.
+ */
+function frozenPolicyForTarget(
+  store: GitOpsStore,
+  app: GitOpsApplicationRow,
+  target: GitOpsTargetCurrentRow,
+): ConfiguredPolicy | null {
+  if (!target.rollout_generation_id) return null;
+  const generation = store.getRolloutGeneration(target.rollout_generation_id);
+  if (!generation || generation.application_id !== app.id) return null;
+  try {
+    const { healthPolicy } = decodeFrozenRolloutStrategy(generation.rollout_strategy_json);
+    return { kind: 'health_rollout', healthPolicy };
+  } catch {
+    return null;
+  }
+}
 function collectHealthDrift(
   app: GitOpsApplicationRow,
   rawTargets: GitOpsTargetCurrentRow[],
@@ -537,21 +571,30 @@ function collectHealthDrift(
   const items: GitOpsDriftItem[] = [];
   for (const target of rawTargets) {
     if (target.target_status !== 'active') continue;
-    if (!target.deployed_generation_id) continue;
+    // The generation the target is running, per target mode. A Blueprint
+    // target's deployed pointer is null because nothing writes it, so reading
+    // health drift off that pointer alone would skip every Blueprint target,
+    // which is exactly the population this class is meant to cover.
+    const runningGenerationId = runningGenerationForTarget(app, target);
+    if (!runningGenerationId) continue;
     if (target.active_operation_stage || target.interruption_stage) continue;
     if (recoveryInProgress(target.recovery_phase)) continue;
     const stackName = targetStackName(app, intent, target);
     if (!stackName) continue;
     const run = store.getLatestStackHealthRun(target.node_id, stackName);
-    if (!run || run.status !== 'failed' || run.deployed_generation_id !== target.deployed_generation_id) continue;
+    if (!run || run.status !== 'failed' || run.deployed_generation_id !== runningGenerationId) continue;
     items.push({
       class: 'health',
-      expected: { kind: 'generation', id: target.deployed_generation_id },
+      expected: { kind: 'generation', id: runningGenerationId },
       observed: { kind: 'health_run', runId: run.id, deployedGenerationId: run.deployed_generation_id ?? null },
       freshnessAt: run.ended_at ?? run.started_at,
       owner: 'HealthGateService',
-      reason: 'the stack-scoped health run for the deployed generation failed',
-      configuredPolicy: null,
+      reason: 'the stack-scoped health run for the running generation failed',
+      // The policy that decided what to do about it, read from the rollout
+      // generation that was authorized. A drift item that says what was found
+      // but not which policy was in force leaves an operator unable to tell a
+      // deliberate observation from a policy that failed to act.
+      configuredPolicy: frozenPolicyForTarget(store, app, target),
       affectedTargets: [{ nodeId: target.node_id, stackName }],
       action: 'none',
     });
@@ -1320,7 +1363,11 @@ function deriveTarget(
   const observed = decodeObservedSafe(target.observed_artifact_identity_json, limitations);
   const connectivity = connectivityFromObservation(target, observed, limitations);
   const artifact = deriveArtifact(app, target.desired_generation_id, target.expected_artifact_set_id, target.latest_artifact_set_id, limitations);
-  const runtime = deriveRuntime(target, artifact, observed, healthDisabled);
+  const runtime = deriveRuntime(target, artifact, observed, healthDisabled, app);
+  // The generation the target is running, in the sense each target mode can
+  // prove. Health reads it from here rather than from deployed_generation_id,
+  // which a Blueprint target never has a writer for.
+  const runningGenerationId = runningGenerationForTarget(app, target);
   return {
     nodeId: target.node_id,
     stackName: app.stack_name,
@@ -1349,7 +1396,12 @@ function deriveTarget(
     connectivity,
     legacyAppliedRevision: target.legacy_applied_revision,
     runtime,
-    health: deriveHealth(target, healthDisabled),
+    health: deriveHealth(target, healthDisabled, runningGenerationId),
+    // What the health-gated rollout has decided for this target, and whether a
+    // rollback has anything to restore from. Surfaced here rather than as a
+    // separate surface so the rollout controls read the same evidence the
+    // decision was made from.
+    healthGate: deriveHealthGate(app, target),
     lkg: deriveLkg(target, limitations),
     tombstoned: target.target_status === 'tombstoned',
   };
@@ -1388,6 +1440,7 @@ function deriveRuntime(
   artifact: ArtifactFacet,
   observed: ReturnType<typeof decodeObservedSafe>,
   healthDisabled: boolean,
+  app: GitOpsApplicationRow,
 ): RuntimeFacet {
   if (target.target_status === 'tombstoned') return { status: 'tombstoned' };
   if (target.recovery_phase === 'restoring' || target.recovery_phase === 'compensating') {
@@ -1435,6 +1488,13 @@ function deriveRuntime(
   // that drifted used to report.
   const blueprintStage = BLUEPRINT_OBSERVATION_STATUS[target.latest_stage ?? ''];
   if (blueprintStage) return { status: blueprintStage };
+  // A health-gated rollout holds this target between its apply and its verdict.
+  // Ranked above the pointer checks, which a Blueprint target would otherwise
+  // answer `applied_not_deployed` (it has no deploy-bound writer, so its
+  // deployed pointer is null). A target mid-rollout is deliberately not judged
+  // yet, and reading it off the previous workload's pointers would call the
+  // fleet converged while it is still verifying one target.
+  if (target.pending_health_run_id) return { status: 'health_checking' };
   if (!target.applied_generation_id) return { status: 'never_applied' };
   if (!target.deployed_generation_id) return { status: 'applied_not_deployed' };
   // The target's contract is its desired generation, so a populated deployed
@@ -1473,21 +1533,92 @@ function deriveRuntime(
   }
   if (target.retry_at) return { status: 'retry_scheduled' };
   if (healthDisabled) return { status: 'synced_and_healthy' };
-  if (target.healthy_generation_id === target.deployed_generation_id) return { status: 'synced_and_healthy' };
+  if (target.healthy_generation_id === runningGenerationForTarget(app, target)) {
+    return { status: 'synced_and_healthy' };
+  }
   return { status: 'fully_deployed_health_pending' };
 }
 
-function deriveHealth(target: GitOpsTargetCurrentRow, healthDisabled: boolean): HealthFacet {
+/**
+ * What the health-gated rollout is doing with one target.
+ *
+ * The policy is read from the rollout generation rather than the live intent, so
+ * what is shown is the policy this rollout was authorized under rather than the
+ * one an operator has since selected.
+ */
+function deriveHealthGate(
+  app: GitOpsApplicationRow,
+  target: GitOpsTargetCurrentRow,
+): HealthGateFacet {
+  const policy = frozenPolicyForTarget(GitOpsStore.getInstance(), app, target);
+  const configuredPolicy = configuredPolicyForApp(GitOpsStore.getInstance(), app);
+  // Same test the decision uses, so a policy that was told recovery is
+  // available never reports as unavailable a moment later and strands the
+  // rollout in a state that is neither advancing nor held. The generation is
+  // the test because that is what the restore consumes.
+  const recoveryAvailable = target.recovery_generation_id !== null;
+  if (policy?.kind !== 'health_rollout') {
+    return {
+      policy: null,
+      configuredPolicy,
+      awaitingRunId: target.pending_health_run_id,
+      attempts: target.health_attempts,
+      stopReason: target.health_stop_reason,
+      recoveryAvailable,
+    };
+  }
+  return {
+    policy: policy.healthPolicy,
+    configuredPolicy,
+    awaitingRunId: target.pending_health_run_id,
+    attempts: target.health_attempts,
+    stopReason: target.health_stop_reason,
+    recoveryAvailable,
+  };
+}
+
+/**
+ * The health policy the operator has set on the application's current intent,
+ * which is what the next rollout will freeze.
+ *
+ * Reported alongside the frozen policy rather than instead of it. The two answer
+ * different questions, and after a change only the configured one moves: the
+ * frozen one is still what the running rollout is under until the next
+ * authorization. Reporting only the frozen one would make a confirmed change look
+ * like it had not been saved.
+ */
+function configuredPolicyForApp(
+  store: GitOpsStore,
+  app: GitOpsApplicationRow,
+): HealthRolloutPolicy {
+  if (!app.intent_revision_id) return DEFAULT_HEALTH_ROLLOUT_POLICY;
+  const intent = store.getIntentRevision(app.intent_revision_id);
+  if (!intent) return DEFAULT_HEALTH_ROLLOUT_POLICY;
+  // Guarded, as the frozen policy beside it is: one corrupt row would otherwise
+  // take down the projection for the whole application, and this is a display
+  // field rather than an authority decision.
+  try {
+    return decodeIntentHealthPolicy(intent.health_failure_rollback_policy_json);
+  } catch {
+    return DEFAULT_HEALTH_ROLLOUT_POLICY;
+  }
+}
+
+function deriveHealth(
+  target: GitOpsTargetCurrentRow,
+  healthDisabled: boolean,
+  runningGenerationId: string | null,
+): HealthFacet {
   if (healthDisabled) return { status: 'not_applicable' };
-  if (!target.deployed_generation_id) return { status: 'unbound' };
+  if (!runningGenerationId) return { status: 'unbound' };
   // A passing run answers for the generation the target was asked to run, so
   // it is judged against the desired id and only falls back to the deployed
   // pointer when no desired id is recorded. Judging against whatever is
   // deployed would let the previous workload's green run vouch for a newer
   // generation nobody has watched.
-  const expectedGeneration = target.desired_generation_id ?? target.deployed_generation_id;
+  const expectedGeneration = target.desired_generation_id ?? runningGenerationId;
   if (target.healthy_generation_id === expectedGeneration) {
-    return { status: 'passed', runId: '', deployedGenerationId: target.deployed_generation_id };
+    return { status: 'passed', runId: '', deployedGenerationId: runningGenerationId };
   }
   // A recorded failure about the generation this target is running outranks the
   // fallback to `pending`. Without it, withdrawing a failed check's promotion

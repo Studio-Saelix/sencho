@@ -1,5 +1,5 @@
-import { useMemo, useState } from 'react';
-import { CirclePause, CirclePlay, MoreHorizontal, Undo2 } from 'lucide-react';
+import { useEffect, useMemo, useState } from 'react';
+import { Activity, CirclePause, CirclePlay, MoreHorizontal, Undo2 } from 'lucide-react';
 
 import { Button } from '@/components/ui/button';
 import { Combobox } from '@/components/ui/combobox';
@@ -14,12 +14,18 @@ import {
   replanGitOpsRollout,
   resumeGitOpsRollout,
   rollbackGitOpsRollout,
+  setGitOpsHealthRolloutPolicy,
   supersedeGitOpsRollout,
   type RolloutRollbackScope,
 } from '@/lib/gitopsAuthorityApi';
-import { livePlacementFacet, liveRolloutFacet } from '@/lib/gitopsState';
+import { HEALTH_ROLLOUT_POLICY_STATE, livePlacementFacet, liveRolloutFacet } from '@/lib/gitopsState';
 import type { PermissionAction } from '@/context/AuthContext';
-import type { GitOpsRevisionProjection, GitOpsTargetProjection } from '@/types/gitops';
+import {
+  HEALTH_ROLLOUT_POLICIES,
+  type GitOpsRevisionProjection,
+  type GitOpsTargetProjection,
+  type HealthRolloutPolicy,
+} from '@/types/gitops';
 
 interface GitOpsRolloutControlsProps {
   /** The portfolio identity (`bp:<blueprintId>`) the controls write to. */
@@ -46,7 +52,7 @@ interface GitOpsRolloutControlsProps {
   rollbackGenerations?: Array<{ generationId: string }>;
 }
 
-type PendingAction = 'pause' | 'resume';
+type PendingAction = 'pause' | 'resume' | 'health_policy';
 
 const PAUSABLE_ROLLOUT_STATES = new Set([
   'rollout_queued',
@@ -109,6 +115,7 @@ export default function GitOpsRolloutControls({
   const [replanOpen, setReplanOpen] = useState(false);
   const [supersedeOpen, setSupersedeOpen] = useState(false);
   const [rollbackOpen, setRollbackOpen] = useState(false);
+  const [healthPolicyOpen, setHealthPolicyOpen] = useState(false);
 
   const canPause = !!live
     && blueprintEnabled
@@ -137,7 +144,27 @@ export default function GitOpsRolloutControls({
     && generations.length > 0
     && allowed('stack:deploy');
 
-  if (!canPause && !canResume && !canReplan && !canSupersede && !canRollback) return null;
+  /**
+   * The policy this application is set to, which is the one the dialog edits and
+   * the next rollout will freeze.
+   *
+   * The configured policy, not the frozen one: the dialog writes the intent, so
+   * after a confirmed change the configured policy is what moved, and showing the
+   * frozen one would leave the control reading as if the change had not been
+   * saved. A target under no authorized rollout reports no frozen policy at all,
+   * which is a different question and is answered by the target card instead.
+   */
+  const currentHealthPolicy = useMemo<HealthRolloutPolicy>(() => {
+    for (const target of targets) {
+      if (target.healthGate) return target.healthGate.configuredPolicy;
+    }
+    return 'observe';
+  }, [targets]);
+  const canSetHealthPolicy = !!live && allowed('stack:deploy');
+
+  if (!canPause && !canResume && !canReplan && !canSupersede && !canRollback && !canSetHealthPolicy) {
+    return null;
+  }
 
   async function handlePause(reason: string): Promise<void> {
     setPending('pause');
@@ -178,6 +205,20 @@ export default function GitOpsRolloutControls({
       onChanged();
     } catch (error) {
       toast.error(errorMessage(error, 'Failed to replan the rollout'));
+    }
+  }
+
+  async function handleHealthPolicy(policy: HealthRolloutPolicy): Promise<void> {
+    setPending('health_policy');
+    try {
+      await setGitOpsHealthRolloutPolicy(applicationId, policy);
+      toast.success('Health rollout policy updated');
+      setHealthPolicyOpen(false);
+      onChanged();
+    } catch (error) {
+      toast.error(errorMessage(error, 'Failed to set the health rollout policy'));
+    } finally {
+      setPending(null);
     }
   }
 
@@ -257,6 +298,15 @@ export default function GitOpsRolloutControls({
                   Roll back rollout
                 </DropdownMenuItem>
               )}
+              {canSetHealthPolicy && (
+                <DropdownMenuItem
+                  onSelect={() => setHealthPolicyOpen(true)}
+                  data-testid="gitops-action-health-policy"
+                >
+                  <Activity className="mr-2 h-3.5 w-3.5" strokeWidth={1.5} />
+                  Health rollout policy
+                </DropdownMenuItem>
+              )}
             </DropdownMenuContent>
           </DropdownMenu>
         )}
@@ -288,6 +338,13 @@ export default function GitOpsRolloutControls({
         busyConfirmLabel="Superseding…"
         onConfirm={handleSupersede}
       />
+      <HealthPolicyDialog
+        open={healthPolicyOpen}
+        onOpenChange={setHealthPolicyOpen}
+        current={currentHealthPolicy}
+        confirming={pending === 'health_policy'}
+        onConfirm={handleHealthPolicy}
+      />
       <RollbackRolloutDialog
         open={rollbackOpen}
         onOpenChange={setRollbackOpen}
@@ -305,6 +362,96 @@ type RollbackCandidate = { generationId: string; nodeIds: number[] };
 
 function shortId(id: string): string {
   return id.length > 8 ? id.slice(0, 8) : id;
+}
+
+/**
+ * Choose how a rollout reacts to per-target health outcomes.
+ *
+ * The copy states the consequence of each mode in a sentence, and says plainly
+ * that a change applies to the next rollout rather than the one running, because
+ * a policy that took effect mid-fleet would be the one thing an operator cannot
+ * reason about from this screen.
+ */
+function HealthPolicyDialog({
+  open,
+  onOpenChange,
+  current,
+  confirming,
+  onConfirm,
+}: {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  current: HealthRolloutPolicy;
+  confirming: boolean;
+  onConfirm: (policy: HealthRolloutPolicy) => Promise<void>;
+}) {
+  // The dialog opens onto whatever the application is set to now, not onto
+  // whatever was last picked in a dialog that has since been closed. Without
+  // this, reopening after a cancel (or after confirming in another tab) would
+  // silently offer the previous choice.
+  const [selected, setSelected] = useState<HealthRolloutPolicy>(current);
+  const shown = open ? selected : current;
+  useEffect(() => {
+    if (open) setSelected(current);
+  }, [open, current]);
+  return (
+    <Modal open={open} onOpenChange={onOpenChange} size="sm">
+      <ModalHeader kicker="ROLLOUT · HEALTH POLICY" title="Health rollout policy" />
+      <ModalBody>
+        <SegmentedControl
+          value={shown}
+          onChange={(value) => setSelected(value as HealthRolloutPolicy)}
+          options={HEALTH_ROLLOUT_POLICIES.map((policy) => ({
+            value: policy,
+            label: HEALTH_ROLLOUT_POLICY_STATE[policy].label,
+          }))}
+          ariaLabel="Health rollout policy"
+          className="max-md:hidden"
+        />
+        <ul className="hidden flex-col gap-1.5 max-md:flex">
+          {HEALTH_ROLLOUT_POLICIES.map((policy) => (
+            <li key={policy}>
+              <button
+                type="button"
+                onClick={() => setSelected(policy)}
+                aria-pressed={policy === shown}
+                className={policy === shown
+                  ? 'w-full rounded-sm border border-foreground/40 bg-foreground/5 px-2.5 py-2 text-left font-mono text-[11px] text-foreground'
+                  : 'w-full rounded-sm border border-transparent px-2.5 py-2 text-left font-mono text-[11px] text-stat-subtitle'}
+              >
+                {HEALTH_ROLLOUT_POLICY_STATE[policy].label}
+              </button>
+            </li>
+          ))}
+        </ul>
+        <p className="font-mono text-[11px] text-foreground">
+          {HEALTH_ROLLOUT_POLICY_STATE[shown].line}
+        </p>
+        <p className="font-mono text-[11px] text-stat-subtitle">
+          Applies to the next rollout. A rollout already running keeps the policy it started with, so a
+          fleet is never halfway between two.
+        </p>
+      </ModalBody>
+      <ModalFooter
+        hint="TAKES EFFECT on the next rollout"
+        secondary={(
+          <Button variant="outline" size="sm" onClick={() => onOpenChange(false)} disabled={confirming}>
+            Cancel
+          </Button>
+        )}
+        primary={(
+          <Button
+            size="sm"
+            onClick={() => void onConfirm(shown)}
+            disabled={confirming || shown === current}
+            data-testid="gitops-confirm-health-policy"
+          >
+            {confirming ? 'Saving…' : 'Set policy'}
+          </Button>
+        )}
+      />
+    </Modal>
+  );
 }
 
 function PauseRolloutDialog({ open, onOpenChange, confirming, onConfirm }: {
