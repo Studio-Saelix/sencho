@@ -317,6 +317,42 @@ function mapPortainerCatalog(data: TemplatesResponse, source: string): Template[
         .map((t: Template) => ({ ...t, source: 'custom', ports: normalizePortEntries(t.ports, source) }));
 }
 
+/**
+ * A registry answered, but not with a catalogue Sencho can read. Distinct from
+ * a transport failure so the message reaches the operator instead of being
+ * folded into the generic fetch error.
+ */
+class UnsupportedCatalogueError extends Error {
+    constructor() {
+        super(
+            'The template registry answered, but not in a format Sencho reads. '
+            + 'Expected the LinuxServer.io shape (data.repositories.linuxserver) or the Portainer v2 shape (a templates array). '
+            + 'A top-level array is the older Portainer v1 format and is not supported. '
+            + 'Check the Registry URL in Settings.',
+        );
+        this.name = 'UnsupportedCatalogueError';
+    }
+}
+
+/**
+ * Which catalogue a response carries, decided by its shape rather than by the
+ * host it came from. A mirror or caching proxy in front of the LinuxServer.io
+ * API serves the same body from a different hostname, and choosing the mapper
+ * by hostname sent that body to the Portainer mapper, which found no templates
+ * and reported an empty App Store with no error.
+ */
+function detectCatalogueFormat(data: unknown): 'linuxserver' | 'portainer' {
+    const body = data as {
+        data?: { repositories?: { linuxserver?: unknown } };
+        templates?: unknown;
+    } | null;
+    // Null is not an empty catalogue, it is a malformed one, so it falls through
+    // to the error rather than being read as a registry with nothing in it.
+    if (body?.data?.repositories?.linuxserver != null) return 'linuxserver';
+    if (Array.isArray(body?.templates)) return 'portainer';
+    throw new UnsupportedCatalogueError();
+}
+
 /** Fallback catalogue when no registry URL is configured. */
 const DEFAULT_REGISTRY_URL = 'https://api.linuxserver.io/api/v1/images?include_config=true';
 
@@ -379,6 +415,14 @@ export class TemplateService {
                 async () => this.fetchTemplates(registryUrl),
             );
         } catch (error) {
+            // A readable response Sencho cannot map is not a transport failure.
+            // Its own message names both supported shapes, which the generic
+            // wrapper below would discard. Logged here because this path skips
+            // the wrapper's own log line.
+            if (error instanceof UnsupportedCatalogueError) {
+                console.error('[Templates] Unsupported catalogue shape:', error.message);
+                throw error;
+            }
             console.error('[Templates] Failed to fetch from registry:', error);
             // Match the stable axios error code first; fall back to the
             // message text in case a transport reports the cap differently.
@@ -401,17 +445,20 @@ export class TemplateService {
         console.log(`[Templates] Fetching from registry: ${registryUrl}`);
 
         let registryHost = '';
-        try { registryHost = new URL(registryUrl).hostname.toLowerCase(); } catch { /* invalid URL, treated as non-LSIO */ }
-        if (registryHost === 'api.linuxserver.io') {
-            const response = await axios.get<LsioApiResponse>(registryUrl, TemplateService.REGISTRY_FETCH_OPTIONS);
-            const templates = mapLsioCatalog(response.data);
+        try { registryHost = new URL(registryUrl).hostname.toLowerCase(); } catch { /* invalid URL, treated as unlabelled */ }
+        const source = registryHost || 'custom';
+
+        const response = await axios.get(registryUrl, TemplateService.REGISTRY_FETCH_OPTIONS);
+        const format = detectCatalogueFormat(response.data);
+
+        if (format === 'linuxserver') {
+            const templates = mapLsioCatalog(response.data as LsioApiResponse);
             console.log(`[Templates] Fetched ${templates.length} templates from LSIO`);
             if (isDebugEnabled()) console.debug('[Templates:debug] LSIO sample:', templates.slice(0, 5).map(t => t.title));
             return templates;
         }
 
-        const response = await axios.get<TemplatesResponse>(registryUrl, TemplateService.REGISTRY_FETCH_OPTIONS);
-        const templates = mapPortainerCatalog(response.data, registryHost || 'custom');
+        const templates = mapPortainerCatalog(response.data as TemplatesResponse, source);
         console.log(`[Templates] Fetched ${templates.length} templates from custom registry`);
         return templates;
     }

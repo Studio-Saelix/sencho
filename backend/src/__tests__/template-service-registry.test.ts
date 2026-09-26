@@ -229,6 +229,88 @@ describe('TemplateService.getTemplates registry size cap', () => {
     warn.mockRestore();
   });
 
+  it('maps an LSIO payload served from a non-LSIO host', async () => {
+    const service = new TemplateService();
+    // A mirror or caching proxy in front of the LinuxServer.io API serves the
+    // same body from a different hostname. Choosing the mapper by hostname sent
+    // this body to the Portainer mapper, which found no templates and returned
+    // an empty App Store with no error.
+    DatabaseService.getInstance().updateGlobalSetting(
+      'template_registry_url',
+      'https://mirror.internal/catalogue.json',
+    );
+    service.clearCache();
+    mockedGet.mockResolvedValueOnce({
+      data: lsioPayload({
+        wireguard: {
+          name: 'wireguard',
+          description: 'A lightweight VPN',
+          config: { ports: [{ external: '51820', internal: '51820/udp' }] },
+        },
+      }),
+    });
+
+    const templates = await service.getTemplates();
+    const wireguard = templates.find(t => t.title === 'wireguard');
+    expect(wireguard).toBeDefined();
+    expect(wireguard!.source).toBe('linuxserver');
+    expect(wireguard!.ports).toEqual(['51820:51820/udp']);
+  });
+
+  it.each([
+    ['a Portainer v1 top-level array', [{ type: 1, title: 'x', image: 'x:1' }]],
+    ['an unrelated object', { hello: 'world' }],
+    ['an empty body', {}],
+    ['a string body', 'not a catalogue'],
+    ['a null catalogue under the LinuxServer key', { data: { repositories: { linuxserver: null } } }],
+    ['null', null],
+  ])('errors instead of returning an empty catalogue for %s', async (_label, body) => {
+    const service = new TemplateService();
+    DatabaseService.getInstance().updateGlobalSetting(
+      'template_registry_url',
+      'https://templates.example/catalogue.json',
+    );
+    service.clearCache();
+    mockedGet.mockResolvedValueOnce({ data: body });
+
+    await expect(service.getTemplates()).rejects.toThrow(/not in a format Sencho reads/);
+  });
+
+  it('names both supported shapes and the unsupported v1 format in that error', async () => {
+    const service = new TemplateService();
+    DatabaseService.getInstance().updateGlobalSetting(
+      'template_registry_url',
+      'https://templates.example/catalogue.json',
+    );
+    service.clearCache();
+    mockedGet.mockResolvedValueOnce({ data: { unexpected: true } });
+
+    await expect(service.getTemplates()).rejects.toThrow(
+      /data\.repositories\.linuxserver[\s\S]*templates array[\s\S]*v1/,
+    );
+  });
+
+  it('accepts an empty Portainer catalogue without erroring', async () => {
+    const service = new TemplateService();
+    DatabaseService.getInstance().updateGlobalSetting(
+      'template_registry_url',
+      'https://templates.example/catalogue.json',
+    );
+    service.clearCache();
+    // A registry with nothing in it is a valid answer, not an unreadable one.
+    mockedGet.mockResolvedValueOnce({ data: { version: '3', templates: [] } });
+
+    await expect(service.getTemplates()).resolves.toEqual([]);
+  });
+
+  it('accepts an empty LSIO catalogue without erroring', async () => {
+    const service = new TemplateService();
+    service.clearCache();
+    mockedGet.mockResolvedValueOnce({ data: lsioPayload({}) });
+
+    await expect(service.getTemplates()).resolves.toEqual([]);
+  });
+
   it('caches per registry URL, so a changed URL is never served a stale catalogue', async () => {
     const service = new TemplateService();
     service.clearCache();
