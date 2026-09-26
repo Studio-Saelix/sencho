@@ -34,7 +34,10 @@ export function redactSensitiveText(value: unknown): string {
     // path that merely contains `a:b@c/` from being read as a credential.
     // The narrowing has a known cost: a credential with no path after the host
     // is not caught, and neither is a password containing `@`, which an image
-    // reference cannot carry unencoded anyway.
+    // reference cannot carry unencoded anyway. The rule also over-matches text
+    // shaped like a time and a host, "10:30@host/a", which is indistinguishable
+    // from a numeric user and password. That direction is deliberate: an
+    // over-redacted log line costs a word, an under-redacted one leaks.
     .replace(
       /(^|[\s"'=,(])[A-Za-z0-9._-]+:[^/\s@]+@(\[[^\]\s]+\]|[A-Za-z0-9.-]+(?::\d+)?\/)/g,
       (_match, lead: string, host: string) => `${lead}[redacted]@${host}`,

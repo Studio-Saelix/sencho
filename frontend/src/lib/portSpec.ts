@@ -50,8 +50,18 @@ export interface PortSpec {
    * cannot be offered in the sheet's port field.
    */
   hostPort: string | null;
-  /** The container segment verbatim, protocol suffix included, for example `80/tcp`. */
+  /**
+   * The container segment verbatim, protocol suffix included, for example
+   * `80/tcp`. Carries the whole spec when `ambiguous` is set, because the
+   * segments could not be told apart.
+   */
   container: string;
+  /**
+   * Set when the spec cannot be taken apart with confidence, which today means
+   * an unbracketed IPv6 bind address. The spec is then left exactly as
+   * published: nothing is offered to edit and nothing is rewritten.
+   */
+  ambiguous: boolean;
 }
 
 /**
@@ -59,25 +69,32 @@ export interface PortSpec {
  * segments. A bracketed IPv6 literal contains colons of its own, so it is
  * consumed whole before the rest is split.
  *
- * The address is recognized by what it is not: a first segment that is a port or
- * a range of ports is a port, and anything else in front of the container is an
- * address the spec is pinned to. Compose documents the position as a host IP,
- * but a hostname is accepted there in practice and a catalogue can publish one,
- * so this does not restrict the address to a dotted quad.
+ * The address is otherwise recognized by what it is not: a first segment that is
+ * a port or a range of ports is a port, and anything else in front of the
+ * container is an address the spec is pinned to. Compose documents the position
+ * as a host IP, but a hostname is accepted there in practice and a catalogue can
+ * publish one, so this does not restrict the address to a dotted quad.
  */
-function splitSpec(spec: string): { bindAddress: string | null; parts: string[] } {
+function splitSpec(spec: string): { bindAddress: string | null; parts: string[]; ambiguous: boolean } {
   if (spec.startsWith('[')) {
     const close = spec.indexOf(']');
     if (close > 0) {
       const bindAddress = spec.slice(0, close + 1);
-      return { bindAddress, parts: spec.slice(close + 1).replace(/^:/, '').split(':') };
+      return { bindAddress, parts: spec.slice(close + 1).replace(/^:/, '').split(':'), ambiguous: false };
     }
   }
   const parts = spec.split(':');
-  if (parts.length > 1 && !PORT_TOKEN.test(parts[0])) {
-    return { bindAddress: parts[0], parts: parts.slice(1) };
+  // An unbracketed IPv6 address carries colons of its own, so the boundary
+  // between the address and the ports cannot be found by counting segments:
+  // in `::1:8080:80` neither `::1` nor `::1:8080` can be ruled out. Compose
+  // accepts the form, so it is worth handling, but not by guessing.
+  if (parts.slice(0, -2).join(':').includes(':')) {
+    return { bindAddress: null, parts: [spec], ambiguous: true };
   }
-  return { bindAddress: null, parts };
+  if (parts.length > 1 && !PORT_TOKEN.test(parts[0])) {
+    return { bindAddress: parts[0], parts: parts.slice(1), ambiguous: false };
+  }
+  return { bindAddress: null, parts, ambiguous: false };
 }
 
 /**
@@ -91,7 +108,7 @@ function hostPortIndex(parts: readonly string[]): number {
 
 /** Break one Compose short-form port spec into its address, host port and container. */
 export function parsePortSpec(spec: string): PortSpec {
-  const { bindAddress, parts } = splitSpec(spec);
+  const { bindAddress, parts, ambiguous } = splitSpec(spec);
   const container = parts[parts.length - 1] ?? '';
   const index = hostPortIndex(parts);
   const segment = index >= 0 ? parts[index] : null;
@@ -100,6 +117,7 @@ export function parsePortSpec(spec: string): PortSpec {
     hostSegment: segment,
     hostPort: segment !== null && SINGLE_PORT.test(segment) ? segment : null,
     container,
+    ambiguous,
   };
 }
 

@@ -47,6 +47,27 @@ describe('parsePortSpec', () => {
     expect(parsed.container).toBe('5432');
   });
 
+  it('leaves an unbracketed IPv6 spec alone rather than guessing where it ends', () => {
+    // Compose accepts ::1:8080:80, but nothing can tell the address `::1` from
+    // the address `::1:8080`, so the segments are not separable.
+    for (const spec of ['::1:8080:80', '2001:db8::1:8080:80', '::1:80']) {
+      const parsed = parsePortSpec(spec);
+      expect(parsed.ambiguous).toBe(true);
+      expect(parsed.hostPort).toBeNull();
+      expect(parsed.hostSegment).toBeNull();
+      expect(parsed.container).toBe(spec);
+      expect(withHostPort(spec, '9090')).toBe(spec);
+    }
+  });
+
+  it('still reads a bracketed IPv6 spec, which has no such ambiguity', () => {
+    const parsed = parsePortSpec('[::1]:8080:80');
+    expect(parsed.ambiguous).toBe(false);
+    expect(parsed.bindAddress).toBe('[::1]');
+    expect(parsed.hostPort).toBe('8080');
+    expect(withHostPort('[::1]:8080:80', '9090')).toBe('[::1]:9090:80');
+  });
+
   it('keeps a range visible as a host segment but does not offer it as one number', () => {
     const parsed = parsePortSpec('3000-3005:3000-3005/udp');
     expect(parsed.hostSegment).toBe('3000-3005');

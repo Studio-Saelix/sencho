@@ -580,7 +580,13 @@ export function AppStoreView({ onDeploySuccess, headerActions }: AppStoreViewPro
                                                                 {parsed.hostSegment ?? '\u00a0'}
                                                             </span>
                                                         )}
-                                                        <span className="text-muted-foreground font-mono">: {containerLabel(parsed)}</span>
+                                                        {/* An unparseable spec is shown whole, so the
+                                                            separator that implies a host/container split
+                                                            would misrepresent it. */}
+                                                        <span className="text-muted-foreground font-mono">
+                                                            {parsed.ambiguous ? '' : ': '}
+                                                            {containerLabel(parsed)}
+                                                        </span>
                                                         {conflict && (
                                                             <>
                                                                 <span className="text-xs text-warning font-mono">
