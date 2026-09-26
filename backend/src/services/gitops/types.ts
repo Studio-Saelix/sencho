@@ -297,6 +297,10 @@ export type GitOpsTargetCurrentRow = {
   applied_generation_id: string | null;
   deployed_generation_id: string | null;
   healthy_generation_id: string | null;
+  /** Last stack-scope health verdict and the generation it judged. */
+  last_health_status: 'passed' | 'failed' | 'unknown' | null;
+  last_health_generation_id: string | null;
+  last_health_run_id: string | null;
   lkg_generation_id: string | null;
   lkg_artifact_set_id: string | null;
   lkg_unavailable_at: number | null;

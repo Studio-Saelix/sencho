@@ -865,7 +865,8 @@ export class GitOpsStore {
     this.db().prepare(
       `INSERT INTO gitops_target_current (
         application_id, node_id, target_status, desired_generation_id, candidate_generation_id,
-        applied_generation_id, deployed_generation_id, healthy_generation_id, lkg_generation_id,
+        applied_generation_id, deployed_generation_id, healthy_generation_id,
+        last_health_status, last_health_generation_id, last_health_run_id, lkg_generation_id,
         lkg_artifact_set_id, lkg_unavailable_at, lkg_unavailable_reason, expected_artifact_set_id,
         latest_artifact_set_id, observed_artifact_identity_json, intent_revision_id,
         rollout_candidate_id, rollout_generation_id, source_acceptance_ref, placement_approval_ref,
@@ -876,7 +877,7 @@ export class GitOpsStore {
         recovery_phase, interruption_stage, interruption_at, interruption_operation_id,
         interruption_generation_id, interruption_intent_revision_id, interruption_rollout_candidate_id,
         pause_at, pause_reason, retry_at, suspended_at, partial_json, evidence_limitations_json, updated_at
-      ) VALUES (${Array(50).fill('?').join(', ')})
+      ) VALUES (${Array(53).fill('?').join(', ')})
       ON CONFLICT(application_id, node_id) DO UPDATE SET
         target_status=excluded.target_status,
         desired_generation_id=excluded.desired_generation_id,
@@ -884,6 +885,9 @@ export class GitOpsStore {
         applied_generation_id=excluded.applied_generation_id,
         deployed_generation_id=excluded.deployed_generation_id,
         healthy_generation_id=excluded.healthy_generation_id,
+        last_health_status=excluded.last_health_status,
+        last_health_generation_id=excluded.last_health_generation_id,
+        last_health_run_id=excluded.last_health_run_id,
         lkg_generation_id=excluded.lkg_generation_id,
         lkg_artifact_set_id=excluded.lkg_artifact_set_id,
         lkg_unavailable_at=excluded.lkg_unavailable_at,
@@ -928,7 +932,8 @@ export class GitOpsStore {
         updated_at=excluded.updated_at`,
     ).run(
       row.application_id, row.node_id, row.target_status, row.desired_generation_id, row.candidate_generation_id,
-      row.applied_generation_id, row.deployed_generation_id, row.healthy_generation_id, row.lkg_generation_id,
+      row.applied_generation_id, row.deployed_generation_id, row.healthy_generation_id,
+      row.last_health_status, row.last_health_generation_id, row.last_health_run_id, row.lkg_generation_id,
       row.lkg_artifact_set_id, row.lkg_unavailable_at, row.lkg_unavailable_reason, row.expected_artifact_set_id,
       row.latest_artifact_set_id, row.observed_artifact_identity_json, row.intent_revision_id,
       row.rollout_candidate_id, row.rollout_generation_id, row.source_acceptance_ref, row.placement_approval_ref,
@@ -1267,6 +1272,9 @@ export function emptyTargetRow(
     applied_generation_id: null,
     deployed_generation_id: null,
     healthy_generation_id: null,
+    last_health_status: null,
+    last_health_generation_id: null,
+    last_health_run_id: null,
     lkg_generation_id: null,
     lkg_artifact_set_id: null,
     lkg_unavailable_at: null,

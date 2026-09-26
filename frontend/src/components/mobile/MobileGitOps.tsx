@@ -1,7 +1,7 @@
 import { ChevronLeft, ChevronRight, RefreshCw, Search, X } from 'lucide-react';
 import { useEffect, useState, type ReactNode } from 'react';
 import { Masthead, SectionHead, StateDot } from '@/components/mobile/mobile-ui';
-import { attentionLabel, PORTFOLIO_EMPTY_COPY, portfolioMastheadState, POSTURE_TONE_CLASS } from '@/lib/gitopsPortfolio';
+import { attentionLabel, countCurrentTargets, PORTFOLIO_EMPTY_COPY, portfolioMastheadState, POSTURE_TONE_CLASS } from '@/lib/gitopsPortfolio';
 import { cn } from '@/lib/utils';
 import { formatRelativeTime } from '@/lib/utils';
 import type { GitOpsPortfolioRow } from '@/types/gitopsPortfolio';
@@ -228,6 +228,7 @@ export function MobileGitOps({ headerActions }: { headerActions?: ReactNode }) {
 }
 
 function MobileGitOpsRow({ row }: { row: GitOpsPortfolioRow }) {
+  const currentTargetCount = countCurrentTargets(row.targets);
   const postureTone = {
     failed: 'destructive',
     attention: 'warning',
@@ -254,7 +255,7 @@ function MobileGitOpsRow({ row }: { row: GitOpsPortfolioRow }) {
             </span>
           </span>
           <span className="shrink-0 font-mono text-[10px] uppercase tracking-[0.1em] text-stat-icon">
-            {row.targetMode === 'direct' ? 'direct' : `${row.targets.length}t`}
+            {row.targetMode === 'direct' ? 'direct' : `${currentTargetCount}t`}
           </span>
         </span>
         {row.attention.length > 0 && (

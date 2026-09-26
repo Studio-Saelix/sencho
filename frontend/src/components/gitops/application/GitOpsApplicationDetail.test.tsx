@@ -67,8 +67,8 @@ const blueprintRow = {
   nodeId: null,
   nodeName: null,
   targets: [
-    { nodeId: 2, nodeName: 'edge-a', stackName: 'shop', runtime: 'synced_and_healthy', health: 'passed', connectivity: 'reachable', evidence: 'fresh' as const },
-    { nodeId: 3, nodeName: 'edge-b', stackName: 'shop', runtime: 'deploying', health: 'unknown', connectivity: 'unreachable', evidence: 'stale' as const },
+    { nodeId: 2, nodeName: 'edge-a', stackName: 'shop', runtime: 'synced_and_healthy', health: 'passed', connectivity: 'reachable', tombstoned: false, evidence: 'fresh' as const },
+    { nodeId: 3, nodeName: 'edge-b', stackName: 'shop', runtime: 'deploying', health: 'unknown', connectivity: 'unreachable', tombstoned: false, evidence: 'stale' as const },
   ],
   attention: ['placement_review_pending'],
   evidence: { partial: true, unreachableNodes: [3], unknown: false },
