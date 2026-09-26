@@ -261,6 +261,11 @@ jobs:
   e2e:
     name: E2E shard ${{ matrix.shard }}/4
     runs-on: ubuntu-latest
+    # Backstop only. Each shard bounds itself with Playwright's `globalTimeout`
+    # (see playwright.config.ts), which fails the test step while the job is
+    # still alive to upload the report. This ceiling stays above that value so
+    # a cascading or wedged run produces evidence instead of a bare
+    # cancellation; a job cancelled by its own timeout runs no further steps.
     timeout-minutes: 20
     needs: changes
     # Runs unless detection positively found no code: a failed detection job
@@ -291,7 +296,9 @@ jobs:
         run: npx playwright test --project=chromium --shard=${{ matrix.shard }}/4
 
       - name: Upload E2E report and service logs
-        if: failure()
+        # `cancelled()` covers a run stopped by the concurrency group, where
+        # GitHub re-evaluates conditions for the job's unfinished steps.
+        if: failure() || cancelled()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: playwright-report-shard-${{ matrix.shard }}
