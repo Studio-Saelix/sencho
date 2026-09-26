@@ -57,7 +57,7 @@ jobs:
           echo "code=$code"; printf '%s\n' "$files"
 
   backend:
-    name: Backend (Build, Test, Lint)
+    name: Backend unit tests (Build, Test, Lint)
     runs-on: ubuntu-latest
     timeout-minutes: 10
     needs: changes
@@ -90,10 +90,6 @@ jobs:
         working-directory: ./backend
         run: npm test
 
-      - name: Docker integration tests (dedicated Vitest config)
-        working-directory: ./backend
-        run: npm run test:docker-integration
-
       - name: Lint (ESLint)
         working-directory: ./backend
         run: npm run lint
@@ -101,6 +97,56 @@ jobs:
       - name: Audit Dependencies
         working-directory: ./backend
         run: npm audit --audit-level=high
+
+  # Real-Docker integration tests, split out of the backend job so their
+  # ~1 minute of serial container work runs alongside the unit tests instead
+  # of after them.
+  backend-docker-integration:
+    name: Backend Docker integration
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.code != 'false' }}
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Setup Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v6
+        with:
+          node-version-file: '.node-version'
+          cache: 'npm'
+          cache-dependency-path: backend/package-lock.json
+
+      - name: Install Dependencies
+        working-directory: ./backend
+        run: npm ci
+
+      - name: Docker integration tests (dedicated Vitest config)
+        working-directory: ./backend
+        run: npm run test:docker-integration
+
+  # Single status for branch protection, which requires this exact job name.
+  # Passes when both backend jobs passed, or both were skipped because change
+  # detection succeeded and found no code.
+  backend-result:
+    name: Backend (Build, Test, Lint)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    needs: [changes, backend, backend-docker-integration]
+    if: always()
+    steps:
+      - name: Check backend results
+        env:
+          CHANGES: ${{ needs.changes.result }}
+          UNIT: ${{ needs.backend.result }}
+          DOCKER: ${{ needs.backend-docker-integration.result }}
+        run: |
+          echo "Change detection: $CHANGES, unit: $UNIT, docker integration: $DOCKER"
+          [ "$CHANGES" = success ] || exit 1
+          for r in "$UNIT" "$DOCKER"; do
+            [ "$r" = success ] || [ "$r" = skipped ] || exit 1
+          done
 
   frontend:
     name: Frontend (Build, Lint)
