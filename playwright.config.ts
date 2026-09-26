@@ -11,6 +11,8 @@ import { defineConfig, devices } from '@playwright/test';
  */
 export default defineConfig({
   testDir: './e2e',
+  // Creates the test admin once so no spec depends on file order.
+  globalSetup: './e2e/global-setup.ts',
   // Don't stop on first failure - show all results
   maxFailures: 0,
   // How long to wait for a single test
