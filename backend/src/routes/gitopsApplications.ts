@@ -51,6 +51,12 @@ import { GitOpsTransitions, GitOpsTransitionError } from '../services/gitops/tra
 import { newGitOpsId } from '../services/gitops/directApplication';
 import { HEALTH_ROLLOUT_POLICIES, isHealthRolloutPolicy } from '../services/gitops/healthPolicy';
 import {
+  PLACEMENT_POLICIES,
+  ROLLOUT_AUTHORIZATION_POLICIES,
+  isPlacementPolicy,
+  isRolloutAuthorizationPolicy,
+} from '../services/gitops/policyComposition';
+import {
   buildAcceptedGeneration,
   ensureRolloutAuthorization,
   frozenStrategyFor,
@@ -1054,6 +1060,154 @@ gitopsApplicationsRouter.post('/:id/rollout/pause', (req: Request, res: Response
  * generation. A bulk action that half-applies on a permission failure would
  * leave some targets on a policy the operator is not entitled to set for them.
  */
+/**
+ * The gate for a policy write that names in advance what the system may do.
+ *
+ * Reused by the placement and rollout authorization policy routes, and shaped
+ * like the health policy gate beside them: a policy that authorizes an action
+ * is authorizing it for every frozen target, so every target is checked before
+ * anything is written, and a bulk action that half-applies on a permission
+ * failure would leave some targets on a policy the operator is not entitled to
+ * set for them.
+ *
+ * The empty-target-set case is the part the health policy route cannot reach and
+ * a placement policy has to: a fresh application has no rollout target set yet,
+ * which is exactly when an operator wants to choose the policy before the first
+ * placement. Falling back to the application-wide grant there would lock out an
+ * operator whose deploy grants are scoped to specific stacks, so the Blueprint's
+ * own deploy stack name is used instead. It is known without an intent, from the
+ * Blueprint row the id already resolved to.
+ */
+function requirePolicyTargetAuthority(
+    req: Request,
+    res: Response,
+    target: AuthorityTarget,
+): boolean {
+  const app = target.application;
+  const store = GitOpsStore.getInstance();
+  const stackName = target.blueprint.name || deployStackNameFor(app);
+  if (!stackName) {
+    res.status(409).json({
+      error: 'The deploy stack identity could not be resolved.',
+      code: 'POLICY_REFUSED',
+    });
+    return false;
+  }
+
+  const frozen = rolloutTargetSet(app);
+  const nodeIds = frozen?.nodeIds ?? store.listTargets(app.id)
+    .filter((row) => row.target_status === 'active')
+    .map((row) => row.node_id);
+
+  if (nodeIds.length === 0) {
+    // Nothing is placed yet, so there is no target to scope an exact grant to.
+    // A stack-scoped assignment is node-qualified, which means it cannot be
+    // resolved for a node that does not exist yet, so authorizing against the
+    // stack name here would pass nobody. The application-wide grant is the only
+    // honest gate, and a stack-scoped operator configures this after the first
+    // placement, when there is a target to be scoped to.
+    if (checkPermission(req, 'stack:deploy')) return true;
+    res.status(403).json({ error: 'Permission denied for this application.', code: 'PERMISSION_DENIED' });
+    return false;
+  }
+  for (const nodeId of nodeIds) {
+    if (!requireDeployOnTarget(req, res, stackName, nodeId)) return false;
+  }
+  return true;
+}
+
+/**
+ * Set the placement policy.
+ *
+ * Configured independently of the source policy and of the rollout
+ * authorization policy, and satisfying neither. The write has its own endpoint
+ * because it has a side effect the generic settings route cannot express: it
+ * decides whether the next placement decision may approve a change without an
+ * operator.
+ *
+ * Authorized by exact `stack:deploy` on every frozen target, which is the
+ * authority that a placement approval itself needs. A global `stack:create` is
+ * deliberately not also required: it is held only by roles that hold a global
+ * `stack:deploy` as well, so demanding it would silently upgrade the gate to
+ * application-wide and make the per-target loop unreachable for every caller
+ * that got past it. The create authority belongs to the placement approval the
+ * policy authorizes, which already requires it, not to the configuration of
+ * whether that approval may be automatic.
+ */
+gitopsApplicationsRouter.post('/:id/placement-policy', async (req: Request, res: Response): Promise<void> => {
+  const target = resolveAuthorityTarget(req, res);
+  if (!target) return;
+  const policy = req.body?.policy;
+  if (!isPlacementPolicy(policy)) {
+    res.status(400).json({
+      error: `policy must be one of: ${PLACEMENT_POLICIES.join(', ')}`,
+      code: 'PLACEMENT_POLICY_REFUSED',
+    });
+    return;
+  }
+  if (!requirePolicyTargetAuthority(req, res, target)) return;
+
+  try {
+    GitOpsTransitions.getInstance().placementPolicyChanged({
+      applicationId: target.application.id,
+      placementPolicy: policy,
+      envelope: authorityEnvelope(req),
+    });
+  } catch (error) {
+    if (error instanceof GitOpsTransitionError) {
+      res.status(409).json({ error: error.message, code: 'PLACEMENT_POLICY_REFUSED' });
+      return;
+    }
+    console.error(
+      '[GitOps authority] Placement policy change failed:',
+      sanitizeForLog(error instanceof Error ? error.message : String(error)),
+    );
+    res.status(500).json({ error: 'Failed to set the placement policy' });
+    return;
+  }
+  res.json({ ok: true, policy });
+});
+
+/**
+ * Set the rollout authorization policy.
+ *
+ * Same gate as the placement policy and for the same reason: this write governs
+ * whether a rollout may be authorized, not whether anything is created.
+ */
+gitopsApplicationsRouter.post('/:id/rollout/authorization-policy', async (req: Request, res: Response): Promise<void> => {
+  const target = resolveAuthorityTarget(req, res);
+  if (!target) return;
+  const policy = req.body?.policy;
+  if (!isRolloutAuthorizationPolicy(policy)) {
+    res.status(400).json({
+      error: `policy must be one of: ${ROLLOUT_AUTHORIZATION_POLICIES.join(', ')}`,
+      code: 'ROLLOUT_POLICY_REFUSED',
+    });
+    return;
+  }
+  if (!requirePolicyTargetAuthority(req, res, target)) return;
+
+  try {
+    GitOpsTransitions.getInstance().rolloutAuthorizationPolicyChanged({
+      applicationId: target.application.id,
+      policy,
+      envelope: authorityEnvelope(req),
+    });
+  } catch (error) {
+    if (error instanceof GitOpsTransitionError) {
+      res.status(409).json({ error: error.message, code: 'ROLLOUT_POLICY_REFUSED' });
+      return;
+    }
+    console.error(
+      '[GitOps authority] Rollout authorization policy change failed:',
+      sanitizeForLog(error instanceof Error ? error.message : String(error)),
+    );
+    res.status(500).json({ error: 'Failed to set the rollout authorization policy' });
+    return;
+  }
+  res.json({ ok: true, policy });
+});
+
 gitopsApplicationsRouter.post('/:id/rollout/health-policy', async (req: Request, res: Response): Promise<void> => {
   const target = resolveAuthorityTarget(req, res);
   if (!target) return;
