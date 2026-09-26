@@ -322,7 +322,18 @@ function PostureCard(
   // dereferencing a missing entry, and a Drift tab that threw here would take
   // the whole tab down, not just this card.
   const meta = POSTURE_LABEL[row.posture] ?? UNRECOGNIZED_POSTURE;
-  const Icon = meta.tone === 'success' ? FileCheck2 : meta.tone === 'destructive' || meta.tone === 'warning' ? TriangleAlert : FileQuestion;
+  // One glyph per posture, because two postures sharing an icon makes the card
+  // read as one state twice. Work in flight and cannot-prove are the pair most
+  // easily confused from a distance, and they are exactly the two that must not
+  // look alike.
+  const ICON_BY_TONE = {
+    success: FileCheck2,
+    destructive: TriangleAlert,
+    warning: TriangleAlert,
+    brand: RefreshCw,
+    neutral: FileQuestion,
+  } as const;
+  const Icon = ICON_BY_TONE[meta.tone];
 
   return (
     <div data-testid="gitops-posture" data-posture={row.posture} className={cn(CARD_CLASS, 'border', POSTURE_TONE_CLASS[meta.tone])}>
@@ -360,6 +371,17 @@ export default function DriftPanel({ stackName }: { stackName: string }) {
   const { activeNode, nodes } = useNodes();
   const nodeId = activeNode?.id;
   const [report, setReport] = useState<StackDriftReport | null>(null);
+  /**
+   * The node `report` was read from, so a report can be recognised as belonging
+   * to a node the operator has since left.
+   *
+   * Dropping the report on a node change is not enough on its own: the render
+   * that follows the change still sees the previous report, because the effect
+   * that clears it runs after that render. Keying the derived posture off the
+   * report's own node closes the window, so the new node is never composed with
+   * the previous node's application.
+   */
+  const [reportNodeId, setReportNodeId] = useState<number | undefined>(undefined);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState(false);
   const [reloadKey, setReloadKey] = useState(0);
@@ -371,6 +393,14 @@ export default function DriftPanel({ stackName }: { stackName: string }) {
   // rather than a stale or blank report.
   useEffect(() => {
     let cancelled = false;
+    // Cleared in the effect body rather than inside the async run, so it lands
+    // before the render that follows this commit. Inside the run it would land a
+    // microtask later, leaving one render where the new node is paired with the
+    // previous node's report, which both probes an identity that cannot exist and
+    // shows a state belonging to the node the operator just left. `loading` is set
+    // below for the same cycle, so the tab reads as checking rather than as wrong.
+    setReport(null);
+    setReportNodeId(undefined);
     const run = async () => {
       setLoading(true);
       setLoadError(false);
@@ -383,6 +413,7 @@ export default function DriftPanel({ stackName }: { stackName: string }) {
           return;
         }
         setReport((await res.json()) as StackDriftReport);
+        setReportNodeId(nodeId);
         setLoadError(false);
       } catch {
         if (!cancelled) {
@@ -408,6 +439,7 @@ export default function DriftPanel({ stackName }: { stackName: string }) {
         return;
       }
       setReport((await res.json()) as StackDriftReport);
+      setReportNodeId(nodeId);
       setLoadError(false);
     } catch {
       toast.error('Failed to re-check drift.');
@@ -448,8 +480,17 @@ export default function DriftPanel({ stackName }: { stackName: string }) {
 
   // The application-level posture, from the hub-owned portfolio rather than from
   // anything on this tab. It is the only answer here that spans every node
-  // holding a target and accounts for evidence that is unknown or missing.
-  const posture = useGitOpsApplicationPosture(portfolioIdFor(revision, nodeId));
+  // holding a target and accounts for evidence that is unknown or missing. The
+  // store application id rides along so the change stream can be filtered to this
+  // application instead of the whole fleet.
+  // Null unless the report in hand was read from the node now selected, which is
+  // what keeps a node change from composing the new node with the old report's
+  // application for the length of the request.
+  const reportIsCurrent = reportNodeId === nodeId;
+  const posture = useGitOpsApplicationPosture(
+    reportIsCurrent ? portfolioIdFor(revision, nodeId) : null,
+    reportIsCurrent && revision && revision.targetMode !== 'not_applicable' ? revision.applicationId : null,
+  );
   // Per-target evidence quality, keyed by the node the target runs on, so each
   // target card can carry the freshness the portfolio computed for it. Only
   // current targets: a tombstoned target's history is not current state, and

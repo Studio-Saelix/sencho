@@ -70,7 +70,17 @@ type PostureRead = {
   result: { kind: 'absent' } | { kind: 'unreadable' } | { kind: 'row'; row: GitOpsPortfolioRow };
 };
 
-export function useGitOpsApplicationPosture(portfolioId: string | null): GitOpsApplicationPosture {
+/**
+ * @param portfolioId the portfolio identity to read, or null when this tab has no
+ *   live application to ask about.
+ * @param applicationId the canonical store id the same projection reports, used
+ *   only to filter change announcements to this application. Null when there is no
+ *   projection, in which case announcements are not filtered.
+ */
+export function useGitOpsApplicationPosture(
+  portfolioId: string | null,
+  applicationId: string | null = null,
+): GitOpsApplicationPosture {
   const [read, setRead] = useState<PostureRead | null>(null);
   /**
    * Bumped by anything that invalidates an in-flight answer. The same stack can
@@ -116,17 +126,27 @@ export function useGitOpsApplicationPosture(portfolioId: string | null): GitOpsA
     void fetchPosture(portfolioId);
   }, [fetchPosture, portfolioId]);
 
-  // The posture changes when a transition commits, which is what the
-  // announcement carries, so that is the trigger rather than a poll. A poll
-  // would also be wrong here: it would re-ask the aggregator about evidence
-  // freshness it has already decided, on a clock, for a tab the operator may
-  // have open for an hour.
+  // The posture changes when a transition commits, which is what the announcement
+  // carries, so that is the trigger rather than a poll. A poll would also be wrong
+  // here: it would re-ask the aggregator about evidence freshness it has already
+  // decided, on a clock, for a tab the operator may have open for an hour.
+  //
+  // Scoped to the application this tab is showing. The announcement names the
+  // application it came from, so a fleet-wide stream is filtered rather than
+  // treated as one application changing, which is both wasted work and a card that
+  // flickers on activity it has nothing to do with.
   useEffect(() => {
     if (portfolioId === null) return;
     let timer: ReturnType<typeof setTimeout> | null = null;
     const onInvalidate = (e: Event) => {
-      const detail = (e as CustomEvent<{ scope?: string }>).detail;
+      const detail = (e as CustomEvent<{ scope?: string; applicationId?: unknown }>).detail;
       if (detail?.scope !== 'gitops') return;
+      // The announcement's application id is the canonical store id, which is the
+      // same string the projection reports, so the comparison is exact. An
+      // announcement without one is not filtered: it cannot be attributed, and
+      // dropping it would risk missing a change to this very application.
+      if (applicationId !== null && typeof detail?.applicationId === 'string'
+        && detail.applicationId !== applicationId) return;
       if (timer) clearTimeout(timer);
       timer = setTimeout(() => {
         timer = null;
@@ -138,7 +158,7 @@ export function useGitOpsApplicationPosture(portfolioId: string | null): GitOpsA
       window.removeEventListener('sencho:state-invalidate', onInvalidate);
       if (timer) clearTimeout(timer);
     };
-  }, [fetchPosture, portfolioId]);
+  }, [fetchPosture, portfolioId, applicationId]);
 
   // Derived during render rather than stored, so a null id and an unanswered
   // question are both a value the caller can read without a state write. A

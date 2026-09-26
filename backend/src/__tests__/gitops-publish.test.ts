@@ -31,6 +31,7 @@ import {
   decodeGitOpsEventPayload,
   decodeSettledAttemptPayload,
   encodeSettledAttemptPayload,
+  SETTLED_ATTEMPT_PAYLOAD_VERSION,
 } from '../services/gitops/attemptPayload';
 import {
   GITOPS_NOTIFICATION_META,
@@ -823,6 +824,55 @@ describe('GitOps notifications agree with the canonical posture', () => {
       'SELECT COUNT(*) AS n FROM notification_history WHERE dedupe_key = ?',
     ).get(settledNotificationDedupeKey(historyId)) as { n: number };
     expect(any.n).toBe(0);
+  });
+
+  it('drains a pre-upgrade unproven row without notifying it', () => {
+    // Boot repair drains rows an earlier process inserted. A build that predates
+    // the suppression can leave an unproven row behind, and the repair must reach
+    // the same conclusion the current insert would, rather than announcing a
+    // failed pull the insert would refuse to write.
+    const historyId = writeHistory('op-stale-unproven', 'source_reconcile_settled', 'committed', {
+      after: { outcome: 'unknown', nextAction: 'none', reason: 'Reconcile in flight.' },
+    });
+    if (!historyId) throw new Error('expected settled history insert');
+    const outbox = db().prepare(
+      'SELECT settled_history_id, payload_json, payload_version, created_at, updated_at, drained_at FROM gitops_settled_outbox WHERE settled_history_id = ?',
+    ).get(historyId) as { drained_at: number | null } | undefined;
+    // Simulate the row an older build would have written, which the current
+    // insert no longer writes.
+    if (outbox === undefined) {
+      db().prepare(
+        `INSERT INTO gitops_settled_outbox (settled_history_id, payload_json, payload_version, created_at, updated_at, drained_at)
+         VALUES (?, ?, ?, 4242, 4242, NULL)`,
+      ).run(historyId, encodeSettledAttemptPayload({
+        version: SETTLED_ATTEMPT_PAYLOAD_VERSION,
+        settledHistoryId: historyId,
+        applicationId: 'app-op-stale-unproven',
+        operationId: 'op-stale-unproven',
+        stackName: 'stack-op-stale-unproven',
+        nodeId: 3,
+        outcome: 'unknown',
+        nextAction: 'none',
+        reason: 'Reconcile in flight.',
+        trigger: 'manual',
+        actor: 'operator-1',
+        at: 4242,
+      }), SETTLED_ATTEMPT_PAYLOAD_VERSION);
+    }
+
+    resetGitOpsPublicationsForTests();
+    repairGitOpsOutbox();
+
+    const any = db().prepare(
+      'SELECT COUNT(*) AS n FROM notification_history WHERE dedupe_key = ?',
+    ).get(settledNotificationDedupeKey(historyId)) as { n: number };
+    expect(any.n).toBe(0);
+
+    // Drained, not left behind: the row is consumed and the silence is recorded.
+    const drained = db().prepare(
+      'SELECT drained_at FROM gitops_settled_outbox WHERE settled_history_id = ?',
+    ).get(historyId) as { drained_at: number | null };
+    expect(drained.drained_at).not.toBeNull();
   });
 
   it('still reports a genuinely failed attempt as a failure', () => {

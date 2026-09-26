@@ -138,6 +138,54 @@ describe('useGitOpsApplicationPosture', () => {
     expect(apiFetch).toHaveBeenCalledTimes(2);
   });
 
+  it('ignores an announcement for a different application', async () => {
+    // The stream is fleet-wide. Treating every GitOps event as this application
+    // changing is both wasted work and a card that flickers on activity it has
+    // nothing to do with, so the announcement's own application is matched.
+    vi.useFakeTimers();
+    vi.mocked(apiFetch).mockResolvedValue(res({ application: portfolioRow() }));
+    renderHook(() => useGitOpsApplicationPosture('1:app-1', 'app-1'));
+    await vi.waitFor(() => expect(apiFetch).toHaveBeenCalledTimes(1));
+
+    await act(async () => {
+      window.dispatchEvent(new CustomEvent('sencho:state-invalidate', {
+        detail: { scope: 'gitops', applicationId: 'app-somewhere-else', nodeId: 9 },
+      }));
+      await vi.advanceTimersByTimeAsync(300);
+    });
+    expect(apiFetch).toHaveBeenCalledTimes(1);
+  });
+
+  it('refetches for an announcement about its own application', async () => {
+    vi.useFakeTimers();
+    vi.mocked(apiFetch).mockResolvedValue(res({ application: portfolioRow() }));
+    renderHook(() => useGitOpsApplicationPosture('1:app-1', 'app-1'));
+    await vi.waitFor(() => expect(apiFetch).toHaveBeenCalledTimes(1));
+
+    await act(async () => {
+      window.dispatchEvent(new CustomEvent('sencho:state-invalidate', {
+        detail: { scope: 'gitops', applicationId: 'app-1', nodeId: 1 },
+      }));
+      await vi.advanceTimersByTimeAsync(300);
+    });
+    expect(apiFetch).toHaveBeenCalledTimes(2);
+  });
+
+  it('refetches for an announcement that names no application, rather than risk missing one', async () => {
+    // It cannot be attributed, so dropping it could miss a change to this very
+    // application. One wasted read is the cheaper mistake.
+    vi.useFakeTimers();
+    vi.mocked(apiFetch).mockResolvedValue(res({ application: portfolioRow() }));
+    renderHook(() => useGitOpsApplicationPosture('1:app-1', 'app-1'));
+    await vi.waitFor(() => expect(apiFetch).toHaveBeenCalledTimes(1));
+
+    await act(async () => {
+      window.dispatchEvent(new CustomEvent('sencho:state-invalidate', { detail: { scope: 'gitops' } }));
+      await vi.advanceTimersByTimeAsync(300);
+    });
+    expect(apiFetch).toHaveBeenCalledTimes(2);
+  });
+
   it('ignores announcements for another scope', async () => {
     vi.useFakeTimers();
     vi.mocked(apiFetch).mockResolvedValue(res({ application: portfolioRow() }));

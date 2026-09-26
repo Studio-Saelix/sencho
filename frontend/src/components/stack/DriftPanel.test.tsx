@@ -8,8 +8,13 @@ import { render, screen, fireEvent, waitFor, within } from '@testing-library/rea
 
 vi.mock('@/lib/api', () => ({ apiFetch: vi.fn() }));
 vi.mock('@/components/ui/toast-store', () => ({ toast: { success: vi.fn(), error: vi.fn() } }));
+/**
+ * The active node is held in a module-level box so a test can switch it and
+ * re-render, which is what a node change looks like to this tab.
+ */
+const activeNodeBox: { id: number } = { id: 1 };
 vi.mock('@/context/NodeContext', () => ({
-  useNodes: () => ({ activeNode: { id: 1 }, nodes: [{ id: 1, name: 'local' }, { id: 2, name: 'edge-02' }] }),
+  useNodes: () => ({ activeNode: { id: activeNodeBox.id }, nodes: [{ id: 1, name: 'local' }, { id: 2, name: 'edge-02' }] }),
 }));
 
 import { apiFetch } from '@/lib/api';
@@ -82,6 +87,7 @@ function mockFailedDriftRead(options: { portfolio?: { application: unknown; ok?:
 
 beforeEach(() => {
   vi.clearAllMocks();
+  activeNodeBox.id = 1;
 });
 
 describe('DriftPanel', () => {
@@ -526,8 +532,9 @@ describe('DriftPanel shows the canonical posture', () => {
       report({ status: 'in-sync', gitopsRevision: healthyRevision() }),
       { portfolio: { application: row } },
     );
-    render(<DriftPanel stackName="web" />);
-    return screen.findByTestId('gitops-posture');
+    const view = render(<DriftPanel stackName="web" />);
+    const card = await screen.findByTestId('gitops-posture');
+    return { card, view };
   };
 
   it.each([
@@ -538,7 +545,7 @@ describe('DriftPanel shows the canonical posture', () => {
     ['in_progress', 'in progress'],
     ['unknown', 'unknown'],
   ] as const)('reports the %s posture the portfolio computed', async (posture, label) => {
-    const card = await renderWith(portfolioRow({ posture }));
+    const { card } = await renderWith(portfolioRow({ posture }));
     expect(card).toHaveAttribute('data-posture', posture);
     expect(card).toHaveTextContent(label);
   });
@@ -546,7 +553,7 @@ describe('DriftPanel shows the canonical posture', () => {
   it('says converged only when the evidence behind it is current', async () => {
     // The one combination that may read as settled: every target reached, and
     // its evidence recorded against the generation now intended.
-    const card = await renderWith(portfolioRow({
+    const { card } = await renderWith(portfolioRow({
       posture: 'converged',
       targets: [portfolioTarget({ evidence: 'fresh' })],
       evidence: { partial: false, unreachableNodes: [], unknown: false },
@@ -557,7 +564,7 @@ describe('DriftPanel shows the canonical posture', () => {
   });
 
   it('never reads as settled while a target holds stale evidence', async () => {
-    const card = await renderWith(portfolioRow({
+    const { card } = await renderWith(portfolioRow({
       posture: 'unknown',
       attention: ['target_stale'],
       targets: [portfolioTarget({ evidence: 'stale' })],
@@ -570,7 +577,7 @@ describe('DriftPanel shows the canonical posture', () => {
   });
 
   it('never reads as settled while a target is unknown', async () => {
-    const card = await renderWith(portfolioRow({
+    const { card } = await renderWith(portfolioRow({
       posture: 'unknown',
       targets: [portfolioTarget({ evidence: 'unknown' })],
     }));
@@ -581,7 +588,7 @@ describe('DriftPanel shows the canonical posture', () => {
   });
 
   it('names a target the portfolio could not reach', async () => {
-    const card = await renderWith(portfolioRow({
+    const { card } = await renderWith(portfolioRow({
       posture: 'attention',
       attention: ['target_unreachable'],
       evidence: { partial: true, unreachableNodes: [7], unknown: false },
@@ -595,7 +602,7 @@ describe('DriftPanel shows the canonical posture', () => {
     // The health verdict is current and complete; it simply says the workload
     // is failing. Fresh evidence plus a failed posture is the case where the
     // posture, not the evidence quality, is the reason not to call it settled.
-    const card = await renderWith(portfolioRow({
+    const { card } = await renderWith(portfolioRow({
       posture: 'failed',
       attention: ['health_failed'],
       healthStatus: 'failed',
@@ -701,13 +708,66 @@ describe('DriftPanel shows the canonical posture', () => {
     // against a newer backend, which can report a posture value this build has
     // never seen. The sibling application view defends against that; the tab
     // must too, because a throw here takes the whole tab down.
-    const card = await renderWith({
+    const { card } = await renderWith({
       ...portfolioRow(),
       posture: 'settled_by_a_newer_build',
     } as unknown as ReturnType<typeof portfolioRow>);
     expect(card).toHaveAttribute('data-posture', 'settled_by_a_newer_build');
     expect(card).toHaveTextContent('unknown');
     expect(card).toHaveTextContent('does not know');
+  });
+
+  it('gives the two easily-confused postures different glyphs', async () => {
+    // Work in flight and cannot-prove are the pair most easily read as one state
+    // from a distance, and they must not look alike on the one surface an operator
+    // opens to find out which it is.
+    const { view } = await renderWith(portfolioRow({ posture: 'in_progress' }));
+    const inProgressSvg = screen.getByTestId('gitops-posture').querySelector('svg')?.outerHTML ?? '';
+    view.unmount();
+
+    await renderWith(portfolioRow({ posture: 'unknown' }));
+    const unknownSvg = screen.getByTestId('gitops-posture').querySelector('svg')?.outerHTML ?? '';
+    expect(inProgressSvg).not.toBe('');
+    expect(unknownSvg).not.toBe('');
+    expect(inProgressSvg).not.toBe(unknownSvg);
+  });
+
+  it('drops the previous node report rather than pairing it with the new node', async () => {
+    // On a node change the old report is still in state for the length of the new
+    // request. Keeping it composes the new node with the previous node's
+    // application, which probes an identity that cannot exist.
+    let served = 0;
+    vi.mocked(apiFetch).mockImplementation(async (path: string) => {
+      if (String(path).startsWith('/gitops/applications')) {
+        return jsonRes({ application: portfolioRow({ posture: 'converged' }) });
+      }
+      served += 1;
+      return jsonRes(report({
+        status: 'in-sync',
+        gitopsRevision: liveRevision({
+          targetMode: 'direct',
+          lifecycleStatus: 'active',
+          applicationId: served === 1 ? 'app-node-1' : 'app-node-2',
+          blueprintId: null,
+          facets: facets({ source: plainSource('application_generation_accepted') }),
+        }),
+      }));
+    });
+
+    const { rerender } = render(<DriftPanel stackName="web" />);
+    await screen.findByTestId('drift-status');
+    const postureCalls = () => vi.mocked(apiFetch).mock.calls
+      .filter(([path]) => String(path).startsWith('/gitops/applications'))
+      .map(([path]) => String(path));
+    await waitFor(() => expect(postureCalls()).toContain('/gitops/applications/1%3Aapp-node-1'));
+
+    activeNodeBox.id = 2;
+    rerender(<DriftPanel stackName="web" />);
+    await waitFor(() => expect(postureCalls()).toContain('/gitops/applications/2%3Aapp-node-2'));
+
+    // The mismatched pairing is never sent, because the stale report is dropped
+    // before the new one lands.
+    expect(postureCalls()).not.toContain('/gitops/applications/2%3Aapp-node-1');
   });
 
   it('shows the age of the evidence behind each drift item', async () => {    mockDriftReads(
