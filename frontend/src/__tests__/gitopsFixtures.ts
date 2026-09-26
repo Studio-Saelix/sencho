@@ -16,6 +16,7 @@ import type {
   SourceFacet,
   SourceIdentityFields,
 } from '@/types/gitops';
+import type { GitOpsPortfolioRow, GitOpsPortfolioTargetSummary } from '@/types/gitopsPortfolio';
 
 /**
  * The candidate-bearing source statuses, which are the ones this slice renders.
@@ -201,3 +202,65 @@ export const missingApplicationLimitation: GitOpsLimitation = {
   message: 'The application row backing this stack could not be read, so its GitOps state cannot be reported.',
   evidence: { applicationId: 'app-1' },
 };
+
+/**
+ * One row of the hub-owned portfolio, which is where the canonical posture
+ * lives.
+ *
+ * Separate from `liveRevision` because the two answer different questions and
+ * the distinction is the point: a revision is one node's own view, while this
+ * row is the settled or unsettled answer computed across every node holding a
+ * target. A test that builds only one of them cannot tell whether a surface
+ * read the canonical posture or re-derived its own.
+ */
+export function portfolioRow(overrides: Partial<GitOpsPortfolioRow> = {}): GitOpsPortfolioRow {
+  return {
+    id: '1:app-1',
+    targetMode: 'direct',
+    name: 'bookstack',
+    stackName: 'bookstack',
+    blueprintId: null,
+    nodeId: 1,
+    nodeName: 'local',
+    repository: {
+      configuredRepoUrl: 'https://github.com/example/repo.git',
+      host: 'github.com',
+      pathname: '/example/repo.git',
+      configuredRef: 'main',
+    },
+    desiredCommitSha: 'abc123',
+    fetchedCommitSha: 'abc123',
+    candidateGenerationId: null,
+    acceptedGenerationId: 'gen-1',
+    sourceStatus: 'application_generation_accepted',
+    artifactStatus: 'artifact_exact',
+    artifactQualification: 'exact',
+    placementStatus: 'unbound_direct',
+    rolloutStatus: 'not_applicable',
+    runtimeStatus: 'synced_and_healthy',
+    healthStatus: 'passed',
+    targets: [portfolioTarget()],
+    drift: { count: 0, classes: [] },
+    attention: [],
+    posture: 'converged',
+    availableActions: [],
+    limitations: [],
+    lastActivityAt: 1,
+    evidence: { partial: false, unreachableNodes: [], unknown: false },
+    ...overrides,
+  };
+}
+
+export function portfolioTarget(overrides: Partial<GitOpsPortfolioTargetSummary> = {}): GitOpsPortfolioTargetSummary {
+  return {
+    nodeId: 1,
+    nodeName: 'local',
+    stackName: 'bookstack',
+    runtime: 'synced_and_healthy',
+    health: 'passed',
+    connectivity: 'reachable',
+    tombstoned: false,
+    evidence: 'fresh',
+    ...overrides,
+  };
+}

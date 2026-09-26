@@ -234,7 +234,7 @@ export function insertHistory(db: Database.Database, row: HistoryInsert): string
     row.redactedReasonClass ?? null,
   );
   if (result.changes !== 1) return null;
-  const outboxPlan = gitOpsOutboxPlan(row.stage, row.application.target_mode);
+  const outboxPlan = gitOpsOutboxPlan(row.stage, row.application.target_mode, row.after);
   if (outboxPlan?.kind === 'settled') {
     insertSettledOutbox(db, {
       version: SETTLED_ATTEMPT_PAYLOAD_VERSION,
@@ -269,6 +269,11 @@ export function insertHistory(db: Database.Database, row: HistoryInsert): string
     id,
     stage: row.stage,
     outcome: row.outcome,
+    // Carried so the drain can re-derive the same outbox decision the insert
+    // made. Without it the drain would fall back to the stage alone, and a
+    // stage whose notification depends on what the transition recorded would
+    // insert a row nothing drains.
+    after: row.after,
     applicationId: row.application.id,
     targetMode: row.application.target_mode,
     stackName: row.application.stack_name,

@@ -36,7 +36,13 @@ import {
   GITOPS_NOTIFICATION_META,
   gitOpsPauseReason,
 } from '../services/gitops/notifications';
-import type { GitOpsApplicationRow } from '../services/gitops/types';
+import { isReconcileOutcome } from '../services/gitops/outcomes';
+import { GitOpsTransitions, type EventEnvelope } from '../services/gitops/transitions';
+import { projectApplication } from '../services/gitops/derive';
+import { postureOf } from '../services/gitops/portfolioAggregator';
+import { attentionReasons } from '../services/gitops/attention';
+import type { GitOpsApplicationRow, GitOpsGenerationRow } from '../services/gitops/types';
+import type { HistoryOutcome } from '../services/gitops/history';
 
 /**
  * The real module, with the enqueue entry point wrapped in a spy.
@@ -55,17 +61,57 @@ vi.mock('../services/gitops/publish', async (importOriginal) => {
 /** Let the publisher's own scheduling run. */
 const settle = (): Promise<void> => new Promise((resolve) => { setImmediate(resolve); });
 
+const testDb = () => DatabaseService.getInstance().getDb();
+
+/**
+ * One history row through the real insert path, which is where the outbox
+ * decision is made. Module scope rather than per-describe because the
+ * notification suites below need it too, and a second copy of the insert
+ * helper would be a second thing that can drift from the real shape.
+ */
+const writeHistory = (
+  operationId: string,
+  stage: Parameters<typeof insertHistory>[1]['stage'],
+  outcome: Parameters<typeof insertHistory>[1]['outcome'] = 'committed',
+  overrides: Partial<Parameters<typeof insertHistory>[1]> = {},
+): string | null => insertHistory(testDb(), {
+  application: directApplicationFixture(`app-${operationId}`, `stack-${operationId}`),
+  nodeId: 3,
+  dedupeTarget: 'app',
+  operationId,
+  stage,
+  outcome,
+  trigger: 'manual',
+  actor: 'operator-1',
+  before: {},
+  after: {},
+  at: 4242,
+  ...overrides,
+});
+
+/**
+ * One database for the whole file.
+ *
+ * `setupTestDb` re-points `process.env.DATA_DIR` at a fresh temp dir and then
+ * writes through the already-constructed `DatabaseService` singleton, so
+ * calling it a second time aims at a directory the singleton is not holding.
+ * Hoisted here so the notification suites below share the same store the
+ * transition announcements already wrote to.
+ */
+let fileTmpDir: string;
+
+beforeAll(async () => {
+  fileTmpDir = await setupTestDb();
+  GitOpsStore.resetForTests();
+  GitOpsTransitions.resetForTests();
+});
+
+afterAll(() => {
+  cleanupTestDb(fileTmpDir);
+});
+
 describe('gitops transition announcements', () => {
-  let tmpDir: string;
   let events: GitOpsInvalidateEvent[];
-
-  beforeAll(async () => {
-    tmpDir = await setupTestDb();
-  });
-
-  afterAll(() => {
-    cleanupTestDb(tmpDir);
-  });
 
   afterEach(() => {
     resetGitOpsPublicationsForTests();
@@ -80,25 +126,7 @@ describe('gitops transition announcements', () => {
 
   const db = () => DatabaseService.getInstance().getDb();
 
-  const write = (
-    operationId: string,
-    stage: Parameters<typeof insertHistory>[1]['stage'],
-    outcome: Parameters<typeof insertHistory>[1]['outcome'] = 'committed',
-    overrides: Partial<Parameters<typeof insertHistory>[1]> = {},
-  ): string | null => insertHistory(db(), {
-    application: directApplicationFixture(`app-${operationId}`, `stack-${operationId}`),
-    nodeId: 3,
-    dedupeTarget: 'app',
-    operationId,
-    stage,
-    outcome,
-    trigger: 'manual',
-    actor: 'operator-1',
-    before: {},
-    after: {},
-    at: 4242,
-    ...overrides,
-  });
+  const write = writeHistory;
 
   it('announces one event and one count per inserted row', async () => {
     listen();
@@ -568,6 +596,275 @@ describe('gitops transition announcements', () => {
   });
 });
 
+/**
+ * A notification must not contradict the posture the portfolio reports for the
+ * same application.
+ *
+ * These drive the real transition chain, because the contradiction the posture
+ * slice exists to prevent is only reachable through a transition that genuinely
+ * commits. Asserting the mapping in isolation would pass with the transition
+ * writing a different `after` record, which is the wiring that had never
+ * existed.
+ */
+describe('GitOps notifications agree with the canonical posture', () => {
+  afterEach(() => {
+    resetGitOpsPublicationsForTests();
+    GitOpsMetricsService.resetForTests();
+  });
+
+  const db = () => DatabaseService.getInstance().getDb();
+
+  const healthEnvelope = (operationId: string): EventEnvelope => ({
+    operationId, actor: 'tester', trigger: 'manual', at: 4242,
+  });
+
+  /**
+   * A deployed, accepted application whose health gate can therefore be given a
+   * verdict, which is the precondition for a recorded verdict at all.
+   */
+  const seedDeployed = (applicationId: string, stackName: string, generationId: string): void => {
+    const store = GitOpsStore.getInstance();
+    const tx = GitOpsTransitions.getInstance();
+    tx.activateDirect({ application: directApplicationFixture(applicationId, stackName), nodeId: 1, envelope: healthEnvelope(`op-act-${applicationId}`) });
+    store.insertGeneration(healthGen(generationId, applicationId));
+    tx.fetchStarted(applicationId, healthEnvelope(`op-f-${applicationId}`));
+    tx.fetched(applicationId, 'abc123', healthEnvelope(`op-f-${applicationId}`));
+    tx.candidateReady(applicationId, generationId, false, healthEnvelope(`op-c-${applicationId}`));
+    tx.applied({
+      applicationId,
+      generationId,
+      artifactSetId: `art-${applicationId}`,
+      sourceAcceptanceId: `acc-${applicationId}`,
+      authority: 'operator',
+      envelope: healthEnvelope(`op-a-${applicationId}`),
+    });
+    tx.deployStarted(applicationId, 1, generationId, healthEnvelope(`op-d-${applicationId}`));
+    tx.deployBound(applicationId, 1, generationId, healthEnvelope(`op-d-${applicationId}`));
+  };
+
+  const notesFor = (operationId: string): Array<{ category: string; level: string; message: string }> =>
+    db().prepare(
+      'SELECT category, level, message FROM notification_history WHERE gitops_operation_id = ? ORDER BY timestamp ASC, id ASC',
+    ).all(operationId) as Array<{ category: string; level: string; message: string }>;
+
+  it('fires for a recorded health failure, and the portfolio reports that same failure', async () => {
+    seedDeployed('app-health-fail', 'health-fail-web', 'gen-health-fail');
+    GitOpsTransitions.getInstance().healthFinalized({
+      applicationId: 'app-health-fail',
+      nodeId: 1,
+      healthRunId: 'run-fail',
+      healthStatus: 'failed',
+      deployedGenerationId: 'gen-health-fail',
+      targetScope: 'stack',
+      envelope: healthEnvelope('op-health-fail'),
+    });
+    await settle();
+    resetGitOpsPublicationsForTests();
+    repairGitOpsOutbox();
+
+    const notes = notesFor('op-health-fail');
+    expect(notes).toHaveLength(1);
+    expect(notes[0].category).toBe('gitops_health_failed');
+    expect(notes[0].level).toBe('error');
+    expect(notes[0].message).toContain('health check failed');
+
+    // The same failure the notification reports is the failure the projection
+    // reports, so the two surfaces cannot be read as disagreeing.
+    const projection = projectApplication('app-health-fail', false);
+    expect(attentionReasons(projection)).toContain('health_failed');
+    expect(postureOf(projection)).toBe('failed');
+  });
+
+  it('stays silent for a passed verdict, which is the ordinary case', async () => {
+    seedDeployed('app-health-pass', 'health-pass-web', 'gen-health-pass');
+    GitOpsTransitions.getInstance().healthFinalized({
+      applicationId: 'app-health-pass',
+      nodeId: 1,
+      healthRunId: 'run-pass',
+      healthStatus: 'passed',
+      deployedGenerationId: 'gen-health-pass',
+      targetScope: 'stack',
+      envelope: healthEnvelope('op-health-pass'),
+    });
+    await settle();
+    resetGitOpsPublicationsForTests();
+    repairGitOpsOutbox();
+
+    // A health check runs on every update. Notifying each pass would bury the
+    // one failure that matters.
+    expect(notesFor('op-health-pass')).toEqual([]);
+  });
+
+  it('stays silent for an unknown verdict, which the gate records for benign conditions', async () => {
+    seedDeployed('app-health-unknown', 'health-unknown-web', 'gen-health-unknown');
+    GitOpsTransitions.getInstance().healthFinalized({
+      applicationId: 'app-health-unknown',
+      nodeId: 1,
+      healthRunId: 'run-unknown',
+      healthStatus: 'unknown',
+      deployedGenerationId: 'gen-health-unknown',
+      targetScope: 'stack',
+      envelope: healthEnvelope('op-health-unknown'),
+    });
+    await settle();
+    resetGitOpsPublicationsForTests();
+    repairGitOpsOutbox();
+
+    // `unknown` is what the gate records while a healthcheck is still starting
+    // or a newer operation supersedes the run. The portfolio reports that as
+    // in-progress, never as a failure, so a notification here would put the
+    // bell and the portfolio in contradiction.
+    expect(notesFor('op-health-unknown')).toEqual([]);
+  });
+
+  it('stays silent for a verdict that cannot be attributed to the running stack', async () => {
+    seedDeployed('app-health-stale', 'health-stale-web', 'gen-health-stale');
+    // A verdict about a generation the target is not running proves nothing,
+    // and the transition records it as `unknown` rather than `failed`.
+    GitOpsTransitions.getInstance().healthFinalized({
+      applicationId: 'app-health-stale',
+      nodeId: 1,
+      healthRunId: 'run-stale',
+      healthStatus: 'failed',
+      deployedGenerationId: 'gen-not-deployed',
+      targetScope: 'stack',
+      envelope: healthEnvelope('op-health-stale'),
+    });
+    await settle();
+    resetGitOpsPublicationsForTests();
+    repairGitOpsOutbox();
+
+    expect(notesFor('op-health-stale')).toEqual([]);
+    const projection = projectApplication('app-health-stale', false);
+    expect(attentionReasons(projection)).not.toContain('health_failed');
+  });
+
+  it('stays silent for a failure on the outgoing generation mid-rollout', async () => {
+    // A newer generation is desired while the previous one is still deployed. The
+    // verdict is a real observation and is recorded, but the projection judges it
+    // against the desired generation and reports the target as work in progress.
+    // Notifying here would put "health check failed" in the bell for an
+    // application the portfolio calls unsettled for a different reason.
+    const store = GitOpsStore.getInstance();
+    const tx = GitOpsTransitions.getInstance();
+    seedDeployed('app-health-rollout', 'health-rollout-web', 'gen-health-rollout');
+    store.insertGeneration(healthGen('gen-health-next', 'app-health-rollout'));
+    tx.fetchStarted('app-health-rollout', healthEnvelope('op-hr-fetch'));
+    tx.fetched('app-health-rollout', 'def456', healthEnvelope('op-hr-fetch'));
+    tx.candidateReady('app-health-rollout', 'gen-health-next', false, healthEnvelope('op-hr-cand'));
+    tx.applied({
+      applicationId: 'app-health-rollout',
+      generationId: 'gen-health-next',
+      artifactSetId: 'art-health-next',
+      sourceAcceptanceId: 'acc-health-next',
+      authority: 'operator',
+      envelope: healthEnvelope('op-hr-apply'),
+    });
+    // The transport ack binds the new generation as desired, but the target is
+    // still running the previous one: the divergence the projection judges against.
+    const before = store.getTarget('app-health-rollout', 1);
+    expect(before?.desired_generation_id).toBe('gen-health-next');
+    expect(before?.deployed_generation_id).toBe('gen-health-rollout');
+
+    tx.healthFinalized({
+      applicationId: 'app-health-rollout',
+      nodeId: 1,
+      healthRunId: 'run-old',
+      healthStatus: 'failed',
+      deployedGenerationId: 'gen-health-rollout',
+      targetScope: 'stack',
+      envelope: healthEnvelope('op-health-rollout'),
+    });
+    await settle();
+    resetGitOpsPublicationsForTests();
+    repairGitOpsOutbox();
+
+    expect(notesFor('op-health-rollout')).toEqual([]);
+
+    // The projection's answer is the one the notification has to match.
+    const projection = projectApplication('app-health-rollout', false);
+    expect(attentionReasons(projection)).not.toContain('health_failed');
+    expect(projection.targets[0]?.health.status).toBe('pending');
+  });
+
+  it('reports an unproven settled attempt as unproven, not as a pull failure', () => {
+    // `unknown` is what the reconcile vocabulary returns for a run still in
+    // flight, a source never reconciled, and an application no longer live. The
+    // portfolio shows all of those as in-progress or unknown, so routing them
+    // into a failed-pull category at error level was a surface contradicting it.
+    const historyId = writeHistory('op-unproven', 'source_reconcile_settled', 'committed', {
+      after: {
+        outcome: 'unknown',
+        nextAction: 'none',
+        reason: 'A reconcile operation is currently in flight; no settled result yet.',
+      },
+    });
+    if (!historyId) throw new Error('expected settled history insert');
+    resetGitOpsPublicationsForTests();
+    repairGitOpsOutbox();
+
+    const note = db().prepare(
+      'SELECT category, level, message FROM notification_history WHERE dedupe_key = ?',
+    ).get(settledNotificationDedupeKey(historyId)) as { category: string; level: string; message: string };
+    expect(note.category).toBe('git_pull_unproven');
+    expect(note.level).toBe('info');
+    expect(note.message).toContain('settled without proving a result');
+    expect(note.message).not.toContain('GitOps unknown for');
+  });
+
+  it('still reports a genuinely failed attempt as a failure', () => {
+    const historyId = writeHistory('op-genuinely-failed', 'source_reconcile_settled', 'committed', {
+      after: {
+        outcome: 'failed_previous_intact',
+        nextAction: 'retry',
+        reason: 'The fetch stage failed (transient).',
+      },
+    });
+    if (!historyId) throw new Error('expected settled history insert');
+    resetGitOpsPublicationsForTests();
+    repairGitOpsOutbox();
+
+    const note = db().prepare(
+      'SELECT category, level FROM notification_history WHERE dedupe_key = ?',
+    ).get(settledNotificationDedupeKey(historyId)) as { category: string; level: string };
+    expect(note.category).toBe('git_pull_failed');
+    expect(note.level).toBe('error');
+  });
+});
+
+function healthGen(id: string, applicationId: string): GitOpsGenerationRow {
+  return {
+    id,
+    application_id: applicationId,
+    commit_sha: 'abc123',
+    repo_url: 'https://github.com/example/repo.git',
+    resolved_ref_kind: 'branch',
+    configured_ref: 'main',
+    repo_identity_json: '{"host":"github.com","pathname":"/example/repo.git"}',
+    manifest_version: 0,
+    candidate_dir: `generations/candidate-${id}`,
+    applied_dir: `generations/applied-${id}-0`,
+    expected_invocation_json: '{"composeFileOrder":[],"projectName":null,"projectDirectory":null,"envFileOrder":[]}',
+    materialization_fingerprint: 'a'.repeat(64),
+    validation_ok: 1,
+    plan_blocked: 0,
+    change_plan_fingerprint: null,
+    operation_id: `op-${id}`,
+    trigger: 'manual',
+    actor: 'tester',
+    previous_generation_id: null,
+    redacted_limitations_json: '[]',
+    portable_manifest_json: null,
+    compose_inputs_json: null,
+    source_policy_evidence_json: null,
+    security_policy_evidence_json: null,
+    support_requirements_json: null,
+    compatibility_requirements_json: null,
+    secret_capability_json: null,
+    created_at: 1,
+  };
+}
+
 describe('GitOps notification mapping', () => {
   it('maps every notifiable stage to its exact category, level, and phrase', () => {
     expect(GITOPS_NOTIFICATION_META).toEqual({
@@ -581,6 +878,7 @@ describe('GitOps notification mapping', () => {
       rollback_completed: { category: 'gitops_rollback_completed', level: 'info', phrase: 'rollback completed' },
       rollback_partial_failed: { category: 'gitops_rollback_partial_failed', level: 'error', phrase: 'rollback partially failed' },
       blueprint_state_review: { category: 'gitops_stateful_confirmation', level: 'warning', phrase: 'stateful deploy awaiting confirmation' },
+      health_finalized: { category: 'gitops_health_failed', level: 'error', phrase: 'health check failed' },
     });
   });
 
@@ -652,5 +950,59 @@ describe('GitOpsMetricsService', () => {
 
     const [entry] = metrics.snapshot();
     expect(Object.keys(entry).sort()).toEqual(['count', 'outcome', 'stage']);
+  });
+
+  /**
+   * The metrics surface cannot contradict the portfolio, because it has no
+   * vocabulary for a claim about an application.
+   *
+   * This is the whole reason no count from here can be read as "up to date" and
+   * disagree with a posture the portfolio reports as unsettled. It is a
+   * structural guarantee rather than a behaviour, so it is pinned from both
+   * sides: the outcome union carries no settled member, and two applications'
+   * transitions land in the same bucket because nothing in the key separates
+   * them.
+   */
+  describe('the application-identity-free keyspace', () => {
+    /**
+     * Every member of `HistoryOutcome`, restated here as a compile-time
+     * tripwire. The `Exclude` is the assertion that matters: a seventh value
+     * added to the history CHECK set leaves this list incomplete and fails the
+     * build, which is what a reviewer needs to see before a settled word can
+     * reach a counter. The `satisfies` alone would not, because it only checks
+     * that the listed values are allowed.
+     */
+    const EVERY_HISTORY_OUTCOME = [
+      'committed', 'failed', 'skipped', 'superseded', 'recovered', 'unknown',
+    ] as const satisfies readonly HistoryOutcome[];
+    type OutcomeNotListed = Exclude<HistoryOutcome, (typeof EVERY_HISTORY_OUTCOME)[number]>;
+    const _noUnlistedOutcome: OutcomeNotListed extends never ? true : never = true;
+    void _noUnlistedOutcome;
+
+    it('admits no outcome that names a settled application', () => {
+      // `outcomes.ts` has a `converged` member, and the portfolio has both
+      // `converged` and `converged_qualified` postures. Neither can reach a
+      // counter: `converged` is a `ReconcileOutcome`, a different union from
+      // the one `record` takes, and the postures never leave the aggregator.
+      const settledVocabulary = ['converged', 'converged_qualified', 'qualified', 'settled', 'up_to_date'];
+      for (const member of EVERY_HISTORY_OUTCOME) {
+        expect(settledVocabulary).not.toContain(member);
+      }
+      // The reconcile union really does hold the word, so the check above is
+      // excluding a live value rather than passing on a vocabulary that never
+      // had one.
+      expect(isReconcileOutcome('converged')).toBe(true);
+    });
+
+    it('aggregates two applications into one bucket, so no bucket is an application', () => {
+      const metrics = GitOpsMetricsService.getInstance();
+      metrics.record('health_finalized', 'failed');
+      metrics.record('health_finalized', 'failed');
+
+      // Two recorded health failures. Nothing here says how many applications
+      // that is, and a reader that wanted the number has to ask the portfolio,
+      // which is the only surface that can answer it.
+      expect(metrics.snapshot()).toEqual([{ stage: 'health_finalized', outcome: 'failed', count: 2 }]);
+    });
   });
 });
