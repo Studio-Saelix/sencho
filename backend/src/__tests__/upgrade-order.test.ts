@@ -256,14 +256,11 @@ describe('WebSocket upgrade dispatch order', () => {
 
     it('marks a restricted api_token as a scope refusal', async () => {
       const { DatabaseService } = await import('../services/DatabaseService');
-      const rawToken = generateApiToken();
-      DatabaseService.getInstance().addApiToken({
-        token_hash: crypto.createHash('sha256').update(rawToken).digest('hex'),
-        name: `mesh-reject-marker-${Date.now()}`,
+      const rawToken = createTestApiToken({
+        db: DatabaseService,
         scope: 'read-only',
-        user_id: DatabaseService.getInstance().getUserByUsername(TEST_USERNAME)!.id,
-        created_at: Date.now(),
-        expires_at: null,
+        userId: DatabaseService.getInstance().getUserByUsername(TEST_USERNAME)!.id,
+        name: `mesh-reject-marker-${Date.now()}`,
       });
       const out = await rejectHeader(connect('/api/mesh/proxy-tunnel', { bearer: rawToken }));
       expect(out).toEqual({ status: 403, reason: 'scope' });

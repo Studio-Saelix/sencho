@@ -572,13 +572,27 @@ function headerValue(headers: UpgradeFailure['httpHeaders'], name: string): stri
     return Array.isArray(v) ? v[0] : v;
 }
 
-/** True when the response carries markers of Cloudflare's edge or Access. */
+/**
+ * True when the response carries markers of Cloudflare's edge or Access.
+ *
+ * The Location check parses the redirect target and compares its host,
+ * rather than looking for the Access domain anywhere in the string. A
+ * redirect whose query or path merely mentions that domain is not an Access
+ * login, and treating it as one would send the operator after a gateway that
+ * is not in the path.
+ */
 function looksLikeCloudflare(headers: UpgradeFailure['httpHeaders']): boolean {
     const server = headerValue(headers, 'server')?.toLowerCase() ?? '';
-    const location = headerValue(headers, 'location')?.toLowerCase() ?? '';
-    return server.includes('cloudflare')
-        || headerValue(headers, 'cf-ray') !== undefined
-        || location.includes('cloudflareaccess.com');
+    if (server.includes('cloudflare')) return true;
+    if (headerValue(headers, 'cf-ray') !== undefined) return true;
+    const location = headerValue(headers, 'location');
+    if (!location) return false;
+    try {
+        const host = new URL(location).hostname.toLowerCase();
+        return host === 'cloudflareaccess.com' || host.endsWith('.cloudflareaccess.com');
+    } catch {
+        return false;
+    }
 }
 
 export function classifyDialError(err: unknown): { code: DialFailureCode; message: string } {

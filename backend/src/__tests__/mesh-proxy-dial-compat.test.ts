@@ -76,6 +76,25 @@ describe('classifyDialError', () => {
         const out = classifyDialError(upgradeFailure(302, { location: 'https://team.cloudflareaccess.com/login' }));
         expect(out.message).toMatch(/Cloudflare Access/);
     });
+
+    it.each([
+        // The Access host itself.
+        'https://team.cloudflareaccess.com/cdn-cgi/access/login',
+        'https://cloudflareaccess.com/login',
+    ])('treats a redirect to %s as Access', (location) => {
+        expect(classifyDialError(upgradeFailure(302, { location })).message).toMatch(/Cloudflare Access/);
+    });
+
+    it.each([
+        // A redirect that merely mentions the Access domain is not Access.
+        'https://evil.example.com/login?next=cloudflareaccess.com',
+        'https://team.cloudflareaccess.com.evil.example/login',
+        'not a url at all cloudflareaccess.com',
+    ])('does not treat %s as Access', (location) => {
+        const out = classifyDialError(upgradeFailure(302, { location }));
+        expect(out.message).not.toMatch(/Cloudflare Access/);
+        expect(out.code).toBe('blocked_by_proxy');
+    });
 });
 
 describe('loadMeshProxyDialConfig', () => {
