@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { render, screen, fireEvent } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 import { useState, type ReactNode } from 'react';
 import { MobileStackDetail } from './MobileStackDetail';
 import type { EditorViewProps } from './EditorView';
@@ -72,6 +73,7 @@ function makeProps(over: Partial<EditorViewProps> = {}): EditorViewProps {
         closeComposeEditor: vi.fn(),
         requestSave: vi.fn(),
         requestSaveAndDeploy: vi.fn(),
+        requestSaveAndPullImages: vi.fn(),
         actionsReady: true,
         discardChanges: vi.fn(),
         setContent: vi.fn(),
@@ -310,6 +312,40 @@ describe('MobileStackDetail mobile editing', () => {
         fireEvent.change(editor, { target: { value: 'late-edit' } });
         expect(setEnvContent).not.toHaveBeenCalled();
         expect(setContent).not.toHaveBeenCalled();
+    });
+});
+
+// The pull action lives behind a chevron attached to Save & Deploy rather than
+// as a third button in the footer row, so the primary label never truncates.
+describe('MobileStackDetail image pull affordance', () => {
+    it('offers Save & Pull Images behind the chevron when the user holds both permissions', async () => {
+        const requestSaveAndPullImages = vi.fn();
+        render(
+            <MobileStackDetail {...makeProps({ editingCompose: true, requestSaveAndPullImages })} />,
+        );
+        expect(screen.getByTestId('mobile-editor-save-deploy')).toHaveTextContent('Save & Deploy');
+        await userEvent.click(screen.getByTestId('mobile-editor-actions-menu'));
+        const item = await screen.findByText('Save & Pull Images');
+        await userEvent.click(item);
+        expect(requestSaveAndPullImages).toHaveBeenCalledTimes(1);
+    });
+
+    it('hides the chevron for an edit-only user while Save & Deploy stays available', () => {
+        render(
+            <MobileStackDetail
+                {...makeProps({
+                    editingCompose: true,
+                    can: (action) => action === 'stack:edit',
+                })}
+            />,
+        );
+        expect(screen.queryByTestId('mobile-editor-actions-menu')).not.toBeInTheDocument();
+        expect(screen.getByTestId('mobile-editor-save-deploy')).toBeInTheDocument();
+    });
+
+    it('hides the chevron on the self stack, whose images update through their own channel', () => {
+        render(<MobileStackDetail {...makeProps({ editingCompose: true, isSelfStack: true })} />);
+        expect(screen.queryByTestId('mobile-editor-actions-menu')).not.toBeInTheDocument();
     });
 });
 

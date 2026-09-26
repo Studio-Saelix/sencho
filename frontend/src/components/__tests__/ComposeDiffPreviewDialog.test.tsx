@@ -24,6 +24,13 @@ describe('resolveComposeDiffActionLabel', () => {
   it('returns Save & reapply when self-stack reapply is eligible', () => {
     expect(resolveComposeDiffActionLabel('save-and-deploy', true)).toBe('Save & reapply');
   });
+
+  it('returns Save & pull images for the pull mode', () => {
+    expect(resolveComposeDiffActionLabel('save-and-pull-images', false)).toBe('Save & pull images');
+    // A pull never reconciles the running stack, so self-stack reapply
+    // eligibility must not relabel it.
+    expect(resolveComposeDiffActionLabel('save-and-pull-images', true)).toBe('Save & pull images');
+  });
 });
 
 describe('ComposeDiffPreviewDialog', () => {

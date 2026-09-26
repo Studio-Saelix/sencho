@@ -293,6 +293,16 @@ export function ShellOverlays({
               }
               const saved = await stackActions.saveFile();
               if (saved) await stackActions.deployStack();
+            } else if (snapshot?.mode === 'save-and-pull-images') {
+              // Same readiness contract as Save & Deploy: this writes the file
+              // first, so it must not proceed while status evidence is not
+              // authoritative.
+              if (!hydrationReady()) {
+                toast.error('Status data unavailable. Refresh and try again.');
+                return;
+              }
+              const saved = await stackActions.saveFile();
+              if (saved) await stackActions.pullStackImages();
             } else {
               // Plain Save is never gated by status readiness.
               await stackActions.saveFile();

@@ -139,7 +139,15 @@ const parseFailureClassification = (value: unknown): FailureClassification | und
   return undefined;
 };
 
-type StackOpAction = 'deploy' | 'down' | 'restart' | 'stop' | 'start' | 'update' | 'delete';
+type StackOpAction =
+  | 'deploy'
+  | 'down'
+  | 'restart'
+  | 'stop'
+  | 'start'
+  | 'update'
+  | 'delete'
+  | 'image_pull';
 
 interface StackOpInProgressInfo {
   action: StackOpAction;
@@ -147,6 +155,14 @@ interface StackOpInProgressInfo {
   user: string;
 }
 
+// Covers the lock service's action set (backend/src/services/
+// StackOpLockService.ts) except rollback, backup, and git_apply. Those three fail the
+// membership check in `parseStackOpInProgress`, so their 409s fall through to
+// `parseStackActionError`, which prefers the backend's own body `error`: a complete
+// sentence carrying neither the "(started by ...)" suffix nor the trailing period that
+// `stackOpInProgressMessage` adds. The union is hand-maintained, so a new backend action
+// is not a compile error here; it degrades to the backend sentence rather than failing to
+// build.
 const STACK_OP_PRESENT_PARTICIPLE: Record<StackOpAction, string> = {
   deploy: 'deploying',
   down: 'taking down',
@@ -155,6 +171,7 @@ const STACK_OP_PRESENT_PARTICIPLE: Record<StackOpAction, string> = {
   start: 'starting',
   update: 'updating',
   delete: 'deleting',
+  image_pull: 'pulling images',
 };
 
 const VALID_STACK_OP_ACTIONS: ReadonlySet<string> = new Set(
@@ -387,6 +404,39 @@ const stackOpInProgressMessage = (stackName: string, info: StackOpInProgressInfo
   const verb = STACK_OP_PRESENT_PARTICIPLE[info.action] ?? 'busy';
   const actor = info.user && info.user !== 'system' ? ` (started by ${info.user})` : '';
   return `${stackName} is already ${verb}${actor}.`;
+};
+
+/**
+ * Success copy for an image pull. The route answers with its own message and the
+ * names of any services that build from source and are therefore skipped; the
+ * count and the list are derived here from those names, never from prose.
+ */
+const pullSuccessMessage = (body: unknown): string => {
+  const message = isRecord(body) && typeof body.message === 'string' ? body.message.trim() : '';
+  const skipped =
+    isRecord(body) && Array.isArray(body.skippedBuildBacked)
+      ? body.skippedBuildBacked.filter((name): name is string => typeof name === 'string')
+      : [];
+  if (skipped.length === 0) return message || 'Pulled registry images.';
+  const noun = skipped.length === 1 ? 'service' : 'services';
+  return `${message || 'Pulled registry images'}. Skipped ${skipped.length} build-backed ${noun}: ${skipped.join(', ')}.`;
+};
+
+/**
+ * A failed pull reports the whole compose output, layer progress included, which
+ * floods a toast. Keep the last few failure lines, which compose writes as
+ * `<service> Error ...` or `Error ...`, and count the rest; with none, keep the
+ * last line. The progress panel, when on, still streams the full output.
+ */
+const PULL_FAILURE_LINE = /^(\S+\s+)?error[\s:]/i;
+const MAX_PULL_FAILURE_LINES = 3;
+const summarizePullFailure = (detail: string): string => {
+  const lines = detail.split(/\r?\n/).map(line => line.trim()).filter(Boolean);
+  const failures = [...new Set(lines.filter(line => PULL_FAILURE_LINE.test(line)))];
+  if (failures.length === 0) return lines.at(-1) ?? detail;
+  const shown = failures.slice(-MAX_PULL_FAILURE_LINES).join('; ');
+  const hidden = failures.length - MAX_PULL_FAILURE_LINES;
+  return hidden > 0 ? `${shown} (+${hidden} more in the progress output)` : shown;
 };
 
 const parseStackActionError = (rawBody: string, fallback: string, status?: number): StackActionError => {
@@ -1283,6 +1333,23 @@ export function useStackActions(options: UseStackActionsOptions) {
     }
   };
 
+  const requestSaveAndPullImages = (e: React.MouseEvent) => {
+    const isCompose = editorState.activeTab === 'compose';
+    const orig = isCompose ? editorState.originalContent : editorState.originalEnvContent;
+    const curr = isCompose ? editorState.content : editorState.envContent;
+    if (diffPreviewEnabled && editorState.activeTab !== 'files' && curr !== orig) {
+      overlayState.setDiffPreview({
+        mode: 'save-and-pull-images',
+        language: isCompose ? 'yaml' : 'ini',
+        original: orig,
+        modified: curr,
+        fileName: isCompose ? 'compose.yaml' : editorState.selectedEnvFile || '.env',
+      });
+    } else {
+      void handleSaveAndPullImages(e);
+    }
+  };
+
   // Parse a 409 body for a scan-policy block. When it is one, record it (with
   // the originating action, file, and the node the operation targeted so the
   // bypass retries the right endpoint on the right node) so PolicyBlockDialog
@@ -1512,6 +1579,56 @@ export function useStackActions(options: UseStackActionsOptions) {
     }
   };
 
+  // Acquires registry images without reconciling the runtime. The running
+  // workload is untouched, so there is no optimistic status flip to undo, and
+  // the endpoint has no policy gate, so there is no policy-block branch. No
+  // activity record is written either: the `deploy_success` and
+  // `image_update_applied` records are the marker `UpdateGuardService` reads as
+  // "last successful apply", so emitting one from a pull would corrupt rollback
+  // readiness.
+  const runPullImages = async (
+    stackName: string,
+    started?: Promise<void>,
+    deploySessionId?: string,
+    opNodeId?: number | null,
+  ): Promise<RunResult> => {
+    try {
+      if (started) await started;
+      const response = await apiFetch(
+        `/stacks/${stackName}/pull-images`,
+        withDeploySession(deploySessionId ?? '', { method: 'POST', nodeId: opNodeId }),
+      );
+      if (!response.ok) {
+        const rawBody = await response.text();
+        if (isSelfStackProtectedResponse(rawBody, response.status)) {
+          overlayState.openSelfStackProtected();
+          return { ok: false, errorMessage: 'Sencho instance protected' };
+        }
+        if (response.status === 409) {
+          const inProgress = parseStackOpInProgress(rawBody);
+          if (inProgress) {
+            // The save half already reported success, so the bare in-progress
+            // sentence would leave this half's outcome unstated. Naming it also
+            // keeps the wording distinct from a Git pull, which means a fetch.
+            const message = `Image pull failed: ${stackOpInProgressMessage(stackName, inProgress)}`;
+            toast.error(message);
+            return { ok: false, errorMessage: message };
+          }
+        }
+        throw parseStackActionError(rawBody, 'The server rejected the request', response.status);
+      }
+      toast.success(pullSuccessMessage(await response.json().catch(() => null)));
+      return { ok: true };
+    } catch (error) {
+      console.error('Failed to pull images:', error);
+      const detail = summarizePullFailure((error as Error).message || 'no detail was returned');
+      // The save half already confirmed itself with its own toast, so this one
+      // reports only the half that failed and never re-states the save.
+      toast.error(`Image pull failed: ${detail}`);
+      return { ok: false, errorMessage: detail };
+    }
+  };
+
   const deployStack = async (e?: React.MouseEvent) => {
     e?.preventDefault();
     e?.stopPropagation();
@@ -1628,6 +1745,46 @@ export function useStackActions(options: UseStackActionsOptions) {
     await beginDeployAfterAdvisory();
   };
 
+  const pullStackImages = async (e?: React.MouseEvent) => {
+    e?.preventDefault();
+    e?.stopPropagation();
+    if (!hydrationReady()) return;
+    if (
+      !stackListState.selectedFile ||
+      stackListState.isStackBusy(stackListState.selectedFile) ||
+      deployPendingRef.current
+    )
+      return;
+
+    const stackFile = stackListState.selectedFile;
+    if (isSelfStackFile(stackFile)) {
+      overlayState.openSelfStackProtected();
+      return;
+    }
+
+    const stackName = stackFile.replace(/\.(yml|yaml)$/, '');
+    // Snapshot the node once so the log session and the POST stay bound to the
+    // same target even if the active node changes mid-flight.
+    const opNodeId = activeNode?.id ?? null;
+    deployPendingRef.current = true;
+    // Publish the pull like every sibling lifecycle action, so the surfaces that
+    // read the action map see an operation in flight rather than an idle stack.
+    // `isStackBusy` keys off map membership, so this is also what holds deploy
+    // and update off while the pull runs. Two refreshes are deliberately absent:
+    // the stack list, because a pull changes no runtime state, and the update
+    // badge, because a pull does not recompute the ImageUpdateService snapshot
+    // the badge reads; it catches up on that hook's own poll instead.
+    stackListState.setStackAction(stackFile, 'pull');
+    try {
+      await runWithLog({ stackName, action: 'pull', nodeId: opNodeId }, (started, ds) =>
+        runPullImages(stackName, started, ds, opNodeId),
+      );
+    } finally {
+      stackListState.clearStackAction(stackFile);
+      deployPendingRef.current = false;
+    }
+  };
+
   const handleSaveAndDeploy = async (e: React.MouseEvent) => {
     // Readiness is rechecked before the PUT so a readiness loss while the file
     // was being edited cannot slip a mutation through.
@@ -1635,6 +1792,13 @@ export function useStackActions(options: UseStackActionsOptions) {
     const saved = await saveFile();
     if (!saved) return;
     await deployStack(e);
+  };
+
+  const handleSaveAndPullImages = async (e: React.MouseEvent) => {
+    if (!hydrationReady()) return;
+    const saved = await saveFile();
+    if (!saved) return;
+    await pullStackImages(e);
   };
 
   // Admin "Deploy anyway": re-issue the blocked action with ?ignorePolicy=true.
@@ -2511,7 +2675,10 @@ export function useStackActions(options: UseStackActionsOptions) {
     saveFile,
     requestSave,
     requestSaveAndDeploy,
+    requestSaveAndPullImages,
     handleSaveAndDeploy,
+    handleSaveAndPullImages,
+    pullStackImages,
     rollbackStack,
     discardChanges,
     openComposeEditor,

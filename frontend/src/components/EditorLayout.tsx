@@ -847,6 +847,7 @@ export default function EditorLayout() {
       closeComposeEditor={stackActions.closeComposeEditor}
       requestSave={stackActions.requestSave}
       requestSaveAndDeploy={stackActions.requestSaveAndDeploy}
+      requestSaveAndPullImages={stackActions.requestSaveAndPullImages}
       discardChanges={stackActions.discardChanges}
       setContent={setContent}
       setEnvContent={setEnvContent}

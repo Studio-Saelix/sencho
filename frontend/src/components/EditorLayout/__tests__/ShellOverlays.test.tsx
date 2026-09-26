@@ -71,7 +71,11 @@ function makeOverlay(over: Partial<OverlayState> = {}): OverlayState {
   } as unknown as OverlayState;
 }
 
-function renderShell(overlay: OverlayState, stackActions: Partial<StackActionsHook>) {
+function renderShell(
+  overlay: OverlayState,
+  stackActions: Partial<StackActionsHook>,
+  over: { hydrationReady?: () => boolean } = {},
+) {
   return render(
     <ShellOverlays
       overlayState={overlay}
@@ -92,7 +96,7 @@ function renderShell(overlay: OverlayState, stackActions: Partial<StackActionsHo
       canOfferVolumeRemoval={false}
       deleteVolumePreservation="unknown"
       onOpenFleetNodeUpdates={() => {}}
-      hydrationReady={() => false}
+      hydrationReady={over.hydrationReady ?? (() => false)}
     />,
   );
 }
@@ -136,5 +140,54 @@ describe('ShellOverlays diff-preview confirmation', () => {
     fireEvent.click(screen.getByRole('button', { name: 'diff-confirm' }));
     expect(saveFile).not.toHaveBeenCalled();
     expect(deployStack).not.toHaveBeenCalled();
+  });
+
+  it('blocks Save & Pull Images through the diff preview while readiness is absent', async () => {
+    const saveFile = vi.fn().mockResolvedValue(true);
+    const pullStackImages = vi.fn();
+    renderShell(
+      makeOverlay({
+        diffPreview: {
+          fileName: 'compose.yml',
+          language: 'yaml',
+          original: 'a',
+          modified: 'b',
+          mode: 'save-and-pull-images',
+        },
+      }),
+      { saveFile, pullStackImages },
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'diff-confirm' }));
+    // This action writes the file first, so it inherits the Save & Deploy
+    // readiness contract rather than the unconditional plain-Save one.
+    expect(saveFile).not.toHaveBeenCalled();
+    expect(pullStackImages).not.toHaveBeenCalled();
+  });
+
+  it('saves before pulling when the diff preview is confirmed', async () => {
+    const order: string[] = [];
+    const saveFile = vi.fn().mockImplementation(async () => {
+      order.push('save');
+      return true;
+    });
+    const pullStackImages = vi.fn().mockImplementation(async () => {
+      order.push('pull');
+    });
+    renderShell(
+      makeOverlay({
+        diffPreview: {
+          fileName: 'compose.yml',
+          language: 'yaml',
+          original: 'a',
+          modified: 'b',
+          mode: 'save-and-pull-images',
+        },
+      }),
+      { saveFile, pullStackImages },
+      { hydrationReady: () => true },
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'diff-confirm' }));
+    await vi.waitFor(() => expect(pullStackImages).toHaveBeenCalledTimes(1));
+    expect(order).toEqual(['save', 'pull']);
   });
 });

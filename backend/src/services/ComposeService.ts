@@ -1722,6 +1722,56 @@ export class ComposeService {
   }
 
   /**
+   * Acquire registry-backed images for a stack without touching the runtime.
+   *
+   * Never builds, and never pulls a build-backed service: `--ignore-buildable`
+   * is added whenever build-backed services are known, so a service declaring
+   * `build:` is skipped rather than pulled or built, and its name is returned
+   * for the caller to report as skipped. A service declaring both `image:` and
+   * `build:` does have a fetchable image; skipping it is the deliberate choice,
+   * not a lack of one. That list comes from `loadStackBuildServices`, the same
+   * helper the update path uses: the rendered effective model when a Git deploy
+   * spec is applied and renders, the root compose file otherwise, which includes
+   * a Git-sourced stack whose effective render failed. This method opens no rollback
+   * generation, writes no deployment generation, and starts no health gate,
+   * because it does not reconcile the runtime and therefore has nothing to roll
+   * back to. The only state it changes is which images exist in the local Docker
+   * image store.
+   */
+  async pullStackImages(
+    stackName: string,
+    ws?: WebSocket,
+  ): Promise<{ skippedBuildBacked: string[] }> {
+    const stackDir = path.join(this.baseDir, stackName);
+    const sendOutput = (data: string) => {
+      if (ws && ws.readyState === WebSocket.OPEN) ws.send(data);
+    };
+
+    const skippedBuildBacked = await loadStackBuildServices(this.nodeId, stackName);
+    const hasBuildBacked = skippedBuildBacked.length > 0;
+
+    await this.withRegistryAuth(async (env) => {
+      if (hasBuildBacked) {
+        sendOutput(
+          `=== Skipping build-backed services: ${skippedBuildBacked.join(', ')} ===\n`,
+        );
+      }
+      // --ignore-buildable is what makes "skip, never build" true at the CLI
+      // level: a service declaring both `image:` and `build:` is skipped rather
+      // than pulled or built.
+      const action = hasBuildBacked ? ['pull', '--ignore-buildable'] : ['pull'];
+      sendOutput('=== Pulling registry images ===\n');
+      await this.execute(
+        'docker',
+        await this.authoredComposeArgs(stackName, action),
+        stackDir, ws, true, env, getComposeStallTimeoutMs(),
+      );
+    }, sendOutput);
+
+    return { skippedBuildBacked };
+  }
+
+  /**
    * Service-scoped update: pull (or `build --pull` for a build-backed service)
    * and recreate a single service's replicas in place. Always
    * `--no-deps --force-recreate`, never `--remove-orphans`, so sibling services
