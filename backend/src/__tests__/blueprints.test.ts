@@ -853,10 +853,12 @@ describe('BlueprintReconciler drift alert node wording', () => {
 
         await reconciler.handleDrift(bp, node, 'volumes diverged', 'revision');
 
+        // A declined repair is a hold, not a detection notice: it says the policy
+        // refused to act and leaves the deployment row in that state.
         expect(dispatchSpy).toHaveBeenCalledWith(
             'warning',
-            'blueprint_drift_detected',
-            'Blueprint "marker-local" lost its marker on this node; auto-fix declined to avoid stomping unowned data. Reason: volumes diverged',
+            'blueprint_drift_repair_held',
+            'Auto-fix for "marker-local" on this node was declined: this Blueprint lost its marker and is stateful, so auto-fix was declined to avoid stomping unowned data. Reason: volumes diverged',
             { stackName: 'marker-local', actor: 'system:blueprint' },
         );
     });

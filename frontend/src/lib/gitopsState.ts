@@ -478,6 +478,12 @@ export const RUNTIME_STATE: Record<GitOpsRuntimeStatus, GitOpsStateMeta> = {
     line: 'Sencho is correcting this node back to the intended state.',
     icon: RefreshCw,
   },
+  repair_held: {
+    label: 'repair held',
+    tone: 'warning',
+    line: 'Drift was found, but Sencho will not auto-fix this node: it has no restorable generation to restore, or the rollout that owned it has moved on.',
+    icon: ShieldAlert,
+  },
   health_checking: {
     label: 'health checking',
     tone: 'brand',

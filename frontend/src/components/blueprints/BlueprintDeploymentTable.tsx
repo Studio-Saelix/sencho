@@ -29,6 +29,7 @@ const STATUS_LABEL: Record<BlueprintDeploymentStatus, string> = {
     active: 'Active',
     drifted: 'Drifted',
     correcting: 'Correcting',
+    repair_held: 'Repair held',
     failed: 'Failed',
     withdrawing: 'Withdrawing',
     withdrawn: 'Withdrawn',
@@ -44,6 +45,7 @@ function statusDotClass(status: BlueprintDeploymentStatus): string {
         case 'failed':
         case 'name_conflict': return 'bg-destructive';
         case 'drifted':
+        case 'repair_held':
         case 'pending':
         case 'pending_state_review':
         case 'evict_blocked':

@@ -26,12 +26,18 @@ export type RuntimeRepairHoldReason =
   | 'evidence_incomplete'
   /** The target's rollout generation was superseded; the rollout that replaced it owns the target. */
   | 'rollout_superseded'
-  /** The target is not in the frozen required set of the rollout it is bound to. */
+  /** The node is not in the frozen required set of the rollout it is bound to. */
   | 'not_a_required_target'
   /** A named rollout generation or artifact set could not be read. */
   | 'authority_unreadable'
   /** The rollout generation and the target's acknowledged pointers disagree. */
-  | 'binding_incoherent';
+  | 'binding_incoherent'
+  /** The target is unreachable, or its connectivity evidence has gone stale. */
+  | 'target_evidence_stale'
+  /** A previous mutation on this target was interrupted, so its state is not known. */
+  | 'target_interrupted'
+  /** A recovery or rollback owns this target, and a repair would race it. */
+  | 'recovery_bound';
 
 export type RuntimeRepairBinding =
   | {
@@ -59,6 +65,24 @@ export function resolveRuntimeRepairBinding(
   target: GitOpsTargetCurrentRow | undefined,
 ): RuntimeRepairBinding {
   if (!target) return { kind: 'hold', reason: 'evidence_incomplete' };
+
+  // These arms come first because they say the target's own state is not
+  // trustworthy yet, which outranks any question about which generation to
+  // restore. A repair writes to the node, so it must not run against a target
+  // that is unreachable, mid-interruption, or owned by an unfinished recovery.
+  if (target.connectivity === 'unreachable' || target.connectivity === 'stale') {
+    return { kind: 'hold', reason: 'target_evidence_stale' };
+  }
+  if (target.interruption_stage !== null) {
+    return { kind: 'hold', reason: 'target_interrupted' };
+  }
+  if (
+    target.health_stop_reason === 'rollback_pending'
+    || target.partial_json !== null
+    || target.lkg_unavailable_at !== null
+  ) {
+    return { kind: 'hold', reason: 'recovery_bound' };
+  }
 
   const acceptedGenerationId = target.desired_generation_id;
   const artifactSetId = target.expected_artifact_set_id;
@@ -136,5 +160,11 @@ export function describeRuntimeRepairHold(reason: RuntimeRepairHoldReason): stri
       return 'the generation or artifact set this target acknowledged could not be read';
     case 'binding_incoherent':
       return 'the rollout and the target acknowledgements disagree, so neither can be trusted as current';
+    case 'target_evidence_stale':
+      return 'this node is unreachable or its connectivity evidence is stale, so Sencho cannot write to it safely';
+    case 'target_interrupted':
+      return 'an earlier change to this target was interrupted, so what is running is not known';
+    case 'recovery_bound':
+      return 'a recovery or rollback owns this target, so an auto-fix would race it';
   }
 }

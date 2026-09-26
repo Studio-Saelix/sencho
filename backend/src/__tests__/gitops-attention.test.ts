@@ -433,6 +433,7 @@ describe('attentionReasons', () => {
       'preflight_blocked',
       'recovery_failed',
       'recovery_required',
+      'repair_held',
       'rollback_failed',
       'rollout_authorization_pending',
       'rollout_authorization_stale',

@@ -11,6 +11,7 @@ export type BlueprintDeploymentStatus =
     | 'active'
     | 'drifted'
     | 'correcting'
+    | 'repair_held'
     | 'failed'
     | 'withdrawing'
     | 'withdrawn'
@@ -571,6 +572,7 @@ export function statusTone(status: BlueprintDeploymentStatus): 'success' | 'bran
         case 'pending_state_review':
         case 'evict_blocked':
         case 'drifted':
+        case 'repair_held':
         case 'withdrawing': return 'warning';
         case 'failed':
         case 'name_conflict': return 'destructive';

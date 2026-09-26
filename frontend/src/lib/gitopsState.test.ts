@@ -126,6 +126,7 @@ const RUNTIME_STATUSES: GitOpsRuntimeStatus[] = [
   'evict_blocked',
   'drifted',
   'correcting',
+  'repair_held',
   'fully_deployed_health_pending',
   'health_checking',
   'synced_and_healthy',

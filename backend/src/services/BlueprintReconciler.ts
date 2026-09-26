@@ -414,6 +414,16 @@ export class BlueprintReconciler {
                     return { ...base, status: 'ok' };
                 }
                 const reason = driftResult.reason;
+                // A workload whose data outlives the container is never
+                // auto-repaired, and a Blueprint Sencho cannot classify is in the
+                // same position because its volumes are unknown. Decided here,
+                // before the drift is committed, so a held target is not first
+                // written as drifted and then rewritten every tick.
+                const heldByClassification = await this.repairHeldByClassification(blueprint, node, reason);
+                if (heldByClassification) {
+                    this.recordRepairHold(blueprint, node, 'evidence_incomplete', heldByClassification);
+                    return { ...base, status: 'ok' };
+                }
                 commitBlueprintDeploymentCause('drift_observed', blueprint.id, node.id, {
                     status: 'drifted',
                     last_checked_at: Date.now(),
@@ -794,19 +804,14 @@ export class BlueprintReconciler {
                 return;
 
             case 'enforce': {
-                // Stateful safeguard: if the upcoming redeploy would destroy named volumes,
-                // downgrade to suggest semantics for this drift event.
-                if (blueprint.classification === 'stateful') {
-                    const marker = await BlueprintService.getInstance().readMarker(blueprint.name, node);
-                    if (!marker) {
-                        notifications.dispatchAlert(
-                            'warning',
-                            'blueprint_drift_detected',
-                            `Blueprint "${blueprint.name}" lost its marker ${nodeLocationClause(node)}; auto-fix declined to avoid stomping unowned data. Reason: ${reason}`,
-                            { stackName: blueprint.name, actor: 'system:blueprint' },
-                        );
-                        return;
-                    }
+                // The classification guard is repeated here, at the site that
+                // mutates, rather than trusted from the caller. Deciding it early
+                // keeps a held target from being written as drifted first; the
+                // decision itself belongs to whoever is about to write to a node.
+                const heldByClassification = await this.repairHeldByClassification(blueprint, node, reason);
+                if (heldByClassification) {
+                    this.recordRepairHold(blueprint, node, 'evidence_incomplete', heldByClassification);
+                    return;
                 }
                 commitBlueprintDeploymentCause('drift_enforce_start', blueprint.id, node.id, {
                     status: 'correcting',
@@ -875,6 +880,11 @@ export class BlueprintReconciler {
                 continue;
             }
             const reason = driftResult.reason;
+            const heldByClassification = await this.repairHeldByClassification(blueprint, node, reason);
+            if (heldByClassification) {
+                this.recordRepairHold(blueprint, node, 'evidence_incomplete', heldByClassification);
+                continue;
+            }
             commitBlueprintDeploymentCause('drift_observed', blueprint.id, node.id, {
                 status: 'drifted',
                 last_checked_at: Date.now(),
@@ -883,6 +893,33 @@ export class BlueprintReconciler {
             }, null);
             await this.handleDrift(blueprint, node, reason, driftResult.cause);
         }
+    }
+
+    /**
+     * Whether this Blueprint's classification forbids an automatic repair, and
+     * the operator-facing reason when it does.
+     *
+     * Restoring the approved generation on a stateless stack converges. Doing
+     * it on a stateful one can destroy or strand named volumes, and a Blueprint
+     * Sencho cannot classify is in the same position because its volumes are
+     * unknown. Both are held so a human or a rollout decides, rather than
+     * downgraded to a notification that leaves the drift in place.
+     *
+     * Returns null for a Blueprint that may be repaired, so the caller reads as
+     * a question rather than a flag.
+     */
+    private async repairHeldByClassification(
+        blueprint: Blueprint,
+        node: Node,
+        reason: string,
+    ): Promise<string | null> {
+        if (blueprint.classification !== 'stateful' && blueprint.classification !== 'unknown') {
+            return null;
+        }
+        const marker = await BlueprintService.getInstance().readMarker(blueprint.name, node);
+        return marker
+            ? `this Blueprint is ${blueprint.classification}, so auto-fix is declined to avoid touching data Sencho cannot prove is safe. Reason: ${reason}`
+            : `this Blueprint lost its marker and is ${blueprint.classification}, so auto-fix was declined to avoid stomping unowned data. Reason: ${reason}`;
     }
 
     /**
