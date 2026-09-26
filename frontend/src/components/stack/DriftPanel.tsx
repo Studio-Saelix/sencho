@@ -269,6 +269,13 @@ function postureLine(row: GitOpsPortfolioRow): string {
  */
 function portfolioIdFor(revision: GitOpsRevisionProjection | null, nodeId: number | undefined): string | null {
   if (!revision || revision.targetMode === 'not_applicable') return null;
+  // The portfolio lists live applications only, and its detail route answers 404
+  // for anything else. A detached stack still projects a Direct revision here,
+  // because the tab is useful for reading what a stack was, so without this the
+  // id would be built and the read would 404 into a warning about a state the
+  // portfolio does not even list. Silence is the honest answer: there is no
+  // current application to have a posture.
+  if (revision.lifecycleStatus !== 'active') return null;
   if (revision.blueprintId != null) return `bp:${revision.blueprintId}`;
   return nodeId === undefined ? null : `${nodeId}:${revision.applicationId}`;
 }

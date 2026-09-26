@@ -1023,40 +1023,14 @@ export class GitOpsTransitions {
           && args.targetScope === 'stack'
           && !!args.deployedGenerationId
           && target.deployed_generation_id === args.deployedGenerationId;
-        const recorded = attributable
-          && (args.healthStatus !== 'unknown' || target.last_health_status === null);
-        if (recorded) {
+        if (
+          attributable
+          && (args.healthStatus !== 'unknown' || target.last_health_status === null)
+        ) {
           target.last_health_status = args.healthStatus;
           target.last_health_generation_id = args.deployedGenerationId;
           target.last_health_run_id = args.healthRunId;
         }
-        /**
-         * The verdict this transition actually persisted, which is not always
-         * the one it was handed.
-         *
-         * A verdict that cannot be tied to the running stack is not recorded, and
-         * an `unknown` verdict over an existing one is discarded rather than
-         * written. The projection reads that recorded value, so a notification
-         * about a failure has to be raised from this field and not from the
-         * incoming `healthStatus`.
-         *
-         * A recorded failure is also not a *reported* failure while a newer
-         * generation is desired. The verdict is a real observation of the workload
-         * still running, so it is stored, but `deriveHealth` judges the recorded
-         * verdict against `desired_generation_id ?? deployed_generation_id`, and
-         * during a rollout those differ. The projection therefore reports the
-         * target as work in progress rather than failed, and a notification here
-         * would put "health check failed" in the bell for an application the
-         * portfolio calls unsettled for a different reason.
-         *
-         * Mirrors that predicate exactly: after the write the recorded generation
-         * is the deployed one, so the judgement is the same only when the desired
-         * generation is that same one.
-         */
-        const reportedFailure = recorded
-          && args.healthStatus === 'failed'
-          && (target.desired_generation_id === null || target.desired_generation_id === args.deployedGenerationId);
-        const recordedVerdict = reportedFailure ? 'failed' : null;
         const promotable = args.healthStatus === 'passed'
           && attributable;
         if (!promotable) {
@@ -1096,7 +1070,6 @@ export class GitOpsTransitions {
               promoted: false,
               demoted: demotes,
               healthStatus: args.healthStatus,
-              recordedVerdict,
             },
           };
         }
@@ -1123,11 +1096,6 @@ export class GitOpsTransitions {
             lkgGenerationId: generationId,
             lkgArtifactSetId: target.lkg_artifact_set_id,
             promoted: true,
-            // Recorded, because promotion only happens for an attributable
-            // `passed` verdict. Present so both arms of this transition carry
-            // the same fact, rather than leaving a reader to infer it. It is
-            // never `failed`, so the notification arm stays silent on purpose.
-            recordedVerdict: args.healthStatus,
           },
         };
       },

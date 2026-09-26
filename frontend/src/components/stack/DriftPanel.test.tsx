@@ -24,6 +24,7 @@ import {
   missingApplicationLimitation,
   plainSource,
   portfolioRow,
+  sourceIdentity,
   portfolioTarget,
   target,
 } from '@/__tests__/gitopsFixtures';
@@ -45,8 +46,8 @@ function report(partial: Partial<DriftReport>): DriftReport {
   return { stack: 'web', status: 'in-sync', hasComposeFile: true, hasContainers: true, findings: [], ...partial };
 }
 
-function jsonRes(body: unknown, ok = true) {
-  return { ok, status: ok ? 200 : 500, json: async () => body, text: async () => '' } as unknown as Response;
+function jsonRes(body: unknown, ok = true, status = ok ? 200 : 500) {
+  return { ok, status, json: async () => body, text: async () => '' } as unknown as Response;
 }
 
 /**
@@ -61,13 +62,14 @@ function jsonRes(body: unknown, ok = true) {
  */
 function mockDriftReads(
   drift: unknown,
-  options: { driftOk?: boolean; portfolio?: { application: unknown; ok?: boolean } } = {},
+  options: { driftOk?: boolean; portfolio?: { application: unknown; ok?: boolean; status?: number } } = {},
 ): void {
   vi.mocked(apiFetch).mockImplementation(async (path: string) => {
     // The posture read is the by-id detail route; the list query is not used
     // here, so anything under /gitops/applications is the posture read.
     if (String(path).startsWith('/gitops/applications')) {
-      return jsonRes({ application: options.portfolio?.application }, options.portfolio?.ok ?? true);
+      const ok = options.portfolio?.ok ?? true;
+      return jsonRes({ application: options.portfolio?.application }, ok, options.portfolio?.status ?? (ok ? 200 : 500));
     }
     return jsonRes(drift, options.driftOk ?? true);
   });
@@ -627,18 +629,64 @@ describe('DriftPanel shows the canonical posture', () => {
     expect(freshness).toHaveAttribute('data-evidence', 'unknown');
   });
 
-  it('says the posture is unreadable rather than showing nothing when the read fails', async () => {
+  it('says the posture is unreadable when the read was permitted and the server could not answer', async () => {
     // Reporting this as "no GitOps application" would let a clean-looking tab
-    // stand in for an answer Sencho could not give.
+    // stand in for an answer Sencho could not give, so a genuine fault still
+    // warns.
     mockDriftReads(
       report({ status: 'in-sync', gitopsRevision: healthyRevision() }),
-      { portfolio: { application: undefined, ok: false } },
+      { portfolio: { application: undefined, ok: false, status: 500 } },
     );
     render(<DriftPanel stackName="web" />);
     const card = await screen.findByTestId('gitops-posture');
     expect(card).toHaveAttribute('data-posture', 'unreadable');
     expect(card).toHaveTextContent('describe one node, not the application');
     expect(card).not.toHaveTextContent('converged');
+  });
+
+  it.each([
+    // The portfolio route answers 403 for a Blueprint the caller cannot read
+    // without the fleet-wide node grant, and 404 both for a missing application
+    // and for one outside the caller's grants. Neither status describes a fault
+    // in the state of the world, so neither earns a warning: warning about one
+    // would tell a stack-scoped operator that something is wrong with a stack they
+    // are fully entitled to read. The tab keeps the node-local view it always had
+    // and says nothing.
+    ['403', 403],
+    ['404', 404],
+  ])('shows no posture and no warning on a %s', async (_label, status) => {
+    mockDriftReads(
+      report({ status: 'in-sync', gitopsRevision: healthyRevision() }),
+      { portfolio: { application: undefined, ok: false, status } },
+    );
+    render(<DriftPanel stackName="web" />);
+    await screen.findByTestId('drift-status');
+    await waitFor(() => expect(screen.queryByTestId('gitops-posture')).not.toBeInTheDocument());
+    expect(screen.getByTestId('drift-status')).toBeInTheDocument();
+  });
+
+  it('never attempts the posture read for a detached stack', async () => {
+    // A detached Direct stack still projects a revision, because the tab is
+    // useful for reading what a stack was. The portfolio lists live applications
+    // only, so building an id here would 404 into a warning about an application
+    // the portfolio does not list.
+    mockDriftReads(report({
+      status: 'in-sync',
+      gitopsRevision: liveRevision({
+        targetMode: 'direct',
+        lifecycleStatus: 'detached',
+        applicationId: 'app-detached',
+        blueprintId: null,
+        // A detached application's source facet is `not_live`, which is the
+        // status the deriver projects for an application no longer live.
+        facets: facets({ source: { ...sourceIdentity(), status: 'not_live', lifecycleStatus: 'detached' } }),
+      }),
+    }));
+    render(<DriftPanel stackName="web" />);
+    await screen.findByTestId('drift-status');
+    await waitFor(() => expect(screen.queryByTestId('gitops-posture')).not.toBeInTheDocument());
+    const postureCalls = vi.mocked(apiFetch).mock.calls.filter(([path]) => String(path).startsWith('/gitops/applications'));
+    expect(postureCalls).toHaveLength(0);
   });
 
   it('shows no posture at all for a stack with no GitOps application', async () => {

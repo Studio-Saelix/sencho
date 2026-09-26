@@ -76,10 +76,10 @@ interface PendingRow {
   outcome: HistoryOutcome;
   /**
    * The transition's `after` record, carried so the drain reaches the same
-   * outbox decision the insert made. A stage whose notification depends on
-   * what the transition recorded cannot be decided from the stage alone, and
-   * the insert and drain disagreeing about whether a row exists is a
-   * notification that never fires.
+   * outbox decision the insert made. A stage whose notification depends on what
+   * the transition recorded cannot be decided from the stage alone, and the
+   * insert and drain disagreeing about whether a row exists is a notification
+   * that never fires.
    */
   after: Record<string, unknown>;
   applicationId: string;
