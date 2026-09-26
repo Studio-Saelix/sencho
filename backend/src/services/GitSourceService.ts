@@ -4046,7 +4046,8 @@ export class GitSourceService {
         // re-bound. healthFinalized() itself records health outcomes as
         // promotions of the healthy/LKG pointers and never writes the
         // target's failure columns, so the health evidence lives in the
-        // gate's own durable run rows, not on the target.
+        // gate's own durable run rows and in the target's last-verdict
+        // columns, not in its failure columns.
         if (target.candidate_generation_id === generationId && target.applied_generation_id !== generationId) {
             return { stage: 'promote', generationId };
         }

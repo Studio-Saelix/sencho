@@ -5,6 +5,8 @@ import { decodeObservedArtifactIdentity, encodeArtifactEvidenceJson } from '../s
 import { GitOpsStore, emptyTargetRow } from '../services/gitops/store';
 import { GitOpsTransitions, type EventEnvelope } from '../services/gitops/transitions';
 import { projectApplication } from '../services/gitops/derive';
+import { postureOf } from '../services/gitops/portfolioAggregator';
+import { attentionReasons } from '../services/gitops/attention';
 import type { GitOpsApplicationRow, GitOpsGenerationRow } from '../services/gitops/types';
 
 describe('gitops transitions', () => {
@@ -1057,6 +1059,337 @@ describe('gitops transitions', () => {
       envelope: env,
     })).toThrow(/not accepted/);
   });
+
+/**
+ * Settled posture from real transitions rather than a hand-built projection.
+ *
+ * Each case drives a Direct application through the whole chain (activate,
+ * fetch, accept, deploy, observe, health passed) and then asks `postureOf` what
+ * the portfolio would show. A healthy application used to read `unknown`
+ * here, because convergence required a `connectivity` value that no producer
+ * ever wrote, so these are the cases that keep the fail-closed rule honest in
+ * both directions: reachable evidence settles, and anything less withdraws
+ * the claim.
+ */
+describe('gitops derive to portfolio posture', () => {
+  function driveHealthyDirect(applicationId: string, stackName: string, generationId: string): void {
+    const store = GitOpsStore.getInstance();
+    const tx = GitOpsTransitions.getInstance();
+    tx.activateDirect({ application: app(applicationId, stackName), nodeId: 1, envelope: envelope(`op-act-${applicationId}`) });
+    store.insertGeneration(gen(generationId, applicationId));
+    tx.fetchStarted(applicationId, envelope(`op-f-${applicationId}`));
+    tx.fetched(applicationId, 'abc123', envelope(`op-f-${applicationId}`));
+    tx.candidateReady(applicationId, generationId, false, envelope(`op-c-${applicationId}`));
+    tx.applied({
+      applicationId,
+      generationId,
+      artifactSetId: `art-${applicationId}`,
+      sourceAcceptanceId: `acc-${applicationId}`,
+      authority: 'operator',
+      envelope: envelope(`op-a-${applicationId}`),
+    });
+    tx.recordArtifactEvidence({
+      applicationId,
+      generationId,
+      artifactSetId: `art-${applicationId}-exact`,
+      // `applied` already seeded version 1 as unresolved, so the exact
+      // resolution that follows is version 2.
+      evidenceVersion: 2,
+      qualification: 'exact',
+      evidenceJson: encodeArtifactEvidenceJson({ kind: 'exact', identity: 'sha256:expected' }),
+      authoritative: 0,
+      envelope: envelope(`op-ev-${applicationId}`),
+    });
+    tx.deployStarted(applicationId, 1, generationId, envelope(`op-d-${applicationId}`));
+    tx.deployBound(applicationId, 1, generationId, envelope(`op-d-${applicationId}`));
+    tx.recordObservedRuntimeArtifact({
+      applicationId,
+      nodeId: 1,
+      observed: { kind: 'exact', identity: 'sha256:expected', observedAt: 1_700_000_000_000 },
+      envelope: envelope(`op-o-${applicationId}`),
+    });
+    tx.healthFinalized({
+      applicationId,
+      nodeId: 1,
+      healthRunId: `run-${applicationId}`,
+      healthStatus: 'passed',
+      deployedGenerationId: generationId,
+      targetScope: 'stack',
+      envelope: envelope(`op-h-${applicationId}`),
+    });
+  }
+
+  it('reports a healthy Direct application observed on its own node as converged', () => {
+    driveHealthyDirect('app-posture-direct', 'posture-direct-web', 'gen-posture-direct');
+    const projection = projectApplication('app-posture-direct', false);
+    const [target] = projection.targets;
+    expect(target?.connectivity).toBe('reachable');
+    expect(target?.health.status).toBe('passed');
+    expect(target?.runtime.status).toBe('synced_and_healthy');
+    expect(postureOf(projection)).toBe('converged');
+  });
+
+  it('agrees with the hub-side settled proof on qualified evidence', () => {
+    const store = GitOpsStore.getInstance();
+    const tx = GitOpsTransitions.getInstance();
+    const applicationId = 'app-posture-qualified';
+    const generationId = 'gen-posture-qualified';
+    tx.activateDirect({ application: app(applicationId, 'posture-qualified-web'), nodeId: 1, envelope: envelope(`op-act-${applicationId}`) });
+    store.insertGeneration(gen(generationId, applicationId));
+    tx.fetchStarted(applicationId, envelope(`op-f-${applicationId}`));
+    tx.fetched(applicationId, 'abc123', envelope(`op-f-${applicationId}`));
+    tx.candidateReady(applicationId, generationId, false, envelope(`op-c-${applicationId}`));
+    tx.applied({
+      applicationId,
+      generationId,
+      artifactSetId: `art-${applicationId}`,
+      sourceAcceptanceId: `acc-${applicationId}`,
+      authority: 'operator',
+      envelope: envelope(`op-a-${applicationId}`),
+    });
+    // Qualified rather than exact: a digest-pinned qualification the runtime
+    // can still match. The settled proof compares qualifications and
+    // per-service digests separately from the exact case, so both are driven
+    // through real transitions here rather than asserted from a fixture.
+    tx.recordArtifactEvidence({
+      applicationId,
+      generationId,
+      artifactSetId: `art-${applicationId}-q`,
+      evidenceVersion: 2,
+      qualification: 'qualified',
+      evidenceJson: encodeArtifactEvidenceJson({ kind: 'qualified', identity: 'sha256:qualified' }),
+      authoritative: 0,
+      envelope: envelope(`op-ev-${applicationId}`),
+    });
+    tx.deployStarted(applicationId, 1, generationId, envelope(`op-d-${applicationId}`));
+    tx.deployBound(applicationId, 1, generationId, envelope(`op-d-${applicationId}`));
+    tx.recordObservedRuntimeArtifact({
+      applicationId,
+      nodeId: 1,
+      observed: { kind: 'qualified', identity: 'sha256:qualified', observedAt: 1_700_000_000_000 },
+      envelope: envelope(`op-o-${applicationId}`),
+    });
+    tx.healthFinalized({
+      applicationId,
+      nodeId: 1,
+      healthRunId: `run-${applicationId}`,
+      healthStatus: 'passed',
+      deployedGenerationId: generationId,
+      targetScope: 'stack',
+      envelope: envelope(`op-h-${applicationId}`),
+    });
+    const projection = projectApplication(applicationId, false);
+    if (projection.targetMode === 'not_applicable' || projection.facets === null) {
+      throw new Error('expected an application projection');
+    }
+    expect(projection.facets.artifact.status).toBe('artifact_qualified');
+    expect(projection.targets[0]?.connectivity).toBe('reachable');
+    // The hub re-verifies a settled claim before trusting it, and it checks
+    // qualifications and per-service digests separately from the exact case.
+    // Settling here proves that re-verification agrees with real derive output
+    // rather than inventing an unknown the two disagree about.
+    expect(postureOf(projection)).toBe('converged_qualified');
+  });
+
+  it('withdraws convergence when a later health verdict fails', () => {
+    const store = GitOpsStore.getInstance();
+    const tx = GitOpsTransitions.getInstance();
+    const applicationId = 'app-posture-healthfail';
+    const generationId = 'gen-posture-healthfail';
+    driveHealthyDirect(applicationId, 'posture-healthfail-web', generationId);
+    expect(postureOf(projectApplication(applicationId, false))).toBe('converged');
+
+    // The generation that passed is still deployed, and the new verdict is
+    // about that same generation, so the earlier pass no longer stands. A
+    // verdict that failed after a pass has to withdraw the settled claim, not
+    // leave the portfolio reporting a healthy application.
+    tx.healthFinalized({
+      applicationId,
+      nodeId: 1,
+      healthRunId: `run-${applicationId}-again`,
+      healthStatus: 'failed',
+      deployedGenerationId: generationId,
+      targetScope: 'stack',
+      envelope: envelope(`op-h2-${applicationId}`),
+    });
+
+    expect(store.getTarget(applicationId, 1)?.healthy_generation_id).toBeNull();
+    const projection = projectApplication(applicationId, false);
+    // The recorded verdict survives the withdrawn promotion, so the projection
+    // keeps saying the check failed rather than collapsing to "not checked".
+    // That is what makes the posture a failure an operator can act on instead
+    // of work in progress that never finishes.
+    expect(projection.targets[0]?.health.status).toBe('failed');
+    expect(postureOf(projection)).toBe('failed');
+    expect(attentionReasons(projection)).toContain('health_failed');
+  });
+
+  it('does not let a later unknown verdict erase a recorded failure', () => {
+    const store = GitOpsStore.getInstance();
+    const tx = GitOpsTransitions.getInstance();
+    const applicationId = 'app-posture-failthenunknown';
+    const generationId = 'gen-posture-failthenunknown';
+    driveHealthyDirect(applicationId, 'posture-failthenunknown-web', generationId);
+    tx.healthFinalized({
+      applicationId,
+      nodeId: 1,
+      healthRunId: `run-${applicationId}-fail`,
+      healthStatus: 'failed',
+      deployedGenerationId: generationId,
+      targetScope: 'stack',
+      envelope: envelope(`op-hf-${applicationId}`),
+    });
+    expect(postureOf(projectApplication(applicationId, false))).toBe('failed');
+
+    // A restart, or an update that supersedes the failing run, produces an
+    // unknown verdict for the same generation. That must not paper over the
+    // failure, or the application goes back to in progress for ever with
+    // nothing re-verifying it.
+    tx.healthFinalized({
+      applicationId,
+      nodeId: 1,
+      healthRunId: `run-${applicationId}-unknown`,
+      healthStatus: 'unknown',
+      deployedGenerationId: generationId,
+      targetScope: 'stack',
+      envelope: envelope(`op-hu-${applicationId}`),
+    });
+
+    expect(store.getTarget(applicationId, 1)?.last_health_status).toBe('failed');
+    const projection = projectApplication(applicationId, false);
+    expect(projection.targets[0]?.health.status).toBe('failed');
+    expect(postureOf(projection)).toBe('failed');
+  });
+
+  it('records a first unknown verdict so never-checked stays distinguishable', () => {
+    const store = GitOpsStore.getInstance();
+    const tx = GitOpsTransitions.getInstance();
+    const applicationId = 'app-posture-firstunknown';
+    const generationId = 'gen-posture-firstunknown';
+    driveHealthyDirect(applicationId, 'posture-firstunknown-web', generationId);
+    // A target deployed but never checked: the first verdict it receives is
+    // the unknown one.
+    const target = store.getTarget(applicationId, 1)!;
+    target.last_health_status = null;
+    target.last_health_generation_id = null;
+    target.last_health_run_id = null;
+    store.upsertTarget(target);
+
+    tx.healthFinalized({
+      applicationId,
+      nodeId: 1,
+      healthRunId: `run-${applicationId}-unknown`,
+      healthStatus: 'unknown',
+      deployedGenerationId: generationId,
+      targetScope: 'stack',
+      envelope: envelope(`op-hu2-${applicationId}`),
+    });
+    // Never checked is a real answer, so the first verdict is kept even when it
+    // is unknown. It simply does not read as a failure.
+    expect(store.getTarget(applicationId, 1)?.last_health_status).toBe('unknown');
+    expect(projectApplication(applicationId, false).targets[0]?.health.status).toBe('passed');
+  });
+
+  it('keeps the settled claim when the verdict is unknown rather than failed', () => {
+    const store = GitOpsStore.getInstance();
+    const tx = GitOpsTransitions.getInstance();
+    const applicationId = 'app-posture-healthunknown';
+    const generationId = 'gen-posture-healthunknown';
+    driveHealthyDirect(applicationId, 'posture-healthunknown-web', generationId);
+    expect(postureOf(projectApplication(applicationId, false))).toBe('converged');
+
+    // The gate records `unknown` for benign conditions: a healthcheck still
+    // starting when the window ended, no containers to observe, a newer
+    // operation superseding the run. It is re-armed against the already
+    // applied generation on every update, so withdrawing here would leave a
+    // healthy application unsettled with nothing re-verifying it.
+    tx.healthFinalized({
+      applicationId,
+      nodeId: 1,
+      healthRunId: `run-${applicationId}-unknown`,
+      healthStatus: 'unknown',
+      deployedGenerationId: generationId,
+      targetScope: 'stack',
+      envelope: envelope(`op-h4-${applicationId}`),
+    });
+
+    expect(store.getTarget(applicationId, 1)?.healthy_generation_id).toBe(generationId);
+    expect(postureOf(projectApplication(applicationId, false))).toBe('converged');
+  });
+
+  it('keeps the promotion when a verdict concerns some other generation', () => {
+    const store = GitOpsStore.getInstance();
+    const tx = GitOpsTransitions.getInstance();
+    const applicationId = 'app-posture-othergen';
+    const generationId = 'gen-posture-othergen';
+    driveHealthyDirect(applicationId, 'posture-othergen-web', generationId);
+    expect(postureOf(projectApplication(applicationId, false))).toBe('converged');
+
+    // A verdict recorded against a generation that is not the deployed one is
+    // not a statement about what is running, so it must not demote.
+    tx.healthFinalized({
+      applicationId,
+      nodeId: 1,
+      healthRunId: `run-${applicationId}-old`,
+      healthStatus: 'failed',
+      deployedGenerationId: 'gen-posture-othergen-superseded',
+      targetScope: 'stack',
+      envelope: envelope(`op-h3-${applicationId}`),
+    });
+
+    expect(store.getTarget(applicationId, 1)?.healthy_generation_id).toBe(generationId);
+    expect(postureOf(projectApplication(applicationId, false))).toBe('converged');
+  });
+
+  it('withdraws convergence once its observation is gone', () => {
+    const store = GitOpsStore.getInstance();
+    driveHealthyDirect('app-posture-fresh', 'posture-fresh-web', 'gen-posture-fresh');
+    expect(postureOf(projectApplication('app-posture-fresh', false))).toBe('converged');
+
+    // Only the evidence changes: the deployed and healthy pointers stay put,
+    // so a posture that still reads converged would be inferring health from
+    // silence.
+    const target = store.getTarget('app-posture-fresh', 1)!;
+    target.observed_artifact_identity_json = null;
+    store.upsertTarget(target);
+
+    const projection = projectApplication('app-posture-fresh', false);
+    expect(projection.targets[0]?.connectivity).toBe('unknown');
+    // The runtime facet reads the missing observation as verification still
+    // pending, so the posture is in progress rather than settled: the node has
+    // not been asked and nothing may be claimed on its behalf.
+    expect(projection.targets[0]?.runtime.status).toBe('artifact_verification_pending');
+    expect(postureOf(projection)).toBe('in_progress');
+  });
+
+  it('honors a stored negative connectivity claim verbatim', () => {
+    const store = GitOpsStore.getInstance();
+    const tx = GitOpsTransitions.getInstance();
+    driveHealthyDirect('app-posture-unreach', 'posture-unreach-web', 'gen-posture-unreach');
+    expect(postureOf(projectApplication('app-posture-unreach', false))).toBe('converged');
+
+    // A node that reports it could not observe its own workload did answer, so
+    // this is unknown evidence rather than an unreachable node.
+    tx.recordObservedRuntimeArtifact({
+      applicationId: 'app-posture-unreach',
+      nodeId: 1,
+      observed: { kind: 'unavailable' },
+      envelope: envelope('op-o-unavail'),
+    });
+    expect(projectApplication('app-posture-unreach', false).targets[0]?.connectivity).toBe('unknown');
+
+    const target = store.getTarget('app-posture-unreach', 1)!;
+    // No producer writes a negative value today, so this pins the contract
+    // rather than a reachable path: a stored negative claim is taken at its
+    // word and withholds the settled claim, which is the only safe direction
+    // for a value that cannot be earned.
+    target.connectivity = 'unreachable';
+    store.upsertTarget(target);
+    const projection = projectApplication('app-posture-unreach', false);
+    expect(projection.targets[0]?.connectivity).toBe('unreachable');
+    expect(postureOf(projection)).not.toBe('converged');
+  });
+});
 });
 
 function mustProject(applicationId: string) {

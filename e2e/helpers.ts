@@ -94,7 +94,7 @@ async function waitForLoginOutcome(page: Page, ready: () => Promise<void>): Prom
   // is attached immediately, so abandoning this promise when the challenge
   // wins the race cannot surface later as an unhandled rejection.
   let readyError: unknown;
-  const settled = ready().catch((err: unknown) => {
+  const settled = ready().then(() => 'ready' as const, (err: unknown) => {
     readyError = err;
     return 'failed' as const;
   });
@@ -109,8 +109,8 @@ async function waitForLoginOutcome(page: Page, ready: () => Promise<void>): Prom
   if (outcome === 'ready') return;
   if (outcome === 'challenge') throw new Error('mfa-challenge');
   // The challenge never appeared, so the outcome belongs to readiness. Await it
-  // rather than reading readyError now: both waits share the same 15s ceiling,
-  // so the challenge lookup can settle first and the error is not set yet.
+  // rather than reading readyError now: readiness can take longer than the
+  // challenge lookup's 15s, so its error may not be set yet.
   if ((await settled) === 'ready') return;
   throw readyError;
 }

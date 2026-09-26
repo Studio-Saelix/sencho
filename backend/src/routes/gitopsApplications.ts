@@ -61,6 +61,9 @@ import {
   isUsableRevision,
   POSTURE_RANK,
   rowFromProjection,
+  probeableRemoteNodeIds,
+  probeSilentNodeIds,
+  withSilentNodes,
 } from '../services/gitops/portfolioAggregator';
 import { filterRemoteIdentityPayload, rewriteIdentityPayload } from '../proxy/gitopsIdentityProxy';
 import { GitOpsStore } from '../services/gitops/store';
@@ -70,6 +73,7 @@ import type {
   GitOpsPortfolioFilters,
   GitOpsPortfolioResponse,
   GitOpsPortfolioRow,
+  GitOpsPortfolioTargetSummary,
 } from '../services/gitops/portfolioTypes';
 import type { GitOpsApplicationRow, GitOpsDriftItem } from '../services/gitops/types';
 
@@ -190,7 +194,12 @@ function parseFilters(query: Request['query']): ParseResult {
   };
 }
 
+function currentTargets(row: GitOpsPortfolioRow): GitOpsPortfolioTargetSummary[] {
+  return row.targets.filter(target => target.tombstoned === false);
+}
+
 function matchesFilters(row: GitOpsPortfolioRow, filters: GitOpsPortfolioFilters): boolean {
+  const targets = currentTargets(row);
   if (filters.attentionOnly && row.attention.length === 0) return false;
   if (filters.targetMode === 'direct' && row.targetMode !== 'direct') return false;
   if (filters.targetMode === 'blueprint' && row.targetMode !== 'blueprint' && row.targetMode !== 'inline_blueprint') return false;
@@ -198,7 +207,8 @@ function matchesFilters(row: GitOpsPortfolioRow, filters: GitOpsPortfolioFilters
   // Blueprint application belongs to every node its targets name, so filtering
   // by node never shrinks the fleet picture into per-node truth.
   if (filters.nodeId !== undefined) {
-    const involved = row.nodeId === filters.nodeId || row.targets.some(target => target.nodeId === filters.nodeId);
+    const involved = row.nodeId === filters.nodeId
+      || targets.some(target => target.nodeId === filters.nodeId);
     if (!involved) return false;
   }
   if (filters.blueprintId !== undefined && row.blueprintId !== filters.blueprintId) return false;
@@ -210,11 +220,11 @@ function matchesFilters(row: GitOpsPortfolioRow, filters: GitOpsPortfolioFilters
   if (filters.driftClass !== undefined && !row.drift.classes.includes(filters.driftClass)) return false;
   if (filters.evidence === 'unknown' && !row.evidence.unknown) return false;
   if (filters.evidence === 'stale'
-    && !row.targets.some(target => target.evidence === 'stale')
+    && !targets.some(target => target.evidence === 'stale')
     && !row.attention.includes('target_stale')) return false;
   if (filters.evidence === 'unreachable'
     && row.evidence.unreachableNodes.length === 0
-    && !row.targets.some(target => target.connectivity === 'unreachable')) return false;
+    && !targets.some(target => target.connectivity === 'unreachable')) return false;
   if (filters.q !== undefined) {
     const needle = filters.q.toLowerCase();
     const haystack = [
@@ -275,7 +285,7 @@ function summarize(rows: GitOpsPortfolioRow[]): GitOpsPortfolioResponse['summary
     if (row.attention.length > 0) {
       // Same involvement rule as the node filter, so a node's count matches
       // what the portfolio lists when filtered to that node.
-      const involved = new Set(row.targets.map(target => target.nodeId));
+      const involved = new Set(currentTargets(row).map(target => target.nodeId));
       if (row.nodeId !== null) involved.add(row.nodeId);
       for (const nodeId of involved) attentionByNode[nodeId] = (attentionByNode[nodeId] ?? 0) + 1;
     }
@@ -525,7 +535,28 @@ gitopsApplicationsRouter.get('/:id', async (req: Request, res: Response): Promis
         res.status(404).json({ error: 'Application not found' });
         return;
       }
-      const projection = projectApplication(application.id, healthGateDisabled());
+      // A Blueprint target is projected hub-side, and its recorded observation
+      // is a statement about the last time that node answered. Probing the
+      // remote target nodes here is what keeps this panel in step with the
+      // portfolio row: a node that has gone dark withdraws the settled claim in
+      // both places instead of leaving the row and its own detail in
+      // contradiction.
+      //
+      // Only nodes the portfolio also probes are asked, through the same shared
+      // set, so the two surfaces cannot answer differently about the hub itself
+      // or about a target whose node row is gone. The probe is bounded to this
+      // application's remote targets and runs concurrently, so it costs one
+      // round trip's worst case, bounded by the shared probe timeout, rather
+      // than a fleet sweep.
+      const rawProjection = projectApplication(application.id, healthGateDisabled());
+      const probeable = probeableRemoteNodeIds();
+      const silent = await probeSilentNodeIds(
+        rawProjection.targets
+          .filter(target => !target.tombstoned)
+          .map(target => target.nodeId)
+          .filter(nodeId => probeable.has(nodeId)),
+      );
+      const projection = withSilentNodes(rawProjection, silent);
       const blueprint = db.getBlueprint(application.blueprint_id);
       const lastActivityAt = latestTransitionByApplication(db.getDb(), [application.id]).get(application.id) ?? null;
       const response: GitOpsPortfolioDetailResponse = {

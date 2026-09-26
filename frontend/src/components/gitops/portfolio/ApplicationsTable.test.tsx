@@ -37,3 +37,26 @@ describe('ApplicationsTable rollout column', () => {
     expect(chip.className).toContain('text-brand');
   });
 });
+
+describe('ApplicationsTable target counts', () => {
+  it('counts current Blueprint targets without tombstoned history', () => {
+    const current = portfolioRow().targets[0];
+    if (!current) throw new Error('expected target fixture');
+    const row = portfolioRow({
+      targetMode: 'blueprint',
+      nodeId: null,
+      blueprintId: 3,
+      targets: [
+        current,
+        { ...current, nodeId: 2, tombstoned: true },
+      ],
+    });
+
+    render(
+      <ApplicationsTable rows={[row]} nextCursor={null} onPrevPage={() => {}} onNextPage={() => {}} pageLoaded={1} portfolioEmpty={false} onDrillDown={() => {}} />,
+    );
+
+    expect(screen.getByText('1 target')).toBeInTheDocument();
+    expect(screen.queryByText('2 targets')).toBeNull();
+  });
+});

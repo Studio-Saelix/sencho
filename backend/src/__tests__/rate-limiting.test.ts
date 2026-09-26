@@ -9,7 +9,7 @@
  * - Authenticated requests are keyed by user session, not IP
  *
  * These tests run against the real Express app with in-memory SQLite.
- * Rate limits in development mode are 10x production values (1000/3000/5000),
+ * Rate limits in development mode are well above production values (10000/3000/5000),
  * so we test header presence and tier separation rather than hitting ceilings.
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
@@ -106,16 +106,16 @@ describe('Tier 2: Standard endpoints', () => {
   it('standard endpoints return global-tier rate limit headers', async () => {
     const res = await request(app).get('/api/stacks');
     const limit = parseInt(res.headers['ratelimit-limit'], 10);
-    // Dev mode global limit is 1000 (production would be 200)
-    expect(limit).toBe(1000);
+    // Dev mode global limit is 10000 (production would be 200)
+    expect(limit).toBe(10000);
   });
 
   it('standard endpoints do NOT get polling-tier headers', async () => {
     const res = await request(app).get('/api/containers');
     const limit = parseInt(res.headers['ratelimit-limit'], 10);
-    // Should be 1000 (global), not 3000 (polling)
+    // Should be 10000 (global), not 3000 (polling)
     expect(limit).not.toBe(3000);
-    expect(limit).toBe(1000);
+    expect(limit).toBe(10000);
   });
 });
 
@@ -164,7 +164,7 @@ describe('Node proxy bypass', () => {
       .get('/api/stacks')
       .set('Authorization', `Bearer ${scopedToken('node_proxy', 'wrong-secret')}`);
 
-    expect(parseInt(res.headers['ratelimit-limit'], 10)).toBe(1000);
+    expect(parseInt(res.headers['ratelimit-limit'], 10)).toBe(10000);
     expect(res.status).toBe(401);
   });
 
@@ -179,7 +179,7 @@ describe('Node proxy bypass', () => {
     const standard = await request(app)
       .get('/api/stacks')
       .set('Authorization', `Bearer ${expired}`);
-    expect(parseInt(standard.headers['ratelimit-limit'], 10)).toBe(1000);
+    expect(parseInt(standard.headers['ratelimit-limit'], 10)).toBe(10000);
   });
 
   it('valid pilot_tunnel token remains rate-limited (not exempt)', async () => {
@@ -187,7 +187,7 @@ describe('Node proxy bypass', () => {
       .get('/api/stacks')
       .set('Authorization', `Bearer ${scopedToken('pilot_tunnel')}`);
 
-    expect(parseInt(res.headers['ratelimit-limit'], 10)).toBe(1000);
+    expect(parseInt(res.headers['ratelimit-limit'], 10)).toBe(10000);
   });
 
   it('requests with invalid Bearer token still get rate limited', async () => {
@@ -210,7 +210,7 @@ describe('Node proxy bypass', () => {
       .get('/api/stacks')
       .set('Authorization', `Bearer ${userToken}`);
 
-    expect(parseInt(res.headers['ratelimit-limit'], 10)).toBe(1000);
+    expect(parseInt(res.headers['ratelimit-limit'], 10)).toBe(10000);
   });
 });
 
@@ -234,9 +234,9 @@ describe('Hybrid key generator', () => {
     // Each should have its own budget. Floor is suite-aware: earlier cases in
     // this file (including forged/expired node_proxy requests keyed by IP)
     // already spent some of the anonymous bucket; independence still holds as
-    // long as both remain near the 1000 ceiling.
-    expect(remaining1).toBeGreaterThanOrEqual(980);
-    expect(remaining2).toBeGreaterThanOrEqual(980);
+    // long as both remain near the 10000 ceiling.
+    expect(remaining1).toBeGreaterThanOrEqual(9980);
+    expect(remaining2).toBeGreaterThanOrEqual(9980);
   });
 
   it('two different users get independent rate limit budgets', async () => {
@@ -260,8 +260,8 @@ describe('Hybrid key generator', () => {
     const remainB = parseInt(resB.headers['ratelimit-remaining'], 10);
 
     // Each user's budget should be near-full
-    expect(remainA).toBeGreaterThanOrEqual(990);
-    expect(remainB).toBeGreaterThanOrEqual(990);
+    expect(remainA).toBeGreaterThanOrEqual(9990);
+    expect(remainB).toBeGreaterThanOrEqual(9990);
   });
 });
 
@@ -305,7 +305,7 @@ describe('Tier separation under load', () => {
     const remaining = parseInt(stdRes.headers['ratelimit-remaining'], 10);
 
     // Should have lost very few from the standard budget (only from other tests)
-    expect(remaining).toBeGreaterThanOrEqual(980);
+    expect(remaining).toBeGreaterThanOrEqual(9980);
   });
 
   it('mixed polling and standard requests maintain independent counters', async () => {
@@ -331,7 +331,7 @@ describe('Tier separation under load', () => {
     // Check that standard results have global-tier headers
     for (let i = 1; i < results.length; i += 2) {
       const limit = parseInt(results[i].headers['ratelimit-limit'], 10);
-      expect(limit).toBe(1000);
+      expect(limit).toBe(10000);
     }
   });
 });

@@ -387,6 +387,14 @@ CREATE TABLE IF NOT EXISTS gitops_target_current (
   applied_generation_id TEXT NULL,
   deployed_generation_id TEXT NULL,
   healthy_generation_id TEXT NULL,
+  -- The last stack-scope verdict, bound to the generation it judged. Kept so a
+  -- failed check stays visible as a failure instead of collapsing back into
+  -- "not checked yet" once its promotion is withdrawn.
+  last_health_status TEXT NULL CHECK (
+    last_health_status IS NULL OR last_health_status IN ('passed','failed','unknown')
+  ),
+  last_health_generation_id TEXT NULL,
+  last_health_run_id TEXT NULL,
   lkg_generation_id TEXT NULL,
   lkg_artifact_set_id TEXT NULL,
   lkg_unavailable_at INTEGER NULL,

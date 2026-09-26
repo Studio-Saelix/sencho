@@ -265,14 +265,63 @@ describe('attentionReasons', () => {
   });
 
   it('flags node connectivity via the rollout facet and target evidence', () => {
-    expect(attentionReasons(liveProjection({ rollout: { status: 'target_unreachable' } })))
-      .toContain('target_unreachable');
-    expect(attentionReasons(liveProjection({ rollout: { status: 'target_stale' } })))
-      .toContain('target_stale');
+    expect(attentionReasons(liveProjection({
+      rollout: { status: 'target_unreachable' },
+      targets: [target({ connectivity: 'unreachable' })],
+    }))).toContain('target_unreachable');
+    expect(attentionReasons(liveProjection({
+      rollout: { status: 'target_stale' },
+      targets: [target({ connectivity: 'stale' })],
+    }))).toContain('target_stale');
     const withUnreachableTarget = liveProjection({
       targets: [target({ connectivity: 'unreachable' })],
     });
     expect(attentionReasons(withUnreachableTarget)).toContain('target_unreachable');
+  });
+
+  it('ignores rollout connectivity backed only by tombstoned target history', () => {
+    expect(attentionReasons(liveProjection({
+      rollout: { status: 'target_stale' },
+      targets: [target({ connectivity: 'stale', tombstoned: true })],
+    }))).toEqual([]);
+    expect(attentionReasons(liveProjection({
+      rollout: { status: 'target_unreachable' },
+      targets: [target({ connectivity: 'unreachable', tombstoned: true })],
+    }))).toEqual([]);
+  });
+
+  it.each([
+    { status: 'failed_after_mutation', reason: 'deploy_failed', failure: true },
+    { status: 'failed_previous_workload_intact', reason: 'deploy_failed', failure: true },
+    { status: 'completion_unknown', reason: 'rollout_completion_unknown', failure: true },
+    { status: 'acknowledged_completion_unknown', reason: 'rollout_completion_unknown', failure: true },
+    { status: 'retry_scheduled', reason: 'source_retry_scheduled', failure: false },
+    { status: 'pending_state_review', reason: 'stateful_confirmation_required', failure: false },
+    { status: 'recovery_required', reason: 'recovery_required', failure: false },
+    { status: 'recovery_failed', reason: 'recovery_failed', failure: true },
+  ] as const)('keeps $reason for current targets and ignores it for tombstoned history', ({ status, reason, failure }) => {
+    const currentReasons = attentionReasons(liveProjection({ targets: [target({ runtime: runtimeAt(status) })] }));
+    expect(currentReasons).toContain(reason);
+    expect(hasFailureReason(currentReasons)).toBe(failure);
+    expect(attentionReasons(liveProjection({
+      targets: [target({ runtime: runtimeAt(status), tombstoned: true })],
+    }))).toEqual([]);
+  });
+
+  it('ignores failed health from tombstoned target history', () => {
+    expect(attentionReasons(liveProjection({
+      targets: [target({ health: healthAt('failed'), tombstoned: true })],
+    }))).toEqual([]);
+  });
+
+  it('ignores tombstoned failures beside a healthy current target', () => {
+    expect(attentionReasons(liveProjection({
+      targets: [
+        target({}),
+        target({ runtime: runtimeAt('failed_after_mutation'), tombstoned: true }),
+        target({ health: healthAt('failed'), tombstoned: true }),
+      ],
+    }))).toEqual([]);
   });
 
   it('flags artifact uncertainty that blocks a convergence claim', () => {
@@ -307,25 +356,37 @@ describe('attentionReasons', () => {
     expect(attentionReasons(liveProjection({ drift: [item, { ...item, class: 'health' }] }))).toEqual(['drift']);
   });
 
+  it('ignores drift scoped only to tombstoned targets', () => {
+    const item = {
+      class: 'runtime' as const,
+      expected: { kind: 'generation' as const, id: 'gen-1' },
+      observed: { kind: 'generation' as const, id: 'gen-old' },
+      freshnessAt: null,
+      owner: 'test',
+      reason: 'test',
+      configuredPolicy: null,
+      affectedTargets: [{ nodeId: 2, stackName: 'historical' }],
+      action: 'none' as const,
+    };
+    const targets = [target({}), target({ nodeId: 2, tombstoned: true })];
+
+    expect(attentionReasons(liveProjection({ targets, drift: [item] }))).toEqual([]);
+    expect(attentionReasons(liveProjection({
+      targets,
+      drift: [{ ...item, affectedTargets: [{ nodeId: 1, stackName: 'current' }] }],
+    }))).toEqual(['drift']);
+    expect(attentionReasons(liveProjection({
+      targets,
+      drift: [{ ...item, affectedTargets: [{ nodeId: null, stackName: null }] }],
+    }))).toEqual(['drift']);
+  });
+
   it('flags a failed health verdict on any target', () => {
     const projection = liveProjection({
       targets: [target({ runtime: runtimeAt('synced_and_healthy'), health: healthAt('failed') })],
     });
     expect(attentionReasons(projection)).toContain('health_failed');
   });
-
-  it.each(['failed_after_mutation', 'failed_previous_workload_intact'] as const)(
-    'flags a hard deploy failure (%s) on a target',
-    (status) => {
-      const projection = liveProjection({
-        targets: [target({ runtime: runtimeAt(status) })],
-      });
-      expect(attentionReasons(projection)).toContain('deploy_failed');
-      // Failure tone, so the posture is `failed`: this is damage, not a
-      // pending decision.
-      expect(hasFailureReason(attentionReasons(projection))).toBe(true);
-    },
-  );
 
   it('does not flag a target that is merely behind', () => {
     const projection = liveProjection({
