@@ -234,6 +234,44 @@ describe('WebSocket upgrade dispatch order', () => {
     });
   });
 
+  describe('/api/mesh/proxy-tunnel rejection marker', () => {
+    // Central reads X-Sencho-Mesh-Reject to tell a refusal by this Sencho
+    // apart from one by an access proxy in front of it.
+    function rejectHeader(ws: WebSocket): Promise<{ status: number; reason: string | undefined }> {
+      return new Promise((resolve, reject) => {
+        ws.once('unexpected-response', (_req, res) => {
+          const raw = res.headers['x-sencho-mesh-reject'];
+          resolve({ status: res.statusCode ?? 0, reason: Array.isArray(raw) ? raw[0] : raw });
+          res.resume();
+        });
+        ws.once('open', () => reject(new Error('upgrade unexpectedly succeeded')));
+        ws.once('error', () => { /* surfaced through unexpected-response */ });
+      });
+    }
+
+    it('marks a missing credential as unauthorized', async () => {
+      const out = await rejectHeader(connect('/api/mesh/proxy-tunnel'));
+      expect(out).toEqual({ status: 401, reason: 'unauthorized' });
+    });
+
+    it('marks a restricted api_token as a scope refusal', async () => {
+      const { DatabaseService } = await import('../services/DatabaseService');
+      const rawToken = createTestApiToken({
+        db: DatabaseService,
+        scope: 'read-only',
+        userId: DatabaseService.getInstance().getUserByUsername(TEST_USERNAME)!.id,
+        name: `mesh-reject-marker-${Date.now()}`,
+      });
+      const out = await rejectHeader(connect('/api/mesh/proxy-tunnel', { bearer: rawToken }));
+      expect(out).toEqual({ status: 403, reason: 'scope' });
+    });
+
+    it('does not add the marker on other paths', async () => {
+      const out = await rejectHeader(connect('/ws'));
+      expect(out).toEqual({ status: 401, reason: undefined });
+    });
+  });
+
   describe('/api/mesh/proxy-tunnel paid entitlement gating', () => {
     // Paid entitlement on the WS data plane is decided against the
     // *central's* asserted tier, matching the HTTP mesh routes
