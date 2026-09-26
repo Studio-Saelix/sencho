@@ -2,8 +2,7 @@
  * Documentation drift in the Stack Dossier.
  *
  * The Dossier tab warns when a port written into access_urls is not published by
- * the stack's compose. The visual-regression project does not cover the
- * stack-detail surface, so this functional flow does. It seeds its own stack and
+ * the stack's compose. It seeds its own stack and
  * compose with a known published port and cleans them up, and does not need a
  * running Docker daemon: documentation drift compares the dossier against the
  * compose-derived anatomy, not the runtime.

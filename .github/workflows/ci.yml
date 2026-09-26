@@ -14,18 +14,56 @@ permissions:
   contents: read
 
 # ---------------------------------------------------------------------------
-# Build & Validation (PRs only, skipped for release-please PRs)
+# Build & Validation (PRs only, gated by change detection)
 # ---------------------------------------------------------------------------
 jobs:
+  # Decides whether the PR touches anything the build/test jobs exercise.
+  # PRs that only touch docs/, .claude/, .opencode/ or markdown anywhere
+  # skip them; a skipped job satisfies a required check, so merging is not
+  # blocked. The release-please PR is treated as no-code (it only touches
+  # version metadata).
+  changes:
+    name: Detect code changes
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      pull-requests: read
+    outputs:
+      code: ${{ steps.filter.outputs.code }}
+    steps:
+      - name: Classify changed files
+        id: filter
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HEAD_REF: ${{ github.head_ref }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          if [ "$HEAD_REF" = 'release-please--branches--main--components--sencho' ]; then
+            echo "code=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # Rename sources count too, so moving code into docs/ still runs CI.
+          files=$(gh api --paginate "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/files" \
+            -q '.[] | .filename, (.previous_filename // empty)')
+          # An empty file list is suspicious, not proof of a docs-only PR. The
+          # here-string (not a pipe) keeps grep -q safe under pipefail.
+          if [ -z "$files" ] || grep -Evq '^(docs/|\.claude/|\.opencode/)|\.mdx?$' <<<"$files"; then
+            code=true
+          else
+            code=false
+          fi
+          echo "code=$code" >> "$GITHUB_OUTPUT"
+          echo "code=$code"; printf '%s\n' "$files"
+
   backend:
     name: Backend (Build, Test, Lint)
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    # Skip on the release-please bot PR. It only touches version metadata,
-    # so the full build+test+lint+audit stack is pure action-minute waste.
-    if: >-
-      github.event_name == 'pull_request'
-      && github.head_ref != 'release-please--branches--main--components--sencho'
+    needs: changes
+    # Runs unless detection positively found no code: a failed detection job
+    # runs every gate instead of skipping them.
+    if: ${{ !cancelled() && needs.changes.outputs.code != 'false' }}
     steps:
       - name: Checkout Code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -64,25 +102,14 @@ jobs:
         working-directory: ./backend
         run: npm audit --audit-level=high
 
-      # Hand the freshly-verified dist/ to the E2E job so it does not have to
-      # re-run `tsc` on the same source. retention-days is the minimum; this
-      # artifact is only needed for the downstream e2e job in the same run.
-      - name: Upload backend dist
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-        with:
-          name: backend-dist
-          path: backend/dist
-          retention-days: 1
-          if-no-files-found: error
-
   frontend:
     name: Frontend (Build, Lint)
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    # See backend job rationale: skip bot PRs that cannot affect the frontend.
-    if: >-
-      github.event_name == 'pull_request'
-      && github.head_ref != 'release-please--branches--main--components--sencho'
+    needs: changes
+    # Runs unless detection positively found no code: a failed detection job
+    # runs every gate instead of skipping them.
+    if: ${{ !cancelled() && needs.changes.outputs.code != 'false' }}
     steps:
       - name: Checkout Code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -118,10 +145,10 @@ jobs:
     name: Docker Build & Scan
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    # See backend job rationale.
-    if: >-
-      github.event_name == 'pull_request'
-      && github.head_ref != 'release-please--branches--main--components--sencho'
+    needs: changes
+    # Runs unless detection positively found no code: a failed detection job
+    # runs every gate instead of skipping them.
+    if: ${{ !cancelled() && needs.changes.outputs.code != 'false' }}
     steps:
       - name: Checkout Code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -177,37 +204,32 @@ jobs:
             'docker --version && docker compose version && git --version'
 
   # ---------------------------------------------------------------------------
-  # E2E Tests (PRs only, skipped for release-please PRs)
+  # E2E Tests (PRs only, gated by change detection)
   # ---------------------------------------------------------------------------
+  # Sharded across runners: each shard starts its own app and database, so the
+  # suite's single-worker constraint (shared DB state) holds within a shard
+  # while shards run in parallel. Playwright shards by whole file
+  # (fullyParallel is off), so serial groups stay intact. It does not wait on
+  # the backend job; building the backend here is cheaper than queueing behind
+  # the full unit-test run.
   e2e:
-    name: E2E Tests (Playwright)
+    name: E2E shard ${{ matrix.shard }}/4
     runs-on: ubuntu-latest
-    # 30 minutes: the suite grew with pane-layout journeys and occasional
-    # serial-group retries; 20 minutes was cancelling mid-run on this branch.
-    timeout-minutes: 30
-    needs: [backend, frontend]
-    # See backend job rationale.
-    if: >-
-      github.event_name == 'pull_request'
-      && github.head_ref != 'release-please--branches--main--components--sencho'
+    timeout-minutes: 20
+    needs: changes
+    # Runs unless detection positively found no code: a failed detection job
+    # runs every gate instead of skipping them.
+    if: ${{ !cancelled() && needs.changes.outputs.code != 'false' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
     steps:
       - name: Checkout Code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      # Reuse the dist/ that the `backend` job produced and verified, instead
-      # of running `tsc` a second time against the same source tree. The
-      # composite action's `skip-backend-build` input short-circuits its build
-      # step when this artifact is already in place.
-      - name: Download backend dist
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
-        with:
-          name: backend-dist
-          path: backend/dist
-
       - name: Start app & install Playwright
         uses: ./.github/actions/start-app
-        with:
-          skip-backend-build: 'true'
         env:
           NODE_EXTRA_CA_CERTS: ${{ github.workspace }}/e2e/fixtures/git-ca.pem
 
@@ -220,18 +242,38 @@ jobs:
         # manual review. That project must not run in CI: its output would
         # be discarded after the run, wasting minutes per PR. Keep this
         # flag; do not "simplify" back to `npx playwright test`.
-        run: npx playwright test --project=chromium
+        run: npx playwright test --project=chromium --shard=${{ matrix.shard }}/4
 
       - name: Upload E2E report and service logs
         if: failure()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: playwright-report
+          name: playwright-report-shard-${{ matrix.shard }}
           path: |
             e2e/report/
             test-results/
             ci-logs/
           retention-days: 7
+
+  # Single status for branch protection, which requires this exact job name.
+  # Passes when every shard passed, or E2E was skipped because change
+  # detection succeeded and found no code. A failed detection job fails this
+  # check so it cannot turn every gate into a silent skip.
+  e2e-result:
+    name: E2E Tests (Playwright)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    needs: [changes, e2e]
+    if: always()
+    steps:
+      - name: Check shard results
+        env:
+          CHANGES: ${{ needs.changes.result }}
+          RESULT: ${{ needs.e2e.result }}
+        run: |
+          echo "Change detection: $CHANGES, E2E shards: $RESULT"
+          [ "$CHANGES" = success ] || exit 1
+          [ "$RESULT" = success ] || [ "$RESULT" = skipped ]
 
   # ---------------------------------------------------------------------------
   # Changelog Credit Script (PRs only, skipped for release-please PRs)
