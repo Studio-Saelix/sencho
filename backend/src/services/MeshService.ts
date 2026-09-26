@@ -16,7 +16,7 @@ import { MeshForwarder, type MeshForwarderHost } from './MeshForwarder';
 import { NodeRegistry } from './NodeRegistry';
 import { PilotTunnelManager } from './PilotTunnelManager';
 import { MeshProxyTunnelDialer, type DialFailureCode } from './MeshProxyTunnelDialer';
-import { generateOverrideYaml, MeshAlias, SENCHO_MESH_NETWORK } from './MeshComposeOverride';
+import { generateOverrideYaml, MeshAlias, SENCHO_MESH_NETWORK, type MeshServiceNetworkShape } from './MeshComposeOverride';
 import { lookupContainerIp } from '../mesh/containerLookup';
 import { STREAM_PENDING_DATA_MAX_BYTES } from '../pilot/protocol';
 import { redactSensitiveText, sanitizeForLog } from '../utils/safeLog';
@@ -400,7 +400,7 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
     private constructor() {
         super();
         this.setMaxListeners(50);
-        this.forwarder = new MeshForwarder(this);
+        this.forwarder = new MeshForwarder(this, () => this.senchoIp);
     }
 
     public static getInstance(): MeshService {
@@ -695,12 +695,14 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
      * Idempotent setup of the shared `sencho_mesh` Docker bridge network and
      * Sencho's static attachment to it. Called once at boot before alias
      * cache refresh. Failures here disable mesh routing for the lifetime of
-     * the process (forwarder still binds, but `ensureStackOverride` short-
-     * circuits because there is no IP to point user containers at).
+     * the process: with no mesh IP, `ensureStackOverride` short-circuits
+     * because there is no address to point user containers at, and
+     * `syncForwarderListeners` binds nothing.
      *
      * Skipped entirely when Sencho is not running inside Docker (dev mode,
      * detected by an unset HOSTNAME env var or by the inspect lookup
-     * failing). The forwarder still runs locally for unit-test coverage.
+     * failing). The forwarder is unit-tested directly in that case, since it
+     * no longer binds without a resolved mesh address.
      *
      * Three subnet-resolution paths:
      *   1. **Operator-explicit.** `SENCHO_MESH_SUBNET` is set. Use exactly
@@ -1437,6 +1439,9 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
                 });
             }
         }
+        // Listeners bind to Sencho's mesh IP only; without a working data
+        // plane there is nothing safe to bind to, so wait for the next tick.
+        if (!this.senchoIp) return;
         for (const port of wantPorts) {
             if (havePorts.has(port)) continue;
             try {
@@ -1794,7 +1799,8 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
         if (!this.senchoIp) return null;
 
         const aliases: MeshAlias[] = Array.from(this.aliasCache.values()).map((a) => ({ host: a.host }));
-        const serviceNames = await this.getDeclaredStackServiceNames(stackName, nodeId);
+        const serviceShapes = await this.getDeclaredStackServices(stackName, nodeId);
+        const serviceNames = Object.keys(serviceShapes);
 
         await fs.mkdir(dir, { recursive: true });
         // path.basename mirrors the applyLocalOverride pattern (and is
@@ -1804,7 +1810,7 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
 
         // Defensive fallback: a deploy that runs `compose down` immediately
         // before `compose up` removes the containers, but the compose file
-        // is still on disk so getDeclaredStackServiceNames returns the
+        // is still on disk so getDeclaredStackServices returns the
         // declared services. The fallback below covers the much narrower
         // case where the compose file itself is unreadable (permission
         // glitch, transient FS error, mid-write rename); in that case
@@ -1824,6 +1830,7 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
 
         const yaml = generateOverrideYaml({
             services: serviceNames,
+            serviceShapes,
             aliases,
             senchoIp: this.senchoIp,
         });
@@ -1877,7 +1884,8 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
         senchoIp: string,
         portAliases?: MeshGlobalAlias[],
     ): Promise<string | null> {
-        const serviceNames = await this.getDeclaredStackServiceNames(stackName, localNodeId);
+        const serviceShapes = await this.getDeclaredStackServices(stackName, localNodeId);
+        const serviceNames = Object.keys(serviceShapes);
 
         const dir = this.overrideDirFor(localNodeId);
         await fs.mkdir(dir, { recursive: true });
@@ -1908,6 +1916,7 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
 
         const yaml = generateOverrideYaml({
             services: serviceNames,
+            serviceShapes,
             aliases,
             senchoIp,
         });
@@ -2279,15 +2288,37 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
     }
 
     /**
-     * Read the local stack's compose file and return its declared service
-     * names. Used by the override-write paths so a deploy that has just
-     * torn containers down still emits a complete services map even
-     * though Dockerode briefly returns no containers. Independent of
-     * runtime container state, so the override stays correct across the
-     * deploy lifecycle.
+     * Resolve the compose file(s) that define a stack, relative to the
+     * node's compose base dir. For a multi-file Git stack this is every
+     * materialized file, so a service or a `network_mode` declared only in
+     * an override file is still seen. Single-file stacks resolve the one
+     * compose file. Each entry passes `isValidRelativeStackPath` before the
+     * caller joins it onto the base dir.
+     */
+    private async resolveStackComposeFiles(fsSvc: FileSystemService, stackName: string): Promise<string[]> {
+        const spec = DatabaseService.getInstance().getGitSource(stackName)?.applied_deploy_spec;
+        const relFiles = spec && spec.files.length > 0
+            ? spec.files
+            : [await fsSvc.getComposeFilename(stackName)];
+        return relFiles.filter((relFile) => relFile !== '' && isValidRelativeStackPath(relFile));
+    }
+
+    /**
+     * Read the stack's compose file(s) and return each declared service
+     * together with its network shape. Used by the override-write paths so a
+     * deploy that has just torn containers down still emits a complete
+     * services map even though Dockerode briefly returns no containers.
+     * Independent of runtime container state, so the override stays correct
+     * across the deploy lifecycle.
      *
-     * Returns [] when the compose file is missing, unreadable, or fails
-     * to parse. Combined with the defensive fallback in
+     * Names and shapes come from one read on purpose: two separate readers
+     * would re-read and re-parse every compose file on every write, and a
+     * file rewritten between the two reads could pair a service's old name
+     * list with its new network shape, producing an override Compose
+     * rejects.
+     *
+     * Returns {} when the compose file is missing, unreadable, or fails to
+     * parse. Combined with the defensive fallback in
      * {@link ensureStackOverride} / {@link applyLocalOverride} a transient
      * empty result does not clobber a known-good override.
      *
@@ -2297,55 +2328,52 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
      * shapes; if extends/include usage emerges, swap to
      * `docker compose config --services` (subprocess).
      */
-    public async getDeclaredStackServiceNames(stackName: string, nodeId?: number): Promise<string[]> {
-        if (!isValidStackName(stackName)) return [];
+    public async getDeclaredStackServices(
+        stackName: string,
+        nodeId?: number,
+    ): Promise<Record<string, MeshServiceNetworkShape>> {
+        if (!isValidStackName(stackName)) return {};
         const targetNodeId = nodeId ?? NodeRegistry.getInstance().getDefaultNodeId();
+        const shapes: Record<string, MeshServiceNetworkShape> = {};
         try {
             const fsSvc = FileSystemService.getInstance(targetNodeId);
             const baseDir = fsSvc.getBaseDir();
-            // For a multi-file Git stack, read every materialized compose file and
-            // union their service names, so a service declared only in an override
-            // file is still attached to the mesh. Single-file stacks read the one
-            // resolved compose file, byte-identical to the prior behavior.
-            const spec = DatabaseService.getInstance().getGitSource(stackName)?.applied_deploy_spec;
-            const relFiles = spec && spec.files.length > 0
-                ? spec.files
-                : [await fsSvc.getComposeFilename(stackName)];
-            const names = new Set<string>();
-            for (const relFile of relFiles) {
-                if (relFile === '' || !isValidRelativeStackPath(relFile)) continue;
-                for (const name of await this.readComposeServiceNames(baseDir, stackName, relFile)) {
-                    names.add(name);
+            for (const relFile of await this.resolveStackComposeFiles(fsSvc, stackName)) {
+                // The stack segment uses path.basename as defense-in-depth and
+                // the resolved path is re-checked against the base dir, so the
+                // form CodeQL's path-injection model recognizes stays at the
+                // read sink.
+                const composePath = path.join(baseDir, path.basename(stackName), relFile);
+                if (!isPathWithinBase(composePath, baseDir)) continue;
+                let parsed: { services?: Record<string, unknown> } | null;
+                try {
+                    parsed = YAML.parse(await fs.readFile(composePath, 'utf8')) as { services?: Record<string, unknown> } | null;
+                } catch {
+                    continue;
+                }
+                const services = parsed?.services && typeof parsed.services === 'object' ? parsed.services : null;
+                if (!services) continue;
+                // Later files override earlier ones, mirroring Compose's merge.
+                for (const [name, raw] of Object.entries(services)) {
+                    if (!/^[A-Za-z0-9_][A-Za-z0-9_.-]*$/.test(name)) continue;
+                    const svc = raw && typeof raw === 'object' ? raw as Record<string, unknown> : {};
+                    const prev = shapes[name] ?? { declaresNetworks: false };
+                    const networkMode = typeof svc.network_mode === 'string' && svc.network_mode.trim() !== ''
+                        ? svc.network_mode.trim()
+                        : prev.networkMode;
+                    shapes[name] = {
+                        declaresNetworks: prev.declaresNetworks || svc.networks != null,
+                        ...(networkMode ? { networkMode } : {}),
+                    };
                 }
             }
-            return Array.from(names);
         } catch (err) {
             console.warn(
-                '[MeshService] getDeclaredStackServiceNames failed:',
+                '[MeshService] getDeclaredStackServices failed:',
                 sanitizeForLog((err as Error).message),
             );
-            return [];
         }
-    }
-
-    /**
-     * Read one compose file under a stack directory and return its declared
-     * service names. The stack segment uses path.basename as defense-in-depth and
-     * the resolved path is re-checked against the base dir; the relative file is
-     * validated by the caller. Returns [] when the file is missing or unparseable.
-     */
-    private async readComposeServiceNames(baseDir: string, stackName: string, relFile: string): Promise<string[]> {
-        const composePath = path.join(baseDir, path.basename(stackName), relFile);
-        if (!isPathWithinBase(composePath, baseDir)) return [];
-        try {
-            const content = await fs.readFile(composePath, 'utf8');
-            const parsed = YAML.parse(content) as { services?: Record<string, unknown> } | null;
-            const services = parsed?.services && typeof parsed.services === 'object' ? parsed.services : null;
-            if (!services) return [];
-            return Object.keys(services).filter((name) => /^[A-Za-z0-9_][A-Za-z0-9_.-]*$/.test(name));
-        } catch {
-            return [];
-        }
+        return shapes;
     }
 
     /**
@@ -3000,6 +3028,12 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
             clearOpenTimer();
             this.activeStreams.delete(record.streamId);
         };
+        // Backpressure below pauses src while the tunnel's send buffer is
+        // full. If the tunnel dies before it drains, src would never resume
+        // and the half-close below would never flush, stranding the socket.
+        const releaseSrc = () => {
+            try { src.resume(); } catch { /* ignore */ }
+        };
 
         tcpStream.on('open', () => {
             clearOpenTimer();
@@ -3033,12 +3067,24 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
         });
         tcpStream.on('close', () => {
             cleanupRecord();
+            releaseSrc();
             try { src.end(); } catch { /* ignore */ }
         });
+        let awaitingDrain = false;
         src.on('data', (chunk: Buffer) => {
             record.bytesOut += chunk.length;
             if (tcpOpen) {
-                tcpStream.write(chunk);
+                // Backpressure: pause the local container's socket while the
+                // tunnel is saturated so a bulk upload over a slow link does
+                // not buffer without bound; resume on the stream's 'drain'.
+                if (!tcpStream.write(chunk) && !awaitingDrain) {
+                    awaitingDrain = true;
+                    src.pause();
+                    tcpStream.once('drain', () => {
+                        awaitingDrain = false;
+                        src.resume();
+                    });
+                }
                 return;
             }
             if (pendingBytes + chunk.length > STREAM_PENDING_DATA_MAX_BYTES) {
@@ -3126,9 +3172,16 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
             });
         }
 
+        // The forwarder binds Sencho's `sencho_mesh` address, not loopback,
+        // so a probe has to dial that address to reach the same listener
+        // real mesh traffic lands on.
+        const bindAddress = this.senchoIp;
+        if (!bindAddress) {
+            return { ok: false, where: 'target_port', code: 'no_route', message: 'mesh data plane not ready' };
+        }
         const t0 = Date.now();
         return new Promise<MeshProbeResult>((resolve) => {
-            const sock = net.createConnection({ host: '127.0.0.1', port: target.port });
+            const sock = net.createConnection({ host: bindAddress, port: target.port });
             sock.setTimeout(PROBE_TIMEOUT_MS);
             sock.once('connect', () => {
                 const latency = Date.now() - t0;
@@ -3397,6 +3450,7 @@ export interface MeshTcpStreamLike {
     on(event: 'data', listener: (chunk: Buffer) => void): this;
     on(event: 'error', listener: (err: Error) => void): this;
     on(event: 'close', listener: () => void): this;
+    once(event: 'drain', listener: () => void): this;
 }
 
 /**

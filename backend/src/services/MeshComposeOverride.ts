@@ -22,9 +22,26 @@ export interface MeshAlias {
     host: string;
 }
 
+/**
+ * Network shape of one service as declared in the user's compose file.
+ * Drives how the override attaches the service to `sencho_mesh` without
+ * changing the service's existing connectivity.
+ */
+export interface MeshServiceNetworkShape {
+    /** Raw `network_mode` value (`host`, `none`, `service:vpn`, `container:x`, ...). */
+    networkMode?: string;
+    /** True when the service declares its own `networks:` key. */
+    declaresNetworks: boolean;
+}
+
 export interface MeshOverrideInput {
     /** Service names from the user's compose file (the override echoes them). */
     services: string[];
+    /**
+     * Per-service network shape from the compose file. A service missing
+     * from the map is treated as using Compose's implicit `default` network.
+     */
+    serviceShapes?: Record<string, MeshServiceNetworkShape>;
     /** Aliases this stack should be able to resolve. Order is normalized in output. */
     aliases: MeshAlias[];
     /** Sencho's static IP on the `sencho_mesh` Docker network. */
@@ -41,9 +58,19 @@ export function generateOverrideYaml(input: MeshOverrideInput): string {
 
     const services: Record<string, unknown> = {};
     for (const svc of sortedServices) {
-        const entry: Record<string, unknown> = {
-            networks: [SENCHO_MESH_NETWORK],
-        };
+        const shape = input.serviceShapes?.[svc];
+        // `network_mode` (host, none, service:vpn, container:x) cannot be
+        // combined with `networks:` or `extra_hosts`; Compose rejects the
+        // deploy. Such services share another namespace and are left alone.
+        if (shape?.networkMode) continue;
+        // A service without its own `networks:` key sits on the implicit
+        // `default` network. Listing only `sencho_mesh` in the override would
+        // replace that attachment and cut the service off from the rest of
+        // its stack and from any reverse proxy reaching it there, so keep it.
+        const networks = shape?.declaresNetworks
+            ? [SENCHO_MESH_NETWORK]
+            : ['default', SENCHO_MESH_NETWORK];
+        const entry: Record<string, unknown> = { networks };
         if (sortedAliases.length > 0) {
             entry.extra_hosts = sortedAliases.map((a) => `${a.host}:${input.senchoIp}`);
         }

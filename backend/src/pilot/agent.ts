@@ -28,6 +28,7 @@ import {
 import { sanitizeForLog } from '../utils/safeLog';
 import { httpUrlToWs } from '../utils/wsUrl';
 import { isDebugEnabled } from '../utils/debug';
+import { startWsHeartbeat } from '../utils/wsHeartbeat';
 
 const RECONNECT_MIN_MS = 1_000;
 const RECONNECT_MAX_MS = 60_000;
@@ -129,7 +130,7 @@ export class PilotAgent {
     private degradedLogged = false;
     private backoff = RECONNECT_MIN_MS;
     private ws: WebSocket | null = null;
-    private pingTimer?: NodeJS.Timeout;
+    private stopHeartbeat?: () => void;
     private reconnectTimer?: NodeJS.Timeout;
     private readonly httpStreams = new Map<number, { req: http.ClientRequest; cancelled?: boolean }>();
     private readonly wsStreams = new Map<number, WebSocket>();
@@ -207,7 +208,7 @@ export class PilotAgent {
 
     private shutdown(): void {
         this.shuttingDown = true;
-        if (this.pingTimer) clearInterval(this.pingTimer);
+        if (this.stopHeartbeat) { this.stopHeartbeat(); this.stopHeartbeat = undefined; }
         if (this.reconnectTimer) { clearTimeout(this.reconnectTimer); this.reconnectTimer = undefined; }
         try { this.ws?.close(1000, 'agent shutdown'); } catch { /* ignore */ }
     }
@@ -294,11 +295,7 @@ export class PilotAgent {
             } catch (err) {
                 console.error('[Pilot] Failed to send hello:', (err as Error).message);
             }
-            this.pingTimer = setInterval(() => {
-                if (ws.readyState === WebSocket.OPEN) {
-                    try { ws.ping(); } catch { /* surfaced via error */ }
-                }
-            }, PING_INTERVAL_MS);
+            this.stopHeartbeat = startWsHeartbeat(ws, PING_INTERVAL_MS);
         });
 
         ws.on('message', (data, isBinary) => this.handleFrame(data, isBinary));
@@ -365,7 +362,7 @@ export class PilotAgent {
     }
 
     private cleanupAfterDisconnect(): void {
-        if (this.pingTimer) { clearInterval(this.pingTimer); this.pingTimer = undefined; }
+        if (this.stopHeartbeat) { this.stopHeartbeat(); this.stopHeartbeat = undefined; }
         for (const [, entry] of this.httpStreams) {
             try { entry.req.destroy(); } catch { /* ignore */ }
         }
