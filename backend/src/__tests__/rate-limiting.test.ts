@@ -260,8 +260,8 @@ describe('Hybrid key generator', () => {
     const remainB = parseInt(resB.headers['ratelimit-remaining'], 10);
 
     // Each user's budget should be near-full
-    expect(remainA).toBeGreaterThanOrEqual(990);
-    expect(remainB).toBeGreaterThanOrEqual(990);
+    expect(remainA).toBeGreaterThanOrEqual(9990);
+    expect(remainB).toBeGreaterThanOrEqual(9990);
   });
 });
 
