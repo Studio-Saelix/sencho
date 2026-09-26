@@ -26,6 +26,30 @@ const FAIL_COMPOSE = `services:
     image: nginnnnx:notexist
 `;
 
+/**
+ * Surface React errors and network failures from the browser so test
+ * failures arrive with diagnostic context instead of just "modal not
+ * visible". Skip noisy info/log/debug messages.
+ */
+function logBrowserErrors(page: Page, title: string): void {
+  page.on('console', (msg) => {
+    if (msg.type() === 'error' || msg.type() === 'warning') {
+      // eslint-disable-next-line no-console
+      console.log(`[browser ${msg.type()}] [${title}] ${msg.text()}`);
+    }
+  });
+  page.on('pageerror', (err) => {
+    // eslint-disable-next-line no-console
+    console.log(`[browser pageerror] [${title}] ${err.message}`);
+  });
+  // Aborted requests (for example net::ERR_NETWORK_CHANGED during login)
+  // never reach the console as a status line, so log them explicitly.
+  page.on('requestfailed', (req) => {
+    // eslint-disable-next-line no-console
+    console.log(`[browser requestfailed] [${title}] ${req.method()} ${req.url()} ${req.failure()?.errorText ?? ''}`);
+  });
+}
+
 async function createStackViaApi(page: Page, name: string, composeContent: string): Promise<void> {
   await page.evaluate(
     async ({ stackName, content }: { stackName: string; content: string }) => {
@@ -188,19 +212,7 @@ async function setupDeployStack(page: Page, name: string, composeContent: string
 
 test.describe('Deploy feedback modal', () => {
   test.beforeEach(async ({ page }, testInfo) => {
-    // Surface React errors and network failures from the browser so test
-    // failures arrive with diagnostic context instead of just "modal not
-    // visible". Skip noisy info/log/debug messages.
-    page.on('console', (msg) => {
-      if (msg.type() === 'error' || msg.type() === 'warning') {
-        // eslint-disable-next-line no-console
-        console.log(`[browser ${msg.type()}] [${testInfo.title}] ${msg.text()}`);
-      }
-    });
-    page.on('pageerror', (err) => {
-      // eslint-disable-next-line no-console
-      console.log(`[browser pageerror] [${testInfo.title}] ${err.message}`);
-    });
+    logBrowserErrors(page, testInfo.title);
     await loginAs(page);
     await waitForStacksLoaded(page);
   });
@@ -407,7 +419,8 @@ test.describe('Deploy feedback modal', () => {
 });
 
 test.describe('Inline deploy progress', () => {
-  test.beforeEach(async ({ page }) => {
+  test.beforeEach(async ({ page }, testInfo) => {
+    logBrowserErrors(page, testInfo.title);
     await loginAs(page);
     await waitForStacksLoaded(page);
   });
