@@ -64,10 +64,22 @@ export const MESH_SUBNET_CANDIDATES = [
     '10.43.0.0/24',
 ];
 
+/** Operator-facing explanation for each dial failure, shown on the node card. */
 const REACHABLE_REASON: Record<DialFailureCode, string> = {
     auth_failed: 'api token rejected by remote',
-    endpoint_not_found: 'remote does not support proxy mesh',
-    tls_failed: 'TLS handshake failed',
+    scope_denied: 'node token is not full-admin; generate a full-admin Node Token on the remote',
+    tier_denied: 'license tier does not include mesh',
+    endpoint_not_found: 'remote does not support proxy mesh (update it, or check the proxy forwards /api/mesh/proxy-tunnel)',
+    blocked_by_proxy: 'blocked by an access proxy in front of the remote (Cloudflare Access, SSO); add a bypass or SENCHO_MESH_PROXY_HEADERS',
+    remote_refused: 'the remote Sencho refused the mesh connection; check the node token scope and the remote mesh setup',
+    proxy_upstream_error: 'reverse proxy or tunnel in front of the remote cannot reach Sencho',
+    upgrade_rejected: 'WebSocket upgrade refused; check the proxy forwards Upgrade and Connection headers',
+    tls_failed: 'TLS handshake failed; if the certificate is from a private CA set SENCHO_MESH_PROXY_CA_FILE, otherwise check the URL scheme matches the server',
+    dns_failed: 'remote hostname does not resolve',
+    connection_refused: 'connection refused by remote host',
+    timeout: 'remote did not answer in time',
+    blocked_address: 'remote address is loopback or reserved and cannot be dialed',
+    config_invalid: 'mesh dial settings are invalid (SENCHO_MESH_PROXY_HEADERS or SENCHO_MESH_PROXY_CA_FILE)',
     no_target: 'proxy target missing',
     network_error: 'remote unreachable',
 };

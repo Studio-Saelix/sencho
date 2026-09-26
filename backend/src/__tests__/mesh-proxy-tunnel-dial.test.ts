@@ -7,6 +7,8 @@
  * lookup. End-to-end TLS / handshake paths are covered by the manual
  * production verification recipe rather than by network-bound tests.
  */
+import http from 'http';
+import type { AddressInfo } from 'net';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { setupTestDb, cleanupTestDb } from './helpers/setupTestDb';
 import { withLoopbackTargetProtection } from './helpers/allowLoopbackTargets';
@@ -75,6 +77,112 @@ describe('MeshProxyTunnelDialer', () => {
         expect(dialer.hasBridge(nodeId)).toBe(false);
     });
 
+    /**
+     * A Cloudflare-style 403 at the edge. Asserts the operator-facing label
+     * and that Sencho's own credential is still on the upgrade.
+     */
+    it('labels an access-proxy refusal', async () => {
+        const seen: http.IncomingHttpHeaders[] = [];
+        const server = http.createServer();
+        server.on('upgrade', (req, socket) => {
+            seen.push(req.headers);
+            // Mimic Cloudflare Access refusing the request at the edge.
+            socket.end('HTTP/1.1 403 Forbidden\r\nServer: cloudflare\r\nCF-RAY: test\r\nContent-Length: 0\r\n\r\n');
+        });
+        await new Promise<void>((r) => server.listen(0, '127.0.0.1', () => r()));
+        const { port } = server.address() as AddressInfo;
+        try {
+            const dialer = MeshProxyTunnelDialer.resetForTest(0);
+            const nodeId = DatabaseService.getInstance().addNode({
+                name: 'proxy-test-access-refusal',
+                type: 'remote',
+                compose_dir: '',
+                is_default: false,
+                mode: 'proxy',
+                api_url: `http://127.0.0.1:${port}`,
+                api_token: 'test-token',
+            });
+
+            expect(await dialer.ensureBridge(nodeId)).toBeNull();
+            expect(seen[0]?.authorization).toBe('Bearer test-token');
+            expect(dialer.getRecentFailure(nodeId)?.code).toBe('blocked_by_proxy');
+        } finally {
+            MeshProxyTunnelDialer.resetForTest(0);
+            await new Promise<void>((r) => server.close(() => r()));
+        }
+    });
+
+    it('refuses to put SENCHO_MESH_PROXY_HEADERS on a cleartext upgrade', async () => {
+        // The configured headers exist to carry a gateway credential. On a
+        // node URL of http:// the upgrade goes out as ws://, so sending them
+        // would hand the secret to anything on the path. The dial has to stop
+        // before the socket is opened, and the node has to be told why.
+        const seen: http.IncomingHttpHeaders[] = [];
+        const server = http.createServer();
+        server.on('upgrade', (req, socket) => {
+            seen.push(req.headers);
+            socket.end('HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n');
+        });
+        await new Promise<void>((r) => server.listen(0, '127.0.0.1', () => r()));
+        const { port } = server.address() as AddressInfo;
+        process.env.SENCHO_MESH_PROXY_HEADERS = JSON.stringify({ 'CF-Access-Client-Id': 'client-id' });
+        try {
+            const dialer = MeshProxyTunnelDialer.resetForTest(0);
+            const nodeId = DatabaseService.getInstance().addNode({
+                name: 'proxy-test-cleartext-headers',
+                type: 'remote',
+                compose_dir: '',
+                is_default: false,
+                mode: 'proxy',
+                api_url: `http://127.0.0.1:${port}`,
+                api_token: 'test-token',
+            });
+
+            expect(await dialer.ensureBridge(nodeId)).toBeNull();
+            // No upgrade at all, so no header and no bearer token on the wire.
+            expect(seen).toEqual([]);
+            const failure = dialer.getRecentFailure(nodeId);
+            expect(failure?.code).toBe('config_invalid');
+            expect(failure?.message).toMatch(/only sent over a TLS node URL/);
+        } finally {
+            delete process.env.SENCHO_MESH_PROXY_HEADERS;
+            MeshProxyTunnelDialer.resetForTest(0);
+            await new Promise<void>((r) => server.close(() => r()));
+        }
+    });
+
+    it('lets a TLS node URL through the configured-headers check', async () => {
+        // The other half: the same config against an https:// node URL is not
+        // refused for its own sake, so the failure is whatever the connection
+        // itself produced. A plain-HTTP server on the far end makes that a
+        // TLS protocol mismatch, which is itself the tls_failed case.
+        const server = http.createServer();
+        await new Promise<void>((r) => server.listen(0, '127.0.0.1', () => r()));
+        const { port } = server.address() as AddressInfo;
+        process.env.SENCHO_MESH_PROXY_HEADERS = JSON.stringify({ 'CF-Access-Client-Id': 'client-id' });
+        try {
+            const dialer = MeshProxyTunnelDialer.resetForTest(0);
+            const nodeId = DatabaseService.getInstance().addNode({
+                name: 'proxy-test-tls-headers',
+                type: 'remote',
+                compose_dir: '',
+                is_default: false,
+                mode: 'proxy',
+                api_url: `https://127.0.0.1:${port}`,
+                api_token: 'test-token',
+            });
+
+            expect(await dialer.ensureBridge(nodeId)).toBeNull();
+            const failure = dialer.getRecentFailure(nodeId);
+            expect(failure?.code).not.toBe('config_invalid');
+            expect(failure?.code).toBe('tls_failed');
+        } finally {
+            delete process.env.SENCHO_MESH_PROXY_HEADERS;
+            MeshProxyTunnelDialer.resetForTest(0);
+            await new Promise<void>((r) => server.close(() => r()));
+        }
+    });
+
     it('rejects an unsafe proxy target before opening a WebSocket', async () => {
         const dialer = MeshProxyTunnelDialer.resetForTest(0);
         const db = DatabaseService.getInstance();
@@ -92,8 +200,8 @@ describe('MeshProxyTunnelDialer', () => {
 
         expect(result).toBeNull();
         expect(dialer.getRecentFailure(nodeId)).toMatchObject({
-            code: 'network_error',
-            message: 'The target address is not allowed.',
+            code: 'blocked_address',
+            message: 'remote resolves to a loopback, link-local or reserved address Sencho does not dial',
         });
     });
 
