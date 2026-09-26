@@ -429,7 +429,11 @@ describe('enforceDigestRepair', () => {
     }, 'deployAuthorizedMaterialization');
 
     const missing = await BlueprintService.getInstance().enforceDigestRepair(bp, node);
-    expect(missing).toEqual({ status: 'failed', error: 'no expected artifact set for digest repair' });
+    // A target with no acknowledged artifact set is a hold, not an attempt that
+    // failed: there is no identity to restore, so nothing was tried and nothing
+    // was touched.
+    expect(missing.status).toBe('repair_held');
+    expect(missing.holdReason).toBe('evidence_incomplete');
 
     const { bp: bp2, node: node2 } = seedBlueprint();
     const nonComparable = seedApp(bp2, node2, { qualification: 'unresolved' });

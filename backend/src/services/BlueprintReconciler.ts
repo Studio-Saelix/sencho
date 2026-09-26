@@ -30,6 +30,7 @@ import {
 } from './gitops/json';
 import { GitOpsStore, placementEffectCompatible } from './gitops/store';
 import { isGitManagedBlueprint } from './gitops/gitManaged';
+import type { RuntimeRepairHoldReason } from './gitops/runtimeRepairBinding';
 import type { GitOpsApplicationRow } from './gitops/types';
 
 const RECONCILER_INTERVAL_MS = 60_000;
@@ -406,6 +407,10 @@ export class BlueprintReconciler {
                         nodeId: node.id,
                         reason: driftResult.reason ?? 'unverified',
                     });
+                    return { ...base, status: 'ok' };
+                }
+                if (driftResult.kind === 'held') {
+                    this.recordRepairHold(blueprint, node, driftResult.reason, driftResult.detail);
                     return { ...base, status: 'ok' };
                 }
                 const reason = driftResult.reason;
@@ -842,7 +847,15 @@ export class BlueprintReconciler {
         const byId = new Map(allNodes.map((n) => [n.id, n]));
         const svc = BlueprintService.getInstance();
         for (const dep of deployments) {
-            if (dep.status !== 'active' && dep.status !== 'drifted' && dep.status !== 'correcting') {
+            // A held target keeps being checked: the hold is a state the rollout
+            // or an operator can clear, so a tick has to keep looking for the
+            // authority that would release it.
+            if (
+                dep.status !== 'active'
+                && dep.status !== 'drifted'
+                && dep.status !== 'correcting'
+                && dep.status !== 'repair_held'
+            ) {
                 continue;
             }
             const node = byId.get(dep.node_id);
@@ -857,6 +870,10 @@ export class BlueprintReconciler {
                 });
                 continue;
             }
+            if (driftResult.kind === 'held') {
+                this.recordRepairHold(blueprint, node, driftResult.reason, driftResult.detail);
+                continue;
+            }
             const reason = driftResult.reason;
             commitBlueprintDeploymentCause('drift_observed', blueprint.id, node.id, {
                 status: 'drifted',
@@ -865,6 +882,48 @@ export class BlueprintReconciler {
                 drift_summary: reason,
             }, null);
             await this.handleDrift(blueprint, node, reason, driftResult.cause);
+        }
+    }
+
+    /**
+     * Record that a drift repair was declined, and say why.
+     *
+     * A hold is a decision, not a failed attempt, so it gets its own
+     * deployment status, its own drift summary, and its own history stage. It
+     * never mutates the workload, and it never reports itself as converged: a
+     * target that cannot be repaired is still drifted and still needs an
+     * operator or a rollout to resolve it.
+     */
+    private recordRepairHold(
+        blueprint: Blueprint,
+        node: Node,
+        reason: RuntimeRepairHoldReason,
+        detail: string,
+    ): void {
+        const previous = DatabaseService.getInstance().getDeployment(blueprint.id, node.id);
+        // Re-asserting the same hold on every tick is not news. Recording it
+        // once per transition keeps the history readable and stops a held target
+        // from appending a row a minute forever.
+        if (previous?.status === 'repair_held' && previous.drift_summary === detail) {
+            return;
+        }
+        commitBlueprintDeploymentCause('drift_repair_held', blueprint.id, node.id, {
+            status: 'repair_held',
+            last_checked_at: Date.now(),
+            drift_summary: detail,
+        }, null);
+        diagnosticLog('drift repair held', {
+            blueprintId: blueprint.id,
+            nodeId: node.id,
+            reason,
+        });
+        if (blueprint.drift_mode === 'enforce') {
+            NotificationService.getInstance().dispatchAlert(
+                'warning',
+                'blueprint_drift_repair_held',
+                `Auto-fix for "${blueprint.name}" ${nodeLocationClause(node)} was declined: ${detail}`,
+                { stackName: blueprint.name, actor: 'system:blueprint' },
+            );
         }
     }
 

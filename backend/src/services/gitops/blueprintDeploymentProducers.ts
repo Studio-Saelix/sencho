@@ -34,7 +34,8 @@ export type BlueprintDeploymentCause =
   | 'await_state_review'
   | 'await_evict_confirm'
   | 'drift_observed'
-  | 'drift_enforce_start';
+  | 'drift_enforce_start'
+  | 'drift_repair_held';
 
 /** Causes that only observe, and must never acknowledge or mint anything. */
 const OBSERVATION_STAGE = {
@@ -42,6 +43,7 @@ const OBSERVATION_STAGE = {
   await_evict_confirm: 'blueprint_evict_blocked',
   drift_observed: 'blueprint_drifted',
   drift_enforce_start: 'blueprint_correcting',
+  drift_repair_held: 'blueprint_repair_held',
 } as const;
 
 type ObservationCause = keyof typeof OBSERVATION_STAGE;

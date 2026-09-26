@@ -1069,12 +1069,20 @@ export class BlueprintTargetAdapter implements TargetAdapter {
           };
         }
 
+        // The marker is the only on-node record of what this deploy installed.
+        // Naming the generation, its artifact set, and the rollout that
+        // authorized it is what lets a later drift check prove what a repair
+        // would overwrite instead of inferring it from the application's
+        // current pointers.
         const marker = buildBlueprintMarker({
           blueprintId: blueprint.id,
           revision: blueprint.revision,
           lastApplied: Date.now(),
           applicationId: liveApp.id,
           bindingRevision: binding.intentRevisionId,
+          generationId: binding.acceptedGenerationId,
+          artifactSetId: binding.artifactSetId,
+          rolloutGenerationId: liveApp.rollout_generation_id ?? undefined,
         });
 
         // Capture the pre-deploy state so this rollout can be rolled back later.

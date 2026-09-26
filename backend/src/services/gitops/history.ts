@@ -42,6 +42,7 @@ export type GitOpsHistoryStage =
   | 'blueprint_deploy_started'
   | 'blueprint_drifted'
   | 'blueprint_evict_blocked'
+  | 'blueprint_repair_held'
   | 'blueprint_state_review'
   | 'blueprint_withdraw_failed'
   | 'blueprint_withdraw_started'

@@ -638,6 +638,7 @@ export type RuntimeFacet =
         | 'evict_blocked'
         | 'drifted'
         | 'correcting'
+        | 'repair_held'
         | 'fully_deployed_health_pending'
         | 'health_checking'
         | 'synced_and_healthy'
@@ -780,6 +781,7 @@ export const FACET_EVIDENCE_SOURCE: FacetEvidenceSource = {
     evict_blocked: 'current',
     drifted: 'current',
     correcting: 'current',
+    repair_held: 'current',
     fully_deployed_health_pending: 'current',
     health_checking: 'current',
     synced_and_healthy: 'current',

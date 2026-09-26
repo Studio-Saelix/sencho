@@ -9,6 +9,7 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from 'vitest';
 import request from 'supertest';
 import { setupTestDb, cleanupTestDb, loginAsTestAdmin } from './helpers/setupTestDb';
+import { newGitOpsId } from '../services/gitops/directApplication';
 
 let tmpDir: string;
 let app: import('express').Express;
@@ -68,6 +69,92 @@ beforeEach(() => {
     db.prepare('DELETE FROM blueprints').run();
     db.prepare('DELETE FROM nodes WHERE is_default = 0').run();
 });
+
+/**
+ * Acknowledge a generation and its artifact set for one target.
+ *
+ * A drift check can only classify a target it can name an expected identity
+ * for, so a test that exercises marker or digest semantics needs a target that
+ * has actually been deployed. Without this the check has nothing to compare and
+ * reports missing evidence, which is a different test.
+ */
+async function acknowledgeInlineTarget(
+    appId: string,
+    nodeId: number,
+    generationId: string,
+    artifactSetId: string,
+): Promise<void> {
+    const { GitOpsStore, emptyTargetRow } = await import('../services/gitops/store');
+    GitOpsStore.getInstance().upsertTarget({
+        ...emptyTargetRow(appId, nodeId, Date.now()),
+        desired_generation_id: generationId,
+        applied_generation_id: generationId,
+        deployed_generation_id: generationId,
+        expected_artifact_set_id: artifactSetId,
+        latest_artifact_set_id: artifactSetId,
+    });
+}
+
+/**
+ * An application with one accepted generation, one exact artifact set, and an
+ * acknowledged target: the minimum a drift check needs before it can say
+ * anything about marker or digest state.
+ */
+async function seedAcknowledgedInlineApp(
+    appId: string,
+    blueprintId: number,
+    nodeId: number,
+): Promise<void> {
+    const { GitOpsStore } = await import('../services/gitops/store');
+    const store = GitOpsStore.getInstance();
+    const genId = newGitOpsId();
+    const artId = newGitOpsId();
+    store.insertGeneration({
+        id: genId,
+        application_id: appId,
+        commit_sha: 'a'.repeat(40),
+        repo_url: `inline://blueprint/${blueprintId}`,
+        configured_ref: 'inline',
+        resolved_ref_kind: null,
+        repo_identity_json: JSON.stringify({ host: 'inline', pathname: `/blueprint/${blueprintId}` }),
+        manifest_version: 1,
+        candidate_dir: `generations/inline-${genId}`,
+        applied_dir: `generations/inline-${genId}-applied`,
+        expected_invocation_json: '{}',
+        materialization_fingerprint: 'a'.repeat(64),
+        validation_ok: 1,
+        plan_blocked: 0,
+        change_plan_fingerprint: null,
+        operation_id: 'op-acknowledged',
+        trigger: 'test',
+        actor: null,
+        previous_generation_id: null,
+        redacted_limitations_json: '[]',
+        portable_manifest_json: null,
+        compose_inputs_json: null,
+        source_policy_evidence_json: null,
+        security_policy_evidence_json: null,
+        support_requirements_json: null,
+        compatibility_requirements_json: null,
+        secret_capability_json: null,
+        created_at: Date.now(),
+    });
+    store.insertArtifactSet({
+        id: artId,
+        generation_id: genId,
+        evidence_version: 1,
+        authoritative: 0,
+        qualification: 'exact',
+        evidence_json: JSON.stringify({ kind: 'exact', identity: `exact:${'a'.repeat(64)}` }),
+        created_at: Date.now(),
+    });
+    const app = store.getApplication(appId)!;
+    app.accepted_generation_id = genId;
+    app.artifact_set_id = artId;
+    app.latest_artifact_set_id = artId;
+    store.writeApplicationPointers(app);
+    await acknowledgeInlineTarget(appId, nodeId, genId, artId);
+}
 
 describe('Blueprint route edge cases', () => {
     it('refuses to disable a blueprint that still has an active deployment', async () => {
@@ -274,6 +361,7 @@ describe('BlueprintService marker edge cases', () => {
         const { newGitOpsId } = await import('../services/gitops/directApplication');
         const appId = newGitOpsId();
         GitOpsStore.getInstance().insertApplication(blankInlineApplication(appId, bp.id, Date.now()));
+        await seedAcknowledgedInlineApp(appId, bp.id, localNode.id);
 
         vi.spyOn(BlueprintService.getInstance(), 'readMarker').mockResolvedValue({
             blueprintId: bp.id,
@@ -381,6 +469,7 @@ describe('BlueprintService marker edge cases', () => {
         app.artifact_set_id = artId;
         app.latest_artifact_set_id = artId;
         store.writeApplicationPointers(app);
+        await acknowledgeInlineTarget(appId, localNode.id, genId, artId);
 
         vi.spyOn(BlueprintService.getInstance(), 'readMarker').mockResolvedValue({
             blueprintId: bp.id,
@@ -505,6 +594,7 @@ describe('BlueprintService marker edge cases', () => {
         app.artifact_set_id = artId;
         app.latest_artifact_set_id = artId;
         store.writeApplicationPointers(app);
+        await acknowledgeInlineTarget(appId, localNode.id, genId, artId);
 
         vi.spyOn(BlueprintService.getInstance(), 'readMarker').mockResolvedValue({
             blueprintId: bp.id,
@@ -533,14 +623,19 @@ describe('BlueprintService marker edge cases', () => {
         expect(matched.kind).toBe('matched');
     });
 
-    it('returns unverified for a Blueprint with no frozen digest record', async () => {
+    it('holds for a target that never acknowledged an artifact record', async () => {
         const localNode = DatabaseService.getInstance().getNodes()[0];
         const bp = seedBlueprint([localNode.id]);
         const bpObj = DatabaseService.getInstance().getBlueprint(bp.id)!;
-        const { GitOpsStore } = await import('../services/gitops/store');
+        const { GitOpsStore, emptyTargetRow } = await import('../services/gitops/store');
         const { blankInlineApplication } = await import('../services/gitops/blueprintProducers');
-        const { newGitOpsId } = await import('../services/gitops/directApplication');
-        GitOpsStore.getInstance().insertApplication(blankInlineApplication(newGitOpsId(), bp.id, Date.now()));
+        const { newGitOpsId: newId } = await import('../services/gitops/directApplication');
+        GitOpsStore.getInstance().insertApplication(blankInlineApplication(newId(), bp.id, Date.now()));
+        // The target exists but has acknowledged nothing: the state a node is in
+        // between being asked to hold a Blueprint and the first rollout landing.
+        GitOpsStore.getInstance().upsertTarget(
+            emptyTargetRow(GitOpsStore.getInstance().getLiveBlueprintApplication(bp.id)!.id, localNode.id, Date.now()),
+        );
         vi.spyOn(BlueprintService.getInstance(), 'readMarker').mockResolvedValue({
             blueprintId: bp.id,
             revision: bpObj.revision,
@@ -557,10 +652,13 @@ describe('BlueprintService marker edge cases', () => {
             observedAt: Date.now(),
         });
 
+        // A target that was never acknowledged has no expected identity to
+        // compare against and nothing a repair could restore, so the honest
+        // answer is a hold rather than a drift Sencho pretends it can fix.
         const result = await BlueprintService.getInstance().checkForDrift(bpObj, localNode);
-        expect(result.kind).toBe('unverified');
-        if (result.kind === 'unverified') {
-            expect(result.reason).toMatch(/no expected artifact set/i);
+        expect(result.kind).toBe('held');
+        if (result.kind === 'held') {
+            expect(result.reason).toBe('evidence_incomplete');
         }
     });
 
