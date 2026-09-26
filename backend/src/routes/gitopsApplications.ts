@@ -41,6 +41,7 @@ import {
   resolveRollbackTargets,
   restoreTargetToGeneration,
   rollbackCandidatesForApplication,
+  rolloutTargetSet,
   type RestoreTargetOutcome,
   type RolloutRollbackScope,
   type RolloutRollbackTargetResult,
@@ -48,9 +49,11 @@ import {
 import { placementEffectCompatible } from '../services/gitops/store';
 import { GitOpsTransitions, GitOpsTransitionError } from '../services/gitops/transitions';
 import { newGitOpsId } from '../services/gitops/directApplication';
+import { HEALTH_ROLLOUT_POLICIES, isHealthRolloutPolicy } from '../services/gitops/healthPolicy';
 import {
   buildAcceptedGeneration,
   ensureRolloutAuthorization,
+  frozenStrategyFor,
 } from '../services/gitops/handoff';
 import { GitSourceService } from '../services/GitSourceService';
 import { sanitizeForLog } from '../utils/safeLog';
@@ -875,7 +878,7 @@ gitopsApplicationsRouter.post('/:id/placement/approve', async (req: Request, res
       envelope: { operationId: newGitOpsId(), actor, trigger: 'manual', at: Date.now() },
       rolloutGenerationId: newGitOpsId(),
       candidateId: candidate.id,
-      strategyJson: intent.rollout_strategy_json,
+      strategyJson: frozenStrategyFor(GitOpsStore.getInstance(), app, intent.id),
       provenance: 'placement_approval',
     });
   } catch (error) {
@@ -1030,6 +1033,78 @@ gitopsApplicationsRouter.post('/:id/rollout/pause', (req: Request, res: Response
     return;
   }
   res.json({ ok: true });
+});
+
+/**
+ * Set the health-and-rollout policy for one application.
+ *
+ * The policy is per application, not a global setting, and it is written through
+ * its own endpoint because the write has a side effect the generic settings
+ * route cannot express: it changes what the next rollout is authorized to do.
+ *
+ * It authorizes a future action on every frozen target, so every target is
+ * checked before anything is written. That is deliberately stricter than the
+ * application-wide `stack:deploy` the other rollout-lifecycle writes take: those
+ * act on the application as a whole, while this one names in advance what the
+ * system may do to each node's stack, including restoring a previous
+ * generation. A bulk action that half-applies on a permission failure would
+ * leave some targets on a policy the operator is not entitled to set for them.
+ */
+gitopsApplicationsRouter.post('/:id/rollout/health-policy', async (req: Request, res: Response): Promise<void> => {
+  const target = resolveAuthorityTarget(req, res);
+  if (!target) return;
+  const policy = req.body?.policy;
+  if (!isHealthRolloutPolicy(policy)) {
+    res.status(400).json({
+      error: `policy must be one of: ${HEALTH_ROLLOUT_POLICIES.join(', ')}`,
+      code: 'HEALTH_POLICY_REFUSED',
+    });
+    return;
+  }
+
+  const app = target.application;
+  const store = GitOpsStore.getInstance();
+  const stackName = deployStackNameFor(app);
+  if (!stackName) {
+    res.status(409).json({
+      error: 'The deploy stack identity could not be resolved.',
+      code: 'HEALTH_POLICY_REFUSED',
+    });
+    return;
+  }
+  // The application-wide grant first, then the exact per-target checks. The
+  // application gate is not redundant: a target set can legitimately be empty
+  // (nothing placed yet, or every target retired), and a loop over no targets
+  // would authorize the write on its own absence. This write names in advance
+  // what the system may do to each stack, so it needs both.
+  if (!requirePermission(req, res, 'stack:deploy')) return;
+  const frozen = rolloutTargetSet(app);
+  const nodeIds = frozen?.nodeIds ?? store.listTargets(app.id)
+    .filter((row) => row.target_status === 'active')
+    .map((row) => row.node_id);
+  for (const nodeId of nodeIds) {
+    if (!requireDeployOnTarget(req, res, stackName, nodeId)) return;
+  }
+
+  try {
+    GitOpsTransitions.getInstance().healthRolloutPolicySet({
+      applicationId: app.id,
+      policy,
+      envelope: authorityEnvelope(req),
+    });
+  } catch (error) {
+    if (error instanceof GitOpsTransitionError) {
+      res.status(409).json({ error: error.message, code: 'HEALTH_POLICY_REFUSED' });
+      return;
+    }
+    console.error(
+      '[GitOps authority] Health rollout policy change failed:',
+      sanitizeForLog(error instanceof Error ? error.message : String(error)),
+    );
+    res.status(500).json({ error: 'Failed to set the health rollout policy' });
+    return;
+  }
+  res.json({ ok: true, policy });
 });
 
 /**

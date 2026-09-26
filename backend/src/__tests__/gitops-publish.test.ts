@@ -581,6 +581,7 @@ describe('GitOps notification mapping', () => {
       rollback_completed: { category: 'gitops_rollback_completed', level: 'info', phrase: 'rollback completed' },
       rollback_partial_failed: { category: 'gitops_rollback_partial_failed', level: 'error', phrase: 'rollback partially failed' },
       blueprint_state_review: { category: 'gitops_stateful_confirmation', level: 'warning', phrase: 'stateful deploy awaiting confirmation' },
+      health_rollout_policy_set: { category: 'gitops_health_rollout_policy_set', level: 'info', phrase: 'health rollout policy changed' },
     });
   });
 

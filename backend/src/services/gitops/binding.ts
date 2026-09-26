@@ -6,6 +6,7 @@ import { GitOpsStore } from './store';
 import { GitOpsTransitions, GitOpsTransitionError, type EventEnvelope } from './transitions';
 import type { GitOpsApplicationRow, GitOpsIntentRevisionRow, GitOpsRolloutCandidateRow } from './types';
 import { decodeGitOpsEvidenceLimitations, decodeGitOpsJson, encodeGitOpsEvidenceLimitations } from './json';
+import { carriedHealthPolicyJson } from './healthPolicy';
 import { isGitManagedBlueprint } from './gitManaged';
 
 export { GitManagedContentError, isGitManagedBlueprint } from './gitManaged';
@@ -399,6 +400,11 @@ function blockedIntentRow(
   blueprint: Blueprint,
   envelope: EventEnvelope,
 ): GitOpsIntentRevisionRow {
+  const store = GitOpsStore.getInstance();
+  const current = store.getApplication(applicationId);
+  const previous = current?.intent_revision_id
+    ? store.getIntentRevision(current.intent_revision_id)
+    : undefined;
   return {
     id: randomUUID(),
     application_id: applicationId,
@@ -412,7 +418,7 @@ function blockedIntentRow(
     rollout_strategy_json: JSON.stringify({ driftMode: blueprint.drift_mode, enabled: blueprint.enabled }),
     runtime_drift_policy: blueprint.drift_mode,
     stateful_policy_json: null,
-    health_failure_rollback_policy_json: null,
+    health_failure_rollback_policy_json: carriedHealthPolicyJson(previous),
     operation_id: envelope.operationId,
     actor: envelope.actor,
     created_at: envelope.at,

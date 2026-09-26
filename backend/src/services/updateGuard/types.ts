@@ -94,7 +94,7 @@ export interface HealthGateReport {
   stack: string;
   id: string | null;
   status: HealthGateStatus | 'never-run';
-  trigger: 'update' | 'deploy' | 'service_update' | 'service_restore' | 'recovery' | null;
+  trigger: 'update' | 'deploy' | 'service_update' | 'service_restore' | 'recovery' | 'rollout' | null;
   reason: string | null;
   windowSeconds: number | null;
   startedAt: number | null;

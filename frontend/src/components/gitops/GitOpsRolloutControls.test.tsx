@@ -31,6 +31,7 @@ vi.mock('@/lib/gitopsAuthorityApi', async (importOriginal) => {
     replanGitOpsRollout: vi.fn(),
     supersedeGitOpsRollout: vi.fn(),
     rollbackGitOpsRollout: vi.fn(),
+    setGitOpsHealthRolloutPolicy: vi.fn(),
   };
 });
 
@@ -43,6 +44,7 @@ import {
   replanGitOpsRollout,
   resumeGitOpsRollout,
   rollbackGitOpsRollout,
+  setGitOpsHealthRolloutPolicy,
   supersedeGitOpsRollout,
 } from '@/lib/gitopsAuthorityApi';
 import { toast } from '@/components/ui/toast-store';
@@ -62,6 +64,18 @@ function blueprintRevision(rollout: RolloutFacet, targets = [target()]): GitOpsR
       rollout,
     }),
   });
+}
+
+/** A target under a health-gated rollout, with the policy the gate froze. */
+function gatedPolicy(policy: 'observe' | 'pause' | 'retry_once' | 'stop' | 'rollback') {
+  return {
+    policy,
+    configuredPolicy: policy,
+    awaitingRunId: null,
+    attempts: 0,
+    stopReason: null,
+    recoveryAvailable: true,
+  };
 }
 
 function renderControls(
@@ -170,6 +184,102 @@ describe('GitOpsRolloutControls', () => {
     await user.click(screen.getByRole('button', { name: 'Supersede rollout' }));
     await waitFor(() => expect(supersedeGitOpsRollout).toHaveBeenCalledWith('bp:5'));
     expect(onChanged).toHaveBeenCalled();
+  });
+
+  it('offers the health policy control and writes the chosen mode', async () => {
+    const user = userEvent.setup();
+    const onChanged = vi.fn();
+    vi.mocked(setGitOpsHealthRolloutPolicy).mockResolvedValue(undefined);
+    renderControls(
+      blueprintRevision(
+        { status: 'rollout_queued', rolloutGenerationId: 'rgen-1' },
+        [target({ healthGate: gatedPolicy('observe') })],
+      ),
+      () => true,
+      true,
+      onChanged,
+    );
+
+    await user.click(screen.getByTestId('gitops-action-health-policy'));
+    await user.click(screen.getByRole('radio', { name: 'pause' }));
+    await user.click(screen.getByTestId('gitops-confirm-health-policy'));
+
+    await waitFor(() => expect(setGitOpsHealthRolloutPolicy).toHaveBeenCalledWith('bp:5', 'pause'));
+    expect(onChanged).toHaveBeenCalled();
+  });
+
+  it('shows the policy the application is configured for, not the one the running rollout froze', async () => {
+    const user = userEvent.setup();
+    // The running rollout is under pause, but the operator has since set the
+    // next one to rollback. The dialog edits the configured policy, so it opens
+    // on rollback: opening on the frozen one would offer to undo a setting that
+    // was never made.
+    renderControls(
+      blueprintRevision(
+        { status: 'batch_in_progress', rolloutGenerationId: 'rgen-1' },
+        [target({ healthGate: { ...gatedPolicy('pause'), configuredPolicy: 'rollback' } })],
+      ),
+      () => true,
+    );
+
+    await user.click(screen.getByTestId('gitops-action-health-policy'));
+
+    expect(screen.getByTestId('gitops-confirm-health-policy')).toBeDisabled();
+    expect(screen.getByRole('radio', { name: 'rollback' })).toHaveAttribute('aria-checked', 'true');
+  });
+
+  it('reopens on the configured policy rather than the last one picked', async () => {
+    const user = userEvent.setup();
+    vi.mocked(setGitOpsHealthRolloutPolicy).mockResolvedValue(undefined);
+    renderControls(
+      blueprintRevision(
+        { status: 'rollout_queued', rolloutGenerationId: 'rgen-1' },
+        [target({ healthGate: gatedPolicy('observe') })],
+      ),
+      () => true,
+    );
+
+    // Pick something, then cancel.
+    await user.click(screen.getByTestId('gitops-action-health-policy'));
+    await user.click(screen.getByRole('radio', { name: 'stop' }));
+    await user.click(screen.getByRole('button', { name: 'Cancel' }));
+
+    // Reopening has to start from what the application is actually set to. If it
+    // kept the cancelled pick, the next open would offer to write a choice that
+    // was abandoned, and confirming it would change the policy by accident.
+    await user.click(screen.getByTestId('gitops-action-health-policy'));
+    expect(screen.getByRole('radio', { name: 'observe' })).toHaveAttribute('aria-checked', 'true');
+  });
+
+  it('describes only the selected policy, and in words rather than the stored mode', async () => {
+    const user = userEvent.setup();
+    renderControls(
+      blueprintRevision(
+        { status: 'rollout_queued', rolloutGenerationId: 'rgen-1' },
+        [target({ healthGate: gatedPolicy('observe') })],
+      ),
+      () => true,
+    );
+
+    await user.click(screen.getByTestId('gitops-action-health-policy'));
+
+    // The stored name is a mode, not copy: `retry_once` is not something an
+    // operator should be reading, so the option reads as prose.
+    expect(screen.getByRole('radio', { name: 'retry once' })).toBeTruthy();
+    // Five stacked explanations is a wall of text. Only the chosen one explains
+    // itself, and the next rollout taking effect later is stated once, always.
+    const body = screen.getByRole('dialog').textContent ?? '';
+    expect(body).toContain('Record each target');
+    expect(body).not.toContain('Restore the captured pre-rollout generation');
+    expect(body).toMatch(/next rollout/i);
+  });
+
+  it('withholds the health policy control without deploy permission', () => {
+    renderControls(
+      blueprintRevision({ status: 'rollout_queued', rolloutGenerationId: 'rgen-1' }),
+      action => action !== 'stack:deploy',
+    );
+    expect(screen.queryByTestId('gitops-action-health-policy')).toBeNull();
   });
 
   it('rolls back to the hub-known prior generation', async () => {

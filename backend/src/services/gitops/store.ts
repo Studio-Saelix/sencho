@@ -818,6 +818,21 @@ export class GitOpsStore {
     );
   }
 
+  /**
+   * Set the health-and-rollout policy on an existing intent revision.
+   *
+   * The policy is the only field on an intent that may change without the
+   * revision changing: a health decision is a different authority domain from
+   * source, placement, and artifact, so rewriting the whole row (or minting a
+   * new one) would invalidate approvals that are still accurate.
+   */
+  updateIntentHealthPolicy(intentId: string, policyJson: string): void {
+    const result = this.db().prepare(
+      'UPDATE gitops_intent_revisions SET health_failure_rollback_policy_json = ? WHERE id = ?',
+    ).run(policyJson, intentId);
+    if (result.changes === 0) throw new Error('intent revision could not be updated');
+  }
+
   insertRolloutCandidate(row: GitOpsRolloutCandidateRow): void {
     decodeGitOpsRequiredTargetsJson(row.required_targets_json);
     this.db().prepare(
@@ -866,7 +881,8 @@ export class GitOpsStore {
       `INSERT INTO gitops_target_current (
         application_id, node_id, target_status, desired_generation_id, candidate_generation_id,
         applied_generation_id, deployed_generation_id, healthy_generation_id,
-        last_health_status, last_health_generation_id, last_health_run_id, lkg_generation_id,
+        last_health_status, last_health_generation_id, last_health_run_id,
+        pending_health_run_id, health_attempts, health_stop_reason, lkg_generation_id,
         lkg_artifact_set_id, lkg_unavailable_at, lkg_unavailable_reason, expected_artifact_set_id,
         latest_artifact_set_id, observed_artifact_identity_json, intent_revision_id,
         rollout_candidate_id, rollout_generation_id, source_acceptance_ref, placement_approval_ref,
@@ -877,7 +893,7 @@ export class GitOpsStore {
         recovery_phase, interruption_stage, interruption_at, interruption_operation_id,
         interruption_generation_id, interruption_intent_revision_id, interruption_rollout_candidate_id,
         pause_at, pause_reason, retry_at, suspended_at, partial_json, evidence_limitations_json, updated_at
-      ) VALUES (${Array(53).fill('?').join(', ')})
+      ) VALUES (${Array(56).fill('?').join(', ')})
       ON CONFLICT(application_id, node_id) DO UPDATE SET
         target_status=excluded.target_status,
         desired_generation_id=excluded.desired_generation_id,
@@ -888,6 +904,9 @@ export class GitOpsStore {
         last_health_status=excluded.last_health_status,
         last_health_generation_id=excluded.last_health_generation_id,
         last_health_run_id=excluded.last_health_run_id,
+        pending_health_run_id=excluded.pending_health_run_id,
+        health_attempts=excluded.health_attempts,
+        health_stop_reason=excluded.health_stop_reason,
         lkg_generation_id=excluded.lkg_generation_id,
         lkg_artifact_set_id=excluded.lkg_artifact_set_id,
         lkg_unavailable_at=excluded.lkg_unavailable_at,
@@ -933,7 +952,9 @@ export class GitOpsStore {
     ).run(
       row.application_id, row.node_id, row.target_status, row.desired_generation_id, row.candidate_generation_id,
       row.applied_generation_id, row.deployed_generation_id, row.healthy_generation_id,
-      row.last_health_status, row.last_health_generation_id, row.last_health_run_id, row.lkg_generation_id,
+      row.last_health_status, row.last_health_generation_id, row.last_health_run_id,
+      row.pending_health_run_id, row.health_attempts, row.health_stop_reason, row.lkg_generation_id,
+
       row.lkg_artifact_set_id, row.lkg_unavailable_at, row.lkg_unavailable_reason, row.expected_artifact_set_id,
       row.latest_artifact_set_id, row.observed_artifact_identity_json, row.intent_revision_id,
       row.rollout_candidate_id, row.rollout_generation_id, row.source_acceptance_ref, row.placement_approval_ref,
@@ -946,6 +967,18 @@ export class GitOpsStore {
       row.pause_at, row.pause_reason, row.retry_at, row.suspended_at, row.partial_json,
       row.evidence_limitations_json, row.updated_at,
     );
+  }
+  /**
+   * Targets still pointing at a health run.
+   *
+   * A target that is awaiting a run whose verdict never arrived is stuck: the
+   * queue skips it and reconstruction skips it, so nothing else would ever move
+   * it. The startup reconciliation walks this list.
+   */
+  listTargetsAwaitingHealthRun(): GitOpsTargetCurrentRow[] {
+    return this.db()
+      .prepare('SELECT * FROM gitops_target_current WHERE pending_health_run_id IS NOT NULL')
+      .all() as GitOpsTargetCurrentRow[];
   }
 
   resolveApprovalRef(id: string, expected: ResolveApprovalExpected): GitOpsApprovalRow | null {
@@ -1275,6 +1308,9 @@ export function emptyTargetRow(
     last_health_status: null,
     last_health_generation_id: null,
     last_health_run_id: null,
+    pending_health_run_id: null,
+    health_attempts: 0,
+    health_stop_reason: null,
     lkg_generation_id: null,
     lkg_artifact_set_id: null,
     lkg_unavailable_at: null,

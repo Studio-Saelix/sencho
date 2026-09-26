@@ -335,6 +335,56 @@ export type LkgFacet =
   | { status: 'unavailable' }
   | { status: 'qualified'; generationId: string; artifactSetId: string };
 
+/**
+ * How a rollout reacts to a per-target health outcome.
+ *
+ * `observe` is the default and records outcomes without gating advancement, so a
+ * rollout behaves exactly as it did before an operator chose anything. The other
+ * four are opt-in because three of them can stop or restore work across a fleet.
+ */
+export type HealthRolloutPolicy = 'observe' | 'pause' | 'retry_once' | 'stop' | 'rollback';
+
+export const HEALTH_ROLLOUT_POLICIES: readonly HealthRolloutPolicy[] = [
+  'observe',
+  'pause',
+  'retry_once',
+  'stop',
+  'rollback',
+];
+
+/** Why a rollout stopped advancing on one target. */
+export type HealthStopReason =
+  | 'health_passed'
+  | 'health_failed'
+  | 'health_unknown'
+  | 'health_retried'
+  | 'health_retry_exhausted'
+  | 'rollout_stopped'
+  | 'rollback_completed'
+  | 'rollback_unavailable';
+
+/**
+ * The health-gated rollout's state for one target.
+ *
+ * `policy` is the frozen policy of the rollout this target is under, null when
+ * there is no authorized rollout, which is a different answer from a policy that
+ * is observe. `configuredPolicy` is what the operator has set on the current
+ * intent, which is what the next rollout will freeze; after a change only it
+ * moves, so reporting just the frozen one would make a saved change look lost.
+ * `recoveryAvailable` says
+ * whether a rollback has a captured pre-rollout generation to restore, which the
+ * LKG facet cannot answer: the LKG is the newest generation that ever passed, not
+ * what this target ran before the rollout.
+ */
+export interface HealthGateFacet {
+  policy: HealthRolloutPolicy | null;
+  configuredPolicy: HealthRolloutPolicy;
+  awaitingRunId: string | null;
+  attempts: number;
+  stopReason: HealthStopReason | null;
+  recoveryAvailable: boolean;
+}
+
 export type HealthFacet =
   | { status: 'not_applicable' | 'unbound' }
   | { status: 'pending'; runId: string | null }
@@ -415,6 +465,8 @@ export interface GitOpsTargetProjection {
   legacyAppliedRevision: number | null;
   runtime: RuntimeFacet;
   health: HealthFacet;
+  /** Absent on a projection from a remote running an older version. */
+  healthGate?: HealthGateFacet;
   lkg: LkgFacet;
   tombstoned: boolean;
 }
@@ -422,6 +474,7 @@ export interface GitOpsTargetProjection {
 export type ConfiguredPolicy =
   | { kind: 'git_source'; autoApplyOnWebhook: boolean; autoDeployOnApply: boolean }
   | { kind: 'blueprint_drift'; driftMode: 'observe' | 'suggest' | 'enforce' }
+  | { kind: 'health_rollout'; healthPolicy: HealthRolloutPolicy }
   | null;
 
 /**

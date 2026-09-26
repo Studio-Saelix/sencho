@@ -11,6 +11,8 @@ import { parseEffectiveModel } from './preflight/effectiveModel';
 import type { HealthGateContainer, HealthGateReport } from './updateGuard/types';
 import { GitOpsStore } from './gitops/store';
 import { GitOpsTransitions } from './gitops/transitions';
+import { reportHealthVerdict } from './gitops/healthRolloutExecutor';
+import type { HealthRolloutPolicy } from './gitops/healthPolicy';
 import { ComposeService, getComposeCommandTimeoutMs } from './ComposeService';
 
 const POLL_INTERVAL_MS = 5_000;
@@ -81,7 +83,7 @@ interface ActiveGate {
   /** 'stack' for the legacy post-mutation gate, 'service' for prepared gates. */
   targetScope: 'stack' | 'service';
   /** Named trigger persisted on the row. */
-  trigger: 'update' | 'deploy' | 'service_update' | 'service_restore' | 'recovery';
+  trigger: 'update' | 'deploy' | 'service_update' | 'service_restore' | 'recovery' | 'rollout';
   /** Service gates only. */
   serviceName: string | null;
   /** Single image id every primary replica must converge on (service gates). */
@@ -261,6 +263,94 @@ export class HealthGateService {
     if (finalized > 0) {
       console.log(`[HealthGate] Marked ${finalized} interrupted observation(s) as unknown`);
     }
+    // A failure here must not stop the gate from accepting begin() calls, which is
+    // the rest of start()'s job and the reason start() is called at all.
+    try {
+      this.reconcileVerdictsThatNeverArrived();
+    } catch (error) {
+      console.error(
+        '[HealthGate] Could not reconcile undelivered verdicts:', getErrorMessage(error, 'unknown'),
+      );
+    }
+  }
+
+  /**
+   * Release targets whose health verdict was recorded but never delivered.
+   *
+   * The observing sweep above only finds runs still in flight. It cannot find a
+   * run that reached a terminal status and then lost the process between that
+   * write and the transition that records the outcome: the run is terminal, so
+   * the sweep skips it, and the target still points at it. Nothing else moves
+   * that target, because the queue skips a target awaiting a verdict and
+   * reconstruction skips it for the same reason, so the rollout would sit behind
+   * a verdict that already exists.
+   *
+   * Replaying the recorded verdict is the fix, not a blind release: when the
+   * verdict still attributes to what the target is running, the policy decides
+   * from it exactly as it would have in the original process. When it no longer
+   * attributes, the transition releases the pointer and says so, which is the
+   * honest outcome for evidence about a generation that is no longer deployed.
+   */
+  private reconcileVerdictsThatNeverArrived(): void {
+    let store: GitOpsStore;
+    try {
+      store = GitOpsStore.getInstance();
+    } catch (error) {
+      console.error('[HealthGate] Could not reconcile undelivered verdicts:', getErrorMessage(error, 'unknown'));
+      return;
+    }
+    for (const target of store.listTargetsAwaitingHealthRun()) {
+      // Per target, so one unreadable row cannot block the rest.
+      try {
+        const runId = target.pending_health_run_id;
+        if (!runId) continue;
+        const run = DatabaseService.getInstance().getHealthGateRunById(runId);
+        if (run && run.status === 'observing') continue;
+        const app = store.getApplication(target.application_id);
+        if (!app || app.lifecycle_status !== 'active') continue;
+        if (run && run.status !== null) {
+          this.recordGitOpsHealthVerdict(
+            run.node_id, run.stack_name, run.id, run.status as 'passed' | 'failed' | 'unknown',
+          );
+          continue;
+        }
+        // The run row is gone entirely, so there is no verdict to read and no
+        // policy to decide from. Only the pointer can be released, and releasing
+        // it is what lets the target's next dispatch reserve a fresh run instead
+        // of skipping itself for ever.
+        GitOpsTransitions.getInstance().healthRunReleased({
+          applicationId: app.id,
+          nodeId: target.node_id,
+          healthRunId: runId,
+          envelope: {
+            operationId: `health-rollout-reconcile-${runId}`,
+            actor: 'system:health-gate',
+            trigger: 'startup_reconcile',
+            at: Date.now(),
+          },
+        });
+        console.warn(
+          '[HealthGate] Released target %s on node %s: its health run %s no longer exists.',
+          sanitizeForLog(app.stack_name ?? app.id), target.node_id, runId,
+        );
+      } catch (error) {
+        console.error(
+          '[HealthGate] Could not reconcile an undelivered verdict on target node %s:',
+          target.node_id, getErrorMessage(error, 'unknown'),
+        );
+      }
+    }
+  }
+
+  /**
+   * Whether the gate is already running.
+   *
+   * Startup needs it so a failure before `start()` is not papered over with a
+   * second call: `start` sweeps the runs a previous process left observing, and
+   * a second sweep would finalize runs this process had just armed.
+   */
+  public isStarted(): boolean {
+    return this.started;
   }
 
   /** Clear every poll timer and finalize in-flight gates as unknown. */
@@ -482,12 +572,34 @@ export class HealthGateService {
    * `start`, never armed here.
    */
   public armReservedRun(runId: string, nodeId: number, stackName: string): void {
+    this.armReservedStackRun(runId, nodeId, stackName, 'recovery');
+  }
+
+  /**
+   * Start observing a health-gated rollout run that was reserved before its
+   * apply was dispatched.
+   *
+   * The same reserve-then-arm contract as a recovery observation, on its own
+   * trigger. It is a separate entry point rather than a widened `armReservedRun`
+   * because the caller that owns a rollout reservation is the rollout
+   * executor, and the two lifecycles answer to different recovery points.
+   */
+  public armRolloutRun(runId: string, nodeId: number, stackName: string): void {
+    this.armReservedStackRun(runId, nodeId, stackName, 'rollout');
+  }
+
+  private armReservedStackRun(
+    runId: string,
+    nodeId: number,
+    stackName: string,
+    expectedTrigger: 'recovery' | 'rollout',
+  ): void {
     if (!this.started) throw new Error('health gate service is not started');
 
     const run = DatabaseService.getInstance().getHealthGateRun(nodeId, stackName, runId);
     if (!run) throw new Error(`reserved health run ${runId} was not found`);
-    if (run.status !== 'observing' || run.trigger_action !== 'recovery' || run.target_scope !== 'stack') {
-      throw new Error(`health run ${runId} is not a reserved stack recovery observation`);
+    if (run.status !== 'observing' || run.trigger_action !== expectedTrigger || run.target_scope !== 'stack') {
+      throw new Error(`health run ${runId} is not a reserved stack ${expectedTrigger} observation`);
     }
 
     const key = this.gateKey(nodeId, stackName, 'stack', null);
@@ -502,7 +614,12 @@ export class HealthGateService {
       nodeId,
       stackName,
       windowSeconds: run.window_seconds,
-      startedAt: run.started_at,
+      // Arm time, not reservation time. A run adopted from a crashed process can
+      // be minutes old by the time it is adopted, and arming from its start
+      // would consume the whole observation window on the first poll: a slow
+      // failure would pass, and a stack whose containers were still appearing
+      // would finalize unknown. The window has to start when observation does.
+      startedAt: Date.now(),
       timer: null,
       expected: null,
       consecutivePollErrors: 0,
@@ -510,7 +627,7 @@ export class HealthGateService {
       restartingLastPoll: new Set(),
       finalized: false,
       targetScope: 'stack',
-      trigger: 'recovery',
+      trigger: expectedTrigger,
       serviceName: null,
       expectedImageId: null,
       expectedReplicas: 0,
@@ -521,6 +638,88 @@ export class HealthGateService {
     };
     this.active.set(key, gate);
     this.scheduleNextPoll(gate);
+  }
+
+  /**
+   * Allocate a health run for a health-gated rollout target, before its apply
+   * is dispatched.
+   *
+   * The row is written up front and carries the whole rollout binding, so a lost
+   * apply response still leaves durable evidence naming the application, intent,
+   * rollout generation, artifact set, and frozen policy the run was allocated
+   * for. A verdict is only consumed while those still match the target's live
+   * rollout, so a run that outlives its rollout cannot advance a later one.
+   *
+   * Returns `disabled` when the health gate is turned off: a rollout the
+   * operator chose to gate must not silently continue ungated, and the caller
+   * turns that into a refusal rather than a dispatch.
+   *
+   * Idempotent on the target's pending run, so a replayed dispatch reuses its
+   * reservation instead of opening a second observation of the same rollout.
+   */
+  public reserveRolloutRun(args: {
+    applicationId: string;
+    intentRevisionId: string;
+    rolloutGenerationId: string;
+    acceptedGenerationId: string;
+    artifactSetId: string | null;
+    healthPolicy: string;
+    nodeId: number;
+    stackName: string;
+    actor: string | null;
+  }): { outcome: 'reserved' | 'replayed' | 'disabled'; runId: string | null } {
+    const settings = this.readSettings();
+    if (!settings.enabled) return { outcome: 'disabled', runId: null };
+
+    const existing = this.findRolloutReservation(args);
+    if (existing) return { outcome: 'replayed', runId: existing.id };
+
+    const runId = randomUUID();
+    DatabaseService.getInstance().insertHealthGateRun({
+      id: runId,
+      node_id: args.nodeId,
+      stack_name: args.stackName,
+      trigger_action: 'rollout',
+      status: 'observing',
+      reason: null,
+      window_seconds: settings.windowSeconds,
+      containers_json: '[]',
+      started_at: Date.now(),
+      ended_at: null,
+      created_by: args.actor,
+      target_scope: 'stack',
+      service_name: null,
+      failure_source: null,
+      deployed_generation_id: args.acceptedGenerationId,
+      application_id: args.applicationId,
+      intent_revision_id: args.intentRevisionId,
+      rollout_generation_id: args.rolloutGenerationId,
+      artifact_set_id: args.artifactSetId,
+      health_policy: args.healthPolicy,
+    });
+    return { outcome: 'reserved', runId };
+  }
+
+  /**
+   * An unconsumed run this target already allocated for the same rollout.
+   *
+   * Scoped to the rollout generation as well as the stack, so a new rollout that
+   * reuses the stack name allocates its own run instead of adopting the previous
+   * rollout's.
+   */
+  private findRolloutReservation(args: {
+    rolloutGenerationId: string;
+    nodeId: number;
+    stackName: string;
+  }): HealthGateRunRow | null {
+    const rows = DatabaseService.getInstance().listObservingHealthGateRuns()
+      .filter((run) => (
+        run.node_id === args.nodeId
+        && run.stack_name === args.stackName
+        && run.trigger_action === 'rollout'
+        && run.rollout_generation_id === args.rolloutGenerationId
+      ));
+    return rows[0] ?? null;
   }
 
   /**
@@ -1196,18 +1395,44 @@ export class HealthGateService {
     try {
       const run = DatabaseService.getInstance().getHealthGateRun(nodeId, stackName, runId);
       if (!run) return;
-      const app = GitOpsStore.getInstance().getLiveDirectApplication(stackName);
+      // A run the rollout executor reserved names its own application, which is
+      // the only way a Blueprint-backed target resolves at all: there is no
+      // direct application for a Blueprint-managed stack, so the direct lookup
+      // below returns nothing and the verdict would never reach the transition.
+      const store = GitOpsStore.getInstance();
+      const app = run.application_id
+        ? store.getApplication(run.application_id)
+        : store.getLiveDirectApplication(stackName);
       if (!app || app.lifecycle_status !== 'active') return;
-      if (!GitOpsStore.getInstance().getTarget(app.id, nodeId)) return;
-      GitOpsTransitions.getInstance().healthFinalized({
+      if (!store.getTarget(app.id, nodeId)) return;
+      const rollout = run.rollout_generation_id && run.health_policy
+        ? { rolloutGenerationId: run.rollout_generation_id, healthPolicy: run.health_policy as HealthRolloutPolicy }
+        : null;
+      const result = GitOpsTransitions.getInstance().healthFinalized({
         applicationId: app.id,
         nodeId,
         healthRunId: runId,
         healthStatus: status,
         deployedGenerationId: run.deployed_generation_id ?? null,
         targetScope: run.target_scope,
+        rollout,
         envelope: { operationId: runId, actor: 'system:health-gate', trigger: 'health', at: Date.now() },
       });
+      // Carrying out the decision is async transport (applies, restores) and
+      // must not run inside the observation that produced the verdict. The
+      // transition has committed by now, so the decision and the state that
+      // justified it are already durable and this is pure follow-through.
+      // Fire-and-forget with its own error boundary: the gate is an observer,
+      // and a failed follow-up must not change the verdict already written.
+      if (result.healthDecision) {
+        reportHealthVerdict({ applicationId: app.id, nodeId, result });
+      } else if (result.healthUnattributable) {
+        // A run that finished without a decision released a target the live
+        // rollout was waiting on. Its decision cannot be applied here, but the
+        // rollout still has to be driven again: the only thing that would have
+        // moved it was this verdict, and it has now been fully recorded.
+        reportHealthVerdict({ applicationId: app.id, nodeId, result, redrive: true });
+      }
     } catch (error) {
       console.error(
         '[GitOps] Could not record the health verdict for %s:',

@@ -7,6 +7,7 @@ import type {
   FutureRolloutAuthorizationBinding,
   GitOpsApplicationRow,
   GitOpsGenerationRow,
+  GitOpsTargetCurrentRow,
 } from './types';
 import { GitOpsStore } from './store';
 import { GitOpsTransitions, type EventEnvelope } from './transitions';
@@ -26,7 +27,19 @@ import {
 import { stackManagedRoot } from './directApplication';
 import { decodeGitOpsRequiredTargetsJson } from './json';
 import { recoveryBindingForTarget } from './recoveryCapture';
-import { DatabaseService } from '../DatabaseService';
+import {
+  DEFAULT_HEALTH_ROLLOUT_POLICY,
+  decodeFrozenRolloutStrategy,
+  decodeIntentHealthPolicy,
+  encodeFrozenRolloutStrategy,
+  gatesAdvancement,
+  type HealthRolloutPolicy,
+} from './healthPolicy';
+import { probeRemoteCapability, type RemoteCapabilityProbe } from '../../helpers/remoteCapabilities';
+import { HEALTH_ROLLOUT_POLICY_CAPABILITY } from '../CapabilityRegistry';
+import { HealthGateService } from '../HealthGateService';
+import type { HealthRolloutExecutor } from './healthRolloutExecutor';
+import { DatabaseService, type Node } from '../DatabaseService';
 import { BlueprintService } from '../BlueprintService';
 import { buildBlueprintMarker } from '../../helpers/blueprintMarker';
 import { sanitizeForLog } from '../../utils/safeLog';
@@ -341,6 +354,11 @@ export async function ensureRolloutAuthorization(
 
     const approvalId = randomUUID();
     const rolloutGenerationId = randomUUID();
+    // The strategy is frozen here, not read later: a rollout generation is
+    // immutable once written, so this is the only moment the policy that governs
+    // this rollout can be captured. A policy the operator changes afterwards
+    // applies at the next authorization, never to a rollout already running.
+    const strategyJson = frozenStrategyFor(store, app, ingredients.intentRevisionId);
     try {
       transitions.rolloutAuthorized({
         applicationId: app.id,
@@ -348,6 +366,7 @@ export async function ensureRolloutAuthorization(
         rolloutGenerationId,
         preflightFingerprint,
         preflightEvidenceJson,
+        strategyJson,
         actor,
         envelope: envelopeFor(actor, trigger),
         authority,
@@ -372,8 +391,9 @@ export async function ensureRolloutAuthorization(
               rolloutGenerationId: randomUUID(),
               preflightFingerprint,
               preflightEvidenceJson,
+              strategyJson,
               actor,
-              envelope: envelopeFor(actor, trigger),
+              envelope: envelopeFor(actor, `${trigger}:preflight_race`),
               authority,
             });
           } catch (retryErr) {
@@ -429,16 +449,96 @@ async function readAppliedComposeContent(
   }
 }
 
+/**
+ * Whether a target has already acknowledged this exact rollout.
+ *
+ * The test reads the target's bound rollout identity, never its latest stage.
+ * A stage is a moving label that every later observation overwrites, and a
+ * health verdict overwrites it too: a target that passed and was then health
+ * checked no longer reads as acked, so a queue that tested the stage would pick
+ * the same target again and advance nowhere. The intent, applied generation, and
+ * authorization ref are what the ack actually asserted, and they survive every
+ * observation written after it.
+ */
 function targetAlreadyAcked(
   target: ReturnType<GitOpsStore['getTarget']>,
   binding: FutureRolloutAuthorizationBinding,
   liveAuthorizationRef: string,
 ): boolean {
   if (!target || target.target_status !== 'active') return false;
-  return target.latest_stage === 'blueprint_ack_recorded'
-    && target.intent_revision_id === binding.intentRevisionId
+  return target.intent_revision_id === binding.intentRevisionId
     && target.applied_generation_id === binding.acceptedGenerationId
     && target.rollout_authorization_ref === liveAuthorizationRef;
+}
+
+/**
+ * A target a health-gated rollout is still waiting on.
+ *
+ * Its health run was allocated before the apply went out, so the row outlives a
+ * lost response. While that is set the target belongs to the gate, not to the
+ * queue: dispatching it again would put two runs on one rollout attempt and
+ * leave two verdicts fighting over one target.
+ */
+function awaitingHealthVerdict(
+  target: ReturnType<GitOpsStore['getTarget']>,
+): boolean {
+  return target?.pending_health_run_id != null;
+}
+
+/**
+ * A target whose health this rollout has already settled.
+ *
+ * Acknowledged is not verified. A target that acked its apply and is now waiting
+ * on its verdict has the same applied generation as one that acked and passed,
+ * so the ack test cannot tell them apart, and a queue built on it would run the
+ * whole fleet while the first target is still unverified. Settled means a passing
+ * verdict for the generation the target is running right now, which is exactly
+ * what the health transition records when it promotes.
+ *
+ * A target that was already healthy on the generation it runs also reads as
+ * settled, so a target whose verdict already passed is not verified twice inside
+ * one rollout. Re-authorization is not covered: a new authorization mints a new
+ * approval ref, so `targetAlreadyAcked` is false and every target is verified
+ * again, which is the intent.
+ */
+function settledForGatedRollout(
+  target: ReturnType<GitOpsStore['getTarget']>,
+  binding: FutureRolloutAuthorizationBinding,
+  liveAuthorizationRef: string,
+): boolean {
+  if (!target) return false;
+  if (!targetAlreadyAcked(target, binding, liveAuthorizationRef)) return false;
+  const running = target.applied_generation_id;
+  if (!running) return false;
+  if (target.healthy_generation_id === running) return true;
+  return target.last_health_status === 'passed' && target.last_health_generation_id === running;
+}
+
+/**
+ * Whether a fence ends this target's turn in the queue rather than asking for
+ * another attempt.
+ *
+ * A policy that stopped, paused, or rolled back has said what it is going to do
+ * with this target, and only `retry_once` asks for it to be deployed again. So
+ * after an operator resumes, those targets are done: the queue moves past them
+ * to the targets it never reached. Treating them as still waiting would make a
+ * resume a silent no-op, because the first unsettled target is always the one
+ * that failed.
+ */
+function fencedOutOfTheQueue(
+  target: GitOpsTargetCurrentRow | undefined,
+  app: GitOpsApplicationRow,
+): boolean {
+  if (!target) return false;
+  if (target.health_stop_reason === null || target.health_stop_reason === 'health_retried') {
+    return false;
+  }
+  // A fence belongs to the rollout that wrote it. A later authorization mints a
+  // new rollout generation, and that rollout never stopped this target: without
+  // the scoping the new rollout would skip the target for ever, and the screen
+  // would report it complete without it. The reset at ack time cannot save it,
+  // because a fenced target is filtered out of the queue before it can be re-acked.
+  return target.rollout_generation_id === app.rollout_generation_id;
 }
 
 /**
@@ -448,6 +548,285 @@ function targetAlreadyAcked(
  * blueprints.compose_content. Per-target stage rows are written before
  * transport so restart can skip committed acks.
  */
+/**
+ * The rollout strategy frozen into a new rollout generation.
+ *
+ * The health policy comes from the intent revision the rollout is authorized
+ * against, not from the application's current pointer, so a rollout always
+ * freezes the intent it was actually built for. The runtime drift pair is read
+ * off the same row so the whole strategy comes from one authority record.
+ */
+export function frozenStrategyFor(
+  store: GitOpsStore,
+  app: GitOpsApplicationRow,
+  intentRevisionId: string,
+): string {
+  const intent = store.getIntentRevision(intentRevisionId);
+  const healthPolicy = decodeIntentHealthPolicy(intent?.health_failure_rollback_policy_json);
+  return encodeFrozenRolloutStrategy({
+    healthPolicy,
+    driftMode: intent?.runtime_drift_policy ?? null,
+    enabled: intent ? decodeEnabled(intent.rollout_strategy_json) : null,
+  });
+}
+
+/** Whether the intent's Blueprint was enabled when it was minted. */
+function decodeEnabled(rolloutStrategyJson: string): boolean | null {
+  try {
+    return decodeFrozenRolloutStrategy(rolloutStrategyJson).enabled;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Test-only injectable probe for the remote health-rollout capability check.
+ * Production always uses the live probe.
+ */
+let healthCapabilityProbeForTests: ((nodeId: number) => Promise<RemoteCapabilityProbe>) | null = null;
+
+export function setHealthCapabilityProbeForTests(
+  fn: ((nodeId: number) => Promise<RemoteCapabilityProbe>) | null,
+): void {
+  healthCapabilityProbeForTests = fn;
+}
+
+/**
+ * The health policy frozen into the rollout this dispatch is executing.
+ *
+ * Read from the live rollout generation rather than the intent revision, because
+ * the generation is what was authorized. A policy the operator changed after
+ * authorization belongs to the next rollout, not this one.
+ *
+ * An unreadable strategy throws, and the caller refuses the dispatch: the row is
+ * an authority record, and defaulting it to `observe` would run a fleet-wide
+ * rollout an operator had gated.
+ *
+ * A rollout with no generation row at all has no frozen policy to read, and
+ * resolves to `observe` downstream: that is the compatibility default for a
+ * rollout that was never gated, not a fallback for one that was.
+ */
+type FrozenHealthPolicy =
+  | { kind: 'policy'; policy: HealthRolloutPolicy }
+  /** No rollout generation: a rollout that was never gated. */
+  | { kind: 'absent' }
+  /** A rollout generation exists but no longer matches the live binding. */
+  | { kind: 'moved_on' }
+  /** A generation is named but cannot be read, or belongs to another application. */
+  | { kind: 'unreadable' };
+type DispatchPolicy =
+  | { kind: 'policy'; policy: HealthRolloutPolicy }
+  | { kind: 'refused' };
+
+function frozenHealthPolicy(
+  store: GitOpsStore,
+  app: GitOpsApplicationRow,
+  binding: FutureRolloutAuthorizationBinding,
+): FrozenHealthPolicy {
+  if (!app.rollout_generation_id) return { kind: 'absent' };
+  const generation = store.getRolloutGeneration(app.rollout_generation_id);
+  // A named generation that cannot be read is a damaged authority pointer, not
+  // a rollout that was never gated. Reading it as absent would remove the gating
+  // a damaged pointer cannot be trusted to have removed, and sweep the fleet.
+  if (!generation || generation.application_id !== app.id) return { kind: 'unreadable' };
+  if (generation.accepted_generation_id !== binding.acceptedGenerationId) {
+    return { kind: 'moved_on' };
+  }
+  return { kind: 'policy', policy: decodeFrozenRolloutStrategy(generation.rollout_strategy_json).healthPolicy };
+}
+
+/**
+ * The policy a dispatch executes, with the one case that must not be guessed.
+ *
+ * A rollout generation whose accepted generation no longer matches the live
+ * binding is a rollout the application has moved past. Reading it as `observe`
+ * would run the whole target sweep ungated, which is the opposite of what the
+ * operator gated, so the dispatch refuses instead. An absent generation is a
+ * rollout that was never gated and resolves to the default.
+ */
+function policyForDispatch(
+  store: GitOpsStore,
+  app: GitOpsApplicationRow,
+  binding: FutureRolloutAuthorizationBinding,
+): DispatchPolicy {
+  let frozen: FrozenHealthPolicy;
+  try {
+    frozen = frozenHealthPolicy(store, app, binding);
+  } catch (error) {
+    // An unreadable frozen strategy is refused here rather than thrown onward.
+    // `dispatchAcceptedGeneration` promises a blocked outcome instead of a throw,
+    // and an uncaught one would abort reconstruction for every later application.
+    console.error(
+      '[GitOps] Frozen rollout strategy for %s could not be read; the dispatch is refused:',
+      sanitizeForLog(app.id), sanitizeForLog(error instanceof Error ? error.message : String(error)),
+    );
+    return { kind: 'refused' };
+  }
+  if (frozen.kind === 'moved_on' || frozen.kind === 'unreadable') return { kind: 'refused' };
+  return frozen.kind === 'policy'
+    ? frozen
+    : { kind: 'policy', policy: DEFAULT_HEALTH_ROLLOUT_POLICY };
+}
+
+/** The stack a Blueprint target is deployed under, as the intent names it. */
+function deployStackNameFor(
+  store: GitOpsStore,
+  app: GitOpsApplicationRow,
+  nodeId: number,
+): string | null {
+  const target = store.getTarget(app.id, nodeId);
+  const targetIntent = target?.intent_revision_id
+    ? store.getIntentRevision(target.intent_revision_id)
+    : undefined;
+  const appIntent = app.intent_revision_id ? store.getIntentRevision(app.intent_revision_id) : undefined;
+  return targetIntent?.deploy_stack_name
+    ?? app.configured_source_stack_name
+    ?? appIntent?.deploy_stack_name
+    ?? null;
+}
+
+/**
+ * Refuse a non-observe health-gated rollout to a target this instance cannot
+ * observe.
+ *
+ * The hub runs a health gate on a target's behalf by reading that target's
+ * Docker directly, and a remote node's Docker is not directly reachable; all
+ * access to it goes through the HTTP proxy. Sending non-observe health work to a
+ * node that cannot serve the verdict would leave the rollout waiting on evidence
+ * that can never arrive, so the refusal happens before the apply is dispatched
+ * and before any run is reserved.
+ *
+ * A local target is not probed: this instance can already read it, so there is
+ * nothing to confirm.
+ */
+async function refuseUngatedRemoteTarget(
+  node: Node,
+  policy: HealthRolloutPolicy,
+): Promise<string | null> {
+  if (node.type !== 'remote') return null;
+  const probe = healthCapabilityProbeForTests
+    ? await healthCapabilityProbeForTests(node.id)
+    : await probeRemoteCapability(node.id, HEALTH_ROLLOUT_POLICY_CAPABILITY);
+  if (probe.kind === 'supported') return null;
+  if (probe.kind === 'unreachable') {
+    return `Node ${node.name} could not be asked whether it supports health-gated rollout (${probe.detail}); the rollout policy "${policy}" was not applied.`;
+  }
+  return `Node ${node.name} does not support health-gated rollout, so the policy "${policy}" cannot run against it. Choose "observe" for this application, or move the target to a node that supports it.`;
+}
+
+type ReservedTargetRun =
+  /** A run this dispatch opened. */
+  | { status: 'reserved'; runId: string; stackName: string }
+  /** This rollout's own earlier run, adopted so it keeps observing the attempt. */
+  | { status: 'replayed'; runId: string; stackName: string }
+  | { status: 'skip'; runId: null }
+  | { status: 'blocked'; reason: string };
+
+/**
+ * Allocate the health run for one target, before its apply goes out.
+ *
+ * The row is written first on purpose: a lost apply response then still leaves a
+ * durable run naming the application, intent, rollout generation, artifact set,
+ * and frozen policy, which is what a restart reads to decide the attempt became
+ * unknown instead of silently completing.
+ *
+ * The target's pending-run pointer is written by the same transition that opens
+ * the deploy, so the queue cannot pick this target up again between the
+ * reservation and the ack.
+ */
+function reserveTargetHealthRun(args: {
+  app: GitOpsApplicationRow;
+  binding: FutureRolloutAuthorizationBinding;
+  node: Node;
+  stackName: string | null;
+  policy: HealthRolloutPolicy;
+  actor: string | null;
+}): ReservedTargetRun {
+  if (!args.stackName) {
+    return {
+      status: 'blocked',
+      reason: `The stack name for node ${args.node.id} could not be read, so no health run could be reserved.`,
+    };
+  }
+  if (!args.binding.acceptedGenerationId) {
+    return {
+      status: 'blocked',
+      reason: 'The accepted generation is missing, so no health run could be bound to this rollout.',
+    };
+  }
+  const reservation = HealthGateService.getInstance().reserveRolloutRun({
+    applicationId: args.app.id,
+    intentRevisionId: args.binding.intentRevisionId,
+    rolloutGenerationId: args.app.rollout_generation_id ?? '',
+    acceptedGenerationId: args.binding.acceptedGenerationId,
+    artifactSetId: args.binding.artifactSetId,
+    healthPolicy: args.policy,
+    nodeId: args.node.id,
+    stackName: args.stackName,
+    actor: args.actor,
+  });
+  if (reservation.outcome === 'disabled') {
+    // Observe records nothing, so a rollout under it does not depend on the
+    // gate and runs exactly as it did before this policy existed. A gated
+    // rollout cannot be quietly downgraded to that, so it is refused instead.
+    if (!gatesAdvancement(args.policy)) return { status: 'skip', runId: null };
+    return {
+      status: 'blocked',
+      reason: 'The health gate is turned off, so a rollout that depends on health outcomes was not dispatched. Turn the health gate on, or set this application to observe.',
+    };
+  }
+  if (reservation.outcome === 'replayed' && reservation.runId) {
+    // The id is kept, not dropped. A process that stopped between reserving and
+    // recording the pointer left a run nobody owns; reconstruction replays this
+    // apply, and the run is the one that will observe it. Losing the id here
+    // would apply the generation with nothing watching, and the startup sweep
+    // would then find no target pointing at the run it has to finalize.
+    return { status: 'replayed', runId: reservation.runId, stackName: args.stackName };
+  }
+  if (!reservation.runId) {
+    return { status: 'blocked', reason: 'The health run for this target could not be reserved.' };
+  }
+  return { status: 'reserved', runId: reservation.runId, stackName: args.stackName };
+}
+
+/**
+ * Attach the poll timer to a run that was reserved before the apply.
+ *
+ * The stack name travels with the reservation rather than being looked up again:
+ * two rollouts can be in flight for different stacks on one node, and an arm
+ * addressed to whichever run happened to be newest would observe the wrong one.
+ */
+function armTargetHealthRun(node: Node, reserved: { runId: string; stackName: string }): void {
+  const gate = HealthGateService.getInstance();
+  try {
+    gate.armRolloutRun(reserved.runId, node.id, reserved.stackName);
+  } catch (error) {
+    // A reservation this process cannot arm is finalized unknown by the same
+    // path a crash would take, so the rollout pauses on missing evidence rather
+    // than waiting on a run nothing is observing.
+    gate.abandonReservedRun(
+      reserved.runId,
+      node.id,
+      reserved.stackName,
+      'The health run could not be started after the apply',
+    );
+    console.error(
+      '[BlueprintTargetAdapter] could not arm the rollout health run for node=%s: %s',
+      node.id,
+      sanitizeForLog(errorMessage(error)),
+    );
+  }
+}
+
+function abandonTargetHealthRun(node: Node, reserved: { runId: string; stackName: string }): void {
+  HealthGateService.getInstance().abandonReservedRun(
+    reserved.runId,
+    node.id,
+    reserved.stackName,
+    'The apply did not complete, so there was nothing to observe',
+  );
+}
+
 export class BlueprintTargetAdapter implements TargetAdapter {
   async dispatch(generation: AcceptedGeneration, _context: DispatchContext): Promise<DispatchResult> {
     const store = GitOpsStore.getInstance();
@@ -519,24 +898,82 @@ export class BlueprintTargetAdapter implements TargetAdapter {
 
     const tx = GitOpsTransitions.getInstance();
     const svc = BlueprintService.getInstance();
+    const frozenForDispatch = policyForDispatch(store, liveApp, binding);
+    if (frozenForDispatch.kind === 'refused') {
+      return {
+        status: 'blocked',
+        reason: 'The rollout this application was authorized for is no longer the one on record.',
+      };
+    }
+    const healthPolicy = frozenForDispatch.policy;
+    const gated = gatesAdvancement(healthPolicy);
     const pausedTargets: number[] = [];
     let anyDispatched = false;
+    // Under a health-gated policy the queue is one target deep: this call takes
+    // the first target whose health this rollout has not settled, and that
+    // target's verdict is what brings the next one. Unsettled rather than
+    // unacked, because an acked target is still unverified until its verdict
+    // passes. Observe keeps the whole-sweep loop it has always run, because
+    // observing outcomes is not gating anything.
+    const queue = gated
+      ? binding.requiredNodeIds.filter((nodeId) => {
+        const row = store.getTarget(liveApp.id, nodeId);
+        return !settledForGatedRollout(row, binding, liveAuthorizationRef)
+          && !fencedOutOfTheQueue(row, liveApp)
+          && !row?.pause_at;
+      }).slice(0, 1)
+      : binding.requiredNodeIds;
 
-    for (const nodeId of binding.requiredNodeIds) {
+    // A gated rollout refuses a target set it cannot observe as a whole, before
+    // the first apply rather than at the turn of each target. Refusing per target
+    // would let an earlier local target deploy and pass, then refuse a later
+    // remote one, leaving a partially deployed rollout the operator has to
+    // unpick by hand.
+    if (gated) {
+      for (const nodeId of binding.requiredNodeIds) {
+        const node = DatabaseService.getInstance().getNode(nodeId);
+        if (!node) {
+          return { status: 'blocked', reason: `Required target node ${nodeId} is missing.` };
+        }
+        const refusal = await refuseUngatedRemoteTarget(node, healthPolicy);
+        if (refusal) return { status: 'blocked', reason: refusal };
+      }
+    }
+
+    for (const nodeId of queue) {
       // Re-read before every target: a pause that lands while this loop runs
       // stops the rollout at the next target rather than after the fleet.
       if (store.getApplication(liveApp.id)?.pause_at) {
         return { status: 'blocked', reason: 'The rollout was paused while it was running.' };
       }
       const target = store.getTarget(liveApp.id, nodeId);
-      if (targetAlreadyAcked(target, binding, liveAuthorizationRef)) {
-        continue;
-      }
       // A per-target pause holds that target alone: the rest of the queue
       // continues, and this target is retried by the dispatch a later resume
       // triggers.
       if (target?.pause_at) {
         pausedTargets.push(nodeId);
+        continue;
+      }
+      // A fence ends this target's part in the rollout: re-dispatching it would
+      // re-apply the generation the policy just stopped, paused, or rolled
+      // back. A retry is the one exception, because that fence is the policy
+      // asking for exactly this dispatch.
+      if (gated && fencedOutOfTheQueue(target, liveApp)) {
+        continue;
+      }
+      if (gated && awaitingHealthVerdict(target)) {
+        // The target owns a reserved run from this rollout, so a second apply
+        // would put two observations and two verdicts on one attempt. Its queue
+        // turn is the verdict's to bring, not this dispatch's.
+        continue;
+      }
+      // Under a gated policy an acked-but-unsettled target is the retry the
+      // policy asked for: it acked, its verdict failed, and nothing has
+      // re-applied it yet. Skipping on the ack alone would leave the queue
+      // permanently stuck behind the first failure, and both `retry_once` and a
+      // resume after a pause would report a dispatch that never happened.
+      const isRetry = gated && targetAlreadyAcked(target, binding, liveAuthorizationRef);
+      if (!gated && targetAlreadyAcked(target, binding, liveAuthorizationRef)) {
         continue;
       }
 
@@ -559,7 +996,29 @@ export class BlueprintTargetAdapter implements TargetAdapter {
         return { status: 'blocked', reason: `Required target node ${nodeId} is missing.` };
       }
 
+      // Refused before the apply and before any run is reserved: sending
+      // non-observe health work to a target whose verdict cannot come back
+      // would leave the rollout waiting on evidence that never arrives.
+      if (gated) {
+        const refusal = await refuseUngatedRemoteTarget(node, healthPolicy);
+        if (refusal) return { status: 'blocked', reason: refusal };
+      }
+
+      // A replayed reservation is this target's own earlier run for the same
+      // rollout, which a resume or a restart re-entered. Adopt it rather than
+      // opening a second observation of one attempt.
+      const reserved = reserveTargetHealthRun({
+        app: liveApp,
+        binding,
+        node,
+        stackName: deployStackNameFor(store, liveApp, nodeId),
+        policy: healthPolicy,
+        actor: generation.actor ?? null,
+      });
+      if (reserved.status === 'blocked') return reserved;
+
       if (!svc.tryAcquireAuthorizedDeployLock(blueprint.id, nodeId)) {
+        if (reserved.status === 'reserved') abandonTargetHealthRun(node, reserved);
         return {
           status: 'blocked',
           reason: `Deploy to node ${nodeId} is already in progress.`,
@@ -573,6 +1032,7 @@ export class BlueprintTargetAdapter implements TargetAdapter {
             nodeId,
             intentRevisionId: binding.intentRevisionId,
             rolloutCandidateId: binding.rolloutCandidateId,
+            pendingHealthRunId: reserved.status === 'skip' ? null : reserved.runId,
             envelope: envelopeFor(generation.actor, trigger),
           });
         } catch (err) {
@@ -590,9 +1050,11 @@ export class BlueprintTargetAdapter implements TargetAdapter {
           bindingRevision: binding.intentRevisionId,
         });
 
-        // Capture the pre-deploy state so this rollout can be rolled back
-        // later. The binding names the generation the target is running now,
-        // which is the one a rollback would restore from here.
+        // Capture the pre-deploy state so this rollout can be rolled back later.
+        // A retry must not re-capture: the recovery point the first attempt took
+        // is the pre-rollout state, and capturing again would replace it with the
+        // generation that just failed health, which is the one a rollback has to
+        // restore *from*.
         const recoveryTarget = store.getTarget(liveApp.id, nodeId);
         const outcome = await svc.deployAuthorizedMaterialization({
           blueprint,
@@ -601,11 +1063,16 @@ export class BlueprintTargetAdapter implements TargetAdapter {
           marker,
           auditPath: `/api/blueprints/${blueprint.id}/rollout/${liveApp.id}`,
           lockHeld: true,
-          captureRecovery: true,
+          captureRecovery: !isRetry,
           recoveryBinding: recoveryBindingForTarget(liveApp, recoveryTarget),
         });
 
         if (outcome.status !== 'active') {
+          // The stack never changed, so the reserved run has nothing to observe.
+          // Finalized unknown rather than abandoned silently: a durable row that
+          // says "this rollout allocated a health run it never got" is the
+          // evidence a restart needs to tell a lost apply from a failed one.
+          if (reserved.status === 'reserved') abandonTargetHealthRun(node, reserved);
           try {
             tx.blueprintDeployFailed({
               applicationId: liveApp.id,
@@ -635,13 +1102,33 @@ export class BlueprintTargetAdapter implements TargetAdapter {
             intentRevisionId: binding.intentRevisionId,
             rolloutCandidateId: binding.rolloutCandidateId,
             legacyAppliedRevision: blueprint.revision,
+            // The generation this target ran before the apply, and only on the
+            // first attempt. It is what a policy-driven rollback restores, and
+            // recording it here is what makes a rollback possible at all: the
+            // node's recovery row is the hub's only other handle on that point,
+            // and it never leaves the node.
+            recoveryGenerationId: isRetry
+              ? null
+              : recoveryBindingForTarget(liveApp, recoveryTarget).gitops_generation_id,
             envelope: envelopeFor(generation.actor, trigger),
           });
         } catch (err) {
+          // An adopted run is abandoned here too. It was never armed, and the
+          // pointer is still set, so leaving it would make every later dispatch
+          // skip the target as awaiting a verdict that nothing will ever report,
+          // while still reporting the dispatch as successful.
+          if (reserved.status === 'reserved' || reserved.status === 'replayed') {
+            abandonTargetHealthRun(node, reserved);
+          }
           return {
             status: 'blocked',
             reason: `Could not record ack for node ${nodeId}: ${errorMessage(err)}`,
           };
+        }
+        // A replayed run is armed too, for the same reason the id was kept: it is
+        // the run observing this attempt, and an unarmed run never reports.
+        if (reserved.status === 'reserved' || reserved.status === 'replayed') {
+          armTargetHealthRun(node, reserved);
         }
         anyDispatched = true;
       } finally {
@@ -666,6 +1153,55 @@ export class BlueprintTargetAdapter implements TargetAdapter {
  * for authorized Blueprint applications that still have unacked frozen targets.
  * Does not probe: skips blocked or missing stored evidence (backfill owns those).
  */
+/**
+ * The production health-rollout follow-up.
+ *
+ * Both entry points are the same dispatch. The distinction between advancing to
+ * the next target and retrying the one that just failed is already durable on
+ * the target (its retry budget is spent, its pending run is consumed), and the
+ * adapter reads durable state, so one call keeps the two paths from drifting
+ * into different dispatch logic.
+ */
+export function liveHealthRolloutExecutor(): HealthRolloutExecutor {
+  const dispatch = async (applicationId: string, nodeId: number | null): Promise<void> => {
+    const store = GitOpsStore.getInstance();
+    const application = store.getApplication(applicationId);
+    if (!application?.accepted_generation_id) return;
+    const generationRow = store.getGeneration(application.accepted_generation_id);
+    if (!generationRow) return;
+    const result = await new BlueprintTargetAdapter().dispatch(
+      buildAcceptedGeneration(generationRow),
+      { targetMode: 'blueprint', nodeId, bindingRevision: application.intent_revision_id },
+    );
+    if (result.status === 'blocked') {
+      console.warn(
+        '[GitOps] Health-gated rollout could not advance %s: %s',
+        sanitizeForLog(applicationId),
+        sanitizeForLog(result.reason),
+      );
+    }
+  };
+  return {
+    advance: (applicationId) => dispatch(applicationId, null),
+    retry: (applicationId, nodeId) => dispatch(applicationId, nodeId),
+  };
+}
+
+/**
+ * Hold a rollout discovered at startup, through the same application-wide pause
+ * the executor uses, so there is one hold an operator can read and clear.
+ */
+function holdReconstructedRollout(applicationId: string, why: string): void {
+  const store = GitOpsStore.getInstance();
+  if (store.getApplication(applicationId)?.pause_at) return;
+  GitOpsTransitions.getInstance().rolloutPaused(applicationId, null, why, {
+    operationId: `health-rollout-reconstruct-${applicationId}`,
+    actor: 'system:health-rollout-policy',
+    trigger: 'startup_reconstruct',
+    at: Date.now(),
+  });
+}
+
 export async function reconstructBlueprintRolloutQueue(): Promise<number> {
   const store = GitOpsStore.getInstance();
   const apps = store.listAuthorizedBlueprintApplications();
@@ -681,11 +1217,43 @@ export async function reconstructBlueprintRolloutQueue(): Promise<number> {
     const binding = liveRolloutBinding(app);
     if (!binding) continue;
 
+    // Under a health-gated policy an acked target is still unverified until its
+    // verdict passes, so "unsettled" is the resume set rather than "unacked".
+    // Reading it as unacked would drop every observing target from the set and
+    // resume the rollout straight past the target that is still being verified.
+    const frozen = frozenHealthPolicy(store, app, binding);
+    const gated = frozen.kind === 'policy' && gatesAdvancement(frozen.policy);
     const remaining = binding.requiredNodeIds.filter((nodeId) => {
       const target = store.getTarget(app.id, nodeId);
-      return !targetAlreadyAcked(target, binding, app.rollout_authorization_ref!);
+      return gated
+        ? !settledForGatedRollout(target, binding, app.rollout_authorization_ref!)
+        : !targetAlreadyAcked(target, binding, app.rollout_authorization_ref!);
     });
     if (remaining.length === 0) continue;
+
+    // A target the policy fenced is the end of its own turn, and it holds the
+    // rollout until an operator says otherwise. The fence commits before the
+    // executor's application-wide pause, so a process that exits in that gap
+    // leaves a fenced target with no `pause_at`; reconstructing past it here
+    // would deploy the targets that came after the one that failed, which is
+    // exactly what stop and rollback promised would not happen. Held from the
+    // fence itself, so the gap cannot exist.
+    const fenced = binding.requiredNodeIds
+      .map((nodeId) => store.getTarget(app.id, nodeId))
+      .find((target) => fencedOutOfTheQueue(target, app));
+    if (fenced) {
+      holdReconstructedRollout(app.id, 'a target was fenced by its health rollout policy');
+      continue;
+    }
+
+    // A target whose reserved run is still open belongs to the boot sweep, not
+    // to this queue. That sweep finalizes the run unknown, and the verdict that
+    // follows applies the frozen policy, which for unknown is a pause. Re-
+    // dispatching here would put a second apply on a target that already has one
+    // run outstanding, and two verdicts would then fight over one attempt.
+    if (gated && remaining.some((nodeId) => awaitingHealthVerdict(store.getTarget(app.id, nodeId)))) {
+      continue;
+    }
 
     const genRow = store.getGeneration(binding.acceptedGenerationId);
     if (!genRow) continue;

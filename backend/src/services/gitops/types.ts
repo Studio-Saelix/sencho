@@ -1,6 +1,7 @@
 import type { ArtifactEvidenceJson, ObservedArtifactIdentity, ServiceArtifactEvidence } from './json';
 import type { RepoIdentity } from './repoIdentity';
 import type { RefKind } from '../git/types';
+import type { HealthRolloutPolicy } from './healthPolicy';
 
 export type GitOpsTargetMode = 'direct' | 'inline_blueprint' | 'blueprint';
 export type GitOpsLifecycleStatus = 'active' | 'creating' | 'detached' | 'deleted';
@@ -40,6 +41,24 @@ export type SourcePolicy = 'manual' | 'review' | 'automatic';
 export type TargetFailureStage = 'deploy' | 'recovery' | 'blueprint_deploy' | 'blueprint_withdraw';
 export type Connectivity = 'unknown' | 'reachable' | 'unreachable' | 'stale';
 export type LkgUnavailableReason = 'generation_missing' | 'recovery_unretainable';
+
+/**
+ * Why a rollout stopped advancing on one target.
+ *
+ * Mirrors the decision reasons in `healthPolicy.ts` so the row and the decision
+ * that wrote it cannot drift. It is a fence, not a status: it is written before
+ * any external restore, so a restart mid-rollback reconciles the rollback
+ * rather than resuming the queue.
+ */
+export type HealthStopReason =
+  | 'health_passed'
+  | 'health_failed'
+  | 'health_unknown'
+  | 'health_retried'
+  | 'health_retry_exhausted'
+  | 'rollout_stopped'
+  | 'rollback_completed'
+  | 'rollback_unavailable';
 
 export type GitOpsApplicationRow = {
   id: string;
@@ -301,6 +320,12 @@ export type GitOpsTargetCurrentRow = {
   last_health_status: 'passed' | 'failed' | 'unknown' | null;
   last_health_generation_id: string | null;
   last_health_run_id: string | null;
+  /** The health run this target is awaiting; only it may mutate health state. */
+  pending_health_run_id: string | null;
+  /** Retries used under the current rollout_generation_id. */
+  health_attempts: number;
+  /** Why advancement stopped, written before any external restore. */
+  health_stop_reason: HealthStopReason | null;
   lkg_generation_id: string | null;
   lkg_artifact_set_id: string | null;
   lkg_unavailable_at: number | null;
@@ -835,6 +860,7 @@ export type GitOpsAvailableAction =
 export type ConfiguredPolicy =
   | { kind: 'git_source'; autoApplyOnWebhook: boolean; autoDeployOnApply: boolean }
   | { kind: 'blueprint_drift'; driftMode: 'observe' | 'suggest' | 'enforce' }
+  | { kind: 'health_rollout'; healthPolicy: HealthRolloutPolicy }
   | null;
 
 export type GitOpsDriftItem = {
@@ -847,6 +873,23 @@ export type GitOpsDriftItem = {
   configuredPolicy: ConfiguredPolicy;
   affectedTargets: Array<{ nodeId: number | null; stackName: string | null }>;
   action: GitOpsAvailableAction;
+};
+
+/**
+ * The health-gated rollout's state for one target.
+ *
+ * `policy` is null for a target under no authorized rollout, which is a
+ * different answer from a policy that is observe. `recoveryAvailable` says
+ * whether a rollback has a captured pre-rollout generation to restore, which is
+ * the precondition a rollback policy needs and cannot be inferred from the LKG.
+ */
+export type HealthGateFacet = {
+  policy: HealthRolloutPolicy | null;
+  configuredPolicy: HealthRolloutPolicy;
+  awaitingRunId: string | null;
+  attempts: number;
+  stopReason: HealthStopReason | null;
+  recoveryAvailable: boolean;
 };
 
 export type GitOpsTargetProjection = {
@@ -873,6 +916,7 @@ export type GitOpsTargetProjection = {
   legacyAppliedRevision: number | null;
   runtime: RuntimeFacet;
   health: HealthFacet;
+  healthGate: HealthGateFacet;
   lkg: LkgFacet;
   tombstoned: boolean;
 };
