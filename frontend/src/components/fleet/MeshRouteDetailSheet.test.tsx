@@ -96,7 +96,7 @@ describe('MeshRouteDetailSheet remove gate', () => {
         const onChanged = vi.fn();
         renderSheet(true, onChanged);
         fireEvent.click(await screen.findByRole('button', { name: /Remove from mesh/i }));
-        fireEvent.click(await screen.findByRole('button', { name: /Remove and redeploy/i }));
+        fireEvent.click(await screen.findByRole('button', { name: /Remove and restart/i }));
         await waitFor(() => {
             expect(vi.mocked(apiFetch)).toHaveBeenCalledWith(
                 '/mesh/nodes/2/stacks/api/opt-out',

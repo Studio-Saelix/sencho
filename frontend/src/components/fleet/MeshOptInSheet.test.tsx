@@ -38,6 +38,7 @@ function renderSheet(canManage: boolean) {
             onOpenChange={() => {}}
             nodeId={1}
             nodeName="node-alpha"
+            status={[]}
             onChanged={() => {}}
             canManage={canManage}
         />,

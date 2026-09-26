@@ -56,11 +56,12 @@ describe('deriveNodeState', () => {
     });
 });
 
-function renderCard(status: MeshNodeStatus) {
+function renderCard(status: MeshNodeStatus, fleetStatus: MeshNodeStatus[] = [status]) {
     const onChanged = vi.fn();
     const view = render(
         <RoutingNodeCard
             status={status}
+            fleetStatus={fleetStatus}
             aliases={[]}
             onAddStack={vi.fn()}
             onShowDiagnostics={vi.fn()}
@@ -125,5 +126,75 @@ describe('RoutingNodeCard enable auto-converge', () => {
             vi.advanceTimersByTime(6000);
         });
         expect(onChanged).not.toHaveBeenCalled();
+    });
+});
+
+/**
+ * `ConfirmModal.description` renders into a screen-reader-only element, so a
+ * text match alone proves nothing about what a sighted operator sees. This
+ * walks up from the matched text and fails if any ancestor inside the dialog
+ * is the sr-only description, which is exactly the regression that made the
+ * impact copy invisible.
+ */
+function expectVisibleInDialog(text: RegExp): void {
+    const dialog = screen.getByRole('alertdialog');
+    const matches = screen.getAllByText(text);
+    const hidden = matches.filter((el) => {
+        for (let cur: HTMLElement | null = el; cur && cur !== dialog; cur = cur.parentElement) {
+            if (/\bsr-only\b/.test(cur.className)) return true;
+        }
+        return false;
+    });
+    expect(matches.length - hidden.length, `visible copy of ${text}`).toBeGreaterThan(0);
+}
+
+describe('RoutingNodeCard disable confirmation', () => {
+    beforeEach(() => {
+        vi.mocked(apiFetch).mockResolvedValue({ ok: true, status: 200, json: async () => ({}) } as unknown as Response);
+    });
+    afterEach(() => { vi.clearAllMocks(); });
+
+    it('asks before turning mesh off and states what restarts', async () => {
+        const status = node({ enabled: true, optedInStacks: [{ stackName: 'pg', currentlyResolvable: true }] });
+        const other = node({ nodeId: 2, nodeName: 'node-beta', optedInStacks: [{ stackName: 'app', currentlyResolvable: true }] });
+        render(
+            <RoutingNodeCard
+                status={status}
+                fleetStatus={[status, other]}
+                aliases={[]}
+                onAddStack={vi.fn()}
+                onShowDiagnostics={vi.fn()}
+                onShowAlias={vi.fn()}
+                onTestUpstream={async () => {}}
+                onChanged={vi.fn()}
+                canManage
+            />,
+        );
+        await act(async () => { fireEvent.click(screen.getByRole('switch')); });
+        expect(apiFetch).not.toHaveBeenCalled();
+        await screen.findByRole('button', { name: /Turn off and restart/i });
+        expectVisibleInDialog(/1 meshed stack on this node leaves the mesh and restarts\. 1 other meshed stack on 1 node also restarts/);
+
+        await act(async () => { fireEvent.click(screen.getByRole('button', { name: /Turn off and restart/i })); });
+        expect(apiFetch).toHaveBeenCalledWith('/mesh/nodes/1/disable', expect.objectContaining({ method: 'POST' }));
+    });
+
+    it('turns mesh off without a prompt when nothing in the fleet is meshed', async () => {
+        const status = node({ enabled: true });
+        render(
+            <RoutingNodeCard
+                status={status}
+                fleetStatus={[status]}
+                aliases={[]}
+                onAddStack={vi.fn()}
+                onShowDiagnostics={vi.fn()}
+                onShowAlias={vi.fn()}
+                onTestUpstream={async () => {}}
+                onChanged={vi.fn()}
+                canManage
+            />,
+        );
+        await act(async () => { fireEvent.click(screen.getByRole('switch')); });
+        expect(apiFetch).toHaveBeenCalledWith('/mesh/nodes/1/disable', expect.objectContaining({ method: 'POST' }));
     });
 });
