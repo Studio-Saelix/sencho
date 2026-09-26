@@ -38,6 +38,7 @@ import {
   OctagonX,
   PauseCircle,
   RotateCcw,
+  SkipForward,
   type LucideIcon,
 } from 'lucide-react';
 
@@ -864,6 +865,18 @@ export const HEALTH_STOP_REASON_STATE: Record<HealthStopReason, GitOpsStateMeta>
     tone: 'destructive',
     line: 'A target failed and the rest of the rollout was stopped. Already deployed targets are unchanged.',
     icon: OctagonX,
+  },
+  rollback_pending: {
+    label: 'roll back pending',
+    tone: 'warning',
+    line: 'A roll back was decided for this target and has not finished. It will not be resumed away.',
+    icon: RotateCcw,
+  },
+  stop_acknowledged: {
+    label: 'stopped, resumed',
+    tone: 'neutral',
+    line: 'The rollout policy finished with this target, and the rollout was resumed past it.',
+    icon: SkipForward,
   },
   rollback_completed: {
     label: 'rolled back',

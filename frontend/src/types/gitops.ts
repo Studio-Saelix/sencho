@@ -361,6 +361,8 @@ export type HealthStopReason =
   | 'health_retry_exhausted'
   | 'rollout_stopped'
   | 'rollback_completed'
+  | 'rollback_pending'
+  | 'stop_acknowledged'
   | 'rollback_unavailable';
 
 /**

@@ -1019,8 +1019,17 @@ describe('retry, stop, and rollback', () => {
       .map((call) => (call[0] as { node: { id: number } }).node.id);
     expect(deployedNodes).not.toContain(nodeId);
     expect(deployedNodes).toContain(fixture.nodeIds[1]!);
+    // Acknowledged, not erased: the outcome stays and the resume is recorded, so
+    // a restart cannot re-pause a rollout the operator already answered.
     expect(store.getTarget(fixture.applicationId, nodeId)!.health_stop_reason)
-      .toBe('rollout_stopped');
+      .toBe('stop_acknowledged');
+
+    // And a restart after that resume must not hold again.
+    DatabaseService.getInstance().getDb()
+      .prepare('UPDATE gitops_applications SET pause_at = NULL WHERE id = ?')
+      .run(fixture.applicationId);
+    await reconstructBlueprintRolloutQueue();
+    expect(store.getApplication(fixture.applicationId)!.pause_at).toBeNull();
   });
 
   it('a resume re-drives a paused target, and a completed rollback is terminal', async () => {
@@ -1092,7 +1101,61 @@ describe('retry, stop, and rollback', () => {
       operationId: 'resume-rollback', actor: 'tester', trigger: 'manual', at: Date.now(),
     });
     expect(rolledStore.getTarget(rolled.applicationId, rolled.nodeId!)!.health_stop_reason)
-      .toBe('rollback_completed');
+      .toBe('stop_acknowledged');
+  });
+
+  it('a pending rollback survives a crash as a non-resumable fence', async () => {
+    const fixture = await gatedAttempt('rollback');
+    const store = GitOpsStore.getInstance();
+    const deploy = vi.spyOn(BlueprintService.getInstance(), 'deployAuthorizedMaterialization')
+      .mockResolvedValue({ status: 'active' });
+    const nodeId = fixture.nodeId!;
+    // A recovery point, or the decision is `rollback_unavailable` and there is no
+    // pending rollback to lose.
+    seedOwnedGeneration(fixture, genId(fixture, 'pre-rollout'));
+    store.upsertTarget({
+      ...store.getTarget(fixture.applicationId, nodeId)!,
+      recovery_ref: 'rec-pre-rollout',
+      recovery_generation_id: genId(fixture, 'pre-rollout'),
+    });
+    const run = store.getTarget(fixture.applicationId, nodeId)!.pending_health_run_id!;
+    // The fixture deployed this target on the same spy, so only the calls after
+    // the decision are the claim under test.
+    const callsAtDecision = deploy.mock.calls.length;
+
+    // The decision lands, and the process dies before the restore is dispatched.
+    const result = finishHealth(fixture, nodeId, 'failed', run, 'rollback');
+    expect(result.healthDecision?.action).toBe('rollback');
+    expect(store.getTarget(fixture.applicationId, nodeId)!.health_stop_reason)
+      .toBe('rollback_pending');
+
+    // Distinct from a pause, and a resume must not answer it: reading it as a
+    // pause would let a resume clear it and the rollout carry on past a target
+    // that is still on the generation that failed, with the rollback lost.
+    GitOpsTransitions.getInstance().rolloutPaused(fixture.applicationId, null, 'held', {
+      operationId: 'hold-pending', actor: 'tester', trigger: 'manual', at: Date.now(),
+    });
+    GitOpsTransitions.getInstance().rolloutUnpaused(fixture.applicationId, null, {
+      operationId: 'resume-pending', actor: 'tester', trigger: 'manual', at: Date.now(),
+    });
+    expect(store.getTarget(fixture.applicationId, nodeId)!.health_stop_reason)
+      .toBe('rollback_pending');
+
+    // And a restart holds on it, which is what keeps the queue off that target
+    // until someone deals with the unfinished restore.
+    DatabaseService.getInstance().getDb()
+      .prepare('UPDATE gitops_applications SET pause_at = NULL WHERE id = ?')
+      .run(fixture.applicationId);
+    await reconstructBlueprintRolloutQueue();
+
+    // Scoped to this rollout's own nodes: reconstruction walks every authorized
+    // application in the shared database, so a global call count would say
+    // nothing about this one.
+    const deployedNodes = deploy.mock.calls
+      .slice(callsAtDecision)
+      .map((c) => (c[0] as { node: { id: number } }).node.id);
+    expect(deployedNodes).not.toContain(nodeId);
+    expect(store.getApplication(fixture.applicationId)!.pause_at).not.toBeNull();
   });
 
   it('a target with no recovery point reports the same availability the decision used', async () => {
@@ -1207,7 +1270,13 @@ describe('retry, stop, and rollback', () => {
 
   it('rollback restores the captured pre-rollout generation, never the LKG', async () => {
     const fixture = await gatedAttempt('rollback');
-    markRecoveryPoint(fixture, 'rec-pre-rollout', 'gen-pre-rollout');
+    // A real generation row the application owns, because `rollbackCompleted`
+    // refuses to bind to one it cannot prove. A fake id here made the completion
+    // throw inside the executor, and the test still passed because it only ever
+    // asserted that the restore had been *called*: the whole success path was
+    // unproven.
+    seedOwnedGeneration(fixture, genId(fixture, 'pre-rollout'));
+    markRecoveryPoint(fixture, 'rec-pre-rollout', genId(fixture, 'pre-rollout'));
     // A generation that passed at some point, which is NOT what the target ran
     // before this rollout. Restoring it would put back a workload the target
     // never ran.
@@ -1217,7 +1286,82 @@ describe('retry, stop, and rollback', () => {
     await decide(fixture, 'failed', spyExecutor(), 'rollback');
 
     expect(restoreSpy).toHaveBeenCalledTimes(1);
-    expect(restoreSpy.mock.calls[0]![0].generationId).toBe('gen-pre-rollout');
+    expect(restoreSpy.mock.calls[0]![0].generationId).toBe(genId(fixture, 'pre-rollout'));
+
+    // The completion is the part that was never exercised, and it is the part
+    // that has to land: the target is back on the pre-rollout generation, the
+    // recovery is complete, and the rollout is held.
+    const after = GitOpsStore.getInstance().getTarget(fixture.applicationId, fixture.nodeId!)!;
+    expect(after.applied_generation_id).toBe(genId(fixture, 'pre-rollout'));
+    expect(after.recovery_phase).toBe('complete');
+    expect(after.health_stop_reason).toBe('rollback_completed');
+    const app = GitOpsStore.getInstance().getApplication(fixture.applicationId)!;
+    expect(app.pause_at).not.toBeNull();
+  });
+
+  it('a completion that cannot be recorded is a partial failure, and the rollout stays held', async () => {
+    const fixture = await gatedAttempt('rollback');
+    const store = GitOpsStore.getInstance();
+    // A recovery point whose generation the application does not own, so the
+    // completion refuses. The restore itself succeeds.
+    markRecoveryPoint(fixture, 'rec-pre-rollout', 'gen-not-owned');
+    await mockRestore();
+
+    const outcome = await decide(fixture, 'failed', spyExecutor(), 'rollback');
+
+    // Not a completed rollback: the target is somewhere between two generations
+    // and only this knows which.
+    expect(outcome.action).toBe('rollback_partial_failed');
+    const target = store.getTarget(fixture.applicationId, fixture.nodeId!)!;
+    expect(target.applied_generation_id).not.toBe('gen-not-owned');
+    expect(target.recovery_phase).toBe('failed');
+    // Application-wide too, or the application still claims a restore is running.
+    expect(store.getApplication(fixture.applicationId)!.recovery_phase).toBe('failed');
+    // Held, from before the restore went out.
+    expect(store.getApplication(fixture.applicationId)!.pause_at).not.toBeNull();
+  });
+
+  it('a restore that throws records a partial failure and holds the rollout', async () => {
+    const fixture = await gatedAttempt('rollback');
+    const store = GitOpsStore.getInstance();
+    seedOwnedGeneration(fixture, genId(fixture, 'pre-rollout'));
+    markRecoveryPoint(fixture, 'rec-pre-rollout', genId(fixture, 'pre-rollout'));
+    const recovery = await import('../services/gitops/rolloutRecovery');
+    vi.spyOn(recovery, 'restoreTargetToGeneration').mockRejectedValue(new Error('docker unreachable'));
+
+    const outcome = await decide(fixture, 'failed', spyExecutor(), 'rollback');
+
+    expect(outcome.action).toBe('rollback_partial_failed');
+    expect(outcome.reason).toBe('rollback_unrecorded');
+    expect(store.getTarget(fixture.applicationId, fixture.nodeId!)!.recovery_phase).toBe('failed');
+    expect(store.getApplication(fixture.applicationId)!.pause_at).not.toBeNull();
+  });
+
+  it('a policy rollback preserves the source acceptance the restored generation was bound to', async () => {
+    const fixture = await gatedAttempt('rollback');
+    const store = GitOpsStore.getInstance();
+    GitOpsStore.getInstance().insertGeneration(generationRow(
+      'gen-pre-rollout',
+      fixture.applicationId,
+      store.getApplication(fixture.applicationId)!.materialization_fingerprint!,
+    ));
+    const generationId = genId(fixture, 'pre-rollout');
+    store.insertApproval({
+      ...approvalRow('acc-pre-rollout', fixture.applicationId, generationId, 'source_acceptance'),
+      authoritative: 1,
+    });
+    markRecoveryPoint(fixture, 'rec-pre-rollout', genId(fixture, 'pre-rollout'));
+
+    await decide(fixture, 'failed', spyExecutor(), 'rollback');
+
+    // A health outcome has no authority over source acceptance. Restoring with null
+    // captured refs cleared the acceptance the generation was bound to and
+    // recorded it unprovable, which is source-authority state a health verdict
+    // must never move.
+    const target = store.getTarget(fixture.applicationId, fixture.nodeId!)!;
+    // Restoring with null captured refs cleared the acceptance and recorded it
+    // unprovable, so the limitation is the signal that the refs were dropped.
+    expect(target.evidence_limitations_json ?? '').not.toContain('source_acceptance_unprovable');
   });
 
   it('rollback without a recovery point reports it rather than restoring something else', async () => {
@@ -1237,7 +1381,7 @@ describe('retry, stop, and rollback', () => {
 
   it('a failed restore is reported as partial, not as a completed rollback', async () => {
     const fixture = await gatedAttempt('rollback');
-    markRecoveryPoint(fixture, 'rec-pre-rollout', 'gen-pre-rollout');
+    markRecoveryPoint(fixture, 'rec-pre-rollout', genId(fixture, 'pre-rollout'));
     await mockRestore({ ok: false, code: 'ROLLBACK_FAILED', error: 'the restore request failed' });
 
     const outcome = await decide(fixture, 'failed', spyExecutor(), 'rollback');
@@ -1658,6 +1802,22 @@ function setLkg(fixture: Seeded, generationId: string): void {
 }
 
 type RestoreOutcome = { ok: true } | { ok: false; code: string; error: string };
+
+/** A per-application id, because the suite shares one database. */
+function genId(fixture: Seeded, label: string): string {
+  return `gen-${label}-${fixture.applicationId}`;
+}
+
+/** A generation row this application owns, so a completion can bind to it. */
+function seedOwnedGeneration(fixture: Seeded, generationId: string): void {
+  const store = GitOpsStore.getInstance();
+  if (store.getGeneration(generationId)) return;
+  store.insertGeneration(generationRow(
+    generationId,
+    fixture.applicationId,
+    store.getApplication(fixture.applicationId)!.materialization_fingerprint!,
+  ));
+}
 
 async function mockRestore(outcome: RestoreOutcome = { ok: true }) {
   const recovery = await import('../services/gitops/rolloutRecovery');

@@ -165,53 +165,90 @@ export async function executeHealthRolloutDecision(args: {
             detail: error instanceof Error ? error.message : String(error),
           };
         }
-        const outcome = await restoreTargetToGeneration({
-          app: application,
-          stackName,
-          nodeId: args.nodeId,
-          generationId: restoreGenerationId,
-          actor: envelope.actor,
-          // A policy-driven restore has no user behind it: the authority is the
-          // operator's policy selection, which the policy write and the rollout
-          // authorization already gated on `stack:deploy`. The actor header
-          // names that provenance so the leaf's audit says a policy ran, not a
-          // person.
-          role: 'admin',
-          scopedActions: SYSTEM_STACK_ACTIONS,
-        });
-        if (outcome.ok) {
-          transitions.rollbackCompleted({
+        // Held BEFORE the restore goes out, not after it finishes. A restore is
+        // external and slow, and until it returns the rollout is still authorized:
+        // an operator dispatch, or an auto-accept that mints a fresh generation,
+        // could deploy the next target, or this one, while the restore is in
+        // flight. The fence is the target's; this is what stops the queue.
+        holdRollout(args.applicationId, decision, envelope);
+
+        // What the restored generation was actually captured with, read off that
+        // generation rather than passed as null. A restore that clears the source
+        // acceptance it was bound to would push source-acceptance state, which a
+        // health outcome has no authority to do.
+        const capturedArtifactSetId = store.newestArtifactSetIdForGeneration(restoreGenerationId);
+        const capturedSourceAcceptanceRef = store.newestSourceAcceptanceId(
+          args.applicationId, restoreGenerationId,
+        );
+
+        // The restore and the record of it are one unit. Either both happen or the
+        // failure is recorded: an error thrown between them used to leave the
+        // target stuck in `restoring` with nothing saying so, and the rollout
+        // unheld, so the fleet carried on as if the policy had not stopped it.
+        try {
+          const outcome = await restoreTargetToGeneration({
+            app: application,
+            stackName,
+            nodeId: args.nodeId,
+            generationId: restoreGenerationId,
+            actor: envelope.actor,
+            // A policy-driven restore has no user behind it: the authority is the
+            // operator's policy selection, which the policy write and the rollout
+            // authorization already gated on `stack:deploy`. The actor header
+            // names that provenance so the leaf's audit says a policy ran, not a
+            // person.
+            role: 'admin',
+            scopedActions: SYSTEM_STACK_ACTIONS,
+          });
+          if (outcome.ok) {
+            transitions.rollbackCompleted({
+              applicationId: args.applicationId,
+              nodeId: args.nodeId,
+              recoveryRef,
+              recoveryGenerationId: restoreGenerationId,
+              capturedArtifactSetId,
+              capturedSourceAcceptanceRef,
+              envelope,
+            });
+            return { action: 'rollback', reason: decision.reason };
+          }
+          // Partial failure is reported as partial. Reporting a single target's
+          // failed restore as a completed rollback would tell the operator the
+          // fleet is back on the pre-rollout generation when it is not.
+          transitions.rollbackPartialFailed({
             applicationId: args.applicationId,
             nodeId: args.nodeId,
             recoveryRef,
-            recoveryGenerationId: restoreGenerationId,
-            // What the restored generation was captured with. A generation this
-            // application no longer owns restores without the pointers rather
-            // than borrowing another generation's.
-            capturedArtifactSetId: null,
-            capturedSourceAcceptanceRef: null,
+            failureClass: 'partial',
             envelope,
           });
-          holdRollout(args.applicationId, decision, envelope);
-          return { action: 'rollback', reason: decision.reason };
+          return { action: 'rollback_partial_failed', reason: outcome.error };
+        } catch (error) {
+          // The restore or the record of it failed. The target is somewhere
+          // between the two generations and only this knows which, so it is
+          // recorded as a partial failure, never as a completed rollback, and the
+          // rollout stays held from before the restore went out.
+          try {
+            transitions.rollbackPartialFailed({
+              applicationId: args.applicationId,
+              nodeId: args.nodeId,
+              recoveryRef,
+              failureClass: 'partial',
+              envelope,
+            });
+          } catch (recordError) {
+            console.error(
+              '[GitOps] Could not record a partial rollback for %s: %s',
+              sanitizeForLog(args.applicationId),
+              sanitizeForLog(recordError instanceof Error ? recordError.message : String(recordError)),
+            );
+          }
+          return {
+            action: 'rollback_partial_failed',
+            reason: 'rollback_unrecorded',
+            detail: error instanceof Error ? error.message : String(error),
+          };
         }
-        // Partial failure is reported as partial. Reporting a single target's
-        // failed restore as a completed rollback would tell the operator the
-        // fleet is back on the pre-rollout generation when it is not. Either way
-        // the rollout stops: the target is no longer on the generation that
-        // failed, and the ones after it were never authorized to run.
-        transitions.rollbackPartialFailed({
-          applicationId: args.applicationId,
-          nodeId: args.nodeId,
-          recoveryRef,
-          failureClass: 'partial',
-          envelope,
-        });
-        // Held for the same reason as a completed rollback: at least one target
-        // is still on the generation that failed, and the ones after it were
-        // never authorized to run.
-        holdRollout(args.applicationId, decision, envelope);
-        return { action: 'rollback_partial_failed', reason: outcome.error };
       }
 
       default:

@@ -48,7 +48,9 @@ Any mode other than **Observe** can stop the rollout and leave it waiting for yo
 
 Resuming means you have looked and decided to carry on, and it re-drives a target the policy was only *holding*: under **Pause** or **Retry once** that target is deployed again and the policy decides afresh from the new verdict. A resume is your decision, not a policy retry, so **Retry once** still only ever gets one automatic attempt: if the budget was already spent, the next failure pauses the rollout again rather than trying a third time.
 
-**Stop** and **Roll back** are not holds, so resuming does not undo them. A stopped target keeps the generation it was given, and a rolled back target keeps the one it was put back on; the rollout carries on past them to the targets it never reached. Putting the failed generation back on either would just fail and stop again, with the rest of the fleet never reached.
+**Stop** and **Roll back** are not holds, so resuming does not undo them. A stopped target keeps the generation it was given, and a rolled back target keeps the one it was put back on; the rollout carries on past them to the targets it never reached. Putting the failed generation back on either would just fail and stop again, with the rest of the fleet never reached. The target card reports such a target as *stopped, resumed*, and a restart does not pause the rollout again for it.
+
+A roll back that was decided but has not finished is reported as *roll back pending*, and resuming does not clear it. A restart holds the rollout on it, because the restore still has to happen or be dealt with.
 
 The hold is also what survives a restart. A rollout held by a policy stays held when Sencho restarts, and a roll back or a stop that already ran is not undone by coming back up. Once you resume, that answer is remembered, so a later restart does not hold the same rollout a second time.
 

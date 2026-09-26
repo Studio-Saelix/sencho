@@ -1077,13 +1077,21 @@ gitopsApplicationsRouter.post('/:id/rollout/health-policy', async (req: Request,
   // (nothing placed yet, or every target retired), and a loop over no targets
   // would authorize the write on its own absence. This write names in advance
   // what the system may do to each stack, so it needs both.
-  if (!requirePermission(req, res, 'stack:deploy')) return;
+  // Per target, exactly, like the pause and resume routes beside it: an operator
+  // whose `stack:deploy` grants are scoped to specific stacks configures the
+  // policy for the targets they can deploy to. The fleet-wide grant is required
+  // only when there is no target to check, which is the same shape those routes
+  // use, so the three cannot drift apart.
   const frozen = rolloutTargetSet(app);
   const nodeIds = frozen?.nodeIds ?? store.listTargets(app.id)
     .filter((row) => row.target_status === 'active')
     .map((row) => row.node_id);
-  for (const nodeId of nodeIds) {
-    if (!requireDeployOnTarget(req, res, stackName, nodeId)) return;
+  if (nodeIds.length === 0) {
+    if (!requirePermission(req, res, 'stack:deploy')) return;
+  } else {
+    for (const nodeId of nodeIds) {
+      if (!requireDeployOnTarget(req, res, stackName, nodeId)) return;
+    }
   }
 
   try {

@@ -414,7 +414,7 @@ CREATE TABLE IF NOT EXISTS gitops_target_current (
   health_stop_reason TEXT NULL CHECK (
     health_stop_reason IS NULL OR health_stop_reason IN (
       'health_failed','health_unknown','health_retry_exhausted','rollout_stopped',
-      'rollback_unavailable','rollback_completed','health_passed','health_retried'
+      'rollback_unavailable','rollback_completed','rollback_pending','stop_acknowledged','health_passed','health_retried'
     )
   ),
   lkg_generation_id TEXT NULL,

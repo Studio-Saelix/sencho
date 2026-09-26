@@ -525,6 +525,14 @@ function settledForGatedRollout(
  * resume a silent no-op, because the first unsettled target is always the one
  * that failed.
  */
+/** A fence that still holds the rollout, which an acknowledged one no longer does. */
+function holdableHealthFence(target: GitOpsTargetCurrentRow | undefined): boolean {
+  if (!target) return false;
+  if (target.health_stop_reason === null) return false;
+  return target.health_stop_reason !== 'health_retried'
+    && target.health_stop_reason !== 'stop_acknowledged';
+}
+
 function fencedOutOfTheQueue(
   target: GitOpsTargetCurrentRow | undefined,
   app: GitOpsApplicationRow,
@@ -1174,6 +1182,15 @@ export function liveHealthRolloutExecutor(): HealthRolloutExecutor {
       { targetMode: 'blueprint', nodeId, bindingRevision: application.intent_revision_id },
     );
     if (result.status === 'blocked') {
+      // Held, not just logged. There is no scheduler here: this dispatch is the
+      // only thing that brings the next target, so a refusal left unheld is a
+      // rollout that stops with no hold and no recorded reason, and a retry whose
+      // budget is already spent. The hold is what makes the refusal visible and
+      // resumable.
+      holdReconstructedRollout(
+        applicationId,
+        `The rollout could not advance: ${result.reason}`,
+      );
       console.warn(
         '[GitOps] Health-gated rollout could not advance %s: %s',
         sanitizeForLog(applicationId),
@@ -1217,6 +1234,20 @@ export async function reconstructBlueprintRolloutQueue(): Promise<number> {
     const binding = liveRolloutBinding(app);
     if (!binding) continue;
 
+    // A target the policy fenced is the end of its own turn, and it holds the
+    // rollout until an operator says otherwise. The fence commits before the
+    // executor's application-wide pause, so a process that exits in that gap
+    // leaves a fenced target with no `pause_at`; reconstructing past it here
+    // would deploy the targets that came after the one that failed, which is
+    // exactly what stop and rollback promised would not happen. Held from the
+    // fence itself, so the gap cannot exist.
+    const fenced = binding.requiredNodeIds
+      .map((nodeId) => store.getTarget(app.id, nodeId))
+      .find((target) => holdableHealthFence(target) && target!.rollout_generation_id === app.rollout_generation_id);
+    if (fenced) {
+      holdReconstructedRollout(app.id, 'a target was fenced by its health rollout policy');
+      continue;
+    }
     // Under a health-gated policy an acked target is still unverified until its
     // verdict passes, so "unsettled" is the resume set rather than "unacked".
     // Reading it as unacked would drop every observing target from the set and
@@ -1230,21 +1261,6 @@ export async function reconstructBlueprintRolloutQueue(): Promise<number> {
         : !targetAlreadyAcked(target, binding, app.rollout_authorization_ref!);
     });
     if (remaining.length === 0) continue;
-
-    // A target the policy fenced is the end of its own turn, and it holds the
-    // rollout until an operator says otherwise. The fence commits before the
-    // executor's application-wide pause, so a process that exits in that gap
-    // leaves a fenced target with no `pause_at`; reconstructing past it here
-    // would deploy the targets that came after the one that failed, which is
-    // exactly what stop and rollback promised would not happen. Held from the
-    // fence itself, so the gap cannot exist.
-    const fenced = binding.requiredNodeIds
-      .map((nodeId) => store.getTarget(app.id, nodeId))
-      .find((target) => fencedOutOfTheQueue(target, app));
-    if (fenced) {
-      holdReconstructedRollout(app.id, 'a target was fenced by its health rollout policy');
-      continue;
-    }
 
     // A target whose reserved run is still open belongs to the boot sweep, not
     // to this queue. That sweep finalizes the run unknown, and the verdict that

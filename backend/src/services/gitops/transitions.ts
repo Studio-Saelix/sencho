@@ -68,6 +68,11 @@ export type AppliedArgs = {
  * answer. `stop` and `rollback_completed` are statements: the policy has finished
  * with that target, and resuming does not put it back.
  */
+const ACKNOWLEDGED_HEALTH_FENCES: ReadonlySet<string> = new Set<string>([
+  'rollout_stopped',
+  'rollback_completed',
+]);
+
 const RESUMABLE_HEALTH_FENCES: ReadonlySet<string> = new Set<string>([
   // Every fence the `pause` action writes, plus the retry budget. `pause` is the
   // action behind all three health outcomes and behind `rollback_unavailable`,
@@ -1260,7 +1265,11 @@ export class GitOpsTransitions {
     // reaches here writes a fence, and `none` returned above, so the reason
     // narrowed here is always a value the column accepts.
     if (decision.action === 'advance') target.health_stop_reason = null;
-    else target.health_stop_reason = decision.reason;
+    // A rollback decision is a distinct fence from a pause, because it has to
+    // survive a crash between deciding and doing: a fence that read as `pause`
+    // would be answered by a resume, and the rollback would be lost with the
+    // rollout carrying on past a target that is still on the failed generation.
+    else target.health_stop_reason = decision.action === 'rollback' ? 'rollback_pending' : decision.reason;
     return decision;
   }
 
@@ -1716,8 +1725,18 @@ export class GitOpsTransitions {
         for (const target of this.store().listTargets(applicationId)) {
           if (target.rollout_generation_id !== app.rollout_generation_id) continue;
           if (target.health_stop_reason === null) continue;
-          if (!RESUMABLE_HEALTH_FENCES.has(target.health_stop_reason)) continue;
-          this.store().upsertTarget({ ...target, health_stop_reason: null });
+          if (RESUMABLE_HEALTH_FENCES.has(target.health_stop_reason)) {
+            this.store().upsertTarget({ ...target, health_stop_reason: null });
+            continue;
+          }
+          // A finished target keeps its outcome, and the resume is recorded
+          // beside it rather than by erasing it. Erasing it cannot work: the
+          // fence is also what reconstruction holds the rollout on, so a restart
+          // would re-pause a rollout the operator had already answered, and
+          // repeating resume and restart would repeat the hold for ever.
+          if (ACKNOWLEDGED_HEALTH_FENCES.has(target.health_stop_reason)) {
+            this.store().upsertTarget({ ...target, health_stop_reason: 'stop_acknowledged' });
+          }
         }
       });
     }
@@ -2844,7 +2863,7 @@ export class GitOpsTransitions {
         applyFailure(app);
       });
     }
-    return this.mutateTarget(
+    const result = this.mutateTarget(
       args.applicationId,
       args.nodeId,
       args.envelope,
@@ -2857,6 +2876,15 @@ export class GitOpsTransitions {
       },
       'failed',
     );
+    // Application-wide too, not only on the target. `rollbackInProgress` opened
+    // the application into `restoring`, so recording the failure on the target
+    // alone would leave the application claiming a recovery is still running that
+    // has already failed, which is what reporting a partial rollback truthfully
+    // has to mean for the rollout as a whole.
+    this.withApplication(args.applicationId, args.envelope, (app) => {
+      applyFailure(app);
+    });
+    return result;
   }
 
   /**

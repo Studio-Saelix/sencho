@@ -1995,7 +1995,7 @@ export class DatabaseService {
         maybeAddCol('gitops_target_current', 'pending_health_run_id', 'TEXT');
         maybeAddCol('gitops_target_current', 'health_attempts', 'INTEGER NOT NULL DEFAULT 0');
         maybeAddCol('gitops_target_current', 'health_stop_reason',
-          "TEXT CHECK (health_stop_reason IS NULL OR health_stop_reason IN ('health_passed','health_failed','health_unknown','health_retried','health_retry_exhausted','rollout_stopped','rollback_completed','rollback_unavailable'))");
+          "TEXT CHECK (health_stop_reason IS NULL OR health_stop_reason IN ('health_passed','health_failed','health_unknown','health_retried','health_retry_exhausted','rollout_stopped','rollback_completed','rollback_pending','stop_acknowledged','rollback_unavailable'))");
         // Cached INSERT may predate the column; rebuild on next flush.
         this.auditLogInsertStmt = null;
 
