@@ -73,6 +73,36 @@ const REACHABLE_REASON: Record<DialFailureCode, string> = {
 };
 
 /**
+ * Parse the JSON column holding a mesh stack's last known services. Returns
+ * [] for missing or malformed values so a bad row never breaks the refresh.
+ */
+export function parseLastKnownServices(raw: string | null | undefined): Array<{ service: string; ports: number[] }> {
+    if (!raw) return [];
+    try {
+        const parsed: unknown = JSON.parse(raw);
+        if (!Array.isArray(parsed)) return [];
+        return parsed
+            .filter((e): e is { service: string; ports: unknown[] } =>
+                !!e && typeof e === 'object'
+                && typeof (e as { service?: unknown }).service === 'string'
+                && Array.isArray((e as { ports?: unknown }).ports))
+            .map((e) => ({
+                service: e.service,
+                ports: e.ports.filter((p): p is number => Number.isInteger(p) && (p as number) > 0 && (p as number) < 65536),
+            }));
+    } catch (err) {
+        // Without this the failure is invisible: the refresh would silently
+        // drop that stack's aliases, which is the exact symptom the
+        // last-known snapshot exists to prevent.
+        console.warn(
+            '[MeshService] parseLastKnownServices: discarding malformed value:',
+            sanitizeForLog((err as Error).message),
+        );
+        return [];
+    }
+}
+
+/**
  * Returns the static IPv4 address Sencho will pin itself to on the mesh
  * Docker network: `<network address> + 2`. The Docker daemon assigns
  * `<network> + 1` to the bridge gateway, so `+2` is the first usable host
@@ -338,6 +368,13 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
     private started = false;
     private aliasCache = new Map<string, MeshGlobalAlias>();
     private aliasByPort = new Map<number, MeshGlobalAlias>();
+    /**
+     * Ports claimed by any opted-in stack, including stopped stacks and
+     * stacks on unreachable nodes (from their last known services). The
+     * opt-in collision check uses this instead of `aliasByPort` so a port
+     * is never handed out twice while its owner is offline.
+     */
+    private reservedPorts = new Map<number, MeshGlobalAlias>();
     // Populated on pilot nodes via the D-1 override push. Central's
     // db.listMeshStacks() is authoritative on central; pilots have no
     // mesh_stacks rows (C-3 design), so the push payload carries the alias
@@ -1421,7 +1458,9 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
      * `handleAccept` then dispatches to the same-node fast path or the
      * cross-node bridge based
      * on the resolved alias's owner. Fleet-wide port collisions are
-     * blocked at opt-in time (`optInStack` checks `aliasByPort`), so
+     * blocked at opt-in time (`optInStack` checks `reservedPorts`, which
+     * is a superset of the live aliases: it also holds ports claimed by
+     * stopped stacks and by nodes that are currently offline), so
      * binding every alias port is unambiguous.
      */
     private async syncForwarderListeners(): Promise<void> {
@@ -1543,7 +1582,7 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
             );
         }
         for (const port of newPorts) {
-            const existing = this.aliasByPort.get(port);
+            const existing = this.reservedPorts.get(port);
             if (existing) {
                 throw new MeshError(
                     'port_collision',
@@ -2227,17 +2266,52 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
         // Inspect all stacks in parallel; each remote-node lookup involves an
         // HTTP fetch with its own 5 s AbortSignal. Sequential awaiting would
         // let one slow node stall the whole refresh, which is on a 60 s loop.
+        //
+        // A node that cannot be reached keeps its last known services: its
+        // aliases stay in every override (so a redeploy elsewhere does not
+        // drop its hostnames) and its ports stay reserved (so no other stack
+        // can claim them while it is away). A stack that is reachable but
+        // stopped publishes no aliases, yet keeps its ports reserved.
+        const reserved = new Map<number, MeshGlobalAlias>();
         const inspections = await Promise.allSettled(
             stacks.map(async (row) => {
                 const node = db.getNode(row.node_id);
                 if (!node) return null;
-                const services = await this.inspectStackServices(row.node_id, row.stack_name);
-                return { row, node, services };
+                const reach = { reachable: true };
+                const live = await this.inspectStackServices(row.node_id, row.stack_name, reach);
+                const { reachable } = reach;
+                const lastKnown = parseLastKnownServices(row.last_known_services);
+                if (reachable && live.length > 0) {
+                    const serialized = JSON.stringify(live);
+                    if (serialized !== row.last_known_services) {
+                        try {
+                            db.setMeshStackLastKnownServices(row.node_id, row.stack_name, serialized);
+                        } catch (err) {
+                            console.warn('[MeshService] failed to persist last known mesh services:', sanitizeForLog((err as Error).message));
+                        }
+                    }
+                }
+                const services = reachable ? live : lastKnown;
+                const reservedServices = live.length > 0 ? live : lastKnown;
+                return { row, node, services, reservedServices };
             }),
         );
         for (const result of inspections) {
             if (result.status !== 'fulfilled' || !result.value) continue;
-            const { row, node, services } = result.value;
+            const { row, node, services, reservedServices } = result.value;
+            for (const svc of reservedServices) {
+                for (const port of svc.ports) {
+                    if (reserved.has(port)) continue;
+                    reserved.set(port, {
+                        host: `${svc.service}.${row.stack_name}.${node.name}.sencho`,
+                        nodeId: row.node_id,
+                        nodeName: node.name,
+                        stackName: row.stack_name,
+                        serviceName: svc.service,
+                        port,
+                    });
+                }
+            }
             for (const svc of services) {
                 const host = `${svc.service}.${row.stack_name}.${node.name}.sencho`;
                 for (const port of svc.ports) {
@@ -2264,8 +2338,16 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
                 if (!portMap.has(alias.port)) portMap.set(alias.port, alias);
             }
         }
+        // A live alias is the routable owner, so it takes ownership back from
+        // a stopped stack that is only holding the port on last-known
+        // services. Without this a port collision error would name a stopped
+        // stack while inbound traffic actually goes to the live one.
+        for (const [port, alias] of portMap) {
+            reserved.set(port, alias);
+        }
         this.aliasCache = next;
         this.aliasByPort = portMap;
+        this.reservedPorts = reserved;
         this.logDiag('alias cache refreshed', {
             stacks: stacks.length,
             aliases: next.size,
@@ -2376,7 +2458,10 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
      * remote node must use {@link inspectStackServices}, which dispatches
      * via the HTTP proxy to the remote's `/api/mesh/local-services/:stack`.
      */
-    public async inspectLocalStackServices(stackName: string): Promise<Array<{ service: string; ports: number[] }>> {
+    public async inspectLocalStackServices(
+        stackName: string,
+        reach?: { reachable: boolean },
+    ): Promise<Array<{ service: string; ports: number[] }>> {
         try {
             const docker = DockerController.getInstance().getDocker();
             const containers = await docker.listContainers({
@@ -2396,6 +2481,10 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
             return Array.from(byService.entries()).map(([service, ports]) => ({ service, ports: Array.from(ports) }));
         } catch (err) {
             console.warn('[MeshService] inspectLocalStackServices failed:', sanitizeForLog((err as Error).message));
+            // A failed Docker inspection is not the same as a stopped stack:
+            // mark it so the alias refresh keeps the last known services
+            // instead of dropping the stack's hostnames on this tick.
+            if (reach) reach.reachable = false;
             return [];
         }
     }
@@ -2407,11 +2496,28 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
      * Sencho's `/api/mesh/local-services/:stackName` via the existing
      * `NodeRegistry.getProxyTarget` resolution chain because Dockerode is not
      * directly reachable for remote nodes by design.
+     *
+     * @param reach Optional out-parameter, set to `reachable: false` on every
+     *   path that could not determine the stack's live state: an offline
+     *   tunnel, a failed fetch, a non-2xx answer, or a failed local Docker
+     *   inspection. A node that answers successfully with an empty service
+     *   list is the opposite case, a reachable node whose stack is stopped.
+     *   The alias refresh keeps the last known services for the former, so
+     *   its hostnames survive into other nodes' overrides and its ports stay
+     *   claimed, instead of both being dropped on this tick.
      */
-    private async inspectStackServices(nodeId: number, stackName: string): Promise<Array<{ service: string; ports: number[] }>> {
+    private async inspectStackServices(
+        nodeId: number,
+        stackName: string,
+        reach?: { reachable: boolean },
+    ): Promise<Array<{ service: string; ports: number[] }>> {
+        const unreachable = (): Array<{ service: string; ports: number[] }> => {
+            if (reach) reach.reachable = false;
+            return [];
+        };
         const node = DatabaseService.getInstance().getNode(nodeId);
-        if (!node) return [];
-        if (node.type !== 'remote') return this.inspectLocalStackServices(stackName);
+        if (!node) return unreachable();
+        if (node.type !== 'remote') return this.inspectLocalStackServices(stackName, reach);
 
         try {
             const res = await this.proxyFetch(
@@ -2423,7 +2529,7 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
             );
             if (!res.ok) {
                 console.error(`[MeshService] inspectStackServices: HTTP ${res.status} from node ${nodeId} (${sanitizeForLog(node.name)})`);
-                return [];
+                return unreachable();
             }
             const body = await res.json() as { services?: Array<{ service: string; ports: number[] }> };
             return body.services ?? [];
@@ -2435,10 +2541,10 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
             // not surface a stack trace for a node that is simply offline.
             if (err instanceof MeshError && (err.code === 'no_target' || err.code === 'push_failed')) {
                 console.warn(`[MeshService] inspectStackServices: unreachable node ${nodeId} (${sanitizeForLog(node.name)}): ${err.code}`);
-                return [];
+                return unreachable();
             }
             console.error('[MeshService] inspectStackServices remote unreachable:', sanitizeForLog((err as Error).message));
-            return [];
+            return unreachable();
         }
     }
 
