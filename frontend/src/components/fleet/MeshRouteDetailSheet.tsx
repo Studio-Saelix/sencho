@@ -5,7 +5,10 @@ import { toast } from '@/components/ui/toast-store';
 import { SystemSheet, SheetSection } from '@/components/ui/system-sheet';
 import { Badge } from '@/components/ui/badge';
 import { ConfirmModal } from '@/components/ui/modal';
-import { Loader2, Activity, Hash, Trash2 } from 'lucide-react';
+import { Loader2, Activity, Hash, Trash2, Copy } from 'lucide-react';
+import { copyToClipboard } from '@/lib/clipboard';
+import { computeMeshMembershipImpact, describeMeshMembershipImpact } from './meshImpact';
+import { describeMembershipError, describeProbeFailure } from './meshMessages';
 import type { MeshAlias, MeshNodeStatus, MeshRouteDiagnostic, MeshActivityEvent, MeshProbeResult } from '@/types/mesh';
 import { meshRouteStateFromBackend, meshRouteStateTokens } from './meshRouteState';
 import { describeTransport } from './meshTransport';
@@ -90,12 +93,15 @@ export function MeshRouteDetailSheet({ open, onOpenChange, alias, canManage, sta
                 `/mesh/nodes/${tgt.nodeId}/stacks/${encodeURIComponent(tgt.stack)}/opt-out`,
                 { method: 'POST', localOnly: true },
             );
-            if (!res.ok) throw new Error(`status ${res.status}`);
-            toast.success(`${tgt.stack} removed from mesh, redeploying`);
+            if (!res.ok) {
+                const body = await res.json().catch(() => ({})) as { error?: string };
+                throw new Error(describeMembershipError(res.status, body.error));
+            }
+            toast.success(`${tgt.stack} removed from the mesh. Restarting affected stacks.`);
             onChanged();
             onOpenChange(false);
         } catch (err) {
-            toast.error(`Failed to remove from mesh: ${(err as Error).message}`);
+            toast.error((err as Error).message);
         } finally {
             setRemoving(false);
         }
@@ -105,12 +111,28 @@ export function MeshRouteDetailSheet({ open, onOpenChange, alias, canManage, sta
     const pillState = diag ? meshRouteStateFromBackend(diag.state) : 'not-authorized';
     const pill = meshRouteStateTokens(pillState);
 
+    const nodeLabel = (nodeId: number): string =>
+        status.find((s) => s.nodeId === nodeId)?.nodeName ?? `node #${nodeId}`;
     const meta = diag?.target
-        ? `${diag.target.stack}/${diag.target.service}:${diag.target.port} · node #${diag.target.nodeId}`
+        ? `${diag.target.stack}/${diag.target.service}:${diag.target.port} · ${nodeLabel(diag.target.nodeId)}`
         : (loading ? 'Loading…' : 'No target resolved');
+    const probeFailure = probe && !probe.ok
+        ? describeProbeFailure(alias, probe, diag?.target
+            ? { nodeName: nodeLabel(diag.target.nodeId), port: diag.target.port }
+            : undefined)
+        : null;
+    const address = diag?.target ? `${alias}:${diag.target.port}` : alias;
+    const copyAddress = async (): Promise<void> => {
+        try {
+            await copyToClipboard(address);
+            toast.success(`Copied ${address}`);
+        } catch {
+            toast.error('Could not copy to the clipboard');
+        }
+    };
 
     const footerContext = probe
-        ? (probe.ok ? `Last probe ok · ${probe.latencyMs}ms` : `Last probe failed · ${probe.where ?? 'unknown'}`)
+        ? (probe.ok ? `Last probe ok · ${probe.latencyMs}ms` : `Last probe failed`)
         : diag?.lastProbeMs != null
             ? (diag.lastProbeAt != null
                 ? `Last probe ${formatTimeAgo(diag.lastProbeAt)} · ${diag.lastProbeMs}ms`
@@ -122,6 +144,11 @@ export function MeshRouteDetailSheet({ open, onOpenChange, alias, canManage, sta
     const stackAliasCount = target
         ? aliases.filter((a) => a.nodeId === target.nodeId && a.stackName === target.stack).length
         : 0;
+    const removeChange = target ? { kind: 'opt-out' as const, nodeId: target.nodeId, stackName: target.stack } : null;
+    const removeDescription = removeChange
+        ? `This removes ${stackAliasCount} ${stackAliasCount === 1 ? 'hostname' : 'hostnames'} published by ${removeChange.stackName}. ${
+            describeMeshMembershipImpact(computeMeshMembershipImpact(status, removeChange), removeChange)}`
+        : undefined;
     const transport = describeTransport(targetNode, diag?.pilot.connected ?? false);
 
     return (
@@ -164,17 +191,35 @@ export function MeshRouteDetailSheet({ open, onOpenChange, alias, canManage, sta
                             </span>
                             {probe && (
                                 <Badge variant={probe.ok ? 'default' : 'destructive'} className="text-[10px] font-mono">
-                                    {probe.ok ? `ok ${probe.latencyMs}ms` : `${probe.where ?? 'fail'}: ${probe.code ?? 'error'}`}
+                                    {probe.ok ? `ok ${probe.latencyMs}ms` : 'test failed'}
                                 </Badge>
                             )}
                         </div>
+                        {probeFailure && (
+                            <div className="mt-2 rounded border border-destructive/30 bg-destructive/10 p-2 text-xs text-stat-value">
+                                {probeFailure.message}
+                            </div>
+                        )}
                     </SheetSection>
 
                     {diag?.target && (
                         <SheetSection title="Target">
                             <div className="grid grid-cols-2 gap-x-4 gap-y-1.5 text-xs">
                                 <div className="text-stat-subtitle">Target node</div>
-                                <div className="font-mono text-stat-value">#{diag.target.nodeId}</div>
+                                <div className="font-mono text-stat-value">{nodeLabel(diag.target.nodeId)}</div>
+                                <div className="text-stat-subtitle">Address</div>
+                                <div className="flex items-center gap-1.5 min-w-0">
+                                    <span className="font-mono text-stat-value truncate">{address}</span>
+                                    <button
+                                        type="button"
+                                        onClick={() => { void copyAddress(); }}
+                                        className="shrink-0 -m-1 p-1 text-stat-subtitle hover:text-brand transition-colors"
+                                        aria-label={`Copy ${address}`}
+                                        title="Copy address"
+                                    >
+                                        <Copy className="w-3 h-3" strokeWidth={1.75} />
+                                    </button>
+                                </div>
                                 <div className="text-stat-subtitle">Stack / service</div>
                                 <div className="font-mono text-stat-value">{diag.target.stack}/{diag.target.service}</div>
                                 <div className="text-stat-subtitle">Port</div>
@@ -245,15 +290,17 @@ export function MeshRouteDetailSheet({ open, onOpenChange, alias, canManage, sta
             variant="destructive"
             kicker={`Mesh / ${target?.stack ?? ''}`}
             title={`Remove ${target?.stack ?? 'stack'} from the mesh?`}
-            description={
-                target
-                    ? `${target.stack} will be redeployed on node #${target.nodeId} so its containers drop the mesh routing entries. This removes ${stackAliasCount} ${stackAliasCount === 1 ? 'alias' : 'aliases'} published by this stack.`
-                    : undefined
-            }
-            confirmLabel="Remove and redeploy"
+            description={removeDescription}
+            confirmLabel="Remove and restart"
             onConfirm={() => { setConfirmRemove(false); void removeFromMesh(); }}
             onCancel={() => setConfirmRemove(false)}
-        />
+        >
+            {/* Visible as well as announced: `description` alone is the
+                screen-reader-only dialog description. */}
+            {removeDescription !== undefined && (
+                <p className="text-sm text-stat-subtitle leading-snug">{removeDescription}</p>
+            )}
+        </ConfirmModal>
         </>
     );
 }

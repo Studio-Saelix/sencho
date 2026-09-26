@@ -1,11 +1,12 @@
 import * as React from 'react';
-import { Loader2, Play, Plus, RotateCw, ServerCog } from 'lucide-react';
+import { Check, Copy, Loader2, Play, Plus, RotateCw, ServerCog } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
 import { TogglePill } from '@/components/ui/toggle-pill';
 import { useDensity } from '@/hooks/use-density';
 import { formatAgeShort } from '@/lib/relativeTime';
 import { cn } from '@/lib/utils';
+import { copyToClipboard } from '@/lib/clipboard';
 
 export type RoutingNodeState = 'meshed' | 'idle' | 'connecting' | 'degraded' | 'offline';
 
@@ -432,6 +433,21 @@ interface AliasRowProps {
 
 function AliasRow({ row, onShowAlias, onTestAlias }: AliasRowProps) {
     const isSuspended = row.kind === 'suspended';
+    const [copied, setCopied] = React.useState(false);
+    const address = `${row.host}:${row.port}`;
+    React.useEffect(() => {
+        if (!copied) return;
+        const t = setTimeout(() => setCopied(false), 1500);
+        return () => clearTimeout(t);
+    }, [copied]);
+    const copyAddress = async (): Promise<void> => {
+        try {
+            await copyToClipboard(address);
+            setCopied(true);
+        } catch {
+            /* clipboard unavailable; the address stays visible to select by hand */
+        }
+    };
     const dot: DotTone = isSuspended
         ? 'warning'
         : row.lastTested
@@ -461,6 +477,20 @@ function AliasRow({ row, onShowAlias, onTestAlias }: AliasRowProps) {
                     </span>}
             {!isSuspended && ageLabel && (
                 <span className={cn(KICKER, 'shrink-0 text-stat-subtitle tabular-nums')}>{ageLabel}</span>
+            )}
+            {!isSuspended && (
+                <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => { void copyAddress(); }}
+                    className="h-[22px] w-[22px] p-0 shrink-0"
+                    aria-label={copied ? `Copied ${address}` : `Copy ${address}`}
+                    title={copied ? 'Copied' : 'Copy address'}
+                >
+                    {copied
+                        ? <Check className="w-3 h-3 text-success" strokeWidth={1.75} />
+                        : <Copy className="w-3 h-3" strokeWidth={1.75} />}
+                </Button>
             )}
             <Button
                 variant="ghost"
