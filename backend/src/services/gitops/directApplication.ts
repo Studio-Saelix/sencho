@@ -168,6 +168,9 @@ export function buildDirectApplicationRow(args: {
     // that the policy contract reads the same shape for every application.
     placement_policy: DEFAULT_PLACEMENT_POLICY,
     rollout_authorization_policy: DEFAULT_ROLLOUT_AUTHORIZATION_POLICY,
+    // Nothing has declined yet on a row that was just inserted.
+    placement_policy_refusal_reason: null,
+    placement_policy_refused_at: null,
     poll_interval_secs: null,
     next_poll_at: null,
     attempt_seq: 0,

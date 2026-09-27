@@ -74,6 +74,84 @@ export const APPLICATIONS_DUE_FOR_RETRY_SQL = `SELECT * FROM gitops_applications
        ORDER BY retry_at ASC
        LIMIT ?`;
 
+/**
+ * The application insert's column list, in the order the values are passed.
+ *
+ * Held as one list so the placeholder count is derived from it. A hardcoded
+ * count is a trap: adding a column here and not to the count compiles cleanly
+ * and fails at runtime as a SQLite arity error on the first insert, which is
+ * the first write any create path makes.
+ */
+const APPLICATION_INSERT_COLUMNS = [
+  'id',
+  'lifecycle_key',
+  'lifecycle_status',
+  'target_mode',
+  'stack_name',
+  'configured_source_stack_name',
+  'blueprint_id',
+  'configured_repo_url',
+  'repo_identity_json',
+  'configured_ref',
+  'compose_paths_json',
+  'context_dir',
+  'sync_env',
+  'env_path',
+  'materialization_fingerprint',
+  'desired_commit_sha',
+  'fetched_commit_sha',
+  'fetched_resolved_ref_kind',
+  'candidate_generation_id',
+  'accepted_generation_id',
+  'candidate_plan_blocked',
+  'review_required',
+  'review_block_reason',
+  'artifact_set_id',
+  'latest_artifact_set_id',
+  'intent_revision_id',
+  'rollout_candidate_id',
+  'rollout_generation_id',
+  'source_acceptance_ref',
+  'placement_approval_ref',
+  'rollout_authorization_ref',
+  'legacy_combined_approval_ref',
+  'preflight_fingerprint',
+  'latest_preflight_evidence_json',
+  'latest_operation_id',
+  'active_operation_id',
+  'active_operation_stage',
+  'active_operation_at',
+  'active_generation_id',
+  'pause_at',
+  'pause_reason',
+  'source_suspended_reason',
+  'source_policy',
+  'placement_policy',
+  'rollout_authorization_policy',
+  'placement_policy_refusal_reason',
+  'placement_policy_refused_at',
+  'poll_interval_secs',
+  'next_poll_at',
+  'attempt_seq',
+  'partial_json',
+  'failure_stage',
+  'failure_class',
+  'failure_at',
+  'retry_at',
+  'retry_count',
+  'suspended_at',
+  'recovery_ref',
+  'recovery_phase',
+  'interruption_stage',
+  'interruption_at',
+  'interruption_operation_id',
+  'interruption_generation_id',
+  'evidence_fresh_at',
+  'evidence_limitations_json',
+  'created_at',
+  'updated_at',
+] as const;
+
 export class GitOpsStore {
   private static instance: GitOpsStore | undefined;
 
@@ -785,23 +863,8 @@ export class GitOpsStore {
 
   insertApplication(row: GitOpsApplicationRow): void {
     this.db().prepare(
-      `INSERT INTO gitops_applications (
-        id, lifecycle_key, lifecycle_status, target_mode, stack_name, configured_source_stack_name, blueprint_id,
-        configured_repo_url, repo_identity_json, configured_ref, compose_paths_json,
-        context_dir, sync_env, env_path, materialization_fingerprint, desired_commit_sha,
-        fetched_commit_sha, fetched_resolved_ref_kind, candidate_generation_id, accepted_generation_id,
-        candidate_plan_blocked, review_required, review_block_reason, artifact_set_id, latest_artifact_set_id,
-        intent_revision_id, rollout_candidate_id, rollout_generation_id, source_acceptance_ref,
-        placement_approval_ref, rollout_authorization_ref, legacy_combined_approval_ref,
-        preflight_fingerprint, latest_preflight_evidence_json, latest_operation_id, active_operation_id, active_operation_stage,
-        active_operation_at, active_generation_id, pause_at, pause_reason, source_suspended_reason,
-        source_policy, placement_policy, rollout_authorization_policy,
-        poll_interval_secs, next_poll_at, attempt_seq, partial_json,
-        failure_stage, failure_class, failure_at, retry_at, retry_count, suspended_at,
-        recovery_ref, recovery_phase, interruption_stage, interruption_at,
-        interruption_operation_id, interruption_generation_id, evidence_fresh_at,
-        evidence_limitations_json, created_at, updated_at
-      ) VALUES (${Array(65).fill('?').join(', ')})`,
+      `INSERT INTO gitops_applications (${APPLICATION_INSERT_COLUMNS.join(', ')})
+       VALUES (${APPLICATION_INSERT_COLUMNS.map(() => '?').join(', ')})`,
     ).run(
       row.id, row.lifecycle_key, row.lifecycle_status, row.target_mode, row.stack_name,
       row.configured_source_stack_name, row.blueprint_id,
@@ -814,6 +877,7 @@ export class GitOpsStore {
       row.preflight_fingerprint, row.latest_preflight_evidence_json, row.latest_operation_id, row.active_operation_id, row.active_operation_stage,
       row.active_operation_at, row.active_generation_id, row.pause_at, row.pause_reason, row.source_suspended_reason,
       row.source_policy, row.placement_policy, row.rollout_authorization_policy,
+      row.placement_policy_refusal_reason, row.placement_policy_refused_at,
       row.poll_interval_secs, row.next_poll_at, row.attempt_seq, row.partial_json,
       row.failure_stage, row.failure_class, row.failure_at, row.retry_at, row.retry_count, row.suspended_at,
       row.recovery_ref, row.recovery_phase, row.interruption_stage, row.interruption_at,

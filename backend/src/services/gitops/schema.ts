@@ -126,6 +126,29 @@ CREATE TABLE IF NOT EXISTS gitops_applications (
   rollout_authorization_policy TEXT NOT NULL DEFAULT 'manual' CHECK (
     rollout_authorization_policy IN ('manual','automatic')
   ),
+  -- Why bounded automatic placement last declined, and when. Null when no
+  -- bounded-auto evaluation has declined, which is the common case and includes
+  -- every application still on the operator policy.
+  --
+  -- Recorded because the decision is otherwise invisible once the producer
+  -- returns. A placement left waiting for review under an automatic policy with
+  -- no stated reason is indistinguishable from a policy that does nothing, and
+  -- that is exactly how an automatic path reads when it is broken.
+  --
+  -- The vocabulary is the closed decision vocabulary and not a free string, so
+  -- a reason that no decision can produce cannot be stored or projected. Cleared
+  -- when the review is resolved, and when the policy changes, because a reason
+  -- that described the old policy describes nothing now.
+  placement_policy_refusal_reason TEXT NULL CHECK (
+    placement_policy_refusal_reason IS NULL OR placement_policy_refusal_reason IN (
+      'policy_is_operator','no_placement_change','stateless_addition','stateless_removal',
+      'mixed_add_and_remove','multiple_additions','multiple_removals','stateful_workload',
+      'unknown_workload','first_multi_node_placement','pin_driven_placement','cordon_override',
+      'stale_node','unknown_connectivity','missing_evidence','malformed_evidence',
+      'destructive_effect','conflicting_operation'
+    )
+  ),
+  placement_policy_refused_at INTEGER NULL,
   poll_interval_secs INTEGER NULL,
   next_poll_at INTEGER NULL,
   attempt_seq INTEGER NOT NULL DEFAULT 0,

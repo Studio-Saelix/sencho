@@ -75,6 +75,8 @@ function blueprintApp(id: string, overrides: Partial<GitOpsApplicationRow> = {})
     source_policy: 'review',
     placement_policy: 'bounded_auto',
     rollout_authorization_policy: 'automatic',
+        placement_policy_refusal_reason: null,
+        placement_policy_refused_at: null,
     poll_interval_secs: null,
     next_poll_at: null,
     attempt_seq: 0,
@@ -451,6 +453,72 @@ describe('a policy edit is configuration, not work', () => {
         envelope: envelope('busy'),
       }),
     ).toThrow(/operation is in flight/);
+  });
+
+  it('drops a recorded refusal when an approval resolves the review', () => {
+    // Both writes happen inside the approval's own transaction, and on the policy
+    // path the same pass records the approval that superseded the refusal. A
+    // reason left behind would name the decision that produced the approval,
+    // which is the opposite of what an operator needs to read.
+    const store = GitOpsStore.getInstance();
+    const app = blueprintApp('9206', { placement_policy: 'bounded_auto' });
+    store.insertIntentRevision(intent(app.intent_revision_id as string, app.id));
+    store.insertRolloutCandidate(candidate(
+      app.rollout_candidate_id as string, app.id, app.intent_revision_id as string, [1],
+    ));
+    store.insertApplication(app);
+    GitOpsTransitions.getInstance().placementPolicyRefused({
+      applicationId: '9206',
+      reason: 'conflicting_operation',
+      at: 700,
+    });
+    expect(store.getApplication('9206')?.placement_policy_refusal_reason).toBe('conflicting_operation');
+
+    GitOpsTransitions.getInstance().placementApproved({
+      applicationId: '9206',
+      approvalId: '9206-placement',
+      intentRevisionId: app.intent_revision_id as string,
+      blastJson: encodeGitOpsApprovedTargetEffectJson([{ nodeId: 1, outcome: 'place' as const }]),
+      requiredNodeIds: [1],
+      fingerprint: null,
+      actor: 'tester',
+      envelope: envelope('approve'),
+      rolloutGenerationId: '9206-gen',
+      candidateId: app.rollout_candidate_id as string,
+      authority: 'operator',
+      policyProvenanceJson: null,
+    });
+
+    const after = store.getApplication('9206');
+    expect(after?.placement_approval_ref).toBe('9206-placement');
+    expect(after?.placement_policy_refusal_reason).toBeNull();
+    expect(after?.placement_policy_refused_at).toBeNull();
+  });
+
+  it('drops a recorded refusal when the policy changes, since it described the old one', () => {
+    // A reason that explained a decline under `bounded_auto` says nothing once
+    // the policy is `operator`. Left in place it would be read as the current
+    // explanation for whatever review is open next, which is the opposite of
+    // what it described.
+    const store = GitOpsStore.getInstance();
+    store.insertApplication(blueprintApp('9205', { placement_policy: 'bounded_auto' }));
+    GitOpsTransitions.getInstance().placementPolicyRefused({
+      applicationId: '9205',
+      reason: 'cordon_override',
+      at: 500,
+    });
+    expect(store.getApplication('9205')?.placement_policy_refusal_reason).toBe('cordon_override');
+
+    GitOpsTransitions.getInstance().placementPolicyChanged({
+      applicationId: '9205',
+      placementPolicy: 'operator',
+      envelope: envelope('policy'),
+    });
+
+    const after = store.getApplication('9205');
+    expect(after?.placement_policy).toBe('operator');
+    expect(after?.placement_policy_refusal_reason).toBeNull();
+    expect(after?.placement_policy_refused_at).toBeNull();
   });
 
   it('refuses a change to the value already set, so no empty history row is written', () => {

@@ -44,6 +44,7 @@ import {
   policyValuesEqual,
 } from './policyComposition';
 import type { PlacementPolicy, RolloutAuthorizationPolicy } from './policyComposition';
+import type { PlacementPolicyReason } from './placementPolicy';
 import { runningGenerationForTarget } from './recoveryCapture';
 
 
@@ -1430,6 +1431,11 @@ export class GitOpsTransitions {
         }
         const before = { placementPolicy: app.placement_policy };
         app.placement_policy = args.placementPolicy;
+        // A reason recorded under the old policy explains a decision that policy
+        // made, and this one is no longer configured. Left in place it would be
+        // read as the current reason for whatever review is open next.
+        app.placement_policy_refusal_reason = null;
+        app.placement_policy_refused_at = null;
         return { before, after: { placementPolicy: args.placementPolicy } };
       },
     );
@@ -2196,6 +2202,12 @@ export class GitOpsTransitions {
         // gitops_approvals as history of the pre-decomposition approval.
         app.legacy_combined_approval_ref = null;
         app.rollout_generation_id = args.rolloutGenerationId;
+        // The review this refusal left behind is resolved by this approval, and
+        // on the policy path the approval is recorded in the same pass that
+        // recorded the refusal, so leaving it would name the decision that
+        // produced the approval still sitting on the row.
+        app.placement_policy_refusal_reason = null;
+        app.placement_policy_refused_at = null;
 
         const approved = this.history(app, args.envelope, {
           stage: 'placement_approved',
@@ -3817,6 +3829,43 @@ export class GitOpsTransitions {
   }
 
   /**
+   * Record why bounded automatic placement declined, so the question it left
+   * behind can be answered.
+   *
+   * The decision itself is computed and returned to the producer, which discards
+   * it. Without this row a placement waiting for review under an automatic policy
+   * is indistinguishable from a policy that never fires, and that is exactly how
+   * an automatic path reads when it is broken: the surface shows a review, the
+   * policy says automatic, and nothing explains the gap.
+   *
+   * Cleared rather than left to go stale, in two places and for the same reason.
+   * An approval resolves the review, and a policy change makes the old reason
+   * describe a policy that is no longer configured. A stale reason would be read
+   * as the current one, which is the failure this row exists to remove. Both
+   * clears write the two columns inside the transition that causes them, rather
+   * than calling here afterwards, so the reason and the change that invalidated
+   * it commit together.
+   *
+   * Writes no history: a refusal is a routine evaluation that re-runs on the
+   * next producer pass, and history is the operator's audit trail of decisions
+   * that stood. The reason on the application row is the read model for the
+   * review currently open, not a record of every evaluation that ever ran.
+   */
+  placementPolicyRefused(args: {
+    applicationId: string;
+    reason: PlacementPolicyReason;
+    at?: number;
+  }): void {
+    this.raw().transaction(() => {
+      const app = this.store().getApplication(args.applicationId);
+      if (!app) throw new GitOpsTransitionError('application not found');
+      app.placement_policy_refusal_reason = args.reason;
+      app.placement_policy_refused_at = args.at ?? Date.now();
+      this.writeApplication(app);
+    })();
+  }
+
+  /**
    * Record or clear the deploy-time registry preflight limitation on the
    * application row. Acceptance and artifact pointers stay intact when set.
    */
@@ -4199,6 +4248,7 @@ export class GitOpsTransitions {
         active_operation_stage=?, active_operation_at=?, active_generation_id=?,
         pause_at=?, pause_reason=?, source_suspended_reason=?,
         source_policy=?, placement_policy=?, rollout_authorization_policy=?,
+        placement_policy_refusal_reason=?, placement_policy_refused_at=?,
         poll_interval_secs=?, next_poll_at=?, attempt_seq=?, partial_json=?,
         failure_stage=?, failure_class=?, failure_at=?, retry_at=?, retry_count=?,
         suspended_at=?, recovery_ref=?, recovery_phase=?,
@@ -4218,6 +4268,7 @@ export class GitOpsTransitions {
       app.active_operation_stage, app.active_operation_at, app.active_generation_id,
       app.pause_at, app.pause_reason, app.source_suspended_reason,
       app.source_policy, app.placement_policy, app.rollout_authorization_policy,
+      app.placement_policy_refusal_reason, app.placement_policy_refused_at,
       app.poll_interval_secs, app.next_poll_at, app.attempt_seq, app.partial_json,
       app.failure_stage, app.failure_class, app.failure_at, app.retry_at, app.retry_count,
       app.suspended_at, app.recovery_ref, app.recovery_phase,

@@ -125,6 +125,7 @@ function liveRevision(overrides: Partial<GitOpsRevisionLive> = {}): GitOpsRevisi
         drift: [],
         limitations: [],
         availableActions: ['apply'],
+        authorityPolicies: [],
         ...overrides,
     };
 }
@@ -139,6 +140,7 @@ const absent: GitOpsRevisionProjection = {
     limitations: [],
     availableActions: [],
     approvals: null,
+    authorityPolicies: [],
 };
 
 const faultLimitation: GitOpsLimitation = {

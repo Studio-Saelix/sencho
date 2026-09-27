@@ -86,6 +86,38 @@ export type PlacementPolicyReason =
   /** An operation is in flight for this application or an affected target. */
   | 'conflicting_operation';
 
+/**
+ * The same vocabulary at runtime, for the places that must store or constrain it
+ * rather than merely name it: the column check on the recorded refusal, and the
+ * transport validation on the wire.
+ *
+ * Kept beside the union rather than derived from it so each member keeps the
+ * comment explaining what it means, and asserted against the union below so the
+ * two cannot drift. A list that gains a member without the union, or loses one,
+ * is a compile error rather than a value the storage layer would reject at
+ * runtime for a decision the policy can legitimately make.
+ */
+export const PLACEMENT_POLICY_REASONS = [
+  'policy_is_operator',
+  'no_placement_change',
+  'stateless_addition',
+  'stateless_removal',
+  'mixed_add_and_remove',
+  'multiple_additions',
+  'multiple_removals',
+  'stateful_workload',
+  'unknown_workload',
+  'first_multi_node_placement',
+  'pin_driven_placement',
+  'cordon_override',
+  'stale_node',
+  'unknown_connectivity',
+  'missing_evidence',
+  'malformed_evidence',
+  'destructive_effect',
+  'conflicting_operation',
+] as const satisfies readonly PlacementPolicyReason[];
+
 export type PlacementDecision =
   | { decision: 'no_action'; reason: 'no_placement_change'; effect: PlacementEffect }
   | {

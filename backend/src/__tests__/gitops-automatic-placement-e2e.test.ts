@@ -119,6 +119,8 @@ function application(overrides: Partial<GitOpsApplicationRow>): GitOpsApplicatio
     source_policy: 'review',
     placement_policy: 'bounded_auto',
     rollout_authorization_policy: 'automatic',
+        placement_policy_refusal_reason: null,
+        placement_policy_refused_at: null,
     poll_interval_secs: null,
     next_poll_at: null,
     attempt_seq: 0,
@@ -288,6 +290,27 @@ describe('a bounded_auto application reaches an approval', () => {
     });
     expect(outcome).toEqual({ status: 'operator_review', reason: 'stateful_workload' });
     expect(GitOpsStore.getInstance().getApplication(app.id)!.placement_approval_ref).toBeNull();
+    // Recorded, because otherwise the review this left behind has no stated
+    // reason and a policy set to automatic looks like one that never fires.
+    const recorded = GitOpsStore.getInstance().getApplication(app.id)!;
+    expect(recorded.placement_policy_refusal_reason).toBe('stateful_workload');
+    expect(recorded.placement_policy_refused_at).toBe(2);
+  });
+
+  it('records no reason when it approves, so nothing is left to explain', () => {
+    // The opposite direction. A reason left on an approved application would be
+    // read as the explanation for whatever review comes next.
+    const nodeId = addNode(`n-${randomUUID().slice(0, 6)}`);
+    const app = seed({ nodeIds: [nodeId], compose: 'services:\n  web:\n    image: nginx:1.25\n' });
+
+    const outcome = applyAutomaticPlacement(app.id, {
+      operationId: 'op-auto-clean', actor: null, trigger: 'test', at: 3,
+    });
+    expect(outcome.status).toBe('auto_approved');
+    const recorded = GitOpsStore.getInstance().getApplication(app.id)!;
+    expect(recorded.placement_approval_ref).not.toBeNull();
+    expect(recorded.placement_policy_refusal_reason).toBeNull();
+    expect(recorded.placement_policy_refused_at).toBeNull();
   });
 
   it('refuses a first placement across two nodes before considering its size', () => {

@@ -23,6 +23,7 @@ import type { GitSourceManifestState } from '../types/gitProjectManifest';
 import type { RollbackOperationKind } from '../types/rollbackGeneration';
 import { collectImageIds, parseServicesJsonStrict } from './recoveryServicesJson';
 import { GITOPS_DUE_INDEX_SQL, GITOPS_SCHEMA_SQL } from './gitops/schema';
+import { PLACEMENT_POLICY_REASONS } from './gitops/placementPolicy';
 
 export type { SnapshotFileReadResult } from '../helpers/snapshotFileDecrypt';
 export type { RollbackOperationKind } from '../types/rollbackGeneration';
@@ -2131,6 +2132,15 @@ export class DatabaseService {
         // completion marker, not the column's existence, is what decides.
         addColIfMissing('gitops_applications', 'rollout_authorization_policy',
             "TEXT NOT NULL DEFAULT 'manual' CHECK (rollout_authorization_policy IN ('manual','automatic'))");
+
+        // Why bounded automatic placement last declined. No backfill: automatic
+        // placement did not exist before this branch, so there is no prior
+        // decision any row could be carrying. Null is the honest starting state
+        // and it is also what every application on the operator policy keeps, so
+        // absence never has to be read as "reviewed and found nothing".
+        addColIfMissing('gitops_applications', 'placement_policy_refusal_reason',
+            `TEXT NULL CHECK (placement_policy_refusal_reason IS NULL OR placement_policy_refusal_reason IN (${PLACEMENT_POLICY_REASONS.map((r) => `'${r}'`).join(',')}))`);
+        addColIfMissing('gitops_applications', 'placement_policy_refused_at', 'INTEGER NULL');
         addColIfMissing('gitops_applications', 'placement_policy',
             "TEXT NOT NULL DEFAULT 'operator' CHECK (placement_policy IN ('operator','bounded_auto'))");
         // Called on every boot, not only the one that created the column: a

@@ -3,6 +3,10 @@ import type { RepoIdentity } from './repoIdentity';
 import type { RefKind } from '../git/types';
 import type { HealthRolloutPolicy } from './healthPolicy';
 import type { PlacementPolicy, RolloutAuthorizationPolicy } from './policyComposition';
+import type { PlacementPolicyReason } from './placementPolicy';
+
+export type { PlacementPolicyReason };
+import type { AuthorityPolicyRead } from './authorityPolicyProjection';
 
 export type GitOpsTargetMode = 'direct' | 'inline_blueprint' | 'blueprint';
 export type GitOpsLifecycleStatus = 'active' | 'creating' | 'detached' | 'deleted';
@@ -127,6 +131,14 @@ export type GitOpsApplicationRow = {
    * either of them.
    */
   rollout_authorization_policy: RolloutAuthorizationPolicy;
+  /**
+   * Why bounded automatic placement last declined, and when it did. Null when
+   * nothing has declined: never evaluated, or the policy is `operator`, or the
+   * last evaluation approved. Absence is not "reviewed and found nothing", so a
+   * reader must not report a clean review from a null here.
+   */
+  placement_policy_refusal_reason: PlacementPolicyReason | null;
+  placement_policy_refused_at: number | null;
   poll_interval_secs: number | null;
   next_poll_at: number | null;
   attempt_seq: number;
@@ -969,6 +981,13 @@ export type GitOpsRevisionProjection =
       limitations: readonly GitOpsLimitation[];
       availableActions: [];
       approvals: null;
+      /**
+       * Empty, because an application that does not exist has no configured
+       * policy to report. The field is present rather than absent so a reader
+       * never has to tell "no application" from "an older build said nothing",
+       * and those are different facts about the same endpoint.
+       */
+      authorityPolicies: readonly AuthorityPolicyRead[];
     }
   | {
       schemaVersion: 1;
@@ -984,6 +1003,12 @@ export type GitOpsRevisionProjection =
       drift: GitOpsDriftItem[];
       limitations: GitOpsLimitation[];
       availableActions: GitOpsAvailableAction[];
+      /**
+       * The three authority policies, configured and effective, in stage order.
+       * See `authorityPolicyProjection` for what each field claims and, more
+       * importantly, what it refuses to claim.
+       */
+      authorityPolicies: AuthorityPolicyRead[];
     };
 
 export type { ArtifactEvidenceJson, ObservedArtifactIdentity, RepoIdentity };

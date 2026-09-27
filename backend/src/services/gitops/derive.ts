@@ -7,6 +7,7 @@ import {
   type ObservedArtifactIdentity,
 } from './json';
 import { GitOpsStore } from './store';
+import { authorityPolicyReads } from './authorityPolicyProjection';
 import { comparableObservationMatches } from './artifactIdentity';
 import { runningGenerationForTarget } from './recoveryCapture';
 import {
@@ -73,6 +74,10 @@ const NOT_APPLICABLE: GitOpsRevisionProjection = {
   limitations: [],
   availableActions: [],
   approvals: null,
+  // An application that does not exist has no policy to report. Present and
+  // empty rather than absent, so a reader never has to tell "no application"
+  // from "an older build said nothing".
+  authorityPolicies: [],
 };
 // Frozen after construction rather than inline: the collections stay mutable
 // types so the projection union still matches, while the shared instance
@@ -82,6 +87,7 @@ for (const collection of [
   NOT_APPLICABLE.drift,
   NOT_APPLICABLE.limitations,
   NOT_APPLICABLE.availableActions,
+  NOT_APPLICABLE.authorityPolicies,
 ]) {
   Object.freeze(collection);
 }
@@ -134,6 +140,7 @@ export function deriveGitOpsRevision(
     }, limitations),
     limitations,
     availableActions,
+    authorityPolicies: authorityPolicyReads(app, { source, placement, rollout }),
   };
 }
 
@@ -1882,6 +1889,9 @@ function unreachableApplicationRevision(limitation: GitOpsLimitation): GitOpsRev
     limitations: [limitation],
     availableActions: [],
     approvals: null,
+    // A fault carries no application either, so it has no policy to report, and
+    // it is deliberately not the shared sentinel's identity.
+    authorityPolicies: [],
   };
 }
 

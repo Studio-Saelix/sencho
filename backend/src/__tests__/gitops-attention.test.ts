@@ -145,6 +145,7 @@ function liveProjection(overrides?: {
     drift: overrides?.drift ?? [],
     limitations: [],
     availableActions: [],
+    authorityPolicies: [],
   };
 }
 

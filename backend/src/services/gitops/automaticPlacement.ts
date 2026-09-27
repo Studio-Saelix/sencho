@@ -216,6 +216,25 @@ function hasCordonOverride(nodeIds: readonly number[]): boolean {
  * reports as malformed evidence rather than as a conflict, because that is what
  * happened: the sets the decision compared are no longer the sets on the row.
  */
+/**
+ * Record a bounded-auto refusal, never letting the record fail the decision.
+ *
+ * The placement is already standing unapproved either way, and the caller is a
+ * producer that has committed its own write. A failure here must not turn a
+ * decision the policy made into an exception the operator sees as a broken
+ * Blueprint edit, so it is logged and the decision stands.
+ */
+function recordRefusal(applicationId: string, reason: PlacementPolicyReason, at: number): void {
+  try {
+    GitOpsTransitions.getInstance().placementPolicyRefused({ applicationId, reason, at });
+  } catch (error) {
+    console.error(
+      `[GitOps] automatic placement refusal could not be recorded for ${sanitizeForLog(applicationId)}:`,
+      sanitizeForLog(error instanceof Error ? error.message : String(error)),
+    );
+  }
+}
+
 function approvalFailureReason(message: string): PlacementPolicyReason {
   if (/is not current|could not be read|not found|does not match/.test(message)) {
     return 'malformed_evidence';
@@ -305,6 +324,7 @@ export function applyAutomaticPlacement(
     return { status: 'no_action', reason: 'no_placement_change' };
   }
   if (decision.decision === 'operator_review') {
+    recordRefusal(app.id, decision.reason, envelope.at);
     return { status: 'operator_review', reason: decision.reason };
   }
 
@@ -354,7 +374,9 @@ export function applyAutomaticPlacement(
       `[GitOps] automatic placement approval failed for ${sanitizeForLog(app.id)}:`,
       sanitizeForLog(message),
     );
-    return { status: 'operator_review', reason: approvalFailureReason(message) };
+    const reason = approvalFailureReason(message);
+    recordRefusal(app.id, reason, envelope.at);
+    return { status: 'operator_review', reason };
   }
 }
 

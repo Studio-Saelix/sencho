@@ -407,6 +407,8 @@ function app(
     source_policy: 'manual',
     placement_policy: DEFAULT_PLACEMENT_POLICY,
     rollout_authorization_policy: DEFAULT_ROLLOUT_AUTHORIZATION_POLICY,
+        placement_policy_refusal_reason: null,
+        placement_policy_refused_at: null,
     poll_interval_secs: null,
     materialization_fingerprint: 'a'.repeat(64),
     desired_commit_sha: 'abc123',

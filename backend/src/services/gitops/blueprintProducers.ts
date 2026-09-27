@@ -449,6 +449,9 @@ export function blankInlineApplication(id: string, blueprintId: number, at: numb
     // independently, and both start at their safe defaults.
     placement_policy: DEFAULT_PLACEMENT_POLICY,
     rollout_authorization_policy: DEFAULT_ROLLOUT_AUTHORIZATION_POLICY,
+    // Nothing has declined yet on a row that was just inserted.
+    placement_policy_refusal_reason: null,
+    placement_policy_refused_at: null,
     poll_interval_secs: null,
     next_poll_at: null,
     attempt_seq: 0,
