@@ -288,6 +288,17 @@ export async function ensureRolloutAuthorization(
       return { ok: false, reason: 'Rollout authorization is only for Blueprint target mode.' };
     }
     if (shouldAbort?.()) return { ok: false, reason: 'The rollout is paused.' };
+    // A policy-authorized mint is only ever allowed by a policy that says so.
+    // The operator path is unaffected: an operator asking to authorize is itself
+    // the authority, and no policy stands in the way of one.
+    //
+    // Without this the column is write-only. An operator could set the policy to
+    // manual, get a success response and a history row, and then watch the next
+    // dispatch mint anyway, under a generation frozen with a policy that did not
+    // govern it.
+    if (authority === 'configured_policy' && app.rollout_authorization_policy !== 'automatic') {
+      return { ok: false, reason: 'The rollout authorization policy requires an operator to authorize.' };
+    }
     // A conflicting operation is a refusal, not a wait. The pause check above
     // only knows about a deliberate pause, so without this an authorization
     // could be minted while a fetch, apply, deploy, or recovery is still running

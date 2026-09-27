@@ -1225,6 +1225,42 @@ export class DatabaseService {
         return this.db;
     }
 
+    /**
+     * Restore the automatic rollout authorization existing installations had.
+     *
+     * Blueprint applications authorized their own rollouts on the acceptance
+     * handoff before this policy existed, so leaving them on the fresh-install
+     * default would strip that behavior from installs that never asked for a
+     * change.
+     *
+     * Runs only on the boot that created the column, plus a recovery pass for a
+     * process that died between the ALTER and the first run. The recovery pass
+     * is gated on a completion marker rather than on the rows themselves: a row
+     * an operator deliberately set back to manual is indistinguishable from a
+     * row that was never backfilled, so re-running the UPDATE on its own
+     * predicate would silently re-grant authority on every restart. A crash
+     * between the two statements is the only gap, and closing it with a marker
+     * is what makes the second pass safe to run at all.
+     */
+    private backfillLegacyRolloutAuthorizationPolicy(): void {
+        const MARKER = 'gitops_rollout_auth_policy_backfilled';
+        const alreadyBackfilled = this.db
+            .prepare('SELECT value FROM global_settings WHERE key = ?')
+            .get(MARKER) as { value: string } | undefined;
+        if (alreadyBackfilled) return;
+
+        this.db.prepare(`
+          UPDATE gitops_applications
+          SET rollout_authorization_policy = 'automatic'
+          WHERE rollout_authorization_policy = 'manual'
+            AND target_mode = 'blueprint'
+            AND lifecycle_status = 'active'
+        `).run();
+        this.db
+            .prepare('INSERT OR REPLACE INTO global_settings (key, value) VALUES (?, ?)')
+            .run(MARKER, new Date().toISOString());
+    }
+
     private initSchema() {
         this.db.exec(`
       CREATE TABLE IF NOT EXISTS agents (
@@ -2086,19 +2122,22 @@ export class DatabaseService {
         // Scoped to live Blueprint applications, the only shape that has an
         // automatic path. Direct, Inline, detached, and closed applications
         // never auto-authorized, so they keep the safe default.
-        const addedRolloutAuthorizationPolicy = addColIfMissing('gitops_applications', 'rollout_authorization_policy',
+        //
+        // The predicate also carries its own completion test, so a crash between
+        // the ALTER and this UPDATE cannot strand the backfill. A process that
+        // dies after the column is created leaves live Blueprint rows still on
+        // the manual default, and gating only on column creation would skip
+        // them for ever because every later boot sees a duplicate column. A
+        // completion marker, not the column's existence, is what decides.
+        addColIfMissing('gitops_applications', 'rollout_authorization_policy',
             "TEXT NOT NULL DEFAULT 'manual' CHECK (rollout_authorization_policy IN ('manual','automatic'))");
         addColIfMissing('gitops_applications', 'placement_policy',
             "TEXT NOT NULL DEFAULT 'operator' CHECK (placement_policy IN ('operator','bounded_auto'))");
-        if (addedRolloutAuthorizationPolicy) {
-            this.db.prepare(`
-              UPDATE gitops_applications
-              SET rollout_authorization_policy = 'automatic'
-              WHERE rollout_authorization_policy = 'manual'
-                AND target_mode = 'blueprint'
-                AND lifecycle_status = 'active'
-            `).run();
-        }
+        // Called on every boot, not only the one that created the column: a
+        // process that died between the ALTER and the backfill would otherwise
+        // skip it for ever, because every later boot sees a duplicate column.
+        // The completion marker inside is what makes running it again safe.
+        this.backfillLegacyRolloutAuthorizationPolicy();
         this.db.exec(GITOPS_DUE_INDEX_SQL);
 
         // Distributed API model columns

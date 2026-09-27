@@ -1600,6 +1600,10 @@ function seedApp(opts: { nodeCount: number; remote?: boolean }): Seeded {
 
   const app: GitOpsApplicationRow = {
     ...directApplicationFixture(applicationId, `src-${applicationId}`),
+    // The automatic dispatch path this fixture exercises is what an existing
+    // installation has, so the policy has to say so. The fresh-install default
+    // is manual, and a policy-authorized mint is refused without this.
+    rollout_authorization_policy: 'automatic',
     target_mode: 'blueprint',
     lifecycle_key: `blueprint:${blueprintId}`,
     stack_name: null,

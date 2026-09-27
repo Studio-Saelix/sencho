@@ -46,30 +46,45 @@ export type AutomaticPlacementOutcome =
   | { status: 'no_action'; reason: 'no_placement_change' }
   | { status: 'skipped'; reason: 'no_current_candidate' | 'unexpected_error' };
 
-/** The last placement-approved target set, or the live one when nothing was ever approved. */
+/**
+ * The last placement-approved target set, or the live one when nothing was ever
+ * approved.
+ *
+ * Resolved from the most recent approval row rather than from the application's
+ * `placement_approval_ref`, because an intent revision clears that pointer
+ * before a new candidate opens. Reading the pointer here found nothing on the
+ * normal path, which left the live-target fallback as the only reachable branch:
+ * every application looked un-approved, and every multi-node candidate was
+ * refused as a first placement. The approval row survives the pointer and is
+ * still the authority record of the last set an operator accepted.
+ */
 function approvedBaseline(
     store: GitOpsStore,
     app: GitOpsApplicationRow,
 ): { ok: true; nodeIds: number[]; hasPriorApproval: boolean } | { ok: false } {
-  if (app.placement_approval_ref) {
-    // A direct read, not resolveApprovalRef: that one answers "does this prove
-    // authority", which needs the expected intent and target set, and here the
-    // question is only "what set did the standing approval name".
-    const approval = store.getApproval(app.placement_approval_ref);
-    if (!approval || approval.kind !== 'placement_approval' || approval.application_id !== app.id) {
-      return { ok: false };
-    }
-    if (!approval.required_targets_json) return { ok: false };
-    try {
-      return { ok: true, nodeIds: decodeGitOpsRequiredTargetsJson(approval.required_targets_json).nodeIds, hasPriorApproval: true };
-    } catch {
-      return { ok: false };
-    }
+  const approval = store.latestPlacementApproval(app.id);
+  if (!approval) {
+    // Never approved, so the honest baseline is what is actually running. The
+    // first-placement rules apply on top of it, which is what keeps a first
+    // placement across several nodes out of the automatic path.
+    return {
+      ok: true,
+      nodeIds: store.listTargets(app.id)
+        .filter((row) => row.target_status === 'active')
+        .map((row) => row.node_id),
+      hasPriorApproval: false,
+    };
   }
-  // Never approved, so the honest baseline is what is actually running. The
-  // first-placement rules apply on top of it, which is what keeps a first
-  // placement across several nodes out of the automatic path.
-  return { ok: true, nodeIds: store.listTargets(app.id).filter((row) => row.target_status === 'active').map((row) => row.node_id), hasPriorApproval: false };
+  if (approval.application_id !== app.id || !approval.required_targets_json) return { ok: false };
+  try {
+    return {
+      ok: true,
+      nodeIds: decodeGitOpsRequiredTargetsJson(approval.required_targets_json).nodeIds,
+      hasPriorApproval: true,
+    };
+  } catch {
+    return { ok: false };
+  }
 }
 
 /**
@@ -118,17 +133,61 @@ function deriveStatelessness(
   }
 }
 
-/** The worst state across the nodes the change touches. */
+/**
+ * The worst state across every node the change touches.
+ *
+ * Both sides of the change, not just the candidate: a withdrawal is about the
+ * node being left, so probing only the candidate set would read a departing
+ * node as fine when it was never looked at.
+ *
+ * `stale` is treated as unreachable rather than as good. It is a real recorded
+ * state meaning the last observation has expired, and a decision about where to
+ * put a workload must not treat expired evidence as a reachable node. Mapping it
+ * to reachable would make the stale-node refusal unreachable for exactly the
+ * targets it exists for.
+ */
 function worstNodeState(store: GitOpsStore, appId: string, nodeIds: readonly number[]): AffectedNodeState {
   let worst: AffectedNodeState = 'reachable';
   for (const nodeId of nodeIds) {
     const target = store.getTarget(appId, nodeId);
     if (!target) return 'unknown';
     const connectivity = target.connectivity;
-    if (connectivity === 'unreachable') return 'unreachable';
+    if (connectivity === 'unreachable' || connectivity === 'stale') return 'unreachable';
     if (connectivity === 'unknown' || connectivity === null) worst = 'unknown';
   }
   return worst;
+}
+
+/** Whether any of these nodes is cordoned for new placements. */
+function hasCordonOverride(nodeIds: readonly number[]): boolean {
+  if (nodeIds.length === 0) return false;
+  const db = DatabaseService.getInstance().getDb();
+  const row = db
+    .prepare(
+      `SELECT 1 AS found FROM nodes
+       WHERE cordoned = 1 AND id IN (${nodeIds.map(() => '?').join(', ')})
+       LIMIT 1`,
+    )
+    .get(...nodeIds);
+  return row !== undefined;
+}
+
+
+/**
+ * Why an approval the decision already allowed did not land.
+ *
+ * Each transition refusal keeps its own meaning, so the reason is derived from
+ * the message rather than assumed. Evidence that moved under the decision
+ * reports as malformed evidence rather than as a conflict, because that is what
+ * happened: the sets the decision compared are no longer the sets on the row.
+ */
+function approvalFailureReason(message: string): PlacementPolicyReason {
+  if (/is not current|could not be read|not found|does not match/.test(message)) {
+    return 'malformed_evidence';
+  }
+  // An already-recorded approval is the replay guard, and a live operation is
+  // the one state reachable from outside the transition's own checks.
+  return 'conflicting_operation';
 }
 
 /**
@@ -143,7 +202,6 @@ export function applyAutomaticPlacement(
     envelope: EventEnvelope,
 ): AutomaticPlacementOutcome {
   const store = GitOpsStore.getInstance();
-  const db = DatabaseService.getInstance();
   const app = store.getApplication(applicationId);
   if (!app || app.lifecycle_status !== 'active' || !app.rollout_candidate_id || !app.intent_revision_id) {
     return { status: 'skipped', reason: 'no_current_candidate' };
@@ -158,14 +216,28 @@ export function applyAutomaticPlacement(
   let evidenceWellFormed = true;
   try {
     candidateNodeIds = decodeGitOpsRequiredTargetsJson(candidate.required_targets_json).nodeIds;
-  } catch {
+  } catch (error) {
+    // Refused either way, but the reason has to be diagnosable: a corrupt
+    // required-target set is a data problem someone has to find.
+    console.warn(
+      `[GitOps] candidate target set unreadable for ${sanitizeForLog(app.id)}:`,
+      sanitizeForLog(error instanceof Error ? error.message : String(error)),
+    );
     evidenceWellFormed = false;
   }
   const baseline = approvedBaseline(store, app);
+  const baselineNodeIds = baseline.ok ? baseline.nodeIds : [];
+
+  // The change itself, computed once so every evidence signal reads the same
+  // two sets rather than each re-deriving them.
+  const inBaseline = new Set(baselineNodeIds);
+  const inCandidate = new Set(candidateNodeIds);
+  const additions = candidateNodeIds.filter((nodeId) => !inBaseline.has(nodeId));
+  const removals = baselineNodeIds.filter((nodeId) => !inCandidate.has(nodeId));
 
   const input: BoundedAutoInput = {
     policy: app.placement_policy,
-    approvedNodeIds: baseline.ok ? baseline.nodeIds : [],
+    approvedNodeIds: baselineNodeIds,
     candidateNodeIds,
     hasPriorApproval: baseline.ok ? baseline.hasPriorApproval : false,
     statelessness: deriveStatelessness(app, intent, app.blueprint_id
@@ -176,8 +248,13 @@ export function applyAutomaticPlacement(
     // rather than from the column name: `pinnedOverridesCordon` records that the
     // Blueprint is pinned, not that a node is cordoned.
     pinDriven: intent.pinned_node_id !== null,
-    cordonOverride: false,
-    affectedNodeState: worstNodeState(store, app.id, candidateNodeIds),
+    // A cordon is an operator saying a node is not available for new placements,
+    // so only a node being added to can override one. Reading a literal false
+    // here would let an automatic approval place a workload onto a cordoned node
+    // while the decision carried a refusal nobody could ever reach.
+    cordonOverride: hasCordonOverride(additions),
+    // Both sides, because a withdrawal is about the node being left.
+    affectedNodeState: worstNodeState(store, app.id, [...additions, ...removals]),
     conflictingOperation: app.active_operation_stage !== null,
     evidenceReadable: baseline.ok,
     evidenceWellFormed,
@@ -220,11 +297,17 @@ export function applyAutomaticPlacement(
     // A refusal here is the safe direction: the candidate stands unapproved and
     // waits for an operator. The Blueprint write that triggered this already
     // committed and must not be undone.
+    //
+    // The reported reason is the actual cause, not a fixed one. Relabelling
+    // every failure as a conflict would send an operator looking for an
+    // operation that is not there, and would turn the replay guard's precise
+    // signal into a lie on exactly the retry path this module relies on.
+    const message = error instanceof Error ? error.message : String(error);
     console.error(
       `[GitOps] automatic placement approval failed for ${sanitizeForLog(app.id)}:`,
-      sanitizeForLog(error instanceof Error ? error.message : String(error)),
+      sanitizeForLog(message),
     );
-    return { status: 'operator_review', reason: 'conflicting_operation' };
+    return { status: 'operator_review', reason: approvalFailureReason(message) };
   }
 }
 

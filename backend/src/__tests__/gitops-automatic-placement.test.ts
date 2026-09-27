@@ -12,14 +12,12 @@ import { setupTestDb, cleanupTestDb } from './helpers/setupTestDb';
 import { GitOpsStore } from '../services/gitops/store';
 import { GitOpsTransitions, type EventEnvelope } from '../services/gitops/transitions';
 import { applyAutomaticPlacement } from '../services/gitops/automaticPlacement';
-import { decodeApprovalPolicySnapshot } from '../services/gitops/policyComposition';
 import {
   encodeGitOpsApprovedTargetEffectJson,
   encodeGitOpsRequiredTargetsJson,
 } from '../services/gitops/json';
 import type {
   GitOpsApplicationRow,
-  GitOpsGenerationRow,
   GitOpsIntentRevisionRow,
   GitOpsRolloutCandidateRow,
 } from '../services/gitops/types';
@@ -101,7 +99,7 @@ function blueprintApp(id: string, overrides: Partial<GitOpsApplicationRow> = {})
   };
 }
 
-function intent(id: string, applicationId: string, nodeIds: number[]): GitOpsIntentRevisionRow {
+function intent(id: string, applicationId: string): GitOpsIntentRevisionRow {
   return {
     id,
     application_id: applicationId,
@@ -140,7 +138,7 @@ function candidate(id: string, applicationId: string, intentId: string, nodeIds:
 
 function seedApproved(app: GitOpsApplicationRow, approvedNodeIds: number[]): void {
   const store = GitOpsStore.getInstance();
-  store.insertIntentRevision(intent(app.intent_revision_id as string, app.id, approvedNodeIds));
+  store.insertIntentRevision(intent(app.intent_revision_id as string, app.id));
   store.insertRolloutCandidate(candidate(app.rollout_candidate_id as string, app.id, app.intent_revision_id as string, approvedNodeIds));
   store.insertApplication(app);
   GitOpsTransitions.getInstance().placementApproved({
@@ -172,7 +170,7 @@ describe('the replay guard', () => {
   it('refuses a second approval for the same intent and candidate', () => {
     const store = GitOpsStore.getInstance();
     const app = blueprintApp('9001', { intent_revision_id: 'r-intent', rollout_candidate_id: 'r-cand' });
-    store.insertIntentRevision(intent('r-intent', '9001', [1]));
+    store.insertIntentRevision(intent('r-intent', '9001'));
     store.insertRolloutCandidate(candidate('r-cand', '9001', 'r-intent', [1]));
     store.insertApplication(app);
 
@@ -208,7 +206,7 @@ describe('the replay guard', () => {
     // Legitimate re-approval after a change must not be blocked by it.
     const store = GitOpsStore.getInstance();
     const app = blueprintApp('9002', { intent_revision_id: 'p-intent-1', rollout_candidate_id: 'p-cand-1' });
-    store.insertIntentRevision(intent('p-intent-1', '9002', [1]));
+    store.insertIntentRevision(intent('p-intent-1', '9002'));
     store.insertRolloutCandidate(candidate('p-cand-1', '9002', 'p-intent-1', [1]));
     store.insertApplication(app);
     GitOpsTransitions.getInstance().placementApproved({
@@ -230,7 +228,7 @@ describe('the replay guard', () => {
     // seeded directly here.
     GitOpsTransitions.getInstance().intentRevised({
       applicationId: '9002',
-      intent: intent('p-intent-2', '9002', [1, 2]),
+      intent: intent('p-intent-2', '9002'),
       envelope: envelope('p2'),
     });
     GitOpsTransitions.getInstance().rolloutCandidateOpened({
@@ -275,7 +273,7 @@ describe('authority and the snapshot that made it', () => {
 
   beforeAll(() => {
     const store = GitOpsStore.getInstance();
-    store.insertIntentRevision(intent('a-intent', '9100', [1]));
+    store.insertIntentRevision(intent('a-intent', '9100'));
     store.insertRolloutCandidate(candidate('a-cand', '9100', 'a-intent', [1]));
     store.insertApplication(blueprintApp('9100', { intent_revision_id: 'a-intent', rollout_candidate_id: 'a-cand' }));
   });
@@ -292,6 +290,77 @@ describe('authority and the snapshot that made it', () => {
       }),
     ).toThrow(/must record its policy snapshot/);
     expect(GitOpsStore.getInstance().getApproval('a-1')).toBeUndefined();
+  });
+
+  it('allows a fresh approval against a second candidate under the same intent', async () => {
+    // The guard is scoped to one intent and candidate pair. Keying on the intent
+    // alone assumed one candidate per intent, which nothing enforces, so this
+    // legitimate approval was refused as a replay of the first.
+    const { GitOpsTransitions: Tx, GitOpsStore: Store } = { GitOpsTransitions, GitOpsStore };
+    const app = blueprintApp('9110', { intent_revision_id: 'c-intent', rollout_candidate_id: 'c-cand-1' });
+    Store.getInstance().insertIntentRevision(intent('c-intent', '9110'));
+    Store.getInstance().insertRolloutCandidate(candidate('c-cand-1', '9110', 'c-intent', [1]));
+    Store.getInstance().insertApplication(app);
+    const approve = (approvalId: string, generationId: string, candidateId: string) => () =>
+      Tx.getInstance().placementApproved({
+        applicationId: '9110',
+        approvalId,
+        intentRevisionId: 'c-intent',
+        blastJson: encodeGitOpsApprovedTargetEffectJson([{ nodeId: 1, outcome: 'place' as const }]),
+        requiredNodeIds: [1],
+        fingerprint: null,
+        actor: 'tester',
+        envelope: { operationId: `op-${approvalId}`, actor: 'tester', trigger: 'test', at: 1 },
+        rolloutGenerationId: generationId,
+        candidateId,
+        authority: 'operator',
+        policyProvenanceJson: null,
+      });
+
+    approve('c-approval-1', 'c-gen-1', 'c-cand-1')();
+    expect(() => approve('c-approval-1-replay', 'c-gen-1b', 'c-cand-1')()).toThrow(/already recorded/);
+
+    Tx.getInstance().rolloutCandidateOpened({
+      applicationId: '9110',
+      candidate: candidate('c-cand-2', '9110', 'c-intent', [1]),
+      envelope: { operationId: 'op-c2', actor: 'tester', trigger: 'test', at: 2 },
+    });
+    expect(() => approve('c-approval-2', 'c-gen-2', 'c-cand-2')()).not.toThrow();
+  });
+
+  it('refuses when the policy changed between the decision and the write', async () => {
+    // The authorizing snapshot is read by the caller before this transaction and
+    // the generation freezes what is configured now. Without a comparison, a
+    // policy edit landing in between would leave the approval and the generation
+    // disagreeing about one decision, under a policy the operator had revoked.
+    const Store = GitOpsStore.getInstance();
+    const Tx = GitOpsTransitions;
+    const live = Store.getApplication('9100')!;
+    // A decision made under bounded_auto, arriving after the operator tightened
+    // the policy to operator.
+    const stale = JSON.stringify({
+      version: 1,
+      source: 'review',
+      placement: 'operator',
+      rolloutAuthorization: 'manual',
+    });
+    expect(() =>
+      Tx.getInstance().placementApproved({
+        applicationId: '9100',
+        approvalId: 'a-stale',
+        intentRevisionId: live.intent_revision_id as string,
+        blastJson: encodeGitOpsApprovedTargetEffectJson([{ nodeId: 1, outcome: 'place' as const }]),
+        requiredNodeIds: [1],
+        fingerprint: null,
+        actor: null,
+        envelope: { operationId: 'op-stale', actor: null, trigger: 'test', at: 1 },
+        rolloutGenerationId: 'a-gen-stale',
+        candidateId: live.rollout_candidate_id as string,
+        authority: 'configured_policy',
+        policyProvenanceJson: stale,
+      }),
+    ).toThrow(/policy changed while the decision was being applied/);
+    expect(Store.getApproval('a-stale')).toBeUndefined();
   });
 
   it('refuses an operator approval that claims a policy decided it', () => {
@@ -379,7 +448,7 @@ describe('the automatic path', () => {
   it('writes nothing when the policy says an operator decides', () => {
     const store = GitOpsStore.getInstance();
     const app = blueprintApp('9300', { placement_policy: 'operator', intent_revision_id: 'o-intent', rollout_candidate_id: 'o-cand' });
-    store.insertIntentRevision(intent('o-intent', '9300', [1, 2]));
+    store.insertIntentRevision(intent('o-intent', '9300'));
     store.insertRolloutCandidate(candidate('o-cand', '9300', 'o-intent', [1, 2, 3]));
     store.insertApplication(app);
 

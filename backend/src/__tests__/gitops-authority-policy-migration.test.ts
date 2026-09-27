@@ -118,6 +118,11 @@ beforeAll(async () => {
   raw.exec('ALTER TABLE gitops_applications DROP COLUMN rollout_authorization_policy');
   raw.exec('ALTER TABLE gitops_applications DROP COLUMN placement_policy');
   raw.exec('ALTER TABLE gitops_rollout_generations DROP COLUMN policy_snapshot_json');
+  // The completion marker is part of the migration state, and an install that
+  // predates this work has never written it. Leaving it behind would make the
+  // backfill believe it had already run, which is the exact situation a real
+  // legacy database is in.
+  raw.exec("DELETE FROM global_settings WHERE key = 'gitops_rollout_auth_policy_backfilled'");
   seedRows(raw, ALL_ROWS);
   raw.close();
 
@@ -203,6 +208,30 @@ describe('the one-time rollout authorization backfill', () => {
   });
 });
 
+describe('a process that died between the column and the backfill', () => {
+  it('backfills on a later boot even though the column already exists', () => {
+    // The gap the completion marker closes. Gating only on "this boot created
+    // the column" would strand these rows for ever, because every later boot
+    // sees a duplicate column and skips: existing installs would silently lose
+    // the automatic rollout authorization the backfill exists to preserve, with
+    // no repair path.
+    const { DatabaseService: Reopened } = { DatabaseService: DbClass };
+    const db = Reopened.getInstance().getDb();
+
+    // Recreate the crash: the column is present, the marker is not, and a live
+    // Blueprint row is still on the fresh-install default.
+    db.exec('DELETE FROM global_settings WHERE key = \'gitops_rollout_auth_policy_backfilled\'');
+    db.prepare("UPDATE gitops_applications SET rollout_authorization_policy = 'manual' WHERE id = 'bp-active'").run();
+    expect(readPolicies(db, ['bp-active'])['bp-active']).toBe('operator/manual');
+
+    db.close();
+    resetDatabaseSingleton();
+    const relaunched = DbClass.getInstance().getDb();
+
+    expect(readPolicies(relaunched, ['bp-active'])['bp-active']).toBe('operator/automatic');
+  });
+});
+
 describe('a second boot after an operator chose manual', () => {
   it('does not re-grant automatic authorization', async () => {
     const db = DbClass.getInstance().getDb();
@@ -213,9 +242,9 @@ describe('a second boot after an operator chose manual', () => {
     ).run();
     expect(readPolicies(db, ['bp-active'])['bp-active']).toBe('operator/manual');
 
-    // Every additive column runs on every boot. If the backfill were not gated
-    // on the boot that created the column, this second init would set it back to
-    // automatic: a silent privilege escalation on every process restart.
+    // Every additive column runs on every boot, and the backfill is now offered
+    // on every boot too, so only the completion marker stands between this and a
+    // silent privilege escalation on every process restart.
     db.close();
     resetDatabaseSingleton();
     const reopened = DbClass.getInstance().getDb();

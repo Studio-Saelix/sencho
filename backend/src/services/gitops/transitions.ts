@@ -37,7 +37,12 @@ import {
   encodeIntentHealthPolicy,
 } from './healthPolicy';
 import type { HealthPolicyDecision, HealthRolloutPolicy } from './healthPolicy';
-import { configuredSnapshotFor, encodePolicySnapshot } from './policyComposition';
+import {
+  configuredSnapshotFor,
+  decodePolicySnapshot,
+  encodePolicySnapshot,
+  policyValuesEqual,
+} from './policyComposition';
 import type { PlacementPolicy, RolloutAuthorizationPolicy } from './policyComposition';
 import { runningGenerationForTarget } from './recoveryCapture';
 
@@ -2070,6 +2075,19 @@ export class GitOpsTransitions {
         if (args.authority === 'operator' && args.policyProvenanceJson !== null) {
           throw new GitOpsTransitionError('an operator approval records no policy snapshot');
         }
+        if (args.authority === 'configured_policy' && args.policyProvenanceJson !== null) {
+          // The snapshot that authorized the decision was read by the caller,
+          // before this transaction. The generation below freezes the policy
+          // configured right now. A policy edit landing in between would make
+          // those two records disagree about one decision, and would mean the
+          // approval was granted under a policy the operator had already
+          // revoked. Comparing them here is what makes the two records agree by
+          // construction rather than by luck.
+          const authorizing = decodePolicySnapshot(args.policyProvenanceJson);
+          if (!policyValuesEqual(authorizing, configuredSnapshotFor(app))) {
+            throw new GitOpsTransitionError('the placement policy changed while the decision was being applied');
+          }
+        }
         if (app.intent_revision_id !== args.intentRevisionId) {
           throw new GitOpsTransitionError('intent revision is not current');
         }
@@ -2087,7 +2105,7 @@ export class GitOpsTransitions {
         // exact intent and candidate means the decision is already durable, and
         // the currency checks above cannot see that because the pointers have
         // not moved.
-        if (this.store().hasPlacementApprovalFor(args.applicationId, args.intentRevisionId)) {
+        if (this.store().hasPlacementApprovalFor(args.applicationId, args.intentRevisionId, args.candidateId)) {
           throw new GitOpsTransitionError('placement approval already recorded for this intent and candidate');
         }
         const requiredNodeIds = canonicalizeNodeIds(args.requiredNodeIds);
@@ -2106,7 +2124,11 @@ export class GitOpsTransitions {
           generation_id: null,
           intent_revision_id: args.intentRevisionId,
           artifact_set_id: null,
-          rollout_candidate_id: null,
+          // The candidate this approval was made against. Recorded so the replay
+          // guard can key on the pair, since nothing enforced that an intent
+          // revision opens only one candidate, and a second candidate under the
+          // same intent would otherwise be refused as a replay of the first.
+          rollout_candidate_id: args.candidateId,
           rollout_generation_id: null,
           source_acceptance_ref: null,
           placement_approval_ref: null,

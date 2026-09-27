@@ -653,8 +653,31 @@ describe('ensureRolloutAuthorization', () => {
     expect(GitOpsStore.getInstance().getApplication(fixture.applicationId)!.rollout_authorization_ref).toBe(ref);
   });
 
-  it('refuses while an operation is in flight for the application', async () => {
-    // The pause check only knows about a deliberate pause. Without this guard an
+  it('refuses a policy-authorized mint when the policy says an operator authorizes', async () => {
+    // The policy is only real if something reads it. Without this gate an
+    // operator could set the policy to manual, get a success response and a
+    // history row, and then watch the next dispatch mint anyway under a
+    // generation frozen with a policy that never governed it.
+    const fixture = seedAuthorizedReadyApp();
+    const store = GitOpsStore.getInstance();
+    GitOpsTransitions.getInstance().rolloutAuthorizationPolicyChanged({
+      applicationId: fixture.applicationId,
+      policy: 'manual',
+      envelope: { operationId: 'op-manual', actor: 'tester', trigger: 'test', at: Date.now() },
+    });
+
+    const automatic = await ensureRolloutAuthorization(fixture.applicationId, 'tester');
+    expect(automatic.ok).toBe(false);
+    if (!automatic.ok) expect(automatic.reason).toMatch(/requires an operator/);
+    expect(store.getApplication(fixture.applicationId)!.rollout_authorization_ref).toBeNull();
+
+    // An operator authorizing by hand is itself the authority, so the policy
+    // does not stand in their way.
+    const byOperator = await ensureRolloutAuthorization(fixture.applicationId, 'tester', 'manual', undefined, 'operator');
+    expect(byOperator.ok).toBe(true);
+  });
+
+  it('refuses while an operation is in flight for the application', async () => {    // The pause check only knows about a deliberate pause. Without this guard an
     // authorization could be minted while a fetch, apply, deploy, or recovery
     // was still running, and the two would disagree about what the next
     // operation acts on.
@@ -786,6 +809,11 @@ function seedAuthorizedReadyApp(opts: {
     latest_artifact_set_id: artifactId,
     source_acceptance_ref: acceptanceId,
     placement_approval_ref: opts.skipPlacement ? null : placementId,
+    // Automatic, which is what the acceptance handoff authorizes on its own.
+    // This is also what an existing installation migrates to, so a fixture
+    // standing in for a live Blueprint app has to say so before a
+    // policy-authorized mint is allowed to happen at all.
+    rollout_authorization_policy: 'automatic',
     evidence_limitations_json: JSON.stringify([
       { code: 'git_managed_rollout_not_enabled', detail: 'Blueprint rollout generations are not enabled' },
     ]),

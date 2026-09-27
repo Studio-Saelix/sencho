@@ -1103,11 +1103,16 @@ function requirePolicyTargetAuthority(
     // Nothing is placed yet, so the set of nodes this policy could later reach
     // is unknown, and a stack-scoped assignment is node-qualified so it cannot be
     // resolved for a node that does not exist. Authorizing against the stack
-    // name here would therefore pass nobody, and a policy about an unknown fleet
-    // is the wrong thing for a narrowly-scoped operator to hold. The
-    // application-wide grant is the conservative answer; once targets exist the
-    // per-target loop above is the gate, and a scoped operator is authorized for
-    // exactly the targets they hold.
+    // name here would therefore pass nobody, which leaves the application-wide
+    // grant as the only gate that can be evaluated at all.
+    //
+    // This is the same shape as the health policy write beside it, and it is
+    // deliberately not described as stricter than the per-target path: a
+    // role-based deployer holds a global grant and passes either way, and a
+    // stack-scoped operator passes neither here nor, before the first
+    // placement, anywhere. What it does mean is that configuring this on a
+    // fresh application is an administrator action, which is recorded as such
+    // rather than left to be discovered.
     if (checkPermission(req, 'stack:deploy')) return true;
     res.status(403).json({ error: 'Permission denied for this application.', code: 'PERMISSION_DENIED' });
     return false;

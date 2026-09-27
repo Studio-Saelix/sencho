@@ -391,6 +391,28 @@ export class GitOpsStore {
   }
 
   /**
+   * The most recent placement approval ever recorded for this application.
+   *
+   * Read from history rather than through `gitops_applications.placement_approval_ref`,
+   * because an intent revision clears that pointer before a new candidate opens.
+   * Resolving the baseline through the pointer therefore found nothing on the
+   * normal path, and every multi-node candidate was refused as a first placement.
+   *
+   * The row stays valid as a baseline after a material change: the intent moved,
+   * the set an operator last approved did not.
+   */
+  latestPlacementApproval(applicationId: string): GitOpsApprovalRow | undefined {
+    return this.db()
+      .prepare(
+        `SELECT * FROM gitops_approvals
+         WHERE application_id = ? AND kind = 'placement_approval'
+         ORDER BY created_at DESC, id DESC
+         LIMIT 1`,
+      )
+      .get(applicationId) as GitOpsApprovalRow | undefined;
+  }
+
+  /**
    * Whether a placement approval already exists against this intent revision.
    *
    * The replay guard. An application pointer only says an approval is stale, so
@@ -398,22 +420,31 @@ export class GitOpsStore {
    * otherwise mint a second approval row and supersede the generation the first
    * one had just opened.
    *
-   * Keyed on the intent revision rather than the rollout candidate because a
-   * placement approval records no candidate: it is minted by the operator
-   * acting on an intent, and the application pointer moves to the candidate that
-   * intent opened in the same breath. An intent revision opens exactly one
-   * candidate, so the intent is the precise key.
+   * Keyed on the intent and the candidate together. Keying on the intent alone
+   * assumed an intent revision opens exactly one candidate, which nothing
+   * enforces, so a legitimate approval against a second candidate under the same
+   * intent would have been refused as a replay.
+   *
+   * A pre-existing approval row recorded before the candidate was stored here
+   * has a null candidate and is deliberately not matched: refusing on it would
+   * block a first approval against a candidate that never had one, which is the
+   * opposite of what this guard is for.
    */
-  hasPlacementApprovalFor(applicationId: string, intentRevisionId: string): boolean {
+  hasPlacementApprovalFor(
+    applicationId: string,
+    intentRevisionId: string,
+    rolloutCandidateId: string,
+  ): boolean {
     const row = this.db()
       .prepare(
         `SELECT 1 AS found FROM gitops_approvals
          WHERE application_id = ?
            AND kind = 'placement_approval'
            AND intent_revision_id = ?
+           AND rollout_candidate_id = ?
          LIMIT 1`,
       )
-      .get(applicationId, intentRevisionId);
+      .get(applicationId, intentRevisionId, rolloutCandidateId);
     return row !== undefined;
   }
 

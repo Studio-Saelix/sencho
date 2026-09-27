@@ -206,6 +206,10 @@ function seedGitManagedBlueprint(opts: { nodeCount?: number } = {}): Seeded {
     review_required: 0,
     review_block_reason: null,
     source_policy: 'manual',
+    // The automatic dispatch path this fixture exercises is what an existing
+    // installation has, so the policy has to say so. The fresh-install default
+    // is manual, and a policy-authorized mint is refused without this.
+    rollout_authorization_policy: 'automatic',
   };
   store.insertApplication(row);
   store.insertIntentRevision(intentRow(intentId, applicationId, blueprint.id, stackName));
