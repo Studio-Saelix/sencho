@@ -310,7 +310,6 @@ describe('a bounded_auto application reaches an approval', () => {
       applyAutomaticPlacement(app.id, { operationId: 'op-seed-a', actor: null, trigger: 'test', at: 2 }),
     ).toEqual({ status: 'auto_approved', reason: 'stateless_addition' });
 
-    const store = GitOpsStore.getInstance();
     // The approved set already holds one node, so the change is whatever else
     // the candidate adds. One more would be a single addition and is allowed;
     // two at once is the case the bound exists for.
