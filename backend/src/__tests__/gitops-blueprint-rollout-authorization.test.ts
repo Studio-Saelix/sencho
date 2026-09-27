@@ -653,6 +653,78 @@ describe('ensureRolloutAuthorization', () => {
     expect(GitOpsStore.getInstance().getApplication(fixture.applicationId)!.rollout_authorization_ref).toBe(ref);
   });
 
+  it('refuses any policy-authorized mint that reaches the transition on a manual policy', () => {
+    // The regression this pins, asserted where the guarantee now lives.
+    //
+    // A drifted authorization is discarded and reminted through this same
+    // transition, as is the race-retry path and every other caller: the
+    // acceptance handoff, the Blueprint dispatch, the startup reconstruction, the
+    // preflight backfill and the operator route. Gating on whether a binding
+    // happened to exist, in one caller, left the remint path minting fresh
+    // authority with no operator on a manual policy. Enforcing it in the single
+    // writer is what makes it unbypassable, and this asserts exactly that.
+    const fixture = seedAuthorizedReadyApp();
+    const store = GitOpsStore.getInstance();
+    const app = store.getApplication(fixture.applicationId)!;
+    const preflight = nonBlockingPreflightForApp(fixture.applicationId);
+
+    GitOpsTransitions.getInstance().rolloutAuthorizationPolicyChanged({
+      applicationId: fixture.applicationId,
+      policy: 'manual',
+      envelope: { operationId: 'op-mint-gate', actor: 'tester', trigger: 'test', at: Date.now() },
+    });
+
+    expect(() =>
+      GitOpsTransitions.getInstance().rolloutAuthorized({
+        applicationId: fixture.applicationId,
+        approvalId: 'mint-manual',
+        rolloutGenerationId: 'rgen-manual',
+        preflightFingerprint: fingerprintPreflightEvidence(preflight),
+        preflightEvidenceJson: encodePreflightEvidenceJson(preflight),
+        actor: null,
+        envelope: { operationId: 'op-mint-gate', actor: null, trigger: 'placement', at: 1 },
+        authority: 'configured_policy',
+      }),
+    ).toThrow(/requires an operator/);
+
+    // The operator path is unaffected: an operator is themselves the authority.
+    expect(() =>
+      GitOpsTransitions.getInstance().rolloutAuthorized({
+        applicationId: fixture.applicationId,
+        approvalId: 'mint-operator',
+        rolloutGenerationId: 'rgen-operator',
+        preflightFingerprint: fingerprintPreflightEvidence(preflight),
+        preflightEvidenceJson: encodePreflightEvidenceJson(preflight),
+        actor: 'tester',
+        envelope: { operationId: 'op-mint-operator', actor: 'tester', trigger: 'manual', at: 1 },
+        authority: 'operator',
+      }),
+    ).not.toThrow();
+    void app;
+  });
+
+  it('refuses a policy-authorized mint that reaches the transition mid-operation', () => {
+    // The same guarantee for the in-flight guard, on the remint path.
+    const fixture = seedAuthorizedReadyApp();
+    const preflight = nonBlockingPreflightForApp(fixture.applicationId);
+    DatabaseService.getInstance().getDb()
+      .prepare("UPDATE gitops_applications SET active_operation_stage = 'deploy_started', active_operation_id = 'op-x' WHERE id = ?")
+      .run(fixture.applicationId);
+
+    expect(() =>
+      GitOpsTransitions.getInstance().rolloutAuthorized({
+        applicationId: fixture.applicationId,
+        approvalId: 'mint-busy',
+        rolloutGenerationId: 'rgen-busy',
+        preflightFingerprint: fingerprintPreflightEvidence(preflight),
+        preflightEvidenceJson: encodePreflightEvidenceJson(preflight),
+        actor: null,
+        envelope: { operationId: 'op-mint-busy', actor: null, trigger: 'preflight_race', at: 1 },
+        authority: 'configured_policy',
+      }),
+    ).toThrow(/already in flight/);
+  });
+
   it('keeps dispatching an authorized rollout while a source operation is in flight', async () => {
     // A routine background source fetch must not pause a rollout that is already
     // authorized and running. The in-flight guard is about whether authority may

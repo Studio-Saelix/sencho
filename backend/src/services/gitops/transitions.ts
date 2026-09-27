@@ -2244,6 +2244,27 @@ export class GitOpsTransitions {
         if (app.target_mode !== 'blueprint') {
           throw new GitOpsTransitionError('rollout authorization is only for Blueprint target mode');
         }
+        // The mint-time gates, enforced here rather than at the caller.
+        //
+        // These belong to the act of creating authority, so tying them to the
+        // single writer is what makes them unbypassable. A caller-side check
+        // cannot: this transition is reached from the acceptance handoff, the
+        // Blueprint dispatch, the startup reconstruction, the preflight backfill,
+        // and the operator route, and it is also reached to *remint* when the
+        // preflight fingerprint drifts. Gating on whether a binding happened to
+        // exist skipped the drift remint, so a tag move could discard an
+        // operator's authorization and replace it with a fresh policy-authorized
+        // one, with no operator and no policy that permitted it.
+        if ((args.authority ?? 'configured_policy') === 'configured_policy') {
+          if (app.rollout_authorization_policy !== 'automatic') {
+            throw new GitOpsTransitionError(
+              'the rollout authorization policy requires an operator to authorize',
+            );
+          }
+        }
+        if (app.active_operation_stage) {
+          throw new GitOpsTransitionError('an operation is already in flight for this application');
+        }
         if (app.rollout_authorization_ref) {
           const live = this.store().currentAuthorizationBinding(app);
           if (
