@@ -277,6 +277,45 @@ describe('EditorView image pull affordance', () => {
     expect(await screen.findByText('Save Only')).toBeInTheDocument();
     expect(screen.queryByText('Save & Pull Images')).not.toBeInTheDocument();
   });
+
+  it('disables the save row and the pull item while a pull is in flight', async () => {
+    // A pull holds the same per-stack lock a deploy does. If these stay live the
+    // operator can dispatch a second save mid-pull and watch it fail on the lock.
+    render(
+      <EditorView
+        {...makeProps({
+          editingCompose: true,
+          activeTab: 'compose',
+          actionsReady: true,
+          loadingAction: 'pull',
+        })}
+      />,
+    );
+
+    const deployButton = screen.getByRole('button', { name: /save & deploy/i });
+    expect(deployButton).toBeDisabled();
+    // The chevron shares the primary's disabled state, so the whole split control
+    // is inert rather than half-open.
+    const trigger = document.querySelector('[aria-haspopup="menu"]');
+    expect(trigger).not.toBeNull();
+    expect(trigger?.closest('button')).toBeDisabled();
+  });
+
+  it('leaves the save row live during an unrelated action', async () => {
+    // The disable is scoped to the lifecycle actions, not every stack action:
+    // over-disabling would strand the operator during a stop or a rollback.
+    render(
+      <EditorView
+        {...makeProps({
+          editingCompose: true,
+          activeTab: 'compose',
+          actionsReady: true,
+          loadingAction: 'stop',
+        })}
+      />,
+    );
+    expect(screen.getByRole('button', { name: /save & deploy/i })).toBeEnabled();
+  });
 });
 
 function containerStub(id: string, name: string): EditorViewProps['containers'][number] {

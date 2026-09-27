@@ -65,7 +65,7 @@ This tutorial covers one guardrail: **Block deploy on missing required env vars*
     <Frame>
       <img src="/images/tutorials/configure-environment-guardrails/save-deploy-blocked-notification.png" alt="Notifications panel showing 'Deploy blocked: required environment variable DB_PASSWORD is missing. Define it in a .env or env_file, then deploy again.' from a Save & Deploy operation." />
     </Frame>
-    This demonstrates the fix: the guardrail message now properly appears when using **Save & Deploy**, matching the exact message shown when using **Update**.
+    This demonstrates the fix: the guardrail message now properly appears when using **Save & Deploy**, matching the exact message shown when using **Update**. **Save & Pull Images** is covered by the same guardrail and refuses the same way, naming that action in the last sentence instead.
   </Step>
   <Step title="Update the stack and watch the guardrail fire">
     Select **Update**. A readiness dialog summarizes preflight, drift, current containers, and a few other checks; note that none of them mention environment variables; the dialog can say **ready** even though this update is about to be refused. Select **Update now** anyway.

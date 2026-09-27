@@ -97,8 +97,10 @@ export function MobileComposeEditor(props: MobileComposeEditorProps) {
     const envSwitchDisabled = hasUnsavedChanges() || isFileLoading;
     // Plain Save is never gated by status readiness (it is not a lifecycle
     // action); only Save & Deploy / Save & Reapply requires authoritative
-    // runtime evidence.
-    const saveDisabled = isFileLoading || loadingAction === 'deploy';
+    // runtime evidence. An image pull holds the same per-stack lock a deploy
+    // does, so it disables the row too, or a second save could be dispatched
+    // mid-pull.
+    const saveDisabled = isFileLoading || loadingAction === 'deploy' || loadingAction === 'pull';
     const saveAndDeployDisabled = saveDisabled || !actionsReady;
     // Read-only while an env-file fetch is in flight: changeEnvFile overwrites the
     // buffer when it resolves, so edits typed during the load would be silently lost.

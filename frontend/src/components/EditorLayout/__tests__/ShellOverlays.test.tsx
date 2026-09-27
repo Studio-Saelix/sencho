@@ -189,5 +189,8 @@ describe('ShellOverlays diff-preview confirmation', () => {
     fireEvent.click(screen.getByRole('button', { name: 'diff-confirm' }));
     await vi.waitFor(() => expect(pullStackImages).toHaveBeenCalledTimes(1));
     expect(order).toEqual(['save', 'pull']);
+    // afterSave travels with the call: this path saved first too, so a pull that
+    // skips has to report itself rather than hide behind the save's own toast.
+    expect(pullStackImages).toHaveBeenCalledWith(undefined, { afterSave: true });
   });
 });

@@ -1343,7 +1343,11 @@ describe('ComposeService - pullStackImages', () => {
     expect(mockAbandon).not.toHaveBeenCalled();
   });
 
-  it('issues a plain pull when no service is build-backed', async () => {
+  it('always passes --ignore-buildable, even when the skip list is empty', async () => {
+    // The safety promise is "skip, never build", and it must not depend on
+    // loadStackBuildServices having seen every build: declaration. A build:
+    // that only compose.override.yaml declares is invisible to that scan, so
+    // the flag is unconditional and the list is only the report.
     mockGetRegistries.mockReturnValue([]);
     mockLoadStackBuildServices.mockResolvedValueOnce([]);
     setupAutoCloseSpawn();
@@ -1357,7 +1361,74 @@ describe('ComposeService - pullStackImages', () => {
     const spawnArgs = mockSpawn.mock.calls.map(c => c[1] as string[]);
     expect(spawnArgs).toHaveLength(1);
     expect(spawnArgs[0]).toContain('pull');
-    expect(spawnArgs[0]).not.toContain('--ignore-buildable');
+    expect(spawnArgs[0]).toContain('--ignore-buildable');
+    expect(spawnArgs[0]).not.toContain('build');
+  });
+
+  it('refuses the pull when a required env var is missing, without running it', async () => {
+    // A pull resolves the same project a deploy would, so the operator gets the
+    // same operator-facing missing-variable message rather than a raw compose
+    // failure, and the pull itself never starts.
+    mockGetRegistries.mockReturnValue([]);
+    mockGetGlobalSettings.mockReturnValue({ env_block_deploy_on_missing_required: '1' });
+    mockSpawn.mockImplementation(() => {
+      const proc = createMockProcess();
+      Promise.resolve().then(() => {
+        proc.stderr.emit('data', Buffer.from('required variable "API_KEY" is missing'));
+        proc.emit('close', 1);
+      });
+      return proc;
+    });
+
+    const svc = ComposeService.getInstance(1);
+    // No "Deploy blocked:" prefix: the editor wraps this in its own
+    // "Image pull failed:" prefix, and the remedy names the chosen action rather
+    // than telling the operator to deploy, which is a different action.
+    await expect(svc.pullStackImages('my-stack')).rejects.toThrow(
+      'required environment variable API_KEY is missing. Define it in a .env or env_file, then run Save & Pull Images again.',
+    );
+
+    // Only the config render ran; nothing reached the pull.
+    const spawnArgs = mockSpawn.mock.calls.map(c => c[1] as string[]);
+    expect(spawnArgs.some(args => args.includes('config'))).toBe(true);
+    expect(spawnArgs.some(args => args.includes('pull'))).toBe(false);
+  });
+
+  it('keeps the published deploy wording byte-identical on the default path', async () => {
+    // This exact sentence is quoted verbatim in a published tutorial and burned
+    // into two committed screenshots, so the deploy refusal is frozen copy. The
+    // pull path passes its own wording and must not be able to shift this.
+    mockGetGlobalSettings.mockReturnValue({ env_block_deploy_on_missing_required: '1' });
+    mockSpawn.mockImplementation(() => {
+      const proc = createMockProcess();
+      Promise.resolve().then(() => {
+        proc.stderr.emit('data', Buffer.from('required variable "DB_PASSWORD" is missing'));
+        proc.emit('close', 1);
+      });
+      return proc;
+    });
+
+    const svc = ComposeService.getInstance(1);
+    await expect(svc.validateStackForMutation('my-stack')).rejects.toThrow(
+      'Deploy blocked: required environment variable DB_PASSWORD is missing. ' +
+        'Define it in a .env or env_file, then deploy again.',
+    );
+  });
+
+  it('still pulls when the required-env guard is switched off', async () => {
+    // The guard is opt-in by setting, so the default path must be unaffected.
+    mockGetRegistries.mockReturnValue([]);
+    mockGetGlobalSettings.mockReturnValue({ env_block_deploy_on_missing_required: '0' });
+    mockLoadStackBuildServices.mockResolvedValueOnce([]);
+    setupAutoCloseSpawn();
+
+    const svc = ComposeService.getInstance(1);
+    const promise = svc.pullStackImages('my-stack');
+    await vi.advanceTimersByTimeAsync(3100);
+    await promise;
+
+    const spawnArgs = mockSpawn.mock.calls.map(c => c[1] as string[]);
+    expect(spawnArgs.some(args => args.includes('pull'))).toBe(true);
   });
 
   it('runs the pull under the registry-auth temp config when registries exist', async () => {

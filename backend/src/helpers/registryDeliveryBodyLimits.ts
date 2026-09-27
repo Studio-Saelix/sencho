@@ -32,7 +32,7 @@ export function classifyRegistryDeliveryRouteClass(method: string, apiPath: stri
   if (upper !== 'POST' && upper !== 'PUT' && upper !== 'PATCH') return null;
 
   if (matchesAny(apiPath, [
-    /^\/api\/stacks\/[^/]+\/(deploy|update|pull-update|rollback)(\/|$)/,
+    /^\/api\/stacks\/[^/]+\/(deploy|update|pull-update|pull-images|rollback)(\/|$)/,
     /^\/api\/stacks\/[^/]+\/services\/[^/]+\/(update|pull-update)(\/|$)/,
     /^\/api\/blueprints\/apply-local$/,
   ])) {

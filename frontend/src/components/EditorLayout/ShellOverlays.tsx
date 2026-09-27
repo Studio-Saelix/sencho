@@ -292,7 +292,9 @@ export function ShellOverlays({
                 return;
               }
               const saved = await stackActions.saveFile();
-              if (saved) await stackActions.deployStack();
+              // afterSave: this path saved before deploying too, so a deploy that
+              // skips is a split outcome here as well.
+              if (saved) await stackActions.deployStack(undefined, { afterSave: true });
             } else if (snapshot?.mode === 'save-and-pull-images') {
               // Same readiness contract as Save & Deploy: this writes the file
               // first, so it must not proceed while status evidence is not
@@ -302,7 +304,9 @@ export function ShellOverlays({
                 return;
               }
               const saved = await stackActions.saveFile();
-              if (saved) await stackActions.pullStackImages();
+              // afterSave: the diff-preview path saves before pulling too, so a
+              // pull that skips is a split outcome here as well.
+              if (saved) await stackActions.pullStackImages(undefined, { afterSave: true });
             } else {
               // Plain Save is never gated by status readiness.
               await stackActions.saveFile();

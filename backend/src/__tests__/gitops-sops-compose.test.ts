@@ -127,4 +127,14 @@ describe('ComposeService SOPS overlay args and mutation guards', () => {
     const compose = ComposeService.getInstance(NodeRegistry.getInstance().getDefaultNodeId());
     await expect(compose.updateStack(stackName)).rejects.toThrow(SOPS_DIRECT_MUTATION_MESSAGE);
   });
+
+  it('refuses an image pull of a SOPS-managed stack', async () => {
+    // A pull resolves the same project a deploy would, so it inherits the same
+    // guard. Without it, ${VAR} in an image reference would resolve against the
+    // still-encrypted files and could fetch an image a deploy would not use.
+    const stackName = 'sops-refuse-pull-images';
+    seedSopsStack(stackName, 'gen-sops-refuse-pull-images');
+    const compose = ComposeService.getInstance(NodeRegistry.getInstance().getDefaultNodeId());
+    await expect(compose.pullStackImages(stackName)).rejects.toThrow(SOPS_DIRECT_MUTATION_MESSAGE);
+  });
 });

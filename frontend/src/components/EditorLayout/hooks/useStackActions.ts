@@ -1629,16 +1629,46 @@ export function useStackActions(options: UseStackActionsOptions) {
     }
   };
 
-  const deployStack = async (e?: React.MouseEvent) => {
+  // When a save has already succeeded and the follow-up action never starts, that
+  // is a split outcome the operator has to be told about: without this they see the
+  // save's own success toast and no indication that nothing was deployed or pulled.
+  // The "Saved;" clause is what separates the two cases, because only the post-save
+  // paths may claim a save happened. Declared above both actions that use it.
+  const DEPLOY_LABELS = { midSentence: 'deploy', standalone: 'Deploy' };
+  const PULL_LABELS = { midSentence: 'image pull', standalone: 'Image pull' };
+
+  const reportNotStarted = (
+    afterSave: boolean,
+    labels: { midSentence: string; standalone: string },
+    reason: string,
+  ) => {
+    toast.error(afterSave
+      ? `Saved; ${labels.midSentence} not started: ${reason}`
+      : `${labels.standalone} not started: ${reason}`);
+  };
+
+  const deployStack = async (e?: React.MouseEvent, options: { afterSave?: boolean } = {}) => {
+    const afterSave = options.afterSave === true;
+    // Report only after a save. A bare call is either blocked by an affordance the
+    // UI already disables, or is a second click landing while the first deploy is
+    // still starting, and an error toast there is wrong: the action IS running.
+    const bail = (reason: string) => {
+      if (afterSave) reportNotStarted(true, DEPLOY_LABELS, reason);
+    };
     e?.preventDefault();
     e?.stopPropagation();
-    if (!hydrationReady()) return;
-    if (
-      !stackListState.selectedFile ||
-      stackListState.isStackBusy(stackListState.selectedFile) ||
-      deployPendingRef.current
-    )
+    if (!hydrationReady()) {
+      bail('status data is unavailable. Refresh and try again.');
       return;
+    }
+    if (!stackListState.selectedFile) {
+      bail('no stack is selected.');
+      return;
+    }
+    if (stackListState.isStackBusy(stackListState.selectedFile) || deployPendingRef.current) {
+      bail('another operation is already running on this stack.');
+      return;
+    }
 
     const stackFile = stackListState.selectedFile;
     if (isSelfStackFile(stackFile)) {
@@ -1745,16 +1775,27 @@ export function useStackActions(options: UseStackActionsOptions) {
     await beginDeployAfterAdvisory();
   };
 
-  const pullStackImages = async (e?: React.MouseEvent) => {
+  const pullStackImages = async (e?: React.MouseEvent, options: { afterSave?: boolean } = {}) => {
+    const afterSave = options.afterSave === true;
+    // Same rule as deployStack: only the post-save path owes the operator an
+    // explanation, because only there has a success toast already gone out.
+    const bail = (reason: string) => {
+      if (afterSave) reportNotStarted(true, PULL_LABELS, reason);
+    };
     e?.preventDefault();
     e?.stopPropagation();
-    if (!hydrationReady()) return;
-    if (
-      !stackListState.selectedFile ||
-      stackListState.isStackBusy(stackListState.selectedFile) ||
-      deployPendingRef.current
-    )
+    if (!hydrationReady()) {
+      bail('status data is unavailable. Refresh and try again.');
       return;
+    }
+    if (!stackListState.selectedFile) {
+      bail('no stack is selected.');
+      return;
+    }
+    if (stackListState.isStackBusy(stackListState.selectedFile) || deployPendingRef.current) {
+      bail('another operation is already running on this stack.');
+      return;
+    }
 
     const stackFile = stackListState.selectedFile;
     if (isSelfStackFile(stackFile)) {
@@ -1791,14 +1832,25 @@ export function useStackActions(options: UseStackActionsOptions) {
     if (!hydrationReady()) return;
     const saved = await saveFile();
     if (!saved) return;
-    await deployStack(e);
+    // afterSave: the save already reported itself, so a deploy that skips has to
+    // name itself rather than leave the operator with one success toast.
+    await deployStack(e, { afterSave: true });
   };
 
   const handleSaveAndPullImages = async (e: React.MouseEvent) => {
-    if (!hydrationReady()) return;
+    // Same readiness contract, and the same sentence, as the diff-preview path
+    // in ShellOverlays: this writes the file before pulling, so it must not
+    // proceed on unauthoritative status evidence, and both entry points for one
+    // action must answer identically when they refuse.
+    if (!hydrationReady()) {
+      toast.error('Status data unavailable. Refresh and try again.');
+      return;
+    }
     const saved = await saveFile();
     if (!saved) return;
-    await pullStackImages(e);
+    // afterSave: the save already reported itself, so a pull that skips has to
+    // name itself rather than leave the operator with one success toast.
+    await pullStackImages(e, { afterSave: true });
   };
 
   // Admin "Deploy anyway": re-issue the blocked action with ?ignorePolicy=true.

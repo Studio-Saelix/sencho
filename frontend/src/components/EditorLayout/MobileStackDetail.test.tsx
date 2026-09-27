@@ -238,6 +238,23 @@ describe('MobileStackDetail mobile editing', () => {
         expect(screen.getByTestId('mobile-editor-save-deploy')).toBeDisabled();
     });
 
+    it('disables save actions while a pull is running', () => {
+        // A pull takes the same per-stack lock a deploy does, so the phone row has
+        // to disable for it too or a second save lands on a busy stack.
+        render(<MobileStackDetail {...makeProps({ editingCompose: true, loadingAction: 'pull' })} />);
+        expect(screen.getByTestId('mobile-editor-save')).toBeDisabled();
+        expect(screen.getByTestId('mobile-editor-save-deploy')).toBeDisabled();
+        expect(screen.getByTestId('mobile-editor-actions-menu')).toBeDisabled();
+    });
+
+    it('leaves save actions live during an unrelated action', () => {
+        // Scoped to the lifecycle actions on purpose: a stop or a rollback must
+        // not strand the operator on the phone editor.
+        render(<MobileStackDetail {...makeProps({ editingCompose: true, loadingAction: 'stop' })} />);
+        expect(screen.getByTestId('mobile-editor-save')).toBeEnabled();
+        expect(screen.getByTestId('mobile-editor-save-deploy')).toBeEnabled();
+    });
+
     it('routes Cancel through the close handler even after a save and a fresh edit', () => {
         const requestSave = vi.fn();
         const onCloseEditor = vi.fn();

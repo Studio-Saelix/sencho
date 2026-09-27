@@ -251,6 +251,10 @@ describe('useStackActions.saveFile', () => {
   });
 });
 
+// Shared by the save-then-deploy and save-then-pull blocks: both assert on the
+// toast text, and both need it at module scope so neither block re-declares it.
+const errorTexts = () => vi.mocked(toast.error).mock.calls.map(c => String(c[0]));
+
 describe('useStackActions.handleSaveAndDeploy', () => {
   beforeEach(() => {
     vi.mocked(apiFetch).mockReset();
@@ -273,6 +277,28 @@ describe('useStackActions.handleSaveAndDeploy', () => {
     await result.current.handleSaveAndDeploy({ preventDefault: vi.fn(), stopPropagation: vi.fn() } as unknown as React.MouseEvent);
     const calls = vi.mocked(apiFetch).mock.calls.map(c => c[0]);
     expect(calls.some(c => String(c).includes('/deploy'))).toBe(true);
+  });
+
+  // Same split outcome the image-pull path reports: the save's own success toast
+  // must not be the last word when the deploy it was chained onto never started.
+  it('says the deploy did not start when the stack is already busy after the save', async () => {
+    vi.mocked(apiFetch).mockResolvedValue(new Response(null, { status: 200 }));
+    const { result } = setup({ stackList: { isStackBusy: vi.fn().mockReturnValue(true) } });
+    await result.current.handleSaveAndDeploy({ preventDefault: vi.fn(), stopPropagation: vi.fn() } as unknown as React.MouseEvent);
+    expect(errorTexts()).toContain(
+      'Saved; deploy not started: another operation is already running on this stack.',
+    );
+    const calls = vi.mocked(apiFetch).mock.calls.map(c => c[0]);
+    expect(calls.some(c => String(c).includes('/deploy'))).toBe(false);
+  });
+
+  it('stays silent when a bare deploy is skipped on a busy stack', async () => {
+    const { result } = setup({ stackList: { isStackBusy: vi.fn().mockReturnValue(true) } });
+    await result.current.deployStack();
+    // No save happened, so there is no split outcome to report, and the busy
+    // state is already carried by the disabled affordance. A second click landing
+    // while the first deploy is still starting must not read as an error either.
+    expect(errorTexts()).toEqual([]);
   });
 });
 
@@ -311,7 +337,6 @@ describe('useStackActions.handleSaveAndPullImages', () => {
     new Response(JSON.stringify({ error }), { status: 500, headers: { 'Content-Type': 'application/json' } });
 
   const successTexts = () => vi.mocked(toast.success).mock.calls.map(c => String(c[0]));
-  const errorTexts = () => vi.mocked(toast.error).mock.calls.map(c => String(c[0]));
 
   beforeEach(() => {
     vi.mocked(apiFetch).mockReset();
@@ -481,6 +506,51 @@ describe('useStackActions.handleSaveAndPullImages', () => {
     const { result } = setup();
     await result.current.handleSaveAndPullImages(pullEvent());
     expect(errorTexts()).toContain('Image pull failed: web is already deploying.');
+  });
+
+  // A pull that never starts is the split outcome the save's own success toast
+  // would otherwise hide: one green toast, no images, no explanation.
+  it('says the pull did not start when the stack is already busy after the save', async () => {
+    mockPullChain();
+    const { result } = setup({ stackList: { isStackBusy: vi.fn().mockReturnValue(true) } });
+    await result.current.handleSaveAndPullImages(pullEvent());
+    // The save half still reports itself; the pull half must add its own.
+    expect(successTexts()).toEqual(['File saved successfully!']);
+    expect(errorTexts()).toEqual([
+      'Saved; image pull not started: another operation is already running on this stack.',
+    ]);
+    const calls = vi.mocked(apiFetch).mock.calls.map(c => c[0]);
+    expect(calls.some(c => String(c).includes('/pull-images'))).toBe(false);
+  });
+
+  it('stays silent when a bare pull finds status evidence unavailable', async () => {
+    mockPullChain();
+    const { result } = setup({ stackList: { hydrationReady: vi.fn().mockReturnValue(false) } });
+    await result.current.pullStackImages();
+    // Both production entry points check readiness before they get here and report
+    // it themselves, so this guard is defensive only. With no save toast
+    // outstanding it must not add one of its own.
+    expect(errorTexts()).toEqual([]);
+    expect(successTexts()).toEqual([]);
+  });
+
+  it('refuses before the save when status evidence is unavailable, like the diff-preview path', async () => {
+    mockPullChain();
+    const { result } = setup({ stackList: { hydrationReady: vi.fn().mockReturnValue(false) } });
+    await result.current.handleSaveAndPullImages(pullEvent());
+    // One action, one refusal sentence: the diff-preview sibling in ShellOverlays
+    // already answers this condition, and a silent path here would be a dead click.
+    expect(errorTexts()).toEqual(['Status data unavailable. Refresh and try again.']);
+    expect(vi.mocked(apiFetch)).not.toHaveBeenCalled();
+  });
+
+  it('stays silent when a bare pull is skipped on a busy stack', async () => {
+    mockPullChain();
+    const { result } = setup({ stackList: { isStackBusy: vi.fn().mockReturnValue(true) } });
+    await result.current.pullStackImages();
+    // Same rule as the post-save case: with no save toast outstanding there is no
+    // split outcome to explain, and the busy state is already on the disabled UI.
+    expect(errorTexts()).toEqual([]);
   });
 });
 

@@ -156,6 +156,8 @@ As soon as the compose editor opens, the toolbar shows a split button. The prima
 
 Downloading images is distinct from the **Pull now** action in the Git source dialog, which fetches the latest commit from the configured repository. **Save & Pull Images** never fetches source and never rebuilds; it only brings registry images onto the node. It is also hidden on Sencho's own Compose-managed stack, whose images update through **Fleet → Node Updates**.
 
+The action runs the same checks every other Compose operation runs before it touches the stack, so it refuses rather than half-applies in two cases. If the stack's repository secrets are SOPS-encrypted, the editor's mutating actions are refused and the stack has to be applied through Git so the secrets are decrypted in a controlled overlay. If **Block deploy on missing required env vars** is on in **Settings → Infrastructure → Stacks** and a required variable is unset, the pull is refused with the same message **Save & Deploy** and **Update** give, and no images are downloaded.
+
 The same controls apply to the `compose.yaml` and `.env` editors.
 
 ## Diff preview before save
@@ -258,7 +260,7 @@ Sencho tries `/bin/bash` first and transparently falls back to `/bin/sh` if bash
     The PUT to write the compose file failed (most often a permission or disk-space issue on the node). Save & Deploy stops at the save step in this case, so no deploy is attempted and your editor still holds the unsaved version. Resolve the underlying error on the node, then retry.
   </Accordion>
   <Accordion title='"Image pull failed" toast appears when I click Save & Pull Images'>
-    Both halves are reported separately, so this toast means the file **was** written and your edits are safe on disk; the download of its registry images is what failed, usually because a registry is unreachable or a credential was rejected. No running container was touched. The toast quotes the error lines Compose reported, which usually name the service whose image failed, and the progress panel streams the full output image by image, so you can see which ones did arrive; fix the registry problem and run **Save & Pull Images** again.
+    Both halves are reported separately, so this toast means the file **was** written and your edits are safe on disk; the download of its registry images is what failed, usually because a registry is unreachable or a credential was rejected. No running container was touched. The toast quotes the error lines Compose reported, which usually name the service whose image failed. To see which images did arrive, open the progress panel: it streams the full output image by image, and the toast does not carry that per-image detail. Fix the registry problem and run **Save & Pull Images** again.
   </Accordion>
   <Accordion title="Switching nodes prompts me to discard unsaved changes">
     The editor blocks a silent loss of in-progress edits. Click **Cancel** to return to the original node with your edits intact; click **Discard** to abandon them and proceed to the other node.

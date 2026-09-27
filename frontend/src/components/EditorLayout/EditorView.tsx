@@ -332,6 +332,11 @@ export function EditorView(props: EditorViewProps) {
     const canPullImages =
         canEditCompose && !isSelfStack && can('stack:deploy', 'stack', stackName, activeNode?.id);
 
+    // An image pull takes the same per-stack operation lock a deploy does, so the
+    // save surfaces have to disable for it as well. Without this they stay
+    // clickable mid-pull and dispatch a second save against a busy stack.
+    const lifecycleBusy = loadingAction === 'deploy' || loadingAction === 'pull';
+
     // Dispose the underlying Monaco model when EditorView unmounts. The
     // @monaco-editor/react wrapper reuses a single model per editor instance
     // (we do not pass a `path`), so this catches the unmount case rather than
@@ -652,13 +657,13 @@ export function EditorView(props: EditorViewProps) {
                                             )}
                                         </Button>
                                         <div className="flex items-center">
-                                            <Button size="sm" variant="default" className="rounded-l-lg rounded-r-none" onClick={requestSaveAndDeploy} disabled={loadingAction === 'deploy' || !actionsReady}>
+                                            <Button size="sm" variant="default" className="rounded-l-lg rounded-r-none" onClick={requestSaveAndDeploy} disabled={lifecycleBusy || !actionsReady}>
                                                 <Rocket className="w-4 h-4 mr-2" strokeWidth={1.5} />
                                                 {canSaveAndReapply ? 'Save & Reapply' : 'Save & Deploy'}
                                             </Button>
                                             <DropdownMenu modal={false}>
                                                 <DropdownMenuTrigger asChild>
-                                                    <Button size="sm" variant="default" className="rounded-r-lg rounded-l-none border-l border-primary-foreground/20 px-1.5" disabled={loadingAction === 'deploy'}>
+                                                    <Button size="sm" variant="default" className="rounded-r-lg rounded-l-none border-l border-primary-foreground/20 px-1.5" disabled={lifecycleBusy}>
                                                         <ChevronDown className="w-3.5 h-3.5" />
                                                     </Button>
                                                 </DropdownMenuTrigger>
@@ -670,7 +675,7 @@ export function EditorView(props: EditorViewProps) {
                                                     {canPullImages && (
                                                         <DropdownMenuItem
                                                             onClick={requestSaveAndPullImages}
-                                                            disabled={!actionsReady}
+                                                            disabled={lifecycleBusy || !actionsReady}
                                                         >
                                                             <Download className="w-4 h-4 mr-2" strokeWidth={1.5} />
                                                             Save &amp; Pull Images
