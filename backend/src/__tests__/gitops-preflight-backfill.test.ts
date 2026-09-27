@@ -16,7 +16,11 @@ type App = {
   latest_preflight_evidence_json: string | null;
 };
 
-type LiveApps = { withoutBinding?: string[]; withoutApproval?: string[] };
+type LiveApps = {
+  withoutBinding?: string[];
+  withoutApproval?: string[];
+  throwsBinding?: string[];
+};
 
 const STUB_BINDING: FutureRolloutAuthorizationBinding = {
   rolloutCandidateId: 'cand-1',
@@ -33,10 +37,14 @@ function installStore(apps: App[], live: LiveApps = {}) {
   const byId = new Map(apps.map((a) => [a.id, a]));
   const withoutBinding = new Set(live.withoutBinding ?? []);
   const withoutApproval = new Set(live.withoutApproval ?? []);
+  const throwsBinding = new Set(live.throwsBinding ?? []);
   const store = {
     listAuthorizedBlueprintApplications: () => apps,
     getApplication: (id: string) => byId.get(id),
-    currentAuthorizationBinding: (row: App) => (withoutBinding.has(row.id) ? null : STUB_BINDING),
+    currentAuthorizationBinding: (row: App) => {
+      if (throwsBinding.has(row.id)) throw new Error('binding read failed');
+      return withoutBinding.has(row.id) ? null : STUB_BINDING;
+    },
     resolveApprovalRef: (ref: string) => (withoutApproval.has(ref) ? null : { id: ref }),
   };
   vi.spyOn(GitOpsStore, 'getInstance').mockReturnValue(store as unknown as GitOpsStore);
@@ -127,6 +135,29 @@ describe('backfillMissingPreflightEvaluations', () => {
       '[GitOps] Preflight backfill failed for %s: %s',
       'boom',
       'registry exploded',
+    );
+  });
+
+  it('contains a throw from the live-binding check instead of abandoning the batch', async () => {
+    const byId = installStore([app('bad-binding'), app('a'), app('b')], {
+      throwsBinding: ['bad-binding'],
+    });
+    const authorize = vi.fn(async (id: string) => {
+      markEvidence(byId, id);
+      return { ok: false as const, reason: 'recorded evidence only' };
+    });
+
+    const filled = await backfillMissingPreflightEvaluations(authorize);
+
+    expect(filled).toBe(2);
+    expect(authorize).toHaveBeenCalledTimes(2);
+    // The other two are evaluated, not abandoned with the throw.
+    expect(authorize).toHaveBeenCalledWith('a', null, 'preflight_backfill');
+    expect(authorize).toHaveBeenCalledWith('b', null, 'preflight_backfill');
+    expect(console.warn).toHaveBeenCalledWith(
+      '[GitOps] Preflight backfill failed for %s: %s',
+      'bad-binding',
+      'binding read failed',
     );
   });
 

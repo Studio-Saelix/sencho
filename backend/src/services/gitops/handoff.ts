@@ -746,22 +746,27 @@ function hasStoredPreflightEvidence(store: GitOpsStore, applicationId: string): 
  *
  * This runs on the startup path ahead of the HTTP bind, and each evaluation can
  * spend the full preflight timeout, so the work is spread over a small pool
- * rather than serialized. The callback contains every failure, so one bad
- * application can never reject the batch and abandon the evaluations still in
- * flight. The tally reads stored evidence rather than the returned verdict,
- * because evidence is what derive projects from.
+ * rather than serialized. The callback contains every per-application failure,
+ * including the live-binding read that decides whether there is anything to
+ * evaluate, so one bad application can never reject the batch and abandon the
+ * evaluations still in flight. The tally reads stored evidence rather than the
+ * returned verdict, because evidence is what derive projects from.
  */
 export async function backfillMissingPreflightEvaluations(
   authorize: BackfillAuthorizer = ensureRolloutAuthorization,
 ): Promise<number> {
   const store = GitOpsStore.getInstance();
   const apps = store.listAuthorizedBlueprintApplications().filter(
-    (app) => app.latest_preflight_evidence_json == null && liveRolloutBinding(app) !== null,
+    (app) => app.latest_preflight_evidence_json == null,
   );
   let filled = 0;
   await mapWithConcurrency(apps, PREFLIGHT_BACKFILL_CONCURRENCY, async (app) => {
     let result: Awaited<ReturnType<BackfillAuthorizer>> | null = null;
     try {
+      // Read inside the callback, not in the filter above: an authorization that
+      // no longer resolves is a per-application skip, and a store that fails to
+      // resolve one costs that application, never the batch.
+      if (!liveRolloutBinding(app)) return;
       result = await authorize(app.id, null, 'preflight_backfill');
     } catch (err) {
       console.warn(
