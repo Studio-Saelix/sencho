@@ -105,6 +105,23 @@ describe('portfolio row actions and attention next steps', () => {
     expect(captured<BlueprintIntent>(BLUEPRINT_INTENT_EVENT, open.run)).toEqual([{ kind: 'open', blueprintId: 3 }]);
   });
 
+  it('does not offer a Fleet handoff for a node-scoped remote Blueprint', () => {
+    const remoteBlueprint = portfolioRow({ id: '2:app-remote-bp', targetMode: 'blueprint', nodeId: 2, stackName: null, blueprintId: 3 });
+    expect(portfolioRowActions(remoteBlueprint, { canOpenFleet: true }).map(action => action.label)).toEqual(['Open application']);
+  });
+
+  it('does not offer a decision action for a node-scoped remote Blueprint', () => {
+    const remoteBlueprint = portfolioRow({ id: '2:app-remote-bp', targetMode: 'blueprint', nodeId: 2, stackName: null, blueprintId: 3 });
+    expect(attentionNextStep('rollout_authorization_pending', remoteBlueprint).label).toBe('Inspect');
+  });
+
+  it('opens the application when inspecting a node-scoped remote Blueprint', () => {
+    const remoteBlueprint = portfolioRow({ id: '2:app-remote-bp', targetMode: 'blueprint', nodeId: 2, stackName: null, blueprintId: 3 });
+    const step = attentionNextStep('rollout_authorization_pending', remoteBlueprint);
+    step.run();
+    expect(applicationIdFromSearch(window.location.search)).toBe('2:app-remote-bp');
+  });
+
   it('sends a pending decision to the application view, where the authority actions live', () => {
     const step = attentionNextStep('rollout_authorization_pending', blueprint);
     expect(step.label).toBe('Review');

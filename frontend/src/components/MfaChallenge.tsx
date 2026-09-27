@@ -107,7 +107,11 @@ export function MfaChallenge({ className, ...props }: React.ComponentPropsWithou
   const throttled = retrySeconds > 0;
 
   return (
-    <div className={cn('relative', className)} {...props}>
+    // data-sn-chrome marks the whole challenge screen, including the throttled
+    // state, which renders neither the OTP nor the backup-code input. E2E uses
+    // it to tell "the login landed on a second-factor challenge" apart from a
+    // bad password without depending on which fields happen to be mounted.
+    <div className={cn('relative', className)} data-sn-chrome="mfa-challenge" {...props}>
       <AuthCanvas
         footer={
           <div className="flex items-center justify-between">

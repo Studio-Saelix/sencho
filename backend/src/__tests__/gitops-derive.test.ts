@@ -330,6 +330,158 @@ describe('gitops derivation', () => {
     expect(projection.drift).toHaveLength(0);
   });
 
+  it('ignores tombstoned target connectivity when deriving blueprint rollout', () => {
+    const application = rawApp('app-tomb-connectivity', {
+      target_mode: 'blueprint',
+      blueprint_id: 91,
+      lifecycle_key: 'blueprint:91',
+      stack_name: null,
+      configured_source_stack_name: null,
+    });
+
+    for (const connectivity of ['stale', 'unreachable'] as const) {
+      const projection = deriveGitOpsRevision({
+        application,
+        targets: [
+          {
+          ...emptyTargetRow(application.id, 1, 1),
+          // Reachable by a real observation, because a stored `reachable` is
+          // not trusted. Without this the live target would also read unknown
+          // and the tombstoned target would have nothing to be ignored
+          // relative to, so the case would pass for the wrong reason.
+          observed_artifact_identity_json: encodeObservedArtifactIdentity({
+            kind: 'exact',
+            identity: 'sha256:active',
+            observedAt: 1,
+          }),
+        },
+          {
+            ...emptyTargetRow(application.id, 2, 1),
+            target_status: 'tombstoned',
+            connectivity,
+          },
+        ],
+        healthDisabled: true,
+      }, null);
+
+      if (projection.targetMode === 'not_applicable') throw new Error('expected application');
+      expect(projection.facets.rollout.status).toBe('not_applicable');
+    }
+
+    const recovery = deriveGitOpsRevision({
+      application,
+      targets: [
+        {
+          ...emptyTargetRow(application.id, 1, 1),
+          // Reachable by a real observation, because a stored `reachable` is
+          // not trusted. Without this the live target would also read unknown
+          // and the tombstoned target would have nothing to be ignored
+          // relative to, so the case would pass for the wrong reason.
+          observed_artifact_identity_json: encodeObservedArtifactIdentity({
+            kind: 'exact',
+            identity: 'sha256:active',
+            observedAt: 1,
+          }),
+        },
+        {
+          ...emptyTargetRow(application.id, 2, 1),
+          target_status: 'tombstoned',
+          recovery_phase: 'failed',
+          recovery_ref: 'recovery-tombstoned',
+          recovery_generation_id: 'gen-tombstoned',
+          failure_stage: 'recovery',
+          failure_class: 'test',
+          failure_at: 1,
+        },
+      ],
+      healthDisabled: true,
+    }, null);
+    if (recovery.targetMode === 'not_applicable') throw new Error('expected application');
+    // A tombstoned target reports `tombstoned` rather than `recovery_failed`,
+    // because the runtime facet answers the tombstone before it reads any
+    // recovery field. So the rollout lookup's tombstone filter is not what
+    // keeps a withdrawn node's failed recovery out of the status.
+    expect(recovery.targets.find((target) => target.nodeId === 2)?.runtime.status).toBe('tombstoned');
+    expect(recovery.facets.rollout.status).toBe('not_applicable');
+  });
+
+  it('projects connectivity for a Blueprint target from its recorded observation', () => {
+    // Blueprint targets record observations on the reconciler's drift check,
+    // which runs for every active deployment on each tick, so a settled
+    // Blueprint target has real evidence to project from. Asserted against a
+    // real target row rather than a hand-built projection, because the
+    // projection is what has to be right for the portfolio to settle.
+    const application = rawApp('app-bp-observed', {
+      target_mode: 'blueprint',
+      blueprint_id: 93,
+      lifecycle_key: 'blueprint:93',
+      stack_name: null,
+      configured_source_stack_name: null,
+    });
+    const observedRow = (identity: string | null) => ({
+      ...emptyTargetRow(application.id, 1, 1),
+      applied_generation_id: 'gen-1',
+      deployed_generation_id: 'gen-1',
+      observed_artifact_identity_json: identity === null
+        ? null
+        : encodeObservedArtifactIdentity({ kind: 'exact', identity, observedAt: 1 }),
+    });
+
+    const observed = deriveGitOpsRevision({
+      application,
+      targets: [observedRow('sha256:bp')],
+      healthDisabled: true,
+    }, null);
+    if (observed.targetMode === 'not_applicable') throw new Error('expected application');
+    expect(observed.targets[0]?.connectivity).toBe('reachable');
+
+    // The same target with no recorded observation is unknown, which is the
+    // case that must never settle.
+    const unobserved = deriveGitOpsRevision({
+      application,
+      targets: [observedRow(null)],
+      healthDisabled: true,
+    }, null);
+    if (unobserved.targetMode === 'not_applicable') throw new Error('expected application');
+    expect(unobserved.targets[0]?.connectivity).toBe('unknown');
+  });
+
+  it('keeps active target connectivity and recovery failures in rollout status', () => {
+    const application = rawApp('app-active-connectivity', {
+      target_mode: 'blueprint',
+      blueprint_id: 92,
+      lifecycle_key: 'blueprint:92',
+      stack_name: null,
+      configured_source_stack_name: null,
+    });
+    const derive = (connectivity: 'stale' | 'unreachable') => deriveGitOpsRevision({
+      application,
+      targets: [{ ...emptyTargetRow(application.id, 1, 1), connectivity }],
+      healthDisabled: true,
+    }, null);
+    const stale = derive('stale');
+    const unreachable = derive('unreachable');
+    if (stale.targetMode === 'not_applicable' || unreachable.targetMode === 'not_applicable') throw new Error('expected application');
+    expect(stale.facets.rollout.status).toBe('target_stale');
+    expect(unreachable.facets.rollout.status).toBe('target_unreachable');
+
+    const recovery = deriveGitOpsRevision({
+      application,
+      targets: [{
+        ...emptyTargetRow(application.id, 2, 1),
+        recovery_phase: 'failed',
+        recovery_ref: 'recovery-1',
+        recovery_generation_id: 'gen-1',
+        failure_stage: 'recovery',
+        failure_class: 'test',
+        failure_at: 1,
+      }],
+      healthDisabled: true,
+    }, null);
+    if (recovery.targetMode === 'not_applicable') throw new Error('expected application');
+    expect(recovery.facets.rollout.status).toBe('rollback_partial_failed');
+  });
+
   it('keeps a failed sibling out of another target\'s deploy action', () => {
     const store = GitOpsStore.getInstance();
     const tx = GitOpsTransitions.getInstance();

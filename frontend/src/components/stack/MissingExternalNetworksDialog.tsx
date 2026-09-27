@@ -117,7 +117,7 @@ export function MissingExternalNetworksDialog({
           {payload?.status !== 'ok' ? (
             <div className="px-4 py-3 text-sm text-muted-foreground">
               {payload?.status === 'render_unavailable'
-                ? 'Sencho could not render this stack\'s Compose model to check external networks.'
+                ? payload.renderError || 'Sencho could not render this stack\'s Compose model to check external networks.'
                 : 'Sencho could not read Docker networking state on this node.'}
             </div>
           ) : networks.length === 0 ? (

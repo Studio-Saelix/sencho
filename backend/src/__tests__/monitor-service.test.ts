@@ -2094,6 +2094,20 @@ describe('MonitorService - janitor cycle and circuit breaker', () => {
     return new Promise<never>(() => { /* never resolves */ });
   }
 
+  // Runs one janitor pass whose df() hangs, advancing fake timers past the 8s
+  // janitor budget (JANITOR_TIMEOUT_MS) instead of waiting it out. Only the
+  // timer functions are faked, so Date.now() stays real for cooldown checks.
+  async function evaluateJanitorPastTimeout(svc: MonitorService): Promise<void> {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    try {
+      const pass = (svc as any).evaluateJanitor();
+      await vi.advanceTimersByTimeAsync(8_000);
+      await pass;
+    } finally {
+      vi.useRealTimers();
+    }
+  }
+
   // Reclaimable payload large enough to cross a 0.5 GB janitor threshold.
   const RECLAIMABLE_3GB = {
     reclaimableImages: 3 * 1024 * 1024 * 1024,
@@ -2200,10 +2214,10 @@ describe('MonitorService - janitor cycle and circuit breaker', () => {
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
 
     const svc = MonitorService.getInstance();
-    await (svc as any).evaluateJanitor();
-    await (svc as any).evaluateJanitor();
+    await evaluateJanitorPastTimeout(svc);
+    await evaluateJanitorPastTimeout(svc);
     expect(warnSpy).not.toHaveBeenCalled(); // Threshold not yet reached.
-    await (svc as any).evaluateJanitor(); // Third timeout trips the breaker.
+    await evaluateJanitorPastTimeout(svc); // Third timeout trips the breaker.
 
     const breakerLine = warnSpy.mock.calls.find(
       (args) => typeof args[0] === 'string' && args[0].includes('circuit breaker opened'),
@@ -2236,8 +2250,8 @@ describe('MonitorService - janitor cycle and circuit breaker', () => {
       .mockResolvedValueOnce(RECLAIMABLE_3GB);
 
     const svc = MonitorService.getInstance();
-    await (svc as any).evaluateJanitor();
-    await (svc as any).evaluateJanitor();
+    await evaluateJanitorPastTimeout(svc);
+    await evaluateJanitorPastTimeout(svc);
     expect((svc as any).janitorConsecutiveTimeouts).toBe(2);
 
     const logSpy = vi.spyOn(console, 'log').mockImplementation(() => undefined);

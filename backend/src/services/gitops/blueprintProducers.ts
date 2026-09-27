@@ -16,6 +16,7 @@ import { GitOpsStore } from './store';
 import { GitOpsTransitions, type EventEnvelope } from './transitions';
 import type { GitOpsApplicationRow, GitOpsIntentRevisionRow, GitOpsRolloutCandidateRow } from './types';
 import { GitManagedContentError, GitOpsBindingError, isGitManagedBlueprint } from './binding';
+import { carriedHealthPolicyJson } from './healthPolicy';
 
 /** What an operator changed, which decides whether a new intent is minted. */
 export type BlueprintChangeKind = 'operational' | 'metadata_only' | 'none';
@@ -144,6 +145,11 @@ export function intentRowFor(
   actor: string | null,
   at: number,
 ): GitOpsIntentRevisionRow {
+  const store = GitOpsStore.getInstance();
+  const current = store.getApplication(applicationId);
+  const previous = current?.intent_revision_id
+    ? store.getIntentRevision(current.intent_revision_id)
+    : undefined;
   return {
     id: randomUUID(),
     application_id: applicationId,
@@ -157,7 +163,7 @@ export function intentRowFor(
     rollout_strategy_json: JSON.stringify({ driftMode: blueprint.drift_mode, enabled: blueprint.enabled }),
     runtime_drift_policy: blueprint.drift_mode,
     stateful_policy_json: null,
-    health_failure_rollback_policy_json: null,
+    health_failure_rollback_policy_json: carriedHealthPolicyJson(previous),
     operation_id: operationId,
     actor,
     created_at: at,

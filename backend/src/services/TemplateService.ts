@@ -1,7 +1,9 @@
+import { createHash } from 'crypto';
 import axios, { type AxiosRequestConfig } from 'axios';
 import YAML from 'yaml';
 import { DatabaseService } from './DatabaseService';
 import { CacheService } from './CacheService';
+import { normalizePortEntries } from '../helpers/portSpec';
 import { isDebugEnabled } from '../utils/debug';
 import { isValidStackName } from '../utils/validation';
 
@@ -56,8 +58,12 @@ interface ComposeServiceDefinition {
     env_file?: string[];
 }
 
-// Typed shapes for the LinuxServer.io API response
-interface LsioPort { external?: number; internal: number; protocol?: string }
+// Typed shapes for the LinuxServer.io API response.
+// Port entries are left as `unknown` on purpose: this API sends them as
+// structured values whose field names and value types vary by app, and the
+// protocol can be carried inside the container value with no separate field at
+// all. `normalizePortEntries` owns interpreting them for every registry, so no
+// shape is asserted here that the payload does not actually send.
 interface LsioVolume {
     path: string;
     host_path?: string;
@@ -65,7 +71,7 @@ interface LsioVolume {
     optional?: boolean;
 }
 interface LsioEnvVar { name: string; desc?: string; default?: string }
-interface LsioAppConfig { ports?: LsioPort[]; volumes?: LsioVolume[]; environment?: LsioEnvVar[] }
+interface LsioAppConfig { ports?: unknown[]; volumes?: LsioVolume[]; environment?: LsioEnvVar[] }
 interface LsioApp {
     name: string;
     description?: string;
@@ -268,8 +274,97 @@ function mapLsioVolume(v: LsioVolume): TemplateVolume | null {
     };
 }
 
+/**
+ * Map the LinuxServer.io catalogue. Its port entries vary by app (string
+ * values, protocol carried inside the container value, no `protocol` field), so
+ * the shared normalizer interprets them rather than this mapper.
+ */
+function mapLsioCatalog(data: LsioApiResponse | undefined): Template[] {
+    const lsioApps = data?.data?.repositories?.linuxserver ?? {};
+    return Object.values(lsioApps).map((app: LsioApp) => ({
+        type: 1,
+        title: app.name,
+        description: app.description || '',
+        logo: app.logo || `https://raw.githubusercontent.com/linuxserver/docker-templates/master/linuxserver.io/img/${app.name}-logo.png`,
+        image: `lscr.io/linuxserver/${app.name}:latest`,
+        github_url: app.github,
+        docs_url: app.readme,
+        architectures: app.arch,
+        stars: app.stars,
+        categories: getCategoriesForApp(app.name),
+        source: 'linuxserver',
+        ports: normalizePortEntries(app.config?.ports, 'linuxserver'),
+        volumes: (app.config?.volumes ?? [])
+            .map((v: LsioVolume) => mapLsioVolume(v))
+            .filter((v): v is TemplateVolume => v !== null),
+        env: (app.config?.environment ?? []).map((e: LsioEnvVar) => ({
+            name: e.name,
+            label: e.desc || e.name,
+            default: e.default || ''
+        }))
+    }));
+}
+
+/**
+ * Map a Portainer v2 catalogue, the format any custom registry is expected to
+ * serve. The spec includes a native `categories` field; it passes through. Port
+ * entries go through the same normalizer as the bundled registry, so switching
+ * registries cannot reintroduce a spec Compose would reject.
+ */
+function mapPortainerCatalog(data: TemplatesResponse, source: string): Template[] {
+    return (data.templates || [])
+        .filter((t: Template) => !!t.image && t.type === 1)
+        .map((t: Template) => ({ ...t, source: 'custom', ports: normalizePortEntries(t.ports, source) }));
+}
+
+/**
+ * A registry answered, but not with a catalogue Sencho can read. Distinct from
+ * a transport failure so the message reaches the operator instead of being
+ * folded into the generic fetch error.
+ */
+class UnsupportedCatalogueError extends Error {
+    constructor() {
+        super(
+            'The template registry answered, but not in a format Sencho reads. '
+            + 'Expected the LinuxServer.io shape (data.repositories.linuxserver) or the Portainer v2 shape (a templates array). '
+            + 'A top-level array is the older Portainer v1 format and is not supported. '
+            + 'Check the Registry URL in Settings.',
+        );
+        this.name = 'UnsupportedCatalogueError';
+    }
+}
+
+/**
+ * Which catalogue a response carries, decided by its shape rather than by the
+ * host it came from. A mirror or caching proxy in front of the LinuxServer.io
+ * API serves the same body from a different hostname, and choosing the mapper
+ * by hostname sent that body to the Portainer mapper, which found no templates
+ * and reported an empty App Store with no error.
+ */
+function detectCatalogueFormat(data: unknown): 'linuxserver' | 'portainer' {
+    const body = data as {
+        data?: { repositories?: { linuxserver?: unknown } };
+        templates?: unknown;
+    } | null;
+    // Null is not an empty catalogue, it is a malformed one, so it falls through
+    // to the error rather than being read as a registry with nothing in it.
+    if (body?.data?.repositories?.linuxserver != null) return 'linuxserver';
+    if (Array.isArray(body?.templates)) return 'portainer';
+    throw new UnsupportedCatalogueError();
+}
+
+/** Fallback catalogue when no registry URL is configured. */
+const DEFAULT_REGISTRY_URL = 'https://api.linuxserver.io/api/v1/images?include_config=true';
+
 export class TemplateService {
-    private static readonly CACHE_KEY = 'templates:all';
+    /**
+     * Cache namespace for the catalogue. The per-registry key is derived from
+     * the registry URL, so a registry change yields a different key instead of
+     * serving the previous registry's catalogue until its TTL expires. Callers
+     * that change the URL outside the Settings UI (an API token, a script) get
+     * the same correctness without having to remember to bust the cache.
+     */
+    private static readonly CACHE_NAMESPACE = 'templates';
     private readonly CACHE_DURATION_MS = 24 * 60 * 60 * 1000; // 24 hours
     // Cap the registry response so a large or compromised custom registry
     // cannot exhaust backend memory by streaming an unbounded body.
@@ -280,13 +375,34 @@ export class TemplateService {
         maxBodyLength: TemplateService.MAX_REGISTRY_RESPONSE_BYTES,
     } satisfies AxiosRequestConfig;
 
+    /**
+     * Cache key for one registry URL. Hashing keeps the key bounded and avoids
+     * putting operator-supplied URL text into a cache identifier.
+     */
+    private static cacheKey(registryUrl: string): string {
+        const digest = createHash('sha256').update(registryUrl).digest('hex').slice(0, 16);
+        return `${TemplateService.CACHE_NAMESPACE}:${digest}`;
+    }
+
+    /**
+     * The configured registry, or the bundled default. Read outside the cache
+     * fetcher so the key can be derived from it.
+     */
+    private resolveRegistryUrl(): string {
+        const settings = DatabaseService.getInstance().getGlobalSettings();
+        return settings.template_registry_url || DEFAULT_REGISTRY_URL;
+    }
+
     public clearCache(): void {
-        CacheService.getInstance().invalidate(TemplateService.CACHE_KEY);
+        // Namespace-wide: the key is per-registry, so a single invalidate()
+        // would miss whichever registry is currently configured.
+        CacheService.getInstance().invalidateNamespace(TemplateService.CACHE_NAMESPACE);
         console.log('[Templates] Cache invalidated');
     }
 
     public async getTemplates(): Promise<Template[]> {
         try {
+            const registryUrl = this.resolveRegistryUrl();
             // getOrFetch serves the last-known-good catalogue when the fetcher
             // rejects and a (now-expired) cache entry exists, so the mapped
             // errors below surface only on a cold or freshly cleared cache.
@@ -294,64 +410,19 @@ export class TemplateService {
             // catalogue usable. The response size cap still protects memory in
             // every case, since axios aborts before buffering the full body.
             return await CacheService.getInstance().getOrFetch<Template[]>(
-                TemplateService.CACHE_KEY,
+                TemplateService.cacheKey(registryUrl),
                 this.CACHE_DURATION_MS,
-                async () => {
-                    const settings = DatabaseService.getInstance().getGlobalSettings();
-                    // Default to a reliable LSIO Portainer v2 template registry if not set
-                    const registryUrl = settings.template_registry_url || 'https://api.linuxserver.io/api/v1/images?include_config=true';
-
-                    console.log(`[Templates] Fetching from registry: ${registryUrl}`);
-                    const debug = isDebugEnabled();
-
-                    let registryHost = '';
-                    try { registryHost = new URL(registryUrl).hostname.toLowerCase(); } catch { /* invalid URL, treated as non-LSIO */ }
-                    if (registryHost === 'api.linuxserver.io') {
-                        const response = await axios.get<LsioApiResponse>(registryUrl, TemplateService.REGISTRY_FETCH_OPTIONS);
-                        // Official LSIO API Schema Mapping
-                        const lsioApps = response.data?.data?.repositories?.linuxserver ?? {};
-
-                        const templates: Template[] = Object.values(lsioApps).map((app: LsioApp) => ({
-                            type: 1,
-                            title: app.name,
-                            description: app.description || '',
-                            logo: app.logo || `https://raw.githubusercontent.com/linuxserver/docker-templates/master/linuxserver.io/img/${app.name}-logo.png`,
-                            image: `lscr.io/linuxserver/${app.name}:latest`,
-                            github_url: app.github,
-                            docs_url: app.readme,
-                            architectures: app.arch,
-                            stars: app.stars,
-                            categories: getCategoriesForApp(app.name),
-                            source: 'linuxserver',
-                            // Map configs if available, otherwise default to empty arrays
-                            ports: (app.config?.ports ?? []).map((p: LsioPort) => `${p.external || p.internal}:${p.internal}/${p.protocol || 'tcp'}`),
-                            volumes: (app.config?.volumes ?? [])
-                                .map((v: LsioVolume) => mapLsioVolume(v))
-                                .filter((v): v is TemplateVolume => v !== null),
-                            env: (app.config?.environment ?? []).map((e: LsioEnvVar) => ({
-                                name: e.name,
-                                label: e.desc || e.name,
-                                default: e.default || ''
-                            }))
-                        }));
-
-                        console.log(`[Templates] Fetched ${templates.length} templates from LSIO`);
-                        if (debug) console.debug('[Templates:debug] LSIO sample:', templates.slice(0, 5).map(t => t.title));
-                        return templates;
-                    }
-
-                    // Legacy Portainer v2 Format (Fallback for custom registries)
-                    // The Portainer v2 spec includes a native `categories` field; pass it through.
-                    const response = await axios.get<TemplatesResponse>(registryUrl, TemplateService.REGISTRY_FETCH_OPTIONS);
-                    const templates = (response.data.templates || [])
-                        .filter((t: Template) => !!t.image && t.type === 1)
-                        .map((t: Template) => ({ ...t, source: 'custom' }));
-
-                    console.log(`[Templates] Fetched ${templates.length} templates from custom registry`);
-                    return templates;
-                },
+                async () => this.fetchTemplates(registryUrl),
             );
         } catch (error) {
+            // A readable response Sencho cannot map is not a transport failure.
+            // Its own message names both supported shapes, which the generic
+            // wrapper below would discard. Logged here because this path skips
+            // the wrapper's own log line.
+            if (error instanceof UnsupportedCatalogueError) {
+                console.error('[Templates] Unsupported catalogue shape:', error.message);
+                throw error;
+            }
             console.error('[Templates] Failed to fetch from registry:', error);
             // Match the stable axios error code first; fall back to the
             // message text in case a transport reports the cap differently.
@@ -363,6 +434,33 @@ export class TemplateService {
             }
             throw new Error('Could not fetch templates from registry', { cause: error });
         }
+    }
+
+    /**
+     * Fetch and map one registry's catalogue. Runs only on a cache miss for the
+     * configured registry, so a stale catalogue can never be attributed to a
+     * registry the operator is no longer pointing at.
+     */
+    private async fetchTemplates(registryUrl: string): Promise<Template[]> {
+        console.log(`[Templates] Fetching from registry: ${registryUrl}`);
+
+        let registryHost = '';
+        try { registryHost = new URL(registryUrl).hostname.toLowerCase(); } catch { /* invalid URL, treated as unlabelled */ }
+        const source = registryHost || 'custom';
+
+        const response = await axios.get(registryUrl, TemplateService.REGISTRY_FETCH_OPTIONS);
+        const format = detectCatalogueFormat(response.data);
+
+        if (format === 'linuxserver') {
+            const templates = mapLsioCatalog(response.data as LsioApiResponse);
+            console.log(`[Templates] Fetched ${templates.length} templates from LSIO`);
+            if (isDebugEnabled()) console.debug('[Templates:debug] LSIO sample:', templates.slice(0, 5).map(t => t.title));
+            return templates;
+        }
+
+        const templates = mapPortainerCatalog(response.data as TemplatesResponse, source);
+        console.log(`[Templates] Fetched ${templates.length} templates from custom registry`);
+        return templates;
     }
 
     public generateComposeFromTemplate(template: Template, serviceName: string): string {

@@ -14,6 +14,30 @@ export const EMPTY_GITOPS_RECOVERY_CAPTURE: GitOpsRecoveryCapture = {
 };
 
 /**
+ * The generation a target is running, in the sense each mode can prove.
+ *
+ * Direct mode reads `deployed_generation_id`, because a generation that was
+ * applied but never deployed is not runtime identity there. Blueprint mode has
+ * no deploy-bound writer (nothing resolves a Direct application for a
+ * Blueprint-managed stack), so the ack's `applied_generation_id` is the pointer
+ * that names what the node acknowledged running.
+ *
+ * Health attribution, the drift projection, and the recovery capture all read
+ * the running generation through this one function, because they are asking the
+ * same question and a verdict that attributed against one pointer while the
+ * projection read another would report a pass the projection then hid.
+ */
+export function runningGenerationForTarget(
+  application: GitOpsApplicationRow,
+  target: GitOpsTargetCurrentRow | undefined,
+): string | null {
+  if (!target) return null;
+  return application.target_mode === 'direct'
+    ? target.deployed_generation_id
+    : target.applied_generation_id;
+}
+
+/**
  * Bind a recovery point to the generation the node is actually running.
  *
  * Direct mode reads `deployed_generation_id`, because a generation that was
@@ -33,9 +57,7 @@ export function recoveryBindingForTarget(
   target: GitOpsTargetCurrentRow | undefined,
 ): GitOpsRecoveryCapture {
   const store = GitOpsStore.getInstance();
-  const generationId = application.target_mode === 'direct'
-    ? (target?.deployed_generation_id ?? null)
-    : (target?.applied_generation_id ?? null);
+  const generationId = runningGenerationForTarget(application, target);
   if (!generationId) return { ...EMPTY_GITOPS_RECOVERY_CAPTURE };
 
   let artifactSetId: string | null = null;

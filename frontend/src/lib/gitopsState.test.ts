@@ -406,6 +406,14 @@ describe('identityRefLabel', () => {
       }),
     ).toBe('no compose files');
   });
+
+  it('names an identity kind this build has not heard of', () => {
+    // The union is closed, so this value can only arrive from a newer node. It
+    // crossed the validator on structure alone, and it must render as something
+    // rather than as nothing.
+    const unfamiliar = { kind: 'future_kind' } as unknown as GitOpsIdentityRef;
+    expect(identityRefLabel(unfamiliar)).toBe('unknown (future_kind)');
+  });
 });
 
 describe('driftClassLabel', () => {

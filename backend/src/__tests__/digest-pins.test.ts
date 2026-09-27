@@ -1,6 +1,5 @@
 import { describe, expect, it } from 'vitest';
 import {
-  digestPinsMatchComposeServices,
   digestPinsMatchServiceNames,
   digestPinsOverlayYaml,
   isDigestPinValue,
@@ -61,27 +60,6 @@ describe('digestPins', () => {
     expect(yaml).toContain(`image: "ghcr.io/org/api@${DIGEST_B}"`);
     expect(yaml).toContain('"web":');
     expect(yaml).toContain(`image: "nginx@${DIGEST_A}"`);
-  });
-
-  it('rejects pin keys that are not services in the composed model', () => {
-    const compose = 'services:\n  web:\n    image: nginx:latest\n';
-    expect(digestPinsMatchComposeServices({ web: `nginx@${DIGEST_A}` }, compose)).toBe(true);
-    expect(digestPinsMatchComposeServices({ other: `nginx@${DIGEST_A}` }, compose)).toBe(false);
-    expect(digestPinsMatchComposeServices({ web: `nginx@${DIGEST_A}` }, 'not: yaml: [')).toBe(false);
-  });
-
-  it('accepts additional service names from an override', () => {
-    const compose = 'services:\n  web:\n    image: nginx:latest\n';
-    expect(digestPinsMatchComposeServices(
-      { web: `nginx@${DIGEST_A}`, sidecar: `busybox@${DIGEST_B}` },
-      compose,
-      ['sidecar'],
-    )).toBe(true);
-    expect(digestPinsMatchComposeServices(
-      { web: `nginx@${DIGEST_A}`, ghost: `busybox@${DIGEST_B}` },
-      compose,
-      ['sidecar'],
-    )).toBe(false);
   });
 
   it('matches pin keys against the rendered multi-file service set', () => {

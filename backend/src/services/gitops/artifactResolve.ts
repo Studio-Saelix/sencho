@@ -38,8 +38,6 @@ import {
   type NodePlatform,
 } from './effectiveArtifactContext';
 
-export { readNodePlatform } from './effectiveArtifactContext';
-
 const REMOTE_RESOLVE_TIMEOUT_MS = 30_000;
 
 function isComposeOneOff(labels: Record<string, string> | undefined): boolean {

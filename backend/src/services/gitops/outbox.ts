@@ -163,6 +163,17 @@ function notificationLabel(applicationId: string, stackName: string | null): {
 }
 
 function fanoutSettledNotification(payload: SettledAttemptPayload): void {
+  // An attempt that settled without proving anything is not notified, the same
+  // rule the insert applies when it decides not to write this row. The two have to
+  // agree, because boot repair drains rows an earlier process inserted, so a build
+  // that predates the rule can still leave one behind: without this, the repair
+  // would announce a failed pull that the current insert would refuse to write,
+  // and the one path that is supposed to reproduce the original outcome would be
+  // the path that diverges from it.
+  if (payload.outcome === 'unknown') {
+    logSuppressedSettledRow(payload);
+    return;
+  }
   const { visibleStack, label } = notificationLabel(payload.applicationId, payload.stackName);
   const reason = payload.reason ? `: ${payload.reason}` : '';
   DatabaseService.getInstance().addNotificationHistory(
@@ -177,6 +188,18 @@ function fanoutSettledNotification(payload: SettledAttemptPayload): void {
       gitops_operation_id: payload.operationId,
       dedupe_key: settledNotificationDedupeKey(payload.settledHistoryId),
     },
+  );
+}
+
+/**
+ * Say that a row was drained without notifying, so a suppressed entry is a
+ * recorded decision rather than a silence someone later has to explain.
+ */
+function logSuppressedSettledRow(payload: SettledAttemptPayload): void {
+  console.warn(
+    '[GitOps] drained a settled attempt that proved nothing without notifying it:'
+    + ` history ${sanitizeForLog(payload.settledHistoryId)}`
+    + ` operation ${sanitizeForLog(payload.operationId)}`,
   );
 }
 

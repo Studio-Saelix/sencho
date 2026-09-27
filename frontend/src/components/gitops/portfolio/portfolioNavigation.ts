@@ -126,7 +126,7 @@ export function owningSurfaceHandoff(row: GitOpsPortfolioRow, opts: { canOpenBlu
       return { label: 'Open Git source', open: () => openDirectStack(row, 'git') };
     case 'blueprint':
     case 'inline_blueprint':
-      if (row.blueprintId === null || !opts.canOpenBlueprint) return null;
+      if (row.nodeId !== null || row.blueprintId === null || !opts.canOpenBlueprint) return null;
       return { label: 'Open Blueprint', open: () => openBlueprint(row) };
     default: {
       const unhandled: never = row.targetMode;
@@ -206,7 +206,7 @@ export function portfolioRowActions(row: GitOpsPortfolioRow, opts: { canOpenFlee
     actions.push({ label: 'Open stack', run: () => openDirectStack(row, 'stack') });
     actions.push({ label: 'Open Git source', run: () => openDirectStack(row, 'git') });
   }
-  if (row.targetMode !== 'direct' && row.blueprintId !== null && opts.canOpenFleet) {
+  if (row.targetMode !== 'direct' && row.nodeId === null && row.blueprintId !== null && opts.canOpenFleet) {
     actions.push({ label: 'Open Blueprint', run: () => openBlueprint(row) });
   }
   return actions;
@@ -248,7 +248,10 @@ const SOURCE_FAILURE_REASONS: ReadonlySet<GitOpsAttentionReason> = new Set<GitOp
  */
 export function attentionNextStep(reason: GitOpsAttentionReason, row: GitOpsPortfolioRow): PortfolioRowAction {
   const review = { label: 'Review', run: () => openPortfolioApplication(row) };
-  if (DECISION_REASONS.has(reason)) return review;
+  const remoteBlueprint = row.targetMode !== 'direct' && row.nodeId !== null;
+  if (DECISION_REASONS.has(reason)) {
+    return remoteBlueprint ? { label: 'Inspect', run: review.run } : review;
+  }
   const direct = row.targetMode === 'direct' && row.nodeId !== null && row.stackName !== null;
   if (direct && RUNTIME_FAILURE_REASONS.has(reason)) return { label: 'Open stack', run: () => openDirectStack(row, 'stack') };
   if (direct && SOURCE_FAILURE_REASONS.has(reason)) return { label: 'Open Git source', run: () => openDirectStack(row, 'git') };
