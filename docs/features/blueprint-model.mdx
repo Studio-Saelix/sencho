@@ -231,6 +231,31 @@ A Git-managed Blueprint takes each authority step as its own action. The GitOps 
 - **Review and approve placement** opens the rollout preview, the same reviewed plan the Inline flow shows: every node to place or remove, with its reachability. Confirming records the placement approval and freezes that blast for the current intent, so a later edit or roster change requires a fresh review. The button appears once source is accepted and the current candidate has no placement approval.
 - **Authorize rollout** evaluates registry preflight, records the rollout authorization, and starts the sequential rollout across the approved targets. It appears while the rollout is not authorized or while the recorded authorization was granted against earlier inputs. Authorization needs resolved executable artifact evidence for the accepted generation, which the artifact card reports: while that evidence is unresolved or unavailable, the authorization is refused with the artifact identity as the reason, and a blocked registry preflight refuses it with the registry reason. When a target cannot start, the authorization is recorded and the surface reports what stopped the rollout.
 
+### Who decides each step
+
+Each of the three steps answers the same question at a different point, so each has its own setting. They are independent: one does not imply or satisfy another, and changing one leaves the other two alone.
+
+| Setting | Options | What it governs |
+|---------|---------|-----------------|
+| **Source policy** | Manual, Review, Applies without an operator | Which fetched source revisions apply on their own. |
+| **Placement policy** | Operator approves each change, One stateless change at a time | Which placement changes are approved without you. |
+| **Rollout authorization policy** | Operator authorizes each rollout, Authorizes without an operator | Which rollouts start without you. |
+
+The source policy is set on the Git source, in its apply behavior. The placement policy sits beside **Review and approve placement**, and the rollout authorization policy is in the rollout overflow next to the health rollout policy, because both answer the same question about a rollout: what the system may do on its own, and what it should do when one fails.
+
+**One stateless change at a time** is the whole of what the placement policy may do without you, and it is deliberately narrow. Sencho approves a placement change on its own only when the change adds exactly one node, or removes exactly one, and only when the workload it would run is stateless. Everything else falls back to you with the reason shown on the placement card:
+
+- a change that both adds and removes nodes, or that moves more than one node either way
+- a workload that carries data, or whose contents Sencho could not establish, which is treated as data
+- a first placement that spans more than one node
+- a node that is cordoned, gone, or was last seen unreachable
+- a change that would leave the application with nothing running it
+- an operation already in flight, for the application or for a node in the plan
+
+The last one matters when you cordon a node: cordoning it produces a removal, and a single stateless removal is inside what the policy may do on its own. Stop the policy before you cordon a node you do not want drained.
+
+Each facet card carries its own policy line, saying who is configured to decide that stage and what the policy actually did. When a rollout is already in flight the card also says which value it was decided under, because every rollout freezes the policy it executes: changing a setting changes what the next decision may do and leaves work already approved exactly where it is.
+
 A disabled Blueprint withholds placement approval and rollout authorization until you enable it again, the same way **Apply now** waits for an Inline Blueprint to be enabled. Accepting source stays available while a Blueprint is disabled, because reviewing content changes nothing on the fleet.
 
 The **Apply now** flow stays Inline-only. For a Git-managed Blueprint the rollout preview is a placement review: its confirm writes the placement approval instead of applying the frozen snapshot.

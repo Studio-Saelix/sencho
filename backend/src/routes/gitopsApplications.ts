@@ -1110,23 +1110,19 @@ function requirePolicyTargetAuthority(
     .filter((row) => row.target_status === 'active')
     .map((row) => row.node_id);
 
-  if (nodeIds.length === 0) {
-    // Nothing is placed yet, so the set of nodes this policy could later reach
-    // is unknown, and a stack-scoped assignment is node-qualified so it cannot be
-    // resolved for a node that does not exist. Authorizing against the stack
-    // name here would therefore pass nobody, which leaves the application-wide
-    // grant as the only gate that can be evaluated at all.
-    //
-    // This is the same shape as the health policy write beside it, and it is
-    // deliberately not described as stricter than the per-target path: a
-    // role-based deployer holds a global grant and passes either way, and a
-    // stack-scoped operator passes neither here nor, before the first
-    // placement, anywhere. What it does mean is that configuring this on a
-    // fresh application is an administrator action, which is recorded as such
-    // rather than left to be discovered.
-    if (checkPermission(req, 'stack:deploy')) return true;
+  // The application-wide half, for the reason in the doc comment: a scoped
+  // operator must not be able to set a policy that then reaches nodes they hold
+  // no grant on.
+  if (!checkPermission(req, 'stack:deploy')) {
     res.status(403).json({ error: 'Permission denied for this application.', code: 'PERMISSION_DENIED' });
     return false;
+  }
+  if (nodeIds.length === 0) {
+    // Nothing is placed yet, so the set of nodes this policy could later reach is
+    // unknown and there is no per-target check to make. The application-wide gate
+    // above is then the whole gate, which is why configuring a policy on a fresh
+    // application is an administrator action.
+    return true;
   }
   for (const nodeId of nodeIds) {
     if (!requireDeployOnTarget(req, res, stackName, nodeId)) return false;

@@ -85,18 +85,23 @@ Drift is derived from what Sencho has recorded, so missing evidence is never rou
 
 Each of those is listed as a caveat under the state it applies to, on the Drift tab and in the application view, saying what could not be proven. The per-service digest view says the same in its own words: a target with no per-service evidence on either side says nothing rather than showing an empty comparison that would read as agreement.
 
-## The four policy domains
+## The policy domains
 
-A drift class reports; a policy decides. Four independent decisions cover the chain, and none of them authorizes another.
+A drift class reports; a policy decides. Each decision below is independent, and none of them authorizes another. Three of them answer the same question at three points in the chain: who is allowed to decide. The other two answer what happens after something has already gone wrong or already drifted.
 
 | Policy | Where it lives | What it governs |
 |---|---|---|
-| **Source policy** | Per Git source: review only, auto-write files, or auto-deploy. | How far Sencho goes on its own after a fetch: record the result only, write the files, or write them and deploy. A withdrawn stateful target always waits for you, whatever the source policy says. |
-| **Placement approval** | Per Blueprint rollout, in the rollout preview. | Which nodes may be placed or withdrawn. Nothing is placed or removed without it. |
+| **Source policy** | Per Git source: Manual, Review only, Auto-write files, or Auto-deploy. | How far Sencho goes on its own after a fetch. Manual takes the source out of the cadence entirely, so nothing happens until you ask for a pull. Review only records the result and waits for you. A withdrawn stateful target always waits for you, whatever the source policy says. |
+| **Placement policy** | Per application, beside the placement approval. | Which placement changes are approved without you. **Operator approves each change** is the only option unless you choose **One stateless change at a time**, and that option approves exactly one stateless addition or one stateless removal, falling back to you with a stated reason for everything else. |
+| **Rollout authorization policy** | Per application, in the rollout overflow. | Which rollouts are authorized without you. Nothing about placement is decided by it: a rollout cannot start before its placement is approved, whichever way this is set. |
 | **Drift mode** | Per Blueprint: Observe, Suggest, or Enforce. | What happens when the Blueprint's own drift is detected: surface it, notify you, or redeploy it. |
-| **Health gate** | Per stack, with a hold period. | Whether a deploy is allowed to finish before its containers prove healthy, and what a failure does next. |
+| **Health rollout policy** | Per application, beside the two above. | Whether a deploy must prove healthy before it is allowed to finish, and what a failure does next: observe, pause, retry once, stop, or roll back. |
 
 Two rules keep them honest. A digest repair redeploys against the approved identity rather than pulling whatever the tag now points at, and a stateful change always re-enters operator confirmation, whatever the drift mode says.
+
+Every rollout freezes the policy snapshot it executes, and every placement approval carries the snapshot that decided it. That is why a policy edit changes what the next decision may do and nothing else: no standing approval is withdrawn, no generation is invalidated, and the card for work already in flight says which value it was actually decided under rather than the one configured now.
+
+The three "who decides" policies are recorded together as one snapshot, so no reader can reach a single value that appears to govern more than one of them.
 
 ## Related
 
@@ -105,10 +110,10 @@ Two rules keep them honest. A digest repair redeploys against the approved ident
     The spatial layer: effective Compose model against the containers running now.
   </Card>
   <Card title="Git Sources" icon="git-branch" href="/features/git-sources">
-    Where source policy, commits, and acceptance live.
+    Where the source policy, commits, and acceptance live.
   </Card>
   <Card title="Blueprints" icon="layers" href="/features/blueprint-model">
-    Placement approval, drift modes, and digest drift on a fleet template.
+    Who decides each step, drift modes, and digest drift on a fleet template.
   </Card>
   <Card title="GitOps portfolio" icon="chart-pie" href="/features/gitops-portfolio">
     Every application in one table, with drift by class and the attention queue.

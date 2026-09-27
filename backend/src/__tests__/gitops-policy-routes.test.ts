@@ -183,16 +183,48 @@ describe('POST /api/gitops/applications/:id/placement-policy', () => {
     expect(GitOpsStore.getInstance().getApplication(seeded.applicationId)!.placement_policy).toBe('operator');
   });
 
-  it('lets a stack-scoped operator set it once every target is one they hold', async () => {
-    // The per-target gate, and the reason it is worth having: a policy that
-    // authorizes work on every target is refused unless the caller is entitled
-    // for all of them, and here they are.
+  it('refuses a stack-scoped operator, who could authorize work on nodes they cannot reach', async () => {
+    // The widening this closes. A policy governs every target of the application,
+    // so an operator scoped to one stack who sets it to automatic would authorize
+    // placements and rollouts on every other node, including nodes they hold no
+    // grant on. The per-target loop alone does not stop that, because the loop
+    // only checks the nodes that exist today and the policy applies to the ones
+    // that come next.
+    //
+    // The application-wide grant is required as well, which is the same
+    // requirement the health policy write beside it already carries.
     const seeded = await seedGitManagedBlueprint(1);
     const blueprintName = DatabaseService.getInstance().getBlueprint(seeded.blueprintId)!.name;
     await seedScopedDeployer(blueprintName, seeded.nodeIds[0]);
     const res = await request(app)
       .post(`/api/gitops/applications/bp:${seeded.blueprintId}/placement-policy`)
       .set('Cookie', scopedCookie)
+      .send({ policy: 'bounded_auto' });
+    expect(res.status).toBe(403);
+    expect(GitOpsStore.getInstance().getApplication(seeded.applicationId)!.placement_policy).toBe('operator');
+  });
+
+  it('refuses a stack-scoped operator for the rollout authorization policy too', async () => {
+    // Same reasoning, same requirement, and asserted separately so the two routes
+    // cannot drift into disagreeing about who may set what.
+    const seeded = await seedGitManagedBlueprint(1);
+    const blueprintName = DatabaseService.getInstance().getBlueprint(seeded.blueprintId)!.name;
+    await seedScopedDeployer(blueprintName, seeded.nodeIds[0]);
+    const res = await request(app)
+      .post(`/api/gitops/applications/bp:${seeded.blueprintId}/rollout/authorization-policy`)
+      .set('Cookie', scopedCookie)
+      .send({ policy: 'automatic' });
+    expect(res.status).toBe(403);
+    expect(GitOpsStore.getInstance().getApplication(seeded.applicationId)!.rollout_authorization_policy).toBe('manual');
+  });
+
+  it('lets a role-based deployer set it, since their grant is application-wide', async () => {
+    // The other half: the application-wide gate must not lock out the operator it
+    // is meant to admit, only the scoped one it is meant to exclude.
+    const seeded = await seedGitManagedBlueprint(1);
+    const res = await request(app)
+      .post(`/api/gitops/applications/bp:${seeded.blueprintId}/placement-policy`)
+      .set('Cookie', deployerCookie)
       .send({ policy: 'bounded_auto' });
     expect(res.status).toBe(200);
     expect(GitOpsStore.getInstance().getApplication(seeded.applicationId)!.placement_policy).toBe('bounded_auto');

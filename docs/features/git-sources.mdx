@@ -133,6 +133,7 @@ On disk, the primary file lands as the stack's `compose.yaml` and each additiona
 
 | Mode | What happens when a webhook fires |
 |------|-----------------------------------|
+| **Manual** | Nothing. Sencho does not fetch this source on its own, so it is not polled and is not joined to a webhook. The stack only changes when you ask Sencho to pull it. |
 | **Review only** | Sencho fetches and validates the incoming commit and marks the stack as having a pending update. You review the change plan and apply manually. |
 | **Auto-write files** | Sencho writes the new compose and env to disk automatically but does not redeploy. Use this when another process handles rollout. |
 | **Auto-deploy** | Sencho writes the files and immediately runs `docker compose up -d` so the stack picks up the new configuration. |
@@ -141,7 +142,9 @@ Auto-deploy implies Auto-write: you cannot deploy automatically without also wri
 
 You can always override on the spot: when you click **Apply** in the change plan, a **Deploy after apply** checkbox lets you deploy regardless of the configured mode.
 
-**Review only** maps to review policy. **Auto-write files** and **Auto-deploy** map to automatic policy. Suspend is the operator stop; there is no fourth Manual radio on the sheet.
+**Manual** is the absence of the cadence rather than a lighter form of review: the other three modes all fetch, and differ in who applies what they found. A manual source still responds when you ask for a pull from the sheet, so switching to it stops unattended movement without stranding you.
+
+**Suspend** pauses one source temporarily. **Manual** removes it from the cadence until you change it back, and is the right choice for a repository Sencho should only ever read at your request.
 
 Automatic modes carry one built-in safety check: when the incoming commit withdraws or renames a service that persists data (named volumes or bind mounts), or when Sencho cannot prove it does not, the change is held for review instead of being accepted or applied, and the stack shows a **stateful change blocked** attention state. The hold clears when you accept the change explicitly, dismiss it, or a newer commit is staged. Nothing is written or redeployed while it is held, so withdrawing a stateful service is always a deliberate choice.
 
@@ -153,7 +156,7 @@ Unattended fetches use a node-wide interval under **Settings → Stacks**. The c
 
 Linked sources with no override inherit this interval. There is no per-source interval knob on the Git Source sheet.
 
-Review-only sources still fetch on the schedule and stage a plan for review. Automatic sources (Auto-write or Auto-deploy) fetch and then follow the configured apply behavior.
+Manual sources are not polled at all, so the interval does not reach them. Review-only sources still fetch on the schedule and stage a plan for review. Automatic sources (Auto-write or Auto-deploy) fetch and then follow the configured apply behavior.
 
 ## Suspend, resume, and retry
 
