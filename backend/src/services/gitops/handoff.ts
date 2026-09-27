@@ -246,6 +246,19 @@ function liveRolloutBinding(app: GitOpsApplicationRow): FutureRolloutAuthorizati
 }
 
 /**
+ * Whether any live target of this application has an operation in flight.
+ *
+ * Read from the target rows rather than from the application pointer, because a
+ * target can be mid-deploy while the application itself has nothing running: the
+ * two are separate machines and only the target knows about its own apply.
+ */
+function hasTargetOperationInFlight(store: GitOpsStore, applicationId: string): boolean {
+  return store
+    .listTargets(applicationId)
+    .some((target) => target.target_status === 'active' && target.active_operation_stage !== null);
+}
+
+/**
  * Ensure a live rollout_authorization exists for the application, minting
  * one when every binding ingredient is present and registry preflight is ready.
  * Recomputes registry readiness on every call; remints when the fingerprint drifts.
@@ -259,19 +272,6 @@ function liveRolloutBinding(app: GitOpsApplicationRow): FutureRolloutAuthorizati
  * holding. Explicit operator authorizations do not pass it: the operator's own
  * decision is the authority there.
  */
-/**
- * Whether any live target of this application has an operation in flight.
- *
- * Read from the target rows rather than from the application pointer, because a
- * target can be mid-deploy while the application itself has nothing running: the
- * two are separate machines and only the target knows about its own apply.
- */
-function hasTargetOperationInFlight(store: GitOpsStore, applicationId: string): boolean {
-  return store
-    .listTargets(applicationId)
-    .some((target) => target.target_status === 'active' && target.active_operation_stage !== null);
-}
-
 export async function ensureRolloutAuthorization(
   applicationId: string,
   actor: string | null,

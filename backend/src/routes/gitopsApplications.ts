@@ -1046,21 +1046,6 @@ gitopsApplicationsRouter.post('/:id/rollout/pause', (req: Request, res: Response
 });
 
 /**
- * Set the health-and-rollout policy for one application.
- *
- * The policy is per application, not a global setting, and it is written through
- * its own endpoint because the write has a side effect the generic settings
- * route cannot express: it changes what the next rollout is authorized to do.
- *
- * It authorizes a future action on every frozen target, so every target is
- * checked before anything is written. That is deliberately stricter than the
- * application-wide `stack:deploy` the other rollout-lifecycle writes take: those
- * act on the application as a whole, while this one names in advance what the
- * system may do to each node's stack, including restoring a previous
- * generation. A bulk action that half-applies on a permission failure would
- * leave some targets on a policy the operator is not entitled to set for them.
- */
-/**
  * The gate for a policy write that names in advance what the system may do.
  *
  * Reused by the placement and rollout authorization policy routes, and shaped
@@ -1070,13 +1055,9 @@ gitopsApplicationsRouter.post('/:id/rollout/pause', (req: Request, res: Response
  * failure would leave some targets on a policy the operator is not entitled to
  * set for them.
  *
- * The empty-target-set case is the part the health policy route cannot reach and
- * a placement policy has to: a fresh application has no rollout target set yet,
- * which is exactly when an operator wants to choose the policy before the first
- * placement. Falling back to the application-wide grant there would lock out an
- * operator whose deploy grants are scoped to specific stacks, so the Blueprint's
- * own deploy stack name is used instead. It is known without an intent, from the
- * Blueprint row the id already resolved to.
+ * Configuring a policy on a fresh application, before any target exists, is an
+ * administrator action. That is a consequence of the shape rather than a choice
+ * made here, and is explained at the branch below.
  */
 function requirePolicyTargetAuthority(
     req: Request,
@@ -1215,6 +1196,21 @@ gitopsApplicationsRouter.post('/:id/rollout/authorization-policy', async (req: R
   res.json({ ok: true, policy });
 });
 
+/**
+ * Set the health-and-rollout policy for one application.
+ *
+ * The policy is per application, not a global setting, and it is written through
+ * its own endpoint because the write has a side effect the generic settings
+ * route cannot express: it changes what the next rollout is authorized to do.
+ *
+ * It authorizes a future action on every frozen target, so every target is
+ * checked before anything is written. That is deliberately stricter than the
+ * application-wide `stack:deploy` the other rollout-lifecycle writes take: those
+ * act on the application as a whole, while this one names in advance what the
+ * system may do to each node's stack, including restoring a previous
+ * generation. A bulk action that half-applies on a permission failure would
+ * leave some targets on a policy the operator is not entitled to set for them.
+ */
 gitopsApplicationsRouter.post('/:id/rollout/health-policy', async (req: Request, res: Response): Promise<void> => {
   const target = resolveAuthorityTarget(req, res);
   if (!target) return;
