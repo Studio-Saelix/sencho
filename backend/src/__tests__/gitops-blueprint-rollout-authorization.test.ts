@@ -79,6 +79,22 @@ function registryReadyTestDeps() {
   };
 }
 
+/**
+ * Reconstruction walks every authorized application in the DB, and earlier
+ * tests leave their fixtures behind, so a count assertion needs only this
+ * test's application to exist.
+ */
+function clearGitOpsState(): void {
+  const db = DatabaseService.getInstance().getDb();
+  for (const table of [
+    'gitops_target_current', 'gitops_history', 'gitops_approvals', 'gitops_rollout_generations',
+    'gitops_rollout_candidates', 'gitops_artifact_sets', 'gitops_generations',
+    'gitops_intent_revisions', 'gitops_applications',
+  ]) {
+    db.prepare(`DELETE FROM ${table}`).run();
+  }
+}
+
 beforeEach(() => {
   vi.restoreAllMocks();
   GitOpsStore.resetForTests();
@@ -295,21 +311,6 @@ describe('rollout pause holds execution', () => {
     return { operationId: randomUUID(), actor: 'tester', trigger: 'test', at: Date.now() };
   }
 
-  /**
-   * Reconstruction walks every authorized application in the DB, and earlier
-   * tests leave their fixtures behind, so a count assertion needs only this
-   * test's application to exist.
-   */
-  function clearGitOpsState(): void {
-    const db = DatabaseService.getInstance().getDb();
-    for (const table of [
-      'gitops_target_current', 'gitops_history', 'gitops_approvals', 'gitops_rollout_generations',
-      'gitops_rollout_candidates', 'gitops_artifact_sets', 'gitops_generations',
-      'gitops_intent_revisions', 'gitops_applications',
-    ]) {
-      db.prepare(`DELETE FROM ${table}`).run();
-    }
-  }
 
   it('blocks a dispatch while the application is paused', async () => {
     clearGitOpsState();
@@ -660,13 +661,16 @@ describe('backfillMissingPreflightEvaluations', () => {
   it('re-evaluates several legacy apps at once and leaves every authorization live', async () => {
     const store = GitOpsStore.getInstance();
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    clearGitOpsState();
     const fixtures = Array.from({ length: 5 }, () => seedAuthorizedReadyApp());
     for (const fixture of fixtures) {
       expect((await ensureRolloutAuthorization(fixture.applicationId, 'tester')).ok).toBe(true);
     }
     // The shape this backfill exists for: live authorization, no stored evidence.
-    // Scoped to these fixtures so applications seeded by earlier cases, which do
-    // hold evidence, stay out of the backfill's candidate set.
+    // Scoped to these fixtures by the clear above. A case earlier in this file
+    // can hold a live authorization with no stored evidence, which is this same
+    // shape, and the backfill walks every authorized application it can see, so
+    // leaving those in would let another case decide this count.
     const placeholders = fixtures.map(() => '?').join(',');
     DatabaseService.getInstance().getDb().prepare(
       `UPDATE gitops_applications SET latest_preflight_evidence_json = NULL
