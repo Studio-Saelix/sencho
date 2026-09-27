@@ -28,7 +28,11 @@ import { sanitizeForLog } from '../../utils/safeLog';
 import { GitOpsStore } from './store';
 import { GitOpsTransitions, type EventEnvelope } from './transitions';
 import { newGitOpsId } from './directApplication';
-import { encodeGitOpsRequiredTargetsJson, decodeGitOpsRequiredTargetsJson } from './json';
+import {
+  decodeGitOpsRequiredTargetsJson,
+  encodeGitOpsApprovedTargetEffectJson,
+  encodeGitOpsRequiredTargetsJson,
+} from './json';
 import {
   decideBoundedAutoPlacement,
   type AffectedNodeState,
@@ -134,19 +138,43 @@ function deriveStatelessness(
 }
 
 /**
- * The worst state across every node the change touches.
+ * The worst state across the nodes an addition touches.
  *
- * Both sides of the change, not just the candidate: a withdrawal is about the
- * node being left, so probing only the candidate set would read a departing
- * node as fine when it was never looked at.
+ * An added node has no target row, and never will until the placement lands, so
+ * the target row cannot be the evidence here: reading it made every addition
+ * resolve to `unknown` and refused the whole feature. The node registry is the
+ * real evidence for a node that is about to receive a workload, and it is
+ * maintained rather than seeded, so a node is judged by whether it is registered
+ * and answering.
  *
- * `stale` is treated as unreachable rather than as good. It is a real recorded
- * state meaning the last observation has expired, and a decision about where to
- * put a workload must not treat expired evidence as a reachable node. Mapping it
- * to reachable would make the stale-node refusal unreachable for exactly the
- * targets it exists for.
+ * `stale` and `unreachable` both mean the node cannot be counted on, and
+ * `unknown` is not a pass either: a node that has not been seen is not a node
+ * this system may place a workload on.
  */
-function worstNodeState(store: GitOpsStore, appId: string, nodeIds: readonly number[]): AffectedNodeState {
+function worstAddedNodeState(nodeIds: readonly number[]): AffectedNodeState {
+  if (nodeIds.length === 0) return 'reachable';
+  const db = DatabaseService.getInstance().getDb();
+  for (const nodeId of nodeIds) {
+    const node = db.prepare('SELECT status FROM nodes WHERE id = ?').get(nodeId) as
+      | { status: string }
+      | undefined;
+    if (!node) return 'unknown';
+    if (node.status !== 'online') return 'unreachable';
+  }
+  return 'reachable';
+}
+
+/**
+ * The worst state across the nodes a removal touches.
+ *
+ * Here the target row is the right evidence, because the workload being left
+ * behind ran on that node, so a real observation of it exists. `stale` is treated
+ * as unreachable: it is a recorded state meaning the last observation expired, and
+ * a decision about withdrawing from a node must not treat expired evidence as a
+ * reachable one.
+ */
+function worstRemovedNodeState(store: GitOpsStore, appId: string, nodeIds: readonly number[]): AffectedNodeState {
+  if (nodeIds.length === 0) return 'reachable';
   let worst: AffectedNodeState = 'reachable';
   for (const nodeId of nodeIds) {
     const target = store.getTarget(appId, nodeId);
@@ -156,6 +184,13 @@ function worstNodeState(store: GitOpsStore, appId: string, nodeIds: readonly num
     if (connectivity === 'unknown' || connectivity === null) worst = 'unknown';
   }
   return worst;
+}
+
+/** The worse of two states, ordered reachable < unknown < unreachable. */
+function worseState(a: AffectedNodeState, b: AffectedNodeState): AffectedNodeState {
+  if (a === 'unreachable' || b === 'unreachable') return 'unreachable';
+  if (a === 'unknown' || b === 'unknown') return 'unknown';
+  return 'reachable';
 }
 
 /** Whether any of these nodes is cordoned for new placements. */
@@ -253,8 +288,13 @@ export function applyAutomaticPlacement(
     // here would let an automatic approval place a workload onto a cordoned node
     // while the decision carried a refusal nobody could ever reach.
     cordonOverride: hasCordonOverride(additions),
-    // Both sides, because a withdrawal is about the node being left.
-    affectedNodeState: worstNodeState(store, app.id, [...additions, ...removals]),
+    // Each side judged by the evidence that actually exists for it: a node being
+    // added is known from the registry, a node being left is known from the
+    // observation of the workload that ran there.
+    affectedNodeState: worseState(
+      worstAddedNodeState(additions),
+      worstRemovedNodeState(store, app.id, removals),
+    ),
     conflictingOperation: app.active_operation_stage !== null,
     evidenceReadable: baseline.ok,
     evidenceWellFormed,
@@ -272,10 +312,17 @@ export function applyAutomaticPlacement(
     // A single stateless change approves exactly the target set the candidate
     // asked for, so the effect is derived here from that same set rather than
     // from anything a client supplied.
-    const placed = decision.effect.additions.map((nodeId) => ({ nodeId, outcome: 'place' as const }));
-    const removed = decision.effect.removals.map((nodeId) => ({ nodeId, outcome: 'remove' as const }));
-    const effect = [...placed, ...removed];
-    const blastJson = JSON.stringify({ entries: effect });
+    //
+    // Encoded through the shared encoder rather than assembled by hand. A
+    // hand-built object was rejected by the transition's own decode, and because
+    // that refusal is the safe direction it surfaced only as an operator review
+    // with no approval ever landing, which is how a feature can look wired up
+    // while doing nothing.
+    const effect = [
+      ...decision.effect.additions.map((nodeId) => ({ nodeId, outcome: 'place' as const })),
+      ...decision.effect.removals.map((nodeId) => ({ nodeId, outcome: 'remove' as const })),
+    ];
+    const blastJson = encodeGitOpsApprovedTargetEffectJson(effect);
     GitOpsTransitions.getInstance().placementApproved({
       applicationId: app.id,
       approvalId: newGitOpsId(),
