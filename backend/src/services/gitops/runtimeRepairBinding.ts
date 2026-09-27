@@ -37,7 +37,12 @@ export type RuntimeRepairHoldReason =
   /** A previous mutation on this target was interrupted, so its state is not known. */
   | 'target_interrupted'
   /** A recovery or rollback owns this target, and a repair would race it. */
-  | 'recovery_bound';
+  | 'recovery_bound'
+  /**
+   * The Blueprint's classification forbids an automatic repair, so the drift
+   * policy declines it whatever the runtime evidence says.
+   */
+  | 'classification_forbids_repair';
 
 export type RuntimeRepairBinding =
   | {
@@ -76,10 +81,16 @@ export function resolveRuntimeRepairBinding(
   if (target.interruption_stage !== null) {
     return { kind: 'hold', reason: 'target_interrupted' };
   }
+  // Every state below means another writer owns this target's next mutation: a
+  // recovery in progress, a partial rollout, an LKG that cannot be reached, or a
+  // rollout waiting on a health verdict. A repair that raced any of them would
+  // fight the writer that already holds the target.
   if (
     target.health_stop_reason === 'rollback_pending'
     || target.partial_json !== null
     || target.lkg_unavailable_at !== null
+    || target.recovery_phase !== null
+    || target.pending_health_run_id !== null
   ) {
     return { kind: 'hold', reason: 'recovery_bound' };
   }
@@ -166,5 +177,7 @@ export function describeRuntimeRepairHold(reason: RuntimeRepairHoldReason): stri
       return 'an earlier change to this target was interrupted, so what is running is not known';
     case 'recovery_bound':
       return 'a recovery or rollback owns this target, so an auto-fix would race it';
+    case 'classification_forbids_repair':
+      return 'this Blueprint is stateful or cannot be classified, so auto-fix is declined to avoid touching data Sencho cannot prove is safe';
   }
 }

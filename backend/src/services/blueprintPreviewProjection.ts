@@ -494,6 +494,13 @@ function projectActions(
             } else if (status === 'active') {
                 const action = driftCheckAction(blueprint.drift_mode);
                 push(node, action, driftCheckSeverity(action), 'Active deployment check');
+            } else if (status === 'repair_held') {
+                // A held target is still being checked, and the hold is a state
+                // rather than a latch, so the preview offers the same check an
+                // active row gets. Omitting it would make a target Sencho is
+                // actively declining to repair look untracked.
+                const action = driftCheckAction(blueprint.drift_mode);
+                push(node, action, driftCheckSeverity(action), 'Repair held; recheck pending');
             }
         } else {
             if (status === 'withdrawn') continue;

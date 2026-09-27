@@ -35,9 +35,17 @@ export type BlueprintDeploymentCause =
   | 'await_evict_confirm'
   | 'drift_observed'
   | 'drift_enforce_start'
+  | 'drift_cleared'
   | 'drift_repair_held';
 
-/** Causes that only observe, and must never acknowledge or mint anything. */
+/**
+ * Causes that only observe, and must never acknowledge or mint anything.
+ *
+ * `drift_cleared` is the absence of a change rather than an observation of one:
+ * a check found the target already matched, so the row moves back to active
+ * without anything being written to the node. It records no history, because
+ * there is no operation to attribute the move to.
+ */
 const OBSERVATION_STAGE = {
   await_state_review: 'blueprint_state_review',
   await_evict_confirm: 'blueprint_evict_blocked',
@@ -45,6 +53,9 @@ const OBSERVATION_STAGE = {
   drift_enforce_start: 'blueprint_correcting',
   drift_repair_held: 'blueprint_repair_held',
 } as const;
+
+/** Causes that move the row but record nothing: nothing was written to a node. */
+const NON_RECORDING_CAUSES: ReadonlySet<BlueprintDeploymentCause> = new Set(['drift_cleared']);
 
 type ObservationCause = keyof typeof OBSERVATION_STAGE;
 
@@ -113,6 +124,8 @@ function record(
   if (!recordableApplication(app)) return;
 
   const envelope = envelopeFor(actor, `blueprint_${cause}`);
+
+  if (NON_RECORDING_CAUSES.has(cause)) return;
 
   if (isObservation(cause)) {
     // Observations are the only causes the status guard applies to. A start
