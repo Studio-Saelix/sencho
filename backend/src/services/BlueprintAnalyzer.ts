@@ -220,6 +220,15 @@ export class BlueprintAnalyzer {
      * to guard them, not to ignore them. Null when the content does not parse,
      * so callers can hold rather than read a parse failure as "nothing
      * stateful here".
+     *
+     * Null also covers content this function cannot fully resolve: a YAML merge
+     * key, an `include`, an `extends`, a `volumes_from`, or a document with no
+     * services. Each can attach a mount to a service whose own block mentions
+     * none, and a merge key is the sharpest case, because the anchored service
+     * is found while the service merging it is not, so the volume is attributed
+     * to the wrong service and the other reads clean. "Cannot prove stateless"
+     * and "is stateless" are different answers and only one of them is safe to
+     * act on.
      */
     static statefulServiceNames(composeContent: string): Set<string> | null {
         let parsed: unknown;
@@ -230,7 +239,11 @@ export class BlueprintAnalyzer {
         }
         if (parsed == null || typeof parsed !== 'object') return null;
         const doc = parsed as ComposeShape;
+        if (BlueprintAnalyzer.hasUnresolvableComposeConstruct(doc)) return null;
         const services = doc.services ?? {};
+        // Nothing to place is not the same as proven stateless, and a caller
+        // deciding whether a placement is safe should not have to tell them apart.
+        if (!services || Object.keys(services).length === 0) return null;
         const out = new Set<string>();
         for (const [serviceName, serviceDef] of Object.entries(services)) {
             if (!serviceDef || typeof serviceDef !== 'object') continue;
@@ -248,6 +261,30 @@ export class BlueprintAnalyzer {
             }
         }
         return out;
+    }
+
+    /**
+     * Whether the document uses a construct whose volumes cannot be resolved from
+     * this text alone.
+     *
+     * `include` and `extends` name another file, and a merge key and
+     * `volumes_from` borrow another service's definition, so in every case the
+     * mounts of the real workload are somewhere this function cannot see. There
+     * is no partial answer worth returning: a set naming only the services it
+     * could see reads as permission for the ones it could not, which is how a
+     * data-bearing service ends up classified stateless.
+     */
+    private static hasUnresolvableComposeConstruct(doc: ComposeShape): boolean {
+        if ('include' in doc) return true;
+        const services = doc.services;
+        if (!services || typeof services !== 'object') return false;
+        for (const serviceDef of Object.values(services)) {
+            if (!serviceDef || typeof serviceDef !== 'object') continue;
+            if ('<<' in serviceDef || 'extends' in serviceDef || 'volumes_from' in serviceDef) {
+                return true;
+            }
+        }
+        return false;
     }
 
     static extractImageRefs(composeContent: string): string[] {
