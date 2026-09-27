@@ -23,7 +23,7 @@ import { BlueprintReconciler } from '../services/BlueprintReconciler';
 import { projectApplication } from '../services/gitops/derive';
 import { latestTransitionByApplication } from '../services/gitops/history';
 import { classifySourceRow, satisfiesGitOpsRead } from '../services/gitops/readAuth';
-import { healthGateDisabled, NOT_APPLICABLE_REVISION, stackResourceSet } from '../helpers/gitopsResponse';
+import { healthGateDisabled, NOT_APPLICABLE_REVISION, projectStackRevision, stackResourceSet } from '../helpers/gitopsResponse';
 import { buildBlueprintPreview, type BlueprintPreviewResult } from '../services/blueprintPreviewProjection';
 import {
   confirmableActionsEqual,
@@ -41,6 +41,7 @@ import {
   resolveRollbackTargets,
   restoreTargetToGeneration,
   rollbackCandidatesForApplication,
+  rolloutTargetSet,
   type RestoreTargetOutcome,
   type RolloutRollbackScope,
   type RolloutRollbackTargetResult,
@@ -48,9 +49,11 @@ import {
 import { placementEffectCompatible } from '../services/gitops/store';
 import { GitOpsTransitions, GitOpsTransitionError } from '../services/gitops/transitions';
 import { newGitOpsId } from '../services/gitops/directApplication';
+import { HEALTH_ROLLOUT_POLICIES, isHealthRolloutPolicy } from '../services/gitops/healthPolicy';
 import {
   buildAcceptedGeneration,
   ensureRolloutAuthorization,
+  frozenStrategyFor,
 } from '../services/gitops/handoff';
 import { GitSourceService } from '../services/GitSourceService';
 import { sanitizeForLog } from '../utils/safeLog';
@@ -59,7 +62,11 @@ import {
   fetchRemoteSourceRows,
   freshestFacetTimestamp,
   isUsableRevision,
+  POSTURE_RANK,
   rowFromProjection,
+  probeableRemoteNodeIds,
+  probeSilentNodeIds,
+  withSilentNodes,
 } from '../services/gitops/portfolioAggregator';
 import { filterRemoteIdentityPayload, rewriteIdentityPayload } from '../proxy/gitopsIdentityProxy';
 import { GitOpsStore } from '../services/gitops/store';
@@ -69,6 +76,7 @@ import type {
   GitOpsPortfolioFilters,
   GitOpsPortfolioResponse,
   GitOpsPortfolioRow,
+  GitOpsPortfolioTargetSummary,
 } from '../services/gitops/portfolioTypes';
 import type { GitOpsApplicationRow, GitOpsDriftItem } from '../services/gitops/types';
 
@@ -153,7 +161,7 @@ function parseFilters(query: Request['query']): ParseResult {
     const raw = stringParam(query[key]);
     if (raw === undefined) return null;
     const parsed = Number(raw);
-    return Number.isSafeInteger(parsed) ? parsed : 'invalid';
+    return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : 'invalid';
   };
   const nodeId = intParam('nodeId');
   if (nodeId === 'invalid') return { ok: false, message: 'nodeId must be an integer' };
@@ -173,6 +181,7 @@ function parseFilters(query: Request['query']): ParseResult {
     ok: true,
     filters: {
       q: stringParam(query.q),
+      stack: stringParam(query.stack),
       attentionOnly: stringParam(query.attention) === '1',
       targetMode: targetModeRaw as GitOpsPortfolioFilters['targetMode'],
       nodeId: nodeId ?? undefined,
@@ -188,7 +197,12 @@ function parseFilters(query: Request['query']): ParseResult {
   };
 }
 
+function currentTargets(row: GitOpsPortfolioRow): GitOpsPortfolioTargetSummary[] {
+  return row.targets.filter(target => target.tombstoned === false);
+}
+
 function matchesFilters(row: GitOpsPortfolioRow, filters: GitOpsPortfolioFilters): boolean {
+  const targets = currentTargets(row);
   if (filters.attentionOnly && row.attention.length === 0) return false;
   if (filters.targetMode === 'direct' && row.targetMode !== 'direct') return false;
   if (filters.targetMode === 'blueprint' && row.targetMode !== 'blueprint' && row.targetMode !== 'inline_blueprint') return false;
@@ -196,21 +210,31 @@ function matchesFilters(row: GitOpsPortfolioRow, filters: GitOpsPortfolioFilters
   // Blueprint application belongs to every node its targets name, so filtering
   // by node never shrinks the fleet picture into per-node truth.
   if (filters.nodeId !== undefined) {
-    const involved = row.nodeId === filters.nodeId || row.targets.some(target => target.nodeId === filters.nodeId);
+    const involved = row.nodeId === filters.nodeId
+      || targets.some(target => target.nodeId === filters.nodeId);
     if (!involved) return false;
   }
   if (filters.blueprintId !== undefined && row.blueprintId !== filters.blueprintId) return false;
+  // Exact, unlike `q`: a stack-scoped entry point must not also match `web2` for `web`.
+  if (filters.stack !== undefined && row.stackName !== filters.stack) return false;
   if (filters.sourceStatus !== undefined && row.sourceStatus !== filters.sourceStatus) return false;
   if (filters.rolloutStatus !== undefined && row.rolloutStatus !== filters.rolloutStatus) return false;
   if (filters.healthStatus !== undefined && row.healthStatus !== filters.healthStatus) return false;
   if (filters.driftClass !== undefined && !row.drift.classes.includes(filters.driftClass)) return false;
-  if (filters.evidence === 'unknown' && !row.evidence.unknown) return false;
+  // An unknown connectivity grade is its own evidence grade, so it belongs in
+  // the unknown-evidence filter even when the row itself claims otherwise. The
+  // grade is read from connectivity rather than from the target's `evidence`
+  // string, which folds `unreachable` into `unknown` and would pull every
+  // unreachable row into this bucket.
+  if (filters.evidence === 'unknown'
+    && !row.evidence.unknown
+    && !targets.some(target => target.connectivity === 'unknown')) return false;
   if (filters.evidence === 'stale'
-    && !row.targets.some(target => target.evidence === 'stale')
+    && !targets.some(target => target.evidence === 'stale')
     && !row.attention.includes('target_stale')) return false;
   if (filters.evidence === 'unreachable'
     && row.evidence.unreachableNodes.length === 0
-    && !row.targets.some(target => target.connectivity === 'unreachable')) return false;
+    && !targets.some(target => target.connectivity === 'unreachable')) return false;
   if (filters.q !== undefined) {
     const needle = filters.q.toLowerCase();
     const haystack = [
@@ -224,15 +248,6 @@ function matchesFilters(row: GitOpsPortfolioRow, filters: GitOpsPortfolioFilters
   }
   return true;
 }
-
-const POSTURE_RANK: Record<GitOpsPortfolioRow['posture'], number> = {
-  failed: 0,
-  attention: 1,
-  in_progress: 2,
-  unknown: 3,
-  converged_qualified: 4,
-  converged: 5,
-};
 
 function sortRows(rows: GitOpsPortfolioRow[], filters: GitOpsPortfolioFilters): GitOpsPortfolioRow[] {
   const sign = filters.dir === 'desc' ? -1 : 1;
@@ -260,6 +275,7 @@ function sortRows(rows: GitOpsPortfolioRow[], filters: GitOpsPortfolioFilters): 
  */
 function summarize(rows: GitOpsPortfolioRow[]): GitOpsPortfolioResponse['summary'] {
   const byReason: GitOpsPortfolioResponse['summary']['byReason'] = {};
+  const attentionByNode: Record<string, number> = {};
   let attentionRequired = 0;
   let failed = 0;
   let inProgress = 0;
@@ -276,6 +292,13 @@ function summarize(rows: GitOpsPortfolioRow[]): GitOpsPortfolioResponse['summary
     else if (row.posture === 'unknown') unknown += 1;
     if (row.drift.count > 0) drifted += 1;
     for (const reason of row.attention) byReason[reason] = (byReason[reason] ?? 0) + 1;
+    if (row.attention.length > 0) {
+      // Same involvement rule as the node filter, so a node's count matches
+      // what the portfolio lists when filtered to that node.
+      const involved = new Set(currentTargets(row).map(target => target.nodeId));
+      if (row.nodeId !== null) involved.add(row.nodeId);
+      for (const nodeId of involved) attentionByNode[nodeId] = (attentionByNode[nodeId] ?? 0) + 1;
+    }
   }
   return {
     applications: rows.length,
@@ -287,6 +310,7 @@ function summarize(rows: GitOpsPortfolioRow[]): GitOpsPortfolioResponse['summary
     unknown,
     drifted,
     byReason,
+    attentionByNode,
   };
 }
 
@@ -351,15 +375,50 @@ type ParsedId =
 function parsePortfolioId(raw: string): ParsedId {
   const blueprint = /^bp:(\d+)$/.exec(raw);
   if (blueprint) {
-    return { kind: 'blueprint', blueprintId: Number(blueprint[1]) };
+    const blueprintId = Number(blueprint[1]);
+    return Number.isSafeInteger(blueprintId) && blueprintId > 0
+      ? { kind: 'blueprint', blueprintId }
+      : { kind: 'invalid' };
   }
   const direct = /^(\d+):(.+)$/.exec(raw);
-  if (direct) return { kind: 'direct', nodeId: Number(direct[1]), applicationId: direct[2] };
+  if (direct) {
+    const nodeId = Number(direct[1]);
+    return Number.isSafeInteger(nodeId) && nodeId > 0
+      ? { kind: 'direct', nodeId, applicationId: direct[2] }
+      : { kind: 'invalid' };
+  }
   return { kind: 'invalid' };
 }
 
 function nodeNameMap(db: DatabaseService, maySeeNodeNames: boolean): Map<number, string | null> {
   return new Map(db.getNodes().map(node => [node.id, maySeeNodeNames ? node.name ?? null : null]));
+}
+
+/** Detail for a legacy id, local or remote: the row predates the revision model, so it reports the not-applicable projection. */
+function legacyDetailResponse(
+  id: string,
+  stackName: string,
+  nodeId: number,
+  nodeNames: Map<number, string | null>,
+  updatedAt: number | null,
+): GitOpsPortfolioDetailResponse {
+  return {
+    schemaVersion: 1,
+    generatedAt: Date.now(),
+    application: rowFromProjection({
+      id,
+      projection: NOT_APPLICABLE_REVISION,
+      name: stackName,
+      stackName,
+      blueprintId: null,
+      nodeId,
+      nodeName: nodeNames.get(nodeId) ?? null,
+      lastActivityAt: updatedAt,
+      partialNodes: [],
+      nodeNames,
+    }),
+    projection: NOT_APPLICABLE_REVISION,
+  };
 }
 
 type AuthorityTarget = { application: GitOpsApplicationRow; blueprint: Blueprint };
@@ -494,7 +553,28 @@ gitopsApplicationsRouter.get('/:id', async (req: Request, res: Response): Promis
         res.status(404).json({ error: 'Application not found' });
         return;
       }
-      const projection = projectApplication(application.id, healthGateDisabled());
+      // A Blueprint target is projected hub-side, and its recorded observation
+      // is a statement about the last time that node answered. Probing the
+      // remote target nodes here is what keeps this panel in step with the
+      // portfolio row: a node that has gone dark withdraws the settled claim in
+      // both places instead of leaving the row and its own detail in
+      // contradiction.
+      //
+      // Only nodes the portfolio also probes are asked, through the same shared
+      // set, so the two surfaces cannot answer differently about the hub itself
+      // or about a target whose node row is gone. The probe is bounded to this
+      // application's remote targets and runs concurrently, so it costs one
+      // round trip's worst case, bounded by the shared probe timeout, rather
+      // than a fleet sweep.
+      const rawProjection = projectApplication(application.id, healthGateDisabled());
+      const probeable = probeableRemoteNodeIds();
+      const silent = await probeSilentNodeIds(
+        rawProjection.targets
+          .filter(target => !target.tombstoned)
+          .map(target => target.nodeId)
+          .filter(nodeId => probeable.has(nodeId)),
+      );
+      const projection = withSilentNodes(rawProjection, silent);
       const blueprint = db.getBlueprint(application.blueprint_id);
       const lastActivityAt = latestTransitionByApplication(db.getDb(), [application.id]).get(application.id) ?? null;
       const response: GitOpsPortfolioDetailResponse = {
@@ -523,6 +603,28 @@ gitopsApplicationsRouter.get('/:id', async (req: Request, res: Response): Promis
     }
 
     const localNodeId = NodeRegistry.getInstance().getDefaultNodeId();
+    if (parsedId.nodeId === localNodeId && parsedId.applicationId.startsWith('legacy:')) {
+      // The hub's own legacy row: a Git source with no application behind it.
+      // Same resolution and authorization as the list, and the same
+      // not-applicable projection the remote legacy branch reports.
+      const legacyStack = parsedId.applicationId.slice('legacy:'.length);
+      const source = db.getGitSource(legacyStack);
+      if (
+        !source
+        || projectStackRevision(legacyStack) !== NOT_APPLICABLE_REVISION
+        || !satisfiesGitOpsRead(req, classifySourceRow({
+          stackName: legacyStack,
+          gitopsRevision: NOT_APPLICABLE_REVISION,
+          stackResourcePresent: (await stackResourceSet(req.nodeId)).has(legacyStack),
+        }))
+      ) {
+        res.status(404).json({ error: 'Application not found' });
+        return;
+      }
+      res.json(legacyDetailResponse(id, legacyStack, localNodeId, nodeNames, source.updated_at));
+      return;
+    }
+
     if (parsedId.nodeId === localNodeId) {
       const application = store.getApplication(parsedId.applicationId);
       const stackName = application?.stack_name ?? null;
@@ -587,7 +689,7 @@ gitopsApplicationsRouter.get('/:id', async (req: Request, res: Response): Promis
     const filtered = filterRemoteIdentityPayload(
       '/git-sources',
       rows,
-      (requirement) => satisfiesGitOpsRead(req, requirement),
+      (requirement, nodeId) => satisfiesGitOpsRead(req, requirement, nodeId),
       parsedId.nodeId,
     );
     const candidates = Array.isArray(filtered) ? filtered.filter(isRecord) : [];
@@ -603,24 +705,10 @@ gitopsApplicationsRouter.get('/:id', async (req: Request, res: Response): Promis
         res.status(404).json({ error: 'Application not found' });
         return;
       }
-      const response: GitOpsPortfolioDetailResponse = {
-        schemaVersion: 1,
-        generatedAt: Date.now(),
-        application: rowFromProjection({
-          id,
-          projection: NOT_APPLICABLE_REVISION,
-          name: legacyStack,
-          stackName: legacyStack,
-          blueprintId: null,
-          nodeId: parsedId.nodeId,
-          nodeName,
-          lastActivityAt: typeof match.updated_at === 'number' ? match.updated_at : null,
-          partialNodes: [],
-          nodeNames,
-        }),
-        projection: NOT_APPLICABLE_REVISION,
-      };
-      res.json(response);
+      res.json(legacyDetailResponse(
+        id, legacyStack, parsedId.nodeId, nodeNames,
+        typeof match.updated_at === 'number' ? match.updated_at : null,
+      ));
       return;
     }
 
@@ -628,6 +716,21 @@ gitopsApplicationsRouter.get('/:id', async (req: Request, res: Response): Promis
       row => isUsableRevision(row.gitopsRevision) && row.gitopsRevision.applicationId === parsedId.applicationId,
     );
     if (!match || !isUsableRevision(match.gitopsRevision)) {
+      const namesApplication = candidates.some(row => {
+        if (!isRecord(row.gitopsRevision) || row.gitopsRevision.applicationId !== parsedId.applicationId) return false;
+        const applicationId = row.gitopsRevision.applicationId;
+        return typeof applicationId === 'string'
+          && applicationId.length > 0
+          && !applicationId.startsWith('legacy:')
+          && !applicationId.startsWith('bp:');
+      });
+      if (namesApplication) {
+        res.status(503).json({
+          error: 'The owning node has not reported usable evidence for this application yet',
+          code: 'evidence_unavailable',
+        });
+        return;
+      }
       res.status(404).json({ error: 'Application not found' });
       return;
     }
@@ -644,8 +747,6 @@ gitopsApplicationsRouter.get('/:id', async (req: Request, res: Response): Promis
         blueprintId: projection.blueprintId,
         nodeId: parsedId.nodeId,
         nodeName,
-        // Same freshness derivation the list uses, so one application never
-        // reports different activity depending on which endpoint was asked.
         lastActivityAt: freshestFacetTimestamp(projection),
         partialNodes: [],
         nodeNames,
@@ -805,7 +906,7 @@ gitopsApplicationsRouter.post('/:id/placement/approve', async (req: Request, res
       envelope: { operationId: newGitOpsId(), actor, trigger: 'manual', at: Date.now() },
       rolloutGenerationId: newGitOpsId(),
       candidateId: candidate.id,
-      strategyJson: intent.rollout_strategy_json,
+      strategyJson: frozenStrategyFor(GitOpsStore.getInstance(), app, intent.id),
       provenance: 'placement_approval',
     });
   } catch (error) {
@@ -960,6 +1061,86 @@ gitopsApplicationsRouter.post('/:id/rollout/pause', (req: Request, res: Response
     return;
   }
   res.json({ ok: true });
+});
+
+/**
+ * Set the health-and-rollout policy for one application.
+ *
+ * The policy is per application, not a global setting, and it is written through
+ * its own endpoint because the write has a side effect the generic settings
+ * route cannot express: it changes what the next rollout is authorized to do.
+ *
+ * It authorizes a future action on every frozen target, so every target is
+ * checked before anything is written. That is deliberately stricter than the
+ * application-wide `stack:deploy` the other rollout-lifecycle writes take: those
+ * act on the application as a whole, while this one names in advance what the
+ * system may do to each node's stack, including restoring a previous
+ * generation. A bulk action that half-applies on a permission failure would
+ * leave some targets on a policy the operator is not entitled to set for them.
+ */
+gitopsApplicationsRouter.post('/:id/rollout/health-policy', async (req: Request, res: Response): Promise<void> => {
+  const target = resolveAuthorityTarget(req, res);
+  if (!target) return;
+  const policy = req.body?.policy;
+  if (!isHealthRolloutPolicy(policy)) {
+    res.status(400).json({
+      error: `policy must be one of: ${HEALTH_ROLLOUT_POLICIES.join(', ')}`,
+      code: 'HEALTH_POLICY_REFUSED',
+    });
+    return;
+  }
+
+  const app = target.application;
+  const store = GitOpsStore.getInstance();
+  const stackName = deployStackNameFor(app);
+  if (!stackName) {
+    res.status(409).json({
+      error: 'The deploy stack identity could not be resolved.',
+      code: 'HEALTH_POLICY_REFUSED',
+    });
+    return;
+  }
+  // The application-wide grant first, then the exact per-target checks. The
+  // application gate is not redundant: a target set can legitimately be empty
+  // (nothing placed yet, or every target retired), and a loop over no targets
+  // would authorize the write on its own absence. This write names in advance
+  // what the system may do to each stack, so it needs both.
+  // Per target, exactly, like the pause and resume routes beside it: an operator
+  // whose `stack:deploy` grants are scoped to specific stacks configures the
+  // policy for the targets they can deploy to. The fleet-wide grant is required
+  // only when there is no target to check, which is the same shape those routes
+  // use, so the three cannot drift apart.
+  const frozen = rolloutTargetSet(app);
+  const nodeIds = frozen?.nodeIds ?? store.listTargets(app.id)
+    .filter((row) => row.target_status === 'active')
+    .map((row) => row.node_id);
+  if (nodeIds.length === 0) {
+    if (!requirePermission(req, res, 'stack:deploy')) return;
+  } else {
+    for (const nodeId of nodeIds) {
+      if (!requireDeployOnTarget(req, res, stackName, nodeId)) return;
+    }
+  }
+
+  try {
+    GitOpsTransitions.getInstance().healthRolloutPolicySet({
+      applicationId: app.id,
+      policy,
+      envelope: authorityEnvelope(req),
+    });
+  } catch (error) {
+    if (error instanceof GitOpsTransitionError) {
+      res.status(409).json({ error: error.message, code: 'HEALTH_POLICY_REFUSED' });
+      return;
+    }
+    console.error(
+      '[GitOps authority] Health rollout policy change failed:',
+      sanitizeForLog(error instanceof Error ? error.message : String(error)),
+    );
+    res.status(500).json({ error: 'Failed to set the health rollout policy' });
+    return;
+  }
+  res.json({ ok: true, policy });
 });
 
 /**

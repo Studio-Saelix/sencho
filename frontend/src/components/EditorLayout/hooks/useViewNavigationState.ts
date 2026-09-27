@@ -37,16 +37,29 @@ export type NavItem = NavDestination;
 
 interface UseViewNavigationStateOptions {
   onNavigateToDashboard?: () => void;
+  /**
+   * A hub-only destination was requested while a remote node is active. The
+   * shell switches to the hub and runs `apply` once the switch lands, instead
+   * of setting a view the remote node hides.
+   */
+  onHubOnlyFromRemote?: (apply: () => void) => void;
   hasFleetCapability?: boolean;
   containerLabelsEnabled?: boolean;
 }
 
 export function useViewNavigationState(options?: UseViewNavigationStateOptions) {
-  const { onNavigateToDashboard, hasFleetCapability = false, containerLabelsEnabled = false } = options ?? {};
+  const { onNavigateToDashboard, onHubOnlyFromRemote, hasFleetCapability = false, containerLabelsEnabled = false } = options ?? {};
   const { isAdmin, can, permissionsStatus, permissions, user } = useAuth();
   const { isPaid, licenseStatus } = useLicense();
   const { activeNode } = useNodes();
   const isRemote = activeNode?.type === 'remote';
+  // Read by the navigate-event listener, which registers once.
+  const isRemoteRef = useRef(isRemote);
+  const onHubOnlyFromRemoteRef = useRef(onHubOnlyFromRemote);
+  useEffect(() => {
+    isRemoteRef.current = isRemote;
+    onHubOnlyFromRemoteRef.current = onHubOnlyFromRemote;
+  });
   const { experimental, experimentalReady } = useExperimental();
 
   const scheduledOpsAccessible = useMemo(() => canScheduleAny(
@@ -118,20 +131,18 @@ export function useViewNavigationState(options?: UseViewNavigationStateOptions) 
     const handler = (e: Event) => {
       const detail = (e as CustomEvent<SenchoNavigateDetail & { view: string }>).detail;
       if (!detail?.view) return;
-      if (detail.view === 'security') {
-        setSecurityTab(detail.tab ?? 'overview');
-        setActiveView('security');
+      const apply = () => {
+        if (detail.view === 'security') setSecurityTab(detail.tab ?? 'overview');
+        if (detail.view === 'fleet' && detail.fleetTab) setFleetActiveTab(detail.fleetTab);
+        setActiveView(detail.view as ActiveView);
         setFilterNodeId(detail.nodeId ?? null);
+      };
+      const switchToHub = onHubOnlyFromRemoteRef.current;
+      if (isRemoteRef.current && HUB_ONLY_VIEWS.has(detail.view as ActiveView) && switchToHub) {
+        switchToHub(apply);
         return;
       }
-      if (detail.view === 'fleet') {
-        if (detail.fleetTab) setFleetActiveTab(detail.fleetTab);
-        setActiveView('fleet');
-        setFilterNodeId(detail.nodeId ?? null);
-        return;
-      }
-      setActiveView(detail.view as ActiveView);
-      setFilterNodeId(detail.nodeId ?? null);
+      apply();
     };
     window.addEventListener(SENCHO_NAVIGATE_EVENT, handler);
     return () => window.removeEventListener(SENCHO_NAVIGATE_EVENT, handler);

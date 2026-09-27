@@ -280,6 +280,7 @@ function app(
     accepted_generation_id: generationId,
     candidate_plan_blocked: 0,
     review_required: 0,
+    review_block_reason: null,
     artifact_set_id: artifactSetId,
     latest_artifact_set_id: artifactSetId,
     intent_revision_id: null,

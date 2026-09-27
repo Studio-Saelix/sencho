@@ -209,6 +209,47 @@ export class BlueprintAnalyzer {
         return false;
     }
 
+    /**
+     * Names of services that declare a named volume or bind mount.
+     *
+     * The same mount classification `analyze` applies document-wide, kept
+     * per-service so a caller can diff one compose against another: a service
+     * whose name leaves this set between revisions is a withdrawal of whatever
+     * data it owned. External volumes count as stateful here even though
+     * `analyze` calls the document unknown: unproven portability is a reason
+     * to guard them, not to ignore them. Null when the content does not parse,
+     * so callers can hold rather than read a parse failure as "nothing
+     * stateful here".
+     */
+    static statefulServiceNames(composeContent: string): Set<string> | null {
+        let parsed: unknown;
+        try {
+            parsed = parseYaml(composeContent);
+        } catch {
+            return null;
+        }
+        if (parsed == null || typeof parsed !== 'object') return null;
+        const doc = parsed as ComposeShape;
+        const services = doc.services ?? {};
+        const out = new Set<string>();
+        for (const [serviceName, serviceDef] of Object.entries(services)) {
+            if (!serviceDef || typeof serviceDef !== 'object') continue;
+            for (const v of serviceDef.volumes ?? []) {
+                if (typeof v === 'string') {
+                    // A source-less entry such as "/data" is an anonymous
+                    // volume, but the mount target alone still marks a
+                    // data-bearing service, and `analyze` counts it too.
+                    if (v.split(':')[0]) out.add(serviceName);
+                } else if (v && typeof v === 'object') {
+                    const type = (v.type ?? '').toLowerCase();
+                    if (type === 'tmpfs') continue;
+                    if (type === 'bind' || type === 'volume' || v.source) out.add(serviceName);
+                }
+            }
+        }
+        return out;
+    }
+
     static extractImageRefs(composeContent: string): string[] {
         const doc = (parseYaml(composeContent) ?? {}) as ComposeShape;
         const services = doc.services ?? {};

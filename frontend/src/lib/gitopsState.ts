@@ -21,6 +21,7 @@ import {
   CircleHelp,
   CirclePause,
   CircleSlash,
+  Eye,
   CircleX,
   Clock,
   Download,
@@ -34,6 +35,10 @@ import {
   Fingerprint,
   KeyRound,
   MapPin,
+  OctagonX,
+  PauseCircle,
+  RotateCcw,
+  SkipForward,
   type LucideIcon,
 } from 'lucide-react';
 
@@ -47,6 +52,8 @@ import type {
   GitOpsRolloutStatus,
   GitOpsRuntimeStatus,
   GitOpsSourceStatus,
+  HealthRolloutPolicy,
+  HealthStopReason,
   PlacementFacet,
   RolloutFacet,
   SourceFacet,
@@ -623,14 +630,21 @@ export const RUNTIME_STATE: Record<GitOpsRuntimeStatus, GitOpsStateMeta> = {
  * makes the miss a fact TypeScript produces, so the guard on it cannot be
  * mistaken for dead code and deleted.
  *
- * Same objects, no copy, no cast: a total record over string-literal keys is
- * assignable to a partial record over `string`.
+ * Each map loses its prototype, so an inherited key such as `toString` reads
+ * as a miss here rather than resolving to a function the caller would treat as
+ * metadata. The maps are module-local and read-only to every consumer, so
+ * mutating them once at construction is safe.
  */
-export const SOURCE_STATE_LOOKUP: Partial<Record<string, GitOpsStateMeta>> = SOURCE_STATE;
-export const ARTIFACT_STATE_LOOKUP: Partial<Record<string, GitOpsStateMeta>> = ARTIFACT_STATE;
-export const PLACEMENT_STATE_LOOKUP: Partial<Record<string, GitOpsStateMeta>> = PLACEMENT_STATE;
-export const ROLLOUT_STATE_LOOKUP: Partial<Record<string, GitOpsStateMeta>> = ROLLOUT_STATE;
-export const RUNTIME_STATE_LOOKUP: Partial<Record<string, GitOpsStateMeta>> = RUNTIME_STATE;
+function stateLookup<T extends Record<string, GitOpsStateMeta>>(states: T): Readonly<Partial<Record<string, GitOpsStateMeta>>> {
+  Object.setPrototypeOf(states, null);
+  return states;
+}
+
+export const SOURCE_STATE_LOOKUP = stateLookup(SOURCE_STATE);
+export const ARTIFACT_STATE_LOOKUP = stateLookup(ARTIFACT_STATE);
+export const PLACEMENT_STATE_LOOKUP = stateLookup(PLACEMENT_STATE);
+export const ROLLOUT_STATE_LOOKUP = stateLookup(ROLLOUT_STATE);
+export const RUNTIME_STATE_LOOKUP = stateLookup(RUNTIME_STATE);
 
 /** Card copy for a placement facet. Preflight blocked uses the redacted server reason as the line. */
 export function placementStateMeta(facet: PlacementFacet): GitOpsStateMeta | undefined {
@@ -755,8 +769,165 @@ export function liveCaveats(revision: GitOpsRevisionProjection): readonly GitOps
   return revision.targetMode === 'not_applicable' ? [] : revision.limitations;
 }
 
+/**
+ * The class name a drift item is shown under. The backend class is an
+ * identifier, and one of them is not a word a reader should have to decode, so
+ * every surface that prints a class reads it from here. The map is keyed by
+ * string because the classes arrive over the wire: a class this build does not
+ * know is shown as itself rather than hidden.
+ */
+const DRIFT_CLASS_LABELS: Readonly<Record<string, string>> = {
+  source: 'source',
+  managed_project: 'managed project',
+  invocation: 'invocation',
+  placement: 'placement',
+  rollout: 'rollout',
+  runtime: 'runtime',
+  health: 'health',
+};
+
+export function driftClassLabel(className: string): string {
+  return Object.hasOwn(DRIFT_CLASS_LABELS, className) ? DRIFT_CLASS_LABELS[className] : className;
+}
+
+/**
+ * What each health-and-rollout policy does, in the operator's terms.
+ *
+ * Every entry states the default, because a rollout that has never had a policy
+ * chosen is already running under it, and an operator reading the control needs
+ * to know that choosing nothing is not choosing nothing.
+ */
+export const HEALTH_ROLLOUT_POLICY_STATE: Record<HealthRolloutPolicy, GitOpsStateMeta> = {
+  observe: {
+    label: 'observe',
+    tone: 'neutral',
+    line: 'Record each target\u2019s health outcome and keep deploying the rest regardless. The default.',
+    icon: Eye,
+  },
+  pause: {
+    label: 'pause',
+    tone: 'warning',
+    line: 'Stop before the next target when one fails or its health cannot be confirmed.',
+    icon: PauseCircle,
+  },
+  retry_once: {
+    label: 'retry once',
+    tone: 'brand',
+    line: 'Deploy the same generation to a failed target one more time, then pause.',
+    icon: RotateCcw,
+  },
+  stop: {
+    label: 'stop',
+    tone: 'destructive',
+    line: 'Stop the rest of the rollout when a target fails. Already deployed targets stay as they are.',
+    icon: OctagonX,
+  },
+  rollback: {
+    label: 'rollback',
+    tone: 'destructive',
+    line: 'Restore a failed target to the generation it ran before this rollout, then stop the rest.',
+    icon: Undo2,
+  },
+};
+
+/**
+ * Why a rollout stopped advancing, and what it means for this target.
+ *
+ * A reason nobody can act on is worse than none, so an unknown or a passed
+ * reason is stated as such rather than dressed up.
+ */
+export const HEALTH_STOP_REASON_STATE: Record<HealthStopReason, GitOpsStateMeta> = {
+  health_passed: {
+    label: 'advanced',
+    tone: 'success',
+    line: 'This target passed and the rollout moved on to the next one.',
+    icon: Check,
+  },
+  health_failed: {
+    label: 'health failed',
+    tone: 'destructive',
+    line: 'The health run for this target failed.',
+    icon: CircleX,
+  },
+  health_unknown: {
+    label: 'health unknown',
+    tone: 'warning',
+    line: 'Health could not be confirmed. The rollout paused rather than assume the target is healthy.',
+    icon: CircleHelp,
+  },
+  health_retried: {
+    label: 'retrying',
+    tone: 'brand',
+    line: 'This target failed once and is being deployed again with the same generation.',
+    icon: RotateCcw,
+  },
+  health_retry_exhausted: {
+    label: 'retry exhausted',
+    tone: 'warning',
+    line: 'This target already used its one retry and failed again, so the rollout paused.',
+    icon: PauseCircle,
+  },
+  rollout_stopped: {
+    label: 'rollout stopped',
+    tone: 'destructive',
+    line: 'A target failed and the rest of the rollout was stopped. Already deployed targets are unchanged.',
+    icon: OctagonX,
+  },
+  rollback_pending: {
+    label: 'roll back pending',
+    tone: 'warning',
+    line: 'A roll back was decided for this target and has not finished. It will not be resumed away.',
+    icon: RotateCcw,
+  },
+  stop_acknowledged: {
+    label: 'stopped, resumed',
+    tone: 'neutral',
+    line: 'The rollout policy finished with this target, and the rollout was resumed past it.',
+    icon: SkipForward,
+  },
+  rollback_completed: {
+    label: 'rolled back',
+    tone: 'neutral',
+    line: 'This target was put back on the generation it ran before this rollout.',
+    icon: RotateCcw,
+  },
+  rollback_unavailable: {
+    label: 'recovery required',
+    tone: 'destructive',
+    line: 'This target failed and no pre-rollout generation was captured, so nothing was restored automatically.',
+    icon: TriangleAlert,
+  },
+};
+
+/**
+ * The identity kinds this build has wording for.
+ *
+ * Typed as a total record rather than a set so the compiler rejects it the
+ * moment a kind is added to the union and forgotten here.
+ */
+const IDENTITY_REF_KINDS: Readonly<Record<GitOpsIdentityRef['kind'], true>> = {
+  none: true,
+  unknown: true,
+  commit: true,
+  generation: true,
+  artifact_set: true,
+  runtime_artifact: true,
+  intent: true,
+  rollout_candidate: true,
+  rollout_generation: true,
+  invocation: true,
+  health_run: true,
+};
+
 /** One short line naming what an identity reference points at, for a drift comparison row. */
 export function identityRefLabel(ref: GitOpsIdentityRef): string {
+  // `GitOpsIdentityRef` is a closed union, so the switch below is exhaustive by
+  // type. The value still crossed a network boundary and was accepted on its
+  // structure alone, so widen the kind once and name an unfamiliar one rather
+  // than rendering nothing. `Object.hasOwn` so an inherited key is not a known
+  // kind.
+  const kind: string = ref.kind;
+  if (!Object.hasOwn(IDENTITY_REF_KINDS, kind)) return `unknown (${kind})`;
   switch (ref.kind) {
     case 'none':
       return 'none';

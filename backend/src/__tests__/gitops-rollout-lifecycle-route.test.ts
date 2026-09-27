@@ -204,6 +204,7 @@ function seedGitManagedBlueprint(opts: { nodeCount?: number } = {}): Seeded {
     latest_artifact_set_id: artifactId,
     source_acceptance_ref: acceptanceId,
     review_required: 0,
+    review_block_reason: null,
     source_policy: 'manual',
   };
   store.insertApplication(row);

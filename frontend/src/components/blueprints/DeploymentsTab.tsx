@@ -17,6 +17,12 @@ import { FleetTabHeading, FleetEmptyState } from '../fleet/FleetEmptyState';
 import { BlueprintDetail } from './BlueprintDetail';
 import { BlueprintEditor } from './BlueprintEditor';
 import { useAuth } from '@/context/AuthContext';
+import {
+    BLUEPRINT_INTENT_EVENT,
+    clearBlueprintIntent,
+    peekBlueprintIntent,
+    type BlueprintIntent,
+} from '@/lib/blueprintIntent';
 
 export function DeploymentsTab() {
     const { can } = useAuth();
@@ -26,9 +32,27 @@ export function DeploymentsTab() {
     const [distinctLabels, setDistinctLabels] = useState<string[]>([]);
     const [loading, setLoading] = useState(true);
     const [loadError, setLoadError] = useState<string | null>(null);
-    const [selectedId, setSelectedId] = useState<number | null>(null);
-    const [createOpen, setCreateOpen] = useState(false);
+    // Another surface (the GitOps workplace) may have asked for one Blueprint
+    // or the create dialog; a tab mounting because of it starts there.
+    const [initialIntent] = useState(peekBlueprintIntent);
+    const [selectedId, setSelectedId] = useState<number | null>(
+        initialIntent?.kind === 'open' ? initialIntent.blueprintId : null,
+    );
+    const [createOpen, setCreateOpen] = useState(initialIntent?.kind === 'create' && canCreate);
     const [submitting, setSubmitting] = useState(false);
+
+    // A tab already mounted hears the intent instead.
+    useEffect(() => {
+        clearBlueprintIntent();
+        const onIntent = (e: Event) => {
+            clearBlueprintIntent();
+            const intent = (e as CustomEvent<BlueprintIntent>).detail;
+            if (intent.kind === 'open') setSelectedId(intent.blueprintId);
+            else if (canCreate) setCreateOpen(true);
+        };
+        window.addEventListener(BLUEPRINT_INTENT_EVENT, onIntent);
+        return () => window.removeEventListener(BLUEPRINT_INTENT_EVENT, onIntent);
+    }, [canCreate]);
 
     const refresh = useCallback(async () => {
         setLoading(true);

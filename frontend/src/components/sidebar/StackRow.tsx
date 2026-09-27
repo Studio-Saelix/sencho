@@ -40,6 +40,8 @@ interface StackRowProps {
    * so a blocked plan reads as blocked instead of as an ordinary update.
    */
   gitPending: GitOpsSourceStatus | null;
+  /** The node `gitPending` was read from, so its indicator can open the workplace scoped to this stack. */
+  gitNodeId?: number | null;
   onSelect: (file: string) => void;
   kebabSlot: ReactNode;
   bulkMode?: boolean;
@@ -93,7 +95,7 @@ function failedCheckTooltip(hasUpdate: boolean, lastError?: string): string {
 export function StackRow(props: StackRowProps) {
   const {
     file, displayName, status, running, total, isBusy, isActive,
-    hasUpdate, outdatedServices, checkStatus, lastError, gitPending, onSelect, kebabSlot,
+    hasUpdate, outdatedServices, checkStatus, lastError, gitPending, gitNodeId, onSelect, kebabSlot,
     bulkMode = false, isSelected = false, onToggleSelect,
     hydrationDisplay = 'pending',
   } = props;
@@ -197,9 +199,9 @@ export function StackRow(props: StackRowProps) {
                 data-testid="stack-trailing-git-pending"
                 onClick={(e) => {
                   e.stopPropagation();
-                  openGitOpsWorkplace();
+                  openGitOpsWorkplace(gitNodeId != null ? { nodeId: gitNodeId, stack: file } : undefined);
                 }}
-                aria-label="Open the GitOps portfolio"
+                aria-label="Open this stack in the GitOps portfolio"
               >
                 <GitBranch className="w-3 h-3 text-brand" strokeWidth={1.5} />
               </button>

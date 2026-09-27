@@ -1,5 +1,5 @@
 import type Database from 'better-sqlite3';
-import { DatabaseService } from '../DatabaseService';
+import { DatabaseService, type HealthGateRunRow, type StackGitSource } from '../DatabaseService';
 import type { GitOpsHistoryCursor, GitOpsHistoryStage } from './history';
 import {
   decodeArtifactEvidenceJson,
@@ -307,6 +307,19 @@ export class GitOpsStore {
 
   getGeneration(id: string): GitOpsGenerationRow | undefined {
     return this.db().prepare('SELECT * FROM gitops_generations WHERE id = ?').get(id) as GitOpsGenerationRow | undefined;
+  }
+
+  /**
+   * The stack's Git source row, for evidence that lives outside the GitOps
+   * tables (the manifest cache and the configured source policy). Read-only.
+   */
+  getStackGitSource(stackName: string): StackGitSource | undefined {
+    return DatabaseService.getInstance().getGitSource(stackName);
+  }
+
+  /** Latest stack-scoped health gate run on one node, for health drift. Read-only. */
+  getLatestStackHealthRun(nodeId: number, stackName: string): HealthGateRunRow | undefined {
+    return DatabaseService.getInstance().getLatestStackHealthGateRun(nodeId, stackName);
   }
 
   listGenerationsForApplication(applicationId: string): GitOpsGenerationRow[] {
@@ -719,7 +732,7 @@ export class GitOpsStore {
         configured_repo_url, repo_identity_json, configured_ref, compose_paths_json,
         context_dir, sync_env, env_path, materialization_fingerprint, desired_commit_sha,
         fetched_commit_sha, fetched_resolved_ref_kind, candidate_generation_id, accepted_generation_id,
-        candidate_plan_blocked, review_required, artifact_set_id, latest_artifact_set_id,
+        candidate_plan_blocked, review_required, review_block_reason, artifact_set_id, latest_artifact_set_id,
         intent_revision_id, rollout_candidate_id, rollout_generation_id, source_acceptance_ref,
         placement_approval_ref, rollout_authorization_ref, legacy_combined_approval_ref,
         preflight_fingerprint, latest_preflight_evidence_json, latest_operation_id, active_operation_id, active_operation_stage,
@@ -729,14 +742,14 @@ export class GitOpsStore {
         recovery_ref, recovery_phase, interruption_stage, interruption_at,
         interruption_operation_id, interruption_generation_id, evidence_fresh_at,
         evidence_limitations_json, created_at, updated_at
-      ) VALUES (${Array(62).fill('?').join(', ')})`,
+      ) VALUES (${Array(63).fill('?').join(', ')})`,
     ).run(
       row.id, row.lifecycle_key, row.lifecycle_status, row.target_mode, row.stack_name,
       row.configured_source_stack_name, row.blueprint_id,
       row.configured_repo_url, row.repo_identity_json, row.configured_ref, row.compose_paths_json,
       row.context_dir, row.sync_env, row.env_path, row.materialization_fingerprint, row.desired_commit_sha,
       row.fetched_commit_sha, row.fetched_resolved_ref_kind, row.candidate_generation_id, row.accepted_generation_id,
-      row.candidate_plan_blocked, row.review_required, row.artifact_set_id, row.latest_artifact_set_id,
+      row.candidate_plan_blocked, row.review_required, row.review_block_reason, row.artifact_set_id, row.latest_artifact_set_id,
       row.intent_revision_id, row.rollout_candidate_id, row.rollout_generation_id, row.source_acceptance_ref,
       row.placement_approval_ref, row.rollout_authorization_ref, row.legacy_combined_approval_ref,
       row.preflight_fingerprint, row.latest_preflight_evidence_json, row.latest_operation_id, row.active_operation_id, row.active_operation_stage,
@@ -805,6 +818,21 @@ export class GitOpsStore {
     );
   }
 
+  /**
+   * Set the health-and-rollout policy on an existing intent revision.
+   *
+   * The policy is the only field on an intent that may change without the
+   * revision changing: a health decision is a different authority domain from
+   * source, placement, and artifact, so rewriting the whole row (or minting a
+   * new one) would invalidate approvals that are still accurate.
+   */
+  updateIntentHealthPolicy(intentId: string, policyJson: string): void {
+    const result = this.db().prepare(
+      'UPDATE gitops_intent_revisions SET health_failure_rollback_policy_json = ? WHERE id = ?',
+    ).run(policyJson, intentId);
+    if (result.changes === 0) throw new Error('intent revision could not be updated');
+  }
+
   insertRolloutCandidate(row: GitOpsRolloutCandidateRow): void {
     decodeGitOpsRequiredTargetsJson(row.required_targets_json);
     this.db().prepare(
@@ -852,7 +880,9 @@ export class GitOpsStore {
     this.db().prepare(
       `INSERT INTO gitops_target_current (
         application_id, node_id, target_status, desired_generation_id, candidate_generation_id,
-        applied_generation_id, deployed_generation_id, healthy_generation_id, lkg_generation_id,
+        applied_generation_id, deployed_generation_id, healthy_generation_id,
+        last_health_status, last_health_generation_id, last_health_run_id,
+        pending_health_run_id, health_attempts, health_stop_reason, lkg_generation_id,
         lkg_artifact_set_id, lkg_unavailable_at, lkg_unavailable_reason, expected_artifact_set_id,
         latest_artifact_set_id, observed_artifact_identity_json, intent_revision_id,
         rollout_candidate_id, rollout_generation_id, source_acceptance_ref, placement_approval_ref,
@@ -863,7 +893,7 @@ export class GitOpsStore {
         recovery_phase, interruption_stage, interruption_at, interruption_operation_id,
         interruption_generation_id, interruption_intent_revision_id, interruption_rollout_candidate_id,
         pause_at, pause_reason, retry_at, suspended_at, partial_json, evidence_limitations_json, updated_at
-      ) VALUES (${Array(50).fill('?').join(', ')})
+      ) VALUES (${Array(56).fill('?').join(', ')})
       ON CONFLICT(application_id, node_id) DO UPDATE SET
         target_status=excluded.target_status,
         desired_generation_id=excluded.desired_generation_id,
@@ -871,6 +901,12 @@ export class GitOpsStore {
         applied_generation_id=excluded.applied_generation_id,
         deployed_generation_id=excluded.deployed_generation_id,
         healthy_generation_id=excluded.healthy_generation_id,
+        last_health_status=excluded.last_health_status,
+        last_health_generation_id=excluded.last_health_generation_id,
+        last_health_run_id=excluded.last_health_run_id,
+        pending_health_run_id=excluded.pending_health_run_id,
+        health_attempts=excluded.health_attempts,
+        health_stop_reason=excluded.health_stop_reason,
         lkg_generation_id=excluded.lkg_generation_id,
         lkg_artifact_set_id=excluded.lkg_artifact_set_id,
         lkg_unavailable_at=excluded.lkg_unavailable_at,
@@ -915,7 +951,10 @@ export class GitOpsStore {
         updated_at=excluded.updated_at`,
     ).run(
       row.application_id, row.node_id, row.target_status, row.desired_generation_id, row.candidate_generation_id,
-      row.applied_generation_id, row.deployed_generation_id, row.healthy_generation_id, row.lkg_generation_id,
+      row.applied_generation_id, row.deployed_generation_id, row.healthy_generation_id,
+      row.last_health_status, row.last_health_generation_id, row.last_health_run_id,
+      row.pending_health_run_id, row.health_attempts, row.health_stop_reason, row.lkg_generation_id,
+
       row.lkg_artifact_set_id, row.lkg_unavailable_at, row.lkg_unavailable_reason, row.expected_artifact_set_id,
       row.latest_artifact_set_id, row.observed_artifact_identity_json, row.intent_revision_id,
       row.rollout_candidate_id, row.rollout_generation_id, row.source_acceptance_ref, row.placement_approval_ref,
@@ -928,6 +967,18 @@ export class GitOpsStore {
       row.pause_at, row.pause_reason, row.retry_at, row.suspended_at, row.partial_json,
       row.evidence_limitations_json, row.updated_at,
     );
+  }
+  /**
+   * Targets still pointing at a health run.
+   *
+   * A target that is awaiting a run whose verdict never arrived is stuck: the
+   * queue skips it and reconstruction skips it, so nothing else would ever move
+   * it. The startup reconciliation walks this list.
+   */
+  listTargetsAwaitingHealthRun(): GitOpsTargetCurrentRow[] {
+    return this.db()
+      .prepare('SELECT * FROM gitops_target_current WHERE pending_health_run_id IS NOT NULL')
+      .all() as GitOpsTargetCurrentRow[];
   }
 
   resolveApprovalRef(id: string, expected: ResolveApprovalExpected): GitOpsApprovalRow | null {
@@ -1254,6 +1305,12 @@ export function emptyTargetRow(
     applied_generation_id: null,
     deployed_generation_id: null,
     healthy_generation_id: null,
+    last_health_status: null,
+    last_health_generation_id: null,
+    last_health_run_id: null,
+    pending_health_run_id: null,
+    health_attempts: 0,
+    health_stop_reason: null,
     lkg_generation_id: null,
     lkg_artifact_set_id: null,
     lkg_unavailable_at: null,

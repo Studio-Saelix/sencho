@@ -334,7 +334,7 @@ function CompactQuickLink({
         </button>
       </ContextMenuTrigger>
       <ContextMenuContent>
-        <ContextMenuItem onSelect={() => onRemove(item.value)}>Remove</ContextMenuItem>
+        <ContextMenuItem onSelect={() => onRemove(item.value)}>Remove from quick links</ContextMenuItem>
       </ContextMenuContent>
     </ContextMenu>
   );

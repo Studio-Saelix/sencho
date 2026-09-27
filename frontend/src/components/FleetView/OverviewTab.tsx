@@ -31,6 +31,7 @@ interface OverviewTabProps {
     onNavigateToNode: (nodeId: number, stackName: string) => void;
     onOpenNodeNetworking: (nodeId: number) => void;
     networkingByNode: Map<number, { exposed: boolean; unknown: boolean; drift: boolean }>;
+    gitopsAttentionByNode: Map<number, number>;
     onUpdate?: (nodeId: number) => void;
     updatingNodeId: number | null;
     onRetryUpdate?: (nodeId: number) => void;
@@ -70,6 +71,7 @@ export function OverviewTab({
     onNavigateToNode,
     onOpenNodeNetworking,
     networkingByNode,
+    gitopsAttentionByNode,
     onUpdate,
     updatingNodeId,
     onRetryUpdate,
@@ -151,6 +153,7 @@ export function OverviewTab({
                                     onNavigate={onNavigateToNode}
                                     onOpenNetworking={onOpenNodeNetworking}
                                     networkingSignal={networkingByNode.get(node.id)}
+                                    gitopsAttention={gitopsAttentionByNode.get(node.id)}
                                     labelMap={fleetStackLabelMap[node.id] ?? {}}
                                     updateStatus={updateStatusMap.get(node.id)}
                                     onUpdate={onUpdate}

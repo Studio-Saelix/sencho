@@ -34,6 +34,10 @@ export function useFleetOverview({ prefs, updatePrefs, updateStatuses }: UseFlee
     // Per-node networking signals (which nodes have an exposed / unknown-exposure
     // / network-drift stack), for the networking filter. Loaded fail-soft.
     const [networkingByNode, setNetworkingByNode] = useState<Map<number, { exposed: boolean; unknown: boolean; drift: boolean }>>(new Map());
+    // Applications needing GitOps attention per node, from the hub portfolio's
+    // summary. Loaded fail-soft like the networking summary: no count, no chip.
+    const [gitopsAttentionByNode, setGitopsAttentionByNode] = useState<Map<number, number>>(new Map());
+    const gitopsLoadedRef = useRef(false);
     const abortRef = useRef<AbortController | null>(null);
 
     const { fleetPalette, fleetStackLabelMap } = useFleetLabels({ nodes });
@@ -57,6 +61,36 @@ export function useFleetOverview({ prefs, updatePrefs, updateStatuses }: UseFlee
         }
     }, []);
 
+    // One portfolio request (limit=1: only the summary is read). The hub still
+    // aggregates the whole portfolio, probing remotes within a bound, so this
+    // runs on the first load and on a manual refresh, not on every heartbeat.
+    // A count is shown only for a node the hub could read; an unreachable node
+    // gets no chip rather than one that could read as "nothing needs you".
+    const loadGitopsAttention = useCallback(async (signal: AbortSignal) => {
+        try {
+            const res = await apiFetch('/gitops/applications?limit=1', { localOnly: true, signal });
+            if (!res.ok) {
+                setGitopsAttentionByNode(new Map());
+                return;
+            }
+            const data = await res.json() as {
+                summary?: { attentionByNode?: Record<string, number> };
+                coverage?: { nodeId: number; state: string }[];
+            };
+            const covered = new Set((data.coverage ?? []).filter(entry => entry.state === 'ok').map(entry => entry.nodeId));
+            const map = new Map<number, number>();
+            for (const [nodeId, count] of Object.entries(data.summary?.attentionByNode ?? {})) {
+                const id = Number(nodeId);
+                if (count > 0 && covered.has(id)) map.set(id, count);
+            }
+            setGitopsAttentionByNode(map);
+        } catch (error) {
+            if (error instanceof DOMException && error.name === 'AbortError') return;
+            console.warn('Failed to fetch GitOps attention summary:', error);
+            setGitopsAttentionByNode(new Map());
+        }
+    }, []);
+
     const fetchOverview = useCallback(async (showRefresh = false) => {
         abortRef.current?.abort();
         const controller = new AbortController();
@@ -71,6 +105,10 @@ export function useFleetOverview({ prefs, updatePrefs, updateStatuses }: UseFlee
             }
             // Detached: it must never gate the loading state cleared in `finally`.
             void loadNetworkingSummary(controller.signal);
+            if (!gitopsLoadedRef.current || showRefresh) {
+                gitopsLoadedRef.current = true;
+                void loadGitopsAttention(controller.signal);
+            }
         } catch (error) {
             if (error instanceof DOMException && error.name === 'AbortError') return;
             console.error('Failed to fetch fleet overview:', error);
@@ -78,7 +116,7 @@ export function useFleetOverview({ prefs, updatePrefs, updateStatuses }: UseFlee
             setLoading(false);
             setRefreshing(false);
         }
-    }, [loadNetworkingSummary]);
+    }, [loadNetworkingSummary, loadGitopsAttention]);
 
     const onlineNodes = useMemo(() => nodes.filter(n => n.status === 'online'), [nodes]);
 
@@ -256,5 +294,6 @@ export function useFleetOverview({ prefs, updatePrefs, updateStatuses }: UseFlee
         activeFilterCount,
         clearFilters,
         networkingByNode,
+        gitopsAttentionByNode,
     };
 }

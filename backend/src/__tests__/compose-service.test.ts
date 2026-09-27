@@ -935,6 +935,45 @@ describe('ComposeService - deployStack', () => {
     expect(mockAddNotificationHistory).not.toHaveBeenCalled();
   });
 
+  it('surfaces the resolver\'s render diagnosis instead of a generic sentence', async () => {
+    const { MissingExternalNetworksError } = await import('../services/network/missingExternalNetworksError');
+    // What the resolver reports for a compose file Docker Compose refuses,
+    // e.g. a malformed port spec. The operator has to be told what to fix.
+    mockResolveMissingExternalNetworks.mockResolvedValue({
+      status: 'render_unavailable',
+      autoCreateEnabled: false,
+      stackName: 'my-stack',
+      networks: [],
+      declaredExternalCount: 0,
+      renderError: 'Sencho could not render the effective Compose model: invalid proto: udp/tcp. Check the compose and env files.',
+    });
+
+    const svc = ComposeService.getInstance(1);
+    const thrown = await svc.deployStack('my-stack', undefined, true).catch((e: unknown) => e);
+    expect(thrown).toBeInstanceOf(MissingExternalNetworksError);
+    expect((thrown as Error).message).toContain('invalid proto: udp/tcp');
+    expect((thrown as Error).message).not.toContain('could not render this stack');
+    expect(mockSpawn).not.toHaveBeenCalled();
+  });
+
+  it('falls back to the generic render sentence when the resolver gives none', async () => {
+    const { MissingExternalNetworksError } = await import('../services/network/missingExternalNetworksError');
+    mockResolveMissingExternalNetworks.mockResolvedValue({
+      status: 'render_unavailable',
+      autoCreateEnabled: false,
+      stackName: 'my-stack',
+      networks: [],
+      declaredExternalCount: 0,
+    });
+
+    const svc = ComposeService.getInstance(1);
+    const thrown = await svc.deployStack('my-stack', undefined, true).catch((e: unknown) => e);
+    expect(thrown).toBeInstanceOf(MissingExternalNetworksError);
+    expect((thrown as Error).message).toBe(
+      'Sencho could not render this stack\'s Compose model to check external networks.',
+    );
+  });
+
   it('auto-creates safe missing networks and records history-only activity', async () => {
     const missing = [{
       name: 'arr-net',

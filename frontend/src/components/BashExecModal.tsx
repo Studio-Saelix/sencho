@@ -3,8 +3,9 @@ import { Modal, ModalHeader } from './ui/modal';
 import { Terminal as TerminalIcon } from 'lucide-react';
 import { loadXtermModules, type Terminal, type FitAddon, type XtermModules } from '@/lib/xtermLoader';
 import { buildXtermMinimalTheme } from '@/lib/terminalTheme';
+import { attachTerminalClipboard } from '@/lib/terminalClipboard';
 
-type TerminalContainer = HTMLDivElement & { __resizeObserver?: ResizeObserver };
+type TerminalContainer = HTMLDivElement & { __resizeObserver?: ResizeObserver; __detachClipboard?: () => void };
 
 interface BashExecModalProps {
   isOpen: boolean;
@@ -97,11 +98,15 @@ export default function BashExecModal({ isOpen, onClose, containerId, containerN
         fontFamily: "'Geist Mono', monospace",
         fontSize: 14,
         cursorBlink: true,
+        // Right-click is paste/copy (see terminalClipboard); word-select would
+        // turn every macOS right-click into a copy.
+        rightClickSelectsWord: false,
       });
 
       const fitAddon = new mods.FitAddon();
       term.loadAddon(fitAddon);
       term.open(containerEl);
+      (containerEl as TerminalContainer).__detachClipboard = attachTerminalClipboard(term, containerEl);
 
       xtermRef.current = term;
       fitAddonRef.current = fitAddon;
@@ -204,6 +209,10 @@ export default function BashExecModal({ isOpen, onClose, containerId, containerN
       if (el?.__resizeObserver) {
         el.__resizeObserver.disconnect();
         delete el.__resizeObserver;
+      }
+      if (el?.__detachClipboard) {
+        el.__detachClipboard();
+        delete el.__detachClipboard;
       }
     };
   }, [isOpen, containerId, cleanup]);

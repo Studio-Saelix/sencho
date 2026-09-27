@@ -1919,6 +1919,99 @@ describe('GitSourceService.handleWebhookPull debounce', () => {
         }
     });
 
+    it('holds a webhook auto-apply that would withdraw a stateful service', async () => {
+        const stackName = 'webhook-stateful-hold';
+        const svc = GitSourceService.getInstance();
+        const validateSpy = vi.spyOn(svc, 'validateCompose').mockResolvedValue({ ok: true });
+        const statefulCompose = [
+            'services:',
+            '  db:',
+            '    image: postgres:16',
+            '    volumes:',
+            '      - pgdata:/var/lib/postgresql/data',
+            'volumes:',
+            '  pgdata:',
+            '',
+        ].join('\n');
+        const withdrawnCompose = 'services:\n  web:\n    image: nginx:1.27\n';
+        try {
+            // The promotion writes the stack's compose file for real, exactly
+            // as a linked stack would have one, so the second delivery's
+            // change plan compares against live state rather than a missing
+            // file (which would read as a local conflict).
+            fs.mkdirSync(path.join(process.env.COMPOSE_DIR!, stackName), { recursive: true });
+            mockSuccessfulClone({ compose: statefulCompose, sha: 'b1'.repeat(20) });
+            await svc.upsert({
+                stackName,
+                repoUrl: 'https://github.com/example/repo.git',
+                branch: 'main',
+                composePaths: ['compose.yaml'],
+                contextDir: null,
+                syncEnv: false,
+                envPath: null,
+                authType: 'none',
+                autoApplyOnWebhook: true,
+                autoDeployOnApply: false,
+            });
+
+            // The first delivery applies a stateful generation; that defines
+            // the managed baseline the guard compares later deliveries to.
+            const first = await svc.handleWebhookPull(stackName, true, 'delivery-stateful-first');
+            expect(first.status).toBe('success');
+            const baseline = GitOpsStore.getInstance().getLiveDirectApplication(stackName)!;
+            const acceptedId = baseline.accepted_generation_id;
+            expect(acceptedId).toBeTruthy();
+
+            // The next commit withdraws that service. An automatic webhook
+            // delivery must hold it for review instead of applying it, and the
+            // hold must be visible as a canonical attention reason.
+            DatabaseService.getInstance().getDb()
+                .prepare('UPDATE stack_git_sources SET last_debounce_at = ? WHERE stack_name = ?')
+                .run(Date.now() - 999_999, stackName);
+            mockSuccessfulClone({ compose: withdrawnCompose, sha: 'b2'.repeat(20) });
+            const held = await svc.handleWebhookPull(stackName, true, 'delivery-stateful-second');
+
+            expect(held.status).toBe('success');
+            expect(held.message).toMatch(/Held for review/i);
+            const after = GitOpsStore.getInstance().getLiveDirectApplication(stackName)!;
+            expect(after.accepted_generation_id).toBe(acceptedId);
+            expect(after.review_required).toBe(1);
+            expect(after.review_block_reason).toBe('stateful_withdrawal');
+            // The withdrawing candidate is still staged, not applied.
+            expect(after.candidate_generation_id).toBeTruthy();
+            expect(GitOpsStore.getInstance().getGeneration(after.candidate_generation_id!)?.commit_sha)
+                .toBe('b2'.repeat(20));
+
+            // A stored redelivery keeps its automated intent even if the policy
+            // moved to review in the meantime. The guard must still hold the
+            // withdrawal rather than let the stored intent apply it.
+            GitOpsTransitions.getInstance().sourcePolicyChanged(after.id, 'review', {
+                operationId: 'policy-to-review',
+                actor: 'operator',
+                trigger: 'manual',
+                at: Date.now(),
+            });
+            const redeliveryId = 'delivery-stateful-redelivery';
+            GitOpsTransitions.getInstance().reserveReconcileAttempt(after.id, {
+                operationId: deliveryKey('webhook', 'fetch', redeliveryId),
+                actor: 'system:webhook',
+                trigger: 'webhook',
+                at: Date.now(),
+            }, undefined, { autoApply: true, deploy: false });
+            mockSuccessfulClone({ compose: withdrawnCompose, sha: 'b3'.repeat(20) });
+            const redelivered = await svc.handleWebhookPull(stackName, false, redeliveryId);
+
+            expect(redelivered.status).toBe('success');
+            expect(redelivered.message).toMatch(/Held for review/i);
+            const afterRedelivery = GitOpsStore.getInstance().getLiveDirectApplication(stackName)!;
+            expect(afterRedelivery.accepted_generation_id).toBe(acceptedId);
+            expect(afterRedelivery.review_block_reason).toBe('stateful_withdrawal');
+        } finally {
+            validateSpy.mockRestore();
+            await cleanupStackDir(stackName);
+        }
+    });
+
     it('reserves and durably settles an attempt for a successful webhook fetch', async () => {
         mockSuccessfulClone({ sha: '8'.repeat(40) });
         const svc = GitSourceService.getInstance();
@@ -2988,6 +3081,46 @@ describe('GitSourceService.pull', () => {
         await cleanupStackDir('pull-repeat');
     });
 
+    it('repeat pulls of a safety-held candidate keep one candidate and its block', async () => {
+        const svc = GitSourceService.getInstance();
+        await createFromGit('pull-held', '4444444444444444444444444444444444444444', true);
+        const base = generationCount('pull-held');
+
+        const updatedSha = '5555555555555555555555555555555555555555';
+        mockSuccessfulClone({
+            compose: 'services:\n  web:\n    image: nginx:1.29\n',
+            sha: updatedSha,
+        });
+        await svc.pull('pull-held');
+        const app = GitOpsStore.getInstance().getLiveDirectApplication('pull-held')!;
+        const stagedId = app.candidate_generation_id;
+        expect(stagedId).toBeTruthy();
+        expect(generationCount('pull-held')).toBe(base + 1);
+
+        // The automatic path refused the candidate for stateful safety. The
+        // hold must survive a repeat pull of the same commit: minting a
+        // lookalike would clear the reason and re-run the guard every poll.
+        GitOpsTransitions.getInstance().sourceReviewBlocked({
+            applicationId: app.id,
+            generationId: stagedId!,
+            reason: 'stateful_withdrawal',
+            envelope: { operationId: 'hold-pull-held', actor: 'system:source-controller', trigger: 'poll', at: Date.now() },
+        });
+
+        mockSuccessfulClone({
+            compose: 'services:\n  web:\n    image: nginx:1.29\n',
+            sha: updatedSha,
+        });
+        await svc.pull('pull-held');
+
+        expect(generationCount('pull-held')).toBe(base + 1);
+        const after = GitOpsStore.getInstance().getLiveDirectApplication('pull-held')!;
+        expect(after.candidate_generation_id).toBe(stagedId);
+        expect(after.review_required).toBe(1);
+        expect(after.review_block_reason).toBe('stateful_withdrawal');
+        await cleanupStackDir('pull-held');
+    });
+
     it('a pull against a staged candidate missing its content digest mints anew', async () => {
         const svc = GitSourceService.getInstance();
         await createFromGit('pull-nohash', '8888888888888888888888888888888888888888');
@@ -3436,6 +3569,49 @@ describe('GitSourceService.createStackFromGit', () => {
         expect(stacks).not.toContain('create-rollback');
 
         saveSpy.mockRestore();
+    });
+
+    it('keeps the stack and its row when a step after the commit boundary fails', async () => {
+        mockSuccessfulClone({
+            compose: 'services:\n  web:\n    image: nginx\n',
+        });
+        const svc = GitSourceService.getInstance();
+        const db = DatabaseService.getInstance();
+        const lastPlanSpy = vi.spyOn(db, 'setGitSourceLastPlan')
+            .mockImplementationOnce(() => { throw new Error('simulated post-commit failure'); });
+        const deleteSpy = vi.spyOn(db, 'deleteGitSource');
+
+        try {
+            await expect(svc.createStackFromGit({
+                stackName: 'create-post-commit-fail',
+                repoUrl: 'https://github.com/example/repo.git',
+                branch: 'main',
+                composePaths: ['compose.yaml'],
+                contextDir: null,
+                syncEnv: false,
+                envPath: null,
+                authType: 'none',
+                token: null,
+                autoApplyOnWebhook: false,
+                autoDeployOnApply: false,
+            })).rejects.toThrow(/stack was created from Git, but a follow-up step failed/);
+
+            // Past the success boundary nothing is compensated: the row and the
+            // stack both stay, so a rollback delete must not run here.
+            expect(deleteSpy).not.toHaveBeenCalled();
+            expect(db.getGitSource('create-post-commit-fail')).toBeDefined();
+            const { FileSystemService } = await import('../services/FileSystemService');
+            const stacks = await FileSystemService.getInstance().getStacks();
+            expect(stacks).toContain('create-post-commit-fail');
+        } finally {
+            lastPlanSpy.mockRestore();
+            deleteSpy.mockRestore();
+            db.deleteGitSource('create-post-commit-fail');
+            db.getDb()
+                .prepare('DELETE FROM gitops_applications WHERE stack_name = ?')
+                .run('create-post-commit-fail');
+            await cleanupStackDir('create-post-commit-fail');
+        }
     });
 });
 
@@ -10067,7 +10243,7 @@ describe('GitSourceService multi-file create + apply flow', () => {
         await cleanupStackDir('ctx-create');
     });
 
-    it('pulls a multi-file v2 pending blob and applies both files to disk', async () => {
+    it('pulls a multi-file v4 pending blob and applies both files to disk', async () => {
         const sha = '4444ddd4444ddd4444ddd4444ddd4444ddd4444d';
         mockSuccessfulClone({
             compose: 'services:\n  web:\n    image: nginx\n',
@@ -10163,11 +10339,10 @@ describe('GitSourceService pending blob decode branches', () => {
     function svc(): unknown { return GitSourceService.getInstance(); }
     type DecodeApi = {
         crypto: { encrypt(s: string): string; decrypt(s: string): string };
-        encodePendingCompose(files: { path: string; content: string }[], ctx: string | null, cand: string | null, inv: unknown): string;
-        decodePendingCompose(s: string): { files: { path: string; content: string }[]; contextDir: string | null; candidateRelPath: string | null; inventory: unknown };
+        decodePendingCompose(s: string): { version: 2 | 3 | 4 | 'plaintext'; files: { path: string; content: string }[]; contextDir: string | null; candidateRelPath: string | null; inventory: unknown };
     };
 
-    it('round-trips the v3 blob with candidate path and inventory', () => {
+    it('decodes a v3 blob with candidate path and inventory', () => {
         const s = svc() as unknown as DecodeApi;
         const encoded = s.crypto.encrypt(JSON.stringify({
             v: 3,
@@ -10177,6 +10352,7 @@ describe('GitSourceService pending blob decode branches', () => {
             inventory: { inputs: [], refusals: [], buildContexts: [] },
         }));
         const decoded = s.decodePendingCompose(encoded);
+        expect(decoded.version).toBe(3);
         expect(decoded.candidateRelPath).toBe('generations/candidate-abc');
         expect(decoded.files[0].content).toBe('x');
         expect(decoded.inventory).toEqual({ inputs: [], refusals: [], buildContexts: [] });
@@ -10190,7 +10366,7 @@ describe('GitSourceService pending blob decode branches', () => {
         expect(decoded.files[0].content).toBe('y');
     });
 
-    it('falls back to legacy plaintext for unknown shapes', () => {
+    it('falls back to legacy plaintext when the blob has no version marker', () => {
         const s = svc() as unknown as DecodeApi;
         const decoded = s.decodePendingCompose(s.crypto.encrypt('legacy content'));
         expect(decoded.files).toEqual([{ path: 'compose.yaml', content: 'legacy content' }]);

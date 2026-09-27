@@ -38,6 +38,8 @@ interface RecentAlertsProps {
   unreportedNodeIds: ReadonlySet<number> | null;
   navigation: AlertNavigation;
   className?: string;
+  /** Hold the eight-row body height even when empty, so a side-by-side neighbour can match it. */
+  reserveHeight?: boolean;
 }
 
 export const RECENT_ALERTS_PREVIEW_SIZE = 8;
@@ -73,7 +75,7 @@ function formatNodeList(names: string[]): string {
   return `${names.slice(0, 2).join(', ')} and ${names.length - 2} more`;
 }
 
-export function RecentAlerts({ notifications, nodes, activeNodeId, unreportedNodeIds, navigation, className }: RecentAlertsProps) {
+export function RecentAlerts({ notifications, nodes, activeNodeId, unreportedNodeIds, navigation, className, reserveHeight = false }: RecentAlertsProps) {
   const [scope, setScope] = useRecentAlertsScopePreference();
 
   // Without a remote node there is no cross-node scope to choose, so the stored
@@ -228,7 +230,7 @@ export function RecentAlerts({ notifications, nodes, activeNodeId, unreportedNod
         </div>
       )}
     >
-      <div className={cn('flex flex-col overflow-hidden', BODY_HEIGHT)}>{body}</div>
+      <div className={cn('flex flex-col overflow-hidden', (reserveHeight || preview.length > 0) && BODY_HEIGHT)}>{body}</div>
     </DashboardPanel>
   );
 }

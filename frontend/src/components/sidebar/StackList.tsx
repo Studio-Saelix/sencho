@@ -275,6 +275,7 @@ export function StackList(props: StackListProps & StackListBulkProps) {
                     checkStatus={stackUpdates[file]?.checkStatus}
                     lastError={stackUpdates[file]?.lastError ?? undefined}
                     gitPending={gitSourcePendingMap[file] ?? null}
+                    gitNodeId={activeNodeId}
                     onSelect={onSelectFile}
                     kebabSlot={<StackKebabMenu file={file} ctx={ctx} />}
                     bulkMode={bulkMode}

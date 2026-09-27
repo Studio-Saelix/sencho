@@ -69,6 +69,7 @@ export type GitOpsPortfolioTargetSummary = {
   runtime: string;
   health: string;
   connectivity: string;
+  tombstoned: boolean;
   evidence: 'fresh' | 'stale' | 'unknown';
 };
 
@@ -87,7 +88,7 @@ export type GitOpsPortfolioRow = {
   name: string;
   stackName: string | null;
   blueprintId: number | null;
-  /** Owning node for Direct applications; null on Blueprint applications. */
+  /** Owning node for Direct and remote Blueprint applications; null on hub-local Blueprints. */
   nodeId: number | null;
   nodeName: string | null;
   repository: GitOpsPortfolioRepository | null;
@@ -142,6 +143,12 @@ export type GitOpsPortfolioSummary = {
   drifted: number;
   /** Count of applications carrying each attention reason. */
   byReason: Partial<Record<GitOpsAttentionReason, number>>;
+  /**
+   * Applications requiring attention per involved node (hub numbering): a
+   * Direct application counts on its owning node, a Blueprint application on
+   * every node its targets name. Keys are node ids as strings (JSON).
+   */
+  attentionByNode: Record<string, number>;
 };
 
 /** How one contributing node's read went. An unreachable node is named, never silently absent. */
@@ -203,6 +210,8 @@ export type GitOpsPortfolioDetailResponse = {
 /** Query filters accepted by the list route. Unknown values are rejected, not dropped. */
 export type GitOpsPortfolioFilters = {
   q?: string;
+  /** Exact stack name, for contextual entry points scoped to one stack. */
+  stack?: string;
   attentionOnly: boolean;
   targetMode?: 'direct' | 'blueprint';
   nodeId?: number;

@@ -38,6 +38,12 @@ import type { NotificationCategory } from '../NotificationService';
  * outcome-dependent mapping predates this list. `gitOpsOutboxPlan` is the
  * union of the two, and it is the one function both the insert and the drain
  * call, so they cannot disagree about which rows exist.
+ *
+ * `health_finalized` is absent for the opposite reason: a recorded health
+ * failure already reaches the bell as `health_gate_failed`, written by the gate
+ * that produced the verdict. A second entry for the same event would tell an
+ * operator the same thing twice, so the posture has a notification behind it
+ * without adding one here.
  */
 export const NOTIFIABLE_GITOPS_STAGES = [
   'source_accepted',
@@ -50,6 +56,7 @@ export const NOTIFIABLE_GITOPS_STAGES = [
   'rollback_completed',
   'rollback_partial_failed',
   'blueprint_state_review',
+  'health_rollout_policy_set',
 ] as const satisfies readonly GitOpsHistoryStage[];
 
 export type NotifiableGitOpsStage = (typeof NOTIFIABLE_GITOPS_STAGES)[number];
@@ -75,12 +82,26 @@ export type GitOpsOutboxPlan =
  * the insert (`history.ts`) and the drain (`publish.ts`) must agree about
  * which rows exist. A stage that inserts no row is never drained, and a stage
  * that inserts one nobody drains is a notification that never fires.
+ *
+ * `after` is the transition's own `after` record, and it is required rather than
+ * optional because one arm's decision depends on what the transition recorded.
+ * Both call sites already hold it, so requiring it keeps the two from being able
+ * to disagree about an outcome-dependent stage, which is the exact failure this
+ * function exists to prevent.
  */
 export function gitOpsOutboxPlan(
   stage: GitOpsHistoryStage,
   targetMode: GitOpsTargetMode,
+  after: Record<string, unknown>,
 ): GitOpsOutboxPlan | null {
-  if (stage === 'source_reconcile_settled') return { kind: 'settled' };
+  if (stage === 'source_reconcile_settled') {
+    // An attempt that settled without proving anything does not notify. The
+    // portfolio reports the same application as in progress or unknown, and a
+    // bell entry for it would be a surface reporting on evidence it does not
+    // have. What is unproven is the portfolio's to show, not the bell's.
+    if (after.outcome === 'unknown') return null;
+    return { kind: 'settled' };
+  }
   if (!isNotifiableGitOpsStage(stage)) return null;
   // A Direct source acceptance is the source controller's automatic
   // bookkeeping, and the settled attempt already tells the operator that a
@@ -114,6 +135,10 @@ export const GITOPS_NOTIFICATION_META: Record<NotifiableGitOpsStage, GitOpsNotif
   rollback_completed: { category: 'gitops_rollback_completed', level: 'info', phrase: 'rollback completed' },
   rollback_partial_failed: { category: 'gitops_rollback_partial_failed', level: 'error', phrase: 'rollback partially failed' },
   blueprint_state_review: { category: 'gitops_stateful_confirmation', level: 'warning', phrase: 'stateful deploy awaiting confirmation' },
+  // An operator changing what a health outcome may do to a rollout. Notified
+  // because it decides whether a future rollout can stop or restore work across
+  // the fleet, and an audit reader has to see the change and who made it.
+  health_rollout_policy_set: { category: 'gitops_health_rollout_policy_set', level: 'info', phrase: 'health rollout policy changed' },
 };
 
 /**

@@ -8,8 +8,16 @@ import { setupTestDb, cleanupTestDb } from './helpers/setupTestDb';
 import { blankInlineApplication } from '../services/gitops/blueprintProducers';
 import { newGitOpsId } from '../services/gitops/directApplication';
 import { emptyTargetRow, GitOpsStore } from '../services/gitops/store';
-import { encodeArtifactEvidenceJson, type ServiceArtifactEvidence } from '../services/gitops/json';
+import {
+  decodeArtifactEvidenceJson,
+  decodeObservedArtifactIdentity,
+  encodeArtifactEvidenceJson,
+  encodeObservedArtifactIdentity,
+  type ObservedArtifactIdentity,
+  type ServiceArtifactEvidence,
+} from '../services/gitops/json';
 import { buildDigestPinsFromArtifactSet } from '../services/gitops/digestPins';
+import { comparableObservationMatches } from '../services/gitops/artifactIdentity';
 import type { Blueprint, Node } from '../services/DatabaseService';
 
 vi.mock('../services/gitops/artifactResolve', async (importOriginal) => {
@@ -23,6 +31,12 @@ vi.mock('../services/gitops/artifactResolve', async (importOriginal) => {
 const DIGEST_A = `sha256:${'a'.repeat(64)}`;
 const DIGEST_B = `sha256:${'b'.repeat(64)}`;
 const INDEX = `sha256:${'1'.repeat(64)}`;
+// A different content digest, standing in for a tag that has been moved to
+// something new since the approved set was frozen.
+const MOVED_DIGEST = `sha256:${'c'.repeat(64)}`;
+// The index digest the same moved tag would resolve to. Distinct from INDEX so
+// the fixture cannot pass by leaving the index behind.
+const MOVED_INDEX = `sha256:${'2'.repeat(64)}`;
 
 function registryService(partial: Partial<ServiceArtifactEvidence> = {}): ServiceArtifactEvidence {
   return {
@@ -45,6 +59,57 @@ function registryService(partial: Partial<ServiceArtifactEvidence> = {}): Servic
   };
 }
 
+/**
+ * A runtime observation shaped the way the observer builds one: a registry
+ * source with the running platform digest, and no platform variants, because
+ * production observations never carry them.
+ */
+function runtimeObservation(platformDigest: string, observedAt: number): ServiceArtifactEvidence {
+  return {
+    serviceName: 'web',
+    authoredRef: 'nginx:latest',
+    source: 'registry',
+    platform: 'linux/amd64',
+    indexDigest: null,
+    platformDigest,
+    // Production observations never carry platform variants, and record the
+    // local repo digests sorted, with the running digest as the candidate.
+    platformVariants: null,
+    localDigests: [platformDigest],
+    buildContextFingerprint: null,
+    producedImageId: 'img-1',
+    failureClass: null,
+    resolvedAt: observedAt,
+  };
+}
+
+type ObservedWithServices = Extract<
+  ObservedArtifactIdentity,
+  { kind: 'exact' | 'qualified' | 'stale' | 'local_build_unverified' }
+>;
+
+/**
+ * The stored observation, narrowed to the kinds that carry per-service evidence.
+ * The other kinds mean Sencho could not read an identity at all, which is not
+ * the state this test sets up.
+ */
+function decodeObservedIdentity(raw: string | null): ObservedWithServices | null {
+  if (raw === null) return null;
+  const observed = decodeObservedArtifactIdentity(raw);
+  if (observed.kind === 'unknown' || observed.kind === 'missing' || observed.kind === 'unavailable') {
+    return null;
+  }
+  return observed;
+}
+
+/** The per-service evidence the approved artifact set actually stored. */
+function approvedServicesOf(artifactSetId: string | null): ServiceArtifactEvidence[] {
+  if (artifactSetId === null) throw new Error('the fixture has no approved artifact set');
+  const row = GitOpsStore.getInstance().getArtifactSet(artifactSetId);
+  if (!row) throw new Error(`artifact set ${artifactSetId} is missing`);
+  return decodeArtifactEvidenceJson(row.evidence_json).services ?? [];
+}
+
 let tmpDir: string;
 let DatabaseService: typeof import('../services/DatabaseService').DatabaseService;
 let BlueprintService: typeof import('../services/BlueprintService').BlueprintService;
@@ -59,6 +124,7 @@ beforeAll(async () => {
 afterAll(() => cleanupTestDb(tmpDir));
 
 beforeEach(() => {
+  vi.restoreAllMocks();
   GitOpsStore.resetForTests();
   const db = DatabaseService.getInstance().getDb();
   db.prepare('DELETE FROM blueprint_deployments').run();
@@ -91,7 +157,14 @@ function seedApp(bp: Blueprint, node: Node, opts: {
   qualification: 'exact' | 'qualified' | 'unresolved' | 'local_build_unverified';
   services?: ServiceArtifactEvidence[];
   omitSet?: boolean;
-}): { artifactSetId: string | null; generationId: string } {
+  /**
+   * A newer candidate set carrying different content, pointed at by
+   * latest_artifact_set_id while the approved pointers stay on the original.
+   * This is what makes "repair used the approved set" distinguishable from
+   * "repair used whatever was resolved most recently".
+   */
+  newerCandidateServices?: ServiceArtifactEvidence[];
+}): { artifactSetId: string | null; generationId: string; newerCandidateSetId: string | null } {
   const store = GitOpsStore.getInstance();
   const appId = newGitOpsId();
   const generationId = newGitOpsId();
@@ -154,10 +227,30 @@ function seedApp(bp: Blueprint, node: Node, opts: {
       created_at: Date.now(),
     });
   }
+  let newerCandidateSetId: string | null = null;
+  if (opts.newerCandidateServices) {
+    newerCandidateSetId = newGitOpsId();
+    store.insertArtifactSet({
+      id: newerCandidateSetId,
+      generation_id: generationId,
+      // A later evidence version of the same generation: the set is unique per
+      // generation and evidence version, and re-resolving an unchanged tag is
+      // exactly how a moved tag produces a newer candidate.
+      evidence_version: 2,
+      authoritative: 0,
+      qualification: 'exact',
+      evidence_json: encodeArtifactEvidenceJson({
+        kind: 'exact',
+        identity: `exact:${'c'.repeat(64)}`,
+        services: opts.newerCandidateServices,
+      }),
+      created_at: Date.now(),
+    });
+  }
   const app = store.getApplication(appId)!;
   app.accepted_generation_id = generationId;
   app.artifact_set_id = artifactSetId;
-  app.latest_artifact_set_id = artifactSetId;
+  app.latest_artifact_set_id = newerCandidateSetId ?? artifactSetId;
   store.writeApplicationPointers(app);
   store.upsertTarget({
     ...emptyTargetRow(appId, node.id, Date.now()),
@@ -165,11 +258,29 @@ function seedApp(bp: Blueprint, node: Node, opts: {
     applied_generation_id: generationId,
     deployed_generation_id: generationId,
     expected_artifact_set_id: artifactSetId,
-    latest_artifact_set_id: artifactSetId,
+    latest_artifact_set_id: newerCandidateSetId ?? artifactSetId,
     lkg_generation_id: generationId,
     lkg_artifact_set_id: artifactSetId,
   });
-  return { artifactSetId, generationId };
+  return { artifactSetId, generationId, newerCandidateSetId };
+}
+
+/**
+ * Record what is actually running on the target, so the test starts from a
+ * genuinely drifted state rather than an assumed one.
+ */
+function seedMovedObservation(appId: string, nodeId: number): void {
+  const store = GitOpsStore.getInstance();
+  const target = store.getTarget(appId, nodeId)!;
+  store.upsertTarget({
+    ...target,
+    observed_artifact_identity_json: encodeObservedArtifactIdentity({
+      kind: 'exact',
+      identity: `exact:${MOVED_DIGEST}`,
+      observedAt: 2,
+      services: [runtimeObservation(MOVED_DIGEST, 2)],
+    }),
+  });
 }
 
 describe('buildDigestPinsFromArtifactSet', () => {
@@ -216,6 +327,100 @@ describe('buildDigestPinsFromArtifactSet', () => {
 });
 
 describe('enforceDigestRepair', () => {
+  it('re-pins the approved digest for the node platform and converges on it, never the moved tag', async () => {
+    const { bp, node } = seedBlueprint();
+    const seeded = seedApp(bp, node, {
+      qualification: 'exact',
+      services: [registryService()],
+      // A newer candidate exists and carries the moved digest. Repair must
+      // ignore it: the approved set is the only thing it may restore.
+      // The variants move with the digest, because the platform child is what
+      // the pin builder reads. A candidate that only changed platformDigest
+      // would be indistinguishable from the approved one.
+      newerCandidateServices: [
+        registryService({
+          // A tag that moved changes the index digest too, not only the child.
+          indexDigest: MOVED_INDEX,
+          platformDigest: MOVED_DIGEST,
+          platformVariants: [
+            { platform: 'linux/amd64', digest: MOVED_DIGEST },
+            { platform: 'linux/arm64', digest: DIGEST_B },
+          ],
+        }),
+      ],
+    });
+    seedMovedObservation(
+      GitOpsStore.getInstance().getLiveBlueprintApplication(bp.id)!.id,
+      node.id,
+    );
+    const service = BlueprintService.getInstance();
+    const deploySpy = vi.spyOn(service, 'deployAuthorizedMaterialization').mockResolvedValue({ status: 'active' });
+
+    // The starting state is asserted before repair runs, not only after, so a
+    // fixture that quietly stopped seeding the newer candidate or the moved
+    // observation cannot pass by leaving the post-state accidentally correct.
+    const store = GitOpsStore.getInstance();
+    const app = store.getLiveBlueprintApplication(bp.id)!;
+    expect(seeded.newerCandidateSetId, 'the fixture has a newer candidate to get wrong').not.toBeNull();
+    expect(app.latest_artifact_set_id).toBe(seeded.newerCandidateSetId);
+    const targetBefore = store.getTarget(app.id, node.id);
+    expect(targetBefore?.latest_artifact_set_id).toBe(seeded.newerCandidateSetId);
+    const observedBefore = decodeObservedIdentity(targetBefore?.observed_artifact_identity_json ?? null);
+    if (observedBefore === null) throw new Error('the fixture did not record an observation to compare');
+    expect(observedBefore.services?.[0]?.platformDigest).toBe(MOVED_DIGEST);
+    expect(
+      comparableObservationMatches(approvedServicesOf(seeded.artifactSetId), observedBefore),
+      'the target must be genuinely drifted before repair, or repair proves nothing',
+    ).toBe(false);
+
+    const repaired = await service.enforceDigestRepair(bp, node);
+
+    expect(repaired).toEqual({ status: 'active' });
+    expect(deploySpy).toHaveBeenCalledTimes(1);
+    // The repair target is the approved child for the platform this node runs,
+    // taken from the accepted artifact set. Nothing about the running image can
+    // reach this decision, which is what makes a moved tag a drift rather than
+    // a new expectation.
+    expect(deploySpy.mock.calls[0]?.[0]?.digestPins).toEqual({ web: `nginx@${DIGEST_A}` });
+
+    // Repair restores a state; it does not authorize one. The accepted
+    // generation and the artifact set it was qualified against are untouched,
+    // so a repaired target still means the generation that was approved, and the
+    // pointer that names the most recent resolution still names the newer
+    // candidate rather than becoming the approved set.
+    const target = store.getTarget(app.id, node.id);
+    expect(app.accepted_generation_id).toBe(seeded.generationId);
+    expect(app.artifact_set_id).toBe(seeded.artifactSetId);
+    expect(app.latest_artifact_set_id).toBe(seeded.newerCandidateSetId);
+    expect(target?.expected_artifact_set_id).toBe(seeded.artifactSetId);
+    expect(target?.lkg_artifact_set_id).toBe(seeded.artifactSetId);
+    expect(target?.latest_artifact_set_id).toBe(seeded.newerCandidateSetId);
+
+    // The target really was drifted when repair ran, and it stays recorded as
+    // drifted afterwards. Repair changes what runs, not what was approved, and it
+    // does not rewrite the observation into agreement.
+    const observedAfter = decodeObservedIdentity(target?.observed_artifact_identity_json ?? null);
+    if (observedAfter === null) throw new Error('the fixture did not record an observation to compare');
+    expect(observedAfter.services?.[0]?.platformDigest).toBe(MOVED_DIGEST);
+    expect(
+      comparableObservationMatches(approvedServicesOf(seeded.artifactSetId), observedAfter),
+      'a node running the moved digest is drifted, which is why repair ran',
+    ).toBe(false);
+
+    // The state repair pins is the one that converges. Once the node runs what was
+    // approved, the production comparator the reconciler uses reports matched
+    // against the same stored expectation repair left in place.
+    expect(
+      comparableObservationMatches(approvedServicesOf(seeded.artifactSetId), {
+        kind: 'exact',
+        identity: 'exact',
+        observedAt: 3,
+        services: [runtimeObservation(DIGEST_A, 3)],
+      }),
+      'a node running the approved digest is matched',
+    ).toBe(true);
+  });
+
   it('fails closed without mutating LKG pointers when the set is missing or not comparable', async () => {
     const { bp, node } = seedBlueprint();
     seedApp(bp, node, { omitSet: true, qualification: 'unresolved' });

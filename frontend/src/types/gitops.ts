@@ -123,19 +123,22 @@ export type SourceFacet =
         | 'never_reconciled'
         | 'checking_fetching'
         | 'application_generation_accepted'
-        | 'candidate_ready'
-        | 'source_review_pending'
-        | 'source_conflict_blocker'
+         | 'candidate_ready'
+         | 'source_conflict_blocker'
         | 'source_reconcile_required';
-    })
-  | (SourceIdentityFields & { status: 'source_superseded'; supersededGenerationId: string })
+     })
+   | (SourceIdentityFields & {
+       status: 'source_review_pending';
+       reviewBlockReason: 'stateful_withdrawal' | null;
+     })
+   | (SourceIdentityFields & { status: 'source_superseded'; supersededGenerationId: string })
   | (SourceIdentityFields & { status: 'applying'; activeOperationId: string; activeGenerationId: string })
   | (SourceIdentityFields & { status: 'source_poll_scheduled'; nextPollAt: number })
   | (SourceIdentityFields & { status: 'source_retry_scheduled'; retryAt: number; retryCount: number })
   | (SourceIdentityFields & { status: 'source_suspended'; suspendedAt: number; suspendedReason: string | null })
   | (SourceIdentityFields & {
       status: 'source_failed';
-      failureStage: 'fetch' | 'validation' | 'apply' | 'create';
+       failureStage: 'fetch' | 'validation' | 'apply' | 'create';
       failureClass: string;
       failureAt: number;
       retryAt: number | null;
@@ -171,6 +174,13 @@ export interface ArtifactExpectedIdentity {
   evidenceVersion: number;
   qualification: ArtifactQualification;
   identity: string | null;
+  /**
+   * Per-service digests as the frozen artifact set recorded them, when it
+   * recorded any. Absent is not the same as empty: an absent list means the
+   * set carries no per-service evidence, so a per-service comparison cannot be
+   * made and nothing may be claimed about it.
+   */
+  services?: ServiceArtifactEvidence[];
 }
 
 export interface ArtifactLatestEvidence {
@@ -328,6 +338,58 @@ export type LkgFacet =
   | { status: 'unavailable' }
   | { status: 'qualified'; generationId: string; artifactSetId: string };
 
+/**
+ * How a rollout reacts to a per-target health outcome.
+ *
+ * `observe` is the default and records outcomes without gating advancement, so a
+ * rollout behaves exactly as it did before an operator chose anything. The other
+ * four are opt-in because three of them can stop or restore work across a fleet.
+ */
+export type HealthRolloutPolicy = 'observe' | 'pause' | 'retry_once' | 'stop' | 'rollback';
+
+export const HEALTH_ROLLOUT_POLICIES: readonly HealthRolloutPolicy[] = [
+  'observe',
+  'pause',
+  'retry_once',
+  'stop',
+  'rollback',
+];
+
+/** Why a rollout stopped advancing on one target. */
+export type HealthStopReason =
+  | 'health_passed'
+  | 'health_failed'
+  | 'health_unknown'
+  | 'health_retried'
+  | 'health_retry_exhausted'
+  | 'rollout_stopped'
+  | 'rollback_completed'
+  | 'rollback_pending'
+  | 'stop_acknowledged'
+  | 'rollback_unavailable';
+
+/**
+ * The health-gated rollout's state for one target.
+ *
+ * `policy` is the frozen policy of the rollout this target is under, null when
+ * there is no authorized rollout, which is a different answer from a policy that
+ * is observe. `configuredPolicy` is what the operator has set on the current
+ * intent, which is what the next rollout will freeze; after a change only it
+ * moves, so reporting just the frozen one would make a saved change look lost.
+ * `recoveryAvailable` says
+ * whether a rollback has a captured pre-rollout generation to restore, which the
+ * LKG facet cannot answer: the LKG is the newest generation that ever passed, not
+ * what this target ran before the rollout.
+ */
+export interface HealthGateFacet {
+  policy: HealthRolloutPolicy | null;
+  configuredPolicy: HealthRolloutPolicy;
+  awaitingRunId: string | null;
+  attempts: number;
+  stopReason: HealthStopReason | null;
+  recoveryAvailable: boolean;
+}
+
 export type HealthFacet =
   | { status: 'not_applicable' | 'unbound' }
   | { status: 'pending'; runId: string | null }
@@ -336,15 +398,41 @@ export type HealthFacet =
   | { status: 'failed'; runId: string; deployedGenerationId: string | null }
   | { status: 'unknown'; runId: string | null; limitation: 'health_unknown' };
 
+/** One frozen child digest for a platform, recorded at resolve time. */
+export interface ArtifactPlatformVariant {
+  platform: string;
+  digest: string;
+}
+
+/**
+ * Per-service image evidence. The digests are candidates, not one answer: a
+ * multi-platform image records a frozen child per platform, and an observation
+ * on a given node only proves the child for that node's platform.
+ */
+export interface ServiceArtifactEvidence {
+  serviceName: string;
+  authoredRef: string | null;
+  source: 'registry' | 'build' | 'unsupported';
+  platform: string | null;
+  indexDigest: string | null;
+  platformDigest: string | null;
+  platformVariants?: readonly ArtifactPlatformVariant[] | null;
+  localDigests?: readonly string[] | null;
+  buildContextFingerprint: string | null;
+  producedImageId: string | null;
+  failureClass: string | null;
+  resolvedAt: number | null;
+}
+
 /** What was observed running, and how much that observation can be trusted as proof. */
 export type ObservedArtifactIdentity =
   | { kind: 'unknown' }
   | { kind: 'missing' }
   | { kind: 'unavailable' }
-  | { kind: 'exact'; identity: string; observedAt: number }
-  | { kind: 'qualified'; identity: string; observedAt: number }
-  | { kind: 'stale'; identity: string; observedAt: number }
-  | { kind: 'local_build_unverified'; identity: string; observedAt: number };
+  | { kind: 'exact'; identity: string; observedAt: number; services?: ServiceArtifactEvidence[] }
+  | { kind: 'qualified'; identity: string; observedAt: number; services?: ServiceArtifactEvidence[] }
+  | { kind: 'stale'; identity: string; observedAt: number; services?: ServiceArtifactEvidence[] }
+  | { kind: 'local_build_unverified'; identity: string; observedAt: number; services?: ServiceArtifactEvidence[] };
 
 // --- application facets, targets, drift -------------------------------------
 
@@ -382,6 +470,8 @@ export interface GitOpsTargetProjection {
   legacyAppliedRevision: number | null;
   runtime: RuntimeFacet;
   health: HealthFacet;
+  /** Absent on a projection from a remote running an older version. */
+  healthGate?: HealthGateFacet;
   lkg: LkgFacet;
   tombstoned: boolean;
 }
@@ -389,13 +479,16 @@ export interface GitOpsTargetProjection {
 export type ConfiguredPolicy =
   | { kind: 'git_source'; autoApplyOnWebhook: boolean; autoDeployOnApply: boolean }
   | { kind: 'blueprint_drift'; driftMode: 'observe' | 'suggest' | 'enforce' }
+  | { kind: 'health_rollout'; healthPolicy: HealthRolloutPolicy }
   | null;
 
 /**
  * A classified divergence between what was intended and what was observed.
  *
- * The backend currently emits one class of item on its own evidence, a runtime
- * artifact mismatch; every other class still needs a producer. An empty list
+ * The backend emits a class only where persisted evidence proves a mismatch:
+ * source, managed project, placement, health, and the runtime family. The
+ * invocation class has no producer yet, because the observed invocation is
+ * never persisted, so it is absent rather than fabricated. An empty list
  * therefore means "no confirmed drift", never "in sync": a state the model was
  * never asked about also answers empty.
  */

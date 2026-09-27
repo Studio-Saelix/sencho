@@ -92,7 +92,15 @@ function target(overrides: Partial<GitOpsTargetProjection> = {}): GitOpsTargetPr
         runtime: { status: 'synced_and_healthy' },
         health: { status: 'not_applicable' },
         lkg: { status: 'none' },
-        tombstoned: false,
+        healthGate: {
+      policy: null,
+      configuredPolicy: 'observe',
+      awaitingRunId: null,
+      attempts: 0,
+      stopReason: null,
+      recoveryAvailable: false,
+    },
+    tombstoned: false,
         ...overrides,
     };
 }

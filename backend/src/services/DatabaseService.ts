@@ -229,7 +229,7 @@ export interface HealthGateRunRow {
     node_id: number;
     stack_name: string;
     /** Named trigger_action because TRIGGER is reserved in SQLite. */
-    trigger_action: 'update' | 'deploy' | 'service_update' | 'service_restore' | 'recovery';
+    trigger_action: 'update' | 'deploy' | 'service_update' | 'service_restore' | 'recovery' | 'rollout';
     status: 'observing' | 'passed' | 'failed' | 'unknown';
     reason: string | null;
     window_seconds: number;
@@ -251,6 +251,19 @@ export interface HealthGateRunRow {
      * verdict belongs to the currently applied generation.
      */
     deployed_generation_id?: string | null;
+    /**
+     * Rollout binding for a run reserved before its apply was dispatched
+     * (reserveRolloutRun). Written up front so a lost response leaves a row
+     * that still names the application, intent, rollout generation, artifact
+     * set, and frozen policy it was allocated for; a late verdict is only
+     * consumed if those still match the target's live rollout. All null for
+     * every run that was not part of a health-gated rollout.
+     */
+    application_id?: string | null;
+    intent_revision_id?: string | null;
+    rollout_generation_id?: string | null;
+    artifact_set_id?: string | null;
+    health_policy?: string | null;
 }
 
 /** Pre-update image snapshot enabling a manual per-service restore after a service-scoped update. */
@@ -1819,7 +1832,7 @@ export class DatabaseService {
         id TEXT PRIMARY KEY,
         node_id INTEGER NOT NULL,
         stack_name TEXT NOT NULL,
-        trigger_action TEXT NOT NULL CHECK (trigger_action IN ('update','deploy','service_update','service_restore','recovery')),
+        trigger_action TEXT NOT NULL CHECK (trigger_action IN ('update','deploy','service_update','service_restore','recovery','rollout')),
         status TEXT NOT NULL CHECK (status IN ('observing','passed','failed','unknown')),
         reason TEXT,
         window_seconds INTEGER NOT NULL,
@@ -1950,14 +1963,39 @@ export class DatabaseService {
 
         this.db.exec(GITOPS_SCHEMA_SQL);
 
-        // Apply migrations safely (ignore if columns already exist)
+        // Apply migrations safely (ignore if columns already exist, log anything else)
         const maybeAddCol = (table: string, col: string, def: string) => {
-            try { this.db.prepare(`ALTER TABLE ${table} ADD COLUMN ${col} ${def}`).run(); } catch (e) { /* ignore */ }
+            try { this.db.prepare(`ALTER TABLE ${table} ADD COLUMN ${col} ${def}`).run(); } catch (e) {
+                const message = e instanceof Error ? e.message : String(e);
+                if (!message.includes('duplicate column')) {
+                    console.error(`[DatabaseService] Failed to add column "${col}" to "${table}":`, message);
+                }
+            }
         };
 
         // Remote Host Console bridges record the hub operator separately from
         // the console_session principal (username stays console_session).
         maybeAddCol('audit_log', 'acting_as', 'TEXT');
+        // The last stack-scope health verdict, bound to the generation it
+        // judged, so a failed check is reported as failed rather than as
+        // "never checked". The CHECK is carried on the ALTER as well as the
+        // fresh-install schema: SQLite accepts a CHECK when adding a column,
+        // so a migrated install is held to the same vocabulary as a new one.
+        maybeAddCol('gitops_target_current', 'last_health_status',
+            "TEXT CHECK (last_health_status IS NULL OR last_health_status IN ('passed','failed','unknown'))");
+        maybeAddCol('gitops_target_current', 'last_health_generation_id', 'TEXT');
+        maybeAddCol('gitops_target_current', 'last_health_run_id', 'TEXT');
+        // Health-gated rollout state. pending_health_run_id is the queue's only
+        // idempotency key: only the run it names may consume the target or move
+        // its health state, which is what makes a duplicate or out-of-order
+        // verdict evidence instead of a second opinion. health_attempts is the
+        // retry budget, scoped to the current rollout generation. The stop
+        // reason is a fence written before any external restore, so a restart
+        // mid-rollback reconciles the rollback instead of resuming the queue.
+        maybeAddCol('gitops_target_current', 'pending_health_run_id', 'TEXT');
+        maybeAddCol('gitops_target_current', 'health_attempts', 'INTEGER NOT NULL DEFAULT 0');
+        maybeAddCol('gitops_target_current', 'health_stop_reason',
+          "TEXT CHECK (health_stop_reason IS NULL OR health_stop_reason IN ('health_passed','health_failed','health_unknown','health_retried','health_retry_exhausted','rollout_stopped','rollback_completed','rollback_pending','stop_acknowledged','rollback_unavailable'))");
         // Cached INSERT may predate the column; rebuild on next flush.
         this.auditLogInsertStmt = null;
 
@@ -1989,6 +2027,10 @@ export class DatabaseService {
         // existing installs already have. New installs get it from the
         // CREATE TABLE; older DBs need the additive column here.
         maybeAddCol('gitops_applications', 'source_suspended_reason', 'TEXT NULL');
+        // Why an automatic acceptance fell back to review (for example a
+        // candidate that withdraws a stateful service). New installs get it
+        // from the CREATE TABLE; older DBs need the additive column here.
+        maybeAddCol('gitops_applications', 'review_block_reason', 'TEXT NULL');
         // Portable accepted-generation contract fields. Additive and
         // nullable: existing generation rows decode these as an explicit
         // limitation rather than invented evidence.
@@ -2259,11 +2301,17 @@ stmt.run('gitops_schema_version', '1');
 
     /**
      * Rebuild health_gate_runs when the CHECK lacks service_update,
-     * service_restore, or recovery, or when target/failure columns are missing.
-     * After the CHECK is current, ensure deployed_generation_id exists.
+     * service_restore, recovery, or rollout, or when target/failure columns are
+     * missing. After the CHECK is current, ensure the deployment and rollout
+     * binding columns exist.
      * Idempotent and restart-safe: drops a stale temporary table, then rebuilds
      * in one better-sqlite3 transaction so an interrupted startup cannot leave
      * CREATE TABLE health_gate_runs_new blocking the next boot.
+     *
+     * The rollout binding columns are added after the rebuild rather than
+     * declared in it, exactly as deployed_generation_id is: a rebuild copies a
+     * fixed column list, so a column the list does not know is dropped on the
+     * exact upgrade path that needs it.
      */
     private migrateHealthGateTargetSchema(): void {
         const tableSql = (this.db.prepare(
@@ -2275,10 +2323,13 @@ stmt.run('gitops_schema_version', '1');
         const hasFailure = colNames.has('failure_source');
         const hasWideTrigger = tableSql.includes('service_update') && tableSql.includes('service_restore');
         const hasRecoveryTrigger = tableSql.includes("'recovery'");
-        if (hasTarget && hasFailure && hasWideTrigger && hasRecoveryTrigger) {
+        const hasRolloutTrigger = tableSql.includes("'rollout'");
+        if (hasTarget && hasFailure && hasWideTrigger && hasRecoveryTrigger && hasRolloutTrigger) {
             this.ensureHealthGateDeployedGenerationColumn();
+            this.ensureHealthGateRolloutBindingColumns();
             return;
         }
+
 
         // A previous crash between CREATE and RENAME leaves this temp table behind.
         this.db.exec('DROP TABLE IF EXISTS health_gate_runs_new');
@@ -2294,7 +2345,7 @@ stmt.run('gitops_schema_version', '1');
                   id TEXT PRIMARY KEY,
                   node_id INTEGER NOT NULL,
                   stack_name TEXT NOT NULL,
-                  trigger_action TEXT NOT NULL CHECK (trigger_action IN ('update','deploy','service_update','service_restore','recovery')),
+                  trigger_action TEXT NOT NULL CHECK (trigger_action IN ('update','deploy','service_update','service_restore','recovery','rollout')),
                   status TEXT NOT NULL CHECK (status IN ('observing','passed','failed','unknown')),
                   reason TEXT,
                   window_seconds INTEGER NOT NULL,
@@ -2326,6 +2377,7 @@ stmt.run('gitops_schema_version', '1');
             `);
         })();
         this.ensureHealthGateDeployedGenerationColumn();
+        this.ensureHealthGateRolloutBindingColumns();
     }
 
     private ensureHealthGateDeployedGenerationColumn(): void {
@@ -2334,6 +2386,24 @@ stmt.run('gitops_schema_version', '1');
             CREATE INDEX IF NOT EXISTS idx_health_gate_runs_deployed_gen
               ON health_gate_runs(node_id, stack_name, deployed_generation_id);
         `);
+    }
+
+    /**
+     * Bind a reserved health run to the rollout that asked for it.
+     *
+     * The reservation is written before the apply is dispatched, so a lost
+     * response leaves a row naming the application, intent, rollout generation,
+     * artifact set, and frozen policy it was allocated for. Without those
+     * bindings a surviving row says only that some stack on some node was being
+     * observed, which is not enough to decide whether a late verdict still
+     * belongs to a rollout that is running now.
+     */
+    private ensureHealthGateRolloutBindingColumns(): void {
+        this.tryAddColumn('health_gate_runs', 'application_id', 'TEXT');
+        this.tryAddColumn('health_gate_runs', 'intent_revision_id', 'TEXT');
+        this.tryAddColumn('health_gate_runs', 'rollout_generation_id', 'TEXT');
+        this.tryAddColumn('health_gate_runs', 'artifact_set_id', 'TEXT');
+        this.tryAddColumn('health_gate_runs', 'health_policy', 'TEXT');
     }
 
     private migrateEncryptNodeTokens(): void {
@@ -4430,13 +4500,16 @@ stmt.run('gitops_schema_version', '1');
             `INSERT INTO health_gate_runs
                (id, node_id, stack_name, trigger_action, status, reason, window_seconds, containers_json,
                 started_at, ended_at, created_by, target_scope, service_name, failure_source,
-                deployed_generation_id)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+                deployed_generation_id, application_id, intent_revision_id, rollout_generation_id,
+                artifact_set_id, health_policy)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
         ).run(
             run.id, run.node_id, run.stack_name, run.trigger_action, run.status, run.reason,
             run.window_seconds, run.containers_json, run.started_at, run.ended_at, run.created_by,
             run.target_scope, run.service_name, run.failure_source,
             run.deployed_generation_id ?? null,
+            run.application_id ?? null, run.intent_revision_id ?? null,
+            run.rollout_generation_id ?? null, run.artifact_set_id ?? null, run.health_policy ?? null,
         );
         // Bounded history: keep only the 10 most recent runs per stack.
         this.db.prepare(
@@ -4494,6 +4567,12 @@ stmt.run('gitops_schema_version', '1');
         return this.db.prepare(
             "SELECT * FROM health_gate_runs WHERE status = 'observing'"
         ).all() as HealthGateRunRow[];
+    }
+
+    public getHealthGateRunById(id: string): HealthGateRunRow | undefined {
+        return this.db.prepare(
+            "SELECT * FROM health_gate_runs WHERE id = ?"
+        ).get(id) as HealthGateRunRow | undefined;
     }
 
     // --- Service Update Recovery ---

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { Search } from 'lucide-react';
+import { Search, X } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Combobox } from '@/components/ui/combobox';
 import { Input } from '@/components/ui/input';
@@ -62,13 +62,25 @@ export function PortfolioFilterBar({
   nodes,
   onChange,
   onQueryChange,
+  onClear,
+  blueprintLabel,
 }: {
   filters: GitOpsPortfolioFilters;
   nodes: NodeOption[];
   onChange: (next: GitOpsPortfolioFilters) => void;
   /** Typed search, debounced by the caller. */
   onQueryChange: (query: string) => void;
+  /** Resets every filter, including ones only a deep link can set (source, rollout, health). */
+  onClear: () => void;
+  /** Display name for a Blueprint scope chip (the filter carries only the id). */
+  blueprintLabel?: string;
 }) {
+  const without = (key: 'stack' | 'blueprintId') => () => {
+    const next = { ...filters };
+    delete next[key];
+    onChange(next);
+  };
+
   const [searchExpanded, setSearchExpanded] = useState(false);
   const searchInputRef = useRef<HTMLInputElement>(null);
   // The input is locally controlled so typing stays immediate while the fetch
@@ -127,6 +139,19 @@ export function PortfolioFilterBar({
         </TooltipProvider>
       )}
 
+      {/* Scopes set by another surface (a stack's Git indicator, a
+          Blueprint's detail); they have no combobox, so they show as
+          removable chips rather than as an invisible narrowing. */}
+      {filters.stack !== undefined && (
+        <ScopeChip label={`stack: ${filters.stack}`} removeLabel="Remove stack filter" onRemove={without('stack')} />
+      )}
+      {filters.blueprintId !== undefined && (
+        <ScopeChip
+          label={`blueprint: ${blueprintLabel ?? `#${filters.blueprintId}`}`}
+          removeLabel="Remove blueprint filter"
+          onRemove={without('blueprintId')}
+        />
+      )}
       <Combobox
         options={ATTENTION_OPTIONS}
         value={attentionValue}
@@ -179,6 +204,36 @@ export function PortfolioFilterBar({
         }}
         className={FILTER_CLASS}
       />
+      {(Object.keys(filters).length > 0 || query !== '') && (
+        <Button
+          variant="ghost"
+          size="sm"
+          className="h-9 text-xs text-muted-foreground"
+          onClick={() => {
+            setQuery('');
+            setSearchExpanded(false);
+            onClear();
+          }}
+        >
+          Clear filters
+        </Button>
+      )}
     </div>
+  );
+}
+
+function ScopeChip({ label, removeLabel, onRemove }: { label: string; removeLabel: string; onRemove: () => void }) {
+  return (
+    <span className="inline-flex h-9 items-center gap-1.5 rounded-md border border-brand/40 bg-brand/[0.06] pl-2.5 pr-1 font-mono text-xs text-brand">
+      {label}
+      <button
+        type="button"
+        onClick={onRemove}
+        aria-label={removeLabel}
+        className="flex h-6 w-6 items-center justify-center rounded-sm hover:bg-brand/10"
+      >
+        <X className="h-3.5 w-3.5" strokeWidth={1.5} />
+      </button>
+    </span>
   );
 }

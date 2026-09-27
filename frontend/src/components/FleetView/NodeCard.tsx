@@ -5,7 +5,7 @@ import {
     MoreVertical, Ban, Pencil, Trash2, Info, FlaskConical,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
-import { Badge } from '@/components/ui/badge';
+import { Badge, badgeVariants } from '@/components/ui/badge';
 import { Skeleton } from '@/components/ui/skeleton';
 import { ConfirmModal } from '@/components/ui/modal';
 import {
@@ -18,7 +18,7 @@ import {
 import { NodeMuteSubmenu } from '@/components/mute/MuteMenuItems';
 import { useNodeMuteActions } from '@/hooks/useMuteRuleActions';
 import type { MuteRuleDraft } from '@/lib/muteRules';
-import { formatBytes } from '@/lib/utils';
+import { cn, formatBytes } from '@/lib/utils';
 import { apiFetch } from '@/lib/api';
 import { toast } from '@/components/ui/toast-store';
 import { formatVersion } from '@/lib/version';
@@ -28,6 +28,7 @@ import { cordonNode, uncordonNode } from '@/lib/nodesApi';
 import { UpdateStatusBadge } from './UpdateStatusBadge';
 import { PinnedUpdateBadge } from './PinnedUpdateBadge';
 import { StackSection } from './NodeCardStackList';
+import { openGitOpsWorkplace } from '@/components/gitops/portfolio/portfolioNavigation';
 import type { Label as StackLabel } from '../label-types';
 import type { FleetNode, NodeUpdateStatus } from './types';
 import { getNodeCpu, getNodeMem, getNodeMemUsed, getNodeMemTotal, getNodeDisk, isCritical } from './nodeUtils';
@@ -41,6 +42,8 @@ export interface NodeCardProps {
     onOpenNetworking?: (nodeId: number) => void;
     /** Networking posture signal from computeNodeNetworkingSummary, if loaded. */
     networkingSignal?: { exposed: boolean; unknown: boolean; drift: boolean };
+    /** GitOps applications needing attention that involve this node, if loaded. */
+    gitopsAttention?: number;
     labelMap?: Record<string, StackLabel[]>;
     updateStatus?: NodeUpdateStatus;
     onUpdate?: (nodeId: number) => void;
@@ -70,7 +73,7 @@ function UsageBar({ percent, color }: { percent: number; color: string }) {
 
 // --- Main Export ---
 
-export function NodeCard({ node, onNavigate, onOpenNetworking, networkingSignal, labelMap, updateStatus, onUpdate, updatingNodeId, onRetryUpdate, onDismissUpdate, onCordonChange, onEdit, onDelete, onOpenMuteRulesWithPrefill, onOpenDetails }: NodeCardProps) {
+export function NodeCard({ node, onNavigate, onOpenNetworking, networkingSignal, gitopsAttention, labelMap, updateStatus, onUpdate, updatingNodeId, onRetryUpdate, onDismissUpdate, onCordonChange, onEdit, onDelete, onOpenMuteRulesWithPrefill, onOpenDetails }: NodeCardProps) {
     const [expanded, setExpanded] = useState(false);
     const [stacks, setStacks] = useState<string[] | null>(node.stacks);
     const [loadingStacks, setLoadingStacks] = useState(false);
@@ -286,6 +289,19 @@ export function NodeCard({ node, onNavigate, onOpenNetworking, networkingSignal,
                                         Networking ·
                                         {networkingSignal.drift ? ' drift' : networkingSignal.exposed ? ' exposed' : ' unknown exposure'}
                                     </Badge>
+                                )}
+                                {gitopsAttention !== undefined && gitopsAttention > 0 && (
+                                    <button
+                                        type="button"
+                                        className={cn(
+                                            badgeVariants({ variant: 'outline' }),
+                                            'text-[10px] px-1.5 py-0 h-4 shrink-0 cursor-pointer bg-warning/10 text-warning border-warning/30 hover:bg-warning/20',
+                                        )}
+                                        onClick={(event) => { event.stopPropagation(); openGitOpsWorkplace({ nodeId: node.id, attention: true }); }}
+                                        title="Open the GitOps applications needing attention on this node"
+                                    >
+                                        GitOps · {gitopsAttention} attention
+                                    </button>
                                 )}
                             </div>
                         </div>

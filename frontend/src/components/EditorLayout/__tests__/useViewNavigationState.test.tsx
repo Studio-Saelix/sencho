@@ -211,6 +211,46 @@ describe('useViewNavigationState', () => {
     expect(result.current.filterNodeId).toBeNull();
   });
 
+  it('routes a hub-only destination from a remote node through the hub switch', () => {
+    mockActiveNode('remote');
+    let queued: (() => void) | null = null;
+    const onHubOnlyFromRemote = vi.fn((apply: () => void) => { queued = apply; });
+    const { result, rerender } = renderHook(() => useViewNavigationState({ onHubOnlyFromRemote }));
+    act(() => {
+      window.dispatchEvent(new CustomEvent(SENCHO_NAVIGATE_EVENT, { detail: { view: 'gitops' } }));
+    });
+    // Not set against the remote node, which hides the view.
+    expect(onHubOnlyFromRemote).toHaveBeenCalledTimes(1);
+    expect(result.current.activeView).toBe('dashboard');
+
+    // The shell runs the queued navigation once the switch to the hub lands.
+    mockActiveNode('local');
+    rerender();
+    act(() => queued!());
+    expect(result.current.activeView).toBe('gitops');
+  });
+
+  it('keeps a node-scoped destination on the remote node', () => {
+    mockActiveNode('remote');
+    const onHubOnlyFromRemote = vi.fn();
+    const { result } = renderHook(() => useViewNavigationState({ onHubOnlyFromRemote }));
+    act(() => {
+      window.dispatchEvent(new CustomEvent(SENCHO_NAVIGATE_EVENT, { detail: { view: 'resources' } }));
+    });
+    expect(onHubOnlyFromRemote).not.toHaveBeenCalled();
+    expect(result.current.activeView).toBe('resources');
+  });
+
+  it('opens a hub-only destination directly on the hub', () => {
+    const onHubOnlyFromRemote = vi.fn();
+    const { result } = renderHook(() => useViewNavigationState({ onHubOnlyFromRemote }));
+    act(() => {
+      window.dispatchEvent(new CustomEvent(SENCHO_NAVIGATE_EVENT, { detail: { view: 'gitops' } }));
+    });
+    expect(onHubOnlyFromRemote).not.toHaveBeenCalled();
+    expect(result.current.activeView).toBe('gitops');
+  });
+
   it('cleans up SENCHO_NAVIGATE_EVENT listener on unmount', () => {
     const { result, unmount } = renderHook(() => useViewNavigationState());
     unmount();

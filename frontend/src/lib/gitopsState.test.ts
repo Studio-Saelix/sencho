@@ -21,6 +21,7 @@ import {
   SOURCE_STATE,
   SOURCE_STATE_LOOKUP,
   absentFault,
+  driftClassLabel,
   identityRefLabel,
   livePlacementFacet,
   liveRolloutFacet,
@@ -404,5 +405,33 @@ describe('identityRefLabel', () => {
         authored: { composeFileOrder: [], projectName: null, projectDirectory: null, envFileOrder: [] },
       }),
     ).toBe('no compose files');
+  });
+
+  it('names an identity kind this build has not heard of', () => {
+    // The union is closed, so this value can only arrive from a newer node. It
+    // crossed the validator on structure alone, and it must render as something
+    // rather than as nothing.
+    const unfamiliar = { kind: 'future_kind' } as unknown as GitOpsIdentityRef;
+    expect(identityRefLabel(unfamiliar)).toBe('unknown (future_kind)');
+  });
+});
+
+describe('driftClassLabel', () => {
+  const cases: [string, string][] = [
+    ['source', 'source'],
+    ['managed_project', 'managed project'],
+    ['invocation', 'invocation'],
+    ['placement', 'placement'],
+    ['rollout', 'rollout'],
+    ['runtime', 'runtime'],
+    ['health', 'health'],
+  ];
+
+  it.each(cases)('names %s', (className, expected) => {
+    expect(driftClassLabel(className)).toBe(expected);
+  });
+
+  it('shows a class this build does not know as itself', () => {
+    expect(driftClassLabel('future_class')).toBe('future_class');
   });
 });

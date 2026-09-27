@@ -6,7 +6,7 @@
  * facet statuses, so a reason code a newer server build introduces renders as
  * its raw code rather than crashing the page.
  */
-import type { GitOpsAttentionReason, GitOpsPortfolioPosture } from '@/types/gitopsPortfolio';
+import type { GitOpsAttentionReason, GitOpsPortfolioPosture, GitOpsPortfolioTargetSummary } from '@/types/gitopsPortfolio';
 
 export type PortfolioTone = 'brand' | 'success' | 'warning' | 'destructive' | 'neutral';
 
@@ -18,7 +18,7 @@ export interface PortfolioLabel {
   line: string;
 }
 
-export const POSTURE_LABEL: Record<GitOpsPortfolioPosture, { label: string; tone: PortfolioTone }> = {
+export const POSTURE_LABEL: Readonly<Partial<Record<GitOpsPortfolioPosture, { label: string; tone: PortfolioTone }>>> = {
   failed: { label: 'failed', tone: 'destructive' },
   attention: { label: 'needs attention', tone: 'warning' },
   in_progress: { label: 'in progress', tone: 'brand' },
@@ -27,7 +27,7 @@ export const POSTURE_LABEL: Record<GitOpsPortfolioPosture, { label: string; tone
   unknown: { label: 'unknown', tone: 'neutral' },
 };
 
-export const ATTENTION_LABEL: Partial<Record<GitOpsAttentionReason, PortfolioLabel>> = {
+export const ATTENTION_LABEL: Readonly<Partial<Record<GitOpsAttentionReason, PortfolioLabel>>> = {
   source_failed: { label: 'source failed', tone: 'destructive', line: 'The last reconciliation of the Git source failed.' },
   source_unknown_outcome: { label: 'outcome unknown', tone: 'warning', line: 'A source operation was interrupted before its outcome could be confirmed.' },
   source_review_pending: { label: 'review required', tone: 'warning', line: 'A fetched commit is waiting for review before it can apply.' },
@@ -37,6 +37,7 @@ export const ATTENTION_LABEL: Partial<Record<GitOpsAttentionReason, PortfolioLab
   source_suspended: { label: 'source suspended', tone: 'neutral', line: 'Reconciliation is suspended for this source.' },
   placement_review_pending: { label: 'placement review', tone: 'warning', line: 'A target placement decision is waiting for review.' },
   stateful_confirmation_required: { label: 'stateful confirmation', tone: 'warning', line: 'Stateful changes need explicit confirmation before proceeding.' },
+  stateful_withdrawal_blocked: { label: 'stateful change blocked', tone: 'warning', line: 'An automatic acceptance was held for review because the candidate removes or renames a stateful service, or that cannot be ruled out.' },
   rollout_authorization_pending: { label: 'rollout authorization', tone: 'warning', line: 'The rollout is waiting for authorization.' },
   rollout_authorization_stale: { label: 'authorization stale', tone: 'warning', line: 'The rollout authorization no longer matches the current intent; re-authorize to proceed.' },
   preflight_blocked: { label: 'preflight blocked', tone: 'warning', line: 'Preflight evidence blocks this rollout (for example an unready private-registry target).' },
@@ -57,7 +58,25 @@ export const ATTENTION_LABEL: Partial<Record<GitOpsAttentionReason, PortfolioLab
 
 /** Fallback rendering for a reason this build has not heard of. */
 export function attentionLabel(reason: GitOpsAttentionReason): PortfolioLabel {
-  return ATTENTION_LABEL[reason] ?? { label: reason.replace(/_/g, ' '), tone: 'warning', line: 'This application reports an attention reason this Sencho build does not know.' };
+  const unrecognized: PortfolioLabel = {
+    label: reason.replace(/_/g, ' '),
+    tone: 'warning',
+    line: 'This application reports an attention reason this Sencho build does not know.',
+  };
+  return Object.hasOwn(ATTENTION_LABEL, reason) && ATTENTION_LABEL[reason]
+    ? ATTENTION_LABEL[reason]
+    : unrecognized;
+}
+
+/**
+ * Whether this build has wording for a posture, own property or not.
+ *
+ * Every surface that shows a posture needs the same answer, and an inherited
+ * key such as `toString` has to read as unrecognized rather than resolve to
+ * something truthy.
+ */
+export function hasKnownPosture(posture: string): boolean {
+  return Object.hasOwn(POSTURE_LABEL, posture);
 }
 
 export const POSTURE_TONE_CLASS: Record<PortfolioTone, string> = {
@@ -91,7 +110,7 @@ export function portfolioMastheadState(summary: {
   if (summary.attentionRequired > 0) return { state: 'Needs attention', tone: 'warn' };
   if (summary.inProgress > 0) return { state: 'In progress', tone: 'live' };
   if (summary.applications === 0) return { state: 'No applications', tone: 'idle' };
-  if (summary.unknown > 0) return { state: 'Partially known', tone: 'idle' };
+  if (summary.unknown > 0 || coverageFailed) return { state: 'Partially known', tone: 'idle' };
   // Qualified convergence is not exact convergence: when nothing is provably
   // exact, the verdict says so instead of borrowing the stronger word.
   if (summary.converged === 0 && summary.convergedQualified > 0) {
@@ -99,3 +118,11 @@ export function portfolioMastheadState(summary: {
   }
   return { state: 'Converged', tone: 'live' };
 }
+
+export function countCurrentTargets(targets: readonly GitOpsPortfolioTargetSummary[]): number {
+  return targets.filter(target => !target.tombstoned).length;
+}
+
+/** Empty-portfolio copy, shared by the desktop table and the phone screen. */
+export const PORTFOLIO_EMPTY_COPY =
+  'No GitOps applications yet. Connect a stack to a Git repository, or deploy a Git-managed Blueprint, and it appears here.';

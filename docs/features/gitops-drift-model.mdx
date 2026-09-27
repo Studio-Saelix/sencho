@@ -1,0 +1,116 @@
+---
+title: "GitOps Drift"
+description: "The drift classes Sencho derives for every Git-managed stack and Blueprint, what each one proves, and which policy decides what happens next."
+---
+
+Sencho reports drift in two layers. The **spatial** layer compares the effective Compose model against the containers running right now and is covered in [Drift Detection](/features/stack-drift). The **GitOps** layer compares what you intended against what Sencho has proven, accepted, and observed over time, for anything managed by a Git source or a [Blueprint](/features/blueprint-model).
+
+This page is the reference for that second layer: the classes it reports, the evidence each one rests on, and the policy that decides what happens after a class is reported.
+
+## The seven classes
+
+Every GitOps drift item carries a class. The class says which part of the chain diverged, and that decides who owns the fix.
+
+| Class | The comparison it is made from | A mismatch is reported when |
+|---|---|---|
+| **Source** | The accepted generation's commit against the commit the configured ref names. | The two differ, or the last fetch or validation failed. |
+| **Managed project** | The stack's recorded managed-project manifest against the accepted generation. | They differ, or the manifest is missing or unreadable. |
+| **Placement** | The approved blast against the nodes that hold applied authority. | A recorded approval no longer binds the current intent, or a node still holds authority outside the required set after the rollout settled. |
+| **Health** | The latest stack-scoped health run for a node against the generation that node runs. | The run failed for exactly that generation. |
+| **Runtime** | What is running against what was approved: the artifact identity, and the generation each node was asked to run. | A node reports another artifact identity, or runs a generation other than the one it was asked for. |
+| **Rollout** | A required rollout target's observed artifact identity against the authorized rollout set. | A required target reports another identity. |
+| **Invocation** | Nothing yet: what was actually invoked on a node is not recorded, so there is no honest comparison to make. | Never, today. |
+
+This is the model's vocabulary: the boundaries a drift item can fall into, and what each one would be measured against. A class appears only where Sencho holds the evidence for it and the rows prove a mismatch, so a class whose evidence is not held is absent rather than approximated. The table does not promise that every class is reported today; it says what each class means when it is.
+
+The [Drift tab](/features/stack-drift) and the application view show the classes they have evidence for. The portfolio's drift summary counts them by class, and its attention queue names the ones that are waiting on you.
+
+## Reading an item
+
+Each item is one line of comparison plus the facts you need to act on it. The drift row shows the class, the owner, the reason, and the expected identity beside the observed one.
+
+- **Class** names the part of the chain that diverged.
+- **Expected** is the identity Sencho was meant to run: a commit, a generation, an artifact set, an intent, or a health run.
+- **Observed** is what it found: the same kind of identity, or `unknown` when Sencho found nothing to compare.
+- **Reason** says in one line what differs.
+- **Owner** names the surface that owns the fix, so you know whether to go to the Git Source sheet, the Blueprint, or the node.
+- **Affected targets** names the nodes involved. A direct Git source has one; a Blueprint can have many.
+- **Freshness** is when the evidence was recorded, when the evidence carries a time. An old observation is weaker proof than a new one, so the timestamp travels with the item; an item derived from two pointers rather than a recorded observation has no timestamp to show.
+- **Action** is the one step that would resolve the item for the affected target, and only when that step is legal right now. A paused or failed node gets no action rather than one that cannot run.
+
+## Where drift is shown
+
+| Surface | What it shows |
+|---|---|
+| **Drift** tab on a stack | The spatial findings plus the GitOps state for that stack, one card per node, with the per-service digest comparison under each node. |
+| **GitOps application view** in the portfolio | The same drift items for one application, alongside its source, artifact, placement, and rollout state. |
+| **Portfolio application table** | A count and the classes involved, so you can narrow the list to one class. |
+
+The same projection feeds all three, so a class never reads differently depending on where you look.
+
+## Per-service digests
+
+When the approved artifact set and the node's observation both carry per-service image evidence, each target's card shows the approved digest beside the running one, per service, and marks each one matched, drifted, or unverified. The comparison uses the child digest for the platform that node runs, because a multi-platform image has one child per platform and a node only ever proves its own.
+
+Where evidence is missing, the card says so. It never renders an empty comparison, because an empty table reads as agreement.
+
+<Note>
+  A digest is compared, never pulled. When Sencho repairs a digest divergence it redeploys against the approved identity, so authored tags on disk stay as you wrote them.
+</Note>
+
+## What is not drift
+
+Work in progress is not drift, and the classes above stay silent while it happens:
+
+- a commit that has been fetched but not yet accepted, including one waiting on review
+- a placement or authorization decision that is still open
+- a rollout that is queued, canarying, batching, or waiting on its health verdict
+- a manifest being written as part of an apply that has not landed on the node yet
+- a node that is deploying, interrupted, or recovering
+- a target that has not been deployed yet, or has never had one recorded
+
+Those states have their own surfaces, and each one names the next step. A node running a different generation than the one it was asked for is a separate class of its own, and is reported whether or not something else about that node is in flight.
+
+One more case sits here by decision rather than by accident. Source drift compares the accepted commit against the commit the ref names. When those still agree but the materialization settings changed, for example a compose path, an env path, or a context directory, there is no expected-versus-observed pair of commits to report, so no source drift item is created. Instead the source shows as **reconcile required** in the attention queue, and for a Direct application that is where you fetch again: the fetch rebuilds the candidate under the settings now in force, and accepting that candidate produces the new generation. This is a choice about what the word drift means, not a claim that the materialized content was proven unchanged. Changing where Compose is read from can change the content, which is why Sencho asks rather than assumes.
+
+## What Sencho cannot prove
+
+Drift is derived from what Sencho has recorded, so missing evidence is never rounded up to agreement. A few cases worth knowing:
+
+- A target on a node Sencho does not host has no health verdict here, so health drift stays silent for it rather than claiming a verdict nobody wrote.
+- A Git-managed Blueprint deployment that opens no generation-bound health gate produces no health item.
+- A required-target set Sencho cannot read records a caveat naming the unreadable record, instead of quietly reporting no placement drift.
+- A service built on the node has no published digest to compare, so the per-service view labels it **not compared** rather than matched or drifted.
+- A service running something the approved set does not name is outside the comparison, so it reads **not compared** rather than drift.
+
+Each of those is listed as a caveat under the state it applies to, on the Drift tab and in the application view, saying what could not be proven. The per-service digest view says the same in its own words: a target with no per-service evidence on either side says nothing rather than showing an empty comparison that would read as agreement.
+
+## The four policy domains
+
+A drift class reports; a policy decides. Four independent decisions cover the chain, and none of them authorizes another.
+
+| Policy | Where it lives | What it governs |
+|---|---|---|
+| **Source policy** | Per Git source: review only, auto-write files, or auto-deploy. | How far Sencho goes on its own after a fetch: record the result only, write the files, or write them and deploy. A withdrawn stateful target always waits for you, whatever the source policy says. |
+| **Placement approval** | Per Blueprint rollout, in the rollout preview. | Which nodes may be placed or withdrawn. Nothing is placed or removed without it. |
+| **Drift mode** | Per Blueprint: Observe, Suggest, or Enforce. | What happens when the Blueprint's own drift is detected: surface it, notify you, or redeploy it. |
+| **Health gate** | Per stack, with a hold period. | Whether a deploy is allowed to finish before its containers prove healthy, and what a failure does next. |
+
+Two rules keep them honest. A digest repair redeploys against the approved identity rather than pulling whatever the tag now points at, and a stateful change always re-enters operator confirmation, whatever the drift mode says.
+
+## Related
+
+<CardGroup cols={2}>
+  <Card title="Drift Detection" icon="magnifying-glass" href="/features/stack-drift">
+    The spatial layer: effective Compose model against the containers running now.
+  </Card>
+  <Card title="Git Sources" icon="git-branch" href="/features/git-sources">
+    Where source policy, commits, and acceptance live.
+  </Card>
+  <Card title="Blueprints" icon="layers" href="/features/blueprint-model">
+    Placement approval, drift modes, and digest drift on a fleet template.
+  </Card>
+  <Card title="GitOps portfolio" icon="chart-pie" href="/features/gitops-portfolio">
+    Every application in one table, with drift by class and the attention queue.
+  </Card>
+</CardGroup>

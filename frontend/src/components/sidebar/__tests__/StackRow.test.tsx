@@ -1,3 +1,4 @@
+import { GITOPS_PORTFOLIO_SCOPE_EVENT } from '@/components/gitops/portfolio/portfolioNavigation';
 import { describe, it, expect, vi } from 'vitest';
 import { render, screen, fireEvent } from '@testing-library/react';
 import type { ComponentProps } from 'react';
@@ -181,6 +182,21 @@ describe('StackRow', () => {
     // Non-empty first: two missing indicators would otherwise compare equal.
     expect(markup(blocked)).toContain('stack-trailing-git-pending');
     expect(markup(blocked)).toBe(markup(ready));
+  });
+
+  it('opens the workplace scoped to this stack on its node, without selecting the row', () => {
+    const onSelect = vi.fn();
+    const scopes: unknown[] = [];
+    const onScope = (e: Event) => scopes.push((e as CustomEvent).detail);
+    window.addEventListener(GITOPS_PORTFOLIO_SCOPE_EVENT, onScope);
+    try {
+      render(<StackRow {...base({ gitPending: 'candidate_ready', gitNodeId: 4, onSelect })} />);
+      fireEvent.click(screen.getByTestId('stack-trailing-git-pending'));
+    } finally {
+      window.removeEventListener(GITOPS_PORTFOLIO_SCOPE_EVENT, onScope);
+    }
+    expect(scopes).toEqual([{ nodeId: 4, stack: base().file }]);
+    expect(onSelect).not.toHaveBeenCalled();
   });
 
   it('keeps a confirmed update above the git indicator in the trailing slot', () => {

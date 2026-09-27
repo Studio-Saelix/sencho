@@ -20,6 +20,10 @@ vi.mock('@/context/AuthContext', () => ({
   useAuth: () => ({ can: () => false }),
 }));
 
+vi.mock('@/context/NodeContext', () => ({
+  useNodes: () => ({ hasCapability: () => false }),
+}));
+
 const mockFetch = vi.mocked(apiFetch);
 
 const list: GitOpsPortfolioResponse = {
@@ -28,6 +32,7 @@ const list: GitOpsPortfolioResponse = {
   summary: {
     applications: 1, attentionRequired: 0, failed: 0, inProgress: 0, converged: 1,
     convergedQualified: 0, unknown: 0, drifted: 0, byReason: {},
+    attentionByNode: {},
   },
   coverage: [{ nodeId: 1, nodeName: 'local', state: 'ok' }],
   attentionQueue: [],
@@ -63,5 +68,40 @@ describe('GitOpsWorkplaceView', () => {
     expect(screen.getByRole('button', { name: 'bookstack' })).toBeInTheDocument();
     expect(window.location.search).toBe('');
     expect(mockFetch.mock.calls.filter(([url]) => !String(url).startsWith('/gitops/applications/')).length).toBe(listFetches);
+  });
+
+  it('tells an empty portfolio apart from a filtered-out one', async () => {
+    mockFetch.mockResolvedValue(ok({
+      ...list,
+      summary: { ...list.summary, applications: 0, converged: 0 },
+      applications: [],
+    }));
+    render(<GitOpsWorkplaceView />);
+    expect(await screen.findByText(/No GitOps applications yet/)).toBeInTheDocument();
+  });
+
+  it('clears a deep-linked filter that has no visible control', async () => {
+    window.history.replaceState({ senchoIdx: 0 }, '', '/nodes/local/gitops?source=failed');
+    mockFetch.mockResolvedValue(ok(list));
+    render(<GitOpsWorkplaceView />);
+
+    await waitFor(() => expect(String(mockFetch.mock.calls[0]?.[0])).toContain('source=failed'));
+    fireEvent.click(await screen.findByRole('button', { name: 'Clear filters' }));
+
+    await waitFor(() => expect(String(mockFetch.mock.calls.at(-1)?.[0])).not.toContain('source='));
+    expect(window.location.search).toBe('');
+    expect(screen.queryByRole('button', { name: 'Clear filters' })).toBeNull();
+  });
+
+  it('shows a stack scope as a removable chip', async () => {
+    window.history.replaceState({ senchoIdx: 0 }, '', '/nodes/local/gitops?stack=web&nodeId=1');
+    mockFetch.mockResolvedValue(ok(list));
+    render(<GitOpsWorkplaceView />);
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Remove stack filter' }));
+
+    await waitFor(() => expect(String(mockFetch.mock.calls.at(-1)?.[0])).not.toContain('stack='));
+    expect(String(mockFetch.mock.calls.at(-1)?.[0])).toContain('nodeId=1');
+    expect(window.location.search).toBe('?nodeId=1');
   });
 });

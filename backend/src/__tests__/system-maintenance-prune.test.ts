@@ -2,14 +2,17 @@
  * Route-level tests for prune estimate timeouts (F-6) and the fingerprinted
  * prune plan / stale-409 path used by Resources.
  *
- * Uses real timers because supertest dispatches lazily and vi.useFakeTimers
- * does not compose cleanly with that pattern. Each timeout test waits the
- * full 12s withTimeout budget, so three such tests add ~36s to the file.
+ * vi.useFakeTimers does not compose with supertest's lazy dispatch, so the
+ * withTimeout budget is capped instead (see helpers/fastTimeouts).
  */
-import { describe, it, expect, beforeAll, afterAll, afterEach, vi } from 'vitest';
+import { describe, it, expect, beforeAll, beforeEach, afterAll, afterEach, vi } from 'vitest';
 import request from 'supertest';
 import jwt from 'jsonwebtoken';
 import { setupTestDb, cleanupTestDb, TEST_USERNAME, TEST_JWT_SECRET } from './helpers/setupTestDb';
+import { requestedTimeoutBudgets, resetRequestedTimeoutBudgets } from './helpers/fastTimeouts';
+
+vi.mock('../utils/withTimeout', async (importOriginal) =>
+  (await import('./helpers/fastTimeouts')).withFastTimeouts(await importOriginal()));
 
 let tmpDir: string;
 let app: import('express').Express;
@@ -66,6 +69,10 @@ function samplePlan(fingerprint = 'abc123') {
   };
 }
 
+beforeEach(() => {
+  resetRequestedTimeoutBudgets();
+});
+
 describe('Prune estimate endpoints return 503 on slow docker df (F-6)', () => {
   it('POST /api/system/prune/estimate returns 503 docker_df_slow when estimateSystemReclaim never settles', async () => {
     stubFsStacks();
@@ -81,9 +88,10 @@ describe('Prune estimate endpoints return 503 on slow docker df (F-6)', () => {
     expect(res.status).toBe(503);
     expect(res.body.code).toBe('docker_df_slow');
     expect(res.body.error).toMatch(/Docker daemon is busy/);
-    expect(elapsed).toBeGreaterThanOrEqual(7_500);
-    expect(elapsed).toBeLessThan(15_000);
-  }, 20_000);
+    // The route asked for the full 12s budget; the capped wait kept this fast.
+    expect(requestedTimeoutBudgets()).toEqual([12_000]);
+    expect(elapsed).toBeLessThan(2_000);
+  });
 
   it('POST /api/system/prune/system dry-run returns 503 docker_df_slow when buildPrunePlan never settles', async () => {
     stubFsStacks();
@@ -98,7 +106,7 @@ describe('Prune estimate endpoints return 503 on slow docker df (F-6)', () => {
 
     expect(res.status).toBe(503);
     expect(res.body.code).toBe('docker_df_slow');
-  }, 20_000);
+  });
 
   it('estimate route succeeds normally when estimateSystemReclaim resolves quickly', async () => {
     stubFsStacks();
@@ -143,9 +151,10 @@ describe('Prune estimate endpoints return 503 on slow docker df (F-6)', () => {
     expect(res.status).toBe(503);
     expect(res.body.code).toBe('docker_df_slow');
     expect(res.body.error).toMatch(/Docker daemon is busy/);
-    expect(elapsed).toBeGreaterThanOrEqual(7_500);
-    expect(elapsed).toBeLessThan(15_000);
-  }, 20_000);
+    // The route asked for the full 12s budget; the capped wait kept this fast.
+    expect(requestedTimeoutBudgets()).toEqual([12_000]);
+    expect(elapsed).toBeLessThan(2_000);
+  });
 });
 
 describe('Prune plan routes', () => {

@@ -1,7 +1,8 @@
+import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
 import { attentionLabel, POSTURE_TONE_CLASS } from '@/lib/gitopsPortfolio';
 import type { GitOpsAttentionReason, GitOpsPortfolioRow } from '@/types/gitopsPortfolio';
-import { openPortfolioApplication } from './portfolioNavigation';
+import { attentionNextStep, openPortfolioApplication } from './portfolioNavigation';
 
 /**
  * The exception queue: one entry per attention reason currently assigned to
@@ -33,19 +34,22 @@ export function AttentionQueue({
   });
 
   return (
-    <section aria-label="Attention required" className="space-y-2">
+    <section aria-label="Attention required" className="shrink-0 space-y-2">
       <h2 className="font-mono text-[10px] uppercase tracking-[0.18em] text-stat-subtitle">
         Attention required · {entries.length}
       </h2>
-      <ul className="divide-y divide-card-border/60 rounded-lg border border-card-border border-t-card-border-top bg-card shadow-card-bevel">
+      {/* Bounded so a long queue scrolls inside its card instead of pushing
+          the application table out of the non-scrolling page. */}
+      <ul className="max-h-56 divide-y divide-card-border/60 overflow-y-auto rounded-lg border border-card-border border-t-card-border-top bg-card shadow-card-bevel">
         {failuresFirst.map(({ reason, row }) => {
           const label = attentionLabel(reason);
+          const next = attentionNextStep(reason, row);
           return (
-            <li key={`${row.id}:${reason}`}>
+            <li key={`${row.id}:${reason}`} className="flex items-center gap-2 pr-2">
               <button
                 type="button"
                 onClick={() => (onDrillDown ? onDrillDown(row) : openPortfolioApplication(row))}
-                className="group flex w-full items-start gap-3 px-3 py-2 text-left transition-colors hover:bg-accent/40"
+                className="flex min-w-0 flex-1 items-start gap-3 px-3 py-2 text-left transition-colors hover:bg-accent/40"
               >
                 <span
                   className={cn(
@@ -59,10 +63,17 @@ export function AttentionQueue({
                   <span className="block truncate font-mono text-xs text-stat-value">{row.name}</span>
                   <span className="block truncate text-xs text-stat-subtitle">{label.line}</span>
                 </span>
-                <span className="shrink-0 self-center font-mono text-[10px] uppercase tracking-[0.12em] text-stat-icon transition-colors group-hover:text-brand">
-                  Open
-                </span>
               </button>
+              {/* The reason-specific next step. Decisions open the application
+                  view, whose authority actions own permission and confirmation. */}
+              <Button
+                variant="outline"
+                size="sm"
+                className="h-7 shrink-0 px-2.5 font-mono text-[10px] uppercase tracking-[0.12em]"
+                onClick={next.run}
+              >
+                {next.label}
+              </Button>
             </li>
           );
         })}

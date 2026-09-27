@@ -777,9 +777,13 @@ export class ComposeService {
   ): Promise<void> {
     const resolved = await resolveMissingExternalNetworks(this.nodeId, stackName);
     if (resolved.status === 'render_unavailable') {
+      // The resolver already reduced the render failure to a specific,
+      // redacted cause. Surface it rather than a generic sentence that names
+      // none of the possible faults, so the operator learns what to fix.
       throw new MissingExternalNetworksError({
         kind: 'unavailable',
-        message: 'Sencho could not render this stack\'s Compose model to check external networks.',
+        message: resolved.renderError
+          || 'Sencho could not render this stack\'s Compose model to check external networks.',
       });
     }
     if (resolved.status === 'runtime_unavailable') {

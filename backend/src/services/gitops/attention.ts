@@ -15,7 +15,7 @@
  * reported by the caller as unknown evidence, not as attention.
  */
 
-import type { GitOpsRevisionProjection } from './types';
+import type { GitOpsDriftItem, GitOpsRevisionProjection } from './types';
 
 /**
  * Every reason an application may need an operator, as a closed union.
@@ -36,6 +36,7 @@ export type GitOpsAttentionReason =
   | 'deploy_failed'
   | 'placement_review_pending'
   | 'stateful_confirmation_required'
+  | 'stateful_withdrawal_blocked'
   | 'rollout_authorization_pending'
   | 'rollout_authorization_stale'
   | 'preflight_blocked'
@@ -72,6 +73,7 @@ export const ATTENTION_TONE: Readonly<Record<GitOpsAttentionReason, 'failure' | 
   deploy_failed: 'failure',
   placement_review_pending: 'pending',
   stateful_confirmation_required: 'pending',
+  stateful_withdrawal_blocked: 'pending',
   rollout_authorization_pending: 'pending',
   rollout_authorization_stale: 'pending',
   preflight_blocked: 'pending',
@@ -90,6 +92,17 @@ export const ATTENTION_TONE: Readonly<Record<GitOpsAttentionReason, 'failure' | 
   drift: 'pending',
 };
 
+export function currentDrift(projection: GitOpsRevisionProjection): GitOpsDriftItem[] {
+  if (projection.targetMode === 'not_applicable') return [];
+  const currentNodeIds = new Set(
+    projection.targets.filter(target => !target.tombstoned).map(target => target.nodeId),
+  );
+  return projection.drift.filter(item => (
+    item.affectedTargets.length === 0
+    || item.affectedTargets.some(target => target.nodeId === null || currentNodeIds.has(target.nodeId))
+  ));
+}
+
 /**
  * The attention reasons a projection currently implies.
  *
@@ -101,6 +114,7 @@ export const ATTENTION_TONE: Readonly<Record<GitOpsAttentionReason, 'failure' | 
 export function attentionReasons(projection: GitOpsRevisionProjection): GitOpsAttentionReason[] {
   if (projection.targetMode === 'not_applicable') return [];
   const reasons = new Set<GitOpsAttentionReason>();
+  const currentTargets = projection.targets.filter(target => !target.tombstoned);
   const { source, placement, rollout } = projection.facets;
 
   switch (source.status) {
@@ -111,7 +125,14 @@ export function attentionReasons(projection: GitOpsRevisionProjection): GitOpsAt
       reasons.add('source_unknown_outcome');
       break;
     case 'source_review_pending':
-      reasons.add('source_review_pending');
+      // One reason, not both: when an automatic acceptance refused for safety
+      // the specific block is the actionable fact, and the queue must not spend
+      // two codes on one waiting decision.
+      reasons.add(
+        source.reviewBlockReason === 'stateful_withdrawal'
+          ? 'stateful_withdrawal_blocked'
+          : 'source_review_pending',
+      );
       break;
     case 'source_conflict_blocker':
       reasons.add('source_conflict_blocker');
@@ -168,12 +189,6 @@ export function attentionReasons(projection: GitOpsRevisionProjection): GitOpsAt
     case 'rollback_partial_failed':
       reasons.add('rollback_failed');
       break;
-    case 'target_stale':
-      reasons.add('target_stale');
-      break;
-    case 'target_unreachable':
-      reasons.add('target_unreachable');
-      break;
     case 'recovery_required':
       reasons.add('recovery_required');
       break;
@@ -198,7 +213,7 @@ export function attentionReasons(projection: GitOpsRevisionProjection): GitOpsAt
       break;
   }
 
-  for (const target of projection.targets) {
+  for (const target of currentTargets) {
     if (target.connectivity === 'unreachable') reasons.add('target_unreachable');
     if (target.connectivity === 'stale') reasons.add('target_stale');
     switch (target.runtime.status) {
@@ -231,7 +246,7 @@ export function attentionReasons(projection: GitOpsRevisionProjection): GitOpsAt
   // Confirmed drift is itself a reason. The classes (source, runtime, placement,
   // and so on) ride on the row's drift summary; a bare `drift` here is the
   // triage signal and the classes answer "drifted where".
-  if (projection.drift.length > 0) reasons.add('drift');
+  if (currentDrift(projection).length > 0) reasons.add('drift');
 
   return [...reasons];
 }

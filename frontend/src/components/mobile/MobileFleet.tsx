@@ -142,7 +142,8 @@ function NodeCard({ node, isActive, isDevImage, onOpen }: { node: FleetNode; isA
 
 // Sibling to NodeCard's outer <button>, never nested inside it (a nested
 // <button> is invalid HTML and breaks touch semantics). Only ever rendered
-// for a local, admin, dev-build-available node.
+// for an online, admin, dev-build-available node with no update in flight
+// (same conditions as the desktop Fleet card).
 function DevBuildUpdateAction({ nodeId, onUpdate, updating }: { nodeId: number; onUpdate: (nodeId: number) => void; updating: boolean }) {
   return (
     <BusyButton
@@ -440,7 +441,7 @@ export function MobileFleet({ headerActions, onInspectNode, onInspectStack }: Mo
                       isDevImage={Boolean(nodeUpdateStatus?.isDevImage)}
                       onOpen={() => setSelectedId(node.id)}
                     />
-                    {nodeUpdateStatus?.devBuildUpdateAvailable && isAdmin && (
+                    {node.status === 'online' && nodeUpdateStatus?.devBuildUpdateAvailable && !nodeUpdateStatus.updateStatus && isAdmin && (
                       <DevBuildUpdateAction
                         nodeId={node.id}
                         onUpdate={updateStatus.triggerNodeUpdate}

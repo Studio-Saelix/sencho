@@ -14,13 +14,7 @@ import type { GitOpsRevisionProjection } from '@/types/gitops';
 /** Per-application attention reason, as classified server-side. */
 export type GitOpsAttentionReason = string;
 
-export type GitOpsPortfolioPosture =
-  | 'failed'
-  | 'attention'
-  | 'in_progress'
-  | 'converged'
-  | 'converged_qualified'
-  | 'unknown';
+export type GitOpsPortfolioPosture = string;
 
 export interface GitOpsPortfolioRepository {
   configuredRepoUrl: string;
@@ -36,7 +30,8 @@ export interface GitOpsPortfolioTargetSummary {
   runtime: string;
   health: string;
   connectivity: string;
-  evidence: 'fresh' | 'stale' | 'unknown';
+  tombstoned: boolean;
+  evidence: string;
 }
 
 export interface GitOpsPortfolioRow {
@@ -83,6 +78,8 @@ export interface GitOpsPortfolioSummary {
   unknown: number;
   drifted: number;
   byReason: Partial<Record<string, number>>;
+  /** Applications requiring attention per involved node id (hub numbering). */
+  attentionByNode: Record<string, number>;
 }
 
 export interface GitOpsPortfolioNodeCoverage {
@@ -135,6 +132,8 @@ export interface GitOpsRollbackCandidate {
 /** Filter set the list route accepts; mirrored from the backend contract. */
 export interface GitOpsPortfolioFilters {
   q?: string;
+  /** Exact stack name (set by the stack-scoped GitOps indicators). */
+  stack?: string;
   attention?: '1';
   mode?: 'direct' | 'blueprint';
   nodeId?: number;

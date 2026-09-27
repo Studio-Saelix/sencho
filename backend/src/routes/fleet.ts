@@ -1330,7 +1330,7 @@ fleetRouter.get('/update-status', authMiddleware, async (req: Request, res: Resp
               localPinStatusFields(pin, compareVersion, compareValid, REPIN_BLOCKED_REASON));
             isDevImage = isSenchoDevRepository(pin.composeImageRef);
             devBuildUpdateAvailable = isSenchoDevFloatingTag(pin.composeImageRef)
-              && Boolean(db.getSystemState(MonitorService.SENCHO_DEV_BUILD_AVAILABLE_KEY));
+              && MonitorService.isDevBuildUpdateAvailable(db);
           }
         } else {
           imagePinKind = remoteImagePinKind;

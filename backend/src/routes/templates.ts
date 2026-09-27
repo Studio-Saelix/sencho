@@ -9,6 +9,7 @@ import { FileSystemService } from '../services/FileSystemService';
 import { ComposeService } from '../services/ComposeService';
 import { DatabaseService } from '../services/DatabaseService';
 import { ErrorParser } from '../utils/ErrorParser';
+import { MissingExternalNetworksError } from '../services/network/missingExternalNetworksError';
 import { isValidStackName, isPathWithinBase } from '../utils/validation';
 import { isDebugEnabled } from '../utils/debug';
 import { getErrorMessage } from '../utils/errors';
@@ -204,9 +205,14 @@ templatesRouter.post('/deploy', authMiddleware, async (req: Request, res: Respon
     } catch (deployError: unknown) {
       const rawError = getErrorMessage(deployError, String(deployError));
       console.error(`[Templates] Deploy failed: ${stackName} -`, rawError);
-      const parsed = ErrorParser.parse(rawError);
+      // A pre-flight refusal already carries a specific, actionable diagnosis
+      // and nothing was ever started, so it always rolls back. Matching its
+      // text against the generic rules would both suppress the rollback and
+      // replace the real cause with a rule's paraphrase.
+      const refusal = deployError instanceof MissingExternalNetworksError ? deployError : null;
+      const parsed = refusal === null ? ErrorParser.parse(rawError) : null;
 
-      const shouldRollback = parsed.rule ? parsed.rule.canSilentlyRollback : true;
+      const shouldRollback = refusal !== null || (parsed?.rule ? parsed.rule.canSilentlyRollback : true);
       let rolledBack = false;
 
       if (shouldRollback) {
@@ -230,9 +236,9 @@ templatesRouter.post('/deploy', authMiddleware, async (req: Request, res: Respon
 
       invalidateNodeCaches(req.nodeId);
       res.status(500).json({
-        error: parsed.message,
+        error: refusal?.message ?? parsed?.message ?? rawError,
         rolledBack,
-        ruleId: parsed.rule?.id || 'UNKNOWN'
+        ruleId: refusal?.code ?? parsed?.rule?.id ?? 'UNKNOWN',
       });
     }
   } catch (error: unknown) {

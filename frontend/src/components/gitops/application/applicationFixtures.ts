@@ -36,6 +36,7 @@ export function portfolioRow(overrides: Partial<GitOpsPortfolioRow> = {}): GitOp
       runtime: 'synced_and_healthy',
       health: 'not_applicable',
       connectivity: 'reachable',
+      tombstoned: false,
       evidence: 'fresh',
     }],
     drift: { count: 0, classes: [] },
