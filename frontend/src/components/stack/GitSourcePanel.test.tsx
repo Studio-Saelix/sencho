@@ -857,6 +857,47 @@ describe('GitSourcePanel controller controls', () => {
     });
   });
 
+  it('sends source_policy manual when Manual is chosen', async () => {
+    // The option that had no affordance at all. Manual is not a flavour of
+    // review: it takes the source out of the unattended cadence entirely, so
+    // Sencho stops polling it and stops joining it to a webhook.
+    vi.mocked(apiFetch).mockResolvedValue(jsonRes({ ...LINKED_SOURCE, source_policy: 'manual' }));
+    render(panel());
+    await screen.findByRole('button', { name: /update/i });
+    fireEvent.click(screen.getByRole('button', { name: /^Manual/ }));
+
+    vi.mocked(apiFetch).mockResolvedValue(jsonRes({ ...LINKED_SOURCE, source_policy: 'manual', gitopsRevision: undefined }));
+    fireEvent.click(screen.getByRole('button', { name: /update/i }));
+
+    await waitFor(() => {
+      const put = vi.mocked(apiFetch).mock.calls.find((call) => call[1]?.method === 'PUT');
+      expect(put).toBeTruthy();
+      const body = JSON.parse(String(put?.[1]?.body)) as {
+        source_policy?: string; auto_apply_on_webhook?: boolean; auto_deploy_on_apply?: boolean;
+      };
+      expect(body.source_policy).toBe('manual');
+      // A manual source applies nothing, so the automation flags must agree with
+      // the policy rather than being left true from the mode before it.
+      expect(body.auto_apply_on_webhook).toBe(false);
+      expect(body.auto_deploy_on_apply).toBe(false);
+    });
+  });
+
+  it('shows a stored manual source as Manual rather than as Review only', async () => {
+    // The two booleans are identical for a manual source and a review source, so
+    // a panel that derived the mode from them would open on the wrong one and the
+    // next save would silently promote a manual source to automatic.
+    vi.mocked(apiFetch).mockResolvedValue(jsonRes({
+      ...LINKED_SOURCE,
+      source_policy: 'manual',
+      auto_apply_on_webhook: false,
+      auto_deploy_on_apply: false,
+    }));
+    render(panel());
+    await screen.findByRole('button', { name: /update/i });
+    expect(screen.getByRole('button', { name: /^Manual/ })).toHaveAttribute('aria-pressed', 'true');
+  });
+
   it('sends source_policy review on save for Review only', async () => {
     vi.mocked(apiFetch).mockResolvedValue(jsonRes(LINKED_SOURCE));
     render(panel());

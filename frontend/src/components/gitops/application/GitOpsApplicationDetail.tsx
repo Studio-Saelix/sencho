@@ -144,7 +144,13 @@ export default function GitOpsApplicationDetail({ detail, actions }: {
               <GitOpsApprovalChips approvals={live.approvals} placement={placement} rollout={rollout} />
             )}
             {actions}
-            <GitOpsFacetCards source={source} artifact={artifact} placement={placement} rollout={rollout} />
+            <GitOpsFacetCards
+              source={source}
+              artifact={artifact}
+              placement={placement}
+              rollout={rollout}
+              authorityPolicies={live?.authorityPolicies}
+            />
           </div>
         </Section>
       </div>

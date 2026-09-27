@@ -392,6 +392,7 @@ function GitOpsEvidenceSection({ preview }: { preview: BlueprintPreview }) {
                             artifact={artifact}
                             placement={placement}
                             rollout={rollout}
+                            authorityPolicies={live.authorityPolicies}
                         />
                         {live.targets.length > 0 && (
                             <div className="space-y-2">

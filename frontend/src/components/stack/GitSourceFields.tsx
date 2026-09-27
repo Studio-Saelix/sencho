@@ -15,7 +15,15 @@ interface HostKeyRotationWarning {
   current: string;
 }
 
-export type ApplyMode = 'review' | 'auto-write' | 'auto-deploy';
+/**
+ * What a source does on its own when the repository moves.
+ *
+ * `manual` is not a variant of the other two: it is the absence of the cadence.
+ * A manual source is never polled and never joined to a webhook, so Sencho only
+ * looks at it when an operator asks. The other three all fetch, and differ in
+ * who applies what they found.
+ */
+export type ApplyMode = 'manual' | 'review' | 'auto-write' | 'auto-deploy';
 
 /**
  * Mirror of the backend's env-path default (see `/api/stacks/from-git` and
@@ -79,11 +87,13 @@ export interface GitSourceFieldsProps extends GitSourceFieldsState {
 
 const APPLY_MODE_COPY: Record<'edit' | 'create', Record<ApplyMode, { title: string; description: string }>> = {
   edit: {
+    'manual': { title: 'Manual', description: 'Sencho does not fetch this source on its own. Nothing changes until you ask it to.' },
     'review': { title: 'Review only', description: 'Webhook fetches and flags a pending diff. You apply manually.' },
     'auto-write': { title: 'Auto-write files', description: 'Webhook writes to disk. You deploy manually.' },
     'auto-deploy': { title: 'Auto-deploy', description: 'Webhook writes and deploys in one step.' },
   },
   create: {
+    'manual': { title: 'Manual', description: 'Sencho never pulls this source on its own. Nothing changes until you ask it to.' },
     'review': { title: 'Review only', description: 'Future webhook pulls surface a diff you apply manually.' },
     'auto-write': { title: 'Auto-write files', description: 'Future webhook pulls write to disk. You deploy manually.' },
     'auto-deploy': { title: 'Auto-deploy', description: 'Future webhook pulls write and redeploy automatically.' },
@@ -180,6 +190,11 @@ export function GitSourceFields({
     <button
       type="button"
       key={mode}
+      // Selection was carried only by the border and fill, so a screen reader
+      // was told four identical buttons. `aria-pressed` states it, and it is
+      // also what makes "this source is on Manual" assertable rather than a
+      // question about a class name.
+      aria-pressed={applyMode === mode}
       onClick={() => !disabled && onApplyModeChange(mode)}
       disabled={disabled}
       className={cn(
@@ -419,6 +434,7 @@ export function GitSourceFields({
       <div className="space-y-2">
         <Label>Apply behavior</Label>
         <div className="space-y-1.5">
+          {radioOption('manual')}
           {radioOption('review')}
           {radioOption('auto-write')}
           {radioOption('auto-deploy')}

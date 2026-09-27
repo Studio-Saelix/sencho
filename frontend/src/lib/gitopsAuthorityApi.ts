@@ -148,6 +148,49 @@ export async function setGitOpsHealthRolloutPolicy(
   );
 }
 
+/**
+ * The three authority policies, as the wire spells them.
+ *
+ * Spelled here rather than imported from the projection's own union because
+ * these are the values a write may send, and the projection's read types are
+ * deliberately looser: a status that crossed the wire may belong to a
+ * vocabulary this build has never seen, and a read type has to survive that.
+ * A write cannot, because the server refuses what it does not recognize.
+ */
+export type GitOpsSourcePolicy = 'manual' | 'review' | 'automatic';
+export type GitOpsPlacementPolicy = 'operator' | 'bounded_auto';
+export type GitOpsRolloutAuthorizationPolicy = 'manual' | 'automatic';
+
+/**
+ * Set the placement policy: whether a placement change may be approved without
+ * an operator.
+ */
+export async function setGitOpsPlacementPolicy(
+  applicationId: string,
+  policy: GitOpsPlacementPolicy,
+): Promise<void> {
+  await postAuthorityAction(
+    `/gitops/applications/${encodeURIComponent(applicationId)}/placement-policy`,
+    { policy },
+    'Failed to set the placement policy',
+  );
+}
+
+/**
+ * Set the rollout authorization policy: whether a rollout may be authorized
+ * without an operator.
+ */
+export async function setGitOpsRolloutAuthorizationPolicy(
+  applicationId: string,
+  policy: GitOpsRolloutAuthorizationPolicy,
+): Promise<void> {
+  await postAuthorityAction(
+    `/gitops/applications/${encodeURIComponent(applicationId)}/rollout/authorization-policy`,
+    { policy },
+    'Failed to set the rollout authorization policy',
+  );
+}
+
 /** Re-derive placement for the current Blueprint and open a fresh review. */
 export async function replanGitOpsRollout(applicationId: string): Promise<void> {
   await postAuthorityAction(

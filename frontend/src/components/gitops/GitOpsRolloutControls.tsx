@@ -19,6 +19,8 @@ import {
   type RolloutRollbackScope,
 } from '@/lib/gitopsAuthorityApi';
 import { HEALTH_ROLLOUT_POLICY_STATE, livePlacementFacet, liveRolloutFacet } from '@/lib/gitopsState';
+import { policyReadFor } from '@/lib/gitopsAuthorityPolicy';
+import GitOpsPolicyControl from '@/components/gitops/GitOpsPolicyControl';
 import type { PermissionAction } from '@/context/AuthContext';
 import {
   HEALTH_ROLLOUT_POLICIES,
@@ -161,8 +163,13 @@ export default function GitOpsRolloutControls({
     return 'observe';
   }, [targets]);
   const canSetHealthPolicy = !!live && allowed('stack:deploy');
+  // The rollout authorization policy, in the same overflow as the health policy
+  // beside it, because both answer the same question at this stage: what the
+  // system may do to a rollout on its own, and what it should do when one fails.
+  const rolloutPolicyRead = policyReadFor(live?.authorityPolicies, 'rollout_authorization');
+  const canSetRolloutPolicy = !!live && allowed('stack:deploy');
 
-  if (!canPause && !canResume && !canReplan && !canSupersede && !canRollback && !canSetHealthPolicy) {
+  if (!canPause && !canResume && !canReplan && !canSupersede && !canRollback && !canSetHealthPolicy && !canSetRolloutPolicy) {
     return null;
   }
 
@@ -306,6 +313,17 @@ export default function GitOpsRolloutControls({
                   <Activity className="mr-2 h-3.5 w-3.5" strokeWidth={1.5} />
                   Health rollout policy
                 </DropdownMenuItem>
+              )}
+              {rolloutPolicyRead && (
+                <GitOpsPolicyControl
+                  applicationId={applicationId}
+                  domain="rollout_authorization"
+                  read={rolloutPolicyRead}
+                  onChanged={onChanged}
+                  canWrite={canSetRolloutPolicy}
+                  inMenu
+                  trigger={() => "Rollout authorization policy"}
+                />
               )}
             </DropdownMenuContent>
           </DropdownMenu>

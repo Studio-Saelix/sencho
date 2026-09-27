@@ -82,6 +82,24 @@ function rolloutPending(): GitOpsRevisionLive {
   });
 }
 
+/** An application whose placement policy is configured and read. */
+function withPlacementPolicy(projection: GitOpsRevisionLive): GitOpsRevisionLive {
+  return {
+    ...projection,
+    authorityPolicies: [
+      {
+        domain: 'placement',
+        configured: 'bounded_auto',
+        effectiveFrozen: null,
+        decision: 'awaiting_operator',
+        reason: null,
+        decidedBy: null,
+        decidedAt: null,
+      },
+    ],
+  };
+}
+
 function renderActions(
   projection: GitOpsRevisionLive,
   can: (action: PermissionAction) => boolean = () => true,
@@ -172,8 +190,33 @@ describe('GitOpsAuthorityActions', () => {
   });
 
   it('offers no source acceptance without stack:create', () => {
+    // Asserted on the button rather than on the row: the row also carries the
+    // placement policy control, which is gated on deploy rather than create, so
+    // the row itself is legitimately present for a session that may not accept
+    // a source.
     renderActions(sourcePending(), action => action !== 'stack:create');
-    expect(screen.queryByTestId('gitops-authority-actions')).toBeNull();
+    expect(screen.queryByTestId('gitops-action-accept-source')).toBeNull();
+  });
+
+  it('offers the placement policy to a session that may deploy but not create', () => {
+    // The control configures a decision the operator may not themselves take, so
+    // it follows deploy rather than create. Asserted because getting this
+    // backwards hides the one control that stops automatic placement.
+    renderActions(withPlacementPolicy(sourcePending()), action => action !== 'stack:create');
+    expect(screen.getByTestId('gitops-action-placement-policy')).toBeInTheDocument();
+  });
+
+  it('withholds the placement policy from a session that may not deploy', () => {
+    renderActions(withPlacementPolicy(sourcePending()), action => action !== 'stack:deploy');
+    expect(screen.queryByTestId('gitops-action-placement-policy')).toBeNull();
+  });
+
+  it('renders no policy control for an application that reports none', () => {
+    // A build or projection that carries no reads must not invent a control
+    // whose current value is unknown, since saving would overwrite whatever the
+    // server is enforcing.
+    renderActions(sourcePending());
+    expect(screen.queryByTestId('gitops-action-placement-policy')).toBeNull();
   });
 
   it('offers source acceptance for a newer candidate after an earlier acceptance', async () => {

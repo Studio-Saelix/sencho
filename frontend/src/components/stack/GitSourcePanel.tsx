@@ -44,6 +44,8 @@ export interface GitSource {
   has_deploy_key: boolean;
   has_ca_bundle: boolean;
   ssh_host_key_fingerprint: string | null;
+  /** The tri-state policy the source runs under. The booleans below cannot express `manual`. */
+  source_policy: 'manual' | 'review' | 'automatic';
   auto_apply_on_webhook: boolean;
   auto_deploy_on_apply: boolean;
   last_applied_commit_sha: string | null;
@@ -74,9 +76,19 @@ interface GitSourcePanelProps {
   canDeploy?: boolean;
 }
 
+/**
+ * What the stored settings mean as a mode.
+ *
+ * The policy is read first because it is the field that carries all three
+ * values. The two booleans cannot express `manual` at all, since a manual source
+ * also has `auto_apply_on_webhook` false, which is exactly what a review source
+ * reports; the policy is the only thing that tells those two apart.
+ */
 function deriveApplyMode(source: GitSource | null, pendingMode: ApplyMode | null): ApplyMode {
   if (pendingMode) return pendingMode;
   if (!source) return 'review';
+  if (source.source_policy === 'manual') return 'manual';
+  if (source.source_policy === 'review') return 'review';
   if (!source.auto_apply_on_webhook) return 'review';
   return source.auto_deploy_on_apply ? 'auto-deploy' : 'auto-write';
 }
@@ -251,7 +263,7 @@ export function GitSourcePanel({
   }, [open, load]);
 
   const buildSaveBody = useCallback(() => {
-    const autoApply = applyMode !== 'review';
+    const autoApply = applyMode === 'auto-write' || applyMode === 'auto-deploy';
     const autoDeploy = applyMode === 'auto-deploy';
     const body: Record<string, unknown> = {
       repo_url: repoUrl.trim(),
@@ -262,7 +274,9 @@ export function GitSourcePanel({
       auth_type: authType,
       auto_apply_on_webhook: autoApply,
       auto_deploy_on_apply: autoDeploy,
-      source_policy: applyMode === 'review' ? 'review' : 'automatic',
+      source_policy: applyMode === 'manual'
+        ? 'manual'
+        : applyMode === 'review' ? 'review' : 'automatic',
     };
     if (authType === 'token' && token !== '') {
       body.token = token;

@@ -174,6 +174,7 @@ export function liveRevision(overrides: Partial<GitOpsRevisionLive> = {}): GitOp
     drift: [],
     limitations: [],
     availableActions: ['apply', 'dismiss'],
+    authorityPolicies: [],
     ...overrides,
   };
 }
