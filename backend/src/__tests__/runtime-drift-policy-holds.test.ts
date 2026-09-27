@@ -103,6 +103,44 @@ function seedBlueprint(node: Node, driftMode: 'observe' | 'suggest' | 'enforce',
   });
 }
 
+/** A generation row for Inline content, which materializes without a Git remote. */
+function inlineGenerationFixture(
+  applicationId: string,
+  blueprintId: number,
+  generationId: string,
+): GitOpsGenerationRow {
+  return {
+    id: generationId,
+    application_id: applicationId,
+    commit_sha: 'a'.repeat(40),
+    repo_url: `inline://blueprint/${blueprintId}`,
+    configured_ref: 'inline',
+    resolved_ref_kind: null,
+    repo_identity_json: JSON.stringify({ host: 'inline', pathname: `/blueprint/${blueprintId}` }),
+    manifest_version: 1,
+    candidate_dir: `generations/inline-${generationId}`,
+    applied_dir: `generations/inline-${generationId}-applied`,
+    expected_invocation_json: '{}',
+    materialization_fingerprint: 'a'.repeat(64),
+    validation_ok: 1,
+    plan_blocked: 0,
+    change_plan_fingerprint: null,
+    operation_id: `op-${generationId}`,
+    trigger: 'test',
+    actor: null,
+    previous_generation_id: null,
+    redacted_limitations_json: '[]',
+    portable_manifest_json: null,
+    compose_inputs_json: null,
+    source_policy_evidence_json: null,
+    security_policy_evidence_json: null,
+    support_requirements_json: null,
+    compatibility_requirements_json: null,
+    secret_capability_json: null,
+    created_at: Date.now(),
+  };
+}
+
 function service(digest: string): ServiceArtifactEvidence {
   return {
     serviceName: 'web',
@@ -922,5 +960,120 @@ describe('the Inline content path', () => {
     expect(outcome.status).toBe('repair_held');
     expect(outcome.holdReason).toBe('evidence_incomplete');
     expect(deploySpy).not.toHaveBeenCalled();
+  });
+
+  it('still classifies drift when an Inline target carries a disagreeing rollout generation', async () => {
+    // An Inline target can carry a rollout_generation_id that was never the
+    // authority for its acknowledged pair, because Inline freezes its own
+    // generation per acceptance. Treating the pointer's presence as proof that a
+    // rollout governs the target held every such target, and a held target
+    // reported no drift at all, so a replaced image on an Inline Blueprint was
+    // invisible in every surface.
+    const node = seedNode();
+    const blueprint = seedBlueprint(node, 'observe');
+    const store = GitOpsStore.getInstance();
+    const appId = newGitOpsId();
+    store.insertApplication(blankInlineApplication(appId, blueprint.id, Date.now()));
+
+    const generationId = newGitOpsId();
+    const artifactSetId = newGitOpsId();
+    store.insertGeneration({
+      ...inlineGenerationFixture(appId, blueprint.id, generationId),
+    });
+    store.insertArtifactSet({
+      id: artifactSetId,
+      generation_id: generationId,
+      evidence_version: 1,
+      authoritative: 0,
+      qualification: 'exact',
+      evidence_json: encodeArtifactEvidenceJson({
+        kind: 'exact',
+        identity: `exact:${DIGEST}`,
+        services: [service(DIGEST)],
+      }),
+      created_at: Date.now(),
+    });
+
+    // A rollout row naming a different pair entirely, which is the state that
+    // used to hold this target.
+    const staleRolloutId = newGitOpsId();
+    store.insertRolloutGeneration({
+      id: staleRolloutId,
+      application_id: appId,
+      intent_revision_id: newGitOpsId(),
+      rollout_candidate_id: newGitOpsId(),
+      accepted_generation_id: newGitOpsId(),
+      artifact_set_id: newGitOpsId(),
+      placement_approval_ref: newGitOpsId(),
+      source_acceptance_ref: newGitOpsId(),
+      rollout_authorization_ref: newGitOpsId(),
+      required_targets_json: encodeGitOpsRequiredTargetsJson([node.id]),
+      preflight_fingerprint: null,
+      preflight_evidence_json: null,
+      rollout_strategy_json: '{}',
+      provenance: 'rollout_authorization',
+      supersedes_generation_id: null,
+      superseded_at: null,
+      operation_id: `op-${staleRolloutId}`,
+      actor: null,
+      trigger: 'test',
+      created_at: Date.now(),
+    });
+
+    const app = store.getApplication(appId)!;
+    app.accepted_generation_id = generationId;
+    app.artifact_set_id = artifactSetId;
+    app.latest_artifact_set_id = artifactSetId;
+    store.writeApplicationPointers(app);
+    store.upsertTarget({
+      ...emptyTargetRow(appId, node.id, Date.now()),
+      target_status: 'active',
+      desired_generation_id: generationId,
+      applied_generation_id: generationId,
+      deployed_generation_id: generationId,
+      expected_artifact_set_id: artifactSetId,
+      latest_artifact_set_id: artifactSetId,
+      rollout_generation_id: staleRolloutId,
+    });
+    DatabaseService.getInstance().upsertDeployment({
+      blueprint_id: blueprint.id,
+      node_id: node.id,
+      status: 'active',
+      applied_revision: blueprint.revision,
+      last_deployed_at: Date.now(),
+    });
+    stubDriftedRuntime(blueprint, generationId, artifactSetId, staleRolloutId);
+
+    const result = await BlueprintService.getInstance().checkForDrift(blueprint, node);
+
+    expect(result.kind, `an Inline target with a stale rollout pointer reported ${result.kind}`).toBe('drifted');
+  });
+
+  it('records the running identity even when the repair is held', async () => {
+    // A hold refuses to mutate, not to observe. What the node is actually running
+    // is the evidence an operator needs when a hold blocks the repair, and it is
+    // what the drift surfaces read, so withholding it left the one target that
+    // most needs explaining reporting nothing.
+    const node = seedNode();
+    const blueprint = seedBlueprint(node, 'enforce');
+    const seeded = await seedDeployedGitManaged({ blueprint, node, compose: COMPOSE });
+    DatabaseService.getInstance().upsertDeployment({
+      blueprint_id: blueprint.id,
+      node_id: node.id,
+      status: 'active',
+      applied_revision: blueprint.revision,
+      last_deployed_at: Date.now(),
+    });
+    stubDriftedRuntime(blueprint, seeded.generationId, seeded.artifactSetId, seeded.rolloutGenerationId);
+    const store = GitOpsStore.getInstance();
+    // Supersede the rollout, which holds the repair, without touching the stub.
+    store.markRolloutGenerationSuperseded(seeded.rolloutGenerationId, Date.now());
+
+    const result = await BlueprintService.getInstance().checkForDrift(blueprint, node);
+
+    expect(result.kind, 'a superseded rollout holds the repair').toBe('held');
+    const observed = store.getTarget(seeded.appId, node.id)?.observed_artifact_identity_json ?? null;
+    expect(observed, 'a held target must still report what it is running').not.toBeNull();
+    expect(observed).toContain(MOVED_DIGEST);
   });
 });

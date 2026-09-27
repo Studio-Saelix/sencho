@@ -815,6 +815,12 @@ export class BlueprintService {
 
             const binding = resolveRuntimeRepairBinding(store, app, target);
             if (binding.kind === 'hold') {
+                // A hold refuses to mutate, not to observe. What is actually
+                // running on the node is precisely the evidence an operator needs
+                // when a hold blocks the repair, and it is what the drift surfaces
+                // read, so it is captured before returning. Without this the one
+                // target that most needs explaining reports nothing at all.
+                await this.captureHeldObservation(blueprint, node, app.id);
                 return {
                     kind: 'held',
                     reason: binding.reason,
@@ -869,22 +875,7 @@ export class BlueprintService {
             if (!observed) {
                 return { kind: 'unverified', reason: 'runtime identity could not be collected' };
             }
-
-            try {
-                GitOpsTransitions.getInstance().recordObservedRuntimeArtifact({
-                    applicationId: app.id,
-                    nodeId: node.id,
-                    observed,
-                    envelope: envelopeFor(null, 'blueprint_drift_observe'),
-                });
-            } catch (error) {
-                console.error(
-                    '[BlueprintService] Failed to record runtime observation for blueprint %s node %d:',
-                    sanitizeForLog(blueprint.name),
-                    node.id,
-                    error instanceof Error ? error.message : String(error),
-                );
-            }
+            this.recordRuntimeObservation(blueprint.name, node, app.id, observed);
 
             // The expected set is the one this target acknowledged. Reading the
             // application's current set here would let a newer accepted
@@ -940,6 +931,58 @@ export class BlueprintService {
             // Prefer unverified over drifted so a transport failure cannot
             // trigger Enforce against an unreachable or half-observed node.
             return { kind: 'unverified', reason: BlueprintService.formatError(err) };
+        }
+    }
+
+    /**
+     * Record the identity a target is actually running, so the drift surfaces
+     * and the projection can report it. A failure to record is logged and
+     * swallowed: the observation is evidence, not authority, and losing it must
+     * not turn into a crash on the reconciler tick.
+     */
+    private recordRuntimeObservation(
+        blueprintName: string,
+        node: Node,
+        applicationId: string,
+        observed: ObservedArtifactIdentity,
+    ): void {
+        try {
+            GitOpsTransitions.getInstance().recordObservedRuntimeArtifact({
+                applicationId,
+                nodeId: node.id,
+                observed,
+                envelope: envelopeFor(null, 'blueprint_drift_observe'),
+            });
+        } catch (error) {
+            console.error(
+                '[BlueprintService] Failed to record runtime observation for blueprint %s node %d:',
+                sanitizeForLog(blueprintName),
+                node.id,
+                error instanceof Error ? error.message : String(error),
+            );
+        }
+    }
+
+    /**
+     * Best-effort observation for a target whose repair is held. It must not
+     * turn the hold into a failure or a different verdict, so every error here
+     * is swallowed after the probe is attempted.
+     */
+    private async captureHeldObservation(
+        blueprint: Blueprint,
+        node: Node,
+        applicationId: string,
+    ): Promise<void> {
+        try {
+            const observed = await this.observeRuntimeIdentity(blueprint.name, node);
+            if (observed) this.recordRuntimeObservation(blueprint.name, node, applicationId, observed);
+        } catch (error) {
+            console.error(
+                '[BlueprintService] Could not observe a held target for blueprint %s node %d:',
+                sanitizeForLog(blueprint.name),
+                node.id,
+                error instanceof Error ? error.message : String(error),
+            );
         }
     }
 

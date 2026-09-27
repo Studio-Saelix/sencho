@@ -137,11 +137,13 @@ export function resolveRuntimeRepairBinding(
     return { kind: 'hold', reason: 'authority_unreadable' };
   }
 
-  // Inline content has no rollout generation: the acknowledged pair is frozen by
-  // the source acceptance that produced it, and there is no rollout to supersede.
-  // Both paths still require the pair to resolve, so "the set this target
-  // acknowledged cannot be read" reports the same way regardless of content mode.
-  if (!target.rollout_generation_id) {
+  // Rollout corroboration applies to Git-managed content only. Inline and Direct
+  // targets can carry a `rollout_generation_id` that is not the authority for
+  // their acknowledged pair, because Inline freezes its own generation per
+  // acceptance and never had a rollout to agree with. Keying this on the
+  // pointer's presence rather than on the content mode held Inline targets whose
+  // pair was perfectly sound, which stopped them reporting drift at all.
+  if (app.target_mode !== 'blueprint' || !target.rollout_generation_id) {
     return { kind: 'binding', acceptedGenerationId, artifactSetId, rolloutGenerationId: null };
   }
 
