@@ -653,6 +653,80 @@ describe('ensureRolloutAuthorization', () => {
     expect(GitOpsStore.getInstance().getApplication(fixture.applicationId)!.rollout_authorization_ref).toBe(ref);
   });
 
+  it('keeps dispatching an authorized rollout while a source operation is in flight', async () => {
+    // A routine background source fetch must not pause a rollout that is already
+    // authorized and running. The in-flight guard is about whether authority may
+    // be minted, and this authority already exists.
+    const fixture = seedAuthorizedReadyApp();
+    const store = GitOpsStore.getInstance();
+    await ensureRolloutAuthorization(fixture.applicationId, 'tester');
+    expect(store.getApplication(fixture.applicationId)!.rollout_authorization_ref).toBeTruthy();
+
+    const db = DatabaseService.getInstance().getDb();
+    db.prepare("UPDATE gitops_applications SET active_operation_stage = 'fetch_started', active_operation_id = 'op-bg' WHERE id = ?")
+      .run(fixture.applicationId);
+
+    expect((await ensureRolloutAuthorization(fixture.applicationId, 'tester')).ok).toBe(true);
+
+    // The same holds for a target, which can be mid-apply while the application
+    // itself has nothing running.
+    db.prepare("UPDATE gitops_applications SET active_operation_stage = NULL WHERE id = ?")
+      .run(fixture.applicationId);
+    db.prepare(
+      `INSERT INTO gitops_target_current (application_id, node_id, target_status, connectivity, latest_stage, active_operation_id, active_operation_stage, updated_at)
+       VALUES (?, ?, 'active', 'reachable', 'blueprint_ack_recorded', 'op-t', 'deploy_started', ?)
+       ON CONFLICT(application_id, node_id) DO UPDATE SET active_operation_stage = 'deploy_started', active_operation_id = 'op-t'`,
+    ).run(fixture.applicationId, fixture.nodeId, Date.now());
+
+    expect((await ensureRolloutAuthorization(fixture.applicationId, 'tester')).ok).toBe(true);
+  });
+
+  it('lets an operator-authorized rollout dispatch on the default manual policy', async () => {
+    // The regression this pins. An operator authorizes, which succeeds because
+    // the operator is the authority, and the dispatch that follows re-enters this
+    // function on the automatic path. With the policy at its fresh-install
+    // default of manual, the gate used to refuse there, so the operator was told
+    // it worked and nothing deployed.
+    const fixture = seedAuthorizedReadyApp();
+    const store = GitOpsStore.getInstance();
+    GitOpsTransitions.getInstance().rolloutAuthorizationPolicyChanged({
+      applicationId: fixture.applicationId,
+      policy: 'manual',
+      envelope: { operationId: 'op-manual-2', actor: 'tester', trigger: 'test', at: Date.now() },
+    });
+
+    // Minted by the operator.
+    const byOperator = await ensureRolloutAuthorization(
+      fixture.applicationId, 'tester', 'manual', undefined, 'operator',
+    );
+    expect(byOperator.ok).toBe(true);
+    expect(store.getApplication(fixture.applicationId)!.rollout_authorization_ref).toBeTruthy();
+
+    // The dispatch that follows asks again as the automatic path, and must be
+    // answered from the authority that already exists rather than re-decided.
+    const onDispatch = await ensureRolloutAuthorization(fixture.applicationId, 'tester');
+    expect(onDispatch.ok).toBe(true);
+  });
+
+  it('still refuses a policy-authorized mint on a manual policy with nothing granted', async () => {
+    // The gate keeps its teeth for the case it exists for: no authority exists,
+    // so policy is the only thing that could grant it, and it does not.
+    const fixture = seedAuthorizedReadyApp();
+    GitOpsTransitions.getInstance().rolloutAuthorizationPolicyChanged({
+      applicationId: fixture.applicationId,
+      policy: 'manual',
+      envelope: { operationId: 'op-manual-3', actor: 'tester', trigger: 'test', at: Date.now() },
+    });
+    // Undo the operator mint by clearing the live authorization for this check.
+    DatabaseService.getInstance().getDb()
+      .prepare('UPDATE gitops_applications SET rollout_authorization_ref = NULL WHERE id = ?')
+      .run(fixture.applicationId);
+
+    const result = await ensureRolloutAuthorization(fixture.applicationId, 'tester');
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.reason).toMatch(/requires an operator/);
+  });
+
   it('refuses a policy-authorized mint when the policy says an operator authorizes', async () => {
     // The policy is only real if something reads it. Without this gate an
     // operator could set the policy to manual, get a success response and a
