@@ -103,9 +103,10 @@ const ROLLBACKABLE_ROLLOUT_STATES: ReadonlySet<GitOpsRolloutStatus> = new Set([
 
 /** Runtime states that read as a failed target rather than a result. */
 const FAILED_RUNTIME_STATES: ReadonlySet<GitOpsRuntimeStatus> = new Set([
+  'recovery_failed',
+  'recovery_required',
   'failed_previous_workload_intact',
   'failed_after_mutation',
-  'recovery_failed',
 ]);
 
 function errorMessage(error: unknown, fallback: string): string {

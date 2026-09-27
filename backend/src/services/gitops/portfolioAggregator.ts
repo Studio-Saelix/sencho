@@ -36,7 +36,7 @@ import type {
   GitOpsPortfolioRow,
   GitOpsPortfolioTargetSummary,
 } from './portfolioTypes';
-import type { FutureRolloutAuthorizationBinding, GitOpsRevisionProjection, GitOpsTargetProjection } from './types';
+import type { GitOpsRevisionProjection, GitOpsTargetProjection } from './types';
 import { canonicalizeServiceEvidence, isRecord } from './json';
 import type { ServiceArtifactEvidence } from './json';
 
