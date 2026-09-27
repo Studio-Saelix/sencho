@@ -4,7 +4,7 @@
  * report it and the handle emits 'drain' once the buffer empties, so the
  * caller can pause its source instead of buffering without bound.
  */
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { attachTcpStreamSwitchboard, TUNNEL_SEND_BUFFER_HIGH_WATER_MARK } from '../mesh/tcpStreamSwitchboard';
 
 function makeWs() {
@@ -40,26 +40,73 @@ describe('TcpStreamSwitchboard backpressure', () => {
 describe('TcpStreamSwitchboard teardown while saturated', () => {
     /**
      * A closed tunnel can never drain, so a drain poll that finds the socket
-     * shut has to resume what it paused. Clearing the set without resuming
-     * would strand those sockets mid-transfer, which is worse than the
+     * shut has to release what it paused. Clearing the set without resuming
+     * would strand those writers mid-transfer, which is worse than the
      * unbounded buffering the pause was added to prevent.
      */
-    it('resumes paused reverse writers when the tunnel is already closed', async () => {
-        const ws = makeWs();
-        const sb = attachTcpStreamSwitchboard({
-            ws: ws as unknown as import('ws').WebSocket,
-            resolveTarget: async () => ({ ok: false, err: 'no_target' }),
-        });
-        const handle = sb.openReverseStream({ nodeId: 2, stack: 's', service: 'db', port: 5432 });
-        expect(handle).not.toBeNull();
+    it('dispatches drain to paused reverse writers when the tunnel is already closed', async () => {
+        vi.useFakeTimers();
+        try {
+            const ws = makeWs();
+            const sb = attachTcpStreamSwitchboard({
+                ws: ws as unknown as import('ws').WebSocket,
+                resolveTarget: async () => ({ ok: false, err: 'no_target' }),
+            });
+            const handle = sb.openReverseStream({ nodeId: 2, stack: 's', service: 'db', port: 5432 });
+            expect(handle).not.toBeNull();
 
-        ws.bufferedAmount = TUNNEL_SEND_BUFFER_HIGH_WATER_MARK + 1;
-        expect(handle!.write(Buffer.from('a'))).toBe(false);
+            ws.bufferedAmount = TUNNEL_SEND_BUFFER_HIGH_WATER_MARK + 1;
+            expect(handle!.write(Buffer.from('a'))).toBe(false);
+            const drained = vi.fn();
+            handle!.on('drain', drained);
 
-        ws.bufferedAmount = 0;
-        ws.readyState = 3;
-        handle!.emit('drain');
-        sb.cleanup();
+            // The tunnel dies while the writer is still parked. Let the real
+            // drain poll run; it has to notice the closed socket, release the
+            // writer, and stop polling (nothing can drain from here).
+            ws.readyState = 3;
+            await vi.advanceTimersByTimeAsync(250);
+
+            expect(drained).toHaveBeenCalledTimes(1);
+            const internals = sb as unknown as {
+                handlesAwaitingDrain: Set<unknown>;
+                drainTimer: NodeJS.Timeout | null;
+            };
+            expect(internals.handlesAwaitingDrain.size).toBe(0);
+            expect(internals.drainTimer).toBeNull();
+            sb.cleanup();
+        } finally {
+            vi.useRealTimers();
+        }
+    });
+
+    it('keeps polling without dispatching drain while the tunnel is still saturated', async () => {
+        vi.useFakeTimers();
+        try {
+            const ws = makeWs();
+            const sb = attachTcpStreamSwitchboard({
+                ws: ws as unknown as import('ws').WebSocket,
+                resolveTarget: async () => ({ ok: false, err: 'no_target' }),
+            });
+            const handle = sb.openReverseStream({ nodeId: 2, stack: 's', service: 'db', port: 5432 });
+            expect(handle).not.toBeNull();
+
+            ws.bufferedAmount = TUNNEL_SEND_BUFFER_HIGH_WATER_MARK + 1;
+            expect(handle!.write(Buffer.from('a'))).toBe(false);
+            const drained = vi.fn();
+            handle!.on('drain', drained);
+
+            await vi.advanceTimersByTimeAsync(250);
+            expect(drained).not.toHaveBeenCalled();
+            expect((sb as unknown as { handlesAwaitingDrain: Set<unknown> }).handlesAwaitingDrain.size).toBe(1);
+
+            // Once the buffer empties the poll releases the writer.
+            ws.bufferedAmount = 0;
+            await vi.advanceTimersByTimeAsync(250);
+            expect(drained).toHaveBeenCalledTimes(1);
+            sb.cleanup();
+        } finally {
+            vi.useRealTimers();
+        }
     });
 
     it('drops a closed reverse handle from the awaiting-drain bookkeeping', () => {

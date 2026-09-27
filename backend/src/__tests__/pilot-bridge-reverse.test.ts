@@ -15,9 +15,11 @@ import net from 'net';
 import { EventEmitter } from 'events';
 import { WebSocket } from 'ws';
 import { setupTestDb, cleanupTestDb } from './helpers/setupTestDb';
+import { TUNNEL_SEND_BUFFER_HIGH_WATER_MARK } from '../mesh/tcpStreamSwitchboard';
 import {
     AGENT_REVERSE_ID_BASE,
     BinaryFrameType,
+    decodeBinaryFrame,
     decodeJsonFrame,
     encodeBinaryFrame,
     encodeJsonFrame,
@@ -70,8 +72,8 @@ function findAck(ws: { sent: unknown[] }, s: number): { ok: boolean; err?: strin
     return undefined;
 }
 
-async function waitFor<T>(check: () => T | undefined): Promise<T> {
-    const deadline = Date.now() + 1500;
+async function waitFor<T>(check: () => T | undefined, timeoutMs = 1500): Promise<T> {
+    const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
         const v = check();
         if (v !== undefined) return v;
@@ -290,6 +292,111 @@ describe('PilotTunnelBridge handles tcp_open_reverse (Phase B)', () => {
         expect(Buffer.concat(writes).toString()).toBe('POST /hook HTTP/1.1\r\n\r\nmid-windowtrailer');
 
         bridge.close();
+        vi.restoreAllMocks();
+    });
+});
+
+/**
+ * Backpressure on the bridge's reverse-stream socket: when the tunnel's send
+ * buffer is saturated the bridge stops reading the local container, and every
+ * pause has to be released again. A pause that is never released is worse than
+ * the unbounded buffering it prevents, because the container's socket stays
+ * parked mid-transfer for the life of the Sencho process.
+ */
+describe('PilotTunnelBridge reverse-socket backpressure', () => {
+    // Comfortably more than one read chunk, so the payload is still mid-transfer
+    // when the pause lands, while keeping the post-drain transfer short enough
+    // that it is not sensitive to a loaded CI event loop.
+    const PAYLOAD_BYTES = 1024 * 1024;
+
+    async function startSaturatedReverseStream(payload: Buffer): Promise<{
+        bridge: InstanceType<typeof PilotTunnelBridge>;
+        mockWs: ReturnType<typeof makeMockTunnelWs>;
+        container: net.Server;
+        forwardedBytes: () => number;
+        pausedSockets: () => Set<unknown>;
+    }> {
+        const mockWs = makeMockTunnelWs();
+        const bridge = new PilotTunnelBridge(1, mockWs as unknown as WebSocket);
+        await bridge.start();
+
+        // Real listener standing in for the target container. The container
+        // side swallows teardown errors: the bridge destroys the connection
+        // on close, and an unhandled ECONNRESET would fail the run.
+        const container = net.createServer((socket) => {
+            socket.on('error', () => { /* destroyed by the bridge */ });
+            socket.write(payload);
+        });
+        await new Promise<void>((resolve) => container.listen(0, '127.0.0.1', () => resolve()));
+        const addr = container.address();
+        if (!addr || typeof addr === 'string') throw new Error('no address');
+
+        // Saturated from the start (the shared 4 MiB high-water mark plus one
+        // byte): the first chunk the bridge reads has to trip the pause.
+        mockWs.bufferedAmount = TUNNEL_SEND_BUFFER_HIGH_WATER_MARK + 1;
+
+        const localNodeId = (await import('../services/NodeRegistry')).NodeRegistry.getInstance().getDefaultNodeId();
+        vi.spyOn(MeshService.getInstance(), 'resolveContainerIp').mockResolvedValue('127.0.0.1');
+
+        const s = AGENT_REVERSE_ID_BASE + 21;
+        mockWs.emit('message', encodeJsonFrame({
+            t: 'tcp_open_reverse', s,
+            targetNodeId: localNodeId, stack: 'bulk', service: 'db', port: addr.port,
+        }), false);
+        await waitFor(() => findAck(mockWs, s));
+
+        const forwardedBytes = (): number => {
+            let total = 0;
+            for (const item of mockWs.sent) {
+                if (!Buffer.isBuffer(item)) continue;
+                try {
+                    const frame = decodeBinaryFrame(item);
+                    if (frame.type === BinaryFrameType.TcpData) total += frame.payload.length;
+                } catch { /* not a binary frame */ }
+            }
+            return total;
+        };
+        const pausedSockets = (): Set<unknown> =>
+            (bridge as unknown as { pausedTcpSockets: Set<unknown> }).pausedTcpSockets;
+
+        return { bridge, mockWs, container, forwardedBytes, pausedSockets };
+    }
+
+    it('stops reading the container while saturated and resumes once the buffer drains', async () => {
+        const payload = Buffer.alloc(PAYLOAD_BYTES, 0x61);
+        const { bridge, mockWs, container, forwardedBytes, pausedSockets } =
+            await startSaturatedReverseStream(payload);
+
+        // Paused: the container's socket is parked, so the payload has not been
+        // drained into the tunnel.
+        await waitFor(() => (pausedSockets().size === 1 ? true : undefined));
+        expect(forwardedBytes()).toBeLessThan(PAYLOAD_BYTES);
+
+        // Buffer drains: the poll releases the socket and the whole payload
+        // flows through.
+        mockWs.bufferedAmount = 0;
+        await waitFor(() => (forwardedBytes() === PAYLOAD_BYTES ? true : undefined), 3000);
+        expect(pausedSockets().size).toBe(0);
+
+        container.close();
+        bridge.close();
+        vi.restoreAllMocks();
+    });
+
+    it('releases a paused container socket when the tunnel closes', async () => {
+        const payload = Buffer.alloc(PAYLOAD_BYTES, 0x61);
+        const { bridge, container, pausedSockets } = await startSaturatedReverseStream(payload);
+        await waitFor(() => (pausedSockets().size === 1 ? true : undefined));
+
+        const resumeSpy = vi.spyOn(net.Socket.prototype, 'resume');
+        bridge.close();
+        container.close();
+
+        // A closed tunnel can never drain, so close() has to wake the socket it
+        // paused instead of leaving it parked forever.
+        expect(resumeSpy).toHaveBeenCalled();
+        expect(pausedSockets().size).toBe(0);
+        resumeSpy.mockRestore();
         vi.restoreAllMocks();
     });
 });

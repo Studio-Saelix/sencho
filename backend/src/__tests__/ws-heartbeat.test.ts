@@ -38,4 +38,50 @@ describe('startWsHeartbeat', () => {
         expect(serverSide.readyState).toBe(WebSocket.OPEN);
         stop();
     });
+
+    // A bulk upload over a slow link queues the pong behind megabytes of
+    // data, so pongs stop arriving inside the miss window long before the link
+    // is actually dead. A shrinking send buffer is the proof of life that
+    // keeps the heartbeat from killing a healthy slow tunnel, and once the
+    // shrink stops the peer is treated as dead again.
+    it('keeps a peer open while its send buffer drains, and terminates it once the drain stops', async () => {
+        const { serverSide } = await pair({ autoPong: false });
+        let buffered = 4_000_000;
+        Object.defineProperty(serverSide, 'bufferedAmount', {
+            get: () => buffered, configurable: true,
+        });
+        let draining = true;
+        const drain = setInterval(() => {
+            if (draining) buffered = Math.max(0, buffered - 100_000);
+        }, 5);
+        cleanup.push(() => clearInterval(drain));
+
+        const closed = new Promise<number>((r) => serverSide.once('close', (code) => r(code)));
+        const stop = startWsHeartbeat(serverSide, 20, 2);
+        try {
+            // Still draining, and still no pong ever: the peer must survive.
+            await new Promise((r) => setTimeout(r, 150));
+            expect(serverSide.readyState).toBe(WebSocket.OPEN);
+
+            // The peer stopped acknowledging. Nothing else counts as life.
+            draining = false;
+            expect(await closed).toBe(1006);
+        } finally {
+            stop();
+        }
+    });
+
+    it('still terminates a peer whose send buffer never drains', async () => {
+        const { serverSide } = await pair({ autoPong: false });
+        // The peer stopped acknowledging: the buffer is stuck above the
+        // high-water mark and never shrinks.
+        const stuck = 4_000_000;
+        Object.defineProperty(serverSide, 'bufferedAmount', {
+            get: () => stuck, configurable: true,
+        });
+        const closed = new Promise<number>((r) => serverSide.once('close', (code) => r(code)));
+        startWsHeartbeat(serverSide, 20, 2);
+
+        expect(await closed).toBe(1006);
+    });
 });

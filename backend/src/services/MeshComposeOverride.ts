@@ -59,9 +59,15 @@ export function generateOverrideYaml(input: MeshOverrideInput): string {
     const services: Record<string, unknown> = {};
     for (const svc of sortedServices) {
         const shape = input.serviceShapes?.[svc];
-        // `network_mode` (host, none, service:vpn, container:x) cannot be
-        // combined with `networks:` or `extra_hosts`; Compose rejects the
-        // deploy. Such services share another namespace and are left alone.
+        // A `network_mode` service (host, none, service:vpn, container:x) cannot
+        // be given a `networks` entry: Compose rejects the combination for
+        // every one of those forms, which fails the whole stack's redeploy.
+        // Verified against `docker compose config` (v5.5.1), which accepts
+        // `extra_hosts` on such a service but rejects `networks` on all of
+        // them. The whole entry is skipped rather than just the attachment,
+        // because the attachment is the point: a service left off
+        // `sencho_mesh` has no mesh address for an alias to resolve to, and it
+        // publishes no port of its own, so it never carries an alias anyway.
         if (shape?.networkMode) continue;
         // A service without its own `networks:` key sits on the implicit
         // `default` network. Listing only `sencho_mesh` in the override would

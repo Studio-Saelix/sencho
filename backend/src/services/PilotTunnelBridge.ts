@@ -219,6 +219,9 @@ export class PilotTunnelBridge extends EventEmitter implements MeshTunnelHandle 
                 resolve();
             });
         });
+        // The WS can die while the loopback listener is still coming up, in
+        // which case close() already ran and there is no heartbeat to stop.
+        if (this.closed) return;
         this.stopHeartbeat = startWsHeartbeat(this.tunnelWs, PING_INTERVAL_MS);
     }
 

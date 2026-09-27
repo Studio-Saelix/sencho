@@ -3,6 +3,7 @@ import { EventEmitter } from 'events';
 import fsSync from 'fs';
 import fs from 'fs/promises';
 import path from 'path';
+import * as YAML from 'yaml';
 import { setupTestDb, cleanupTestDb } from './helpers/setupTestDb';
 import { getSenchoIpFromSubnet, MeshError, type MeshTarget, type MeshTcpStreamLike } from '../services/MeshService';
 
@@ -193,6 +194,46 @@ describe('MeshService.optInStack', () => {
         await expect(svc.optInStack(localNodeId, '../../etc/passwd', 'tester'))
             .rejects.toThrow(/invalid stack name/);
         expect(db.isMeshStackEnabled(localNodeId, '../../etc/passwd')).toBe(false);
+    });
+
+    it('binds nothing and logs no bind error while the mesh data plane is not ready', async () => {
+        const svc = MeshService.getInstance();
+        const db = DatabaseService.getInstance();
+        const localNodeId = db.getNodes()[0].id;
+        // No sencho_mesh IP: the data plane setup has not completed, so there
+        // is no address a mesh listener could safely bind to.
+        (svc as unknown as { senchoIp: string | null }).senchoIp = null;
+
+        const aliasByPort = (svc as unknown as { aliasByPort: Map<number, unknown> }).aliasByPort;
+        aliasByPort.set(9000, {
+            host: 'echo.local-stack.Local.sencho',
+            nodeId: localNodeId, nodeName: 'Local',
+            stackName: 'local-stack', serviceName: 'echo', port: 9000,
+        });
+
+        const fwd = (svc as unknown as {
+            forwarder: { listen: (p: number) => Promise<void>; unlisten: (p: number) => Promise<void>; getListenerPorts: () => number[] };
+        }).forwarder;
+        const realListen = fwd.listen.bind(fwd);
+        const realUnlisten = fwd.unlisten.bind(fwd);
+        const realGetListenerPorts = fwd.getListenerPorts.bind(fwd);
+        const attempted: number[] = [];
+        fwd.listen = async (p: number) => { attempted.push(p); throw new Error('mesh forwarder has no bind address'); };
+        fwd.unlisten = async () => { /* no-op */ };
+        fwd.getListenerPorts = () => [];
+
+        try {
+            await (svc as unknown as { syncForwarderListeners: () => Promise<void> }).syncForwarderListeners();
+            // No bind attempt at all, so a not-ready data plane does not fill
+            // the activity log with one forwarder.error per port per tick.
+            expect(attempted).toEqual([]);
+            expect(svc.getActivity({ limit: 50 }).some((e) => e.type === 'forwarder.error')).toBe(false);
+        } finally {
+            fwd.listen = realListen;
+            fwd.unlisten = realUnlisten;
+            fwd.getListenerPorts = realGetListenerPorts;
+            aliasByPort.clear();
+        }
     });
 
     it('forwarder binds every alias port across the fleet, not just local-owned ports', async () => {
@@ -654,6 +695,33 @@ describe('MeshService.testUpstream tunnel-down path', () => {
         expect(result.code).toBe('denied');
     });
 
+    it('returns ok:false where=target_port when the local mesh data plane is not ready', async () => {
+        const svc = MeshService.getInstance();
+        const db = DatabaseService.getInstance();
+        const localNodeId = db.getNodes()[0].id;
+        // The same-node probe dials Sencho's mesh IP, so with no mesh IP there
+        // is no address to dial and the probe must say so rather than fall
+        // back to loopback (where no listener exists).
+        (svc as unknown as { senchoIp: string | null }).senchoIp = null;
+
+        (svc as unknown as { aliasCache: Map<string, unknown> }).aliasCache = new Map([
+            ['db.api.local.sencho', {
+                host: 'db.api.local.sencho',
+                nodeId: localNodeId,
+                nodeName: 'local',
+                stackName: 'api',
+                serviceName: 'db',
+                port: 5432,
+            }],
+        ]);
+        db.insertMeshStack(localNodeId, 'api', 'tester');
+
+        const result = await svc.testUpstream('db.api.local.sencho', localNodeId);
+        expect(result).toEqual({
+            ok: false, where: 'target_port', code: 'no_route', message: 'mesh data plane not ready',
+        });
+    });
+
     it('returns ok:false where=sidecar when alias is unknown', async () => {
         const svc = MeshService.getInstance();
         const localNodeId = DatabaseService.getInstance().getNodes()[0].id;
@@ -1101,6 +1169,39 @@ describe('MeshService.getDeclaredStackServices (BUG-1)', () => {
             app: { declaresNetworks: false, networkMode: 'service:vpn' },
         });
     });
+
+    // The common VPN-sidecar pattern shares service fields through a YAML
+    // merge key. Without merge resolution the service looks like it declares
+    // neither network_mode nor networks, so the override adds both to it and
+    // Compose rejects the whole redeploy.
+    it('resolves network_mode and networks supplied through a YAML merge key', async () => {
+        const svc = MeshService.getInstance();
+        writeStackFile('anchor-stack', [
+            'x-vpn-sidecar: &vpn-sidecar',
+            '  image: alpine:3',
+            '  network_mode: "service:vpn"',
+            'x-proxied: &proxied',
+            '  image: alpine:3',
+            '  networks: [proxy]',
+            'services:',
+            '  vpn:',
+            '    image: alpine:3',
+            '  app:',
+            '    <<: *vpn-sidecar',
+            '  web:',
+            '    <<: *proxied',
+            'networks:',
+            '  proxy:',
+            '    external: true',
+        ].join('\n'));
+
+        const shapes = await svc.getDeclaredStackServices('anchor-stack');
+        expect(shapes).toEqual({
+            vpn: { declaresNetworks: false },
+            app: { declaresNetworks: false, networkMode: 'service:vpn' },
+            web: { declaresNetworks: true },
+        });
+    });
 });
 
 describe('MeshService.ensureStackOverride (BUG-1 fix)', () => {
@@ -1305,6 +1406,44 @@ describe('MeshService.ensureStackOverride (BUG-1 fix)', () => {
 
         expect(fsSync.readFileSync(overrideFile, 'utf8')).toBe(originalYaml);
         expect(db.isMeshStackEnabled(localNodeId, 'replacement-failure')).toBe(true);
+    });
+
+    // End-to-end shape of the VPN-sidecar pattern: the override must not list
+    // the namespace-sharing service at all (Compose refuses networks on it),
+    // and the other services must keep the attachments they declared.
+    it('omits a merge-key network_mode service from the generated override', async () => {
+        const svc = MeshService.getInstance();
+        const db = DatabaseService.getInstance();
+        const localNodeId = db.getNodes()[0].id;
+
+        writeStackFile('anchor-override-stack', [
+            'x-vpn-sidecar: &vpn-sidecar',
+            '  image: alpine:3',
+            '  network_mode: "service:vpn"',
+            'x-proxied: &proxied',
+            '  image: alpine:3',
+            '  networks: [proxy]',
+            'services:',
+            '  vpn:',
+            '    image: alpine:3',
+            '  app:',
+            '    <<: *vpn-sidecar',
+            '  web:',
+            '    <<: *proxied',
+            'networks:',
+            '  proxy:',
+            '    external: true',
+        ].join('\n'));
+        db.insertMeshStack(localNodeId, 'anchor-override-stack', 'tester');
+
+        const overridePath = await svc.ensureStackOverride(localNodeId, 'anchor-override-stack');
+        const parsed = YAML.parse(fsSync.readFileSync(overridePath as string, 'utf8')) as {
+            services: Record<string, { networks: string[] }>;
+        };
+
+        expect(Object.keys(parsed.services).sort()).toEqual(['vpn', 'web']);
+        expect(parsed.services.vpn.networks).toEqual(['default', 'sencho_mesh']);
+        expect(parsed.services.web.networks).toEqual(['sencho_mesh']);
     });
 
     it('prevents overlapping override mutations for the same stack', async () => {
@@ -1682,6 +1821,24 @@ describe('MeshService.openCrossNode (BUG-4)', () => {
         fakeStream.emit('close');
         expect(fakeSrc.resume).toHaveBeenCalledTimes(1);
         expect(fakeSrc.end).toHaveBeenCalled();
+    });
+
+    it('tears the source socket down on data that arrives after the tunnel stream closed', async () => {
+        const fakeStream = makeFakeStream(63);
+        (fakeStream.write as ReturnType<typeof vi.fn>).mockReturnValue(false);
+        const fakeSrc = makeBackpressureSocket();
+        await dispatchCrossNode(fakeStream, fakeSrc);
+
+        fakeStream.emit('close');
+        fakeSrc.pause.mockClear();
+
+        // The stream is gone, so a write can only ever report backpressure
+        // that never clears. Pausing on it would strand the socket (leaked
+        // descriptor, container writing into a zero window) instead of
+        // closing it.
+        fakeSrc.emit('data', Buffer.from('after-close'));
+        expect(fakeSrc.pause).not.toHaveBeenCalled();
+        expect(fakeSrc.destroy).toHaveBeenCalled();
     });
 
     it('src.on(close) deletes activeStreams entry even when tcpStream never emits close', async () => {

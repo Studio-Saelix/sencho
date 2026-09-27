@@ -2347,7 +2347,13 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
                 if (!isPathWithinBase(composePath, baseDir)) continue;
                 let parsed: { services?: Record<string, unknown> } | null;
                 try {
-                    parsed = YAML.parse(await fs.readFile(composePath, 'utf8')) as { services?: Record<string, unknown> } | null;
+                    // merge: true resolves YAML 1.1 merge keys (`<<: *anchor`).
+                    // Compose files pull shared service fields in that way, and
+                    // without it a service inheriting `network_mode` or
+                    // `networks` through an anchor looks like it declares
+                    // neither, so the override adds networks and extra_hosts
+                    // to a service Compose refuses to start with them.
+                    parsed = YAML.parse(await fs.readFile(composePath, 'utf8'), { merge: true }) as { services?: Record<string, unknown> } | null;
                 } catch {
                     continue;
                 }
@@ -2998,6 +3004,10 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
         // (HTTP, TLS, Redis, Postgres). Cap matches the bridge's reservation
         // cap so a misbehaving source cannot exhaust gateway memory.
         let tcpOpen = false;
+        // Set once the tunnel stream is gone. Bytes that still arrive from the
+        // container after that have nowhere to go, and no 'drain' can fire
+        // any more, so the src path has to drop them instead of pausing.
+        let tcpStreamClosed = false;
         const pending: Buffer[] = [];
         let pendingBytes = 0;
 
@@ -3057,6 +3067,9 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
             try { src.write(chunk); } catch { /* ignore */ }
         });
         tcpStream.on('error', (err: Error) => {
+            // An error means the tunnel is gone, same as a close: nothing more
+            // can be written through it, so the src path must stop pausing.
+            tcpStreamClosed = true;
             cleanupRecord();
             this.logActivity({
                 source: 'pilot', level: 'error', type: 'tunnel.fail',
@@ -3066,6 +3079,7 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
             try { src.destroy(); } catch { /* ignore */ }
         });
         tcpStream.on('close', () => {
+            tcpStreamClosed = true;
             cleanupRecord();
             releaseSrc();
             try { src.end(); } catch { /* ignore */ }
@@ -3073,6 +3087,14 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
         let awaitingDrain = false;
         src.on('data', (chunk: Buffer) => {
             record.bytesOut += chunk.length;
+            if (tcpStreamClosed) {
+                // The tunnel is gone, so tcpStream.write below can only report
+                // backpressure that never clears. Pausing here would strand
+                // the socket (leaked fd, container blocked on a zero window);
+                // drop the bytes and close the local side instead.
+                try { src.destroy(); } catch { /* ignore */ }
+                return;
+            }
             if (tcpOpen) {
                 // Backpressure: pause the local container's socket while the
                 // tunnel is saturated so a bulk upload over a slow link does

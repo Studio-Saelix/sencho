@@ -64,7 +64,7 @@ Each opt-in and opt-out triggers a redeploy of the affected stack so its `/etc/h
 
 ## Lifecycle and behavior
 
-**Opt-in.** Sencho writes a Compose override file (`<DATA_DIR>/mesh/overrides/<nodeId>/<stack>.override.yml`) that adds the `sencho_mesh` network attachment to every service in the stack and injects `extra_hosts` lines for every cross-node alias the fleet currently exposes. Services keep their existing networks: a service that relies on the stack's implicit `default` network stays on it, so links between services in the stack and routes from your reverse proxy keep working. Services that use `network_mode` (`host`, `none`, `service:<name>`, `container:<name>`) are left out of the override, because Compose does not allow extra networks or hosts entries on them. The stack redeploys with that override applied. Containers come back up with the alias names resolvable in their `/etc/hosts`.
+**Opt-in.** Sencho writes a Compose override file (`<DATA_DIR>/mesh/overrides/<nodeId>/<stack>.override.yml`) that adds the `sencho_mesh` network attachment to the stack's services and injects `extra_hosts` lines for every cross-node alias the fleet currently exposes. Services keep their existing networks: a service that relies on the stack's implicit `default` network stays on it, so links between services in the stack and routes from your reverse proxy keep working, and a service that declares its own networks keeps those alongside the mesh network. Services that use `network_mode` are left out of the override, because Compose does not accept a `networks` entry on them. The stack redeploys with that override applied. Containers come back up with the alias names resolvable in their `/etc/hosts`.
 
 **Opt-out.** The override file is removed and the stack redeploys without it. Containers come back without the mesh network attachment and without the `extra_hosts` lines.
 
@@ -197,7 +197,7 @@ These are the explicit boundaries of the v1 mesh.
 - **Shared stream pool with the Pilot tunnel.** Each Pilot tunnel multiplexes up to **1024** concurrent streams covering HTTP, WebSocket, and mesh TCP. A heavy mesh workload counts against the same ceiling as ordinary fleet API traffic. See Pilot Agent's [Resource limits](/features/pilot-agent#resource-limits) for the full picture.
 - **No TLS termination, no L7 features.** Mesh is L4. There is no built-in HTTPS, no host-based routing, no header rewriting, no blue/green cutover. Run those at your existing reverse proxy.
 - **No application authentication.** Mesh does not add a credential layer to the transported protocol. Your services still authenticate their callers themselves.
-- **`network_mode` services cannot join.** A service that uses `network_mode` (`host`, `none`, or another container's namespace such as a VPN sidecar with `service:gluetun`) cannot attach to `sencho_mesh`. The rest of the stack still meshes; Sencho leaves those services untouched. Alias discovery reads published ports, so such a service can still show an alias; whether it routes depends on how the rest of the stack exposes that port.
+- **`network_mode` services cannot join.** A service that uses `network_mode` (`host`, `none`, or another container's namespace such as a VPN sidecar with `service:gluetun`) cannot attach to `sencho_mesh`. The rest of the stack still meshes; Sencho leaves those services untouched. A service that shares another container's namespace cannot publish a port at all (Docker refuses to start it with one), and `host` and `none` discard port publishing, so such a service never carries an alias. Reach the stack through the container that owns the namespace.
 - **Mesh activity log is in-memory.** The fleet-wide log resets when Sencho restarts. For long-term retention rely on the audit log (opt-in / opt-out) or export from your reverse proxy.
 
 ## Example workflows
@@ -231,7 +231,11 @@ These are the explicit boundaries of the v1 mesh.
   </Accordion>
 
   <Accordion title="A service using network_mode is left untouched">
-    Services that declare `network_mode` (`host`, `none`, `service:<name>`, `container:<name>`) are left out of the mesh override, because Compose rejects extra networks and hosts entries on them. They keep running on the namespace they already use. For a VPN sidecar pattern, the ports come from the sidecar, so reach the stack through the sidecar's service. Otherwise switch the service to bridge networking and redeploy.
+    Services that declare `network_mode` are left out of the mesh override, because Compose does not accept a `networks` entry on a service that declares one. They keep running on the namespace they already use, and they never publish a port of their own, so they carry no mesh alias. For a VPN sidecar pattern, the published ports belong to the sidecar, so reach the stack through the sidecar's service. Otherwise switch the service to bridge networking and redeploy.
+  </Accordion>
+
+  <Accordion title="My reverse proxy stopped reaching a meshed service">
+    A meshed service is now attached to the mesh network in addition to the networks it already had, and your reverse proxy reaches it on one of those. A reverse proxy that discovers containers by network can pick the mesh network instead of the one it shares with the service, and it cannot route to a network it is not attached to. Traefik users set the container label `traefik.docker.network` to the network name the proxy should use (for a Compose project named `myapp`, that is `myapp_proxy`, not `proxy`). Other proxies: pin the network in their service discovery, or attach the proxy to the service's network by name. Confirm what the service is on with `docker inspect <container> --format '{{json .NetworkSettings.Networks}}'`.
   </Accordion>
 
   <Accordion title="Opt-in returns 409 'Port already claimed by another mesh stack'">
