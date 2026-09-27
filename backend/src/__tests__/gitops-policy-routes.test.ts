@@ -296,3 +296,107 @@ describe('POST /api/gitops/applications/:id/rollout/authorization-policy', () =>
     expect(res.body.code).toBe('NOT_GIT_MANAGED');
   });
 });
+
+/**
+ * A Blueprint application demoted back to Inline.
+ *
+ * The demotion keeps every policy column, and the placement decision does not
+ * read the target mode, so a `bounded_auto` application keeps being decided
+ * automatically after the demotion. Nothing about placement depends on where the
+ * content came from, so resetting the policy here would re-couple the domains
+ * this model separates. What has to hold instead is that the operator can still
+ * read and set it, which is what these cases pin.
+ */
+describe('policy writes on a Blueprint demoted to Inline', () => {
+  async function seedDemotedBlueprint(nodeCount: number): Promise<{ blueprintId: number; applicationId: string }> {
+    const seeded = await seedGitManagedBlueprint(nodeCount);
+    GitOpsTransitions.getInstance().blueprintModeDemoted({
+      applicationId: seeded.applicationId,
+      envelope: { operationId: `op-demote-${randomUUID().slice(0, 8)}`, actor: 'tester', trigger: 'test', at: Date.now() },
+    });
+    expect(GitOpsStore.getInstance().getApplication(seeded.applicationId)!.target_mode).toBe('inline_blueprint');
+    return seeded;
+  }
+
+  it('lets an operator put the placement policy back to operator review', async () => {
+    // The case that matters. A `bounded_auto` application demoted to Inline
+    // keeps approving its own stateless placement changes, and while every
+    // policy write answered NOT_GIT_MANAGED here the only way to stop it was to
+    // edit the row directly.
+    const seeded = await seedGitManagedBlueprint(0);
+    // Set through the transition, the way an operator would have.
+    GitOpsTransitions.getInstance().placementPolicyChanged({
+      applicationId: seeded.applicationId,
+      placementPolicy: 'bounded_auto',
+      envelope: { operationId: `op-auto-${randomUUID().slice(0, 8)}`, actor: 'tester', trigger: 'test', at: Date.now() },
+    });
+    GitOpsTransitions.getInstance().blueprintModeDemoted({
+      applicationId: seeded.applicationId,
+      envelope: { operationId: `op-demote-${randomUUID().slice(0, 8)}`, actor: 'tester', trigger: 'test', at: Date.now() },
+    });
+    const store = GitOpsStore.getInstance();
+    expect(store.getApplication(seeded.applicationId)!.target_mode).toBe('inline_blueprint');
+    // The demotion must not have quietly reset it, or the write below proves
+    // nothing about a policy that was still in force.
+    expect(store.getApplication(seeded.applicationId)!.placement_policy).toBe('bounded_auto');
+
+    const res = await request(app)
+      .post(`/api/gitops/applications/bp:${seeded.blueprintId}/placement-policy`)
+      .set('Cookie', adminCookie)
+      .send({ policy: 'operator' });
+    expect(res.status).toBe(200);
+    expect(store.getApplication(seeded.applicationId)!.placement_policy).toBe('operator');
+  });
+
+  it('lets an operator set the rollout authorization policy', async () => {
+    const seeded = await seedDemotedBlueprint(0);
+    const res = await request(app)
+      .post(`/api/gitops/applications/bp:${seeded.blueprintId}/rollout/authorization-policy`)
+      .set('Cookie', adminCookie)
+      .send({ policy: 'automatic' });
+    expect(res.status).toBe(200);
+    expect(GitOpsStore.getInstance().getApplication(seeded.applicationId)!.rollout_authorization_policy).toBe('automatic');
+  });
+
+  it('no longer refuses the health rollout policy as not Git-managed', async () => {
+    // The same gate served this write before the two new policies existed, so it
+    // had the same gap and would otherwise be left in place next to the fix.
+    //
+    // The seed has no intent revision, and this route resolves the stack only
+    // from the intent, so it still answers 409 for that reason rather than
+    // because of Git management. Which is the point: the refusal is no longer
+    // the source-domain one, and the two new policy routes beside it resolve
+    // the same identity from the Blueprint name.
+    const seeded = await seedDemotedBlueprint(0);
+    const res = await request(app)
+      .post(`/api/gitops/applications/bp:${seeded.blueprintId}/rollout/health-policy`)
+      .set('Cookie', adminCookie)
+      .send({ policy: 'pause' });
+    // Whatever it answers, the refusal is no longer the source-domain one.
+    expect(res.body?.code).not.toBe('NOT_GIT_MANAGED');
+  });
+
+  it('still refuses a caller without the deploy grant', async () => {
+    // Widening which applications a policy write reaches must not widen who may
+    // write one, so the permission behaviour is pinned here too.
+    const seeded = await seedDemotedBlueprint(0);
+    const res = await request(app)
+      .post(`/api/gitops/applications/bp:${seeded.blueprintId}/placement-policy`)
+      .set('Cookie', viewerCookie)
+      .send({ policy: 'bounded_auto' });
+    expect(res.status).toBe(403);
+  });
+
+  it('still refuses a Direct application, which has no policy domain', async () => {
+    const { directApplicationFixture } = await import('./helpers/gitopsFixtures');
+    const applicationId = `direct-${randomUUID().slice(0, 8)}`;
+    GitOpsStore.getInstance().insertApplication(directApplicationFixture(applicationId, `stack-${applicationId}`));
+    const nodeId = insertNode(`direct-node-${randomUUID().slice(0, 8)}`);
+    const res = await request(app)
+      .post(`/api/gitops/applications/${nodeId}:${applicationId}/placement-policy`)
+      .set('Cookie', adminCookie)
+      .send({ policy: 'bounded_auto' });
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe('NOT_GIT_MANAGED');
+  });
+});

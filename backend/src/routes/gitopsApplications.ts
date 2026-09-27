@@ -429,7 +429,11 @@ const NOT_GIT_MANAGED = {
  * rather than refused later by a transition, so the reason names the surface
  * contract instead of an internal precondition.
  */
-function resolveAuthorityTarget(req: Request, res: Response): AuthorityTarget | null {
+function resolveAuthorityTargetInternal(
+    req: Request,
+    res: Response,
+    requireGitManaged: boolean,
+): AuthorityTarget | null {
   const rawParam: unknown = req.params.id;
   const id = typeof rawParam === 'string' ? rawParam : Array.isArray(rawParam) ? rawParam.join('/') : '';
   const parsedId = parsePortfolioId(id);
@@ -449,11 +453,37 @@ function resolveAuthorityTarget(req: Request, res: Response): AuthorityTarget | 
     res.status(404).json({ error: 'Application not found' });
     return null;
   }
-  if (application.target_mode !== 'blueprint' || !isGitManagedBlueprint(blueprint)) {
+  if (requireGitManaged && (application.target_mode !== 'blueprint' || !isGitManagedBlueprint(blueprint))) {
     res.status(409).json(NOT_GIT_MANAGED);
     return null;
   }
   return { application, blueprint };
+}
+
+/**
+ * Resolve the target of an action that only exists for a Git-managed Blueprint.
+ *
+ * Source acceptance, placement approval and the rollout lifecycle writes all act
+ * on content or on a rollout that Git produced, so requiring Git management here
+ * is the right condition for them.
+ */
+function resolveAuthorityTarget(req: Request, res: Response): AuthorityTarget | null {
+  return resolveAuthorityTargetInternal(req, res, true);
+}
+
+/**
+ * Resolve the target of a policy write, which is deliberately the wider gate.
+ *
+ * A policy is a statement about who decides, not about where content comes from,
+ * so a source-domain condition has no business gating it. Requiring Git
+ * management here meant an application demoted back to Inline kept whatever
+ * placement and rollout policies it had, with automatic placement still
+ * evaluating them and no route left that could set them back. That is the
+ * entanglement this model exists to remove, and it was widest exactly where the
+ * operator had least recourse.
+ */
+function resolvePolicyTarget(req: Request, res: Response): AuthorityTarget | null {
+  return resolveAuthorityTargetInternal(req, res, false);
 }
 
 /** The actor recorded on a decomposed authority action's transition. */
@@ -1123,7 +1153,7 @@ function requirePolicyTargetAuthority(
  * whether that approval may be automatic.
  */
 gitopsApplicationsRouter.post('/:id/placement-policy', async (req: Request, res: Response): Promise<void> => {
-  const target = resolveAuthorityTarget(req, res);
+  const target = resolvePolicyTarget(req, res);
   if (!target) return;
   const policy = req.body?.policy;
   if (!isPlacementPolicy(policy)) {
@@ -1163,7 +1193,7 @@ gitopsApplicationsRouter.post('/:id/placement-policy', async (req: Request, res:
  * whether a rollout may be authorized, not whether anything is created.
  */
 gitopsApplicationsRouter.post('/:id/rollout/authorization-policy', async (req: Request, res: Response): Promise<void> => {
-  const target = resolveAuthorityTarget(req, res);
+  const target = resolvePolicyTarget(req, res);
   if (!target) return;
   const policy = req.body?.policy;
   if (!isRolloutAuthorizationPolicy(policy)) {
@@ -1212,7 +1242,7 @@ gitopsApplicationsRouter.post('/:id/rollout/authorization-policy', async (req: R
  * leave some targets on a policy the operator is not entitled to set for them.
  */
 gitopsApplicationsRouter.post('/:id/rollout/health-policy', async (req: Request, res: Response): Promise<void> => {
-  const target = resolveAuthorityTarget(req, res);
+  const target = resolvePolicyTarget(req, res);
   if (!target) return;
   const policy = req.body?.policy;
   if (!isHealthRolloutPolicy(policy)) {
