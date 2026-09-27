@@ -639,7 +639,6 @@ export type RuntimeFacet =
         | 'drifted'
         | 'correcting'
         | 'repair_held'
-        | 'converged'
         | 'fully_deployed_health_pending'
         | 'health_checking'
         | 'synced_and_healthy'
@@ -783,7 +782,6 @@ export const FACET_EVIDENCE_SOURCE: FacetEvidenceSource = {
     drifted: 'current',
     correcting: 'current',
     repair_held: 'current',
-    converged: 'current',
     fully_deployed_health_pending: 'current',
     health_checking: 'current',
     synced_and_healthy: 'current',

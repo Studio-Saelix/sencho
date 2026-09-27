@@ -2741,7 +2741,7 @@ export class GitOpsTransitions {
         if (target.target_status !== 'active') {
           throw new GitOpsTransitionError('cannot observe a tombstoned target');
         }
-        // The runtime facet projects these four stages, which is the only route
+        // The runtime facet projects these stages, which is the only route
         // an observation has into the derived status: the reconciler records
         // what it saw rather than moving any pointer. The history row written
         // alongside is the separate, unprojected record. `mutateTarget` stamps

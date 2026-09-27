@@ -21,7 +21,6 @@ import {
   CircleHelp,
   CirclePause,
   CircleSlash,
-  CircleCheck,
   Eye,
   CircleX,
   Clock,
@@ -484,12 +483,6 @@ export const RUNTIME_STATE: Record<GitOpsRuntimeStatus, GitOpsStateMeta> = {
     tone: 'warning',
     line: 'Drift was found, but Sencho will not auto-fix this node: it has no restorable generation to restore, or the rollout that owned it has moved on.',
     icon: ShieldAlert,
-  },
-  converged: {
-    label: 'converged',
-    tone: 'success',
-    line: 'A check found this node already matching the state it was acknowledged for.',
-    icon: CircleCheck,
   },
   health_checking: {
     label: 'health checking',

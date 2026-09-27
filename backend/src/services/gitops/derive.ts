@@ -1432,7 +1432,7 @@ type ObservationRuntimeStatus =
   | 'drifted'
   | 'correcting'
   | 'repair_held'
-  | 'converged';
+  | 'fully_deployed_health_pending';
 
 const BLUEPRINT_OBSERVATION_STATUS: Record<string, ObservationRuntimeStatus | undefined> = {
   blueprint_state_review: 'pending_state_review',
@@ -1440,10 +1440,11 @@ const BLUEPRINT_OBSERVATION_STATUS: Record<string, ObservationRuntimeStatus | un
   blueprint_drifted: 'drifted',
   blueprint_correcting: 'correcting',
   blueprint_repair_held: 'repair_held',
-  // A check that matched is the one observation that says the target is fine, so
-  // it has to project to a settled state. Without it the projection would keep
-  // reading the drift or hold that just cleared, from the stage that recorded it.
-  blueprint_drift_cleared: 'converged',
+  // A check that matched. It has to project to something, and the only honest
+  // option already in the vocabulary is "deployed, no health verdict claimed":
+  // a matched drift check is not a health verdict, so it must not read as one.
+  // The alternative, leaving the stage on the hold, reports drift that is gone.
+  blueprint_drift_cleared: 'fully_deployed_health_pending',
 } satisfies Record<BlueprintObservationStage, ObservationRuntimeStatus>;
 
 function deriveRuntime(

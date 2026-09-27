@@ -45,16 +45,28 @@ export type RuntimeRepairHoldReason =
   | 'classification_forbids_repair';
 
 /**
- * Whether a recovery is still moving on this target.
+ * Whether something about this target's recovery still owns its next mutation.
  *
- * Only the in-progress phases. `complete` and `failed` are terminal and persist
- * for the life of the target, so testing the column for non-null would hold
- * every target that has ever been recovered, which is most of them after a
- * rollback. Mirrors `recoveryInProgress` in `derive.ts`; kept local rather than
- * imported so this module stays below the projection.
+ * Everything except a recovery that finished successfully. `complete` and
+ * `failed` are both terminal and both persist for the life of the target, so
+ * testing the column for non-null would hold every target that has ever been
+ * recovered, which is most of them after a rollback. `complete` is the one
+ * terminal phase that releases the target.
+ *
+ * `failed` does not release it. An explicit deploy is already withheld on a
+ * failed recovery (`appDeployWithheld` in `derive.ts`, which reads the
+ * application-level column; the transition writers set both together), so
+ * letting auto-repair through here would let Enforce perform exactly the
+ * mutation an operator is not permitted to make.
+ *
+ * Mirrors the recovery checks in `derive.ts`; kept local rather than imported so
+ * this module stays below the projection.
  */
-function recoveryInProgress(phase: string | null): boolean {
-  return phase === 'capturing' || phase === 'restoring' || phase === 'compensating';
+function recoveryOwnsTarget(phase: string | null): boolean {
+  return phase === 'capturing'
+    || phase === 'restoring'
+    || phase === 'compensating'
+    || phase === 'failed';
 }
 
 export type RuntimeRepairBinding =
@@ -102,7 +114,7 @@ export function resolveRuntimeRepairBinding(
     target.health_stop_reason === 'rollback_pending'
     || target.partial_json !== null
     || target.lkg_unavailable_at !== null
-    || recoveryInProgress(target.recovery_phase)
+    || recoveryOwnsTarget(target.recovery_phase)
     || target.pending_health_run_id !== null
   ) {
     return { kind: 'hold', reason: 'recovery_bound' };

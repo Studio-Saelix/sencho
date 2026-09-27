@@ -1565,6 +1565,41 @@ describe('aggregateGitOpsPortfolio', () => {
   });
 });
 
+describe('posture recognizes every runtime status it can be handed', () => {
+  // A status missing from the severity ladder does not fall back to anything
+  // sensible: it reads as unrecognized, and the whole row becomes `unknown`.
+  // That is how `repair_held` and `converged` would have reported a healthy
+  // application as unknown, so each is pinned here against a literal.
+
+  function rowWithRuntimeStatus(status: string): string {
+    const revision = remoteProjection(`app-runtime-${status}`, `stack-${status}`);
+    revision.facets.artifact = artifactFacet();
+    revision.targetMode = 'blueprint';
+    revision.rolloutGenerationId = 'rg-1';
+    bindBlueprintAuthority(revision);
+    revision.facets.rollout = { status: 'exactly_converged_healthy', rolloutGenerationId: 'rg-1' };
+    const target = targetProjection('reachable', 'rg-1');
+    target.stackName = revision.stackName;
+    Object.assign(target.runtime, { status });
+    revision.targets = [target];
+    return rowForProjection(revision, `evidence-${status}`).posture;
+  }
+
+  it('reads a settled target as converged rather than unknown', () => {
+    // This is the case that actually exercises the severity ladder: nothing
+    // earlier in postureOf claims it, so a status missing from the ladder
+    // reads as unrecognized and drops the row to `unknown`. The statuses the
+    // in-flight and attention checks claim first cannot test the ladder at all.
+    expect(rowWithRuntimeStatus('synced_and_healthy')).toBe('converged');
+  });
+
+  it('reads a held repair as attention rather than a settled row', () => {
+    // Its own attention reason decides this one, ahead of the ladder, so this
+    // asserts the operator-facing outcome rather than the ladder lookup.
+    expect(rowWithRuntimeStatus('repair_held')).toBe('attention');
+  });
+});
+
 describe('postureOf', () => {
   function baseFixture(overrides?: {
     source?: LiveFacets['source'];

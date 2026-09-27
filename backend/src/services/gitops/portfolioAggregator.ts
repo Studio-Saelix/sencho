@@ -63,6 +63,10 @@ const RUNTIME_SEVERITY: readonly string[] = [
   'recovery_failed',
   'recovery_required',
   'drifted',
+  // A hold is drift Sencho declined to fix, so it ranks with drift. Its own
+  // attention reason is what usually surfaces it; ranking it here keeps the
+  // posture from reading as better than the target actually is.
+  'repair_held',
   'health_drift',
   'runtime_artifact_drift',
   'rollout_artifact_drift',

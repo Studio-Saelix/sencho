@@ -368,6 +368,26 @@ describe('runtime repair reads the target\'s acknowledged generation', () => {
     expect(deploySpy).toHaveBeenCalledTimes(1);
   });
 
+  it('holds while a recovery failed, because an explicit deploy is withheld too', async () => {
+    // A failed recovery is terminal but unresolved, and the model already
+    // refuses an operator-initiated deploy on it. Auto-repair letting through
+    // what the operator cannot do would be the worse of the two errors.
+    const { bp, node } = seedBlueprint();
+    const fixture = await seedGitManagedMidRollout(bp, node);
+    const store = GitOpsStore.getInstance();
+    const target = store.getTarget(fixture.appId, node.id)!;
+    store.upsertTarget({ ...target, recovery_phase: 'failed' });
+    const deploySpy = vi
+      .spyOn(BlueprintService.getInstance(), 'deployAuthorizedMaterialization')
+      .mockResolvedValue({ status: 'active' });
+
+    const outcome = await BlueprintService.getInstance().enforceDigestRepair(bp, node);
+
+    expect(outcome.status).toBe('repair_held');
+    expect(outcome.holdReason).toBe('recovery_bound');
+    expect(deploySpy).not.toHaveBeenCalled();
+  });
+
   it('holds while a recovery is still moving on the target', async () => {
     const { bp, node } = seedBlueprint();
     const fixture = await seedGitManagedMidRollout(bp, node);

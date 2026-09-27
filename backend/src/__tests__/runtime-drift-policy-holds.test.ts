@@ -625,7 +625,14 @@ describe('the runtime drift policy holds what it must not repair', () => {
     // optional chain here would make the whole case pass on a missing target,
     // which is the failure this test exists to catch.
     expect(target, 'the target must be projected, or this case proves nothing').toBeDefined();
-    expect(target?.runtime.status).toBe('converged');
+    // Asserted on the stage, not only the derived status: the same check also
+    // records the observed artifact, which advances the stage on its own, so the
+    // derived status alone is identical with and without the clearing
+    // observation. The stage is what this commit is actually about.
+    expect(store.getTarget(seeded.appId, node.id)?.latest_stage).toBe('blueprint_drift_cleared');
+    // A matched drift check is not a health verdict, so it must not read as
+    // synced-and-healthy. It reads as deployed with no health claim instead.
+    expect(target?.runtime.status).toBe('fully_deployed_health_pending');
   });
 
   it('never mutates in Observe mode', async () => {
