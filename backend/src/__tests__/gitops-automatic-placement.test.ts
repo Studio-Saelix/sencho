@@ -167,7 +167,7 @@ afterAll(() => {
 });
 
 describe('the replay guard', () => {
-  it('refuses a second approval for the same intent and candidate', () => {
+  it('lets an operator approve the same intent and candidate twice', () => {
     const store = GitOpsStore.getInstance();
     const app = blueprintApp('9001', { intent_revision_id: 'r-intent', rollout_candidate_id: 'r-cand' });
     store.insertIntentRevision(intent('r-intent', '9001'));
@@ -191,14 +191,14 @@ describe('the replay guard', () => {
     GitOpsTransitions.getInstance().placementApproved(first);
 
     // The pointers have not moved, so every currency check passes. Without the
-    // replay guard this mints a second approval and supersedes the generation
-    // the first one had just opened.
+    // The Inline Apply path reuses the current intent, so an operator pressing
+    // Apply again lands on the same intent and candidate. That is a deliberate
+    // second decision, and refusing it as a replay regressed a flow that had
+    // worked for ever.
     expect(() =>
       GitOpsTransitions.getInstance().placementApproved({ ...first, approvalId: 'r-approval-2', rolloutGenerationId: 'r-gen-2' }),
-    ).toThrow(/already recorded/);
-
-    expect(store.getApproval('r-approval-2')).toBeUndefined();
-    expect(GitOpsStore.getInstance().getRolloutGeneration('r-gen-2')).toBeUndefined();
+    ).not.toThrow();
+    expect(store.getApproval('r-approval-2')).toBeDefined();
   });
 
   it('allows a fresh approval once a new candidate exists for a new intent', () => {
@@ -292,6 +292,39 @@ describe('authority and the snapshot that made it', () => {
     expect(GitOpsStore.getInstance().getApproval('a-1')).toBeUndefined();
   });
 
+  it('refuses a replayed automatic approval for the same intent and candidate', () => {
+    // The guard the automatic path relies on: a policy decision already recorded
+    // for this exact pair is durable, and re-running it must not mint a second
+    // approval or supersede the generation the first one opened.
+    const store = GitOpsStore.getInstance();
+    const app = blueprintApp('9120', { intent_revision_id: 'd-intent', rollout_candidate_id: 'd-cand' });
+    store.insertIntentRevision(intent('d-intent', '9120'));
+    store.insertRolloutCandidate(candidate('d-cand', '9120', 'd-intent', [1]));
+    store.insertApplication(app);
+    const automatic = (approvalId: string, generationId: string) => () =>
+      GitOpsTransitions.getInstance().placementApproved({
+        applicationId: '9120',
+        approvalId,
+        intentRevisionId: 'd-intent',
+        blastJson: encodeGitOpsApprovedTargetEffectJson([{ nodeId: 1, outcome: 'place' as const }]),
+        requiredNodeIds: [1],
+        fingerprint: null,
+        actor: null,
+        envelope: { operationId: `op-${approvalId}`, actor: null, trigger: 'placement_policy', at: 1 },
+        rolloutGenerationId: generationId,
+        candidateId: 'd-cand',
+        authority: 'configured_policy',
+        policyProvenanceJson: JSON.stringify({
+          version: 1, source: 'review', placement: 'bounded_auto', rolloutAuthorization: 'automatic',
+        }),
+      });
+
+    automatic('d-approval-1', 'd-gen-1')();
+    expect(() => automatic('d-approval-1-replay', 'd-gen-1b')()).toThrow(/already recorded/);
+    expect(store.getApproval('d-approval-1-replay')).toBeUndefined();
+    expect(store.getRolloutGeneration('d-gen-1b')).toBeUndefined();
+  });
+
   it('allows a fresh approval against a second candidate under the same intent', async () => {
     // The guard is scoped to one intent and candidate pair. Keying on the intent
     // alone assumed one candidate per intent, which nothing enforces, so this
@@ -318,7 +351,9 @@ describe('authority and the snapshot that made it', () => {
       });
 
     approve('c-approval-1', 'c-gen-1', 'c-cand-1')();
-    expect(() => approve('c-approval-1-replay', 'c-gen-1b', 'c-cand-1')()).toThrow(/already recorded/);
+    // A second operator approval on the same intent and candidate is a deliberate
+    // decision, not a replay, and the Inline Apply path depends on it.
+    expect(() => approve('c-approval-1-again', 'c-gen-1b', 'c-cand-1')()).not.toThrow();
 
     Tx.getInstance().rolloutCandidateOpened({
       applicationId: '9110',

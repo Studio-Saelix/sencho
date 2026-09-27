@@ -2101,11 +2101,19 @@ export class GitOpsTransitions {
         if (candidate.intent_revision_id !== args.intentRevisionId) {
           throw new GitOpsTransitionError('rollout candidate does not match intent');
         }
-        // The replay guard. A placement approval already recorded against this
-        // exact intent and candidate means the decision is already durable, and
-        // the currency checks above cannot see that because the pointers have
-        // not moved.
-        if (this.store().hasPlacementApprovalFor(args.applicationId, args.intentRevisionId, args.candidateId)) {
+        // The replay guard, for the automatic path only.
+        //
+        // A policy-authorized approval already recorded against this exact intent
+        // and candidate means the decision is durable, and the currency checks
+        // above cannot see that because the pointers have not moved. An operator
+        // pressing Apply twice is not that: it is a deliberate second decision on
+        // the same intent, which the Inline Apply path relies on, since it reuses
+        // the current intent rather than minting a new one. Refusing it as a
+        // replay regressed a flow that had worked for ever.
+        if (
+          args.authority === 'configured_policy' &&
+          this.store().hasPlacementApprovalFor(args.applicationId, args.intentRevisionId, args.candidateId)
+        ) {
           throw new GitOpsTransitionError('placement approval already recorded for this intent and candidate');
         }
         const requiredNodeIds = canonicalizeNodeIds(args.requiredNodeIds);
