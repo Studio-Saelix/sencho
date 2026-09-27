@@ -14,6 +14,7 @@ import { directApplicationFixture } from './helpers/gitopsFixtures';
 import { newGitOpsId } from '../services/gitops/directApplication';
 import { emptyTargetRow, GitOpsStore } from '../services/gitops/store';
 import { blankInlineApplication } from '../services/gitops/blueprintProducers';
+import { projectApplication } from '../services/gitops/derive';
 import {
   encodeArtifactEvidenceJson,
   encodeGitOpsRequiredTargetsJson,
@@ -297,6 +298,48 @@ function store_app(blueprint: Blueprint): string {
   return GitOpsStore.getInstance().getLiveBlueprintApplication(blueprint.id)!.id;
 }
 
+/**
+ * Make the node look converged: containers up, marker current, and the approved
+ * digest actually running. The counterpart to `stubDriftedRuntime`, for the
+ * case where a hold clears because the workload is right rather than because
+ * there is something to repair.
+ */
+function stubMatchedRuntime(blueprint: Blueprint, generationId: string, artifactSetId: string, rolloutGenerationId: string): void {
+  const svc = BlueprintService.getInstance() as unknown as {
+    containerHealth: () => Promise<{ kind: 'running' }>;
+    observeRuntimeIdentity: () => Promise<import('../services/gitops/json').ObservedArtifactIdentity>;
+  };
+  vi.spyOn(BlueprintService.getInstance(), 'readMarker').mockResolvedValue({
+    blueprintId: blueprint.id,
+    revision: blueprint.revision,
+    lastApplied: Date.now(),
+    applicationId: store_app(blueprint),
+    generationId,
+    artifactSetId,
+    rolloutGenerationId,
+  });
+  vi.spyOn(svc, 'containerHealth').mockResolvedValue({ kind: 'running' });
+  vi.spyOn(svc, 'observeRuntimeIdentity').mockResolvedValue({
+    kind: 'exact',
+    identity: `exact:${DIGEST}`,
+    observedAt: Date.now(),
+    services: [{
+      serviceName: 'web',
+      authoredRef: 'nginx:latest',
+      source: 'registry',
+      platform: 'linux/amd64',
+      indexDigest: null,
+      platformDigest: DIGEST,
+      platformVariants: null,
+      localDigests: [DIGEST],
+      buildContextFingerprint: null,
+      producedImageId: 'img-1',
+      failureClass: null,
+      resolvedAt: 2,
+    }],
+  });
+}
+
 /** Drive the reconciler tick for one Blueprint, re-reading it first. */
 async function tick(blueprint: Blueprint, node: Node): Promise<void> {
   // Re-read: binding this Blueprint to Git changes its content origin, and the
@@ -539,6 +582,50 @@ describe('the runtime drift policy holds what it must not repair', () => {
     // The deploy is mocked, so it does not write the terminal row itself. What
     // matters here is that the target left the held state and entered a repair.
     expect(deploymentOf(blueprint, node)?.status).not.toBe('repair_held');
+  });
+
+  it('advances the projection when a hold clears without a repair', async () => {
+    // The other way a hold clears: the node comes back and the workload is
+    // already correct, so there is nothing to repair. The deployment row must
+    // return to active AND the GitOps projection must stop reporting the hold,
+    // because the projection reads the latest observation stage. A row that went
+    // active while the stage still said "repair held" would leave the Drift
+    // surface and the attention queue contradicting the deployment table.
+    const node = seedNode();
+    const blueprint = seedBlueprint(node, 'enforce');
+    const seeded = await seedDeployedGitManaged({ blueprint, node, compose: COMPOSE });
+    DatabaseService.getInstance().upsertDeployment({
+      blueprint_id: blueprint.id,
+      node_id: node.id,
+      status: 'active',
+      applied_revision: blueprint.revision,
+      last_deployed_at: Date.now(),
+    });
+    stubMatchedRuntime(blueprint, seeded.generationId, seeded.artifactSetId, seeded.rolloutGenerationId);
+    const store = GitOpsStore.getInstance();
+    store.upsertTarget({
+      ...store.getTarget(seeded.appId, node.id)!,
+      connectivity: 'unreachable',
+    });
+
+    await tick(blueprint, node);
+    expect(deploymentOf(blueprint, node)?.status).toBe('repair_held');
+    expect(store.getTarget(seeded.appId, node.id)?.latest_stage).toBe('blueprint_repair_held');
+
+    store.upsertTarget({
+      ...store.getTarget(seeded.appId, node.id)!,
+      connectivity: 'reachable',
+    });
+    await tick(blueprint, node);
+
+    expect(deploymentOf(blueprint, node)?.status).toBe('active');
+    const projected = projectApplication(seeded.appId, false);
+    const target = 'targets' in projected ? projected.targets[0] : undefined;
+    // Asserted against a literal, and the target is required to exist: an
+    // optional chain here would make the whole case pass on a missing target,
+    // which is the failure this test exists to catch.
+    expect(target, 'the target must be projected, or this case proves nothing').toBeDefined();
+    expect(target?.runtime.status).toBe('converged');
   });
 
   it('never mutates in Observe mode', async () => {

@@ -302,6 +302,7 @@ export type RuntimeFacet =
         | 'drifted'
         | 'correcting'
         | 'repair_held'
+        | 'converged'
         | 'fully_deployed_health_pending'
         | 'health_checking'
         | 'synced_and_healthy'

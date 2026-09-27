@@ -347,4 +347,59 @@ describe('runtime repair reads the target\'s acknowledged generation', () => {
     expect(outcome).toEqual({ status: 'active' });
     expect(deploySpy.mock.calls[0]?.[0]?.digestPins).toEqual({ web: `nginx@${OLD_DIGEST}` });
   });
+
+  it('does not hold a target whose recovery already finished', async () => {
+    // `recovery_phase` keeps a terminal value for the life of the target and is
+    // never reset to null, so testing the column for non-null would hold every
+    // target that has ever been rolled back, permanently. Only an in-progress
+    // recovery owns the target.
+    const { bp, node } = seedBlueprint();
+    const fixture = await seedGitManagedMidRollout(bp, node);
+    const store = GitOpsStore.getInstance();
+    const target = store.getTarget(fixture.appId, node.id)!;
+    store.upsertTarget({ ...target, recovery_phase: 'complete' });
+    const deploySpy = vi
+      .spyOn(BlueprintService.getInstance(), 'deployAuthorizedMaterialization')
+      .mockResolvedValue({ status: 'active' });
+
+    const outcome = await BlueprintService.getInstance().enforceDigestRepair(bp, node);
+
+    expect(outcome).toEqual({ status: 'active' });
+    expect(deploySpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('holds while a recovery is still moving on the target', async () => {
+    const { bp, node } = seedBlueprint();
+    const fixture = await seedGitManagedMidRollout(bp, node);
+    const store = GitOpsStore.getInstance();
+    const target = store.getTarget(fixture.appId, node.id)!;
+    store.upsertTarget({ ...target, recovery_phase: 'restoring' });
+    const deploySpy = vi
+      .spyOn(BlueprintService.getInstance(), 'deployAuthorizedMaterialization')
+      .mockResolvedValue({ status: 'active' });
+
+    const outcome = await BlueprintService.getInstance().enforceDigestRepair(bp, node);
+
+    expect(outcome.status).toBe('repair_held');
+    expect(outcome.holdReason).toBe('recovery_bound');
+    expect(deploySpy, 'a repair must not fight the recovery that owns the target')
+      .not.toHaveBeenCalled();
+  });
+
+  it('holds while a rollout is waiting on this target\'s health verdict', async () => {
+    const { bp, node } = seedBlueprint();
+    const fixture = await seedGitManagedMidRollout(bp, node);
+    const store = GitOpsStore.getInstance();
+    const target = store.getTarget(fixture.appId, node.id)!;
+    store.upsertTarget({ ...target, pending_health_run_id: 'run-1' });
+    const deploySpy = vi
+      .spyOn(BlueprintService.getInstance(), 'deployAuthorizedMaterialization')
+      .mockResolvedValue({ status: 'active' });
+
+    const outcome = await BlueprintService.getInstance().enforceDigestRepair(bp, node);
+
+    expect(outcome.status).toBe('repair_held');
+    expect(outcome.holdReason).toBe('recovery_bound');
+    expect(deploySpy).not.toHaveBeenCalled();
+  });
 });

@@ -116,7 +116,8 @@ export type BlueprintObservationStage =
   | 'blueprint_evict_blocked'
   | 'blueprint_drifted'
   | 'blueprint_correcting'
-  | 'blueprint_repair_held';
+  | 'blueprint_repair_held'
+  | 'blueprint_drift_cleared';
 
 /**
  * What a health run claimed inside a recovery transaction reported back.

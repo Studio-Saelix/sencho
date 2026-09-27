@@ -241,7 +241,9 @@ export function attentionReasons(projection: GitOpsRevisionProjection): GitOpsAt
         break;
       // A held repair is drift Sencho has declined to fix. It is its own reason
       // because the operator action differs from every other drift: a rollout or
-      // an explicit deployment has to resolve it, and no tick will clear it.
+      // an explicit deployment has to resolve it. A tick keeps re-checking, so
+      // most holds clear on their own once the cause does, but a hold whose
+      // cause is a superseded rollout will not, because superseding is one-way.
       case 'repair_held':
         reasons.add('repair_held');
         break;

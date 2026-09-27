@@ -1431,7 +1431,8 @@ type ObservationRuntimeStatus =
   | 'evict_blocked'
   | 'drifted'
   | 'correcting'
-  | 'repair_held';
+  | 'repair_held'
+  | 'converged';
 
 const BLUEPRINT_OBSERVATION_STATUS: Record<string, ObservationRuntimeStatus | undefined> = {
   blueprint_state_review: 'pending_state_review',
@@ -1439,6 +1440,10 @@ const BLUEPRINT_OBSERVATION_STATUS: Record<string, ObservationRuntimeStatus | un
   blueprint_drifted: 'drifted',
   blueprint_correcting: 'correcting',
   blueprint_repair_held: 'repair_held',
+  // A check that matched is the one observation that says the target is fine, so
+  // it has to project to a settled state. Without it the projection would keep
+  // reading the drift or hold that just cleared, from the stage that recorded it.
+  blueprint_drift_cleared: 'converged',
 } satisfies Record<BlueprintObservationStage, ObservationRuntimeStatus>;
 
 function deriveRuntime(

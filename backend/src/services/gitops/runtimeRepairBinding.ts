@@ -44,6 +44,19 @@ export type RuntimeRepairHoldReason =
    */
   | 'classification_forbids_repair';
 
+/**
+ * Whether a recovery is still moving on this target.
+ *
+ * Only the in-progress phases. `complete` and `failed` are terminal and persist
+ * for the life of the target, so testing the column for non-null would hold
+ * every target that has ever been recovered, which is most of them after a
+ * rollback. Mirrors `recoveryInProgress` in `derive.ts`; kept local rather than
+ * imported so this module stays below the projection.
+ */
+function recoveryInProgress(phase: string | null): boolean {
+  return phase === 'capturing' || phase === 'restoring' || phase === 'compensating';
+}
+
 export type RuntimeRepairBinding =
   | {
       kind: 'binding';
@@ -89,7 +102,7 @@ export function resolveRuntimeRepairBinding(
     target.health_stop_reason === 'rollback_pending'
     || target.partial_json !== null
     || target.lkg_unavailable_at !== null
-    || target.recovery_phase !== null
+    || recoveryInProgress(target.recovery_phase)
     || target.pending_health_run_id !== null
   ) {
     return { kind: 'hold', reason: 'recovery_bound' };
