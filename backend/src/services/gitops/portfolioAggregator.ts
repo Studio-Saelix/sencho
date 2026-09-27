@@ -198,10 +198,6 @@ const LKG_UNAVAILABLE_REASONS: ReadonlySet<string> = new Set([
   'recovery_unretainable',
 ]);
 
-function isLkgUnavailableReason(value: unknown): boolean {
-  return value === null || (typeof value === 'string' && LKG_UNAVAILABLE_REASONS.has(value));
-}
-
 function hasFacetStatus(registry: object, status: string): boolean {
   return Object.prototype.hasOwnProperty.call(registry, status);
 }
@@ -261,10 +257,11 @@ function hasKnownArtifactVocabulary(artifact: { status: string } & Record<string
  * Whether the projection carries any status this build has never heard of.
  *
  * Checks the four top-level facets against the canonical status registry
- * (`FACET_EVIDENCE_SOURCE`, which is total over the closed unions) plus the
- * per-target runtime/health/connectivity statuses, so a newer node answering
- * an older hub is reported as unknown evidence rather than silently
- * reinterpreted (or, worse, read as a convergence claim).
+ * (`FACET_EVIDENCE_SOURCE`, which is total over the closed unions), the
+ * per-target runtime/health/connectivity statuses, and the per-target
+ * last-known-good status, last-known-good reason and observed artifact kind, so
+ * a newer node answering an older hub is reported as unknown evidence rather
+ * than silently reinterpreted (or, worse, read as a convergence claim).
  */
 function hasUnrecognizedStatus(
   projection: GitOpsRevisionProjection,
@@ -284,6 +281,7 @@ function hasUnrecognizedStatus(
     if (!Object.hasOwn(FACET_EVIDENCE_SOURCE.artifact, target.artifact.status)) return true;
     if (!hasKnownArtifactVocabulary(target.artifact)) return true;
     if (!Object.hasOwn(FACET_EVIDENCE_SOURCE.lkg, target.lkg.status)) return true;
+    if (target.lkgUnavailableReason !== null && !LKG_UNAVAILABLE_REASONS.has(target.lkgUnavailableReason)) return true;
     if (!OBSERVED_ARTIFACT_KINDS.has(target.observedArtifactIdentity.kind)) return true;
     if (target.connectivity !== 'reachable' && target.connectivity !== 'unreachable' && target.connectivity !== 'stale' && target.connectivity !== 'unknown') return true;
   }
@@ -1270,10 +1268,11 @@ function isTargetRecord(value: unknown): value is Record<string, unknown> {
     && (typeof value.legacyAppliedRevision === 'number' && Number.isFinite(value.legacyAppliedRevision)
       || value.legacyAppliedRevision === null)
     && isFiniteNumberOrNull(value.lkgUnavailableAt)
-    && (value.lkgUnavailableReason === null || (
-      typeof value.lkgUnavailableReason === 'string'
-      && LKG_UNAVAILABLE_REASONS.has(value.lkgUnavailableReason)
-    ))
+    // A reason this build has not heard of is accepted on its structure, like
+    // every other unknown vocabulary, and reported as unknown evidence by
+    // `hasUnrecognizedStatus`. Rejecting the projection here instead would tell
+    // the operator the evidence is unavailable when it is merely unfamiliar.
+    && (value.lkgUnavailableReason === null || isNonEmptyString(value.lkgUnavailableReason))
     && lkgMirrorsAreConsistent(value.lkg, value)
     && typeof value.runtime.status === 'string';
 }

@@ -154,7 +154,12 @@ function isIdentityRef(value: unknown): boolean {
     case 'health_run':
       return isString(value.runId) && isNullableString(value.deployedGenerationId);
     default:
-      return false;
+      // A kind this build has not heard of. It is accepted on its structure
+      // alone, the same as every other unknown vocabulary in this file, so one
+      // newer node's identity kind costs that one drift row its label instead
+      // of failing the whole read and telling the operator the application
+      // could not be read at all.
+      return true;
   }
 }
 
@@ -206,7 +211,11 @@ function isNullablePositiveInteger(value: unknown): boolean {
 }
 
 function isLkgUnavailableReason(value: unknown): boolean {
-  return value === null || value === 'generation_missing' || value === 'recovery_unretainable';
+  // A reason this build has not heard of is accepted on its structure, the same
+  // as every other unknown vocabulary in this file. The server already grades
+  // it as unknown evidence in the same response, so refusing it here would only
+  // replace that with a total read failure. An empty string is not a reason.
+  return value === null || isNonEmptyString(value);
 }
 
 function isBinding(value: unknown): value is FutureRolloutAuthorizationBinding {

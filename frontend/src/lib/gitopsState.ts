@@ -899,8 +899,35 @@ export const HEALTH_STOP_REASON_STATE: Record<HealthStopReason, GitOpsStateMeta>
   },
 };
 
+/**
+ * The identity kinds this build has wording for.
+ *
+ * Typed as a total record rather than a set so the compiler rejects it the
+ * moment a kind is added to the union and forgotten here.
+ */
+const IDENTITY_REF_KINDS: Readonly<Record<GitOpsIdentityRef['kind'], true>> = {
+  none: true,
+  unknown: true,
+  commit: true,
+  generation: true,
+  artifact_set: true,
+  runtime_artifact: true,
+  intent: true,
+  rollout_candidate: true,
+  rollout_generation: true,
+  invocation: true,
+  health_run: true,
+};
+
 /** One short line naming what an identity reference points at, for a drift comparison row. */
 export function identityRefLabel(ref: GitOpsIdentityRef): string {
+  // `GitOpsIdentityRef` is a closed union, so the switch below is exhaustive by
+  // type. The value still crossed a network boundary and was accepted on its
+  // structure alone, so widen the kind once and name an unfamiliar one rather
+  // than rendering nothing. `Object.hasOwn` so an inherited key is not a known
+  // kind.
+  const kind: string = ref.kind;
+  if (!Object.hasOwn(IDENTITY_REF_KINDS, kind)) return `unknown (${kind})`;
   switch (ref.kind) {
     case 'none':
       return 'none';

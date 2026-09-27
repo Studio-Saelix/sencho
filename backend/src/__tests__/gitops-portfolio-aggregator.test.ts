@@ -1758,6 +1758,15 @@ describe('postureOf', () => {
     ['an unknown LKG status', (projection: LiveProjection) => {
       projection.targets[0].lkg = { status: 'future_lkg' } as unknown as LiveProjection['targets'][number]['lkg'];
     }],
+    ['an unknown last-known-good reason', (projection: LiveProjection) => {
+      Object.assign(projection.targets[0], {
+        lkg: { status: 'unavailable' },
+        lkgGenerationId: null,
+        lkgArtifactSetId: null,
+        lkgUnavailableAt: 1,
+        lkgUnavailableReason: 'future_reason',
+      });
+    }],
     ['an unknown observed artifact kind', (projection: LiveProjection) => {
       projection.targets[0].observedArtifactIdentity = { kind: 'future_kind', identity: 'sha256:abc', observedAt: 1 } as unknown as LiveProjection['targets'][number]['observedArtifactIdentity'];
     }],
@@ -1768,6 +1777,43 @@ describe('postureOf', () => {
     const projection = directSettledFixture('artifact_exact');
     mutate(projection);
     expect(postureOf(projection)).toBe('unknown');
+  });
+
+  it('keeps a projection readable when a target carries an unfamiliar last-known-good reason', () => {
+    // A reason from a newer node is unfamiliar, not unusable. The row stays
+    // addressable and says its evidence is unknown; rejecting the projection
+    // would report the evidence as unavailable, which is a different and
+    // stronger claim than the evidence supports.
+    const projection = remoteProjection('app-future-lkg-reason', 'future-lkg-reason');
+    const target = remoteTarget(projection, 'reachable');
+    Object.assign(target, {
+      lkg: { status: 'unavailable' },
+      lkgGenerationId: null,
+      lkgArtifactSetId: null,
+      lkgUnavailableAt: 1,
+      lkgUnavailableReason: 'future_reason',
+    });
+    projection.targets = [target];
+
+    expect(isUsableRevision(projection)).toBe(true);
+    const row = rowForProjection(projection, 'future-lkg-reason');
+    expect(row.posture).toBe('unknown');
+    expect(row.evidence.unknown).toBe(true);
+    expect(row.limitations).not.toContain('evidence_unavailable');
+  });
+
+  it('rejects an empty last-known-good reason rather than reading it as one', () => {
+    const projection = remoteProjection('app-empty-lkg-reason', 'empty-lkg-reason');
+    const target = remoteTarget(projection, 'reachable');
+    Object.assign(target, {
+      lkg: { status: 'unavailable' },
+      lkgGenerationId: null,
+      lkgArtifactSetId: null,
+      lkgUnavailableAt: 1,
+      lkgUnavailableReason: '',
+    });
+    projection.targets = [target];
+    expect(isUsableRevision(projection)).toBe(false);
   });
 
   it.each(['source', 'artifact', 'placement', 'rollout'] as const)(

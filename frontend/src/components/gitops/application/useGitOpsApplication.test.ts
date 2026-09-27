@@ -184,6 +184,82 @@ describe('useGitOpsApplication', () => {
     expect(result.current.data).not.toBeNull();
   });
 
+  it('keeps a future drift identity kind readable for the renderer fallback', async () => {
+    // One unfamiliar identity kind costs that one drift row its label. Failing
+    // the whole read would tell the operator the application could not be read
+    // at all, which is a much stronger claim than the evidence supports.
+    const base = detailResponse();
+    const body = {
+      ...base,
+      projection: {
+        ...base.projection,
+        drift: [{
+          class: 'runtime',
+          expected: { kind: 'future_kind' },
+          observed: { kind: 'future_kind' },
+          freshnessAt: null,
+          owner: 'operator',
+          reason: 'unfamiliar identity vocabulary',
+          configuredPolicy: null,
+          affectedTargets: [],
+          action: 'none',
+        }],
+      },
+    };
+    mockFetch.mockResolvedValueOnce(ok(body));
+    const { result } = renderHook(() => useGitOpsApplication('1:app-1'));
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    expect(result.current.error).toBeNull();
+    expect(result.current.data?.projection.drift[0]?.expected.kind).toBe('future_kind');
+  });
+
+  it('keeps an unfamiliar last-known-good reason readable', async () => {
+    // The server grades an unfamiliar reason as unknown evidence in the same
+    // response. Refusing it here would replace that with a total read failure.
+    const base = detailResponse();
+    const body = {
+      ...base,
+      projection: {
+        ...base.projection,
+        targets: base.projection.targets.map(target => ({
+          ...target,
+          lkg: { status: 'unavailable' },
+          lkgGenerationId: null,
+          lkgArtifactSetId: null,
+          lkgUnavailableAt: 1,
+          lkgUnavailableReason: 'future_reason',
+        })),
+      },
+    };
+    mockFetch.mockResolvedValueOnce(ok(body));
+    const { result } = renderHook(() => useGitOpsApplication('1:app-1'));
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    expect(result.current.error).toBeNull();
+    expect(result.current.data?.projection.targets[0]?.lkgUnavailableReason).toBe('future_reason');
+  });
+
+  it('rejects a target whose last-known-good reason is a blank string', async () => {
+    const base = detailResponse();
+    const body = {
+      ...base,
+      projection: {
+        ...base.projection,
+        targets: base.projection.targets.map(target => ({
+          ...target,
+          lkg: { status: 'unavailable' },
+          lkgGenerationId: null,
+          lkgArtifactSetId: null,
+          lkgUnavailableAt: 1,
+          lkgUnavailableReason: '',
+        })),
+      },
+    };
+    mockFetch.mockResolvedValueOnce(ok(body));
+    const { result } = renderHook(() => useGitOpsApplication('1:app-1'));
+    await waitFor(() => expect(result.current.error?.kind).toBe('failed'));
+    expect(result.current.data).toBeNull();
+  });
+
   it('rejects an exact claim whose expected identity disagrees with the latest evidence', async () => {
     const base = liveRevision();
     const projection = liveRevision({
