@@ -7,15 +7,18 @@
  *  - POST /api/fleet/labels/fleet-prune  with dryRun: true
  *  - POST /api/fleet/prune/estimate
  *
- * Uses real timers because supertest dispatches lazily and the in-route
- * `withTimeout` setTimeout cannot be advanced via vi.useFakeTimers from
- * outside the request lifecycle. Five timeout tests add ~49s to the file
- * (three single-target ~12s each, plus two multi-target partial ~12s each).
+ * The in-route `withTimeout` cannot be advanced via vi.useFakeTimers from
+ * outside the supertest request lifecycle, so its budget is capped instead
+ * (see helpers/fastTimeouts).
  */
-import { describe, it, expect, beforeAll, afterAll, afterEach, vi } from 'vitest';
+import { describe, it, expect, beforeAll, beforeEach, afterAll, afterEach, vi } from 'vitest';
 import request from 'supertest';
 import jwt from 'jsonwebtoken';
 import { setupTestDb, cleanupTestDb, TEST_USERNAME, TEST_JWT_SECRET } from './helpers/setupTestDb';
+import { requestedTimeoutBudgets, resetRequestedTimeoutBudgets } from './helpers/fastTimeouts';
+
+vi.mock('../utils/withTimeout', async (importOriginal) =>
+  (await import('./helpers/fastTimeouts')).withFastTimeouts(await importOriginal()));
 
 let tmpDir: string;
 let app: import('express').Express;
@@ -57,6 +60,10 @@ function stubLocalEstimate(
   vi.spyOn(FileSystemService.prototype, 'getStacks').mockResolvedValue([]);
 }
 
+beforeEach(() => {
+  resetRequestedTimeoutBudgets();
+});
+
 describe('Fleet prune routes bound docker df at 12s on local nodes (F-6)', () => {
   it('POST /api/fleet/labels/fleet-prune dry-run surfaces a busy-daemon error on local timeout', async () => {
     stubLocalEstimate(
@@ -76,9 +83,10 @@ describe('Fleet prune routes bound docker df at 12s on local nodes (F-6)', () =>
     expect(local.reachable).toBe(true);
     expect(local.targets[0].success).toBe(false);
     expect(local.targets[0].error).toMatch(/Docker daemon is busy/);
-    expect(elapsed).toBeGreaterThanOrEqual(7_500);
-    expect(elapsed).toBeLessThan(15_000);
-  }, 20_000);
+    // Plan enumeration uses the 8s janitor-aligned budget; the capped wait kept this fast.
+    expect(requestedTimeoutBudgets()).toEqual([8_000]);
+    expect(elapsed).toBeLessThan(2_000);
+  });
 
   it('POST /api/fleet/prune/estimate marks the local node unreachable with a busy-daemon error on timeout', async () => {
     stubLocalEstimate(() => new Promise(() => { /* never resolves */ }));
@@ -93,7 +101,7 @@ describe('Fleet prune routes bound docker df at 12s on local nodes (F-6)', () =>
     const local = res.body.perNode[0];
     expect(local.reachable).toBe(false);
     expect(local.error).toMatch(/Docker daemon is busy/);
-  }, 20_000);
+  });
 
   it('POST /api/fleet/prune/estimate marks the local node unreachable on managed timeout', async () => {
     vi.spyOn(FileSystemService.prototype, 'getStacks').mockResolvedValue([]);
@@ -114,7 +122,7 @@ describe('Fleet prune routes bound docker df at 12s on local nodes (F-6)', () =>
     const local = res.body.perNode[0];
     expect(local.reachable).toBe(false);
     expect(local.error).toMatch(/Docker daemon is busy/);
-  }, 20_000);
+  });
 
   it('POST /api/fleet/prune/estimate keeps successful all-scope bytes when a later target times out', async () => {
     const estimateSystemReclaim = vi.fn().mockImplementation(async (target: string) => {
@@ -142,9 +150,11 @@ describe('Fleet prune routes bound docker df at 12s on local nodes (F-6)', () =>
     expect(local.reclaimableBytes).toBe(600);
     expect(local.error).toMatch(/Docker daemon is busy/);
     expect(estimateSystemReclaim).toHaveBeenCalledTimes(3);
-    expect(elapsed).toBeGreaterThanOrEqual(11_500);
-    expect(elapsed).toBeLessThan(24_000);
-  }, 30_000);
+    // One full 12s budget per target; only the hung target waited, so the
+    // capped run stays well under two stacked waits.
+    expect(requestedTimeoutBudgets()).toEqual([12_000, 12_000, 12_000]);
+    expect(elapsed).toBeLessThan(500);
+  });
 
   it('POST /api/fleet/prune/estimate keeps successful managed-scope bytes when a later target times out', async () => {
     const estimateManagedReclaim = vi.fn().mockImplementation(async (target: string) => {
@@ -172,9 +182,11 @@ describe('Fleet prune routes bound docker df at 12s on local nodes (F-6)', () =>
     expect(local.reclaimableBytes).toBe(600);
     expect(local.error).toMatch(/Docker daemon is busy/);
     expect(estimateManagedReclaim).toHaveBeenCalledTimes(3);
-    expect(elapsed).toBeGreaterThanOrEqual(11_500);
-    expect(elapsed).toBeLessThan(24_000);
-  }, 30_000);
+    // One full 12s budget per target; only the hung target waited, so the
+    // capped run stays well under two stacked waits.
+    expect(requestedTimeoutBudgets()).toEqual([12_000, 12_000, 12_000]);
+    expect(elapsed).toBeLessThan(500);
+  });
 
   it('fleet-prune dry-run succeeds normally when estimateSystemReclaim resolves quickly', async () => {
     stubLocalEstimate(

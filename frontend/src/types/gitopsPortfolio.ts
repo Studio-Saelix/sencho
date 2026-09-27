@@ -30,6 +30,7 @@ export interface GitOpsPortfolioTargetSummary {
   runtime: string;
   health: string;
   connectivity: string;
+  tombstoned: boolean;
   evidence: string;
 }
 

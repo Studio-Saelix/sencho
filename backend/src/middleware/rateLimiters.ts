@@ -145,11 +145,18 @@ const rateLimitBase = {
 
 // Tier 2: Global API rate limiter. Skips polling endpoints (Tier 0/1), webhook
 // triggers (Tier W), and internal node-to-node traffic (node_proxy).
+//
+// The non-production ceiling is high on purpose. The E2E suite drives one admin
+// account across every spec, so its aggregate request rate is not comparable to
+// a single operator's: a measured 19.6-minute run averaged roughly 970
+// requests/min on that shared bucket against the previous 1000 limit, so
+// ordinary bursts returned 429 and failed tests far from the burst. Production
+// keeps its own ceiling.
 export const globalApiLimiter = rateLimit({
   ...rateLimitBase,
   max: process.env.NODE_ENV === 'production'
     ? parseInt(process.env.API_RATE_LIMIT || '200', 10)
-    : 1000,
+    : 10000,
   keyGenerator: rateLimitKeyGenerator,
   message: { error: 'Too many requests. Please try again shortly.' },
   skip: (req: Request) => {

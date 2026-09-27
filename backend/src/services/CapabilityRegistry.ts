@@ -73,6 +73,7 @@ export const CAPABILITIES = [
   'remote-auto-update-checked-v1',
   'gitops-source-controller',
   'fleet-readiness-v1',
+  'blueprint-digest-pins-v1',
 ] as const;
 
 /**
@@ -172,6 +173,34 @@ export const GITOPS_SOURCE_CONTROLLER_CAPABILITY =
  * surface it feeds.
  */
 export const FLEET_READINESS_V1_CAPABILITY = 'fleet-readiness-v1' as const satisfies Capability;
+
+/**
+ * Capability key the hub probes a remote target for before sending it
+ * non-observe health work.
+ *
+ * Deliberately NOT in the advertised `CAPABILITIES` list. The hub runs a health
+ * gate on a target's behalf by reading that target's Docker directly, and a
+ * remote node's Docker is only reachable over the HTTP proxy, so no node can
+ * serve that verdict for a hub-driven rollout yet. Advertising the key would
+ * make every same-version remote answer "supported", the refusal would never
+ * fire, and the rollout would advance on a run that can only end unknown.
+ *
+ * With the key absent, `probeRemoteCapability` fails closed for every remote and
+ * the refusal is honest. Adding it to the list is the single switch that opens
+ * non-observe rollout to remote targets, and it belongs with the leaf-side
+ * health protocol that would make the verdict real, not before.
+ */
+export const HEALTH_ROLLOUT_POLICY_CAPABILITY = 'gitops-health-rollout-policy';
+
+/**
+ * Leaves whose `/api/blueprints/apply-local` honors `digestPins` (deploys each
+ * service at the pinned digest with `--pull never` instead of its authored
+ * tag). A leaf without this flag ignores the field and redeploys by tag, so the
+ * hub refuses to send a digest-pinned apply to one rather than let a repair
+ * silently lose its pin.
+ */
+export const BLUEPRINT_DIGEST_PINS_V1_CAPABILITY =
+  'blueprint-digest-pins-v1' as const satisfies Capability;
 
 /** Contract version the hub and target negotiate for exact-ref proof. */
 export const REMOTE_REGISTRY_EXACT_REF_CONTRACT_VERSION = 1;

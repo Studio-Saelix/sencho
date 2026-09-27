@@ -351,6 +351,69 @@ describe('POST /api/gitops/applications/:id/source/accept', () => {
   });
 });
 
+describe('POST /api/gitops/applications/:id/rollout/health-policy', () => {
+  const applicationOf = (blueprintId: number) => `bp:${blueprintId}`;
+
+  it('records the operator selection on the current intent revision', async () => {
+    const seeded = seedGitManagedBlueprint({ sourceAccepted: true });
+    const intentBefore = GitOpsStore.getInstance()
+      .getIntentRevision(seeded.intentId)!.health_failure_rollback_policy_json;
+
+    const res = await request(app)
+      .post(`/api/gitops/applications/${applicationOf(seeded.blueprintId)}/rollout/health-policy`)
+      .set('Cookie', adminCookie)
+      .send({ policy: 'pause' });
+
+    expect(res.status).toBe(200);
+    const intentAfter = GitOpsStore.getInstance().getIntentRevision(seeded.intentId)!;
+    expect(intentAfter.health_failure_rollback_policy_json).not.toBe(intentBefore);
+    expect(JSON.parse(intentAfter.health_failure_rollback_policy_json!)).toEqual({ policy: 'pause' });
+  });
+
+  it('rejects a mode that is not one of the five', async () => {
+    const seeded = seedGitManagedBlueprint({ sourceAccepted: true });
+    const res = await request(app)
+      .post(`/api/gitops/applications/${applicationOf(seeded.blueprintId)}/rollout/health-policy`)
+      .set('Cookie', adminCookie)
+      .send({ policy: 'rollback-everything' });
+    expect(res.status).toBe(400);
+  });
+
+  it('rejects a missing policy', async () => {
+    const seeded = seedGitManagedBlueprint({ sourceAccepted: true });
+    const res = await request(app)
+      .post(`/api/gitops/applications/${applicationOf(seeded.blueprintId)}/rollout/health-policy`)
+      .set('Cookie', adminCookie)
+      .send({});
+    expect(res.status).toBe(400);
+  });
+
+  // The write names in advance what the system may do to each node's stack,
+  // including restoring a previous generation, so it is gated on every target
+  // rather than the application-wide grant its sibling writes take.
+  it('rejects a caller without stack:deploy', async () => {
+    const seeded = seedGitManagedBlueprint({ sourceAccepted: true });
+    const res = await request(app)
+      .post(`/api/gitops/applications/${applicationOf(seeded.blueprintId)}/rollout/health-policy`)
+      .set('Cookie', viewerCookie)
+      .send({ policy: 'stop' });
+    expect(res.status).toBe(403);
+  });
+
+  it('leaves the intent untouched when the caller is refused', async () => {
+    const seeded = seedGitManagedBlueprint({ sourceAccepted: true });
+    const before = GitOpsStore.getInstance().getIntentRevision(seeded.intentId)!
+      .health_failure_rollback_policy_json;
+    await request(app)
+      .post(`/api/gitops/applications/${applicationOf(seeded.blueprintId)}/rollout/health-policy`)
+      .set('Cookie', viewerCookie)
+      .send({ policy: 'rollback' });
+    const after = GitOpsStore.getInstance().getIntentRevision(seeded.intentId)!
+      .health_failure_rollback_policy_json;
+    expect(after).toBe(before);
+  });
+});
+
 describe('POST /api/gitops/applications/:id/placement/approve', () => {
   it('records the reviewed placement as an operator and opens a placement generation', async () => {
     const seeded = seedGitManagedBlueprint({ sourceAccepted: true });

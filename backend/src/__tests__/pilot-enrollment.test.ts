@@ -406,7 +406,7 @@ describe('Enrollment rate limiter wiring', () => {
       .send({ name: 'pilot-headers', type: 'remote', mode: 'pilot_agent' });
 
     const limit = parseInt(res.headers['ratelimit-limit'], 10);
-    // Dev limit is 100/min for the enrollment limiter; global is 1000/min.
+    // Dev limit is 100/min for the enrollment limiter; global is 10000/min.
     expect(limit).toBe(100);
   });
 
@@ -422,7 +422,7 @@ describe('Enrollment rate limiter wiring', () => {
       });
 
     const limit = parseInt(res.headers['ratelimit-limit'], 10);
-    expect(limit).toBe(1000);
+    expect(limit).toBe(10000);
   });
 
   it('POST /api/nodes/:id/pilot/enroll uses the enrollment limiter', async () => {

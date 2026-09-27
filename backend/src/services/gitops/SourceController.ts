@@ -465,11 +465,10 @@ export class SourceController {
             return;
         }
         if (evaluation.status !== 'allowed') {
-            // Fail closed with the reason visible: the row keeps its
-            // candidate_ready facet, which on its own reads as progress, so
-            // the hold is only attributable when it is logged. The evaluator
-            // records the policy verdict itself in the audit trail; this log
-            // ties it to the source being held.
+            // Fail closed and log the policy verdict: the retained `candidate_ready`
+            // facet reads as progress. The evaluator records policy audit rows
+            // only for bypasses and suppression-driven passes, not blocked or
+            // unavailable verdicts.
             console.warn(
                 `[SourceController] automatic candidate held for ${sanitizeForLog(app.id)}: policy verdict ${evaluation.status}`,
             );

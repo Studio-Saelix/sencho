@@ -387,6 +387,37 @@ CREATE TABLE IF NOT EXISTS gitops_target_current (
   applied_generation_id TEXT NULL,
   deployed_generation_id TEXT NULL,
   healthy_generation_id TEXT NULL,
+  -- The last stack-scope verdict, bound to the generation it judged. Kept so a
+  -- failed check stays visible as a failure instead of collapsing back into
+  -- "not checked yet" once its promotion is withdrawn.
+  last_health_status TEXT NULL CHECK (
+    last_health_status IS NULL OR last_health_status IN ('passed','failed','unknown')
+  ),
+  last_health_generation_id TEXT NULL,
+  last_health_run_id TEXT NULL,
+  -- The health run this target is currently awaiting a verdict from, allocated
+  -- before its apply was dispatched. A non-null value is the queue's sole
+  -- idempotency key: only that run may consume the target or mutate its health
+  -- state, so a duplicate or out-of-order report records evidence and nothing
+  -- else. Every policy allocates one, observe included: the run is what makes
+  -- 'record the outcome' mean anything, and observe's own decision is a no-op,
+  -- so it changes no other state.
+  pending_health_run_id TEXT NULL,
+  -- How many times this target has been retried under the same rollout
+  -- generation. Reset when rollout_generation_id changes, which is what makes
+  -- retry_once exactly once per target and generation.
+  health_attempts INTEGER NOT NULL DEFAULT 0,
+  -- Why this rollout stopped advancing, recorded before any external restore is
+  -- attempted. A restart that lands mid-rollback reads this and holds the
+  -- rollout rather than resuming the queue and dispatching the targets that came
+  -- after the failed one. It fences the unfinished restore; it does not replay
+  -- it, so the restore has to be finished or undone through the manual route.
+  health_stop_reason TEXT NULL CHECK (
+    health_stop_reason IS NULL OR health_stop_reason IN (
+      'health_failed','health_unknown','health_retry_exhausted','rollout_stopped',
+      'rollback_unavailable','rollback_completed','rollback_pending','stop_acknowledged','health_passed','health_retried'
+    )
+  ),
   lkg_generation_id TEXT NULL,
   lkg_artifact_set_id TEXT NULL,
   lkg_unavailable_at INTEGER NULL,

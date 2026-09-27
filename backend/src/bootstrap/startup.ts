@@ -245,7 +245,23 @@ export async function startServer(server: Server): Promise<void> {
   }
 
   try {
-    const { reconstructBlueprintRolloutQueue, backfillMissingPreflightEvaluations } = await import('../services/gitops/handoff');
+    const { reconstructBlueprintRolloutQueue, backfillMissingPreflightEvaluations, liveHealthRolloutExecutor } = await import('../services/gitops/handoff');
+    // The sink is installed before the gate starts, because starting the gate
+    // reconciles verdicts that were persisted but never delivered, and each of
+    // those has to be carried out. With no sink installed yet the decision would
+    // be recorded and its follow-up dropped, leaving a rollback decided and never
+    // performed.
+    const { setHealthVerdictSink, executeHealthRolloutDecision } = await import('../services/gitops/healthRolloutExecutor');
+    const executor = liveHealthRolloutExecutor();
+    setHealthVerdictSink((args) => executeHealthRolloutDecision({ ...args, executor }));
+
+    // The gate starts before the queue is reconstructed, because reconstruction
+    // can deploy a target and arm the run that observes it. Arming throws until
+    // the gate is started, and an unarmed reservation is finalized unknown, which
+    // under a gated policy pauses a rollout this process had just applied and
+    // could have watched.
+    HealthGateService.getInstance().start();
+
     const resumed = await reconstructBlueprintRolloutQueue();
     if (resumed > 0) {
       console.log(`[GitOps] Resumed ${resumed} Blueprint rollout(s) after restart`);
@@ -255,6 +271,15 @@ export async function startServer(server: Server): Promise<void> {
       console.log(`[GitOps] Backfilled preflight evidence for ${backfilled} Blueprint application(s)`);
     }
   } catch (err) {
+    // The gate is started at the top of the block, before reconstruction. If the
+    // block failed before reaching that point, start it here rather than leave it
+    // closed for the life of the process. Never started a second time once it is
+    // running: `start` sweeps the runs a previous process left observing, and a
+    // second sweep would finalize the runs reconstruction had just armed, pausing
+    // a resumed rollout on a verdict its own startup caused.
+    if (!HealthGateService.getInstance().isStarted()) {
+      HealthGateService.getInstance().start();
+    }
     console.error('[GitOps] Blueprint rollout reconstruction failed:', err instanceof Error ? err.stack ?? err.message : String(err));
   }
 
@@ -328,7 +353,6 @@ export async function startServer(server: Server): Promise<void> {
   // safely run alongside the async initializers below.
   MonitorService.getInstance().start();
   AutoHealService.getInstance().start();
-  HealthGateService.getInstance().start();
   ServiceUpdateRecoveryService.getInstance().start();
   FleetSyncRetryService.getInstance().start();
   SuppressionRetractionRetryService.getInstance().start();

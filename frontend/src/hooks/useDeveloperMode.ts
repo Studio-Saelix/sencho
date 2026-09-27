@@ -64,12 +64,16 @@ export function useDeveloperMode(activeNodeId: number | undefined): boolean {
     void refreshRef.current();
   }, [activeNodeId]);
 
-  // Propagate a developer-mode toggle immediately. Refetch when the change set
-  // names developer_mode, or when the detail is missing (unknown change set).
+  // Propagate a developer-mode toggle immediately. Only a broadcast that names
+  // developer_mode can change this flag: every server-side settings write
+  // dispatches changedKeys, and the broadcasts without it are the client-side
+  // preference hooks (pane layout, density, top nav, quick links) that only
+  // touch localStorage. Refetching on those would pull the whole settings
+  // document over the network for a change with no server-side effect.
   useEffect(() => {
     const handler = (e: Event) => {
       const detail = (e as CustomEvent<Partial<SenchoSettingsChangedDetail>>).detail;
-      if (!detail?.changedKeys || detail.changedKeys.includes('developer_mode')) {
+      if (detail?.changedKeys?.includes('developer_mode')) {
         void refreshRef.current();
       }
     };
