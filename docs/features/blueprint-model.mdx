@@ -146,7 +146,11 @@ Enforce's auto-fix restores the exact generation and image identity the target a
 
 Some drift cannot be repaired safely, and Sencho says so instead of trying. The deployment row ends in **Repair held**, the reason is on the row, and a `blueprint_drift_repair_held` notification fires. The workload is left exactly as it is, and the drift is still drift: a held target is not reported as up to date.
 
-Holding only ever applies to **Enforce**, because it is a decision about auto-repair. In **Observe** and **Suggest** the drift is detected and reported normally, including for a stateful Blueprint, and Suggest still sends its notification. A hold also never hides drift: Sencho still checks the node and still reports what is running, it just declines to overwrite it.
+Holding only ever applies to **Enforce**, because it is a decision about auto-repair, and it is re-decided on every tick. In **Observe** and **Suggest** the drift is detected and reported normally, including for a stateful Blueprint, and Suggest still sends its notification. A hold also never hides drift: Sencho still checks the node and still reports what is running, it just declines to overwrite it.
+
+The reason on a held row is the reason the repair was declined, not the drift itself, so the Drift panel is where you read what is actually running. A row held under Enforce also keeps reading **Repair held** if you switch to Observe or Suggest while the drift cannot be classified, until the cause clears.
+
+Changing the drift mode does not re-open placement approval, so you can switch a Blueprint to Enforce and have it act on the generation it already acknowledged. On an **Inline** Blueprint a mode change is still treated as an edit to the Blueprint, so it re-enters **Awaiting confirmation** on every targeted node before the new mode takes effect.
 
 A repair is held when:
 

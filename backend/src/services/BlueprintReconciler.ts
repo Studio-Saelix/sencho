@@ -937,25 +937,6 @@ export class BlueprintReconciler {
     }
 
     /**
-     * Whether this Blueprint's classification forbids an automatic repair, and
-     * the operator-facing reason when it does.
-     *
-     * Restoring the approved generation on a stateless stack converges. Doing
-     * it on a stateful one can destroy or strand named volumes, and a Blueprint
-     * Sencho cannot classify is in the same position because its volumes are
-     * unknown. Both are held so a human or a rollout decides, rather than
-     * downgraded to a notification that leaves the drift in place.
-     *
-     * The text is deliberately free of the drift reason. It is the replay key:
-     * a reason that changes every tick (a container exit message, say) would
-     * make every tick look like a new decision and append a history row and an
-     * alert per tick for a hold that never changes. The drift itself is already
-     * recorded on the row by the write that precedes this.
-     *
-     * Returns null for a Blueprint that may be repaired, so the caller reads as
-     * a question rather than a flag.
-     */
-    /**
      * Why Enforce may not act on this drift, if it may not.
      *
      * Two independent sources: the evidence the drift check carried, and the
@@ -976,6 +957,26 @@ export class BlueprintReconciler {
             : undefined;
     }
 
+    /**
+     * Whether this Blueprint's classification forbids an automatic repair, and
+     * the operator-facing reason when it does.
+     *
+     * Restoring the approved generation on a stateless stack converges. Doing it
+     * on a stateful one can destroy or strand named volumes, and a Blueprint
+     * Sencho cannot classify is in the same position because its volumes are
+     * unknown. Both are held so a human or a rollout decides, rather than
+     * downgraded to a notification that leaves the drift in place.
+     *
+     * The text is deliberately free of the drift reason. It is the replay key:
+     * a reason that changes every tick (a container exit message, say) would make
+     * every tick look like a new decision and append a history row and an alert
+     * per tick for a hold that never changes. The drift is not on the row in
+     * Enforce, because a held target takes one write per tick and that write is
+     * the hold; the Drift panel reads the same evidence from the projection.
+     *
+     * Returns null for a Blueprint that may be repaired, so the caller reads as a
+     * question rather than a flag.
+     */
     private async repairHeldByClassification(
         blueprint: Blueprint,
         node: Node,

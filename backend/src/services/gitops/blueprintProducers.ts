@@ -70,7 +70,7 @@ export type BlueprintUpdates = Parameters<DatabaseService['updateBlueprint']>[1]
  * about what any node runs. Treating it as operational opened a rollout
  * candidate, which invalidated placement and superseded the live rollout
  * generation, which left every target permanently held with nothing left to
- * advance it: switching a Blueprint to Enfore was the one edit guaranteed to
+ * advance it: switching a Blueprint to Enforce was the one edit guaranteed to
  * stop Enforce from ever repairing.
  */
 export function classifyBlueprintChange(
