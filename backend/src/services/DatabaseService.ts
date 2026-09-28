@@ -1246,11 +1246,24 @@ export class DatabaseService {
      */
     private backfillLegacyRolloutAuthorizationPolicy(): void {
         const MARKER = 'gitops_rollout_auth_policy_backfilled';
-        const alreadyBackfilled = this.db
-            .prepare('SELECT value FROM global_settings WHERE key = ?')
-            .get(MARKER) as { value: string } | undefined;
-        if (alreadyBackfilled) return;
+        // system_state, not global_settings. This is internal migration progress,
+        // not a setting: global_settings is the allowlisted table the settings
+        // route projects, and putting a key there that is not on the allowlist
+        // leaves it in the table whose purpose is user-facing configuration.
+        if (this.getSystemState(MARKER) !== null) return;
 
+        // The lifecycle predicate is deliberate and is not a general safety
+        // filter. A `blueprint` mode row is never `creating`: a Blueprint
+        // application is inserted as `inline_blueprint` and is `active` from the
+        // start, and the transitions that write `creating` are the Direct create
+        // and activate paths. So this excludes nothing today.
+        //
+        // It is also the right line to draw if that ever changes. A Blueprint
+        // application still being created never reached the acceptance handoff, so
+        // it never auto-authorized, and granting it `automatic` here would be a
+        // privilege grant rather than a behavior preservation. If a future mode
+        // can hold a `blueprint` row in `creating`, that row wants `manual` and
+        // this predicate should stay as it is.
         this.db.prepare(`
           UPDATE gitops_applications
           SET rollout_authorization_policy = 'automatic'
@@ -1258,9 +1271,7 @@ export class DatabaseService {
             AND target_mode = 'blueprint'
             AND lifecycle_status = 'active'
         `).run();
-        this.db
-            .prepare('INSERT OR REPLACE INTO global_settings (key, value) VALUES (?, ?)')
-            .run(MARKER, new Date().toISOString());
+        this.setSystemState(MARKER, new Date().toISOString());
     }
 
     private initSchema() {

@@ -436,6 +436,82 @@ describe('a bounded_auto application reaches an approval', () => {
     expect(store.hasPlacementApprovalFor(app.id, 'intent-wd', 'cand-wd')).toBe(true);
   });
 
+  it('does not read a migrated application as a first placement', () => {
+    // The migration that carries a forward approval records a pre-decomposition
+    // row, which names no target set. With no decomposed approval to read, the
+    // baseline fell back to the running targets and reported no prior approval,
+    // so every removal that left more than one node was refused as a first
+    // placement. For ever, on exactly the installations the migration was for.
+    const kept = addNode(`n-${randomUUID().slice(0, 6)}`);
+    const alsoKept = addNode(`n-${randomUUID().slice(0, 6)}`);
+    const withdrawn = addNode(`n-${randomUUID().slice(0, 6)}`);
+    const app = seed({ nodeIds: [kept, alsoKept, withdrawn], compose: 'services:\n  web:\n    image: nginx:1.25\n' });
+    const store = GitOpsStore.getInstance();
+
+    // The carried-forward row, with no placement_approval beside it.
+    store.insertApproval({
+      id: 'legacy-combined',
+      kind: 'legacy_combined',
+      authority: 'legacy_combined',
+      authoritative: 0,
+      application_id: app.id,
+      generation_id: null,
+      intent_revision_id: null,
+      artifact_set_id: null,
+      rollout_candidate_id: null,
+      rollout_generation_id: null,
+      source_acceptance_ref: null,
+      placement_approval_ref: null,
+      required_targets_json: null,
+      preflight_fingerprint: null,
+      fingerprint: null,
+      blast_json: null,
+      policy_provenance_json: null,
+      actor: null,
+      created_at: 1,
+    } as never);
+    for (const nodeId of [kept, alsoKept, withdrawn]) {
+      store.upsertTarget({ ...emptyTargetRow(app.id, nodeId, 1), target_status: 'active', connectivity: 'reachable' });
+    }
+
+    const previous = store.getIntentRevision(store.getApplication(app.id)!.intent_revision_id!)!;
+    GitOpsTransitions.getInstance().intentRevised({
+      applicationId: app.id,
+      intent: { ...previous, id: 'intent-narrow', operation_id: 'op-narrow' },
+      envelope: { operationId: 'op-narrow', actor: 'tester', trigger: 'test', at: 2 },
+    });
+    GitOpsTransitions.getInstance().rolloutCandidateOpened({
+      applicationId: app.id,
+      candidate: {
+        id: 'cand-narrow',
+        application_id: app.id,
+        intent_revision_id: 'intent-narrow',
+        required_targets_json: encodeGitOpsRequiredTargetsJson([kept, alsoKept]),
+        compose_content_sha256: 'a'.repeat(64),
+        accepted_generation_id: null,
+        artifact_set_id: null,
+        authoritative: 1,
+        provenance: 'roster_change',
+        created_at: 2,
+        operation_id: 'op-narrow',
+      } as never,
+      envelope: { operationId: 'op-narrow', actor: 'tester', trigger: 'test', at: 2 },
+    });
+
+    // Two nodes left, so the first-placement rule would fire if this were read
+    // as a first placement.
+    const outcome = applyAutomaticPlacement(app.id, { operationId: 'op-narrow-2', actor: null, trigger: 'test', at: 3 });
+    expect(outcome).toEqual({ status: 'auto_approved', reason: 'stateless_removal' });
+  });
+
+  it('reads an application with no approval at all as never having been placed', () => {
+    // The other half, asserted on the reader the decision depends on rather than
+    // through a refusal that has several other possible causes. The fix must not
+    // turn a genuine first placement into something the policy may approve.
+    const app = seed({ nodeIds: [1], compose: 'services:\n  web:\n    image: nginx:1.25\n' });
+    expect(GitOpsStore.getInstance().hasEverHadPlacementAuthority(app.id)).toBe(false);
+  });
+
   it('records no reason when it approves, so nothing is left to explain', () => {
     // The opposite direction. A reason left on an approved application would be
     // read as the explanation for whatever review comes next.

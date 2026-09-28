@@ -68,15 +68,24 @@ function approvedBaseline(
 ): { ok: true; nodeIds: number[]; hasPriorApproval: boolean } | { ok: false } {
   const approval = store.latestPlacementApproval(app.id);
   if (!approval) {
-    // Never approved, so the honest baseline is what is actually running. The
-    // first-placement rules apply on top of it, which is what keeps a first
-    // placement across several nodes out of the automatic path.
+    // No decomposed placement approval, so the honest baseline is what is
+    // actually running. The first-placement rules apply on top of it only when
+    // nothing ever authorized this application's placement, which is what keeps a
+    // first placement across several nodes out of the automatic path.
+    //
+    // "Ever authorized" is not the same question as "has a decomposed approval".
+    // A migration that carried a forward approval records a pre-decomposition
+    // row, which names no target set and so cannot supply a baseline but does
+    // prove the placement was not the first thing that ever happened to it.
+    // Reading that as a first placement made every removal that left more than
+    // one node an automatic refusal, for ever, on exactly the installations the
+    // migration was written for.
     return {
       ok: true,
       nodeIds: store.listTargets(app.id)
         .filter((row) => row.target_status === 'active')
         .map((row) => row.node_id),
-      hasPriorApproval: false,
+      hasPriorApproval: store.hasEverHadPlacementAuthority(app.id),
     };
   }
   if (approval.application_id !== app.id || !approval.required_targets_json) return { ok: false };

@@ -122,7 +122,7 @@ beforeAll(async () => {
   // predates this work has never written it. Leaving it behind would make the
   // backfill believe it had already run, which is the exact situation a real
   // legacy database is in.
-  raw.exec("DELETE FROM global_settings WHERE key = 'gitops_rollout_auth_policy_backfilled'");
+  raw.exec("DELETE FROM system_state WHERE key = 'gitops_rollout_auth_policy_backfilled'");
   seedRows(raw, ALL_ROWS);
   raw.close();
 
@@ -220,7 +220,7 @@ describe('a process that died between the column and the backfill', () => {
 
     // Recreate the crash: the column is present, the marker is not, and a live
     // Blueprint row is still on the fresh-install default.
-    db.exec('DELETE FROM global_settings WHERE key = \'gitops_rollout_auth_policy_backfilled\'');
+    db.exec('DELETE FROM system_state WHERE key = \'gitops_rollout_auth_policy_backfilled\'');
     db.prepare("UPDATE gitops_applications SET rollout_authorization_policy = 'manual' WHERE id = 'bp-active'").run();
     expect(readPolicies(db, ['bp-active'])['bp-active']).toBe('operator/manual');
 

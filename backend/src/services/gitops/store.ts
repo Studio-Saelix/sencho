@@ -491,6 +491,30 @@ export class GitOpsStore {
   }
 
   /**
+   * Whether any approval at all ever stood behind this application's placement.
+   *
+   * Separate from `latestPlacementApproval` because the two answer different
+   * questions. That one asks what the current placement was authorized to be,
+   * and the decomposed row is the only thing that can answer it. This asks
+   * whether the application was ever placed under an operator's authority, and a
+   * pre-decomposition `legacy_combined` row answers that even though it names no
+   * target set.
+   *
+   * A migration that carried an approval forward records exactly that row, so an
+   * application with one is not a first placement and must not be read as one.
+   */
+  hasEverHadPlacementAuthority(applicationId: string): boolean {
+    const row = this.db()
+      .prepare(
+        `SELECT 1 AS found FROM gitops_approvals
+         WHERE application_id = ? AND kind IN ('placement_approval', 'legacy_combined')
+         LIMIT 1`,
+      )
+      .get(applicationId) as { found: number } | undefined;
+    return row !== undefined;
+  }
+
+  /**
    * Whether a placement approval already exists against this intent revision.
    *
    * The replay guard. An application pointer only says an approval is stale, so
