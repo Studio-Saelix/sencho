@@ -527,6 +527,17 @@ export class SchedulerService {
             }
         }
 
+        // This path drives the Engine API itself, so it ends the gate itself. A
+        // restart runs containers one at a time against a 10s Docker timeout, and
+        // a gate poll landing in that window would record the deliberate restart
+        // as a failed update. The remote branch goes through the stack restart
+        // route, which does the same.
+        HealthGateService.getInstance().supersedeForContainerOp(
+            task.node_id,
+            task.target_id,
+            'the stack was restarted during the observation',
+        );
+
         await Promise.all(filtered.map(c => docker.restartContainer(c.Id)));
         const servicesSuffix = task.target_services
             ? ` (services: ${(JSON.parse(task.target_services) as string[]).join(', ')})`

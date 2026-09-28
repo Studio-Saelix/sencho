@@ -32,6 +32,7 @@ const {
   mockMarkReconciling,
   mockMarkImmediateVerified,
   mockInvalidateActiveServiceRecoveries,
+  mockSupersedeForContainerOp,
   mockAbandon,
   mockCompensateWithCandidate,
   mockBuildUnifiedHeldImagePredicate,
@@ -95,6 +96,7 @@ const {
   mockMarkReconciling: vi.fn().mockReturnValue(true),
   mockMarkImmediateVerified: vi.fn().mockReturnValue(true),
   mockInvalidateActiveServiceRecoveries: vi.fn().mockReturnValue(0),
+  mockSupersedeForContainerOp: vi.fn().mockReturnValue(0),
   mockAbandon: vi.fn().mockResolvedValue(true),
   mockCompensateWithCandidate: vi.fn().mockResolvedValue(true),
   mockBuildUnifiedHeldImagePredicate: vi.fn().mockReturnValue(() => false),
@@ -261,6 +263,14 @@ vi.mock('../services/StackUpdateRecoveryService', () => ({
   },
 }));
 
+
+vi.mock('../services/HealthGateService', () => ({
+  HealthGateService: {
+    getInstance: () => ({
+      supersedeForContainerOp: mockSupersedeForContainerOp,
+    }),
+  },
+}));
 
 vi.mock('../services/ServiceUpdateRecoveryService', () => ({
   ServiceUpdateRecoveryService: {
@@ -962,6 +972,41 @@ describe('ComposeService - deployStack', () => {
     // The deploy landed and its evidence is recorded; failing to retire an offer
     // must not turn that into a failed deploy.
     await expect(promise).resolves.toMatchObject({ recoveryId: 'recovery-1' });
+  });
+
+  it('ends health gate observations before a stop or down runs, and never for a start', async () => {
+    setupAutoCloseSpawn();
+    const svc = ComposeService.getInstance(1);
+
+    // Ordering is the point: the gate must be ended before Compose can change a
+    // container, or a poll landing in the stop window records the deliberate
+    // stop as a failed update.
+    await svc.runCommand('my-stack', 'stop');
+    expect(mockSupersedeForContainerOp).toHaveBeenCalledWith(1, 'my-stack', expect.stringContaining('stopped'));
+    expect(mockSupersedeForContainerOp.mock.invocationCallOrder[0])
+      .toBeLessThan(mockSpawn.mock.invocationCallOrder[0]);
+
+    mockSupersedeForContainerOp.mockClear();
+    await svc.runDown('my-stack');
+    expect(mockSupersedeForContainerOp).toHaveBeenCalledWith(1, 'my-stack', expect.stringContaining('taken down'));
+
+    // A start does not disturb the containers a gate is observing.
+    mockSupersedeForContainerOp.mockClear();
+    await svc.runCommand('my-stack', 'start');
+    expect(mockSupersedeForContainerOp).not.toHaveBeenCalled();
+  });
+
+  it('ends the gates a completed deploy or update invalidated', async () => {
+    setupAutoCloseSpawn();
+    mockListContainers.mockResolvedValue([]);
+
+    const deploy = ComposeService.getInstance(1).deployStack('my-stack', undefined, true);
+    await vi.advanceTimersByTimeAsync(3100);
+    await deploy;
+    // The callers that open a replacement gate supersede again a moment later;
+    // this is what covers the ones that never do (fleet, labels, templates,
+    // mesh, blueprint, scheduled deploy).
+    expect(mockSupersedeForContainerOp).toHaveBeenCalledWith(1, 'my-stack', expect.stringContaining('redeployed'));
   });
 
   it('blocks deploy before backup when missing external networks need a prompt', async () => {

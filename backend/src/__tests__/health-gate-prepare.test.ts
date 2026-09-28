@@ -181,10 +181,10 @@ afterEach(() => {
 });
 
 describe('container-op supersede across sibling service gates', () => {
-  it('ends the named service gate and leaves a sibling service gate observing', async () => {
+  it('ends every service gate on the stack, naming the deliberate stop', async () => {
     // Two services on one stack, each with its own gate. A stop of one service
-    // can only end that service's observation: the sibling is still running and
-    // its gate still means something.
+    // compromised both: the sibling's gate had that container in its baseline, so
+    // left running it would fail on a container the operator removed on purpose.
     setContainers([{ id: 'a1', name: 'web-app-1', service: 'app' }, { id: 'd1', name: 'web-db-1', service: 'db' }]);
     const appToken = await prepareService([{ id: 'a1', name: 'web-app-1', service: 'app' }], { serviceName: 'app' });
     const appRun = svc().beginPrepared({ prepareToken: appToken, actor: 'tester' }).runId!;
@@ -193,10 +193,12 @@ describe('container-op supersede across sibling service gates', () => {
     const dbRun = svc().beginPrepared({ prepareToken: dbToken, actor: 'tester' }).runId!;
     await ticks(1);
 
-    expect(svc().supersedeForContainerOp(0, 'web', 'the service was stopped during the observation', 'app')).toBe(1);
-    expect(svc().getReport(0, 'web', appRun).status).toBe('unknown');
-    expect(svc().getReport(0, 'web', appRun).reason).toBe('the service was stopped during the observation');
-    expect(svc().getReport(0, 'web', dbRun).status).toBe('observing');
+    expect(svc().supersedeForContainerOp(0, 'web', 'the service app was stopped during the observation')).toBe(2);
+    for (const run of [appRun, dbRun]) {
+      const report = svc().getReport(0, 'web', run);
+      expect(report.status).toBe('unknown');
+      expect(report.reason).toBe('the service app was stopped during the observation');
+    }
   });
 });
 

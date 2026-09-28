@@ -237,6 +237,28 @@ describe('DeployFeedbackModal health gate', () => {
     }));
   });
 
+  it('offers no Restore when the failed gate failed collaterally', async () => {
+    driverServiceName = 'api';
+    // The gate is api's and api is healthy; a sibling regressed. api's snapshot
+    // is not the way back, so the banner explains the failure without offering
+    // to roll a healthy service back.
+    routeGateApi([{
+      id: 'gate-1', status: 'failed', reason: 'container worker exited during observation',
+      serviceName: 'api', targetScope: 'service', failureSource: 'collateral',
+    }]);
+    await renderStreaming();
+    await act(async () => { await vi.advanceTimersByTimeAsync(60); });
+    await act(async () => {
+      resolveRun?.({ ok: true, healthGateId: 'gate-1', recoveryId: 'rec-1' });
+      await runOuter;
+    });
+    await act(async () => { await vi.advanceTimersByTimeAsync(100); });
+
+    expect(screen.getByTestId('health-gate-banner')).toHaveAttribute('data-status', 'failed');
+    expect(screen.getByText(/A dependent service triggered the failure/)).toBeInTheDocument();
+    expect(screen.queryByTestId('service-restore-from-gate')).not.toBeInTheDocument();
+  });
+
   it('gives up with an unknown verdict after repeated poll failures', async () => {
     vi.mocked(apiFetch).mockImplementation((url: string) => {
       if (String(url).includes('/health-gate')) {

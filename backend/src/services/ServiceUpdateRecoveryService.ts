@@ -163,15 +163,20 @@ export class ServiceUpdateRecoveryService {
    * Retire every active recovery for a stack after a stack-scoped deploy or
    * update replaced its runtime. Those snapshots point at images the stack is
    * no longer running, so offering one would be a rollback behind the operator's
-   * own deploy. Called from the commits every runtime change passes through
-   * (the ComposeService deploy and update success paths, plus the rollback route
-   * that runs its own compose up), so no path can leave a stale offer behind.
+   * own deploy. Called from the one commit a stack runtime change passes through
+   * (`ComposeService.settleStackRuntimeChange`, reached by the deploy and update
+   * success paths, so fleet, labels, templates, webhook, scheduler, mesh,
+   * blueprint and Git apply are all covered) plus the stack rollback route, which
+   * runs its own compose up. Single-container operations that carry no stack
+   * identity (the by-id container routes, the scheduler's container actions)
+   * change no service's image, so they have nothing to retire.
    *
    * Scoped to the stack, not per image: a successful run whose pull found
    * nothing new changed no image either, so its snapshots are retired too. That
    * withholds a still-accurate offer rather than showing a wrong one, which is
-   * the direction that matters; the images stay held for prune until the rows
-   * expire on their own.
+   * the direction that matters. The image itself is unaffected: a retired row
+   * still holds its image from prune until the row's own TTL expires, so the
+   * rollback image outlives the withdrawn offer.
    *
    * Never throws. Every caller is an operation that already succeeded and
    * recorded its own evidence, so failing that operation over an offer the
@@ -253,9 +258,15 @@ export class ServiceUpdateRecoveryService {
   }
 
   /**
-   * Image IDs currently held for this node (active rows and restoring rows
-   * with a live claim). Returns null when the held set cannot be read so
-   * callers can fail closed (skip prune) instead of treating the miss as empty.
+   * Image ids held against prune on this node: active rows, restoring rows with
+   * a live claim, and retired rows until their own TTL. Returns null when the
+   * held set cannot be read so callers can fail closed (skip prune) instead of
+   * treating the miss as empty.
+   */
+  /**
+   * Image ids held against prune on this node: active rows, restoring rows with
+   * a live claim, and retired rows until their own TTL. Fails closed (null) on a
+   * read error, which the caller treats as "hold nothing".
    */
   public getHeldImageIds(nodeId: number): Set<string> | null {
     try {

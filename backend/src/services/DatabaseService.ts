@@ -4727,12 +4727,24 @@ stmt.run('gitops_schema_version', '1');
         return result.changes;
     }
 
-    /** Image IDs currently protected from prune: active rows and restoring rows with a live claim. */
+    /**
+     * Image IDs currently protected from prune: active rows, restoring rows with
+     * a live claim, and retired rows until their own TTL expires.
+     *
+     * Retired (`invalidated`) rows still hold: a stack deploy or update retires
+     * the stack's snapshots without touching the images, and the prune that runs
+     * right behind an update would otherwise delete the only known-good image the
+     * stack was on. The hold is bounded by `expires_at`, the same TTL that bounds
+     * the offer, so it needs no sweeper of its own.
+     */
     public listHeldServiceUpdateRecoveryImageIds(nodeId: number, now: number): string[] {
         const rows = this.db.prepare(
             `SELECT DISTINCT majority_image_id FROM service_update_recovery
-             WHERE node_id = ? AND (status = 'active' OR (status = 'restoring' AND claim_expires_at > ?))`
-        ).all(nodeId, now) as Array<{ majority_image_id: string }>;
+             WHERE node_id = ?
+               AND (status = 'active'
+                    OR (status = 'restoring' AND claim_expires_at > ?)
+                    OR (status = 'invalidated' AND expires_at > ?))`
+        ).all(nodeId, now, now) as Array<{ majority_image_id: string }>;
         return rows.map(r => r.majority_image_id);
     }
 

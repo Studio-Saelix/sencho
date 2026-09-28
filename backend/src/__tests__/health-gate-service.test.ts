@@ -529,13 +529,10 @@ describe('HealthGateService container-op supersede', () => {
     const stack = svc().beginStack(0, 'web', 'update', 'tester', { deployedGenerationId: null })!;
     await ticks(2);
 
-    // A service-scoped call still ends the stack's own gate (it is watching the
-    // same containers); the sibling-service exemption is the pre-existing rule
-    // this forwards to, exercised by the service-update flow's own tests.
-    expect(svc().supersedeForContainerOp(0, 'web', 'the service was stopped during the observation', 'app')).toBe(1);
+    expect(svc().supersedeForContainerOp(0, 'web', 'the service app was stopped during the observation')).toBe(1);
     const report = svc().getReport(0, 'web', stack);
     expect(report.status).toBe('unknown');
-    expect(report.reason).toBe('the service was stopped during the observation');
+    expect(report.reason).toBe('the service app was stopped during the observation');
   });
 
   it('reports nothing to supersede for a stack with no live gate', () => {

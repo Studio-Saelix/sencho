@@ -369,6 +369,25 @@ describe('getHeldImageIds', () => {
     expect(svc().getHeldImageIds(1)).toEqual(new Set(['sha256:held']));
   });
 
+  it('keeps a retired row\'s image held until that row\'s own TTL expires', () => {
+    const now = Date.now();
+    db().insertServiceUpdateRecovery({
+      id: 'rec-retired', node_id: 1, stack_name: 'web', service_name: 'api',
+      replicas_json: '[]', majority_image_id: 'sha256:retired', declared_image_ref: 'x:1',
+      weak_floating_tag: 0, health_gate_id: null, status: 'active',
+      expires_at: now + 60_000, claim_expires_at: null, created_at: now, created_by: null,
+    });
+    // A deploy retires the row; the prune that runs right behind it must not find
+    // the only known-good image unprotected and delete it. The projection is read
+    // directly so the test can move the clock past the row's TTL.
+    expect(svc().invalidateActiveForStack(1, 'web')).toBe(1);
+    expect(svc().listActive(1, 'web', 'api')).toEqual([]);
+    expect(db().listHeldServiceUpdateRecoveryImageIds(1, now)).toEqual(['sha256:retired']);
+
+    // The hold is bounded by the row's own TTL, so it needs no sweeper.
+    expect(db().listHeldServiceUpdateRecoveryImageIds(1, now + 60_001)).toEqual([]);
+  });
+
   it('fails closed (null) when the DB read throws', () => {
     const spy = vi.spyOn(db(), 'listHeldServiceUpdateRecoveryImageIds').mockImplementation(() => {
       throw new Error('boom');

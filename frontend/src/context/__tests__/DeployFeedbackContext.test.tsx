@@ -1038,6 +1038,36 @@ describe('an overlapping operation never cancels an earlier Restore offer', () =
     }
   });
 
+  it('offers no Restore when the failure is a sibling regressing, not this service', async () => {
+    vi.useFakeTimers();
+    try {
+      // The gate is for "api", which is healthy; a sibling exited during the
+      // window, which is a collateral failure. api's own container is fine, so its
+      // pre-update snapshot is not the way back and offering it would undo a
+      // healthy service.
+      vi.mocked(apiFetch).mockImplementation(async (url: string) => {
+        const gateId = new URL(String(url), 'http://localhost').searchParams.get('gateId') ?? '';
+        return new Response(JSON.stringify({
+          id: gateId, status: 'failed', reason: 'container worker exited during observation',
+          windowSeconds: 90, startedAt: Date.now(), targetScope: 'service',
+          serviceName: 'api', failureSource: 'collateral',
+        }), { status: 200 });
+      });
+      vi.mocked(fetchStackRecoveries).mockResolvedValue(recoveries([]));
+      const { result } = renderSession();
+
+      await runSession(result, { serviceName: 'api' }, { ok: true, healthGateId: 'gate-api', recoveryId: 'rec-api' });
+      // Dismissing the panel is what puts the failed gate on screen.
+      act(() => { result.current.onPanelClose(); });
+      await tick();
+
+      expect(result.current.healthGate).toMatchObject({ gateId: 'gate-api', status: 'failed', failureSource: 'collateral' });
+      expect(toast.error).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('offers a snapshot once when the primary gate and the stack watch both see it fail', async () => {
     // The silent no-gate path leaves the running session's gate polling while a
     // later update arms the same service on the stack watch, so two pollers can

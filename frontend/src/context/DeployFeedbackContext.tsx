@@ -649,6 +649,11 @@ export function DeployFeedbackProvider({ children }: { children: React.ReactNode
     offerRestoreToastRef.current = (gate: HealthGateUiState) => {
       const serviceName = gate.serviceName;
       if (!serviceName) return;
+      // A collateral failure is a sibling regressing, not this service breaking:
+      // its own container is healthy, so its pre-update snapshot is not the way
+      // back and offering it would undo a healthy service. The stack's rollback
+      // surfaces are where a mixed outcome belongs.
+      if (gate.failureSource === 'collateral') return;
       // Every path that offers a Restore funnels through here, so this is the
       // one place that decides a snapshot has already been offered. The set is
       // cleared per session, which is what lets a later session re-offer a
@@ -697,11 +702,11 @@ export function DeployFeedbackProvider({ children }: { children: React.ReactNode
 
   /**
    * Stops the stack's watches after a stack-scoped run that ended or replaced
-   * its running containers. A gate still observing on the stack can no longer
-   * report on a runtime that is gone, and service recovery snapshots are not
-   * invalidated by a deploy, so a watch left polling would offer a Restore back
-   * to state the operator just ended or replaced. A run that changed nothing
-   * (it failed) leaves the offers standing.
+   * its running containers. The server settles the same operation on its side
+   * (the gates end and the recovery rows retire), so this is polling hygiene
+   * rather than correctness: it stops this tab reading a stack it is no longer
+   * watching, instead of waiting for those reads to come back changed. A run
+   * that changed nothing (it failed) leaves the watches running.
    */
   const abandonStackWatches = useCallback((params: RunWithLogParams, result: { ok: boolean }) => {
     if (!result.ok) return;

@@ -400,38 +400,47 @@ export class HealthGateService {
   }
 
   /**
-   * Finalize the gates a deliberate container lifecycle operation just
-   * invalidated: stopping or restarting a service, restarting or stopping a
-   * whole stack, or taking it down.
+   * Finalize the gates a deliberate container lifecycle operation invalidated:
+   * stopping or restarting a service, restarting or stopping a whole stack, or
+   * taking it down.
    *
    * Such a gate cannot produce a verdict that means anything, because the
    * containers it is observing are being replaced or removed underneath it. Left
-   * running it fails within seconds with "container disappeared during
-   * observation" or "exited", which reads as a failed update and, in the UI, as
-   * a Restore offer for a service the operator just stopped on purpose. Recorded
-   * as `unknown` with the operation named, which is the honest verdict: nothing
-   * was proven either way.
+   * running it fails within a poll interval with "container disappeared during
+   * observation" or "exited", which reads as a failed update and, in the UI, as a
+   * Restore offer for a service the operator just stopped on purpose. Recorded as
+   * `unknown` with the operation named, which is the honest verdict: nothing was
+   * proven either way.
+   *
+   * Always stack-wide, including for a single service: the other services' gates
+   * observed *this* service's container as part of their baseline, so a
+   * deliberate stop of one service compromises their observation just as much.
+   * Ending them is quieter and more honest than letting them fail on a container
+   * the operator removed on purpose.
    *
    * `start` is deliberately not a trigger: starting a service that was already
    * down does not disturb the containers a live gate is observing.
    *
    * Returns the number of gates finalized. Never throws.
+   *
+   * Covered seams: the compose commands (`runCommand`, `runDown`, `downStack`),
+   * which reach the routes, the scheduler and the webhook; the Engine API
+   * stack- and service-level ops (`containerActionForStack`, which the single
+   * route, the bulk route and the fleet label stop share, plus the label bulk
+   * action and the scheduler's stack restart). Not covered, by design: the
+   * single-container operations that carry no stack identity (the by-id
+   * container routes, the scheduler's container actions), which disturb a
+   * container without saying which stack it belongs to.
    */
-  public supersedeForContainerOp(
-    nodeId: number,
-    stackName: string,
-    reason: string,
-    serviceName?: string,
-  ): number {
+  public supersedeForContainerOp(nodeId: number, stackName: string, reason: string): number {
     try {
       const before = this.active.size;
-      this.supersedeGatesForStack(nodeId, stackName, serviceName ? { serviceName, reason } : { reason });
+      this.supersedeGatesForStack(nodeId, stackName, { reason });
       return before - this.active.size;
     } catch (error) {
       console.warn(
-        '[HealthGate] Container-op supersede failed for %s/%s on node %d:',
+        '[HealthGate] Container-op supersede failed for %s on node %d:',
         sanitizeForLog(stackName),
-        sanitizeForLog(serviceName ?? '*'),
         nodeId,
         getErrorMessage(error, 'unknown'),
       );
