@@ -803,34 +803,44 @@ export class BlueprintService {
      * carrying a `repairBlock` saying Enforce may not act on it. `unverified`
      * means the check could not prove either side (no application row,
      * unreachable node, missing expected set, or non-comparable observation).
+     * It carries a block only when a repair is barred outright; a marker that
+     * merely fails to prove the repair authority is not one, because nothing
+     * would have attempted a repair anyway.
      *
      * Drift is detected even when the repair is blocked. A legacy marker or a
      * superseded rollout says Sencho may not overwrite what is running; it does
      * not say the workload is fine.
      */
     async checkForDrift(blueprint: Blueprint, node: Node): Promise<DriftCheckResult> {
-        // Declared out here rather than inside the try so the catch can reach it:
-        // a transport failure is exactly the case where the hold must survive.
-        let repairBlock: RepairBlock | undefined;
-        // Every drifted return from here on carries the block. Dropping it on any
-        // one of them hands the reconciler a repairable verdict for a target the
-        // hold exists to protect, and the mutation sites trust this result:
-        // `deployToNode` and `reapplyAuthorizedMaterialization` will write to the
-        // node on the strength of it.
-        const drifted = (reason: string, cause: DriftCause): DriftCheckResult => ({
-            kind: 'drifted',
-            reason,
-            cause,
-            ...(repairBlock ? { repairBlock } : {}),
-        });
-        // Same rule for the returns that cannot classify: the reconciler records
-        // a hold off this result too, so dropping the block here would silently
-        // unhold a target for exactly as long as the node stays unobservable,
-        // which is the state a hold most needs to cover.
+        // Two blocks, named apart, because they reach different surfaces.
+        //
+        // A binding hold is a standing decision that Sencho must not write to this
+        // target, whatever the check can or cannot classify. A marker that names
+        // no generation, or a different one, says only that a repair could not
+        // prove what it would overwrite, and nothing about whether the workload
+        // is drifted.
+        //
+        // A drifted result carries whichever applies, because a repair is about to
+        // be attempted and the mutation sites trust this result: `deployToNode` and
+        // `reapplyAuthorizedMaterialization` will write to the node on its strength.
+        // An unverified result attempts no repair, and the reconciler's only use of
+        // its block is recording a hold and an alert, so it carries the binding
+        // hold alone. Carrying the marker case there would report every target
+        // whose marker predates the generation fields as held on any tick the check
+        // could not classify, and announce a declined auto-fix that was never due.
+        //
+        // Declared out here rather than inside the try so the catch can reach them:
+        // a transport failure is exactly the case where a hold must survive.
+        let bindingBlock: RepairBlock | undefined;
+        let markerBlock: RepairBlock | undefined;
+        const drifted = (reason: string, cause: DriftCause): DriftCheckResult => {
+            const block = bindingBlock ?? markerBlock;
+            return { kind: 'drifted', reason, cause, ...(block ? { repairBlock: block } : {}) };
+        };
         const unverified = (reason: string): DriftCheckResult => ({
             kind: 'unverified',
             reason,
-            ...(repairBlock ? { repairBlock } : {}),
+            ...(bindingBlock ? { repairBlock: bindingBlock } : {}),
         });
         try {
             const store = GitOpsStore.getInstance();
@@ -849,7 +859,7 @@ export class BlueprintService {
             // stop on it.
             const binding = resolveRuntimeRepairBinding(store, app, target);
             if (binding.kind === 'hold') {
-                repairBlock = { reason: binding.reason, detail: describeRuntimeRepairHold(binding.reason) };
+                bindingBlock = { reason: binding.reason, detail: describeRuntimeRepairHold(binding.reason) };
             }
 
             const marker = await this.readMarker(blueprint.name, node);
@@ -865,14 +875,14 @@ export class BlueprintService {
             // so it blocks the repair and the container and digest checks below
             // still run. Returning here instead is what let an upgrade hide a
             // stopped container on every Git-managed target in the fleet.
-            if (app.target_mode === 'blueprint' && !repairBlock && binding.kind === 'binding') {
+            if (app.target_mode === 'blueprint' && !bindingBlock && binding.kind === 'binding') {
                 if (!marker.generationId) {
-                    repairBlock = {
+                    markerBlock = {
                         reason: 'evidence_incomplete',
                         detail: 'the marker on this node names no generation, so a repair could not prove what it would overwrite',
                     };
                 } else if (marker.generationId !== binding.acceptedGenerationId) {
-                    repairBlock = {
+                    markerBlock = {
                         reason: 'binding_incoherent',
                         detail: `the node runs generation ${marker.generationId} but this target acknowledged ${binding.acceptedGenerationId}`,
                     };

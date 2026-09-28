@@ -341,6 +341,21 @@ function stubDriftedRuntime(blueprint: Blueprint, generationId: string, artifact
   });
 }
 
+/**
+ * A marker written before the generation fields existed, which is what every
+ * node upgraded from an older Sencho carries. It blocks a repair, because Sencho
+ * cannot prove what it would overwrite, and it says nothing at all about whether
+ * the workload is drifted.
+ */
+function stubLegacyMarker(blueprint: Blueprint): void {
+  vi.spyOn(BlueprintService.getInstance(), 'readMarker').mockResolvedValue({
+    blueprintId: blueprint.id,
+    revision: blueprint.revision,
+    lastApplied: Date.now(),
+    applicationId: store_app(blueprint),
+  });
+}
+
 function store_app(blueprint: Blueprint): string {
   return GitOpsStore.getInstance().getLiveBlueprintApplication(blueprint.id)!.id;
 }
@@ -1188,6 +1203,91 @@ describe('artifact uncertainty blocks a repair', () => {
     expect(deployment?.status).not.toBe('repair_held');
   });
 
+  it('does not hold an Enforce target on a legacy marker alone when the check cannot classify', async () => {
+    // The upgrade case. Every Enforce target whose marker predates the generation
+    // fields blocks its repair, and if that block also reported a hold, any tick
+    // the check could not classify would put a target with no proven drift into
+    // Repair held and alert that an auto-fix was declined. None was due: an
+    // unverified result never attempts a repair, so there is nothing to hold off.
+    const { NotificationService } = await import('../services/NotificationService');
+    const alertSpy = vi
+      .spyOn(NotificationService.getInstance(), 'dispatchAlert')
+      .mockResolvedValue({ persisted: true });
+    const node = seedNode();
+    const blueprint = seedBlueprint(node, 'enforce');
+    await seedDeployedGitManaged({ blueprint, node, compose: COMPOSE });
+    DatabaseService.getInstance().upsertDeployment({
+      blueprint_id: blueprint.id,
+      node_id: node.id,
+      status: 'active',
+      applied_revision: blueprint.revision,
+      last_deployed_at: Date.now(),
+    });
+    stubLegacyMarker(blueprint);
+    const svc = BlueprintService.getInstance() as unknown as {
+      containerHealth: () => Promise<{ kind: 'unreachable'; detail: string }>;
+    };
+    vi.spyOn(svc, 'containerHealth').mockResolvedValue({ kind: 'unreachable', detail: 'the node did not answer' });
+    const deploySpy = vi
+      .spyOn(BlueprintService.getInstance(), 'deployAuthorizedMaterialization')
+      .mockResolvedValue({ status: 'active' });
+
+    await tick(blueprint, node);
+
+    const deployment = deploymentOf(blueprint, node);
+    expect(deployment?.status, 'an unclassifiable check is not a hold').toBe('active');
+    expect(deploySpy, 'and nothing may be written to the node').not.toHaveBeenCalled();
+    expect(
+      alertSpy.mock.calls.filter((call) => call[1] === 'blueprint_drift_repair_held'),
+      'no auto-fix was due, so declining one must not be announced',
+    ).toHaveLength(0);
+  });
+
+  it('does not hold an Enforce target on a legacy marker alone when the build cannot be identified', async () => {
+    // The same upgrade case on the tick where the node answers but the running
+    // image is a local build with no comparable digest. This one is permanent
+    // rather than a transient blip, so without the split it would hold the target
+    // for good and keep re-alerting.
+    const { NotificationService } = await import('../services/NotificationService');
+    const alertSpy = vi
+      .spyOn(NotificationService.getInstance(), 'dispatchAlert')
+      .mockResolvedValue({ persisted: true });
+    const node = seedNode();
+    const blueprint = seedBlueprint(node, 'enforce');
+    await seedDeployedGitManaged({ blueprint, node, compose: COMPOSE });
+    DatabaseService.getInstance().upsertDeployment({
+      blueprint_id: blueprint.id,
+      node_id: node.id,
+      status: 'active',
+      applied_revision: blueprint.revision,
+      last_deployed_at: Date.now(),
+    });
+    stubLegacyMarker(blueprint);
+    const svc = BlueprintService.getInstance() as unknown as {
+      containerHealth: () => Promise<{ kind: 'running' }>;
+      observeRuntimeIdentity: () => Promise<import('../services/gitops/json').ObservedArtifactIdentity>;
+    };
+    vi.spyOn(svc, 'containerHealth').mockResolvedValue({ kind: 'running' });
+    vi.spyOn(svc, 'observeRuntimeIdentity').mockResolvedValue({
+      kind: 'local_build_unverified',
+      identity: 'local:img-1',
+      observedAt: Date.now(),
+    });
+    const deploySpy = vi
+      .spyOn(BlueprintService.getInstance(), 'deployAuthorizedMaterialization')
+      .mockResolvedValue({ status: 'active' });
+
+    await tick(blueprint, node);
+
+    expect(deploymentOf(blueprint, node)?.status, 'an unidentifiable build is uncertainty, not a hold')
+      .toBe('active');
+    expect(deploySpy, 'and nothing may be written to the node').not.toHaveBeenCalled();
+    expect(
+      alertSpy.mock.calls.filter((call) => call[1] === 'blueprint_drift_repair_held'),
+      'no auto-fix was due, so declining one must not be announced',
+    ).toHaveLength(0);
+  });
+
   it('holds when the target\'s expectation no longer matches what the rollout authorized', async () => {
     const node = seedNode();
     const blueprint = seedBlueprint(node, 'enforce');
@@ -1517,10 +1617,14 @@ describe('the Inline content path', () => {
     store.markRolloutGenerationSuperseded(seeded.rolloutGenerationId, Date.now());
     // The node goes away after the marker was read, so the check bails out on
     // the way to classifying it: a return that is neither the resolution's own
-    // arm nor a drifted one.
-    (BlueprintService.getInstance() as unknown as {
+    // arm nor a drifted one. Spied rather than assigned, because a direct
+    // assignment on the singleton outlives this test and would leave every later
+    // one in the file looking at an unreachable node.
+    const svc = BlueprintService.getInstance() as unknown as {
       containerHealth: () => Promise<{ kind: 'unreachable'; detail: string }>;
-    }).containerHealth = async () => ({ kind: 'unreachable', detail: 'the node did not answer' });
+    };
+    vi.spyOn(svc, 'containerHealth')
+      .mockResolvedValue({ kind: 'unreachable', detail: 'the node did not answer' });
 
     const result = await BlueprintService.getInstance().checkForDrift(blueprint, node);
 
