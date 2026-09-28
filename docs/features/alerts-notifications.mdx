@@ -446,7 +446,7 @@ Local-target failure reasons stay node-neutral (`Target node is offline`, `Conta
 ### Blueprints
 
 - `warning`/`blueprint_drift_detected`: `Blueprint "<n>" drifted on this node: <reason>` for a local target, or `Blueprint "<n>" drifted on node "<remote>": <reason>` for a remote. Stateful marker-loss uses the same local/remote clause.
-- `error`/`blueprint_drift_correction_failed`: `Auto-fix for "<n>" on this node failed: <err>` (local) or `Auto-fix for "<n>" on node "<remote>" failed: <err>` (remote).
+- `error`/`blueprint_drift_correction_failed`: `Auto-fix for "<n>" on this node failed: <err>` (local) or `Auto-fix for "<n>" on node "<remote>" failed: <err>` (remote). The repair is retried on the next reconciler tick, so this fires once for a given reason rather than on every retry, and fires again when the reason changes.
 - `warning`/`blueprint_drift_repair_held`: `Auto-fix for "<n>" on this node was declined: <reason>` (local) or the same on the remote node name (remote). This fires once per hold, when the reason changes, not on every tick.
 
 See [Blueprints](/features/blueprint-model).

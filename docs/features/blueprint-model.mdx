@@ -136,7 +136,7 @@ The three policy cards in the editor map exactly to the three modes the reconcil
 |---|---|
 | **Observe** · Detect & display, no notifications | Drift surfaces in the deployment table; no notification, no auto-fix. |
 | **Suggest** · Detect & notify, operator decides | Sencho dispatches a `blueprint_drift_detected` notification through your notification routes, if any. |
-| **Enforce** · Detect & auto-fix, silent on success | Sencho re-deploys the blueprint silently when drift is detected. A `blueprint_drift_correction_failed` notification fires only when the auto-fix attempt fails, and a `blueprint_drift_repair_held` notification fires when auto-fix is declined. |
+| **Enforce** · Detect & auto-fix, silent on success | Sencho re-deploys the blueprint silently when drift is detected, and retries on each following tick for as long as the row stays **Drifted**. A `blueprint_drift_correction_failed` notification fires when an auto-fix attempt fails, once for that reason rather than on every retry, and a `blueprint_drift_repair_held` notification fires when auto-fix is declined. |
 
 Even **Observe** keeps Sencho honest about what it found: the deployment row shows "drifted 3h ago: service caddy exited code 1". Silence would forfeit Sencho's authority over your fleet.
 
@@ -190,8 +190,8 @@ Possible status values:
 | **Awaiting confirmation** | A stateful blueprint reached a new node. The reconciler refuses to deploy until you click **Confirm deploy** in the action column. |
 | **Deploying** | The compose action is in flight on this node. |
 | **Active** | The deployment is placed and its containers are running for this blueprint revision. Exact image identity is a separate GitOps / Drift proof; a row can read Active while Drift shows runtime artifact disagreement. |
-| **Drifted** | The reconciler detected a difference between the live state and the desired one (marker, revision, container health, or frozen image digest). |
-| **Correcting** | An Enforce-mode auto-fix is in flight. |
+| **Drifted** | The reconciler detected a difference between the live state and the desired one (marker, revision, container health, or frozen image digest). Under **Enforce** the next tick tries to repair it, and tries again for as long as the row stays in this state. |
+| **Correcting** | An Enforce-mode auto-fix is in flight. This state does not last: an attempt that cannot finish leaves the row on **Drifted** with the reason in the notes column, for the next tick to try again. Drift that is held or blocked instead does not come back here, because **Repair held** and **Name conflict** are waiting on you, not on the reconciler. |
 | **Repair held** | Drift was found and auto-fix was declined, with the reason on the row. Nothing was changed. |
 | **Failed** | The deployment or withdrawal errored. The notes column carries the message. |
 | **Withdrawing** | A withdraw is in flight. |
@@ -207,7 +207,7 @@ Possible status values:
 
 The common paths through the status enum.
 
-- **Stateless first deploy.** No row → **Pending** → **Deploying** → **Active**. Drift detected later on Enforce flips to **Drifted** → **Correcting** → **Active**. Drift that cannot be repaired safely goes to **Repair held** instead and stays there until the cause clears.
+- **Stateless first deploy.** No row → **Pending** → **Deploying** → **Active**. Drift detected later on Enforce flips to **Drifted** → **Correcting** → **Active**. Drift that cannot be repaired safely goes to **Repair held** instead and stays there until the cause clears. An auto-fix that fails goes back to **Drifted** with the reason in the notes column, and the next tick tries again, so a repair that fails once is not the end of it.
 - **Stateful first deploy.** No row → **Awaiting confirmation**. Operator clicks **Confirm deploy** and picks **Deploy fresh** → **Deploying** → **Active**.
 - **Compose change on a stateless deployment.** **Active** → **Deploying** on the next tick → **Active**.
 - **Compose change on a stateful or unknown deployment.** **Active** → **Awaiting confirmation** on every targeted node so the operator can decide whether the new revision is safe for that node's local data. Operator confirms → **Deploying** → **Active**.
@@ -457,6 +457,8 @@ A future Volume Migration feature will automate this with app-aware backup tooli
   </Accordion>
   <Accordion title="Drift is reported but never gets corrected">
     Confirm the drift policy is **Enforce** and that **Reconciler enabled** is on. Open the detail sheet to check the row's status and the most recent drift summary. If the row is sitting in **Awaiting confirmation** instead of **Drifted**, that is expected: a compose edit on a stateful or state-unknown blueprint never auto-corrects under any drift mode, including Enforce. It always waits for an explicit **Confirm deploy** so a human signs off before the new revision touches that node's data. Enforce's auto-fix applies to container-level drift (a stopped or crashed container) and to frozen image-digest disagreement on a deployment that is already **Active**. Unreachable nodes and missing digest evidence stay unverified and never auto-correct.
+
+    When an auto-fix cannot finish, the row returns to **Drifted** with the reason in the notes column and the next tick tries again, so the reason there is what to fix: an unreachable node, a node running a Sencho release too old to honor digest pins, or a registry that cannot resolve the approved image. A row left reading **Correcting** is different: it means the attempt never reported back at all, which a restart in the middle of a repair can cause. Such a row does not retry on its own and Confirm does not act on it either, so treat it as needing your decision rather than as work in progress.
   </Accordion>
   <Accordion title="'Apply now' is greyed out">
     **Apply now** requires the blueprint to be enabled and Inline. Open the detail sheet, click **Enable** to flip the reconciler back on, then click **Apply now**. The button is also disabled while the detail sheet is in edit mode; save or cancel the edit first. Git-managed Blueprints do not offer Apply now: content comes from Git, and place runs from an authorized accepted generation rather than from the editor or the detach snapshot. Use **Detach Git** if you need Inline editing and Confirm Apply again.
@@ -488,7 +490,7 @@ A future Volume Migration feature will automate this with app-aware backup tooli
     A Blueprint is a fleet-wide declaration: one compose YAML targeting a set of nodes. Each node where the blueprint resolves materializes as a Stack on that node, in the same compose directory layout the rest of the per-stack lane uses, with a `.blueprint.json` marker added. You can browse the materialized stack in the per-node Stacks view; the Blueprint is the source of truth that drives it.
   </Accordion>
   <Accordion title="How fast does drift get noticed?">
-    After you confirm the updated rollout, the next reconciler tick (or the Confirm Apply execution itself) places or removes as approved. The reconciler ticks every 60 seconds with a 5-second initial delay after startup. Within Enforce mode, drift correction for an already-approved place outcome begins on the same tick that detects the drift.
+    After you confirm the updated rollout, the next reconciler tick (or the Confirm Apply execution itself) places or removes as approved. The reconciler ticks every 60 seconds with a 5-second initial delay after startup. Within Enforce mode, drift correction for an already-approved place outcome begins on the same tick that detects the drift, and a row that is still **Drifted** is checked and repaired again on each tick after that, so a repair that could not complete is retried rather than left in place.
   </Accordion>
   <Accordion title="Can I roll back to a previous revision?">
     Not through a one-click history. Blueprints intentionally do not keep a versioned revision history. To revert an Inline Blueprint, paste the prior compose into the editor and save; the reconciler treats the change as a new revision and redeploys. Git-managed Blueprints place from an authorized accepted generation, not from the detach snapshot. Detach Git first if you need Inline paste-and-apply.

@@ -1,5 +1,5 @@
 /**
- * Digest drift on a real Blueprint deployment.
+ * Digest drift on a real Blueprint deployment, and what each policy does about it.
  *
  * A tag is a promise, not an identity, so the drift this exercises is created
  * the way it happens in the field: the compose pins an approved image digest,
@@ -7,6 +7,16 @@
  * must report the per-service digest difference, show both digests on the Drift
  * tab, and leave the approved identity where it was instead of adopting whatever
  * is actually running.
+ *
+ * Two policies are covered against that same drift, because the interesting part
+ * is what happens next. Observe reports it and leaves the row drifted, which is
+ * what the first test asserts. Enforce has to take that same drifted row and put
+ * it back: the second test watches the row return to Active with no drift
+ * summary and the workload running the approved digest again, which is the whole
+ * cycle rather than only its detection. It switches the policy on *after* the
+ * drift is recorded, so the repair lands on a pass later than the one that
+ * recorded it, and the pass that picks a drifted row back up is genuinely
+ * exercised instead of being raced.
  *
  * The approved digest is discovered from `nginx:alpine` and the digest the
  * workload is moved to is discovered from `nginx:1.27`, both of them real
@@ -172,6 +182,7 @@ interface ServiceEvidence {
 
 interface DeploymentRow {
   status: string;
+  drift_summary: string | null;
 }
 
 interface PreviewPayload {
@@ -201,13 +212,48 @@ interface DriftPayload {
   } | null;
 }
 
+/**
+ * Preview the plan and confirm it, the way an operator does.
+ *
+ * Confirming against a live Blueprint is a two-step dance: the tick can re-save
+ * the row between the preview and the confirm, which the server refuses with
+ * PREVIEW_STALE. That one case is worth retrying with a fresh preview, because
+ * the UI asks the operator to confirm again. Any other failure is reported as it
+ * is, since retrying it would only repeat it.
+ */
+async function confirmPlan(page: Page, blueprintId: number): Promise<void> {
+  let applied: { status: number; body: ApplyPayload } | null = null;
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    const preview = expectOk(
+      await jsonRequest<PreviewPayload>(page, `/api/blueprints/${blueprintId}/preview`),
+      'previewing the plan',
+    );
+    const result = await jsonRequest<ApplyPayload>(page, `/api/blueprints/${blueprintId}/apply`, {
+      method: 'POST',
+      body: {
+        planFingerprint: preview.planFingerprint,
+        // The apply confirms the authority evidence the preview displayed, so
+        // what it showed has to be echoed back with the plan.
+        ...(preview.gitopsFingerprint ? { gitopsFingerprint: preview.gitopsFingerprint } : {}),
+        actions: preview.confirmableActions,
+      },
+    });
+    applied = result;
+    if (result.status === 200) break;
+    if (result.status !== 409 || result.body.code !== 'PREVIEW_STALE') break;
+  }
+  expect(applied?.status, `applying the plan: ${JSON.stringify(applied?.body)}`).toBe(200);
+}
+
 test.describe('GitOps digest drift', () => {
   test.skip(!dockerAvailable() && !process.env.CI, 'Docker with the Compose plugin is not available');
 
   // The reconciler ticks once a minute, so the drift poll covers a tick and the
   // observation that follows it, and the baseline poll covers the compose run.
   // These are ceilings rather than expected durations: the happy path takes about
-  // half a minute, and the CI job has a whole-suite budget to protect.
+  // half a minute, and the CI job has a whole-suite budget to protect. Both tests
+  // here are reconciler-driven, so each carries its own ceiling and the repair's
+  // ceiling covers a second tick on top of the detection it waits for.
   test.setTimeout(360_000);
 
   const stamp = Date.now();
@@ -273,27 +319,7 @@ test.describe('GitOps digest drift', () => {
     // refuses with PREVIEW_STALE. That one case is worth retrying with a fresh
     // preview, because the UI asks the operator to confirm again. Any other
     // failure is reported as it is, since retrying it would only repeat it.
-    let applied: { status: number; body: ApplyPayload } | null = null;
-    for (let attempt = 0; attempt < 4; attempt += 1) {
-      const preview = expectOk(
-        await jsonRequest<PreviewPayload>(page, `/api/blueprints/${blueprintId}/preview`),
-        'previewing the plan',
-      );
-      const result = await jsonRequest<ApplyPayload>(page, `/api/blueprints/${blueprintId}/apply`, {
-        method: 'POST',
-        body: {
-          planFingerprint: preview.planFingerprint,
-          // The apply confirms the authority evidence the preview displayed, so
-          // what it showed has to be echoed back with the plan.
-          ...(preview.gitopsFingerprint ? { gitopsFingerprint: preview.gitopsFingerprint } : {}),
-          actions: preview.confirmableActions,
-        },
-      });
-      applied = result;
-      if (result.status === 200) break;
-      if (result.status !== 409 || result.body.code !== 'PREVIEW_STALE') break;
-    }
-    expect(applied?.status, `applying the plan: ${JSON.stringify(applied?.body)}`).toBe(200);
+    await confirmPlan(page, blueprintId);
 
     // Only the projection is read after its poll, so it is the only field that
     // needs to outlive the callbacks that fill it.
@@ -405,6 +431,158 @@ test.describe('GitOps digest drift', () => {
     const stillApproved =
       afterUi.gitopsRevision?.targets?.[0]?.artifact?.expected?.services?.[0]?.platformDigest;
     expect(stillApproved, 'reading the expectation must not adopt the running image').toBe(pinned);
+  });
+
+  test('an Enforce Blueprint repairs a moved image back to the approved digest and reconverges', async ({ page }) => {
+    await loginAs(page);
+
+    const approvedDigests = repoDigests(approvedImage);
+    const movedDigests = repoDigests(movedImage);
+    const [pinned] = approvedDigests;
+    if (pinned === undefined) throw new Error(`${approvedImage} reported no repo digest`);
+    expect(
+      movedDigests.filter((digest) => approvedDigests.includes(digest)),
+      `${approvedImage} and ${movedImage} resolve to the same digest, so nothing would drift`,
+    ).toEqual([]);
+    const approvedRef = `nginx@${pinned}`;
+    const compose = `services:\n  web:\n    image: ${approvedRef}\n`;
+
+    const nodes = expectOk(await jsonRequest<NodeRow[]>(page, '/api/nodes'), 'listing nodes');
+    const local = nodes.find((node) => node.type === 'local');
+    expect(local, 'expected a local node to target').toBeTruthy();
+    const stackDir = `${local!.compose_dir}/${blueprintName}`;
+
+    // Observe first, then switch to Enforce once the drift is on the row. Going
+    // straight to Enforce would let the tick that detects the drift repair it in
+    // the same pass, so the row would never be observably drifted and the pass
+    // that picks a drifted row back up would go unproven. This way the row is
+    // provably drifted under Enforce before anything may repair it.
+    const created = await jsonRequest<{ id?: number; error?: string }>(page, '/api/blueprints', {
+      method: 'POST',
+      body: {
+        name: blueprintName,
+        compose_content: compose,
+        selector: { type: 'nodes', ids: [local!.id] },
+        drift_mode: 'observe',
+      },
+    });
+    expect(created.status, `creating the blueprint: ${JSON.stringify(created.body)}`).toBe(201);
+    if (typeof created.body.id !== 'number') {
+      throw new Error(`the create response carried no blueprint id: ${JSON.stringify(created.body)}`);
+    }
+    blueprintId = created.body.id;
+
+    await confirmPlan(page, blueprintId);
+
+    // The baseline has to be proven, not assumed: a mismatch that was already
+    // there at deploy time would otherwise be credited to the override below.
+    await expect
+      .poll(
+        async () => {
+          const detail = expectOk(
+            await jsonRequest<BlueprintDetail>(page, `/api/blueprints/${blueprintId}`),
+            'reading the blueprint',
+          );
+          const approved =
+            detail.gitopsRevision?.targets?.[0]?.artifact?.expected?.services?.[0]?.platformDigest ?? null;
+          return approved === pinned && detail.deployments.some((row) => row.status === 'active');
+        },
+        { timeout: 150_000, intervals: [1_000] },
+      )
+      .toBe(true);
+    expect(
+      containerImageReference(blueprintName, 'web'),
+      'the deploy must run the approved reference, or the override proves nothing',
+    ).toContain(`nginx@${pinned}`);
+
+    // Replace the running workload under the same project. The compose on disk
+    // still pins the approved digest, so the only thing that changed is what is
+    // actually running.
+    writeFileSync(overrideFile, `services:\n  web:\n    image: ${movedImage}\n`);
+    execFileSync(
+      'docker',
+      [
+        'compose', '-p', blueprintName,
+        '-f', `${stackDir}/compose.yaml`,
+        '-f', overrideFile,
+        'up', '-d', '--force-recreate', '--pull', 'never',
+      ],
+      { timeout: DOCKER_TIMEOUT_MS, stdio: 'pipe' },
+    );
+
+    // Observe records the drift and leaves it, which is what makes the row
+    // drifted rather than repaired on the pass that finds it.
+    await expect
+      .poll(
+        async () => {
+          const detail = expectOk(
+            await jsonRequest<BlueprintDetail>(page, `/api/blueprints/${blueprintId}`),
+            'reading the blueprint',
+          );
+          return detail.deployments.some((row) => row.status === 'drifted');
+        },
+        { timeout: 150_000, intervals: [2_000] },
+      )
+      .toBe(true);
+    const drifted = expectOk(
+      await jsonRequest<BlueprintDetail>(page, `/api/blueprints/${blueprintId}`),
+      'reading the drifted row',
+    ).deployments.find((row) => row.status === 'drifted');
+    expect(drifted?.drift_summary, 'a drifted row carries why it drifted').toBeTruthy();
+    expect(
+      containerImageReference(blueprintName, 'web'),
+      'the moved image is what is running until the repair lands',
+    ).not.toContain(`nginx@${pinned}`);
+
+    // Switch the policy on. The edit clears the approval, because the plan the
+    // operator confirmed described a different policy, so the plan is confirmed
+    // again against the same intent.
+    const switched = await jsonRequest<{ error?: string }>(page, `/api/blueprints/${blueprintId}`, {
+      method: 'PUT',
+      body: { drift_mode: 'enforce' },
+    });
+    expect(switched.status, `switching to enforce: ${JSON.stringify(switched.body)}`).toBe(200);
+    await confirmPlan(page, blueprintId);
+
+    // The row was already drifted when Enforce started, so the repair runs on a
+    // later pass than the one that recorded the drift. Either the confirm
+    // executes it or the next reconciler tick does; the poll covers both.
+    //
+    // What this covers is the cycle and the reconvergence, not the settle of a
+    // repair that could not complete: here the repair succeeds, so the row is
+    // never stranded in `correcting` across ticks. That path needs a refusal
+    // arranged on purpose, and it is pinned deterministically in
+    // `backend/src/__tests__/blueprints-inline-drift-repair-retry.test.ts`.
+    await expect
+      .poll(
+        async () => {
+          const detail = expectOk(
+            await jsonRequest<BlueprintDetail>(page, `/api/blueprints/${blueprintId}`),
+            'reading the blueprint',
+          );
+          const row = detail.deployments[0];
+          return row?.status === 'active' && row.drift_summary === null;
+        },
+        { timeout: 180_000, intervals: [2_000] },
+      )
+      .toBe(true);
+
+    // The repair restored the approved identity rather than adopting whatever
+    // the tag points at now, which is the whole point of a digest-pinned repair.
+    const repaired = containerImageReference(blueprintName, 'web');
+    expect(
+      repaired,
+      'the repaired workload must run the approved image identity',
+    ).toContain(`nginx@${pinned}`);
+
+    const after = expectOk(
+      await jsonRequest<DriftPayload>(page, `/api/stacks/${blueprintName}/drift`),
+      'reading drift after the repair',
+    );
+    expect(
+      after.gitopsRevision?.targets?.[0]?.artifact?.expected?.services?.[0]?.platformDigest,
+      'the expectation never moved to the running image',
+    ).toBe(pinned);
   });
 
   test.afterEach(async ({ page }) => {

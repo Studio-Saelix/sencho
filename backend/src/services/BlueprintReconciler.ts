@@ -747,6 +747,17 @@ export class BlueprintReconciler {
                 decision.check.push(node);
                 continue;
             }
+            // A drifted row at the current revision belongs to the drift check,
+            // for the same reason an active one does: the drift is still there
+            // until a check says otherwise, and under Enforce the check is what
+            // repairs it. The projection also reaches such a row through its own
+            // status fallback, so this changes nothing an operator sees; it is
+            // here so the decision a tick acts on is not two files away in the
+            // preview projection, which is no place to keep a recovery path.
+            if (dep.status === 'drifted' && dep.applied_revision === blueprint.revision) {
+                decision.check.push(node);
+                continue;
+            }
             // A held target keeps its check. The hold is a state, not a latch:
             // the cause can clear (a node returns, a rollout lands, a rollback
             // finishes), and this is the only thing that notices. Without it a
@@ -832,15 +843,27 @@ export class BlueprintReconciler {
                     });
                     return;
                 }
+                // Read before the attempt, because the answer to "is this failure
+                // new" cannot come from the row afterwards: a repair that reaches
+                // a deploy writes its own status and its own `last_error`, and it
+                // writes the very string it returns, so the row it leaves behind
+                // already looks like a failure someone has reported.
+                const before = DatabaseService.getInstance().getDeployment(blueprint.id, node.id);
                 commitBlueprintDeploymentCause('drift_enforce_start', blueprint.id, node.id, {
                     status: 'correcting',
                     last_checked_at: Date.now(),
                 }, null);
-                const result = cause === 'digest'
-                    ? await BlueprintService.getInstance().enforceDigestRepair(blueprint, node)
-                    : isGitManagedBlueprint(blueprint)
-                        ? await BlueprintService.getInstance().reapplyAuthorizedMaterialization(blueprint, node)
-                        : await BlueprintService.getInstance().deployToNode(blueprint, node);
+                let result: DeployOutcome;
+                try {
+                    result = await this.runDriftRepair(blueprint, node, cause);
+                } catch (err) {
+                    // A repair that throws has not written anything either, and
+                    // the row is already reading `correcting`, so it is settled
+                    // exactly like a refusal. Without this the throw escapes to
+                    // the per-blueprint catch and strands the row, which is the
+                    // same ambiguity a refusal used to leave.
+                    result = { status: 'failed', error: BlueprintService.formatError(err) };
+                }
                 // A hold is a decision, not a failed attempt. The repair
                 // re-resolved its authority and found it unprovable, so this
                 // tick records the hold and leaves no `correcting` row behind.
@@ -858,16 +881,120 @@ export class BlueprintReconciler {
                     return;
                 }
                 if (result.status !== 'active') {
-                    notifications.dispatchAlert(
-                        'error',
-                        'blueprint_drift_correction_failed',
-                        `Auto-fix for "${blueprint.name}" ${nodeLocationClause(node)} failed: ${result.error ?? 'unknown error'}`,
-                        { stackName: blueprint.name, actor: 'system:blueprint' },
-                    );
+                    // Losing a race for the deploy lock is not a failure and
+                    // carries no message of its own. The row still has to leave
+                    // `correcting` so the next tick picks it up, and it says why
+                    // it is being deferred, but there is nothing to page about.
+                    const deferred = result.status === 'pending';
+                    const failure = deferred
+                        ? 'repair deferred: another operation holds this deployment'
+                        : result.error ?? 'unknown error';
+                    // A refusal that wrote no status of its own is settled here,
+                    // so the row never keeps reading `correcting` and the next
+                    // tick gets to try again. The alert is for a failure that is
+                    // new, so a refusal that persists retries every tick without
+                    // paging every tick.
+                    const isNew = this.settleRefusedDriftRepair(blueprint, node, failure, before);
+                    if (isNew && !deferred) {
+                        notifications.dispatchAlert(
+                            'error',
+                            'blueprint_drift_correction_failed',
+                            `Auto-fix for "${blueprint.name}" ${nodeLocationClause(node)} failed: ${failure}`,
+                            { stackName: blueprint.name, actor: 'system:blueprint' },
+                        );
+                    }
                 }
                 return;
             }
         }
+    }
+
+    /**
+     * Run the repair a drift calls for.
+     *
+     * Three methods, one per cause, because a frozen image identity must be
+     * restored through the approved digest rather than by tag, and a Git-managed
+     * target has no authored compose to deploy at all. A throw is left to the
+     * caller, which settles the row: every one of these can reject before it
+     * writes anything.
+     */
+    private runDriftRepair(blueprint: Blueprint, node: Node, cause: DriftCause): Promise<DeployOutcome> {
+        if (cause === 'digest') {
+            return BlueprintService.getInstance().enforceDigestRepair(blueprint, node);
+        }
+        if (isGitManagedBlueprint(blueprint)) {
+            return BlueprintService.getInstance().reapplyAuthorizedMaterialization(blueprint, node);
+        }
+        return BlueprintService.getInstance().deployToNode(blueprint, node);
+    }
+
+    /**
+     * Settle a drift repair that refused, and report whether the operator needs
+     * telling about it.
+     *
+     * `drift_enforce_start` writes `correcting` before the repair runs, so any
+     * repair path that answers without reaching a deploy leaves the row there.
+     * A `correcting` row is skipped by the decision buckets and projected as
+     * informational, so nothing would re-examine it: the drift would sit
+     * unrepaired, with the wrong image still running, behind a single alert.
+     * A repair that reaches a deploy writes its own terminal status, and a hold
+     * writes its own row, so the row is only rewritten when the refusal wrote
+     * nothing at all.
+     *
+     * Such a row returns to `drifted` because the drift is still real and still
+     * owed a repair, and `drifted` is re-checked on every following tick.
+     * Writing `failed` or `pending` instead would be a worse answer: both are
+     * retry buckets for an ordinary deploy, so the next tick would repair by tag
+     * and adopt whatever the tag points at now, which is exactly what a
+     * digest-pinned repair exists to prevent.
+     *
+     * The alert is for a failure that is **new**, judged against the row as it
+     * stood before this tick's attempt. That snapshot is the only honest basis
+     * for it: a repair that reaches a deploy writes its own status and its own
+     * `last_error`, and it writes the very string it returns, so the row it
+     * leaves behind already looks like a failure someone reported. Comparing
+     * against the row afterwards would silence the first real failure of every
+     * kind, and comparing `last_error` alone would go on silencing a failure
+     * that recurs after the drift converged in between.
+     *
+     * The key is a message rather than a code because every refusal that reaches
+     * here answers with a constant string: the preconditions in the digest repair
+     * and the authorized reapply, a lock the deploy could not take, or the thrown
+     * error of a repair that failed outright. A code column is the thing to add
+     * if a refusal ever starts composing its own text.
+     *
+     * Every tick of a persistent refusal records a `blueprint_correcting` and a
+     * `blueprint_drifted` observation, so the history grows by two rows a minute
+     * while it persists. That is left in place deliberately: the row really does
+     * move between the two states on every attempt, and the projection reads the
+     * latest stage, so suppressing either write would leave the history claiming
+     * a state the row is not in. A hold, which does not move, suppresses instead.
+     */
+    private settleRefusedDriftRepair(
+        blueprint: Blueprint,
+        node: Node,
+        failure: string,
+        before: BlueprintDeployment | undefined,
+    ): boolean {
+        const row = DatabaseService.getInstance().getDeployment(blueprint.id, node.id);
+        // A repair that reached a deploy wrote its own terminal status, and a
+        // hold wrote its own row. Only the refusals that wrote nothing are
+        // settled here.
+        const stranded = row?.status === 'correcting';
+        if (stranded) {
+            // `last_drift_at` is deliberately left alone. It answers when this
+            // drift episode began, and it is the same drift still owed a repair,
+            // so restamping it would report the drift as brand new on every
+            // retry and hide how long it has actually been standing.
+            commitBlueprintDeploymentCause('drift_observed', blueprint.id, node.id, {
+                status: 'drifted',
+                last_checked_at: Date.now(),
+                last_error: failure,
+            }, null);
+        }
+        const nowStatus = stranded ? 'drifted' : row?.status;
+        const nowError = stranded ? failure : row?.last_error;
+        return nowStatus !== before?.status || nowError !== before?.last_error;
     }
 
     /**
@@ -1006,6 +1133,11 @@ export class BlueprintReconciler {
             last_checked_at: Date.now(),
             last_drift_at: null,
             drift_summary: null,
+            // Cleared with the drift, like the deploy acknowledgement clears it.
+            // Left behind, it would keep naming a failure that has since been
+            // repaired, and a failure that recurs after this would be read as one
+            // already reported.
+            last_error: null,
         }, null);
     }
 
