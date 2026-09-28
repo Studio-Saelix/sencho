@@ -414,6 +414,24 @@ describe('useStackActions.handleSaveAndPullImages', () => {
     expect(errorTexts()[0]).toContain('Image pull failed');
   });
 
+  // The mixed-version-fleet shape: the save half lands, then the node that has no
+  // copy of this action answers 404 with its own unmatched-/api body. That body is
+  // the only thing carrying the reason, so the toast has to keep it verbatim rather
+  // than substituting a generic sentence, and the save half must still be reported
+  // separately. The Compose Editor page states this exact outcome.
+  it('names the missing endpoint when the node has no copy of the action', async () => {
+    mockPullChain({
+      pull: new Response(JSON.stringify({ error: 'API endpoint not found' }), {
+        status: 404,
+        headers: { 'Content-Type': 'application/json' },
+      }),
+    });
+    const { result } = setup();
+    await result.current.handleSaveAndPullImages(pullEvent());
+    expect(successTexts()).toEqual(['File saved successfully!']);
+    expect(errorTexts()).toEqual(['Image pull failed: API endpoint not found']);
+  });
+
   it('condenses a multi-line compose failure to its error lines in the toast', async () => {
     const output = [
       ' db Pulling',

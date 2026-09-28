@@ -158,6 +158,8 @@ Downloading images is distinct from the **Pull now** action in the Git source di
 
 The action runs the same checks every other Compose operation runs before it touches the stack, so it refuses rather than half-applies in two cases. If the stack's repository secrets are SOPS-encrypted, the editor's mutating actions are refused and the stack has to be applied through Git so the secrets are decrypted in a controlled overlay. If **Block deploy on missing required env vars** is on in **Settings → Infrastructure → Stacks** and a required variable is unset, the pull is refused with the same message **Save & Deploy** and **Update** give, and no images are downloaded.
 
+Against a node whose Sencho instance does not include this action, only the download half fails. The file is written before the download is attempted, so your edit is on disk, no image is downloaded, and no running container is touched. The toast reports the image pull as failed and names the refusal rather than its cause. Update that node, then run **Save & Pull Images** again: the second run reads the file already on disk and downloads the images from it. See [Node Compatibility](/features/node-compatibility) for how Sencho handles version differences across a fleet.
+
 The same controls apply to the `compose.yaml` and `.env` editors.
 
 ## Diff preview before save
@@ -261,6 +263,9 @@ Sencho tries `/bin/bash` first and transparently falls back to `/bin/sh` if bash
   </Accordion>
   <Accordion title='"Image pull failed" toast appears when I click Save & Pull Images'>
     Both halves are reported separately, so this toast means the file **was** written and your edits are safe on disk; the download of its registry images is what failed, usually because a registry is unreachable or a credential was rejected. No running container was touched. The toast quotes the error lines Compose reported, which usually name the service whose image failed. To see which images did arrive, open the progress panel: it streams the full output image by image, and the toast does not carry that per-image detail. Fix the registry problem and run **Save & Pull Images** again.
+  </Accordion>
+  <Accordion title='"Image pull failed" toast names a missing API endpoint on a remote node'>
+    The node does not implement the download itself, which is what a fleet with nodes on different Sencho versions looks like when the node has no copy of this action. The compose file was still written before the refusal, so your edit is on disk, no image was downloaded, and no running container changed. Update that node from the Fleet view, then run **Save & Pull Images** again on it; the second run reads the file already on disk and downloads the images from it. The version a node runs appears next to its name in the node switcher once you have visited that node, and **Settings · Nodes** shows it directly in the connection details.
   </Accordion>
   <Accordion title="Switching nodes prompts me to discard unsaved changes">
     The editor blocks a silent loss of in-progress edits. Click **Cancel** to return to the original node with your edits intact; click **Discard** to abandon them and proceed to the other node.
