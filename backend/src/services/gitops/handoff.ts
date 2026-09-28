@@ -574,9 +574,19 @@ export function frozenStrategyFor(
   const healthPolicy = decodeIntentHealthPolicy(intent?.health_failure_rollback_policy_json);
   return encodeFrozenRolloutStrategy({
     healthPolicy,
-    driftMode: intent?.runtime_drift_policy ?? null,
+    // The mode in force when the rollout is authorized, not the one the intent
+    // happened to be minted with. A drift-mode-only edit mints no intent by
+    // design, so freezing the snapshot would record a mode the operator has
+    // already changed.
+    driftMode: liveDriftMode(app, intent?.runtime_drift_policy ?? null),
     enabled: intent ? decodeEnabled(intent.rollout_strategy_json) : null,
   });
+}
+
+/** The Blueprint's current drift mode, falling back to the intent's snapshot. */
+function liveDriftMode(app: GitOpsApplicationRow, snapshot: string | null): string | null {
+  if (app.blueprint_id === null) return snapshot;
+  return DatabaseService.getInstance().getBlueprint(app.blueprint_id)?.drift_mode ?? snapshot;
 }
 
 /** Whether the intent's Blueprint was enabled when it was minted. */

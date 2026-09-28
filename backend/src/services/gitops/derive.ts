@@ -6,6 +6,7 @@ import {
   GitOpsJsonError,
   type ObservedArtifactIdentity,
 } from './json';
+import { DatabaseService } from '../DatabaseService';
 import { GitOpsStore } from './store';
 import { comparableObservationMatches } from './artifactIdentity';
 import { runningGenerationForTarget } from './recoveryCapture';
@@ -369,7 +370,7 @@ function collectPlacementDrift(
   const store = GitOpsStore.getInstance();
   const intent = app.intent_revision_id ? store.getIntentRevision(app.intent_revision_id) : undefined;
   if (!intent || intent.application_id !== app.id) return [];
-  const policy = blueprintDriftPolicy(intent);
+  const policy = blueprintDriftPolicy(app, intent);
   const candidate = app.rollout_candidate_id ? store.getRolloutCandidate(app.rollout_candidate_id) : undefined;
   const candidateBelongs = candidate && candidate.application_id === app.id
     && candidate.intent_revision_id === app.intent_revision_id;
@@ -665,8 +666,21 @@ function configuredGitSourcePolicy(app: GitOpsApplicationRow): ConfiguredPolicy 
   };
 }
 
-function blueprintDriftPolicy(intent: GitOpsIntentRevisionRow): ConfiguredPolicy {
-  const mode = intent.runtime_drift_policy;
+/**
+ * The drift mode the Blueprint is configured with right now.
+ *
+ * The live Blueprint wins over the intent's snapshot, because the drift mode is
+ * a policy the operator sets on the Blueprint and a mode-only edit deliberately
+ * mints no new intent. Reading the snapshot alone left the reported mode stale
+ * after every mode change until the next edit that did mint one, and an
+ * explanation of "what Sencho will do here" that names the wrong mode is worse
+ * than no explanation.
+ */
+function blueprintDriftPolicy(app: GitOpsApplicationRow, intent: GitOpsIntentRevisionRow): ConfiguredPolicy {
+  const live = app.blueprint_id === null
+    ? null
+    : DatabaseService.getInstance().getBlueprint(app.blueprint_id)?.drift_mode;
+  const mode = live ?? intent.runtime_drift_policy;
   if (mode === 'observe' || mode === 'suggest' || mode === 'enforce') {
     return { kind: 'blueprint_drift', driftMode: mode };
   }
