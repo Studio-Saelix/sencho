@@ -4,6 +4,7 @@ import { FACET_EVIDENCE_SOURCE } from '../services/gitops/types';
 import { GitOpsStore, emptyTargetRow } from '../services/gitops/store';
 import { GitOpsTransitions, type EventEnvelope } from '../services/gitops/transitions';
 import { deriveGitOpsRevision, projectApplication } from '../services/gitops/derive';
+import { attentionReasons } from '../services/gitops/attention';
 import { DatabaseService } from '../services/DatabaseService';
 import type {
   FutureGitOpsEvidence,
@@ -1521,6 +1522,223 @@ describe('gitops derivation', () => {
     if (projection.targetMode === 'not_applicable') throw new Error('expected application');
     expect(projection.targets[0]?.runtime.status).toBe('synced_and_healthy');
     expect(projection.drift).toHaveLength(0);
+  });
+
+  /**
+   * A drift the Blueprint reconciler recorded, rather than one the pointer
+   * comparison found.
+   *
+   * The reconciler observes a node and records the result as its own runtime
+   * status, `drifted`, which outranks the pointer and artifact comparisons in
+   * `deriveRuntime`. So a Blueprint digest drift arrives here carrying that
+   * status, and the item has to be built from it or the canonical list says
+   * nothing about an application the deployment row calls drifted.
+   *
+   * Pinned in five directions: an item naming the service and digest that
+   * moved, the rollout class reported once rather than twice, a correction in
+   * progress reported as progress, an unverified observation reported as
+   * unverified rather than as agreement or as divergence, and a converged
+   * observation reported as nothing at all.
+   */
+  describe('a Blueprint reconciler observation reaches the canonical drift list', () => {
+    const approved = `sha256:${'a'.repeat(64)}`;
+    const moved = `sha256:${'b'.repeat(64)}`;
+    const approvedService = (): ServiceArtifactEvidence => ({
+      serviceName: 'web',
+      authoredRef: 'nginx:1.27',
+      source: 'registry',
+      platform: 'linux/amd64',
+      indexDigest: `sha256:${'1'.repeat(64)}`,
+      platformDigest: approved,
+      platformVariants: null,
+      localDigests: null,
+      buildContextFingerprint: null,
+      producedImageId: null,
+      failureClass: null,
+      resolvedAt: 1,
+    });
+    /** A running web whose approved child is not among the digests it reports. */
+    const movedService = (): ServiceArtifactEvidence => ({
+      ...approvedService(),
+      platformDigest: moved,
+      localDigests: [moved],
+    });
+
+    /**
+     * A deployed Blueprint target, converged on its pointers, that recorded
+     * `latest_stage` as the observation the reconciler left behind. The
+     * generation pointers all agree, so the only thing that can produce a
+     * runtime item here is the observation.
+     */
+    function seedObservedBlueprint(
+      applicationId: string,
+      blueprintId: number,
+      stage: 'blueprint_drifted' | 'blueprint_correcting',
+      observed: Parameters<typeof encodeObservedArtifactIdentity>[0],
+    ): void {
+      const store = GitOpsStore.getInstance();
+      const generationId = `gen-${applicationId}`;
+      const artifactSetId = `art-${applicationId}`;
+      store.insertGeneration(gen(generationId, applicationId));
+      store.insertArtifactSet({
+        id: artifactSetId,
+        generation_id: generationId,
+        evidence_version: 1,
+        authoritative: 0,
+        qualification: 'exact',
+        evidence_json: encodeArtifactEvidenceJson({
+          kind: 'exact',
+          identity: `sha256:${'c'.repeat(64)}`,
+          services: [approvedService()],
+        }),
+        created_at: 1,
+      });
+      store.insertApplication(rawApp(applicationId, {
+        target_mode: 'blueprint',
+        blueprint_id: blueprintId,
+        lifecycle_key: `blueprint:${blueprintId}`,
+        stack_name: null,
+        configured_source_stack_name: null,
+        accepted_generation_id: generationId,
+        artifact_set_id: artifactSetId,
+        latest_artifact_set_id: artifactSetId,
+      }));
+      store.upsertTarget({
+        ...emptyTargetRow(applicationId, 1, 1),
+        desired_generation_id: generationId,
+        applied_generation_id: generationId,
+        deployed_generation_id: generationId,
+        expected_artifact_set_id: artifactSetId,
+        latest_artifact_set_id: artifactSetId,
+        latest_stage: stage,
+        observed_artifact_identity_json: encodeObservedArtifactIdentity(observed),
+      });
+    }
+
+    it('reports one runtime item naming the service and digest that moved', () => {
+      seedObservedBlueprint('app-obs-drifted', 301, 'blueprint_drifted', {
+        kind: 'exact',
+        identity: `sha256:${'d'.repeat(64)}`,
+        observedAt: 42,
+        services: [movedService()],
+      });
+
+      const projection = projectApplication('app-obs-drifted', false);
+      if (projection.targetMode === 'not_applicable') throw new Error('expected application');
+      // The observation is what the target reports, and the item has to be
+      // built from it: a converged pointer set alone would report nothing.
+      expect(projection.targets[0]?.runtime.status).toBe('drifted');
+      expect(projection.drift).toHaveLength(1);
+      const item = projection.drift[0];
+      expect(item?.class).toBe('runtime');
+      expect(item?.owner).toBe('observed_artifact_identity');
+      expect(item?.freshnessAt).toBe(42);
+      expect(item?.affectedTargets).toEqual([{ nodeId: 1, stackName: null }]);
+      // The identity alone is a fingerprint over the set, so the per-service
+      // evidence is the only way the item can name what actually moved.
+      expect(item?.observed).toMatchObject({
+        kind: 'runtime_artifact',
+        observedAt: 42,
+        services: [{ serviceName: 'web', platformDigest: moved }],
+      });
+      // The reason the item exists: the attention queue reads the canonical
+      // list, so an application whose deployment row says drifted has to reach
+      // the operator through it.
+      expect(attentionReasons(projection)).toContain('drift');
+    });
+
+    it('reports a rollout-authorized target once, as the rollout class', () => {
+      const store = GitOpsStore.getInstance();
+      seedObservedBlueprint('app-obs-rollout', 302, 'blueprint_drifted', {
+        kind: 'exact',
+        identity: `sha256:${'d'.repeat(64)}`,
+        observedAt: 42,
+        services: [movedService()],
+      });
+      // The same target, now bound to an authorized rollout. Its identity
+      // disagrees with the approved set, and the class answers whose authority
+      // that is, so it must be reported once as rollout rather than also as
+      // runtime.
+      const target = store.getTarget('app-obs-rollout', 1)!;
+      store.upsertTarget({ ...target, rollout_authorization_ref: 'auth-obs-1' });
+
+      const projection = projectApplication('app-obs-rollout', false);
+      if (projection.targetMode === 'not_applicable') throw new Error('expected application');
+      expect(projection.drift).toHaveLength(1);
+      expect(projection.drift[0]?.class).toBe('rollout');
+    });
+
+    it('reports nothing for a drift Enforce is correcting on this pass', () => {
+      seedObservedBlueprint('app-obs-correcting', 303, 'blueprint_correcting', {
+        kind: 'exact',
+        identity: `sha256:${'d'.repeat(64)}`,
+        observedAt: 42,
+        services: [movedService()],
+      });
+
+      const projection = projectApplication('app-obs-correcting', false);
+      if (projection.targetMode === 'not_applicable') throw new Error('expected application');
+      // A repair in flight is progress. The target still reports the old
+      // identity, so reporting it would describe a divergence the model is
+      // actively resolving as though it had settled.
+      expect(projection.targets[0]?.runtime.status).toBe('correcting');
+      expect(projection.drift).toHaveLength(0);
+    });
+
+    it('reports nothing when the recorded observation is unverified', () => {
+      seedObservedBlueprint('app-obs-unverified', 304, 'blueprint_drifted', { kind: 'unavailable' });
+
+      const projection = projectApplication('app-obs-unverified', false);
+      if (projection.targetMode === 'not_applicable') throw new Error('expected application');
+      // The target says it drifted, but it cannot say what is running, so the
+      // model has no identity to compare. Silence here is the honest answer;
+      // asserting a divergence would be claiming evidence nobody recorded.
+      expect(projection.drift).toHaveLength(0);
+    });
+
+    it('reports nothing when the recorded observation agrees with the approved set', () => {
+      seedObservedBlueprint('app-obs-converged', 305, 'blueprint_drifted', {
+        kind: 'exact',
+        identity: `sha256:${'c'.repeat(64)}`,
+        observedAt: 42,
+        services: [approvedService()],
+      });
+
+      const projection = projectApplication('app-obs-converged', false);
+      if (projection.targetMode === 'not_applicable') throw new Error('expected application');
+      // The stage is the last thing the reconciler recorded, and it can be
+      // superseded. The comparison is made against the evidence rather than
+      // against the stage, so a target whose digests match reports nothing.
+      expect(projection.drift).toHaveLength(0);
+      expect(attentionReasons(projection)).not.toContain('drift');
+    });
+
+    it('does not blame a running workload for a drift the reconciler could have caused another way', () => {
+      // The reconciler records the same stage for a digest mismatch, a revision
+      // mismatch, and a container that is not running, and it refreshes the
+      // stored observation only on the first, so a `drifted` target's identity
+      // is the last one that was observed. The cause is on the Blueprint
+      // deployment row, which this projection does not read, so the item must
+      // not assert a cause it cannot prove.
+      seedObservedBlueprint('app-obs-stale', 306, 'blueprint_drifted', {
+        kind: 'exact',
+        identity: `sha256:${'d'.repeat(64)}`,
+        observedAt: 42,
+        services: [movedService()],
+      });
+
+      const projection = projectApplication('app-obs-stale', false);
+      if (projection.targetMode === 'not_applicable') throw new Error('expected application');
+      expect(projection.drift).toHaveLength(1);
+      // If the container is down, nothing is running, and "the running workload
+      // reports" would send an operator to compare digests instead of looking
+      // at the node. The comparison that was made is the claim; the cause is the
+      // facet's to report, and the evidence's age is on the item.
+      expect(projection.drift[0]?.reason).toBe(
+        'the last artifact identity observed for this target differs from the expected artifact set',
+      );
+      expect(projection.drift[0]?.freshnessAt).toBe(42);
+    });
   });
 
   /**

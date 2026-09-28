@@ -80,7 +80,7 @@ export type GitOpsIdentityRef =
   | { kind: 'commit'; sha: string; repoUrl: string; ref: string }
   | { kind: 'generation'; id: string }
   | { kind: 'artifact_set'; id: string; qualification: ArtifactQualification; evidenceVersion: number }
-  | { kind: 'runtime_artifact'; identity: string; observedAt: number | null }
+  | { kind: 'runtime_artifact'; identity: string; observedAt: number | null; services?: ServiceArtifactEvidence[] }
   | { kind: 'intent'; id: string; composeContentSha256: string }
   | { kind: 'rollout_candidate'; id: string }
   | { kind: 'rollout_generation'; id: string }

@@ -237,12 +237,9 @@ function collectRuntimeDrift(
       });
     }
     // Artifact mismatch: comparable exact/qualified expectation vs observation.
-    // Per-node Direct (and unbound) mismatch stays runtime class;
-    // authorized-rollout disagreement is rollout class.
-    const driftClass =
-      target.runtime.status === 'rollout_artifact_drift' ? 'rollout'
-        : target.runtime.status === 'runtime_artifact_drift' ? 'runtime'
-          : null;
+    // Which of the two runtime-family classes it belongs to is the helper's
+    // call, because a Blueprint's reconciler observation reports it too.
+    const driftClass = runtimeDriftClass(target);
     if (!driftClass) continue;
     const expected = target.artifact.status !== 'not_applicable' && 'expected' in target.artifact
       ? target.artifact.expected
@@ -259,18 +256,99 @@ function collectRuntimeDrift(
         qualification: expected.qualification,
         evidenceVersion: expected.evidenceVersion,
       },
-      observed: { kind: 'runtime_artifact', identity: observed.identity, observedAt: observed.observedAt },
+      observed: {
+        kind: 'runtime_artifact',
+        identity: observed.identity,
+        observedAt: observed.observedAt,
+        // The identity is a fingerprint over the set, so on its own the item
+        // cannot say which service moved to which digest. The expected side is
+        // a pointer to a stored set that a reader resolves itself; the observed
+        // side was inlined, so its per-service evidence travels with it.
+        services: observed.services,
+      },
       freshnessAt: observed.observedAt,
       owner: 'observed_artifact_identity',
-      reason: driftClass === 'rollout'
-        ? 'a required rollout target reports an artifact identity other than the approved rollout set'
-        : 'the running workload reports an artifact identity other than the expected artifact set',
+      reason: reasonForRuntimeDrift(target.runtime.status, driftClass),
       configuredPolicy: null,
       affectedTargets: [{ nodeId: target.nodeId, stackName: app.stack_name }],
       action: 'none',
     });
   }
   return items;
+}
+
+/**
+ * Why a runtime-family item is reported, in words that stay true for every
+ * cause that can produce one.
+ *
+ * The two artifact-identity statuses are decided by comparing an expected set
+ * against an observation on rows written by a deploy, so the workload behind
+ * the observation is the one that is running, and the reason can say so.
+ *
+ * `drifted` is different, and this is the case worth being careful about. The
+ * Blueprint reconciler records that status for three causes: a digest
+ * mismatch, a revision mismatch, and a container that is not running. It
+ * refreshes the stored observation only on the first, because the other two
+ * return before it reads the node, so the identity this item compares is the
+ * last one that was observed, not necessarily a current reading. The cause is
+ * held on the Blueprint deployment row, which this projection does not read and
+ * which a remote node's hub has no copy of, so the item cannot name it. The
+ * reason therefore states the comparison that was actually made and leaves the
+ * cause to the facet, which does report `drifted`. `freshnessAt` carries the
+ * observation's own timestamp, so a reader can see how old the evidence is.
+ */
+function reasonForRuntimeDrift(
+  status: RuntimeFacet['status'],
+  driftClass: 'runtime' | 'rollout',
+): string {
+  if (status === 'drifted') {
+    return 'the last artifact identity observed for this target differs from the expected artifact set';
+  }
+  return driftClass === 'rollout'
+    ? 'a required rollout target reports an artifact identity other than the approved rollout set'
+    : 'the running workload reports an artifact identity other than the expected artifact set';
+}
+
+/**
+ * Which runtime-family class a target's artifact divergence belongs to, or null
+ * when the status is not a candidate for one. Whether it is actually reported
+ * is decided by the evidence guards at the call site, not here.
+ *
+ * The class answers whose authority the divergence is from, which is a fact
+ * about the target rather than about the status: a target bound to an
+ * authorized rollout answers `rollout`, everything else answers `runtime`.
+ * `deriveRuntime` picks `rollout_artifact_drift` over `runtime_artifact_drift`
+ * on that same test, so for those two statuses the class is the one the target's
+ * own facet already implies. `drifted` names no class in that vocabulary, which
+ * is why the same test is what answers for it, and why its reason is worded
+ * separately by `reasonForRuntimeDrift`.
+ *
+ * A rollout target is therefore reported once as rollout, not also as runtime:
+ * one target yields at most one item for this comparison, whatever class it
+ * lands in. (A target whose desired and deployed generations also disagree is a
+ * different comparison and keeps its own item, which is unchanged by this.)
+ *
+ * `drifted` is in this set because it is how a Blueprint reports a drift the
+ * reconciler observed. That observation outranks the pointer and artifact
+ * comparisons in `deriveRuntime`, so a recorded Blueprint digest drift arrives
+ * carrying this status rather than either of the two above, and without it the
+ * canonical list would say nothing about an application the deployment row
+ * already calls drifted. The comparison against the expected set is what
+ * decides whether it is reported, so a stale stage, an unverified observation,
+ * or a digest that has since been corrected reports nothing.
+ *
+ * `correcting` is deliberately absent: a divergence Enforce is repairing on
+ * this pass is work in progress, and reporting it would describe a repair as a
+ * settled divergence.
+ */
+function runtimeDriftClass(target: GitOpsTargetProjection): 'runtime' | 'rollout' | null {
+  const { status } = target.runtime;
+  if (status !== 'runtime_artifact_drift' && status !== 'rollout_artifact_drift' && status !== 'drifted') {
+    return null;
+  }
+  return target.rolloutGenerationId !== null || target.approvals.rolloutAuthorizationRef !== null
+    ? 'rollout'
+    : 'runtime';
 }
 
 /**

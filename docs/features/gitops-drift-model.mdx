@@ -79,6 +79,7 @@ Work in progress is not drift, and the classes above stay silent while it happen
 - a rollout that is queued, canarying, batching, or waiting on its health verdict
 - a manifest being written as part of an apply that has not landed on the node yet
 - a node that is deploying, interrupted, or recovering
+- a drift that Enforce is repairing on its current pass, which is why the Blueprint deployment row reads as correcting rather than drifted
 - a target that has not been deployed yet, or has never had one recorded
 
 Those states have their own surfaces, and each one names the next step. A node running a different generation than the one it was asked for is a separate class of its own, and is reported whether or not something else about that node is in flight.
