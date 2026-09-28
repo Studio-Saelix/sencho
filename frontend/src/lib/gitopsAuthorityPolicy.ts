@@ -118,6 +118,12 @@ export function policyDecisionLabel(read: AuthorityPolicyRead): string {
  * the operator's next move depends on the former and not the latter.
  */
 const PLACEMENT_REASON_TEXT: Record<string, string> = {
+  // Kept although this build's backend never records it, because a node running
+  // an earlier build still does. This dashboard reads the reason from whichever
+  // node owns the application, so during an upgrade a mixed fleet can hand this
+  // string back, and dropping the entry would put a raw enum in front of an
+  // operator instead of a sentence. The stored value is constrained to the
+  // closed vocabulary, so the map is the only place that has to know.
   policy_is_operator: 'The placement policy asks for an operator.',
   no_placement_change: 'The plan asks for the nodes that are already placed.',
   mixed_add_and_remove: 'The plan both places and withdraws nodes at once.',

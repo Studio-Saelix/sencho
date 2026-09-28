@@ -42,6 +42,31 @@ let tmpDir: string;
  * placement decision look correct while it was reading a directory the source
  * path never writes to, and that is how a renamed stack went unnoticed.
  */
+function writeComposeInto(
+  stackName: string,
+  dir: string,
+  compose: string,
+  composePaths: readonly string[],
+): void {
+  const base = path.resolve(stackManagedRoot(stackName), dir);
+  fs.mkdirSync(base, { recursive: true });
+  for (const local of composePaths) {
+    fs.mkdirSync(path.dirname(path.join(base, local)), { recursive: true });
+    fs.writeFileSync(path.join(base, local), compose, 'utf8');
+  }
+}
+
+/**
+ * Stage a generation the way one that has been promoted exists on disk.
+ *
+ * Promotion removes the applied directory and renames the candidate over it, so
+ * a promoted generation has content under the applied directory and nothing at
+ * all under the candidate path its row still names. Staging only the candidate,
+ * as this file did for every case, describes a generation that has been accepted
+ * but not yet promoted, which is the narrowest window in the whole lifecycle and
+ * the one an install spends least time in. A reader resolving only the candidate
+ * passed every test here and then found nothing on every real generation.
+ */
 function writeStagedCompose(
   stackName: string,
   generationId: string,
@@ -49,16 +74,25 @@ function writeStagedCompose(
   composePaths: readonly string[] = ['compose.yaml'],
 ): string {
   const candidateDir = `generations/candidate-${generationId}`;
-  const base = path.resolve(stackManagedRoot(stackName), candidateDir);
-  fs.mkdirSync(base, { recursive: true });
-  composePaths.forEach((local, index) => {
-    fs.mkdirSync(path.dirname(path.join(base, local)), { recursive: true });
-    fs.writeFileSync(path.join(base, local), index === 0 ? compose : compose, 'utf8');
-  });
+  writeComposeInto(stackName, candidateDir, compose, composePaths);
   return candidateDir;
 }
 
-function generation(id: string, applicationId: string, candidateDir: string): GitOpsGenerationRow {
+function writePromotedCompose(
+  stackName: string,
+  generationId: string,
+  compose: string,
+  composePaths: readonly string[] = ['compose.yaml'],
+): { candidateDir: string; appliedDir: string } {
+  const candidateDir = `generations/candidate-${generationId}`;
+  const appliedDir = `generations/applied-${generationId}-0`;
+  // Only the applied directory exists. The candidate path is left absent on
+  // purpose, because that is what the rename leaves behind.
+  writeComposeInto(stackName, appliedDir, compose, composePaths);
+  return { candidateDir, appliedDir };
+}
+
+function generation(id: string, applicationId: string, candidateDir: string, appliedDir?: string): GitOpsGenerationRow {
   return {
     id,
     application_id: applicationId,
@@ -69,7 +103,7 @@ function generation(id: string, applicationId: string, candidateDir: string): Gi
     repo_identity_json: '{"host":"example.invalid","pathname":"/x.git"}',
     manifest_version: 0,
     candidate_dir: candidateDir,
-    applied_dir: `generations/applied-${id}-0`,
+    applied_dir: appliedDir ?? `generations/applied-${id}-0`,
     expected_invocation_json: '{"composeFileOrder":[],"projectName":null,"projectDirectory":null,"envFileOrder":[]}',
     materialization_fingerprint: 'a'.repeat(64),
     validation_ok: 1,
@@ -183,6 +217,8 @@ function seed(opts: {
   accepted?: boolean;
   /** The multi-file shape, which is analyzed one file at a time. */
   composePaths?: readonly string[];
+  /** Stage the generation as promoted: content under applied_dir only. */
+  promoted?: boolean;
 }): GitOpsApplicationRow {
   const store = GitOpsStore.getInstance();
   const app = application({
@@ -195,12 +231,11 @@ function seed(opts: {
   // follows the stack, not the Blueprint.
   const deployStackName = `bp-${app.id}`;
   const stagedStackName = app.configured_source_stack_name ?? deployStackName;
-  const candidateDir = writeStagedCompose(
-    stagedStackName,
-    generationId,
-    opts.compose ?? 'services:\n  web:\n    image: nginx:1.25\n',
-    opts.composePaths,
-  );
+  const compose = opts.compose ?? 'services:\n  web:\n    image: nginx:1.25\n';
+  const composePaths = opts.composePaths ?? ['compose.yaml'];
+  const dirs = opts.promoted
+    ? writePromotedCompose(stagedStackName, generationId, compose, composePaths)
+    : { candidateDir: writeStagedCompose(stagedStackName, generationId, compose, composePaths), appliedDir: undefined };
   if (opts.accepted !== false) {
     app.accepted_generation_id = generationId;
   }
@@ -246,7 +281,7 @@ function seed(opts: {
     },
     envelope: { operationId: `op-${app.id}`, actor: 'tester', trigger: 'test', at: 1 },
   });
-  store.insertGeneration(generation(generationId, app.id, candidateDir));
+  store.insertGeneration(generation(generationId, app.id, dirs.candidateDir, dirs.appliedDir));
   void opts.cordoned;
   return app;
 }
@@ -588,6 +623,62 @@ describe('a bounded_auto application reaches an approval', () => {
     );
 
     const outcome = applyAutomaticPlacement(app.id, { operationId: 'op-multifile-2', actor: null, trigger: 'test', at: 1 });
+    expect(outcome).toEqual({ status: 'operator_review', reason: 'stateful_workload' });
+  });
+
+  it('approves a stateless addition on a generation that has already been promoted', () => {
+    // The steady-state case, and the one bounded-auto exists for. Promotion
+    // renames the candidate directory over the applied one, so a promoted
+    // generation has no candidate directory at all. Reading only the candidate
+    // meant every placement after the first rollout read as an unknown workload,
+    // and the feature only worked between source acceptance and the first
+    // promotion.
+    const nodeId = addNode(`n-${randomUUID().slice(0, 6)}`);
+    const app = seed({ nodeIds: [nodeId], compose: 'services:\n  web:\n    image: nginx:1.25\n', promoted: true });
+    const generationDir = path.resolve(
+      stackManagedRoot(app.configured_source_stack_name!),
+      `generations/candidate-${app.accepted_generation_id}`,
+    );
+    expect(fs.existsSync(generationDir)).toBe(false);
+
+    const outcome = applyAutomaticPlacement(app.id, { operationId: 'op-promoted', actor: null, trigger: 'test', at: 1 });
+    expect(outcome).toEqual({ status: 'auto_approved', reason: 'stateless_addition' });
+  });
+
+  it('still refuses a stateful workload on a promoted generation', () => {
+    // The other half, so the applied-first read cannot become "anything goes".
+    const nodeId = addNode(`n-${randomUUID().slice(0, 6)}`);
+    const app = seed({
+      nodeIds: [nodeId],
+      compose: 'services:\n  db:\n    image: postgres:16\n    volumes:\n      - data:/var/lib\n',
+      promoted: true,
+    });
+
+    const outcome = applyAutomaticPlacement(app.id, { operationId: 'op-promoted-stateful', actor: null, trigger: 'test', at: 1 });
+    expect(outcome).toEqual({ status: 'operator_review', reason: 'stateful_workload' });
+  });
+
+  it('reads a promoted generation rather than an unpromoted candidate when both exist', () => {
+    // The applied copy is what a target would receive, so it is the copy that
+    // decides. A candidate still sitting beside it has not been promoted and
+    // describes something no target is running.
+    const nodeId = addNode(`n-${randomUUID().slice(0, 6)}`);
+    const app = seed({ nodeIds: [nodeId], promoted: true });
+    const generationId = app.accepted_generation_id!;
+    // The in-force copy is stateless, and a stateless candidate is staged beside it.
+    writeComposeInto(
+      app.configured_source_stack_name!,
+      `generations/candidate-${generationId}`,
+      'services:\n  web:\n    image: nginx:1.25\n',
+      ['compose.yaml'],
+    );
+    fs.writeFileSync(path.resolve(
+      stackManagedRoot(app.configured_source_stack_name!),
+      `generations/applied-${generationId}-0`,
+      'compose.yaml',
+    ), 'services:\n  db:\n    image: postgres:16\n    volumes:\n      - data:/var/lib\n', 'utf8');
+
+    const outcome = applyAutomaticPlacement(app.id, { operationId: 'op-both', actor: null, trigger: 'test', at: 1 });
     expect(outcome).toEqual({ status: 'operator_review', reason: 'stateful_workload' });
   });
 

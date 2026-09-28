@@ -42,7 +42,7 @@ import {
   type WorkloadStatelessness,
 } from './placementPolicy';
 import { configuredSnapshotFor, encodePolicySnapshot } from './policyComposition';
-import { readStagedGeneration } from './statefulGuard';
+import { readAppliedGenerationContents } from './statefulGuard';
 import type { GitOpsApplicationRow } from './types';
 
 export type AutomaticPlacementOutcome =
@@ -124,13 +124,19 @@ function deriveStatelessness(
   if (app.accepted_generation_id && stackName) {
     const generation = GitOpsStore.getInstance().getGeneration(app.accepted_generation_id);
     if (!generation || generation.application_id !== app.id) return 'unknown';
-    const staged = readStagedGeneration(stackName, app, generation);
-    if (!staged) return 'unknown';
+    // The generation in force, not the candidate on disk. Promotion removes the
+    // applied directory and renames the candidate over it, so a promoted
+    // generation has an applied directory and no candidate directory at all.
+    // Reading only the candidate found nothing there and every placement after
+    // the first rollout read as an unknown workload, which confined bounded-auto
+    // to the window between source acceptance and the first promotion.
+    const inForce = readAppliedGenerationContents(stackName, app, generation);
+    if (!inForce) return 'unknown';
     // Each file on its own. Concatenating them put the same service key in one
     // document twice, which does not parse, so a multi-file compose always read
     // as an unknown workload and the policy could never approve it.
     let stateful = false;
-    for (const content of staged.contents) {
+    for (const content of inForce.contents) {
       try {
         const names = BlueprintAnalyzer.statefulServiceNamesStrict(content);
         if (names === null) return 'unknown';

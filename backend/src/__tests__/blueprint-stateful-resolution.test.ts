@@ -80,6 +80,29 @@ describe('statefulServiceNames on content it can resolve', () => {
   it('still returns null for content that does not parse', () => {
     expect(BlueprintAnalyzer.statefulServiceNamesStrict('services: [unclosed')).toBeNull();
   });
+  it.each([
+    ['a merge key merging whole services', 'shared: &svcs\n  web:\n    volumes:\n      - data:/d\nservices:\n  <<: *svcs\n'],
+    ['a merge key inside a long-form volume entry', 'x-vol: &vol\n  type: volume\n  source: data\n  target: /var/lib\nservices:\n  db:\n    image: postgres\n    volumes:\n      - <<: *vol\n'],
+    ['a merge key merging a list of volumes', 'x-vols: &vols\n  - data:/d\nservices:\n  db:\n    image: postgres\n    volumes:\n      <<: *vols\n'],
+    ['a merge key merging a whole service block below another', 'shared: &s\n  volumes:\n    - data:/d\nservices:\n  db:\n    image: postgres\n    deploy:\n      <<: *s\n'],
+  ])('refuses %s, which the service-level check could not see', (_label, yaml) => {
+    // The volume walk only reads a service's own block, so a merge key anywhere
+    // else attaches a mount the walk never visits and the workload reads as
+    // stateless. These are the shapes a check that only looked for `<<`
+    // directly under a service let through, and each one would otherwise have
+    // been approved for automatic placement.
+    expect(BlueprintAnalyzer.statefulServiceNamesStrict(yaml)).toBeNull();
+  });
+
+  it('still answers for an alias, which the parser resolves rather than merges', () => {
+    // Not a merge key: an alias to a concrete value is readable, so refusing it
+    // would be an unearned operator review. The distinction matters, because a
+    // reader that refuses anything anchored would hold ordinary compose files.
+    const names = BlueprintAnalyzer.statefulServiceNamesStrict(
+      'x-volumes: &vols\n  - data:/d\nservices:\n  db:\n    image: postgres\n    volumes: *vols\n',
+    );
+    expect(names).toEqual(new Set(['db']));
+  });
 });
 
 describe('the withdrawal guard reading is unaffected by the strict one', () => {

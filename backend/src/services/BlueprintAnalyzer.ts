@@ -315,13 +315,29 @@ export class BlueprintAnalyzer {
      */
     private static hasUnresolvableComposeConstruct(doc: ComposeShape): boolean {
         if ('include' in doc) return true;
+        // A merge key can appear at any depth, not only directly under a service:
+        // `services: { <<: *shared }` merges whole services in, and
+        // `volumes: [{ <<: *vol }]` merges a mount into a service whose own block
+        // never mentions one. Checking only the service level left both shapes
+        // visible to the volume walk below, which then reported the workload as
+        // stateless and let it be placed automatically.
+        if (BlueprintAnalyzer.containsMergeKey(doc)) return true;
         const services = doc.services;
         if (!services || typeof services !== 'object') return false;
         for (const serviceDef of Object.values(services)) {
             if (!serviceDef || typeof serviceDef !== 'object') continue;
-            if ('<<' in serviceDef || 'extends' in serviceDef || 'volumes_from' in serviceDef) {
-                return true;
-            }
+            if ('extends' in serviceDef || 'volumes_from' in serviceDef) return true;
+        }
+        return false;
+    }
+
+    /** Whether a YAML merge key appears anywhere in the parsed document. */
+    private static containsMergeKey(node: unknown): boolean {
+        if (Array.isArray(node)) return node.some((entry) => BlueprintAnalyzer.containsMergeKey(entry));
+        if (!node || typeof node !== 'object') return false;
+        for (const [key, value] of Object.entries(node as Record<string, unknown>)) {
+            if (key === '<<') return true;
+            if (BlueprintAnalyzer.containsMergeKey(value)) return true;
         }
         return false;
     }

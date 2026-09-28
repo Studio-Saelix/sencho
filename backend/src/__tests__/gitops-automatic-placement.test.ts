@@ -457,19 +457,6 @@ describe('a policy edit is configuration, not work', () => {
     ).toThrow(/operation is in flight/);
   });
 
-  it('records no refusal when the policy is the operator policy', () => {
-    // The default policy, on the default application, was reporting a decline.
-    // `policy_is_operator` is not a decline: that policy never runs, so it has
-    // nothing to record, and writing one made every ordinary placement read as
-    // "declined by policy, waiting on an operator".
-    const store = GitOpsStore.getInstance();
-    store.insertApplication(blueprintApp('9207', { placement_policy: 'operator' }));
-    expect(() => applyAutomaticPlacement('9207', envelope('operator-policy'))).not.toThrow();
-    const app = store.getApplication('9207')!;
-    expect(app.placement_policy_refusal_reason).toBeNull();
-    expect(app.placement_policy_refused_at).toBeNull();
-  });
-
   it('records a refusal for a reason that is a decline', () => {
     // The other half, so the fix is not simply "record nothing ever".
     const store = GitOpsStore.getInstance();
@@ -587,6 +574,13 @@ describe('the automatic path', () => {
     const outcome = applyAutomaticPlacement('9300', envelope('auto'));
     expect(outcome).toEqual({ status: 'operator_review', reason: 'policy_is_operator' });
     expect(store.getApplication('9300')?.placement_approval_ref).toBeNull();
+    // Nothing recorded, even though the decision ran and named a reason. The
+    // operator policy is the default, and it never runs: it has no judgement to
+    // decline with, so a recorded reason here is what made every ordinary
+    // placement read as "declined by policy, waiting on an operator".
+    const decided = store.getApplication('9300')!;
+    expect(decided.placement_policy_refusal_reason).toBeNull();
+    expect(decided.placement_policy_refused_at).toBeNull();
   });
 
   it('skips an application with no current candidate rather than deciding anything', () => {

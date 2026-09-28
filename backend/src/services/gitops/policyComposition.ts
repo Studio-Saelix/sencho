@@ -223,15 +223,6 @@ export function decodePolicySnapshot(raw: string | null | undefined): PolicySnap
 }
 
 /**
- * Read a recorded snapshot as stored on an approval, where absence is a fact.
- *
- * An approval written by an operator carries no policy snapshot, because no
- * policy decided it. That is not the same as an unreadable snapshot, which is an
- * error, so this returns `null` for absence and still throws for damage.
- */
-
-/** Whether a snapshot was reconstructed rather than recorded. */
-/**
  * The snapshot an approval carries, or null when it carries none.
  *
  * Distinct from `decodePolicySnapshot` in what absence means. A generation with
@@ -240,12 +231,16 @@ export function decodePolicySnapshot(raw: string | null | undefined): PolicySnap
  * snapshot is a different fact: an operator approval records none, because no
  * policy decided it, and reconstructing the legacy policy there would claim a
  * policy governed a decision it did not make.
+ *
+ * Absence returns null rather than throwing, because an approval with no
+ * snapshot is the expected shape of an operator approval, not damage.
  */
 export function decodeApprovalPolicySnapshot(raw: string | null | undefined): PolicySnapshot | null {
   if (raw == null || raw.trim() === '') return null;
   return decodePolicySnapshot(raw);
 }
 
+/** Whether a snapshot was reconstructed rather than recorded. */
 export function isLegacyPolicySnapshot(snapshot: PolicySnapshot): boolean {
   return snapshot.version === LEGACY_FROZEN_POLICY_SNAPSHOT.version;
 }

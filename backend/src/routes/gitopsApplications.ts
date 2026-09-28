@@ -1169,16 +1169,15 @@ function requirePolicyTargetAuthority(
  *
  * Authorized by the application-wide `stack:deploy` grant and an exact
  * `stack:deploy` on every frozen target. Both halves are required, which is the
- * same requirement the health policy write beside it carries; the exact per-target
- * check is the part a stack-scoped assignment can satisfy, and the
- * application-wide grant is the part it cannot. The gate is the
- * authority that a placement approval itself needs. A global `stack:create` is
- * deliberately not also required: it is held only by roles that hold a global
- * `stack:deploy` as well, so demanding it would silently upgrade the gate to
- * application-wide and make the per-target loop unreachable for every caller
- * that got past it. The create authority belongs to the placement approval the
- * policy authorizes, which already requires it, not to the configuration of
- * whether that approval may be automatic.
+ * same requirement the health policy write beside it carries: the exact
+ * per-target check is the part a stack-scoped assignment can satisfy, and the
+ * application-wide grant is the part it cannot, and a policy governs every
+ * target of the application including the ones that do not exist yet.
+ *
+ * A global `stack:create` is deliberately not also required. The create
+ * authority belongs to the placement approval this policy authorizes, which
+ * already demands it, not to the configuration of whether that approval may be
+ * automatic.
  */
 gitopsApplicationsRouter.post('/:id/placement-policy', async (req: Request, res: Response): Promise<void> => {
   const target = resolvePolicyTarget(req, res);
