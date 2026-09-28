@@ -273,6 +273,13 @@ describe('gitops blueprint producers', () => {
     expect(classifyBlueprintChange(before, { selector: { type: 'nodes', ids: [2] } })).toBe('operational');
     // An operational change alongside a metadata one is still operational.
     expect(classifyBlueprintChange(before, { name: 'b', description: 'other' })).toBe('operational');
+    // The drift mode is a policy choice about divergence Sencho already observes.
+    // It changes nothing a node runs, so it must not mint an intent: doing so
+    // opened a rollout candidate, which invalidated placement and superseded the
+    // live rollout generation, which left every target held with nothing left to
+    // advance it. Switching a Blueprint to Enforce was the one edit guaranteed
+    // to stop Enforce from ever repairing.
+    expect(classifyBlueprintChange(before, { drift_mode: 'enforce' })).toBe('metadata_only');
   });
 
   describe('an application that is not yet active', () => {

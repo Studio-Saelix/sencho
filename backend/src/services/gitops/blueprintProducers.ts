@@ -64,6 +64,14 @@ export type BlueprintUpdates = Parameters<DatabaseService['updateBlueprint']>[1]
  * describe the Blueprint to a reader and change nothing a node runs, so they
  * must not mint an intent: a fresh identity would invalidate acknowledgements
  * that are still accurate.
+ *
+ * `drift_mode` is deliberately not operational, for the same reason. It chooses
+ * what Sencho does about divergence it already observes, and changes nothing
+ * about what any node runs. Treating it as operational opened a rollout
+ * candidate, which invalidated placement and superseded the live rollout
+ * generation, which left every target permanently held with nothing left to
+ * advance it: switching a Blueprint to Enfore was the one edit guaranteed to
+ * stop Enforce from ever repairing.
  */
 export function classifyBlueprintChange(
   before: Blueprint,
@@ -74,7 +82,8 @@ export function classifyBlueprintChange(
   return changedKeys.size > 0 ? 'metadata_only' : 'none';
 }
 
-const OPERATIONAL_KEYS = ['name', 'compose_content', 'selector', 'drift_mode', 'enabled'] as const;
+/** What gets deployed, and where. Anything outside this changes no node's runtime. */
+const OPERATIONAL_KEYS = ['name', 'compose_content', 'selector', 'enabled'] as const;
 
 /**
  * A selector compared by value rather than by how it was written.
