@@ -3,6 +3,7 @@ import { DatabaseService, type ServiceUpdateRecoveryRow } from './DatabaseServic
 import { getComposeCommandTimeoutMs } from './ComposeService';
 import { buildUnifiedHeldImagePredicate } from './recoveryHeldImages';
 import { getErrorMessage } from '../utils/errors';
+import { sanitizeForLog } from '../utils/safeLog';
 
 const SWEEP_INTERVAL_MS = 5 * 60_000;
 const INITIAL_SWEEP_DELAY_MS = 30_000;
@@ -156,6 +157,41 @@ export class ServiceUpdateRecoveryService {
   /** Active, unexpired recovery rows for all services in a stack (drives the /recoveries endpoint). */
   public listAllActiveForStack(nodeId: number, stackName: string): ServiceUpdateRecoveryRow[] {
     return DatabaseService.getInstance().listActiveServiceUpdateRecoveriesForStack(nodeId, stackName, Date.now());
+  }
+
+  /**
+   * Retire every active recovery for a stack after a stack-scoped deploy or
+   * update replaced its runtime. Those snapshots point at images the stack is
+   * no longer running, so offering one would be a rollback behind the operator's
+   * own deploy. Called from the commits every runtime change passes through
+   * (the ComposeService deploy and update success paths, plus the rollback route
+   * that runs its own compose up), so no path can leave a stale offer behind.
+   *
+   * Scoped to the stack, not per image: a successful run whose pull found
+   * nothing new changed no image either, so its snapshots are retired too. That
+   * withholds a still-accurate offer rather than showing a wrong one, which is
+   * the direction that matters; the images stay held for prune until the rows
+   * expire on their own.
+   *
+   * Never throws. Every caller is an operation that already succeeded and
+   * recorded its own evidence, so failing that operation over an offer the
+   * operator can decline would be the worse outcome.
+   */
+  public invalidateActiveForStack(nodeId: number, stackName: string): number {
+    try {
+      const retired = DatabaseService.getInstance().invalidateActiveServiceUpdateRecoveriesForStack(nodeId, stackName);
+      if (retired > 0) {
+        console.log(`[ServiceUpdateRecovery] Retired ${retired} stale service recovery record(s) for ${sanitizeForLog(stackName)} after a stack runtime change`);
+      }
+      return retired;
+    } catch (error) {
+      console.error(
+        '[ServiceUpdateRecovery] Failed to retire stale service recovery records for %s:',
+        sanitizeForLog(stackName),
+        getErrorMessage(error, 'unknown'),
+      );
+      return 0;
+    }
   }
 
   public get(id: string): ServiceUpdateRecoveryRow | undefined {

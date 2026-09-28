@@ -671,6 +671,16 @@ export class ComposeService {
   async runCommand(stackName: string, action: 'down' | 'start' | 'stop' | 'restart', ws?: WebSocket): Promise<void> {
     const stackDir = path.join(this.baseDir, stackName);
     await this.execute('docker', await this.authoredComposeArgs(stackName, [action]), stackDir, ws);
+    // Centralized so every caller is covered, not just the HTTP routes: a
+    // scheduled stop or a webhook restart replaces the containers a live gate is
+    // observing just as a manual one does. `start` is excluded because it does
+    // not disturb them.
+    if (action !== 'start') {
+      await this.supersedeGatesForContainerOp(
+        stackName,
+        `the stack was ${action === 'down' ? 'taken down' : action === 'stop' ? 'stopped' : 'restarted'} during the observation`,
+      );
+    }
   }
 
   /** Interactive compose down (Take down UI / POST /down). Plain `down` by default. */
@@ -678,6 +688,27 @@ export class ComposeService {
     const stackDir = path.join(this.baseDir, stackName);
     const args = options?.removeVolumes ? ['down', '--volumes'] : ['down'];
     await this.execute('docker', await this.authoredComposeArgs(stackName, args), stackDir, ws);
+    await this.supersedeGatesForContainerOp(stackName, 'the stack was taken down during the observation');
+  }
+
+  /**
+   * End the gates a container lifecycle operation just invalidated, before the
+   * operation's caller continues, so no gate poll can read the replaced
+   * containers first and report a failure against a deliberate action. Awaited
+   * dynamic import: HealthGateService imports this module, so a static import
+   * would be a cycle.
+   */
+  private async supersedeGatesForContainerOp(stackName: string, reason: string): Promise<void> {
+    try {
+      const { HealthGateService } = await import('./HealthGateService');
+      HealthGateService.getInstance().supersedeForContainerOp(this.nodeId, stackName, reason);
+    } catch (error) {
+      console.error(
+        '[ComposeService] Failed to end health gate observations for %s:',
+        sanitizeForLog(stackName),
+        error instanceof Error ? error.message : String(error),
+      );
+    }
   }
 
   /**
@@ -976,6 +1007,28 @@ export class ComposeService {
     }
   }
 
+  /**
+   * Retire the stack's per-service recovery snapshots after a successful
+   * stack-scoped deploy or update replaced its runtime. Best effort by design:
+   * the deploy already succeeded and its evidence is already recorded, so a
+   * failure to retire an offer must not turn a good deploy into a failed one
+   * (the worst case is one stale Restore offer, which the operator can decline).
+   * Dynamic import for the same reason as above: this module and the recovery
+   * services form an import cycle.
+   */
+  private async retireStaleServiceRecoveries(stackName: string): Promise<void> {
+    try {
+      const { ServiceUpdateRecoveryService } = await import('./ServiceUpdateRecoveryService');
+      ServiceUpdateRecoveryService.getInstance().invalidateActiveForStack(this.nodeId, stackName);
+    } catch (error) {
+      console.error(
+        '[ComposeService] Failed to retire stale service recovery records for %s:',
+        sanitizeForLog(stackName),
+        error instanceof Error ? error.message : String(error),
+      );
+    }
+  }
+
   async deployStack(
     stackName: string,
     ws?: WebSocket,
@@ -1105,6 +1158,13 @@ export class ComposeService {
           );
         }
       }
+      // The deploy replaced every service's image, so the per-service snapshots
+      // taken before it are no longer a rollback target. This is the one commit
+      // every deploy path (route, template, webhook, scheduler, mesh, blueprint,
+      // Git apply) passes through, which is what keeps a later service update
+      // from offering a rollback behind the deploy the operator just ran. A stack
+      // rollback runs its own compose up, so the route retires them there.
+      await this.retireStaleServiceRecoveries(stackName);
       if (debug) console.debug(`[ComposeService:debug] deployStack completed in ${Date.now() - t0}ms`, { stackName });
       gitopsDeploy?.bound();
     } catch (deployError) {
@@ -1662,6 +1722,12 @@ export class ComposeService {
           sanitizeForLog(candidate.id),
         );
       }
+
+      // The update replaced every service's image, so the per-service snapshots
+      // taken before it are no longer a rollback target. Together with the same
+      // call on the deploy path, this is the single commit every stack runtime
+      // change passes through.
+      await this.retireStaleServiceRecoveries(stackName);
 
       sendOutput('=== Stack updated successfully ===\n');
 

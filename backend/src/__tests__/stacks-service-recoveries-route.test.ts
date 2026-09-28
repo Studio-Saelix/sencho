@@ -154,6 +154,27 @@ describe('GET /api/stacks/:stackName/recoveries', () => {
     expect(body[0].healthGateReason).toBe('no health gate linked');
   });
 
+  it('omits a service recovery the stack has already replaced', async () => {
+    vi.mocked(getActiveCapabilities).mockReset();
+    vi.mocked(getActiveCapabilities).mockReturnValue(['service-scoped-update' as const]);
+    const getReportSpy = vi.spyOn(HealthGateService.prototype, 'getReport').mockReturnValue(gateReport);
+
+    // A stack deploy retired the pre-deploy snapshots (see
+    // ServiceUpdateRecoveryService.invalidateActiveForStack). Those rows stay
+    // for the audit trail but must never be offered again as rollback targets,
+    // while a snapshot captured after the deploy still is.
+    insertRecovery({ id: 'rec-pre-deploy', service_name: 'api', health_gate_id: 'gate-1' });
+    insertRecovery({ id: 'rec-pre-deploy-2', service_name: 'db', health_gate_id: 'gate-1' });
+    ServiceUpdateRecoveryService.getInstance().invalidateActiveForStack(1, 'web');
+    insertRecovery({ id: 'rec-post-deploy', service_name: 'cache', health_gate_id: 'gate-1' });
+
+    const res = await request(app).get('/api/stacks/web/recoveries').set('Cookie', adminCookie);
+    expect(res.status).toBe(200);
+    const body = res.body as Array<{ recoveryId: string }>;
+    expect(body.map(r => r.recoveryId)).toEqual(['rec-post-deploy']);
+    getReportSpy.mockRestore();
+  });
+
   it('returns 500 on unexpected database error', async () => {
     vi.mocked(getActiveCapabilities).mockReset();
     vi.mocked(getActiveCapabilities).mockReturnValue(['service-scoped-update' as const]);

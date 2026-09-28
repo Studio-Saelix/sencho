@@ -504,6 +504,45 @@ describe('HealthGateService verdicts', () => {
   });
 });
 
+describe('HealthGateService container-op supersede', () => {
+  it('finalizes the gates on the stack as unknown when the stack is stopped', async () => {
+    const gate = svc().beginStack(0, 'web', 'update', 'tester', { deployedGenerationId: null })!;
+    await ticks(2);
+
+    expect(svc().supersedeForContainerOp(0, 'web', 'the stack was stopped during the observation')).toBe(1);
+    const report = svc().getReport(0, 'web', gate);
+    expect(report.status).toBe('unknown');
+    expect(report.reason).toContain('stopped');
+  });
+
+  it('leaves another stack observing', async () => {
+    const web = svc().beginStack(0, 'web', 'update', 'tester', { deployedGenerationId: null })!;
+    const api = svc().beginStack(0, 'api', 'update', 'tester', { deployedGenerationId: null })!;
+    await ticks(2);
+
+    svc().supersedeForContainerOp(0, 'web', 'the stack was taken down during the observation');
+    expect(svc().getReport(0, 'web', web).status).toBe('unknown');
+    expect(svc().getReport(0, 'api', api).status).toBe('observing');
+  });
+
+  it('records the named reason on every gate it finalizes', async () => {
+    const stack = svc().beginStack(0, 'web', 'update', 'tester', { deployedGenerationId: null })!;
+    await ticks(2);
+
+    // A service-scoped call still ends the stack's own gate (it is watching the
+    // same containers); the sibling-service exemption is the pre-existing rule
+    // this forwards to, exercised by the service-update flow's own tests.
+    expect(svc().supersedeForContainerOp(0, 'web', 'the service was stopped during the observation', 'app')).toBe(1);
+    const report = svc().getReport(0, 'web', stack);
+    expect(report.status).toBe('unknown');
+    expect(report.reason).toBe('the service was stopped during the observation');
+  });
+
+  it('reports nothing to supersede for a stack with no live gate', () => {
+    expect(svc().supersedeForContainerOp(0, 'quiet', 'the stack was stopped')).toBe(0);
+  });
+});
+
 describe('HealthGateService lifecycle', () => {
   it('never lets a poll that straddled a supersede overwrite the terminal verdict', async () => {
     // A poll is mid-await on Docker when a newer update supersedes the gate;

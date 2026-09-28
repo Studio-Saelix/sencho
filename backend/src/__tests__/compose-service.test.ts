@@ -31,6 +31,7 @@ const {
   mockHandoff,
   mockMarkReconciling,
   mockMarkImmediateVerified,
+  mockInvalidateActiveServiceRecoveries,
   mockAbandon,
   mockCompensateWithCandidate,
   mockBuildUnifiedHeldImagePredicate,
@@ -93,6 +94,7 @@ const {
   mockHandoff: vi.fn().mockReturnValue(true),
   mockMarkReconciling: vi.fn().mockReturnValue(true),
   mockMarkImmediateVerified: vi.fn().mockReturnValue(true),
+  mockInvalidateActiveServiceRecoveries: vi.fn().mockReturnValue(0),
   mockAbandon: vi.fn().mockResolvedValue(true),
   mockCompensateWithCandidate: vi.fn().mockResolvedValue(true),
   mockBuildUnifiedHeldImagePredicate: vi.fn().mockReturnValue(() => false),
@@ -259,6 +261,14 @@ vi.mock('../services/StackUpdateRecoveryService', () => ({
   },
 }));
 
+
+vi.mock('../services/ServiceUpdateRecoveryService', () => ({
+  ServiceUpdateRecoveryService: {
+    getInstance: () => ({
+      invalidateActiveForStack: mockInvalidateActiveServiceRecoveries,
+    }),
+  },
+}));
 
 vi.mock('../services/SelfIdentityService', () => ({
   default: {
@@ -911,6 +921,49 @@ describe('ComposeService - deployStack', () => {
     expect(mockMarkImmediateVerified).toHaveBeenCalledWith('recovery-1');
   });
 
+  it('retires the stack service-recovery snapshots on success, atomic or not', async () => {
+    setupAutoCloseSpawn();
+    mockListContainers.mockResolvedValue([]);
+
+    const svc = ComposeService.getInstance(1);
+    const atomic = svc.deployStack('my-stack', undefined, true);
+    await vi.advanceTimersByTimeAsync(3100);
+    await atomic;
+    expect(mockInvalidateActiveServiceRecoveries).toHaveBeenCalledWith(1, 'my-stack');
+
+    // A deploy without a rollback generation still replaced every service's
+    // image, so the per-service snapshots are just as stale.
+    mockInvalidateActiveServiceRecoveries.mockClear();
+    const plain = svc.deployStack('my-stack');
+    await vi.advanceTimersByTimeAsync(3100);
+    await plain;
+    expect(mockInvalidateActiveServiceRecoveries).toHaveBeenCalledWith(1, 'my-stack');
+  });
+
+  it('leaves the stack service-recovery snapshots alone when the deploy fails', async () => {
+    setupAutoCloseSpawn();
+    mockSpawn.mockImplementation(() => { const e = new Error('compose failed'); (e as unknown as { code?: number }).code = 1; throw e; });
+
+    await expect(ComposeService.getInstance(1).deployStack('my-stack', undefined, true)).rejects.toThrow();
+    expect(mockInvalidateActiveServiceRecoveries).not.toHaveBeenCalled();
+  });
+
+  it('still reports the deploy as successful when retiring stale recoveries fails', async () => {
+    setupAutoCloseSpawn();
+    mockListContainers.mockResolvedValue([]);
+    mockInvalidateActiveServiceRecoveries.mockImplementationOnce(() => {
+      throw new Error('recovery table is locked');
+    });
+
+    const svc = ComposeService.getInstance(1);
+    const promise = svc.deployStack('my-stack', undefined, true);
+    await vi.advanceTimersByTimeAsync(3100);
+
+    // The deploy landed and its evidence is recorded; failing to retire an offer
+    // must not turn that into a failed deploy.
+    await expect(promise).resolves.toMatchObject({ recoveryId: 'recovery-1' });
+  });
+
   it('blocks deploy before backup when missing external networks need a prompt', async () => {
     const { MissingExternalNetworksError } = await import('../services/network/missingExternalNetworksError');
     mockResolveMissingExternalNetworks.mockResolvedValue({
@@ -1496,6 +1549,32 @@ describe('ComposeService - pullStackImages', () => {
 });
 
 // ── updateStack: prune-on-update ───────────────────────────────────────
+
+describe('ComposeService - updateStack service-recovery retirement', () => {
+  it('retires the stack service-recovery snapshots after a successful update', async () => {
+    setupAutoCloseSpawn();
+    mockListContainers.mockResolvedValue([]);
+    mockGetGlobalSettings.mockReturnValue({});
+
+    const promise = ComposeService.getInstance(1).updateStack('my-stack');
+    await vi.advanceTimersByTimeAsync(3100);
+    await promise;
+
+    // The update replaced every service's image, so the snapshots taken before
+    // it stop being rollback targets.
+    expect(mockInvalidateActiveServiceRecoveries).toHaveBeenCalledWith(1, 'my-stack');
+  });
+
+  it('leaves them alone when the update never reaches Compose', async () => {
+    setupAutoCloseSpawn();
+    mockClassifyLegacyOrphansForUpdate.mockResolvedValueOnce({
+      status: 'classification_failed', error: 'daemon said no',
+    });
+
+    await expect(ComposeService.getInstance(1).updateStack('my-stack')).rejects.toThrow(/classification/i);
+    expect(mockInvalidateActiveServiceRecoveries).not.toHaveBeenCalled();
+  });
+});
 
 describe('ComposeService - updateStack prune-on-update', () => {
   it('prunes dangling images after a successful update when prune_on_update=1', async () => {

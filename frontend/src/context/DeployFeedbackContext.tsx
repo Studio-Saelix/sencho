@@ -96,12 +96,13 @@ export interface HealthGateUiState {
 const GATE_POLL_INTERVAL_MS = 4_000;
 
 /**
- * Consecutive failed sibling-recovery reads tolerated before a watch gives up.
- * Matches the primary gate poller's strike budget: enough to ride out a rate
- * limit or a proxy blip, short enough that a node which will never answer
- * (an older build without this route) stops being polled.
+ * How long a stack watch keeps retrying after its first failed read before it
+ * gives up. Sized to outlast the API rate limiter's one-minute window, so one
+ * burst of 429s (or a 5xx, a proxy blip, or a node predating this route) cannot
+ * cancel every pending Restore offer. A node that will never answer still stops
+ * being polled, one budget later rather than four polls in.
  */
-const SIBLING_POLL_MAX_STRIKES = 4;
+const SIBLING_POLL_GIVE_UP_MS = 70_000;
 
 /**
  * Services whose recovery is still observing, for one (node, stack) pair.
@@ -116,13 +117,27 @@ interface SiblingWatch {
   nodeId: number | null;
   services: Set<string>;
   interval: ReturnType<typeof setInterval> | null;
-  /** Consecutive failed reads, so a transient error is not read as "all gone". */
-  strikes: number;
+  /**
+   * When the current run of failed reads started, or null while reads succeed.
+   * Only a successful read clears it, so a hand-off cannot keep a watch alive
+   * that never manages to read the route.
+   */
+  failingSince: number | null;
   /** Single-flight guard: a slow remote node must not get overlapping polls. */
   inFlight: boolean;
 }
 
 const watchKey = (nodeId: number | null, stackName: string): string => `${nodeId ?? 'local'}:${stackName}`;
+
+/**
+ * Stack-scoped actions that end or replace the stack's running containers. After
+ * one of these succeeds, a health gate still observing on the stack can no
+ * longer say anything true about the runtime, and the service snapshots it was
+ * watching are no longer a rollback target, so the stack's watches end with it.
+ * A scan observes without changing anything and is deliberately absent.
+ */
+const STACK_RUNTIME_ENDING_ACTIONS: ReadonlySet<ActionVerb> =
+  new Set<ActionVerb>(['deploy', 'update', 'install', 'down', 'stop', 'restart']);
 
 /** Parameters identifying the operation a runWithLog call drives. */
 export interface RunWithLogParams {
@@ -290,17 +305,17 @@ export function DeployFeedbackProvider({ children }: { children: React.ReactNode
       watch.inFlight = true;
       try {
         const result = await fetchStackRecoveries({ nodeId, stackName });
-        // The watch may have been dropped while this read was in flight (a stack
-        // deploy replaced the images, the provider unmounted). A response for a
-        // watch that no longer exists must not offer anything.
-        if (!siblingWatchesRef.current.has(key)) return;
+        // This exact watch may be gone: a stack-scoped run that replaced the
+        // images, a provider unmount, or a re-create of the same key. A response
+        // for a watch that no longer exists must not offer anything.
+        if (siblingWatchesRef.current.get(key) !== watch) return;
         if (!result.ok) {
-          watch.strikes += 1;
+          watch.failingSince ??= Date.now();
           console.warn('[DeployFeedback] sibling recovery poll failed:', result.error);
-          if (watch.strikes >= SIBLING_POLL_MAX_STRIKES) stopSiblingWatch(key);
+          if (Date.now() - watch.failingSince >= SIBLING_POLL_GIVE_UP_MS) stopSiblingWatch(key);
           return;
         }
-        watch.strikes = 0;
+        watch.failingSince = null;
         for (const serviceName of [...watch.services]) {
           const found = result.recoveries.find(r => r.serviceName === serviceName);
           if (!found || found.expiresAt <= Date.now() || found.healthGateStatus !== 'observing') {
@@ -322,12 +337,10 @@ export function DeployFeedbackProvider({ children }: { children: React.ReactNode
     const key = watchKey(nodeId, stackName);
     let watch = siblingWatchesRef.current.get(key);
     if (!watch) {
-      watch = { stackName, nodeId, services: new Set(), interval: null, strikes: 0, inFlight: false };
+      watch = { stackName, nodeId, services: new Set(), interval: null, failingSince: null, inFlight: false };
       siblingWatchesRef.current.set(key, watch);
     }
     watch.services.add(serviceName);
-    // Re-arming after a successful read resets the budget: the route answered.
-    watch.strikes = 0;
     if (watch.interval === null) {
       watch.interval = setInterval(() => pollSiblingWatch(key), GATE_POLL_INTERVAL_MS);
     }
@@ -491,6 +504,9 @@ export function DeployFeedbackProvider({ children }: { children: React.ReactNode
     };
     const tick = async () => {
       if (sessionIdRef.current !== mySession) {
+        // Something else took the slot. Whatever took it hands this gate to its
+        // stack watch on the way out (a new session, or a Restore click), so
+        // there is nothing to rescue here.
         stopGatePolling();
         return;
       }
@@ -664,6 +680,9 @@ export function DeployFeedbackProvider({ children }: { children: React.ReactNode
         console.warn('[DeployFeedback] sibling recovery lookup failed:', result.error);
         return;
       }
+      // This read answered, so the stack's watch is not on a failing run.
+      const watch = siblingWatchesRef.current.get(watchKey(nodeId, stackName));
+      if (watch) watch.failingSince = null;
       for (const recovery of result.recoveries) {
         if (recovery.serviceName === currentServiceName) continue;
         if (recovery.healthGateStatus === 'observing') {
@@ -677,15 +696,16 @@ export function DeployFeedbackProvider({ children }: { children: React.ReactNode
   );
 
   /**
-   * Stops the stack's watches after a stack-scoped run that replaced its
-   * images. Service recovery snapshots are not invalidated by a deploy, so a
-   * watch left polling would still offer a Restore back to the runtime the
-   * operator just replaced. A run that changed nothing (it failed) leaves the
-   * offers standing, since the snapshots still describe the running images.
+   * Stops the stack's watches after a stack-scoped run that ended or replaced
+   * its running containers. A gate still observing on the stack can no longer
+   * report on a runtime that is gone, and service recovery snapshots are not
+   * invalidated by a deploy, so a watch left polling would offer a Restore back
+   * to state the operator just ended or replaced. A run that changed nothing
+   * (it failed) leaves the offers standing.
    */
   const abandonStackWatches = useCallback((params: RunWithLogParams, result: { ok: boolean }) => {
     if (!result.ok) return;
-    if (params.action !== 'deploy' && params.action !== 'update') return;
+    if (!STACK_RUNTIME_ENDING_ACTIONS.has(params.action)) return;
     stopSiblingWatch(watchKey(params.nodeId, params.stackName));
   }, [stopSiblingWatch]);
 
@@ -828,19 +848,26 @@ export function DeployFeedbackProvider({ children }: { children: React.ReactNode
         }
         // Re-surface the stack's other recoveries whatever this run did, so a
         // failed or gate-less update leaves no earlier service unwatched. Only a
-        // service-scoped run re-surfaces: a stack deploy replaces the images
-        // those snapshots would roll back to, so offering them is a rollback to
-        // state the operator just replaced.
+        // service-scoped run re-surfaces: a stack-scoped run that ended or
+        // replaced the containers stops the stack's watches instead, since it
+        // retired both those gates and the snapshots they would roll back to.
         if (params.serviceName) {
           void surfaceSiblingRecoveries(params.stackName, params.nodeId, params.serviceName);
         } else {
           abandonStackWatches(params, result);
         }
+      } else if (result.ok && result.healthGateId && params.serviceName) {
+        // This run finished with a gate, but a newer session already took the
+        // slot, and the newer session's own read is guarded against this one. Hand
+        // the gate to its stack watch directly, or an update that was replaced
+        // mid-flight (a run on another stack, a panel closed before the gate
+        // existed) would leave its service with no way back.
+        watchSibling(params.stackName, params.nodeId, params.serviceName);
       }
 
       return result;
     },
-    [isEnabled, startGatePolling, stopGatePolling, surfaceSiblingRecoveries, watchPrimaryGate, unwatchSibling, abandonStackWatches]
+    [isEnabled, startGatePolling, stopGatePolling, surfaceSiblingRecoveries, watchPrimaryGate, watchSibling, unwatchSibling, abandonStackWatches]
   );
 
   return (

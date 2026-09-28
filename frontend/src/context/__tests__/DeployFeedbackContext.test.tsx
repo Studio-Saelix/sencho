@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { renderHook, act } from '@testing-library/react';
 import type { ReactNode } from 'react';
-import { DeployFeedbackProvider, useDeployFeedback } from '../DeployFeedbackContext';
+import { DeployFeedbackProvider, useDeployFeedback, type ActionVerb } from '../DeployFeedbackContext';
 import { DEPLOY_FEEDBACK_KEY } from '@/hooks/use-deploy-feedback-enabled';
 import { DEPLOY_FEEDBACK_STYLE_KEY } from '@/hooks/use-deploy-feedback-style';
 
@@ -681,7 +681,7 @@ describe('an overlapping operation never cancels an earlier Restore offer', () =
   /** Drives one runWithLog session to completion, stream gate included. */
   async function runSession(
     session: Session,
-    params: { stackName?: string; serviceName?: string; action?: 'update' | 'deploy'; nodeId?: number | null },
+    params: { stackName?: string; serviceName?: string; action?: ActionVerb; nodeId?: number | null },
     outcome: RunOutcome,
   ) {
     let done: Promise<unknown> | undefined;
@@ -869,6 +869,116 @@ describe('an overlapping operation never cancels an earlier Restore offer', () =
     }
   });
 
+  it.each<ActionVerb>(['down', 'stop', 'restart', 'install'])(
+    'ends the stack watch after a successful %s',
+    async (action) => {
+      vi.useFakeTimers();
+      try {
+        mockGates();
+        let read: ReturnType<typeof recoveries> | ReturnType<typeof readFailed> = recoveries([observing('api', 'rec-api')]);
+        vi.mocked(fetchStackRecoveries).mockImplementation(async () => read);
+        const { result } = renderSession();
+
+        await runSession(result, { serviceName: 'api' }, { ok: true, healthGateId: 'gate-api', recoveryId: 'rec-api' });
+        await runSession(result, { serviceName: 'db' }, { ok: true, healthGateId: 'gate-db', recoveryId: 'rec-db' });
+
+        // The operator ended or replaced the containers on purpose, so the gate
+        // watching the old service can no longer say anything true, and its
+        // snapshot is not a rollback target for what they just did.
+        await runSession(result, { action, serviceName: undefined }, { ok: true });
+        const afterRun = vi.mocked(fetchStackRecoveries).mock.calls.length;
+
+        read = recoveries([failed('api', 'rec-api')]);
+        await tick();
+        expect(toast.error).not.toHaveBeenCalled();
+        expect(vi.mocked(fetchStackRecoveries).mock.calls.length).toBe(afterRun);
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
+
+  it('keeps the gate of a run that was replaced mid-flight watched', async () => {
+    vi.useFakeTimers();
+    try {
+      mockGates();
+      // Stack-aware on purpose: only the superseded run's own stack can produce
+      // the api offer, so the newer session's stack cannot stand in for it.
+      let webRead: ReturnType<typeof recoveries> | ReturnType<typeof readFailed> = recoveries([observing('api', 'rec-api')]);
+      vi.mocked(fetchStackRecoveries).mockImplementation(async ({ stackName }) =>
+        stackName === 'web' ? webRead : recoveries([]),
+      );
+      const { result } = renderSession();
+
+      // A service update that is still in flight when a run on another stack
+      // takes the session. It finishes with a gate nobody is polling, and its own
+      // recoveries read is guarded against the newer session.
+      let release: () => void = () => {};
+      const inFlight = new Promise<void>((resolve) => { release = resolve; });
+      let done: Promise<unknown> | undefined;
+      await act(async () => {
+        done = result.current.runWithLog(
+          { stackName: 'web', action: 'update', nodeId: null, serviceName: 'api' },
+          async (started) => {
+            await started;
+            await inFlight;
+            return { ok: true, healthGateId: 'gate-api', recoveryId: 'rec-api' };
+          },
+        );
+        await Promise.resolve();
+      });
+      await act(async () => { result.current.onTerminalReady(); await vi.advanceTimersByTimeAsync(60); });
+      await runSession(result, { stackName: 'billing', serviceName: 'ledger' }, { ok: true, healthGateId: 'gate-ledger' });
+      await act(async () => { release(); await done; await vi.advanceTimersByTimeAsync(1); });
+
+      webRead = recoveries([failed('api', 'rec-api')]);
+      await tick();
+      expectRestoreToast('api');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('keeps the gate of a run whose panel was closed before the gate existed', async () => {
+    vi.useFakeTimers();
+    try {
+      mockGates();
+      const byStack: Record<string, ReturnType<typeof recoveries>> = {
+        web: recoveries([observing('api', 'rec-api')]),
+        billing: recoveries([]),
+      };
+      vi.mocked(fetchStackRecoveries).mockImplementation(async ({ stackName }) => byStack[stackName] ?? recoveries([]));
+      const { result } = renderSession();
+
+      // The operator closes the panel while the update is still in flight, so no
+      // gate exists to hand off at that moment. The gate that lands afterwards
+      // must still be watched.
+      let release: () => void = () => {};
+      const inFlight = new Promise<void>((resolve) => { release = resolve; });
+      let done: Promise<unknown> | undefined;
+      await act(async () => {
+        done = result.current.runWithLog(
+          { stackName: 'web', action: 'update', nodeId: null, serviceName: 'api' },
+          async (started) => {
+            await started;
+            await inFlight;
+            return { ok: true, healthGateId: 'gate-api', recoveryId: 'rec-api' };
+          },
+        );
+        await Promise.resolve();
+      });
+      await act(async () => { result.current.onTerminalReady(); await vi.advanceTimersByTimeAsync(60); });
+      act(() => { result.current.onPanelClose(); });
+      await act(async () => { release(); await done; await vi.advanceTimersByTimeAsync(1); });
+
+      byStack.web = recoveries([failed('api', 'rec-api')]);
+      await tick();
+      expectRestoreToast('api');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('offers nothing for a poll that was already in flight when the deploy replaced the images', async () => {
     vi.useFakeTimers();
     try {
@@ -965,15 +1075,19 @@ describe('an overlapping operation never cancels an earlier Restore offer', () =
       const { result } = renderSession();
 
       await runSession(result, { serviceName: 'db' }, { ok: true, healthGateId: 'gate-db', recoveryId: 'rec-db' });
+      // Just under a full rate-limit window of failed reads.
       read = readFailed();
-      await tick(); await tick(); await tick();
-      // A successful read of the stack re-arms the service, which proves the
-      // route is answerable, so the failed-read budget starts over.
+      await tick(64_000);
+      // A successful read of the stack proves the route is answerable, so the
+      // give-up window restarts; only a successful read may restart it.
       read = recoveries([observing('api', 'rec-api')]);
       await runSession(result, { serviceName: 'ledger' }, { ok: true, healthGateId: 'gate-ledger', recoveryId: 'rec-ledger' });
 
       read = readFailed();
-      await tick();
+      const afterReArm = vi.mocked(fetchStackRecoveries).mock.calls.length;
+      await tick(64_000);
+      expect(vi.mocked(fetchStackRecoveries).mock.calls.length).toBeGreaterThan(afterReArm + 8);
+
       read = recoveries([failed('api', 'rec-api')]);
       await tick();
       expectRestoreToast('api');
@@ -982,12 +1096,12 @@ describe('an overlapping operation never cancels an earlier Restore offer', () =
     }
   });
 
-  it('stops polling a stack after repeated recoveries failures', async () => {
+  it('keeps polling through a rate-limit window, then stops', async () => {
     vi.useFakeTimers();
     try {
       mockGates();
       // The two surface reads succeed (that is what arms the watch); every poll
-      // after them fails, as a node predating this route would.
+      // after them fails, as a rate-limited or older-build node would.
       let reads = 0;
       vi.mocked(fetchStackRecoveries).mockImplementation(async () => {
         reads += 1;
@@ -999,13 +1113,19 @@ describe('an overlapping operation never cancels an earlier Restore offer', () =
       await runSession(result, { serviceName: 'db' }, { ok: true, healthGateId: 'gate-db', recoveryId: 'rec-db' });
       const afterSurface = vi.mocked(fetchStackRecoveries).mock.calls.length;
 
-      // Four failed reads exhaust the strike budget, so a node that will never
-      // answer this route stops being polled instead of retrying forever.
-      await tick(); await tick(); await tick(); await tick();
-      expect(vi.mocked(fetchStackRecoveries).mock.calls.length).toBe(afterSurface + 4);
+      // A burst of 429s inside one limiter window must not cancel the offer.
+      await tick(64_000);
+      const afterWindow = vi.mocked(fetchStackRecoveries).mock.calls.length;
+      expect(afterWindow).toBeGreaterThan(afterSurface + 8);
+      await tick(8_000);
+      expect(vi.mocked(fetchStackRecoveries).mock.calls.length).toBeGreaterThan(afterWindow);
 
-      await tick();
-      expect(vi.mocked(fetchStackRecoveries).mock.calls.length).toBe(afterSurface + 4);
+      // Well past the give-up window, a node that will never answer this route
+      // stops being polled instead of being retried forever.
+      await tick(120_000);
+      const afterGiveUp = vi.mocked(fetchStackRecoveries).mock.calls.length;
+      await tick(40_000);
+      expect(vi.mocked(fetchStackRecoveries).mock.calls.length).toBe(afterGiveUp);
     } finally {
       vi.useRealTimers();
     }

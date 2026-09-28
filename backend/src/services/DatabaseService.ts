@@ -4631,6 +4631,24 @@ stmt.run('gitops_schema_version', '1');
         ).all(nodeId, stackName, now, now, now) as ServiceUpdateRecoveryRow[];
     }
 
+    /**
+     * Retire every active service recovery for a stack: a stack-scoped deploy or
+     * update replaced the runtime all of them point at, so none of them is a
+     * rollback target any more. Returns the number of rows retired.
+     *
+     * This is the whole point of a snapshot, so retiring is terminal and honest
+     * ('invalidated', the same state a mid-flight restore with a missing image
+     * lands in) rather than a hidden expiry. The rows stay for the audit trail;
+     * only their offer disappears.
+     */
+    public invalidateActiveServiceUpdateRecoveriesForStack(nodeId: number, stackName: string): number {
+        const result = this.db.prepare(
+            `UPDATE service_update_recovery SET status = 'invalidated'
+             WHERE node_id = ? AND stack_name = ? AND status = 'active'`
+        ).run(nodeId, stackName);
+        return result.changes;
+    }
+
     /** Attach the update flow's own health gate run id while the row is still active. */
     public linkServiceUpdateRecoveryHealthGate(id: string, healthGateId: string): void {
         this.db.prepare(

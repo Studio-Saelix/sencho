@@ -180,6 +180,26 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
+describe('container-op supersede across sibling service gates', () => {
+  it('ends the named service gate and leaves a sibling service gate observing', async () => {
+    // Two services on one stack, each with its own gate. A stop of one service
+    // can only end that service's observation: the sibling is still running and
+    // its gate still means something.
+    setContainers([{ id: 'a1', name: 'web-app-1', service: 'app' }, { id: 'd1', name: 'web-db-1', service: 'db' }]);
+    const appToken = await prepareService([{ id: 'a1', name: 'web-app-1', service: 'app' }], { serviceName: 'app' });
+    const appRun = svc().beginPrepared({ prepareToken: appToken, actor: 'tester' }).runId!;
+    setContainers([{ id: 'd1', name: 'web-db-1', service: 'db' }]);
+    const dbToken = await prepareService([{ id: 'd1', name: 'web-db-1', service: 'db' }], { serviceName: 'db' });
+    const dbRun = svc().beginPrepared({ prepareToken: dbToken, actor: 'tester' }).runId!;
+    await ticks(1);
+
+    expect(svc().supersedeForContainerOp(0, 'web', 'the service was stopped during the observation', 'app')).toBe(1);
+    expect(svc().getReport(0, 'web', appRun).status).toBe('unknown');
+    expect(svc().getReport(0, 'web', appRun).reason).toBe('the service was stopped during the observation');
+    expect(svc().getReport(0, 'web', dbRun).status).toBe('observing');
+  });
+});
+
 describe('prepare / beginPrepared nullability', () => {
   it('prepare returns a token with a TTL that outlives the Compose timeout', async () => {
     const before = Date.now();

@@ -383,7 +383,7 @@ export class HealthGateService {
   private supersedeGatesForStack(
     nodeId: number,
     stackName: string,
-    options?: { serviceName?: string | null; stackOnly?: boolean },
+    options?: { serviceName?: string | null; stackOnly?: boolean; reason?: string },
   ): void {
     const serviceName = options?.serviceName;
     const stackOnly = options?.stackOnly === true;
@@ -395,7 +395,47 @@ export class HealthGateService {
       } else if (stackOnly) {
         if (gate.targetScope !== 'stack') continue;
       }
-      this.finalize(gate, 'unknown', 'superseded by a newer operation', []);
+      this.finalize(gate, 'unknown', options?.reason ?? 'superseded by a newer operation', []);
+    }
+  }
+
+  /**
+   * Finalize the gates a deliberate container lifecycle operation just
+   * invalidated: stopping or restarting a service, restarting or stopping a
+   * whole stack, or taking it down.
+   *
+   * Such a gate cannot produce a verdict that means anything, because the
+   * containers it is observing are being replaced or removed underneath it. Left
+   * running it fails within seconds with "container disappeared during
+   * observation" or "exited", which reads as a failed update and, in the UI, as
+   * a Restore offer for a service the operator just stopped on purpose. Recorded
+   * as `unknown` with the operation named, which is the honest verdict: nothing
+   * was proven either way.
+   *
+   * `start` is deliberately not a trigger: starting a service that was already
+   * down does not disturb the containers a live gate is observing.
+   *
+   * Returns the number of gates finalized. Never throws.
+   */
+  public supersedeForContainerOp(
+    nodeId: number,
+    stackName: string,
+    reason: string,
+    serviceName?: string,
+  ): number {
+    try {
+      const before = this.active.size;
+      this.supersedeGatesForStack(nodeId, stackName, serviceName ? { serviceName, reason } : { reason });
+      return before - this.active.size;
+    } catch (error) {
+      console.warn(
+        '[HealthGate] Container-op supersede failed for %s/%s on node %d:',
+        sanitizeForLog(stackName),
+        sanitizeForLog(serviceName ?? '*'),
+        nodeId,
+        getErrorMessage(error, 'unknown'),
+      );
+      return 0;
     }
   }
 

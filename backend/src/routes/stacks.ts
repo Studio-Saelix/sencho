@@ -2017,6 +2017,8 @@ stacksRouter.post('/:stackName/down', async (req: Request, res: Response) => {
     if (isDebugEnabled()) console.debug(`[Stacks:debug] Down starting`, { stackName: sanitizeForLog(stackName), nodeId: req.nodeId, removeVolumes });
     await ComposeService.getInstance(req.nodeId).runDown(stackName, { removeVolumes }, getTerminalWs(req.get(DEPLOY_SESSION_HEADER)));
     invalidateNodeCaches(req.nodeId);
+    // runDown ends the gates it invalidated, so a gate on a stack the operator
+    // just took down cannot report the removal as a failed update.
     dlog(`[Stacks] Down completed: ${sanitizeForLog(stackName)}`);
     notifyActionSuccess(
       'stack_taken_down',
@@ -2138,6 +2140,16 @@ async function bulkContainerOp(
 
     invalidateNodeCaches(req.nodeId);
     dlog(`[Stacks] ${titleCase} completed: ${sanitizeForLog(stackName)} (${outcome.count} containers)`);
+    // A stopped or restarted container is no longer the one a live gate is
+    // observing, so that gate cannot report on it. `start` is excluded: it does
+    // not disturb the containers a live gate watches.
+    if (action !== 'start') {
+      HealthGateService.getInstance().supersedeForContainerOp(
+        req.nodeId,
+        stackName,
+        `the stack was ${action === 'stop' ? 'stopped' : 'restarted'} during the observation`,
+      );
+    }
     ok = true;
     res.json({ success: true, message: `${titleCase} completed via Engine API.` });
     const { category, pastTense } = CONTAINER_ACTION_META[action];
@@ -2192,6 +2204,17 @@ async function handleServiceAction(
           : (id: string) => dockerController.restartContainer(id);
     await Promise.all(matching.map(c => op(c.Id)));
     invalidateNodeCaches(req.nodeId);
+    // Same reason as the stack-level op above, scoped to this service so a
+    // sibling's gate keeps observing: a stopped or restarted service can no
+    // longer be judged by the gate that was watching it.
+    if (action !== 'start') {
+      HealthGateService.getInstance().supersedeForContainerOp(
+        req.nodeId,
+        stackName,
+        `the service was ${action === 'stop' ? 'stopped' : 'restarted'} during the observation`,
+        serviceName,
+      );
+    }
     dlog(
       `[Stacks] Service ${sanitizeForLog(action)} completed: ${sanitizeForLog(stackName)}/${sanitizeForLog(serviceName)} (${matching.length} containers)`,
     );
@@ -2721,6 +2744,12 @@ stacksRouter.post('/:stackName/rollback', async (req: Request, res: Response) =>
         throw compError;
       }
       invalidateNodeCaches(req.nodeId);
+      // The restore replaced every service's runtime, so the per-service
+      // snapshots taken before it are not rollback targets any more. The
+      // backup-based rollback path below gets this from deployStack; this path
+      // runs its own compose up, so it retires them here.
+      const { ServiceUpdateRecoveryService } = await import('../services/ServiceUpdateRecoveryService');
+      ServiceUpdateRecoveryService.getInstance().invalidateActiveForStack(req.nodeId, stackName);
       dlog(`[Stacks] Rollback completed: ${sanitizeForLog(stackName)}`);
       // Echo the generation the point was bound to. A hub-driven rollout
       // rollback requires this to equal the generation it asked for, so a

@@ -8,6 +8,7 @@
 import { describe, it, expect, vi, beforeAll, afterAll, beforeEach, afterEach } from 'vitest';
 import { setupTestDb, cleanupTestDb } from './helpers/setupTestDb';
 import type { ServiceReplicaSnapshot } from '../services/ServiceUpdateRecoveryService';
+import type { ServiceUpdateRecoveryRow } from '../services/DatabaseService';
 
 let tmpDir: string;
 let DatabaseService: typeof import('../services/DatabaseService').DatabaseService;
@@ -256,6 +257,59 @@ describe('listAllActiveForStack', () => {
 
   it('returns an empty array when no rows match the stack', () => {
     expect(svc().listAllActiveForStack(1, 'web')).toEqual([]);
+  });
+});
+
+describe('invalidateActiveForStack', () => {
+  it('retires every active row for the stack and leaves terminal and other rows alone', () => {
+    const now = Date.now();
+    const row = (overrides: Partial<ServiceUpdateRecoveryRow> = {}) => ({
+      id: 'rec-x', node_id: 1, stack_name: 'web', service_name: 'api',
+      replicas_json: '[]', majority_image_id: 'sha256:a', declared_image_ref: 'x:1',
+      weak_floating_tag: 0, health_gate_id: null, status: 'active' as const,
+      expires_at: now + 60_000, claim_expires_at: null, created_at: now, created_by: null,
+      ...overrides,
+    });
+    db().insertServiceUpdateRecovery(row({ id: 'rec-api' }));
+    db().insertServiceUpdateRecovery(row({ id: 'rec-db', service_name: 'db' }));
+    db().insertServiceUpdateRecovery(row({ id: 'rec-consumed', status: 'consumed' }));
+    db().insertServiceUpdateRecovery(row({ id: 'rec-other-stack', stack_name: 'api' }));
+    db().insertServiceUpdateRecovery(row({ id: 'rec-other-node', node_id: 2 }));
+
+    expect(svc().invalidateActiveForStack(1, 'web')).toBe(2);
+    expect(svc().listActive(1, 'web', 'api')).toEqual([]);
+    expect(svc().listActive(1, 'web', 'db')).toEqual([]);
+    expect(svc().listActive(1, 'api', 'api').map(r => r.id)).toEqual(['rec-other-stack']);
+    // The rows themselves stay for the audit trail, in the terminal state a
+    // restore with a missing image also lands in.
+    expect(db().getServiceUpdateRecovery('rec-api')?.status).toBe('invalidated');
+    expect(db().getServiceUpdateRecovery('rec-consumed')?.status).toBe('consumed');
+  });
+
+  it('reports nothing retired when the stack has no active rows', () => {
+    expect(svc().invalidateActiveForStack(1, 'web')).toBe(0);
+  });
+
+  it('keeps a restoring row claimable and only retires the active ones', () => {
+    const now = Date.now();
+    db().insertServiceUpdateRecovery({
+      id: 'rec-restoring', node_id: 1, stack_name: 'web', service_name: 'api',
+      replicas_json: '[]', majority_image_id: 'sha256:a', declared_image_ref: 'x:1',
+      weak_floating_tag: 0, health_gate_id: null, status: 'restoring',
+      expires_at: now + 60_000, claim_expires_at: now + 30_000, created_at: now, created_by: null,
+    });
+    db().insertServiceUpdateRecovery({
+      id: 'rec-active', node_id: 1, stack_name: 'web', service_name: 'db',
+      replicas_json: '[]', majority_image_id: 'sha256:b', declared_image_ref: 'x:2',
+      weak_floating_tag: 0, health_gate_id: null, status: 'active',
+      expires_at: now + 60_000, claim_expires_at: null, created_at: now, created_by: null,
+    });
+
+    expect(svc().invalidateActiveForStack(1, 'web')).toBe(1);
+    // A restore already in flight owns its row; retiring it would strand the
+    // restore's own claim bookkeeping.
+    expect(db().getServiceUpdateRecovery('rec-restoring')?.status).toBe('restoring');
+    expect(db().getServiceUpdateRecovery('rec-active')?.status).toBe('invalidated');
   });
 });
 

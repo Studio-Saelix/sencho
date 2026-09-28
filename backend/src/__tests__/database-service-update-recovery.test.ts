@@ -335,4 +335,36 @@ describe('service_update_recovery accessors', () => {
       expect(rows.map(r => r.id)).toEqual(['rec-older']);
     });
   });
+
+  describe('invalidateActiveServiceUpdateRecoveriesForStack', () => {
+    it('retires active rows for that stack and node only, and reports how many', () => {
+      const now = Date.now();
+      const row = (overrides: Partial<ServiceUpdateRecoveryRow> = {}) => makeRow({
+        expires_at: now + 60_000, created_at: now, ...overrides,
+      });
+      db().insertServiceUpdateRecovery(row({ id: 'rec-api', service_name: 'api' }));
+      db().insertServiceUpdateRecovery(row({ id: 'rec-db', service_name: 'db' }));
+      db().insertServiceUpdateRecovery(row({ id: 'rec-consumed', service_name: 'cache', status: 'consumed' }));
+      db().insertServiceUpdateRecovery(row({ id: 'rec-other-stack', stack_name: 'api' }));
+      db().insertServiceUpdateRecovery(row({ id: 'rec-other-node', node_id: 99 }));
+
+      expect(db().invalidateActiveServiceUpdateRecoveriesForStack(NODE, 'web')).toBe(2);
+      expect(db().getServiceUpdateRecovery('rec-api')?.status).toBe('invalidated');
+      expect(db().getServiceUpdateRecovery('rec-db')?.status).toBe('invalidated');
+      // A terminal row keeps its own status, and the invalidation is stack- and
+      // node-scoped, so another stack's and another node's offers are untouched.
+      expect(db().getServiceUpdateRecovery('rec-consumed')?.status).toBe('consumed');
+      expect(db().getServiceUpdateRecovery('rec-other-stack')?.status).toBe('active');
+      expect(db().getServiceUpdateRecovery('rec-other-node')?.status).toBe('active');
+      // Idempotent: a second retirement finds nothing left to retire.
+      expect(db().invalidateActiveServiceUpdateRecoveriesForStack(NODE, 'web')).toBe(0);
+    });
+
+    it('retires an expired row that the sweep has not reached yet', () => {
+      const now = Date.now();
+      db().insertServiceUpdateRecovery(makeRow({ id: 'rec-expired', created_at: now, expires_at: now - 1 }));
+      expect(db().invalidateActiveServiceUpdateRecoveriesForStack(NODE, 'web')).toBe(1);
+      expect(db().getServiceUpdateRecovery('rec-expired')?.status).toBe('invalidated');
+    });
+  });
 });
