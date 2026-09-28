@@ -428,10 +428,17 @@ export class BlueprintReconciler {
                     }
                 }
                 const reason = driftResult.reason;
+                // The drift episode began when the row first read drifted, so a
+                // tick that re-observes the same drift must not restamp it.
+                // Restamping made a drift that outlived one tick report itself
+                // as just found, forever, which is the one thing the drift age
+                // on the row exists to say.
+                const alreadyDrifted =
+                    DatabaseService.getInstance().getDeployment(blueprint.id, node.id)?.status === 'drifted';
                 commitBlueprintDeploymentCause('drift_observed', blueprint.id, node.id, {
                     status: 'drifted',
                     last_checked_at: Date.now(),
-                    last_drift_at: Date.now(),
+                    ...(alreadyDrifted ? {} : { last_drift_at: Date.now() }),
                     drift_summary: reason,
                 }, null);
                 // A block about auto-repair means nothing to Observe or Suggest,
@@ -862,6 +869,18 @@ export class BlueprintReconciler {
                     // exactly like a refusal. Without this the throw escapes to
                     // the per-blueprint catch and strands the row, which is the
                     // same ambiguity a refusal used to leave.
+                    //
+                    // The throw is logged rather than only alerted, because this
+                    // boundary cannot tell an operational failure from a bug in
+                    // the repair itself, and both look identical here. Letting a
+                    // bug through as an alert alone would repeat it every tick
+                    // with a cryptic message and never reach a developer, while
+                    // re-throwing would strand the row again. Logging covers the
+                    // developer and the alert covers the operator.
+                    console.error(
+                        `[BlueprintReconciler] drift repair threw for blueprint ${blueprint.id} on node ${node.id}:`,
+                        err instanceof Error ? err.stack ?? err.message : String(err),
+                    );
                     result = { status: 'failed', error: BlueprintService.formatError(err) };
                 }
                 // A hold is a decision, not a failed attempt. The repair
@@ -883,23 +902,26 @@ export class BlueprintReconciler {
                 if (result.status !== 'active') {
                     // Losing a race for the deploy lock is not a failure and
                     // carries no message of its own. The row still has to leave
-                    // `correcting` so the next tick picks it up, and it says why
-                    // it is being deferred, but there is nothing to page about.
+                    // `correcting` so the next tick picks it up, but there is
+                    // nothing to page about.
                     const deferred = result.status === 'pending';
-                    const failure = deferred
-                        ? 'repair deferred: another operation holds this deployment'
-                        : result.error ?? 'unknown error';
                     // A refusal that wrote no status of its own is settled here,
                     // so the row never keeps reading `correcting` and the next
-                    // tick gets to try again. The alert is for a failure that is
-                    // new, so a refusal that persists retries every tick without
-                    // paging every tick.
-                    const isNew = this.settleRefusedDriftRepair(blueprint, node, failure, before);
-                    if (isNew && !deferred) {
+                    // tick gets to try again. The settle decides whether this is
+                    // news, because that question can only be answered against
+                    // the row and the snapshot together.
+                    const report = this.settleRefusedDriftRepair(
+                        blueprint,
+                        node,
+                        result,
+                        before,
+                        deferred,
+                    );
+                    if (report) {
                         notifications.dispatchAlert(
                             'error',
                             'blueprint_drift_correction_failed',
-                            `Auto-fix for "${blueprint.name}" ${nodeLocationClause(node)} failed: ${failure}`,
+                            `Auto-fix for "${blueprint.name}" ${nodeLocationClause(node)} failed: ${report}`,
                             { stackName: blueprint.name, actor: 'system:blueprint' },
                         );
                     }
@@ -969,32 +991,55 @@ export class BlueprintReconciler {
      * move between the two states on every attempt, and the projection reads the
      * latest stage, so suppressing either write would leave the history claiming
      * a state the row is not in. A hold, which does not move, suppresses instead.
+     *
+     * Returns the message to report, or null when the operator has already been
+     * told this one.
      */
     private settleRefusedDriftRepair(
         blueprint: Blueprint,
         node: Node,
-        failure: string,
+        outcome: DeployOutcome,
         before: BlueprintDeployment | undefined,
-    ): boolean {
+        deferred: boolean,
+    ): string | null {
         const row = DatabaseService.getInstance().getDeployment(blueprint.id, node.id);
         // A repair that reached a deploy wrote its own terminal status, and a
         // hold wrote its own row. Only the refusals that wrote nothing are
         // settled here.
         const stranded = row?.status === 'correcting';
+        // When the repair reached a deploy, the row it left behind spells this
+        // failure out and the outcome may only carry a shorthand: the
+        // name-conflict paths return the bare word `name_conflict` and then park
+        // the row for good, so that one alert is the only signal the operator
+        // gets and it has to name the directory in the way. When the row is
+        // still `correcting` nothing was written, so the row's `last_error` is
+        // the *previous* failure and the outcome is the only honest source.
+        const message = stranded
+            ? outcome.error ?? 'unknown error'
+            : row?.last_error ?? outcome.error ?? 'unknown error';
         if (stranded) {
-            // `last_drift_at` is deliberately left alone. It answers when this
-            // drift episode began, and it is the same drift still owed a repair,
-            // so restamping it would report the drift as brand new on every
-            // retry and hide how long it has actually been standing.
+            // Neither `last_drift_at` nor `last_error` is restamped by a
+            // deferral. The timestamp answers when this drift episode began, and
+            // the error is the replay key: writing a note about a lost lock race
+            // over the failure being replayed would make the very next tick
+            // report that same failure again as though it were new. What the row
+            // already says is worth more to an operator than a note about a race
+            // that is over.
             commitBlueprintDeploymentCause('drift_observed', blueprint.id, node.id, {
                 status: 'drifted',
                 last_checked_at: Date.now(),
-                last_error: failure,
+                ...(deferred ? {} : { last_error: message }),
             }, null);
         }
         const nowStatus = stranded ? 'drifted' : row?.status;
-        const nowError = stranded ? failure : row?.last_error;
-        return nowStatus !== before?.status || nowError !== before?.last_error;
+        const nowError = stranded && !deferred ? message : row?.last_error;
+        if (deferred) return null;
+        // A row that converged while the repair was in flight has no drift left
+        // for this failure to be about, so reporting it would page the operator
+        // over a target that is already healthy.
+        if (nowStatus === 'active') return null;
+        const isNew = nowStatus !== before?.status || nowError !== before?.last_error;
+        return isNew ? message : null;
     }
 
     /**
@@ -1053,10 +1098,12 @@ export class BlueprintReconciler {
                 }
             }
             const reason = driftResult.reason;
+            const alreadyDrifted =
+                DatabaseService.getInstance().getDeployment(blueprint.id, node.id)?.status === 'drifted';
             commitBlueprintDeploymentCause('drift_observed', blueprint.id, node.id, {
                 status: 'drifted',
                 last_checked_at: Date.now(),
-                last_drift_at: Date.now(),
+                ...(alreadyDrifted ? {} : { last_drift_at: Date.now() }),
                 drift_summary: reason,
             }, null);
             await this.handleDrift(blueprint, node, reason, driftResult.cause);

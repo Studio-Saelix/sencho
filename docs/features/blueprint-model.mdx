@@ -190,8 +190,8 @@ Possible status values:
 | **Awaiting confirmation** | A stateful blueprint reached a new node. The reconciler refuses to deploy until you click **Confirm deploy** in the action column. |
 | **Deploying** | The compose action is in flight on this node. |
 | **Active** | The deployment is placed and its containers are running for this blueprint revision. Exact image identity is a separate GitOps / Drift proof; a row can read Active while Drift shows runtime artifact disagreement. |
-| **Drifted** | The reconciler detected a difference between the live state and the desired one (marker, revision, container health, or frozen image digest). Under **Enforce** the next tick tries to repair it, and tries again for as long as the row stays in this state. |
-| **Correcting** | An Enforce-mode auto-fix is in flight. This state does not last: an attempt that cannot finish leaves the row on **Drifted** with the reason in the notes column, for the next tick to try again. Drift that is held or blocked instead does not come back here, because **Repair held** and **Name conflict** are waiting on you, not on the reconciler. |
+| **Drifted** | The reconciler detected a difference between the live state and the desired one (marker, revision, container health, or frozen image digest). Under **Enforce** the next tick tries to repair it, and tries again for as long as the row stays in this state. Drift that is held or blocked instead does not come back here, because **Repair held** and **Name conflict** are waiting on you, not on the reconciler. |
+| **Correcting** | An Enforce-mode auto-fix is in flight. An attempt that reports back without finishing leaves the row on **Drifted** with the reason in the notes column, for the next tick to try again. A row that stays here means the attempt never reported back at all, which a restart during a repair can cause, and it will not pick itself up. |
 | **Repair held** | Drift was found and auto-fix was declined, with the reason on the row. Nothing was changed. |
 | **Failed** | The deployment or withdrawal errored. The notes column carries the message. |
 | **Withdrawing** | A withdraw is in flight. |

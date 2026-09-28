@@ -164,9 +164,10 @@ describe('a refused drift repair does not strand the deployment', () => {
     const afterFirst = DatabaseService.getInstance().getDeployment(blueprint.id, node.id);
     expect(afterFirst?.status).toBe('drifted');
     // Losing the lock for a moment is a deferral, not a failure, and it carries
-    // no message of its own, so the row is told why it is waiting and the
-    // operator is not paged about a race they cannot act on.
-    expect(afterFirst?.last_error).toMatch(/deferred/i);
+    // no message of its own. The row is left saying whatever it last actually
+    // failed with, because that text is the replay key, and the operator is not
+    // paged about a race they cannot act on.
+    expect(afterFirst?.last_error, 'a deferral does not overwrite what the row last failed with').toBeFalsy();
     expect(alerts.categories()).toEqual([]);
 
     await BlueprintReconciler.getInstance().reconcileOne(blueprint.id);
@@ -342,6 +343,134 @@ describe('a refused drift repair does not strand the deployment', () => {
       'blueprint_drift_correction_failed',
       'blueprint_drift_correction_failed',
     ]);
+  });
+
+  it('does not report an already-reported failure again just because a lock was lost in between', async () => {
+    const node = seedNode();
+    const blueprint = seedEnforceBlueprint(node);
+    approvePlace(blueprint, node.id);
+    writeRow(blueprint, node.id, 'drifted');
+    countDriftChecks();
+    const alerts = countAlerts();
+    const repair = vi.spyOn(BlueprintService.getInstance(), 'enforceDigestRepair')
+      .mockResolvedValue({ status: 'failed', error: PIN_REFUSAL } as never);
+
+    await BlueprintReconciler.getInstance().reconcileOne(blueprint.id);
+    expect(alerts.categories()).toEqual(['blueprint_drift_correction_failed']);
+
+    // A concurrent operation takes the deploy lock for one tick.
+    repair.mockResolvedValue({ status: 'pending' } as never);
+    await BlueprintReconciler.getInstance().reconcileOne(blueprint.id);
+    const deferred = DatabaseService.getInstance().getDeployment(blueprint.id, node.id);
+    expect(deferred?.status).toBe('drifted');
+    expect(alerts.categories(), 'a lost lock race is not news').toEqual([
+      'blueprint_drift_correction_failed',
+    ]);
+
+    // The same refusal comes back. It is the failure already reported, so the
+    // note about the race must not have displaced it from the row.
+    repair.mockResolvedValue({ status: 'failed', error: PIN_REFUSAL } as never);
+    await BlueprintReconciler.getInstance().reconcileOne(blueprint.id);
+
+    expect(alerts.categories()).toEqual(['blueprint_drift_correction_failed']);
+  });
+
+  it('names the directory in the alert when a name conflict blocks the repair for good', async () => {
+    const node = seedNode();
+    const blueprint = seedEnforceBlueprint(node);
+    approvePlace(blueprint, node.id);
+    writeRow(blueprint, node.id, 'drifted');
+    countDriftChecks();
+    const messages: string[] = [];
+    vi.spyOn(NotificationService.getInstance(), 'dispatchAlert')
+      .mockImplementation(async (_level, _category, message) => {
+        messages.push(message);
+        return { persisted: true };
+      });
+    // The real name-conflict path returns the bare shorthand but writes the
+    // sentence onto the row, and the row then stays blocked for good.
+    const sentence = 'A stack named "retry-bp" already exists on this node and is not managed by Sencho.';
+    vi.spyOn(BlueprintService.getInstance(), 'enforceDigestRepair').mockImplementation(async () => {
+      writeRow(blueprint, node.id, 'name_conflict', { drift_summary: null, last_error: sentence });
+      return { status: 'name_conflict', error: 'name_conflict' } as never;
+    });
+
+    await BlueprintReconciler.getInstance().reconcileOne(blueprint.id);
+
+    expect(messages).toHaveLength(1);
+    expect(messages[0], 'the one alert this operator gets has to be actionable').toContain(sentence);
+  });
+
+  it('stays silent when the target converged while the repair was in flight', async () => {
+    const node = seedNode();
+    const blueprint = seedEnforceBlueprint(node);
+    approvePlace(blueprint, node.id);
+    writeRow(blueprint, node.id, 'drifted');
+    countDriftChecks();
+    const alerts = countAlerts();
+    // Someone else converged the target while this tick's repair was running, so
+    // there is no drift left for this failure to be about.
+    vi.spyOn(BlueprintService.getInstance(), 'enforceDigestRepair').mockImplementation(async () => {
+      writeRow(blueprint, node.id, 'active', { drift_summary: null, last_drift_at: null });
+      return { status: 'failed', error: 'service "web" failed to start' } as never;
+    });
+
+    await BlueprintReconciler.getInstance().reconcileOne(blueprint.id);
+
+    expect(DatabaseService.getInstance().getDeployment(blueprint.id, node.id)?.status).toBe('active');
+    expect(alerts.categories(), 'a healthy target is not paged about a stale failure').toEqual([]);
+  });
+
+  it('settles a refusal on a Git-managed blueprint, which repairs by reapplying the generation', async () => {
+    const node = seedNode();
+    const blueprint = seedEnforceBlueprint(node);
+    DatabaseService.getInstance().updateBlueprintContentOrigin(blueprint.id, 'git', 'app-git-managed');
+    const gitBlueprint = DatabaseService.getInstance().getBlueprint(blueprint.id)!;
+    approvePlace(gitBlueprint, node.id);
+    writeRow(gitBlueprint, node.id, 'drifted');
+    const alerts = countAlerts();
+    // Container drift, not a frozen-image disagreement, so the dispatch reaches
+    // the Git-managed branch. Git-managed content has no authored compose to
+    // deploy, so its repair is the authorized reapply, and it has to settle the
+    // same way or a Git-managed target strands exactly like an Inline one.
+    vi.spyOn(BlueprintService.getInstance(), 'checkForDrift').mockResolvedValue({
+      kind: 'drifted', reason: 'no containers running for this blueprint', cause: 'container',
+    });
+    const reapply = vi.spyOn(BlueprintService.getInstance(), 'reapplyAuthorizedMaterialization')
+      .mockResolvedValue({ status: 'failed', error: 'acknowledged generation missing for authorized reapply' } as never);
+    const deploy = vi.spyOn(BlueprintService.getInstance(), 'deployToNode');
+
+    await BlueprintReconciler.getInstance().reconcileOne(gitBlueprint.id);
+
+    expect(reapply, 'a Git-managed drift repairs by reapplying, not by deploying authored compose').toHaveBeenCalledTimes(1);
+    expect(deploy).not.toHaveBeenCalled();
+    const after = DatabaseService.getInstance().getDeployment(gitBlueprint.id, node.id);
+    expect(after?.status).toBe('drifted');
+    expect(after?.last_error).toMatch(/acknowledged generation missing/);
+    expect(alerts.categories()).toEqual(['blueprint_drift_correction_failed']);
+  });
+
+  it('keeps the original drift timestamp when a later tick re-observes the same drift', async () => {
+    const node = seedNode();
+    const blueprint = seedEnforceBlueprint(node);
+    approvePlace(blueprint, node.id);
+    writeRow(blueprint, node.id, 'drifted');
+    countDriftChecks();
+    countAlerts();
+    vi.spyOn(BlueprintService.getInstance(), 'enforceDigestRepair')
+      .mockResolvedValue({ status: 'failed', error: PIN_REFUSAL } as never);
+
+    await BlueprintReconciler.getInstance().reconcileOne(blueprint.id);
+    const firstSeen = DatabaseService.getInstance().getDeployment(blueprint.id, node.id)?.last_drift_at;
+    expect(firstSeen, 'the first observation stamps when the drift began').toBeTruthy();
+
+    await BlueprintReconciler.getInstance().reconcileOne(blueprint.id);
+
+    // The drift episode began at the first observation. Restamping on every tick
+    // made a drift that outlived one tick report itself as just found, forever,
+    // which is the one thing the drift age on the row exists to say.
+    const dep = DatabaseService.getInstance().getDeployment(blueprint.id, node.id);
+    expect(dep?.last_drift_at).toBe(firstSeen);
   });
 
   it('alerts once for a failure that persists instead of once per tick', async () => {

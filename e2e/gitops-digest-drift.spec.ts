@@ -257,7 +257,11 @@ test.describe('GitOps digest drift', () => {
   test.setTimeout(360_000);
 
   const stamp = Date.now();
-  const blueprintName = `e2e-digest-${stamp}`;
+  // One stack name per case, not one per file. Both cases deploy a real compose
+  // project under this name, so a shared one would make the second case collide
+  // with whatever the first case's teardown left behind, and the failure would
+  // surface as a confusing container count rather than as the leak it is.
+  const blueprintNameFor = (caseName: string) => `e2e-digest-${caseName}-${stamp}`;
   // Two real tags of one repository, pinned by digest and then swapped, so the
   // approved reference resolves locally and the observed digest matches the
   // authored repository. The digests themselves are read from the daemon, never
@@ -266,6 +270,9 @@ test.describe('GitOps digest drift', () => {
   const movedImage = 'nginx:1.27';
   const overrideFile = `/tmp/e2e-digest-override-${stamp}.yaml`;
   let blueprintId: number | null = null;
+  // Set by each case as it starts, so teardown can look for the containers that
+  // case created even when the case failed before it created the blueprint.
+  let blueprintName = '';
 
   test.beforeAll(() => {
     execFileSync('docker', ['pull', '--quiet', approvedImage], { timeout: DOCKER_TIMEOUT_MS, stdio: 'pipe' });
@@ -278,6 +285,7 @@ test.describe('GitOps digest drift', () => {
 
   test('a replaced image digest is reported per service with both digests, and the approved identity holds', async ({ page }) => {
     await loginAs(page);
+    blueprintName = blueprintNameFor('observe');
 
     const approvedDigests = repoDigests(approvedImage);
     const movedDigests = repoDigests(movedImage);
@@ -435,6 +443,7 @@ test.describe('GitOps digest drift', () => {
 
   test('an Enforce Blueprint repairs a moved image back to the approved digest and reconverges', async ({ page }) => {
     await loginAs(page);
+    blueprintName = blueprintNameFor('enforce');
 
     const approvedDigests = repoDigests(approvedImage);
     const movedDigests = repoDigests(movedImage);
