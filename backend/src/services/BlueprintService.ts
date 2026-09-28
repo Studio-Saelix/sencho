@@ -809,6 +809,29 @@ export class BlueprintService {
      * not say the workload is fine.
      */
     async checkForDrift(blueprint: Blueprint, node: Node): Promise<DriftCheckResult> {
+        // Declared out here rather than inside the try so the catch can reach it:
+        // a transport failure is exactly the case where the hold must survive.
+        let repairBlock: RepairBlock | undefined;
+        // Every drifted return from here on carries the block. Dropping it on any
+        // one of them hands the reconciler a repairable verdict for a target the
+        // hold exists to protect, and the mutation sites trust this result:
+        // `deployToNode` and `reapplyAuthorizedMaterialization` will write to the
+        // node on the strength of it.
+        const drifted = (reason: string, cause: DriftCause): DriftCheckResult => ({
+            kind: 'drifted',
+            reason,
+            cause,
+            ...(repairBlock ? { repairBlock } : {}),
+        });
+        // Same rule for the returns that cannot classify: the reconciler records
+        // a hold off this result too, so dropping the block here would silently
+        // unhold a target for exactly as long as the node stays unobservable,
+        // which is the state a hold most needs to cover.
+        const unverified = (reason: string): DriftCheckResult => ({
+            kind: 'unverified',
+            reason,
+            ...(repairBlock ? { repairBlock } : {}),
+        });
         try {
             const store = GitOpsStore.getInstance();
             const app = store.getLiveBlueprintApplication(blueprint.id);
@@ -825,21 +848,9 @@ export class BlueprintService {
             // Resolved first so the rest of the check can carry the block, not
             // stop on it.
             const binding = resolveRuntimeRepairBinding(store, app, target);
-            let repairBlock: RepairBlock | undefined = binding.kind === 'hold'
-                ? { reason: binding.reason, detail: describeRuntimeRepairHold(binding.reason) }
-                : undefined;
-
-            // Every drifted return from here on carries the block. Dropping it on
-            // any one of them hands the reconciler a repairable verdict for a
-            // target the hold exists to protect, and the mutation sites trust
-            // this result: `deployToNode` and `reapplyAuthorizedMaterialization`
-            // will write to the node on the strength of it.
-            const drifted = (reason: string, cause: DriftCause): DriftCheckResult => ({
-                kind: 'drifted',
-                reason,
-                cause,
-                ...(repairBlock ? { repairBlock } : {}),
-            });
+            if (binding.kind === 'hold') {
+                repairBlock = { reason: binding.reason, detail: describeRuntimeRepairHold(binding.reason) };
+            }
 
             const marker = await this.readMarker(blueprint.name, node);
             if (!marker) {
@@ -876,7 +887,7 @@ export class BlueprintService {
 
             const containerState = await this.containerHealth(blueprint.name, node);
             if (containerState.kind === 'unreachable') {
-                return { kind: 'unverified', reason: containerState.detail };
+                return unverified(containerState.detail);
             }
             if (containerState.kind === 'not_running') {
                 return drifted(containerState.detail, 'container');
@@ -884,7 +895,7 @@ export class BlueprintService {
 
             const observed = await this.observeRuntimeIdentity(blueprint.name, node);
             if (!observed) {
-                return { kind: 'unverified', reason: 'runtime identity could not be collected' };
+                return unverified('runtime identity could not be collected');
             }
             // Recorded on every path that reaches here, including a blocked one.
             // A hold says Sencho may not overwrite the workload; it is not a
@@ -895,11 +906,7 @@ export class BlueprintService {
             // so the artifact question cannot be answered either way. The block
             // travels with the answer so the hold is still visible.
             if (binding.kind === 'hold') {
-                return {
-                    kind: 'unverified',
-                    reason: 'no authoritative artifact set to compare the observation against',
-                    repairBlock,
-                };
+                return unverified('no authoritative artifact set to compare the observation against');
             }
 
             // The expected set is the one this target acknowledged. Reading the
@@ -913,7 +920,7 @@ export class BlueprintService {
                 !expectedRow
                 || (expectedRow.qualification !== 'exact' && expectedRow.qualification !== 'qualified')
             ) {
-                return { kind: 'unverified', reason: 'expected artifact set is not comparable' };
+                return unverified('expected artifact set is not comparable');
             }
             let expectedIdentity: string | null = null;
             let expectedServices: ServiceArtifactEvidence[] | undefined;
@@ -922,18 +929,18 @@ export class BlueprintService {
                 expectedIdentity = 'identity' in decoded ? decoded.identity : null;
                 expectedServices = 'services' in decoded ? decoded.services : undefined;
             } catch {
-                return { kind: 'unverified', reason: 'expected artifact evidence is invalid' };
+                return unverified('expected artifact evidence is invalid');
             }
             if (!expectedIdentity) {
-                return { kind: 'unverified', reason: 'expected artifact identity missing' };
+                return unverified('expected artifact identity missing');
             }
 
             if (observed.kind !== 'exact' && observed.kind !== 'qualified') {
-                return { kind: 'unverified', reason: `observation is ${observed.kind}` };
+                return unverified(`observation is ${observed.kind}`);
             }
             if (expectedServices && expectedServices.length > 0) {
                 if (!observed.services || observed.services.length === 0) {
-                    return { kind: 'unverified', reason: 'observation has no per-service digest evidence' };
+                    return unverified('observation has no per-service digest evidence');
                 }
                 if (comparableObservationMatches(expectedServices, observed)) {
                     return { kind: 'matched' };
@@ -947,7 +954,7 @@ export class BlueprintService {
         } catch (err) {
             // Prefer unverified over drifted so a transport failure cannot
             // trigger Enforce against an unreachable or half-observed node.
-            return { kind: 'unverified', reason: BlueprintService.formatError(err) };
+            return unverified(BlueprintService.formatError(err));
         }
     }
 
