@@ -74,6 +74,13 @@ function frozenSnapshotFor(app: GitOpsApplicationRow): PolicySnapshot | null {
   if (!generationId) return null;
   const generation = store.getRolloutGeneration(generationId);
   if (!generation || generation.application_id !== app.id) return null;
+  // Absent is absent. A generation that predates the policy contract has no
+  // snapshot recorded, and decoding that as the fresh-install defaults would
+  // report a rollout as having been decided under a policy that did not exist
+  // when it ran. The strict decoder also throws on an unrecognized version,
+  // which is caught here for the same reason: a snapshot this build cannot read
+  // is not one it may report a value from.
+  if (generation.policy_snapshot_json === null) return null;
   try {
     return decodePolicySnapshot(generation.policy_snapshot_json);
   } catch {
@@ -172,15 +179,22 @@ function readFor(
   // Source acceptance is the authority the source domain acts through. There is
   // no source decision the system declines on its own, so the only two answers
   // are that something decided it or that nobody has.
+  //
+  // The authority is read from the approval rather than assumed, because the
+  // automatic path records the same row with the policy as the decider. Reporting
+  // every acceptance as an operator's would have told an operator on the
+  // automatic policy that they had personally accepted a revision nobody showed
+  // them.
   const acceptance = app.source_acceptance_ref
     ? GitOpsStore.getInstance().getApproval(app.source_acceptance_ref)
     : undefined;
   if (acceptance && acceptance.kind === 'source_acceptance') {
+    const byPolicy = acceptance.authority === 'configured_policy';
     return {
       ...base,
-      decision: 'operator_authorized',
+      decision: byPolicy ? 'policy_authorized' : 'operator_authorized',
       reason: null,
-      decidedBy: 'operator',
+      decidedBy: byPolicy ? 'configured_policy' : 'operator',
       decidedAt: acceptance.created_at,
     };
   }

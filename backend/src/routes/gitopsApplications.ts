@@ -1167,7 +1167,11 @@ function requirePolicyTargetAuthority(
  * decides whether the next placement decision may approve a change without an
  * operator.
  *
- * Authorized by exact `stack:deploy` on every frozen target, which is the
+ * Authorized by the application-wide `stack:deploy` grant and an exact
+ * `stack:deploy` on every frozen target. Both halves are required, which is the
+ * same requirement the health policy write beside it carries; the exact per-target
+ * check is the part a stack-scoped assignment can satisfy, and the
+ * application-wide grant is the part it cannot. The gate is the
  * authority that a placement approval itself needs. A global `stack:create` is
  * deliberately not also required: it is held only by roles that hold a global
  * `stack:deploy` as well, so demanding it would silently upgrade the gate to

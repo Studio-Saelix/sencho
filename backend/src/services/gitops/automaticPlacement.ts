@@ -355,7 +355,15 @@ export function applyAutomaticPlacement(
     return { status: 'no_action', reason: 'no_placement_change' };
   }
   if (decision.decision === 'operator_review') {
-    recordRefusal(app.id, decision.reason, envelope.at);
+    // `policy_is_operator` is not a decline, and recording it as one made the
+    // default policy read as "declined by policy, waiting on an operator" on
+    // every placement that was simply configured the way most installations are.
+    // A refusal answers "the policy ran and said no"; the operator policy never
+    // ran, so it has nothing to record. The projection reads a null reason as
+    // awaiting an operator, which is what this actually is.
+    if (decision.reason !== 'policy_is_operator') {
+      recordRefusal(app.id, decision.reason, envelope.at);
+    }
     return { status: 'operator_review', reason: decision.reason };
   }
 

@@ -272,6 +272,37 @@ describe('authority policy reads', () => {
     const ref = insertApproval({ kind: 'source_acceptance', authority: 'operator', application_id: app.id, created_at: 3 });
     const entry = read('source', { ...app, source_acceptance_ref: ref });
     expect(entry.decision).toBe('operator_authorized');
+    expect(entry.decidedBy).toBe('operator');
+    expect(entry.configured).toBe('automatic');
+  });
+
+  it('reports a source acceptance the automatic path made as the policy deciding it', () => {
+    // An operator on the automatic policy was being told they had personally
+    // accepted a revision nobody showed them, because the authority was
+    // hardcoded rather than read from the approval.
+    const app = seedApp({ source_policy: 'automatic' });
+    const ref = insertApproval({
+      kind: 'source_acceptance',
+      authority: 'configured_policy',
+      application_id: app.id,
+      actor: null,
+      created_at: 4,
+    });
+    const entry = read('source', { ...app, source_acceptance_ref: ref });
+    expect(entry.decision).toBe('policy_authorized');
+    expect(entry.decidedBy).toBe('configured_policy');
+  });
+
+  it('reports no frozen value for a generation that predates the policy contract', () => {
+    // A generation with no recorded snapshot is one that predates the contract.
+    // Decoding that as the fresh-install defaults would claim a rollout was
+    // decided under a policy that did not exist when it ran.
+    const app = seedApp({ placement_policy: 'bounded_auto', rollout_authorization_policy: 'automatic' });
+    const withGeneration = { ...app, rollout_generation_id: seedGeneration(app, null) };
+    const entry = read('rollout_authorization', withGeneration);
+    expect(entry.effectiveFrozen).toBeNull();
+    // The configured value is still reported. Absent evidence about the frozen
+    // policy is not an excuse to withhold the one fact the row does hold.
     expect(entry.configured).toBe('automatic');
   });
 

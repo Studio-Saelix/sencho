@@ -125,7 +125,7 @@ export default function GitOpsPolicyControl({
   }));
 
   async function handleConfirm(): Promise<void> {
-    if (!canWrite || pending || selected === current) {
+    if (pending || selected === current) {
       setOpen(false);
       return;
     }
@@ -154,7 +154,6 @@ export default function GitOpsPolicyControl({
         <DropdownMenuItem
           onSelect={(event) => event.preventDefault()}
           onClick={openDialog}
-          disabled={!canWrite}
           data-testid={`gitops-action-${domain}-policy`}
         >
           {trigger(openDialog)}
@@ -183,7 +182,7 @@ export default function GitOpsPolicyControl({
             onChange={(value) => setSelected(value)}
             options={options}
             ariaLabel={`${POLICY_DOMAIN_LABEL[domain]} policy: decides ${POLICY_DOMAIN_SUBJECT[domain]}`}
-            disabled={!canWrite || pending}
+            disabled={pending}
             className="max-md:hidden"
           />
           <ul className="hidden flex-col gap-1.5 max-md:flex">
@@ -193,7 +192,7 @@ export default function GitOpsPolicyControl({
                   type="button"
                   onClick={() => setSelected(value)}
                   aria-pressed={value === selected}
-                  disabled={!canWrite || pending}
+                  disabled={pending}
                   className={value === selected
                     ? 'w-full rounded-sm border border-foreground/40 bg-foreground/5 px-2.5 py-2 text-left font-mono text-[11px] text-foreground'
                     : 'w-full rounded-sm border border-transparent px-2.5 py-2 text-left font-mono text-[11px] text-stat-subtitle'}
@@ -215,7 +214,7 @@ export default function GitOpsPolicyControl({
             <button
               type="button"
               onClick={() => void handleConfirm()}
-              disabled={!canWrite || pending || selected === current}
+              disabled={pending || selected === current}
               data-testid="gitops-policy-confirm"
               className="rounded-md bg-brand px-3 py-1.5 font-mono text-[11px] uppercase tracking-wide text-brand-foreground disabled:opacity-50"
             >

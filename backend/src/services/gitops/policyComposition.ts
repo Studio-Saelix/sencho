@@ -60,6 +60,24 @@ export type RolloutAuthorizationPolicy = (typeof ROLLOUT_AUTHORIZATION_POLICIES)
  * `manual`. An install that has no rollout history has no evidence that any
  * target can actually take the generation, so it waits for an operator. Existing
  * installs are a separate case: see `LEGACY_FROZEN_POLICY_SNAPSHOT`.
+ *
+ * **What this means after the upgrade, stated so it is not a surprise.**
+ *
+ * The one-time backfill restores `automatic` for the live Blueprint applications
+ * that already authorized their own rollouts, which is the only class that had
+ * that behavior before the column existed. Everything created afterwards gets
+ * `manual`, including:
+ *
+ * - a Blueprint adopted or converted after the upgrade;
+ * - an application converted back and converted forward again;
+ * - any row written by an older binary during a downgrade and read back after a
+ *   re-upgrade, since the marker means the backfill will not run a second time.
+ *
+ * That is a real change of behavior for those applications, and it is the safe
+ * direction: they never had evidence that a target could take a generation, so
+ * waiting for an operator costs one review. An operator who wants the old
+ * behavior sets the policy on the application, and the control is beside the
+ * rollout authorization action it governs.
  */
 export const DEFAULT_ROLLOUT_AUTHORIZATION_POLICY: RolloutAuthorizationPolicy = 'manual';
 
@@ -211,12 +229,23 @@ export function decodePolicySnapshot(raw: string | null | undefined): PolicySnap
  * policy decided it. That is not the same as an unreadable snapshot, which is an
  * error, so this returns `null` for absence and still throws for damage.
  */
+
+/** Whether a snapshot was reconstructed rather than recorded. */
+/**
+ * The snapshot an approval carries, or null when it carries none.
+ *
+ * Distinct from `decodePolicySnapshot` in what absence means. A generation with
+ * no snapshot predates the policy contract, and reading that as the legacy
+ * defaults preserves the behavior it was authorized under. An approval with no
+ * snapshot is a different fact: an operator approval records none, because no
+ * policy decided it, and reconstructing the legacy policy there would claim a
+ * policy governed a decision it did not make.
+ */
 export function decodeApprovalPolicySnapshot(raw: string | null | undefined): PolicySnapshot | null {
   if (raw == null || raw.trim() === '') return null;
   return decodePolicySnapshot(raw);
 }
 
-/** Whether a snapshot was reconstructed rather than recorded. */
 export function isLegacyPolicySnapshot(snapshot: PolicySnapshot): boolean {
   return snapshot.version === LEGACY_FROZEN_POLICY_SNAPSHOT.version;
 }

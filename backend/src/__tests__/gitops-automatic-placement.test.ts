@@ -9,9 +9,11 @@
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { setupTestDb, cleanupTestDb } from './helpers/setupTestDb';
+import { DatabaseService } from '../services/DatabaseService';
 import { GitOpsStore } from '../services/gitops/store';
 import { GitOpsTransitions, type EventEnvelope } from '../services/gitops/transitions';
 import { applyAutomaticPlacement } from '../services/gitops/automaticPlacement';
+import { encodePolicySnapshot } from '../services/gitops/policyComposition';
 import {
   encodeGitOpsApprovedTargetEffectJson,
   encodeGitOpsRequiredTargetsJson,
@@ -455,6 +457,33 @@ describe('a policy edit is configuration, not work', () => {
     ).toThrow(/operation is in flight/);
   });
 
+  it('records no refusal when the policy is the operator policy', () => {
+    // The default policy, on the default application, was reporting a decline.
+    // `policy_is_operator` is not a decline: that policy never runs, so it has
+    // nothing to record, and writing one made every ordinary placement read as
+    // "declined by policy, waiting on an operator".
+    const store = GitOpsStore.getInstance();
+    store.insertApplication(blueprintApp('9207', { placement_policy: 'operator' }));
+    expect(() => applyAutomaticPlacement('9207', envelope('operator-policy'))).not.toThrow();
+    const app = store.getApplication('9207')!;
+    expect(app.placement_policy_refusal_reason).toBeNull();
+    expect(app.placement_policy_refused_at).toBeNull();
+  });
+
+  it('records a refusal for a reason that is a decline', () => {
+    // The other half, so the fix is not simply "record nothing ever".
+    const store = GitOpsStore.getInstance();
+    store.insertApplication(blueprintApp('9208', { placement_policy: 'bounded_auto' }));
+    const app = store.getApplication('9208')!;
+    GitOpsTransitions.getInstance().placementPolicyRefused({
+      applicationId: '9208',
+      reason: 'stateful_workload',
+      at: 5,
+    });
+    expect(store.getApplication('9208')!.placement_policy_refusal_reason).toBe('stateful_workload');
+    expect(app.placement_policy).toBe('bounded_auto');
+  });
+
   it('drops a recorded refusal when an approval resolves the review', () => {
     // Both writes happen inside the approval's own transaction, and on the policy
     // path the same pass records the approval that superseded the refusal. A
@@ -575,5 +604,134 @@ describe('the automatic path', () => {
     for (const id of ['missing-app', '9300', '']) {
       expect(() => applyAutomaticPlacement(id, envelope('auto'))).not.toThrow();
     }
+  });
+});
+
+describe('a policy change is auditable', () => {
+  function historyPayload(applicationId: string, stage: string): { before?: Record<string, unknown>; after?: Record<string, unknown> } {
+    const row = DatabaseService.getInstance().getDb()
+      .prepare('SELECT before_json, after_json FROM gitops_history WHERE application_id = ? AND stage = ?')
+      .get(applicationId, stage) as { before_json: string | null; after_json: string | null } | undefined;
+    expect(row).toBeDefined();
+    return {
+      before: row!.before_json ? JSON.parse(row!.before_json) as Record<string, unknown> : undefined,
+      after: row!.after_json ? JSON.parse(row!.after_json) as Record<string, unknown> : undefined,
+    };
+  }
+
+  it('records the before and the after on the history row', () => {
+    // A policy change wrote a history row whose before and after both omitted the
+    // policy, so the audit trail recorded that something changed without saying
+    // which way, which is the one question an operator reads that row to answer.
+    const store = GitOpsStore.getInstance();
+    store.insertApplication(blueprintApp('9500', { placement_policy: 'operator' }));
+    GitOpsTransitions.getInstance().placementPolicyChanged({
+      applicationId: '9500',
+      placementPolicy: 'bounded_auto',
+      envelope: envelope('policy-history'),
+    });
+    const payload = historyPayload('9500', 'placement_policy_changed') as {
+      before?: { placementPolicy?: string };
+      after?: { placementPolicy?: string };
+    };
+    expect(payload.before?.placementPolicy).toBe('operator');
+    expect(payload.after?.placementPolicy).toBe('bounded_auto');
+  });
+
+  it('records the rollout authorization policy on its own history row', () => {
+    const store = GitOpsStore.getInstance();
+    store.insertApplication(blueprintApp('9501', { rollout_authorization_policy: 'manual' }));
+    GitOpsTransitions.getInstance().rolloutAuthorizationPolicyChanged({
+      applicationId: '9501',
+      policy: 'automatic',
+      envelope: envelope('rollout-policy-history'),
+    });
+    const payload = historyPayload('9501', 'rollout_authorization_policy_changed') as {
+      before?: { rolloutAuthorizationPolicy?: string };
+      after?: { rolloutAuthorizationPolicy?: string };
+    };
+    expect(payload.before?.rolloutAuthorizationPolicy).toBe('manual');
+    expect(payload.after?.rolloutAuthorizationPolicy).toBe('automatic');
+  });
+
+  it('records the refusal a policy change cleared', () => {
+    // A reason is cleared by a policy change, and a reader asking where it went
+    // needs the policy that produced it on the same row.
+    const store = GitOpsStore.getInstance();
+    store.insertApplication(blueprintApp('9502', { placement_policy: 'bounded_auto' }));
+    GitOpsTransitions.getInstance().placementPolicyRefused({
+      applicationId: '9502',
+      reason: 'cordon_override',
+      at: 1,
+    });
+    GitOpsTransitions.getInstance().placementPolicyChanged({
+      applicationId: '9502',
+      placementPolicy: 'operator',
+      envelope: envelope('clears-refusal'),
+    });
+    const payload = historyPayload('9502', 'placement_policy_changed') as {
+      before?: { placementPolicyRefusalReason?: string | null };
+      after?: { placementPolicyRefusalReason?: string | null };
+    };
+    expect(payload.before?.placementPolicyRefusalReason).toBe('cordon_override');
+    expect(payload.after?.placementPolicyRefusalReason).toBeNull();
+  });
+});
+
+describe('the placement writer checks its own domain', () => {
+  it('refuses a policy-authorized approval while the placement policy is operator', () => {
+    // The check `rolloutAuthorized` already makes for its own domain. Without
+    // it here, a caller could reach the single writer with a policy-authorized
+    // approval and a snapshot that happened to agree, and agreement by accident
+    // is not authority.
+    const store = GitOpsStore.getInstance();
+    // All three columns, so the snapshot the caller passes genuinely agrees with
+    // the row and the refusal is the domain rule rather than the snapshot race.
+    store.insertApplication(blueprintApp('9600', {
+      source_policy: 'review',
+      placement_policy: 'operator',
+      rollout_authorization_policy: 'manual',
+    }));
+    store.insertIntentRevision(intent('9600-intent', '9600'));
+    store.insertRolloutCandidate(candidate('9600-cand', '9600', '9600-intent', [1]));
+    expect(() => GitOpsTransitions.getInstance().placementApproved({
+      applicationId: '9600',
+      approvalId: '9600-place',
+      intentRevisionId: '9600-intent',
+      blastJson: encodeGitOpsApprovedTargetEffectJson([{ nodeId: 1, outcome: 'place' as const }]),
+      requiredNodeIds: [1],
+      fingerprint: null,
+      actor: null,
+      envelope: envelope('wrong-domain'),
+      rolloutGenerationId: '9600-gen',
+      candidateId: '9600-cand',
+      authority: 'configured_policy',
+      policyProvenanceJson: encodePolicySnapshot({
+        version: 1, source: 'review', placement: 'operator', rolloutAuthorization: 'manual',
+      }),
+    })).toThrow(/requires an operator/);
+  });
+
+  it('still allows an operator approval while the placement policy is operator', () => {
+    // The other half: the new assertion must not refuse the operator path, which
+    // is the ordinary way a placement is approved on that policy.
+    const store = GitOpsStore.getInstance();
+    store.insertApplication(blueprintApp('9601', { placement_policy: 'operator' }));
+    store.insertIntentRevision(intent('9601-intent', '9601'));
+    store.insertRolloutCandidate(candidate('9601-cand', '9601', '9601-intent', [1]));
+    expect(() => GitOpsTransitions.getInstance().placementApproved({
+      applicationId: '9601',
+      approvalId: '9601-place',
+      intentRevisionId: '9601-intent',
+      blastJson: encodeGitOpsApprovedTargetEffectJson([{ nodeId: 1, outcome: 'place' as const }]),
+      requiredNodeIds: [1],
+      fingerprint: null,
+      actor: 'tester',
+      envelope: envelope('operator-ok'),
+      rolloutGenerationId: '9601-gen',
+      candidateId: '9601-cand',
+      authority: 'operator',
+      policyProvenanceJson: null,
+    })).not.toThrow();
   });
 });

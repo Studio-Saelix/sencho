@@ -211,6 +211,28 @@ describe('GitOpsAuthorityActions', () => {
     expect(screen.queryByTestId('gitops-action-placement-policy')).toBeNull();
   });
 
+  it('offers the placement policy to a demoted Blueprint, which is still placed', () => {
+    // The gap this closes. A Blueprint demoted back to Inline keeps its
+    // placement policy and the placement decision keeps evaluating it, but the
+    // control was behind a Git-mode gate, so an operator had a live automatic
+    // decision and no way to reach it from the interface.
+    const demoted = withPlacementPolicy(sourcePending());
+    const asInline: GitOpsRevisionLive = { ...demoted, targetMode: 'inline_blueprint' };
+    renderActions(asInline);
+    expect(screen.getByTestId('gitops-action-placement-policy')).toBeInTheDocument();
+  });
+
+  it('offers no Git lifecycle action to a demoted Blueprint', () => {
+    // The other half. Those actions act on a Git generation the demoted
+    // application does not have, and the routes refuse one, so a button that
+    // always 409s is worse than no button.
+    const demoted = withPlacementPolicy(sourcePending());
+    const asInline: GitOpsRevisionLive = { ...demoted, targetMode: 'inline_blueprint' };
+    renderActions(asInline);
+    expect(screen.queryByTestId('gitops-action-accept-source')).toBeNull();
+    expect(screen.queryByTestId('gitops-action-authorize-rollout')).toBeNull();
+  });
+
   it('renders no policy control for an application that reports none', () => {
     // A build or projection that carries no reads must not invent a control
     // whose current value is unknown, since saving would overwrite whatever the

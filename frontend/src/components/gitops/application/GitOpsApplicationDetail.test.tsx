@@ -189,15 +189,31 @@ describe('GitOpsApplicationView', () => {
       ...detailResponse(blueprintRow, blueprintProjection),
       blueprintEnabled: null,
     })],
-    ['an inline Blueprint application', 'bp:3', () => ({
-      ...detailResponse({ ...blueprintRow, targetMode: 'inline_blueprint' as const }, { ...blueprintProjection, targetMode: 'inline_blueprint' as const }),
-      blueprintEnabled: true,
-    })],
   ])('offers no authority actions for %s', async (_label, id, build) => {
     mockFetch.mockResolvedValueOnce(ok(build()));
     render(<GitOpsApplicationView id={id} />);
     await screen.findByTestId('gitops-application-posture');
     expect(screen.queryByTestId('authority-actions')).toBeNull();
+    expect(screen.queryByTestId('rollout-controls')).toBeNull();
+  });
+
+  it('mounts the authority block for an inline Blueprint but not the rollout controls', async () => {
+    // An inline Blueprint is still placed, so the block that carries the
+    // placement policy has to be reachable for it. What the policy control
+    // itself renders is checked in the authority actions suite, which mounts the
+    // real component; this one only asks whether the blocks are present.
+    mockFetch.mockResolvedValueOnce(ok({
+      ...detailResponse(
+        { ...blueprintRow, targetMode: 'inline_blueprint' as const },
+        { ...blueprintProjection, targetMode: 'inline_blueprint' as const },
+      ),
+      blueprintEnabled: true,
+    }));
+    render(<GitOpsApplicationView id="bp:3" />);
+    await screen.findByTestId('gitops-application-posture');
+    expect(screen.getByTestId('authority-actions')).toBeInTheDocument();
+    // The rollout lifecycle is the other half and stays Git-only, because an
+    // inline application has no Git generation to authorize a rollout of.
     expect(screen.queryByTestId('rollout-controls')).toBeNull();
   });
 

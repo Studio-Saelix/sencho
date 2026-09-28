@@ -62,8 +62,20 @@ describe('the policy line on a facet card', () => {
     expect(line).toHaveTextContent('carries data');
   });
 
-  it('distinguishes a decline that asked for an operator from a policy that is simply configured', () => {
-    renderCards([read({ configured: 'operator', decision: 'awaiting_operator', reason: 'policy_is_operator' })]);
+  it('shows nothing for the operator policy, which never declines anything', () => {
+    // The state the backend actually produces for the operator policy: a review
+    // waiting on a person, with no recorded reason, because that policy has no
+    // decision to decline with. A fixture carrying a `policy_is_operator`
+    // reason described a state the backend stopped producing, which is how a
+    // wrong claim can sit in a test and still pass.
+    renderCards([read({ configured: 'operator', decision: 'awaiting_operator', reason: null })]);
+    expect(screen.queryByTestId('gitops-policy-line')).toBeNull();
+  });
+
+  it('names the operator policy when something else is outstanding', () => {
+    // The operator policy can still be configured while a decision is recorded
+    // from the stage before it, so the line has to name the policy.
+    renderCards([read({ configured: 'operator', decision: 'operator_authorized', reason: null, decidedBy: 'operator' })]);
     expect(screen.getByTestId('gitops-policy-line')).toHaveTextContent('Operator approves each change');
   });
 

@@ -159,25 +159,6 @@ describe('a snapshot that is present but unreadable', () => {
   });
 });
 
-describe('an approval snapshot', () => {
-  it('treats absence as a fact, because no policy decided an operator approval', () => {
-    for (const absent of [null, undefined, '', '  ']) {
-      expect(decodeApprovalPolicySnapshot(absent)).toBeNull();
-    }
-  });
-
-  it('still refuses damage rather than reporting no policy', () => {
-    expect(() => decodeApprovalPolicySnapshot('{}')).toThrow();
-    expect(decodeApprovalPolicySnapshot(encodePolicySnapshot(recorded))).toEqual(recorded);
-  });
-
-  it('does not reconstruct a legacy snapshot for an approval', () => {
-    // An approval predating the contract has no snapshot, and the honest reading
-    // of that is "no policy decided this", not "the legacy policy decided it".
-    expect(decodeApprovalPolicySnapshot(null)).toBeNull();
-  });
-});
-
 describe('the configured snapshot for an application', () => {
   it('reads the three columns as they are', () => {
     expect(
@@ -242,3 +223,16 @@ function corruptWithExtraDomain(): string {
     runtimeDrift: 'enforce',
   });
 }
+
+describe('an approval snapshot', () => {
+  it('treats absence as a fact, because no policy decided an operator approval', () => {
+    for (const absent of [null, undefined, '', '  ']) {
+      expect(decodeApprovalPolicySnapshot(absent)).toBeNull();
+    }
+  });
+
+  it('still refuses damage rather than reporting no policy', () => {
+    expect(() => decodeApprovalPolicySnapshot('{}')).toThrow();
+    expect(decodeApprovalPolicySnapshot(encodePolicySnapshot(recorded))).toEqual(recorded);
+  });
+});

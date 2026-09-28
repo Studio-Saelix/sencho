@@ -115,6 +115,20 @@ Every rollout freezes the policy snapshot it executes, and every placement appro
 
 The three "who decides" policies are recorded together as one snapshot, so no reader can reach a single value that appears to govern more than one of them.
 
+### What a new application starts on
+
+A new or newly adopted application waits for an operator at every step. That is
+the safe default for something with no history: nothing about it has yet proved
+that a node can take a generation, and the placement policy starts on operator
+review for the same reason.
+
+An application that already existed before these settings were introduced keeps
+what it was doing, and only that. If you adopt a Blueprint after the fact, or
+convert one twice, it starts on operator review rather than inheriting the
+behavior of applications that were around earlier. The setting is beside the
+rollout authorization action it governs, so turning it on is one click rather
+than a request.
+
 ## Related
 
 <CardGroup cols={2}>

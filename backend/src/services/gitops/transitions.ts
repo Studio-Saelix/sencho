@@ -2096,6 +2096,17 @@ export class GitOpsTransitions {
             throw new GitOpsTransitionError('the placement policy changed while the decision was being applied');
           }
         }
+        // The single writer checks its own domain, exactly as `rolloutAuthorized`
+        // checks the rollout authorization policy. A caller reaching this
+        // transition with a policy-authorized approval while the placement policy
+        // is `operator` has not been authorized by anything: the snapshot happens
+        // to agree because both were read at the same moment, which is agreement
+        // by accident rather than by authority. Refusing here means the domain
+        // rule cannot be satisfied by a caller that simply passes a matching
+        // snapshot.
+        if (args.authority === 'configured_policy' && app.placement_policy !== 'bounded_auto') {
+          throw new GitOpsTransitionError('the placement policy requires an operator to approve');
+        }
         if (app.intent_revision_id !== args.intentRevisionId) {
           throw new GitOpsTransitionError('intent revision is not current');
         }
@@ -4293,5 +4304,16 @@ function snapshotApp(app: GitOpsApplicationRow): Record<string, unknown> {
     sourceAcceptanceRef: app.source_acceptance_ref,
     activeOperationStage: app.active_operation_stage,
     failureStage: app.failure_stage,
+    // The three authority policies, and the recorded bounded-auto refusal.
+    //
+    // Without these a policy change wrote a history row with no before and no
+    // after for the one thing it changed, so the audit trail said a policy
+    // changed without recording which way. The refusal belongs with them because
+    // it is cleared by two of the same transitions, and a reader asking why a
+    // reason went away needs the policy that produced it on the same row.
+    sourcePolicy: app.source_policy,
+    placementPolicy: app.placement_policy,
+    rolloutAuthorizationPolicy: app.rollout_authorization_policy,
+    placementPolicyRefusalReason: app.placement_policy_refusal_reason,
   };
 }

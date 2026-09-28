@@ -69,7 +69,13 @@ export default function GitOpsAuthorityActions({
   const [pending, setPending] = useState<PendingAction | null>(null);
   const [previewOpen, setPreviewOpen] = useState(false);
 
-  const live = projection.targetMode === 'blueprint' ? projection : null;
+  // Both Blueprint modes count as a live application here, because both are
+  // placed. A Blueprint demoted back to Inline keeps its placement policy and the
+  // placement decision still evaluates it, so its policy needs a control; hiding
+  // the whole block on target mode left a demoted application with a live
+  // automatic decision and no way to reach it from the interface.
+  const isBlueprintTarget = projection.targetMode === 'blueprint' || projection.targetMode === 'inline_blueprint';
+  const live = isBlueprintTarget ? projection : null;
   const source = liveSourceFacet(projection);
   const placement = livePlacementFacet(projection);
 
@@ -79,16 +85,19 @@ export default function GitOpsAuthorityActions({
   const candidateGenerationId = source?.status === 'candidate_ready' || source?.status === 'source_review_pending'
     ? source.candidateGenerationId
     : null;
-  const canAcceptSource = !!live
+  // Each of these acts on a Git source generation, which an Inline Blueprint
+  // does not have, and the routes behind them refuse anything but a Git-managed
+  // application. Offering one would be a button whose every press is a 409.
+  const canAcceptSource = projection.targetMode === 'blueprint'
     && candidateGenerationId !== null
     && allowed('stack:create');
 
-  const canApprovePlacement = !!live
+  const canApprovePlacement = projection.targetMode === 'blueprint'
     && blueprintId !== null
     && placement?.status === 'placement_review_pending'
     && allowed('stack:create') && allowed('stack:deploy');
 
-  const canAuthorizeRollout = !!live
+  const canAuthorizeRollout = projection.targetMode === 'blueprint'
     && (placement?.status === 'rollout_authorization_pending'
       || placement?.status === 'rollout_authorization_stale'
       || placement?.status === 'preflight_blocked')

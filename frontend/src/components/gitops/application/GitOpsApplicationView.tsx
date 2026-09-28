@@ -37,11 +37,16 @@ export function GitOpsApplicationView({ id, className, headerActions }: {
   const { canOpenFleet } = useWorkplaceCapabilities();
   const isMobile = useIsMobile();
   const handoff = row ? owningSurfaceHandoff(row, { canOpenBlueprint: canOpenFleet && !isMobile }) : null;
+  // Both Blueprint modes reach this block, not just the Git-managed one. A
+  // demoted application still has a placement policy the placement decision
+  // evaluates, so it needs the control that sets it; the Git-only actions inside
+  // gate themselves on the target mode. The rollout controls beside them are a
+  // different question and stay Git-only.
   const canOperateBlueprint = data !== null
     && row !== null
     && !isMobile
     && id.startsWith('bp:')
-    && row.targetMode === 'blueprint'
+    && (row.targetMode === 'blueprint' || row.targetMode === 'inline_blueprint')
     && typeof data.blueprintEnabled === 'boolean';
   // A posture from a newer build still renders, as an explicit unknown.
   const posture = row
@@ -117,6 +122,7 @@ export function GitOpsApplicationView({ id, className, headerActions }: {
                   can={can}
                   blueprintEnabled={data.blueprintEnabled ?? false}
                 />
+                {row.targetMode === 'blueprint' && (
                 <GitOpsRolloutControls
                   applicationId={id}
                   projection={data.projection}
@@ -129,6 +135,7 @@ export function GitOpsApplicationView({ id, className, headerActions }: {
                     return target?.nodeName ?? `node ${nodeId}`;
                   }}
                 />
+                )}
               </div>
             ) : null}
           />
