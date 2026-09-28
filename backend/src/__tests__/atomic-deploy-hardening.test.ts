@@ -161,14 +161,13 @@ describe('Rollback holds the stack lifecycle lock (H-1)', () => {
     const supersede = vi.spyOn(HealthGateService.prototype, 'supersedeForContainerOp').mockReturnValue(0);
     const compensate = vi.spyOn(StackUpdateRecoveryService.prototype, 'compensateWithCandidate');
     try {
-
       // The restore itself is not the point here (this fixture has no content to
       // restore), so its status is not asserted. What matters is the order: the
       // gates must end before the restore runs, because a restore that succeeds
       // arms its own recovery observation, and a supersede afterwards would
       // finalize that one as unknown, so the rollback could never be verified
       // healthy.
-      const resp = await request(app).post('/api/stacks/web/rollback').set('Cookie', authCookie);
+      await request(app).post('/api/stacks/web/rollback').set('Cookie', authCookie);
       expect(supersede).toHaveBeenCalledWith(1, 'web', expect.stringContaining('rolled back'));
       expect(supersede.mock.invocationCallOrder[0]).toBeLessThan(compensate.mock.invocationCallOrder[0]);
     } finally {
