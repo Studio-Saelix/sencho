@@ -829,12 +829,24 @@ export class BlueprintService {
                 ? { reason: binding.reason, detail: describeRuntimeRepairHold(binding.reason) }
                 : undefined;
 
+            // Every drifted return from here on carries the block. Dropping it on
+            // any one of them hands the reconciler a repairable verdict for a
+            // target the hold exists to protect, and the mutation sites trust
+            // this result: `deployToNode` and `reapplyAuthorizedMaterialization`
+            // will write to the node on the strength of it.
+            const drifted = (reason: string, cause: DriftCause): DriftCheckResult => ({
+                kind: 'drifted',
+                reason,
+                cause,
+                ...(repairBlock ? { repairBlock } : {}),
+            });
+
             const marker = await this.readMarker(blueprint.name, node);
             if (!marker) {
-                return { kind: 'drifted', reason: 'marker file missing on node', cause: 'revision' };
+                return drifted('marker file missing on node', 'revision');
             }
             if (marker.blueprintId !== blueprint.id) {
-                return { kind: 'drifted', reason: 'marker references a different blueprint', cause: 'revision' };
+                return drifted('marker references a different blueprint', 'revision');
             }
             // A marker that names no generation, or a different one than the
             // target acknowledged, means a repair could not prove what it would
@@ -856,11 +868,10 @@ export class BlueprintService {
                 }
             }
             if (marker.revision !== blueprint.revision) {
-                return {
-                    kind: 'drifted',
-                    reason: `revision drift (node has ${marker.revision}, blueprint is ${blueprint.revision})`,
-                    cause: 'revision',
-                };
+                return drifted(
+                    `revision drift (node has ${marker.revision}, blueprint is ${blueprint.revision})`,
+                    'revision',
+                );
             }
 
             const containerState = await this.containerHealth(blueprint.name, node);
@@ -868,12 +879,7 @@ export class BlueprintService {
                 return { kind: 'unverified', reason: containerState.detail };
             }
             if (containerState.kind === 'not_running') {
-                return {
-                    kind: 'drifted',
-                    reason: containerState.detail,
-                    cause: 'container',
-                    ...(repairBlock ? { repairBlock } : {}),
-                };
+                return drifted(containerState.detail, 'container');
             }
 
             const observed = await this.observeRuntimeIdentity(blueprint.name, node);
@@ -932,20 +938,10 @@ export class BlueprintService {
                 if (comparableObservationMatches(expectedServices, observed)) {
                     return { kind: 'matched' };
                 }
-                return {
-                    kind: 'drifted',
-                    reason: 'runtime artifact identity differs from the expected artifact set',
-                    cause: 'digest',
-                    ...(repairBlock ? { repairBlock } : {}),
-                };
+                return drifted('runtime artifact identity differs from the expected artifact set', 'digest');
             }
             if (observed.identity !== expectedIdentity) {
-                return {
-                    kind: 'drifted',
-                    reason: 'runtime artifact identity differs from the expected artifact set',
-                    cause: 'digest',
-                    ...(repairBlock ? { repairBlock } : {}),
-                };
+                return drifted('runtime artifact identity differs from the expected artifact set', 'digest');
             }
             return { kind: 'matched' };
         } catch (err) {
@@ -978,29 +974,6 @@ export class BlueprintService {
             console.error(
                 '[BlueprintService] Failed to record runtime observation for blueprint %s node %d:',
                 sanitizeForLog(blueprintName),
-                node.id,
-                error instanceof Error ? error.message : String(error),
-            );
-        }
-    }
-
-    /**
-     * Best-effort observation for a target whose repair is held. It must not
-     * turn the hold into a failure or a different verdict, so every error here
-     * is swallowed after the probe is attempted.
-     */
-    private async captureHeldObservation(
-        blueprint: Blueprint,
-        node: Node,
-        applicationId: string,
-    ): Promise<void> {
-        try {
-            const observed = await this.observeRuntimeIdentity(blueprint.name, node);
-            if (observed) this.recordRuntimeObservation(blueprint.name, node, applicationId, observed);
-        } catch (error) {
-            console.error(
-                '[BlueprintService] Could not observe a held target for blueprint %s node %d:',
-                sanitizeForLog(blueprint.name),
                 node.id,
                 error instanceof Error ? error.message : String(error),
             );

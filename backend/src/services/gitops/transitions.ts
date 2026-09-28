@@ -119,6 +119,24 @@ export type BlueprintObservationStage =
   | 'blueprint_repair_held'
   | 'blueprint_drift_cleared';
 
+const BLUEPRINT_OBSERVATION_STAGES: ReadonlySet<string> = new Set<BlueprintObservationStage>([
+  'blueprint_state_review',
+  'blueprint_evict_blocked',
+  'blueprint_drifted',
+  'blueprint_correcting',
+  'blueprint_repair_held',
+  'blueprint_drift_cleared',
+]);
+
+/**
+ * Whether a stored stage is a decision the reconciler made, as opposed to
+ * evidence it gathered. Only the projection maps these onto a runtime status, so
+ * only these are worth preserving when evidence is recorded.
+ */
+function isBlueprintObservationStage(stage: string | null): boolean {
+  return stage !== null && BLUEPRINT_OBSERVATION_STAGES.has(stage);
+}
+
 /**
  * What a health run claimed inside a recovery transaction reported back.
  *
@@ -868,6 +886,14 @@ export class GitOpsTransitions {
         target.observed_artifact_identity_json = observedJson;
         return { before, after: { observedArtifactIdentityJson: observedJson } };
       },
+      'committed',
+      // Evidence does not supersede a decision. This runs on every drift check,
+      // and the projection reads `latest_stage`, so letting it overwrite a
+      // Blueprint observation stage made a hold vanish from the projection on
+      // the tick after it was recorded: the deployment row still said held while
+      // every GitOps surface said otherwise. The stage stays as the reconciler
+      // last decided it until a decision changes it.
+      { keepBlueprintObservationStage: true },
     );
   }
 
@@ -3842,6 +3868,11 @@ export class GitOpsTransitions {
       app: GitOpsApplicationRow,
     ) => { before: Record<string, unknown>; after: Record<string, unknown> },
     outcome: HistoryOutcome = 'committed',
+    // A transition that only records evidence can ask to leave a Blueprint
+    // decision stage standing. The projection reads `latest_stage` and maps
+    // observation stages onto the runtime status, so a stage that maps to
+    // nothing (an artifact observation) would otherwise silently drop a hold.
+    options: { keepBlueprintObservationStage?: boolean } = {},
   ): TransitionResult {
     return this.raw().transaction(() => {
       const app = this.requireApp(applicationId);
@@ -3863,7 +3894,9 @@ export class GitOpsTransitions {
       // target by some other route would silently erase a drift the reconciler
       // will not re-record, because it only records an observation when the
       // deployment status moves.
-      target.latest_stage = stage;
+      if (!(options.keepBlueprintObservationStage && isBlueprintObservationStage(target.latest_stage))) {
+        target.latest_stage = stage;
+      }
       target.updated_at = envelope.at;
       this.store().upsertTarget(target);
       const historyId = this.history(app, envelope, {
