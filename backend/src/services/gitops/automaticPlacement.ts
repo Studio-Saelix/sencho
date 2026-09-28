@@ -26,6 +26,7 @@ import { DatabaseService, type Blueprint } from '../DatabaseService';
 import { BlueprintAnalyzer } from '../BlueprintAnalyzer';
 import { sanitizeForLog } from '../../utils/safeLog';
 import { GitOpsStore } from './store';
+import { hasTargetOperationInFlight } from './handoff';
 import { GitOpsTransitions, type EventEnvelope } from './transitions';
 import { newGitOpsId } from './directApplication';
 import {
@@ -42,7 +43,7 @@ import {
 } from './placementPolicy';
 import { configuredSnapshotFor, encodePolicySnapshot } from './policyComposition';
 import { readStagedGeneration } from './statefulGuard';
-import type { GitOpsApplicationRow, GitOpsIntentRevisionRow } from './types';
+import type { GitOpsApplicationRow } from './types';
 
 export type AutomaticPlacementOutcome =
   | { status: 'auto_approved'; reason: 'stateless_addition' | 'stateless_removal' }
@@ -112,25 +113,37 @@ function approvedBaseline(
  */
 function deriveStatelessness(
     app: GitOpsApplicationRow,
-    intent: GitOpsIntentRevisionRow,
     blueprint: Blueprint | undefined,
 ): WorkloadStatelessness {
-  if (app.accepted_generation_id && intent.deploy_stack_name) {
+  // The stack identity the generations are actually staged under, which is the
+  // same one the source path resolves. `intent.deploy_stack_name` is the
+  // Blueprint's own name and is a different directory once a stack has been
+  // renamed, so reading through it found nothing and every placement on a
+  // renamed stack read as an unknown workload.
+  const stackName = app.stack_name ?? app.configured_source_stack_name;
+  if (app.accepted_generation_id && stackName) {
     const generation = GitOpsStore.getInstance().getGeneration(app.accepted_generation_id);
     if (!generation || generation.application_id !== app.id) return 'unknown';
-    const staged = readStagedGeneration(intent.deploy_stack_name, app, generation);
+    const staged = readStagedGeneration(stackName, app, generation);
     if (!staged) return 'unknown';
-    try {
-      const names = BlueprintAnalyzer.statefulServiceNames(staged.contents.join('\n'));
-      if (names === null) return 'unknown';
-      return names.size > 0 ? 'stateful' : 'stateless';
-    } catch (error) {
-      console.warn(
-        `[GitOps] compose classification failed for ${sanitizeForLog(app.id)}:`,
-        error instanceof Error ? error.message : String(error),
-      );
-      return 'unknown';
+    // Each file on its own. Concatenating them put the same service key in one
+    // document twice, which does not parse, so a multi-file compose always read
+    // as an unknown workload and the policy could never approve it.
+    let stateful = false;
+    for (const content of staged.contents) {
+      try {
+        const names = BlueprintAnalyzer.statefulServiceNamesStrict(content);
+        if (names === null) return 'unknown';
+        if (names.size > 0) stateful = true;
+      } catch (error) {
+        console.warn(
+          `[GitOps] compose classification failed for ${sanitizeForLog(app.id)}:`,
+          error instanceof Error ? error.message : String(error),
+        );
+        return 'unknown';
+      }
     }
+    return stateful ? 'stateful' : 'stateless';
   }
   // No accepted generation yet, so the Blueprint's own content is what a first
   // placement would run. Absent or unparseable content is unknown, never
@@ -138,7 +151,7 @@ function deriveStatelessness(
   const content = blueprint?.compose_content;
   if (typeof content !== 'string' || content.trim() === '') return 'unknown';
   try {
-    const names = BlueprintAnalyzer.statefulServiceNames(content);
+    const names = BlueprintAnalyzer.statefulServiceNamesStrict(content);
     if (names === null) return 'unknown';
     return names.size > 0 ? 'stateful' : 'stateless';
   } catch {
@@ -303,7 +316,7 @@ export function applyAutomaticPlacement(
     approvedNodeIds: baselineNodeIds,
     candidateNodeIds,
     hasPriorApproval: baseline.ok ? baseline.hasPriorApproval : false,
-    statelessness: deriveStatelessness(app, intent, app.blueprint_id
+    statelessness: deriveStatelessness(app, app.blueprint_id
       ? (DatabaseService.getInstance().getBlueprint(app.blueprint_id) ?? undefined)
       : undefined),
     // A pin is an operator's choice of where a workload may run, so placement
@@ -326,7 +339,13 @@ export function applyAutomaticPlacement(
       worstAddedNodeState(additions),
       worstRemovedNodeState(store, app.id, removals),
     ),
-    conflictingOperation: app.active_operation_stage !== null,
+    // Both machines, not one. The application pointer covers a fetch or apply;
+    // a target carries the stage for a deploy or a withdrawal, which is what a
+    // sequential rollout sets. Missing the target side meant an automatic
+    // placement could approve mid-deploy, clear the authorization, and supersede
+    // the generation that deploy was running under.
+    conflictingOperation: app.active_operation_stage !== null
+      || hasTargetOperationInFlight(store, app.id),
     evidenceReadable: baseline.ok,
     evidenceWellFormed,
   };

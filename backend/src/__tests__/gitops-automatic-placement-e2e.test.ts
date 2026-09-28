@@ -34,11 +34,27 @@ import type { GitOpsApplicationRow, GitOpsGenerationRow } from '../services/gito
 let tmpDir: string;
 
 /** Write the staged compose a generation would carry, so it can be read back. */
-function writeStagedCompose(stackName: string, generationId: string, compose: string): string {
+/**
+ * Stage compose content where generations actually live.
+ *
+ * Under the application's own source stack identity, which is what the source
+ * path reads. Staging under the Blueprint's `deploy_stack_name` made the
+ * placement decision look correct while it was reading a directory the source
+ * path never writes to, and that is how a renamed stack went unnoticed.
+ */
+function writeStagedCompose(
+  stackName: string,
+  generationId: string,
+  compose: string,
+  composePaths: readonly string[] = ['compose.yaml'],
+): string {
   const candidateDir = `generations/candidate-${generationId}`;
   const base = path.resolve(stackManagedRoot(stackName), candidateDir);
   fs.mkdirSync(base, { recursive: true });
-  fs.writeFileSync(path.join(base, 'compose.yaml'), compose, 'utf8');
+  composePaths.forEach((local, index) => {
+    fs.mkdirSync(path.dirname(path.join(base, local)), { recursive: true });
+    fs.writeFileSync(path.join(base, local), index === 0 ? compose : compose, 'utf8');
+  });
   return candidateDir;
 }
 
@@ -165,15 +181,25 @@ function seed(opts: {
   nodeIds: number[];
   cordoned?: boolean;
   accepted?: boolean;
+  /** The multi-file shape, which is analyzed one file at a time. */
+  composePaths?: readonly string[];
 }): GitOpsApplicationRow {
   const store = GitOpsStore.getInstance();
-  const app = application({ accepted_generation_id: null });
+  const app = application({
+    accepted_generation_id: null,
+    compose_paths_json: JSON.stringify(opts.composePaths ?? ['compose.yaml']),
+  });
   const generationId = `gen-${randomUUID().slice(0, 8)}`;
-  const stackName = `bp-${app.id}`;
+  // The Blueprint's own name, which is deliberately not where generations are
+  // staged: a Blueprint can be renamed, and the directory the source path writes
+  // follows the stack, not the Blueprint.
+  const deployStackName = `bp-${app.id}`;
+  const stagedStackName = app.configured_source_stack_name ?? deployStackName;
   const candidateDir = writeStagedCompose(
-    stackName,
+    stagedStackName,
     generationId,
     opts.compose ?? 'services:\n  web:\n    image: nginx:1.25\n',
+    opts.composePaths,
   );
   if (opts.accepted !== false) {
     app.accepted_generation_id = generationId;
@@ -189,7 +215,7 @@ function seed(opts: {
       blueprint_id: app.blueprint_id!,
       compose_content_sha256: 'b'.repeat(64),
       blueprint_revision: 1,
-      deploy_stack_name: stackName,
+      deploy_stack_name: `bp-${app.id}`,
       selector_json: '{"labels":{}}',
       pinned_node_id: null,
       cordon_implications_json: '{"pinnedOverridesCordon":false}',
@@ -510,6 +536,80 @@ describe('a bounded_auto application reaches an approval', () => {
     // turn a genuine first placement into something the policy may approve.
     const app = seed({ nodeIds: [1], compose: 'services:\n  web:\n    image: nginx:1.25\n' });
     expect(GitOpsStore.getInstance().hasEverHadPlacementAuthority(app.id)).toBe(false);
+  });
+
+  it('approves a stateless addition on a Blueprint whose name is not its stack', async () => {
+    // The renamed-stack case. Generations are staged under the application's
+    // source stack while the Blueprint carries its own name, so reading through
+    // the Blueprint's name found no content and every placement on a renamed
+    // stack read as an unknown workload.
+    const nodeId = addNode(`n-${randomUUID().slice(0, 6)}`);
+    const app = seed({ nodeIds: [nodeId], compose: 'services:\n  web:\n    image: nginx:1.25\n' });
+    expect(app.configured_source_stack_name).not.toBe(`bp-${app.id}`);
+
+    const outcome = applyAutomaticPlacement(app.id, { operationId: 'op-renamed', actor: null, trigger: 'test', at: 1 });
+    expect(outcome).toEqual({ status: 'auto_approved', reason: 'stateless_addition' });
+  });
+
+  it('approves a stateless addition from a multi-file compose', async () => {
+    // The multi-file case. Concatenating the files put the same service key in
+    // one document twice, which does not parse, so a multi-file project always
+    // read as an unknown workload and the policy could never approve it.
+    const nodeId = addNode(`n-${randomUUID().slice(0, 6)}`);
+    const app = seed({
+      nodeIds: [nodeId],
+      compose: 'services:\n  web:\n    image: nginx:1.25\n',
+      composePaths: ['compose.yaml', 'compose.override.yaml'],
+    });
+
+    const outcome = applyAutomaticPlacement(app.id, { operationId: 'op-multifile', actor: null, trigger: 'test', at: 1 });
+    expect(outcome).toEqual({ status: 'auto_approved', reason: 'stateless_addition' });
+  });
+
+  it('still refuses a multi-file compose when one file is stateful', async () => {
+    // The other half of the per-file loop: analyzing files separately must not
+    // become analyzing only the first one.
+    const nodeId = addNode(`n-${randomUUID().slice(0, 6)}`);
+    const app = seed({
+      nodeIds: [nodeId],
+      compose: 'services:\n  web:\n    image: nginx:1.25\n',
+      composePaths: ['compose.yaml', 'compose.override.yaml'],
+    });
+    // Put a volume in the second file only.
+    const dir = path.resolve(
+      stackManagedRoot(app.configured_source_stack_name!),
+      `generations/candidate-${app.accepted_generation_id}`,
+      'compose.override.yaml',
+    );
+    fs.writeFileSync(
+      dir,
+      'services:\n  db:\n    image: postgres:16\n    volumes:\n      - data:/var/lib\n',
+      'utf8',
+    );
+
+    const outcome = applyAutomaticPlacement(app.id, { operationId: 'op-multifile-2', actor: null, trigger: 'test', at: 1 });
+    expect(outcome).toEqual({ status: 'operator_review', reason: 'stateful_workload' });
+  });
+
+  it('refuses an addition while one of its targets is mid-deploy', async () => {
+    // A sequential rollout sets its stage on the target, not on the application,
+    // so a check reading only the application pointer could approve a placement
+    // mid-deploy, clear the authorization, and supersede the generation that
+    // deploy was running under.
+    const nodeId = addNode(`n-${randomUUID().slice(0, 6)}`);
+    const other = addNode(`n-${randomUUID().slice(0, 6)}`);
+    const app = seed({ nodeIds: [nodeId, other], compose: 'services:\n  web:\n    image: nginx:1.25\n' });
+    const store = GitOpsStore.getInstance();
+    store.upsertTarget({
+      ...emptyTargetRow(app.id, other, 1),
+      target_status: 'active',
+      active_operation_stage: 'blueprint_deploy_started',
+      active_operation_id: 'op-deploy',
+    });
+
+    const outcome = applyAutomaticPlacement(app.id, { operationId: 'op-inflight', actor: null, trigger: 'test', at: 1 });
+    expect(outcome).toEqual({ status: 'operator_review', reason: 'conflicting_operation' });
+    expect(store.getApplication(app.id)!.placement_approval_ref).toBeNull();
   });
 
   it('records no reason when it approves, so nothing is left to explain', () => {

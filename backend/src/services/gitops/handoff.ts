@@ -253,7 +253,16 @@ function liveRolloutBinding(app: GitOpsApplicationRow): FutureRolloutAuthorizati
  * target can be mid-deploy while the application itself has nothing running: the
  * two are separate machines and only the target knows about its own apply.
  */
-function hasTargetOperationInFlight(store: GitOpsStore, applicationId: string): boolean {
+/**
+ * Whether any live target of this application has an operation in flight.
+ *
+ * Exported because the placement decision needs the same answer for the same
+ * reason. A sequential rollout sets the stage on the target, not on the
+ * application, so a check that only reads the application pointer cannot see a
+ * rollout that is mid-deploy. An automatic placement approved during one clears
+ * the authorization and supersedes the generation that deploy is running under.
+ */
+export function hasTargetOperationInFlight(store: GitOpsStore, applicationId: string): boolean {
   return store
     .listTargets(applicationId)
     .some((target) => target.target_status === 'active' && target.active_operation_stage !== null);

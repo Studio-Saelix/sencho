@@ -221,14 +221,18 @@ export class BlueprintAnalyzer {
      * so callers can hold rather than read a parse failure as "nothing
      * stateful here".
      *
-     * Null also covers content this function cannot fully resolve: a YAML merge
-     * key, an `include`, an `extends`, a `volumes_from`, or a document with no
-     * services. Each can attach a mount to a service whose own block mentions
-     * none, and a merge key is the sharpest case, because the anchored service
-     * is found while the service merging it is not, so the volume is attributed
-     * to the wrong service and the other reads clean. "Cannot prove stateless"
-     * and "is stateless" are different answers and only one of them is safe to
-     * act on.
+     * Best effort by design, and that is the correct reading for the only
+     * historical caller. This reports what it can see: content using a YAML
+     * merge key, an `include`, an `extends`, or a `volumes_from` yields the
+     * services whose own blocks declare a mount, and a document with no services
+     * yields nothing. A caller asking "is a stateful service being withdrawn?"
+     * gets a partial answer rather than no answer, and that is what the
+     * withdrawal guard needs in order to keep behaving as it did before the
+     * policy model existed.
+     *
+     * Returning null for the constructs it cannot resolve instead is right for a
+     * different question, and is what `statefulServiceNamesStrict` is for. See
+     * that method for why the two must not be merged.
      */
     static statefulServiceNames(composeContent: string): Set<string> | null {
         let parsed: unknown;
@@ -239,11 +243,7 @@ export class BlueprintAnalyzer {
         }
         if (parsed == null || typeof parsed !== 'object') return null;
         const doc = parsed as ComposeShape;
-        if (BlueprintAnalyzer.hasUnresolvableComposeConstruct(doc)) return null;
         const services = doc.services ?? {};
-        // Nothing to place is not the same as proven stateless, and a caller
-        // deciding whether a placement is safe should not have to tell them apart.
-        if (!services || Object.keys(services).length === 0) return null;
         const out = new Set<string>();
         for (const [serviceName, serviceDef] of Object.entries(services)) {
             if (!serviceDef || typeof serviceDef !== 'object') continue;
@@ -261,6 +261,45 @@ export class BlueprintAnalyzer {
             }
         }
         return out;
+    }
+
+    /**
+     * Stateful services, refusing any content it cannot fully resolve.
+     *
+     * A YAML merge key, an `include`, an `extends`, or a `volumes_from` can each
+     * attach a mount to a service whose own block mentions none, and a merge key
+     * is the sharpest case: the anchored service is found while the service
+     * merging it is not, so a partial answer attributes the volume to the wrong
+     * service and reports the other as clean. A document with no services is
+     * unproven too, since nothing to place is not the same as proven stateless.
+     *
+     * All of these answer null, with no partial set. A set naming only the
+     * services the detector could see reads as permission for the ones it could
+     * not, which is the one answer a caller must never be handed.
+     *
+     * Separate from `statefulServiceNames` because the two consumers need
+     * opposite answers to the same document. This is for a caller about to act on
+     * the result, where "cannot prove" has to be a refusal. The withdrawal guard
+     * is not deciding whether to place anything: it is comparing two generations
+     * to see whether a stateful service is being withdrawn, and returning null
+     * there holds the update for ever on a compose file that was working
+     * yesterday. Sharing one method between them broke automatic source
+     * acceptance for every file using a merge key or an extends, which is a
+     * common idiom and not a defect worth refusing.
+     */
+    static statefulServiceNamesStrict(composeContent: string): Set<string> | null {
+        let parsed: unknown;
+        try {
+            parsed = parseYaml(composeContent);
+        } catch {
+            return null;
+        }
+        if (parsed == null || typeof parsed !== 'object') return null;
+        const doc = parsed as ComposeShape;
+        if (BlueprintAnalyzer.hasUnresolvableComposeConstruct(doc)) return null;
+        const services = doc.services ?? {};
+        if (!services || Object.keys(services).length === 0) return null;
+        return BlueprintAnalyzer.statefulServiceNames(composeContent);
     }
 
     /**
