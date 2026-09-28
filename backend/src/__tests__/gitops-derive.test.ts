@@ -8,6 +8,7 @@ import { DatabaseService } from '../services/DatabaseService';
 import type {
   FutureGitOpsEvidence,
   GitOpsApplicationRow,
+  GitOpsDriftItem,
   GitOpsGenerationRow,
   GitOpsIntentRevisionRow,
   GitOpsRevisionProjection,
@@ -1741,36 +1742,47 @@ describe('gitops derivation', () => {
     expect(projection.drift).toEqual([]);
   });
 
-  it('reports a stale placement approval that no longer binds the current intent', () => {
+  /**
+   * An application whose recorded placement approval names a superseded intent,
+   * which is what makes the approval stale: it no longer binds the intent the
+   * application actually runs. `snapshotMode` is the mode frozen in that intent,
+   * which callers set differently on purpose to pin down which source the
+   * reported policy is read from.
+   */
+  function seedStalePlacementApproval(appId: string, blueprintId: number, snapshotMode: string): { current: string; old: string } {
+    // Ids are suffixed per caller because intent revisions are globally unique,
+    // so two applications cannot share one.
+    const current = `ir-current-${appId}`;
+    const old = `ir-old-${appId}`;
     const store = GitOpsStore.getInstance();
-    store.insertApplication(gitManagedApp('app-place-stale', 71, {
-      intent_revision_id: 'ir-place-current',
-      rollout_candidate_id: 'cand-place',
-      placement_approval_ref: 'place-stale',
+    store.insertApplication(gitManagedApp(appId, blueprintId, {
+      intent_revision_id: current,
+      rollout_candidate_id: `cand-${appId}`,
+      placement_approval_ref: `place-stale-${appId}`,
     }));
-    store.insertIntentRevision(intentRev('ir-place-current', 'app-place-stale', 'a'.repeat(64), 'suggest'));
-    store.insertIntentRevision(intentRev('ir-place-old', 'app-place-stale', 'b'.repeat(64)));
+    store.insertIntentRevision(intentRev(current, appId, 'a'.repeat(64), snapshotMode));
+    store.insertIntentRevision(intentRev(old, appId, 'b'.repeat(64)));
     store.insertRolloutCandidate({
-      id: 'cand-place',
-      application_id: 'app-place-stale',
-      intent_revision_id: 'ir-place-current',
+      id: `cand-${appId}`,
+      application_id: appId,
+      intent_revision_id: current,
       compose_content_sha256: 'a'.repeat(64),
       accepted_generation_id: null,
       artifact_set_id: null,
       required_targets_json: '{"nodeIds":[1]}',
       authoritative: 1,
       provenance: 'intent_change',
-      operation_id: 'op-cand-place',
+      operation_id: `op-cand-${appId}`,
       created_at: 1,
     });
     store.insertApproval({
-      id: 'place-stale',
+      id: `place-stale-${appId}`,
       kind: 'placement_approval',
       authority: 'operator',
       authoritative: 1,
-      application_id: 'app-place-stale',
+      application_id: appId,
       generation_id: null,
-      intent_revision_id: 'ir-place-old',
+      intent_revision_id: old,
       artifact_set_id: null,
       rollout_candidate_id: null,
       rollout_generation_id: null,
@@ -1784,14 +1796,46 @@ describe('gitops derivation', () => {
       actor: 'tester',
       created_at: 9,
     });
+    return { current, old };
+  }
 
-    const projection = projectApplication('app-place-stale', false);
+  function placementDriftItems(appId: string): GitOpsDriftItem[] {
+    const projection = projectApplication(appId, false);
     if (projection.targetMode === 'not_applicable') throw new Error('expected application');
-    const items = projection.drift.filter((entry) => entry.class === 'placement');
+    return projection.drift.filter((entry) => entry.class === 'placement');
+  }
+
+  it('reports the live drift mode, not the mode frozen in the intent', () => {
+    // A mode-only edit mints no intent, so the snapshot goes stale while the
+    // operator's choice does not. Naming the mode Sencho is configured with is
+    // the point of reporting a configured policy at all, so the live row is the
+    // only honest source; this leaves the snapshot on Suggest to prove it.
+    const live = DatabaseService.getInstance().createBlueprint({
+      name: 'live-mode-bp',
+      description: null,
+      compose_content: 'services:\n  web:\n    image: nginx:latest\n',
+      selector: { type: 'nodes', ids: [1] },
+      drift_mode: 'enforce',
+      classification: 'stateless',
+      classification_reasons: [],
+      enabled: true,
+      created_by: 'tester',
+    });
+    seedStalePlacementApproval('app-place-live', live.id, 'suggest');
+
+    expect(placementDriftItems('app-place-live')).toMatchObject([
+      { configuredPolicy: { kind: 'blueprint_drift', driftMode: 'enforce' } },
+    ]);
+  });
+
+  it('reports a stale placement approval that no longer binds the current intent', () => {
+    const { current, old } = seedStalePlacementApproval('app-place-stale', 71, 'suggest');
+
+    const items = placementDriftItems('app-place-stale');
     expect(items).toHaveLength(1);
     expect(items[0]).toMatchObject({
-      expected: { kind: 'intent', id: 'ir-place-current', composeContentSha256: 'a'.repeat(64) },
-      observed: { kind: 'intent', id: 'ir-place-old', composeContentSha256: 'b'.repeat(64) },
+      expected: { kind: 'intent', id: current, composeContentSha256: 'a'.repeat(64) },
+      observed: { kind: 'intent', id: old, composeContentSha256: 'b'.repeat(64) },
       freshnessAt: 9,
       owner: 'BlueprintReconciler',
       configuredPolicy: { kind: 'blueprint_drift', driftMode: 'suggest' },
