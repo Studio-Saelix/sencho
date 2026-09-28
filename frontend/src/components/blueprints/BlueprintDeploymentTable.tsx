@@ -152,7 +152,7 @@ export function BlueprintDeploymentTable({
                                                 Retry
                                             </Button>
                                         )}
-                                        {(dep.status === 'active' || dep.status === 'drifted' || dep.status === 'evict_blocked' || dep.status === 'failed') && canWithdraw(dep.node_id) && (
+                                        {(dep.status === 'active' || dep.status === 'drifted' || dep.status === 'repair_held' || dep.status === 'evict_blocked' || dep.status === 'failed') && canWithdraw(dep.node_id) && (
                                             <Button
                                                 size="sm"
                                                 variant="ghost"

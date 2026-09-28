@@ -157,6 +157,30 @@ async function seedAcknowledgedInlineApp(
 }
 
 describe('Blueprint route edge cases', () => {
+    it('refuses to disable a blueprint whose repair is held, because its workload still runs', async () => {
+        // A hold is a decision not to overwrite the workload, not a statement that
+        // the workload is gone. Leaving this status out of the disable guard let a
+        // Blueprint be disabled while its containers kept running unattended.
+        const node = seedNode();
+        const bp = seedBlueprint([node.id]);
+        DatabaseService.getInstance().upsertDeployment({
+            blueprint_id: bp.id,
+            node_id: node.id,
+            status: 'repair_held',
+            applied_revision: bp.revision,
+            drift_summary: 'the rollout for this target was superseded',
+        });
+
+        const res = await request(app)
+            .put(`/api/blueprints/${bp.id}`)
+            .set('Cookie', adminCookie)
+            .send({ enabled: false });
+
+        expect(res.status).toBe(409);
+        expect(res.body.code).toBe('has_active_deployments');
+        expect(DatabaseService.getInstance().getBlueprint(bp.id)?.enabled).toBe(true);
+    });
+
     it('refuses to disable a blueprint that still has an active deployment', async () => {
         const node = seedNode();
         const bp = seedBlueprint([node.id]);
@@ -653,12 +677,13 @@ describe('BlueprintService marker edge cases', () => {
         });
 
         // A target that was never acknowledged has no expected identity to
-        // compare against and nothing a repair could restore, so the honest
-        // answer is a hold rather than a drift Sencho pretends it can fix.
+        // compare against, so the check cannot classify it either way. That is
+        // unverified, carrying the block that says Enforce may not act, so the
+        // reconciler can still put the decision on the row.
         const result = await BlueprintService.getInstance().checkForDrift(bpObj, localNode);
-        expect(result.kind).toBe('held');
-        if (result.kind === 'held') {
-            expect(result.reason).toBe('evidence_incomplete');
+        expect(result.kind).toBe('unverified');
+        if (result.kind === 'unverified') {
+            expect(result.repairBlock?.reason).toBe('evidence_incomplete');
         }
     });
 

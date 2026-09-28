@@ -419,8 +419,11 @@ blueprintsRouter.put('/:id', (req: Request, res: Response): void => {
             const existing = DatabaseService.getInstance().getBlueprint(id);
             if (existing?.enabled) {
                 const deployments = DatabaseService.getInstance().listDeployments(id);
+                // A held repair is still a running workload, so it blocks a
+                // disable the same way a drifted one does. Leaving it out let a
+                // Blueprint be disabled while its containers kept running.
                 const blocking = deployments.filter(d =>
-                    d.status === 'active' || d.status === 'drifted' || d.status === 'correcting' || d.status === 'evict_blocked',
+                    d.status === 'active' || d.status === 'drifted' || d.status === 'correcting' || d.status === 'repair_held' || d.status === 'evict_blocked',
                 );
                 if (blocking.length > 0) {
                     res.status(409).json({
