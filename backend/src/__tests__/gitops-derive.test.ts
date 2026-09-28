@@ -1967,6 +1967,62 @@ describe('gitops derivation', () => {
     ).run(cache.version, cache.state, cache.generation, cache.commit, cache.updatedAt ?? 1, stackName);
   }
 
+  /** Seeds a managed-project application in the one state that reports drift: the application is settled, every live target has applied the accepted generation, and the manifest cache names a different commit. A test that opens one window from here isolates a single suppression guard, because nothing else in the fixture can hold the item back. */
+  function seedManagedProjectDrift(suffix: string, options: {
+    application?: Partial<GitOpsApplicationRow>;
+    targets?: Array<{ nodeId: number } & Partial<ReturnType<typeof emptyTargetRow>>>;
+    previousGeneration?: boolean;
+    cache?: Partial<{ version: number | null; state: string | null; generation: string | null; commit: string | null }>;
+  } = {}): { appId: string; generationId: string } {
+    const store = GitOpsStore.getInstance();
+    const stackName = `mp-${suffix}`;
+    const appId = `app-mp-${suffix}`;
+    const generationId = `gen-mp-${suffix}`;
+    const previousGenerationId = `gen-mp-${suffix}-prev`;
+    const appliedDir = `generations/applied-${generationId}-3`;
+    seedGitSource(stackName);
+    store.insertApplication(rawApp(appId, {
+      stack_name: stackName,
+      desired_commit_sha: 'abc123',
+      accepted_generation_id: generationId,
+      ...options.application,
+    }));
+    const accepted: GitOpsGenerationRow = { ...gen(generationId, appId), manifest_version: 3, applied_dir: appliedDir };
+    if (options.previousGeneration) {
+      store.insertGeneration({
+        ...gen(previousGenerationId, appId),
+        manifest_version: 2,
+        applied_dir: `generations/applied-${previousGenerationId}-2`,
+      });
+      accepted.previous_generation_id = previousGenerationId;
+    }
+    store.insertGeneration(accepted);
+    for (const target of options.targets ?? [{ nodeId: 1 }]) {
+      const { nodeId, ...overrides } = target;
+      store.upsertTarget({
+        ...emptyTargetRow(appId, nodeId, 1),
+        desired_generation_id: generationId,
+        applied_generation_id: generationId,
+        deployed_generation_id: generationId,
+        ...overrides,
+      });
+    }
+    setManifestCache(stackName, {
+      version: 3,
+      state: 'active',
+      generation: appliedDir,
+      commit: 'othersha',
+      ...options.cache,
+    });
+    return { appId, generationId };
+  }
+
+  function managedProjectItems(applicationId: string): GitOpsDriftItem[] {
+    const projection = projectApplication(applicationId, false);
+    if (projection.targetMode === 'not_applicable') throw new Error(`expected ${applicationId} to be projectable`);
+    return projection.drift.filter((entry) => entry.class === 'managed_project');
+  }
+
   function intentRev(
     id: string,
     applicationId: string,
@@ -2761,6 +2817,159 @@ describe('gitops derivation', () => {
     projection = projectApplication('app-mp-pending', false);
     if (projection.targetMode === 'not_applicable') throw new Error('expected application');
     expect(projection.drift.filter((entry) => entry.class === 'managed_project')).toEqual([]);
+  });
+
+  // The cases below pin the windows in which this collector makes no claim:
+  // an application mid-apply, interrupted, or recovering; a live target that
+  // has not applied the accepted generation, or is itself mid-deploy,
+  // interrupted, or recovering; a tombstoned target, which is not one of the
+  // live targets at all; and a cache field nobody has written yet. Each opens
+  // exactly one window on its own fixture, because a window tested only
+  // alongside another can be deleted without its test noticing: the other
+  // window would hold the item back anyway. One window per fixture is what
+  // makes deleting one of them fail its own case.
+
+  it('stays quiet while the application is mid-apply, interrupted, or recovering', () => {
+    const applying = seedManagedProjectDrift('app-applying', {
+      application: {
+        active_operation_id: 'op-mp-applying',
+        active_operation_stage: 'apply_started',
+        active_operation_at: 90,
+      },
+    });
+    expect(managedProjectItems(applying.appId)).toEqual([]);
+
+    const interrupted = seedManagedProjectDrift('app-interrupted', {
+      application: {
+        interruption_stage: 'apply_started',
+        interruption_at: 90,
+        interruption_operation_id: 'op-mp-interrupted',
+      },
+    });
+    expect(managedProjectItems(interrupted.appId)).toEqual([]);
+
+    const capturing = seedManagedProjectDrift('app-capturing', {
+      application: { recovery_phase: 'capturing', recovery_ref: 'recovery-mp-capturing' },
+    });
+    expect(managedProjectItems(capturing.appId)).toEqual([]);
+
+    const restoring = seedManagedProjectDrift('app-restoring', {
+      application: { recovery_phase: 'restoring', recovery_ref: 'recovery-mp-restoring' },
+    });
+    expect(managedProjectItems(restoring.appId)).toEqual([]);
+
+    const compensating = seedManagedProjectDrift('app-compensating', {
+      application: { recovery_phase: 'compensating', recovery_ref: 'recovery-mp-compensating' },
+    });
+    expect(managedProjectItems(compensating.appId)).toEqual([]);
+  });
+
+  it('stays quiet while a live target has not yet applied the accepted generation', () => {
+    // Acceptance lands before the apply reaches the node, so the cache is
+    // behind rather than divergent until every live target catches up.
+    const pending = seedManagedProjectDrift('target-pending', {
+      previousGeneration: true,
+      targets: [
+        { nodeId: 1 },
+        {
+          nodeId: 2,
+          applied_generation_id: 'gen-mp-target-pending-prev',
+          deployed_generation_id: 'gen-mp-target-pending-prev',
+        },
+      ],
+    });
+    expect(managedProjectItems(pending.appId)).toEqual([]);
+  });
+
+  it('stays quiet while a target is mid-deploy, interrupted, or recovering', () => {
+    // A Blueprint deploy or withdrawal runs on the target alone while the
+    // application sits idle, so each window is checked one level down.
+    const deploying = seedManagedProjectDrift('target-deploying', {
+      targets: [{
+        nodeId: 1,
+        active_operation_id: 'op-mp-target-deploying',
+        active_operation_stage: 'blueprint_deploy_started',
+      }],
+    });
+    expect(managedProjectItems(deploying.appId)).toEqual([]);
+
+    const interrupted = seedManagedProjectDrift('target-interrupted', {
+      targets: [{
+        nodeId: 1,
+        interruption_stage: 'blueprint_withdraw_started',
+        interruption_at: 95,
+      }],
+    });
+    expect(managedProjectItems(interrupted.appId)).toEqual([]);
+
+    const recovering = seedManagedProjectDrift('target-recovering', {
+      targets: [{ nodeId: 1, recovery_phase: 'restoring', recovery_ref: 'recovery-mp-target' }],
+    });
+    expect(managedProjectItems(recovering.appId)).toEqual([]);
+  });
+
+  it('treats a null manifest cache field as unknown rather than disagreement', () => {
+    // The cache is a projection of the manifest file, so a null field is a
+    // field nobody wrote yet, not a value that contradicts the generation.
+    const version = seedManagedProjectDrift('cache-version-null', {
+      cache: { version: null, commit: 'abc123' },
+    });
+    expect(managedProjectItems(version.appId)).toEqual([]);
+
+    const generation = seedManagedProjectDrift('cache-generation-null', {
+      cache: { generation: null, commit: 'abc123' },
+    });
+    expect(managedProjectItems(generation.appId)).toEqual([]);
+
+    const commit = seedManagedProjectDrift('cache-commit-null', {
+      cache: { commit: null },
+    });
+    expect(managedProjectItems(commit.appId)).toEqual([]);
+  });
+
+  it('does not let a tombstoned target suppress the item', () => {
+    // A withdrawn target is not a node still catching up with the accepted
+    // generation, so it stays out of the settled check entirely.
+    const fixture = seedManagedProjectDrift('target-tombstoned', {
+      previousGeneration: true,
+      targets: [
+        { nodeId: 1 },
+        {
+          nodeId: 2,
+          target_status: 'tombstoned',
+          applied_generation_id: 'gen-mp-target-tombstoned-prev',
+          deployed_generation_id: 'gen-mp-target-tombstoned-prev',
+        },
+      ],
+    });
+    const items = managedProjectItems(fixture.appId);
+    expect(items).toHaveLength(1);
+    expect(items[0]).toMatchObject({ expected: { kind: 'generation', id: fixture.generationId } });
+  });
+
+  it('reports an item for each manifest state that cannot be read', () => {
+    const absent = seedManagedProjectDrift('state-absent', {
+      cache: { state: 'absent', commit: 'abc123' },
+    });
+    const missing = managedProjectItems(absent.appId);
+    expect(missing).toHaveLength(1);
+    expect(missing[0].reason).toContain('absent');
+
+    // A cache this build cannot interpret proves nothing about the generation,
+    // so it is the same claim as a manifest that is missing.
+    const migrating = seedManagedProjectDrift('state-migration-required', {
+      cache: { state: 'migration_required', commit: 'abc123' },
+    });
+    const uninterpretable = managedProjectItems(migrating.appId);
+    expect(uninterpretable).toHaveLength(1);
+    expect(uninterpretable[0].reason).toContain('migration_required');
+
+    const unsupported = seedManagedProjectDrift('state-unsupported', {
+      cache: { state: 'unsupported', commit: 'abc123' },
+    });
+    const unreadable = managedProjectItems(unsupported.appId);
+    expect(unreadable).toHaveLength(1);
+    expect(unreadable[0].reason).toContain('unsupported');
   });
 
   it('carries the expected per-service digests so a reader can compare service by service', () => {
