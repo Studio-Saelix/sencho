@@ -234,6 +234,49 @@ describe('container-op supersede across sibling service gates', () => {
     expect(svc().getReport(0, 'web', runId!).status).toBe('passed');
   });
 
+  it('drops every pending prepare on the stack when the whole runtime is replaced', async () => {
+    // The window between a prepare and its begin is the compose up, so a
+    // stack-wide stop can land inside it. A gate armed afterwards would seed from
+    // the pre-stop baseline and fail on the services that are now deliberately
+    // down, which records a failure and offers a Restore. There is nothing left
+    // for it to judge, so the token is dropped and the update simply reports no
+    // gate.
+    const token = await prepareService([
+      { id: 'p1', name: 'web-app-1', service: 'app' },
+      { id: 's1', name: 'web-db-1', service: 'db' },
+    ]);
+    setContainers([
+      { id: 'p1', name: 'web-app-1', service: 'app', state: 'exited', exitCode: 0, restartPolicy: 'unless-stopped' },
+      { id: 's1', name: 'web-db-1', service: 'db', state: 'exited', exitCode: 0, restartPolicy: 'unless-stopped' },
+    ]);
+    svc().supersedeForContainerOp(0, 'web', 'the stack was stopped during the observation');
+
+    const { runId, observing } = svc().beginPrepared({ prepareToken: token, actor: 'tester' });
+    expect(observing).toBe(false);
+    expect(runId).toBeNull();
+    await ticks(7);
+    expect(state.runs.size).toBe(0);
+  });
+
+  it('says a dropped prepare had no gate because a container operation ended it', async () => {
+    // The update is ungated, and the response has to be able to say why rather
+    // than leaving a successful update with nothing watching it. A token this
+    // process never issued must not be reported the same way.
+    const token = await prepareService([
+      { id: 'p1', name: 'web-app-1', service: 'app' },
+      { id: 's1', name: 'web-db-1', service: 'db' },
+    ], { serviceName: 'db' });
+    // db's own update is the one whose observation the stop invalidates, so its
+    // pending token is the one that goes. app's token is only detached.
+    svc().supersedeForContainerOp(0, 'web', 'the service db was stopped during the observation', ['db']);
+
+    expect(svc().beginPrepared({ prepareToken: token, actor: 'tester' }).droppedByContainerOp).toBe(true);
+    expect(svc().beginPrepared({ prepareToken: 'never-issued', actor: 'tester' }).droppedByContainerOp).toBe(false);
+
+    const live = await prepareService([{ id: 'p1', name: 'web-app-1', service: 'app' }], { serviceName: 'worker' });
+    expect(svc().beginPrepared({ prepareToken: live, actor: 'tester' }).droppedByContainerOp).toBe(false);
+  });
+
   it('ends the operated service gate, and leaves the sibling gate alone', async () => {
     // Two services on one stack, each with its own gate. The operated service's
     // own gate is judging the very container that is about to be stopped, so it
@@ -291,7 +334,8 @@ describe('prepare / beginPrepared nullability', () => {
   it('returns runId null / observing false when gating is disabled', async () => {
     const token = await prepareService([{ id: 'p1', name: 'web-app-1', service: 'app' }]);
     state.settings.health_gate_enabled = '0';
-    expect(svc().beginPrepared({ prepareToken: token, actor: 'tester' })).toEqual({ runId: null, observing: false });
+    expect(svc().beginPrepared({ prepareToken: token, actor: 'tester' }))
+      .toEqual({ runId: null, observing: false, droppedByContainerOp: false });
   });
 
   it('returns runId null / observing false for an unknown or consumed token', async () => {
@@ -300,7 +344,8 @@ describe('prepare / beginPrepared nullability', () => {
     svc().attachExpectedImage(token, 'sha256:app');
     const first = svc().beginPrepared({ prepareToken: token, actor: 'tester' });
     expect(first.observing).toBe(true);
-    expect(svc().beginPrepared({ prepareToken: token, actor: 'tester' })).toEqual({ runId: null, observing: false });
+    expect(svc().beginPrepared({ prepareToken: token, actor: 'tester' }))
+      .toEqual({ runId: null, observing: false, droppedByContainerOp: false });
   });
 
   it('persists an immediate unknown past the concurrency cap', async () => {

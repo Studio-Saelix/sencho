@@ -578,6 +578,12 @@ export class StackUpdateOrchestrator {
       healthGateId: begin.runId,
       observing: begin.observing,
       newImageId: convergence.imageId,
+      // A deliberate container operation ended the observation the update would
+      // have opened, so there is no gate to resolve. Saying so beats an update
+      // that simply reports success with nothing watching it.
+      ...(begin.droppedByContainerOp && {
+        gateWarning: 'Health gate skipped: a container operation ended the observation for this update.',
+      }),
     };
   }
 
@@ -586,7 +592,7 @@ export class StackUpdateOrchestrator {
     prepareToken: string,
     imageId: string | null,
     actor: string | null,
-  ): { runId: string | null; observing: boolean } {
+  ): { runId: string | null; observing: boolean; droppedByContainerOp: boolean } {
     if (imageId) {
       HealthGateService.getInstance().attachExpectedImage(prepareToken, imageId);
     }

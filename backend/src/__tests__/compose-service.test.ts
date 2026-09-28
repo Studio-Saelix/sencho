@@ -367,6 +367,9 @@ beforeEach(() => {
   mockGetComposeFilename.mockResolvedValue('compose.yaml');
   mockGetOverrideFilename.mockResolvedValue(null);
   mockEnsureStackOverride.mockResolvedValue(null);
+  mockIsMeshStackEnabled.mockReturnValue(false);
+  mockGetRegistries.mockReturnValue([]);
+  mockResolveDockerConfig.mockResolvedValue({ config: { auths: {} }, warnings: [] });
   mockGetBindMounts.mockResolvedValue(null);
   mockLoadStackBuildServices.mockResolvedValue([]);
   mockResolveMissingExternalNetworks.mockResolvedValue({
@@ -600,6 +603,101 @@ describe('ComposeService - runCommand', () => {
 });
 
 // ── authoredComposeArgs: mesh + user override ──────────────────────────
+
+// ── gate invalidation: end before the compose up, never on a refusal ──────
+
+/**
+ * The two commit points every stack-scoped runtime change passes through, and
+ * the one ordering invariant they share: the gates a change invalidates end
+ * after the compose arguments and the registry auth for the compose up have
+ * resolved, so a run refused at either costs no live gate, and before Compose
+ * can replace a container, so no poll in the compose up's own seconds records
+ * the replacement as a failed update.
+ *
+ * `commitResolution` is which resolution belongs to the compose up: a deploy
+ * resolves it on its first, an update on its second because the pull in the
+ * acquisition phase resolves first.
+ */
+const STACK_RUNTIME_WRITES = [
+  {
+    label: 'deployStack',
+    reason: 'redeployed during the observation',
+    commitResolution: 1,
+    write: (svc: ComposeService) => svc.deployStack('my-stack', undefined, true),
+  },
+  {
+    label: 'updateStack',
+    reason: 'updated during the observation',
+    commitResolution: 2,
+    write: (svc: ComposeService) => svc.updateStack('my-stack', undefined, true),
+  },
+];
+
+describe.each(STACK_RUNTIME_WRITES)('ComposeService - $label and the health gates', ({ reason, commitResolution, write }) => {
+  it('ends the gates before Compose can replace a container', async () => {
+    setupAutoCloseSpawn();
+    mockListContainers.mockResolvedValue([]);
+
+    const promise = write(ComposeService.getInstance(1));
+    await vi.advanceTimersByTimeAsync(3100);
+    await promise;
+
+    expect(mockSupersedeForContainerOp).toHaveBeenCalledWith(1, 'my-stack', expect.stringContaining(reason));
+    // The up is the first spawn for a deploy and the second for an update that
+    // pulls first, so the gate end is pinned against that one.
+    const upIndex = mockSpawn.mock.calls.findIndex(c => (c[1] as string[]).includes('up'));
+    expect(upIndex).toBeGreaterThanOrEqual(0);
+    expect(mockSupersedeForContainerOp.mock.invocationCallOrder[0])
+      .toBeLessThan(mockSpawn.mock.invocationCallOrder[upIndex]);
+  });
+
+  it('ends no gate when the compose up\'s own arguments cannot be resolved', async () => {
+    setupAutoCloseSpawn();
+    mockListContainers.mockResolvedValue([]);
+    // A mesh stack whose override cannot be generated fails argument resolution,
+    // which happens long before any handoff, so the previous workload is
+    // provably intact and a gate must keep observing. Failing only the
+    // resolution that belongs to the up is what makes this an assertion about
+    // the gate end: the earlier resolutions, which run under both placements,
+    // succeed here.
+    mockIsMeshStackEnabled.mockReturnValue(true);
+    let resolutions = 0;
+    mockEnsureStackOverride.mockImplementation(async () => {
+      resolutions += 1;
+      if (resolutions === commitResolution) throw new Error('mesh override generation failed');
+      // A mesh stack refuses a null override, so the resolutions that are not
+      // the subject of this test have to hand one back.
+      return '/data/mesh/overrides/1/my-stack.override.yml';
+    });
+
+    await write(ComposeService.getInstance(1)).then(() => null, () => null);
+
+    // The up never ran, so nothing was replaced, and no gate was ended. An
+    // update that pulled first has legitimately spawned by now.
+    expect(mockSpawn.mock.calls.some(c => (c[1] as string[]).includes('up'))).toBe(false);
+    expect(mockSupersedeForContainerOp).not.toHaveBeenCalled();
+  });
+
+  it('ends no gate when the compose up\'s own registry auth cannot be resolved', async () => {
+    setupAutoCloseSpawn();
+    mockListContainers.mockResolvedValue([]);
+    mockGetRegistries.mockReturnValue([{ url: 'https://registry.example.com' }]);
+    // Same shape as above, for the credential resolution the up depends on.
+    let resolutions = 0;
+    mockResolveDockerConfig.mockImplementation(async () => {
+      resolutions += 1;
+      if (resolutions === commitResolution) throw new Error('docker config unavailable');
+      return { config: { auths: {} }, warnings: [] };
+    });
+
+    await write(ComposeService.getInstance(1)).then(() => null, () => null);
+
+    // The up never ran, so nothing was replaced, and no gate was ended. An
+    // update that pulled first has legitimately spawned by now.
+    expect(mockSpawn.mock.calls.some(c => (c[1] as string[]).includes('up'))).toBe(false);
+    expect(mockSupersedeForContainerOp).not.toHaveBeenCalled();
+  });
+});
 
 describe('ComposeService - authoredComposeArgs mesh override', () => {
   const MESH_OVERRIDE = '/app/data/mesh/overrides/1/my-stack.override.yml';

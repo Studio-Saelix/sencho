@@ -199,6 +199,12 @@ export interface PrepareInput {
 export interface BeginPreparedResult {
   runId: string | null;
   observing: boolean;
+  /**
+   * The token was dropped because a container operation replaced the runtime it
+   * would have observed, which is why there is no gate. Distinct from a token
+   * this process never issued or has already swept, so the caller can say which.
+   */
+  droppedByContainerOp: boolean;
 }
 
 /**
@@ -219,6 +225,12 @@ export class HealthGateService {
   private readonly active = new Map<string, ActiveGate>();
   /** Prepare tokens awaiting beginPrepared (service update/restore only). */
   private readonly prepared = new Map<string, PreparedGate>();
+  /**
+   * Prepare tokens a container operation dropped, kept only until the token's
+   * own TTL so `beginPrepared` can say why there is no gate instead of leaving
+   * the update silently ungated.
+   */
+  private readonly droppedPrepared = new Map<string, number>();
   private started = false;
 
   public static getInstance(): HealthGateService {
@@ -429,8 +441,10 @@ export class HealthGateService {
    *
    * A prepare token that has not begun yet is treated the same way: the
    * operated service's token is dropped, because a gate armed for a service the
-   * operator just stopped would fail on it, and a sibling's token has the
-   * operated service removed from the collateral set it would seed from.
+   * operator just stopped would fail on it; a sibling's token has the operated
+   * service removed from the collateral set it would seed from; and a
+   * stack-wide operation drops every token on the stack, because it has replaced
+   * the runtime all of them would observe.
    *
    * With no `serviceNames` the whole stack's runtime is being replaced, so
    * every gate on the stack ends. `start` is deliberately not a trigger at any
@@ -461,6 +475,15 @@ export class HealthGateService {
       const before = this.active.size;
       if (named.length === 0) {
         this.supersedeGatesForStack(nodeId, stackName, { reason });
+        // A stack-wide operation replaces every service's containers, so a
+        // prepare that has not begun has nothing left to judge either: arming it
+        // from the pre-operation baseline would fail it on the services that are
+        // now deliberately down. Reachable, because the compose up between a
+        // prepare and its begin is seconds long and a stack-wide stop takes no
+        // per-stack operation lock.
+        for (const prep of [...this.prepared.values()]) {
+          if (prep.nodeId === nodeId && prep.stackName === stackName) this.dropPreparedForContainerOp(prep);
+        }
         return before - this.active.size;
       }
       for (const gate of [...this.active.values()]) {
@@ -476,7 +499,7 @@ export class HealthGateService {
       for (const prep of [...this.prepared.values()]) {
         if (prep.nodeId !== nodeId || prep.stackName !== stackName) continue;
         if (named.includes(prep.serviceName)) {
-          this.prepared.delete(prep.token);
+          this.dropPreparedForContainerOp(prep);
           continue;
         }
         for (const name of named) this.detachServiceFromPrepared(prep, name);
@@ -538,6 +561,20 @@ export class HealthGateService {
     for (const [token, prep] of this.prepared) {
       if (now >= prep.expiresAt) this.prepared.delete(token);
     }
+    for (const [token, expiresAt] of this.droppedPrepared) {
+      if (now >= expiresAt) this.droppedPrepared.delete(token);
+    }
+  }
+
+  /**
+   * Drop a prepare token because a container operation replaced the runtime it
+   * would have observed. Remembered until the token's own TTL so the begin that
+   * follows can report why there is no gate, rather than the update looking
+   * ungated for no stated reason.
+   */
+  private dropPreparedForContainerOp(prep: PreparedGate): void {
+    this.prepared.delete(prep.token);
+    this.droppedPrepared.set(prep.token, prep.expiresAt);
   }
 
   /**
@@ -943,7 +980,9 @@ export class HealthGateService {
     this.sweepExpiredPrepared(Date.now());
     const prep = this.prepared.get(prepareToken);
     if (!prep) {
-      console.warn('[HealthGate] attachExpectedImage: unknown or expired prepare token');
+      console.warn(this.droppedPrepared.has(prepareToken)
+        ? '[HealthGate] attachExpectedImage: prepare token ended by a container operation'
+        : '[HealthGate] attachExpectedImage: unknown or expired prepare token');
       return;
     }
     prep.expectedImageId = expectedImageId;
@@ -963,13 +1002,16 @@ export class HealthGateService {
     const prep = this.prepared.get(input.prepareToken);
     // Always consume the token so a caller cannot begin twice off one prepare.
     if (prep) this.prepared.delete(input.prepareToken);
+    // A token a container operation dropped is reported as such, so the caller
+    // can tell a deliberately ended observation from one that never started.
+    const droppedByContainerOp = this.droppedPrepared.delete(input.prepareToken);
 
-    if (!this.started || !prep) return { runId: null, observing: false };
+    if (!this.started || !prep) return { runId: null, observing: false, droppedByContainerOp };
 
     try {
       const db = DatabaseService.getInstance();
       const settings = this.readSettings();
-      if (!settings.enabled) return { runId: null, observing: false };
+      if (!settings.enabled) return { runId: null, observing: false, droppedByContainerOp };
 
       const key = this.gateKey(prep.nodeId, prep.stackName, 'service', prep.serviceName);
       // Same-service + stack gates only; sibling service observations continue.
@@ -996,7 +1038,7 @@ export class HealthGateService {
 
       if (this.active.size >= MAX_CONCURRENT_GATES) {
         db.insertHealthGateRun({ ...row, status: 'unknown', reason: 'too many concurrent observations', ended_at: startedAt });
-        return { runId, observing: false };
+        return { runId, observing: false, droppedByContainerOp };
       }
 
       db.insertHealthGateRun(row);
@@ -1026,11 +1068,11 @@ export class HealthGateService {
       };
       this.active.set(key, gate);
       this.scheduleNextPoll(gate);
-      return { runId, observing: true };
+      return { runId, observing: true, droppedByContainerOp };
     } catch (error) {
       console.error('[HealthGate] beginPrepared failed for %s/%s:',
         sanitizeForLog(prep.stackName), sanitizeForLog(prep.serviceName), error);
-      return { runId: null, observing: false };
+      return { runId: null, observing: false, droppedByContainerOp };
     }
   }
 
