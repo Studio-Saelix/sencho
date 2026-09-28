@@ -254,24 +254,6 @@ function collectRuntimeDrift(
     // confirmed divergence against an expectation nothing verified. The facet
     // already reads that case as pending or unverified, and the two must agree.
     if (expected.qualification !== 'exact' && expected.qualification !== 'qualified') continue;
-    // The approved set has to be the one this target is actually serving, or
-    // the observation describes a different generation than the set does.
-    //
-    // Recording an acknowledgement rebinds the target to the new generation's
-    // approved set and leaves the stored observation as the previous generation
-    // recorded it, so from that moment the two describe different generations.
-    // `deriveRuntime` never reaches this comparison for the two
-    // artifact-identity statuses while desired and deployed disagree, so they
-    // are already safe. `drifted` is assigned before that pointer check, so a
-    // target that recorded a drift through a cause that returns before
-    // re-observing (a stopped container, a marker or revision mismatch) can
-    // reach here mid-way between generations. Comparing across the two would
-    // report a digest divergence nobody measured, with a class, a reason, and
-    // digests that all read as real evidence. The set names the generation it
-    // belongs to, so that is what the comparison is anchored to. A set that
-    // cannot be read cannot anchor anything, and the direction that fails is
-    // the one that reports nothing.
-    if (!expectedSetBelongsToDeployedGeneration(expected.artifactSetId, target.deployedGenerationId)) continue;
     const observed = target.observedArtifactIdentity;
     if (observed.kind !== 'exact' && observed.kind !== 'qualified') continue;
     if (expectedSetAgreesWithObservation(expected.artifactSetId, observed, expected.identity)) continue;
@@ -814,34 +796,7 @@ function targetObservationMatchesExpected(target: GitOpsTargetProjection): boole
     : null;
   if (!expected || expected.identity === null) return false;
   if (expected.qualification !== 'exact' && expected.qualification !== 'qualified') return false;
-  if (!expectedSetBelongsToDeployedGeneration(expected.artifactSetId, target.deployedGenerationId)) return false;
   return expectedSetAgreesWithObservation(expected.artifactSetId, target.observedArtifactIdentity, expected.identity);
-}
-
-/**
- * True when the approved set is the one belonging to the generation the target
- * is actually serving, which is the only case where an observation of that
- * target can be read as evidence about that set.
- *
- * The two are separate facts that move separately. An acknowledgement rebinds
- * the target to the accepted generation's set and, deliberately, leaves the
- * stored observation as the previous generation recorded it. So a target can
- * carry an expected set from one generation and an observation from the
- * previous one, and the observation then says nothing at all about the set.
- *
- * Fail-closed on an unreadable set, a target that has never recorded a
- * deployed generation, and a target whose deployed generation is unknown. In
- * each of those the generation the set belongs to cannot be established, and a
- * comparison that cannot place both sides on the same generation is not a
- * comparison.
- */
-function expectedSetBelongsToDeployedGeneration(
-  expectedSetId: string,
-  deployedGenerationId: string | null,
-): boolean {
-  if (deployedGenerationId === null) return false;
-  const expectedRow = GitOpsStore.getInstance().getArtifactSet(expectedSetId);
-  return expectedRow !== undefined && expectedRow.generation_id === deployedGenerationId;
 }
 
 /**

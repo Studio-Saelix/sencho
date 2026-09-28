@@ -1612,7 +1612,13 @@ describe('gitops derivation', () => {
         ...emptyTargetRow(applicationId, 1, 1),
         desired_generation_id: generationId,
         applied_generation_id: generationId,
-        deployed_generation_id: generationId,
+        // Deliberately left null, which is the shape a Blueprint target really
+        // has: nothing binds a deploy for a Blueprint-managed stack, so the
+        // ack's applied pointer is what names what the node acknowledged
+        // running. An earlier version of this fixture set the deployed pointer
+        // too, and every case here passed for a reason production cannot
+        // reproduce.
+        deployed_generation_id: null,
         expected_artifact_set_id: artifactSetId,
         latest_artifact_set_id: artifactSetId,
         latest_stage: stage,
@@ -1777,16 +1783,55 @@ describe('gitops derivation', () => {
       }
     });
 
-    it('reports nothing when the observation belongs to a generation the node is no longer serving', () => {
-      // The reconciler rebinds the target to a new generation's approved set when
-      // it records the acknowledgement, and leaves the stored observation alone,
-      // so from that moment the observation describes the generation the node
-      // was running before. If the next tick records a drift through the cause
-      // that returns before re-observing (a stopped container, or a marker or
-      // revision mismatch), the digests on the target are the old generation's
-      // while the approved set is the new one's. Comparing those two produces a
-      // divergence nobody measured, and it is a confirmed one: the class, the
-      // reason, and the digests all look like real evidence.
+    it('reports a rollout class for a target bound by its rollout generation alone', () => {
+      const store = GitOpsStore.getInstance();
+      seedObservedBlueprint('app-obs-rollout-gen', 310, 'blueprint_drifted', {
+        kind: 'exact',
+        identity: `sha256:${'d'.repeat(64)}`,
+        observedAt: 42,
+        services: [movedService()],
+      });
+      // The class is read off the target's rollout binding, and that binding is
+      // either an authorization or a rollout generation. Only the first arm had
+      // coverage, so a regression could split the class read from the facet's
+      // without a test noticing.
+      const target = store.getTarget('app-obs-rollout-gen', 1)!;
+      store.upsertTarget({ ...target, rollout_generation_id: 'gen-obs-rollout-1' });
+
+      const projection = projectApplication('app-obs-rollout-gen', false);
+      if (projection.targetMode === 'not_applicable') throw new Error('expected application');
+      expect(projection.drift).toHaveLength(1);
+      expect(projection.drift[0]?.class).toBe('rollout');
+    });
+
+    it('KNOWN LIMITATION: reports a drift from an observation the target has already moved past', () => {
+      // Pinned deliberately rather than left to chance, and named for what it
+      // is so a green suite does not read as a specification.
+      //
+      // Recording an acknowledgement rebinds the target to the new generation's
+      // approved set and leaves the stored observation as the previous
+      // generation recorded it. It also overwrites latest_stage, so the
+      // reconciler has to record the drift again on a later tick, through a
+      // cause that returns before re-observing: a stopped container, or a
+      // marker or revision mismatch. That comparison then reads the old
+      // generation's digests against the new generation's set.
+      //
+      // Every field of the resulting item is literally true and the operator is
+      // still misdirected, because the action is to deploy rather than to
+      // investigate a digest that moved. The assertions below pin the misleading
+      // fields, not just the count, so the case documents what is wrong.
+      //
+      // Suppressing it needs to know which generation the observation belongs
+      // to, and the observation records no generation of its own. The pointers
+      // cannot supply that: the acknowledgement sets the applied generation and
+      // the expected set from the same application row in one step, so they
+      // always agree, and a Blueprint target has no deploy-bound writer, so its
+      // deployed pointer is null. Two code-only routes remain open, neither
+      // taken here: have the acknowledgement invalidate an observation older
+      // than the rebind it performs, or give the reconciler's causes distinct
+      // observation stages so a drift recorded without re-observing is
+      // distinguishable from one recorded with it. Whichever lands, this test
+      // fails and becomes the regression test for it.
       const store = GitOpsStore.getInstance();
       seedObservedBlueprint('app-obs-superseded', 309, 'blueprint_drifted', {
         kind: 'exact',
@@ -1794,9 +1839,9 @@ describe('gitops derivation', () => {
         observedAt: 42,
         services: [movedService()],
       });
-      // The next generation is acknowledged, so the target now expects that
-      // generation's set while still deploying the previous one. The observation
-      // is deliberately left as the previous generation recorded it.
+      // The application advances, because the acknowledgement copies the
+      // target's pointers from the application. A target can never lead its
+      // application in production, so the fixture must not.
       const nextGenerationId = 'gen-app-obs-superseded-next';
       const nextArtifactSetId = 'art-app-obs-superseded-next';
       store.insertGeneration(gen(nextGenerationId, 'app-obs-superseded'));
@@ -1813,47 +1858,43 @@ describe('gitops derivation', () => {
         }),
         created_at: 2,
       });
+      const application = store.getApplication('app-obs-superseded')!;
+      store.writeApplicationPointers({
+        ...application,
+        accepted_generation_id: nextGenerationId,
+        artifact_set_id: nextArtifactSetId,
+        latest_artifact_set_id: nextArtifactSetId,
+      });
       store.upsertTarget({
         ...store.getTarget('app-obs-superseded', 1)!,
         desired_generation_id: nextGenerationId,
         applied_generation_id: nextGenerationId,
         expected_artifact_set_id: nextArtifactSetId,
         latest_artifact_set_id: nextArtifactSetId,
+        // The acknowledgement overwrites the stage, and the reconciler records
+        // the drift again on a later tick through a cause that never
+        // re-observes. The observation is therefore still generation N's.
+        latest_stage: 'blueprint_drifted',
       });
 
       const projection = projectApplication('app-obs-superseded', false);
       if (projection.targetMode === 'not_applicable') throw new Error('expected application');
-      // The reconciler's own record still says the target drifted, and the
-      // runtime facet still reports that, which is the reconciler's coarse
-      // claim. What must not happen is the list naming a digest divergence
-      // against a set the node was never observed running.
       expect(projection.targets[0]?.runtime.status).toBe('drifted');
-      expect(projection.drift.filter(item => item.observed.kind === 'runtime_artifact')).toHaveLength(0);
-      // Desired N+1 against deployed N is a real divergence of its own, and it
-      // keeps its own item. That one compares two generations and asserts
-      // nothing about what is running, so it stays.
       expect(projection.drift).toHaveLength(1);
-      expect(projection.drift[0]?.observed).toEqual({ kind: 'generation', id: 'gen-app-obs-superseded' });
-    });
-
-    it('reports a rollout class for a target bound by its rollout generation alone', () => {
-      const store = GitOpsStore.getInstance();
-      seedObservedBlueprint('app-obs-rollout-gen', 310, 'blueprint_drifted', {
-        kind: 'exact',
-        identity: `sha256:${'d'.repeat(64)}`,
-        observedAt: 42,
-        services: [movedService()],
+      // The fields that mislead, pinned so the case is diagnosable and so a fix
+      // has something concrete to change.
+      expect(projection.drift[0]?.class).toBe('runtime');
+      expect(projection.drift[0]?.owner).toBe('observed_artifact_identity');
+      expect(projection.drift[0]?.expected).toMatchObject({
+        kind: 'artifact_set',
+        id: nextArtifactSetId,
       });
-      // deriveRuntime reads either the authorization or the rollout generation,
-      // so both arms of that test need coverage. With only the generation set,
-      // the class is still rollout.
-      const target = store.getTarget('app-obs-rollout-gen', 1)!;
-      store.upsertTarget({ ...target, rollout_generation_id: 'gen-obs-rollout-1' });
-
-      const projection = projectApplication('app-obs-rollout-gen', false);
-      if (projection.targetMode === 'not_applicable') throw new Error('expected application');
-      expect(projection.drift).toHaveLength(1);
-      expect(projection.drift[0]?.class).toBe('rollout');
+      // The digests are generation N's, presented as this generation's evidence.
+      expect(projection.drift[0]?.observed).toMatchObject({
+        kind: 'runtime_artifact',
+        observedAt: 42,
+        services: [{ serviceName: 'web', platformDigest: moved }],
+      });
     });
   });
 

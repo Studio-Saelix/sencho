@@ -598,6 +598,103 @@ describe('derive facets for authorization and convergence', () => {
     expect(projection.drift.some((item) => item.class === 'rollout')).toBe(true);
   });
 
+  it('reaches exact convergence on a Blueprint target with no deploy-bound pointer', () => {
+    // Nothing binds a deploy for a Blueprint-managed stack, so a real Blueprint
+    // target carries a null deployed pointer and its applied pointer is what
+    // names what the node acknowledged running. Exact convergence has to be
+    // reachable in that shape, and it is reached from the pointers, the health
+    // verdict, and a per-target observation that matches the approved set. A
+    // guard that reads the deployed pointer here would report a false
+    // runtime_artifact_divergence on a healthy fleet instead, which is the
+    // direction that costs an operator their trust in the model.
+    const fixture = seedAuthorizedReadyApp({ artifactQualification: 'exact' });
+    authorize(fixture.applicationId);
+    const store = GitOpsStore.getInstance();
+    const app = store.getApplication(fixture.applicationId)!;
+    const binding = store.currentAuthorizationBinding(app)!;
+    store.upsertTarget({
+      ...emptyTarget(fixture.applicationId, fixture.nodeId),
+      intent_revision_id: binding.intentRevisionId,
+      applied_generation_id: binding.acceptedGenerationId,
+      desired_generation_id: binding.acceptedGenerationId,
+      deployed_generation_id: null,
+      healthy_generation_id: binding.acceptedGenerationId,
+      expected_artifact_set_id: binding.artifactSetId,
+      latest_artifact_set_id: binding.artifactSetId,
+      rollout_authorization_ref: app.rollout_authorization_ref,
+      rollout_generation_id: app.rollout_generation_id,
+      latest_stage: 'blueprint_ack_recorded',
+      // The identity the fixture froze for the approved set, so the comparison
+      // agrees the way a converged target's does.
+      observed_artifact_identity_json: JSON.stringify({
+        kind: 'exact',
+        identity: 'sha256:deadbeef',
+        observedAt: 9,
+      }),
+    });
+
+    const projection = deriveGitOpsRevision({
+      application: store.getApplication(fixture.applicationId)!,
+      targets: store.listTargets(fixture.applicationId),
+      healthDisabled: false,
+    }, null);
+
+    expect(projection.facets?.rollout.status).toBe('exactly_converged_healthy');
+    expect(projection.drift).toEqual([]);
+  });
+
+  it('cannot reach an artifact drift status on a Blueprint target, so reports none', () => {
+    // KNOWN GAP, pinned deliberately so it stops being invisible.
+    //
+    // The runtime facet decides the artifact statuses only after it has read the
+    // applied and deployed pointers, and it requires the deployed pointer to be
+    // populated. Nothing binds a deploy for a Blueprint-managed stack, so on
+    // every real Blueprint target that pointer is null and the facet answers
+    // applied_not_deployed before it ever compares identities. Both artifact
+    // statuses are therefore unreachable for Blueprint targets, and a Blueprint
+    // whose digests genuinely disagree with the approved set contributes
+    // nothing to the canonical drift list, while the per-target digest
+    // comparison on the Drift tab still shows the divergence.
+    //
+    // The reconciler's own observation stage does not go through that pointer
+    // check, which is the only reason a recorded Blueprint drift reaches the
+    // list at all. Fixing this properly means deciding what the running pointer
+    // is for Blueprint mode and changing the facet's status surface with it,
+    // which is a behavior change well beyond a drift-reporting fix.
+    const fixture = seedAuthorizedReadyApp({ artifactQualification: 'exact' });
+    authorize(fixture.applicationId);
+    const store = GitOpsStore.getInstance();
+    const app = store.getApplication(fixture.applicationId)!;
+    const binding = store.currentAuthorizationBinding(app)!;
+    store.upsertTarget({
+      ...emptyTarget(fixture.applicationId, fixture.nodeId),
+      intent_revision_id: binding.intentRevisionId,
+      applied_generation_id: binding.acceptedGenerationId,
+      desired_generation_id: binding.acceptedGenerationId,
+      deployed_generation_id: null,
+      healthy_generation_id: binding.acceptedGenerationId,
+      expected_artifact_set_id: binding.artifactSetId,
+      latest_artifact_set_id: binding.artifactSetId,
+      rollout_authorization_ref: app.rollout_authorization_ref,
+      rollout_generation_id: app.rollout_generation_id,
+      latest_stage: 'blueprint_ack_recorded',
+      observed_artifact_identity_json: JSON.stringify({
+        kind: 'exact',
+        identity: 'sha256:serving-other',
+        observedAt: 9,
+      }),
+    });
+
+    const projection = deriveGitOpsRevision({
+      application: store.getApplication(fixture.applicationId)!,
+      targets: store.listTargets(fixture.applicationId),
+      healthDisabled: false,
+    }, null);
+
+    expect(projection.targets[0]?.runtime.status).toBe('applied_not_deployed');
+    expect(projection.drift).toEqual([]);
+  });
+
   it('does not treat synced_and_healthy as healthy for a different generation', () => {
     const fixture = seedAuthorizedReadyApp({ artifactQualification: 'exact' });
     authorize(fixture.applicationId);
