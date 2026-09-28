@@ -263,11 +263,6 @@ export class ServiceUpdateRecoveryService {
    * held set cannot be read so callers can fail closed (skip prune) instead of
    * treating the miss as empty.
    */
-  /**
-   * Image ids held against prune on this node: active rows, restoring rows with
-   * a live claim, and retired rows until their own TTL. Fails closed (null) on a
-   * read error, which the caller treats as "hold nothing".
-   */
   public getHeldImageIds(nodeId: number): Set<string> | null {
     try {
       return new Set(DatabaseService.getInstance().listHeldServiceUpdateRecoveryImageIds(nodeId, Date.now()));

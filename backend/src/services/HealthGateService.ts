@@ -412,11 +412,10 @@ export class HealthGateService {
    * `unknown` with the operation named, which is the honest verdict: nothing was
    * proven either way.
    *
-   * Always stack-wide, including for a single service: the other services' gates
-   * observed *this* service's container as part of their baseline, so a
-   * deliberate stop of one service compromises their observation just as much.
-   * Ending them is quieter and more honest than letting them fail on a container
-   * the operator removed on purpose.
+   * Scoped to the named service when one is given, which is the same rule a
+   * service-scoped update or restore uses: that service's gate and the stack gate
+   * end, and a sibling's gate keeps observing its own runtime. A stack-wide call
+   * (no service named) ends every gate on the stack.
    *
    * `start` is deliberately not a trigger: starting a service that was already
    * down does not disturb the containers a live gate is observing.
@@ -432,10 +431,15 @@ export class HealthGateService {
    * container routes, the scheduler's container actions), which disturb a
    * container without saying which stack it belongs to.
    */
-  public supersedeForContainerOp(nodeId: number, stackName: string, reason: string): number {
+  public supersedeForContainerOp(
+    nodeId: number,
+    stackName: string,
+    reason: string,
+    serviceName?: string,
+  ): number {
     try {
       const before = this.active.size;
-      this.supersedeGatesForStack(nodeId, stackName, { reason });
+      this.supersedeGatesForStack(nodeId, stackName, serviceName ? { serviceName, reason } : { reason });
       return before - this.active.size;
     } catch (error) {
       console.warn(

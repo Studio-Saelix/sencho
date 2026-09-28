@@ -649,11 +649,6 @@ export function DeployFeedbackProvider({ children }: { children: React.ReactNode
     offerRestoreToastRef.current = (gate: HealthGateUiState) => {
       const serviceName = gate.serviceName;
       if (!serviceName) return;
-      // A collateral failure is a sibling regressing, not this service breaking:
-      // its own container is healthy, so its pre-update snapshot is not the way
-      // back and offering it would undo a healthy service. The stack's rollback
-      // surfaces are where a mixed outcome belongs.
-      if (gate.failureSource === 'collateral') return;
       // Every path that offers a Restore funnels through here, so this is the
       // one place that decides a snapshot has already been offered. The set is
       // cleared per session, which is what lets a later session re-offer a

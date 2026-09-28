@@ -1015,28 +1015,46 @@ export class ComposeService {
   }
 
   /**
-   * Settle everything that a successful stack-scoped deploy or update invalidates,
-   * as one step at the single commit every stack-scoped runtime change passes
-   * through:
-   *  - the stack's per-service recovery rows are retired, so a later service
-   *    update cannot offer a rollback behind the deploy the operator just ran;
-   *  - the gates that were observing are ended, so one of the callers that never
-   *    opens a replacement gate (fleet, labels, templates, mesh, blueprint,
-   *    scheduled deploy) cannot leave an observation to report the replaced
-   *    containers as a failed update. Callers that do call `beginStack` supersede
-   *    the same gates a moment later, so this is a harmless no-op for them.
+   * End the gates a stack-scoped deploy or update is about to invalidate, before
+   * the compose up runs. A gate from an earlier run cannot judge the runtime this
+   * operation is about to create, and left observing it can record the replaced
+   * containers as a failure ("exited during observation") in the seconds the
+   * compose up takes. Callers that open a replacement gate supersede the same
+   * gates again a moment later, so this is a harmless no-op for them.
    *
-   * Both are best effort by design: the deploy already succeeded and its own
-   * evidence is recorded, so failing it over an offer the operator can decline,
-   * or over a gate that resolves to unknown, would be the worse outcome.
-   * Dynamic import for the same reason as above: this module and the recovery
-   * and health-gate services form import cycles.
+   * Best effort by design: the operation has not run yet, so a failure here must
+   * not stop it. Awaited dynamic import: HealthGateService imports this module,
+   * so a static import would be a cycle.
    */
-  private async settleStackRuntimeChange(stackName: string): Promise<void> {
-    // Gates first. Of the two, a gate left observing the new containers is the
-    // worse residue: it can still report a failure, while a snapshot that stays
-    // offerable is one the operator can decline.
-    await this.supersedeGatesForContainerOp(stackName, 'the stack was redeployed during the observation');
+  private async endGateObservations(stackName: string, reason: string): Promise<void> {
+    try {
+      const { HealthGateService } = await import('./HealthGateService');
+      HealthGateService.getInstance().supersedeForContainerOp(this.nodeId, stackName, reason);
+    } catch (error) {
+      console.error(
+        '[ComposeService] Failed to end health gate observations for %s:',
+        sanitizeForLog(stackName),
+        error instanceof Error ? error.message : String(error),
+      );
+    }
+  }
+
+  /**
+   * Retire the stack's per-service recovery snapshots after a successful
+   * stack-scoped deploy or update replaced its runtime. Those snapshots point at
+   * images the stack is no longer running, so offering one would be a rollback
+   * behind the deploy the operator just ran.
+   *
+   * Deliberately after the compose up and only on success: a run that failed
+   * before handing off left the previous workload provably intact, and its
+   * snapshots still describe what is running.
+   *
+   * Best effort by design: the deploy already succeeded and its own evidence is
+   * recorded, so failing it over an offer the operator can decline would be the
+   * worse outcome. Dynamic import for the same reason as above: this module and
+   * the recovery services form an import cycle.
+   */
+  private async retireStaleServiceRecoveries(stackName: string): Promise<void> {
     try {
       const { ServiceUpdateRecoveryService } = await import('./ServiceUpdateRecoveryService');
       ServiceUpdateRecoveryService.getInstance().invalidateActiveForStack(this.nodeId, stackName);
@@ -1122,6 +1140,12 @@ export class ComposeService {
         console.warn('Failed to clean up legacy containers for %s:', sanitizeForLog(stackName), e);
       }
 
+      // End the gates from any earlier run before the compose up replaces the
+      // containers they are observing, so none of them can record the replacement
+      // as a failure. The snapshots are retired further down, once this has
+      // provably succeeded.
+      await this.endGateObservations(stackName, 'the stack was redeployed during the observation');
+
       await this.withRegistryAuth(async (env) => {
         const digestPins = ctx?.digestPins;
         let overlayDir: string | null = null;
@@ -1178,13 +1202,12 @@ export class ComposeService {
           );
         }
       }
-      // The deploy replaced every service's image and its containers, so the
-      // per-service snapshots taken before it stop being rollback targets and the
-      // gates that were observing stop being able to say anything. This is the
-      // one commit every deploy path (route, template, webhook, scheduler, mesh,
-      // blueprint, Git apply) passes through. A stack rollback runs its own
-      // compose up, so the route settles it there.
-      await this.settleStackRuntimeChange(stackName);
+      // The deploy replaced every service's image, so the per-service snapshots
+      // taken before it stop being rollback targets. This is the one commit every
+      // deploy path (route, template, webhook, scheduler, mesh, blueprint, Git
+      // apply) passes through. A stack rollback runs its own compose up, so the
+      // route settles it there.
+      await this.retireStaleServiceRecoveries(stackName);
       if (debug) console.debug(`[ComposeService:debug] deployStack completed in ${Date.now() - t0}ms`, { stackName });
       gitopsDeploy?.bound();
     } catch (deployError) {
@@ -1707,6 +1730,9 @@ export class ComposeService {
       }
 
       gitopsDeploy = this.beginGitOpsDeploy(stackName);
+      // End the gates from any earlier run before the compose up replaces the
+      // containers they are observing, for the same reason as the deploy path.
+      await this.endGateObservations(stackName, 'the stack was updated during the observation');
       await this.withRegistryAuth(async (env) => {
         sendOutput('=== Recreating containers ===\n');
         const args = await this.authoredComposeArgs(stackName, ['up', '-d', '--remove-orphans']);
@@ -1743,11 +1769,10 @@ export class ComposeService {
         );
       }
 
-      // The update replaced every service's image and its containers: retire the
-      // stale per-service snapshots and end the gates that were observing. With
-      // the same step on the deploy path, this is the one place a stack runtime
-      // change is settled.
-      await this.settleStackRuntimeChange(stackName);
+      // The update replaced every service's image, so the per-service snapshots
+      // taken before it stop being rollback targets. With the same step on the
+      // deploy path, this is the one place a stack runtime change retires them.
+      await this.retireStaleServiceRecoveries(stackName);
 
       sendOutput('=== Stack updated successfully ===\n');
 

@@ -12,6 +12,9 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } from 'vitest';
 import request from 'supertest';
 import { setupTestDb, cleanupTestDb, loginAsTestAdmin } from './helpers/setupTestDb';
+import { DatabaseService } from '../services/DatabaseService';
+import { HealthGateService } from '../services/HealthGateService';
+import { StackUpdateRecoveryService } from '../services/StackUpdateRecoveryService';
 
 const {
   mockDeployStack,
@@ -138,6 +141,42 @@ describe('Rollback holds the stack lifecycle lock (H-1)', () => {
 
     gate.resolve({ recoveryId: null, deployedGenerationId: null, gitopsOperationId: null });
     await deploy;
+  });
+
+  it('ends the gates before a generation rollback replaces the runtime', async () => {
+    mockTier('paid');
+    mockDeployStack.mockResolvedValue({ recoveryId: null, deployedGenerationId: null, gitopsOperationId: null });
+    // A current recovery generation is what sends the route down the generation
+    // path, which arms its own recovery observation once the restore lands.
+    DatabaseService.getInstance().insertStackUpdateRecoveryGeneration({
+      id: 'gen-1', node_id: 1, stack_name: 'web', status: 'active', phase: 'immediate_verified',
+      is_current: 1, backup_slot_id: null, content_path: null, operation_kind: 'update',
+      override_path: 'rollback-override-path', services_json: '[]', health_gate_id: null, gate_retain_until: null,
+      artifact_expires_at: null, operation_lease_expires_at: null, created_at: Date.now(),
+      updated_at: Date.now(), created_by: 'tester', artifacts_retired: 0,
+      released_at: null, released_by: null,
+    });
+    // The other tests in this file take the backup path, so the generation row
+    // this test needs is removed again before it finishes.
+    const supersede = vi.spyOn(HealthGateService.prototype, 'supersedeForContainerOp').mockReturnValue(0);
+    const compensate = vi.spyOn(StackUpdateRecoveryService.prototype, 'compensateWithCandidate');
+    try {
+
+      // The restore itself is not the point here (this fixture has no content to
+      // restore), so its status is not asserted. What matters is the order: the
+      // gates must end before the restore runs, because a restore that succeeds
+      // arms its own recovery observation, and a supersede afterwards would
+      // finalize that one as unknown, so the rollback could never be verified
+      // healthy.
+      const resp = await request(app).post('/api/stacks/web/rollback').set('Cookie', authCookie);
+      expect(supersede).toHaveBeenCalledWith(1, 'web', expect.stringContaining('rolled back'));
+      expect(supersede.mock.invocationCallOrder[0]).toBeLessThan(compensate.mock.invocationCallOrder[0]);
+    } finally {
+      const raw = (DatabaseService.getInstance() as unknown as { db: { prepare: (s: string) => { run: () => void } } }).db;
+      raw.prepare('DELETE FROM stack_update_recovery_generations').run();
+      supersede.mockRestore();
+      compensate.mockRestore();
+    }
   });
 
   it('releases the lock after a successful rollback', async () => {

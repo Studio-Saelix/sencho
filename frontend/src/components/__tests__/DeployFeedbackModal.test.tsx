@@ -237,11 +237,11 @@ describe('DeployFeedbackModal health gate', () => {
     }));
   });
 
-  it('offers no Restore when the failed gate failed collaterally', async () => {
+  it('offers Restore for a collateral failure, with the sibling named', async () => {
     driverServiceName = 'api';
-    // The gate is api's and api is healthy; a sibling regressed. api's snapshot
-    // is not the way back, so the banner explains the failure without offering
-    // to roll a healthy service back.
+    // A collateral failure means a sibling regressed during the window, but the
+    // role is assigned by whichever container failed first, so this service may be
+    // the broken one. The offer stays, and the banner already names the cause.
     routeGateApi([{
       id: 'gate-1', status: 'failed', reason: 'container worker exited during observation',
       serviceName: 'api', targetScope: 'service', failureSource: 'collateral',
@@ -256,7 +256,7 @@ describe('DeployFeedbackModal health gate', () => {
 
     expect(screen.getByTestId('health-gate-banner')).toHaveAttribute('data-status', 'failed');
     expect(screen.getByText(/A dependent service triggered the failure/)).toBeInTheDocument();
-    expect(screen.queryByTestId('service-restore-from-gate')).not.toBeInTheDocument();
+    expect(screen.getByTestId('service-restore-from-gate')).toBeInTheDocument();
   });
 
   it('gives up with an unknown verdict after repeated poll failures', async () => {

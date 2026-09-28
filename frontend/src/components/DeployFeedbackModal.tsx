@@ -378,11 +378,7 @@ function HealthGateBanner({ gate }: { gate: HealthGateUiState }) {
     gate.targetScope === 'service'
     && !!gate.serviceName
     && !!gate.recoveryId
-    && gate.status === 'failed'
-    // A collateral failure is a sibling regressing, not this service breaking, so
-    // its pre-update snapshot is not the way back. Matches the toast rule in
-    // DeployFeedbackContext, so the two surfaces never disagree.
-    && gate.failureSource !== 'collateral';
+    && gate.status === 'failed';
 
   const onRestoreService = useCallback(async () => {
     if (!gate.serviceName || !gate.recoveryId || restoring) return;
