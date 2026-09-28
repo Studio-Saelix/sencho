@@ -245,6 +245,15 @@ function collectRuntimeDrift(
       ? target.artifact.expected
       : null;
     if (!expected || expected.identity === null) continue;
+    // The expected set has to be comparable too, not just the observation.
+    // `deriveRuntime` checks this before it assigns either artifact-identity
+    // status, so those two arrive here already qualified. `drifted` is assigned
+    // before that check, so this path has to enforce it for itself: a set Sencho
+    // could not resolve, or resolved against a stale resolution, still carries a
+    // real fingerprint identity, and without this the item would report a
+    // confirmed divergence against an expectation nothing verified. The facet
+    // already reads that case as pending or unverified, and the two must agree.
+    if (expected.qualification !== 'exact' && expected.qualification !== 'qualified') continue;
     const observed = target.observedArtifactIdentity;
     if (observed.kind !== 'exact' && observed.kind !== 'qualified') continue;
     if (expectedSetAgreesWithObservation(expected.artifactSetId, observed, expected.identity)) continue;
@@ -321,7 +330,9 @@ function reasonForRuntimeDrift(
  * on that same test, so for those two statuses the class is the one the target's
  * own facet already implies. `drifted` names no class in that vocabulary, which
  * is why the same test is what answers for it, and why its reason is worded
- * separately by `reasonForRuntimeDrift`.
+ * separately by `reasonForRuntimeDrift`. The test is spelled the way
+ * `deriveRuntime` spells it, so the two cannot answer differently about the
+ * same target.
  *
  * A rollout target is therefore reported once as rollout, not also as runtime:
  * one target yields at most one item for this comparison, whatever class it
@@ -333,9 +344,10 @@ function reasonForRuntimeDrift(
  * comparisons in `deriveRuntime`, so a recorded Blueprint digest drift arrives
  * carrying this status rather than either of the two above, and without it the
  * canonical list would say nothing about an application the deployment row
- * already calls drifted. The comparison against the expected set is what
- * decides whether it is reported, so a stale stage, an unverified observation,
- * or a digest that has since been corrected reports nothing.
+ * already calls drifted. Being reported still depends on the comparison, and on
+ * both sides of it: an approved set that is not exact or qualified, an
+ * observation that is not exact or qualified, a stale stage whose digests have
+ * since been corrected, and a repair Enforce is applying all report nothing.
  *
  * `correcting` is deliberately absent: a divergence Enforce is repairing on
  * this pass is work in progress, and reporting it would describe a repair as a
@@ -346,7 +358,7 @@ function runtimeDriftClass(target: GitOpsTargetProjection): 'runtime' | 'rollout
   if (status !== 'runtime_artifact_drift' && status !== 'rollout_artifact_drift' && status !== 'drifted') {
     return null;
   }
-  return target.rolloutGenerationId !== null || target.approvals.rolloutAuthorizationRef !== null
+  return target.rolloutGenerationId || target.approvals.rolloutAuthorizationRef
     ? 'rollout'
     : 'runtime';
 }

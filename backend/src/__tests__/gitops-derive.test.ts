@@ -1575,6 +1575,7 @@ describe('gitops derivation', () => {
       blueprintId: number,
       stage: 'blueprint_drifted' | 'blueprint_correcting',
       observed: Parameters<typeof encodeObservedArtifactIdentity>[0],
+      expectedQualification: 'exact' | 'qualified' | 'stale' | 'local_build_unverified' = 'exact',
     ): void {
       const store = GitOpsStore.getInstance();
       const generationId = `gen-${applicationId}`;
@@ -1585,9 +1586,13 @@ describe('gitops derivation', () => {
         generation_id: generationId,
         evidence_version: 1,
         authoritative: 0,
-        qualification: 'exact',
+        qualification: expectedQualification,
+        // `stale` and `local_build_unverified` sets still carry a real
+        // fingerprint identity, which is what makes the missing qualification
+        // check observable: the identity is present, so only the qualification
+        // can tell a comparable expectation from an unverified one.
         evidence_json: encodeArtifactEvidenceJson({
-          kind: 'exact',
+          kind: expectedQualification,
           identity: `sha256:${'c'.repeat(64)}`,
           services: [approvedService()],
         }),
@@ -1738,6 +1743,38 @@ describe('gitops derivation', () => {
         'the last artifact identity observed for this target differs from the expected artifact set',
       );
       expect(projection.drift[0]?.freshnessAt).toBe(42);
+    });
+
+    it('reports nothing when the approved set is not comparable enough to compare', () => {
+      // The two artifact-identity statuses are protected by deriveRuntime, which
+      // only assigns them when the approved set is exact or qualified. The
+      // observation is assigned before that check, so nothing else protects
+      // this path: an expectation Sencho cannot compare must not become a
+      // confirmed divergence just because a Blueprint recorded a stage.
+      //
+      // Both sets here carry a real fingerprint identity, so the identity is
+      // present and only the qualification distinguishes them. Without the
+      // qualification check this target reports a runtime drift item built on an
+      // expectation nothing verified, while the same target with no Blueprint
+      // stage reports artifact_verification_pending and no item.
+      const unverifiedSets = ['local_build_unverified', 'stale'] as const;
+      for (const [index, qualification] of unverifiedSets.entries()) {
+        seedObservedBlueprint(`app-obs-unpinned-${qualification}`, 307 + index, 'blueprint_drifted', {
+          kind: 'exact',
+          identity: `sha256:${'d'.repeat(64)}`,
+          observedAt: 42,
+          services: [movedService()],
+        }, qualification);
+
+        const projection = projectApplication(`app-obs-unpinned-${qualification}`, false);
+        if (projection.targetMode === 'not_applicable') throw new Error('expected application');
+        // The facet says the same thing, so the two surfaces agree.
+        expect(projection.facets.artifact.status, qualification).toBe(
+          qualification === 'stale' ? 'artifact_stale' : 'artifact_local_build_unverified',
+        );
+        expect(projection.drift, qualification).toHaveLength(0);
+        expect(attentionReasons(projection), qualification).not.toContain('drift');
+      }
     });
   });
 
