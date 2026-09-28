@@ -307,6 +307,9 @@ export function applyAutomaticPlacement(
     // here would let an automatic approval place a workload onto a cordoned node
     // while the decision carried a refusal nobody could ever reach.
     cordonOverride: hasCordonOverride(additions),
+    // A cordon on the node being withdrawn makes the withdrawal the cordon's doing,
+    // not the policy's judgement about the workload.
+    cordonDrivenRemoval: removals.length === 1 && hasCordonOverride(removals),
     // Each side judged by the evidence that actually exists for it: a node being
     // added is known from the registry, a node being left is known from the
     // observation of the workload that ran there.

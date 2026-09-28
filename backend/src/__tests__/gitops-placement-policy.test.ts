@@ -25,6 +25,7 @@ function input(overrides: Partial<BoundedAutoInput> = {}): BoundedAutoInput {
     statelessness: 'stateless',
     pinDriven: false,
     cordonOverride: false,
+    cordonDrivenRemoval: false,
     affectedNodeState: 'reachable',
     conflictingOperation: false,
     evidenceReadable: true,
@@ -189,6 +190,33 @@ describe('workload nature', () => {
 describe('node and binding state', () => {
   it('refuses a cordon override', () => {
     expect(decideBoundedAutoPlacement(input({ cordonOverride: true })).reason).toBe('cordon_override');
+  });
+
+  it('refuses a withdrawal whose only cause is a cordon on the node being left', () => {
+    // The drain. One cordon on a stateless workload produced a single stateless
+    // removal, which is otherwise inside what this policy may approve on its
+    // own, so cordoning a node silently stopped the workload running on it. A
+    // cordon says do not put work here; taking work away is a separate decision,
+    // and the operator who cordoned the node has not necessarily made it.
+    const decision = decideBoundedAutoPlacement(input({
+      approvedNodeIds: [1, 2],
+      candidateNodeIds: [2],
+      cordonDrivenRemoval: true,
+    }));
+    expect(decision.decision).toBe('operator_review');
+    expect(decision.reason).toBe('cordon_driven_removal');
+  });
+
+  it('still approves a withdrawal of a node that is not cordoned', () => {
+    // The refusal is about the cordon, not about removals. A withdrawal the
+    // Blueprint asked for on its own remains inside the policy.
+    const decision = decideBoundedAutoPlacement(input({
+      approvedNodeIds: [1, 2],
+      candidateNodeIds: [2],
+      cordonDrivenRemoval: false,
+    }));
+    expect(decision.decision).toBe('auto_approve');
+    expect(decision.reason).toBe('stateless_removal');
   });
 
   it('refuses placement that moved because a pin moved', () => {

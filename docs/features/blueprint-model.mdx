@@ -252,7 +252,7 @@ The source policy is set on the Git source, in its apply behavior. The placement
 - a change that would leave the application with nothing running it
 - an operation already in flight, for the application or for a node in the plan
 
-The last one matters when you cordon a node: cordoning it produces a removal, and a single stateless removal is inside what the policy may do on its own. Stop the policy before you cordon a node you do not want drained.
+Cordoning is a statement about where work may not go, not a decision to take work away, so a node you cordon is never withdrawn automatically. The withdrawal it would have caused falls back to you with that stated, and the workload keeps running where it is. Uncordon the node, or approve the move yourself.
 
 Each facet card carries its own policy line, saying who is configured to decide that stage and what the policy actually did. When a rollout is already in flight the card also says which value it was decided under, because every rollout freezes the policy it executes: changing a setting changes what the next decision may do and leaves work already approved exactly where it is.
 

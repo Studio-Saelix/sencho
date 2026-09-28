@@ -143,7 +143,7 @@ CREATE TABLE IF NOT EXISTS gitops_applications (
     placement_policy_refusal_reason IS NULL OR placement_policy_refusal_reason IN (
       'policy_is_operator','no_placement_change','stateless_addition','stateless_removal',
       'mixed_add_and_remove','multiple_additions','multiple_removals','stateful_workload',
-      'unknown_workload','first_multi_node_placement','pin_driven_placement','cordon_override',
+      'unknown_workload','first_multi_node_placement','pin_driven_placement','cordon_override','cordon_driven_removal',
       'stale_node','unknown_connectivity','missing_evidence','malformed_evidence',
       'destructive_effect','conflicting_operation'
     )

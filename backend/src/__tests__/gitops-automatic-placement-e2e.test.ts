@@ -23,8 +23,12 @@ import { GitOpsStore } from '../services/gitops/store';
 import { GitOpsTransitions } from '../services/gitops/transitions';
 import { applyAutomaticPlacement } from '../services/gitops/automaticPlacement';
 import { stackManagedRoot } from '../services/gitops/directApplication';
+import { emptyTargetRow } from '../services/gitops/store';
 import { decodeApprovalPolicySnapshot } from '../services/gitops/policyComposition';
-import { encodeGitOpsRequiredTargetsJson } from '../services/gitops/json';
+import {
+  encodeGitOpsApprovedTargetEffectJson,
+  encodeGitOpsRequiredTargetsJson,
+} from '../services/gitops/json';
 import type { GitOpsApplicationRow, GitOpsGenerationRow } from '../services/gitops/types';
 
 let tmpDir: string;
@@ -295,6 +299,141 @@ describe('a bounded_auto application reaches an approval', () => {
     const recorded = GitOpsStore.getInstance().getApplication(app.id)!;
     expect(recorded.placement_policy_refusal_reason).toBe('stateful_workload');
     expect(recorded.placement_policy_refused_at).toBe(2);
+  });
+
+  it('does not drain a node that was cordoned', () => {
+    // The finding this pins. Cordoning a node removed it from the candidate set,
+    // and a single stateless removal is inside what the policy may approve, so
+    // one cordon silently stopped the workload running there. The operator who
+    // cordoned a node has said where work may not go; they have not said the
+    // workload there should stop.
+    const kept = addNode(`n-${randomUUID().slice(0, 6)}`);
+    const cordoned = addNode(`n-${randomUUID().slice(0, 6)}`);
+    const app = seed({ nodeIds: [kept, cordoned], compose: 'services:\n  web:\n    image: nginx:1.25\n' });
+
+    // A hand-approved baseline over both nodes, so there is something to withdraw from.
+    GitOpsTransitions.getInstance().placementApproved({
+      applicationId: app.id,
+      approvalId: 'place-baseline',
+      intentRevisionId: GitOpsStore.getInstance().getApplication(app.id)!.intent_revision_id!,
+      blastJson: encodeGitOpsApprovedTargetEffectJson([
+        { nodeId: kept, outcome: 'place' as const },
+        { nodeId: cordoned, outcome: 'place' as const },
+      ]),
+      requiredNodeIds: [kept, cordoned],
+      fingerprint: null,
+      actor: 'tester',
+      envelope: { operationId: 'op-cordon-base', actor: 'tester', trigger: 'test', at: 2 },
+      rolloutGenerationId: 'rgen-cordon',
+      candidateId: GitOpsStore.getInstance().getApplication(app.id)!.rollout_candidate_id!,
+      authority: 'operator',
+      policyProvenanceJson: null,
+    });
+
+    DatabaseService.getInstance().getDb()
+      .prepare('UPDATE nodes SET cordoned = 1 WHERE id = ?')
+      .run(cordoned);
+    // A new intent, because the cordon moved the desired set and an intent
+    // revision is what records that. Reusing the old row would collide on its id.
+    const previous = GitOpsStore.getInstance().getIntentRevision(
+      GitOpsStore.getInstance().getApplication(app.id)!.intent_revision_id!,
+    )!;
+    GitOpsTransitions.getInstance().intentRevised({
+      applicationId: app.id,
+      intent: { ...previous, id: 'intent-after-cordon', operation_id: 'op-cordon-2' },
+      envelope: { operationId: 'op-cordon-2', actor: 'tester', trigger: 'test', at: 3 },
+    });
+    GitOpsTransitions.getInstance().rolloutCandidateOpened({
+      applicationId: app.id,
+      candidate: {
+        id: 'cand-after-cordon',
+        application_id: app.id,
+        intent_revision_id: 'intent-after-cordon',
+        required_targets_json: encodeGitOpsRequiredTargetsJson([kept]),
+        compose_content_sha256: 'a'.repeat(64),
+        accepted_generation_id: null,
+        artifact_set_id: null,
+        authoritative: 1,
+        provenance: 'roster_change',
+        created_at: 3,
+        operation_id: 'op-cordon-2',
+      } as never,
+      envelope: { operationId: 'op-cordon-2', actor: 'tester', trigger: 'test', at: 3 },
+    });
+
+    const outcome = applyAutomaticPlacement(app.id, { operationId: 'op-cordon-3', actor: null, trigger: 'test', at: 4 });
+    expect(outcome).toEqual({ status: 'operator_review', reason: 'cordon_driven_removal' });
+    // No second approval exists. The intent revision cleared the pointer, which
+    // is its own documented behavior, so the claim is about the approval history
+    // rather than the pointer: the cordon produced a review, not an approval.
+    expect(GitOpsStore.getInstance().hasPlacementApprovalFor(app.id, 'intent-after-cordon', 'cand-after-cordon')).toBe(false);
+  });
+
+  it('still approves a withdrawal of a node that is not cordoned', async () => {
+    // The other half of the cordon refusal, and the part only this level can
+    // pin. A pure decision test passes the flag in directly, so it cannot catch a
+    // caller that sets it for every removal rather than for a cordoned one. That
+    // would refuse every withdrawal the Blueprint asked for on its own, which is
+    // the policy's whole purpose.
+    const kept = addNode(`n-${randomUUID().slice(0, 6)}`);
+    const withdrawn = addNode(`n-${randomUUID().slice(0, 6)}`);
+    const app = seed({ nodeIds: [kept, withdrawn], compose: 'services:\n  web:\n    image: nginx:1.25\n' });
+    const store = GitOpsStore.getInstance();
+
+    GitOpsTransitions.getInstance().placementApproved({
+      applicationId: app.id,
+      approvalId: 'place-both',
+      intentRevisionId: store.getApplication(app.id)!.intent_revision_id!,
+      blastJson: encodeGitOpsApprovedTargetEffectJson([
+        { nodeId: kept, outcome: 'place' as const },
+        { nodeId: withdrawn, outcome: 'place' as const },
+      ]),
+      requiredNodeIds: [kept, withdrawn],
+      fingerprint: null,
+      actor: 'tester',
+      envelope: { operationId: 'op-wd-base', actor: 'tester', trigger: 'test', at: 1 },
+      rolloutGenerationId: 'rgen-wd',
+      candidateId: store.getApplication(app.id)!.rollout_candidate_id!,
+      authority: 'operator',
+      policyProvenanceJson: null,
+    });
+
+    // The withdrawn node must read as reachable: a removal is judged by the
+    // observation of the workload that ran there, and a node with no observation
+    // is unknown, which is its own refusal.
+    store.upsertTarget({
+      ...emptyTargetRow(app.id, withdrawn, 1),
+      target_status: 'active',
+      connectivity: 'reachable',
+    });
+    // Neither node is cordoned, and the Blueprint itself now asks for one of them.
+    const previous = store.getIntentRevision(store.getApplication(app.id)!.intent_revision_id!)!;
+    GitOpsTransitions.getInstance().intentRevised({
+      applicationId: app.id,
+      intent: { ...previous, id: 'intent-wd', operation_id: 'op-wd-2' },
+      envelope: { operationId: 'op-wd-2', actor: 'tester', trigger: 'test', at: 2 },
+    });
+    GitOpsTransitions.getInstance().rolloutCandidateOpened({
+      applicationId: app.id,
+      candidate: {
+        id: 'cand-wd',
+        application_id: app.id,
+        intent_revision_id: 'intent-wd',
+        required_targets_json: encodeGitOpsRequiredTargetsJson([kept]),
+        compose_content_sha256: 'a'.repeat(64),
+        accepted_generation_id: null,
+        artifact_set_id: null,
+        authoritative: 1,
+        provenance: 'roster_change',
+        created_at: 2,
+        operation_id: 'op-wd-2',
+      } as never,
+      envelope: { operationId: 'op-wd-2', actor: 'tester', trigger: 'test', at: 2 },
+    });
+
+    const outcome = applyAutomaticPlacement(app.id, { operationId: 'op-wd-3', actor: null, trigger: 'test', at: 3 });
+    expect(outcome).toEqual({ status: 'auto_approved', reason: 'stateless_removal' });
+    expect(store.hasPlacementApprovalFor(app.id, 'intent-wd', 'cand-wd')).toBe(true);
   });
 
   it('records no reason when it approves, so nothing is left to explain', () => {

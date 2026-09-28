@@ -128,6 +128,7 @@ const PLACEMENT_REASON_TEXT: Record<string, string> = {
   first_multi_node_placement: 'This is the first placement, and it spans more than one node.',
   pin_driven_placement: 'Placement moved because a pin moved, which is a choice of where to run.',
   cordon_override: 'A node in the plan is cordoned, so moving work onto it would override that.',
+  cordon_driven_removal: 'The node was cordoned, so this withdrawal follows from that cordon. Moving the workload is your decision to make.',
   stale_node: 'A node in the plan is gone, or was last seen unreachable.',
   unknown_connectivity: 'A node in the plan answered but could not be read.',
   missing_evidence: 'The evidence this decision needed could not be read at all.',

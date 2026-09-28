@@ -73,6 +73,17 @@ export type PlacementPolicyReason =
   | 'pin_driven_placement'
   /** A cordon on an affected node would be overridden. */
   | 'cordon_override'
+  /**
+   * The node being withdrawn is cordoned, so this change follows from that
+   * cordon rather than from anything Sencho judged about the workload.
+   *
+   * A separate reason from `cordon_override` because the two ask opposite
+   * questions of the operator. That one says Sencho would have placed work on a
+   * node you told it to leave alone; this one says the withdrawal you are seeing
+   * is a consequence of the cordon you set, and the decision to actually move it
+   * is yours.
+   */
+  | 'cordon_driven_removal'
   /** An affected node is gone, or was last seen unreachable. */
   | 'stale_node'
   /** An affected node answered but could not be read. */
@@ -110,6 +121,7 @@ export const PLACEMENT_POLICY_REASONS = [
   'first_multi_node_placement',
   'pin_driven_placement',
   'cordon_override',
+  'cordon_driven_removal',
   'stale_node',
   'unknown_connectivity',
   'missing_evidence',
@@ -147,6 +159,8 @@ export type BoundedAutoInput = {
   pinDriven: boolean;
   /** A cordon on an affected node would be overridden. */
   cordonOverride: boolean;
+  /** The only node being withdrawn is cordoned, so the cordon caused this. */
+  cordonDrivenRemoval: boolean;
   /** The worst state across affected nodes. */
   affectedNodeState: AffectedNodeState;
   /** An operation is in flight for the application or an affected target. */
@@ -230,6 +244,13 @@ export function decideBoundedAutoPlacement(input: BoundedAutoInput): PlacementDe
   if (input?.statelessness === 'unknown') return review('unknown_workload');
 
   if (input?.cordonOverride) return review('cordon_override');
+  // A withdrawal whose only cause is a cordon is the operator's decision to make.
+  // Without this, one cordon on a stateless workload silently stops the
+  // workload, because a single stateless removal is otherwise inside what this
+  // policy may approve. Reading the cordon for removals as well as additions is
+  // what makes "do not put work here" and "take work away from here" different
+  // statements.
+  if (input?.cordonDrivenRemoval) return review('cordon_driven_removal');
   if (input?.pinDriven) return review('pin_driven_placement');
   if (input?.affectedNodeState === 'unreachable') return review('stale_node');
   if (input?.affectedNodeState === 'unknown') return review('unknown_connectivity');

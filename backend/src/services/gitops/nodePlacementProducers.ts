@@ -57,9 +57,15 @@ export function recordPlacementShift(
   const store = GitOpsStore.getInstance();
   const tx = GitOpsTransitions.getInstance();
   const moved: number[] = [];
-  // Collected and evaluated after the loop, because this function opens no
-  // transaction of its own: each transition commits on its own, so the decision
-  // runs against durable state rather than against a partially applied shift.
+  // Collected and evaluated after the loop, so the automatic decision never runs
+  // while the transitions below are still being minted.
+  //
+  // This function opens no transaction of its own, which means whether each
+  // transition commits immediately or joins the caller's is the caller's choice.
+  // Both callers wrap it in a transaction, so the automatic evaluation below
+  // runs inside theirs and rolls back with it if anything after it throws. That
+  // is atomic and safe, because every refusal is caught rather than propagated,
+  // but it does mean the guarantee is the caller's and not this function's.
   const pending: { applicationId: string; envelope: EventEnvelope }[] = [];
 
   for (const [blueprintId, desired] of after) {
@@ -96,9 +102,10 @@ export function recordPlacementShift(
     try {
       applyAutomaticPlacement(entry.applicationId, entry.envelope);
     } catch (e) {
-      // The label change that triggered this already committed. A failure to
-      // evaluate leaves the candidate unapproved, which waits for an operator,
-      // so the safe direction does not depend on this succeeding.
+      // A failure to evaluate leaves the candidate unapproved, which waits for an
+      // operator, so the safe direction does not depend on this succeeding. It
+      // never propagates, which is what keeps a decision defect from rolling back
+      // the label, cordon or node write that caused the shift.
       console.error(
         '[GitOps] automatic placement evaluation failed for',
         sanitizeForLog(entry.applicationId),
