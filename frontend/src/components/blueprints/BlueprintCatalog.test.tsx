@@ -51,3 +51,40 @@ describe('the catalog shows a held repair as something to act on', () => {
         expect(chip.textContent).not.toMatch(/[1-9]/);
     });
 });
+
+describe('the catalog tile reflects a held repair', () => {
+    /**
+     * The tile's status dot is the first aria-hidden span: it is the one whose
+     * colour comes from the priority list. The tile carries other dots (the
+     * content-origin badge, a health indicator), so asserting on "any warning
+     * class" would pass on the wrong element.
+     */
+    function statusDotClass(list: BlueprintListItem[]): string {
+        const { container } = renderCatalog(list);
+        const dot = container.querySelector('span[aria-hidden="true"]');
+        return dot?.className ?? '';
+    }
+
+    it('ranks a held target above a healthy one, and warns rather than reads as fine', () => {
+        // A Blueprint with one held target and one healthy target must read as
+        // warning, not as the success an `active` target alone would give it: a
+        // hold is drift Sencho declined to fix, so it is the state an operator has
+        // to act on.
+        expect(statusDotClass([blueprint({ deploymentCounts: { active: 1, repair_held: 1 } })]))
+            .toContain('bg-warning');
+    });
+
+    it('reads as healthy when nothing is drifted or held', () => {
+        expect(statusDotClass([blueprint({ deploymentCounts: { active: 1 } })]))
+            .toContain('bg-success');
+    });
+
+    it('ranks a held target above a merely drifted one', () => {
+        // Both warn, so the dot alone cannot show the ordering. What it shows is
+        // that a held target is never hidden behind a state that outranks it: with
+        // `active` also present, the warning tone is what survives.
+        expect(statusDotClass([blueprint({ deploymentCounts: { drifted: 1, repair_held: 1, active: 1 } })]))
+            .toContain('bg-warning');
+    });
+});
+

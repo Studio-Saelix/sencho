@@ -50,13 +50,13 @@ export function BlueprintCatalog({ blueprints, onSelect, onCreate, canCreate }: 
     const [filter, setFilter] = useState<ModeFilter>('all');
 
     const counts = useMemo(() => {
-        const c = { all: blueprints.length, observe: 0, suggest: 0, enforce: 0, drifted: 0, repair_held: 0 };
+        const c = { all: blueprints.length, observe: 0, suggest: 0, enforce: 0, drifted: 0 };
         for (const b of blueprints) {
             c[b.drift_mode] = (c[b.drift_mode] ?? 0) + 1;
-            // A held row counts as drift on the chip, because the chip is how an
-            // operator finds it, and separately as held for the tile's own state.
+            // A held row counts as drift on this chip, because the chip is how an
+            // operator finds it. The tile's own state comes from the status
+            // priority list, which already ranks a hold.
             if ((b.deploymentCounts.drifted ?? 0) > 0 || (b.deploymentCounts.repair_held ?? 0) > 0) c.drifted += 1;
-            if ((b.deploymentCounts.repair_held ?? 0) > 0) c.repair_held += 1;
         }
         return c;
     }, [blueprints]);

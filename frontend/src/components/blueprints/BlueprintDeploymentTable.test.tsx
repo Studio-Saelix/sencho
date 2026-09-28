@@ -62,4 +62,12 @@ describe('a held repair is visible in the deployment table', () => {
     // A held row is not a corrective target, so no auto-fix action is offered.
     expect(screen.queryByRole('button', { name: /correct/i })).toBeNull();
   });
+
+  it('still offers Withdraw, which is the documented way out of a hold', () => {
+    renderTable([deployment({})]);
+
+    // Without this the state the docs tell operators to resolve by withdrawing
+    // had no control on the row that shows it.
+    expect(screen.getByRole('button', { name: /withdraw/i })).toBeDefined();
+  });
 });
