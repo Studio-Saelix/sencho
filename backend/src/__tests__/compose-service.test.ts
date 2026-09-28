@@ -1007,6 +1007,10 @@ describe('ComposeService - deployStack', () => {
     // this is what covers the ones that never do (fleet, labels, templates,
     // mesh, blueprint, scheduled deploy).
     expect(mockSupersedeForContainerOp).toHaveBeenCalledWith(1, 'my-stack', expect.stringContaining('redeployed'));
+    // Still before Compose can replace a container, whichever route the
+    // arguments took to get there.
+    expect(mockSupersedeForContainerOp.mock.invocationCallOrder[0])
+      .toBeLessThan(mockSpawn.mock.invocationCallOrder[0]);
   });
 
   it('blocks deploy before backup when missing external networks need a prompt', async () => {
