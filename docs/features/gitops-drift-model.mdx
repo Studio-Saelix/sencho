@@ -42,13 +42,13 @@ Each item is one line of comparison plus the facts you need to act on it. The dr
 
 A Blueprint whose drift mode is **Enforce** can restore runtime drift on its own, but only the state the target was already authorized to run: the generation that target acknowledged and the image identity approved for it. A newer accepted generation never changes what an older target restores, because the repair answers "put this node back" rather than "deploy the newest thing".
 
-Where Sencho cannot prove that, it declines and says so rather than guessing. The deployment row reads **Repair held** with the reason, the attention queue names it, and the workload is left untouched. A held target is still drifted: it is never counted as up to date.
+Holding is an **Enforce** decision. Observe and Suggest still detect and report the same drift, because "auto-fix was declined" is not an answer for someone who never asked for one. And a hold never suppresses detection: Sencho still inspects the node and still records what is running, it only declines to overwrite it. The deployment row reads **Repair held** with the reason, the attention queue names it, and the workload is left untouched. A held target is still drifted: it is never counted as up to date.
 
 The reasons a repair is held are the states this model already treats as uncertainty rather than divergence: a stateful or unclassifiable Blueprint, a rollout that has moved on, on-node evidence that does not name a generation, an unreachable target or stale connectivity, an interrupted change, a recovery or rollback that owns the target, and a disagreement between the rollout's frozen pair and the target's own expectation.
 
 Most holds clear themselves. Sencho keeps re-checking the target, so once the cause is resolved, by a node returning or an interrupted change finishing, the next reconciliation repairs the drift normally.
 
-One does not: a hold because the rollout moved on stays until a later rollout includes that target, or until you deploy to it explicitly. Superseding is a one-way fact, so nothing reopens that rollout on its own.
+One does not: a hold because the rollout moved on stays until a later rollout includes that target. Superseding is a one-way fact, so nothing reopens that rollout on its own, and Git-managed Blueprints have no manual redeploy to fall back on, so the rollout is the only way out.
 
 ## Where drift is shown
 

@@ -211,6 +211,7 @@ Every alert Sencho dispatches carries a category that you can filter on in the b
 | `blueprint_deployment_failed` | `blueprint_deployment_failed` | Blueprint deployment errored out |
 | `blueprint_drift_detected` | `blueprint_drift_detected` | Blueprint drift detected in `suggest` or `enforce` mode |
 | `blueprint_drift_correction_failed` | `blueprint_drift_correction_failed` | Blueprint enforce-mode redeploy failed |
+| `blueprint_drift_repair_held` | `blueprint_drift_repair_held` | Blueprint enforce-mode auto-fix declined, with the reason |
 
 The four `blueprint_*` categories are accepted by routing rules but are missing from the bell's category filter and the Settings category pickers because the frontend label map omits them.
 
@@ -446,6 +447,7 @@ Local-target failure reasons stay node-neutral (`Target node is offline`, `Conta
 
 - `warning`/`blueprint_drift_detected`: `Blueprint "<n>" drifted on this node: <reason>` for a local target, or `Blueprint "<n>" drifted on node "<remote>": <reason>` for a remote. Stateful marker-loss uses the same local/remote clause.
 - `error`/`blueprint_drift_correction_failed`: `Auto-fix for "<n>" on this node failed: <err>` (local) or `Auto-fix for "<n>" on node "<remote>" failed: <err>` (remote).
+- `warning`/`blueprint_drift_repair_held`: `Auto-fix for "<n>" on this node was declined: <reason>` (local) or the same on the remote node name (remote). This fires once per hold, when the reason changes, not on every tick.
 
 See [Blueprints](/features/blueprint-model).
 
