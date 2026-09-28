@@ -264,6 +264,10 @@ async function seedDeployedGitManaged(args: {
     preflight_fingerprint: null,
     preflight_evidence_json: null,
     rollout_strategy_json: '{}',
+    // A generation with no policy snapshot is what one predating the policy
+    // contract looks like, and these rows are about acknowledgement rather
+    // than provenance, so null is the honest value rather than a stand-in.
+    policy_snapshot_json: null,
     provenance: 'rollout_authorization',
     supersedes_generation_id: null,
     superseded_at: null,
@@ -1011,6 +1015,10 @@ describe('the Inline content path', () => {
       preflight_fingerprint: null,
       preflight_evidence_json: null,
       rollout_strategy_json: '{}',
+      // A generation with no policy snapshot is what one predating the policy
+      // contract looks like, and these rows are about acknowledgement rather
+      // than provenance, so null is the honest value rather than a stand-in.
+      policy_snapshot_json: null,
       provenance: 'rollout_authorization',
       supersedes_generation_id: null,
       superseded_at: null,

@@ -184,6 +184,10 @@ function seedRolloutGeneration(args: {
     accepted_generation_id: args.generation.generationId,
     artifact_set_id: args.generation.artifactSetId,
     placement_approval_ref: newGitOpsId(),
+    // A generation with no policy snapshot is what one predating the policy
+    // contract looks like, and this row is about which generation a target
+    // may restore, so null is the honest value rather than a stand-in.
+    policy_snapshot_json: null,
     source_acceptance_ref: newGitOpsId(),
     rollout_authorization_ref: newGitOpsId(),
     required_targets_json: encodeGitOpsRequiredTargetsJson([args.nodeId]),
