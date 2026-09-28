@@ -400,46 +400,87 @@ export class HealthGateService {
   }
 
   /**
-   * Finalize the gates a deliberate container lifecycle operation invalidated:
-   * stopping or restarting a service, restarting or stopping a whole stack, or
-   * taking it down.
+   * Apply a deliberate container operation to the gates it affects, before the
+   * operation runs, so no gate poll can read the replaced containers first and
+   * report the operator's own action as a failed update.
    *
-   * Such a gate cannot produce a verdict that means anything, because the
-   * containers it is observing are being replaced or removed underneath it. Left
-   * running it fails within a poll interval with "container disappeared during
-   * observation" or "exited", which reads as a failed update and, in the UI, as a
-   * Restore offer for a service the operator just stopped on purpose. Recorded as
-   * `unknown` with the operation named, which is the honest verdict: nothing was
-   * proven either way.
+   * What a gate may say depends on which of the operation's containers it was
+   * observing. A service gate observes one service's replicas and judges them
+   * against the rest of the stack as collateral, so an operation on a service
+   * is either that gate's own subject, which leaves nothing to say, or context
+   * the gate would misattribute to its own service, which it should stop
+   * watching rather than stop observing.
    *
-   * Scoped to the named service when one is given, which is the same rule a
-   * service-scoped update or restore uses: that service's gate and the stack gate
-   * end, and a sibling's gate keeps observing its own runtime. A stack-wide call
-   * (no service named) ends every gate on the stack.
+   *   operation                       own service's gate   sibling gates   stack gate
+   *   stop or restart one service     end                  detach it       end
+   *   stop, restart or take down      end                  end             end
+   *   deploy or update a stack        end before the up    end             end
+   *   update or restore one service   the new gate supersedes it; siblings are untouched
    *
-   * `start` is deliberately not a trigger: starting a service that was already
-   * down does not disturb the containers a live gate is observing.
+   * "End" is `finalize(gate, 'unknown', reason)`, naming the operation. That is
+   * the honest verdict: the containers the gate was judging are gone or being
+   * replaced, so nothing was proven either way. "Detach" drops that service's
+   * containers from a sibling's expected, collateral, baseline and role sets, so
+   * the sibling keeps a verdict on its own runtime. Ending a sibling instead
+   * would record `unknown` for a service nobody touched; leaving it to fail
+   * would report the deliberate stop as a failed update and offer a Restore for
+   * a healthy service, which is the recovery path for a fault that never
+   * happened.
    *
-   * Returns the number of gates finalized. Never throws.
+   * A prepare token that has not begun yet is treated the same way: the
+   * operated service's token is dropped, because a gate armed for a service the
+   * operator just stopped would fail on it, and a sibling's token has the
+   * operated service removed from the collateral set it would seed from.
+   *
+   * With no `serviceNames` the whole stack's runtime is being replaced, so
+   * every gate on the stack ends. `start` is deliberately not a trigger at any
+   * call site: starting a service that was already down does not disturb the
+   * containers a live gate is observing.
+   *
+   * Returns the number of gates ended; detached gates are left observing and so
+   * are not counted. Never throws.
    *
    * Covered seams: the compose commands (`runCommand`, `runDown`, `downStack`),
    * which reach the routes, the scheduler and the webhook; the Engine API
    * stack- and service-level ops (`containerActionForStack`, which the single
    * route, the bulk route and the fleet label stop share, plus the label bulk
-   * action and the scheduler's stack restart). Not covered, by design: the
-   * single-container operations that carry no stack identity (the by-id
-   * container routes, the scheduler's container actions), which disturb a
-   * container without saying which stack it belongs to.
+   * action), the per-service op (`handleServiceAction`) and the scheduler's
+   * filtered stack restart. Not covered, by design: the single-container
+   * operations that carry no stack identity (the by-id container routes, the
+   * scheduler's container actions), which disturb a container without saying
+   * which stack it belongs to.
    */
   public supersedeForContainerOp(
     nodeId: number,
     stackName: string,
     reason: string,
-    serviceName?: string,
+    serviceNames?: string[],
   ): number {
     try {
+      const named = (serviceNames ?? []).filter(name => name.length > 0);
       const before = this.active.size;
-      this.supersedeGatesForStack(nodeId, stackName, serviceName ? { serviceName, reason } : { reason });
+      if (named.length === 0) {
+        this.supersedeGatesForStack(nodeId, stackName, { reason });
+        return before - this.active.size;
+      }
+      for (const gate of [...this.active.values()]) {
+        if (gate.nodeId !== nodeId || gate.stackName !== stackName) continue;
+        // A stack gate judges every service on the stack, so the operated
+        // service is part of its subject rather than context: it ends.
+        if (gate.targetScope === 'stack' || named.includes(gate.serviceName ?? '')) {
+          this.finalize(gate, 'unknown', reason, []);
+          continue;
+        }
+        for (const name of named) this.detachServiceFromGate(gate, name);
+      }
+      for (const prep of [...this.prepared.values()]) {
+        if (prep.nodeId !== nodeId || prep.stackName !== stackName) continue;
+        if (named.includes(prep.serviceName)) {
+          this.prepared.delete(prep.token);
+          continue;
+        }
+        for (const name of named) this.detachServiceFromPrepared(prep, name);
+      }
       return before - this.active.size;
     } catch (error) {
       console.warn(
@@ -450,6 +491,46 @@ export class HealthGateService {
       );
       return 0;
     }
+  }
+
+  /**
+   * Drop one service's containers from a sibling gate's observed set, so the
+   * deliberate stop or restart of that service cannot fail this gate. The
+   * container names are resolved through the prepare baseline, which is keyed
+   * by name and carries the service each name belongs to.
+   */
+  private detachServiceFromGate(gate: ActiveGate, serviceName: string): void {
+    const names = new Set<string>();
+    for (const name of gate.collateralEligibleNames) {
+      if (gate.collateralBaselineByName.get(name)?.service === serviceName) names.add(name);
+    }
+    // An armed gate may hold a name that is not in the prepare-time eligible
+    // set (a replica that appeared under a new name), so the observed set is
+    // consulted too. A primary is never detached: it belongs to this gate's
+    // own service, not to the operated one.
+    if (gate.expected) {
+      for (const [name, baseline] of gate.expected) {
+        if (baseline.service === serviceName && gate.roleByName.get(name) !== 'primary') names.add(name);
+      }
+    }
+    for (const name of names) {
+      gate.collateralEligibleNames.delete(name);
+      gate.collateralBaselineByName.delete(name);
+      gate.roleByName.delete(name);
+      gate.missingLastPoll.delete(name);
+      gate.restartingLastPoll.delete(name);
+      gate.expected?.delete(name);
+    }
+  }
+
+  /** The same detach on a prepare token that has not begun yet. */
+  private detachServiceFromPrepared(prep: PreparedGate, serviceName: string): void {
+    for (const name of [...prep.collateralEligibleNames]) {
+      if (prep.collateralBaseline.some(b => b.name === name && b.service === serviceName)) {
+        prep.collateralEligibleNames.delete(name);
+      }
+    }
+    prep.collateralBaseline = prep.collateralBaseline.filter(b => b.service !== serviceName);
   }
 
   /** Drop prepare tokens whose TTL elapsed without a beginPrepared (lazy, no standing timer). */

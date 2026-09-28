@@ -696,14 +696,21 @@ export class ComposeService {
   }
 
   /**
-   * End the gates a container lifecycle operation is about to invalidate, before
-   * the operation starts, so no gate poll can read the replaced containers first
-   * and report a deliberate action as a failed update. Awaited dynamic import:
-   * HealthGateService imports this module, so a static import would be a cycle.
+   * End the gates that a compose run is about to invalidate, immediately before
+   * the compose command starts, so no gate poll can read the replaced containers
+   * first and report the operation as a failed update. Covers both a deliberate
+   * container action (the run commands and the take-downs below) and a
+   * stack-scoped deploy or update: from a gate's point of view those are the same
+   * event, the runtime it observes is about to be replaced. Awaited dynamic
+   * import: HealthGateService imports this module, so a static import would be a
+   * cycle.
    *
-   * Ending a gate that the operation then fails to perform is the honest
-   * direction: the verdict is `unknown` with the attempted operation named,
-   * never a failure.
+   * Every caller resolves its compose arguments, and a deploy resolves its
+   * registry auth, before getting here, so a run refused at that stage costs no
+   * live gate. Ending a gate that the compose run then fails to perform is the
+   * honest direction: the verdict is `unknown` with the attempted operation
+   * named, never a failure. Callers that open a replacement gate supersede the
+   * same gates again a moment later, so this is a harmless no-op for them.
    */
   private async supersedeGatesForContainerOp(stackName: string, reason: string): Promise<void> {
     try {
@@ -1015,31 +1022,6 @@ export class ComposeService {
   }
 
   /**
-   * End the gates a stack-scoped deploy or update is about to invalidate, before
-   * the compose up runs. A gate from an earlier run cannot judge the runtime this
-   * operation is about to create, and left observing it can record the replaced
-   * containers as a failure ("exited during observation") in the seconds the
-   * compose up takes. Callers that open a replacement gate supersede the same
-   * gates again a moment later, so this is a harmless no-op for them.
-   *
-   * Best effort by design: the operation has not run yet, so a failure here must
-   * not stop it. Awaited dynamic import: HealthGateService imports this module,
-   * so a static import would be a cycle.
-   */
-  private async endGateObservations(stackName: string, reason: string): Promise<void> {
-    try {
-      const { HealthGateService } = await import('./HealthGateService');
-      HealthGateService.getInstance().supersedeForContainerOp(this.nodeId, stackName, reason);
-    } catch (error) {
-      console.error(
-        '[ComposeService] Failed to end health gate observations for %s:',
-        sanitizeForLog(stackName),
-        error instanceof Error ? error.message : String(error),
-      );
-    }
-  }
-
-  /**
    * Retire the stack's per-service recovery snapshots after a successful
    * stack-scoped deploy or update replaced its runtime. Those snapshots point at
    * images the stack is no longer running, so offering one would be a rollback
@@ -1140,12 +1122,6 @@ export class ComposeService {
         console.warn('Failed to clean up legacy containers for %s:', sanitizeForLog(stackName), e);
       }
 
-      // End the gates from any earlier run before the compose up replaces the
-      // containers they are observing, so none of them can record the replacement
-      // as a failure. The snapshots are retired further down, once this has
-      // provably succeeded.
-      await this.endGateObservations(stackName, 'the stack was redeployed during the observation');
-
       await this.withRegistryAuth(async (env) => {
         const digestPins = ctx?.digestPins;
         let overlayDir: string | null = null;
@@ -1164,6 +1140,13 @@ export class ComposeService {
           } else {
             args = await this.authoredComposeArgs(stackName, upAction, stackDir);
           }
+          // End the gates from any earlier run here, after the arguments and the
+          // registry auth have resolved and immediately before the compose up
+          // replaces the containers they are observing, so neither a refused
+          // deploy nor a poll in the compose up's own seconds costs a live gate.
+          // The snapshots are retired further down, once this has provably
+          // succeeded.
+          await this.supersedeGatesForContainerOp(stackName, 'the stack was redeployed during the observation');
           composeHandedOff = true;
           await this.execute('docker', args, stackDir, ws, true, env, getComposeStallTimeoutMs());
         } finally {
@@ -1730,12 +1713,14 @@ export class ComposeService {
       }
 
       gitopsDeploy = this.beginGitOpsDeploy(stackName);
-      // End the gates from any earlier run before the compose up replaces the
-      // containers they are observing, for the same reason as the deploy path.
-      await this.endGateObservations(stackName, 'the stack was updated during the observation');
       await this.withRegistryAuth(async (env) => {
         sendOutput('=== Recreating containers ===\n');
         const args = await this.authoredComposeArgs(stackName, ['up', '-d', '--remove-orphans']);
+        // End the gates from any earlier run here, for the same reason as the
+        // deploy path: after the arguments and the registry auth have resolved,
+        // and immediately before the compose up replaces the containers they are
+        // observing.
+        await this.supersedeGatesForContainerOp(stackName, 'the stack was updated during the observation');
         // Set only once Compose is genuinely about to receive the mutation:
         // reading compose args or resolving registry auth can still fail with
         // the previous workload provably intact.

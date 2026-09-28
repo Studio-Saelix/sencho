@@ -256,6 +256,7 @@ vi.mock('../services/RemoteImageUpdateService', () => ({
 }));
 
 import { SchedulerService } from '../services/SchedulerService';
+import { HealthGateService } from '../services/HealthGateService';
 import { StackOpLockService } from '../services/StackOpLockService';
 import { prepareOutboundRegistryDeliveryBody } from '../helpers/registryDeliveryOutbound';
 
@@ -568,6 +569,38 @@ describe('SchedulerService - executeRestart', () => {
 
     expect(mockRestartContainer).toHaveBeenCalledTimes(1);
     expect(mockRestartContainer).toHaveBeenCalledWith('c1');
+  });
+
+  it('ends the gate of every named service, not just the first', async () => {
+    // The task restarts both services' containers, so both of their gates are
+    // judging containers that are about to be replaced. Scoping the supersede to
+    // the first name left the second one observing, and a poll in the gap
+    // between a container exiting and starting again would record the scheduled
+    // restart as a failed update and offer a Restore for a service that is fine.
+    mockGetScheduledTask.mockReturnValue({
+      id: 64,
+      name: 'restart-two',
+      action: 'restart',
+      cron_expression: '*/5 * * * *',
+      enabled: true,
+      target_id: 'my-stack',
+      node_id: 1,
+      target_services: JSON.stringify(['web', 'db']),
+      created_by: 'admin',
+      last_status: null,
+    });
+    mockGetContainersByStack.mockResolvedValue([
+      { Id: 'c1', Service: 'web' },
+      { Id: 'c2', Service: 'db' },
+    ]);
+    const supersede = vi.spyOn(HealthGateService.prototype, 'supersedeForContainerOp').mockReturnValue(0);
+
+    const svc = SchedulerService.getInstance();
+    await svc.triggerTask(64, { userId: 1, username: 'admin', role: 'admin' } as const);
+
+    expect(mockRestartContainer).toHaveBeenCalledTimes(2);
+    expect(supersede).toHaveBeenCalledWith(1, 'my-stack', expect.stringContaining('restarted'), ['web', 'db']);
+    supersede.mockRestore();
   });
 
   it('records failure when no containers found', async () => {

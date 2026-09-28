@@ -2212,15 +2212,16 @@ async function handleServiceAction(
     }
     // Before the op, for the same reason as the stack-level op: a stop runs
     // containers against a 10s Docker timeout, and a gate poll landing in that
-    // window would record the deliberate stop as a failed update. Scoped to this
-    // service, the same rule a service-scoped update or restore uses, so a
-    // sibling's gate keeps observing its own runtime.
+    // window would record the deliberate stop as a failed update. Scoped to
+    // this service: its own gate and the stack gate end, while a sibling's gate
+    // keeps observing its own runtime with this service detached from the
+    // collateral set it would otherwise fail on.
     if (action !== 'start') {
       HealthGateService.getInstance().supersedeForContainerOp(
         req.nodeId,
         stackName,
         `the service ${serviceName} was ${action === 'stop' ? 'stopped' : 'restarted'} during the observation`,
-        serviceName,
+        [serviceName],
       );
     }
     const op =
@@ -2713,28 +2714,33 @@ stacksRouter.post('/:stackName/rollback', async (req: Request, res: Response) =>
     // against the restored target inside compensate, not the live pre-restore project.
     if (currentGen) {
       dlog(`[Stacks] Rollback initiated via recovery generation: ${sanitizeForLog(stackName)}`);
-      // End the gates from any earlier run before the restore replaces the
-      // containers they are observing. This has to happen before the restore
-      // rather than after it: the restore arms its own recovery observation, and
-      // a supersede afterwards would end that one too, so the rollback could never
-      // be verified healthy.
-      HealthGateService.getInstance().supersedeForContainerOp(
-        req.nodeId,
-        stackName,
-        'the stack was rolled back during the observation',
-      );
       try {
         const rolledBack = await recoverySvc.compensateWithCandidate(
           currentGen.id,
-          // Returns the Compose result rather than swallowing it, so a proven
-          // restore can bind its deployed pointer and open a health run.
-          (overridePath, invocation, overlay) => ComposeService.getInstance(req.nodeId).composeUpWithRecoveryOverride(
-            stackName,
-            overridePath,
-            getTerminalWs(req.get(DEPLOY_SESSION_HEADER)),
-            invocation,
-            overlay,
-          ),
+          // Ends the gates the restore is about to invalidate, and returns the
+          // Compose result rather than swallowing it, so a proven restore can
+          // bind its deployed pointer and open a health run.
+          //
+          // The supersede is in here rather than around the call for two reasons.
+          // The restore can refuse first, on integrity, policy or missing held
+          // references, and a refusal changes nothing, so it must not cost a live
+          // gate. And once the restore lands it arms its own recovery
+          // observation, so ending the gates after it would end that one too and
+          // the rollback could never be verified healthy.
+          (overridePath, invocation, overlay) => {
+            HealthGateService.getInstance().supersedeForContainerOp(
+              req.nodeId,
+              stackName,
+              'the stack was rolled back during the observation',
+            );
+            return ComposeService.getInstance(req.nodeId).composeUpWithRecoveryOverride(
+              stackName,
+              overridePath,
+              getTerminalWs(req.get(DEPLOY_SESSION_HEADER)),
+              invocation,
+              overlay,
+            );
+          },
           buildPolicyGateOptions(req, { actor: req.user?.username ?? 'system' }),
         );
         if (!rolledBack) {
@@ -2762,14 +2768,10 @@ stacksRouter.post('/:stackName/rollback', async (req: Request, res: Response) =>
         if (compCode === 'RECOVERY_PROBE_FAILED') {
           // The restore itself completed; only the probe after it failed, so the
           // runtime really was replaced and this stack is settled like the
-          // success path below. ROLLBACK_PROHIBITED and HELD_IMAGE_MISSING do
-          // not reach this point with a replaced runtime, so they skip it.
+          // success path below. The gates were already ended by the restore
+          // itself. ROLLBACK_PROHIBITED and HELD_IMAGE_MISSING do not reach this
+          // point with a replaced runtime, so they skip it.
           await retireRollbackServiceRecoveries(req.nodeId, stackName);
-          HealthGateService.getInstance().supersedeForContainerOp(
-            req.nodeId,
-            stackName,
-            'the stack was rolled back during the observation',
-          );
           res.status(500).json({
             error: 'Rollback restore completed but recovery probe failed.',
             code: 'RECOVERY_PROBE_FAILED',
@@ -2782,8 +2784,8 @@ stacksRouter.post('/:stackName/rollback', async (req: Request, res: Response) =>
       invalidateNodeCaches(req.nodeId);
       // The restore replaced every service's runtime, so the per-service snapshots
       // taken before it are not rollback targets any more. The gates were already
-      // ended above, before the restore armed its own recovery observation. The
-      // backup-based rollback below gets both from `deployStack`.
+      // ended by the restore itself, just before its compose up. The backup-based
+      // rollback below gets both from `deployStack`.
       const { ServiceUpdateRecoveryService } = await import('../services/ServiceUpdateRecoveryService');
       ServiceUpdateRecoveryService.getInstance().invalidateActiveForStack(req.nodeId, stackName);
       dlog(`[Stacks] Rollback completed: ${sanitizeForLog(stackName)}`);

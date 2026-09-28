@@ -18,11 +18,13 @@ import { StackUpdateRecoveryService } from '../services/StackUpdateRecoveryServi
 
 const {
   mockDeployStack,
+  mockComposeUpWithRecoveryOverride,
   mockGetBackupInfo,
   mockRestoreStackFiles,
   mockSnapshotStackFiles,
 } = vi.hoisted(() => ({
   mockDeployStack: vi.fn(),
+  mockComposeUpWithRecoveryOverride: vi.fn(),
   mockGetBackupInfo: vi.fn(),
   mockRestoreStackFiles: vi.fn(),
   mockSnapshotStackFiles: vi.fn(),
@@ -36,7 +38,10 @@ vi.mock('../services/ComposeService', async () => {
     ...actual,
     ComposeService: {
       ...actual.ComposeService,
-      getInstance: () => ({ deployStack: mockDeployStack }),
+      getInstance: () => ({
+        deployStack: mockDeployStack,
+        composeUpWithRecoveryOverride: mockComposeUpWithRecoveryOverride,
+      }),
     },
   };
 });
@@ -60,6 +65,26 @@ let LicenseService: typeof import('../services/LicenseService').LicenseService;
 
 function mockTier(tier: 'paid' | 'community') {
   vi.spyOn(LicenseService.getInstance(), 'getTier').mockReturnValue(tier);
+}
+
+/** A current recovery generation, which is what routes a rollback to the generation path. */
+function insertGeneration(over: { id: string; services_json?: string }) {
+  DatabaseService.getInstance().insertStackUpdateRecoveryGeneration({
+    id: over.id, node_id: 1, stack_name: 'web', status: 'active', phase: 'immediate_verified',
+    is_current: 1, backup_slot_id: null, content_path: null, operation_kind: 'update',
+    override_path: 'rollback-override-path',
+    services_json: over.services_json ?? '[]',
+    health_gate_id: null, gate_retain_until: null,
+    artifact_expires_at: null, operation_lease_expires_at: null, created_at: Date.now(),
+    updated_at: Date.now(), created_by: 'tester', artifacts_retired: 0,
+    released_at: null, released_by: null,
+  });
+}
+
+/** The other tests in this file take the backup path, which needs no generation row. */
+function clearGenerations() {
+  const raw = (DatabaseService.getInstance() as unknown as { db: { prepare: (s: string) => { run: () => void } } }).db;
+  raw.prepare('DELETE FROM stack_update_recovery_generations').run();
 }
 
 interface Deferred<T> {
@@ -87,6 +112,7 @@ afterAll(() => {
 
 beforeEach(async () => {
   mockDeployStack.mockReset().mockResolvedValue({ recoveryId: null, deployedGenerationId: null, gitopsOperationId: null });
+  mockComposeUpWithRecoveryOverride.mockReset().mockResolvedValue(undefined);
   mockGetBackupInfo.mockReset().mockResolvedValue({ exists: true, timestamp: Date.now() });
   mockRestoreStackFiles.mockReset().mockResolvedValue(undefined);
   mockSnapshotStackFiles.mockReset().mockResolvedValue(async () => {});
@@ -143,36 +169,52 @@ describe('Rollback holds the stack lifecycle lock (H-1)', () => {
     await deploy;
   });
 
-  it('ends the gates before a generation rollback replaces the runtime', async () => {
+  it('leaves a live gate alone when the rollback is refused', async () => {
     mockTier('paid');
-    mockDeployStack.mockResolvedValue({ recoveryId: null, deployedGenerationId: null, gitopsOperationId: null });
     // A current recovery generation is what sends the route down the generation
-    // path, which arms its own recovery observation once the restore lands.
-    DatabaseService.getInstance().insertStackUpdateRecoveryGeneration({
-      id: 'gen-1', node_id: 1, stack_name: 'web', status: 'active', phase: 'immediate_verified',
-      is_current: 1, backup_slot_id: null, content_path: null, operation_kind: 'update',
-      override_path: 'rollback-override-path', services_json: '[]', health_gate_id: null, gate_retain_until: null,
-      artifact_expires_at: null, operation_lease_expires_at: null, created_at: Date.now(),
-      updated_at: Date.now(), created_by: 'tester', artifacts_retired: 0,
-      released_at: null, released_by: null,
-    });
-    // The other tests in this file take the backup path, so the generation row
-    // this test needs is removed again before it finishes.
+    // path. Its service state is unreadable, so the restore refuses on
+    // eligibility before it touches a file or a container: nothing changed, so
+    // a gate that is observing must keep observing, and it must not be told the
+    // stack was rolled back.
+    insertGeneration({ id: 'gen-refused', services_json: 'not json' });
     const supersede = vi.spyOn(HealthGateService.prototype, 'supersedeForContainerOp').mockReturnValue(0);
-    const compensate = vi.spyOn(StackUpdateRecoveryService.prototype, 'compensateWithCandidate');
     try {
-      // The restore itself is not the point here (this fixture has no content to
-      // restore), so its status is not asserted. What matters is the order: the
-      // gates must end before the restore runs, because a restore that succeeds
-      // arms its own recovery observation, and a supersede afterwards would
-      // finalize that one as unknown, so the rollback could never be verified
-      // healthy.
-      await request(app).post('/api/stacks/web/rollback').set('Cookie', authCookie);
-      expect(supersede).toHaveBeenCalledWith(1, 'web', expect.stringContaining('rolled back'));
-      expect(supersede.mock.invocationCallOrder[0]).toBeLessThan(compensate.mock.invocationCallOrder[0]);
+      const res = await request(app).post('/api/stacks/web/rollback').set('Cookie', authCookie);
+      expect(res.status).toBe(409);
+      expect(res.body.code).toBe('ROLLBACK_PROHIBITED');
+      expect(supersede).not.toHaveBeenCalled();
     } finally {
-      const raw = (DatabaseService.getInstance() as unknown as { db: { prepare: (s: string) => { run: () => void } } }).db;
-      raw.prepare('DELETE FROM stack_update_recovery_generations').run();
+      clearGenerations();
+      supersede.mockRestore();
+    }
+  });
+
+  it('ends the gates once a rollback is permitted, before its compose up runs', async () => {
+    mockTier('paid');
+    insertGeneration({ id: 'gen-permitted' });
+    const order: string[] = [];
+    const supersede = vi.spyOn(HealthGateService.prototype, 'supersedeForContainerOp')
+      .mockImplementation(() => { order.push('gates ended'); return 0; });
+    mockComposeUpWithRecoveryOverride.mockImplementation(async () => { order.push('compose up'); return undefined; });
+    // The restore stands in for one that passes every check and reaches its
+    // compose up, which is the point at which the runtime is about to change.
+    const compensate = vi.spyOn(StackUpdateRecoveryService.prototype, 'compensateWithCandidate')
+      .mockImplementation(async (_id, composeUp) => {
+        order.push('restore permitted');
+        await composeUp('rollback-override-path', null, undefined);
+        return true;
+      });
+    try {
+      const res = await request(app).post('/api/stacks/web/rollback').set('Cookie', authCookie);
+      expect(res.status).toBe(200);
+      expect(supersede).toHaveBeenCalledWith(1, 'web', expect.stringContaining('rolled back'));
+      // Ending the gates inside the compose-up callback puts them after the
+      // eligibility and policy checks, so a refusal costs nothing, and still
+      // before the compose up, so the restore's own recovery observation is armed
+      // afterwards and survives to verify the rollback.
+      expect(order).toEqual(['restore permitted', 'gates ended', 'compose up']);
+    } finally {
+      clearGenerations();
       supersede.mockRestore();
       compensate.mockRestore();
     }

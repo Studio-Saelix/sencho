@@ -529,7 +529,7 @@ describe('HealthGateService container-op supersede', () => {
     const stack = svc().beginStack(0, 'web', 'update', 'tester', { deployedGenerationId: null })!;
     await ticks(2);
 
-    expect(svc().supersedeForContainerOp(0, 'web', 'the service app was stopped during the observation', 'app')).toBe(1);
+    expect(svc().supersedeForContainerOp(0, 'web', 'the service app was stopped during the observation', ['app'])).toBe(1);
     const report = svc().getReport(0, 'web', stack);
     expect(report.status).toBe('unknown');
     expect(report.reason).toBe('the service app was stopped during the observation');
