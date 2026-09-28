@@ -434,6 +434,7 @@ describe('attentionReasons', () => {
       'preflight_blocked',
       'recovery_failed',
       'recovery_required',
+      'repair_held',
       'rollback_failed',
       'rollout_authorization_pending',
       'rollout_authorization_stale',
@@ -452,5 +453,19 @@ describe('attentionReasons', () => {
       'target_stale',
       'target_unreachable',
     ]);
+  });
+
+  it('ignores a retired target, whose failure it can no longer be waiting on', () => {
+    const failing = {
+      connectivity: 'unreachable' as const,
+      runtime: runtimeAt('failed_after_mutation'),
+      health: healthAt('failed'),
+    };
+    // The same failure on a live target is still attention, so the retirement
+    // is what silences it rather than the state being unreadable.
+    expect(attentionReasons(liveProjection({ targets: [target(failing)] })).length).toBeGreaterThan(0);
+    expect(attentionReasons(liveProjection({
+      targets: [target({ ...failing, tombstoned: true })],
+    }))).toEqual([]);
   });
 });

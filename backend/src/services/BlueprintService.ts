@@ -25,6 +25,8 @@ import {
     throwRegistryDeliveryRefusal,
 } from '../helpers/registryDeliveryOutbound';
 import { getRegistryDeliveryLockContext } from '../helpers/registryDeliveryContext';
+import { probeRemoteCapability } from '../helpers/remoteCapabilities';
+import { BLUEPRINT_DIGEST_PINS_V1_CAPABILITY } from './CapabilityRegistry';
 import { enforcePolicyForImageRefs } from './PolicyEnforcement';
 import { BlueprintAnalyzer } from './BlueprintAnalyzer';
 import { sanitizeForLog } from '../utils/safeLog';
@@ -59,6 +61,12 @@ import {
     type ServiceArtifactEvidence,
 } from './gitops/json';
 import { GitOpsStore } from './gitops/store';
+import {
+    describeRuntimeRepairHold,
+    resolveRuntimeRepairBinding,
+    type RuntimeRepairBinding,
+    type RuntimeRepairHoldReason,
+} from './gitops/runtimeRepairBinding';
 import { GitOpsTransitions } from './gitops/transitions';
 import { envelopeFor, recordableApplication } from './gitops/blueprintProducers';
 import type { GitOpsApplicationRow, GitOpsGenerationRow } from './gitops/types';
@@ -72,7 +80,14 @@ export type DriftCause = 'revision' | 'container' | 'digest';
 export type DriftCheckResult =
     | { kind: 'matched' }
     | { kind: 'drifted'; reason: string; cause: DriftCause }
-    | { kind: 'unverified'; reason: string };
+    | { kind: 'unverified'; reason: string }
+    /**
+     * The target cannot be repaired and must not be: the authority a repair
+     * would restore is missing, unreadable, or has moved on. Distinct from
+     * `unverified` because this is a decision, not a failure to observe, and
+     * because it must stay visible as a hold rather than pass as "no drift".
+     */
+    | { kind: 'held'; reason: RuntimeRepairHoldReason; detail: string };
 
 function isDeveloperModeEnabled(): boolean {
     try {
@@ -123,6 +138,12 @@ export interface DeployOutcome {
     error?: string;
     /** Machine-readable registry delivery refusal code, when the deploy failed on one. */
     code?: string;
+    /**
+     * Why a drift repair was held instead of attempted. Present only on a
+     * `repair_held` outcome, so a caller can distinguish "the policy declined
+     * this repair" from "the repair was attempted and failed".
+     */
+    holdReason?: RuntimeRepairHoldReason;
 }
 
 type LocalMarkerRead =
@@ -179,18 +200,33 @@ export class BlueprintService {
         this.releaseLock(blueprintId, nodeId);
     }
 
-    private buildMarker(blueprint: Blueprint): BlueprintMarker {
-        return {
+    /**
+     * The on-node record of what was deployed. For Git-managed content it also
+     * names the generation and artifact set the deploy came from, so a later
+     * drift check can prove what a repair would overwrite instead of assuming.
+     */
+    private buildMarker(blueprint: Blueprint, binding?: RuntimeRepairBinding): BlueprintMarker {
+        const marker: BlueprintMarker = {
             blueprintId: blueprint.id,
             revision: blueprint.revision,
             lastApplied: Date.now(),
         };
+        if (binding?.kind === 'binding') {
+            marker.generationId = binding.acceptedGenerationId;
+            marker.artifactSetId = binding.artifactSetId;
+            if (binding.rolloutGenerationId) marker.rolloutGenerationId = binding.rolloutGenerationId;
+        }
+        return marker;
     }
 
     /**
      * Digest-pinned Enforce repair: restore the frozen expected identity without
      * rewriting authored compose tags on disk. Fails closed when the approved
      * digest cannot be retrieved; LKG/expected pointers stay untouched.
+     *
+     * The pinned set is the one the target acknowledged. The application's
+     * current artifact set is deliberately not consulted: a newer accepted
+     * generation must not be able to change what an older target repairs.
      */
     async enforceDigestRepair(blueprint: Blueprint, node: Node): Promise<DeployOutcome> {
         const store = GitOpsStore.getInstance();
@@ -198,13 +234,12 @@ export class BlueprintService {
         if (!recordableApplication(app)) {
             return { status: 'failed', error: 'no recordable GitOps application for digest repair' };
         }
-        const target = store.getTarget(app.id, node.id);
-        const expectedSetId = target?.expected_artifact_set_id ?? app.artifact_set_id;
-        if (!expectedSetId) {
-            return { status: 'failed', error: 'no expected artifact set for digest repair' };
+        const binding = resolveRuntimeRepairBinding(store, app, store.getTarget(app.id, node.id));
+        if (binding.kind === 'hold') {
+            return BlueprintService.heldRepair(binding.reason);
         }
         const platformLabel = await resolvePlatformLabelForNode(node.id, blueprint.name);
-        const digestPins = buildDigestPinsFromArtifactSet(expectedSetId, platformLabel);
+        const digestPins = buildDigestPinsFromArtifactSet(binding.artifactSetId, platformLabel);
         if (!digestPins) {
             return { status: 'failed', error: 'approved digest unavailable for digest repair' };
         }
@@ -215,6 +250,11 @@ export class BlueprintService {
      * Re-apply already-authorized compose without rewriting authored tags.
      * Used by Enforce for git-managed container/revision drift, where
      * deployToNode would refuse Git-managed content.
+     *
+     * The compose bytes come from the generation the target acknowledged, not
+     * from the application's newest accepted generation. Reading the newest one
+     * turns a repair into an unauthorized content upgrade: the target would
+     * receive a generation no rollout ever authorized for it.
      */
     async reapplyAuthorizedMaterialization(
         blueprint: Blueprint,
@@ -226,11 +266,15 @@ export class BlueprintService {
         if (!recordableApplication(app)) {
             return { status: 'failed', error: 'no recordable GitOps application for authorized reapply' };
         }
+        const binding = resolveRuntimeRepairBinding(store, app, store.getTarget(app.id, node.id));
+        if (binding.kind === 'hold') {
+            return BlueprintService.heldRepair(binding.reason);
+        }
         let composeContent = blueprint.compose_content;
-        if (app.target_mode === 'blueprint' && app.accepted_generation_id) {
-            const generation = store.getGeneration(app.accepted_generation_id);
+        if (app.target_mode === 'blueprint') {
+            const generation = store.getGeneration(binding.acceptedGenerationId);
             if (!generation) {
-                return { status: 'failed', error: 'accepted generation missing for authorized reapply' };
+                return { status: 'failed', error: 'acknowledged generation missing for authorized reapply' };
             }
             try {
                 composeContent = await this.readGitManagedAppliedCompose(app, generation);
@@ -242,7 +286,7 @@ export class BlueprintService {
             blueprint,
             node,
             composeContent,
-            marker: this.buildMarker(blueprint),
+            marker: this.buildMarker(blueprint, binding),
             auditPath: `/api/blueprints/${blueprint.id}/enforce-reapply`,
             digestPins,
         });
@@ -373,6 +417,36 @@ export class BlueprintService {
         }
     }
 
+    /**
+     * Refuses a digest-pinned remote apply unless the leaf advertises digestPins
+     * support. A leaf that predates the field drops it and redeploys by tag,
+     * which re-pulls the drifted image the pin exists to keep out, so the
+     * repair must fail rather than quietly lose its pin. An unreachable probe
+     * fails closed for the same reason.
+     */
+    private async assertRemoteSupportsDigestPins(node: Node): Promise<void> {
+        const probe = await probeRemoteCapability(node.id, BLUEPRINT_DIGEST_PINS_V1_CAPABILITY);
+        if (probe.kind === 'supported') return;
+        if (probe.kind === 'unsupported') {
+            console.warn(
+                '[BlueprintService] Refusing digest-pinned apply on node %s: it does not advertise %s',
+                sanitizeForLog(node.name),
+                BLUEPRINT_DIGEST_PINS_V1_CAPABILITY,
+            );
+            throw new BlueprintRemoteUpgradeRequiredError(
+                `Remote node "${node.name}" does not support digest-pinned blueprint apply. Upgrade that Sencho instance, then retry.`,
+            );
+        }
+        console.warn(
+            '[BlueprintService] Could not verify digest-pinned apply support on node %s (probe: %s); refusing to redeploy by tag',
+            sanitizeForLog(node.name),
+            sanitizeForLog(probe.detail),
+        );
+        throw new Error(
+            `Could not confirm that remote node "${node.name}" supports digest-pinned blueprint apply, so the repair was not sent. Check that node is online, then retry.`,
+        );
+    }
+
     private async deployRemoteMaterialization(
         blueprint: Blueprint,
         node: Node,
@@ -393,6 +467,7 @@ export class BlueprintService {
             allowGitManagedContent: true,
         };
         if (digestPins) {
+            await this.assertRemoteSupportsDigestPins(node);
             applyBody.digestPins = digestPins;
         }
         if (captureRecovery) {
@@ -610,7 +685,18 @@ export class BlueprintService {
                     sanitizeForLog(blueprint.name), node.id, Date.now() - started);
                 return { status: 'name_conflict', error: 'name_conflict' };
             }
-            const marker = this.buildMarker(blueprint);
+            // Best-effort stamping: a fresh Inline deploy is not a repair, so an
+            // unresolvable binding must not block it. When it does resolve, the
+            // marker records what was installed so later drift checks have
+            // on-node evidence to compare against.
+            const store = GitOpsStore.getInstance();
+            const liveApp = store.getLiveBlueprintApplication(blueprint.id);
+            const marker = this.buildMarker(
+                blueprint,
+                recordableApplication(liveApp)
+                    ? resolveRuntimeRepairBinding(store, liveApp, store.getTarget(liveApp.id, node.id))
+                    : undefined,
+            );
             if (node.type === 'local') {
                 diagnosticLog('deploy branch', { blueprintId: blueprint.id, nodeId: node.id, target: 'local' });
                 await this.deployLocal(blueprint, node, marker);
@@ -710,7 +796,8 @@ export class BlueprintService {
      * restorable divergence (marker/revision/not-running/digest mismatch).
      * `unverified` means the check could not prove either side (no application
      * row, unreachable node, missing expected set, or non-comparable observation)
-     * and must never trigger Enforce.
+     * and must never trigger Enforce. `held` means the target has no restorable
+     * identity, so Enforce must decline rather than guess.
      */
     async checkForDrift(blueprint: Blueprint, node: Node): Promise<DriftCheckResult> {
         try {
@@ -720,12 +807,53 @@ export class BlueprintService {
                 return { kind: 'unverified', reason: 'no recordable GitOps application' };
             }
 
+            const target = store.getTarget(app.id, node.id);
+            // A Blueprint with no target row has no runtime to speak about, so
+            // this check cannot classify anything. That is missing evidence, not
+            // a decision to decline a repair.
+            if (!target) return { kind: 'unverified', reason: 'no GitOps target for this node' };
+
+            const binding = resolveRuntimeRepairBinding(store, app, target);
+            if (binding.kind === 'hold') {
+                // A hold refuses to mutate, not to observe. What is actually
+                // running on the node is precisely the evidence an operator needs
+                // when a hold blocks the repair, and it is what the drift surfaces
+                // read, so it is captured before returning. Without this the one
+                // target that most needs explaining reports nothing at all.
+                await this.captureHeldObservation(blueprint, node, app.id);
+                return {
+                    kind: 'held',
+                    reason: binding.reason,
+                    detail: describeRuntimeRepairHold(binding.reason),
+                };
+            }
+
             const marker = await this.readMarker(blueprint.name, node);
             if (!marker) {
                 return { kind: 'drifted', reason: 'marker file missing on node', cause: 'revision' };
             }
             if (marker.blueprintId !== blueprint.id) {
                 return { kind: 'drifted', reason: 'marker references a different blueprint', cause: 'revision' };
+            }
+            // A node whose marker names a different generation than the target
+            // acknowledged is not a restorable divergence: Sencho cannot tell
+            // whether the node is behind a rollout or was overwritten by
+            // something else, so the rollout decides, not the drift policy.
+            if (app.target_mode === 'blueprint') {
+                if (!marker.generationId) {
+                    return {
+                        kind: 'held',
+                        reason: 'evidence_incomplete',
+                        detail: 'the marker on this node names no generation, so a repair could not prove what it would overwrite',
+                    };
+                }
+                if (marker.generationId !== binding.acceptedGenerationId) {
+                    return {
+                        kind: 'held',
+                        reason: 'binding_incoherent',
+                        detail: `the node runs generation ${marker.generationId} but this target acknowledged ${binding.acceptedGenerationId}`,
+                    };
+                }
             }
             if (marker.revision !== blueprint.revision) {
                 return {
@@ -747,30 +875,14 @@ export class BlueprintService {
             if (!observed) {
                 return { kind: 'unverified', reason: 'runtime identity could not be collected' };
             }
+            this.recordRuntimeObservation(blueprint.name, node, app.id, observed);
 
-            const target = store.getTarget(app.id, node.id);
-            if (target) {
-                try {
-                    GitOpsTransitions.getInstance().recordObservedRuntimeArtifact({
-                        applicationId: app.id,
-                        nodeId: node.id,
-                        observed,
-                        envelope: envelopeFor(null, 'blueprint_drift_observe'),
-                    });
-                } catch (error) {
-                    console.error(
-                        '[BlueprintService] Failed to record runtime observation for blueprint %s node %d:',
-                        sanitizeForLog(blueprint.name),
-                        node.id,
-                        error instanceof Error ? error.message : String(error),
-                    );
-                }
-            }
-
-            const expectedSetId = target?.expected_artifact_set_id ?? app.artifact_set_id;
-            if (!expectedSetId) {
-                return { kind: 'unverified', reason: 'no expected artifact set' };
-            }
+            // The expected set is the one this target acknowledged. Reading the
+            // application's current set here would let a newer accepted
+            // generation redefine what an older target is compared against, and
+            // a target matching a generation it never acknowledged is not
+            // converged.
+            const expectedSetId = binding.artifactSetId;
             const expectedRow = store.getArtifactSet(expectedSetId);
             if (
                 !expectedRow
@@ -819,6 +931,58 @@ export class BlueprintService {
             // Prefer unverified over drifted so a transport failure cannot
             // trigger Enforce against an unreachable or half-observed node.
             return { kind: 'unverified', reason: BlueprintService.formatError(err) };
+        }
+    }
+
+    /**
+     * Record the identity a target is actually running, so the drift surfaces
+     * and the projection can report it. A failure to record is logged and
+     * swallowed: the observation is evidence, not authority, and losing it must
+     * not turn into a crash on the reconciler tick.
+     */
+    private recordRuntimeObservation(
+        blueprintName: string,
+        node: Node,
+        applicationId: string,
+        observed: ObservedArtifactIdentity,
+    ): void {
+        try {
+            GitOpsTransitions.getInstance().recordObservedRuntimeArtifact({
+                applicationId,
+                nodeId: node.id,
+                observed,
+                envelope: envelopeFor(null, 'blueprint_drift_observe'),
+            });
+        } catch (error) {
+            console.error(
+                '[BlueprintService] Failed to record runtime observation for blueprint %s node %d:',
+                sanitizeForLog(blueprintName),
+                node.id,
+                error instanceof Error ? error.message : String(error),
+            );
+        }
+    }
+
+    /**
+     * Best-effort observation for a target whose repair is held. It must not
+     * turn the hold into a failure or a different verdict, so every error here
+     * is swallowed after the probe is attempted.
+     */
+    private async captureHeldObservation(
+        blueprint: Blueprint,
+        node: Node,
+        applicationId: string,
+    ): Promise<void> {
+        try {
+            const observed = await this.observeRuntimeIdentity(blueprint.name, node);
+            if (observed) this.recordRuntimeObservation(blueprint.name, node, applicationId, observed);
+        } catch (error) {
+            console.error(
+                '[BlueprintService] Could not observe a held target for blueprint %s node %d:',
+                sanitizeForLog(blueprint.name),
+                node.id,
+                error instanceof Error ? error.message : String(error),
+            );
         }
     }
 
@@ -1319,6 +1483,15 @@ export class BlueprintService {
         if (!body || typeof body !== 'object') return '';
         const code = (body as Record<string, unknown>).code;
         return typeof code === 'string' ? code : '';
+    }
+
+    /**
+     * A repair that must not be attempted. Carries the reason so the caller can
+     * record an explicit hold instead of an opaque failure, and keeps the
+     * human-readable explanation in one place.
+     */
+    private static heldRepair(reason: RuntimeRepairHoldReason): DeployOutcome {
+        return { status: 'repair_held', error: describeRuntimeRepairHold(reason), holdReason: reason };
     }
 
     static formatError(err: unknown): string {

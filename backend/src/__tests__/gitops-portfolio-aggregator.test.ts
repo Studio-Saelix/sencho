@@ -86,7 +86,7 @@ function createBlueprintApplication(id: string, blueprintId: number): void {
 function remoteSourceRow(
   applicationId: string,
   stackName: string,
-  revision: GitOpsRevisionProjection,
+  revision: unknown,
   stackResourcePresent = true,
 ): unknown[] {
   return [{
@@ -123,6 +123,12 @@ function remoteSourceRow(
 
 type LiveProjection = Extract<GitOpsRevisionProjection, { applicationId: string }>;
 type LiveFacets = LiveProjection['facets'];
+
+/**
+ * A projection whose `targets` are unvalidated, so a test can push a target no
+ * live projection could carry and assert the row degrades instead of vanishing.
+ */
+type RemoteProjectionFixture = Omit<LiveProjection, 'targets'> & { targets: unknown[] };
 
 function liveProjectionFixture(input: {
   applicationId: string;
@@ -185,6 +191,11 @@ function bindBlueprintAuthority(projection: LiveProjection): void {
   projection.blueprintId = 1;
   projection.approvals.rolloutAuthorizationRef = 'auth-1';
   projection.facets.placement = { status: 'blueprint_bound', completion: 'unknown' };
+}
+
+/** `remoteProjection` with unvalidated `targets`, for the malformed-payload cases. */
+function rawRemoteProjection(applicationId: string, stackName: string): RemoteProjectionFixture {
+  return { ...remoteProjection(applicationId, stackName), targets: [] };
 }
 
 function targetProjection(
@@ -445,6 +456,32 @@ describe('aggregateGitOpsPortfolio', () => {
     expect(coverage.find(candidate => candidate.nodeId === remoteId)?.state).toBe('ok');
   });
 
+  it('keeps a malformed remote application addressable instead of relabeling it as legacy', async () => {
+    const db = DatabaseService.getInstance();
+    const localNodeId = db.getNodes()[0]!.id;
+    const remoteId = db.addNode({
+      name: 'port-remote-evidence-gap',
+      type: 'remote',
+      api_url: 'http://127.0.0.1:29995',
+      api_token: 'tok',
+      compose_dir: '/app/compose',
+      is_default: false,
+    });
+
+    const { rows } = await aggregateGitOpsPortfolio(adminReq(localNodeId), {
+      fetchRows: async (nodeId: number) => nodeId === remoteId ? [{
+        stack_name: 'remote-gap',
+        stackResourcePresent: true,
+        gitopsRevision: { applicationId: 'app-evidence-gap', targetMode: 'direct' },
+      }] : null,
+    });
+
+    const row = rows.find(candidate => candidate.id === `${remoteId}:app-evidence-gap`);
+    expect(row).toBeDefined();
+    expect(row!.evidence).toEqual({ partial: true, unreachableNodes: [], unknown: true });
+    expect(row!.limitations).toContain('evidence_unavailable');
+  });
+
   it('keeps failures inside the merge cap, dropping settled rows first', async () => {
     const db = DatabaseService.getInstance();
     const localNodeId = db.getNodes()[0]!.id;
@@ -501,13 +538,16 @@ describe('aggregateGitOpsPortfolio', () => {
     const localNodeId = db.getNodes()[0]!.id;
     const remoteId = addRemoteNode('port-remote-new', 29996);
 
-    const newer = remoteProjection('app-remote-new', 'new-stack');
+    const newer = rawRemoteProjection('app-remote-new', 'new-stack');
     newer.targetMode = 'blueprint';
     newer.rolloutGenerationId = 'rg-1';
-    bindBlueprintAuthority(newer);
+    bindBlueprintAuthority(newer as LiveProjection);
     newer.facets.rollout = { status: 'exactly_converged_healthy', rolloutGenerationId: 'rg-1' };
     const target = targetProjection('reachable', 'rg-1');
+    // Two vocabularies this build has never heard of, on the same target: the
+    // runtime status and the connectivity grade.
     Object.assign(target.runtime, { status: 'brand_new_status' });
+    Object.assign(target, { connectivity: 'from_a_newer_node' });
     newer.targets = [target];
     const { rows } = await aggregateGitOpsPortfolio(adminReq(localNodeId), {
       fetchRows: async (nodeId: number) =>
@@ -516,6 +556,7 @@ describe('aggregateGitOpsPortfolio', () => {
     const row = rows.find(candidate => candidate.id === `${remoteId}:app-remote-new`);
     expect(row).toBeDefined();
     expect(row!.runtimeStatus).toBe('brand_new_status');
+    expect(row!.targets[0].evidence).toBe('unknown');
     expect(row!.evidence.unknown).toBe(true);
     expect(row!.posture).toBe('unknown');
   });
@@ -1005,10 +1046,14 @@ describe('aggregateGitOpsPortfolio', () => {
           : null,
       });
 
-      const row = rows.find(candidate => candidate.id === `${remoteId}:legacy:${stackName}`);
+      // The row names a real application, so it stays addressable under that
+      // name and says its evidence is unavailable. Relabelling it legacy would
+      // hide an application that exists from every surface that lists it.
+      const row = rows.find(candidate => candidate.id === `${remoteId}:app-${kind}`);
       expect(row).toBeDefined();
       expect(row!.posture).toBe('unknown');
       expect(row!.evidence).toEqual({ partial: true, unreachableNodes: [], unknown: true });
+      expect(row!.limitations).toContain('evidence_unavailable');
       expect(coverage.find(candidate => candidate.nodeId === remoteId)?.state).toBe('ok');
     },
   );
@@ -1566,6 +1611,41 @@ describe('aggregateGitOpsPortfolio', () => {
   });
 });
 
+describe('posture recognizes every runtime status it can be handed', () => {
+  // A status missing from the severity ladder does not fall back to anything
+  // sensible: it reads as unrecognized, and the whole row becomes `unknown`.
+  // That is how `repair_held` and `converged` would have reported a healthy
+  // application as unknown, so each is pinned here against a literal.
+
+  function rowWithRuntimeStatus(status: string): string {
+    const revision = remoteProjection(`app-runtime-${status}`, `stack-${status}`);
+    revision.facets.artifact = artifactFacet();
+    revision.targetMode = 'blueprint';
+    revision.rolloutGenerationId = 'rg-1';
+    bindBlueprintAuthority(revision);
+    revision.facets.rollout = { status: 'exactly_converged_healthy', rolloutGenerationId: 'rg-1' };
+    const target = targetProjection('reachable', 'rg-1');
+    target.stackName = revision.stackName;
+    Object.assign(target.runtime, { status });
+    revision.targets = [target];
+    return rowForProjection(revision, `evidence-${status}`).posture;
+  }
+
+  it('reads a settled target as converged rather than unknown', () => {
+    // This is the case that actually exercises the severity ladder: nothing
+    // earlier in postureOf claims it, so a status missing from the ladder
+    // reads as unrecognized and drops the row to `unknown`. The statuses the
+    // in-flight and attention checks claim first cannot test the ladder at all.
+    expect(rowWithRuntimeStatus('synced_and_healthy')).toBe('converged');
+  });
+
+  it('reads a held repair as attention rather than a settled row', () => {
+    // Its own attention reason decides this one, ahead of the ladder, so this
+    // asserts the operator-facing outcome rather than the ladder lookup.
+    expect(rowWithRuntimeStatus('repair_held')).toBe('attention');
+  });
+});
+
 describe('postureOf', () => {
   function baseFixture(overrides?: {
     source?: LiveFacets['source'];
@@ -1609,6 +1689,168 @@ describe('postureOf', () => {
     }
     return projection;
   }
+
+  /**
+   * A Blueprint application settled on one reachable target.
+   *
+   * The application facet and the target's artifact are the same object on
+   * purpose: a target reporting a different status than the application is
+   * exactly the disagreement this fixture must not be able to express.
+   */
+  function settledFixture(rollout: LiveFacets['rollout']): LiveProjection {
+    const exact = rollout.status === 'exactly_converged_healthy';
+    const projection = baseFixture({ rollout });
+    projection.targets = [targetProjection('reachable', 'rg-1', 1, 'p-web', exact ? 'exact' : 'qualified')];
+    projection.facets.artifact = projection.targets[0].artifact;
+    return projection;
+  }
+
+  /** The same settled target evidence, proven by a Direct application's own source facet. */
+  function directSettledFixture(artifactStatus: 'artifact_exact' | 'artifact_qualified'): LiveProjection {
+    const projection = baseFixture();
+    projection.targets = [targetProjection('reachable', null, 1, 'p-web', artifactStatus === 'artifact_exact' ? 'exact' : 'qualified')];
+    projection.facets.artifact = projection.targets[0].artifact;
+    return projection;
+  }
+
+  it('accepts an exact observation for a qualified artifact claim', () => {
+    const projection = settledFixture({ status: 'configuration_converged_artifact_qualified', rolloutGenerationId: 'rg-1' });
+    expect(projection.facets.artifact.status).toBe('artifact_qualified');
+    expect(projection.targets[0].observedArtifactIdentity.kind).toBe('qualified');
+    projection.targets[0].observedArtifactIdentity = {
+      kind: 'exact',
+      identity: 'sha256:abc',
+      observedAt: 1,
+    };
+    expect(postureOf(projection)).toBe('converged_qualified');
+  });
+
+  it('ignores retired targets when proving convergence', () => {
+    const projection = settledFixture({ status: 'exactly_converged_healthy', rolloutGenerationId: 'rg-1' });
+    projection.targets.push({ ...projection.targets[0], nodeId: 2, tombstoned: true });
+    expect(postureOf(projection)).toBe('converged');
+  });
+
+  it('allows a health-gate-disabled target to keep a stale healthy pointer', () => {
+    const projection = settledFixture({ status: 'exactly_converged_healthy', rolloutGenerationId: 'rg-1' });
+    projection.targets[0].health = { status: 'not_applicable' };
+    projection.targets[0].healthyGenerationId = 'gen-old';
+    expect(postureOf(projection)).toBe('converged');
+  });
+
+  it('never claims convergence from a blank rollout generation', () => {
+    const projection = settledFixture({ status: 'exactly_converged_healthy', rolloutGenerationId: 'rg-1' });
+    projection.rolloutGenerationId = '';
+    projection.facets.rollout = { status: 'exactly_converged_healthy', rolloutGenerationId: '' } as typeof projection.facets.rollout;
+    projection.targets[0].rolloutGenerationId = '';
+    expect(postureOf(projection)).toBe('unknown');
+  });
+
+  it('never claims convergence from an artifact status this build does not know', () => {
+    const projection = baseFixture({
+      artifact: { status: 'artifact_future_unknown' } as unknown as ArtifactFacet,
+    });
+    expect(postureOf(projection)).toBe('unknown');
+  });
+
+  it('never claims convergence from a known artifact status carrying an unknown qualification', () => {
+    const projection = settledFixture({ status: 'exactly_converged_healthy', rolloutGenerationId: 'rg-1' });
+    const artifact = projection.facets.artifact as unknown as Record<string, unknown>;
+    artifact.qualification = 'future_qualification';
+    expect(postureOf(projection)).toBe('unknown');
+  });
+
+  it.each([
+    ['the application expected artifact', (projection: LiveProjection) => {
+      const artifact = projection.facets.artifact as unknown as { expected: Record<string, unknown> | null };
+      artifact.expected = { artifactSetId: 'artifact-1', evidenceVersion: 1, qualification: 'future_qualification', identity: 'sha256:abc' };
+    }],
+    ['the target expected artifact', (projection: LiveProjection) => {
+      const artifact = projection.targets[0].artifact as unknown as { expected: Record<string, unknown> | null };
+      artifact.expected = { artifactSetId: 'artifact-1', evidenceVersion: 1, qualification: 'future_qualification', identity: 'sha256:abc' };
+    }],
+  ])('never claims convergence from a future qualification in %s', (_label, mutate) => {
+    const projection = settledFixture({ status: 'exactly_converged_healthy', rolloutGenerationId: 'rg-1' });
+    mutate(projection);
+    expect(postureOf(projection)).toBe('unknown');
+  });
+
+  it('claims a settled Direct application converged from its own target evidence', () => {
+    expect(postureOf(directSettledFixture('artifact_exact'))).toBe('converged');
+    expect(postureOf(directSettledFixture('artifact_qualified'))).toBe('converged_qualified');
+  });
+
+  it('never reads a Direct application with an unreachable target as converged', () => {
+    const projection = directSettledFixture('artifact_exact');
+    projection.targets[0].connectivity = 'unreachable';
+    expect(postureOf(projection)).not.toBe('converged');
+    expect(postureOf(projection)).not.toBe('converged_qualified');
+  });
+
+  it.each([
+    ['an unknown target artifact status', (projection: LiveProjection) => {
+      projection.targets[0].artifact = { status: 'artifact_future_verdict' } as unknown as ArtifactFacet;
+    }],
+    ['an unknown LKG status', (projection: LiveProjection) => {
+      projection.targets[0].lkg = { status: 'future_lkg' } as unknown as LiveProjection['targets'][number]['lkg'];
+    }],
+    ['an unknown last-known-good reason', (projection: LiveProjection) => {
+      Object.assign(projection.targets[0], {
+        lkg: { status: 'unavailable' },
+        lkgGenerationId: null,
+        lkgArtifactSetId: null,
+        lkgUnavailableAt: 1,
+        lkgUnavailableReason: 'future_reason',
+      });
+    }],
+    ['an unknown observed artifact kind', (projection: LiveProjection) => {
+      projection.targets[0].observedArtifactIdentity = { kind: 'future_kind', identity: 'sha256:abc', observedAt: 1 } as unknown as LiveProjection['targets'][number]['observedArtifactIdentity'];
+    }],
+    ['an unknown connectivity', (projection: LiveProjection) => {
+      projection.targets[0].connectivity = 'future' as 'reachable';
+    }],
+  ])('reports %s as unknown evidence rather than convergence', (_label, mutate) => {
+    const projection = directSettledFixture('artifact_exact');
+    mutate(projection);
+    expect(postureOf(projection)).toBe('unknown');
+  });
+
+  it('keeps a projection readable when a target carries an unfamiliar last-known-good reason', () => {
+    // A reason from a newer node is unfamiliar, not unusable. The row stays
+    // addressable and says its evidence is unknown; rejecting the projection
+    // would report the evidence as unavailable, which is a different and
+    // stronger claim than the evidence supports.
+    const projection = remoteProjection('app-future-lkg-reason', 'future-lkg-reason');
+    const target = remoteTarget(projection, 'reachable');
+    Object.assign(target, {
+      lkg: { status: 'unavailable' },
+      lkgGenerationId: null,
+      lkgArtifactSetId: null,
+      lkgUnavailableAt: 1,
+      lkgUnavailableReason: 'future_reason',
+    });
+    projection.targets = [target];
+
+    expect(isUsableRevision(projection)).toBe(true);
+    const row = rowForProjection(projection, 'future-lkg-reason');
+    expect(row.posture).toBe('unknown');
+    expect(row.evidence.unknown).toBe(true);
+    expect(row.limitations).not.toContain('evidence_unavailable');
+  });
+
+  it('rejects an empty last-known-good reason rather than reading it as one', () => {
+    const projection = remoteProjection('app-empty-lkg-reason', 'empty-lkg-reason');
+    const target = remoteTarget(projection, 'reachable');
+    Object.assign(target, {
+      lkg: { status: 'unavailable' },
+      lkgGenerationId: null,
+      lkgArtifactSetId: null,
+      lkgUnavailableAt: 1,
+      lkgUnavailableReason: '',
+    });
+    projection.targets = [target];
+    expect(isUsableRevision(projection)).toBe(false);
+  });
 
   it.each(['source', 'artifact', 'placement', 'rollout'] as const)(
     'does not accept a prototype key as a known %s status',

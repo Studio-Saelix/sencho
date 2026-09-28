@@ -478,6 +478,12 @@ export const RUNTIME_STATE: Record<GitOpsRuntimeStatus, GitOpsStateMeta> = {
     line: 'Sencho is correcting this node back to the intended state.',
     icon: RefreshCw,
   },
+  repair_held: {
+    label: 'repair held',
+    tone: 'warning',
+    line: 'Drift was found, but Sencho will not auto-fix this node: it has no restorable generation to restore, or the rollout that owned it has moved on.',
+    icon: ShieldAlert,
+  },
   health_checking: {
     label: 'health checking',
     tone: 'brand',
@@ -630,14 +636,21 @@ export const RUNTIME_STATE: Record<GitOpsRuntimeStatus, GitOpsStateMeta> = {
  * makes the miss a fact TypeScript produces, so the guard on it cannot be
  * mistaken for dead code and deleted.
  *
- * Same objects, no copy, no cast: a total record over string-literal keys is
- * assignable to a partial record over `string`.
+ * Each map loses its prototype, so an inherited key such as `toString` reads
+ * as a miss here rather than resolving to a function the caller would treat as
+ * metadata. The maps are module-local and read-only to every consumer, so
+ * mutating them once at construction is safe.
  */
-export const SOURCE_STATE_LOOKUP: Partial<Record<string, GitOpsStateMeta>> = SOURCE_STATE;
-export const ARTIFACT_STATE_LOOKUP: Partial<Record<string, GitOpsStateMeta>> = ARTIFACT_STATE;
-export const PLACEMENT_STATE_LOOKUP: Partial<Record<string, GitOpsStateMeta>> = PLACEMENT_STATE;
-export const ROLLOUT_STATE_LOOKUP: Partial<Record<string, GitOpsStateMeta>> = ROLLOUT_STATE;
-export const RUNTIME_STATE_LOOKUP: Partial<Record<string, GitOpsStateMeta>> = RUNTIME_STATE;
+function stateLookup<T extends Record<string, GitOpsStateMeta>>(states: T): Readonly<Partial<Record<string, GitOpsStateMeta>>> {
+  Object.setPrototypeOf(states, null);
+  return states;
+}
+
+export const SOURCE_STATE_LOOKUP = stateLookup(SOURCE_STATE);
+export const ARTIFACT_STATE_LOOKUP = stateLookup(ARTIFACT_STATE);
+export const PLACEMENT_STATE_LOOKUP = stateLookup(PLACEMENT_STATE);
+export const ROLLOUT_STATE_LOOKUP = stateLookup(ROLLOUT_STATE);
+export const RUNTIME_STATE_LOOKUP = stateLookup(RUNTIME_STATE);
 
 /** Card copy for a placement facet. Preflight blocked uses the redacted server reason as the line. */
 export function placementStateMeta(facet: PlacementFacet): GitOpsStateMeta | undefined {
@@ -769,7 +782,7 @@ export function liveCaveats(revision: GitOpsRevisionProjection): readonly GitOps
  * string because the classes arrive over the wire: a class this build does not
  * know is shown as itself rather than hidden.
  */
-const DRIFT_CLASS_LABELS: Record<string, string> = {
+const DRIFT_CLASS_LABELS: Readonly<Record<string, string>> = {
   source: 'source',
   managed_project: 'managed project',
   invocation: 'invocation',
@@ -780,7 +793,7 @@ const DRIFT_CLASS_LABELS: Record<string, string> = {
 };
 
 export function driftClassLabel(className: string): string {
-  return DRIFT_CLASS_LABELS[className] ?? className;
+  return Object.hasOwn(DRIFT_CLASS_LABELS, className) ? DRIFT_CLASS_LABELS[className] : className;
 }
 
 /**
@@ -892,8 +905,35 @@ export const HEALTH_STOP_REASON_STATE: Record<HealthStopReason, GitOpsStateMeta>
   },
 };
 
+/**
+ * The identity kinds this build has wording for.
+ *
+ * Typed as a total record rather than a set so the compiler rejects it the
+ * moment a kind is added to the union and forgotten here.
+ */
+const IDENTITY_REF_KINDS: Readonly<Record<GitOpsIdentityRef['kind'], true>> = {
+  none: true,
+  unknown: true,
+  commit: true,
+  generation: true,
+  artifact_set: true,
+  runtime_artifact: true,
+  intent: true,
+  rollout_candidate: true,
+  rollout_generation: true,
+  invocation: true,
+  health_run: true,
+};
+
 /** One short line naming what an identity reference points at, for a drift comparison row. */
 export function identityRefLabel(ref: GitOpsIdentityRef): string {
+  // `GitOpsIdentityRef` is a closed union, so the switch below is exhaustive by
+  // type. The value still crossed a network boundary and was accepted on its
+  // structure alone, so widen the kind once and name an unfamiliar one rather
+  // than rendering nothing. `Object.hasOwn` so an inherited key is not a known
+  // kind.
+  const kind: string = ref.kind;
+  if (!Object.hasOwn(IDENTITY_REF_KINDS, kind)) return `unknown (${kind})`;
   switch (ref.kind) {
     case 'none':
       return 'none';

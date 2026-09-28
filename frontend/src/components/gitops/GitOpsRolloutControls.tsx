@@ -24,7 +24,10 @@ import GitOpsPolicyControl from '@/components/gitops/GitOpsPolicyControl';
 import type { PermissionAction } from '@/context/AuthContext';
 import {
   HEALTH_ROLLOUT_POLICIES,
+  type GitOpsPlacementStatus,
   type GitOpsRevisionProjection,
+  type GitOpsRolloutStatus,
+  type GitOpsRuntimeStatus,
   type GitOpsTargetProjection,
   type HealthRolloutPolicy,
 } from '@/types/gitops';
@@ -56,14 +59,14 @@ interface GitOpsRolloutControlsProps {
 
 type PendingAction = 'pause' | 'resume' | 'health_policy';
 
-const PAUSABLE_ROLLOUT_STATES = new Set([
+const PAUSABLE_ROLLOUT_STATES: ReadonlySet<GitOpsRolloutStatus> = new Set([
   'rollout_queued',
   'canary_in_progress',
   'batch_in_progress',
   'partially_rolled_out',
 ]);
 
-const SUPERSEDABLE_ROLLOUT_STATES = new Set([
+const SUPERSEDABLE_ROLLOUT_STATES: ReadonlySet<GitOpsRolloutStatus> = new Set([
   'rollout_queued',
   'canary_in_progress',
   'batch_in_progress',
@@ -71,8 +74,37 @@ const SUPERSEDABLE_ROLLOUT_STATES = new Set([
   'rollout_paused',
 ]);
 
+const REPLANNABLE_PLACEMENT_STATES: ReadonlySet<GitOpsPlacementStatus> = new Set([
+  'source_acceptance_pending',
+  'unknown',
+  'placement_review_pending',
+  'stateful_confirmation_required',
+  'rollout_authorization_pending',
+  'rollout_authorization_stale',
+  'preflight_blocked',
+  'blueprint_bound',
+]);
+
+const ROLLBACKABLE_ROLLOUT_STATES: ReadonlySet<GitOpsRolloutStatus> = new Set([
+  'rollout_not_executable',
+  'rollout_queued',
+  'canary_in_progress',
+  'batch_in_progress',
+  'rollout_paused',
+  'partially_rolled_out',
+  'fully_deployed_health_pending',
+  'configuration_converged_artifact_qualified',
+  'exactly_converged_healthy',
+  'target_stale',
+  'target_unreachable',
+  'rollback_partial_failed',
+  'recovery_required',
+  'completion_unknown',
+  'rollout_superseded',
+]);
+
 /** Runtime states that read as a failed target rather than a result. */
-const FAILED_RUNTIME_STATES = new Set([
+const FAILED_RUNTIME_STATES: ReadonlySet<GitOpsRuntimeStatus> = new Set([
   'recovery_failed',
   'recovery_required',
   'failed_previous_workload_intact',
@@ -130,7 +162,7 @@ export default function GitOpsRolloutControls({
     && allowed('stack:deploy');
   const canReplan = !!live
     && placement !== null
-    && placement.status !== 'unbound_direct'
+    && REPLANNABLE_PLACEMENT_STATES.has(placement.status)
     && allowed('stack:create');
   const canSupersede = !!live
     && blueprintEnabled
@@ -143,6 +175,8 @@ export default function GitOpsRolloutControls({
   );
   const canRollback = !!live
     && blueprintEnabled
+    && rollout !== null
+    && ROLLBACKABLE_ROLLOUT_STATES.has(rollout.status)
     && generations.length > 0
     && allowed('stack:deploy');
 

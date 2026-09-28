@@ -33,6 +33,16 @@ vi.mock('../portfolio/useWorkplaceCapabilities', () => ({
   useWorkplaceCapabilities: () => ({ canConnectStack: false, canCreateBlueprint: false, canOpenFleet: fleet.reachable }),
 }));
 
+// The authority boundary is what these suites check, so the two action
+// components stand in as markers: whether they are mounted is the question,
+// never what they render.
+vi.mock('@/components/gitops/GitOpsAuthorityActions', () => ({
+  default: () => <div data-testid="authority-actions" />,
+}));
+vi.mock('@/components/gitops/GitOpsRolloutControls', () => ({
+  default: () => <div data-testid="rollout-controls" />,
+}));
+
 const mockFetch = vi.mocked(apiFetch);
 
 afterEach(() => {
@@ -173,6 +183,32 @@ function ok(body: unknown): Response {
 }
 
 describe('GitOpsApplicationView', () => {
+  it.each([
+    ['a Direct application', '1:app-1', () => detailResponse()],
+    ['a Blueprint application with no local Blueprint authority', 'bp:3', () => ({
+      ...detailResponse(blueprintRow, blueprintProjection),
+      blueprintEnabled: null,
+    })],
+    ['an inline Blueprint application', 'bp:3', () => ({
+      ...detailResponse({ ...blueprintRow, targetMode: 'inline_blueprint' as const }, { ...blueprintProjection, targetMode: 'inline_blueprint' as const }),
+      blueprintEnabled: true,
+    })],
+  ])('offers no authority actions for %s', async (_label, id, build) => {
+    mockFetch.mockResolvedValueOnce(ok(build()));
+    render(<GitOpsApplicationView id={id} />);
+    await screen.findByTestId('gitops-application-posture');
+    expect(screen.queryByTestId('authority-actions')).toBeNull();
+    expect(screen.queryByTestId('rollout-controls')).toBeNull();
+  });
+
+  it('offers authority actions for a local Git-managed Blueprint', async () => {
+    mockFetch.mockResolvedValueOnce(ok({ ...detailResponse(blueprintRow, blueprintProjection), blueprintEnabled: true }));
+    render(<GitOpsApplicationView id="bp:3" />);
+    await screen.findByTestId('gitops-application-posture');
+    expect(screen.getByTestId('authority-actions')).toBeInTheDocument();
+    expect(screen.getByTestId('rollout-controls')).toBeInTheDocument();
+  });
+
   it('hands a Direct application off to its stack Git panel', async () => {
     mockFetch.mockResolvedValueOnce(ok(detailResponse()));
     const listener = vi.fn();
@@ -188,7 +224,7 @@ describe('GitOpsApplicationView', () => {
   });
 
   it('hands a Blueprint application off to its own Blueprint on the Fleet deployments tab', async () => {
-    mockFetch.mockResolvedValueOnce(ok(detailResponse(blueprintRow, blueprintProjection)));
+    mockFetch.mockResolvedValueOnce(ok({ ...detailResponse(blueprintRow, blueprintProjection), blueprintEnabled: true }));
     const navigate = vi.fn();
     const intent = vi.fn();
     window.addEventListener(SENCHO_NAVIGATE_EVENT, navigate);
@@ -206,7 +242,7 @@ describe('GitOpsApplicationView', () => {
   it('offers no Blueprint hand-off to a role that cannot open Fleet', async () => {
     fleet.reachable = false;
     try {
-      mockFetch.mockResolvedValueOnce(ok(detailResponse(blueprintRow, blueprintProjection)));
+      mockFetch.mockResolvedValueOnce(ok({ ...detailResponse(blueprintRow, blueprintProjection), blueprintEnabled: true }));
       render(<GitOpsApplicationView id="bp:3" />);
       await screen.findByTestId('gitops-application-posture');
       expect(screen.queryByRole('button', { name: /open blueprint/i })).toBeNull();
@@ -236,7 +272,20 @@ describe('GitOpsApplicationView', () => {
     mockFetch.mockResolvedValueOnce({ ok: false, status: 503, json: async () => ({ error: 'Owning node is unreachable' }) } as unknown as Response);
     render(<GitOpsApplicationView id="2:a" />);
     await waitFor(() => expect(screen.getByTestId('gitops-application-error')).toHaveAttribute('data-error', 'unreachable'));
-    mockFetch.mockResolvedValueOnce(ok(detailResponse()));
+    mockFetch.mockResolvedValueOnce(ok(detailResponse({ id: '2:a', nodeId: 2 }, liveRevision({ applicationId: 'a' }))));
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+    expect(await screen.findByRole('heading', { name: 'bookstack' })).toBeInTheDocument();
+  });
+
+  it('says evidence is unavailable, not that the application is missing, and retries', async () => {
+    mockFetch.mockResolvedValueOnce({
+      ok: false, status: 503, json: async () => ({ error: 'no usable evidence', code: 'evidence_unavailable' }),
+    } as unknown as Response);
+    render(<GitOpsApplicationView id="2:a" />);
+    await waitFor(() => expect(screen.getByTestId('gitops-application-error')).toHaveAttribute('data-error', 'evidence_unavailable'));
+    expect(screen.getByText('Evidence for this application is unavailable')).toBeInTheDocument();
+    expect(screen.queryByText('This application is not available')).toBeNull();
+    mockFetch.mockResolvedValueOnce(ok(detailResponse({ id: '2:a', nodeId: 2 }, liveRevision({ applicationId: 'a' }))));
     fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
     expect(await screen.findByRole('heading', { name: 'bookstack' })).toBeInTheDocument();
   });
@@ -276,10 +325,19 @@ describe('GitOpsApplicationView', () => {
     expect(screen.getByRole('button', { name: 'Retry' })).toBeInTheDocument();
   });
 
-  it('offers no hand-off when the row names no surface that could open it', async () => {
-    mockFetch.mockResolvedValueOnce(ok(detailResponse({ nodeId: null })));
-    render(<GitOpsApplicationView id="1:app-1" />);
+  it('hands a Blueprint row to its Blueprint, never to a stack', async () => {
+    mockFetch.mockResolvedValueOnce(ok({
+      ...detailResponse(
+        { id: 'bp:3', targetMode: 'blueprint', blueprintId: 3, nodeId: null, stackName: null },
+        liveRevision({ targetMode: 'blueprint', applicationId: 'app-bp', blueprintId: 3 }),
+      ),
+      blueprintEnabled: true,
+    }));
+    render(<GitOpsApplicationView id="bp:3" />);
     await screen.findByRole('heading', { name: 'bookstack' });
+    expect(screen.getByRole('button', { name: /open blueprint/i })).toBeInTheDocument();
+    // A Blueprint application spans several nodes and owns no single stack, so
+    // a stack hand-off would name a target the row never claimed.
     expect(screen.queryByRole('button', { name: /open stack/i })).toBeNull();
   });
 });

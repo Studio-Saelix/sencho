@@ -63,6 +63,10 @@ const RUNTIME_SEVERITY: readonly string[] = [
   'recovery_failed',
   'recovery_required',
   'drifted',
+  // A hold is drift Sencho declined to fix, so it ranks with drift. Its own
+  // attention reason is what usually surfaces it; ranking it here keeps the
+  // posture from reading as better than the target actually is.
+  'repair_held',
   'health_drift',
   'runtime_artifact_drift',
   'rollout_artifact_drift',
@@ -87,10 +91,39 @@ const RUNTIME_SEVERITY: readonly string[] = [
   'tombstoned',
 ];
 
-const RUNTIME_RANK = new Map(RUNTIME_SEVERITY.map((status, index) => [status, index]));
+const RUNTIME_RANK: ReadonlyMap<string, number> = new Map(RUNTIME_SEVERITY.map((status, index) => [status, index]));
 
 const HEALTH_SEVERITY: readonly string[] = ['failed', 'unknown', 'pending', 'checking', 'passed', 'unbound', 'not_applicable'];
-const HEALTH_RANK = new Map(HEALTH_SEVERITY.map((status, index) => [status, index]));
+const HEALTH_RANK: ReadonlyMap<string, number> = new Map(HEALTH_SEVERITY.map((status, index) => [status, index]));
+
+/**
+ * Every `observedArtifactIdentity.kind` this build has vocabulary for.
+ *
+ * `unknown`, `missing`, and `unavailable` are the three "no artifact was
+ * observed" kinds: they are recognized vocabulary, so they do not make a
+ * projection's evidence unknown, and a target carrying one simply cannot prove
+ * a convergence claim. A kind outside this set came from a newer node.
+ */
+const OBSERVED_ARTIFACT_KINDS: ReadonlySet<string> = new Set([
+  'unknown',
+  'missing',
+  'unavailable',
+  'exact',
+  'qualified',
+  'stale',
+  'local_build_unverified',
+]);
+
+const GENERATION_BOUND_ROLLOUT_STATES: ReadonlySet<string> = new Set([
+  'rollout_queued',
+  'canary_in_progress',
+  'batch_in_progress',
+  'fully_deployed_health_pending',
+  'configuration_converged_artifact_qualified',
+  'exactly_converged_healthy',
+  'rollout_superseded',
+]);
+
 const ARTIFACT_QUALIFICATIONS: ReadonlySet<string> = new Set([
   'unresolved',
   'exact',
@@ -99,6 +132,21 @@ const ARTIFACT_QUALIFICATIONS: ReadonlySet<string> = new Set([
   'unavailable',
   'local_build_unverified',
 ]);
+
+/**
+ * The one qualification each artifact status may carry, keyed by that status.
+ * Its value domain is exactly `ARTIFACT_QUALIFICATIONS`, so the vocabulary is
+ * written once: a status missing here carries no pairing requirement.
+ */
+const ARTIFACT_STATUS_QUALIFICATION: Readonly<Record<string, string>> = {
+  artifact_exact: 'exact',
+  artifact_qualified: 'qualified',
+  artifact_stale: 'stale',
+  artifact_unavailable: 'unavailable',
+  artifact_local_build_unverified: 'local_build_unverified',
+  artifact_resolution_pending: 'unresolved',
+};
+
 const ARTIFACT_SERVICE_SOURCES: ReadonlySet<string> = new Set(['registry', 'build', 'unsupported']);
 const ARTIFACT_SERVICE_FAILURE_CLASSES: ReadonlySet<string> = new Set([
   'unresolved',
@@ -124,7 +172,6 @@ const SETTLED_ROLLOUT_ARTIFACT: ReadonlyMap<string, 'artifact_exact' | 'artifact
   ['exactly_converged_healthy', 'artifact_exact'],
   ['configuration_converged_artifact_qualified', 'artifact_qualified'],
 ]);
-const OBSERVED_ARTIFACT_KINDS: ReadonlySet<string> = new Set(['exact', 'qualified', 'stale', 'local_build_unverified']);
 const AVAILABLE_ACTIONS: ReadonlySet<string> = new Set([
   'fetch',
   'apply',
@@ -197,13 +244,28 @@ function worstTargetStatus(
 }
 
 /**
+ * Whether every artifact qualification this facet carries is vocabulary this
+ * build knows. A newer node's qualification is accepted structurally, but it
+ * is reported as unknown evidence rather than read as a convergence claim.
+ */
+function hasKnownArtifactVocabulary(artifact: { status: string } & Record<string, unknown>): boolean {
+  if ('qualification' in artifact && !ARTIFACT_QUALIFICATIONS.has(String(artifact.qualification))) return false;
+  const expected = artifact.expected;
+  if (isRecord(expected) && !ARTIFACT_QUALIFICATIONS.has(String(expected.qualification))) return false;
+  const latest = artifact.latestEvidence;
+  if (isRecord(latest) && !ARTIFACT_QUALIFICATIONS.has(String(latest.qualification))) return false;
+  return true;
+}
+
+/**
  * Whether the projection carries any status this build has never heard of.
  *
  * Checks the four top-level facets against the canonical status registry
- * (`FACET_EVIDENCE_SOURCE`, which is total over the closed unions) plus the
- * per-target runtime/health/connectivity statuses, so a newer node answering
- * an older hub is reported as unknown evidence rather than silently
- * reinterpreted (or, worse, read as a convergence claim).
+ * (`FACET_EVIDENCE_SOURCE`, which is total over the closed unions), the
+ * per-target runtime/health/connectivity statuses, and the per-target
+ * last-known-good status, last-known-good reason and observed artifact kind, so
+ * a newer node answering an older hub is reported as unknown evidence rather
+ * than silently reinterpreted (or, worse, read as a convergence claim).
  */
 function hasUnrecognizedStatus(
   projection: GitOpsRevisionProjection,
@@ -214,11 +276,17 @@ function hasUnrecognizedStatus(
   const { source, artifact, placement, rollout } = projection.facets;
   if (!hasFacetStatus(FACET_EVIDENCE_SOURCE.source, source.status)) return true;
   if (!hasFacetStatus(FACET_EVIDENCE_SOURCE.artifact, artifact.status)) return true;
+  if (!hasKnownArtifactVocabulary(artifact)) return true;
   if (!hasFacetStatus(FACET_EVIDENCE_SOURCE.placement, placement.status)) return true;
   if (!hasFacetStatus(FACET_EVIDENCE_SOURCE.rollout, rollout.status)) return true;
   for (const target of targets) {
     if (!RUNTIME_RANK.has(target.runtime.status)) return true;
     if (!HEALTH_RANK.has(target.health.status)) return true;
+    if (!Object.hasOwn(FACET_EVIDENCE_SOURCE.artifact, target.artifact.status)) return true;
+    if (!hasKnownArtifactVocabulary(target.artifact)) return true;
+    if (!Object.hasOwn(FACET_EVIDENCE_SOURCE.lkg, target.lkg.status)) return true;
+    if (target.lkgUnavailableReason !== null && !LKG_UNAVAILABLE_REASONS.has(target.lkgUnavailableReason)) return true;
+    if (!OBSERVED_ARTIFACT_KINDS.has(target.observedArtifactIdentity.kind)) return true;
     if (target.connectivity !== 'reachable' && target.connectivity !== 'unreachable' && target.connectivity !== 'stale' && target.connectivity !== 'unknown') return true;
   }
   return false;
@@ -483,7 +551,7 @@ export function postureOf(projection: GitOpsRevisionProjection): GitOpsPortfolio
     && currentDrift(projection).length === 0
   ) {
     if (artifact.status === 'artifact_exact') return 'converged';
-    return 'converged_qualified';
+    if (artifact.status === 'artifact_qualified') return 'converged_qualified';
   }
 
   return 'unknown';
@@ -504,6 +572,9 @@ function repositoryOf(projection: GitOpsRevisionProjection): GitOpsPortfolioRepo
 
 function targetSummaries(projection: GitOpsRevisionProjection, nodeNames: Map<number, string | null>): GitOpsPortfolioTargetSummary[] {
   if (projection.targetMode === 'not_applicable') return [];
+  // Tombstoned targets stay in the summary, flagged: the audit trail needs
+  // them. They are excluded where a *current* answer is read, which is what
+  // `currentTargets` is for.
   return projection.targets.map(target => ({
     nodeId: target.nodeId,
     nodeName: nodeNames.get(target.nodeId) ?? null,
@@ -771,7 +842,7 @@ export async function aggregateGitOpsPortfolio(req: Request, options: AggregateO
       const filtered = filterRemoteIdentityPayload(
         '/git-sources',
         remoteRows,
-        (requirement) => satisfiesGitOpsRead(req, requirement),
+        (requirement, nodeId) => satisfiesGitOpsRead(req, requirement, nodeId),
         node.id,
       );
       if (!Array.isArray(filtered)) {
@@ -953,11 +1024,55 @@ function isSourceFacetRecord(source: Record<string, unknown>): boolean {
   if (source.status === 'source_poll_scheduled') {
     return typeof source.nextPollAt === 'number' && Number.isFinite(source.nextPollAt);
   }
-  return source.status !== 'application_generation_accepted' || typeof source.acceptedGenerationId === 'string';
+  if (source.status === 'application_generation_accepted') return typeof source.acceptedGenerationId === 'string';
+  // Every other source status names the evidence that produced it. A status
+  // without that evidence is a claim nobody can check, so it is rejected here
+  // rather than read as a settled state.
+  switch (source.status) {
+    case 'source_review_pending':
+      return source.reviewBlockReason === null || source.reviewBlockReason === 'stateful_withdrawal';
+    case 'source_superseded':
+      return typeof source.supersededGenerationId === 'string';
+    case 'applying':
+      return typeof source.activeOperationId === 'string' && typeof source.activeGenerationId === 'string';
+    case 'source_retry_scheduled':
+      return isFiniteNumber(source.retryAt) && isFiniteNumber(source.retryCount);
+    case 'source_suspended':
+      return isFiniteNumber(source.suspendedAt) && isNullableString(source.suspendedReason);
+    case 'source_failed':
+      return typeof source.failureStage === 'string'
+        && ['fetch', 'validation', 'apply', 'create'].includes(source.failureStage)
+        && typeof source.failureClass === 'string'
+        && isFiniteNumber(source.failureAt)
+        && isFiniteNumberOrNull(source.retryAt)
+        && isFiniteNumber(source.retryCount);
+    case 'source_unknown':
+      return typeof source.interruptedStage === 'string'
+        && ['fetch_started', 'apply_started'].includes(source.interruptedStage)
+        && isFiniteNumber(source.interruptedAt)
+        && isNullableString(source.interruptedOperationId)
+        && isNullableString(source.interruptedGenerationId);
+    case 'recovery_required':
+      return isNullableString(source.recoveryRef) && isNullableString(source.recoveryGenerationId);
+    case 'recovery_failed':
+      return isNullableString(source.recoveryRef)
+        && isNullableString(source.recoveryGenerationId)
+        && typeof source.failureClass === 'string'
+        && isFiniteNumber(source.failureAt);
+    case 'not_live':
+      return source.lifecycleStatus === 'detached' || source.lifecycleStatus === 'deleted';
+    default:
+      return true;
+  }
 }
 
 function isNonEmptyString(value: unknown): value is string {
   return typeof value === 'string' && value.length > 0;
+}
+
+/** A database identity: a positive integer, not merely a finite number. */
+function isPositiveInteger(value: unknown): value is number {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value > 0;
 }
 
 function isNullableString(value: unknown): boolean {
@@ -966,6 +1081,10 @@ function isNullableString(value: unknown): boolean {
 
 function isFiniteNumberOrNull(value: unknown): boolean {
   return typeof value === 'number' && Number.isFinite(value) || value === null;
+}
+
+function isFiniteNumber(value: unknown): value is number {
+  return typeof value === 'number' && Number.isFinite(value);
 }
 
 function isApprovalRecord(value: unknown): value is Record<string, unknown> {
@@ -1143,19 +1262,21 @@ function isTargetRecord(value: unknown): value is Record<string, unknown> {
     && isObservedArtifactIdentityRecord(value.observedArtifactIdentity)
     && isLkgRecord(value.lkg)
     && isApprovalRecord(value.approvals)
-    && typeof value.nodeId === 'number'
-    && Number.isFinite(value.nodeId)
+    && isPositiveInteger(value.nodeId)
     && (typeof value.stackName === 'string' || value.stackName === null)
     && typeof value.tombstoned === 'boolean'
     && typeof value.connectivity === 'string'
-    && TARGET_GENERATION_FIELDS.every(field => typeof value[field] === 'string' || value[field] === null)
+    // A generation or artifact-set pointer is an identity, not a label: a blank
+    // string must not satisfy the equality checks that prove convergence.
+    && TARGET_GENERATION_FIELDS.every(field => value[field] === null || isNonEmptyString(value[field]))
     && (typeof value.legacyAppliedRevision === 'number' && Number.isFinite(value.legacyAppliedRevision)
       || value.legacyAppliedRevision === null)
     && isFiniteNumberOrNull(value.lkgUnavailableAt)
-    && (value.lkgUnavailableReason === null || (
-      typeof value.lkgUnavailableReason === 'string'
-      && LKG_UNAVAILABLE_REASONS.has(value.lkgUnavailableReason)
-    ))
+    // A reason this build has not heard of is accepted on its structure, like
+    // every other unknown vocabulary, and reported as unknown evidence by
+    // `hasUnrecognizedStatus`. Rejecting the projection here instead would tell
+    // the operator the evidence is unavailable when it is merely unfamiliar.
+    && (value.lkgUnavailableReason === null || isNonEmptyString(value.lkgUnavailableReason))
     && lkgMirrorsAreConsistent(value.lkg, value)
     && typeof value.runtime.status === 'string';
 }
@@ -1233,34 +1354,62 @@ function isDriftItemRecord(value: unknown): value is Record<string, unknown> {
 }
 
 function isArtifactFacetRecord(artifact: Record<string, unknown>): boolean {
-  if (artifact.status !== 'artifact_exact' && artifact.status !== 'artifact_qualified') return true;
-  const qualification = artifact.status === 'artifact_exact' ? 'exact' : 'qualified';
-  if (
-    !isNonEmptyString(artifact.artifactSetId)
-    || !isNonEmptyString(artifact.generationId)
-    || typeof artifact.evidenceVersion !== 'number'
-    || !Number.isFinite(artifact.evidenceVersion)
-    || artifact.qualification !== qualification
-    || typeof artifact.freshnessAt !== 'number'
-    || !Number.isFinite(artifact.freshnessAt)
-    || artifact.expected !== null && !isArtifactExpectedRecord(artifact.expected)
-    || !isRecord(artifact.latestEvidence)
-    || !isNonEmptyString(artifact.latestEvidence.artifactSetId)
-    || artifact.latestEvidence.artifactSetId !== artifact.artifactSetId
-    || typeof artifact.latestEvidence.evidenceVersion !== 'number'
-    || !Number.isFinite(artifact.latestEvidence.evidenceVersion)
-    || artifact.latestEvidence.evidenceVersion !== artifact.evidenceVersion
-    || artifact.latestEvidence.qualification !== qualification
-    || typeof artifact.latestEvidence.identity !== 'string'
-    || artifact.latestEvidence.identity.length === 0
-  ) return false;
-  if (artifact.expected === null) return true;
-  return !(
-    (artifact.expected.qualification === 'exact' || artifact.expected.qualification === 'qualified')
-    && typeof artifact.expected.identity === 'string'
-    && typeof artifact.latestEvidence.identity === 'string'
-    && artifact.expected.identity !== artifact.latestEvidence.identity
-  );
+  const status = artifact.status;
+  if (typeof status !== 'string') return false;
+  if (status === 'not_applicable') return true;
+  if (!isNonEmptyString(artifact.generationId)) return false;
+  const expected = artifact.expected;
+  const expectedIsValid = expected === null || expected === undefined || isArtifactExpectedRecord(expected);
+  if (artifact.latestEvidence === null) {
+    return status === 'artifact_unresolved'
+      && artifact.limitation === 'artifact_pointer_missing'
+      && expectedIsValid;
+  }
+  if (!isLatestEvidenceRecord(artifact.latestEvidence)) return false;
+  if (!expectedIsValid) return false;
+  const latest = artifact.latestEvidence;
+  if (artifact.artifactSetId !== latest.artifactSetId || artifact.evidenceVersion !== latest.evidenceVersion) return false;
+  const expectedRecord = expected === null || expected === undefined ? null : expected;
+  // An exact or qualified verdict claims the observed artifact is the expected
+  // one, so it cannot be made while the observed identity is unknown. A null
+  // *expected* identity is not a disagreement: it means there is no expected
+  // identity to disagree with, which the next clause leaves alone.
+  const claimsAgreement = status === 'artifact_exact' || status === 'artifact_qualified' || status === 'artifact_identity_changed';
+  if (claimsAgreement && latest.identity === null) return false;
+  if ((status === 'artifact_exact' || status === 'artifact_qualified')
+    && expectedRecord !== null
+    && expectedRecord.identity !== null
+    && expectedRecord.identity !== latest.identity) return false;
+  // The claim is that the observed identity changed. With no expected identity,
+  // or with one that matches, the status and the evidence contradict each other.
+  if (status === 'artifact_identity_changed' && (
+    expectedRecord === null
+    || (expectedRecord.qualification !== 'exact' && expectedRecord.qualification !== 'qualified')
+    || latest.identity === null
+    || expectedRecord.identity === null
+    || latest.identity === expectedRecord.identity
+  )) return false;
+  // Every status except `artifact_identity_changed` names the one qualification
+  // it may carry, on the facet and on the latest evidence alike.
+  const pairedQualification = ARTIFACT_STATUS_QUALIFICATION[status];
+  if (pairedQualification !== undefined
+    && (artifact.qualification !== pairedQualification || latest.qualification !== pairedQualification)) return false;
+  if (status === 'artifact_identity_changed'
+    && (artifact.qualification !== latest.qualification
+      || (artifact.qualification !== 'exact' && artifact.qualification !== 'qualified'))) return false;
+  return isNonEmptyString(artifact.artifactSetId)
+    && isFiniteNumber(artifact.evidenceVersion)
+    && isNonEmptyString(artifact.qualification)
+    && isFiniteNumber(artifact.freshnessAt);
+}
+
+/** The latest-evidence half of an artifact claim: an identity, or an honest null. */
+function isLatestEvidenceRecord(value: unknown): value is Record<string, unknown> {
+  return isRecord(value)
+    && isNonEmptyString(value.artifactSetId)
+    && isFiniteNumber(value.evidenceVersion)
+    && isNonEmptyString(value.qualification)
+    && (value.identity === null || isNonEmptyString(value.identity));
 }
 
 function isSettledRolloutRecord(rollout: Record<string, unknown>, generationId: unknown): boolean {
@@ -1269,17 +1418,23 @@ function isSettledRolloutRecord(rollout: Record<string, unknown>, generationId: 
 }
 
 /**
- * Whether a value looks like a walkable live projection.
+ * Whether a value is a walkable live projection.
  *
  * Narrows to the live arm of the union: the sentinel variant carries no facets
- * and must take the unknown-evidence path instead, so a caller can read
- * `facets`/`targets` after this guard without another discriminant check.
+ * and is rejected here, so the caller takes the unknown-evidence path instead
+ * and can read `facets`/`targets` after this guard without another
+ * discriminant check.
  */
 export function isUsableRevision(value: unknown): value is Extract<GitOpsRevisionProjection, { applicationId: string }> {
   if (!isRecord(value)) return false;
   const mode = value.targetMode;
   if (mode !== 'direct' && mode !== 'blueprint' && mode !== 'inline_blueprint') return false;
   if (value.schemaVersion !== 1 || !isNonEmptyString(value.applicationId)) return false;
+  // A `legacy:` or `bp:` id is a routing artifact, not a live application's own
+  // identity: `legacyPortfolioRow` synthesizes the first and the portfolio uses
+  // the second for hub-owned Blueprints. Accepting either here would let a
+  // synthesized row be read back as proof.
+  if (value.applicationId.startsWith('legacy:') || value.applicationId.startsWith('bp:')) return false;
   if (
     !isNonEmptyString(value.lifecycleStatus)
     || !isApprovalRecord(value.approvals)
@@ -1301,7 +1456,9 @@ export function isUsableRevision(value: unknown): value is Extract<GitOpsRevisio
     || !isRecord(facets.placement)
     || !isRecord(facets.rollout)
   ) return false;
-  if (![facets.source, facets.artifact, facets.placement, facets.rollout].every(facet => typeof facet.status === 'string')) return false;
+  if (![facets.source, facets.artifact, facets.placement].every(facet => typeof facet.status === 'string')) return false;
+  const rolloutStatus = facets.rollout.status;
+  if (typeof rolloutStatus !== 'string') return false;
   return isSourceFacetRecord(facets.source)
     && value.targets.every(isTargetRecord)
     && isPlacementFacetRecord(facets.placement)
@@ -1314,7 +1471,13 @@ export function isUsableRevision(value: unknown): value is Extract<GitOpsRevisio
     ))
     && value.availableActions.every(item => typeof item === 'string' && AVAILABLE_ACTIONS.has(item))
     && isArtifactFacetRecord(facets.artifact)
-    && isSettledRolloutRecord(facets.rollout, value.rolloutGenerationId);
+    && isSettledRolloutRecord(facets.rollout, value.rolloutGenerationId)
+    // Any rollout state that names a generation must name the same one the
+    // application does, not only the two settled states above: a queued or
+    // in-flight rollout pointing at a different generation is a projection
+    // nobody can reason about.
+    && !(GENERATION_BOUND_ROLLOUT_STATES.has(rolloutStatus)
+      && facets.rollout.rolloutGenerationId !== value.rolloutGenerationId);
 }
 
 /**
@@ -1458,6 +1621,46 @@ export function withSilentNodes(
  * that is present but not walkable degrades to the same unknown row instead of
  * throwing into the node leg.
  */
+function unavailablePortfolioRow(
+  nodeId: number,
+  nodeName: string | null,
+  applicationId: string,
+  stackName: string | null,
+  updatedAt: number | null,
+  targetMode: 'direct' | 'blueprint' | 'inline_blueprint',
+  blueprintId: number | null,
+): GitOpsPortfolioRow {
+  return {
+    id: `${nodeId}:${applicationId}`,
+    targetMode,
+    name: stackName ?? applicationId,
+    stackName,
+    blueprintId,
+    nodeId,
+    nodeName,
+    repository: null,
+    desiredCommitSha: null,
+    fetchedCommitSha: null,
+    candidateGenerationId: null,
+    acceptedGenerationId: null,
+    sourceStatus: 'unknown',
+    artifactStatus: 'unknown',
+    artifactQualification: null,
+    placementStatus: 'unknown',
+    rolloutStatus: 'unknown',
+    runtimeStatus: 'unknown',
+    healthStatus: 'unknown',
+    targets: [],
+    drift: { count: 0, classes: [] },
+    attention: [],
+    posture: 'unknown',
+    availableActions: [],
+    limitations: ['evidence_unavailable'],
+    lastActivityAt: finiteTimestamp(updatedAt),
+    evidence: { partial: true, unreachableNodes: [], unknown: true },
+  };
+}
+
 function remotePortfolioRow(
   row: unknown,
   nodeId: number,
@@ -1465,9 +1668,34 @@ function remotePortfolioRow(
   nodeNames: Map<number, string | null>,
 ): GitOpsPortfolioRow | null {
   if (!isRecord(row)) return null;
-  const revision = isUsableRevision(row.gitopsRevision) ? row.gitopsRevision : null;
+  const rawRevision = row.gitopsRevision;
+  const revision = isUsableRevision(rawRevision) ? rawRevision : null;
   const stackName = typeof row.stack_name === 'string' ? row.stack_name : null;
+  const rawTargetMode = isRecord(rawRevision)
+    && (rawRevision.targetMode === 'blueprint' || rawRevision.targetMode === 'inline_blueprint')
+    ? rawRevision.targetMode
+    : 'direct';
+  const rawBlueprintId = isRecord(rawRevision) && isPositiveInteger(rawRevision.blueprintId)
+    ? rawRevision.blueprintId
+    : null;
+  const applicationId = isRecord(rawRevision) && typeof rawRevision.applicationId === 'string'
+    && rawRevision.applicationId.length > 0
+    && !rawRevision.applicationId.startsWith('legacy:')
+    && !rawRevision.applicationId.startsWith('bp:')
+    ? rawRevision.applicationId
+    : null;
   if (revision === null) {
+    if (applicationId !== null) {
+      return unavailablePortfolioRow(
+        nodeId,
+        nodeName,
+        applicationId,
+        stackName,
+        typeof row.updated_at === 'number' ? row.updated_at : null,
+        rawTargetMode,
+        rawTargetMode === 'direct' ? null : rawBlueprintId,
+      );
+    }
     if (stackName === null) return null;
     return legacyPortfolioRow(nodeId, nodeName, stackName, typeof row.updated_at === 'number' ? row.updated_at : null);
   }

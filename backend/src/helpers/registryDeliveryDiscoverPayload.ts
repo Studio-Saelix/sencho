@@ -18,6 +18,11 @@ function sourceKindForStage(stage: RegistryDeliveryStage): RegistryDeliverySourc
       return 'git-candidate';
     case 'stack-deploy':
       return 'live-project';
+    // Every other stage, including stack-pull-images, is a live-project fetch.
+    // This branch and the matching default in registryDeliverySeam must agree:
+    // the remote recomputes the action-set hash from its own default, so moving a
+    // stage off this default on the hub alone would break every un-upgraded
+    // remote. Add an explicit case on both sides together, never one.
     default:
       return 'live-project';
   }
@@ -45,7 +50,11 @@ export function buildRegistryDiscoverPayload(options: {
 
   const stack = resolveStackName(options.body, classification.stack);
   const stage = classification.stage;
-  const isRollback = Boolean(options.apiPath.match(/^\/api\/stacks\/[^/]+\/rollback$/));
+  // Must accept the same trailing slash as the op classifier. When the two
+  // disagreed, a slashed rollback still classified as eligible but was discovered
+  // as a live-project fetch instead of a restore candidate, so it was answered
+  // with credentials for the wrong image set and failed late with "unauthorized".
+  const isRollback = Boolean(options.apiPath.match(/^\/api\/stacks\/[^/]+\/rollback\/?$/));
   const sourceKind = isRollback ? 'restore-candidate' : sourceKindForStage(stage);
 
   const payload: Record<string, unknown> = {

@@ -394,7 +394,7 @@ export function createRemoteProxyMiddleware(): RequestHandler {
               // ship every remote row unfiltered under a 200.
               identity.preRewritePath,
               payload,
-              (requirement) => satisfiesGitOpsRead(req, requirement),
+              requirement => satisfiesGitOpsRead(req, requirement, nodeId),
               nodeId,
             );
           },

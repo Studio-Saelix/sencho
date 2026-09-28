@@ -133,6 +133,7 @@ const STACK_OP_PRESENT_PARTICIPLE: Record<StackOpAction, string> = {
   backup: 'backing up',
   delete: 'deleting',
   git_apply: 'applying Git changes',
+  image_pull: 'pulling images',
 };
 
 function linkStackUpdateRecoveryGate(recoveryId: string | null | undefined, healthGateId: string | null): void {
@@ -1944,6 +1945,57 @@ stacksRouter.post('/:stackName/deploy', async (req: Request, res: Response) => {
   } finally {
     releaseStackOpLock(req, stackName);
     StackOpMetricsService.getInstance().record(req.nodeId, 'deploy', Date.now() - t0, ok);
+  }
+});
+
+/**
+ * Acquire registry-backed images for a stack and stop. This never reconciles
+ * the runtime: no `up`, no restart, no recreate, no build. It therefore opens
+ * no rollback generation, starts no health gate, records no lifecycle metric,
+ * and dispatches no activity notification, because no deployment happened.
+ * Only the local image store changes.
+ *
+ * Deliberately absent, each for a reason: the policy gate guards runtime
+ * mutations; the post-deploy scan and drift re-baseline describe a reconciled
+ * runtime; and the `deploy_success` / `image_update_applied` activity records
+ * are the marker the update guard reads as "last successful apply", so emitting
+ * one from a pull would corrupt rollback readiness.
+ */
+stacksRouter.post('/:stackName/pull-images', async (req: Request, res: Response) => {
+  const stackName = req.params.stackName as string;
+  // Pulling stages images for a deploy, so it needs both the edit authority for
+  // the authored state it resolves against and the deploy authority that later
+  // consumes the images. Both are unconditional here, unlike Git source apply,
+  // which asks for deploy authority only when that apply will itself deploy: a
+  // pull always fetches, so there is no mode in which the second gate is moot.
+  if (!requirePermission(req, res, 'stack:edit', 'stack', stackName)) return;
+  if (!requirePermission(req, res, 'stack:deploy', 'stack', stackName)) return;
+  if (!(await requireStackExists(req.nodeId, stackName, res))) return;
+  if (await refuseIfSelfStack(req, res, stackName)) return;
+  // Lock held below. All early-returns must stay inside the try so finally fires.
+  if (!tryAcquireStackOpLock(req, res, stackName, 'image_pull')) return;
+  try {
+    const result = await ComposeService.getInstance(req.nodeId)
+      .pullStackImages(stackName, getTerminalWs(req.get(DEPLOY_SESSION_HEADER)));
+    invalidateNodeCaches(req.nodeId);
+    dlog(`[Stacks] Image pull completed: ${sanitizeForLog(stackName)}`);
+    res.json({
+      message: 'Pulled registry images',
+      skippedBuildBacked: result.skippedBuildBacked,
+    });
+  } catch (error: unknown) {
+    // A failed compose step reports the output it accumulated, so collapse the
+    // line breaks into a visible separator before the sanitizer deletes them
+    // outright: this entry is the only durable record of the failure, and
+    // welded lines cannot be read. The fallback stays neutral so a throw the
+    // log cannot render does not read back as the operation's name.
+    const detail = getErrorMessage(error, 'unknown').replace(/\s*[\r\n]+\s*/g, ' | ');
+    console.error('[Stacks] Image pull failed: %s', sanitizeForLog(stackName), sanitizeForLog(detail));
+    if (!res.headersSent) {
+      res.status(500).json({ error: getErrorMessage(error, 'Image pull failed') });
+    }
+  } finally {
+    releaseStackOpLock(req, stackName);
   }
 });
 

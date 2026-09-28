@@ -31,6 +31,7 @@ let FACET_EVIDENCE_SOURCE: typeof import('../services/gitops/types').FACET_EVIDE
 let BlueprintTargetAdapter: typeof import('../services/gitops/handoff').BlueprintTargetAdapter;
 let buildAcceptedGeneration: typeof import('../services/gitops/handoff').buildAcceptedGeneration;
 let ensureRolloutAuthorization: typeof import('../services/gitops/handoff').ensureRolloutAuthorization;
+let backfillMissingPreflightEvaluations: typeof import('../services/gitops/handoff').backfillMissingPreflightEvaluations;
 let setRegistryReadinessDepsForTests: typeof import('../services/gitops/handoff').setRegistryReadinessDepsForTests;
 let reconstructBlueprintRolloutQueue: typeof import('../services/gitops/handoff').reconstructBlueprintRolloutQueue;
 let BlueprintService: typeof import('../services/BlueprintService').BlueprintService;
@@ -50,6 +51,7 @@ beforeAll(async () => {
     ensureRolloutAuthorization,
     reconstructBlueprintRolloutQueue,
     setRegistryReadinessDepsForTests,
+    backfillMissingPreflightEvaluations,
   } = await import('../services/gitops/handoff'));
   ({ BlueprintService } = await import('../services/BlueprintService'));
   ({ DatabaseService } = await import('../services/DatabaseService'));
@@ -75,6 +77,22 @@ function registryReadyTestDeps() {
     isControlNode: () => true,
     nowMs: () => 1_000_000,
   };
+}
+
+/**
+ * Reconstruction walks every authorized application in the DB, and earlier
+ * tests leave their fixtures behind, so a count assertion needs only this
+ * test's application to exist.
+ */
+function clearGitOpsState(): void {
+  const db = DatabaseService.getInstance().getDb();
+  for (const table of [
+    'gitops_target_current', 'gitops_history', 'gitops_approvals', 'gitops_rollout_generations',
+    'gitops_rollout_candidates', 'gitops_artifact_sets', 'gitops_generations',
+    'gitops_intent_revisions', 'gitops_applications',
+  ]) {
+    db.prepare(`DELETE FROM ${table}`).run();
+  }
 }
 
 beforeEach(() => {
@@ -293,21 +311,6 @@ describe('rollout pause holds execution', () => {
     return { operationId: randomUUID(), actor: 'tester', trigger: 'test', at: Date.now() };
   }
 
-  /**
-   * Reconstruction walks every authorized application in the DB, and earlier
-   * tests leave their fixtures behind, so a count assertion needs only this
-   * test's application to exist.
-   */
-  function clearGitOpsState(): void {
-    const db = DatabaseService.getInstance().getDb();
-    for (const table of [
-      'gitops_target_current', 'gitops_history', 'gitops_approvals', 'gitops_rollout_generations',
-      'gitops_rollout_candidates', 'gitops_artifact_sets', 'gitops_generations',
-      'gitops_intent_revisions', 'gitops_applications',
-    ]) {
-      db.prepare(`DELETE FROM ${table}`).run();
-    }
-  }
 
   it('blocks a dispatch while the application is paused', async () => {
     clearGitOpsState();
@@ -857,6 +860,45 @@ describe('ensureRolloutAuthorization', () => {
     expect(result.ok).toBe(false);
     if (!result.ok) expect(result.reason).toMatch(/already in flight/);
     expect(store.getApplication(fixture.applicationId)!.rollout_authorization_ref).toBeNull();
+  });
+});
+
+describe('backfillMissingPreflightEvaluations', () => {
+  it('re-evaluates several legacy apps at once and leaves every authorization live', async () => {
+    const store = GitOpsStore.getInstance();
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    clearGitOpsState();
+    const fixtures = Array.from({ length: 5 }, () => seedAuthorizedReadyApp());
+    for (const fixture of fixtures) {
+      expect((await ensureRolloutAuthorization(fixture.applicationId, 'tester')).ok).toBe(true);
+    }
+    // The shape this backfill exists for: live authorization, no stored evidence.
+    // Scoped to these fixtures by the clear above. A case earlier in this file
+    // can hold a live authorization with no stored evidence, which is this same
+    // shape, and the backfill walks every authorized application it can see, so
+    // leaving those in would let another case decide this count.
+    const placeholders = fixtures.map(() => '?').join(',');
+    DatabaseService.getInstance().getDb().prepare(
+      `UPDATE gitops_applications SET latest_preflight_evidence_json = NULL
+       WHERE id IN (${placeholders})`,
+    ).run(...fixtures.map((f) => f.applicationId));
+    const refsBefore = fixtures.map(
+      (f) => store.getApplication(f.applicationId)!.rollout_authorization_ref,
+    );
+
+    expect(await backfillMissingPreflightEvaluations()).toBe(fixtures.length);
+
+    for (const [index, fixture] of fixtures.entries()) {
+      const app = store.getApplication(fixture.applicationId)!;
+      expect(app.latest_preflight_evidence_json).toBeTruthy();
+      // Same ref, so the concurrent pass re-evaluated rather than reminted.
+      expect(app.rollout_authorization_ref).toBe(refsBefore[index]);
+      const again = await ensureRolloutAuthorization(fixture.applicationId, 'tester');
+      expect(again.ok).toBe(true);
+      expect(store.getApplication(fixture.applicationId)!.rollout_authorization_ref).toBe(refsBefore[index]);
+    }
+    const backfillWarnings = warn.mock.calls.filter((call) => String(call[0]).includes('Preflight backfill'));
+    expect(backfillWarnings).toEqual([]);
   });
 });
 

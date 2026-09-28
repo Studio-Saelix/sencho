@@ -681,14 +681,33 @@ export class ComposeService {
   }
 
   /**
-   * Opt-in guard: when `env_block_deploy_on_missing_required` is enabled, refuse a
-   * deploy whose required `${VAR:?err}` variables are unset OR empty, before any
-   * backup, cleanup, pull, or `up` runs. Compose's own resolution is authoritative
-   * (it passes process.env), and on the failing path it emits no rendered model, so
-   * no env value is materialized. Default off and any settings-read failure both
-   * fall through without blocking.
+   * How the missing-variable refusal names the blocked action and the next step.
+   *
+   * The default is the deploy wording, kept byte-identical because it is quoted
+   * verbatim in a published tutorial and its screenshots. An operation that is not
+   * a deploy passes its own remedy, and omits `blocked` when the caller already
+   * names the action: the editor's pull path surfaces this text behind its own
+   * "Image pull failed:" prefix, and a second "Image pull blocked:" in front of it
+   * reads as a stutter rather than a clearer message.
    */
-  private async assertRequiredEnvPresent(stackName: string, stackDirOverride?: string): Promise<void> {
+  private static readonly ENV_REFUSAL_WORDING = {
+    blocked: 'Deploy blocked:',
+    remedy: 'then deploy again.',
+  } as const;
+
+  /**
+   * Opt-in guard: when `env_block_deploy_on_missing_required` is enabled, refuse a
+   * compose operation whose required `${VAR:?err}` variables are unset OR empty,
+   * before any backup, cleanup, pull, or `up` runs. Compose's own resolution is
+   * authoritative (it passes process.env), and on the failing path it emits no
+   * rendered model, so no env value is materialized. Default off and any
+   * settings-read failure both fall through without blocking.
+   */
+  private async assertRequiredEnvPresent(
+    stackName: string,
+    stackDirOverride?: string,
+    wording: { blocked?: string; remedy: string } = ComposeService.ENV_REFUSAL_WORDING,
+  ): Promise<void> {
     let enabled = false;
     try {
       enabled = DatabaseService.getInstance().getGlobalSettings()['env_block_deploy_on_missing_required'] === '1';
@@ -723,9 +742,10 @@ export class ComposeService {
     }
     if (missing.length === 0) return;
     const plural = missing.length > 1;
+    const lead = wording.blocked ? `${wording.blocked} ` : '';
     throw new Error(
-      `Deploy blocked: required environment variable${plural ? 's' : ''} ${missing.join(', ')} ` +
-      `${plural ? 'are' : 'is'} missing. Define ${plural ? 'them' : 'it'} in a .env or env_file, then deploy again.`,
+      `${lead}required environment variable${plural ? 's' : ''} ${missing.join(', ')} ` +
+      `${plural ? 'are' : 'is'} missing. Define ${plural ? 'them' : 'it'} in a .env or env_file, ${wording.remedy}`,
     );
   }
 
@@ -777,9 +797,13 @@ export class ComposeService {
   ): Promise<void> {
     const resolved = await resolveMissingExternalNetworks(this.nodeId, stackName);
     if (resolved.status === 'render_unavailable') {
+      // The resolver already reduced the render failure to a specific,
+      // redacted cause. Surface it rather than a generic sentence that names
+      // none of the possible faults, so the operator learns what to fix.
       throw new MissingExternalNetworksError({
         kind: 'unavailable',
-        message: 'Sencho could not render this stack\'s Compose model to check external networks.',
+        message: resolved.renderError
+          || 'Sencho could not render this stack\'s Compose model to check external networks.',
       });
     }
     if (resolved.status === 'runtime_unavailable') {
@@ -1719,6 +1743,70 @@ export class ComposeService {
       deployedGenerationId: gitopsDeploy?.generationId ?? null,
       gitopsOperationId: gitopsDeploy?.gitopsOperationId ?? null,
     };
+  }
+
+  /**
+   * Acquire registry-backed images for a stack without touching the runtime.
+   *
+   * Never builds, and never pulls a build-backed service: `--ignore-buildable`
+   * is passed unconditionally, so a service declaring `build:` is skipped rather
+   * than pulled or built whether or not this method knows about it. The
+   * unconditional flag is what makes that true; the name list is a report only.
+   * A service declaring both `image:` and `build:` does have a fetchable image;
+   * skipping it is the deliberate choice, not a lack of one. That list comes from
+   * `loadStackBuildServices`, the same helper the update path uses: the rendered
+   * effective model when a Git deploy spec is applied and renders, the root
+   * compose file otherwise, which includes a Git-sourced stack whose effective
+   * render failed. A `build:` that only an override file declares is therefore
+   * skipped by the CLI but not named in the list. This method opens no rollback
+   * generation, writes no deployment generation, and starts no health gate,
+   * because it does not reconcile the runtime and therefore has nothing to roll
+   * back to. The only state it changes is which images exist in the local Docker
+   * image store.
+   */
+  async pullStackImages(
+    stackName: string,
+    ws?: WebSocket,
+  ): Promise<{ skippedBuildBacked: string[] }> {
+    const stackDir = path.join(this.baseDir, stackName);
+    const sendOutput = (data: string) => {
+      if (ws && ws.readyState === WebSocket.OPEN) ws.send(data);
+    };
+
+    // Same preflight every sibling compose operation runs. Without it, ${VAR} in
+    // an image reference resolves against still-encrypted files on a SOPS stack,
+    // so the pull can fetch a different image than a deploy would use.
+    this.assertSopsOverlayOrRefuse(stackName);
+    // No `blocked` clause: the editor surfaces this behind its own "Image pull
+    // failed:" prefix, and the remedy names the action the operator actually chose.
+    await this.assertRequiredEnvPresent(stackName, undefined, {
+      remedy: 'then run Save & Pull Images again.',
+    });
+
+    // Best-effort, and only for the skip report. loadStackBuildServices reads the
+    // root compose file for stacks without a Git source, so a build: declared
+    // only in compose.override.yaml is not listed below.
+    const skippedBuildBacked = await loadStackBuildServices(this.nodeId, stackName);
+
+    await this.withRegistryAuth(async (env) => {
+      if (skippedBuildBacked.length > 0) {
+        sendOutput(
+          `=== Skipping build-backed services: ${skippedBuildBacked.join(', ')} ===\n`,
+        );
+      }
+      // --ignore-buildable is unconditional: it is what makes "skip, never
+      // build" true at the CLI level, for a service declaring both `image:` and
+      // `build:`. It does not rely on the skip list above being complete, so a
+      // build: that only an override file declares is still skipped.
+      sendOutput('=== Pulling registry images ===\n');
+      await this.execute(
+        'docker',
+        await this.authoredComposeArgs(stackName, ['pull', '--ignore-buildable']),
+        stackDir, ws, true, env, getComposeStallTimeoutMs(),
+      );
+    }, sendOutput);
+
+    return { skippedBuildBacked };
   }
 
   /**

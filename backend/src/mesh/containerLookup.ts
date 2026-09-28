@@ -11,6 +11,8 @@
  * runs the conventional-name fast path first (`<stack>-<service>-1`)
  * before falling back to a compose-label container list.
  */
+import { SENCHO_MESH_NETWORK } from '../services/MeshComposeOverride';
+
 interface ContainerInspectInfo {
     NetworkSettings?: {
         Networks?: Record<string, { IPAddress?: string } | undefined>;
@@ -28,15 +30,26 @@ interface DockerodeLike {
 }
 
 /**
- * Pick a deterministic IPv4 for a container. Prefer the compose default
- * network (`<stack>_default` or any network named `<stack>_*`), then any
- * other attached network, then the legacy `NetworkSettings.IPAddress`.
- * Without this preference order, `Object.values(Networks)` ordering on
- * multi-network containers varies across daemon versions and can make
- * same-node forwarding flaky on a redeploy.
+ * Pick a deterministic IPv4 for a container.
+ *
+ * `sencho_mesh` wins when present. It is the one network every meshed
+ * container is attached to and the only one the Sencho container itself is
+ * attached to, so it is the only address on the mesh data plane that is
+ * actually dialable. Docker user-defined bridges are isolated from each
+ * other, so returning an address on the stack's `default` or a custom
+ * network would hand back a target the mesh hop cannot route to.
+ *
+ * Without `sencho_mesh` (a service the override left alone, such as one on
+ * `network_mode: host`) fall back to the compose default network, then any
+ * network named `<stack>_*`, then any other attached network, then the
+ * legacy `NetworkSettings.IPAddress`. The fallback chain still needs a fixed
+ * order because `Object.values(Networks)` ordering varies across daemon
+ * versions.
  */
 export function pickContainerIp(stackName: string, info: ContainerInspectInfo): string | null {
     const networks = info.NetworkSettings?.Networks ?? {};
+    const meshNetwork = networks[SENCHO_MESH_NETWORK];
+    if (meshNetwork?.IPAddress) return meshNetwork.IPAddress;
     const composeDefault = networks[`${stackName}_default`];
     if (composeDefault?.IPAddress) return composeDefault.IPAddress;
     for (const [name, net] of Object.entries(networks)) {

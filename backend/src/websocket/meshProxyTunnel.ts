@@ -11,6 +11,7 @@ import {
 import { sanitizeForLog } from '../utils/safeLog';
 import { isDebugEnabled } from '../utils/debug';
 import { rejectUpgrade as reject } from './reject';
+import { startWsHeartbeat } from '../utils/wsHeartbeat';
 
 /**
  * Mesh proxy-tunnel ingress.
@@ -81,6 +82,46 @@ export async function handleMeshProxyTunnel(req: IncomingMessage, socket: Duplex
     });
 }
 
+/** Ping cadence for the peer side of the bridge (central pings too). */
+const PEER_HEARTBEAT_INTERVAL_MS = 30_000;
+/**
+ * How long a new upgrade waits for the current tunnel to answer a ping
+ * before treating it as dead and taking over its slot.
+ */
+const STALE_TUNNEL_PROBE_MS = 5_000;
+
+interface ActiveTunnel {
+    ws: WebSocket;
+    teardown: () => void;
+}
+
+/** The tunnel currently holding this node's reverse-dialer slot, if any. */
+let activeTunnel: ActiveTunnel | null = null;
+
+/**
+ * Resolve true when `ws` answers a ping within `timeoutMs`. Used to tell a
+ * live tunnel (a second central racing for the slot: keep it) from a
+ * half-open one left behind by a tunnel, VPN, or NAT restart (replace it).
+ */
+function answersPing(ws: WebSocket, timeoutMs: number): Promise<boolean> {
+    return new Promise((resolve) => {
+        if (ws.readyState !== ws.OPEN) { resolve(false); return; }
+        const done = (alive: boolean): void => {
+            clearTimeout(timer);
+            ws.off('pong', onPong);
+            ws.off('close', onClose);
+            resolve(alive);
+        };
+        const onPong = (): void => done(true);
+        const onClose = (): void => done(false);
+        const timer = setTimeout(() => done(false), timeoutMs);
+        timer.unref?.();
+        ws.on('pong', onPong);
+        ws.on('close', onClose);
+        try { ws.ping(); } catch { done(false); }
+    });
+}
+
 async function attachSwitchboard(ws: WebSocket, peerNodeId: number | null): Promise<void> {
     let switchboard: TcpStreamSwitchboard | null = null;
     let meshServiceCleanup: (() => void) | null = null;
@@ -104,7 +145,10 @@ async function attachSwitchboard(ws: WebSocket, peerNodeId: number | null): Prom
         }
     };
 
+    let stopHeartbeat: (() => void) | null = null;
     const teardown = (): void => {
+        if (stopHeartbeat) { stopHeartbeat(); stopHeartbeat = null; }
+        if (activeTunnel?.ws === ws) activeTunnel = null;
         ws.off('message', onMessage);
         if (switchboard) {
             switchboard.cleanup('mesh proxy-tunnel closed');
@@ -125,6 +169,10 @@ async function attachSwitchboard(ws: WebSocket, peerNodeId: number | null): Prom
 
         ws.on('message', onMessage);
         ws.once('close', teardown);
+        // Detect a dead central (half-open socket) from this side too, so
+        // the reverse-dialer slot frees up instead of lingering until the
+        // kernel times the connection out.
+        stopHeartbeat = startWsHeartbeat(ws, PEER_HEARTBEAT_INTERVAL_MS);
         ws.once('error', (err) => {
             if (isDebugEnabled()) {
                 console.warn('[MeshProxy:diag] ws error:', sanitizeForLog(err.message));
@@ -145,6 +193,21 @@ async function attachSwitchboard(ws: WebSocket, peerNodeId: number | null): Prom
                 return localSwitchboard.openReverseStream(target);
             },
         };
+        // A previous tunnel still holding the slot is usually a half-open
+        // leftover after the path between central and this node dropped.
+        // Replace it when it no longer answers pings; keep it (and reject
+        // this upgrade) when it is alive, so two centrals cannot flap.
+        const previous = activeTunnel;
+        if (previous && previous.ws !== ws && !(await answersPing(previous.ws, STALE_TUNNEL_PROBE_MS))) {
+            console.warn('[MeshProxy] replacing unresponsive proxy tunnel with a new connection');
+            if (activeTunnel === previous) activeTunnel = null;
+            previous.teardown();
+            try { previous.ws.terminate(); } catch { /* ignore */ }
+        }
+        if (ws.readyState !== ws.OPEN) {
+            teardown();
+            return;
+        }
         const installed = meshService.setReverseDialer(localDialer, null);
         if (!installed) {
             console.warn('[MeshProxy] reverse dialer already installed; rejecting concurrent tunnel');
@@ -163,6 +226,7 @@ async function attachSwitchboard(ws: WebSocket, peerNodeId: number | null): Prom
         meshServiceCleanup = () => {
             meshService.setReverseDialer(null, localDialer);
         };
+        activeTunnel = { ws, teardown };
     } catch (err) {
         if (isDebugEnabled()) {
             console.warn('[MeshProxy:diag] failed to attach switchboard:', sanitizeForLog((err as Error).message));

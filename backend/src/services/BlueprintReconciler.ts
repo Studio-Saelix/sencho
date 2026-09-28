@@ -30,6 +30,7 @@ import {
 } from './gitops/json';
 import { GitOpsStore, placementEffectCompatible } from './gitops/store';
 import { isGitManagedBlueprint } from './gitops/gitManaged';
+import type { RuntimeRepairHoldReason } from './gitops/runtimeRepairBinding';
 import type { GitOpsApplicationRow } from './gitops/types';
 
 const RECONCILER_INTERVAL_MS = 60_000;
@@ -397,7 +398,10 @@ export class BlueprintReconciler {
             case 'check_observe':
             case 'check_enforce': {
                 const driftResult = await svc.checkForDrift(blueprint, node);
-                if (driftResult.kind === 'matched') return { ...base, status: 'ok' };
+                if (driftResult.kind === 'matched') {
+                    this.clearSettledDriftState(blueprint.id, node.id);
+                    return { ...base, status: 'ok' };
+                }
                 if (driftResult.kind === 'unverified') {
                     // Record nothing as drifted and never Enforce: unreachable
                     // or missing evidence must not look like a corrective target.
@@ -408,7 +412,21 @@ export class BlueprintReconciler {
                     });
                     return { ...base, status: 'ok' };
                 }
+                if (driftResult.kind === 'held') {
+                    this.recordRepairHold(blueprint, node, driftResult.reason, driftResult.detail);
+                    return { ...base, status: 'ok' };
+                }
                 const reason = driftResult.reason;
+                // A workload whose data outlives the container is never
+                // auto-repaired, and a Blueprint Sencho cannot classify is in the
+                // same position because its volumes are unknown. Decided here,
+                // before the drift is committed, so a held target is not first
+                // written as drifted and then rewritten every tick.
+                const heldByClassification = await this.repairHeldByClassification(blueprint, node);
+                if (heldByClassification) {
+                    this.recordRepairHold(blueprint, node, 'classification_forbids_repair', heldByClassification);
+                    return { ...base, status: 'ok' };
+                }
                 commitBlueprintDeploymentCause('drift_observed', blueprint.id, node.id, {
                     status: 'drifted',
                     last_checked_at: Date.now(),
@@ -725,6 +743,15 @@ export class BlueprintReconciler {
                 decision.check.push(node);
                 continue;
             }
+            // A held target keeps its check. The hold is a state, not a latch:
+            // the cause can clear (a node returns, a rollout lands, a rollback
+            // finishes), and this is the only thing that notices. Without it a
+            // held row matches no branch here and is never re-examined, so a
+            // transient cause would strand the target permanently.
+            if (dep.status === 'repair_held' && dep.applied_revision === blueprint.revision) {
+                decision.check.push(node);
+                continue;
+            }
             if (dep.applied_revision !== blueprint.revision) {
                 if (severedNodes.has(node.id)) continue;
                 if (blueprint.classification === 'stateful' || blueprint.classification === 'unknown') {
@@ -789,19 +816,14 @@ export class BlueprintReconciler {
                 return;
 
             case 'enforce': {
-                // Stateful safeguard: if the upcoming redeploy would destroy named volumes,
-                // downgrade to suggest semantics for this drift event.
-                if (blueprint.classification === 'stateful') {
-                    const marker = await BlueprintService.getInstance().readMarker(blueprint.name, node);
-                    if (!marker) {
-                        notifications.dispatchAlert(
-                            'warning',
-                            'blueprint_drift_detected',
-                            `Blueprint "${blueprint.name}" lost its marker ${nodeLocationClause(node)}; auto-fix declined to avoid stomping unowned data. Reason: ${reason}`,
-                            { stackName: blueprint.name, actor: 'system:blueprint' },
-                        );
-                        return;
-                    }
+                // The classification guard is repeated here, at the site that
+                // mutates, rather than trusted from the caller. Deciding it early
+                // keeps a held target from being written as drifted first; the
+                // decision itself belongs to whoever is about to write to a node.
+                const heldByClassification = await this.repairHeldByClassification(blueprint, node);
+                if (heldByClassification) {
+                    this.recordRepairHold(blueprint, node, 'classification_forbids_repair', heldByClassification);
+                    return;
                 }
                 commitBlueprintDeploymentCause('drift_enforce_start', blueprint.id, node.id, {
                     status: 'correcting',
@@ -812,6 +834,20 @@ export class BlueprintReconciler {
                     : isGitManagedBlueprint(blueprint)
                         ? await BlueprintService.getInstance().reapplyAuthorizedMaterialization(blueprint, node)
                         : await BlueprintService.getInstance().deployToNode(blueprint, node);
+                // A hold is a decision, not a failed attempt. The repair
+                // re-resolved its authority and found it unprovable, so this
+                // tick records the hold and leaves no `correcting` row behind.
+                // Reporting it as a failure would page the operator about a
+                // choice Sencho made on purpose.
+                if (result.status === 'repair_held') {
+                    this.recordRepairHold(
+                        blueprint,
+                        node,
+                        result.holdReason ?? 'evidence_incomplete',
+                        result.error ?? 'the repair authority could not be resolved',
+                    );
+                    return;
+                }
                 if (result.status !== 'active') {
                     notifications.dispatchAlert(
                         'error',
@@ -842,13 +878,24 @@ export class BlueprintReconciler {
         const byId = new Map(allNodes.map((n) => [n.id, n]));
         const svc = BlueprintService.getInstance();
         for (const dep of deployments) {
-            if (dep.status !== 'active' && dep.status !== 'drifted' && dep.status !== 'correcting') {
+            // A held target keeps being checked: the hold is a state the rollout
+            // or an operator can clear, so a tick has to keep looking for the
+            // authority that would release it.
+            if (
+                dep.status !== 'active'
+                && dep.status !== 'drifted'
+                && dep.status !== 'correcting'
+                && dep.status !== 'repair_held'
+            ) {
                 continue;
             }
             const node = byId.get(dep.node_id);
             if (!node) continue;
             const driftResult = await svc.checkForDrift(blueprint, node);
-            if (driftResult.kind === 'matched') continue;
+            if (driftResult.kind === 'matched') {
+                this.clearSettledDriftState(blueprint.id, node.id);
+                continue;
+            }
             if (driftResult.kind === 'unverified') {
                 diagnosticLog('git-managed drift unverified', {
                     blueprintId: blueprint.id,
@@ -857,7 +904,16 @@ export class BlueprintReconciler {
                 });
                 continue;
             }
+            if (driftResult.kind === 'held') {
+                this.recordRepairHold(blueprint, node, driftResult.reason, driftResult.detail);
+                continue;
+            }
             const reason = driftResult.reason;
+            const heldByClassification = await this.repairHeldByClassification(blueprint, node);
+            if (heldByClassification) {
+                this.recordRepairHold(blueprint, node, 'classification_forbids_repair', heldByClassification);
+                continue;
+            }
             commitBlueprintDeploymentCause('drift_observed', blueprint.id, node.id, {
                 status: 'drifted',
                 last_checked_at: Date.now(),
@@ -865,6 +921,99 @@ export class BlueprintReconciler {
                 drift_summary: reason,
             }, null);
             await this.handleDrift(blueprint, node, reason, driftResult.cause);
+        }
+    }
+
+    /**
+     * Whether this Blueprint's classification forbids an automatic repair, and
+     * the operator-facing reason when it does.
+     *
+     * Restoring the approved generation on a stateless stack converges. Doing
+     * it on a stateful one can destroy or strand named volumes, and a Blueprint
+     * Sencho cannot classify is in the same position because its volumes are
+     * unknown. Both are held so a human or a rollout decides, rather than
+     * downgraded to a notification that leaves the drift in place.
+     *
+     * The text is deliberately free of the drift reason. It is the replay key:
+     * a reason that changes every tick (a container exit message, say) would
+     * make every tick look like a new decision and append a history row and an
+     * alert per tick for a hold that never changes. The drift itself is already
+     * recorded on the row by the write that precedes this.
+     *
+     * Returns null for a Blueprint that may be repaired, so the caller reads as
+     * a question rather than a flag.
+     */
+    private async repairHeldByClassification(
+        blueprint: Blueprint,
+        node: Node,
+    ): Promise<string | null> {
+        if (blueprint.classification !== 'stateful' && blueprint.classification !== 'unknown') {
+            return null;
+        }
+        const marker = await BlueprintService.getInstance().readMarker(blueprint.name, node);
+        return marker
+            ? `this Blueprint is ${blueprint.classification}, so auto-fix is declined to avoid touching data Sencho cannot prove is safe`
+            : `this Blueprint lost its marker and is ${blueprint.classification}, so auto-fix was declined to avoid stomping unowned data`;
+    }
+
+    /**
+     * Return a row that no longer has drift to `active`.
+     *
+     * Without this a target that was drifted, or whose repair was held, keeps
+     * reading that way forever once the cause clears: nothing else writes an
+     * `active` row on a check. Only the two states a check can resolve are
+     * touched, so an in-flight or operator-owned row is never stomped.
+     */
+    private clearSettledDriftState(blueprintId: number, nodeId: number): void {
+        const previous = DatabaseService.getInstance().getDeployment(blueprintId, nodeId);
+        if (previous?.status !== 'drifted' && previous?.status !== 'repair_held') return;
+        commitBlueprintDeploymentCause('drift_cleared', blueprintId, nodeId, {
+            status: 'active',
+            last_checked_at: Date.now(),
+            last_drift_at: null,
+            drift_summary: null,
+        }, null);
+    }
+
+    /**
+     * Record that a drift repair was declined, and say why.
+     *
+     * A hold is a decision, not a failed attempt, so it gets its own
+     * deployment status, its own drift summary, and its own history stage. It
+     * never mutates the workload, and it never reports itself as converged: a
+     * target that cannot be repaired is still drifted and still needs an
+     * operator or a rollout to resolve it.
+     */
+    private recordRepairHold(
+        blueprint: Blueprint,
+        node: Node,
+        reason: RuntimeRepairHoldReason,
+        detail: string,
+    ): void {
+        const previous = DatabaseService.getInstance().getDeployment(blueprint.id, node.id);
+        // Re-asserting the same hold on every tick is not news. Recording it
+        // once per transition keeps the history readable and stops a held target
+        // from appending a row a minute forever.
+        if (previous?.status === 'repair_held' && previous.drift_summary === detail) {
+            return;
+        }
+        commitBlueprintDeploymentCause('drift_repair_held', blueprint.id, node.id, {
+            status: 'repair_held',
+            last_checked_at: Date.now(),
+            drift_summary: detail,
+        }, null);
+        diagnosticLog('drift repair held', {
+            blueprintId: blueprint.id,
+            nodeId: node.id,
+            reason,
+        });
+        if (blueprint.drift_mode === 'enforce') {
+            NotificationService.getInstance().dispatchAlert(
+                'warning',
+                'blueprint_drift_repair_held',
+                `Auto-fix for "${blueprint.name}" ${nodeLocationClause(node)} was declined: ${detail}`,
+                { stackName: blueprint.name, actor: 'system:blueprint' },
+            );
         }
     }
 

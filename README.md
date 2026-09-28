@@ -32,9 +32,6 @@
 
 <img src="docs/images/hero.png" alt="Sencho stack detail view showing the Drift tab for the cloudflared stack">
 
-> [!NOTE]
-> Sencho is used in production for day-to-day Docker Compose and fleet management. As a pre-1.0 project it still evolves quickly, so review the known limitations and validate against your own setup before deploying it on critical infrastructure.
-
 ---
 
 ## What Sencho is
@@ -229,7 +226,6 @@ Sencho does not emit telemetry, analytics, or crash reports, and makes no outbou
 
 - **Documentation:** [docs.sencho.io](https://docs.sencho.io)
 - **Blog:** [sencho.io/blog](https://sencho.io/blog)
-- **Known limitations:** [KNOWN_LIMITATIONS.md](KNOWN_LIMITATIONS.md)
 - **If something breaks:** the [Recovery guide](https://docs.sencho.io/operations/recovery) covers getting back to a working state when Sencho, a deploy, sign-in, Docker, or a node fails.
 - **Community:** [GitHub Discussions](https://github.com/studio-saelix/sencho/discussions)
 - **Contributing:** [CONTRIBUTING.md](CONTRIBUTING.md)

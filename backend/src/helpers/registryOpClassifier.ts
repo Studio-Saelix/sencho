@@ -2,6 +2,7 @@ export type RegistryDeliveryStage =
   | 'stack-deploy'
   | 'stack-update'
   | 'stack-pull-update'
+  | 'stack-pull-images'
   | 'service-update'
   | 'service-pull-update'
   | 'webhook-deploy'
@@ -39,17 +40,30 @@ export function classifyRegistryDeliveryOp(method: string, apiPath: string): Reg
 
   const stack = stackNameFromPath(apiPath);
 
-  if (apiPath.match(/^\/api\/stacks\/[^/]+\/deploy$/)) {
+  // The trailing slash is optional in every pattern below, and deliberately so:
+  // Express routes the slashed form to the same handler, and the body classifier
+  // in registryDeliveryBodyLimits already accepts it for these routes. When the
+  // two disagreed, a slashed request still reached the handler but was forwarded
+  // to a remote with no credentials attached, which surfaces as a late and very
+  // confusing "unauthorized" instead of a refusal. Both gates must agree.
+  if (apiPath.match(/^\/api\/stacks\/[^/]+\/deploy\/?$/)) {
     return { eligible: true, stage: 'stack-deploy', stack };
   }
-  if (apiPath.match(/^\/api\/stacks\/[^/]+\/update$/)) {
+  if (apiPath.match(/^\/api\/stacks\/[^/]+\/update\/?$/)) {
     return { eligible: true, stage: 'stack-update', stack };
   }
-  if (apiPath.match(/^\/api\/stacks\/[^/]+\/pull-update$/)) {
+  if (apiPath.match(/^\/api\/stacks\/[^/]+\/pull-update\/?$/)) {
     return { eligible: true, stage: 'stack-pull-update', stack };
   }
+  // Save & Pull Images fetches the stack's registry-backed images without
+  // reconciling the workload, so it needs the same credentials a deploy would.
+  // The route carries no body, so the stack name reaches the discover payload
+  // only through the URL match above.
+  if (apiPath.match(/^\/api\/stacks\/[^/]+\/pull-images\/?$/)) {
+    return { eligible: true, stage: 'stack-pull-images', stack };
+  }
 
-  const serviceMatch = apiPath.match(/^\/api\/stacks\/([^/]+)\/services\/([^/]+)\/(update|pull-update)$/);
+  const serviceMatch = apiPath.match(/^\/api\/stacks\/([^/]+)\/services\/([^/]+)\/(update|pull-update)\/?$/);
   if (serviceMatch) {
     return {
       eligible: true,
@@ -86,7 +100,7 @@ export function classifyRegistryDeliveryOp(method: string, apiPath: string): Reg
   if (apiPath.match(/^\/api\/mesh\/[^/]+\/redeploy$/)) {
     return { eligible: true, stage: 'mesh-redeploy' };
   }
-  if (apiPath.match(/^\/api\/stacks\/[^/]+\/rollback$/)) {
+  if (apiPath.match(/^\/api\/stacks\/[^/]+\/rollback\/?$/)) {
     return { eligible: true, stage: 'stack-deploy', stack };
   }
 

@@ -70,7 +70,7 @@ export function PortfolioMasthead({ data, staleSince }: {
 }) {
   const unreachable = data.coverage.filter(entry => entry.state === 'unreachable');
   const unsupported = data.coverage.filter(entry => entry.state === 'unsupported');
-  const coverageFailed = unreachable.length + unsupported.length > 0;
+  const coverageFailed = unreachable.length + unsupported.length > 0 || data.truncated;
   const { state, tone } = portfolioMastheadState(data.summary, coverageFailed);
   const config = TONE_CONFIG[tone];
   const now = useTicker(SYNC_LABEL_TICK_MS);
@@ -82,6 +82,7 @@ export function PortfolioMasthead({ data, staleSince }: {
   const reasons: string[] = [];
   if (unreachable.length > 0) reasons.push(`unreachable: ${unreachable.map(entry => entry.nodeName ?? `node ${entry.nodeId}`).join(', ')}`);
   if (unsupported.length > 0) reasons.push(`too old to answer: ${unsupported.map(entry => entry.nodeName ?? `node ${entry.nodeId}`).join(', ')}`);
+  if (data.truncated) reasons.push('more applications than this view can show');
 
   return (
     <div className="relative overflow-hidden rounded-lg border border-card-border border-t-card-border-top bg-card shadow-card-bevel transition-colors mb-4">

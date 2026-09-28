@@ -91,5 +91,11 @@
     "blurb": "Recent alerts opens the operational row with a This node / All nodes scope, and each alert leads to the stack, scan history, or update it concerns, switching nodes when needed. Fleet heartbeat sits beside it at the same height, lists problem nodes first, and opens their details, and Configuration summary gives one row per domain with each setting's scope.",
     "docUrl": "https://docs.sencho.io/features/dashboard",
     "screenshot": "home-fleet-triage.png"
+  },
+  {
+    "id": "save-and-pull-images",
+    "title": "Save & Pull Images",
+    "blurb": "Download a stack's images without deploying it. The compose editor's save menu now writes your edits and fetches the registry images in one step, so the next deploy in a maintenance window has nothing left to download. Running containers are left exactly as they are.",
+    "docUrl": "https://docs.sencho.io/features/editor"
   }
 ]

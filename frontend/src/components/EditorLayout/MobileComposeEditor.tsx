@@ -1,5 +1,5 @@
 import { useEffect } from 'react';
-import { ChevronLeft, Save, Rocket } from 'lucide-react';
+import { ChevronDown, ChevronLeft, Download, Save, Rocket } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { Button } from '../ui/button';
 import {
@@ -9,6 +9,12 @@ import {
     SelectTrigger,
     SelectValue,
 } from '@/components/ui/select';
+import {
+    DropdownMenu,
+    DropdownMenuContent,
+    DropdownMenuItem,
+    DropdownMenuTrigger,
+} from '@/components/ui/dropdown-menu';
 import type { StackAction } from './EditorView';
 
 interface MobileComposeEditorProps {
@@ -27,7 +33,11 @@ interface MobileComposeEditorProps {
     canEdit: boolean;
     requestSave: () => void;
     requestSaveAndDeploy: (e: React.MouseEvent) => void;
+    requestSaveAndPullImages: (e: React.MouseEvent) => void;
     canSaveAndReapply?: boolean;
+    /** Both stack:edit and stack:deploy on this stack, and not the self stack:
+     *  gates the image-pull item on the save menu. */
+    canPullImages?: boolean;
     /** False while status evidence is not authoritative; disables Save & Deploy
      *  (Save Only stays available). */
     actionsReady?: boolean;
@@ -58,7 +68,9 @@ export function MobileComposeEditor(props: MobileComposeEditorProps) {
         canEdit,
         requestSave,
         requestSaveAndDeploy,
+        requestSaveAndPullImages,
         canSaveAndReapply = false,
+        canPullImages = false,
         actionsReady = false,
         onClose,
         hasUnsavedChanges,
@@ -85,8 +97,10 @@ export function MobileComposeEditor(props: MobileComposeEditorProps) {
     const envSwitchDisabled = hasUnsavedChanges() || isFileLoading;
     // Plain Save is never gated by status readiness (it is not a lifecycle
     // action); only Save & Deploy / Save & Reapply requires authoritative
-    // runtime evidence.
-    const saveDisabled = isFileLoading || loadingAction === 'deploy';
+    // runtime evidence. An image pull holds the same per-stack lock a deploy
+    // does, so it disables the row too, or a second save could be dispatched
+    // mid-pull.
+    const saveDisabled = isFileLoading || loadingAction === 'deploy' || loadingAction === 'pull';
     const saveAndDeployDisabled = saveDisabled || !actionsReady;
     // Read-only while an env-file fetch is in flight: changeEnvFile overwrites the
     // buffer when it resolves, so edits typed during the load would be silently lost.
@@ -196,17 +210,50 @@ export function MobileComposeEditor(props: MobileComposeEditorProps) {
                             <Save className="mr-2 h-4 w-4" strokeWidth={1.5} />
                             Save
                         </Button>
-                        <Button
-                            type="button"
-                            variant="default"
-                            onClick={requestSaveAndDeploy}
-                            disabled={saveAndDeployDisabled}
-                            data-testid="mobile-editor-save-deploy"
-                            className="h-11 flex-1 rounded-lg"
-                        >
-                            <Rocket className="mr-2 h-4 w-4" strokeWidth={1.5} />
-                            {canSaveAndReapply ? 'Save & Reapply' : 'Save & Deploy'}
-                        </Button>
+                        {/* Split control: a full-width primary plus a narrow menu
+                            trigger, so adding an action never crowds the phone row
+                            or truncates the primary label. */}
+                        <div className="flex flex-1 items-center">
+                            <Button
+                                type="button"
+                                variant="default"
+                                onClick={requestSaveAndDeploy}
+                                disabled={saveAndDeployDisabled}
+                                data-testid="mobile-editor-save-deploy"
+                                className={cn(
+                                    'h-11 flex-1',
+                                    canPullImages ? 'rounded-l-lg rounded-r-none' : 'rounded-lg',
+                                )}
+                            >
+                                <Rocket className="mr-2 h-4 w-4" strokeWidth={1.5} />
+                                {canSaveAndReapply ? 'Save & Reapply' : 'Save & Deploy'}
+                            </Button>
+                            {canPullImages && (
+                                <DropdownMenu modal={false}>
+                                    <DropdownMenuTrigger asChild>
+                                        <Button
+                                            type="button"
+                                            variant="default"
+                                            aria-label="More save actions"
+                                            data-testid="mobile-editor-actions-menu"
+                                            disabled={saveDisabled}
+                                            className="h-11 rounded-l-none rounded-r-lg border-l border-primary-foreground/20 px-2"
+                                        >
+                                            <ChevronDown className="h-4 w-4" strokeWidth={1.6} />
+                                        </Button>
+                                    </DropdownMenuTrigger>
+                                    <DropdownMenuContent align="end">
+                                        <DropdownMenuItem
+                                            onClick={requestSaveAndPullImages}
+                                            disabled={!actionsReady}
+                                        >
+                                            <Download className="mr-2 h-4 w-4" strokeWidth={1.5} />
+                                            {'Save & Pull Images'}
+                                        </DropdownMenuItem>
+                                    </DropdownMenuContent>
+                                </DropdownMenu>
+                            )}
+                        </div>
                     </div>
                 )}
             </div>

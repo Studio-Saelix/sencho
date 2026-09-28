@@ -245,7 +245,7 @@ export async function startServer(server: Server): Promise<void> {
   }
 
   try {
-    const { reconstructBlueprintRolloutQueue, backfillMissingPreflightEvaluations, liveHealthRolloutExecutor } = await import('../services/gitops/handoff');
+    const { reconstructBlueprintRolloutQueue, liveHealthRolloutExecutor } = await import('../services/gitops/handoff');
     // The sink is installed before the gate starts, because starting the gate
     // reconciles verdicts that were persisted but never delivered, and each of
     // those has to be carried out. With no sink installed yet the decision would
@@ -266,10 +266,6 @@ export async function startServer(server: Server): Promise<void> {
     if (resumed > 0) {
       console.log(`[GitOps] Resumed ${resumed} Blueprint rollout(s) after restart`);
     }
-    const backfilled = await backfillMissingPreflightEvaluations();
-    if (backfilled > 0) {
-      console.log(`[GitOps] Backfilled preflight evidence for ${backfilled} Blueprint application(s)`);
-    }
   } catch (err) {
     // The gate is started at the top of the block, before reconstruction. If the
     // block failed before reaching that point, start it here rather than leave it
@@ -281,6 +277,18 @@ export async function startServer(server: Server): Promise<void> {
       HealthGateService.getInstance().start();
     }
     console.error('[GitOps] Blueprint rollout reconstruction failed:', err instanceof Error ? err.stack ?? err.message : String(err));
+  }
+
+  // Kept in its own step so a failure here is not reported as a rollout
+  // reconstruction failure, which would name the wrong work.
+  try {
+    const { backfillMissingPreflightEvaluations } = await import('../services/gitops/handoff');
+    const backfilled = await backfillMissingPreflightEvaluations();
+    if (backfilled > 0) {
+      console.log(`[GitOps] Backfilled preflight evidence for ${backfilled} Blueprint application(s)`);
+    }
+  } catch (err) {
+    console.error('[GitOps] Preflight backfill failed:', err instanceof Error ? err.stack ?? err.message : String(err));
   }
 
   // Git stacks that predate the revision state model are brought into it here,

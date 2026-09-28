@@ -145,20 +145,21 @@ The available actions are:
 - **Refresh** to re-read the live container status after the failure.
 - **Copy details** to put the stack name, node, action, error, elapsed time, and last output line on your clipboard for a bug report.
 
-Retry, Restart, and Roll back require deploy permission on the stack. **Stop**, **Take down**, **Install**, and **Scan this node** failures do not produce a recovery entry. After a failed or stalled operation, Sencho refreshes the container state automatically so the page reflects reality, and it never leaves the action stuck in an endless spinner.
+Retry, Restart, and Roll back require deploy permission on the stack. **Stop**, **Take down**, **Install**, **Scan this node**, and **Save & Pull Images** failures do not produce a recovery entry. After a failed or stalled operation, Sencho refreshes the container state automatically so the page reflects reality, and it never leaves the action stuck in an endless spinner.
 
 ## Supported entry points
 
 The progress view opens for the following actions:
 
 - **Deploy**, **Update**, **Restart**, **Stop**, **Take down** from the stack editor's action bar, sidebar context menu, or confirmation dialogs.
+- **Save & Pull Images** from the compose editor's save menu.
 - **Install** from the App Store.
 - **Apply** from a Git Source panel when the apply request includes a deploy.
 - **Scan this node** from the Security page's Overview tab, covering the vulnerability, secret, and compose-misconfiguration scan types you select. See [Vulnerability Scanning](/features/vulnerability-scanning#scanning-a-whole-node-at-once) for what each scan type checks.
 
-Of those, **Deploy**, **Update**, **Install**, **Take down**, and Git **Apply** route through `docker compose up` or `docker compose down` and produce a populated structured-log body. **Restart** and **Stop** call the Docker Engine directly to act on existing containers; they bypass compose, so the modal opens, registers `0 lines`, and finishes. **Scan this node** streams its own sanitized progress lines (counts and rule IDs, never raw secret values) as LOG rows.
+Of those, **Deploy**, **Update**, **Install**, **Take down**, and Git **Apply** route through `docker compose up` or `docker compose down`, and **Save & Pull Images** routes through `docker compose pull`; all of them produce a populated structured-log body. **Restart** and **Stop** call the Docker Engine directly to act on existing containers; they bypass compose, so the modal opens, registers `0 lines`, and finishes. **Scan this node** streams its own sanitized progress lines (counts and rule IDs, never raw secret values) as LOG rows.
 
-The [health gate](#health-gate) activates only after **Deploy** and **Update**; it does not fire for Restart, Stop, Take down, Install, Git Apply, or Scan this node.
+The [health gate](#health-gate) activates only after **Deploy** and **Update**; it does not fire for Restart, Stop, Take down, Install, Git Apply, Scan this node, or Save & Pull Images. A pull never reconciles the running stack, so there is nothing to observe.
 
 **Take down** is exposed over the HTTP API as `POST /api/stacks/:name/down`, with an optional `?removeVolumes=true` to remove compose volumes when the node advertises support.
 

@@ -9,6 +9,7 @@ import {
     FolderOpen,
     Maximize2,
     Minimize2,
+    Download,
 } from 'lucide-react';
 import { Button } from '../ui/button';
 import { Card, CardContent, CardHeader } from '../ui/card';
@@ -72,6 +73,7 @@ export type StackAction =
     | 'update'
     | 'delete'
     | 'rollback'
+    | 'pull'
     | 'down';
 
 /**
@@ -175,6 +177,7 @@ export interface EditorViewProps {
     closeComposeEditor: () => void;
     requestSave: () => void;
     requestSaveAndDeploy: (e: React.MouseEvent) => void;
+    requestSaveAndPullImages: (e: React.MouseEvent) => void;
     discardChanges: () => void;
     setContent: (next: string) => void;
     setEnvContent: (next: string) => void;
@@ -287,6 +290,7 @@ export function EditorView(props: EditorViewProps) {
         closeComposeEditor,
         requestSave,
         requestSaveAndDeploy,
+        requestSaveAndPullImages,
         discardChanges,
         setContent,
         setEnvContent,
@@ -320,6 +324,18 @@ export function EditorView(props: EditorViewProps) {
     } = props;
     const monacoEditorRef = useRef<import('monaco-editor').editor.IStandaloneCodeEditor | null>(null);
     const canEditCompose = can('stack:edit', 'stack', stackName, activeNode?.id);
+    // Pulling stages images for a deploy, so it takes the edit authority for the
+    // authored state it resolves against plus the deploy authority that consumes
+    // the images. A caller holding only one half would collect a 403, so the
+    // item stays hidden rather than shown dead. The self stack is excluded: the
+    // backend refuses a pull there and its image updates have their own channel.
+    const canPullImages =
+        canEditCompose && !isSelfStack && can('stack:deploy', 'stack', stackName, activeNode?.id);
+
+    // An image pull takes the same per-stack operation lock a deploy does, so the
+    // save surfaces have to disable for it as well. Without this they stay
+    // clickable mid-pull and dispatch a second save against a busy stack.
+    const lifecycleBusy = loadingAction === 'deploy' || loadingAction === 'pull';
 
     // Dispose the underlying Monaco model when EditorView unmounts. The
     // @monaco-editor/react wrapper reuses a single model per editor instance
@@ -641,13 +657,13 @@ export function EditorView(props: EditorViewProps) {
                                             )}
                                         </Button>
                                         <div className="flex items-center">
-                                            <Button size="sm" variant="default" className="rounded-l-lg rounded-r-none" onClick={requestSaveAndDeploy} disabled={loadingAction === 'deploy' || !actionsReady}>
+                                            <Button size="sm" variant="default" className="rounded-l-lg rounded-r-none" onClick={requestSaveAndDeploy} disabled={lifecycleBusy || !actionsReady}>
                                                 <Rocket className="w-4 h-4 mr-2" strokeWidth={1.5} />
                                                 {canSaveAndReapply ? 'Save & Reapply' : 'Save & Deploy'}
                                             </Button>
                                             <DropdownMenu modal={false}>
                                                 <DropdownMenuTrigger asChild>
-                                                    <Button size="sm" variant="default" className="rounded-r-lg rounded-l-none border-l border-primary-foreground/20 px-1.5" disabled={loadingAction === 'deploy'}>
+                                                    <Button size="sm" variant="default" className="rounded-r-lg rounded-l-none border-l border-primary-foreground/20 px-1.5" disabled={lifecycleBusy}>
                                                         <ChevronDown className="w-3.5 h-3.5" />
                                                     </Button>
                                                 </DropdownMenuTrigger>
@@ -656,6 +672,15 @@ export function EditorView(props: EditorViewProps) {
                                                         <Save className="w-4 h-4 mr-2" strokeWidth={1.5} />
                                                         Save Only
                                                     </DropdownMenuItem>
+                                                    {canPullImages && (
+                                                        <DropdownMenuItem
+                                                            onClick={requestSaveAndPullImages}
+                                                            disabled={lifecycleBusy || !actionsReady}
+                                                        >
+                                                            <Download className="w-4 h-4 mr-2" strokeWidth={1.5} />
+                                                            Save &amp; Pull Images
+                                                        </DropdownMenuItem>
+                                                    )}
                                                     <DropdownMenuItem onClick={discardChanges} className="text-destructive/80 focus:text-destructive">
                                                         <X className="w-4 h-4 mr-2" strokeWidth={1.5} />
                                                         Discard Changes

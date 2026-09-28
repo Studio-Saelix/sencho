@@ -42,7 +42,8 @@ import type { HealthRolloutExecutor } from './healthRolloutExecutor';
 import { DatabaseService, type Node } from '../DatabaseService';
 import { BlueprintService } from '../BlueprintService';
 import { buildBlueprintMarker } from '../../helpers/blueprintMarker';
-import { sanitizeForLog } from '../../utils/safeLog';
+import { errorMessageForLog, sanitizeForLog } from '../../utils/safeLog';
+import { mapWithConcurrency } from '../../utils/mapWithConcurrency';
 
 export { setRegistryReadinessDepsForTests };
 
@@ -1130,12 +1131,20 @@ export class BlueprintTargetAdapter implements TargetAdapter {
           };
         }
 
+        // The marker is the only on-node record of what this deploy installed.
+        // Naming the generation, its artifact set, and the rollout that
+        // authorized it is what lets a later drift check prove what a repair
+        // would overwrite instead of inferring it from the application's
+        // current pointers.
         const marker = buildBlueprintMarker({
           blueprintId: blueprint.id,
           revision: blueprint.revision,
           lastApplied: Date.now(),
           applicationId: liveApp.id,
           bindingRevision: binding.intentRevisionId,
+          generationId: binding.acceptedGenerationId,
+          artifactSetId: binding.artifactSetId,
+          rolloutGenerationId: liveApp.rollout_generation_id ?? undefined,
         });
 
         // Capture the pre-deploy state so this rollout can be rolled back later.
@@ -1373,29 +1382,88 @@ export async function reconstructBlueprintRolloutQueue(): Promise<number> {
 }
 
 /**
+ * Max concurrent preflight evaluations during the startup backfill.
+ *
+ * Each evaluation is network-bound on registry probes, so overlapping a few
+ * hides that latency, while the writes they finish with share one synchronous
+ * SQLite connection and gain nothing from more overlap.
+ */
+export const PREFLIGHT_BACKFILL_CONCURRENCY = 3;
+
+/** The per-application evaluation the backfill drives, injectable so tests can
+ * drive the loop without a live registry probe. */
+type BackfillAuthorizer = typeof ensureRolloutAuthorization;
+
+/**
+ * Whether stored preflight evidence exists for an application. Never throws:
+ * a store read that fails must cost this one application, never the batch.
+ */
+function hasStoredPreflightEvidence(store: GitOpsStore, applicationId: string): boolean {
+  try {
+    return Boolean(store.getApplication(applicationId)?.latest_preflight_evidence_json);
+  } catch (err) {
+    console.warn(
+      '[GitOps] Preflight backfill could not read evidence for %s: %s',
+      sanitizeForLog(applicationId),
+      errorMessageForLog(err),
+    );
+    return false;
+  }
+}
+
+/**
  * One-shot startup backfill: live-authorized Blueprint apps that still lack
  * stored preflight evidence are evaluated once so derive can project honestly
  * without painting them blocked for a missing column.
+ *
+ * This runs on the startup path ahead of the HTTP bind, and each evaluation can
+ * spend the full preflight timeout, so the work is spread over a small pool
+ * rather than serialized. The callback contains every per-application failure,
+ * including the live-binding read that decides whether there is anything to
+ * evaluate, so one bad application can never reject the batch and abandon the
+ * evaluations still in flight. The tally reads stored evidence rather than the
+ * returned verdict, because evidence is what derive projects from.
  */
-export async function backfillMissingPreflightEvaluations(): Promise<number> {
+export async function backfillMissingPreflightEvaluations(
+  authorize: BackfillAuthorizer = ensureRolloutAuthorization,
+): Promise<number> {
   const store = GitOpsStore.getInstance();
   const apps = store.listAuthorizedBlueprintApplications().filter(
     (app) => app.latest_preflight_evidence_json == null,
   );
   let filled = 0;
-  for (const app of apps) {
-    if (!liveRolloutBinding(app)) continue;
-    const result = await ensureRolloutAuthorization(app.id, null, 'preflight_backfill');
-    if (store.getApplication(app.id)?.latest_preflight_evidence_json) {
+  await mapWithConcurrency(apps, PREFLIGHT_BACKFILL_CONCURRENCY, async (app) => {
+    let result: Awaited<ReturnType<BackfillAuthorizer>> | null = null;
+    try {
+      // Read inside the callback, not in the filter above: an authorization that
+      // no longer resolves is a per-application skip, and a store that fails to
+      // resolve one costs that application, never the batch.
+      if (!liveRolloutBinding(app)) return;
+      result = await authorize(app.id, null, 'preflight_backfill');
+    } catch (err) {
+      console.warn(
+        '[GitOps] Preflight backfill failed for %s: %s',
+        sanitizeForLog(app.id),
+        errorMessageForLog(err),
+      );
+    }
+    if (hasStoredPreflightEvidence(store, app.id)) {
       filled += 1;
-    } else if (!result.ok) {
+    } else if (result && !result.ok) {
       console.warn(
         '[GitOps] Preflight backfill could not authorize %s: %s',
         sanitizeForLog(app.id),
         sanitizeForLog(result.reason),
       );
+    } else if (result) {
+      // No evaluation today can return ok without writing evidence first. If
+      // one ever does, the app is unevaluable to derive and must say so.
+      console.warn(
+        '[GitOps] Preflight backfill stored no evidence for authorized %s',
+        sanitizeForLog(app.id),
+      );
     }
-  }
+  });
   return filled;
 }
 

@@ -628,6 +628,7 @@ export type BlueprintDeploymentStatus =
     | 'active'
     | 'drifted'
     | 'correcting'
+    | 'repair_held'
     | 'failed'
     | 'withdrawing'
     | 'withdrawn'

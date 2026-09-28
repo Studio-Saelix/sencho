@@ -385,6 +385,13 @@ export async function augmentJsonBodyForRegistryDelivery(
     const challengedHosts = await findChallengedHosts(discover, classification.stack, input.nodeId, input.abortSignal);
     if (challengedHosts.length === 0) {
       // All uncovered refs are public or inconclusive: nothing to deliver, no refusal.
+      // An empty discovery set is the CORRECT answer for a stack whose images are
+      // all public, or which declares no images at all, so it must never be turned
+      // into a refusal. A remote whose project genuinely cannot be read lands here
+      // too and fails downstream with compose's own error, which is why that case
+      // reads as a late "unauthorized" rather than an early diagnosis. Tightening
+      // it belongs in the discovery step on the target, not here: this layer
+      // cannot tell an empty stack from an unreadable one.
       return passthrough(input.body);
     }
 

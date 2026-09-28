@@ -136,11 +136,27 @@ The three policy cards in the editor map exactly to the three modes the reconcil
 |---|---|
 | **Observe** · Detect & display, no notifications | Drift surfaces in the deployment table; no notification, no auto-fix. |
 | **Suggest** · Detect & notify, operator decides | Sencho dispatches a `blueprint_drift_detected` notification through your notification routes, if any. |
-| **Enforce** · Detect & auto-fix, silent on success | Sencho re-deploys the blueprint silently when drift is detected. A `blueprint_drift_correction_failed` notification fires only when the auto-fix attempt fails. |
+| **Enforce** · Detect & auto-fix, silent on success | Sencho re-deploys the blueprint silently when drift is detected. A `blueprint_drift_correction_failed` notification fires only when the auto-fix attempt fails, and a `blueprint_drift_repair_held` notification fires when auto-fix is declined. |
 
 Even **Observe** keeps Sencho honest about what it found: the deployment row shows "drifted 3h ago: service caddy exited code 1". Silence would forfeit Sencho's authority over your fleet.
 
-Enforce's auto-fix only ever redeploys the blueprint's *current* revision. Container-level drift (a stopped or crashed container) uses the ordinary deploy path. Frozen image-digest disagreement uses a digest-pinned overlay with `--pull never`, so authored tags on disk stay unchanged. For a remote target, Sencho freezes and repairs against that node's own rendered Compose model and Docker platform (fetched over the authenticated proxy), not the controlling instance's local filesystem. A compose edit never reaches that auto-fix path on a stateful or state-unknown blueprint: any revision change re-enters **Awaiting confirmation** on every targeted node first, regardless of drift mode, so a human always signs off before a new revision touches existing data. See [Lifecycle: status transitions](#lifecycle-status-transitions).
+Enforce's auto-fix restores the exact generation and image identity the target already acknowledged, and nothing else. If a newer generation is accepted while a target is still on an older one, the repair restores the older one, because that is the state the target was authorized to run. Container-level drift (a stopped or crashed container) uses the ordinary deploy path. Frozen image-digest disagreement uses a digest-pinned overlay with `--pull never`, so authored tags on disk stay unchanged. For a remote target, Sencho freezes and repairs against that node's own rendered Compose model and Docker platform (fetched over the authenticated proxy), not the controlling instance's local filesystem. That repair also needs the target node to run a Sencho release that honors digest pins. A node that predates them would drop the pins and redeploy by tag, so the repair is refused and the node is reported as needing an upgrade instead, and the same applies when the node cannot be reached to confirm. The deployment row for that target ends in **Failed** with the reason, and a `blueprint_drift_correction_failed` notification fires. Upgrade the node, then trigger a deploy as you would for any other failed deployment; other drift modes are unaffected. A compose edit never reaches that auto-fix path on a stateful or state-unknown blueprint: any revision change re-enters **Awaiting confirmation** on every targeted node first, regardless of drift mode, so a human always signs off before a new revision touches existing data. See [Lifecycle: status transitions](#lifecycle-status-transitions).
+
+### When a repair is held
+
+Some drift cannot be repaired safely, and Sencho says so instead of trying. The deployment row ends in **Repair held**, the reason is on the row, and a `blueprint_drift_repair_held` notification fires in Enforce mode. The workload is left exactly as it is, and the drift is still drift: a held target is not reported as up to date.
+
+A repair is held when:
+
+- **The Blueprint is stateful, or Sencho cannot classify it.** Auto-fix is declined rather than risk volumes Sencho cannot prove are safe.
+- **The rollout that owned the target has moved on.** The rollout replacing it advances the target instead.
+- **Sencho cannot prove what the node is running.** The on-node marker names no generation, or names a different one than the target acknowledged.
+- **The target's own evidence is not usable.** It is unreachable, its connectivity evidence is stale, an earlier change to it was interrupted, or a recovery or rollback owns it.
+- **The generation and its approved image identity disagree.** The rollout froze a different pair than the target expects, so neither can be called current.
+
+Most holds are a state rather than a block. Sencho keeps checking the target, so once the cause clears, for example a node comes back, the next reconciliation repairs the drift normally. To resolve one sooner, deploy explicitly as you would for any other target.
+
+A hold whose cause is the rollout moving on is the exception: it stays until a later rollout covers that target, or until you deploy to it. Superseding does not reverse, so Sencho will not reopen that rollout by itself.
 
 ### Digest drift
 
@@ -170,6 +186,7 @@ Possible status values:
 | **Active** | The deployment is placed and its containers are running for this blueprint revision. Exact image identity is a separate GitOps / Drift proof; a row can read Active while Drift shows runtime artifact disagreement. |
 | **Drifted** | The reconciler detected a difference between the live state and the desired one (marker, revision, container health, or frozen image digest). |
 | **Correcting** | An Enforce-mode auto-fix is in flight. |
+| **Repair held** | Drift was found and auto-fix was declined, with the reason on the row. Nothing was changed. |
 | **Failed** | The deployment or withdrawal errored. The notes column carries the message. |
 | **Withdrawing** | A withdraw is in flight. |
 | **Withdrawn** | The deployment was successfully removed; the row is about to be cleared. |
@@ -184,7 +201,7 @@ Possible status values:
 
 The common paths through the status enum.
 
-- **Stateless first deploy.** No row → **Pending** → **Deploying** → **Active**. Drift detected later on Enforce flips to **Drifted** → **Correcting** → **Active**.
+- **Stateless first deploy.** No row → **Pending** → **Deploying** → **Active**. Drift detected later on Enforce flips to **Drifted** → **Correcting** → **Active**. Drift that cannot be repaired safely goes to **Repair held** instead and stays there until the cause clears.
 - **Stateful first deploy.** No row → **Awaiting confirmation**. Operator clicks **Confirm deploy** and picks **Deploy fresh** → **Deploying** → **Active**.
 - **Compose change on a stateless deployment.** **Active** → **Deploying** on the next tick → **Active**.
 - **Compose change on a stateful or unknown deployment.** **Active** → **Awaiting confirmation** on every targeted node so the operator can decide whether the new revision is safe for that node's local data. Operator confirms → **Deploying** → **Active**.
@@ -341,6 +358,7 @@ Two notification events fire from the reconciler:
 
 - `blueprint_drift_detected` (warning severity), in Observe and Suggest modes when drift is detected. In Observe the row updates silently in the table; in Suggest the notification is also dispatched through your notification routes.
 - `blueprint_drift_correction_failed` (error severity), in Enforce mode when an auto-fix attempt fails.
+- `blueprint_drift_repair_held` (warning severity), in Enforce mode when a repair is declined. The deployment row reads **Repair held** with the reason.
 
 Both events route through the standard alert pipeline. Configure delivery channels under [Notification routing](/features/alerts-notifications#notification-routing).
 
@@ -508,6 +526,6 @@ A future Volume Migration feature will automate this with app-aware backup tooli
     Outbound-only remote mode. A Pilot-attached node is eligible as a Blueprint target the same way a Distributed API Proxy node is.
   </Card>
   <Card title="Alerts & Notifications" icon="bell" href="/features/alerts-notifications">
-    Where `blueprint_drift_detected` and `blueprint_drift_correction_failed` route. Configure channels per notification.
+    Where `blueprint_drift_detected`, `blueprint_drift_correction_failed`, and `blueprint_drift_repair_held` route. Configure channels per notification.
   </Card>
 </CardGroup>

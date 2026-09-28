@@ -58,6 +58,9 @@ export function plainSource(
   status: PlainSourceStatus,
   overrides: Partial<SourceIdentityFields> = {},
 ): SourceFacet {
+  if (status === 'source_review_pending') {
+    return { ...sourceIdentity(overrides), status, reviewBlockReason: null };
+  }
   return { ...sourceIdentity(overrides), status };
 }
 

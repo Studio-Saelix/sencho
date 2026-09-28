@@ -169,6 +169,13 @@ describe('GitOpsRolloutControls', () => {
     expect(toast.success).toHaveBeenCalledWith('Placement review reopened');
   });
 
+  it('does not offer replan for an unknown placement state', () => {
+    const projection = blueprintRevision({ status: 'not_applicable' });
+    projection.facets.placement = JSON.parse('{"status":"from_a_newer_node"}') as typeof projection.facets.placement;
+    renderControls(projection);
+    expect(screen.queryByTestId('gitops-action-replan')).toBeNull();
+  });
+
   it('supersedes the live rollout through its destructive confirmation', async () => {
     const user = userEvent.setup();
     const onChanged = vi.fn();
@@ -310,6 +317,21 @@ describe('GitOpsRolloutControls', () => {
     expect(onChanged).toHaveBeenCalled();
   });
 
+  it.each([
+    ['a rollback already running', 'rollback_in_progress', false],
+    ['a partially failed rollback', 'rollback_partial_failed', true],
+    ['a target that is unreachable', 'target_unreachable', true],
+  ])('offers rollback for %s', (_label, status, expected) => {
+    renderControls(
+      blueprintRevision({ status: status as never, rolloutGenerationId: 'rgen-1' }),
+      () => true,
+      true,
+      () => {},
+      [{ generationId: 'gen-lkg' }],
+    );
+    expect(screen.queryByTestId('gitops-action-rollback') !== null).toBe(expected);
+  });
+
   it('reports a partial rollback failure truthfully', async () => {
     const user = userEvent.setup();
     vi.mocked(rollbackGitOpsRollout).mockResolvedValue({
@@ -341,13 +363,13 @@ describe('GitOpsRolloutControls', () => {
       blueprintRevision(
         { status: 'rollout_queued', rolloutGenerationId: 'rgen-1' },
         [target({
-          runtime: {
-            status: 'recovery_failed',
-            recoveryRef: 'rec-1',
-            recoveryGenerationId: 'gen-lkg',
-            failureClass: 'partial',
-            failureAt: 1,
-          },
+           runtime: {
+             status: 'recovery_failed',
+             recoveryRef: 'rec-1',
+             recoveryGenerationId: 'gen-lkg',
+             failureClass: 'partial',
+             failureAt: 1,
+           },
         })],
       ),
       () => true,
@@ -364,6 +386,43 @@ describe('GitOpsRolloutControls', () => {
       scope: { kind: 'failed' },
     }));
   });
+
+  it.each(['recovery_required', 'recovery_failed'] as const)(
+    'offers the failed-targets scope for a target in %s',
+    async runtimeStatus => {
+      const user = userEvent.setup();
+      vi.mocked(rollbackGitOpsRollout).mockResolvedValue({
+        ok: true,
+        results: [{ nodeId: 1, status: 'restored' }],
+      });
+      renderControls(
+        blueprintRevision(
+          { status: 'rollout_queued', rolloutGenerationId: 'rgen-1' },
+          [target({
+            runtime: {
+              status: runtimeStatus,
+              recoveryRef: 'rec-1',
+              recoveryGenerationId: 'gen-lkg',
+              failureClass: 'partial',
+              failureAt: 1,
+            },
+          })],
+        ),
+        () => true,
+        true,
+        () => {},
+        [{ generationId: 'gen-lkg' }],
+      );
+
+      await user.click(screen.getByTestId('gitops-action-rollback'));
+      await user.click(screen.getByRole('radio', { name: 'Failed targets' }));
+      await user.click(screen.getByTestId('gitops-confirm-rollback'));
+      await waitFor(() => expect(rollbackGitOpsRollout).toHaveBeenCalledWith('bp:5', {
+        generationId: 'gen-lkg',
+        scope: { kind: 'failed' },
+      }));
+    },
+  );
 
   it('scopes a rollback to one target', async () => {
     const user = userEvent.setup();

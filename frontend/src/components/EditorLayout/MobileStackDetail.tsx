@@ -56,6 +56,7 @@ export function MobileStackDetail(props: EditorViewProps) {
         scanStackConfig,
         requestSave,
         requestSaveAndDeploy,
+        requestSaveAndPullImages,
         setContent,
         setEnvContent,
         changeEnvFile,
@@ -96,6 +97,10 @@ export function MobileStackDetail(props: EditorViewProps) {
     const isMultiContainerLayout = safeContainers.length > 1 || effectiveServices.length > 1;
     const isRunning = safeContainers.some(c => c.State === 'running');
     const canEditStack = can('stack:edit', 'stack', stackName, activeNode?.id);
+    // Same paired gate as the desktop item: the route requires stack:edit and
+    // stack:deploy, so an edit-only user must not see the affordance at all.
+    const canPullImages =
+        canEditStack && !isSelfStack && can('stack:deploy', 'stack', stackName, activeNode?.id);
 
     // The writable editor layer renders only for an editor; a stale editingCompose
     // while the user lacks stack:edit falls back to the read-only Compose segment.
@@ -118,8 +123,10 @@ export function MobileStackDetail(props: EditorViewProps) {
                     canEdit={canEditStack}
                     requestSave={requestSave}
                     requestSaveAndDeploy={requestSaveAndDeploy}
+                    requestSaveAndPullImages={requestSaveAndPullImages}
                     actionsReady={actionsReady}
                     canSaveAndReapply={canSaveAndReapply}
+                    canPullImages={canPullImages}
                     onClose={onCloseEditor}
                     hasUnsavedChanges={hasUnsavedChanges}
                 />

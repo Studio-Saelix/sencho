@@ -90,6 +90,7 @@ const EXACT_SUFFIX_RULES: readonly SuffixRule[] = [
   { method: 'DELETE', suffix: '/git-source', action: 'stack:edit' },
   { method: 'POST', suffix: '/git-source/pull', action: 'stack:edit' },
   { method: 'POST', suffix: '/git-source/apply', action: 'stack:edit' },
+  { method: 'POST', suffix: '/pull-images', action: 'stack:edit' },
   { method: 'POST', suffix: '/git-source/webhook-pull', action: 'stack:edit' },
   { method: 'POST', suffix: '/git-source/dismiss-pending', action: 'stack:edit' },
   { method: 'POST', suffix: '/git-source/browse', action: 'stack:edit' },

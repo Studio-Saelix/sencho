@@ -37,8 +37,16 @@ export function GitOpsApplicationView({ id, className, headerActions }: {
   const { canOpenFleet } = useWorkplaceCapabilities();
   const isMobile = useIsMobile();
   const handoff = row ? owningSurfaceHandoff(row, { canOpenBlueprint: canOpenFleet && !isMobile }) : null;
+  const canOperateBlueprint = data !== null
+    && row !== null
+    && !isMobile
+    && id.startsWith('bp:')
+    && row.targetMode === 'blueprint'
+    && typeof data.blueprintEnabled === 'boolean';
   // A posture from a newer build still renders, as an explicit unknown.
-  const posture = row ? (POSTURE_LABEL[row.posture] ?? { label: `unrecognized (${row.posture})`, tone: 'neutral' as const }) : null;
+  const posture = row
+    ? POSTURE_LABEL[row.posture] ?? { label: `unrecognized (${row.posture})`, tone: 'neutral' as const }
+    : null;
 
   return (
     <div data-testid="gitops-application-view" className={cn('flex h-full min-h-0 flex-col overflow-hidden p-6', className)}>
@@ -98,7 +106,7 @@ export function GitOpsApplicationView({ id, className, headerActions }: {
           </header>
           <GitOpsApplicationDetail
             detail={data}
-            actions={(
+            actions={canOperateBlueprint ? (
               <div className="flex flex-col gap-2">
                 <GitOpsAuthorityActions
                   applicationId={id}
@@ -107,14 +115,14 @@ export function GitOpsApplicationView({ id, className, headerActions }: {
                   projection={data.projection}
                   onChanged={refresh}
                   can={can}
-                  blueprintEnabled={data.blueprintEnabled ?? undefined}
+                  blueprintEnabled={data.blueprintEnabled ?? false}
                 />
                 <GitOpsRolloutControls
                   applicationId={id}
                   projection={data.projection}
                   onChanged={refresh}
                   can={can}
-                  blueprintEnabled={data.blueprintEnabled ?? undefined}
+                  blueprintEnabled={data.blueprintEnabled ?? false}
                   rollbackGenerations={data.rollbackCandidates}
                   nodeLabel={(nodeId) => {
                     const target = row.targets.find(entry => entry.nodeId === nodeId);
@@ -122,7 +130,7 @@ export function GitOpsApplicationView({ id, className, headerActions }: {
                   }}
                 />
               </div>
-            )}
+            ) : null}
           />
         </ScrollArea>
       ) : null}
@@ -151,6 +159,11 @@ function errorCopy(error: GitOpsApplicationError): { title: string; line: string
       return {
         title: 'The owning node did not answer',
         line: `The application's state is unknown until the node reports again (${error.message}).`,
+      };
+    case 'evidence_unavailable':
+      return {
+        title: 'Evidence for this application is unavailable',
+        line: `Its owning node reports it, but not yet with state this node can read; retry once it reports again (${error.message}).`,
       };
     case 'failed':
       return { title: 'The application could not be read', line: error.message };

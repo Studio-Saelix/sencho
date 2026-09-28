@@ -3570,6 +3570,49 @@ describe('GitSourceService.createStackFromGit', () => {
 
         saveSpy.mockRestore();
     });
+
+    it('keeps the stack and its row when a step after the commit boundary fails', async () => {
+        mockSuccessfulClone({
+            compose: 'services:\n  web:\n    image: nginx\n',
+        });
+        const svc = GitSourceService.getInstance();
+        const db = DatabaseService.getInstance();
+        const lastPlanSpy = vi.spyOn(db, 'setGitSourceLastPlan')
+            .mockImplementationOnce(() => { throw new Error('simulated post-commit failure'); });
+        const deleteSpy = vi.spyOn(db, 'deleteGitSource');
+
+        try {
+            await expect(svc.createStackFromGit({
+                stackName: 'create-post-commit-fail',
+                repoUrl: 'https://github.com/example/repo.git',
+                branch: 'main',
+                composePaths: ['compose.yaml'],
+                contextDir: null,
+                syncEnv: false,
+                envPath: null,
+                authType: 'none',
+                token: null,
+                autoApplyOnWebhook: false,
+                autoDeployOnApply: false,
+            })).rejects.toThrow(/stack was created from Git, but a follow-up step failed/);
+
+            // Past the success boundary nothing is compensated: the row and the
+            // stack both stay, so a rollback delete must not run here.
+            expect(deleteSpy).not.toHaveBeenCalled();
+            expect(db.getGitSource('create-post-commit-fail')).toBeDefined();
+            const { FileSystemService } = await import('../services/FileSystemService');
+            const stacks = await FileSystemService.getInstance().getStacks();
+            expect(stacks).toContain('create-post-commit-fail');
+        } finally {
+            lastPlanSpy.mockRestore();
+            deleteSpy.mockRestore();
+            db.deleteGitSource('create-post-commit-fail');
+            db.getDb()
+                .prepare('DELETE FROM gitops_applications WHERE stack_name = ?')
+                .run('create-post-commit-fail');
+            await cleanupStackDir('create-post-commit-fail');
+        }
+    });
 });
 
 describe('GitSourceService.apply', () => {
@@ -10200,7 +10243,7 @@ describe('GitSourceService multi-file create + apply flow', () => {
         await cleanupStackDir('ctx-create');
     });
 
-    it('pulls a multi-file v2 pending blob and applies both files to disk', async () => {
+    it('pulls a multi-file v4 pending blob and applies both files to disk', async () => {
         const sha = '4444ddd4444ddd4444ddd4444ddd4444ddd4444d';
         mockSuccessfulClone({
             compose: 'services:\n  web:\n    image: nginx\n',
@@ -10296,11 +10339,10 @@ describe('GitSourceService pending blob decode branches', () => {
     function svc(): unknown { return GitSourceService.getInstance(); }
     type DecodeApi = {
         crypto: { encrypt(s: string): string; decrypt(s: string): string };
-        encodePendingCompose(files: { path: string; content: string }[], ctx: string | null, cand: string | null, inv: unknown): string;
-        decodePendingCompose(s: string): { files: { path: string; content: string }[]; contextDir: string | null; candidateRelPath: string | null; inventory: unknown };
+        decodePendingCompose(s: string): { version: 2 | 3 | 4 | 'plaintext'; files: { path: string; content: string }[]; contextDir: string | null; candidateRelPath: string | null; inventory: unknown };
     };
 
-    it('round-trips the v3 blob with candidate path and inventory', () => {
+    it('decodes a v3 blob with candidate path and inventory', () => {
         const s = svc() as unknown as DecodeApi;
         const encoded = s.crypto.encrypt(JSON.stringify({
             v: 3,
@@ -10310,6 +10352,7 @@ describe('GitSourceService pending blob decode branches', () => {
             inventory: { inputs: [], refusals: [], buildContexts: [] },
         }));
         const decoded = s.decodePendingCompose(encoded);
+        expect(decoded.version).toBe(3);
         expect(decoded.candidateRelPath).toBe('generations/candidate-abc');
         expect(decoded.files[0].content).toBe('x');
         expect(decoded.inventory).toEqual({ inputs: [], refusals: [], buildContexts: [] });
@@ -10323,7 +10366,7 @@ describe('GitSourceService pending blob decode branches', () => {
         expect(decoded.files[0].content).toBe('y');
     });
 
-    it('falls back to legacy plaintext for unknown shapes', () => {
+    it('falls back to legacy plaintext when the blob has no version marker', () => {
         const s = svc() as unknown as DecodeApi;
         const decoded = s.decodePendingCompose(s.crypto.encrypt('legacy content'));
         expect(decoded.files).toEqual([{ path: 'compose.yaml', content: 'legacy content' }]);

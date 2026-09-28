@@ -52,7 +52,8 @@ export type GitOpsAttentionReason =
   | 'artifact_unqualified'
   | 'artifact_stale'
   | 'artifact_identity_changed'
-  | 'drift';
+  | 'drift'
+  | 'repair_held';
 
 /**
  * How loudly a reason should present.
@@ -90,6 +91,7 @@ export const ATTENTION_TONE: Readonly<Record<GitOpsAttentionReason, 'failure' | 
   artifact_stale: 'pending',
   artifact_identity_changed: 'pending',
   drift: 'pending',
+  repair_held: 'pending',
 };
 
 export function currentDrift(projection: GitOpsRevisionProjection): GitOpsDriftItem[] {
@@ -236,6 +238,14 @@ export function attentionReasons(projection: GitOpsRevisionProjection): GitOpsAt
         break;
       case 'recovery_failed':
         reasons.add('recovery_failed');
+        break;
+      // A held repair is drift Sencho has declined to fix. It is its own reason
+      // because the operator action differs from every other drift: a rollout or
+      // an explicit deployment has to resolve it. A tick keeps re-checking, so
+      // most holds clear on their own once the cause does, but a hold whose
+      // cause is a superseded rollout will not, because superseding is one-way.
+      case 'repair_held':
+        reasons.add('repair_held');
         break;
       default:
         break;

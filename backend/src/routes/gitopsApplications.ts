@@ -167,7 +167,7 @@ function parseFilters(query: Request['query']): ParseResult {
     const raw = stringParam(query[key]);
     if (raw === undefined) return null;
     const parsed = Number(raw);
-    return Number.isSafeInteger(parsed) ? parsed : 'invalid';
+    return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : 'invalid';
   };
   const nodeId = intParam('nodeId');
   if (nodeId === 'invalid') return { ok: false, message: 'nodeId must be an integer' };
@@ -227,7 +227,14 @@ function matchesFilters(row: GitOpsPortfolioRow, filters: GitOpsPortfolioFilters
   if (filters.rolloutStatus !== undefined && row.rolloutStatus !== filters.rolloutStatus) return false;
   if (filters.healthStatus !== undefined && row.healthStatus !== filters.healthStatus) return false;
   if (filters.driftClass !== undefined && !row.drift.classes.includes(filters.driftClass)) return false;
-  if (filters.evidence === 'unknown' && !row.evidence.unknown) return false;
+  // An unknown connectivity grade is its own evidence grade, so it belongs in
+  // the unknown-evidence filter even when the row itself claims otherwise. The
+  // grade is read from connectivity rather than from the target's `evidence`
+  // string, which folds `unreachable` into `unknown` and would pull every
+  // unreachable row into this bucket.
+  if (filters.evidence === 'unknown'
+    && !row.evidence.unknown
+    && !targets.some(target => target.connectivity === 'unknown')) return false;
   if (filters.evidence === 'stale'
     && !targets.some(target => target.evidence === 'stale')
     && !row.attention.includes('target_stale')) return false;
@@ -374,10 +381,18 @@ type ParsedId =
 function parsePortfolioId(raw: string): ParsedId {
   const blueprint = /^bp:(\d+)$/.exec(raw);
   if (blueprint) {
-    return { kind: 'blueprint', blueprintId: Number(blueprint[1]) };
+    const blueprintId = Number(blueprint[1]);
+    return Number.isSafeInteger(blueprintId) && blueprintId > 0
+      ? { kind: 'blueprint', blueprintId }
+      : { kind: 'invalid' };
   }
   const direct = /^(\d+):(.+)$/.exec(raw);
-  if (direct) return { kind: 'direct', nodeId: Number(direct[1]), applicationId: direct[2] };
+  if (direct) {
+    const nodeId = Number(direct[1]);
+    return Number.isSafeInteger(nodeId) && nodeId > 0
+      ? { kind: 'direct', nodeId, applicationId: direct[2] }
+      : { kind: 'invalid' };
+  }
   return { kind: 'invalid' };
 }
 
@@ -710,7 +725,7 @@ gitopsApplicationsRouter.get('/:id', async (req: Request, res: Response): Promis
     const filtered = filterRemoteIdentityPayload(
       '/git-sources',
       rows,
-      (requirement) => satisfiesGitOpsRead(req, requirement),
+      (requirement, nodeId) => satisfiesGitOpsRead(req, requirement, nodeId),
       parsedId.nodeId,
     );
     const candidates = Array.isArray(filtered) ? filtered.filter(isRecord) : [];
@@ -737,6 +752,21 @@ gitopsApplicationsRouter.get('/:id', async (req: Request, res: Response): Promis
       row => isUsableRevision(row.gitopsRevision) && row.gitopsRevision.applicationId === parsedId.applicationId,
     );
     if (!match || !isUsableRevision(match.gitopsRevision)) {
+      const namesApplication = candidates.some(row => {
+        if (!isRecord(row.gitopsRevision) || row.gitopsRevision.applicationId !== parsedId.applicationId) return false;
+        const applicationId = row.gitopsRevision.applicationId;
+        return typeof applicationId === 'string'
+          && applicationId.length > 0
+          && !applicationId.startsWith('legacy:')
+          && !applicationId.startsWith('bp:');
+      });
+      if (namesApplication) {
+        res.status(503).json({
+          error: 'The owning node has not reported usable evidence for this application yet',
+          code: 'evidence_unavailable',
+        });
+        return;
+      }
       res.status(404).json({ error: 'Application not found' });
       return;
     }
@@ -753,8 +783,6 @@ gitopsApplicationsRouter.get('/:id', async (req: Request, res: Response): Promis
         blueprintId: projection.blueprintId,
         nodeId: parsedId.nodeId,
         nodeName,
-        // Same freshness derivation the list uses, so one application never
-        // reports different activity depending on which endpoint was asked.
         lastActivityAt: freshestFacetTimestamp(projection),
         partialNodes: [],
         nodeNames,

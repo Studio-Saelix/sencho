@@ -34,14 +34,25 @@ export type BlueprintDeploymentCause =
   | 'await_state_review'
   | 'await_evict_confirm'
   | 'drift_observed'
-  | 'drift_enforce_start';
+  | 'drift_enforce_start'
+  | 'drift_cleared'
+  | 'drift_repair_held';
 
-/** Causes that only observe, and must never acknowledge or mint anything. */
+/**
+ * Causes that only observe, and must never acknowledge or mint anything.
+ *
+ * `drift_cleared` is an observation like the rest, not a silent write: a check
+ * found the target already matched, so the row returns to active. It has to
+ * advance the observation stage, because the projection reads the latest stage
+ * and would otherwise keep reporting the drift or hold that just cleared.
+ */
 const OBSERVATION_STAGE = {
   await_state_review: 'blueprint_state_review',
   await_evict_confirm: 'blueprint_evict_blocked',
   drift_observed: 'blueprint_drifted',
   drift_enforce_start: 'blueprint_correcting',
+  drift_cleared: 'blueprint_drift_cleared',
+  drift_repair_held: 'blueprint_repair_held',
 } as const;
 
 type ObservationCause = keyof typeof OBSERVATION_STAGE;

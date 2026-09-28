@@ -1433,13 +1433,25 @@ function deriveTarget(
  * `noUncheckedIndexedAccess`, so without it a miss would type as a status and
  * the guard at the call site would look like dead code.
  */
-type ObservationRuntimeStatus = 'pending_state_review' | 'evict_blocked' | 'drifted' | 'correcting';
+type ObservationRuntimeStatus =
+  | 'pending_state_review'
+  | 'evict_blocked'
+  | 'drifted'
+  | 'correcting'
+  | 'repair_held'
+  | 'fully_deployed_health_pending';
 
 const BLUEPRINT_OBSERVATION_STATUS: Record<string, ObservationRuntimeStatus | undefined> = {
   blueprint_state_review: 'pending_state_review',
   blueprint_evict_blocked: 'evict_blocked',
   blueprint_drifted: 'drifted',
   blueprint_correcting: 'correcting',
+  blueprint_repair_held: 'repair_held',
+  // A check that matched. It has to project to something, and the only honest
+  // option already in the vocabulary is "deployed, no health verdict claimed":
+  // a matched drift check is not a health verdict, so it must not read as one.
+  // The alternative, leaving the stage on the hold, reports drift that is gone.
+  blueprint_drift_cleared: 'fully_deployed_health_pending',
 } satisfies Record<BlueprintObservationStage, ObservationRuntimeStatus>;
 
 function deriveRuntime(

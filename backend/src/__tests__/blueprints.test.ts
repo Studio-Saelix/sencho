@@ -120,6 +120,27 @@ describe('BlueprintReconciler.computeDecision', () => {
         expect(decision.deploy).toEqual([]);
     });
 
+    it('keeps checking a held deployment so a cleared hold can heal', () => {
+        // A hold is a state, not a latch. If the reconciler stopped queueing a
+        // check for a held row, the cause could clear (a node returns, a rollout
+        // lands) and nothing would ever look again, stranding the target
+        // permanently. This is the regression guard for that.
+        const nodeId = seedNode();
+        const bp = seedBlueprint({ classification: 'stateless', nodeIds: [nodeId] });
+        DatabaseService.getInstance().upsertDeployment({
+            blueprint_id: bp.id,
+            node_id: nodeId,
+            status: 'repair_held',
+            applied_revision: bp.revision,
+            drift_summary: 'a node is unreachable or its connectivity evidence is stale, so Sencho cannot write to it safely',
+        });
+        const reconciler = BlueprintReconciler.getInstance() as unknown as ReconcilerWithCompute;
+        const allNodes = DatabaseService.getInstance().getNodes();
+        const decision = reconciler.computeDecision(bp, allNodes);
+        expect(decision.check.map((n: { id: number }) => n.id)).toContain(nodeId);
+        expect(decision.deploy, 'a held row is re-checked, not redeployed').toEqual([]);
+    });
+
     it('queues redeploy when the blueprint revision moved past the deployed revision', () => {
         const nodeId = seedNode();
         const bp = seedBlueprint({ classification: 'stateless', nodeIds: [nodeId] });
@@ -853,12 +874,66 @@ describe('BlueprintReconciler drift alert node wording', () => {
 
         await reconciler.handleDrift(bp, node, 'volumes diverged', 'revision');
 
+        // A declined repair is a hold, not a detection notice: it says the policy
+        // refused to act and leaves the deployment row in that state. The text
+        // carries no drift reason on purpose, because it is the replay key and a
+        // reason that changes every tick would re-alert on every tick.
         expect(dispatchSpy).toHaveBeenCalledWith(
             'warning',
-            'blueprint_drift_detected',
-            'Blueprint "marker-local" lost its marker on this node; auto-fix declined to avoid stomping unowned data. Reason: volumes diverged',
+            'blueprint_drift_repair_held',
+            'Auto-fix for "marker-local" on this node was declined: this Blueprint lost its marker and is stateful, so auto-fix was declined to avoid stomping unowned data',
             { stackName: 'marker-local', actor: 'system:blueprint' },
         );
+    });
+
+    it('records a hold instead of a correction failure when the repair declines', async () => {
+        // The repair re-resolves its own authority, so a target that becomes
+        // unprovable between the drift check and the repair returns a hold. That
+        // is a decision, not an attempt that failed: it must not page the
+        // operator as an error, and it must not leave the row reading
+        // "correcting" with nothing in flight to correct.
+        const { NotificationService } = await import('../services/NotificationService');
+        const dispatchSpy = vi.spyOn(NotificationService.getInstance(), 'dispatchAlert').mockResolvedValue({ persisted: true });
+        vi.spyOn(BlueprintService.getInstance(), 'enforceDigestRepair').mockResolvedValue({
+            status: 'repair_held',
+            error: 'the rollout for this target was superseded, so the rollout replacing it owns it',
+            holdReason: 'rollout_superseded',
+        } as Awaited<ReturnType<typeof BlueprintService.prototype.enforceDigestRepair>>);
+        const nodeId = seedNode();
+        const bp = seedBlueprint({
+            name: 'held-local',
+            drift_mode: 'enforce',
+            classification: 'stateless',
+            nodeIds: [nodeId],
+        });
+        const node = DatabaseService.getInstance().getNode(nodeId)!;
+        DatabaseService.getInstance().upsertDeployment({
+            blueprint_id: bp.id,
+            node_id: nodeId,
+            status: 'drifted',
+            applied_revision: bp.revision,
+            last_deployed_at: Date.now(),
+        });
+        const reconciler = BlueprintReconciler.getInstance() as unknown as ReconcilerWithDrift;
+
+        await reconciler.handleDrift(bp, node, 'image identity differs', 'digest');
+
+        expect(dispatchSpy).toHaveBeenCalledWith(
+            'warning',
+            'blueprint_drift_repair_held',
+            expect.stringContaining('superseded'),
+            { stackName: 'held-local', actor: 'system:blueprint' },
+        );
+        expect(dispatchSpy).not.toHaveBeenCalledWith(
+            'error',
+            'blueprint_drift_correction_failed',
+            expect.anything(),
+            expect.anything(),
+        );
+        const deployment = DatabaseService.getInstance().getDeployment(bp.id, nodeId);
+        expect(deployment?.status).toBe('repair_held');
+        expect(deployment?.status, 'a hold must not leave the row stranded in correcting')
+            .not.toBe('correcting');
     });
 
     it('enforce correction-failure on local uses on this node', async () => {
