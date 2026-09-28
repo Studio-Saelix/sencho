@@ -304,5 +304,35 @@ describe('service_update_recovery accessors', () => {
       const rows = db().listActiveServiceUpdateRecoveriesForStack(NODE, 'web', now);
       expect(rows.map(r => r.id)).toEqual(['rec-active']);
     });
+
+    it('hides the older active row while a newer one for the same service is restoring', () => {
+      const now = Date.now();
+      // A restore already holding a live claim is mid-replacement. Falling back
+      // to the older row while it runs would offer a second, stale rollback for
+      // the same service.
+      db().insertServiceUpdateRecovery(makeRow({ id: 'rec-older', created_at: now - 10_000, expires_at: now + 60_000, service_name: 'api' }));
+      db().insertServiceUpdateRecovery(makeRow({
+        id: 'rec-newer', created_at: now - 1_000, expires_at: now + 60_000, service_name: 'api',
+        status: 'restoring', claim_expires_at: now + 30_000,
+      }));
+      db().insertServiceUpdateRecovery(makeRow({ id: 'rec-db', created_at: now - 5_000, expires_at: now + 60_000, service_name: 'db' }));
+
+      const rows = db().listActiveServiceUpdateRecoveriesForStack(NODE, 'web', now);
+      expect(rows.map(r => r.id)).toEqual(['rec-db']);
+    });
+
+    it('resumes showing the older active row once the newer restore claim is dead', () => {
+      const now = Date.now();
+      // An abandoned claim is swept to 'expired'; until the sweep lands it must
+      // not keep hiding a Restore offer the operator can still use.
+      db().insertServiceUpdateRecovery(makeRow({ id: 'rec-older', created_at: now - 10_000, expires_at: now + 60_000, service_name: 'api' }));
+      db().insertServiceUpdateRecovery(makeRow({
+        id: 'rec-newer', created_at: now - 1_000, expires_at: now + 60_000, service_name: 'api',
+        status: 'restoring', claim_expires_at: now - 1_000,
+      }));
+
+      const rows = db().listActiveServiceUpdateRecoveriesForStack(NODE, 'web', now);
+      expect(rows.map(r => r.id)).toEqual(['rec-older']);
+    });
   });
 });

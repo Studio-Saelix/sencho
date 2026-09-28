@@ -1,6 +1,7 @@
 /**
  * Coverage for fetchStackRecoveries: forwards nodeId, maps response
- * entries, and returns an empty array on non-ok responses or network failure.
+ * entries, and reports a failed read as an error rather than as an empty list
+ * (a caller watching recoveries over time must not read a blip as "gone").
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { fetchStackRecoveries } from '../serviceUpdate';
@@ -34,6 +35,13 @@ const sampleEntries = [
   },
 ];
 
+/** Unwraps a successful read, failing the test if the read errored. */
+async function readOk(params: { nodeId: number | null; stackName: string }) {
+  const result = await fetchStackRecoveries(params);
+  if (!result.ok) throw new Error(`expected a successful read, got: ${result.error}`);
+  return result.recoveries;
+}
+
 beforeEach(() => {
   mockedApiFetch.mockReset();
 });
@@ -51,28 +59,34 @@ describe('fetchStackRecoveries', () => {
 
   it('returns the mapped entries on 200', async () => {
     mockedApiFetch.mockResolvedValue(new Response(JSON.stringify(sampleEntries), { status: 200 }));
-    const result = await fetchStackRecoveries({ nodeId: null, stackName: 'web' });
-    expect(result).toHaveLength(2);
-    expect(result[0]).toMatchObject({ serviceName: 'api', recoveryId: 'rec-api', healthGateStatus: 'failed' });
-    expect(result[1]).toMatchObject({ serviceName: 'db', recoveryId: 'rec-db', healthGateStatus: 'unknown' });
+    const recoveries = await readOk({ nodeId: null, stackName: 'web' });
+    expect(recoveries).toHaveLength(2);
+    expect(recoveries[0]).toMatchObject({ serviceName: 'api', recoveryId: 'rec-api', healthGateStatus: 'failed' });
+    expect(recoveries[1]).toMatchObject({ serviceName: 'db', recoveryId: 'rec-db', healthGateStatus: 'unknown' });
   });
 
-  it('returns an empty array on 400 (capability_unavailable from older nodes)', async () => {
+  it('returns an empty list, not an error, when the stack has no active recoveries', async () => {
+    mockedApiFetch.mockResolvedValue(new Response('[]', { status: 200 }));
+    const result = await fetchStackRecoveries({ nodeId: null, stackName: 'web' });
+    expect(result).toEqual({ ok: true, recoveries: [] });
+  });
+
+  it('reports an error, not an empty list, on 400 (capability_unavailable from older nodes)', async () => {
     mockedApiFetch.mockResolvedValue(new Response(JSON.stringify({ error: 'capability_unavailable' }), { status: 400 }));
     const result = await fetchStackRecoveries({ nodeId: null, stackName: 'web' });
-    expect(result).toEqual([]);
+    expect(result).toEqual({ ok: false, error: 'capability_unavailable' });
   });
 
-  it('returns an empty array on 403', async () => {
+  it('reports an error, not an empty list, on 403', async () => {
     mockedApiFetch.mockResolvedValue(new Response('Forbidden', { status: 403 }));
     const result = await fetchStackRecoveries({ nodeId: null, stackName: 'web' });
-    expect(result).toEqual([]);
+    expect(result.ok).toBe(false);
   });
 
-  it('returns an empty array when the response body is not an array', async () => {
+  it('reports an error, not an empty list, when the response body is not an array', async () => {
     mockedApiFetch.mockResolvedValue(new Response(JSON.stringify({ error: 'oops' }), { status: 200 }));
     const result = await fetchStackRecoveries({ nodeId: null, stackName: 'web' });
-    expect(result).toEqual([]);
+    expect(result).toEqual({ ok: false, error: 'Unexpected recovery response for "web"' });
   });
 
   it('skips malformed entries and keeps well-formed ones', async () => {
@@ -81,9 +95,8 @@ describe('fetchStackRecoveries', () => {
       { serviceName: 12, recoveryId: 'bad' },
       sampleEntries[1],
     ]), { status: 200 }));
-    const result = await fetchStackRecoveries({ nodeId: null, stackName: 'web' });
-    expect(result).toHaveLength(2);
-    expect(result.map((r) => r.recoveryId)).toEqual(['rec-api', 'rec-db']);
+    const recoveries = await readOk({ nodeId: null, stackName: 'web' });
+    expect(recoveries.map(r => r.recoveryId)).toEqual(['rec-api', 'rec-db']);
   });
 
   it('keeps only the first (newest) entry per service when the server sends duplicates', async () => {
@@ -100,14 +113,14 @@ describe('fetchStackRecoveries', () => {
     };
     const newerPassed = { ...sampleEntries[0], recoveryId: 'rec-api-new', healthGateStatus: 'passed' as const, healthGateReason: null, healthGateFailureSource: null };
     mockedApiFetch.mockResolvedValue(new Response(JSON.stringify([newerPassed, olderFailed]), { status: 200 }));
-    const result = await fetchStackRecoveries({ nodeId: null, stackName: 'web' });
-    expect(result).toHaveLength(1);
-    expect(result[0]).toMatchObject({ recoveryId: 'rec-api-new', healthGateStatus: 'passed' });
+    const recoveries = await readOk({ nodeId: null, stackName: 'web' });
+    expect(recoveries).toHaveLength(1);
+    expect(recoveries[0]).toMatchObject({ recoveryId: 'rec-api-new', healthGateStatus: 'passed' });
   });
 
-  it('returns an empty array on network failure', async () => {
+  it('reports an error, not an empty list, on network failure', async () => {
     mockedApiFetch.mockRejectedValue(new Error('ECONNREFUSED'));
     const result = await fetchStackRecoveries({ nodeId: null, stackName: 'web' });
-    expect(result).toEqual([]);
+    expect(result).toEqual({ ok: false, error: 'ECONNREFUSED' });
   });
 });

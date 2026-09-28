@@ -183,6 +183,16 @@ export interface StackRecoveryEntry {
     expiresAt: number;
 }
 
+/**
+ * Outcome of the stack recoveries read. A failed read is reported as such
+ * rather than as an empty list: callers watch recoveries over time, and an
+ * error read as "nothing to restore" would silently cancel those watches on the
+ * first blip (rate limit, 5xx, proxy hiccup, or a node predating the route).
+ */
+export type FetchStackRecoveriesResult =
+    | { ok: true; recoveries: StackRecoveryEntry[] }
+    | { ok: false; error: string };
+
 function isStackRecoveryGateStatus(value: unknown): value is StackRecoveryGateStatus {
     return value === 'observing' || value === 'passed' || value === 'failed' || value === 'unknown';
 }
@@ -216,19 +226,22 @@ function parseStackRecoveryEntry(value: unknown): StackRecoveryEntry | null {
 export async function fetchStackRecoveries(params: {
     nodeId: number | null;
     stackName: string;
-}): Promise<StackRecoveryEntry[]> {
+}): Promise<FetchStackRecoveriesResult> {
     const { nodeId, stackName } = params;
     try {
         const res = await apiFetch(
             `/stacks/${encodeURIComponent(stackName)}/recoveries`,
             { method: 'GET', nodeId },
         );
-        if (!res.ok) {
-            console.warn('[serviceUpdate] stack recoveries fetch returned', res.status);
-            return [];
-        }
         const body: unknown = await res.json().catch(() => null);
-        if (!Array.isArray(body)) return [];
+        if (!res.ok) {
+            const error = isRecord(body) && typeof body.error === 'string'
+                ? body.error
+                : `Failed to load recoveries for "${stackName}"`;
+            console.warn('[serviceUpdate] stack recoveries fetch returned', res.status);
+            return { ok: false, error };
+        }
+        if (!Array.isArray(body)) return { ok: false, error: `Unexpected recovery response for "${stackName}"` };
         const parsed = body
             .map(parseStackRecoveryEntry)
             .filter((entry): entry is StackRecoveryEntry => entry !== null);
@@ -237,14 +250,18 @@ export async function fetchStackRecoveries(params: {
         // only the first entry per service so a superseded row can never produce
         // a Restore toast pointing at a stale snapshot.
         const seen = new Set<string>();
-        return parsed.filter((entry) => {
-            if (seen.has(entry.serviceName)) return false;
-            seen.add(entry.serviceName);
-            return true;
-        });
-    } catch {
-        console.warn('[serviceUpdate] stack recoveries fetch failed');
-        return [];
+        return {
+            ok: true,
+            recoveries: parsed.filter((entry) => {
+                if (seen.has(entry.serviceName)) return false;
+                seen.add(entry.serviceName);
+                return true;
+            }),
+        };
+    } catch (error) {
+        const message = error instanceof Error ? error.message : `Failed to load recoveries for "${stackName}"`;
+        console.warn('[serviceUpdate] stack recoveries fetch failed:', message);
+        return { ok: false, error: message };
     }
 }
 

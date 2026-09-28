@@ -4609,9 +4609,12 @@ stmt.run('gitops_schema_version', '1');
 
     /**
      * Active, unexpired rows for all services in a stack, most recent first.
-     * Only the newest row per service is returned: a superseded row (e.g. an
-     * older failed gate followed by a passing re-update) must never surface a
+     * Only the newest usable row per service is returned: a superseded row (e.g.
+     * an older failed gate followed by a passing re-update) must never surface a
      * Restore offer that would roll a healthy service back to a stale snapshot.
+     * "Usable" excludes an in-flight newer row too, since a restore already
+     * holding a live claim is mid-replacement: falling back to the older row
+     * while it runs would offer a second, stale rollback for the same service.
      */
     public listActiveServiceUpdateRecoveriesForStack(nodeId: number, stackName: string, now: number): ServiceUpdateRecoveryRow[] {
         return this.db.prepare(
@@ -4620,11 +4623,12 @@ stmt.run('gitops_schema_version', '1');
                AND NOT EXISTS (
                    SELECT 1 FROM service_update_recovery n
                    WHERE n.node_id = r.node_id AND n.stack_name = r.stack_name AND n.service_name = r.service_name
-                     AND n.status = 'active' AND n.expires_at > ?
+                     AND ((n.status = 'active' AND n.expires_at > ?)
+                          OR (n.status = 'restoring' AND n.claim_expires_at > ?))
                      AND (n.created_at > r.created_at OR (n.created_at = r.created_at AND n.rowid > r.rowid))
                )
              ORDER BY r.created_at DESC`
-        ).all(nodeId, stackName, now, now) as ServiceUpdateRecoveryRow[];
+        ).all(nodeId, stackName, now, now, now) as ServiceUpdateRecoveryRow[];
     }
 
     /** Attach the update flow's own health gate run id while the row is still active. */
