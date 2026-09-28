@@ -1776,6 +1776,85 @@ describe('gitops derivation', () => {
         expect(attentionReasons(projection), qualification).not.toContain('drift');
       }
     });
+
+    it('reports nothing when the observation belongs to a generation the node is no longer serving', () => {
+      // The reconciler rebinds the target to a new generation's approved set when
+      // it records the acknowledgement, and leaves the stored observation alone,
+      // so from that moment the observation describes the generation the node
+      // was running before. If the next tick records a drift through the cause
+      // that returns before re-observing (a stopped container, or a marker or
+      // revision mismatch), the digests on the target are the old generation's
+      // while the approved set is the new one's. Comparing those two produces a
+      // divergence nobody measured, and it is a confirmed one: the class, the
+      // reason, and the digests all look like real evidence.
+      const store = GitOpsStore.getInstance();
+      seedObservedBlueprint('app-obs-superseded', 309, 'blueprint_drifted', {
+        kind: 'exact',
+        identity: `sha256:${'d'.repeat(64)}`,
+        observedAt: 42,
+        services: [movedService()],
+      });
+      // The next generation is acknowledged, so the target now expects that
+      // generation's set while still deploying the previous one. The observation
+      // is deliberately left as the previous generation recorded it.
+      const nextGenerationId = 'gen-app-obs-superseded-next';
+      const nextArtifactSetId = 'art-app-obs-superseded-next';
+      store.insertGeneration(gen(nextGenerationId, 'app-obs-superseded'));
+      store.insertArtifactSet({
+        id: nextArtifactSetId,
+        generation_id: nextGenerationId,
+        evidence_version: 1,
+        authoritative: 0,
+        qualification: 'exact',
+        evidence_json: encodeArtifactEvidenceJson({
+          kind: 'exact',
+          identity: `sha256:${'e'.repeat(64)}`,
+          services: [approvedService()],
+        }),
+        created_at: 2,
+      });
+      store.upsertTarget({
+        ...store.getTarget('app-obs-superseded', 1)!,
+        desired_generation_id: nextGenerationId,
+        applied_generation_id: nextGenerationId,
+        expected_artifact_set_id: nextArtifactSetId,
+        latest_artifact_set_id: nextArtifactSetId,
+      });
+
+      const projection = projectApplication('app-obs-superseded', false);
+      if (projection.targetMode === 'not_applicable') throw new Error('expected application');
+      // The reconciler's own record still says the target drifted, and the
+      // runtime facet still reports that, which is the reconciler's coarse
+      // claim. What must not happen is the list naming a digest divergence
+      // against a set the node was never observed running.
+      expect(projection.targets[0]?.runtime.status).toBe('drifted');
+      expect(projection.drift.filter(item => item.observed.kind === 'runtime_artifact')).toHaveLength(0);
+      // Desired N+1 against deployed N is a real divergence of its own, and it
+      // keeps its own item. That one compares two generations and asserts
+      // nothing about what is running, so it stays.
+      expect(projection.drift).toHaveLength(1);
+      expect(projection.drift[0]?.observed).toEqual({ kind: 'generation', id: 'gen-app-obs-superseded' });
+    });
+
+    it('reports a rollout class for a target bound by its rollout generation alone', () => {
+      const store = GitOpsStore.getInstance();
+      seedObservedBlueprint('app-obs-rollout-gen', 310, 'blueprint_drifted', {
+        kind: 'exact',
+        identity: `sha256:${'d'.repeat(64)}`,
+        observedAt: 42,
+        services: [movedService()],
+      });
+      // deriveRuntime reads either the authorization or the rollout generation,
+      // so both arms of that test need coverage. With only the generation set,
+      // the class is still rollout.
+      const target = store.getTarget('app-obs-rollout-gen', 1)!;
+      store.upsertTarget({ ...target, rollout_generation_id: 'gen-obs-rollout-1' });
+
+      const projection = projectApplication('app-obs-rollout-gen', false);
+      if (projection.targetMode === 'not_applicable') throw new Error('expected application');
+      expect(projection.drift).toHaveLength(1);
+      expect(projection.drift[0]?.class).toBe('rollout');
+    });
   });
 
   /**
