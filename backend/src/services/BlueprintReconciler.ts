@@ -4,7 +4,7 @@ import {
     type BlueprintDeployment,
     type Node,
 } from './DatabaseService';
-import { BlueprintService, type DeployOutcome, type DriftCause } from './BlueprintService';
+import { BlueprintService, type DeployOutcome, type DriftCause, type RepairBlock } from './BlueprintService';
 import { BlueprintAnalyzer } from './BlueprintAnalyzer';
 import { NodeLabelService } from './NodeLabelService';
 import { NotificationService } from './NotificationService';
@@ -30,7 +30,6 @@ import {
 } from './gitops/json';
 import { GitOpsStore, placementEffectCompatible } from './gitops/store';
 import { isGitManagedBlueprint } from './gitops/gitManaged';
-import type { RuntimeRepairHoldReason } from './gitops/runtimeRepairBinding';
 import type { GitOpsApplicationRow } from './gitops/types';
 
 const RECONCILER_INTERVAL_MS = 60_000;
@@ -403,37 +402,42 @@ export class BlueprintReconciler {
                     return { ...base, status: 'ok' };
                 }
                 if (driftResult.kind === 'unverified') {
-                    // Record nothing as drifted and never Enforce: unreachable
-                    // or missing evidence must not look like a corrective target.
+                    // Nothing drifted that Sencho can name. A blocked repair still
+                    // belongs on the row, because it is a decision an operator has
+                    // to make, but it is not drift.
                     diagnosticLog('drift unverified', {
                         blueprintId: blueprint.id,
                         nodeId: node.id,
                         reason: driftResult.reason ?? 'unverified',
                     });
+                    if (driftResult.repairBlock && blueprint.drift_mode === 'enforce') {
+                        this.recordRepairHold(blueprint, node, driftResult.repairBlock);
+                    }
                     return { ...base, status: 'ok' };
                 }
-                if (driftResult.kind === 'held') {
-                    this.recordRepairHold(blueprint, node, driftResult.reason, driftResult.detail);
-                    return { ...base, status: 'ok' };
+                // One write per tick, and which one depends on whether a repair
+                // would have been attempted. Writing the drift and then the hold
+                // would flip the row between the two states every tick, so
+                // neither write would ever be suppressed and every tick would
+                // append history and fire an alert.
+                if (blueprint.drift_mode === 'enforce') {
+                    const block = await this.effectiveRepairBlock(blueprint, node, driftResult.repairBlock);
+                    if (block) {
+                        this.recordRepairHold(blueprint, node, block);
+                        return { ...base, status: 'ok' };
+                    }
                 }
                 const reason = driftResult.reason;
-                // A workload whose data outlives the container is never
-                // auto-repaired, and a Blueprint Sencho cannot classify is in the
-                // same position because its volumes are unknown. Decided here,
-                // before the drift is committed, so a held target is not first
-                // written as drifted and then rewritten every tick.
-                const heldByClassification = await this.repairHeldByClassification(blueprint, node);
-                if (heldByClassification) {
-                    this.recordRepairHold(blueprint, node, 'classification_forbids_repair', heldByClassification);
-                    return { ...base, status: 'ok' };
-                }
                 commitBlueprintDeploymentCause('drift_observed', blueprint.id, node.id, {
                     status: 'drifted',
                     last_checked_at: Date.now(),
                     last_drift_at: Date.now(),
                     drift_summary: reason,
                 }, null);
-                // observe/suggest/enforce: notify path via handleDrift still respects drift_mode
+                // A block about auto-repair means nothing to Observe or Suggest,
+                // so the drift is recorded and the mode's own response runs. A
+                // stateful or unclassifiable workload is never auto-repaired,
+                // and that is decided at the mutation site, inside handleDrift.
                 await this.handleDrift(blueprint, node, reason, driftResult.cause);
                 return { ...base, status: 'ok' };
             }
@@ -822,7 +826,10 @@ export class BlueprintReconciler {
                 // decision itself belongs to whoever is about to write to a node.
                 const heldByClassification = await this.repairHeldByClassification(blueprint, node);
                 if (heldByClassification) {
-                    this.recordRepairHold(blueprint, node, 'classification_forbids_repair', heldByClassification);
+                    this.recordRepairHold(blueprint, node, {
+                        reason: 'classification_forbids_repair',
+                        detail: heldByClassification,
+                    });
                     return;
                 }
                 commitBlueprintDeploymentCause('drift_enforce_start', blueprint.id, node.id, {
@@ -843,8 +850,10 @@ export class BlueprintReconciler {
                     this.recordRepairHold(
                         blueprint,
                         node,
-                        result.holdReason ?? 'evidence_incomplete',
-                        result.error ?? 'the repair authority could not be resolved',
+                        {
+                            reason: result.holdReason ?? 'evidence_incomplete',
+                            detail: result.error ?? 'the repair authority could not be resolved',
+                        },
                     );
                     return;
                 }
@@ -902,18 +911,21 @@ export class BlueprintReconciler {
                     nodeId: node.id,
                     reason: driftResult.reason ?? 'unverified',
                 });
+                if (driftResult.repairBlock && blueprint.drift_mode === 'enforce') {
+                    this.recordRepairHold(blueprint, node, driftResult.repairBlock);
+                }
                 continue;
             }
-            if (driftResult.kind === 'held') {
-                this.recordRepairHold(blueprint, node, driftResult.reason, driftResult.detail);
-                continue;
+            // One write per tick; see the Inline path for why the hold replaces
+            // the drift write rather than following it.
+            if (blueprint.drift_mode === 'enforce') {
+                const block = await this.effectiveRepairBlock(blueprint, node, driftResult.repairBlock);
+                if (block) {
+                    this.recordRepairHold(blueprint, node, block);
+                    continue;
+                }
             }
             const reason = driftResult.reason;
-            const heldByClassification = await this.repairHeldByClassification(blueprint, node);
-            if (heldByClassification) {
-                this.recordRepairHold(blueprint, node, 'classification_forbids_repair', heldByClassification);
-                continue;
-            }
             commitBlueprintDeploymentCause('drift_observed', blueprint.id, node.id, {
                 status: 'drifted',
                 last_checked_at: Date.now(),
@@ -943,6 +955,27 @@ export class BlueprintReconciler {
      * Returns null for a Blueprint that may be repaired, so the caller reads as
      * a question rather than a flag.
      */
+    /**
+     * Why Enforce may not act on this drift, if it may not.
+     *
+     * Two independent sources: the evidence the drift check carried, and the
+     * Blueprint's classification. Both are resolved before the row is written so
+     * a held target takes exactly one write per tick. A classification hold
+     * belongs only in Enforce, because "auto-fix was declined" is not an answer
+     * for an operator who chose Observe or Suggest and never asked for one.
+     */
+    private async effectiveRepairBlock(
+        blueprint: Blueprint,
+        node: Node,
+        evidenceBlock: RepairBlock | undefined,
+    ): Promise<RepairBlock | undefined> {
+        if (evidenceBlock) return evidenceBlock;
+        const heldByClassification = await this.repairHeldByClassification(blueprint, node);
+        return heldByClassification
+            ? { reason: 'classification_forbids_repair', detail: heldByClassification }
+            : undefined;
+    }
+
     private async repairHeldByClassification(
         blueprint: Blueprint,
         node: Node,
@@ -987,34 +1020,33 @@ export class BlueprintReconciler {
     private recordRepairHold(
         blueprint: Blueprint,
         node: Node,
-        reason: RuntimeRepairHoldReason,
-        detail: string,
+        block: RepairBlock,
     ): void {
         const previous = DatabaseService.getInstance().getDeployment(blueprint.id, node.id);
-        // Re-asserting the same hold on every tick is not news. Recording it
-        // once per transition keeps the history readable and stops a held target
-        // from appending a row a minute forever.
-        if (previous?.status === 'repair_held' && previous.drift_summary === detail) {
+        // Re-asserting the same hold on every tick is not news. Recording it once
+        // per transition keeps the history readable, and it is also what keeps the
+        // hold in the projection: the runtime observation stamps a stage on every
+        // check, so skipping this write would let the hold's stage be overwritten
+        // and the hold disappear from every drift surface on the next tick.
+        if (previous?.status === 'repair_held' && previous.drift_summary === block.detail) {
             return;
         }
         commitBlueprintDeploymentCause('drift_repair_held', blueprint.id, node.id, {
             status: 'repair_held',
             last_checked_at: Date.now(),
-            drift_summary: detail,
+            drift_summary: block.detail,
         }, null);
         diagnosticLog('drift repair held', {
             blueprintId: blueprint.id,
             nodeId: node.id,
-            reason,
+            reason: block.reason,
         });
-        if (blueprint.drift_mode === 'enforce') {
-            NotificationService.getInstance().dispatchAlert(
-                'warning',
-                'blueprint_drift_repair_held',
-                `Auto-fix for "${blueprint.name}" ${nodeLocationClause(node)} was declined: ${detail}`,
-                { stackName: blueprint.name, actor: 'system:blueprint' },
-            );
-        }
+        NotificationService.getInstance().dispatchAlert(
+            'warning',
+            'blueprint_drift_repair_held',
+            `Auto-fix for "${blueprint.name}" ${nodeLocationClause(node)} was declined: ${block.detail}`,
+            { stackName: blueprint.name, actor: 'system:blueprint' },
+        );
     }
 
     /**
