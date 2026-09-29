@@ -1,6 +1,7 @@
 import { GitOpsStore } from './store';
 import { GitOpsTransitions, type TransitionResult } from './transitions';
 import { restoreTargetToGeneration } from './rolloutRecovery';
+import { healthHoldReason } from './healthPolicy';
 import { ROLE_PERMISSIONS, type PermissionAction } from '../../middleware/permissions';
 import { sanitizeForLog } from '../../utils/safeLog';
 
@@ -296,11 +297,15 @@ function holdRollout(
   decision: { reason: string },
   envelope: { operationId: string; actor: string; trigger: string; at: number },
 ): void {
+  // A hold the transition already recorded is left alone, which is the case for
+  // an unacked attempt: there the pause is written in the same transaction as
+  // the fence, because a target that never acked has no rollout pointer for the
+  // fence to be scoped to.
   if (GitOpsStore.getInstance().getApplication(applicationId)?.pause_at) return;
   GitOpsTransitions.getInstance().rolloutPaused(
     applicationId,
     null,
-    `Held by the health rollout policy (${decision.reason.replace(/_/g, ' ')}).`,
+    healthHoldReason(decision.reason),
     envelope,
   );
 }

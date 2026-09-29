@@ -1340,12 +1340,17 @@ export async function reconstructBlueprintRolloutQueue(): Promise<number> {
     if (!binding) continue;
 
     // A target the policy fenced is the end of its own turn, and it holds the
-    // rollout until an operator says otherwise. The fence commits before the
-    // executor's application-wide pause, so a process that exits in that gap
-    // leaves a fenced target with no `pause_at`; reconstructing past it here
-    // would deploy the targets that came after the one that failed, which is
-    // exactly what stop and rollback promised would not happen. Held from the
-    // fence itself, so the gap cannot exist.
+    // rollout until an operator says otherwise. For an acked target the fence
+    // commits before the executor's application-wide pause, so a process that
+    // exits in that gap leaves a fenced target with no `pause_at`; reconstructing
+    // past it here would deploy the targets that came after the one that failed,
+    // which is exactly what stop and rollback promised would not happen. Held
+    // from the fence itself, so the gap cannot exist.
+    //
+    // An unacked target's fence cannot be scoped this way, because it names no
+    // rollout generation, so this scan cannot see it. Its hold is the application
+    // pause, which the transition commits in the same transaction as the fence
+    // and which the `pause_at` check above has already honored.
     const fenced = binding.requiredNodeIds
       .map((nodeId) => store.getTarget(app.id, nodeId))
       .find((target) => holdableHealthFence(target) && target!.rollout_generation_id === app.rollout_generation_id);
