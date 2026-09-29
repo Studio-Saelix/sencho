@@ -20,6 +20,7 @@ import type { ArtifactQualification } from './types';
 import {
   computeArtifactSetFingerprint,
   decodeArtifactEvidenceJson,
+  decodeObservedArtifactIdentity,
   encodeArtifactEvidenceJson,
   isRecord,
   type ArtifactEvidenceJson,
@@ -380,6 +381,72 @@ export async function fetchRemoteEffectiveArtifactContext(
   }
 }
 
+/**
+ * Ask the leaf what it is actually running, over the node proxy.
+ * A remote node's Docker is not reachable from here, so the identity can only
+ * come from the leaf's own runtime-artifact-identity route. Returns null when
+ * the leaf cannot answer, so the caller records an explicit unavailable rather
+ * than a hub-local guess.
+ */
+export async function fetchRemoteRuntimeArtifactIdentity(
+  nodeId: number,
+  stackName: string,
+): Promise<ObservedArtifactIdentity | null> {
+  const target = NodeRegistry.getInstance().getProxyTarget(nodeId);
+  if (!target) {
+    console.warn(
+      '[GitOpsArtifactResolve] No proxy target for remote runtime identity on node %s (%s)',
+      nodeId,
+      sanitizeForLog(stackName),
+    );
+    return null;
+  }
+  const proxy = LicenseService.getInstance().getProxyHeaders();
+  const url = `${target.apiUrl.replace(/\/$/, '')}/api/stacks/${encodeURIComponent(stackName)}/runtime-artifact-identity`;
+  try {
+    const res = await axios.get(url, {
+      ...safeAxiosTransport(target.trustedLoopback),
+      headers: {
+        Authorization: `Bearer ${target.apiToken}`,
+        [PROXY_TIER_HEADER]: proxy.tier,
+        'Content-Type': 'application/json',
+      },
+      timeout: REMOTE_RESOLVE_TIMEOUT_MS,
+      validateStatus: () => true,
+    });
+    if (res.status !== 200) {
+      console.warn(
+        '[GitOpsArtifactResolve] Remote runtime-artifact-identity returned %s for %s on node %s',
+        res.status,
+        sanitizeForLog(stackName),
+        nodeId,
+      );
+      return null;
+    }
+    // A leaf that answers with something this module cannot read is no
+    // evidence. Decoding separately keeps an unreadable payload distinguishable
+    // in the log from a leaf that could not be reached at all.
+    try {
+      return decodeObservedArtifactIdentity(JSON.stringify(res.data));
+    } catch {
+      console.warn(
+        '[GitOpsArtifactResolve] Remote runtime-artifact-identity invalid shape for %s on node %s',
+        sanitizeForLog(stackName),
+        nodeId,
+      );
+      return null;
+    }
+  } catch (err) {
+    console.warn(
+      '[GitOpsArtifactResolve] Remote runtime-artifact-identity failed for %s on node %s: %s',
+      sanitizeForLog(stackName),
+      nodeId,
+      sanitizeForLog(err instanceof Error ? err.message : String(err)),
+    );
+    return null;
+  }
+}
+
 async function loadArtifactContextForNode(
   nodeId: number,
   stackName: string,
@@ -670,6 +737,10 @@ function recordRuntimeObservation(
  * Observe the running image identity for a stack on a node.
  * Does not require a GitOps application or generation; callers record when they have one.
  * Compose project labels use the lowercase stack name (Docker Compose convention).
+ *
+ * A remote node is asked over the proxy before anything is rendered or read
+ * here: a hub-local model of a remote stack and a hub-local Docker socket are
+ * both the wrong answer, and the second one throws.
  */
 export async function observeStackRuntimeArtifact(args: {
   stackName: string;
@@ -677,6 +748,13 @@ export async function observeStackRuntimeArtifact(args: {
   observedAt?: number;
 }): Promise<ObservedArtifactIdentity> {
   const observedAt = args.observedAt ?? Date.now();
+  const node = DatabaseService.getInstance().getNode(args.nodeId);
+  if (node?.type === 'remote') {
+    // The leaf's observedAt is authoritative: that is when it actually looked.
+    // The caller's timestamp belongs to the hub's envelope, not to this read.
+    const remote = await fetchRemoteRuntimeArtifactIdentity(args.nodeId, args.stackName);
+    return remote ?? { kind: 'unavailable' };
+  }
   const projectName = args.stackName.toLowerCase();
   try {
     const model = await buildEffectiveServiceModel(args.nodeId, args.stackName);

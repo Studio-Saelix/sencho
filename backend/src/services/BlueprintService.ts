@@ -44,7 +44,11 @@ import {
     freezeInlineRevisionAfterDeploy,
     type BlueprintDeploymentCause,
 } from './gitops/blueprintDeploymentProducers';
-import { observeStackRuntimeArtifact, resolvePlatformLabelForNode } from './gitops/artifactResolve';
+import {
+    fetchRemoteRuntimeArtifactIdentity,
+    observeStackRuntimeArtifact,
+    resolvePlatformLabelForNode,
+} from './gitops/artifactResolve';
 import { stackManagedRoot } from './gitops/directApplication';
 import {
     buildDigestPinsFromArtifactSet,
@@ -56,7 +60,6 @@ import { buildEffectiveServiceModel } from './effectiveServiceModel';
 import { comparableObservationMatches } from './gitops/artifactIdentity';
 import {
     decodeArtifactEvidenceJson,
-    decodeObservedArtifactIdentity,
     type ObservedArtifactIdentity,
     type ServiceArtifactEvidence,
 } from './gitops/json';
@@ -1004,26 +1007,7 @@ export class BlueprintService {
         if (node.type === 'local') {
             return observeStackRuntimeArtifact({ stackName: blueprintName, nodeId: node.id });
         }
-        const target = NodeRegistry.getInstance().getProxyTarget(node.id);
-        if (!target) return null;
-        const url = `${target.apiUrl.replace(/\/$/, '')}/api/stacks/${encodeURIComponent(blueprintName)}/runtime-artifact-identity`;
-        try {
-            const res = await axios.get(url, {
-                ...safeAxiosTransport(target.trustedLoopback),
-                headers: this.remoteHeaders(target.apiToken),
-                timeout: REMOTE_HTTP_TIMEOUT_MS,
-                validateStatus: () => true,
-            });
-            if (res.status !== 200) return null;
-            return decodeObservedArtifactIdentity(JSON.stringify(res.data));
-        } catch (error) {
-            console.error(
-                '[BlueprintService] Remote runtime identity observation failed for %s:',
-                sanitizeForLog(blueprintName),
-                error instanceof Error ? error.message : String(error),
-            );
-            return null;
-        }
+        return fetchRemoteRuntimeArtifactIdentity(node.id, blueprintName);
     }
 
     private async containerHealth(
