@@ -79,9 +79,9 @@ const HOLDS_ROLLOUT: ReadonlySet<HealthRolloutAction> = new Set<HealthRolloutAct
  * the second, which is the one where the stale value is also what the queue
  * scopes fences by.
  *
- * The queue and the resume path make the same comparison inline, so the two have
- * to keep agreeing on which targets are unacked; that is why it is a mismatch and
- * not a null on both sides.
+ * The queue applies the same test in `handoff.ts`, as the positive form: a fence
+ * is honoured only where the two match, so a mismatch is exactly the case where
+ * it is not.
  */
 function hasNotAckedRollout(
   target: GitOpsTargetCurrentRow,
@@ -1264,9 +1264,13 @@ export class GitOpsTransitions {
         // re-rollout of the same accepted generation leaves the target running
         // exactly what the run is observing, so the generation test would answer
         // true for an unacked target and attribute a `passed` or a `failed` the
-        // comment above rules out. It would also write a fence under the target's
-        // stale pointer, which is not the pointer the queue scopes fences by, so
-        // a `stop` decided that way would not hold anything.
+        // comment above rules out.
+        //
+        // The fence such a verdict would write lands under the target's stale
+        // pointer, which is not the pointer the queue scopes fences by, so a
+        // `rollback_pending` written that way would not stop the targets that came
+        // after it. A `pause` is safe regardless, because the hold below is the
+        // application pause rather than the target fence.
         const attributable = target.target_status === 'active'
           && args.targetScope === 'stack'
           && !!args.deployedGenerationId
@@ -1995,9 +1999,9 @@ export class GitOpsTransitions {
             // test is the mismatch and not the null.
             //
             // Clearing it cannot lose a decision the operator still has to make.
-            // Only a resumable fence is cleared, so a stop or a completed rollback
-            // keeps its outcome, and those are written by a policy acting on a
-            // target whose apply landed, which is a target that acked.
+            // Only a resumable fence is cleared. A stop and a completed rollback
+            // are answers rather than questions, and a rollback still in flight is
+            // neither, so all three fall through to the branch below or past it.
             this.store().upsertTarget({ ...target, health_stop_reason: null });
             continue;
           }
@@ -2005,13 +2009,18 @@ export class GitOpsTransitions {
           // beside it rather than by erasing it. Erasing it cannot work: the
           // fence is also what reconstruction holds the rollout on, so a restart
           // would re-pause a rollout the operator had already answered, and
-          // repeating resume and restart would repeat the hold for ever. The
-          // marker replaces the outcome rather than joining it, and for every
-          // finished fence on every target, so the answer a resume leaves behind
-          // is the same whether the target acked the live rollout or not: the
-          // operator has been told this target is done, and the queue must not
-          // hold on it again.
-          if (ACKNOWLEDGED_HEALTH_FENCES.has(target.health_stop_reason)) {
+          // repeating resume and restart would repeat the hold for ever.
+          //
+          // Scoped to the rollout that wrote it, unlike the clearing above. A
+          // finished outcome under a stale pointer belongs to a rollout this
+          // resume is not answering, and the outcome is a record of what that
+          // rollout did to the node: this one will re-drive the target, so
+          // marking it acknowledged here would tell the operator the policy was
+          // finished with a target it is about to deploy to.
+          if (
+            ACKNOWLEDGED_HEALTH_FENCES.has(target.health_stop_reason)
+            && target.rollout_generation_id === app.rollout_generation_id
+          ) {
             this.store().upsertTarget({ ...target, health_stop_reason: 'stop_acknowledged' });
           }
         }

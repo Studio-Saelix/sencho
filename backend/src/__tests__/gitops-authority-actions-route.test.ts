@@ -482,7 +482,8 @@ describe('POST /api/gitops/applications/:id/rollout/health-policy', () => {
     const seeded = seedGitManagedBlueprint({ sourceAccepted: true, nodeCount: 2 });
     expect(seeded.nodeIds).toHaveLength(2);
     // The grant names the first target only, so the second is what the write is
-    // refused over.
+    // refused over. The caller is a global viewer, so it can read the application
+    // and is refused only on the deploy authority the per-target loop requires.
     scopeRolesToTarget(seeded, seeded.nodeIds[0]!, ['deployer']);
 
     const res = await request(app)
@@ -491,24 +492,29 @@ describe('POST /api/gitops/applications/:id/rollout/health-policy', () => {
       .send({ policy: 'pause' });
 
     expect(res.status).toBe(403);
+    expect(res.body.code).toBe('PERMISSION_DENIED');
     expect(GitOpsStore.getInstance().getIntentRevision(seeded.intentId)!
       .health_failure_rollback_policy_json).toBeNull();
   });
 
   it('needs the application-wide grant when there is no target to check', async () => {
-    // The empty-set branch. Nothing is placed yet, so there is no per-target
-    // grant to resolve and the write falls back to the application-wide one. A
-    // loop over no targets would otherwise authorize the write on its own
-    // absence.
+    // The empty-set branch. Nothing is placed yet, so there is no per-target grant
+    // to resolve and the write falls back to the application-wide one. A loop over
+    // no targets would otherwise authorize the write on its own absence.
+    //
+    // The caller holds no deploy grant anywhere, so this is the refusal the branch
+    // exists to produce rather than one about which targets a grant happens to
+    // name. The paired case below shows the same application admitting a caller
+    // who does hold that grant.
     const seeded = seedGitManagedBlueprint({ sourceAccepted: true, nodeCount: 0 });
     expect(GitOpsStore.getInstance().listTargets(seeded.applicationId)).toEqual([]);
-
     const res = await request(app)
       .post(`/api/gitops/applications/${applicationOf(seeded.blueprintId)}/rollout/health-policy`)
       .set('Cookie', scopedCookie)
       .send({ policy: 'pause' });
 
     expect(res.status).toBe(403);
+    expect(res.body.code).toBe('PERMISSION_DENIED');
     expect(GitOpsStore.getInstance().getIntentRevision(seeded.intentId)!
       .health_failure_rollback_policy_json).toBeNull();
   });
@@ -528,14 +534,15 @@ describe('POST /api/gitops/applications/:id/rollout/health-policy', () => {
       .send({ policy: 'pause' });
 
     expect(res.status).toBe(403);
+    expect(res.body.code).toBe('PERMISSION_DENIED');
     expect(GitOpsStore.getInstance().getIntentRevision(seeded.intentId)!
       .health_failure_rollback_policy_json).toBeNull();
   });
 
   it('refuses a read-only grant, so seeing the policy is not authority over it', async () => {
-    // The auditor half of the scoped persona. Read access to the application is
-    // what lets the policy control render; the write still needs the deploy grant
-    // on each target, and a read must not stand in for it.
+    // The read half of the scoped persona, on its own. Read access is what lets
+    // the policy control render at all, and this is the case that shows it is not
+    // also the authority to set it: the same stack and node, granted only the read.
     const seeded = seedGitManagedBlueprint({ sourceAccepted: true });
     scopeRolesToTarget(seeded, seeded.nodeIds[0]!, ['auditor']);
 
@@ -545,6 +552,7 @@ describe('POST /api/gitops/applications/:id/rollout/health-policy', () => {
       .send({ policy: 'pause' });
 
     expect(res.status).toBe(403);
+    expect(res.body.code).toBe('PERMISSION_DENIED');
     expect(GitOpsStore.getInstance().getIntentRevision(seeded.intentId)!
       .health_failure_rollback_policy_json).toBeNull();
   });
