@@ -68,6 +68,10 @@ When the approved artifact set and the node's observation both carry per-service
 
 Where evidence is missing, the card says so. It never renders an empty comparison, because an empty table reads as agreement.
 
+When a Blueprint is first applied, Sencho freezes the exact image identity it was approved at by resolving each image against its registry. If that resolution cannot reach the registry, the target has no approved identity to compare against and its drift reads as unverified rather than as agreement.
+
+For a Blueprint applied from stored content, Sencho retries that resolution on its own, so the target recovers on its own schedule instead of waiting for you to redeploy it. A caveat under the state names the condition while it lasts, and clears once the identity is provable. The retry interval is yours to set under **Settings → GitOps**, and it has no effect while every target's identity is already resolved.
+
 <Note>
   A digest is compared, never pulled. When Sencho repairs a digest divergence it redeploys against the approved identity, so authored tags on disk stay as you wrote them.
 </Note>
@@ -113,6 +117,7 @@ Drift is derived from what Sencho has recorded, so missing evidence is never rou
 - A stack whose invocation has not been recorded yet records a caveat saying so, rather than reporting no invocation drift.
 - A stack whose generation names no compose file records a caveat, rather than reporting a difference against a file list that was never written.
 - A Blueprint deployment is not compared at all. Each of its targets is brought up from the Blueprint rather than from a recorded compose invocation, so there is no expected invocation to compare against, and the class stays silent for them rather than reporting every one as different.
+- A Blueprint target whose approved image identity could not be resolved records a caveat and is not compared against what is running, rather than reporting no drift. For a Blueprint applied from stored content, Sencho retries the resolution on its own, so this clears without a redeploy.
 - A service built on the node has no published digest to compare, so the per-service view labels it **not compared** rather than matched or drifted.
 - A service running something the approved set does not name is outside the comparison, so it reads **not compared** rather than drift.
 

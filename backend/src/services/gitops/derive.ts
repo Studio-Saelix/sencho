@@ -1242,6 +1242,20 @@ function artifactStatus(
   return qualification === 'qualified' ? 'artifact_qualified' : 'artifact_exact';
 }
 
+/**
+ * The artifact set a target or application expects, with its qualification.
+ *
+ * An expectation that carries no provable identity is reported as a limitation
+ * here rather than only through the facet status, because the status already
+ * says "unresolved" and the caveat is what tells an operator that drift between
+ * what is running and what was intended is consequently not being checked. The
+ * facet's `artifact_unresolved` / `artifact_resolution_pending` status carries
+ * the classification; this carries the consequence.
+ *
+ * Derived rather than recorded at write time, so it disappears on its own the
+ * moment a resolve advances the expectation, and it covers the legacy case
+ * where a set was never resolved in the first place.
+ */
 function toExpected(
   store: GitOpsStore,
   id: string,
@@ -1251,6 +1265,26 @@ function toExpected(
   if (!row) {
     limitations.push({ code: 'artifact_pointer_missing', message: 'expected artifact row is missing', evidence: id });
     return null;
+  }
+  // Only the two qualifications that mean the evidence was never obtained.
+  // `local_build_unverified` is a permanent property of a stack that builds on
+  // the node, and `stale` already reports itself through the facet status and
+  // the drift item; caveating either would name a condition the operator is not
+  // being kept in the dark about.
+  //
+  // The code is unconditional on the target mode, and its copy therefore does not
+  // promise a retry. The drift check re-resolves this only for an Inline
+  // Blueprint (`retryInlineArtifactFreeze`); a Git-managed one recovers through
+  // its own preflight and authorization path, and a Direct one through the next
+  // apply. Both still deserve the caveat, because the thing it reports, that
+  // what is running is not being compared against what was intended, is true of
+  // all of them.
+  if (row.qualification === 'unresolved' || row.qualification === 'unavailable') {
+    limitations.push({
+      code: 'artifact_expectation_unresolved',
+      message: 'the expected artifact set has no provable executable identity',
+      evidence: row.id,
+    });
   }
   try {
     const decoded = decodeArtifactEvidenceJson(row.evidence_json);

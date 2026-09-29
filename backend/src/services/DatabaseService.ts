@@ -84,6 +84,11 @@ export interface StackUpdateDetail {
 const SERVICES_JSON_VERSION = 1;
 const DEFAULT_RECOVERY_RETENTION_DAYS = 7;
 const DEFAULT_RECOVERY_MAX_GENERATIONS = 0;
+// Bounds of gitops_artifact_retry_interval_mins. The floor matches the Blueprint
+// reconciler tick, below which no retry is reachable; the ceiling keeps a stored
+// value from parking a target unverified for longer than a day.
+const DEFAULT_ARTIFACT_RETRY_INTERVAL_MINS = 5;
+const MAX_ARTIFACT_RETRY_INTERVAL_MINS = 1440;
 
 function isStackServiceStatus(value: unknown): value is StackServiceStatus {
     if (!value || typeof value !== 'object') return false;
@@ -2330,6 +2335,11 @@ export class DatabaseService {
 stmt.run('gitops_schema_version', '1');
         // Global GitOps polling starts off after an upgrade; operators opt in.
         stmt.run('gitops_poll_interval_mins', '0');
+        // Minutes between retries of an artifact freeze whose registry resolve
+        // could not complete. The reconciler ticks every 60s, so 1 minute is the
+        // reachable floor. Kept off the generic read path on purpose: it is only
+        // consulted for a target whose approved identity is still unresolved.
+        stmt.run('gitops_artifact_retry_interval_mins', '5');
         // SSO role sync defaults off: admin-set roles persist across SSO sign-ins;
         // operators who want IdP group membership to drive roles opt in via Settings > SSO.
         stmt.run('sso_role_sync', '0');
@@ -4961,6 +4971,35 @@ stmt.run('gitops_schema_version', '1');
         } catch (e) {
             console.warn('[DatabaseService] gitops_poll_interval_mins read failed; treating as 0 (off):', (e as Error).message);
             return 0;
+        }
+    }
+
+    /**
+     * Minutes a target's unresolved artifact expectation is left alone before a
+     * drift check retries resolving it.
+     *
+     * Unlike the poll interval there is no off value: turning the retry off would
+     * leave a target unverified until an unrelated redeploy, which is the failure
+     * the retry exists to remove. So a failed read falls back to the default
+     * rather than to 0, and the floor is one minute because the Blueprint
+     * reconciler that drives the retry ticks on that cadence.
+     */
+    public getGitOpsArtifactRetryIntervalMins(): number {
+        try {
+            const raw = this.getGlobalSettings()['gitops_artifact_retry_interval_mins'];
+            const parsed = parseInt(String(raw ?? ''), 10);
+            if (!Number.isFinite(parsed) || parsed < 1) {
+                console.warn(`[DatabaseService] invalid gitops_artifact_retry_interval_mins "${String(raw)}"; treating as ${DEFAULT_ARTIFACT_RETRY_INTERVAL_MINS}`);
+                return DEFAULT_ARTIFACT_RETRY_INTERVAL_MINS;
+            }
+            return Math.min(parsed, MAX_ARTIFACT_RETRY_INTERVAL_MINS);
+        } catch (e) {
+            console.warn(
+                '[DatabaseService] gitops_artifact_retry_interval_mins read failed; treating as %d:',
+                DEFAULT_ARTIFACT_RETRY_INTERVAL_MINS,
+                (e as Error).message,
+            );
+            return DEFAULT_ARTIFACT_RETRY_INTERVAL_MINS;
         }
     }
 

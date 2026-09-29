@@ -28,7 +28,7 @@ import {
   type ServiceArtifactEvidence,
 } from './json';
 import { GitOpsStore } from './store';
-import { GitOpsTransitions, type EventEnvelope } from './transitions';
+import { GitOpsTransitions, GitOpsTransitionError, type EventEnvelope } from './transitions';
 import { newGitOpsId } from './directApplication';
 import { sanitizeForLog } from '../../utils/safeLog';
 import {
@@ -505,6 +505,12 @@ export async function resolveAndRecordArtifactSet(args: {
       envelope: args.envelope,
     });
   } catch (error) {
+    // A lost write race is not a failed resolve. Recording `unavailable` for it
+    // would write evidence asserting the registry could not be reached at a
+    // moment the registry was never asked, and it would move the latest pointer
+    // on a row the winner is already writing. Rethrown so the caller decides:
+    // the drift check treats it as contained, and a deploy reports it.
+    if (error instanceof GitOpsTransitionError) throw error;
     console.error(
       `[GitOpsArtifactResolve] Resolution failed for ${args.applicationId}/${args.generationId}:`,
       error instanceof Error ? error.message : String(error),

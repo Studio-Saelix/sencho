@@ -42,6 +42,7 @@ import {
     commitBlueprintDeploymentCause,
     commitBlueprintDeploymentRemoved,
     freezeInlineRevisionAfterDeploy,
+    retryInlineArtifactFreeze,
     type BlueprintDeploymentCause,
 } from './gitops/blueprintDeploymentProducers';
 import { observeStackRuntimeArtifact, resolvePlatformLabelForNode } from './gitops/artifactResolve';
@@ -69,11 +70,28 @@ import {
 } from './gitops/runtimeRepairBinding';
 import { GitOpsTransitions } from './gitops/transitions';
 import { envelopeFor, recordableApplication } from './gitops/blueprintProducers';
-import type { GitOpsApplicationRow, GitOpsGenerationRow } from './gitops/types';
+import type {
+    GitOpsApplicationRow,
+    GitOpsArtifactSetRow,
+    GitOpsGenerationRow,
+} from './gitops/types';
 
 /** On-disk compose name for Blueprint applies. Must match createStack scaffold and Sencho discovery priority. */
 const COMPOSE_FILENAME = 'compose.yaml';
 const REMOTE_HTTP_TIMEOUT_MS = 30_000;
+
+/**
+ * Artifact qualifications a drift check re-resolves.
+ *
+ * `stale` is absent on purpose: it means a tag moved after the generation was
+ * accepted, and resolving toward that is the acceptance this path is not allowed
+ * to make. `local_build_unverified` is absent because a locally built service
+ * never resolves to a published digest, so a retry could not succeed.
+ */
+const RETRYABLE_ARTIFACT_QUALIFICATIONS: ReadonlySet<GitOpsArtifactSetRow['qualification']> = new Set([
+    'unresolved',
+    'unavailable',
+]);
 
 export type DriftCause = 'revision' | 'container' | 'digest';
 
@@ -925,12 +943,30 @@ export class BlueprintService {
             // a target matching a generation it never acknowledged is not
             // converged.
             const expectedSetId = binding.artifactSetId;
-            const expectedRow = store.getArtifactSet(expectedSetId);
+            let expectedRow = store.getArtifactSet(expectedSetId);
             if (
                 !expectedRow
                 || (expectedRow.qualification !== 'exact' && expectedRow.qualification !== 'qualified')
             ) {
-                return unverified('expected artifact set is not comparable');
+                // The freeze could not resolve an identity when it ran, so this
+                // target has nothing approved to compare against until a resolve
+                // succeeds. Today only the next deploy of this revision produces
+                // one, which makes an unrelated redeploy the price of proving what
+                // is running. The freeze is a no-op once minted, so retrying means
+                // re-resolving the generation that is already frozen.
+                await this.retryArtifactFreeze(blueprint, node, app.id, binding, expectedRow);
+                // Re-read the target rather than `binding.artifactSetId`: a
+                // successful retry moves the target's own pointer, and the old id
+                // still names the set that could not be resolved.
+                expectedRow = store.getArtifactSet(
+                    store.getTarget(app.id, node.id)?.expected_artifact_set_id ?? expectedSetId,
+                );
+                if (
+                    !expectedRow
+                    || (expectedRow.qualification !== 'exact' && expectedRow.qualification !== 'qualified')
+                ) {
+                    return unverified('expected artifact set is not comparable');
+                }
             }
             let expectedIdentity: string | null = null;
             let expectedServices: ServiceArtifactEvidence[] | undefined;
@@ -965,6 +1001,86 @@ export class BlueprintService {
             // Prefer unverified over drifted so a transport failure cannot
             // trigger Enforce against an unreachable or half-observed node.
             return unverified(BlueprintService.formatError(err));
+        }
+    }
+
+    /**
+     * Re-resolve a freeze whose registry resolve could not complete.
+     *
+     * Gated on how recently the unresolved expectation was recorded, because the
+     * reconciler runs this whole check every 60 seconds and a registry that is
+     * down would otherwise be asked once per target per tick forever.
+     *
+     * The gate reads the *latest* evidence for the generation, not the expected
+     * set. The distinction is load-bearing: a failed resolve records a fresh
+     * `unavailable` row that does **not** advance the expected pointer
+     * (`allowedExpectedAdvance` refuses it), so dating the window from the
+     * expected set would pin it to the original freeze forever and the second
+     * tick onwards would retry every 60 seconds. The latest pointer advances on
+     * every recorded resolve, successful or not, so it moves with each attempt.
+     *
+     * Reading a row rather than keeping a timer means there is no schedule to
+     * manage and no state to reconcile across restarts: the next attempt happens
+     * once the current window has elapsed. The interval is the operator's to set.
+     *
+     * Failure is logged and dropped rather than raised. A retry that cannot
+     * resolve leaves exactly the state it found, and the caller is about to
+     * report `unverified`, which is the honest answer for a target with no
+     * provable approved identity. Letting the rejection escape would fail the
+     * whole drift check, including the parts that had already answered.
+     */
+    private async retryArtifactFreeze(
+        blueprint: Blueprint,
+        node: Node,
+        applicationId: string,
+        binding: Extract<ReturnType<typeof resolveRuntimeRepairBinding>, { kind: 'binding' }>,
+        expectedRow: GitOpsArtifactSetRow | undefined,
+    ): Promise<void> {
+        if (!expectedRow) {
+            // No set to date the window from, so there is nothing to throttle
+            // against. A missing pointer is a different defect from a failed
+            // resolve, and re-resolving on every tick would paper over it.
+            return;
+        }
+        if (!RETRYABLE_ARTIFACT_QUALIFICATIONS.has(expectedRow.qualification)) return;
+
+        const store = GitOpsStore.getInstance();
+        const target = store.getTarget(applicationId, node.id);
+        // Falls back to the expected set's own age for a target that never
+        // recorded one, so a missing latest pointer throttles on the original
+        // freeze rather than retrying every tick.
+        const lastAttemptAt = (target?.latest_artifact_set_id
+            ? store.getArtifactSet(target.latest_artifact_set_id)?.created_at
+            : undefined) ?? expectedRow.created_at;
+        const intervalMs = DatabaseService.getInstance().getGitOpsArtifactRetryIntervalMins() * 60_000;
+        // No clamp on the age, and deliberately: a stamp dated in the future (a
+        // clock step backwards, or a database restored from a host whose clock
+        // ran ahead) makes the age negative, which fails the same comparison and
+        // therefore waits out a full interval rather than retrying at once. That
+        // is the direction to be wrong in: a wrong-in-the-past stamp delays a
+        // retry by one interval, a wrong-in-the-future one would hammer a
+        // registry that is already struggling.
+        if (Date.now() - lastAttemptAt < intervalMs) return;
+
+        // Skipped, not blocked, when a deploy holds this target's lock. A
+        // deploy resolves the freeze itself, so a concurrent retry would only
+        // contend for the same artifact rows.
+        if (!this.acquireLock(blueprint.id, node.id)) return;
+        try {
+            await retryInlineArtifactFreeze({
+                blueprintId: blueprint.id,
+                nodeId: node.id,
+                generationId: binding.acceptedGenerationId,
+            });
+        } catch (err) {
+            console.error(
+                '[BlueprintService] artifact freeze retry failed blueprint=%s node=%s error=%s',
+                sanitizeForLog(blueprint.name),
+                node.id,
+                sanitizeForLog(BlueprintService.formatError(err)),
+            );
+        } finally {
+            this.releaseLock(blueprint.id, node.id);
         }
     }
 

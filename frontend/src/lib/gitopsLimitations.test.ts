@@ -36,6 +36,7 @@ const LIVE_ARM_CODES = [
   'invocation_observed_invalid',
   'invocation_expected_invalid',
   'recovery_unproven',
+  'artifact_expectation_unresolved',
   'lkg_artifact_unprovable',
   'source_acceptance_unprovable',
   'artifact_expectation_unprovable',

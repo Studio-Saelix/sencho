@@ -39,6 +39,7 @@ import { FleetMeshSection } from '../FleetMeshSection';
 import { DataRetentionSection } from '../DataRetentionSection';
 import { DeveloperSection } from '../DeveloperSection';
 import { StacksSection } from '../StacksSection';
+import { GitOpsSection } from '../GitOpsSection';
 
 const mockedFetch = apiFetch as unknown as ReturnType<typeof vi.fn>;
 const mockedLicense = useLicense as unknown as ReturnType<typeof vi.fn>;
@@ -65,6 +66,7 @@ const FULL_SETTINGS: Record<string, string> = {
     health_gate_window_seconds: '90',
     env_block_deploy_on_missing_required: '0',
     auto_create_missing_external_networks: '0',
+    gitops_artifact_retry_interval_mins: '5',
 };
 
 function patchedKeys(): string[] {
@@ -125,6 +127,20 @@ describe('split section save payloads', () => {
             'recovery_max_generations',
             'recovery_retention_days',
         ]);
+    });
+
+    it('GitOpsSection patches only the artifact retry interval', async () => {
+        // The polling control saves to its own endpoint, and this file's
+        // patchedKeys() reads the last PATCH, so the capability is off here to
+        // keep that control out of the way and leave one PATCH to inspect.
+        render(<GitOpsSection />);
+        const save = await screen.findByRole('button', { name: /save settings/i });
+        fireEvent.click(screen.getByRole('button', { name: /^5\s*min/i }));
+        fireEvent.change(screen.getByRole('spinbutton'), { target: { value: '30' } });
+        fireEvent.blur(screen.getByRole('spinbutton'));
+        fireEvent.click(save);
+        await waitFor(() => expect(mockedFetch.mock.calls.some(c => c[1]?.method === 'PATCH')).toBe(true));
+        expect(patchedKeys()).toEqual(['gitops_artifact_retry_interval_mins']);
     });
 
     it('DockerStorageSection patches only docker and storage keys', async () => {

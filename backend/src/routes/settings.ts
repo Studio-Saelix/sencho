@@ -24,6 +24,12 @@ export const SETTING_WRITE_PERMISSIONS: Record<string, PermissionAction> = {
   reclaim_hero: 'node:manage',
   health_gate_enabled: 'node:manage',
   health_gate_window_seconds: 'node:manage',
+  // `system:settings`, not `node:manage`: this is instance-scoped rather than
+  // node-scoped. The reconciler that reads it is the one on the instance the
+  // write lands on, and it runs the drift checks for every node that instance
+  // manages, so one value governs the fleet. The sibling node-scoped keys keep
+  // `node:manage` because each governs the node it is stored against.
+  gitops_artifact_retry_interval_mins: 'system:settings',
   env_block_deploy_on_missing_required: 'node:manage',
   auto_create_missing_external_networks: 'node:manage',
   notification_dispatch_retries: 'node:manage',
@@ -113,6 +119,7 @@ const SettingsPatchSchema = z.object({
   snapshot_documentation: z.enum(['0', '1']),
   health_gate_enabled: z.enum(['0', '1']),
   health_gate_window_seconds: z.coerce.number().int().min(15).max(600).transform(String),
+  gitops_artifact_retry_interval_mins: z.coerce.number().int().min(1).max(1440).transform(String),
   env_block_deploy_on_missing_required: z.enum(['0', '1']),
   auto_create_missing_external_networks: z.enum(['0', '1']),
   image_update_sidebar_indicators: z.enum(['0', '1']),

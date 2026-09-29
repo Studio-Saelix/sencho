@@ -40,7 +40,7 @@ The body groups five sections:
 - **Repository secrets.** Age identities for SOPS-encrypted env files and file-backed secrets, encrypted-source policy, and a readiness chip for whether this node can decrypt what the repository expects.
 - **Manifest.** The managed-project summary when a source is linked.
 
-Polling interval lives in **Settings → Stacks**, not on this sheet. There is no per-source interval control; a source with no override inherits the node default.
+Polling interval lives in **Settings → GitOps**, not on this sheet. There is no per-source interval control; a source with no override inherits the node default.
 
 ## Source state
 
@@ -152,7 +152,7 @@ Git Sources apply to stacks you link from the editor. Blueprint deployments do n
 
 ## Polling
 
-Unattended fetches use a node-wide interval under **Settings → Stacks**. The control is **Poll Git sources**. The default is off (interval `0`). Turn it on to fetch linked sources on a schedule; sources still pull on demand, on webhook, and on retry when polling is off.
+Unattended fetches use a node-wide interval under **Settings → GitOps**. The control is **Poll Git sources**. The default is off (interval `0`). Turn it on to fetch linked sources on a schedule; sources still pull on demand, on webhook, and on retry when polling is off.
 
 Linked sources with no override inherit this interval. There is no per-source interval knob on the Git Source sheet.
 

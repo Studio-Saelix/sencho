@@ -72,6 +72,8 @@ export const GITOPS_LIMITATION_COPY: Readonly<Record<string, string | undefined>
   // --- recorded at write time, merged in later ------------------------------
   recovery_unproven:
     'A recovery ran but could not be tied to a specific generation, so the pointers were left where they were rather than moved on an unproven claim.',
+  artifact_expectation_unresolved:
+    'The image identity this target is meant to be running could not be resolved, so Sencho is not comparing what is running against what was intended on this node. It clears once the identity is resolved.',
   lkg_artifact_unprovable:
     'The artifact captured with the last known good could not be proven during recovery, so the fallback is available but no longer qualified.',
   source_acceptance_unprovable:

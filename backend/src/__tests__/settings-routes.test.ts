@@ -461,6 +461,44 @@ describe('health gate settings', () => {
   });
 });
 
+describe('gitops_artifact_retry_interval_mins setting', () => {
+  const KEY = 'gitops_artifact_retry_interval_mins';
+
+  it('seeds to 5 in a fresh database', () => {
+    expect(DatabaseService.getInstance().getGlobalSettings()[KEY]).toBe('5');
+  });
+
+  it('is exposed through the settings GET projection', async () => {
+    const res = await request(app).get('/api/settings').set('Cookie', adminCookie);
+    expect(res.status).toBe(200);
+    expect(res.body[KEY]).toBeDefined();
+  });
+
+  it('accepts an in-range value and persists it', async () => {
+    const res = await request(app)
+      .patch('/api/settings')
+      .set('Cookie', adminCookie)
+      .send({ [KEY]: 30 });
+    expect(res.status).toBe(200);
+    expect(DatabaseService.getInstance().getGlobalSettings()[KEY]).toBe('30');
+    DatabaseService.getInstance().updateGlobalSetting(KEY, '5');
+  });
+
+  it('rejects zero, a negative value, and one past the ceiling', async () => {
+    // Zero is rejected rather than accepted as "off": the drift check is the
+    // only thing that recovers a target whose approved identity is unresolved,
+    // so disabling the retry would reintroduce the redeploy dependency.
+    for (const value of [0, -1, 1441]) {
+      const res = await request(app)
+        .post('/api/settings')
+        .set('Cookie', adminCookie)
+        .send({ key: KEY, value });
+      expect(res.status, `value ${value}`).toBe(400);
+    }
+    expect(DatabaseService.getInstance().getGlobalSettings()[KEY]).toBe('5');
+  });
+});
+
 describe('notification_dispatch_retries setting', () => {
   it('seeds to "0" in a fresh database', () => {
     expect(DatabaseService.getInstance().getGlobalSettings().notification_dispatch_retries).toBe('0');

@@ -18,7 +18,8 @@ import { GitOpsTransitions, GitOpsTransitionError } from './transitions';
 import { envelopeFor, recordableApplication } from './blueprintProducers';
 import { resolveAndRecordArtifactSet } from './artifactResolve';
 import { newGitOpsId } from './directApplication';
-import type { GitOpsGenerationRow } from './types';
+import type { Blueprint } from '../DatabaseService';
+import type { GitOpsGenerationRow, GitOpsIntentRevisionRow } from './types';
 import { sanitizeForLog } from '../../utils/safeLog';
 
 /** Why a deployment row moved. */
@@ -260,6 +261,83 @@ export function commitBlueprintDeploymentRemoved(
 }
 
 /**
+ * The stack name an Inline Blueprint's artifact is resolved against.
+ *
+ * Prefers the intent's recorded stack name, because that is what the deploy
+ * applied, and falls back to the Blueprint's own name for an application with
+ * no intent revision yet. Shared with the freeze so a retry can never resolve
+ * against a different stack than the freeze did.
+ */
+function inlineFreezeStackName(
+  intent: GitOpsIntentRevisionRow | undefined,
+  blueprint: Blueprint | undefined,
+): string | null {
+  return intent?.deploy_stack_name ?? blueprint?.name ?? null;
+}
+
+/**
+ * Re-resolve an already-frozen Inline Blueprint generation, without re-freezing.
+ *
+ * This is the recovery half of `freezeInlineRevisionAfterDeploy`: the freeze
+ * itself mints a generation and is a no-op once one exists, so a transient
+ * registry failure at freeze time would otherwise park the target's approved
+ * identity at `unresolved` until an unrelated redeploy of the same revision
+ * happened to land. Resolving again against the generation that is already
+ * frozen is the same operation the freeze performs, minus the mint.
+ *
+ * This is a deferred freeze, and it trusts exactly what a freeze trusts: the
+ * registry, right now. Nothing here compares the result against an approval,
+ * because the freeze that failed recorded no digests to compare against. So a
+ * tag that moved between the failed freeze and this retry resolves to its new
+ * digest, and that becomes the expectation, which is the same trust a redeploy
+ * of this revision would extend and the same exposure the pre-existing redeploy
+ * recovery already carries. What the transition does bound is narrower and
+ * worth stating exactly: recording a fresh `exact`/`qualified` set moves an
+ * expectation that is not already resolved and leaves a resolved one alone. So
+ * a retry cannot redefine an identity that was ever approved, and it cannot
+ * move an already-stale set either. It is not, and does not claim to be, a
+ * second line of defence against a moving tag.
+ *
+ * No-op unless the application is a live Inline Blueprint, since a Git-managed
+ * one resolves its artifact from the repository rather than from a node's
+ * running compose model.
+ */
+export async function retryInlineArtifactFreeze(args: {
+  blueprintId: number;
+  nodeId: number;
+  generationId: string;
+}): Promise<void> {
+  const store = GitOpsStore.getInstance();
+  const app = store.getLiveBlueprintApplication(args.blueprintId);
+  if (!recordableApplication(app) || app.target_mode !== 'inline_blueprint') return;
+  // The generation is the one the caller compared the observation against. A
+  // newer accepted generation makes that comparison stale, and the newer one
+  // owns its own resolve.
+  if (app.accepted_generation_id !== args.generationId) return;
+
+  const intent = app.intent_revision_id
+    ? store.getIntentRevision(app.intent_revision_id)
+    : undefined;
+  const stackName = inlineFreezeStackName(intent, DatabaseService.getInstance().getBlueprint(args.blueprintId));
+  if (!stackName) {
+    console.error(
+      '[GitOps] Inline artifact retry skipped for blueprint %s: no stack name on intent or blueprint',
+      sanitizeForLog(String(args.blueprintId)),
+    );
+    return;
+  }
+
+  await resolveAndRecordArtifactSet({
+    stackName,
+    nodeId: args.nodeId,
+    applicationId: app.id,
+    generationId: args.generationId,
+    buildContexts: [],
+    envelope: envelopeFor(null, 'inline_revision_frozen'),
+  });
+}
+
+/**
  * After the first successful Inline deploy of a revision, freeze executable identity.
  *
  * Mints an inline-owned generation and unresolved expected set, then resolves
@@ -282,7 +360,7 @@ export async function freezeInlineRevisionAfterDeploy(args: {
     ? store.getIntentRevision(app.intent_revision_id)
     : undefined;
   const blueprint = DatabaseService.getInstance().getBlueprint(args.blueprintId);
-  const stackName = intent?.deploy_stack_name ?? blueprint?.name;
+  const stackName = inlineFreezeStackName(intent, blueprint);
   if (!stackName) {
     console.error(
       '[GitOps] Inline freeze skipped for blueprint %s: no stack name on intent or blueprint',
@@ -293,14 +371,30 @@ export async function freezeInlineRevisionAfterDeploy(args: {
 
   const envelope = envelopeFor(args.actor, 'inline_revision_frozen');
 
-  const resolveFreezeSet = (generationId: string) => resolveAndRecordArtifactSet({
-    stackName,
-    nodeId: args.nodeId,
-    applicationId: app.id,
-    generationId,
-    buildContexts: [],
-    envelope,
-  });
+  // A lost write race on the evidence row is not a failed resolve, so
+  // `resolveAndRecordArtifactSet` rethrows it rather than recording
+  // `unavailable`. A deploy has already applied the workload by this point, so
+  // letting that escape would report a successful deploy as failed; the
+  // generation is frozen either way and the next resolve picks it up.
+  const resolveFreezeSet = async (generationId: string): Promise<void> => {
+    try {
+      await resolveAndRecordArtifactSet({
+        stackName,
+        nodeId: args.nodeId,
+        applicationId: app.id,
+        generationId,
+        buildContexts: [],
+        envelope,
+      });
+    } catch (error) {
+      if (!(error instanceof GitOpsTransitionError)) throw error;
+      console.error(
+        '[GitOps] Inline freeze resolve lost a write race for blueprint %s on node %s; the generation stays frozen and unresolved',
+        sanitizeForLog(String(args.blueprintId)),
+        args.nodeId,
+      );
+    }
+  };
 
   if (app.accepted_generation_id && app.artifact_set_id) {
     const existing = store.getArtifactSet(app.artifact_set_id);

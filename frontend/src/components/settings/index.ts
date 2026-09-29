@@ -13,6 +13,7 @@ export { DeveloperSection } from './DeveloperSection';
 export { DataRetentionSection } from './DataRetentionSection';
 export { AppStoreSection } from './AppStoreSection';
 export { StacksSection } from './StacksSection';
+export { GitOpsSection } from './GitOpsSection';
 export { SupportSection } from './SupportSection';
 export { AboutSection } from './AboutSection';
 export { RecoverySection } from './RecoverySection';

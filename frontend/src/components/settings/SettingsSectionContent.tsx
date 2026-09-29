@@ -16,6 +16,7 @@ import {
     DataRetentionSection,
     AppStoreSection,
     StacksSection,
+    GitOpsSection,
     SupportSection,
     AboutSection,
     RecoverySection,
@@ -121,6 +122,7 @@ function renderSection({
         case 'nodes': return <NodeManager />;
         case 'app-store': return <AppStoreSection />;
         case 'stacks': return <StacksSection onDirtyChange={(d) => onDirtyChange('stacks', d)} />;
+        case 'gitops': return <GitOpsSection onDirtyChange={(d) => onDirtyChange('gitops', d)} />;
         case 'recovery': return <RecoverySection />;
         case 'support': return <SupportSection />;
         case 'about': return <AboutSection />;

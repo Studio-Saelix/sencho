@@ -272,14 +272,25 @@ describe('gitops recovery', () => {
       });
     };
 
+    const codes = (): string[] => projectApplication('app-rec-clear', true).limitations.map((l) => l.code);
+
     restore('art-b-app-rec-clear', 'acc-b-app-rec-clear');
     expect(store.getTarget('app-rec-clear', 1)?.evidence_limitations_json).not.toBeNull();
+    // The unprovable pointer is the artifact expectation, since this restore
+    // names a set the generation does not own.
+    expect(codes()).toContain('artifact_expectation_unprovable');
 
     restore('art-a-app-rec-clear', 'acc-a-app-rec-clear');
     // A stale limitation is worse than none: it would keep reporting doubt
     // about evidence that is now proven.
     expect(store.getTarget('app-rec-clear', 1)?.evidence_limitations_json).toBeNull();
-    expect(projectApplication('app-rec-clear', true).limitations).toHaveLength(0);
+    // Scoped to the code under test rather than to an empty list, because the
+    // restored artifact set is the unresolved placeholder the apply transition
+    // seeds and this fixture never resolves it. That target really does have no
+    // provable approved identity, so `artifact_expectation_unresolved` is a true
+    // caveat here and not the stale one this test is about.
+    expect(codes()).not.toContain('artifact_expectation_unprovable');
+    expect(codes()).toContain('artifact_expectation_unresolved');
   });
 
   it('opens and closes a recovery from the restore path itself', async () => {
