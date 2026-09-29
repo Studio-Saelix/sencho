@@ -4,10 +4,17 @@ import { GitOpsStore } from '../services/gitops/store';
 import { GitOpsTransitions, type EventEnvelope } from '../services/gitops/transitions';
 import {
   observeStackRuntimeArtifact,
+  probeStaleArtifactEvidence,
   recordObservedRuntimeArtifactForDeploy,
   resolveAndRecordArtifactSet,
 } from '../services/gitops/artifactResolve';
-import { decodeObservedArtifactIdentity, encodeArtifactEvidenceJson } from '../services/gitops/json';
+import {
+  computeArtifactSetFingerprint,
+  decodeArtifactEvidenceJson,
+  decodeObservedArtifactIdentity,
+  encodeArtifactEvidenceJson,
+  type ArtifactEvidenceJson,
+} from '../services/gitops/json';
 import { observationMatchesExpected } from '../services/gitops/artifactIdentity';
 import type { GitOpsApplicationRow, GitOpsGenerationRow } from '../services/gitops/types';
 import { DEFAULT_PLACEMENT_POLICY, DEFAULT_ROLLOUT_AUTHORIZATION_POLICY } from '../services/gitops/policyComposition';
@@ -59,6 +66,35 @@ vi.mock('../services/DockerController', () => ({
 }));
 
 const EXACT_DIGEST = 'sha256:1111111111111111111111111111111111111111111111111111111111111111';
+const INDEX_DIGEST = `sha256:${'2'.repeat(64)}`;
+const AMD64_DIGEST = `sha256:${'a'.repeat(64)}`;
+const ARM64_DIGEST = `sha256:${'b'.repeat(64)}`;
+const ARM64_MOVED_DIGEST = `sha256:${'c'.repeat(64)}`;
+
+/** What a registry answers for a multi-arch tag resolved for one platform. */
+function multiArchIndex(platformLabel: string, platformDigest: string, armDigest = ARM64_DIGEST) {
+  return {
+    ok: true as const,
+    indexDigest: INDEX_DIGEST,
+    platformDigest,
+    platformLabel,
+    qualification: 'qualified' as const,
+    platformVariants: [
+      { platform: 'linux/amd64', digest: AMD64_DIGEST },
+      { platform: 'linux/arm64', digest: armDigest },
+    ],
+  };
+}
+
+/** One registry service on the default platform. */
+function singleServiceModel() {
+  return {
+    renderable: true,
+    services: [
+      { name: 'web', declaredImage: 'nginx:latest', hasBuild: false, expectedReplicas: 1, dependsOn: [], hasHealthcheck: false },
+    ],
+  };
+}
 
 describe('gitops artifact resolve', () => {
   let tmpDir: string;
@@ -352,6 +388,150 @@ describe('gitops artifact resolve', () => {
     }];
     expect(observationMatchesExpected(expected, observed.services ?? [])).toBe(true);
   });
+
+  it('keeps an arm64 target on a multi-arch expected set out of the stale bucket', async () => {
+    seedDirectApp({ applicationId: 'app-memb', generationId: 'gen-memb', stackName: 'memb-web', artifactSetId: 'art-memb-seed' });
+    mockBuildEffectiveServiceModel.mockResolvedValue(singleServiceModel());
+
+    // The expected set is resolved on the amd64 node first, so it carries both
+    // platform children but its fingerprint pins the amd64 one.
+    mockDockerInfo.mockResolvedValue({ OSType: 'linux', Architecture: 'amd64' });
+    mockResolveRegistryImageDigestForPlatform.mockResolvedValue(
+      multiArchIndex('linux/amd64', AMD64_DIGEST),
+    );
+    await resolveAndRecordArtifactSet({
+      stackName: 'memb-web',
+      nodeId: 1,
+      applicationId: 'app-memb',
+      generationId: 'gen-memb',
+      buildContexts: [],
+      envelope: envelope('op-resolve-memb'),
+    });
+    const expectedId = GitOpsStore.getInstance().getApplication('app-memb')!.artifact_set_id!;
+    expect(GitOpsStore.getInstance().getArtifactSet(expectedId)?.qualification).toBe('qualified');
+
+    // The same tag probed on an arm64 node resolves a different fingerprint for
+    // the same approved identity, so identity equality alone cannot decide this.
+    mockDockerInfo.mockResolvedValue({ OSType: 'linux', Architecture: 'arm64' });
+    mockResolveRegistryImageDigestForPlatform.mockResolvedValue(
+      multiArchIndex('linux/arm64', ARM64_DIGEST),
+    );
+    await probeStaleArtifactEvidence({
+      stackName: 'memb-web',
+      nodeId: 1,
+      applicationId: 'app-memb',
+      generationId: 'gen-memb',
+      buildContexts: [],
+      envelope: envelope('op-probe-memb'),
+    });
+
+    const app = GitOpsStore.getInstance().getApplication('app-memb')!;
+    expect(app.latest_artifact_set_id).toBe(expectedId);
+    expect(GitOpsStore.getInstance().getArtifactSet(app.latest_artifact_set_id!)?.qualification).toBe('qualified');
+  });
+
+  it('records stale when the platform child actually moved', async () => {
+    seedDirectApp({ applicationId: 'app-move', generationId: 'gen-move', stackName: 'move-web', artifactSetId: 'art-move-seed' });
+    mockBuildEffectiveServiceModel.mockResolvedValue(singleServiceModel());
+
+    mockDockerInfo.mockResolvedValue({ OSType: 'linux', Architecture: 'amd64' });
+    mockResolveRegistryImageDigestForPlatform.mockResolvedValue(
+      multiArchIndex('linux/amd64', AMD64_DIGEST),
+    );
+    await resolveAndRecordArtifactSet({
+      stackName: 'move-web',
+      nodeId: 1,
+      applicationId: 'app-move',
+      generationId: 'gen-move',
+      buildContexts: [],
+      envelope: envelope('op-resolve-move'),
+    });
+    const expectedId = GitOpsStore.getInstance().getApplication('app-move')!.artifact_set_id!;
+
+    // The arm64 child of the tag is now something the expected set never named.
+    mockDockerInfo.mockResolvedValue({ OSType: 'linux', Architecture: 'arm64' });
+    mockResolveRegistryImageDigestForPlatform.mockResolvedValue(
+      multiArchIndex('linux/arm64', ARM64_MOVED_DIGEST, ARM64_MOVED_DIGEST),
+    );
+    await probeStaleArtifactEvidence({
+      stackName: 'move-web',
+      nodeId: 1,
+      applicationId: 'app-move',
+      generationId: 'gen-move',
+      buildContexts: [],
+      envelope: envelope('op-probe-move'),
+    });
+
+    const app = GitOpsStore.getInstance().getApplication('app-move')!;
+    expect(app.latest_artifact_set_id).not.toBe(expectedId);
+    const latest = GitOpsStore.getInstance().getArtifactSet(app.latest_artifact_set_id!)!;
+    expect(latest.qualification).toBe('stale');
+    expect(decodeArtifactEvidenceJson(latest.evidence_json).kind).toBe('stale');
+    const expectedRow = GitOpsStore.getInstance().getArtifactSet(expectedId)!;
+    expect(decodeArtifactEvidenceJson(latest.evidence_json).services?.[0]?.platformDigest)
+      .toBe(ARM64_MOVED_DIGEST);
+    expect(expectedRow.qualification).toBe('qualified');
+  });
+
+  it('falls back to the identity string for an expected set with no per-service evidence', async () => {
+    const legacyServices = [{
+      serviceName: 'web',
+      authoredRef: 'nginx:latest',
+      source: 'registry' as const,
+      platform: 'linux/amd64',
+      indexDigest: EXACT_DIGEST,
+      platformDigest: EXACT_DIGEST,
+      buildContextFingerprint: null,
+      producedImageId: null,
+      failureClass: null,
+      resolvedAt: 1,
+    }];
+    seedDirectApp({
+      applicationId: 'app-legacy',
+      generationId: 'gen-legacy',
+      stackName: 'legacy-web',
+      artifactSetId: 'art-legacy-v1',
+      evidence: { kind: 'exact', identity: computeArtifactSetFingerprint(legacyServices) },
+    });
+    mockBuildEffectiveServiceModel.mockResolvedValue(singleServiceModel());
+    mockResolveRegistryImageDigestForPlatform.mockResolvedValue({
+      ok: true,
+      indexDigest: EXACT_DIGEST,
+      platformDigest: EXACT_DIGEST,
+      platformLabel: 'linux/amd64',
+      qualification: 'exact',
+    });
+
+    await probeStaleArtifactEvidence({
+      stackName: 'legacy-web',
+      nodeId: 1,
+      applicationId: 'app-legacy',
+      generationId: 'gen-legacy',
+      buildContexts: [],
+      envelope: envelope('op-probe-legacy-same'),
+    });
+    expect(GitOpsStore.getInstance().getApplication('app-legacy')!.latest_artifact_set_id).toBe('art-legacy-v1');
+
+    const movedDigest = `sha256:${'d'.repeat(64)}`;
+    mockResolveRegistryImageDigestForPlatform.mockResolvedValue({
+      ok: true,
+      indexDigest: movedDigest,
+      platformDigest: movedDigest,
+      platformLabel: 'linux/amd64',
+      qualification: 'exact',
+    });
+    await probeStaleArtifactEvidence({
+      stackName: 'legacy-web',
+      nodeId: 1,
+      applicationId: 'app-legacy',
+      generationId: 'gen-legacy',
+      buildContexts: [],
+      envelope: envelope('op-probe-legacy-moved'),
+    });
+    const app = GitOpsStore.getInstance().getApplication('app-legacy')!;
+    expect(app.latest_artifact_set_id).not.toBe('art-legacy-v1');
+    expect(GitOpsStore.getInstance().getArtifactSet(app.latest_artifact_set_id!)?.qualification).toBe('stale');
+  });
 });
 
 function envelope(operationId: string): EventEnvelope {
@@ -363,6 +543,8 @@ function seedDirectApp(ids: {
   generationId: string;
   stackName: string;
   artifactSetId: string;
+  /** Recorded verbatim; defaults to the unresolved placeholder every seed uses. */
+  evidence?: ArtifactEvidenceJson;
 }): void {
   const store = GitOpsStore.getInstance();
   const tx = GitOpsTransitions.getInstance();
@@ -377,8 +559,8 @@ function seedDirectApp(ids: {
     generation_id: ids.generationId,
     evidence_version: 1,
     authoritative: 0,
-    qualification: 'unresolved',
-    evidence_json: encodeArtifactEvidenceJson({ kind: 'unresolved' }),
+    qualification: (ids.evidence?.kind ?? 'unresolved'),
+    evidence_json: encodeArtifactEvidenceJson(ids.evidence ?? { kind: 'unresolved' }),
     created_at: 1,
   });
 }

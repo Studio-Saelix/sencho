@@ -27,6 +27,7 @@ import {
   type ObservedArtifactIdentity,
   type ServiceArtifactEvidence,
 } from './json';
+import { observationMatchesExpected } from './artifactIdentity';
 import { GitOpsStore } from './store';
 import { GitOpsTransitions, type EventEnvelope } from './transitions';
 import { newGitOpsId } from './directApplication';
@@ -540,6 +541,7 @@ export async function probeStaleArtifactEvidence(args: {
   }
   const expectedIdentity = 'identity' in expectedEvidence ? expectedEvidence.identity : null;
   if (!expectedIdentity) return;
+  const expectedServices = 'services' in expectedEvidence ? expectedEvidence.services : undefined;
 
   try {
     const resolvedAt = args.envelope.at;
@@ -552,6 +554,16 @@ export async function probeStaleArtifactEvidence(args: {
     const latestIdentity = 'identity' in evidence ? evidence.identity : null;
     if (!latestIdentity || latestIdentity === expectedIdentity) return;
     if (qualification === 'unresolved' || qualification === 'unavailable') return;
+    // The set fingerprint pins one platform child per service, so a target on a
+    // different architecture resolves a different fingerprint for the same
+    // multi-arch tag, and the fingerprint alone would report a moved identity.
+    // Membership is the test the Blueprint drift path applies: this platform's
+    // child is one of the expected set's own variants, so nothing moved. It
+    // weighs the expected registry services only, and both sides resolve this
+    // one generation, so the service sets agree.
+    if (expectedServices?.length
+      && evidence.services?.length
+      && observationMatchesExpected(expectedServices, evidence.services)) return;
     recordResolvedEvidence({
       applicationId: args.applicationId,
       generationId: args.generationId,
