@@ -15,9 +15,12 @@ import { setupTestDb, cleanupTestDb } from './helpers/setupTestDb';
 import { GitOpsStore, emptyTargetRow } from '../services/gitops/store';
 import { GitOpsTransitions, type EventEnvelope } from '../services/gitops/transitions';
 import { projectApplication } from '../services/gitops/derive';
+import { attentionReasons } from '../services/gitops/attention';
+import { postureOf } from '../services/gitops/portfolioAggregator';
 import type {
   GitOpsApplicationRow,
   GitOpsIntentRevisionRow,
+  GitOpsRevisionProjection,
   GitOpsRolloutCandidateRow,
 } from '../services/gitops/types';
 import { DEFAULT_PLACEMENT_POLICY, DEFAULT_ROLLOUT_AUTHORIZATION_POLICY } from '../services/gitops/policyComposition';
@@ -513,6 +516,178 @@ describe('gitops blueprint transitions', () => {
     expect(runtimeStatusOf('app-failfirst')).toBe('failed_after_mutation');
   });
 
+  it('projects a Blueprint deploy and withdrawal in flight as work in progress', () => {
+    // Both stages share the `active_operation_stage` column with the Direct
+    // deploy. Read against the Direct value alone they fell through to the
+    // applied and deployed pointers, so a rollout under way read as whatever
+    // the node last converged on.
+    const tx = GitOpsTransitions.getInstance();
+    seedInline('app-live', 212, 1);
+    tx.intentRevised({ applicationId: 'app-live', intent: intent('int-live', 'app-live', 212), envelope: env('op-int-live') });
+    tx.blueprintDeployStarted({
+      applicationId: 'app-live', nodeId: 1, intentRevisionId: 'int-live',
+      rolloutCandidateId: null, envelope: env('op-live'),
+    });
+    expect(runtimeStatusOf('app-live')).toBe('deploying');
+
+    // A withdrawal cannot start on top of an in-flight deploy, so the node is
+    // acknowledged first, which is the sequence a real rollout follows.
+    tx.blueprintAckRecorded({
+      applicationId: 'app-live', nodeId: 1, intentRevisionId: 'int-live',
+      rolloutCandidateId: null, legacyAppliedRevision: null, envelope: env('op-live-ack'),
+    });
+    tx.blueprintWithdrawStarted({
+      applicationId: 'app-live', nodeId: 1, intentRevisionId: 'int-live', envelope: env('op-live-wd'),
+    });
+    // Nothing else in the codebase produces this status.
+    expect(runtimeStatusOf('app-live')).toBe('withdrawing');
+  });
+
+  it('does not let an observation mask an operation that is running now', () => {
+    // The same ordering claim as the Direct failure above, on the other side of
+    // it: a start supersedes the observation it replaces, so a stale drift
+    // report must not read through the operation that is under way.
+    const tx = GitOpsTransitions.getInstance();
+    seedInline('app-liveobs', 213, 1);
+    tx.intentRevised({ applicationId: 'app-liveobs', intent: intent('int-liveobs', 'app-liveobs', 213), envelope: env('op-int-liveobs') });
+    tx.blueprintObservation({
+      applicationId: 'app-liveobs', nodeId: 1, stage: 'blueprint_drifted', envelope: env('op-liveobs-obs'),
+    });
+    expect(runtimeStatusOf('app-liveobs')).toBe('drifted');
+
+    tx.blueprintDeployStarted({
+      applicationId: 'app-liveobs', nodeId: 1, intentRevisionId: 'int-liveobs',
+      rolloutCandidateId: null, envelope: env('op-liveobs-dep'),
+    });
+    expect(runtimeStatusOf('app-liveobs')).toBe('deploying');
+  });
+
+  it.each([
+    { stage: 'deploy', class: 'post_mutation', expected: 'failed_after_mutation', blueprintId: 214 },
+    { stage: 'deploy', class: 'name_conflict', expected: 'failed_previous_workload_intact', blueprintId: 215 },
+    { stage: 'deploy', class: 'pre_mutation', expected: 'failed_previous_workload_intact', blueprintId: 216 },
+    { stage: 'deploy', class: 'deploy_failed', expected: 'failed_after_mutation', blueprintId: 219 },
+    { stage: 'deploy', class: 'target_missing', expected: 'failed_previous_workload_intact', blueprintId: 224 },
+    { stage: 'withdraw', class: 'post_mutation', expected: 'failed_after_mutation', blueprintId: 217 },
+    { stage: 'withdraw', class: 'name_conflict', expected: 'failed_previous_workload_intact', blueprintId: 218 },
+  ] as const)('projects a failed Blueprint $stage ($class) as a failure', ({ stage, class: failureClass, expected, blueprintId }) => {
+    // A recorded Blueprint failure that projects as a pointer state is the
+    // sharpest edge of the gap: a failure status is what the attention
+    // classifier keys on, so a failure that missed it reached no queue at all.
+    // The two classes written only by this path carry the whole argument:
+    // `name_conflict` and `target_missing` both refuse before the node is
+    // touched, and read against the Direct vocabulary they matched neither arm.
+    // `deploy_failed` is the opposite: it is recorded for anything that went
+    // wrong once the Compose apply was handed over, so it has to read as
+    // mutated, or a half-replaced workload reports as intact.
+    const tx = GitOpsTransitions.getInstance();
+    // One live application per Blueprint, so each case names its own.
+    const id = `app-bp-${blueprintId}`;
+    seedInline(id, blueprintId, 1);
+    tx.intentRevised({ applicationId: id, intent: intent(`int-${id}`, id, blueprintId), envelope: env(`op-int-${id}`) });
+    if (stage === 'deploy') {
+      tx.blueprintDeployStarted({
+        applicationId: id, nodeId: 1, intentRevisionId: `int-${id}`,
+        rolloutCandidateId: null, envelope: env(`op-${id}`),
+      });
+      tx.blueprintDeployFailed({
+        applicationId: id, nodeId: 1, failureClass, envelope: env(`op-${id}`),
+      });
+    } else {
+      // A withdrawal answers an acknowledged deployment, so the node is
+      // acknowledged first.
+      tx.blueprintDeployStarted({
+        applicationId: id, nodeId: 1, intentRevisionId: `int-${id}`,
+        rolloutCandidateId: null, envelope: env(`op-${id}`),
+      });
+      tx.blueprintAckRecorded({
+        applicationId: id, nodeId: 1, intentRevisionId: `int-${id}`,
+        rolloutCandidateId: null, legacyAppliedRevision: null, envelope: env(`op-${id}-ack`),
+      });
+      tx.blueprintWithdrawStarted({
+        applicationId: id, nodeId: 1, intentRevisionId: `int-${id}`, envelope: env(`op-${id}-wd`),
+      });
+      tx.blueprintWithdrawFailed({
+        applicationId: id, nodeId: 1, failureClass, envelope: env(`op-${id}-wd`),
+      });
+    }
+
+    expect(runtimeStatusOf(id)).toBe(expected);
+    // The operator-visible half: a recorded failure has to reach the queue.
+    expect(attentionReasons(mustProject(id))).toContain('deploy_failed');
+  });
+
+  it('does not let an observation mask a failure a Blueprint deploy recorded', () => {
+    const tx = GitOpsTransitions.getInstance();
+    seedInline('app-bpfailfirst', 221, 1);
+    tx.intentRevised({ applicationId: 'app-bpfailfirst', intent: intent('int-bpfailfirst', 'app-bpfailfirst', 221), envelope: env('op-int-bpfailfirst') });
+    tx.blueprintDeployStarted({
+      applicationId: 'app-bpfailfirst', nodeId: 1, intentRevisionId: 'int-bpfailfirst',
+      rolloutCandidateId: null, envelope: env('op-bpfailfirst'),
+    });
+    tx.blueprintDeployFailed({
+      applicationId: 'app-bpfailfirst', nodeId: 1, failureClass: 'post_mutation', envelope: env('op-bpfailfirst'),
+    });
+    tx.blueprintObservation({
+      applicationId: 'app-bpfailfirst', nodeId: 1, stage: 'blueprint_drifted', envelope: env('op-bpfailfirst-obs'),
+    });
+
+    expect(runtimeStatusOf('app-bpfailfirst')).toBe('failed_after_mutation');
+    expect(attentionReasons(mustProject('app-bpfailfirst'))).toContain('deploy_failed');
+  });
+
+  it('reads a Blueprint target mid-deploy as in progress in the portfolio', () => {
+    // The in-flight classification keys on `deploying` and `withdrawing`, so a
+    // Blueprint rollout under way was neither in progress nor failed: the
+    // portfolio reported the fleet as settled while it was still rolling out.
+    const tx = GitOpsTransitions.getInstance();
+    seedInline('app-posture', 222, 1);
+    tx.intentRevised({ applicationId: 'app-posture', intent: intent('int-posture', 'app-posture', 222), envelope: env('op-int-posture') });
+    tx.blueprintDeployStarted({
+      applicationId: 'app-posture', nodeId: 1, intentRevisionId: 'int-posture',
+      rolloutCandidateId: null, envelope: env('op-posture'),
+    });
+
+    expect(postureOf(mustProject('app-posture'))).toBe('in_progress');
+  });
+
+  it('retires a recorded withdrawal failure once the node converges again', () => {
+    // The reconciler retries a node it could not withdraw by deploying it, so
+    // clearing only a deploy failure would leave a target that has since
+    // converged reporting its old withdrawal as a standing failure for ever.
+    const tx = GitOpsTransitions.getInstance();
+    const store = GitOpsStore.getInstance();
+    seedInline('app-wdfail', 223, 1);
+    tx.intentRevised({ applicationId: 'app-wdfail', intent: intent('int-wdfail', 'app-wdfail', 223), envelope: env('op-int-wdfail') });
+    tx.blueprintDeployStarted({
+      applicationId: 'app-wdfail', nodeId: 1, intentRevisionId: 'int-wdfail',
+      rolloutCandidateId: null, envelope: env('op-wdfail'),
+    });
+    tx.blueprintAckRecorded({
+      applicationId: 'app-wdfail', nodeId: 1, intentRevisionId: 'int-wdfail',
+      rolloutCandidateId: null, legacyAppliedRevision: null, envelope: env('op-wdfail-ack'),
+    });
+    tx.blueprintWithdrawStarted({
+      applicationId: 'app-wdfail', nodeId: 1, intentRevisionId: 'int-wdfail', envelope: env('op-wdfail-wd'),
+    });
+    tx.blueprintWithdrawFailed({
+      applicationId: 'app-wdfail', nodeId: 1, failureClass: 'post_mutation', envelope: env('op-wdfail-wd'),
+    });
+    expect(store.getTarget('app-wdfail', 1)!.failure_stage).toBe('blueprint_withdraw');
+
+    tx.blueprintDeployStarted({
+      applicationId: 'app-wdfail', nodeId: 1, intentRevisionId: 'int-wdfail',
+      rolloutCandidateId: null, envelope: env('op-wdfail-again'),
+    });
+    tx.blueprintAckRecorded({
+      applicationId: 'app-wdfail', nodeId: 1, intentRevisionId: 'int-wdfail',
+      rolloutCandidateId: null, legacyAppliedRevision: null, envelope: env('op-wdfail-again-ack'),
+    });
+
+    expect(store.getTarget('app-wdfail', 1)!.failure_stage).toBeNull();
+    expect(attentionReasons(mustProject('app-wdfail'))).not.toContain('deploy_failed');
+  });
+
   it('freezes an Inline revision once: mints generation and set, binds null targets, then no-ops', () => {
     const store = GitOpsStore.getInstance();
     const tx = GitOpsTransitions.getInstance();
@@ -690,9 +865,13 @@ function inlineGeneration(
 }
 
 function runtimeStatusOf(applicationId: string): string | undefined {
+  return mustProject(applicationId).targets[0]?.runtime.status;
+}
+
+function mustProject(applicationId: string): Extract<GitOpsRevisionProjection, { applicationId: string }> {
   const projection = projectApplication(applicationId, false);
   if (projection.targetMode === 'not_applicable') throw new Error('expected application');
-  return projection.targets[0]?.runtime.status;
+  return projection;
 }
 
 function seedInline(applicationId: string, blueprintId: number, nodeId?: number): void {

@@ -2712,7 +2712,12 @@ export class GitOpsTransitions {
           target.health_stop_reason = null;
         }
         target.rollout_generation_id = app.rollout_generation_id;
-        if (target.failure_stage === 'blueprint_deploy') {
+        // A Blueprint failure of either kind is retired by this acknowledgement,
+        // which is what a Direct `deployBound` already does. The reconciler
+        // retries a node it could not withdraw by deploying it again, so
+        // clearing only a deploy failure would leave a target that has since
+        // converged reporting its old withdrawal as a standing failure.
+        if (target.failure_stage === 'blueprint_deploy' || target.failure_stage === 'blueprint_withdraw') {
           target.failure_stage = null;
           target.failure_class = null;
           target.failure_at = null;

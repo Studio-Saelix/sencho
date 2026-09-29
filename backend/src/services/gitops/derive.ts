@@ -1558,6 +1558,52 @@ const BLUEPRINT_OBSERVATION_STATUS: Record<string, ObservationRuntimeStatus | un
   blueprint_drift_cleared: 'fully_deployed_health_pending',
 } satisfies Record<BlueprintObservationStage, ObservationRuntimeStatus>;
 
+/**
+ * The runtime status a live target operation projects as.
+ *
+ * `active_operation_stage` and `interruption_stage` are two vocabularies over the
+ * same physical operations, and they are written by the same transitions: a
+ * Direct deploy and a Blueprint deploy are both "put this generation on that
+ * node". Reading the live column against only the Direct value is what left a
+ * Blueprint deploy or withdrawal reading as a pointer state, because the fall
+ * through past this table landed on the applied and deployed comparisons.
+ *
+ * Keyed on an open string for the same reason as the observation table above:
+ * the column is null when nothing is in flight, and a miss must fall through to
+ * the states below rather than claim one.
+ */
+const LIVE_OPERATION_STATUS: Record<string, 'deploying' | 'withdrawing' | undefined> = {
+  deploy_started: 'deploying',
+  blueprint_deploy_started: 'deploying',
+  blueprint_withdraw_started: 'withdrawing',
+} satisfies Partial<Record<
+  NonNullable<GitOpsTargetCurrentRow['active_operation_stage']>,
+  'deploying' | 'withdrawing'
+>>;
+
+/**
+ * The failure stages that record a mutation attempt against a target's workload,
+ * as opposed to the recovery failures the recovery branches above already read.
+ *
+ * A Blueprint deploy and a Blueprint withdrawal both land here, because both are
+ * attempts to change what the node runs, and the recorded class is what
+ * separates the one that never got that far from the one that did.
+ */
+const MUTATION_FAILURE_STAGE: ReadonlySet<GitOpsTargetCurrentRow['failure_stage']> = new Set([
+  'deploy',
+  'blueprint_deploy',
+  'blueprint_withdraw',
+]);
+
+/**
+ * The failure classes that mean the mutation reached the node.
+ *
+ * An open `TEXT` column, so the read is a set lookup rather than a comparison
+ * against a closed union: a class a future producer invents is read as
+ * non-mutating, which withholds a claim rather than making one.
+ */
+const APPLIED_MUTATION_CLASS: ReadonlySet<string> = new Set(['post_mutation', 'deploy_failed']);
+
 function deriveRuntime(
   target: GitOpsTargetCurrentRow,
   artifact: ArtifactFacet,
@@ -1578,7 +1624,14 @@ function deriveRuntime(
       failureAt: target.failure_at ?? 0,
     };
   }
-  if (target.active_operation_stage === 'deploy_started') return { status: 'deploying' };
+  // Ahead of the interruption branch, exactly as the Direct deploy was: a start
+  // clears its own interruption, so when both columns are set the live
+  // operation is the later fact. A cross-stage interruption survives the clear
+  // (it only retires the stage it matches), and it is still the right thing to
+  // mask here, because an operation that is running now is what the target is
+  // doing, and the unresolved one resurfaces the moment this one settles.
+  const liveOperation = LIVE_OPERATION_STATUS[target.active_operation_stage ?? ''];
+  if (liveOperation) return { status: liveOperation };
   if (
     target.interruption_stage === 'deploy_started'
     || target.interruption_stage === 'blueprint_deploy_started'
@@ -1596,11 +1649,26 @@ function deriveRuntime(
   }
   if (target.pause_at) return { status: 'paused', pauseAt: target.pause_at, pauseReason: target.pause_reason };
   if (target.partial_json) return { status: 'partially_rolled_out' };
-  if (target.failure_stage === 'deploy' && (target.failure_class === 'pre_mutation' || target.failure_class === 'unbound')) {
-    return { status: 'failed_previous_workload_intact' };
-  }
-  if (target.failure_stage === 'deploy' && target.failure_class === 'post_mutation') {
-    return { status: 'failed_after_mutation' };
+  if (MUTATION_FAILURE_STAGE.has(target.failure_stage)) {
+    // The class records whether the mutation was handed to the node, and that is
+    // what decides which of the two statuses is honest. `post_mutation` is the
+    // Direct spelling. `deploy_failed` is what the Blueprint dispatch path
+    // records for anything that went wrong once it handed the Compose apply
+    // over, and its sibling writer records the same physical event as
+    // `post_mutation`. A skip that found the stack already in place is the one
+    // pre-mutation case hiding inside it, and it resolves the safe way round:
+    // over-claiming a mutation is corrected by looking at the node, while
+    // under-claiming is how a half-replaced workload goes on reporting healthy.
+    //
+    // Every other class, including the ones only the Blueprint path records
+    // (`name_conflict`, `target_missing`) and a class a future producer invents,
+    // reports the workload as intact. Reading a stage against the Direct
+    // vocabulary alone left all of them falling through to the applied and
+    // deployed pointers, and a status is what puts a target in the attention
+    // queue, so a failed Blueprint deploy reached no queue at all.
+    return APPLIED_MUTATION_CLASS.has(target.failure_class ?? '')
+      ? { status: 'failed_after_mutation' }
+      : { status: 'failed_previous_workload_intact' };
   }
   // Placed after every state a live, interrupted or failed mutation puts the
   // target in, and before the applied and deployed pointer checks. So an
