@@ -88,3 +88,36 @@ export function directApplicationFixture(id: string, stackName: string): GitOpsA
         updated_at: now,
     };
 }
+
+/**
+ * A minimal live Inline Blueprint application row.
+ *
+ * The Blueprint shape rather than the Direct one, and the difference is
+ * load-bearing rather than cosmetic. A Blueprint application is stored without
+ * a stack identity (the reconciler materializes each Blueprint as a stack
+ * directory of the Blueprint's name), so the row carries a Blueprint id, a null
+ * stack name, and no configured source at all; a test that reused the Direct
+ * fixture with a Blueprint mode would build a row the schema cannot hold.
+ *
+ * Spread from the Direct fixture so the column list lives in one place, with
+ * every field whose value is mode-specific spelled out. A Direct source
+ * fingerprint and compose path are not merely defaults here: a Blueprint
+ * revision names neither until an intent revision describes the content.
+ */
+export function blueprintApplicationFixture(id: string, blueprintId: number): GitOpsApplicationRow {
+    const now = Date.now();
+    return {
+        ...directApplicationFixture(id, `${id}-unused-stack`),
+        lifecycle_key: `blueprint:${blueprintId}`,
+        target_mode: 'inline_blueprint',
+        stack_name: null,
+        blueprint_id: blueprintId,
+        configured_repo_url: null,
+        repo_identity_json: null,
+        configured_ref: null,
+        compose_paths_json: null,
+        materialization_fingerprint: null,
+        created_at: now,
+        updated_at: now,
+    };
+}

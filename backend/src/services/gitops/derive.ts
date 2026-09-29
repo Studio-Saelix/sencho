@@ -116,11 +116,15 @@ export function deriveGitOpsRevision(
   mergePersistedLimitations(app.evidence_limitations_json, limitations);
   const source = deriveSource(app, limitations);
   const artifact = deriveArtifact(app, app.accepted_generation_id, app.artifact_set_id, app.latest_artifact_set_id, limitations);
-  const placement = derivePlacement(app, futureEvidence);
+  // Targets are derived before the placement facet, which reads them to report
+  // a stateful hold. The dependency is one-way: `deriveTarget` reads the
+  // application row and the target's own evidence, never the placement facet,
+  // so deriving them first introduces no cycle.
   const targets = facts.targets
     .slice()
     .sort((a, b) => a.node_id - b.node_id)
     .map((target) => deriveTarget(app, target, facts.healthDisabled, limitations));
+  const placement = derivePlacement(app, futureEvidence, targets);
   const rollout = deriveRollout(app, targets, artifact, facts.healthDisabled, futureEvidence);
   const availableActions = deriveActions(app, source, placement, targets);
   return {
@@ -186,7 +190,7 @@ function collectDrift(
   limitations: GitOpsLimitation[],
 ): GitOpsDriftItem[] {
   return [
-    ...collectRuntimeDrift(app, targets),
+    ...collectRuntimeDrift(app, targets, rawByNodeId(rawTargets)),
     ...collectSourceDrift(app, facts.source, availableActions),
     ...collectPlacementDrift(app, rawTargets, facts.placement, facts.rollout, limitations),
     ...collectManagedProjectDrift(app, rawTargets),
@@ -203,6 +207,18 @@ function collectDrift(
  */
 function projectionByNodeId(targets: GitOpsTargetProjection[]): Map<number, GitOpsTargetProjection> {
   return new Map(targets.map((target) => [target.nodeId, target]));
+}
+
+/**
+ * The raw per-target rows, keyed by node.
+ *
+ * `runningGenerationForTarget` reads the row rather than the projection, so a
+ * caller comparing a projected target against its running generation needs the
+ * row behind it. A missing row is absent rather than null, which the helper
+ * already answers as "nothing is running".
+ */
+function rawByNodeId(targets: GitOpsTargetCurrentRow[]): Map<number, GitOpsTargetCurrentRow> {
+  return new Map(targets.map((target) => [target.node_id, target]));
 }
 
 /**
@@ -227,6 +243,7 @@ function projectionByNodeId(targets: GitOpsTargetProjection[]): Map<number, GitO
 function collectRuntimeDrift(
   app: GitOpsApplicationRow,
   targets: GitOpsTargetProjection[],
+  rawByNodeId: ReadonlyMap<number, GitOpsTargetCurrentRow>,
 ): GitOpsDriftItem[] {
   const items: GitOpsDriftItem[] = [];
   for (const target of targets) {
@@ -239,16 +256,26 @@ function collectRuntimeDrift(
     // A retired target is excluded: its pointers survive retirement on
     // purpose, but nothing can ever rebind it, so its mismatch would be a
     // permanently unresolvable item rather than a live divergence.
+    //
+    // Compared against the per-mode running generation, not the deployed
+    // pointer. A Blueprint target has no deploy-bound writer, so its deployed
+    // pointer is null by construction rather than because a deploy is
+    // outstanding; reading it here made the item unreachable for every Blueprint
+    // target, which is how a confirmed divergence could show in the runtime
+    // facet while contributing nothing to this list. `deriveRuntime` resolves
+    // the same helper for the same reason, so the two surfaces cannot disagree
+    // about which generation is running.
+    const runningGenerationId = runningGenerationForTarget(app, rawByNodeId.get(target.nodeId));
     if (
       !target.tombstoned
       && target.desiredGenerationId !== null
-      && target.deployedGenerationId !== null
-      && target.desiredGenerationId !== target.deployedGenerationId
+      && runningGenerationId !== null
+      && target.desiredGenerationId !== runningGenerationId
     ) {
       items.push({
         class: 'runtime',
         expected: { kind: 'generation', id: target.desiredGenerationId },
-        observed: { kind: 'generation', id: target.deployedGenerationId },
+        observed: { kind: 'generation', id: runningGenerationId },
         freshnessAt: null,
         owner: 'ComposeService',
         reason: 'the target is running a different generation than the one it was asked to run',
@@ -1326,6 +1353,7 @@ function toExpected(
 function derivePlacement(
   app: GitOpsApplicationRow,
   futureEvidence: FutureGitOpsEvidence | null,
+  targets: GitOpsTargetProjection[],
 ): PlacementFacet {
   if (futureEvidence?.placement) {
     const ev = futureEvidence.placement;
@@ -1398,6 +1426,24 @@ function derivePlacement(
   // whose source has not been accepted.
   if (app.target_mode === 'blueprint' && app.rollout_candidate_id && !app.placement_approval_ref) {
     return { status: 'placement_review_pending' };
+  }
+
+  // A node holding stateful changes for review blocks this placement, and the
+  // hold is per-target, so the application-level facet is the only place an
+  // operator sees that one node is waiting on them. The runtime facet reports
+  // the same fact per target, and the two agree by construction: the read is
+  // the derived status, not a second decode of the observation column, so they
+  // cannot drift apart the way a separate reader would.
+  //
+  // Placed after the placement approval gate above, not before it. Approving
+  // the blast radius is an earlier authority step than confirming a stateful
+  // outcome on one node within it, so reporting the hold over an unapproved
+  // placement would send the operator to confirm something they cannot act on
+  // yet. A drift observation is deliberately not a hold: it is a fact about a
+  // node's runtime, which the runtime facet owns, and treating it as a
+  // placement decision would report the same divergence at two altitudes.
+  if (targets.some((target) => target.runtime.status === 'pending_state_review')) {
+    return { status: 'stateful_confirmation_required' };
   }
 
   const ingredients = store.authorizationIngredients(app);
@@ -1845,6 +1891,80 @@ const MUTATION_FAILURE_STAGE: ReadonlySet<GitOpsTargetCurrentRow['failure_stage'
  */
 const APPLIED_MUTATION_CLASS: ReadonlySet<string> = new Set(['post_mutation', 'deploy_failed']);
 
+/**
+ * What a Blueprint target's acknowledgement means, or null when the question
+ * does not apply.
+ *
+ * A Blueprint target has no deploy-bound writer: nothing resolves a Direct
+ * application for a Blueprint-managed stack, so the ack's `applied_generation_id`
+ * is the only pointer that names what the node acknowledged running
+ * (`runningGenerationForTarget` reads the applied pointer for exactly this
+ * reason). Its `deployed_generation_id` is therefore structurally null, and
+ * every acked Blueprint target fell through to the `!deployed` check and
+ * reported `applied_not_deployed`. That says "applied, awaiting deploy" for a
+ * deploy that does not exist, and `targetDeployLegal` correctly refuses to
+ * recommend one for a Blueprint target, so the status described a wait that no
+ * action could ever resolve. Two statuses replace it, split by what is actually
+ * known.
+ *
+ * `stale_acknowledgement` is the identity test: the target acknowledged an
+ * intent or candidate the application has since left. `blueprintAckRecorded`
+ * makes the same comparison when the ack lands and deliberately declines to
+ * move the convergence pointers on a superseded request, so the divergence
+ * outlives the ack that recorded it. The candidate is part of the test because a
+ * new candidate under the same intent is the same fact.
+ *
+ * `acknowledged_completion_unknown` is the evidence test, and deliberately
+ * narrow. The ack proves the apply was handed to the node; it claims nothing
+ * about what is running since. So this is reported only while nothing has
+ * confirmed the outcome, which is what keeps it from being a second name for
+ * "has not been drift-checked recently": a target the reconciler actually
+ * looked at has its answer, however old that observation is, and a target with a
+ * health verdict has been judged. A target nobody has checked is genuinely
+ * unconfirmed, which is what this status is for, and it is deliberately a
+ * failure-toned attention reason because an unconfirmed acknowledgement is an
+ * unknown outcome rather than progress.
+ *
+ * Direct targets are excluded: they have a real deploy pointer, so the ordinary
+ * `applied_not_deployed` reading is true and actionable for them, and the
+ * identity test would misreport every Direct target mid-rollout as stale.
+ */
+function blueprintAckStatus(
+  app: GitOpsApplicationRow,
+  target: GitOpsTargetCurrentRow,
+  observed: ReturnType<typeof decodeObservedSafe>,
+  healthDisabled: boolean,
+): 'stale_acknowledgement' | 'acknowledged_completion_unknown' | null {
+  if (app.target_mode === 'direct') return null;
+  if (target.target_status === 'tombstoned') return null;
+  if (!target.applied_generation_id) return null;
+  // A Blueprint target the reconciler has looked at, or a health gate has
+  // judged, has an answer. This is the whole narrowing: without it every
+  // unconverged Blueprint would report an unknown outcome and flood the
+  // attention queue with failures that describe no fault.
+  if (!healthDisabled) {
+    if (target.healthy_generation_id !== null) return null;
+    if (target.last_health_status !== null && target.last_health_status !== 'unknown') return null;
+  }
+  // Same three kinds `connectivityFromObservation` reads as "the node could not
+  // tell us": it answered, but not with an identity of its own runtime.
+  if (observed.kind !== 'unknown' && observed.kind !== 'missing' && observed.kind !== 'unavailable') {
+    return null;
+  }
+  // Each leg is only a staleness claim when the application has something to
+  // have moved on from. A target that recorded an intent against an
+  // application that never established one is not running a superseded
+  // generation; it is running an unplaced generation, which the other status
+  // names honestly.
+  const identityStale = (app.intent_revision_id !== null
+      && target.intent_revision_id !== null
+      && target.intent_revision_id !== app.intent_revision_id)
+    || (app.rollout_candidate_id !== null
+      && target.rollout_candidate_id !== null
+      && target.rollout_candidate_id !== app.rollout_candidate_id);
+  return identityStale ? 'stale_acknowledgement' : 'acknowledged_completion_unknown';
+}
+
 function deriveRuntime(
   target: GitOpsTargetCurrentRow,
   artifact: ArtifactFacet,
@@ -1928,16 +2048,30 @@ function deriveRuntime(
   // fleet converged while it is still verifying one target.
   if (target.pending_health_run_id) return { status: 'health_checking' };
   if (!target.applied_generation_id) return { status: 'never_applied' };
-  if (!target.deployed_generation_id) return { status: 'applied_not_deployed' };
-  // The target's contract is its desired generation, so a populated deployed
+  // What a Blueprint acknowledgement means, read before the pointer checks.
+  // See `blueprintAckStatus` for what each status claims and why.
+  const ackStatus = blueprintAckStatus(app, target, observed, healthDisabled);
+  if (ackStatus) return { status: ackStatus };
+  // The generation this target actually runs, which is not the deployed pointer
+  // in every mode. Reading `deployed_generation_id` directly is what made every
+  // Blueprint target report `applied_not_deployed` for ever: nothing binds a
+  // deploy for a Blueprint-managed stack, so the pointer is null by
+  // construction rather than because a deploy is outstanding, and
+  // `targetDeployLegal` refuses to offer one. `runningGenerationForTarget`
+  // already resolves the per-mode answer (the applied pointer for Blueprint),
+  // and this is the same fact the health comparison at the end of this function
+  // reads, so the two agree on what "running" means for a given target.
+  const runningGenerationId = runningGenerationForTarget(app, target);
+  if (!runningGenerationId) return { status: 'applied_not_deployed' };
+  // The target's contract is its desired generation, so a populated running
   // pointer alone proves nothing: a newer applied generation with the old one
   // still running stays deploy-pending, or a stack awaiting its deploy would
   // read as synced and healthy off the previous workload's pointers. A null
   // desired id is the unknown case (legacy rows, recovered targets), where the
-  // deployed pointer remains the only basis to judge.
+  // running pointer remains the only basis to judge.
   if (
     target.desired_generation_id !== null
-    && target.deployed_generation_id !== target.desired_generation_id
+    && runningGenerationId !== target.desired_generation_id
   ) {
     return { status: 'applied_not_deployed' };
   }
@@ -1965,7 +2099,7 @@ function deriveRuntime(
   }
   if (target.retry_at) return { status: 'retry_scheduled' };
   if (healthDisabled) return { status: 'synced_and_healthy' };
-  if (target.healthy_generation_id === runningGenerationForTarget(app, target)) {
+  if (target.healthy_generation_id === runningGenerationId) {
     return { status: 'synced_and_healthy' };
   }
   return { status: 'fully_deployed_health_pending' };

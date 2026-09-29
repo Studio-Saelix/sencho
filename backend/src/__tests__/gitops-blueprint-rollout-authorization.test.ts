@@ -651,24 +651,26 @@ describe('derive facets for authorization and convergence', () => {
     expect(projection.drift).toEqual([]);
   });
 
-  it('cannot reach an artifact drift status on a Blueprint target, so reports none', () => {
-    // KNOWN GAP, pinned deliberately so it stops being invisible.
+  it('reaches the artifact drift statuses on a Blueprint target and reports the divergence', () => {
+    // This was a KNOWN GAP, pinned deliberately so it stopped being invisible.
     //
-    // The runtime facet decides the artifact statuses only after it has read the
-    // applied and deployed pointers, and it requires the deployed pointer to be
+    // The runtime facet decided the artifact statuses only after reading the
+    // applied and deployed pointers, and required the deployed pointer to be
     // populated. Nothing binds a deploy for a Blueprint-managed stack, so on
-    // every real Blueprint target that pointer is null and the facet answers
-    // applied_not_deployed before it ever compares identities. Both artifact
-    // statuses are therefore unreachable for Blueprint targets, and a Blueprint
-    // whose digests genuinely disagree with the approved set contributes
-    // nothing to the canonical drift list, while the per-target digest
-    // comparison on the Drift tab still shows the divergence.
+    // every real Blueprint target that pointer is null by construction and the
+    // facet answered `applied_not_deployed` before it ever compared
+    // identities. Both artifact statuses were therefore unreachable for
+    // Blueprint targets, and a Blueprint whose digests genuinely disagreed with
+    // the approved set contributed nothing to the canonical drift list, while
+    // the per-target digest comparison on the Drift tab still showed the
+    // divergence. Two surfaces disagreeing about the same confirmed fact is the
+    // failure this model exists to prevent.
     //
-    // The reconciler's own observation stage does not go through that pointer
-    // check, which is the only reason a recorded Blueprint drift reaches the
-    // list at all. Fixing this properly means deciding what the running pointer
-    // is for Blueprint mode and changing the facet's status surface with it,
-    // which is a behavior change well beyond a drift-reporting fix.
+    // The facet now resolves the running generation per target mode (the applied
+    // pointer for Blueprint), which is what the health comparison at the end of
+    // the same function already read, so the two agree on what "running" means.
+    // The divergence is now reachable, and it belongs to the rollout class
+    // because this target is bound to an authorized rollout generation.
     const fixture = seedAuthorizedReadyApp({ artifactQualification: 'exact' });
     authorize(fixture.applicationId);
     const store = GitOpsStore.getInstance();
@@ -699,8 +701,13 @@ describe('derive facets for authorization and convergence', () => {
       healthDisabled: false,
     }, null);
 
-    expect(projection.targets[0]?.runtime.status).toBe('applied_not_deployed');
-    expect(projection.drift).toEqual([]);
+    expect(projection.targets[0]?.runtime.status).toBe('rollout_artifact_drift');
+    // One item, in the rollout class, naming the same mismatch the runtime
+    // facet now reports. Before this the canonical list was empty for a
+    // confirmed digest divergence, and only the Drift tab showed it.
+    expect(projection.drift).toHaveLength(1);
+    expect(projection.drift[0]?.class).toBe('rollout');
+    expect(projection.drift[0]?.affectedTargets[0]?.nodeId).toBe(fixture.nodeId);
   });
 
   it('does not treat synced_and_healthy as healthy for a different generation', () => {

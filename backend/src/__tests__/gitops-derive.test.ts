@@ -650,11 +650,17 @@ describe('gitops derivation', () => {
     // A divergent Blueprint target reads applied_not_deployed like any other,
     // but Direct deployment is not a legal move for this mode: only an
     // identity-matched interruption retry ever deploys here.
+    //
+    // The deployed pointer is null, which is the shape a Blueprint target
+    // really has: nothing binds a deploy for a Blueprint-managed stack, so the
+    // running generation is the applied pointer and the divergence has to be
+    // expressed as desired versus applied. An earlier version of this fixture
+    // set the deployed pointer, which is a shape no Blueprint target can have,
+    // and the case passed for a reason production cannot reproduce.
     store.upsertTarget({
       ...emptyTargetRow('app-bp-deploy', 1, 1),
       desired_generation_id: 'gen-bp-wanted',
-      applied_generation_id: 'gen-bp-wanted',
-      deployed_generation_id: 'gen-bp-serving',
+      applied_generation_id: 'gen-bp-serving',
     });
 
     const projection = projectApplication('app-bp-deploy', false);
@@ -677,11 +683,15 @@ describe('gitops derivation', () => {
         configured_ref: null,
         ...overrides,
       });
+    // The deployed pointer is null, which is the shape a Blueprint target
+    // really has: nothing binds a deploy for a Blueprint-managed stack, so the
+    // running generation is the applied pointer and the divergence has to be
+    // expressed as desired versus applied. Setting the deployed pointer here
+    // built a row no Blueprint target can have.
     const divergentTarget = (appId: string) => ({
       ...emptyTargetRow(appId, 1, 1),
       desired_generation_id: `wanted-${appId}`,
-      applied_generation_id: `wanted-${appId}`,
-      deployed_generation_id: `serving-${appId}`,
+      applied_generation_id: `serving-${appId}`,
       interruption_stage: 'blueprint_deploy_started' as const,
       interruption_at: 1,
     });
