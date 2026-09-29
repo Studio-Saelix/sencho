@@ -597,3 +597,87 @@ export function encodeObservedArtifactIdentity(value: ObservedArtifactIdentity):
   decodeObservedArtifactIdentity(encoded);
   return encoded;
 }
+
+/**
+ * What Compose was actually invoked with, read back off the running project.
+ *
+ * Every path is relative to the stack directory and every project name is
+ * lowercased, so the value compares against an authored invocation that was
+ * built for the same stack without depending on where the compose directory is
+ * mounted. A node whose compose directory is mounted at a different absolute
+ * path is not drift, and a stack name written `Web` names the same Compose
+ * project as `web`.
+ *
+ * There is no `unknown` or `unavailable` variant on purpose. The absence of a
+ * row is what says the observation was never taken, which is also what a node
+ * that could not be reached leaves behind, and both are the same honest fact:
+ * Sencho has not looked. A discriminator here would force a synthesized value
+ * to be written to say nothing, and a synthesized value is exactly what the
+ * drift projection must never compare against.
+ */
+export interface ObservedInvocationIdentity {
+  composeFileOrder: string[];
+  projectName: string;
+  projectDirectory: string;
+  envFileOrder: string[];
+  observedAt: number;
+}
+
+function assertInvocationKeys(decoded: Record<string, unknown>, allowed: readonly string[]): void {
+  for (const key of Object.keys(decoded)) {
+    if (!allowed.includes(key)) {
+      throw new GitOpsJsonError('observed invocation has unknown keys');
+    }
+  }
+}
+
+function decodeInvocationPathList(value: unknown, field: string): string[] {
+  if (!Array.isArray(value)) {
+    throw new GitOpsJsonError(`observed invocation ${field} must be an array`);
+  }
+  return value.map((entry) => {
+    if (typeof entry !== 'string' || entry.length === 0) {
+      throw new GitOpsJsonError(`observed invocation ${field} must hold non-empty strings`);
+    }
+    return entry;
+  });
+}
+
+export function decodeObservedInvocation(raw: string | null): ObservedInvocationIdentity | null {
+  if (raw === null) return null;
+  const decoded = decodeGitOpsJson(raw);
+  if (!isRecord(decoded)) {
+    throw new GitOpsJsonError('observed invocation must be an object');
+  }
+  assertInvocationKeys(decoded, [
+    'composeFileOrder', 'projectName', 'projectDirectory', 'envFileOrder', 'observedAt',
+  ]);
+  if (typeof decoded.projectName !== 'string' || decoded.projectName.length === 0) {
+    throw new GitOpsJsonError('observed invocation projectName must be a non-empty string');
+  }
+  if (typeof decoded.projectDirectory !== 'string' || decoded.projectDirectory.length === 0) {
+    throw new GitOpsJsonError('observed invocation projectDirectory must be a non-empty string');
+  }
+  if (typeof decoded.observedAt !== 'number' || !Number.isFinite(decoded.observedAt)) {
+    throw new GitOpsJsonError('observed invocation observedAt must be a finite number');
+  }
+  return {
+    composeFileOrder: decodeInvocationPathList(decoded.composeFileOrder, 'composeFileOrder'),
+    projectName: decoded.projectName,
+    projectDirectory: decoded.projectDirectory,
+    envFileOrder: decodeInvocationPathList(decoded.envFileOrder, 'envFileOrder'),
+    observedAt: decoded.observedAt,
+  };
+}
+
+export function encodeObservedInvocation(value: ObservedInvocationIdentity): string {
+  const encoded = encodeGitOpsJson({
+    composeFileOrder: value.composeFileOrder,
+    projectName: value.projectName,
+    projectDirectory: value.projectDirectory,
+    envFileOrder: value.envFileOrder,
+    observedAt: value.observedAt,
+  });
+  decodeObservedInvocation(encoded);
+  return encoded;
+}

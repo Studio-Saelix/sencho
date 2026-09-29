@@ -62,6 +62,12 @@ export const GITOPS_LIMITATION_COPY: Readonly<Record<string, string | undefined>
     'What is running on this node could not be read, so it is reported as unidentified rather than as matching.',
   placement_required_targets_invalid:
     'The nodes this rollout should cover could not be read, so Sencho cannot say whether the placement still matches what this Blueprint asks for.',
+  invocation_observation_missing:
+    'The compose invocation on this node has not been recorded, so Sencho cannot say whether the stack is still being brought up the way this generation was applied.',
+  invocation_observed_invalid:
+    'The recorded compose invocation could not be read, so it is not being compared against what this generation was applied with.',
+  invocation_expected_invalid:
+    'The compose invocation this generation was applied with could not be compared with what is on the node, so the two are not being checked against each other.',
 
   // --- recorded at write time, merged in later ------------------------------
   recovery_unproven:

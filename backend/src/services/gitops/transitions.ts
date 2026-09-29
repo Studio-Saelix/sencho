@@ -13,6 +13,8 @@ import {
   encodeGitOpsEvidenceLimitations,
   encodeGitOpsRequiredTargetsJson,
   encodeObservedArtifactIdentity,
+  encodeObservedInvocation,
+  type ObservedInvocationIdentity,
 } from './json';
 import { insertHistory, type DeployDispatchedPayload, type DeployIntentRefusedPayload, type GitOpsHistoryStage, type HistoryOutcome, type PromotionCommittedPayload } from './history';
 import { emptyTargetRow, GitOpsStore } from './store';
@@ -911,6 +913,41 @@ export class GitOpsTransitions {
       // on the tick after it was recorded: the deployment row still said held
       // while every GitOps surface said otherwise.
       { keepStandingDecision: true },
+    );
+  }
+
+  /**
+   * Record what Compose was actually invoked with on this node.
+   *
+   * The observation is the only evidence the `invocation` drift class has, and
+   * it is deliberately not written when the node could not be reached: the
+   * column stays null, which the projection reads as "Sencho has not looked".
+   * Writing a placeholder instead would turn an unknown into a value a drift
+   * comparison could be made against, and every such value would disagree with
+   * the authored invocation.
+   */
+  recordObservedInvocation(args: {
+    applicationId: string;
+    nodeId: number;
+    observed: ObservedInvocationIdentity;
+    envelope: EventEnvelope;
+  }): TransitionResult {
+    const observedJson = encodeObservedInvocation(args.observed);
+    return this.mutateTarget(
+      args.applicationId,
+      args.nodeId,
+      args.envelope,
+      'invocation_observed',
+      null,
+      (target) => {
+        const before = { observedInvocationJson: target.observed_invocation_json };
+        target.observed_invocation_json = observedJson;
+        return { before, after: { observedInvocationJson: observedJson } };
+      },
+      'committed',
+      // Same reasoning as the artifact observation: this runs on every drift
+      // check and every apply, and a standing decision outranks new evidence.
+      { keepStandingDecision: true, invocationObservedJson: observedJson },
     );
   }
 
@@ -4105,7 +4142,10 @@ export class GitOpsTransitions {
     // decision alone. The projection reads `latest_stage` and maps observation
     // stages onto the runtime status, so a stage that maps to nothing (an
     // artifact observation) would otherwise silently drop a hold.
-    options: { keepStandingDecision?: boolean } = {},
+    // `invocationObservedJson` copies the observation into the audit row
+    // itself, so the row records the evidence and not only the fact that
+    // something changed.
+    options: { keepStandingDecision?: boolean; invocationObservedJson?: string | null } = {},
   ): TransitionResult {
     return this.raw().transaction(() => {
       const app = this.requireApp(applicationId);
@@ -4139,6 +4179,7 @@ export class GitOpsTransitions {
         generationId,
         before: snapshots.before,
         after: snapshots.after,
+        invocationObservedJson: options.invocationObservedJson ?? null,
       });
       return { historyIds: historyId ? [historyId] : [], replayed: !historyId };
     })();
@@ -4166,6 +4207,7 @@ export class GitOpsTransitions {
       rolloutAuthorizationRef?: string | null;
       rolloutGenerationId?: string | null;
       commitSha?: string | null;
+      invocationObservedJson?: string | null;
     },
   ): string | null {
     const nodeId = fields.nodeId ?? null;
@@ -4187,6 +4229,7 @@ export class GitOpsTransitions {
       rolloutAuthorizationRef: fields.rolloutAuthorizationRef,
       rolloutGenerationId: fields.rolloutGenerationId,
       commitSha: fields.commitSha,
+      invocationObservedJson: fields.invocationObservedJson,
       at: envelope.at,
     });
   }

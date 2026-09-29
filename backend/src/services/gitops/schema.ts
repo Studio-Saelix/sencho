@@ -472,6 +472,10 @@ CREATE TABLE IF NOT EXISTS gitops_target_current (
   expected_artifact_set_id TEXT NULL,
   latest_artifact_set_id TEXT NULL,
   observed_artifact_identity_json TEXT NULL,
+  -- What Compose was actually invoked with on this node, read back off the
+  -- running project. NULL means Sencho has not looked, never a value written
+  -- to stand in for a node that could not be reached. See json.ts.
+  observed_invocation_json TEXT NULL,
   intent_revision_id TEXT NULL,
   rollout_candidate_id TEXT NULL,
   rollout_generation_id TEXT NULL,

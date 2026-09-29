@@ -85,6 +85,7 @@ export type GitOpsIdentityRef =
   | { kind: 'rollout_candidate'; id: string }
   | { kind: 'rollout_generation'; id: string }
   | { kind: 'invocation'; authored: AuthoredInvocationIdentity }
+  | { kind: 'observed_invocation'; observed: AuthoredInvocationIdentity; observedAt: number }
   | { kind: 'health_run'; runId: string; deployedGenerationId: string | null };
 
 export interface GitOpsApprovalRefs {

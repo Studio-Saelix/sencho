@@ -2044,6 +2044,11 @@ export class DatabaseService {
             "TEXT CHECK (last_health_status IS NULL OR last_health_status IN ('passed','failed','unknown'))");
         maybeAddCol('gitops_target_current', 'last_health_generation_id', 'TEXT');
         maybeAddCol('gitops_target_current', 'last_health_run_id', 'TEXT');
+        // What Compose was actually invoked with on this node. The column is
+        // nullable and stays null on a target Sencho has not observed, so a
+        // migrated install needs no backfill: there is no value to invent for
+        // an apply that already happened.
+        maybeAddCol('gitops_target_current', 'observed_invocation_json', 'TEXT');
         // Health-gated rollout state. pending_health_run_id is the queue's only
         // idempotency key: only the run it names may consume the target or move
         // its health state, which is what makes a duplicate or out-of-order

@@ -77,6 +77,7 @@ import {
     recordObservedRuntimeArtifactForDeploy,
     resolveAndRecordArtifactSet,
 } from './gitops/artifactResolve';
+import { recordObservedInvocationForDeploy } from './gitops/invocationObserve';
 import {
     encodePreflightEvidenceJson,
     isPreflightBlocked,
@@ -5940,6 +5941,21 @@ export class GitSourceService {
                         envelope: gitopsEnv,
                     }).catch((err) =>
                         console.error(`[GitSource] Runtime artifact observation failed for ${sanitizeForLog(stackName)}:`, err),
+                    );
+                    // The invocation half of the same observation, recorded here
+                    // rather than in the deploy because this is the last point
+                    // where the freshly applied generation and the running
+                    // project are known to be the same thing. Reading it on a
+                    // later tick would compare a project that could since have
+                    // been recreated against a generation that has since been
+                    // superseded.
+                    recordObservedInvocationForDeploy({
+                        stackName,
+                        nodeId,
+                        applicationId: artifactApp.id,
+                        envelope: gitopsEnv,
+                    }).catch((err) =>
+                        console.error(`[GitSource] Invocation observation failed for ${sanitizeForLog(stackName)}:`, err),
                     );
                 }
                 return { applied: true, deployed: true, recoveryId, gitopsOperationId: autoDeploy.gitopsOperationId };

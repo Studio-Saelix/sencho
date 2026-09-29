@@ -67,6 +67,7 @@ export type GitOpsHistoryStage =
   | 'health_run_released'
   | 'inline_revision_frozen'
   | 'intent_revised'
+  | 'invocation_observed'
   | 'legacy_combined_appended'
   | 'operation_interrupted'
   | 'partial_cleared'
@@ -165,6 +166,13 @@ export type HistoryInsert = {
   rolloutAuthorizationRef?: string | null;
   legacyCombinedApprovalRef?: string | null;
   requiredTargetsJson?: string | null;
+  /**
+   * The observation this row records, when the stage is one that carries
+   * evidence. The column predates its writer; the audit row is where a
+   * reader looking at *why* the target row moved finds the value itself,
+   * rather than only the fact that something moved.
+   */
+  invocationObservedJson?: string | null;
   recoveryRef?: string | null;
   redactedReasonClass?: string | null;
   at: number;
@@ -235,7 +243,7 @@ export function insertHistory(db: Database.Database, row: HistoryInsert): string
     null,
     null,
     null,
-    null,
+    row.invocationObservedJson ?? null,
     row.recoveryRef ?? null,
     row.redactedReasonClass ?? null,
   );

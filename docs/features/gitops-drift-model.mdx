@@ -19,7 +19,7 @@ Every GitOps drift item carries a class. The class says which part of the chain 
 | **Health** | The latest stack-scoped health run for a node against the generation that node runs. | The run failed for exactly that generation. |
 | **Runtime** | What is running against what was approved: the artifact identity, and the generation each node was asked to run. | A node reports another artifact identity, or runs a generation other than the one it was asked for. |
 | **Rollout** | A required rollout target's observed artifact identity against the authorized rollout set. | A required target reports another identity. |
-| **Invocation** | Nothing yet: what was actually invoked on a node is not recorded, so there is no honest comparison to make. | Never, today. |
+| **Invocation** | The compose invocation a node recorded when the stack was applied, against the invocation that generation was applied with. | The node's compose file order, project name, project directory, or env file order is not the one it was given. |
 
 This is the model's vocabulary: the boundaries a drift item can fall into, and what each one would be measured against. A class appears only where Sencho holds the evidence for it and the rows prove a mismatch, so a class whose evidence is not held is absent rather than approximated. The table does not promise that every class is reported today; it says what each class means when it is.
 
@@ -88,6 +88,21 @@ Those states have their own surfaces, and each one names the next step. A node r
 
 One more case sits here by decision rather than by accident. Source drift compares the accepted commit against the commit the ref names. When those still agree but the materialization settings changed, for example a compose path, an env path, or a context directory, there is no expected-versus-observed pair of commits to report, so no source drift item is created. Instead the source shows as **reconcile required** in the attention queue, and for a Direct application that is where you fetch again: the fetch rebuilds the candidate under the settings now in force, and accepting that candidate produces the new generation. This is a choice about what the word drift means, not a claim that the materialized content was proven unchanged. Changing where Compose is read from can change the content, which is why Sencho asks rather than assumes.
 
+## Invocation
+
+Invocation drift answers one question: is this stack being brought up the way this generation said it would be?
+
+When a generation is applied, Sencho reads back how Compose was actually invoked on the node: the compose files in order, the project name, the project directory, and the env files in order. That record is compared against the invocation the accepted generation was applied with. It is the only evidence in the model that can contradict the authored invocation at all, because reading the command back would only confirm what Sencho already believed.
+
+What it catches in practice is a project that came up differently from the way the generation named it. The common case is a stack directory holding a compose file the generation did not name: Compose resolves it, the node records more files than were asked for, and the difference is reported. A node that answers with a different project name, project directory, or file order is reported the same way.
+
+Two limits worth knowing, both about when the evidence is taken:
+
+- **The record is read after the apply finishes.** A stack brought up by hand *before* an apply is overwritten by that apply, so the apply reads back its own work. A hand-made invocation that the apply replaced is not what you see here.
+- **It is a snapshot, not a watch.** Nothing re-reads it on a timer. An invocation changed on the node after the apply is not reported until the next apply records a new one. Every item carries the time its evidence was taken, so you can see how old it is.
+
+A stack whose invocation has not been recorded yet reports nothing and says why, rather than showing you an empty comparison that would read as agreement. The first apply records it and the caveat clears.
+
 ## What Sencho cannot prove
 
 Drift is derived from what Sencho has recorded, so missing evidence is never rounded up to agreement. A few cases worth knowing:
@@ -95,6 +110,9 @@ Drift is derived from what Sencho has recorded, so missing evidence is never rou
 - A target on a node Sencho does not host has no health verdict here, so health drift stays silent for it rather than claiming a verdict nobody wrote.
 - A Git-managed Blueprint deployment that opens no generation-bound health gate produces no health item.
 - A required-target set Sencho cannot read records a caveat naming the unreadable record, instead of quietly reporting no placement drift.
+- A stack whose invocation has not been recorded yet records a caveat saying so, rather than reporting no invocation drift.
+- A stack whose generation names no compose file records a caveat, rather than reporting a difference against a file list that was never written.
+- A Blueprint deployment is not compared at all. Each of its targets is brought up from the Blueprint rather than from a recorded compose invocation, so there is no expected invocation to compare against, and the class stays silent for them rather than reporting every one as different.
 - A service built on the node has no published digest to compare, so the per-service view labels it **not compared** rather than matched or drifted.
 - A service running something the approved set does not name is outside the comparison, so it reads **not compared** rather than drift.
 

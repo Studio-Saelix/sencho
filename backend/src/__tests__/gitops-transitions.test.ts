@@ -1,7 +1,12 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { setupTestDb, cleanupTestDb } from './helpers/setupTestDb';
 import { DatabaseService } from '../services/DatabaseService';
-import { decodeObservedArtifactIdentity, encodeArtifactEvidenceJson } from '../services/gitops/json';
+import {
+  decodeObservedArtifactIdentity,
+  decodeObservedInvocation,
+  encodeArtifactEvidenceJson,
+  type ObservedInvocationIdentity,
+} from '../services/gitops/json';
 import { GitOpsStore, emptyTargetRow } from '../services/gitops/store';
 import { GitOpsTransitions, type EventEnvelope } from '../services/gitops/transitions';
 import { projectApplication } from '../services/gitops/derive';
@@ -183,6 +188,79 @@ describe('gitops transitions', () => {
     });
     const projection = projectApplication('app-observe', false);
     expect(projection.targets[0]?.runtime.status).toBe('runtime_artifact_drift');
+  });
+
+  it('recordObservedInvocation writes the observation and the audit row, without raw SQL', () => {
+    const store = GitOpsStore.getInstance();
+    const tx = GitOpsTransitions.getInstance();
+    seedApplied('app-invoke', 'invoke-web', 'gen-invoke', 'art-invoke', 'acc-invoke');
+    tx.deployStarted('app-invoke', 1, 'gen-invoke', envelope('op-invoke-dep'));
+    tx.deployBound('app-invoke', 1, 'gen-invoke', envelope('op-invoke-dep'));
+    const observed: ObservedInvocationIdentity = {
+      composeFileOrder: ['compose.yaml'],
+      projectName: 'invoke-web',
+      projectDirectory: '.',
+      envFileOrder: [],
+      observedAt: 4321,
+    };
+    const result = tx.recordObservedInvocation({
+      applicationId: 'app-invoke',
+      nodeId: 1,
+      observed,
+      envelope: envelope('op-invoke'),
+    });
+    expect(result.replayed).toBe(false);
+
+    const target = store.getTarget('app-invoke', 1)!;
+    expect(decodeObservedInvocation(target.observed_invocation_json)).toEqual(observed);
+
+    // The audit row carries the evidence, not only the fact that a column
+    // moved, so a reader of the history sees what was observed.
+    const row = DatabaseService.getInstance().getDb().prepare(
+      'SELECT stage, node_id, invocation_observed_json FROM gitops_history WHERE id = ?',
+    ).get(result.historyIds[0]) as Record<string, unknown>;
+    expect(row.stage).toBe('invocation_observed');
+    expect(row.node_id).toBe(1);
+    expect(row.invocation_observed_json).toBe(target.observed_invocation_json);
+
+    // The observation becomes the latest stage, exactly as the artifact
+    // observation does. It maps to no runtime status, so the facet still
+    // resolves this target from its pointers rather than reading the
+    // observation as a decision.
+    expect(target.latest_stage).toBe('invocation_observed');
+    const projection = projectApplication('app-invoke', false);
+    expect(projection.targets[0]?.runtime.status).toBe('fully_deployed_health_pending');
+  });
+
+  it('a second observation of the same operation is a replay, not a second row', () => {
+    const store = GitOpsStore.getInstance();
+    const tx = GitOpsTransitions.getInstance();
+    seedApplied('app-invoke-replay', 'invoke-replay-web', 'gen-invoke-replay', 'art-invoke-replay', 'acc-invoke-replay');
+    const observed: ObservedInvocationIdentity = {
+      composeFileOrder: ['compose.yaml'],
+      projectName: 'invoke-replay-web',
+      projectDirectory: '.',
+      envFileOrder: [],
+      observedAt: 1,
+    };
+    const first = envelope('op-invoke-replay');
+    tx.recordObservedInvocation({ applicationId: 'app-invoke-replay', nodeId: 1, observed, envelope: first });
+    const second = tx.recordObservedInvocation({
+      applicationId: 'app-invoke-replay',
+      nodeId: 1,
+      observed: { ...observed, observedAt: 2 },
+      envelope: first,
+    });
+    expect(second.replayed).toBe(true);
+    const count = DatabaseService.getInstance().getDb().prepare(
+      "SELECT COUNT(*) AS n FROM gitops_history WHERE application_id = ? AND stage = 'invocation_observed'",
+    ).get('app-invoke-replay') as { n: number };
+    expect(count.n).toBe(1);
+    // The column keeps the later observation, because the state did change
+    // even though the audit row was deduped.
+    expect(decodeObservedInvocation(
+      store.getTarget('app-invoke-replay', 1)!.observed_invocation_json,
+    )?.observedAt).toBe(2);
   });
 
   it('clears fetch failure on successful fetch and keeps accepted pointers', () => {

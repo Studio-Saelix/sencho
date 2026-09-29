@@ -25,6 +25,7 @@ import type {
 
 let tmpDir: string;
 let GitOpsStore: typeof import('../services/gitops/store').GitOpsStore;
+let emptyTargetRow: typeof import('../services/gitops/store').emptyTargetRow;
 let GitOpsTransitions: typeof import('../services/gitops/transitions').GitOpsTransitions;
 let deriveGitOpsRevision: typeof import('../services/gitops/derive').deriveGitOpsRevision;
 let FACET_EVIDENCE_SOURCE: typeof import('../services/gitops/types').FACET_EVIDENCE_SOURCE;
@@ -41,7 +42,7 @@ let dataDir: string;
 beforeAll(async () => {
   tmpDir = await setupTestDb();
   dataDir = process.env.DATA_DIR || path.join(process.cwd(), 'data');
-  ({ GitOpsStore } = await import('../services/gitops/store'));
+  ({ GitOpsStore, emptyTargetRow } = await import('../services/gitops/store'));
   ({ GitOpsTransitions } = await import('../services/gitops/transitions'));
   ({ deriveGitOpsRevision } = await import('../services/gitops/derive'));
   ({ FACET_EVIDENCE_SOURCE } = await import('../services/gitops/types'));
@@ -1273,62 +1274,5 @@ function candidate(
 }
 
 function emptyTarget(applicationId: string, nodeId: number) {
-  return {
-    application_id: applicationId,
-    node_id: nodeId,
-    target_status: 'active' as const,
-    desired_generation_id: null,
-    candidate_generation_id: null,
-    applied_generation_id: null,
-    deployed_generation_id: null,
-    healthy_generation_id: null,
-    last_health_status: null,
-    last_health_generation_id: null,
-    last_health_run_id: null,
-    pending_health_run_id: null,
-    health_attempts: 0,
-    health_stop_reason: null,
-    lkg_generation_id: null,
-    lkg_artifact_set_id: null,
-    lkg_unavailable_at: null,
-    lkg_unavailable_reason: null,
-    expected_artifact_set_id: null,
-    latest_artifact_set_id: null,
-    observed_artifact_identity_json: null,
-    intent_revision_id: null,
-    rollout_candidate_id: null,
-    rollout_generation_id: null,
-    source_acceptance_ref: null,
-    placement_approval_ref: null,
-    rollout_authorization_ref: null,
-    legacy_combined_approval_ref: null,
-    legacy_applied_revision: null,
-    connectivity: null,
-    latest_stage: null,
-    active_operation_id: null,
-    active_operation_stage: null,
-    active_operation_at: null,
-    active_generation_id: null,
-    active_intent_revision_id: null,
-    active_rollout_candidate_id: null,
-    failure_stage: null,
-    failure_class: null,
-    failure_at: null,
-    recovery_ref: null,
-    recovery_generation_id: null,
-    recovery_phase: null,
-    interruption_stage: null,
-    interruption_at: null,
-    interruption_operation_id: null,
-    interruption_generation_id: null,
-    interruption_intent_revision_id: null,
-    interruption_rollout_candidate_id: null,
-    pause_at: null,
-    pause_reason: null,
-    retry_at: null,
-    suspended_at: null,
-    partial_json: null,
-    evidence_limitations_json: null,
-    updated_at: Date.now(),
-  };
+  return emptyTargetRow(applicationId, nodeId, 1);
 }

@@ -1,15 +1,21 @@
+import path from 'path';
+
 import {
   decodeArtifactEvidenceJson,
   decodeGitOpsEvidenceLimitations,
   decodeGitOpsRequiredTargetsJson,
   decodeObservedArtifactIdentity,
+  decodeObservedInvocation,
   GitOpsJsonError,
   type ObservedArtifactIdentity,
+  type ObservedInvocationIdentity,
 } from './json';
 import { DatabaseService } from '../DatabaseService';
+import { NodeRegistry } from '../NodeRegistry';
 import { GitOpsStore } from './store';
 import { authorityPolicyReads } from './authorityPolicyProjection';
 import { comparableObservationMatches } from './artifactIdentity';
+import { canonicalizeAuthoredInvocation, compareInvocations } from './invocationIdentity';
 import { runningGenerationForTarget } from './recoveryCapture';
 import {
   DEFAULT_HEALTH_ROLLOUT_POLICY,
@@ -160,11 +166,11 @@ export function deriveGitOpsRevision(
  * so an item can never claim a divergence the facet calls settled progress, and
  * every facet status that means progress or waiting suppresses its class.
  *
- * The `invocation` class has no producer here: the observed invocation is not
- * persisted anywhere derive can read (no column, no history field), and
- * emitting the authored invocation against a permanent `unknown` would be
- * constant fabricated drift. It lands once an apply-time observation is
- * recorded.
+ * The `invocation` class compares the compose invocation a generation was
+ * authored with against the one a node recorded at apply time. It is the one
+ * class that needs a read of the node to mean anything, so it reports nothing
+ * until an observation exists, and a missing observation is a caveat rather
+ * than agreement.
  */
 function collectDrift(
   app: GitOpsApplicationRow,
@@ -185,7 +191,18 @@ function collectDrift(
     ...collectPlacementDrift(app, rawTargets, facts.placement, facts.rollout, limitations),
     ...collectManagedProjectDrift(app, rawTargets),
     ...collectHealthDrift(app, rawTargets, facts.healthDisabled),
+    ...collectInvocationDrift(app, rawTargets, projectionByNodeId(targets), limitations),
   ];
+}
+
+/**
+ * The projections keyed by node, so a collector reading raw rows can reach the
+ * derived facet of the same target. The two lists are the same targets in a
+ * possibly different order, so a position lookup would pair a target with its
+ * neighbour.
+ */
+function projectionByNodeId(targets: GitOpsTargetProjection[]): Map<number, GitOpsTargetProjection> {
+  return new Map(targets.map((target) => [target.nodeId, target]));
 }
 
 /**
@@ -613,6 +630,154 @@ function collectManagedProjectDrift(
     affectedTargets: [{ nodeId: null, stackName }],
     action: 'none',
   }];
+}
+
+/**
+ * Invocation drift: the compose invocation a node recorded does not match the
+ * one the accepted generation was authored with.
+ *
+ * This is the only class whose two sides come from different places. The
+ * expected side is the generation's own `expected_invocation_json`, reduced
+ * against the target's own stack directory. The observed side is what Compose
+ * recorded on the running project when the apply landed, which is the only
+ * evidence in the model that can contradict the authored invocation at all:
+ * reading the argv back would only ever confirm what Sencho already believes.
+ *
+ * Three states produce nothing, and each says so rather than reporting
+ * agreement:
+ *
+ * - No observation. The column is null when no apply has recorded one and when
+ *   the node could not be reached at the time, because those are the same fact
+ *   to a reader: Sencho has not looked. A caveat is pushed instead, and only
+ *   for a settled target, so a deploy in progress does not raise one.
+ * - An unreadable observation or an authored record that names no compose
+ *   file. Neither side is a value, so neither can be compared.
+ * - An authored path that will not resolve inside this target's own stack
+ *   directory. That is the shape a Direct target has when its argv was built
+ *   against a different node's compose directory, and comparing it would
+ *   report a mount path as drift.
+ *
+ * Direct applications only. A Blueprint target is deployed from a materialized
+ * Blueprint under its own `deploy_stack_name`, and the argv its generation
+ * carries was authored for the source stack, so there is no correct expected
+ * side to compare an observation against. Saying nothing is the honest answer;
+ * the alternative would be reporting every Blueprint target as drifted.
+ *
+ * The gates around it mirror the managed-project class: an operation in flight,
+ * an interruption or a recovery means the pointers and the observation are
+ * describing different moments, and a target that has not applied the accepted
+ * generation has nothing to compare against it yet.
+ */
+function collectInvocationDrift(
+  app: GitOpsApplicationRow,
+  rawTargets: GitOpsTargetCurrentRow[],
+  projections: Map<number, GitOpsTargetProjection>,
+  limitations: GitOpsLimitation[],
+): GitOpsDriftItem[] {
+  if (app.target_mode !== 'direct') return [];
+  if (!app.accepted_generation_id) return [];
+  if (app.active_operation_stage !== null || app.interruption_stage !== null) return [];
+  if (recoveryInProgress(app.recovery_phase)) return [];
+  const stackName = app.stack_name;
+  if (!stackName) return [];
+  const store = GitOpsStore.getInstance();
+  const generation = store.getGeneration(app.accepted_generation_id);
+  if (!generation || generation.application_id !== app.id) return [];
+  const policy = configuredGitSourcePolicy(app);
+  const items: GitOpsDriftItem[] = [];
+
+  for (const target of rawTargets) {
+    if (target.target_status !== 'active') continue;
+    if (target.applied_generation_id !== generation.id) continue;
+    if (target.active_operation_stage || target.interruption_stage) continue;
+    if (recoveryInProgress(target.recovery_phase)) continue;
+
+    // Three outcomes, and they are three different facts. An unreadable
+    // observation has already pushed its own caveat, so it must not also be
+    // reported as never observed: "what is stored cannot be read" and "nothing
+    // was ever stored" call for different next steps.
+    const decoded = decodeObservedInvocationSafe(target.observed_invocation_json, limitations);
+    if (decoded.kind === 'invalid') continue;
+    if (decoded.kind === 'missing') {
+      limitations.push({
+        code: 'invocation_observation_missing',
+        message: 'no compose invocation has been observed for this target',
+        evidence: { nodeId: target.node_id, stackName },
+      });
+      continue;
+    }
+    const observed = decoded.observation;
+
+    // The action predicate reads the derived runtime facet, so it needs this
+    // target's projection. A target with no projection cannot be judged, and a
+    // drift item that cannot name a legal action says none.
+    const projection = projections.get(target.node_id);
+    const authored = canonicalizeAuthoredInvocation({
+      expectedInvocationJson: generation.expected_invocation_json,
+      composePathsJson: app.compose_paths_json,
+      stackName,
+      stackDir: targetStackDirectory(target.node_id, stackName),
+    });
+    if (authored.kind === 'not_comparable') {
+      limitations.push({
+        code: 'invocation_expected_invalid',
+        message: `the accepted generation's compose invocation cannot be compared (${authored.reason})`,
+        evidence: { nodeId: target.node_id, generationId: generation.id, reason: authored.reason },
+      });
+      continue;
+    }
+
+    const comparison = compareInvocations(authored.invocation, observed);
+    if (comparison.kind !== 'different') continue;
+    items.push({
+      class: 'invocation',
+      expected: { kind: 'invocation', authored: comparison.expected },
+      observed: { kind: 'observed_invocation', observed: comparison.observed, observedAt: observed.observedAt },
+      freshnessAt: observed.observedAt,
+      owner: 'ComposeService',
+      reason: 'the compose invocation on this node is not the one this generation was applied with',
+      configuredPolicy: policy,
+      affectedTargets: [{ nodeId: target.node_id, stackName }],
+      // The fix is a re-apply of the accepted generation, which is the deploy
+      // action. It is offered under the same legality predicate the runtime
+      // class uses, so a paused or failed target gets no action rather than one
+      // that cannot run.
+      action: projection && targetDeployLegal(app, projection) ? 'deploy' : 'none',
+    });
+  }
+  return items;
+}
+
+/**
+ * The stack directory a target's own node keeps this stack in.
+ *
+ * The node's, not the default node's: the authored argv is reduced against
+ * whichever directory this target is actually deployed under, and a target
+ * whose argv names a path outside it is reported as not comparable rather than
+ * as a difference.
+ */
+function targetStackDirectory(nodeId: number, stackName: string): string {
+  return path.join(NodeRegistry.getInstance().getComposeDir(nodeId), stackName);
+}
+
+function decodeObservedInvocationSafe(
+  raw: string | null,
+  limitations: GitOpsLimitation[],
+): { kind: 'missing' } | { kind: 'invalid' } | { kind: 'ok'; observation: ObservedInvocationIdentity } {
+  if (raw === null) return { kind: 'missing' };
+  try {
+    const observation = decodeObservedInvocation(raw);
+    return observation ? { kind: 'ok', observation } : { kind: 'missing' };
+  } catch (err) {
+    // An unusable observation must not read as "nothing observed yet", which
+    // would quietly downgrade a real invocation difference to silence.
+    limitations.push({
+      code: 'invocation_observed_invalid',
+      message: err instanceof Error ? err.message : String(err),
+      evidence: raw,
+    });
+    return { kind: 'invalid' };
+  }
 }
 
 /**

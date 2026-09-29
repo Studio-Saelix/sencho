@@ -393,6 +393,22 @@ describe('identityRefLabel', () => {
       'compose.yaml, compose.override.yaml',
     ],
     [{ kind: 'health_run', runId: 'run-12345678-x', deployedGenerationId: null }, 'health run run-1234'],
+    [
+      {
+        kind: 'observed_invocation',
+        observed: {
+          composeFileOrder: ['compose.yaml', 'compose.override.yaml'],
+          projectName: 'web',
+          projectDirectory: '.',
+          envFileOrder: [],
+        },
+        observedAt: 1,
+      },
+      // The observed side names the same thing as the authored one, so both
+      // sides of an invocation row read as a file list and the reader can see
+      // which order differs.
+      'compose.yaml, compose.override.yaml',
+    ],
   ];
 
   it.each(cases)('labels %o', (ref, expected) => {
@@ -404,6 +420,16 @@ describe('identityRefLabel', () => {
       identityRefLabel({
         kind: 'invocation',
         authored: { composeFileOrder: [], projectName: null, projectDirectory: null, envFileOrder: [] },
+      }),
+    ).toBe('no compose files');
+  });
+
+  it('names an observed invocation that reported no compose files', () => {
+    expect(
+      identityRefLabel({
+        kind: 'observed_invocation',
+        observed: { composeFileOrder: [], projectName: 'web', projectDirectory: '.', envFileOrder: [] },
+        observedAt: 1,
       }),
     ).toBe('no compose files');
   });

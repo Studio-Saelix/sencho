@@ -1034,7 +1034,7 @@ export class GitOpsStore {
         last_health_status, last_health_generation_id, last_health_run_id,
         pending_health_run_id, health_attempts, health_stop_reason, lkg_generation_id,
         lkg_artifact_set_id, lkg_unavailable_at, lkg_unavailable_reason, expected_artifact_set_id,
-        latest_artifact_set_id, observed_artifact_identity_json, intent_revision_id,
+        latest_artifact_set_id, observed_artifact_identity_json, observed_invocation_json, intent_revision_id,
         rollout_candidate_id, rollout_generation_id, source_acceptance_ref, placement_approval_ref,
         rollout_authorization_ref, legacy_combined_approval_ref, legacy_applied_revision,
         connectivity, latest_stage, active_operation_id, active_operation_stage, active_operation_at,
@@ -1043,7 +1043,7 @@ export class GitOpsStore {
         recovery_phase, interruption_stage, interruption_at, interruption_operation_id,
         interruption_generation_id, interruption_intent_revision_id, interruption_rollout_candidate_id,
         pause_at, pause_reason, retry_at, suspended_at, partial_json, evidence_limitations_json, updated_at
-      ) VALUES (${Array(56).fill('?').join(', ')})
+      ) VALUES (${Array(57).fill('?').join(', ')})
       ON CONFLICT(application_id, node_id) DO UPDATE SET
         target_status=excluded.target_status,
         desired_generation_id=excluded.desired_generation_id,
@@ -1064,6 +1064,7 @@ export class GitOpsStore {
         expected_artifact_set_id=excluded.expected_artifact_set_id,
         latest_artifact_set_id=excluded.latest_artifact_set_id,
         observed_artifact_identity_json=excluded.observed_artifact_identity_json,
+        observed_invocation_json=excluded.observed_invocation_json,
         intent_revision_id=excluded.intent_revision_id,
         rollout_candidate_id=excluded.rollout_candidate_id,
         rollout_generation_id=excluded.rollout_generation_id,
@@ -1106,7 +1107,7 @@ export class GitOpsStore {
       row.pending_health_run_id, row.health_attempts, row.health_stop_reason, row.lkg_generation_id,
 
       row.lkg_artifact_set_id, row.lkg_unavailable_at, row.lkg_unavailable_reason, row.expected_artifact_set_id,
-      row.latest_artifact_set_id, row.observed_artifact_identity_json, row.intent_revision_id,
+      row.latest_artifact_set_id, row.observed_artifact_identity_json, row.observed_invocation_json, row.intent_revision_id,
       row.rollout_candidate_id, row.rollout_generation_id, row.source_acceptance_ref, row.placement_approval_ref,
       row.rollout_authorization_ref, row.legacy_combined_approval_ref, row.legacy_applied_revision,
       row.connectivity, row.latest_stage, row.active_operation_id, row.active_operation_stage, row.active_operation_at,
@@ -1468,6 +1469,7 @@ export function emptyTargetRow(
     expected_artifact_set_id: null,
     latest_artifact_set_id: null,
     observed_artifact_identity_json: null,
+    observed_invocation_json: null,
     intent_revision_id: null,
     rollout_candidate_id: null,
     rollout_generation_id: null,

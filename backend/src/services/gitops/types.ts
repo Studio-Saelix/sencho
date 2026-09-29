@@ -369,6 +369,12 @@ export type GitOpsTargetCurrentRow = {
   expected_artifact_set_id: string | null;
   latest_artifact_set_id: string | null;
   observed_artifact_identity_json: string | null;
+  /**
+   * What Compose was actually invoked with on this node, read back off the
+   * running project. Null means Sencho has not looked: either no apply has
+   * recorded one, or the node could not be reached. See json.ts.
+   */
+  observed_invocation_json: string | null;
   intent_revision_id: string | null;
   rollout_candidate_id: string | null;
   rollout_generation_id: string | null;
@@ -869,6 +875,13 @@ export type GitOpsIdentityRef =
   | { kind: 'rollout_candidate'; id: string }
   | { kind: 'rollout_generation'; id: string }
   | { kind: 'invocation'; authored: AuthoredInvocationIdentity }
+  /**
+   * The other side of an invocation comparison: what Compose was actually
+   * invoked with, read back off the running project on the node. A separate
+   * kind from `invocation` rather than a reused one, because naming an
+   * observation `authored` would assert the opposite of what it is.
+   */
+  | { kind: 'observed_invocation'; observed: AuthoredInvocationIdentity; observedAt: number }
   | { kind: 'health_run'; runId: string; deployedGenerationId: string | null };
 
 /**

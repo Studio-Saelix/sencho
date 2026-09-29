@@ -922,6 +922,7 @@ const IDENTITY_REF_KINDS: Readonly<Record<GitOpsIdentityRef['kind'], true>> = {
   rollout_candidate: true,
   rollout_generation: true,
   invocation: true,
+  observed_invocation: true,
   health_run: true,
 };
 
@@ -955,6 +956,11 @@ export function identityRefLabel(ref: GitOpsIdentityRef): string {
       return `rollout ${ref.id.slice(0, 8)}`;
     case 'invocation':
       return ref.authored.composeFileOrder.join(', ') || 'no compose files';
+    case 'observed_invocation':
+      // The observed side names the same thing as the authored one, so both
+      // sides of an invocation row read as a file list and a reader can see
+      // which order differs.
+      return ref.observed.composeFileOrder.join(', ') || 'no compose files';
     case 'health_run':
       return `health run ${ref.runId.slice(0, 8)}`;
   }
