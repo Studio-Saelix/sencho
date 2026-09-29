@@ -1347,10 +1347,11 @@ export async function reconstructBlueprintRolloutQueue(): Promise<number> {
     // which is exactly what stop and rollback promised would not happen. Held
     // from the fence itself, so the gap cannot exist.
     //
-    // An unacked target's fence cannot be scoped this way, because it names no
-    // rollout generation, so this scan cannot see it. Its hold is the application
-    // pause, which the transition commits in the same transaction as the fence
-    // and which the `pause_at` check above has already honored.
+    // An unacked target's fence cannot be scoped this way, because its pointer
+    // names an older rollout or none at all, so this scan cannot see it. Its hold
+    // is the application pause, which the transition commits in the same
+    // transaction as the fence and which the `pause_at` check above has already
+    // honored.
     const fenced = binding.requiredNodeIds
       .map((nodeId) => store.getTarget(app.id, nodeId))
       .find((target) => holdableHealthFence(target) && target!.rollout_generation_id === app.rollout_generation_id);

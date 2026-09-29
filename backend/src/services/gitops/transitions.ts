@@ -54,14 +54,41 @@ import { sanitizeForLog } from '../../utils/safeLog';
 /**
  * The decisions that end advancement, and so hold the whole rollout.
  *
- * The same three the executor holds for after the commit. `advance` hands the
- * queue on and `none` is `observe`, which gates nothing.
+ * The same set the executor holds for after the commit, named once because both
+ * writers have to agree on which decisions hold. `advance` hands the queue on and
+ * `none` is `observe`, which gates nothing. Today an unacked attempt reaches only
+ * `pause` or `none`: `unknown` is the only verdict it attributes, and `unknown`
+ * pauses under a gating policy while `observe` decides nothing. `stop` and
+ * `rollback` are here so that widening the verdicts this branch attributes cannot
+ * quietly start writing holds the executor would also write.
  */
 const HOLDS_ROLLOUT: ReadonlySet<HealthRolloutAction> = new Set<HealthRolloutAction>([
   'pause',
   'stop',
   'rollback',
 ]);
+
+/**
+ * Whether a target has not yet acked the rollout generation it is being worked
+ * under, whatever it last recorded.
+ *
+ * A mismatch, not a null. The pointer is written only by an acknowledgement, so
+ * a target on its first rollout has none while a target mid-re-rollout still
+ * carries the previous rollout's, and both are unacked as far as the live rollout
+ * is concerned. Testing for null would cover the first case and silently miss
+ * the second, which is the one where the stale value is also what the queue
+ * scopes fences by.
+ *
+ * The queue and the resume path make the same comparison inline, so the two have
+ * to keep agreeing on which targets are unacked; that is why it is a mismatch and
+ * not a null on both sides.
+ */
+function hasNotAckedRollout(
+  target: GitOpsTargetCurrentRow,
+  app: GitOpsApplicationRow,
+): boolean {
+  return target.rollout_generation_id !== app.rollout_generation_id;
+}
 
 export type EventEnvelope = {
   operationId: string;
@@ -1175,7 +1202,7 @@ export class GitOpsTransitions {
         // apart: while it is still on the run's rollout generation, the run is
         // this rollout's own attempt at a target whose ack never came back.
         const unackedAttempt = args.rollout != null
-          && target.rollout_generation_id !== args.rollout.rolloutGenerationId
+          && hasNotAckedRollout(target, app)
           && app.rollout_generation_id === args.rollout.rolloutGenerationId;
         if (
           args.rollout
@@ -1231,18 +1258,28 @@ export class GitOpsTransitions {
         // a `failed` stays unattributed because the policy's answer to it
         // (retry, stop, roll back) spends itself on whichever generation the
         // observation turned out to be about.
+        //
+        // The unacked case is decided on its own, ahead of the running-generation
+        // test, and that ordering is load-bearing rather than stylistic. A
+        // re-rollout of the same accepted generation leaves the target running
+        // exactly what the run is observing, so the generation test would answer
+        // true for an unacked target and attribute a `passed` or a `failed` the
+        // comment above rules out. It would also write a fence under the target's
+        // stale pointer, which is not the pointer the queue scopes fences by, so
+        // a `stop` decided that way would not hold anything.
         const attributable = target.target_status === 'active'
           && args.targetScope === 'stack'
           && !!args.deployedGenerationId
-          && (runningGenerationForTarget(app, target) === args.deployedGenerationId
-            || (unackedAttempt && args.healthStatus === 'unknown'));
+          && (unackedAttempt
+            ? args.healthStatus === 'unknown'
+            : runningGenerationForTarget(app, target) === args.deployedGenerationId);
         if (attributable && args.rollout) {
           decision = this.applyHealthGatedDecision(target, args.rollout.healthPolicy, args.healthStatus);
-          // A target that never acked has no `rollout_generation_id`, so a fence
-          // written here cannot be scoped to the rollout that wrote it and the
-          // queue would not honour it: `fencedOutOfTheQueue` compares that
-          // pointer with the application's, and reconstruction holds the rollout
-          // from a fence only when they match. For an acked target the fence is
+          // An unacked target's fence cannot be scoped to the rollout that wrote
+          // it, because its pointer names an older rollout or none at all, and the
+          // queue honours a fence only when the two match: `fencedOutOfTheQueue`
+          // and the reconstruction scan both compare the target's pointer with the
+          // application's. For an acked target the fence is
           // the durable hold and the executor's application pause is a
           // belt-and-braces second write. Here the roles are reversed, so the
           // pause is written in the same transaction as the fence. Atomicity is
@@ -1948,26 +1985,19 @@ export class GitOpsTransitions {
         // operator has already answered for.
         for (const target of this.store().listTargets(applicationId)) {
           if (target.health_stop_reason === null) continue;
-          // A target that never acked this rollout still holds a resumable fence
-          // of its own: it names no rollout generation, so the equality below can
-          // never match it. Skipping it would leave the fence on the row after a
-          // resume, and the target card would report a stopped target while the
-          // rollout moved on. It converges either way, because the re-ack resets
-          // the fence, but the operator would be reading a state that is not
-          // what is about to happen.
-          //
-          // The unacked case is only a resumable fence. A finished target always
-          // acked, because the policy acts on a target whose apply landed, so
-          // nothing here can let a stop or a completed rollback be erased by a
-          // resume that was answering a different target's hold.
-          if (target.rollout_generation_id !== app.rollout_generation_id) {
-            if (target.rollout_generation_id !== null) continue;
-            if (RESUMABLE_HEALTH_FENCES.has(target.health_stop_reason)) {
-              this.store().upsertTarget({ ...target, health_stop_reason: null });
-            }
-            continue;
-          }
           if (RESUMABLE_HEALTH_FENCES.has(target.health_stop_reason)) {
+            // Any resumable fence goes, whether the target acked this rollout or
+            // not. The unacked case is the reason: a target whose pointer does not
+            // match can never satisfy the equality the queue scopes fences by, so
+            // its fence is inert and the card would report a stopped target while
+            // the rollout re-drove it. That is true of a null pointer on a first
+            // rollout and of the previous rollout's value on a re-rollout, so the
+            // test is the mismatch and not the null.
+            //
+            // Clearing it cannot lose a decision the operator still has to make.
+            // Only a resumable fence is cleared, so a stop or a completed rollback
+            // keeps its outcome, and those are written by a policy acting on a
+            // target whose apply landed, which is a target that acked.
             this.store().upsertTarget({ ...target, health_stop_reason: null });
             continue;
           }
@@ -1975,7 +2005,12 @@ export class GitOpsTransitions {
           // beside it rather than by erasing it. Erasing it cannot work: the
           // fence is also what reconstruction holds the rollout on, so a restart
           // would re-pause a rollout the operator had already answered, and
-          // repeating resume and restart would repeat the hold for ever.
+          // repeating resume and restart would repeat the hold for ever. The
+          // marker replaces the outcome rather than joining it, and for every
+          // finished fence on every target, so the answer a resume leaves behind
+          // is the same whether the target acked the live rollout or not: the
+          // operator has been told this target is done, and the queue must not
+          // hold on it again.
           if (ACKNOWLEDGED_HEALTH_FENCES.has(target.health_stop_reason)) {
             this.store().upsertTarget({ ...target, health_stop_reason: 'stop_acknowledged' });
           }

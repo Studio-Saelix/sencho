@@ -315,10 +315,12 @@ type HealthVerdictSink = (args: {
   nodeId: number;
   result: TransitionResult;
   /**
-   * Set when a run finished without a decision because it belonged to a rollout
-   * the application has left. The run is released, so whatever was waiting on it
-   * is now free, and the live rollout has to be driven again: nothing else would,
-   * because a verdict with no decision produces no follow-up of its own.
+   * Set when a run finished without a decision but released a target the live
+   * rollout was waiting on: a run belonging to a rollout the application has left,
+   * or a verdict that could not be attributed to what the target is running. The run
+   * is released, so whatever was waiting on it is now free, and the live rollout has
+   * to be driven again: nothing else would, because a verdict with no decision
+   * produces no follow-up of its own.
    */
   redrive?: boolean;
 }) => Promise<HealthRolloutOutcome>;
