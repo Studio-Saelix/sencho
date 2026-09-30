@@ -8,11 +8,12 @@
  * quietly broader answer), cursor round-trips, and the detail route's 404
  * semantics for applications the caller may not read or that do not exist.
  */
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import request from 'supertest';
 import fs from 'fs';
 import path from 'path';
 import { setupTestDb, cleanupTestDb, loginAsTestAdmin } from './helpers/setupTestDb';
+import { CacheService } from '../services/CacheService';
 import { DatabaseService } from '../services/DatabaseService';
 import { GitOpsStore, emptyTargetRow } from '../services/gitops/store';
 import { GitOpsTransitions, type EventEnvelope } from '../services/gitops/transitions';
@@ -160,6 +161,12 @@ beforeAll(async () => {
       connectivity: fixture.connectivity,
     });
   }
+});
+
+// A reachability verdict is process state that these reads reuse, so each test
+// starts from a hub that has probed nothing yet.
+beforeEach(() => {
+  CacheService.getInstance().flush();
 });
 
 afterAll(() => {
@@ -452,6 +459,57 @@ describe('GET /api/gitops/applications/:id', () => {
     expect(listRow?.targets[0]?.connectivity).toBe('unreachable');
     expect(detail.body.application.targets[0]?.connectivity).toBe('unreachable');
     expect(listRow?.attention).toContain('target_unreachable');
+    expect(detail.body.application.attention).toContain('target_unreachable');
+  });
+
+  it('withdraws the settled claim on the first detail read of a Blueprint whose node is silent', async () => {
+    const db = DatabaseService.getInstance();
+    // A node nothing is listening on. This hub has probed nothing yet, so the
+    // detail read has to do the probing itself rather than reuse a verdict.
+    const darkNodeId = db.addNode({
+      name: 'route-dark-first-read',
+      type: 'remote',
+      api_url: 'http://127.0.0.1:29992',
+      api_token: 'tok',
+      compose_dir: '/app/compose',
+      is_default: false,
+    });
+    const blueprint = db.createBlueprint({
+      name: 'route-dark-first-blueprint',
+      description: null,
+      compose_content: 'services:\n  app:\n    image: nginx\n',
+      selector: { type: 'nodes', ids: [] },
+      drift_mode: 'observe',
+      classification: 'stateless',
+      classification_reasons: [],
+      enabled: true,
+      created_by: 'tester',
+    });
+    GitOpsStore.getInstance().insertApplication({
+      ...directApplicationFixture('app-route-dark-first', 'source-route-dark-first'),
+      lifecycle_key: `blueprint:${blueprint.id}`,
+      target_mode: 'blueprint',
+      stack_name: null,
+      configured_source_stack_name: null,
+      blueprint_id: blueprint.id,
+    });
+    // The recorded observation is the reachable claim the probe has to withdraw.
+    GitOpsStore.getInstance().upsertTarget({
+      ...emptyTargetRow('app-route-dark-first', darkNodeId, 1),
+      observed_artifact_identity_json: encodeObservedArtifactIdentity({
+        kind: 'exact',
+        identity: 'sha256:dark-first',
+        observedAt: 1,
+      }),
+    });
+
+    const detail = await request(app)
+      .get(`/api/gitops/applications/bp:${blueprint.id}`)
+      .set('Cookie', adminCookie);
+
+    expect(detail.status).toBe(200);
+    expect(detail.body.application.targets[0]?.nodeId).toBe(darkNodeId);
+    expect(detail.body.application.targets[0]?.connectivity).toBe('unreachable');
     expect(detail.body.application.attention).toContain('target_unreachable');
   });
 

@@ -9,16 +9,17 @@
  * rather than vanishing, and rows carrying statuses this build does not know
  * are reported as unknown evidence instead of being reinterpreted.
  */
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import fs from 'fs';
 import path from 'path';
 import type { Request } from 'express';
 import { setupTestDb, cleanupTestDb } from './helpers/setupTestDb';
+import { CacheService } from '../services/CacheService';
 import { DatabaseService } from '../services/DatabaseService';
 import { GitOpsStore, emptyTargetRow } from '../services/gitops/store';
 import { GitOpsTransitions, type EventEnvelope } from '../services/gitops/transitions';
 import { encodeObservedArtifactIdentity } from '../services/gitops/json';
-import { aggregateGitOpsPortfolio, freshestFacetTimestamp, isUsableRevision, PORTFOLIO_MERGE_CAP, postureOf, rowFromProjection } from '../services/gitops/portfolioAggregator';
+import { aggregateGitOpsPortfolio, freshestFacetTimestamp, isUsableRevision, PORTFOLIO_MERGE_CAP, postureOf, probeSilentNodeIds, rowFromProjection } from '../services/gitops/portfolioAggregator';
 import { directApplicationFixture } from './helpers/gitopsFixtures';
 import type { GitOpsIdentityRef, GitOpsRevisionProjection, GitOpsTargetProjection } from '../services/gitops/types';
 import type { ArtifactFacet } from '../services/gitops/types';
@@ -30,6 +31,12 @@ beforeAll(async () => {
   tmpDir = await setupTestDb();
   GitOpsStore.resetForTests();
   GitOpsTransitions.resetForTests();
+});
+
+// The reachability verdict is process state, so a verdict recorded by one test
+// would otherwise be read by the next one in this file.
+beforeEach(() => {
+  CacheService.getInstance().flush();
 });
 
 afterAll(() => {
@@ -435,6 +442,72 @@ describe('aggregateGitOpsPortfolio', () => {
     expect(withdrawn?.targets[0]?.connectivity).toBe('unreachable');
     expect(withdrawn?.evidence.unreachableNodes).toContain(silentId);
     expect(withdrawn?.evidence.partial).toBe(true);
+  });
+
+  it('shares its reachability verdict with the application detail probe', async () => {
+    const db = DatabaseService.getInstance();
+    const localNodeId = db.getNodes()[0]!.id;
+    const darkId = addRemoteNode('port-detail-window', 29994);
+
+    // The list read pays the probe and records the verdict.
+    await aggregateGitOpsPortfolio(adminReq(localNodeId), {
+      fetchRows: async (nodeId: number) => (nodeId === darkId ? null : []),
+    });
+
+    // The detail read that follows it reuses that verdict rather than paying a
+    // second timeout about a node this hub already found dark.
+    const detailProbe = vi.fn<(nodeId: number) => Promise<unknown[] | null | 'unsupported'>>(async () => null);
+    expect([...(await probeSilentNodeIds([darkId], detailProbe))]).toEqual([darkId]);
+    expect(detailProbe).not.toHaveBeenCalled();
+  });
+
+  it('retires a cached dark verdict once the list read sees the node answer', async () => {
+    const db = DatabaseService.getInstance();
+    const localNodeId = db.getNodes()[0]!.id;
+    const recoveredId = addRemoteNode('port-detail-recovered', 29993);
+
+    await aggregateGitOpsPortfolio(adminReq(localNodeId), {
+      fetchRows: async (nodeId: number) => (nodeId === recoveredId ? null : []),
+    });
+
+    // The list read needs the rows themselves, so it never serves the cached
+    // verdict: it probes the node even while a dark entry is live, and that
+    // answer is what retires the entry.
+    const listProbe = vi.fn<(nodeId: number) => Promise<unknown[] | null | 'unsupported'>>(async () => []);
+    const { coverage } = await aggregateGitOpsPortfolio(adminReq(localNodeId), { fetchRows: listProbe });
+    expect(listProbe).toHaveBeenCalledWith(recoveredId);
+    expect(coverage.find(candidate => candidate.nodeId === recoveredId)?.state).toBe('ok');
+
+    // With the entry retired, the detail probe is free to ask again and reach
+    // the same answer the list already had.
+    const detailProbe = vi.fn<(nodeId: number) => Promise<unknown[] | null | 'unsupported'>>(async () => null);
+    expect([...(await probeSilentNodeIds([recoveredId], detailProbe))]).toEqual([recoveredId]);
+    expect(detailProbe).toHaveBeenCalledTimes(1);
+  });
+
+  it('retires a cached dark verdict when a remote payload cannot be walked', async () => {
+    const db = DatabaseService.getInstance();
+    const localNodeId = db.getNodes()[0]!.id;
+    const unreadableId = addRemoteNode('port-unreadable-after-dark', 29992);
+
+    await aggregateGitOpsPortfolio(adminReq(localNodeId), {
+      fetchRows: async (nodeId: number) => (nodeId === unreadableId ? null : []),
+    });
+
+    // The leg cannot be walked this time. A throw is not evidence that the node
+    // is down anywhere in this module, so it must not leave a dark verdict
+    // behind for the detail panel to serve.
+    const { coverage } = await aggregateGitOpsPortfolio(adminReq(localNodeId), {
+      fetchRows: async (nodeId: number) => {
+        if (nodeId === unreadableId) throw new Error('payload this build cannot walk');
+        return [];
+      },
+    });
+    expect(coverage.find(candidate => candidate.nodeId === unreadableId)?.state).toBe('unsupported');
+
+    const detailProbe = vi.fn<(nodeId: number) => Promise<unknown[] | null | 'unsupported'>>(async () => []);
+    expect([...(await probeSilentNodeIds([unreadableId], detailProbe))]).toEqual([]);
+    expect(detailProbe).toHaveBeenCalledTimes(1);
   });
 
   it('merges remote rows with hub node ids applied', async () => {

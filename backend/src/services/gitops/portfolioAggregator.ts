@@ -13,9 +13,22 @@
  *    attached to its `GET /api/git-sources` rows through the identity proxy
  *    contract), attention comes from `attention.ts`, and read authorization
  *    reuses `readAuth.ts` per row, fail-closed. Keys never carry credentials.
+ *
+ * Read frequency, and the one decision that follows from it. The list is read
+ * on navigation and on every published `gitops` state invalidation. The
+ * application detail panel is read once per mount plus those same
+ * invalidations, and the stack drift panel reads that same endpoint through a
+ * second hook, so two or three readers can ask about one node at once. The
+ * panel is not polled on an interval: the repeated read comes from repeated
+ * navigation and from every transition published while a panel is held open.
+ * A node that does not answer costs the whole probe budget each time, so a "did
+ * not answer" verdict is reused for a bounded window
+ * (`REACHABILITY_VERDICT_TTL_MS`) and only in that direction, so a cached
+ * entry can withhold a settled claim but never assert one.
  */
 
 import type { Request } from 'express';
+import { CacheService } from '../CacheService';
 import { DatabaseService } from '../DatabaseService';
 import { NodeRegistry } from '../NodeRegistry';
 import { checkPermission } from '../../middleware/permissions';
@@ -41,7 +54,23 @@ import { canonicalizeServiceEvidence, isRecord } from './json';
 import type { ServiceArtifactEvidence } from './json';
 
 /** Per-remote probe budget; mirrors the fleet overview probe so one dead node cannot stall the portfolio. */
-const REMOTE_PROBE_TIMEOUT_MS = 3000;
+export const REMOTE_PROBE_TIMEOUT_MS = 3000;
+
+/** Cache namespace for the per-node reachability verdict. */
+const REACHABILITY_NAMESPACE = 'gitops-reachability';
+
+/**
+ * How long one node's "did not answer" verdict may be reused.
+ *
+ * Strictly under `REMOTE_PROBE_TIMEOUT_MS`, so a served verdict is never older
+ * than the longest a fresh probe could have taken. Long enough that the reads
+ * that follow one dark answer (the next navigation, the next published
+ * transition, the second reader of the same endpoint) do not each pay the
+ * timeout again, and short enough that a node which came back is seen back
+ * within the freshness the rest of the read model already assumes. Exported so
+ * the test can hold the window to this relationship rather than to a literal.
+ */
+export const REACHABILITY_VERDICT_TTL_MS = 1500;
 
 /** Merge bound across all contributors. Beyond this the response reports `truncated`. */
 export const PORTFOLIO_MERGE_CAP = 1000;
@@ -829,10 +858,16 @@ export async function aggregateGitOpsPortfolio(req: Request, options: AggregateO
     try {
       const remoteRows = await fetchRows(node.id);
       if (remoteRows === null) {
+        // Recorded so a detail read that lands inside the reuse window reuses
+        // this verdict instead of paying the same timeout again.
+        rememberUnanswered(node.id);
         remoteProbes.set(node.id, { state: 'unreachable', rows: null });
         coverage.push({ nodeId: node.id, nodeName: nodeLabel, state: 'unreachable' });
         return;
       }
+      // Everything that is not `null` answered, including a payload this build
+      // could not walk, so a cached dark verdict is dropped here.
+      rememberAnswered(node.id);
       if (remoteRows === 'unsupported') {
         remoteProbes.set(node.id, { state: 'unsupported', rows: null });
         coverage.push({ nodeId: node.id, nodeName: nodeLabel, state: 'unsupported' });
@@ -857,6 +892,11 @@ export async function aggregateGitOpsPortfolio(req: Request, options: AggregateO
         `[GitOps portfolio] Node ${node.id} contributed a payload this build could not read:`,
         error instanceof Error ? error.message : error,
       );
+      // A leg that reached a payload this build could not walk answered, and a
+      // leg that threw is not evidence of a silent node anywhere in this
+      // module, so a cached dark verdict is retired either way. Leaving it live
+      // would let the detail panel keep reporting a node the list just reached.
+      rememberAnswered(node.id);
       remoteProbes.set(node.id, { state: 'unsupported', rows: null });
       coverage.push({ nodeId: node.id, nodeName: nodeLabel, state: 'unsupported' });
     }
@@ -1543,6 +1583,37 @@ export function probeableRemoteNodeIds(): Set<number> {
   );
 }
 
+function reachabilityKey(nodeId: number): string {
+  return `${REACHABILITY_NAMESPACE}:${nodeId}`;
+}
+
+/**
+ * Whether this hub probed `nodeId` very recently and it did not answer.
+ *
+ * Only the "did not answer" verdict is ever reused. Learning it costs a full
+ * probe timeout and serving it can only withhold a settled claim, so reusing
+ * it briefly is the safe direction. A reachable verdict is never cached: a
+ * live node answers in milliseconds, and the direction that would be wrong to
+ * reuse is the one that asserts a node is up after it went dark.
+ *
+ * Read without the hit/miss counters, because the absent entry is the normal
+ * case for every healthy node and counting it would bury the real cache
+ * behaviour in the diagnostics endpoint.
+ */
+function knownUnreachable(nodeId: number): boolean {
+  return CacheService.getInstance().peek<boolean>(reachabilityKey(nodeId)) === true;
+}
+
+/** Record that `nodeId` just answered, so a cached dark verdict cannot outlive the node's recovery. */
+function rememberAnswered(nodeId: number): void {
+  CacheService.getInstance().invalidate(reachabilityKey(nodeId));
+}
+
+/** Record that `nodeId` just failed to answer, for the bounded reuse window. */
+function rememberUnanswered(nodeId: number): void {
+  CacheService.getInstance().set(reachabilityKey(nodeId), true, REACHABILITY_VERDICT_TTL_MS);
+}
+
 /**
  * The nodes in `nodeIds` that did not answer a bounded probe.
  *
@@ -1557,6 +1628,13 @@ export function probeableRemoteNodeIds(): Set<number> {
  * unsettle every Blueprint on an older node. The probe is bounded to the given
  * ids and runs concurrently, so a detail read costs one round trip per target
  * node and never a fleet sweep.
+ *
+ * A node this hub already found silent inside the reuse window is not asked
+ * again, because the answer costs a full timeout to re-learn and repeated
+ * reads of the same dark node are the case worth bounding. Two writers keep
+ * that window honest: this probe, and the portfolio fan-out. Both record a dark
+ * verdict and both retire it on an answer, because the fan-out probes on every
+ * read and can prove a node is back while this panel is mid-window.
  */
 export async function probeSilentNodeIds(
   nodeIds: readonly number[],
@@ -1564,8 +1642,16 @@ export async function probeSilentNodeIds(
 ): Promise<Set<number>> {
   const unique = [...new Set(nodeIds)];
   const outcomes = await Promise.all(unique.map(async (nodeId) => {
+    if (knownUnreachable(nodeId)) return { nodeId, silent: true };
     try {
-      return { nodeId, silent: (await fetchRows(nodeId)) === null };
+      const rows = await fetchRows(nodeId);
+      // A node that answers retires any dark verdict, including one the
+      // portfolio fan-out wrote while this leg was in flight. Without that the
+      // two writers disagree: the list has just proved the node is up, and the
+      // detail panel would keep saying otherwise until the window runs out.
+      if (rows === null) rememberUnanswered(nodeId);
+      else rememberAnswered(nodeId);
+      return { nodeId, silent: rows === null };
     } catch (error) {
       // A leg that throws is a node this build could not read, not a node that
       // is down, so it is left out of the silent set rather than guessed at.

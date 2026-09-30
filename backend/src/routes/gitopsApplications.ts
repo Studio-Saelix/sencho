@@ -602,6 +602,14 @@ gitopsApplicationsRouter.get('/:id', async (req: Request, res: Response): Promis
       // application's remote targets and runs concurrently, so it costs one
       // round trip's worst case, bounded by the shared probe timeout, rather
       // than a fleet sweep.
+      //
+      // A node this hub already found silent inside the shared reuse window is
+      // not asked again: this panel is read on every navigation and on every
+      // published GitOps transition, so a dark target would otherwise cost the
+      // probe timeout on each of those reads. The window is strictly shorter
+      // than the probe timeout itself, so a node that comes back is seen back
+      // no later than one probe would have taken, and only the "did not answer"
+      // verdict is ever reused.
       const rawProjection = projectApplication(application.id, healthGateDisabled());
       const probeable = probeableRemoteNodeIds();
       const silent = await probeSilentNodeIds(
