@@ -520,6 +520,24 @@ export async function resolveAndRecordArtifactSet(args: {
   }
 }
 
+/**
+ * Whether both sides describe the same set of services.
+ *
+ * `observationMatchesExpected` only walks the expected services and weighs the
+ * registry ones, so it cannot tell an extra service from an unchanged set. The
+ * probe resolves the live stack rather than the staged candidate, so a stack
+ * edited out of band can carry a different set than the one that was frozen, and
+ * that is a moved identity rather than a matching one.
+ */
+function sameServiceSet(
+  expected: readonly ServiceArtifactEvidence[],
+  observed: readonly ServiceArtifactEvidence[],
+): boolean {
+  if (expected.length !== observed.length) return false;
+  const expectedNames = new Set(expected.map((service) => service.serviceName));
+  return observed.every((service) => expectedNames.has(service.serviceName));
+}
+
 export async function probeStaleArtifactEvidence(args: {
   stackName: string;
   nodeId: number;
@@ -559,10 +577,12 @@ export async function probeStaleArtifactEvidence(args: {
     // multi-arch tag, and the fingerprint alone would report a moved identity.
     // Membership is the test the Blueprint drift path applies: this platform's
     // child is one of the expected set's own variants, so nothing moved. It
-    // weighs the expected registry services only, and both sides resolve this
-    // one generation, so the service sets agree.
+    // answers only the digest question, so it is asked when both sides hold the
+    // same services; a set that grew or shrank, or an expected set that recorded
+    // no per-service evidence, keeps the fingerprint verdict.
     if (expectedServices?.length
       && evidence.services?.length
+      && sameServiceSet(expectedServices, evidence.services)
       && observationMatchesExpected(expectedServices, evidence.services)) return;
     recordResolvedEvidence({
       applicationId: args.applicationId,

@@ -70,12 +70,18 @@ const INDEX_DIGEST = `sha256:${'2'.repeat(64)}`;
 const AMD64_DIGEST = `sha256:${'a'.repeat(64)}`;
 const ARM64_DIGEST = `sha256:${'b'.repeat(64)}`;
 const ARM64_MOVED_DIGEST = `sha256:${'c'.repeat(64)}`;
+const AMD64_MOVED_DIGEST = `sha256:${'d'.repeat(64)}`;
 
 /** What a registry answers for a multi-arch tag resolved for one platform. */
-function multiArchIndex(platformLabel: string, platformDigest: string, armDigest = ARM64_DIGEST) {
+function multiArchIndex(
+  platformLabel: string,
+  platformDigest: string,
+  armDigest = ARM64_DIGEST,
+  indexDigest = INDEX_DIGEST,
+) {
   return {
     ok: true as const,
-    indexDigest: INDEX_DIGEST,
+    indexDigest,
     platformDigest,
     platformLabel,
     qualification: 'qualified' as const,
@@ -448,10 +454,12 @@ describe('gitops artifact resolve', () => {
     });
     const expectedId = GitOpsStore.getInstance().getApplication('app-move')!.artifact_set_id!;
 
-    // The arm64 child of the tag is now something the expected set never named.
+    // The arm64 child of the tag is now something the expected set never named,
+    // and the index moved with it, as a registry repush would.
+    const movedIndex = `sha256:${'e'.repeat(64)}`;
     mockDockerInfo.mockResolvedValue({ OSType: 'linux', Architecture: 'arm64' });
     mockResolveRegistryImageDigestForPlatform.mockResolvedValue(
-      multiArchIndex('linux/arm64', ARM64_MOVED_DIGEST, ARM64_MOVED_DIGEST),
+      multiArchIndex('linux/arm64', ARM64_MOVED_DIGEST, ARM64_MOVED_DIGEST, movedIndex),
     );
     await probeStaleArtifactEvidence({
       stackName: 'move-web',
@@ -471,6 +479,176 @@ describe('gitops artifact resolve', () => {
     expect(decodeArtifactEvidenceJson(latest.evidence_json).services?.[0]?.platformDigest)
       .toBe(ARM64_MOVED_DIGEST);
     expect(expectedRow.qualification).toBe('qualified');
+  });
+
+  it('records stale when the same platform child moved on the same platform', async () => {
+    seedDirectApp({ applicationId: 'app-same', generationId: 'gen-same', stackName: 'same-web', artifactSetId: 'art-same-seed' });
+    mockBuildEffectiveServiceModel.mockResolvedValue(singleServiceModel());
+
+    const movedIndex = `sha256:${'f'.repeat(64)}`;
+    mockResolveRegistryImageDigestForPlatform.mockResolvedValue(
+      multiArchIndex('linux/amd64', AMD64_DIGEST),
+    );
+    await resolveAndRecordArtifactSet({
+      stackName: 'same-web',
+      nodeId: 1,
+      applicationId: 'app-same',
+      generationId: 'gen-same',
+      buildContexts: [],
+      envelope: envelope('op-resolve-same'),
+    });
+    const expectedId = GitOpsStore.getInstance().getApplication('app-same')!.artifact_set_id!;
+
+    // Same node, same platform, different child. Membership must not excuse it.
+    mockResolveRegistryImageDigestForPlatform.mockResolvedValue({
+      ok: true,
+      indexDigest: movedIndex,
+      platformDigest: AMD64_MOVED_DIGEST,
+      platformLabel: 'linux/amd64',
+      qualification: 'qualified',
+      platformVariants: [{ platform: 'linux/amd64', digest: AMD64_MOVED_DIGEST }],
+    });
+    await probeStaleArtifactEvidence({
+      stackName: 'same-web',
+      nodeId: 1,
+      applicationId: 'app-same',
+      generationId: 'gen-same',
+      buildContexts: [],
+      envelope: envelope('op-probe-same'),
+    });
+
+    const app = GitOpsStore.getInstance().getApplication('app-same')!;
+    expect(app.latest_artifact_set_id).not.toBe(expectedId);
+    expect(GitOpsStore.getInstance().getArtifactSet(app.latest_artifact_set_id!)?.qualification).toBe('stale');
+  });
+
+  it('records stale when the live stack gained a service the expected set never froze', async () => {
+    seedDirectApp({ applicationId: 'app-grew', generationId: 'gen-grew', stackName: 'grew-web', artifactSetId: 'art-grew-seed' });
+    mockBuildEffectiveServiceModel.mockResolvedValue(singleServiceModel());
+
+    mockResolveRegistryImageDigestForPlatform.mockResolvedValue(
+      multiArchIndex('linux/amd64', AMD64_DIGEST),
+    );
+    await resolveAndRecordArtifactSet({
+      stackName: 'grew-web',
+      nodeId: 1,
+      applicationId: 'app-grew',
+      generationId: 'gen-grew',
+      buildContexts: [],
+      envelope: envelope('op-resolve-grew'),
+    });
+    const expectedId = GitOpsStore.getInstance().getApplication('app-grew')!.artifact_set_id!;
+
+    // The stack was edited out of band after acceptance, so the probe renders
+    // one more service than the frozen set names. `web` still matches, which is
+    // exactly the case a digest-only membership test would wave through.
+    mockBuildEffectiveServiceModel.mockResolvedValue({
+      renderable: true,
+      services: [
+        ...singleServiceModel().services,
+        { name: 'db', declaredImage: 'postgres:latest', hasBuild: false, expectedReplicas: 1, dependsOn: [], hasHealthcheck: false },
+      ],
+    });
+    mockResolveRegistryImageDigestForPlatform.mockImplementation(async (_registry: string, repo: string) => (
+      repo.includes('postgres')
+        ? {
+          ok: true,
+          indexDigest: INDEX_DIGEST,
+          platformDigest: `sha256:${'9'.repeat(64)}`,
+          platformLabel: 'linux/amd64',
+          qualification: 'qualified',
+          platformVariants: [{ platform: 'linux/amd64', digest: `sha256:${'9'.repeat(64)}` }],
+        }
+        : multiArchIndex('linux/amd64', AMD64_DIGEST)
+    ));
+    await probeStaleArtifactEvidence({
+      stackName: 'grew-web',
+      nodeId: 1,
+      applicationId: 'app-grew',
+      generationId: 'gen-grew',
+      buildContexts: [],
+      envelope: envelope('op-probe-grew'),
+    });
+
+    const app = GitOpsStore.getInstance().getApplication('app-grew')!;
+    expect(app.latest_artifact_set_id).not.toBe(expectedId);
+    expect(GitOpsStore.getInstance().getArtifactSet(app.latest_artifact_set_id!)?.qualification).toBe('stale');
+  });
+
+  it('records stale when a build-only expected set no longer describes the stack', async () => {
+    const buildOnly = {
+      kind: 'local_build_unverified' as const,
+      identity: computeArtifactSetFingerprint([{
+        serviceName: 'worker',
+        authoredRef: null,
+        source: 'build' as const,
+        platform: 'linux/amd64',
+        indexDigest: null,
+        platformDigest: null,
+        buildContextFingerprint: `sha256:${'7'.repeat(64)}`,
+        producedImageId: null,
+        failureClass: null,
+        resolvedAt: 1,
+      }]),
+      services: [{
+        serviceName: 'worker',
+        authoredRef: null,
+        source: 'build' as const,
+        platform: 'linux/amd64',
+        indexDigest: null,
+        platformDigest: null,
+        buildContextFingerprint: `sha256:${'7'.repeat(64)}`,
+        producedImageId: null,
+        failureClass: null,
+        resolvedAt: 1,
+      }],
+    };
+    seedDirectApp({
+      applicationId: 'app-build',
+      generationId: 'gen-build',
+      stackName: 'build-web',
+      artifactSetId: 'art-build-v1',
+      evidence: buildOnly,
+    });
+    // Membership weighs registry services only, so with nothing to weigh it
+    // answers vacuously. Only the service set can still tell these apart.
+    mockBuildEffectiveServiceModel.mockResolvedValue({
+      renderable: true,
+      services: [
+        { name: 'worker', declaredImage: null, hasBuild: true, expectedReplicas: 1, dependsOn: [], hasHealthcheck: false },
+      ],
+    });
+
+    // Same service, same unverified fingerprint: nothing moved.
+    await probeStaleArtifactEvidence({
+      stackName: 'build-web',
+      nodeId: 1,
+      applicationId: 'app-build',
+      generationId: 'gen-build',
+      buildContexts: [],
+      envelope: envelope('op-probe-build-same'),
+    });
+    expect(GitOpsStore.getInstance().getApplication('app-build')!.latest_artifact_set_id).toBe('art-build-v1');
+
+    // The built service was renamed out of band. Both sides are unverified, so
+    // only the service set distinguishes them.
+    mockBuildEffectiveServiceModel.mockResolvedValue({
+      renderable: true,
+      services: [
+        { name: 'batch', declaredImage: null, hasBuild: true, expectedReplicas: 1, dependsOn: [], hasHealthcheck: false },
+      ],
+    });
+    await probeStaleArtifactEvidence({
+      stackName: 'build-web',
+      nodeId: 1,
+      applicationId: 'app-build',
+      generationId: 'gen-build',
+      buildContexts: [],
+      envelope: envelope('op-probe-build-renamed'),
+    });
+    const app = GitOpsStore.getInstance().getApplication('app-build')!;
+    expect(app.latest_artifact_set_id).not.toBe('art-build-v1');
+    expect(GitOpsStore.getInstance().getArtifactSet(app.latest_artifact_set_id!)?.qualification).toBe('stale');
   });
 
   it('falls back to the identity string for an expected set with no per-service evidence', async () => {
@@ -512,11 +690,10 @@ describe('gitops artifact resolve', () => {
     });
     expect(GitOpsStore.getInstance().getApplication('app-legacy')!.latest_artifact_set_id).toBe('art-legacy-v1');
 
-    const movedDigest = `sha256:${'d'.repeat(64)}`;
     mockResolveRegistryImageDigestForPlatform.mockResolvedValue({
       ok: true,
-      indexDigest: movedDigest,
-      platformDigest: movedDigest,
+      indexDigest: AMD64_MOVED_DIGEST,
+      platformDigest: AMD64_MOVED_DIGEST,
       platformLabel: 'linux/amd64',
       qualification: 'exact',
     });
