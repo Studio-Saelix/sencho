@@ -39,6 +39,7 @@ let GitOpsTransitions: typeof import('../services/gitops/transitions').GitOpsTra
 let BlueprintTargetAdapter: typeof import('../services/gitops/handoff').BlueprintTargetAdapter;
 let buildAcceptedGeneration: typeof import('../services/gitops/handoff').buildAcceptedGeneration;
 let ensureRolloutAuthorization: typeof import('../services/gitops/handoff').ensureRolloutAuthorization;
+let hasTargetOperationInFlight: typeof import('../services/gitops/handoff').hasTargetOperationInFlight;
 let dataDir: string;
 let setRegistryReadinessDepsForTests: typeof import('../services/gitops/handoff').setRegistryReadinessDepsForTests;
 let setHealthCapabilityProbeForTests: typeof import('../services/gitops/handoff').setHealthCapabilityProbeForTests;
@@ -59,6 +60,7 @@ beforeAll(async () => {
     BlueprintTargetAdapter,
     buildAcceptedGeneration,
     ensureRolloutAuthorization,
+    hasTargetOperationInFlight,
     reconstructBlueprintRolloutQueue,
     setHealthCapabilityProbeForTests,
     setRegistryReadinessDepsForTests,
@@ -445,6 +447,69 @@ describe('the preallocated health run', () => {
   });
 });
 
+describe('an unresolved run reads as an operation in flight', () => {
+  it('a real ack leaves the target unsettled with no stage, and the predicate says so', async () => {
+    // The window this covers is only reachable through the real path, so it is
+    // driven through it rather than seeded. The apply lands, the ack clears the
+    // stage, and the rollout then waits out its observation window with the run
+    // still open. Reading only the stage calls that target idle, and a placement
+    // approved in that window supersedes a rollout the fleet has not finished.
+    const fixture = await gatedAttempt('pause');
+    const store = GitOpsStore.getInstance();
+    const target = store.getTarget(fixture.applicationId, fixture.nodeId!)!;
+
+    expect(target.latest_stage).toBe('blueprint_ack_recorded');
+    expect(target.active_operation_stage).toBeNull();
+    expect(target.pending_health_run_id).not.toBeNull();
+    expect(hasTargetOperationInFlight(store, fixture.applicationId)).toBe(true);
+
+    // The verdict is what ends the window, so it is what ends the conflict. A
+    // target waiting on nothing is a target an operator can place around.
+    finishHealth(fixture, fixture.nodeId!, 'passed', undefined, 'pause');
+    const settled = store.getTarget(fixture.applicationId, fixture.nodeId!)!;
+    expect(settled.pending_health_run_id).toBeNull();
+    expect(hasTargetOperationInFlight(store, fixture.applicationId)).toBe(false);
+  });
+
+  it('reads each of the two pieces of evidence on its own', () => {
+    const fixture = seedApp({ nodeCount: 2 });
+    const store = GitOpsStore.getInstance();
+    const nodeId = fixture.nodeId!;
+    const other = fixture.nodeIds[1]!;
+
+    store.upsertTarget({
+      ...targetRow(fixture.applicationId, nodeId),
+      active_operation_stage: 'blueprint_deploy_started',
+    });
+    expect(hasTargetOperationInFlight(store, fixture.applicationId)).toBe(true);
+
+    // The stage alone is the case that already worked. The pointer alone is the
+    // one that read as idle.
+    store.upsertTarget({
+      ...store.getTarget(fixture.applicationId, nodeId)!,
+      active_operation_stage: null,
+      pending_health_run_id: 'run-unresolved',
+    });
+    expect(hasTargetOperationInFlight(store, fixture.applicationId)).toBe(true);
+
+    store.upsertTarget({
+      ...store.getTarget(fixture.applicationId, nodeId)!,
+      pending_health_run_id: null,
+    });
+    expect(hasTargetOperationInFlight(store, fixture.applicationId)).toBe(false);
+
+    // A target the application no longer runs is not an operation in flight for
+    // it, so neither piece of evidence on a tombstoned row holds anything up.
+    store.upsertTarget({
+      ...targetRow(fixture.applicationId, other),
+      target_status: 'tombstoned',
+      active_operation_stage: 'blueprint_deploy_started',
+      pending_health_run_id: 'run-tombstoned',
+    });
+    expect(hasTargetOperationInFlight(store, fixture.applicationId)).toBe(false);
+  });
+});
+
 describe('verdict idempotency', () => {
   it('a duplicate verdict is evidence only and changes nothing', async () => {
     const fixture = await gatedAttempt('pause');
@@ -560,6 +625,10 @@ describe('retry, stop, and rollback', () => {
     expect(after.recovery_ref).toBe(recoveryRef);
     expect(after.recovery_generation_id).toBe('gen-pre-rollout');
     expect(after.pending_health_run_id).not.toBe(firstRun);
+    // The replacement run is a second observation window, not a gap between two.
+    // Reading the released pointer here as "nothing in flight" would let a
+    // placement approve straight over a retry the policy asked for.
+    expect(hasTargetOperationInFlight(store, fixture.applicationId)).toBe(true);
   });
 
   it('does not re-dispatch a target whose retry budget is already spent', async () => {
@@ -1015,6 +1084,10 @@ describe('retry, stop, and rollback', () => {
     const target = store.getTarget(fixture.applicationId, nodeId)!;
     expect(target.pending_health_run_id).toBeNull();
     expect(target.healthy_generation_id).toBeNull();
+    // The released pointer is what ends the conflict. A superseded rollout whose
+    // verdict is never released would hold every later placement off this
+    // application for ever, which is the one way this rule could do lasting harm.
+    expect(hasTargetOperationInFlight(store, fixture.applicationId)).toBe(false);
     // Recorded as a verdict about the rollout the target left, which is the
     // record an operator reads to see why nothing was decided. Naming it as a
     // superseded application instead would describe a target that had been

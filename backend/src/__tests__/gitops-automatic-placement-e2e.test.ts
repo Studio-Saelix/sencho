@@ -703,6 +703,33 @@ describe('a bounded_auto application reaches an approval', () => {
     expect(store.getApplication(app.id)!.placement_approval_ref).toBeNull();
   });
 
+  it('refuses an addition while one of its targets is awaiting a health verdict', () => {
+    // The half of the same window the stage cannot see. The apply lands and the
+    // ack clears the stage, so a health-gated rollout spends the rest of its
+    // observation window acked-but-unsettled: no stage, and a health run the
+    // fleet is still waiting on. Approving here supersedes a rollout that has
+    // not finished, which is what stops a gated rollout part-way across a fleet.
+    //
+    // The pointer is the evidence, so the pointer is what the fixture sets. The
+    // run behind it is what the startup reconciliation reads back, and that path
+    // is covered against real reservations in the rollout suite.
+    const nodeId = addNode(`n-${randomUUID().slice(0, 6)}`);
+    const other = addNode(`n-${randomUUID().slice(0, 6)}`);
+    const app = seed({ nodeIds: [nodeId, other], compose: 'services:\n  web:\n    image: nginx:1.25\n' });
+    const store = GitOpsStore.getInstance();
+    store.upsertTarget({
+      ...emptyTargetRow(app.id, other, 1),
+      target_status: 'active',
+      latest_stage: 'blueprint_ack_recorded',
+      pending_health_run_id: `run-${randomUUID()}`,
+    });
+
+    const outcome = applyAutomaticPlacement(app.id, { operationId: 'op-awaiting-verdict', actor: null, trigger: 'test', at: 1 });
+    expect(outcome).toEqual({ status: 'operator_review', reason: 'conflicting_operation' });
+    expect(store.getApplication(app.id)!.placement_approval_ref).toBeNull();
+    expect(store.getApplication(app.id)!.placement_policy_refusal_reason).toBe('conflicting_operation');
+  });
+
   it('records no reason when it approves, so nothing is left to explain', () => {
     // The opposite direction. A reason left on an approved application would be
     // read as the explanation for whatever review comes next.

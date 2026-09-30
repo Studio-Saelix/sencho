@@ -258,11 +258,24 @@ function liveRolloutBinding(app: GitOpsApplicationRow): FutureRolloutAuthorizati
  * reads the application pointer cannot see a rollout that is mid-deploy. An
  * automatic placement approved during one clears the authorization and
  * supersedes the generation that deploy is running under.
+ *
+ * An unresolved health run counts as in flight too. The stage covers the apply
+ * and the acknowledgement that ends it, but not what follows: a health-gated
+ * rollout is acked before its verdict lands, so its target sits
+ * acked-but-unsettled for the rest of the observation window with the run still
+ * outstanding, and the stage alone calls that idle. The pointer is the target's
+ * own record of the run it awaits, the same one the dispatch queue and the
+ * startup reconciliation read, and that reconciliation releases a pointer whose
+ * run turned terminal without a verdict.
  */
 export function hasTargetOperationInFlight(store: GitOpsStore, applicationId: string): boolean {
   return store
     .listTargets(applicationId)
-    .some((target) => target.target_status === 'active' && target.active_operation_stage !== null);
+    .some(
+      (target) =>
+        target.target_status === 'active'
+        && (target.active_operation_stage !== null || target.pending_health_run_id !== null),
+    );
 }
 
 /**
