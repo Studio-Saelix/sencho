@@ -1303,6 +1303,67 @@ describe('gitops derive to portfolio posture', () => {
     expect(attentionReasons(projection)).toContain('health_failed');
   });
 
+  it('reads a failed generation as work in progress while that same generation is redeployed', () => {
+    const tx = GitOpsTransitions.getInstance();
+    const applicationId = 'app-posture-healthredeploy';
+    const generationId = 'gen-posture-healthredeploy';
+    driveHealthyDirect(applicationId, 'posture-healthredeploy-web', generationId);
+    tx.healthFinalized({
+      applicationId,
+      nodeId: 1,
+      healthRunId: `run-${applicationId}-fail`,
+      healthStatus: 'failed',
+      deployedGenerationId: generationId,
+      targetScope: 'stack',
+      envelope: envelope(`op-hf-${applicationId}`),
+    });
+    expect(postureOf(projectApplication(applicationId, false))).toBe('failed');
+
+    // A retry of the failed generation, which is what the health rollout policy
+    // answers a failure with. The recorded verdict still says failed, because
+    // the redeploy has not produced one of its own yet.
+    tx.deployStarted(applicationId, 1, generationId, envelope(`op-rd-${applicationId}`));
+    const redeploying = projectApplication(applicationId, false);
+
+    expect(redeploying.targets[0]?.runtime.status).toBe('deploying');
+    expect(redeploying.targets[0]?.health.status).toBe('failed');
+    // The verdict has not been overturned, so it must not be reported as needing
+    // an operator while the run that will overturn it is on the node. Progress
+    // rather than failure: the failure reading is what the operator sees today,
+    // and it names a settled state nobody is working on.
+    expect(redeploying.targets[0]?.healthFailureSuperseded).toBe(true);
+    expect(attentionReasons(redeploying)).not.toContain('health_failed');
+    expect(postureOf(redeploying)).toBe('in_progress');
+
+    // The redeploy's own verdict is what the target reports once it lands, and
+    // the promotion it earns is not held back by the failure it replaces. The
+    // window between the bind and that verdict belongs to the health gate's own
+    // observation, which this change leaves alone: nothing is reserved yet, so
+    // the recorded failure is reported again until the new run settles.
+    tx.deployBound(applicationId, 1, generationId, envelope(`op-rd-${applicationId}`));
+    const bound = projectApplication(applicationId, false);
+
+    expect(bound.targets[0]?.health.status).toBe('failed');
+    expect(bound.targets[0]?.healthFailureSuperseded).toBe(false);
+    expect(postureOf(bound)).toBe('failed');
+
+    tx.healthFinalized({
+      applicationId,
+      nodeId: 1,
+      healthRunId: `run-${applicationId}-retry`,
+      healthStatus: 'passed',
+      deployedGenerationId: generationId,
+      targetScope: 'stack',
+      envelope: envelope(`op-hr-${applicationId}`),
+    });
+    const retried = projectApplication(applicationId, false);
+
+    expect(retried.targets[0]?.healthFailureSuperseded).toBe(false);
+    expect(retried.targets[0]?.health.status).toBe('passed');
+    expect(attentionReasons(retried)).not.toContain('health_failed');
+    expect(postureOf(retried)).toBe('converged');
+  });
+
   it('does not let a later unknown verdict erase a recorded failure', () => {
     const store = GitOpsStore.getInstance();
     const tx = GitOpsTransitions.getInstance();

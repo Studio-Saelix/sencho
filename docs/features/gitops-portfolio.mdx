@@ -38,6 +38,8 @@ Above the list, the **Attention required** section groups everything currently w
 
 Failure-toned entries (failures, unreachable targets, failed rollbacks or recovery) sort ahead of pending decisions.
 
+A stack whose health check failed stops asking for you once the same version is deployed again, and reads as work in progress while that redeploy runs. The result of the redeploy is what the application reports next. This applies to a stack applied straight from a Git source.
+
 ## One application
 
 Selecting an application name in the list, or an entry in the attention queue, opens that application's view without leaving the portfolio. It is read-only and shows, in order:

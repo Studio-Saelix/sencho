@@ -91,6 +91,7 @@ function target(overrides: Partial<GitOpsTargetProjection> = {}): GitOpsTargetPr
         legacyAppliedRevision: null,
         runtime: { status: 'synced_and_healthy' },
         health: { status: 'not_applicable' },
+        healthFailureSuperseded: false,
         lkg: { status: 'none' },
         healthGate: {
       policy: null,

@@ -969,6 +969,22 @@ export type GitOpsTargetProjection = {
   health: HealthFacet;
   healthGate: HealthGateFacet;
   lkg: LkgFacet;
+  /**
+   * Whether a live operation is redeploying the generation a recorded health
+   * failure is about, so the failure is about to be replaced by a newer verdict
+   * rather than standing on its own.
+   *
+   * Only meaningful while `health.status` is `failed`. It is a fact about the
+   * two row columns and their generations, not a tone: the consumer still decides
+   * what to present.
+   *
+   * **Absent means not superseded.** A remote instance on an older build answers
+   * without the field, and the value arrives as `undefined` even though this type
+   * requires a boolean, so every read has to stay falsy-tolerant. Rewriting a
+   * read as `=== false` would invert that and hide every failure arriving from an
+   * older peer, which is the one outcome this may not produce.
+   */
+  healthFailureSuperseded: boolean;
   tombstoned: boolean;
 };
 

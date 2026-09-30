@@ -239,6 +239,7 @@ function targetProjection(
     legacyAppliedRevision: null,
     runtime: { status: 'synced_and_healthy' },
     health: { status: 'passed', runId: 'run-1', deployedGenerationId: 'gen-1' },
+    healthFailureSuperseded: false,
     lkg: { status: 'available', generationId: 'gen-1', artifactSetId: null },
     healthGate: {
       policy: null,

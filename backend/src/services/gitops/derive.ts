@@ -1818,6 +1818,7 @@ function deriveTarget(
     legacyAppliedRevision: target.legacy_applied_revision,
     runtime,
     health: deriveHealth(target, healthDisabled, runningGenerationId),
+    healthFailureSuperseded: healthFailureSuperseded(target),
     // What the health-gated rollout has decided for this target, and whether a
     // rollback has anything to restore from. Surfaced here rather than as a
     // separate surface so the rollout controls read the same evidence the
@@ -1890,6 +1891,50 @@ const LIVE_OPERATION_STATUS: Record<string, 'deploying' | 'withdrawing' | undefi
   NonNullable<GitOpsTargetCurrentRow['active_operation_stage']>,
   'deploying' | 'withdrawing'
 >>;
+
+/**
+ * Whether a live operation is redeploying the very generation a recorded health
+ * failure is about.
+ *
+ * A recorded failure keeps being reported until a newer verdict lands, and the
+ * verdict it is waiting for is usually a redeploy of the same generation: the
+ * health rollout policy answers a failure by re-running that generation. So
+ * while that redeploy runs, the failure is the thing being worked on rather than
+ * something an operator has to act on, and the fleet should read it as work in
+ * progress. `collectHealthDrift` already withholds the drift item for the same
+ * window and for the same reason.
+ *
+ * The generation match is the whole rule. A redeploy of a *different* generation
+ * is not this failure's successor, and matching on it would leave a known-bad
+ * workload looking like progress towards something else. The identity compared
+ * against is the one the failure was recorded against, not the running pointer:
+ * `deriveHealth` judges a verdict against the desired generation when there is
+ * one, so the two can differ while a newer generation waits to be deployed, and
+ * it is the failure's own record that the operation has to be about to supersede
+ * it. A consumer cannot make this comparison from the projection, because the
+ * runtime facet collapses an operation into a status and drops which generation
+ * it is for.
+ *
+ * The scope is the stages in `LIVE_OPERATION_STATUS` against a target whose
+ * operation recorded a generation, which is what only a Direct `deployStarted`
+ * writes. A Blueprint deploy and withdrawal record their intent and candidate
+ * instead of a generation, so this stays false for them and a redeployed
+ * Blueprint target keeps reporting its failure, as it did before. The withdrawal
+ * stage is therefore in the table but unreachable here.
+ *
+ * It also stays false once the deploy binds, before the retry's own verdict
+ * lands: the health gate runs after the deploy, and nothing reserves a run yet,
+ * so there is no second operation to read. That window belongs to the gate's own
+ * observation, which is deliberately not touched here. What ends the suppression
+ * is any terminal for the operation (`deployBound`, `deployUnbound`,
+ * `deployFailed`), the startup reclassification that turns an operation nobody
+ * finished into an interruption, or the next verdict.
+ */
+function healthFailureSuperseded(target: GitOpsTargetCurrentRow): boolean {
+  if (!LIVE_OPERATION_STATUS[target.active_operation_stage ?? '']) return false;
+  if (target.active_generation_id === null) return false;
+  return target.active_generation_id === target.last_health_generation_id;
+}
 
 /**
  * The failure stages that record a mutation attempt against a target's workload,

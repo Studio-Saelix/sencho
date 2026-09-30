@@ -2609,6 +2609,121 @@ describe('gitops derivation', () => {
     expect(projection.drift.filter((entry) => entry.class === 'health')).toEqual([]);
   });
 
+  it('marks a recorded health failure superseded only by a redeploy of its own generation', () => {
+    const store = GitOpsStore.getInstance();
+    store.insertApplication(rawApp('app-health-supersede', { stack_name: 'health-supersede-web' }));
+    store.insertGeneration(gen('gen-running', 'app-health-supersede'));
+    store.insertGeneration(gen('gen-incoming', 'app-health-supersede'));
+    const failed = {
+      ...emptyTargetRow('app-health-supersede', 1, 1),
+      desired_generation_id: 'gen-running',
+      applied_generation_id: 'gen-running',
+      deployed_generation_id: 'gen-running',
+      last_health_status: 'failed',
+      last_health_generation_id: 'gen-running',
+      last_health_run_id: 'run-supersede',
+    } as const;
+    const project = () => {
+      const projection = projectApplication('app-health-supersede', false);
+      if (projection.targetMode === 'not_applicable') throw new Error('expected application');
+      return projection.targets[0]!;
+    };
+
+    // Settled: the failure is recorded, and nothing is in flight, so it stands
+    // on its own.
+    store.upsertTarget(failed);
+    expect(project().health.status).toBe('failed');
+    expect(project().healthFailureSuperseded).toBe(false);
+
+    // A retry of that same generation is the verdict this failure is waiting
+    // for, so it is about to be replaced rather than outstanding.
+    store.upsertTarget({
+      ...failed,
+      active_operation_stage: 'deploy_started',
+      active_generation_id: 'gen-running',
+    });
+    expect(project().runtime.status).toBe('deploying');
+    expect(project().health.status).toBe('failed');
+    expect(project().healthFailureSuperseded).toBe(true);
+
+    // A deploy of a different generation is not this failure's successor. The
+    // generation match is what stops a broader rule from hiding a known-bad
+    // workload behind unrelated work.
+    store.upsertTarget({
+      ...failed,
+      applied_generation_id: 'gen-incoming',
+      active_operation_stage: 'deploy_started',
+      active_generation_id: 'gen-incoming',
+    });
+    expect(project().healthFailureSuperseded).toBe(false);
+
+    // The identity compared is the one the failure was recorded against, not the
+    // running pointer. Here a verdict about a newer generation is waiting to be
+    // deployed while the running one is being redeployed, so the operation is not
+    // about the failure and the failure keeps standing. A rule keyed on the
+    // running pointer would call this superseded, and the case is the only one
+    // that tells the two rules apart, because everywhere else the desired
+    // generation, the running one and the failed one are the same id.
+    store.upsertTarget({
+      ...failed,
+      desired_generation_id: 'gen-incoming',
+      last_health_generation_id: 'gen-incoming',
+      active_operation_stage: 'deploy_started',
+      active_generation_id: 'gen-running',
+    });
+    expect(project().health.status).toBe('failed');
+    expect(project().healthFailureSuperseded).toBe(false);
+
+    // A recovery capture writes the live operation columns too, but it restores
+    // a generation rather than redeploying what runs, and the runtime facet
+    // claims it from the recovery phase before the live-operation table is read.
+    store.upsertTarget({
+      ...failed,
+      recovery_phase: 'restoring',
+      recovery_generation_id: 'gen-running',
+      active_operation_stage: 'recovery_started',
+      active_generation_id: 'gen-running',
+    });
+    expect(project().runtime.status).toBe('recovery_required');
+    expect(project().healthFailureSuperseded).toBe(false);
+  });
+
+  it('leaves a redeployed Blueprint target reporting its recorded health failure', () => {
+    const store = GitOpsStore.getInstance();
+    // The blueprint CHECK requires a blueprint id, a null stack name, and a
+    // configured repo URL, which the shared app fixture already carries.
+    store.insertApplication(rawApp('app-health-supersede-bp', {
+      target_mode: 'blueprint',
+      blueprint_id: 411,
+      lifecycle_key: 'blueprint:411:app-health-supersede-bp',
+      stack_name: null,
+    }));
+    store.insertGeneration(gen('gen-bp', 'app-health-supersede-bp'));
+
+    // A Blueprint deploy records the intent and candidate it is for, never the
+    // generation: there is no writer of `active_generation_id` on that path. With
+    // nothing to compare, the rule cannot claim the failure is being superseded,
+    // so a redeployed Blueprint target keeps reading failed. Stated here so the
+    // gap is a pinned limitation rather than a silent hole.
+    store.upsertTarget({
+      ...emptyTargetRow('app-health-supersede-bp', 1, 1),
+      intent_revision_id: 'ir-bp',
+      applied_generation_id: 'gen-bp',
+      desired_generation_id: 'gen-bp',
+      last_health_status: 'failed',
+      last_health_generation_id: 'gen-bp',
+      last_health_run_id: 'run-bp',
+      active_operation_stage: 'blueprint_deploy_started',
+      active_intent_revision_id: 'ir-bp',
+    });
+    const projection = projectApplication('app-health-supersede-bp', false);
+    if (projection.targetMode === 'not_applicable') throw new Error('expected application');
+
+    expect(projection.targets[0]?.runtime.status).toBe('deploying');
+    expect(projection.targets[0]?.health.status).toBe('failed');
+    expect(projection.targets[0]?.healthFailureSuperseded).toBe(false);
+  });
+
   it('says why it cannot compare placement when the required targets are unreadable', () => {
     const store = GitOpsStore.getInstance();
     store.insertApplication(gitManagedApp('app-place-corrupt', 75, {

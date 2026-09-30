@@ -87,6 +87,7 @@ function target(overrides: Partial<GitOpsTargetProjection>): GitOpsTargetProject
     tombstoned: false,
     runtime: { status: 'synced_and_healthy' },
     health: { status: 'passed', runId: 'run-1', deployedGenerationId: 'gen-1' },
+    healthFailureSuperseded: false,
     lkg: { status: 'none' },
     artifact: { status: 'not_applicable' },
     observedArtifactIdentity: { kind: 'unknown' },
@@ -395,6 +396,20 @@ describe('attentionReasons', () => {
       targets: [target({ runtime: runtimeAt('synced_and_healthy'), health: healthAt('failed') })],
     });
     expect(attentionReasons(projection)).toContain('health_failed');
+  });
+
+  it('does not flag a failure a live operation on its own generation is about to replace', () => {
+    const projection = liveProjection({
+      targets: [target({
+        runtime: runtimeAt('deploying'),
+        health: healthAt('failed'),
+        healthFailureSuperseded: true,
+      })],
+    });
+    // No reason at all, rather than a quieter one: any reason here would read as
+    // `attention` and lose the work-in-progress reading the runtime facet has
+    // already proved.
+    expect(attentionReasons(projection)).toEqual([]);
   });
 
   it('does not flag a target that is merely behind', () => {
