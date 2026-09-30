@@ -521,21 +521,24 @@ export async function resolveAndRecordArtifactSet(args: {
 }
 
 /**
- * Whether both sides describe the same set of services.
+ * Whether both sides describe the same set of services, by name and by kind.
  *
  * `observationMatchesExpected` only walks the expected services and weighs the
- * registry ones, so it cannot tell an extra service from an unchanged set. The
- * probe resolves the live stack rather than the staged candidate, so a stack
- * edited out of band can carry a different set than the one that was frozen, and
- * that is a moved identity rather than a matching one.
+ * registry ones, so it cannot tell an extra service, a rename, or a service that
+ * swapped a local build for a published image from an unchanged set. The probe
+ * resolves the live stack rather than the staged candidate, so a stack edited out
+ * of band can carry a different set than the one that was frozen, and that is a
+ * moved identity rather than a matching one.
  */
 function sameServiceSet(
   expected: readonly ServiceArtifactEvidence[],
   observed: readonly ServiceArtifactEvidence[],
 ): boolean {
-  if (expected.length !== observed.length) return false;
-  const expectedNames = new Set(expected.map((service) => service.serviceName));
-  return observed.every((service) => expectedNames.has(service.serviceName));
+  const identityOf = (service: ServiceArtifactEvidence): string =>
+    `${service.serviceName}:${service.source}`;
+  const expectedIdentities = new Set(expected.map(identityOf));
+  if (expectedIdentities.size !== expected.length) return false;
+  return observed.every((service) => expectedIdentities.has(identityOf(service)));
 }
 
 export async function probeStaleArtifactEvidence(args: {
@@ -578,8 +581,9 @@ export async function probeStaleArtifactEvidence(args: {
     // Membership is the test the Blueprint drift path applies: this platform's
     // child is one of the expected set's own variants, so nothing moved. It
     // answers only the digest question, so it is asked when both sides hold the
-    // same services; a set that grew or shrank, or an expected set that recorded
-    // no per-service evidence, keeps the fingerprint verdict.
+    // same services; a set that grew, shrank, or changed what a service is, and
+    // an expected set that recorded no per-service evidence, all keep the
+    // fingerprint verdict.
     if (expectedServices?.length
       && evidence.services?.length
       && sameServiceSet(expectedServices, evidence.services)

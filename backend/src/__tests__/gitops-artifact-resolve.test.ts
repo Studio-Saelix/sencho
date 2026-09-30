@@ -454,8 +454,9 @@ describe('gitops artifact resolve', () => {
     });
     const expectedId = GitOpsStore.getInstance().getApplication('app-move')!.artifact_set_id!;
 
-    // The arm64 child of the tag is now something the expected set never named,
-    // and the index moved with it, as a registry repush would.
+    // The arm64 child is now something the expected set never named. Membership
+    // explains a differing fingerprint only when the child it approves is the
+    // one being observed, so this must still be recorded as moved.
     const movedIndex = `sha256:${'e'.repeat(64)}`;
     mockDockerInfo.mockResolvedValue({ OSType: 'linux', Architecture: 'arm64' });
     mockResolveRegistryImageDigestForPlatform.mockResolvedValue(
@@ -479,47 +480,35 @@ describe('gitops artifact resolve', () => {
     expect(decodeArtifactEvidenceJson(latest.evidence_json).services?.[0]?.platformDigest)
       .toBe(ARM64_MOVED_DIGEST);
     expect(expectedRow.qualification).toBe('qualified');
-  });
 
-  it('records stale when the same platform child moved on the same platform', async () => {
-    seedDirectApp({ applicationId: 'app-same', generationId: 'gen-same', stackName: 'same-web', artifactSetId: 'art-same-seed' });
-    mockBuildEffectiveServiceModel.mockResolvedValue(singleServiceModel());
-
-    const movedIndex = `sha256:${'f'.repeat(64)}`;
-    mockResolveRegistryImageDigestForPlatform.mockResolvedValue(
-      multiArchIndex('linux/amd64', AMD64_DIGEST),
-    );
-    await resolveAndRecordArtifactSet({
-      stackName: 'same-web',
-      nodeId: 1,
-      applicationId: 'app-same',
-      generationId: 'gen-same',
-      buildContexts: [],
-      envelope: envelope('op-resolve-same'),
-    });
-    const expectedId = GitOpsStore.getInstance().getApplication('app-same')!.artifact_set_id!;
-
-    // Same node, same platform, different child. Membership must not excuse it.
+    // The same node, same platform, different child. Membership must not become
+    // an excuse for a move on the platform the target actually runs.
+    const amdMovedIndex = `sha256:${'f'.repeat(64)}`;
+    mockDockerInfo.mockResolvedValue({ OSType: 'linux', Architecture: 'amd64' });
     mockResolveRegistryImageDigestForPlatform.mockResolvedValue({
       ok: true,
-      indexDigest: movedIndex,
+      indexDigest: amdMovedIndex,
       platformDigest: AMD64_MOVED_DIGEST,
       platformLabel: 'linux/amd64',
       qualification: 'qualified',
       platformVariants: [{ platform: 'linux/amd64', digest: AMD64_MOVED_DIGEST }],
     });
     await probeStaleArtifactEvidence({
-      stackName: 'same-web',
+      stackName: 'move-web',
       nodeId: 1,
-      applicationId: 'app-same',
-      generationId: 'gen-same',
+      applicationId: 'app-move',
+      generationId: 'gen-move',
       buildContexts: [],
-      envelope: envelope('op-probe-same'),
+      envelope: envelope('op-probe-move-same-platform'),
     });
 
-    const app = GitOpsStore.getInstance().getApplication('app-same')!;
-    expect(app.latest_artifact_set_id).not.toBe(expectedId);
-    expect(GitOpsStore.getInstance().getArtifactSet(app.latest_artifact_set_id!)?.qualification).toBe('stale');
+    const afterSamePlatform = GitOpsStore.getInstance().getApplication('app-move')!;
+    const samePlatformRow = GitOpsStore
+      .getInstance()
+      .getArtifactSet(afterSamePlatform.latest_artifact_set_id!)!;
+    expect(samePlatformRow.qualification).toBe('stale');
+    expect(decodeArtifactEvidenceJson(samePlatformRow.evidence_json).services?.[0]?.platformDigest)
+      .toBe(AMD64_MOVED_DIGEST);
   });
 
   it('records stale when the live stack gained a service the expected set never froze', async () => {
@@ -648,6 +637,72 @@ describe('gitops artifact resolve', () => {
     });
     const app = GitOpsStore.getInstance().getApplication('app-build')!;
     expect(app.latest_artifact_set_id).not.toBe('art-build-v1');
+    expect(GitOpsStore.getInstance().getArtifactSet(app.latest_artifact_set_id!)?.qualification).toBe('stale');
+  });
+
+  it('records stale when a built service became a published image', async () => {
+    seedDirectApp({
+      applicationId: 'app-flip',
+      generationId: 'gen-flip',
+      stackName: 'flip-web',
+      artifactSetId: 'art-flip-v1',
+      evidence: {
+        kind: 'local_build_unverified',
+        identity: computeArtifactSetFingerprint([{
+          serviceName: 'worker',
+          authoredRef: null,
+          source: 'build',
+          platform: 'linux/amd64',
+          indexDigest: null,
+          platformDigest: null,
+          buildContextFingerprint: null,
+          producedImageId: null,
+          failureClass: null,
+          resolvedAt: 1,
+        }]),
+        services: [{
+          serviceName: 'worker',
+          authoredRef: null,
+          source: 'build',
+          platform: 'linux/amd64',
+          indexDigest: null,
+          platformDigest: null,
+          buildContextFingerprint: null,
+          producedImageId: null,
+          failureClass: null,
+          resolvedAt: 1,
+        }],
+      },
+    });
+    // Same name, now a published image. The name set is unchanged and the
+    // matcher has no registry service to weigh, so nothing but the kind of the
+    // service can tell these apart.
+    mockBuildEffectiveServiceModel.mockResolvedValue({
+      renderable: true,
+      services: [
+        { name: 'worker', declaredImage: 'ghcr.io/org/worker:1', hasBuild: false, expectedReplicas: 1, dependsOn: [], hasHealthcheck: false },
+      ],
+    });
+    mockResolveRegistryImageDigestForPlatform.mockResolvedValue({
+      ok: true,
+      indexDigest: INDEX_DIGEST,
+      platformDigest: AMD64_DIGEST,
+      platformLabel: 'linux/amd64',
+      qualification: 'qualified',
+      platformVariants: [{ platform: 'linux/amd64', digest: AMD64_DIGEST }],
+    });
+
+    await probeStaleArtifactEvidence({
+      stackName: 'flip-web',
+      nodeId: 1,
+      applicationId: 'app-flip',
+      generationId: 'gen-flip',
+      buildContexts: [],
+      envelope: envelope('op-probe-flip'),
+    });
+
+    const app = GitOpsStore.getInstance().getApplication('app-flip')!;
+    expect(app.latest_artifact_set_id).not.toBe('art-flip-v1');
     expect(GitOpsStore.getInstance().getArtifactSet(app.latest_artifact_set_id!)?.qualification).toBe('stale');
   });
 
