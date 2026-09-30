@@ -710,6 +710,10 @@ describe('POST /api/gitops/applications/:id/rollout/authorize', () => {
     const approval = store.getApproval(row.rollout_authorization_ref!)!;
     expect(approval.kind).toBe('rollout_authorization');
     expect(approval.authority).toBe('operator');
+    // An operator authorization names no policy, because none decided it. The
+    // route is the other half of the pair: the automatic mint records the
+    // configured snapshot, and this one must not claim one.
+    expect(approval.policy_provenance_json).toBeNull();
     expect(store.getRolloutGeneration(row.rollout_generation_id!)?.provenance).toBe('rollout_authorization');
   });
 

@@ -26,6 +26,7 @@ import {
 } from './registryReadiness';
 import { stackManagedRoot } from './directApplication';
 import { decodeGitOpsRequiredTargetsJson } from './json';
+import { configuredSnapshotFor, encodePolicySnapshot } from './policyComposition';
 import { recoveryBindingForTarget } from './recoveryCapture';
 import {
   DEFAULT_HEALTH_ROLLOUT_POLICY,
@@ -427,6 +428,14 @@ export async function ensureRolloutAuthorization(
     // this rollout can be captured. A policy the operator changes afterwards
     // applies at the next authorization, never to a rollout already running.
     const strategyJson = frozenStrategyFor(store, app, ingredients.intentRevisionId);
+    // The policy this mint is recorded under, read here rather than from the row
+    // this function opened with: the write transaction compares it against the
+    // policy configured at write time, and the preflight await above is long
+    // enough for a policy edit to land in between. An operator mint records no
+    // snapshot, because no policy decided it.
+    const policyProvenanceJson = authority === 'configured_policy'
+      ? encodePolicySnapshot(configuredSnapshotFor(store.getApplication(applicationId) ?? app))
+      : null;
     try {
       transitions.rolloutAuthorized({
         applicationId: app.id,
@@ -438,6 +447,7 @@ export async function ensureRolloutAuthorization(
         actor,
         envelope: envelopeFor(actor, trigger),
         authority,
+        policyProvenanceJson,
       });
     } catch (err) {
       const message = errorMessage(err);
@@ -452,6 +462,12 @@ export async function ensureRolloutAuthorization(
             applicationId: app.id,
             envelope: envelopeFor(actor, `${trigger}:preflight_race`),
           });
+          // The row read after the failed attempt, for the same reason as the
+          // read above: it is the newest one available, and the retry writes
+          // under whatever the operator has configured by now.
+          const racedPolicyProvenanceJson = authority === 'configured_policy'
+            ? encodePolicySnapshot(configuredSnapshotFor(raced ?? app))
+            : null;
           try {
             transitions.rolloutAuthorized({
               applicationId: app.id,
@@ -463,6 +479,7 @@ export async function ensureRolloutAuthorization(
               actor,
               envelope: envelopeFor(actor, `${trigger}:preflight_race`),
               authority,
+              policyProvenanceJson: racedPolicyProvenanceJson,
             });
           } catch (retryErr) {
             return { ok: false, reason: `Rollout authorization failed: ${errorMessage(retryErr)}` };

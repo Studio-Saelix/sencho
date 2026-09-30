@@ -14,6 +14,11 @@ import {
   fingerprintPreflightEvidence,
   REGISTRY_PREFLIGHT_UNEVALUATED_REASON,
 } from '../services/gitops/preflight';
+import {
+  configuredSnapshotFor,
+  decodeApprovalPolicySnapshot,
+  encodePolicySnapshot,
+} from '../services/gitops/policyComposition';
 import { directApplicationFixture } from './helpers/gitopsFixtures';
 import type {
   GitOpsApplicationRow,
@@ -120,6 +125,8 @@ describe('rollout authorization transition', () => {
       preflightEvidenceJson: encodePreflightEvidenceJson(preflight),
       actor: 'tester',
       envelope: { operationId: 'op-auth-1', actor: 'tester', trigger: 'manual', at: 100 },
+      authority: 'operator',
+      policyProvenanceJson: null,
     });
     const store = GitOpsStore.getInstance();
     const app = store.getApplication(fixture.applicationId)!;
@@ -724,6 +731,142 @@ describe('derive facets for authorization and convergence', () => {
   });
 });
 
+describe('a rollout authorization records the policy that decided it', () => {
+  it('records the configured snapshot on a policy-authorized mint', async () => {
+    // The record this exists for. The projection can still answer "what
+    // authorized this" from the generation, but only while that generation is
+    // reachable: once it is superseded or its row is unreadable, the approval is
+    // the only record left, and an approval that cannot name the policy it acted
+    // under is an authority record with the authority missing from it.
+    const fixture = seedAuthorizedReadyApp();
+    const result = await ensureRolloutAuthorization(fixture.applicationId, 'tester');
+    expect(result.ok).toBe(true);
+
+    const store = GitOpsStore.getInstance();
+    const app = store.getApplication(fixture.applicationId)!;
+    const approval = store.getApproval(app.rollout_authorization_ref!)!;
+    expect(approval.kind).toBe('rollout_authorization');
+    expect(approval.authority).toBe('configured_policy');
+    // Decoded rather than compared as text: the assertion is about what the row
+    // says, not about the encoder's key order.
+    expect(decodeApprovalPolicySnapshot(approval.policy_provenance_json)).toEqual({
+      version: 1,
+      source: 'manual',
+      placement: 'operator',
+      rolloutAuthorization: 'automatic',
+    });
+    // The approval record and the frozen generation are two records of one
+    // decision, so they hold the same snapshot. Asserting it here is what makes
+    // the agreement check inside the writer mean something.
+    const generation = store.getRolloutGeneration(app.rollout_generation_id!)!;
+    expect(generation.policy_snapshot_json).toBe(approval.policy_provenance_json);
+  });
+
+  it('records no snapshot on an operator mint', async () => {
+    // An operator is themselves the authority, so reconstructing a policy here
+    // would claim a policy decided something it did not.
+    const fixture = seedAuthorizedReadyApp();
+    const result = await ensureRolloutAuthorization(
+      fixture.applicationId, 'tester', 'manual', undefined, 'operator',
+    );
+    expect(result.ok).toBe(true);
+
+    const store = GitOpsStore.getInstance();
+    const app = store.getApplication(fixture.applicationId)!;
+    const approval = store.getApproval(app.rollout_authorization_ref!)!;
+    expect(approval.authority).toBe('operator');
+    expect(approval.policy_provenance_json).toBeNull();
+    // The generation still freezes what the work executes, which is a different
+    // fact from who authorized it.
+    expect(store.getRolloutGeneration(app.rollout_generation_id!)!.policy_snapshot_json).toBeTruthy();
+  });
+
+  it('refuses a policy-authorized mint that records no snapshot', () => {
+    // The caller contract, enforced in the single writer because every mint
+    // path goes through it and none of them can be trusted to remember.
+    const fixture = seedAuthorizedReadyApp();
+    const preflight = nonBlockingPreflightForApp(fixture.applicationId);
+    expect(() =>
+      GitOpsTransitions.getInstance().rolloutAuthorized({
+        applicationId: fixture.applicationId,
+        approvalId: 'auth-no-snapshot',
+        rolloutGenerationId: 'rgen-no-snapshot',
+        preflightFingerprint: fingerprintPreflightEvidence(preflight),
+        preflightEvidenceJson: encodePreflightEvidenceJson(preflight),
+        actor: null,
+        envelope: { operationId: 'op-no-snapshot', actor: null, trigger: 'blueprint_dispatch', at: 1 },
+        authority: 'configured_policy',
+        policyProvenanceJson: null,
+      }),
+    ).toThrow(/must record its policy snapshot/);
+    expect(GitOpsStore.getInstance().getApproval('auth-no-snapshot')).toBeUndefined();
+  });
+
+  it('refuses an operator mint that claims a policy decided it', () => {
+    const fixture = seedAuthorizedReadyApp();
+    const preflight = nonBlockingPreflightForApp(fixture.applicationId);
+    expect(() =>
+      GitOpsTransitions.getInstance().rolloutAuthorized({
+        applicationId: fixture.applicationId,
+        approvalId: 'auth-claimed',
+        rolloutGenerationId: 'rgen-claimed',
+        preflightFingerprint: fingerprintPreflightEvidence(preflight),
+        preflightEvidenceJson: encodePreflightEvidenceJson(preflight),
+        actor: 'tester',
+        envelope: { operationId: 'op-claimed', actor: 'tester', trigger: 'manual', at: 1 },
+        authority: 'operator',
+        policyProvenanceJson: configuredSnapshotJsonFor(fixture.applicationId),
+      }),
+    ).toThrow(/records no policy snapshot/);
+    expect(GitOpsStore.getInstance().getApproval('auth-claimed')).toBeUndefined();
+  });
+
+  it('refuses a policy-authorized mint whose snapshot is no longer configured', () => {
+    // The agreement check, and the reason the mint path reads the application
+    // row immediately before the write rather than reusing the row it read
+    // before the preflight await. On placement the same race is refused, so an
+    // approval cannot be granted under a policy the operator has already
+    // changed; here it was accepted silently and the generation froze whatever
+    // was configured at write time.
+    //
+    // The edit is to the source policy, not this one, on purpose: the snapshot
+    // is the unit of provenance, so a decision taken under a configuration that
+    // is no longer the configured one is refused whichever domain moved. A
+    // comparison scoped to the rollout domain would mint this and record two
+    // versions of one decision that disagree about the source.
+    const fixture = seedAuthorizedReadyApp();
+    const preflight = nonBlockingPreflightForApp(fixture.applicationId);
+    // The snapshot as configured when the decision was made.
+    const stale = configuredSnapshotJsonFor(fixture.applicationId);
+    GitOpsTransitions.getInstance().sourcePolicyChanged(
+      fixture.applicationId,
+      'automatic',
+      { operationId: 'op-stale-source', actor: 'tester', trigger: 'test', at: Date.now() },
+    );
+
+    const mint = (approvalId: string, policyProvenanceJson: string, at: number) => () =>
+      GitOpsTransitions.getInstance().rolloutAuthorized({
+        applicationId: fixture.applicationId,
+        approvalId,
+        rolloutGenerationId: `rgen-${approvalId}`,
+        preflightFingerprint: fingerprintPreflightEvidence(preflight),
+        preflightEvidenceJson: encodePreflightEvidenceJson(preflight),
+        actor: null,
+        envelope: { operationId: `op-${approvalId}`, actor: null, trigger: 'blueprint_dispatch', at },
+        authority: 'configured_policy',
+        policyProvenanceJson,
+      });
+
+    expect(mint('auth-stale', stale, 2)).toThrow(/policy changed while the decision was being applied/);
+    expect(GitOpsStore.getInstance().getApproval('auth-stale')).toBeUndefined();
+
+    // The refusal is the comparison and nothing else: the same mint under the
+    // policy configured now is allowed, so a refused mint strands nothing. The
+    // dispatch that hit the race simply did not happen this pass.
+    expect(mint('auth-fresh', configuredSnapshotJsonFor(fixture.applicationId), 3)).not.toThrow();
+  });
+});
+
 describe('ensureRolloutAuthorization', () => {
   it('auto-mints when ingredients are ready and preflight is not blocked', async () => {
     const fixture = seedAuthorizedReadyApp();
@@ -785,6 +928,9 @@ describe('ensureRolloutAuthorization', () => {
         actor: null,
         envelope: { operationId: 'op-mint-gate', actor: null, trigger: 'placement', at: 1 },
         authority: 'configured_policy',
+        // The snapshot genuinely agrees with the row, so the refusal is the
+        // domain rule rather than the snapshot race.
+        policyProvenanceJson: configuredSnapshotJsonFor(fixture.applicationId),
       }),
     ).toThrow(/requires an operator/);
 
@@ -799,6 +945,7 @@ describe('ensureRolloutAuthorization', () => {
         actor: 'tester',
         envelope: { operationId: 'op-mint-operator', actor: 'tester', trigger: 'manual', at: 1 },
         authority: 'operator',
+        policyProvenanceJson: null,
       }),
     ).not.toThrow();
     void app;
@@ -822,6 +969,7 @@ describe('ensureRolloutAuthorization', () => {
         actor: null,
         envelope: { operationId: 'op-mint-busy', actor: null, trigger: 'preflight_race', at: 1 },
         authority: 'configured_policy',
+        policyProvenanceJson: configuredSnapshotJsonFor(fixture.applicationId),
       }),
     ).toThrow(/already in flight/);
   });
@@ -1019,6 +1167,18 @@ function nonBlockingPreflightForApp(applicationId: string) {
   });
 }
 
+/**
+ * The configured snapshot, encoded the way a policy mint records it.
+ *
+ * Read from the row rather than hand-built, so a case that is about some other
+ * guard cannot accidentally trip the agreement check instead of reaching the
+ * guard it means to exercise.
+ */
+function configuredSnapshotJsonFor(applicationId: string): string {
+  const app = GitOpsStore.getInstance().getApplication(applicationId)!;
+  return encodePolicySnapshot(configuredSnapshotFor(app));
+}
+
 function recordNonBlockingPreflight(applicationId: string): void {
   const preflight = nonBlockingPreflightForApp(applicationId);
   GitOpsTransitions.getInstance().recordPreflightEvaluation({
@@ -1040,6 +1200,12 @@ function authorize(applicationId: string): void {
     rolloutGenerationId: randomUUID(),
     preflightFingerprint: fingerprintPreflightEvidence(preflight),
     preflightEvidenceJson: evidenceJson,
+    // An operator mint, because that is what this helper stands for: a person
+    // asking to authorize. The fixture's policy is automatic, so the operator
+    // path is the one these read-model cases exercise, and it records no policy
+    // snapshot because no policy decided it.
+    authority: 'operator',
+    policyProvenanceJson: null,
     actor: 'tester',
     envelope: { operationId: randomUUID(), actor: 'tester', trigger: 'manual', at: Date.now() },
   });

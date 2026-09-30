@@ -2445,9 +2445,18 @@ export class GitOpsTransitions {
    * to authorize (config deploy may proceed under a qualified claim); exact
    * convergence is derived later only when qualification is exact.
    *
-   * Authority defaults to `configured_policy` (the automatic handoff minting
-   * on the configured policy's behalf). An explicit operator authorization
-   * passes `operator`, so the approval row records who actually decided.
+   * `authority` is required rather than defaulted, for the reason it is
+   * required on `placementApproved`: the only two values are an operator and a
+   * configured policy, and a default here would mislabel an operator's approval
+   * as a policy's. `policyProvenanceJson` is checked against it as a pair rather
+   * than trusted individually, because a decision with no record of the policy
+   * that made it is not reviewable, and an approval that claims a policy must
+   * be able to name it.
+   *
+   * The approval carries the snapshot the decision was made under, so the
+   * approval is self-sufficient: the generation it opens freezes the same
+   * snapshot, and once that generation is superseded or unreadable the approval
+   * row is the only record left of which policy authorized the rollout.
    */
   rolloutAuthorized(args: {
     applicationId: string;
@@ -2458,7 +2467,8 @@ export class GitOpsTransitions {
     actor: string | null;
     envelope: EventEnvelope;
     strategyJson?: string;
-    authority?: 'operator' | 'configured_policy';
+    authority: 'operator' | 'configured_policy';
+    policyProvenanceJson: string | null;
   }): TransitionResult {
     return this.mutateApp(
       args.applicationId,
@@ -2469,6 +2479,34 @@ export class GitOpsTransitions {
         if (app.lifecycle_status !== 'active') throw new GitOpsTransitionError('application is not live');
         if (app.target_mode !== 'blueprint') {
           throw new GitOpsTransitionError('rollout authorization is only for Blueprint target mode');
+        }
+        if (args.authority === 'configured_policy' && args.policyProvenanceJson === null) {
+          throw new GitOpsTransitionError('a policy-authorized rollout must record its policy snapshot');
+        }
+        if (args.authority === 'operator' && args.policyProvenanceJson !== null) {
+          throw new GitOpsTransitionError('an operator rollout authorization records no policy snapshot');
+        }
+        if (args.authority === 'configured_policy' && args.policyProvenanceJson !== null) {
+          // The snapshot that authorized the decision was read by the caller,
+          // before this transaction. The generation below freezes the policy
+          // configured right now. A policy edit landing in between would make
+          // those two records disagree about one decision, and would mean the
+          // authorization was granted under a policy the operator had already
+          // changed. Comparing them here is what makes the two records agree by
+          // construction rather than by luck, and it is the same check
+          // `placementApproved` makes for its own decision.
+          //
+          // The comparison is over the whole snapshot, not just this domain,
+          // because the snapshot is the unit of provenance: the approval record
+          // and the frozen generation are two records of one decision, so
+          // letting them disagree about any domain is what this exists to
+          // prevent. A refused mint is not a stranded rollout: the caller
+          // returns the refusal and the next dispatch mints under the policy
+          // configured then.
+          const authorizing = decodePolicySnapshot(args.policyProvenanceJson);
+          if (!policyValuesEqual(authorizing, configuredSnapshotFor(app))) {
+            throw new GitOpsTransitionError('the configured policy changed while the decision was being applied');
+          }
         }
         // The mint-time gates, enforced here rather than at the caller.
         //
@@ -2481,7 +2519,7 @@ export class GitOpsTransitions {
         // exist skipped the drift remint, so a tag move could discard an
         // operator's authorization and replace it with a fresh policy-authorized
         // one, with no operator and no policy that permitted it.
-        if ((args.authority ?? 'configured_policy') === 'configured_policy') {
+        if (args.authority === 'configured_policy') {
           if (app.rollout_authorization_policy !== 'automatic') {
             throw new GitOpsTransitionError(
               'the rollout authorization policy requires an operator to authorize',
@@ -2523,7 +2561,7 @@ export class GitOpsTransitions {
         this.store().insertApproval({
           id: args.approvalId,
           kind: 'rollout_authorization',
-          authority: args.authority ?? 'configured_policy',
+          authority: args.authority,
           authoritative: 1,
           application_id: args.applicationId,
           generation_id: ingredients.acceptedGenerationId,
@@ -2537,7 +2575,9 @@ export class GitOpsTransitions {
           preflight_fingerprint: args.preflightFingerprint,
           fingerprint: null,
           blast_json: null,
-          policy_provenance_json: null,
+          // The policy this decision was made under, for a policy-authorized
+          // mint. An operator mint records none, because no policy decided it.
+          policy_provenance_json: args.policyProvenanceJson,
           actor: args.actor,
           created_at: args.envelope.at,
         });
@@ -2570,6 +2610,8 @@ export class GitOpsTransitions {
           // The snapshot this generation executes. Read from the live
           // application row rather than from the binding, so what is frozen is
           // what the operator has configured, not a value a caller supplied.
+          // The check above is what makes this the same snapshot the approval
+          // records, rather than one that merely happened to match.
           policy_snapshot_json: encodePolicySnapshot(configuredSnapshotFor(app)),
           provenance: 'rollout_authorization',
           supersedes_generation_id: previousGenerationId,
