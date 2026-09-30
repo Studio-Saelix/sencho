@@ -22,6 +22,7 @@ import { DatabaseService } from '../services/DatabaseService';
 import { GitOpsStore } from '../services/gitops/store';
 import { GitOpsTransitions } from '../services/gitops/transitions';
 import { applyAutomaticPlacement } from '../services/gitops/automaticPlacement';
+import { projectApplication } from '../services/gitops/derive';
 import { stackManagedRoot } from '../services/gitops/directApplication';
 import { emptyTargetRow } from '../services/gitops/store';
 import { decodeApprovalPolicySnapshot } from '../services/gitops/policyComposition';
@@ -795,5 +796,97 @@ describe('a bounded_auto application reaches an approval', () => {
     // No generation means no content-derived evidence, and missing evidence is
     // never read as the stateless answer that approves.
     expect(outcome).toEqual({ status: 'operator_review', reason: 'unknown_workload' });
+  });
+});
+
+describe('a refusal recorded for an operation that has since finished', () => {
+  it('keeps the recorded reason and the time it was recorded, on the real projection', () => {
+    // The finding this pins. A reason is written once, when the policy runs, and
+    // is cleared only when an operator approves, edits the policy, or a later
+    // change re-decides. A decision runs only when a placement change is pending,
+    // so a refusal recorded because an operation was in flight outlives that
+    // operation and nothing corrects it on its own. The projection therefore
+    // reports a conflict that had already ended, and the operator arriving after
+    // a deploy is told the system is withholding a placement over a conflict
+    // that is over.
+    //
+    // The record is kept, and the projection carries the moment it was made, so
+    // the reason reads as what the policy found then rather than as a claim about
+    // now. Re-deciding here instead would need a trigger that does not exist, and
+    // would make an automatic approval land at a moment the operator is not
+    // watching, which is a larger claim than the evidence supports.
+    const nodeId = addNode(`n-${randomUUID().slice(0, 6)}`);
+    const app = seed({ nodeIds: [nodeId] });
+    const store = GitOpsStore.getInstance();
+
+    // An operation genuinely in flight, through the transition that starts one.
+    GitOpsTransitions.getInstance().fetchStarted(app.id, {
+      operationId: 'op-inflight-refusal', actor: 'tester', trigger: 'test', at: 3_000,
+    });
+    const outcome = applyAutomaticPlacement(app.id, {
+      operationId: 'op-decide', actor: null, trigger: 'test', at: 4_000,
+    });
+    expect(outcome).toEqual({ status: 'operator_review', reason: 'conflicting_operation' });
+    expect(store.getApplication(app.id)!.placement_policy_refused_at).toBe(4_000);
+
+    // The operation finishes, and nothing else changes: no new candidate, no
+    // policy edit, no approval. `fetched` is the terminal that releases the
+    // in-flight stage.
+    GitOpsTransitions.getInstance().fetched(
+      app.id,
+      'c'.repeat(40),
+      { operationId: 'op-inflight-refusal', actor: 'tester', trigger: 'test', at: 5_000 },
+    );
+    const settled = store.getApplication(app.id)!;
+    expect(settled.active_operation_stage).toBeNull();
+    expect(settled.placement_policy_refusal_reason).toBe('conflicting_operation');
+    expect(settled.placement_policy_refused_at).toBe(4_000);
+    // Nothing re-decided, so nothing approved either. The review is still the
+    // operator's to take, which is the direction a stale reason has to stay in.
+    expect(settled.placement_approval_ref).toBeNull();
+
+    // What the operator is shown. The decline is still reported, carrying the
+    // moment it was recorded rather than asserting it of the present.
+    const projection = projectApplication(app.id, false);
+    const entry = projection.authorityPolicies.find((p) => p.domain === 'placement');
+    expect(entry).toMatchObject({
+      decision: 'policy_declined',
+      reason: 'conflicting_operation',
+      decidedAt: 4_000,
+    });
+    // Not the current time, which is what would make it read as a live claim.
+    expect(entry!.decidedAt).not.toBe(5_000);
+  });
+
+  it('reports a settled application as awaiting an operator, with no reason', () => {
+    // The other arm of the same question. A reason left on an application whose
+    // review has closed would be read as the explanation for whatever comes next.
+    const nodeId = addNode(`n-${randomUUID().slice(0, 6)}`);
+    const app = seed({ nodeIds: [nodeId] });
+    const store = GitOpsStore.getInstance();
+    GitOpsTransitions.getInstance().placementPolicyRefused({
+      applicationId: app.id,
+      reason: 'cordon_override',
+      at: 6_000,
+    });
+    GitOpsTransitions.getInstance().placementApproved({
+      applicationId: app.id,
+      approvalId: `${app.id}-placement`,
+      intentRevisionId: store.getApplication(app.id)!.intent_revision_id!,
+      blastJson: encodeGitOpsApprovedTargetEffectJson([{ nodeId, outcome: 'place' as const }]),
+      requiredNodeIds: [nodeId],
+      fingerprint: null,
+      actor: 'tester',
+      envelope: { operationId: 'op-approve', actor: 'tester', trigger: 'test', at: 7_000 },
+      rolloutGenerationId: `${app.id}-gen`,
+      candidateId: store.getApplication(app.id)!.rollout_candidate_id!,
+      authority: 'operator',
+      policyProvenanceJson: null,
+    });
+
+    const entry = projectApplication(app.id, false).authorityPolicies
+      .find((p) => p.domain === 'placement');
+    expect(entry).toMatchObject({ decision: 'operator_authorized', reason: null });
+    expect(entry!.decidedAt).toBe(7_000);
   });
 });

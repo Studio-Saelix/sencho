@@ -7,7 +7,7 @@
  * mostly about the second, because a line that repeats the card's own state is
  * noise and a line that claims the current policy decided older work is a lie.
  */
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { render, screen } from '@testing-library/react';
 
 import { GitOpsFacetCards } from './GitOpsFacetCards';
@@ -90,6 +90,46 @@ describe('the policy line on a facet card', () => {
     // Reporting agreement on every application would be noise on the majority.
     renderCards([read({ effectiveFrozen: 'bounded_auto', decision: 'policy_authorized', decidedBy: 'configured_policy' })]);
     expect(screen.queryByTestId('gitops-policy-frozen')).toBeNull();
+  });
+
+  it('dates a recorded reason, so a refusal that has gone stale is not read as current', () => {
+    // A refusal is written once and cleared only when an operator acts or a later
+    // change re-decides, so a reason recorded because an operation was in flight
+    // outlives that operation. Printed undated it told an operator the placement
+    // was still being withheld over a conflict that had finished.
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date('2026-01-01T12:00:00Z'));
+      renderCards([
+        read({
+          decision: 'policy_declined',
+          reason: 'conflicting_operation',
+          decidedAt: new Date('2026-01-01T08:00:00Z').getTime(),
+        }),
+      ]);
+      expect(screen.getByTestId('gitops-policy-recorded')).toHaveTextContent('Recorded 4h ago.');
+      // The reason still names what the policy saw. Only its tense is corrected.
+      expect(screen.getByTestId('gitops-policy-line')).toHaveTextContent('already in flight');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('says no date when a reason arrives without one, rather than dating it wrongly', () => {
+    // A reason with no timestamp cannot be placed in time at all. Inventing "just
+    // now" would assert a moment nobody recorded, which is the claim this clause
+    // was added to stop making.
+    renderCards([read({ decision: 'policy_declined', reason: 'cordon_override', decidedAt: null })]);
+    expect(screen.getByTestId('gitops-policy-line')).toHaveTextContent('cordoned');
+    expect(screen.queryByTestId('gitops-policy-recorded')).toBeNull();
+  });
+
+  it('says no date for a decision that carries no reason', () => {
+    // An approval is dated by the approval itself, not by this card. A date here
+    // would claim the policy line knows when an approval was granted.
+    renderCards([read({ decision: 'operator_authorized', reason: null, decidedBy: 'operator', decidedAt: 7 })]);
+    expect(screen.getByTestId('gitops-policy-line')).toBeInTheDocument();
+    expect(screen.queryByTestId('gitops-policy-recorded')).toBeNull();
   });
 
   it('shows a reason it has no wording for, rather than hiding it', () => {

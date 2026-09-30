@@ -277,7 +277,9 @@ The source policy is set on the Git source, in its apply behavior. The placement
 
 Cordoning is a statement about where work may not go, not a decision to take work away, so a node you cordon is never withdrawn automatically. The withdrawal it would have caused falls back to you with that stated, and the workload keeps running where it is. Uncordon the node, or approve the move yourself.
 
-Each facet card carries its own policy line, saying who is configured to decide that stage and what the policy actually did. When a rollout is already in flight the card also says which value it was decided under, because every rollout freezes the policy it executes: changing a setting changes what the next decision may do and leaves work already approved exactly where it is.
+Each facet card carries its own policy line, saying who is configured to decide that stage and what the policy actually did. When the policy declined, the line also says when it recorded that reason. A reason is recorded the moment the policy runs, and Sencho re-decides only when something changes, so a reason recorded because an operation was in flight is still what is recorded after that operation finishes. Showing when it was recorded keeps it a fact about the moment the policy looked, rather than a claim about now.
+
+When a rollout is already in flight the card also says which value it was decided under, because every rollout freezes the policy it executes: changing a setting changes what the next decision may do and leaves work already approved exactly where it is.
 
 A disabled Blueprint withholds placement approval and rollout authorization until you enable it again, the same way **Apply now** waits for an Inline Blueprint to be enabled. Accepting source stays available while a Blueprint is disabled, because reviewing content changes nothing on the fleet.
 

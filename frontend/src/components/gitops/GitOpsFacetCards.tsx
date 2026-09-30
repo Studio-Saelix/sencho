@@ -1,4 +1,5 @@
 import GitOpsStateCard from '@/components/gitops/GitOpsStateCard';
+import { formatRelativeTime } from '@/lib/utils';
 import {
   ARTIFACT_STATE_LOOKUP,
   ROLLOUT_STATE_LOOKUP,
@@ -33,12 +34,27 @@ import type {
  * A card with no recorded decision and no reason renders nothing, so the line is
  * never a restatement of the card's own state. That is the common case and the
  * reason the row does not appear on every application.
+ *
+ * A recorded reason is dated. A refusal is written once, when the policy runs,
+ * and is cleared only when an operator approves the placement, edits the policy,
+ * or a later change re-decides. So a reason recorded because an operation was in
+ * flight is still the recorded reason after that operation finishes, and reading
+ * it in the present tense told an operator the system was withholding a
+ * placement over a conflict that was over. The timestamp the decision already
+ * carries says when that claim was true, which is what lets one line serve a
+ * reason that has since gone stale.
  */
 function PolicyLine({ read }: { read: AuthorityPolicyRead | null }) {
   if (!read) return null;
   const reason = read.reason ? placementReasonText(read.reason) : null;
   const decided = read.decision !== 'awaiting_operator' || reason;
   if (!reason && !decided) return null;
+  // The date needs both halves of the claim. A reason carries no timestamp of
+  // its own, so printing one beside a reason would place it in time by
+  // association rather than by record, and a missing timestamp therefore
+  // suppresses the date line rather than the reason. The reason still prints,
+  // because it is the fact and the date is only the correction of its tense.
+  const recordedAt = reason && read.decidedAt !== null ? read.decidedAt : null;
   return (
     <div data-testid="gitops-policy-line" className="mt-1.5 space-y-0.5">
       <div className="font-mono text-[10px] uppercase tracking-[0.18em] text-stat-subtitle">
@@ -51,6 +67,14 @@ function PolicyLine({ read }: { read: AuthorityPolicyRead | null }) {
         {policyDecisionLabel(read)}
         {reason ? ` ${reason}` : ''}
       </div>
+      {recordedAt !== null && (
+        <div
+          data-testid="gitops-policy-recorded"
+          className="font-mono text-[11px] leading-relaxed text-stat-subtitle"
+        >
+          Recorded {formatRelativeTime(Math.floor(recordedAt / 1000))}.
+        </div>
+      )}
       {read.effectiveFrozen && read.effectiveFrozen !== read.configured && (
         <div
           data-testid="gitops-policy-frozen"
