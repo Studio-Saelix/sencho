@@ -284,11 +284,13 @@ describe('BlueprintService remote deploy', () => {
         const nodeObj = DatabaseService.getInstance().getNode(node.id)!;
         const bpObj = DatabaseService.getInstance().getBlueprint(bp.id)!;
 
-        // hasNameConflict lists /api/stacks first, then reads the marker. A 404 marker on an
-        // existing stack means it is unmanaged, so the deploy must refuse.
+        // hasNameConflict lists /api/stacks first, then reads the marker. The leaf reporting the
+        // marker absent on an existing stack means it is unmanaged, so the deploy must refuse.
+        // The body carries the leaf's not-found code because that is what the leaf sends for an
+        // absent file, and a bare 404 is a node that could not be read rather than an empty one.
         vi.spyOn(axios, 'get')
             .mockResolvedValueOnce({ status: 200, data: [{ name: bpObj.name }] })
-            .mockResolvedValueOnce({ status: 404, data: {} });
+            .mockResolvedValueOnce({ status: 404, data: { error: 'File not found', code: 'NOT_FOUND' } });
         const postSpy = vi.spyOn(axios, 'post');
 
         const result = await BlueprintService.getInstance().deployToNode(bpObj, nodeObj);

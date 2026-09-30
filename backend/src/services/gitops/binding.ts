@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'crypto';
 import { DatabaseService, type Blueprint } from '../DatabaseService';
-import { BlueprintService } from '../BlueprintService';
+import { BlueprintService, type MarkerRead } from '../BlueprintService';
 import { buildBlueprintPreview, type BlueprintPreviewResult } from '../blueprintPreviewProjection';
 import { GitOpsStore } from './store';
 import { GitOpsTransitions, GitOpsTransitionError, type EventEnvelope } from './transitions';
@@ -317,11 +317,11 @@ export class GitOpsBindingService {
         out.push({ nodeId: change.nodeId, nodeName: change.nodeName, classification: 'unproven' });
         continue;
       }
-      const marker = await svc.readMarker(blueprint.name, node);
+      const markerRead = await svc.readMarker(blueprint.name, node);
       out.push({
         nodeId: node.id,
         nodeName: node.name,
-        classification: classifyMarker(marker, change.action, blueprint.id),
+        classification: classifyMarker(markerRead, change.action, blueprint.id),
       });
     }
     return out;
@@ -361,12 +361,17 @@ function parseComposePathList(raw: string | null | undefined): string[] | null {
 }
 
 function classifyMarker(
-  marker: { blueprintId: number } | null,
+  markerRead: MarkerRead,
   action: string,
   blueprintId: number,
 ): BindingMarkerClassification {
-  if (marker == null) return action === 'create' ? 'unmanaged' : 'unproven';
-  if (marker.blueprintId === blueprintId) return 'managed';
+  // A marker this node could not be asked about is unproven whatever the action.
+  // Reading it as absent would call a `create` target unmanaged on the strength
+  // of a transport failure, which tells the operator the directory is clear to
+  // write to when nobody has established that.
+  if (markerRead.kind === 'failed') return 'unproven';
+  if (markerRead.kind === 'missing') return action === 'create' ? 'unmanaged' : 'unproven';
+  if (markerRead.marker.blueprintId === blueprintId) return 'managed';
   return 'conflicting';
 }
 

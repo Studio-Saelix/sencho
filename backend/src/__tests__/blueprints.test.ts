@@ -434,7 +434,7 @@ describe('BlueprintService per-stack lock', () => {
         };
         vi.spyOn(svc as unknown as PrivateProbe, 'stackDirExists').mockResolvedValue(true);
         vi.spyOn(svc as unknown as PrivateProbe, 'readLocalMarkerFromDisk').mockResolvedValue({
-            kind: 'ok',
+            kind: 'present',
             marker: { blueprintId: bp.id, revision: bp.revision, lastApplied: 1 },
         });
         vi.spyOn(FileSystemService.prototype, 'readStackFile').mockResolvedValue({
@@ -508,7 +508,7 @@ describe('BlueprintService per-stack lock', () => {
         };
         vi.spyOn(svc as unknown as PrivateProbe, 'stackDirExists').mockResolvedValue(opts.stackExists ?? true);
         vi.spyOn(svc as unknown as PrivateProbe, 'readLocalMarkerFromDisk').mockResolvedValue({
-            kind: 'ok',
+            kind: 'present',
             marker: { blueprintId: bp.id, revision: bp.revision, lastApplied: 1 },
         });
         vi.spyOn(FileSystemService.prototype, 'createStack').mockResolvedValue(undefined);
@@ -649,7 +649,7 @@ describe('BlueprintService per-stack lock', () => {
         expect(outcome.status).toBe('failed');
         expect(outcome.error).toContain('already in progress');
         // No marker file was written (the lock guards the file writes too).
-        expect(await BlueprintService.getInstance().readMarker(bp.name, node)).toBeNull();
+        expect(await BlueprintService.getInstance().readMarker(bp.name, node)).toEqual({ kind: 'missing' });
         // The manual op still holds the lock; the deploy never acquired it.
         expect(StackOpLockService.getInstance().get(nodeId, bp.name)?.action).toBe('update');
     });
@@ -861,7 +861,7 @@ describe('BlueprintReconciler drift alert node wording', () => {
     it('stateful marker-loss on local uses on this node', async () => {
         const { NotificationService } = await import('../services/NotificationService');
         const dispatchSpy = vi.spyOn(NotificationService.getInstance(), 'dispatchAlert').mockResolvedValue({ persisted: true });
-        vi.spyOn(BlueprintService.getInstance(), 'readMarker').mockResolvedValue(null);
+        vi.spyOn(BlueprintService.getInstance(), 'readMarker').mockResolvedValue({ kind: 'missing' });
         const nodeId = seedNode();
         const bp = seedBlueprint({
             name: 'marker-local',
@@ -883,6 +883,43 @@ describe('BlueprintReconciler drift alert node wording', () => {
             'blueprint_drift_repair_held',
             'Auto-fix for "marker-local" on this node was declined: this Blueprint lost its marker and is stateful, so auto-fix was declined to avoid stomping unowned data',
             { stackName: 'marker-local', actor: 'system:blueprint' },
+        );
+    });
+
+    it('does not claim a stateful Blueprint lost its marker when the read failed', async () => {
+        // The same hold, reached because the marker could not be read. The
+        // Blueprint did not lose anything, so the text must not say that it did:
+        // this string is what an operator reads to decide whether a human has to
+        // go and look at the node.
+        const { NotificationService } = await import('../services/NotificationService');
+        const dispatchSpy = vi.spyOn(NotificationService.getInstance(), 'dispatchAlert').mockResolvedValue({ persisted: true });
+        vi.spyOn(BlueprintService.getInstance(), 'readMarker').mockResolvedValue({
+            kind: 'failed',
+            error: 'the node answered HTTP 502',
+        });
+        const nodeId = seedNode();
+        const bp = seedBlueprint({
+            name: 'marker-unreadable',
+            drift_mode: 'enforce',
+            classification: 'stateful',
+            nodeIds: [nodeId],
+        });
+        const node = DatabaseService.getInstance().getNode(nodeId)!;
+        const reconciler = BlueprintReconciler.getInstance() as unknown as ReconcilerWithDrift;
+
+        await reconciler.handleDrift(bp, node, 'volumes diverged', 'revision');
+
+        expect(dispatchSpy).toHaveBeenCalledWith(
+            'warning',
+            'blueprint_drift_repair_held',
+            expect.stringContaining('this Blueprint is stateful, so auto-fix is declined'),
+            { stackName: 'marker-unreadable', actor: 'system:blueprint' },
+        );
+        expect(dispatchSpy).not.toHaveBeenCalledWith(
+            'warning',
+            'blueprint_drift_repair_held',
+            expect.stringContaining('lost its marker'),
+            expect.anything(),
         );
     });
 

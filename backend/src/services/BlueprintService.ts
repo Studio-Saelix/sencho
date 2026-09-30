@@ -203,7 +203,18 @@ export interface DeployOutcome {
     holdReason?: RuntimeRepairHoldReason;
 }
 
-type LocalMarkerRead =
+/**
+ * The outcome of reading a node's `.blueprint.json`, separating a marker that
+ * is not there from a marker this instance could not read.
+ *
+ * `missing` and `failed` are both "no marker object came back", and they are not
+ * the same answer. `missing` is a fact about the node; `failed` is an absence of
+ * evidence about it, and must never authorize a write to that node.
+ *
+ * Both the local disk read and the remote HTTP read produce these same three
+ * arms, so a caller does not have to know which transport answered it.
+ */
+export type MarkerRead =
     | { kind: 'missing' }
     | { kind: 'present'; marker: BlueprintMarker }
     | { kind: 'failed'; error: string };
@@ -603,32 +614,84 @@ export class BlueprintService {
     }
 
     /**
-     * Read the marker file from a target node. Returns null when missing,
-     * malformed, or unreadable. The reconciler treats null as "we do not
-     * own this directory" and refuses to touch it.
+     * Read the marker file from a target node, as a discriminated result.
+     *
+     * The three arms are load-bearing. `missing` is a fact about the node and
+     * may be acted on; `failed` is an absence of evidence about it and may not,
+     * because a node that could not be read cannot be assumed to be in any
+     * particular state. Collapsing the two is what once let a network blip be
+     * reported as drift, so the remote arm discriminates the same way the local
+     * one already did.
      */
-    async readMarker(blueprintName: string, node: Node): Promise<BlueprintMarker | null> {
+    async readMarker(blueprintName: string, node: Node): Promise<MarkerRead> {
+        if (node.type === 'local') {
+            return this.readLocalMarkerFromDisk(node.id, blueprintName);
+        }
+        return this.readRemoteMarker(blueprintName, node);
+    }
+
+    /**
+     * Read a remote node's marker over HTTP, discriminating the same way the
+     * local read does. A 404 is the leaf reporting the file is not there; every
+     * other way of not getting a marker is `failed`, because a response Sencho
+     * could not read says nothing about what is on the node.
+     */
+    private async readRemoteMarker(blueprintName: string, node: Node): Promise<MarkerRead> {
+        const target = NodeRegistry.getInstance().getProxyTarget(node.id);
+        if (!target) {
+            return {
+                kind: 'failed',
+                error: `no proxy target is configured for node "${node.name}"`,
+            };
+        }
+        const url = `${target.apiUrl.replace(/\/$/, '')}/api/stacks/${encodeURIComponent(blueprintName)}/files/content?path=${encodeURIComponent(BLUEPRINT_MARKER_FILENAME)}`;
         try {
-            if (node.type === 'local') {
-                const markerRead = await this.readLocalMarkerFromDisk(node.id, blueprintName);
-                return markerRead.kind === 'present' ? markerRead.marker : null;
-            }
-            const target = NodeRegistry.getInstance().getProxyTarget(node.id);
-            if (!target) return null;
-            const url = `${target.apiUrl.replace(/\/$/, '')}/api/stacks/${encodeURIComponent(blueprintName)}/files/content?path=${encodeURIComponent(BLUEPRINT_MARKER_FILENAME)}`;
             const res = await axios.get(url, {
                 ...safeAxiosTransport(target.trustedLoopback),
                 headers: this.remoteHeaders(target.apiToken),
                 timeout: REMOTE_HTTP_TIMEOUT_MS,
                 validateStatus: () => true,
             });
-            if (res.status !== 200) return null;
+            // A 404 status alone does not mean the marker is absent. A leaf
+            // predating this route, an apiUrl pointing at the wrong base path, or
+            // any middlebox in between all answer 404 too, and each of those is a
+            // node that could not be read, which is the case this discrimination
+            // exists for. The leaf's own not-found answer is the one that carries
+            // the code: this URL sends no rootId, so the read always resolves the
+            // stack-source root, whose only absent path is sendFsError's ENOENT
+            // branch. That body is ours and changes under our control; an
+            // infrastructure 404 is not, so a bare 404 fails closed.
+            if (res.status !== 200) {
+                if (res.status === 404 && BlueprintService.extractApiCode(res.data) === 'NOT_FOUND') {
+                    return { kind: 'missing' };
+                }
+                // The leaf's own message is the most useful part of a 4xx here: a
+                // 403 from the leaf's permission check is a permission deny, not
+                // a node that happened to be down.
+                const detail = BlueprintService.extractApiError(res.data);
+                return {
+                    kind: 'failed',
+                    error: `the node answered HTTP ${res.status}${detail ? `: ${detail}` : ''}`,
+                };
+            }
             const body = res.data;
             const content = typeof body === 'string' ? body : (typeof body?.content === 'string' ? body.content : null);
-            if (content == null) return null;
-            return parseBlueprintMarker(content);
-        } catch {
-            return null;
+            if (content == null) {
+                return { kind: 'failed', error: 'the node answered with no file content' };
+            }
+            const marker = parseBlueprintMarker(content);
+            // A 200 whose body does not parse is not treated the way an unparseable
+            // marker on disk is. Locally those bytes were read from the file, so a
+            // parse failure is provably a corrupt marker and reads as repairable
+            // drift. Remotely the same signal is confounded with a body that some
+            // intermediary rewrote, and a marker Sencho cannot read cannot prove
+            // what a repair would overwrite. Marker writes are atomic, so the
+            // corrupt-file case is close to unreachable anyway; the ambiguous one
+            // is the response, and it is the response that must not authorize a
+            // write.
+            return marker ? { kind: 'present', marker } : { kind: 'failed', error: 'the marker file could not be parsed' };
+        } catch (err) {
+            return { kind: 'failed', error: BlueprintService.formatError(err) };
         }
     }
 
@@ -685,12 +748,20 @@ export class BlueprintService {
         const stacks = Array.isArray(listRes.data) ? listRes.data as Array<{ name?: string }> : [];
         const exists = stacks.some(s => s?.name === blueprintName);
         if (!exists) return false;
-        const marker = await this.readMarker(blueprintName, node);
-        return marker == null || marker.blueprintId !== blueprintId;
+        // A marker this node could not be asked about is not a marker that is
+        // absent, and reporting it as a conflict would tell the operator a stack
+        // they do not own is sitting there. The local arm above throws in the
+        // same situation; the remote arm does too, which is what the function's
+        // own contract already promised.
+        const markerRead = await this.readMarker(blueprintName, node);
+        if (markerRead.kind === 'failed') {
+            throw BlueprintService.ownershipProbeError(blueprintName, markerRead.error);
+        }
+        return markerRead.kind === 'missing' || markerRead.marker.blueprintId !== blueprintId;
     }
 
     /** Read and parse a local on-disk marker without going through the remote HTTP path. */
-    private async readLocalMarkerFromDisk(nodeId: number, stackName: string): Promise<LocalMarkerRead> {
+    private async readLocalMarkerFromDisk(nodeId: number, stackName: string): Promise<MarkerRead> {
         try {
             // Canonical js/path-injection barrier inline with the read sink.
             const baseResolved = path.resolve(NodeRegistry.getInstance().getComposeDir(nodeId));
@@ -912,10 +983,19 @@ export class BlueprintService {
                 bindingBlock = { reason: binding.reason, detail: describeRuntimeRepairHold(binding.reason) };
             }
 
-            const marker = await this.readMarker(blueprint.name, node);
-            if (!marker) {
+            const markerRead = await this.readMarker(blueprint.name, node);
+            // A marker that could not be read is not a marker that is gone. This
+            // is the same transport failure the catch at the end of this function
+            // already refuses to answer with drift for, so it has to be refused
+            // here too: returning `drifted` would send Enforce to write to a node
+            // that has just demonstrated it cannot be read.
+            if (markerRead.kind === 'failed') {
+                return unverified(`marker file could not be read: ${markerRead.error}`);
+            }
+            if (markerRead.kind === 'missing') {
                 return drifted('marker file missing on node', 'revision');
             }
+            const marker = markerRead.marker;
             if (marker.blueprintId !== blueprint.id) {
                 return drifted('marker references a different blueprint', 'revision');
             }

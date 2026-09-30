@@ -314,7 +314,7 @@ function stubDriftedRuntime(blueprint: Blueprint, generationId: string, artifact
     containerHealth: () => Promise<{ kind: 'running' }>;
     observeRuntimeIdentity: () => Promise<import('../services/gitops/json').ObservedArtifactIdentity>;
   };
-  vi.spyOn(BlueprintService.getInstance(), 'readMarker').mockResolvedValue({
+  vi.spyOn(BlueprintService.getInstance(), 'readMarker').mockResolvedValue({ kind: 'present', marker: {
     blueprintId: blueprint.id,
     revision: blueprint.revision,
     lastApplied: Date.now(),
@@ -322,7 +322,7 @@ function stubDriftedRuntime(blueprint: Blueprint, generationId: string, artifact
     generationId,
     artifactSetId,
     rolloutGenerationId,
-  });
+  } });
   vi.spyOn(svc, 'containerHealth').mockResolvedValue({ kind: 'running' });
   vi.spyOn(svc, 'observeRuntimeIdentity').mockResolvedValue({
     kind: 'exact',
@@ -352,12 +352,12 @@ function stubDriftedRuntime(blueprint: Blueprint, generationId: string, artifact
  * the workload is drifted.
  */
 function stubLegacyMarker(blueprint: Blueprint): void {
-  vi.spyOn(BlueprintService.getInstance(), 'readMarker').mockResolvedValue({
+  vi.spyOn(BlueprintService.getInstance(), 'readMarker').mockResolvedValue({ kind: 'present', marker: {
     blueprintId: blueprint.id,
     revision: blueprint.revision,
     lastApplied: Date.now(),
     applicationId: store_app(blueprint),
-  });
+  } });
 }
 
 function store_app(blueprint: Blueprint): string {
@@ -375,7 +375,7 @@ function stubMatchedRuntime(blueprint: Blueprint, generationId: string, artifact
     containerHealth: () => Promise<{ kind: 'running' }>;
     observeRuntimeIdentity: () => Promise<import('../services/gitops/json').ObservedArtifactIdentity>;
   };
-  vi.spyOn(BlueprintService.getInstance(), 'readMarker').mockResolvedValue({
+  vi.spyOn(BlueprintService.getInstance(), 'readMarker').mockResolvedValue({ kind: 'present', marker: {
     blueprintId: blueprint.id,
     revision: blueprint.revision,
     lastApplied: Date.now(),
@@ -383,7 +383,7 @@ function stubMatchedRuntime(blueprint: Blueprint, generationId: string, artifact
     generationId,
     artifactSetId,
     rolloutGenerationId,
-  });
+  } });
   vi.spyOn(svc, 'containerHealth').mockResolvedValue({ kind: 'running' });
   vi.spyOn(svc, 'observeRuntimeIdentity').mockResolvedValue({
     kind: 'exact',
@@ -570,11 +570,11 @@ describe('the runtime drift policy holds what it must not repair', () => {
     // The matched-runtime stub stamps a current marker; overriding it afterwards
     // is what makes this a legacy marker while leaving the healthy observation.
     stubMatchedRuntime(blueprint, seeded.generationId, seeded.artifactSetId, seeded.rolloutGenerationId);
-    vi.spyOn(BlueprintService.getInstance(), 'readMarker').mockResolvedValue({
+    vi.spyOn(BlueprintService.getInstance(), 'readMarker').mockResolvedValue({ kind: 'present', marker: {
       blueprintId: blueprint.id,
       revision: blueprint.revision,
       lastApplied: Date.now(),
-    });
+    } });
     const deploySpy = vi
       .spyOn(BlueprintService.getInstance(), 'deployAuthorizedMaterialization')
       .mockResolvedValue({ status: 'active' });
@@ -603,11 +603,11 @@ describe('the runtime drift policy holds what it must not repair', () => {
       applied_revision: blueprint.revision,
       last_deployed_at: Date.now(),
     });
-    vi.spyOn(BlueprintService.getInstance(), 'readMarker').mockResolvedValue({
+    vi.spyOn(BlueprintService.getInstance(), 'readMarker').mockResolvedValue({ kind: 'present', marker: {
       blueprintId: blueprint.id,
       revision: blueprint.revision,
       lastApplied: Date.now(),
-    });
+    } });
     const svc = BlueprintService.getInstance() as unknown as {
       containerHealth: () => Promise<unknown>;
       observeRuntimeIdentity: () => Promise<import('../services/gitops/json').ObservedArtifactIdentity>;
@@ -836,7 +836,7 @@ describe('the runtime drift policy holds what it must not repair', () => {
       applied_revision: blueprint.revision,
       last_deployed_at: Date.now(),
     });
-    vi.spyOn(BlueprintService.getInstance(), 'readMarker').mockResolvedValue(null);
+    vi.spyOn(BlueprintService.getInstance(), 'readMarker').mockResolvedValue({ kind: 'missing' });
     const svc = BlueprintService.getInstance() as unknown as {
       containerHealth: () => Promise<{ kind: 'running' }>;
     };
@@ -852,6 +852,11 @@ describe('the runtime drift policy holds what it must not repair', () => {
     expect(result.kind).toBe('drifted');
     if (result.kind === 'drifted') {
       expect(result.repairBlock?.reason, 'a recovery owns this target').toBe('recovery_bound');
+      // Pinned so the absent path cannot be quietly folded into the unreadable
+      // one: a marker that is gone is drift on the revision cause, and only a
+      // marker Sencho could not read answers unverified instead.
+      expect(result.reason).toBe('marker file missing on node');
+      expect(result.cause).toBe('revision');
     }
     const held = await BlueprintService.getInstance().enforceDigestRepair(blueprint, node);
     expect(held.status, 'the repair entry points refuse the same target').toBe('repair_held');
@@ -873,11 +878,11 @@ describe('the runtime drift policy holds what it must not repair', () => {
       last_deployed_at: Date.now(),
     });
     // Legacy marker: parses, names no generation, and is a revision behind.
-    vi.spyOn(BlueprintService.getInstance(), 'readMarker').mockResolvedValue({
+    vi.spyOn(BlueprintService.getInstance(), 'readMarker').mockResolvedValue({ kind: 'present', marker: {
       blueprintId: blueprint.id,
       revision: blueprint.revision - 1,
       lastApplied: Date.now(),
-    });
+    } });
     const deploySpy = vi
       .spyOn(BlueprintService.getInstance(), 'deployAuthorizedMaterialization')
       .mockResolvedValue({ status: 'active' });
@@ -909,7 +914,7 @@ describe('the runtime drift policy holds what it must not repair', () => {
       last_deployed_at: Date.now(),
     });
     stubDriftedRuntime(blueprint, seeded.generationId, seeded.artifactSetId, seeded.rolloutGenerationId);
-    vi.spyOn(BlueprintService.getInstance(), 'readMarker').mockResolvedValue(null);
+    vi.spyOn(BlueprintService.getInstance(), 'readMarker').mockResolvedValue({ kind: 'missing' });
     vi.spyOn(BlueprintService.getInstance(), 'deployAuthorizedMaterialization')
       .mockResolvedValue({ status: 'active' });
     const store = GitOpsStore.getInstance();
@@ -1642,5 +1647,47 @@ describe('the Inline content path', () => {
       result.repairBlock?.reason,
       'a hold must not lapse just because the node became unobservable',
     ).toBe('rollout_superseded');
+  });
+
+  it('leaves the row alone and alerts nobody when a remote marker read fails', async () => {
+    // The end-to-end shape of the same defect, through a whole tick rather than
+    // the check alone. A marker read that failed used to reach the check as the
+    // same null as an absent marker, so Enforce wrote a `drifted` row, fired a
+    // drift alert, and attempted a repair against a node it had just failed to
+    // read. The transport failure is what the check's own catch refuses to
+    // answer with drift for, so the marker arm has to refuse it the same way.
+    const { NotificationService } = await import('../services/NotificationService');
+    const axios = (await import('axios')).default;
+    const alertSpy = vi
+      .spyOn(NotificationService.getInstance(), 'dispatchAlert')
+      .mockResolvedValue({ persisted: true });
+    const node = seedRemoteNode();
+    const blueprint = seedBlueprint(node, 'enforce');
+    await seedDeployedGitManaged({ blueprint, node, compose: COMPOSE });
+    DatabaseService.getInstance().upsertDeployment({
+      blueprint_id: blueprint.id,
+      node_id: node.id,
+      status: 'active',
+      applied_revision: blueprint.revision,
+      last_deployed_at: Date.now(),
+    });
+    const deploySpy = vi
+      .spyOn(BlueprintService.getInstance(), 'deployAuthorizedMaterialization')
+      .mockResolvedValue({ status: 'active' });
+    vi.spyOn(axios, 'get').mockRejectedValue(new Error('socket hang up'));
+
+    await tick(blueprint, node);
+
+    expect(deploySpy, 'a node that cannot be read is not repaired').not.toHaveBeenCalled();
+    expect(
+      deploymentOf(blueprint, node)?.status,
+      'a failed read is not a drift the operator has to act on',
+    ).not.toBe('drifted');
+    expect(alertSpy, 'no drift was found, so none is announced').not.toHaveBeenCalledWith(
+      'warning',
+      'blueprint_drift_detected',
+      expect.anything(),
+      expect.anything(),
+    );
   });
 });

@@ -1158,10 +1158,14 @@ export class BlueprintReconciler {
         if (blueprint.classification !== 'stateful' && blueprint.classification !== 'unknown') {
             return null;
         }
-        const marker = await BlueprintService.getInstance().readMarker(blueprint.name, node);
-        return marker
-            ? `this Blueprint is ${blueprint.classification}, so auto-fix is declined to avoid touching data Sencho cannot prove is safe`
-            : `this Blueprint lost its marker and is ${blueprint.classification}, so auto-fix was declined to avoid stomping unowned data`;
+        const markerRead = await BlueprintService.getInstance().readMarker(blueprint.name, node);
+        // Only a marker that is provably gone is one this Blueprint lost. A read
+        // that failed leaves it unknown, and the classification still holds the
+        // repair either way, so the text stays the one that asserts nothing about
+        // the marker.
+        return markerRead.kind === 'missing'
+            ? `this Blueprint lost its marker and is ${blueprint.classification}, so auto-fix was declined to avoid stomping unowned data`
+            : `this Blueprint is ${blueprint.classification}, so auto-fix is declined to avoid touching data Sencho cannot prove is safe`;
     }
 
     /**
