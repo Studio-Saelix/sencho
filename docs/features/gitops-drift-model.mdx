@@ -112,6 +112,7 @@ Drift is derived from what Sencho has recorded, so missing evidence is never rou
 - A required-target set Sencho cannot read records a caveat naming the unreadable record, instead of quietly reporting no placement drift.
 - A stack whose invocation has not been recorded yet records a caveat saying so, rather than reporting no invocation drift.
 - A stack whose generation names no compose file records a caveat, rather than reporting a difference against a file list that was never written.
+- A node that was withdrawn while a recovery on it had failed records a caveat, because the withdrawal ended what Sencho tracks there and the failed recovery is no longer reported as a state.
 - A Blueprint deployment is not compared at all. Each of its targets is brought up from the Blueprint rather than from a recorded compose invocation, so there is no expected invocation to compare against, and the class stays silent for them rather than reporting every one as different.
 - A service built on the node has no published digest to compare, so the per-service view labels it **not compared** rather than matched or drifted.
 - A service running something the approved set does not name is outside the comparison, so it reads **not compared** rather than drift.

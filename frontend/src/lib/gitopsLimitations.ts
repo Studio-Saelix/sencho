@@ -68,6 +68,8 @@ export const GITOPS_LIMITATION_COPY: Readonly<Record<string, string | undefined>
     'The recorded compose invocation could not be read, so it is not being compared against what this generation was applied with.',
   invocation_expected_invalid:
     'The compose invocation this generation was applied with could not be compared with what is on the node, so the two are not being checked against each other.',
+  withdrawal_residue:
+    'A node was withdrawn while a recovery on it had failed, so Sencho can no longer say what is still running there. Look at the host directly.',
 
   // --- recorded at write time, merged in later ------------------------------
   recovery_unproven:

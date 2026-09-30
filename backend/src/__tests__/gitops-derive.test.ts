@@ -406,6 +406,108 @@ describe('gitops derivation', () => {
     // keeps a withdrawn node's failed recovery out of the status.
     expect(recovery.targets.find((target) => target.nodeId === 2)?.runtime.status).toBe('tombstoned');
     expect(recovery.facets.rollout.status).toBe('not_applicable');
+    // What the ordering hides is reported rather than dropped. The tombstone
+    // cleared the failure columns but left the recovery ones, so the row still
+    // holds the failed recovery, and the one thing that cannot be proven from
+    // here is what the withdrawn node is still running. A limitation rather than
+    // a state, because a withdrawal is not a runtime state.
+    expect(recovery.limitations).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        code: 'withdrawal_residue',
+        evidence: { nodeId: 2, recoveryRef: 'recovery-tombstoned' },
+      }),
+    ]));
+  });
+
+  it('reports no withdrawal residue for a retirement that carried no failed recovery', () => {
+    const application = rawApp('app-tomb-clean', {
+      target_mode: 'blueprint',
+      blueprint_id: 96,
+      lifecycle_key: 'blueprint:96',
+      stack_name: null,
+      configured_source_stack_name: null,
+    });
+
+    const projection = deriveGitOpsRevision({
+      application,
+      targets: [
+        {
+          ...emptyTargetRow(application.id, 1, 1),
+          observed_artifact_identity_json: encodeObservedArtifactIdentity({
+            kind: 'exact',
+            identity: 'sha256:active',
+            observedAt: 1,
+          }),
+        },
+        {
+          ...emptyTargetRow(application.id, 2, 1),
+          target_status: 'tombstoned',
+        },
+      ],
+      healthDisabled: true,
+    }, null);
+
+    if (projection.targetMode === 'not_applicable') throw new Error('expected application');
+    // The ordinary retirement has nothing to qualify, and a caveat on every one
+    // of them would be noise on a surface that stays silent by default. The
+    // retired target's own state already says it is no longer reconciled, and
+    // what a withdrawal cannot prove about the node is recorded in the internal
+    // docs rather than asserted per target.
+    expect(projection.limitations.map((limitation) => limitation.code)).not.toContain('withdrawal_residue');
+  });
+
+  it('reports withdrawal residue from either arm of the failed-recovery condition', () => {
+    // Two orderings reach a tombstoned row carrying a failed recovery, and they
+    // populate different columns, so each arm is exercised on its own. Asserting
+    // both on one row would pass even if the implementation read only one.
+    const orderings = [
+      {
+        label: 'recovered then withdrawn',
+        // Both retirement paths clear the failure columns and keep the recovery
+        // ones, so this is the shape a withdrawal leaves behind.
+        row: { recovery_phase: 'failed', recovery_ref: 'recovery-a' } as const,
+      },
+      {
+        label: 'withdrawn then recorded a failed recovery',
+        // `recoveryFailed` sets the failure stage on a tombstoned row too: it
+        // guards on nothing but the row existing, so this ordering is reachable.
+        row: { failure_stage: 'recovery', failure_class: 'post_mutation' } as const,
+      },
+    ] as const;
+
+    orderings.forEach(({ label, row }, index) => {
+      const application = rawApp(`app-tomb-arm-${index}`, {
+        target_mode: 'blueprint',
+        blueprint_id: 97 + index,
+        lifecycle_key: `blueprint:${97 + index}`,
+        stack_name: null,
+        configured_source_stack_name: null,
+      });
+
+      const projection = deriveGitOpsRevision({
+        application,
+        targets: [
+          {
+            ...emptyTargetRow(application.id, 1, 1),
+            observed_artifact_identity_json: encodeObservedArtifactIdentity({
+              kind: 'exact',
+              identity: 'sha256:active',
+              observedAt: 1,
+            }),
+          },
+          {
+            ...emptyTargetRow(application.id, 2, 1),
+            target_status: 'tombstoned',
+            ...row,
+          },
+        ],
+        healthDisabled: true,
+      }, null);
+
+      if (projection.targetMode === 'not_applicable') throw new Error('expected application');
+      expect(projection.limitations.map((limitation) => limitation.code), label).toContain('withdrawal_residue');
+      expect(projection.targets[1]?.runtime.status, label).toBe('tombstoned');
+    });
   });
 
   it('projects connectivity for a Blueprint target from its recorded observation', () => {
