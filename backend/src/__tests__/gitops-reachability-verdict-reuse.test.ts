@@ -32,11 +32,25 @@ afterEach(() => {
   CacheService.getInstance().flush();
 });
 
+/**
+ * The freshness ceiling the product's live probes share: the GitOps portfolio
+ * probe budget, the fleet overview probe budget, and the fleet readiness
+ * evidence budget. Spelled as a literal rather than imported, because the
+ * window has to stay under the ceiling those three agree on, not under one of
+ * them: raising this read model's probe budget on its own would otherwise
+ * leave a widened window looking compliant while the other two surfaces still
+ * treat 3 s as the bound.
+ */
+const SHARED_PROBE_CEILING_MS = 3000;
+
 describe('reachability verdict reuse', () => {
-  it('keeps the reuse window shorter than the probe budget', () => {
-    // The whole safety argument rests on this: a served verdict may never
-    // outlive the longest a fresh probe could have taken.
+  it('keeps the reuse window under the shared probe ceiling', () => {
+    // The safety argument rests on this: a served verdict may never outlive the
+    // longest a fresh probe could have taken. The live comparison catches a
+    // window that outgrew this read model's own budget, and the literal catches
+    // one that outgrew the ceiling the rest of the product still assumes.
     expect(REACHABILITY_VERDICT_TTL_MS).toBeLessThan(REMOTE_PROBE_TIMEOUT_MS);
+    expect(REACHABILITY_VERDICT_TTL_MS).toBeLessThan(SHARED_PROBE_CEILING_MS);
   });
 
   it('answers a dark node from the reuse window instead of probing it again', async () => {

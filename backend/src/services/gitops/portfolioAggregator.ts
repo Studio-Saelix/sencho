@@ -62,9 +62,11 @@ const REACHABILITY_NAMESPACE = 'gitops-reachability';
 /**
  * How long one node's "did not answer" verdict may be reused.
  *
- * Strictly under `REMOTE_PROBE_TIMEOUT_MS`, so a served verdict is never older
- * than the longest a fresh probe could have taken. Long enough that the reads
- * that follow one dark answer (the next navigation, the next published
+ * Strictly under `REMOTE_PROBE_TIMEOUT_MS`, which mirrors the fleet overview
+ * and fleet readiness probe budgets: the bound is the ceiling the product's live
+ * probes share, not one surface's own budget, so a served verdict is never older
+ * than the longest a fresh probe anywhere could have taken. Long enough that the
+ * reads which follow one dark answer (the next navigation, the next published
  * transition, the second reader of the same endpoint) do not each pay the
  * timeout again, and short enough that a node which came back is seen back
  * within the freshness the rest of the read model already assumes. Exported so
