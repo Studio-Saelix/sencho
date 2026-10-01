@@ -29,7 +29,7 @@ describe('buildEvidenceLines', () => {
     expect(buildEvidenceLines(evidence)).toEqual([]);
   });
 
-  it('names the rule that produced the outcome', () => {
+  it('names the setting in operator wording rather than by its raw key', () => {
     const evidence: Evidence = {
       outcome: 'block',
       summary: 'x',
@@ -46,8 +46,10 @@ describe('buildEvidenceLines', () => {
     const lines = buildEvidenceLines(evidence);
     expect(lines).toHaveLength(1);
     expect(lines[0].text).toBe(
-      'scanner availability evidence was unavailable, so it was blocked by security_scanner_unavailable=block.',
+      'scanner availability evidence was unavailable, so it was blocked by the Scanner unavailable setting, set to block.',
     );
+    // The raw key belongs in the decision record, not in front of an operator.
+    expect(lines[0].text).not.toContain('security_scanner_unavailable');
   });
 
   it('names the image when one is known', () => {
@@ -74,7 +76,7 @@ describe('buildEvidenceLines', () => {
         outcome,
         summary: 'x',
         records: [],
-        applications: [{ source: 'vulnerability_scan', state: 'stale', outcome, rule: 'r=1' }],
+        applications: [{ source: 'vulnerability_scan', state: 'stale', outcome, rule: 'unknown_key' }],
       })[0].text;
     expect(textFor('block')).toContain('it was blocked');
     expect(textFor('allow')).toContain('it was allowed');
@@ -125,14 +127,14 @@ describe('buildEvidenceLines', () => {
           source: 'vulnerability_scan',
           state: 'stale',
           outcome: 'block',
-          rule: 'security_stale_scan=block',
+          rule: 'security_scan_failure=block',
           target: 'nginx:1.27',
         },
       ],
     };
     const lines = buildEvidenceLines(evidence);
     expect(lines).toHaveLength(2);
-    expect(lines.some((l) => l.text.includes('security_stale_scan=block'))).toBe(true);
+    expect(lines.some((l) => l.text.includes('the Scan failed setting'))).toBe(true);
     expect(lines.some((l) => l.text.includes('incomplete'))).toBe(true);
   });
 
@@ -141,7 +143,7 @@ describe('buildEvidenceLines', () => {
       source: 'vulnerability_scan' as const,
       state: 'stale',
       outcome: 'block' as const,
-      rule: 'security_stale_scan=block',
+      rule: 'security_scan_failure=block',
       target: 'nginx:1.27',
     };
     const evidence: Evidence = {
@@ -167,12 +169,28 @@ describe('buildEvidenceLines', () => {
         { source: 'image_exposure_map', state: 'stale', target: 'stack:web' },
       ],
       applications: [
-        { source: 'vulnerability_scan', state: 'stale', outcome: 'warn', rule: 'r=1', target: 'a:1' },
-        { source: 'vulnerability_scan', state: 'stale', outcome: 'warn', rule: 'r=1', target: 'b:1' },
+        { source: 'vulnerability_scan', state: 'stale', outcome: 'warn', rule: 'unknown_key', target: 'a:1' },
+        { source: 'vulnerability_scan', state: 'stale', outcome: 'warn', rule: 'unknown_key', target: 'b:1' },
       ],
     };
     const keys = buildEvidenceLines(evidence).map((l) => l.key);
     expect(new Set(keys).size).toBe(keys.length);
+  });
+
+  it('degrades rather than throwing on a malformed rule from an old payload', () => {
+    // The dialog is where a malformed payload lands, so a missing rule must not
+    // take the block explanation down with it.
+    for (const bad of [undefined, null, ''] as unknown[]) {
+      const lines = buildEvidenceLines({
+        outcome: 'block',
+        summary: 'x',
+        applications: [
+          { source: 'vulnerability_scan', state: 'failed', outcome: 'block', rule: bad as string },
+        ],
+      });
+      expect(lines).toHaveLength(1);
+      expect(lines[0].text).toContain('an unknown rule');
+    }
   });
 
   it('maps every declared state to readable wording', () => {

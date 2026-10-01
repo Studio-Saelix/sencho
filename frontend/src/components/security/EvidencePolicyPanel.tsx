@@ -14,15 +14,13 @@ import { apiFetch } from '@/lib/api';
 import { useAuth } from '@/context/AuthContext';
 import { Label } from '@/components/ui/label';
 import { SegmentedControl, type SegmentedControlOption } from '@/components/ui/segmented-control';
-import { Input } from '@/components/ui/input';
 
 type Outcome = 'allow' | 'warn' | 'block';
 
 interface EvidencePolicy {
   scannerUnavailable: Outcome;
   scanFailure: Outcome;
-  staleScan: Outcome;
-  maxScanAgeDays: number;
+  candidateUnproven: Outcome;
   isDefault: boolean;
 }
 
@@ -37,7 +35,6 @@ interface EvidencePolicyResponse {
   policy: EvidencePolicy;
   defaults: EvidencePolicy;
   outcomes: Outcome[];
-  maxScanAgeDaysCeiling: number;
 }
 
 const OUTCOME_OPTIONS: SegmentedControlOption<Outcome>[] = [
@@ -56,9 +53,7 @@ function parsePolicy(value: unknown): EvidencePolicy | null {
   if (
     !isOutcome(q.scannerUnavailable) ||
     !isOutcome(q.scanFailure) ||
-    !isOutcome(q.staleScan) ||
-    typeof q.maxScanAgeDays !== 'number' ||
-    !Number.isFinite(q.maxScanAgeDays) ||
+    !isOutcome(q.candidateUnproven) ||
     typeof q.isDefault !== 'boolean'
   ) {
     return null;
@@ -81,15 +76,10 @@ function parseEvidencePolicyResponse(body: unknown): EvidencePolicyResponse | nu
   const policy = parsePolicy(raw.policy);
   const defaults = parsePolicy(raw.defaults);
   if (!policy || !defaults) return null;
-  const ceiling =
-    typeof raw.maxScanAgeDaysCeiling === 'number' && raw.maxScanAgeDaysCeiling > 0
-      ? raw.maxScanAgeDaysCeiling
-      : 365;
   return {
     policy,
     defaults,
     outcomes: [...VALID_OUTCOMES] as Outcome[],
-    maxScanAgeDaysCeiling: ceiling,
   };
 }
 
@@ -138,7 +128,6 @@ export function EvidencePolicyPanel() {
   const [state, setState] = useState<EvidencePolicyResponse | null>(null);
   const [loadFailed, setLoadFailed] = useState(false);
   const [busy, setBusy] = useState(false);
-  const [daysDraft, setDaysDraft] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     try {
@@ -176,7 +165,6 @@ export function EvidencePolicyPanel() {
         const policy = parsePolicy(await res.json().then((b) => (b as { policy?: unknown })?.policy));
         if (!policy) throw new Error('unreadable policy payload');
         setState((prev) => (prev ? { ...prev, policy } : prev));
-        setDaysDraft(null);
         toast.success('Evidence policy updated');
       } catch (err) {
         toast.error((err as Error)?.message || 'Failed to update the evidence policy');
@@ -187,30 +175,14 @@ export function EvidencePolicyPanel() {
     [],
   );
 
-  const commitDays = useCallback(() => {
-    if (!state) return;
-    const raw = daysDraft;
-    if (raw === null) return;
-    const parsed = Number(raw);
-    if (!Number.isInteger(parsed) || parsed < 0 || parsed > state.maxScanAgeDaysCeiling) {
-      toast.error(`Enter a whole number of days between 0 and ${state.maxScanAgeDaysCeiling}`);
-      setDaysDraft(null);
-      return;
-    }
-    if (parsed === state.policy.maxScanAgeDays) {
-      setDaysDraft(null);
-      return;
-    }
-    void save({ maxScanAgeDays: parsed });
-  }, [daysDraft, save, state]);
-
   if (loadFailed) {
     return (
       <div className="rounded-lg border border-card-border bg-card px-4 py-3">
         <Label className="text-sm">Evidence availability</Label>
         <p className="text-xs text-muted-foreground mt-1">
-          The evidence policy could not be read, so deploys are using the shipped defaults: a missing
-          scanner still allows the deploy, a failed scan blocks it, and scan age is not limited.
+          The policy could not be read, so what this node currently enforces is unknown here. Deploys
+          continue; a read failure falls back to the shipped defaults, which allow a deploy when the
+          scanner is missing and block one whose scan failed. Reload to see the active values.
         </p>
         <button
           type="button"
@@ -259,41 +231,14 @@ export function EvidencePolicyPanel() {
       />
 
       <PolicyRow
-        label="Scan too old"
-        help="When a scan finished but is older than the freshness limit below. A stale scan still reports its findings and still blocks on them; this row only decides whether its age stops the deploy. Default: allow."
-        value={policy.staleScan}
-        defaultValue={defaults.staleScan}
+        label="Candidate not evaluated"
+        help="When an image a Git-managed source is about to accept cannot be evaluated. This path has no person in the loop, so it is held by default even if you allow a failed scan above. Default: block."
+        value={policy.candidateUnproven}
+        defaultValue={defaults.candidateUnproven}
         disabled={disabled}
         busy={busy}
-        onChange={(next) => void save({ staleScan: next })}
+        onChange={(next) => void save({ candidateUnproven: next })}
       />
-
-      <div className="min-w-0">
-        <div className="flex flex-wrap items-center justify-between gap-2">
-          <Label htmlFor="evidence-max-scan-age" className="text-sm">
-            Freshness limit (days)
-          </Label>
-          <Input
-            id="evidence-max-scan-age"
-            type="number"
-            min={0}
-            max={state.maxScanAgeDaysCeiling}
-            step={1}
-            disabled={disabled || busy}
-            value={daysDraft ?? String(policy.maxScanAgeDays)}
-            onChange={(e) => setDaysDraft(e.target.value)}
-            onBlur={commitDays}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter') commitDays();
-            }}
-            className="w-28"
-          />
-        </div>
-        <p className="text-xs text-muted-foreground mt-1">
-          How old a completed scan may be before it counts as stale. 0 (the default) sets no limit,
-          so no scan is ever stale.
-        </p>
-      </div>
 
       {!isAdmin && (
         <p className="text-xs text-muted-foreground">

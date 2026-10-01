@@ -164,6 +164,19 @@ describe('scanner unavailability policy', () => {
         expect(gate.bypassed).toBe(true);
     });
 
+    it('audits the bypass of a scanner-unavailable block like every other bypass', async () => {
+        // Regression: this branch returned bypassed:true and wrote nothing, so an
+        // admin choosing to proceed past a missing scanner left no trace at all.
+        dbStub.getGlobalSettings.mockReturnValue({ security_scanner_unavailable: 'block' });
+        const gate = await enforcePolicyForImageRefs('web', 1, ['nginx:1.27'], { bypass: true, actor: 'admin' });
+        expect(gate.ok).toBe(true);
+        expect(dbStub.insertAuditLog).toHaveBeenCalledTimes(1);
+        const entry = dbStub.insertAuditLog.mock.calls[0][0] as { summary: string; username: string };
+        expect(entry.summary).toContain('policy.bypass');
+        expect(entry.summary).toContain('policy="block-high"');
+        expect(entry.username).toBe('admin');
+    });
+
     it('never reports an unavailable scanner as a clean scan on the candidate path', async () => {
         const candidate = await evaluateCandidatePolicy('web', 1, ['nginx:1.27'], { bypass: false, actor: 'system' });
         expect(candidate.status).toBe('unavailable');
@@ -193,25 +206,59 @@ describe('scanner unavailability policy', () => {
     });
 });
 
-describe('candidate acceptance under a loosened policy', () => {
-    it('accepts a candidate when the operator has explicitly allowed failed scans', async () => {
-        // Pinned deliberately, and documented. The operator's availability policy
-        // is one contract consumed by every path, so a policy that lets a deploy
-        // proceed on a failed scan also lets source acceptance proceed. Treating
-        // the candidate path specially here would be the second engine this
-        // design exists to avoid. The evidence record still shows `failed`.
-        dbStub.getGlobalSettings.mockReturnValue({ security_scan_failure: 'allow' });
-        trivyStub.scanImagePreflight.mockRejectedValue(new Error('scan process crashed'));
-        const candidate = await evaluateCandidatePolicy('web', 1, ['nginx:1.27'], { bypass: false, actor: 'system' });
-        expect(candidate.status).toBe('allowed');
-        expect(candidate.evidence?.records[0]).toMatchObject({ state: 'failed' });
-    });
-
-    it('still refuses a candidate when the operator has not loosened anything', async () => {
-        dbStub.getGlobalSettings.mockReturnValue({});
+describe('candidate acceptance applies its own rule', () => {
+    it('holds an unevaluable candidate by default, whatever the deploy settings say', async () => {
+        // The deploy fields are relaxed here on purpose. The candidate path must
+        // not inherit them: an unattended acceptance is not the same decision as
+        // an operator getting past a scanner outage at the keyboard.
+        dbStub.getGlobalSettings.mockReturnValue({
+            security_scanner_unavailable: 'allow',
+            security_scan_failure: 'allow',
+        });
         trivyStub.scanImagePreflight.mockRejectedValue(new Error('scan process crashed'));
         const candidate = await evaluateCandidatePolicy('web', 1, ['nginx:1.27'], { bypass: false, actor: 'system' });
         expect(candidate.status).toBe('unavailable');
+    });
+
+    it('accepts an unevaluable candidate only when its own setting allows it', async () => {
+        dbStub.getGlobalSettings.mockReturnValue({ security_candidate_unproven: 'allow' });
+        trivyStub.scanImagePreflight.mockRejectedValue(new Error('scan process crashed'));
+        const candidate = await evaluateCandidatePolicy('web', 1, ['nginx:1.27'], { bypass: false, actor: 'system' });
+        expect(candidate.status).toBe('allowed');
+        // Accepted, but still recorded as unproven rather than as clean.
+        expect(candidate.evidence?.records[0]).toMatchObject({ state: 'failed' });
+    });
+
+    it('warns without holding when its own setting is warn', async () => {
+        dbStub.getGlobalSettings.mockReturnValue({ security_candidate_unproven: 'warn' });
+        trivyStub.scanImagePreflight.mockRejectedValue(new Error('scan process crashed'));
+        const candidate = await evaluateCandidatePolicy('web', 1, ['nginx:1.27'], { bypass: false, actor: 'system' });
+        expect(candidate.status).toBe('allowed');
+        expect(notificationStub.dispatchAlert).toHaveBeenCalledTimes(1);
+    });
+
+    it('holds an unevaluable candidate when the scanner is unavailable, at every deploy setting', async () => {
+        for (const setting of ['allow', 'warn', 'block']) {
+            dbStub.getGlobalSettings.mockReturnValue({ security_scanner_unavailable: setting });
+            trivyStub.isTrivyAvailable.mockReturnValue(false);
+            const candidate = await evaluateCandidatePolicy('web', 1, ['nginx:1.27'], { bypass: false, actor: 'system' });
+            expect(candidate.status, `scannerUnavailable=${setting}`).toBe('unavailable');
+        }
+    });
+
+    it('still reports blocked, not unavailable, when a candidate has a genuine violation', async () => {
+        dbStub.getGlobalSettings.mockReturnValue({ security_candidate_unproven: 'allow' });
+        primeCleanScan({ highest_severity: 'CRITICAL', critical_count: 2, total_vulnerabilities: 2 });
+        const candidate = await evaluateCandidatePolicy('web', 1, ['nginx:1.27'], { bypass: false, actor: 'system' });
+        // A relaxed candidate rule must not downgrade a proven finding into an
+        // evidence gap.
+        expect(candidate.status).toBe('blocked');
+    });
+
+    it('accepts a candidate on an authorized bypass', async () => {
+        trivyStub.scanImagePreflight.mockRejectedValue(new Error('scan process crashed'));
+        const candidate = await evaluateCandidatePolicy('web', 1, ['nginx:1.27'], { bypass: true, actor: 'admin' });
+        expect(candidate.status).toBe('allowed');
     });
 });
 
@@ -251,27 +298,31 @@ describe('scan failure policy', () => {
     });
 });
 
-describe('scan freshness policy', () => {
-    it('does not consult scan age when no bound is configured, however old the scan', async () => {
+describe('scan freshness is not a gate input', () => {
+    it('records the scan as current however old it is, because no bound is applied here', async () => {
+        // A pre-deploy gate scans on demand, so the evidence it holds is fresh by
+        // construction and can never be stale.
         primeCleanScan({ scanned_at: Date.now() - 400 * DAY });
         const gate = await enforcePolicyForImageRefs('web', 1, ['nginx:1.27'], { bypass: false, actor: 'admin' });
         expect(gate.ok).toBe(true);
         expect(gate.evidence?.records[0]?.state).toBe('current');
     });
 
-    it('records a stale scan as stale once a bound is configured', async () => {
-        dbStub.getGlobalSettings.mockReturnValue({ security_max_scan_age_days: '7' });
+    it('ignores a freshness bound left behind in settings by a hand edit or an older build', async () => {
+        // A control the UI does not offer must not be able to refuse deploys.
+        dbStub.getGlobalSettings.mockReturnValue({
+            security_max_scan_age_days: '7',
+            security_stale_scan: 'block',
+        });
         primeCleanScan({ scanned_at: Date.now() - 9 * DAY });
         const gate = await enforcePolicyForImageRefs('web', 1, ['nginx:1.27'], { bypass: false, actor: 'admin' });
         expect(gate.ok).toBe(true);
-        expect(gate.evidence?.records[0]?.state).toBe('stale');
         expect(gate.evidence?.outcome).toBe('allow');
     });
 
-    it('still blocks on the findings of a stale scan, because age is not risk', async () => {
-        dbStub.getGlobalSettings.mockReturnValue({ security_max_scan_age_days: '7' });
+    it('still blocks on the findings of an old scan, because age is not risk', async () => {
         primeCleanScan({
-            scanned_at: Date.now() - 9 * DAY,
+            scanned_at: Date.now() - 400 * DAY,
             highest_severity: 'CRITICAL',
             critical_count: 3,
             total_vulnerabilities: 3,
@@ -279,29 +330,6 @@ describe('scan freshness policy', () => {
         const gate = await enforcePolicyForImageRefs('web', 1, ['nginx:1.27'], { bypass: false, actor: 'admin' });
         expect(gate.ok).toBe(false);
         expect(gate.violations[0].reasons).toContain('severity');
-    });
-
-    it('blocks on staleness alone when configured to', async () => {
-        dbStub.getGlobalSettings.mockReturnValue({
-            security_max_scan_age_days: '7',
-            security_stale_scan: 'block',
-        });
-        primeCleanScan({ scanned_at: Date.now() - 9 * DAY });
-        const gate = await enforcePolicyForImageRefs('web', 1, ['nginx:1.27'], { bypass: false, actor: 'admin' });
-        expect(gate.ok).toBe(false);
-        expect(gate.violations[0].error).toContain('9 day(s) old');
-        expect(gate.violations[0].error).toContain('7 day limit');
-    });
-
-    it('leaves a fresh scan current under the same bound', async () => {
-        dbStub.getGlobalSettings.mockReturnValue({
-            security_max_scan_age_days: '7',
-            security_stale_scan: 'block',
-        });
-        primeCleanScan({ scanned_at: Date.now() - DAY });
-        const gate = await enforcePolicyForImageRefs('web', 1, ['nginx:1.27'], { bypass: false, actor: 'admin' });
-        expect(gate.ok).toBe(true);
-        expect(gate.evidence?.records[0]?.state).toBe('current');
     });
 });
 

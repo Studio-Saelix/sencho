@@ -21,7 +21,6 @@ import { applyMisconfigAcknowledgements } from '../utils/misconfig-ack-filter';
 import { buildSecurityOverview } from '../services/securityOverview';
 import {
   DEFAULT_SECURITY_EVIDENCE_POLICY,
-  MAX_SCAN_AGE_DAYS_CEILING,
   SECURITY_EVIDENCE_SETTING_KEYS,
   resolveSecurityEvidencePolicy,
   serializeSecurityEvidencePolicy,
@@ -29,12 +28,9 @@ import {
 const EVIDENCE_OUTCOMES: readonly string[] = ['allow', 'warn', 'block'];
 /** The typed twin of `EVIDENCE_OUTCOMES`, for anything that needs the union. */
 const VALID_EVIDENCE_OUTCOMES: ReadonlySet<string> = new Set(EVIDENCE_OUTCOMES);
-/** The three outcome fields, keyed by the settings row each one is stored in. */
-const OUTCOME_FIELDS = ['scannerUnavailable', 'scanFailure', 'staleScan'] as const;
-const EVIDENCE_POLICY_BODY_KEYS: ReadonlySet<string> = new Set<string>([
-  ...OUTCOME_FIELDS,
-  'maxScanAgeDays',
-]);
+/** The outcome fields, keyed by the settings row each one is stored in. */
+const OUTCOME_FIELDS = ['scannerUnavailable', 'scanFailure', 'candidateUnproven'] as const;
+const EVIDENCE_POLICY_BODY_KEYS: ReadonlySet<string> = new Set<string>([...OUTCOME_FIELDS]);
 import { generateSarif } from '../services/SarifExporter';
 import { generateOpenVex } from '../services/OpenVexExporter';
 import { buildExposedImageMap, type StackExposure } from '../services/preflight/exposure';
@@ -338,7 +334,6 @@ securityRouter.get('/evidence-policy', authMiddleware, (req: Request, res: Respo
       ),
       defaults: serializeSecurityEvidencePolicy(DEFAULT_SECURITY_EVIDENCE_POLICY),
       outcomes: ['allow', 'warn', 'block'],
-      maxScanAgeDaysCeiling: MAX_SCAN_AGE_DAYS_CEILING,
     });
   } catch (err) {
     const msg = getErrorMessage(err, 'Failed to read the evidence policy');
@@ -349,11 +344,11 @@ securityRouter.get('/evidence-policy', authMiddleware, (req: Request, res: Respo
 
 securityRouter.put('/evidence-policy', authMiddleware, (req: Request, res: Response): void => {
   if (!requireAdmin(req, res)) return;
-  // The availability policy is a per-instance gate setting, not a replicated
-  // resource. Without this guard an admin could loosen the deploy gate on a
-  // replica alone, and that replica would silently diverge from the hub it
-  // claims to be governed by. Matches the sibling policy and suppression writes.
-  if (blockIfReplica(res, 'security evidence policy')) return;
+  // Deliberately NOT blocked on a replica. The gate runs on the node that
+  // deploys, and this configures that node's own behavior, exactly like the
+  // honour-suppressions toggle beside it, which a replica can also set. Blocking
+  // the write here would leave the panel rendered but every save refused.
+  // Organization-wide mandatory policy is a separate, paid capability, not this.
   const body = req.body ?? {};
   const unknown = Object.keys(body).filter((k) => !EVIDENCE_POLICY_BODY_KEYS.has(k));
   if (unknown.length > 0) {
@@ -372,16 +367,24 @@ securityRouter.put('/evidence-policy', authMiddleware, (req: Request, res: Respo
     }
     next[SECURITY_EVIDENCE_SETTING_KEYS[field]] = value;
   }
-  if (body.maxScanAgeDays !== undefined) {
-    const days = body.maxScanAgeDays;
-    if (typeof days !== 'number' || !Number.isInteger(days) || days < 0 || days > MAX_SCAN_AGE_DAYS_CEILING) {
-      res.status(400).json({ error: `maxScanAgeDays must be an integer between 0 and ${MAX_SCAN_AGE_DAYS_CEILING} (0 disables the freshness bound)` });
-      return;
-    }
-    next[SECURITY_EVIDENCE_SETTING_KEYS.maxScanAgeDays] = String(days);
-  }
   try {
     const db = DatabaseService.getInstance();
+    const before = resolveSecurityEvidencePolicy(db.getGlobalSettings());
+    // Named by the field an operator sees, not by the settings row it is stored
+    // in, so the audit reads as a record of the control that moved.
+    const changed: string[] = [];
+    const previous: string[] = [];
+    for (const field of OUTCOME_FIELDS) {
+      if (next[SECURITY_EVIDENCE_SETTING_KEYS[field]] !== undefined) {
+        changed.push(field);
+        previous.push(`${field}=${before[field]}`);
+      }
+    }
+    if (changed.length === 0) {
+      // An empty body changed nothing, so it audits nothing.
+      res.json({ policy: serializeSecurityEvidencePolicy(before) });
+      return;
+    }
     // One transaction, so a multi-field save is all-or-nothing.
     db.updateGlobalSettings(next);
     db.insertAuditLog({
@@ -392,10 +395,10 @@ securityRouter.put('/evidence-policy', authMiddleware, (req: Request, res: Respo
       status_code: 200,
       node_id: typeof req.nodeId === 'number' ? req.nodeId : null,
       ip_address: req.ip ?? '',
-      // Records which controls moved, not their previous values. This write can
-      // weaken a deploy gate, so "who loosened it and when" has to be answerable
-      // from the audit log alone.
-      summary: `policy.evidence_availability changed=[${Object.keys(next).join(',')}]`,
+      // Records the previous values as well as the new ones. These fields
+      // decide whether a deploy is refused, so "who loosened it, when, and from
+      // what" has to be answerable from the audit log alone.
+      summary: `policy.evidence_availability changed=[${changed.join(',')}] was=[${previous.join(',')}]`,
     });
     res.json({
       policy: serializeSecurityEvidencePolicy(resolveSecurityEvidencePolicy(db.getGlobalSettings())),

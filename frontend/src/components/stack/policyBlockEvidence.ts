@@ -34,6 +34,33 @@ export interface EvidenceLine {
 }
 
 /**
+ * Operator-facing name for the setting behind a rule clause.
+ *
+ * The decision record carries the raw setting key (`security_scan_failure=block`)
+ * because that is what an audit needs. An operator reading a block dialog needs
+ * the control they can go and change, so the dialog renders this instead and the
+ * raw clause stays in the record.
+ */
+const RULE_LABEL: Record<string, string> = {
+    'security_scanner_unavailable': 'the Scanner unavailable setting',
+    'security_scan_failure': 'the Scan failed setting',
+    'security_candidate_unproven': 'the Candidate not evaluated setting',
+    'security_partial_evidence': 'partial evidence handling',
+};
+
+/** Turn `security_scan_failure=block` into "the Scan failed setting, set to block". */
+function describeRule(rule: string): string {
+    // The dialog is where a malformed payload lands, so this must degrade rather
+    // than throw. The code it replaced interpolated the value directly and could
+    // not fail; a split on a missing string would.
+    if (typeof rule !== 'string' || rule === '') return 'an unknown rule';
+    const [key, value] = rule.split('=');
+    const label = RULE_LABEL[key];
+    if (!label) return rule;
+    return value ? `${label}, set to ${value}` : label;
+}
+
+/**
  * Turn the decision record into one sentence per piece of evidence that was not
  * usable, preferring the rule application (which names the setting that acted)
  * and falling back to the record's own reason for a state no setting governs.
@@ -54,7 +81,7 @@ export function buildEvidenceLines(evidence: PolicyBlockPayload['evidence']): Ev
     const who = a.target ? ` for ${a.target}` : '';
     lines.push({
       key: `app:${a.source}:${a.state}:${a.target ?? ''}`,
-      text: `${what} evidence${who} was ${state}, so it was ${OUTCOME_PAST_TENSE[a.outcome]} by ${a.rule}.`,
+      text: `${what} evidence${who} was ${state}, so it was ${OUTCOME_PAST_TENSE[a.outcome]} by ${describeRule(a.rule)}.`,
     });
     // Keyed by state as well as target: one image can legitimately have two
     // distinct problems (a stale scan whose finding rows were also truncated),

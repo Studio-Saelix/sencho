@@ -8,21 +8,38 @@ import TrivyService, { DIGEST_CACHE_TTL_MS } from '../services/TrivyService';
 import { getErrorMessage } from '../utils/errors';
 import { sanitizeForLog } from '../utils/safeLog';
 import { summarizeBlockReasons } from '../utils/policy-risk';
+import type { EvidenceGateDecision } from '../services/securityEvidence';
 
 type BlockableAction = 'deploy' | 'update' | 'rollback';
 
 /**
- * One-line block message naming the risk inputs that matched, shared by the
- * thrown-error and 409-response paths so they never drift. Falls back to a
- * generic phrase when no reason was recorded (e.g. an image that could not be
- * scanned).
+ * One-line block message, shared by the thrown-error and 409-response paths so
+ * they never drift.
+ *
+ * A block is reached two ways, and the message has to tell them apart. Either a
+ * scanned image matched a risk input, or the gate could not obtain the evidence
+ * it needed and the configured availability policy refused. Reporting the
+ * second as "matched scan policy conditions" is false and, on the unattended
+ * paths that only have this sentence (bulk deploy, the scheduler, auto-update,
+ * Git sources, rollback), it is the operator's only explanation.
  */
 export function describePolicyBlock(
   policy: ScanPolicy | undefined,
   violations: PolicyViolation[],
   action: BlockableAction = 'deploy',
+  evidence?: EvidenceGateDecision,
 ): string {
-  return `Policy "${policy?.name ?? 'policy'}" blocked ${action}: ${violations.length} image(s) matched ${summarizeBlockReasons(violations)}`;
+  const name = policy?.name ?? 'policy';
+  // A genuine match is one with no `error` set; an `error` marks a violation
+  // standing in for evidence the gate could not obtain.
+  const genuine = violations.filter((v) => !v.error);
+  if (genuine.length > 0) {
+    return `Policy "${name}" blocked ${action}: ${genuine.length} image(s) matched ${summarizeBlockReasons(genuine)}`;
+  }
+  if (evidence) {
+    return `Policy "${name}" blocked ${action} because required security evidence was unavailable: ${evidence.summary}`;
+  }
+  return `Policy "${name}" blocked ${action}: ${violations.length} image(s) could not be evaluated`;
 }
 
 // Bypass requires `?ignorePolicy=true` AND `req.user.role === 'admin'`. The
@@ -61,7 +78,7 @@ export async function assertPolicyGateAllows(
 ): Promise<void> {
   const gate = await enforcePolicyPreDeploy(stackName, nodeId, options);
   if (!gate.ok) {
-    throw new Error(describePolicyBlock(gate.policy, gate.violations));
+    throw new Error(describePolicyBlock(gate.policy, gate.violations, 'deploy', gate.evidence));
   }
 }
 
@@ -78,7 +95,7 @@ export async function runPolicyGate(
   const gate = await enforcePolicyPreDeploy(stackName, nodeId, buildPolicyGateOptions(req));
   if (!gate.ok) {
     res.status(409).json({
-      error: describePolicyBlock(gate.policy, gate.violations),
+      error: describePolicyBlock(gate.policy, gate.violations, 'deploy', gate.evidence),
       policy: gate.policy && {
         id: gate.policy.id,
         name: gate.policy.name,

@@ -2303,12 +2303,12 @@ export class DatabaseService {
         // cannot prove a target is safe. These defaults reproduce the gate's
         // pre-policy behavior exactly, so seeding them changes no outcome on an
         // existing install. A missing scanner still allows the deploy (a tool
-        // outage must not lock an operator out); a failed scan still blocks;
-        // scan age is not yet consulted (0 = no freshness bound).
+        // outage must not lock an operator out); a failed scan still blocks; a
+        // candidate that cannot be evaluated is still held, which is what the
+        // Git-managed source path did before it was configurable.
         stmt.run('security_scanner_unavailable', 'allow');
         stmt.run('security_scan_failure', 'block');
-        stmt.run('security_stale_scan', 'allow');
-        stmt.run('security_max_scan_age_days', '0');
+        stmt.run('security_candidate_unproven', 'block');
         stmt.run('mesh_auto_recreate', '0');
         stmt.run('prune_on_update', '1');
         // Managed by /api/sso/auth-mode, not the generic /api/settings route

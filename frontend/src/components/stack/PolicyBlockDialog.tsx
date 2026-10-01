@@ -130,6 +130,11 @@ export function PolicyBlockDialog({
   // policy governs, such as partial evidence the gate fails closed on by
   // definition. Together they mean the dialog never shows a bare refusal.
   const evidenceLines = buildEvidenceLines(payload?.evidence);
+  // A payload can carry both a genuine match and an evidence gap. The gap is
+  // still worth naming, but the "not a proven vulnerability" sentence is a claim
+  // about the whole block and is false when any image matched on the merits.
+  const genuineCount = violations.filter((v) => !v.error).length;
+  const hasGenuineViolation = genuineCount > 0;
 
   return (
     <Modal open={open} onOpenChange={(next) => { if (!next) onClose(); }} size="xl">
@@ -142,7 +147,12 @@ export function PolicyBlockDialog({
         <p className="text-sm text-muted-foreground">
           Policy <span className="font-medium text-foreground">{policyName}</span> blocks deploys
           on <span className="font-medium text-foreground">{inputsText}</span>.{' '}
-          The following {violations.length === 1 ? 'image' : `${violations.length} images`} triggered the block.
+          {hasGenuineViolation
+            ? // Counted over the genuine matches only. On a mixed payload the
+              // remaining rows are evidence placeholders, which did not trigger
+              // anything on the merits.
+              `The following ${genuineCount === 1 ? 'image' : `${genuineCount} images`} triggered the block.`
+            : 'No image was found to match those conditions. The deploy was stopped because the evidence needed to check them could not be obtained.'}
         </p>
         <div className="border border-glass-border bg-card/60 shadow-card-bevel divide-y divide-glass-border">
           {violations.length === 0 ? (
@@ -197,9 +207,9 @@ export function PolicyBlockDialog({
               Evidence unavailable
             </div>
             <p className="text-xs text-muted-foreground mt-1">
-              This deploy was not stopped by a proven vulnerability. It was stopped because the
-              evidence the policy needs could not be obtained, and your settings say what to do in
-              that case.
+              {hasGenuineViolation
+                ? 'This deploy was also affected by missing evidence. Alongside the findings above, the evidence below could not be obtained, and your settings say what to do in that case.'
+                : 'This deploy was not stopped by a proven vulnerability. It was stopped because the evidence the policy needs could not be obtained, and your settings say what to do in that case.'}
             </p>
             <ul className="mt-2 space-y-1">
               {evidenceLines.map((line) => (

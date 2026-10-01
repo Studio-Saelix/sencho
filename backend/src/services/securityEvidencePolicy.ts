@@ -38,17 +38,18 @@ export interface SecurityEvidencePolicy {
      */
     scanFailure: EvidenceAvailabilityOutcome;
     /**
-     * What to do when a scan completed but is older than the freshness bound.
-     * Default `allow`, and inert at that value: the gate has never consulted
-     * scan age before. A stale scan still reports its findings and still
-     * blocks; this only decides whether age alone stops the deploy.
+     * What to do when a scan cannot be evaluated for a *candidate*: an image a
+     * Git-managed source is about to accept without a person in the loop.
+     *
+     * Its own field rather than an inherited one, and it defaults to `block`
+     * unlike the deploy gate's fail-open fields. Two reasons. The issue names
+     * "candidate image not scanned" as a control in its own right, so the
+     * operator can hold it stricter than an interactive deploy. And a setting an
+     * operator relaxes to get past a scanner outage at the keyboard must not
+     * silently become authority for an unattended automation to accept code
+     * nothing proved safe.
      */
-    staleScan: EvidenceAvailabilityOutcome;
-    /**
-     * Maximum accepted scan age in ms, or null for no bound. Default null, which
-     * is what makes `staleScan` inert: with no bound nothing is ever stale.
-     */
-    maxScanAgeMs: number | null;
+    candidateUnproven: EvidenceAvailabilityOutcome;
 }
 
 /**
@@ -59,19 +60,14 @@ export interface SecurityEvidencePolicy {
 export const DEFAULT_SECURITY_EVIDENCE_POLICY: SecurityEvidencePolicy = {
     scannerUnavailable: 'allow',
     scanFailure: 'block',
-    staleScan: 'allow',
-    maxScanAgeMs: null,
+    candidateUnproven: 'block',
 };
 
 export const SECURITY_EVIDENCE_SETTING_KEYS = {
     scannerUnavailable: 'security_scanner_unavailable',
     scanFailure: 'security_scan_failure',
-    staleScan: 'security_stale_scan',
-    maxScanAgeDays: 'security_max_scan_age_days',
+    candidateUnproven: 'security_candidate_unproven',
 } as const;
-
-/** Freshness bounds above this are a configuration mistake, not a preference. */
-export const MAX_SCAN_AGE_DAYS_CEILING = 365;
 
 const VALID_OUTCOMES: ReadonlySet<string> = new Set<EvidenceAvailabilityOutcome>(['allow', 'warn', 'block']);
 
@@ -87,15 +83,6 @@ function readOutcome(
     // reason unrelated to security.
     if (typeof raw !== 'string' || !VALID_OUTCOMES.has(raw)) return fallback;
     return raw as EvidenceAvailabilityOutcome;
-}
-
-function readMaxScanAgeMs(settings: Record<string, string>): number | null {
-    const raw = settings[SECURITY_EVIDENCE_SETTING_KEYS.maxScanAgeDays];
-    if (raw === undefined || raw === '') return null;
-    const days = Number(raw);
-    if (!Number.isFinite(days) || days <= 0) return null;
-    const clamped = Math.min(days, MAX_SCAN_AGE_DAYS_CEILING);
-    return Math.floor(clamped) * 86_400_000;
 }
 
 /**
@@ -117,12 +104,11 @@ export function resolveSecurityEvidencePolicy(
             SECURITY_EVIDENCE_SETTING_KEYS.scanFailure,
             DEFAULT_SECURITY_EVIDENCE_POLICY.scanFailure,
         ),
-        staleScan: readOutcome(
+        candidateUnproven: readOutcome(
             source,
-            SECURITY_EVIDENCE_SETTING_KEYS.staleScan,
-            DEFAULT_SECURITY_EVIDENCE_POLICY.staleScan,
+            SECURITY_EVIDENCE_SETTING_KEYS.candidateUnproven,
+            DEFAULT_SECURITY_EVIDENCE_POLICY.candidateUnproven,
         ),
-        maxScanAgeMs: readMaxScanAgeMs(source),
     };
 }
 
@@ -130,8 +116,7 @@ export function resolveSecurityEvidencePolicy(
 export interface SerializedSecurityEvidencePolicy {
     scannerUnavailable: EvidenceAvailabilityOutcome;
     scanFailure: EvidenceAvailabilityOutcome;
-    staleScan: EvidenceAvailabilityOutcome;
-    maxScanAgeDays: number;
+    candidateUnproven: EvidenceAvailabilityOutcome;
     /** True when the resolved policy equals the shipped default. */
     isDefault: boolean;
 }
@@ -140,12 +125,10 @@ export function serializeSecurityEvidencePolicy(policy: SecurityEvidencePolicy):
     return {
         scannerUnavailable: policy.scannerUnavailable,
         scanFailure: policy.scanFailure,
-        staleScan: policy.staleScan,
-        maxScanAgeDays: policy.maxScanAgeMs === null ? 0 : Math.floor(policy.maxScanAgeMs / 86_400_000),
+        candidateUnproven: policy.candidateUnproven,
         isDefault:
             policy.scannerUnavailable === DEFAULT_SECURITY_EVIDENCE_POLICY.scannerUnavailable &&
             policy.scanFailure === DEFAULT_SECURITY_EVIDENCE_POLICY.scanFailure &&
-            policy.staleScan === DEFAULT_SECURITY_EVIDENCE_POLICY.staleScan &&
-            policy.maxScanAgeMs === DEFAULT_SECURITY_EVIDENCE_POLICY.maxScanAgeMs,
+            policy.candidateUnproven === DEFAULT_SECURITY_EVIDENCE_POLICY.candidateUnproven,
     };
 }

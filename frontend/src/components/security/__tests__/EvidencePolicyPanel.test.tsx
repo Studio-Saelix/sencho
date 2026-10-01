@@ -27,8 +27,7 @@ function jsonResponse(status: number, body: unknown): Response {
 const DEFAULTS = {
   scannerUnavailable: 'allow',
   scanFailure: 'block',
-  staleScan: 'allow',
-  maxScanAgeDays: 0,
+  candidateUnproven: 'block',
   isDefault: true,
 };
 
@@ -37,7 +36,6 @@ function payload(overrides: Record<string, unknown> = {}) {
     policy: { ...DEFAULTS, ...overrides },
     defaults: DEFAULTS,
     outcomes: ['allow', 'warn', 'block'],
-    maxScanAgeDaysCeiling: 365,
   };
 }
 
@@ -65,8 +63,7 @@ it('states the active setting and the shipped default on every row', async () =>
   await waitFor(() => expect(screen.getByText('Evidence availability')).toBeInTheDocument());
   // Every row's help text names the default, so it is never hidden.
   expect(screen.getAllByText(/Default: allow\./).length).toBeGreaterThan(0);
-  expect(screen.getByText(/Default: block\./)).toBeInTheDocument();
-  expect(screen.getByText(/0 \(the default\) sets no limit/)).toBeInTheDocument();
+  expect(screen.getAllByText(/Default: block\./).length).toBeGreaterThan(0);
 });
 
 it('marks a value that differs from the default', async () => {
@@ -103,8 +100,10 @@ it('surfaces a read failure and says the shipped default is in force', async () 
   render(<EvidencePolicyPanel />);
   await waitFor(() => expect(screen.getByText(/could not be read/)).toBeInTheDocument());
   // The fallback copy has to describe all three defaults, not just the first.
-  expect(screen.getByText(/a missing\s+scanner still allows the deploy/)).toBeInTheDocument();
-  expect(screen.getByText(/a failed scan blocks it/)).toBeInTheDocument();
+  // It must not claim to know what the gate currently enforces: a failed read
+  // says nothing about the stored values.
+  expect(screen.getByText(/currently enforces is unknown/)).toBeInTheDocument();
+  expect(screen.getByText(/a read failure falls back to the shipped defaults/)).toBeInTheDocument();
 });
 
 it('accepts the write response, which carries the policy without the read envelope', async () => {
@@ -116,7 +115,7 @@ it('accepts the write response, which carries the policy without the read envelo
 
   mockedFetch.mockResolvedValue(
     jsonResponse(200, {
-      policy: { scannerUnavailable: 'block', scanFailure: 'block', staleScan: 'allow', maxScanAgeDays: 0, isDefault: false },
+      policy: { scannerUnavailable: 'block', scanFailure: 'block', candidateUnproven: 'block', isDefault: false },
     }),
   );
   fireEvent.click(radio('Scanner unavailable', 'Block'));
@@ -154,7 +153,7 @@ it('disables the controls for a non-admin', async () => {
   render(<EvidencePolicyPanel />);
   await waitFor(() => expect(screen.getByText(/read-only for your role/)).toBeInTheDocument());
   expect(radio('Scanner unavailable', 'Block')).toBeDisabled();
-  expect(screen.getByLabelText('Freshness limit (days)')).toBeDisabled();
+  expect(radio('Candidate not evaluated', 'Allow')).toBeDisabled();
 });
 
 it('keeps showing the active values to a non-admin', async () => {
@@ -171,38 +170,9 @@ it('reports a rejected write without claiming success', async () => {
   render(<EvidencePolicyPanel />);
   await waitFor(() => expect(screen.getByText('Evidence availability')).toBeInTheDocument());
 
-  mockedFetch.mockResolvedValue(jsonResponse(400, { error: 'staleScan must be one of: allow, warn, block' }));
-  fireEvent.click(radio('Scan too old', 'Warn'));
+  mockedFetch.mockResolvedValue(jsonResponse(400, { error: 'scanFailure must be one of: allow, warn, block' }));
+  fireEvent.click(radio('Scan failed', 'Warn'));
 
-  await waitFor(() => expect(toast.error).toHaveBeenCalledWith('staleScan must be one of: allow, warn, block'));
+  await waitFor(() => expect(toast.error).toHaveBeenCalledWith('scanFailure must be one of: allow, warn, block'));
   expect(toast.success).not.toHaveBeenCalled();
-});
-
-it('rejects an out-of-range freshness limit before sending it', async () => {
-  render(<EvidencePolicyPanel />);
-  await waitFor(() => expect(screen.getByText('Evidence availability')).toBeInTheDocument());
-
-  const input = screen.getByLabelText('Freshness limit (days)');
-  fireEvent.change(input, { target: { value: '9999' } });
-  fireEvent.focusOut(input);
-
-  await waitFor(() => expect(toast.error).toHaveBeenCalled());
-  expect(vi.mocked(toast.error).mock.calls[0][0]).toMatch(/between 0 and 365/);
-  expect(mockedFetch.mock.calls.some(([, init]) => init?.method === 'PUT')).toBe(false);
-});
-
-it('accepts a valid freshness limit and sends it', async () => {
-  render(<EvidencePolicyPanel />);
-  await waitFor(() => expect(screen.getByText('Evidence availability')).toBeInTheDocument());
-
-  const input = screen.getByLabelText('Freshness limit (days)');
-  fireEvent.change(input, { target: { value: '14' } });
-  fireEvent.focusOut(input);
-
-  await waitFor(() => {
-    const call = mockedFetch.mock.calls.find(
-      ([url, init]) => url === '/security/evidence-policy' && init?.method === 'PUT',
-    );
-    expect(JSON.parse((call?.[1] as { body: string }).body)).toEqual({ maxScanAgeDays: 14 });
-  });
 });

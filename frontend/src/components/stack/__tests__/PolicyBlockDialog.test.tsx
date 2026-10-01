@@ -2,7 +2,7 @@ import { describe, it, expect, vi } from 'vitest';
 import { render, screen } from '@testing-library/react';
 import { PolicyBlockDialog, type PolicyBlockPayload } from '../PolicyBlockDialog';
 
-const payload: PolicyBlockPayload = {
+const publicPayload: PolicyBlockPayload = {
   error: 'blocked',
   policy: { id: 1, name: 'prod-gate', maxSeverity: 'CRITICAL', blockOnSeverity: 0, blockOnKev: 1, blockOnFixable: 1 },
   violations: [
@@ -43,7 +43,7 @@ describe('PolicyBlockDialog evidence', () => {
     // render container.
     const rows = [...document.body.querySelectorAll('li')].map((li) => li.textContent ?? '');
     expect(rows.some((t) => t.includes('scanner availability evidence was unavailable'))).toBe(true);
-    expect(rows.some((t) => t.includes('it was blocked by security_scanner_unavailable=block'))).toBe(true);
+    expect(rows.some((t) => t.includes('it was blocked by the Scanner unavailable setting, set to block'))).toBe(true);
   });
 
   it('spells every outcome rather than appending a suffix', () => {
@@ -53,13 +53,13 @@ describe('PolicyBlockDialog evidence', () => {
         outcome: 'warn',
         summary: 'x',
         applications: [
-          { source: 'vulnerability_scan', state: 'stale', outcome: 'warn', rule: 'security_stale_scan=warn' },
+          { source: 'vulnerability_scan', state: 'stale', outcome: 'warn', rule: 'security_scan_failure=warn' },
         ],
       },
     };
     renderDialog(warned);
     const text = [...document.body.querySelectorAll('li')].map((li) => li.textContent ?? '').join(' ');
-    expect(text).toContain('it was warned about by security_stale_scan=warn');
+    expect(text).toContain('it was warned about by the Scan failed setting, set to warn');
     expect(text).not.toContain('warnd');
     expect(text).not.toContain('allowd');
   });
@@ -72,12 +72,12 @@ describe('PolicyBlockDialog evidence', () => {
   it('shows no evidence section for a genuine policy match', () => {
     // A proven match needs no availability explanation, and adding one would
     // dilute the case that actually matters.
-    renderDialog(payload);
+    renderDialog(publicPayload);
     expect(screen.queryByText(/Evidence unavailable/i)).not.toBeInTheDocument();
   });
 
   it('shows no evidence section on an older control payload with no evidence field', () => {
-    renderDialog({ ...payload, evidence: undefined });
+    renderDialog({ ...publicPayload, evidence: undefined });
     expect(screen.queryByText(/Evidence unavailable/i)).not.toBeInTheDocument();
   });
 
@@ -110,7 +110,7 @@ describe('PolicyBlockDialog evidence', () => {
             source: 'vulnerability_scan',
             state: 'stale',
             outcome: 'block',
-            rule: 'security_stale_scan=block',
+            rule: 'security_scan_failure=block',
             target: 'nginx:1.27',
           },
         ],
@@ -118,7 +118,7 @@ describe('PolicyBlockDialog evidence', () => {
     };
     renderDialog(both);
     const rows = [...document.body.querySelectorAll('li')].map((li) => li.textContent ?? '');
-    expect(rows.some((t) => t.includes('security_stale_scan=block'))).toBe(true);
+    expect(rows.some((t) => t.includes('the Scan failed setting'))).toBe(true);
     expect(rows.some((t) => t.includes('incomplete'))).toBe(true);
   });
 
@@ -130,8 +130,8 @@ describe('PolicyBlockDialog evidence', () => {
         summary: 'x',
         records: [],
         applications: [
-          { source: 'vulnerability_scan', state: 'stale', outcome: 'allow', rule: 'security_stale_scan=allow', target: 'a:1' },
-          { source: 'vulnerability_scan', state: 'stale', outcome: 'allow', rule: 'security_stale_scan=allow', target: 'b:1' },
+          { source: 'vulnerability_scan', state: 'stale', outcome: 'allow', rule: 'security_scan_failure=allow', target: 'a:1' },
+          { source: 'vulnerability_scan', state: 'stale', outcome: 'allow', rule: 'security_scan_failure=allow', target: 'b:1' },
         ],
       },
     };
@@ -149,6 +149,50 @@ describe('PolicyBlockDialog evidence', () => {
     }
   });
 
+  it('does not claim the block was not a vulnerability when a genuine violation is also present', () => {
+    // A payload can carry both. The gap is still worth naming, but the sentence
+    // is a claim about the whole block and would be false here.
+    const mixed: PolicyBlockPayload = {
+      ...unavailablePayload,
+      violations: [
+        ...unavailablePayload.violations,
+        publicPayload.violations[0],
+      ],
+    };
+    renderDialog(mixed);
+    expect(screen.queryByText(/not stopped by a proven vulnerability/i)).not.toBeInTheDocument();
+    expect(screen.getByText(/also affected by missing evidence/i)).toBeInTheDocument();
+    // The gap is still explained rather than dropped.
+    expect(screen.getAllByText(/the Scanner unavailable setting/).length).toBeGreaterThan(0);
+  });
+
+  it('names no violating image when every violation is an evidence gap', () => {
+    // For an evidence block the violating row is a placeholder, not an image, so
+    // "the following image triggered the block" would be false.
+    renderDialog(unavailablePayload);
+    expect(screen.queryByText(/triggered the block/i)).not.toBeInTheDocument();
+    expect(screen.getByText(/No image was found to match those conditions/i)).toBeInTheDocument();
+  });
+
+  it('still names the violating images when there is a genuine match', () => {
+    renderDialog(publicPayload);
+    expect(screen.getByText(/triggered the block/i)).toBeInTheDocument();
+  });
+
+  it('counts only the genuine matches on a mixed payload', () => {
+    // The evidence placeholder did not trigger anything on the merits, so
+    // counting it would overstate how many images matched.
+    const mixed: PolicyBlockPayload = {
+      ...unavailablePayload,
+      violations: [...unavailablePayload.violations, publicPayload.violations[0]],
+    };
+    renderDialog(mixed);
+    // One genuine match, so the singular form: the evidence placeholder beside it
+    // must not be counted as a second violating image.
+    expect(screen.getByText(/The following image triggered the block/)).toBeInTheDocument();
+    expect(screen.queryByText(/2 images triggered the block/)).not.toBeInTheDocument();
+  });
+
   it('omits current evidence from the explanation', () => {
     const mixed: PolicyBlockPayload = {
       ...unavailablePayload,
@@ -157,12 +201,12 @@ describe('PolicyBlockDialog evidence', () => {
         summary: 'x',
         applications: [
           { source: 'vulnerability_scan', state: 'current', outcome: 'allow', rule: 'nothing' },
-          { source: 'vulnerability_scan', state: 'stale', outcome: 'block', rule: 'security_stale_scan=block' },
+          { source: 'vulnerability_scan', state: 'stale', outcome: 'block', rule: 'security_scan_failure=block' },
         ],
       },
     };
     renderDialog(mixed);
-    expect(screen.getByText(/security_stale_scan=block/)).toBeInTheDocument();
+    expect(screen.getByText(/the Scan failed setting/)).toBeInTheDocument();
     expect(screen.queryByText(/state was current/)).not.toBeInTheDocument();
   });
 });
@@ -170,7 +214,7 @@ describe('PolicyBlockDialog evidence', () => {
 describe('PolicyBlockDialog', () => {
   it('describes the active inputs (KEV + fixable, not the severity threshold)', () => {
     render(
-      <PolicyBlockDialog open payload={payload} stackName="web" canBypass={false} bypassing={false} onClose={vi.fn()} onBypass={vi.fn()} />,
+      <PolicyBlockDialog open payload={publicPayload} stackName="web" canBypass={false} bypassing={false} onClose={vi.fn()} onBypass={vi.fn()} />,
     );
     const desc = screen.getAllByText(/known-exploited CVE \(KEV\)/i);
     expect(desc.length).toBeGreaterThan(0);
@@ -179,7 +223,7 @@ describe('PolicyBlockDialog', () => {
 
   it('renders a reason badge per matched input on the violation row', () => {
     render(
-      <PolicyBlockDialog open payload={payload} stackName="web" canBypass={false} bypassing={false} onClose={vi.fn()} onBypass={vi.fn()} />,
+      <PolicyBlockDialog open payload={publicPayload} stackName="web" canBypass={false} bypassing={false} onClose={vi.fn()} onBypass={vi.fn()} />,
     );
     expect(screen.getByText('KEV')).toBeInTheDocument();
     expect(screen.getByText('Fixable')).toBeInTheDocument();

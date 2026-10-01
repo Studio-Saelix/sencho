@@ -41,8 +41,7 @@ beforeEach(async () => {
   const db = DatabaseService.getInstance();
   db.updateGlobalSetting('security_scanner_unavailable', 'allow');
   db.updateGlobalSetting('security_scan_failure', 'block');
-  db.updateGlobalSetting('security_stale_scan', 'allow');
-  db.updateGlobalSetting('security_max_scan_age_days', '0');
+  db.updateGlobalSetting('security_candidate_unproven', 'block');
 });
 
 describe('GET /api/security/evidence-policy', () => {
@@ -52,8 +51,7 @@ describe('GET /api/security/evidence-policy', () => {
     expect(res.body.policy).toMatchObject({
       scannerUnavailable: 'allow',
       scanFailure: 'block',
-      staleScan: 'allow',
-      maxScanAgeDays: 0,
+      candidateUnproven: 'block',
       isDefault: true,
     });
     // The UI has to be able to say what the default is, not just what is set.
@@ -68,17 +66,16 @@ describe('GET /api/security/evidence-policy', () => {
 });
 
 describe('PUT /api/security/evidence-policy', () => {
-  it('persists each outcome and the freshness bound', async () => {
+  it('persists each outcome', async () => {
     const res = await request(app)
       .put('/api/security/evidence-policy')
       .set('Cookie', authCookie)
-      .send({ scannerUnavailable: 'warn', scanFailure: 'allow', staleScan: 'block', maxScanAgeDays: 7 });
+      .send({ scannerUnavailable: 'warn', scanFailure: 'allow', candidateUnproven: 'allow' });
     expect(res.status).toBe(200);
     expect(res.body.policy).toMatchObject({
       scannerUnavailable: 'warn',
       scanFailure: 'allow',
-      staleScan: 'block',
-      maxScanAgeDays: 7,
+      candidateUnproven: 'allow',
       isDefault: false,
     });
 
@@ -86,9 +83,46 @@ describe('PUT /api/security/evidence-policy', () => {
     expect(readBack.body.policy).toMatchObject({
       scannerUnavailable: 'warn',
       scanFailure: 'allow',
-      staleScan: 'block',
-      maxScanAgeDays: 7,
+      candidateUnproven: 'allow',
     });
+  });
+
+  it('records what a gate-weakening write changed and what it changed from', async () => {
+    const { DatabaseService } = await import('../services/DatabaseService');
+    const audit = vi.spyOn(DatabaseService.getInstance(), 'insertAuditLog');
+    try {
+      await request(app)
+        .put('/api/security/evidence-policy')
+        .set('Cookie', authCookie)
+        .send({ scanFailure: 'allow' });
+      // The request-audit middleware also writes a row per request, so select
+      // this route's own entry rather than the last one written.
+      const summaries = audit.mock.calls
+        .map((c) => (c[0] as { summary?: string }).summary ?? '')
+        .filter((t) => t.startsWith('policy.evidence_availability'));
+      expect(summaries).toHaveLength(1);
+      expect(summaries[0]).toContain('changed=[scanFailure]');
+      // The previous value matters as much as the new one: "who loosened it,
+      // and from what".
+      expect(summaries[0]).toContain('was=[scanFailure=block]');
+    } finally {
+      audit.mockRestore();
+    }
+  });
+
+  it('writes no audit row when the body changed nothing', async () => {
+    const { DatabaseService } = await import('../services/DatabaseService');
+    const audit = vi.spyOn(DatabaseService.getInstance(), 'insertAuditLog');
+    try {
+      const res = await request(app).put('/api/security/evidence-policy').set('Cookie', authCookie).send({});
+      expect(res.status).toBe(200);
+      const mine = audit.mock.calls
+        .map((c) => (c[0] as { summary?: string }).summary ?? '')
+        .filter((t) => t.startsWith('policy.evidence_availability'));
+      expect(mine).toEqual([]);
+    } finally {
+      audit.mockRestore();
+    }
   });
 
   it('accepts a partial body and leaves the rest of the policy alone', async () => {
@@ -97,16 +131,11 @@ describe('PUT /api/security/evidence-policy', () => {
       .set('Cookie', authCookie)
       .send({ scannerUnavailable: 'block' });
     expect(res.status).toBe(200);
-    expect(res.body.policy).toMatchObject({ scannerUnavailable: 'block', scanFailure: 'block', staleScan: 'allow' });
-  });
-
-  it('accepts 0 days to disable the freshness bound', async () => {
-    const res = await request(app)
-      .put('/api/security/evidence-policy')
-      .set('Cookie', authCookie)
-      .send({ maxScanAgeDays: 0 });
-    expect(res.status).toBe(200);
-    expect(res.body.policy.maxScanAgeDays).toBe(0);
+    expect(res.body.policy).toMatchObject({
+      scannerUnavailable: 'block',
+      scanFailure: 'block',
+      candidateUnproven: 'block',
+    });
   });
 
   it('rejects an unknown outcome and writes nothing', async () => {
@@ -127,14 +156,15 @@ describe('PUT /api/security/evidence-policy', () => {
     expect(res.status).toBe(400);
   });
 
-  it('rejects an out-of-range freshness bound', async () => {
-    for (const days of [-1, 1.5, 4000]) {
-      const res = await request(app)
-        .put('/api/security/evidence-policy')
-        .set('Cookie', authCookie)
-        .send({ maxScanAgeDays: days });
-      expect(res.status, `days=${days}`).toBe(400);
-    }
+  it('rejects the deferred freshness field rather than accepting a setting nothing reads', async () => {
+    // The control is deferred to the paths that can act on stored evidence.
+    // Accepting the field here would persist a value that silently does nothing.
+    const res = await request(app)
+      .put('/api/security/evidence-policy')
+      .set('Cookie', authCookie)
+      .send({ maxScanAgeDays: 7 });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toContain('maxScanAgeDays');
   });
 
   it('rejects an unknown field rather than silently dropping it', async () => {
@@ -151,10 +181,45 @@ describe('PUT /api/security/evidence-policy', () => {
     const res = await request(app)
       .put('/api/security/evidence-policy')
       .set('Cookie', authCookie)
-      .send({ scannerUnavailable: 'warn', staleScan: 'sometimes' });
+      .send({ scannerUnavailable: 'warn', candidateUnproven: 'sometimes' });
     expect(res.status).toBe(400);
     const readBack = await request(app).get('/api/security/evidence-policy').set('Cookie', authCookie);
     expect(readBack.body.policy.scannerUnavailable).toBe('allow');
+  });
+
+  it('is writable on a replica, because the gate runs on the node that deploys', async () => {
+    // Deliberately NOT replica-blocked. This configures the local gate, exactly
+    // like the honour-suppressions toggle beside it, which a replica can also
+    // set. Blocking it would leave the panel rendered and every save refused.
+    const { FleetSyncService } = await import('../services/FleetSyncService');
+    const roleSpy = vi.spyOn(FleetSyncService, 'getRole').mockReturnValue('replica');
+    try {
+      const res = await request(app)
+        .put('/api/security/evidence-policy')
+        .set('Cookie', authCookie)
+        .send({ scanFailure: 'allow' });
+      expect(res.status).toBe(200);
+      expect(res.body.policy.scanFailure).toBe('allow');
+    } finally {
+      roleSpy.mockRestore();
+    }
+  });
+
+  it('still refuses a replicated resource write on a replica, so the guard is real', async () => {
+    // Contrast case: proves the replica guard exists and this route is a
+    // deliberate exception rather than an oversight.
+    const { FleetSyncService } = await import('../services/FleetSyncService');
+    const roleSpy = vi.spyOn(FleetSyncService, 'getRole').mockReturnValue('replica');
+    try {
+      const res = await request(app)
+        .post('/api/security/policies')
+        .set('Cookie', authCookie)
+        .send({ name: 'replica-refused', stack_pattern: '*', max_severity: 'HIGH', block_on_deploy: true, enabled: true, block_on_severity: true });
+      expect(res.status).toBe(403);
+      expect(res.body.code).toBe('REPLICA_READ_ONLY');
+    } finally {
+      roleSpy.mockRestore();
+    }
   });
 
   it('refuses a non-admin write', async () => {

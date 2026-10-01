@@ -20,7 +20,6 @@ import {
 } from '../services/securityEvidence';
 import {
     DEFAULT_SECURITY_EVIDENCE_POLICY,
-    MAX_SCAN_AGE_DAYS_CEILING,
     resolveSecurityEvidencePolicy,
     serializeSecurityEvidencePolicy,
 } from '../services/securityEvidencePolicy';
@@ -220,7 +219,7 @@ describe('resolveSecurityEvidencePolicy', () => {
         expect(policy).toEqual(DEFAULT_SECURITY_EVIDENCE_POLICY);
         expect(policy.scannerUnavailable).toBe('allow');
         expect(policy.scanFailure).toBe('block');
-        expect(policy.maxScanAgeMs).toBeNull();
+        expect(policy.candidateUnproven).toBe('block');
     });
 
     it('falls back to the defaults on a null or absent settings read', () => {
@@ -233,32 +232,31 @@ describe('resolveSecurityEvidencePolicy', () => {
         expect(policy.scannerUnavailable).toBe('allow');
     });
 
-    it('treats 0 and a non-numeric age as no bound, so staleScan cannot fire on one', () => {
-        expect(resolveSecurityEvidencePolicy({ security_max_scan_age_days: '0' }).maxScanAgeMs).toBeNull();
-        expect(resolveSecurityEvidencePolicy({ security_max_scan_age_days: 'soon' }).maxScanAgeMs).toBeNull();
-        expect(resolveSecurityEvidencePolicy({ security_max_scan_age_days: '-5' }).maxScanAgeMs).toBeNull();
+    it('holds an unevaluable candidate by default, which is what the path did before it was configurable', () => {
+        expect(DEFAULT_SECURITY_EVIDENCE_POLICY.candidateUnproven).toBe('block');
     });
 
-    it('converts a day count to milliseconds', () => {
-        expect(resolveSecurityEvidencePolicy({ security_max_scan_age_days: '7' }).maxScanAgeMs).toBe(7 * DAY);
-    });
-
-    it('clamps an absurd bound instead of accepting unbounded freshness', () => {
-        const policy = resolveSecurityEvidencePolicy({ security_max_scan_age_days: '100000' });
-        expect(policy.maxScanAgeMs).toBe(MAX_SCAN_AGE_DAYS_CEILING * DAY);
-    });
-
-    it('accepts every configured outcome', () => {
+    it('accepts every configured outcome on every field', () => {
         for (const outcome of ['allow', 'warn', 'block'] as const) {
             const policy = resolveSecurityEvidencePolicy({
                 security_scanner_unavailable: outcome,
                 security_scan_failure: outcome,
-                security_stale_scan: outcome,
+                security_candidate_unproven: outcome,
             });
             expect(policy.scannerUnavailable).toBe(outcome);
             expect(policy.scanFailure).toBe(outcome);
-            expect(policy.staleScan).toBe(outcome);
+            expect(policy.candidateUnproven).toBe(outcome);
         }
+    });
+
+    it('keeps the candidate field independent of the deploy fields', () => {
+        // The separation is the point: relaxing the interactive gate must not
+        // relax the unattended acceptance path.
+        const policy = resolveSecurityEvidencePolicy({
+            security_scanner_unavailable: 'allow',
+            security_scan_failure: 'allow',
+        });
+        expect(policy.candidateUnproven).toBe('block');
     });
 });
 
@@ -266,7 +264,6 @@ describe('serializeSecurityEvidencePolicy', () => {
     it('reports the defaults as defaults', () => {
         expect(serializeSecurityEvidencePolicy(DEFAULT_SECURITY_EVIDENCE_POLICY)).toMatchObject({
             isDefault: true,
-            maxScanAgeDays: 0,
         });
     });
 
@@ -276,8 +273,9 @@ describe('serializeSecurityEvidencePolicy', () => {
         ).toMatchObject({ isDefault: false, scannerUnavailable: 'block' });
     });
 
-    it('round-trips a bound through the serialized day count', () => {
-        const resolved = resolveSecurityEvidencePolicy({ security_max_scan_age_days: '30' });
-        expect(serializeSecurityEvidencePolicy(resolved).maxScanAgeDays).toBe(30);
+    it('reports a non-default candidate rule as a deviation', () => {
+        expect(
+            serializeSecurityEvidencePolicy({ ...DEFAULT_SECURITY_EVIDENCE_POLICY, candidateUnproven: 'allow' }),
+        ).toMatchObject({ isDefault: false, candidateUnproven: 'allow' });
     });
 });

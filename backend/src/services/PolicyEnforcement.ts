@@ -272,6 +272,11 @@ function decideScannerUnavailable(
         // hatch that every other branch keeps. Without this the setting would
         // silently strand a node whose scanner is missing.
         if (opts.bypass) {
+            // Audited like every other bypass. An admin proceeding past a gate
+            // is the same event here as anywhere else, and the reason it was
+            // needed (no scanner on this node) is exactly what an incident
+            // review will want to see.
+            recordBypassAudit(stackName, nodeId, policy, [], opts);
             return { ok: true, bypassed: true, policy, violations: [], trivyMissing: true, evidence: decision };
         }
         console.warn(
@@ -288,11 +293,6 @@ function decideScannerUnavailable(
     }
 
     return { ok: true, bypassed: false, policy, violations: [], trivyMissing: true, evidence: decision };
-}
-
-/** The freshness bound in force, or null when the operator set none. */
-function freshnessThresholdMs(evidencePolicy: SecurityEvidencePolicy): number | null {
-    return evidencePolicy.maxScanAgeMs;
 }
 
 type PreflightScan = Pick<VulnerabilityScan, 'id' | 'highest_severity' | 'critical_count' | 'high_count' | 'total_vulnerabilities'>;
@@ -450,6 +450,37 @@ function evaluateImageRisk(
 }
 
 /**
+ * Record an authorized bypass.
+ *
+ * Shared by every refusal this evaluator can return, because a bypass is the
+ * same security-relevant event whichever branch refused: an admin chose to
+ * proceed past a gate. Writing this inline at one branch and not another is how
+ * the scanner-unavailable bypass came to leave no trace at all.
+ */
+function recordBypassAudit(
+    stackName: string,
+    nodeId: number,
+    policy: ScanPolicy,
+    images: string[],
+    opts: PolicyEnforcementOptions,
+): void {
+    try {
+        DatabaseService.getInstance().insertAuditLog({
+            timestamp: Date.now(),
+            username: opts.actor,
+            method: opts.auditMethod ?? 'POST',
+            path: opts.auditPath ?? `/api/stacks/${stackName}/deploy`,
+            status_code: 200,
+            node_id: nodeId,
+            ip_address: opts.ip ?? '',
+            summary: `policy.bypass stack="${stackName}" policy="${policy.name}" violations=${images.length} images=[${images.join(',')}]`,
+        });
+    } catch (err) {
+        console.error('[Policy] Failed to record bypass audit entry:', err);
+    }
+}
+
+/**
  * A deploy that would have been blocked on raw severity but proceeded because
  * suppressions dropped every image below the threshold is a security-relevant
  * event: record it so the suppression-driven pass is traceable in the audit log.
@@ -550,7 +581,6 @@ export async function enforcePolicyForImageRefs(
     }
 
     const { evidencePolicy, honorSuppressions } = loadGateSettings();
-    const thresholdMs = freshnessThresholdMs(evidencePolicy);
 
     const debug = isDebugEnabled();
     if (debug) {
@@ -627,10 +657,16 @@ export async function enforcePolicyForImageRefs(
             continue;
         }
 
+        // No freshness bound is passed. This path scans on demand (reusing a
+        // cached row only inside the scanner's own cache window), so the
+        // evidence it holds is fresh by construction and can never be `stale`.
+        // The `stale` state and the classifier's bound exist for the paths that
+        // read stored evidence without re-scanning; they arrive with the
+        // cached-acceptance work.
         const scanEvidence = classifyScanEvidence({
             now: Date.now(),
             collectedAt: scan.scanned_at,
-            freshnessThresholdMs: thresholdMs,
+            freshnessThresholdMs: null,
         });
         evidenceRecords.push({
             source: 'vulnerability_scan',
@@ -638,33 +674,8 @@ export async function enforcePolicyForImageRefs(
             target: imageRef,
             collectedAt: scan.scanned_at,
             digest: scan.image_digest ?? null,
-            freshnessThresholdMs: thresholdMs,
             ...(scanEvidence.reason ? { reason: scanEvidence.reason } : {}),
         });
-        if (scanEvidence.state === 'stale') {
-            const outcome = evidencePolicy.staleScan;
-            evidenceApplications.push({
-                source: 'vulnerability_scan',
-                state: 'stale',
-                outcome,
-                rule: ruleClause('security_stale_scan', outcome),
-                target: imageRef,
-            });
-            if (outcome === 'warn') {
-                notifyEvidenceWarningOnce(
-                    nodeId, stackName, 'security_stale_scan',
-                    `the scan of ${imageRef} is past its freshness limit`,
-                );
-            }
-            if (outcome === 'block') {
-                violations.push(unavailableViolation(imageRef, scanEvidence.reason ?? 'The scan is past its freshness limit'));
-                continue;
-            }
-            // allow and warn both fall through to the real evaluation below: a
-            // stale scan still reports its findings and still blocks on them.
-            // Age alone is what this branch decides, not risk.
-        }
-
         try {
             const evaluated = evaluateImageRisk(scan, imageRef, policy, honorSuppressions);
             if (debug) {
@@ -732,14 +743,10 @@ export async function enforcePolicyForImageRefs(
         }
     }
 
-    // Built once, before any return, so every exit carries the same account of
-    // what the evidence said. A decision with no violation can still have been
-    // made on `unavailable` or `stale` evidence, and that is exactly the case an
-    // operator cannot otherwise see.
     // Built once, before any return below this point, so every exit carries the
     // same account of what the evidence said. A decision with no violation can
-    // still have been made on `unavailable` or `stale` evidence, and that is
-    // exactly the case an operator cannot otherwise see.
+    // still have been made on `unavailable` evidence, and that is exactly the
+    // case an operator cannot otherwise see.
     //
     // No notification here. Every rule that can produce `warn` already notified
     // at the point it fired, keyed by (node, stack, rule), and one event must
@@ -759,20 +766,7 @@ export async function enforcePolicyForImageRefs(
     }
 
     if (opts.bypass) {
-        try {
-            db.insertAuditLog({
-                timestamp: Date.now(),
-                username: opts.actor,
-                method: opts.auditMethod ?? 'POST',
-                path: opts.auditPath ?? `/api/stacks/${stackName}/deploy`,
-                status_code: 200,
-                node_id: nodeId,
-                ip_address: opts.ip ?? '',
-                summary: `policy.bypass stack="${stackName}" policy="${policy.name}" violations=${violations.length} images=[${violations.map((v) => v.imageRef).join(',')}]`,
-            });
-        } catch (err) {
-            console.error('[Policy] Failed to record bypass audit entry:', err);
-        }
+        recordBypassAudit(stackName, nodeId, policy, violations.map((v) => v.imageRef), opts);
         if (debug) {
             console.log(
                 '[Policy:debug] Bypass for "%s" (%d violation(s))',
@@ -815,33 +809,48 @@ export async function evaluateCandidatePolicy(
         // unscannable ref must surface as evidence, not vanish, so it can be
         // told apart from a genuinely clean scan below.
     }, undefined, true);
-    // Only trivyMissing forgoes bypass consideration below it because it is
-    // the one path that returns bypassed: false unconditionally; every other
-    // branch of the shared evaluator already honors opts.bypass itself.
-    if (result.trivyMissing) {
-        if (opts.bypass) return { status: 'allowed', policy: result.policy, evidence: result.evidence };
+
+    // A violation with no `error` is a genuine scanned policy match; one with
+    // `error` set is an invalid ref, a scan failure, or an evaluation failure,
+    // which is evidence Sencho could not prove either way rather than a proven
+    // violation. Only a genuine match is reported as `blocked`; everything else
+    // is `unavailable` so it cannot read as a refusal on the merits.
+    const hasGenuineViolation = result.violations.some((v) => !v.error);
+
+    if (opts.bypass && (result.bypassed || result.trivyMissing || hasGenuineViolation)) {
+        return { status: 'allowed', policy: result.policy, evidence: result.evidence };
+    }
+    if (hasGenuineViolation) {
+        return { status: 'blocked', policy: result.policy, evidence: result.evidence, violations: result.violations };
+    }
+
+    // Anything the gate could not establish as `current` is unproven, and this
+    // path applies its OWN rule to it rather than inheriting the deploy gate's.
+    // That separation is the point: a setting an operator relaxes to get past a
+    // scanner outage at the keyboard must not become standing authority for an
+    // unattended automation to accept a candidate nothing proved safe. The
+    // default holds, which is also what this path did before it was
+    // configurable.
+    const unproven = (result.evidence?.records ?? []).filter((r) => r.state !== 'current');
+    if (unproven.length > 0) {
+        const { candidateUnproven } = loadGateSettings().evidencePolicy;
+        if (candidateUnproven === 'allow') {
+            return { status: 'allowed', policy: result.policy, evidence: result.evidence };
+        }
+        if (candidateUnproven === 'warn') {
+            notifyEvidenceWarningOnce(
+                nodeId, stackName, 'security_candidate_unproven',
+                `a candidate image could not be fully evaluated (${unproven.map((r) => r.target).join(', ')})`,
+            );
+            return { status: 'allowed', policy: result.policy, evidence: result.evidence };
+        }
         return {
             status: 'unavailable',
             policy: result.policy,
             evidence: result.evidence,
-            reason: 'Vulnerability scanner is unavailable',
+            reason: 'Candidate could not be fully evaluated',
         };
     }
-    if (!result.ok) {
-        // A violation with no `error` is a genuine scanned policy match; one
-        // with `error` set is an invalid ref, a scan failure, or an
-        // evaluation failure -- evidence Sencho could not prove either way,
-        // not a proven violation. All-unproven must not read as `blocked`.
-        const hasGenuineViolation = result.violations.some((v) => !v.error);
-        if (!hasGenuineViolation) {
-            return {
-                status: 'unavailable',
-                policy: result.policy,
-                evidence: result.evidence,
-                reason: 'Candidate could not be fully evaluated',
-            };
-        }
-        return { status: 'blocked', policy: result.policy, evidence: result.evidence, violations: result.violations };
-    }
+
     return { status: 'allowed', policy: result.policy, evidence: result.evidence };
 }
