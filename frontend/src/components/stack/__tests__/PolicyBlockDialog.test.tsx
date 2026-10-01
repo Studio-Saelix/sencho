@@ -10,6 +10,163 @@ const payload: PolicyBlockPayload = {
   ],
 };
 
+describe('PolicyBlockDialog evidence', () => {
+  const unavailablePayload: PolicyBlockPayload = {
+    error: 'blocked',
+    policy: { id: 1, name: 'prod-gate', maxSeverity: 'HIGH', blockOnSeverity: 1, blockOnKev: 0, blockOnFixable: 0 },
+    violations: [
+      { imageRef: '(scanner unavailable)', severity: 'UNKNOWN', criticalCount: 0, highCount: 0, kevCount: 0, fixableCount: 0, reasons: [], scanId: 0, error: 'Unavailable evidence for scanner availability: block (security_scanner_unavailable=block)' },
+    ],
+    evidence: {
+      outcome: 'block',
+      summary: 'Unavailable evidence for scanner availability: block (security_scanner_unavailable=block)',
+      applications: [
+        { source: 'scanner_availability', state: 'unavailable', outcome: 'block', rule: 'security_scanner_unavailable=block' },
+      ],
+    },
+  };
+
+  const renderDialog = (p: PolicyBlockPayload) =>
+    render(<PolicyBlockDialog open payload={p} stackName="web" canBypass={false} bypassing={false} onClose={vi.fn()} onBypass={vi.fn()} />);
+
+  it('says the block was not a proven vulnerability', () => {
+    renderDialog(unavailablePayload);
+    // The distinction the whole change exists for: absent evidence must never
+    // read as a proven finding.
+    expect(screen.getByText(/not stopped by a proven vulnerability/i)).toBeInTheDocument();
+  });
+
+  it('names the evidence state and the setting that produced the refusal', () => {
+    renderDialog(unavailablePayload);
+    // The sentence is split across inline spans, so match the assembled row text.
+    // The modal portals to document.body, so read it there rather than off the
+    // render container.
+    const rows = [...document.body.querySelectorAll('li')].map((li) => li.textContent ?? '');
+    expect(rows.some((t) => t.includes('scanner availability evidence was unavailable'))).toBe(true);
+    expect(rows.some((t) => t.includes('it was blocked by security_scanner_unavailable=block'))).toBe(true);
+  });
+
+  it('spells every outcome rather than appending a suffix', () => {
+    const warned: PolicyBlockPayload = {
+      ...unavailablePayload,
+      evidence: {
+        outcome: 'warn',
+        summary: 'x',
+        applications: [
+          { source: 'vulnerability_scan', state: 'stale', outcome: 'warn', rule: 'security_stale_scan=warn' },
+        ],
+      },
+    };
+    renderDialog(warned);
+    const text = [...document.body.querySelectorAll('li')].map((li) => li.textContent ?? '').join(' ');
+    expect(text).toContain('it was warned about by security_stale_scan=warn');
+    expect(text).not.toContain('warnd');
+    expect(text).not.toContain('allowd');
+  });
+
+  it('points at the place to change it', () => {
+    renderDialog(unavailablePayload);
+    expect(screen.getByText(/Policies tab, under Evidence availability/i)).toBeInTheDocument();
+  });
+
+  it('shows no evidence section for a genuine policy match', () => {
+    // A proven match needs no availability explanation, and adding one would
+    // dilute the case that actually matters.
+    renderDialog(payload);
+    expect(screen.queryByText(/Evidence unavailable/i)).not.toBeInTheDocument();
+  });
+
+  it('shows no evidence section on an older control payload with no evidence field', () => {
+    renderDialog({ ...payload, evidence: undefined });
+    expect(screen.queryByText(/Evidence unavailable/i)).not.toBeInTheDocument();
+  });
+
+  it('explains both problems when one image is stale and its findings incomplete', () => {
+    // Regression: the de-duplication keyed only on source:target, so the second
+    // problem on the same image was silently dropped from the dialog.
+    const both: PolicyBlockPayload = {
+      ...unavailablePayload,
+      evidence: {
+        outcome: 'block',
+        summary: 'x',
+        records: [
+          {
+            source: 'vulnerability_scan',
+            state: 'stale',
+            target: 'nginx:1.27',
+            collectedAt: Date.now() - 9 * 86_400_000,
+            reason: 'The scan is 9 day(s) old, past the configured 7 day limit',
+          },
+          {
+            source: 'vulnerability_scan',
+            state: 'partial',
+            target: 'nginx:1.27',
+            collectedAt: Date.now() - 9 * 86_400_000,
+            reason: 'The stored findings do not cover every vulnerability in this scan',
+          },
+        ],
+        applications: [
+          {
+            source: 'vulnerability_scan',
+            state: 'stale',
+            outcome: 'block',
+            rule: 'security_stale_scan=block',
+            target: 'nginx:1.27',
+          },
+        ],
+      },
+    };
+    renderDialog(both);
+    const rows = [...document.body.querySelectorAll('li')].map((li) => li.textContent ?? '');
+    expect(rows.some((t) => t.includes('security_stale_scan=block'))).toBe(true);
+    expect(rows.some((t) => t.includes('incomplete'))).toBe(true);
+  });
+
+  it('gives every row a distinct key when one image has several problems', () => {
+    const multi: PolicyBlockPayload = {
+      ...unavailablePayload,
+      evidence: {
+        outcome: 'block',
+        summary: 'x',
+        records: [],
+        applications: [
+          { source: 'vulnerability_scan', state: 'stale', outcome: 'allow', rule: 'security_stale_scan=allow', target: 'a:1' },
+          { source: 'vulnerability_scan', state: 'stale', outcome: 'allow', rule: 'security_stale_scan=allow', target: 'b:1' },
+        ],
+      },
+    };
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      renderDialog(multi);
+      // Two images, two rows, and no duplicate-key complaint. Asserting on the
+      // specific warning rather than blanket silence, so an unrelated error is
+      // not swallowed and still fails the run.
+      expect(document.body.querySelectorAll('li').length).toBe(2);
+      const keyWarnings = errSpy.mock.calls.filter((args) => /same key|duplicate key/i.test(String(args[0])));
+      expect(keyWarnings).toEqual([]);
+    } finally {
+      errSpy.mockRestore();
+    }
+  });
+
+  it('omits current evidence from the explanation', () => {
+    const mixed: PolicyBlockPayload = {
+      ...unavailablePayload,
+      evidence: {
+        outcome: 'block',
+        summary: 'x',
+        applications: [
+          { source: 'vulnerability_scan', state: 'current', outcome: 'allow', rule: 'nothing' },
+          { source: 'vulnerability_scan', state: 'stale', outcome: 'block', rule: 'security_stale_scan=block' },
+        ],
+      },
+    };
+    renderDialog(mixed);
+    expect(screen.getByText(/security_stale_scan=block/)).toBeInTheDocument();
+    expect(screen.queryByText(/state was current/)).not.toBeInTheDocument();
+  });
+});
+
 describe('PolicyBlockDialog', () => {
   it('describes the active inputs (KEV + fixable, not the severity threshold)', () => {
     render(

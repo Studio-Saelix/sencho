@@ -19,6 +19,22 @@ import {
 } from '../utils/suppression-filter';
 import { applyMisconfigAcknowledgements } from '../utils/misconfig-ack-filter';
 import { buildSecurityOverview } from '../services/securityOverview';
+import {
+  DEFAULT_SECURITY_EVIDENCE_POLICY,
+  MAX_SCAN_AGE_DAYS_CEILING,
+  SECURITY_EVIDENCE_SETTING_KEYS,
+  resolveSecurityEvidencePolicy,
+  serializeSecurityEvidencePolicy,
+} from '../services/securityEvidencePolicy';
+const EVIDENCE_OUTCOMES: readonly string[] = ['allow', 'warn', 'block'];
+/** The typed twin of `EVIDENCE_OUTCOMES`, for anything that needs the union. */
+const VALID_EVIDENCE_OUTCOMES: ReadonlySet<string> = new Set(EVIDENCE_OUTCOMES);
+/** The three outcome fields, keyed by the settings row each one is stored in. */
+const OUTCOME_FIELDS = ['scannerUnavailable', 'scanFailure', 'staleScan'] as const;
+const EVIDENCE_POLICY_BODY_KEYS: ReadonlySet<string> = new Set<string>([
+  ...OUTCOME_FIELDS,
+  'maxScanAgeDays',
+]);
 import { generateSarif } from '../services/SarifExporter';
 import { generateOpenVex } from '../services/OpenVexExporter';
 import { buildExposedImageMap, type StackExposure } from '../services/preflight/exposure';
@@ -303,6 +319,90 @@ securityRouter.put('/deploy-block-honor-suppressions', authMiddleware, (req: Req
   } catch (err) {
     const msg = getErrorMessage(err, 'Failed to update setting');
     console.error('[Security] Deploy-block honor-suppressions toggle failed:', msg);
+    res.status(500).json({ error: msg });
+  }
+});
+
+// Evidence-availability policy: what the pre-deploy gate may do when it cannot
+// prove a target is safe. Admin-only because every field can weaken a deploy
+// block, matching the honor-suppressions toggle above and its stated reason
+// ("this toggle weakens a deploy block, so intent must be unambiguous"). The
+// response always carries the resolved values plus `isDefault`, so the UI can
+// state the active behaviour instead of leaving it to be inferred.
+securityRouter.get('/evidence-policy', authMiddleware, (req: Request, res: Response): void => {
+  if (!requirePermission(req, res, 'stack:read')) return;
+  try {
+    res.json({
+      policy: serializeSecurityEvidencePolicy(
+        resolveSecurityEvidencePolicy(DatabaseService.getInstance().getGlobalSettings()),
+      ),
+      defaults: serializeSecurityEvidencePolicy(DEFAULT_SECURITY_EVIDENCE_POLICY),
+      outcomes: ['allow', 'warn', 'block'],
+      maxScanAgeDaysCeiling: MAX_SCAN_AGE_DAYS_CEILING,
+    });
+  } catch (err) {
+    const msg = getErrorMessage(err, 'Failed to read the evidence policy');
+    console.error('[Security] Evidence policy read failed:', msg);
+    res.status(500).json({ error: msg });
+  }
+});
+
+securityRouter.put('/evidence-policy', authMiddleware, (req: Request, res: Response): void => {
+  if (!requireAdmin(req, res)) return;
+  // The availability policy is a per-instance gate setting, not a replicated
+  // resource. Without this guard an admin could loosen the deploy gate on a
+  // replica alone, and that replica would silently diverge from the hub it
+  // claims to be governed by. Matches the sibling policy and suppression writes.
+  if (blockIfReplica(res, 'security evidence policy')) return;
+  const body = req.body ?? {};
+  const unknown = Object.keys(body).filter((k) => !EVIDENCE_POLICY_BODY_KEYS.has(k));
+  if (unknown.length > 0) {
+    res.status(400).json({ error: `Unknown field(s): ${unknown.join(', ')}` });
+    return;
+  }
+  // Validate everything before writing anything: a partial apply would leave the
+  // gate reading a policy the operator never asked for.
+  const next: Record<string, string> = {};
+  for (const field of OUTCOME_FIELDS) {
+    const value = body[field];
+    if (value === undefined) continue;
+    if (typeof value !== 'string' || !VALID_EVIDENCE_OUTCOMES.has(value)) {
+      res.status(400).json({ error: `${field} must be one of: ${EVIDENCE_OUTCOMES.join(', ')}` });
+      return;
+    }
+    next[SECURITY_EVIDENCE_SETTING_KEYS[field]] = value;
+  }
+  if (body.maxScanAgeDays !== undefined) {
+    const days = body.maxScanAgeDays;
+    if (typeof days !== 'number' || !Number.isInteger(days) || days < 0 || days > MAX_SCAN_AGE_DAYS_CEILING) {
+      res.status(400).json({ error: `maxScanAgeDays must be an integer between 0 and ${MAX_SCAN_AGE_DAYS_CEILING} (0 disables the freshness bound)` });
+      return;
+    }
+    next[SECURITY_EVIDENCE_SETTING_KEYS.maxScanAgeDays] = String(days);
+  }
+  try {
+    const db = DatabaseService.getInstance();
+    // One transaction, so a multi-field save is all-or-nothing.
+    db.updateGlobalSettings(next);
+    db.insertAuditLog({
+      timestamp: Date.now(),
+      username: req.user?.username ?? 'unknown',
+      method: req.method,
+      path: req.originalUrl || req.url,
+      status_code: 200,
+      node_id: typeof req.nodeId === 'number' ? req.nodeId : null,
+      ip_address: req.ip ?? '',
+      // Records which controls moved, not their previous values. This write can
+      // weaken a deploy gate, so "who loosened it and when" has to be answerable
+      // from the audit log alone.
+      summary: `policy.evidence_availability changed=[${Object.keys(next).join(',')}]`,
+    });
+    res.json({
+      policy: serializeSecurityEvidencePolicy(resolveSecurityEvidencePolicy(db.getGlobalSettings())),
+    });
+  } catch (err) {
+    const msg = getErrorMessage(err, 'Failed to update the evidence policy');
+    console.error('[Security] Evidence policy update failed:', msg);
     res.status(500).json({ error: msg });
   }
 });

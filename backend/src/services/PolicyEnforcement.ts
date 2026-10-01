@@ -28,6 +28,19 @@ import {
     type PolicyBlockReason,
     type PolicyRiskInputs,
 } from '../utils/policy-risk';
+import {
+    classifyScanEvidence,
+    classifyScannerEvidence,
+    decideEvidenceGate,
+    type EvidenceAvailabilityOutcome,
+    type EvidenceGateDecision,
+    type EvidenceRuleApplication,
+    type SecurityEvidenceRecord,
+} from './securityEvidence';
+import {
+    resolveSecurityEvidencePolicy,
+    type SecurityEvidencePolicy,
+} from './securityEvidencePolicy';
 
 export interface PolicyViolation {
     imageRef: string;
@@ -71,7 +84,19 @@ export interface PolicyEnforcementResult {
     bypassed: boolean;
     policy?: ScanPolicy;
     violations: PolicyViolation[];
+    /**
+     * True when the deploy was allowed because no scanner could run, which is
+     * distinct from "no policy matched" and from "every image was scanned and
+     * clean". Set only on an allow; when the policy blocks on an unavailable
+     * scanner this stays absent and `violations` carries the refusal.
+     */
     trivyMissing?: boolean;
+    /**
+     * The evidence half of the decision: what each required source actually
+     * reported, and which configured rule turned that into the outcome. Absent
+     * when the gate short-circuited before any evidence was required.
+     */
+    evidence?: EvidenceGateDecision;
 }
 
 /**
@@ -82,7 +107,7 @@ export interface PolicyEnforcementResult {
  * `unavailable` as `allowed`, or a GitOps source could accept a candidate
  * nothing actually proved safe.
  */
-export type CandidatePolicyEvaluation = { policy?: ScanPolicy } & (
+export type CandidatePolicyEvaluation = { policy?: ScanPolicy; evidence?: EvidenceGateDecision } & (
     | { status: 'allowed' }
     | { status: 'blocked'; violations: PolicyViolation[] }
     | { status: 'unavailable'; reason: string }
@@ -93,6 +118,10 @@ const TRIVY_MISSING_NOTIFY_COOLDOWN_MS = 60 * 60 * 1000;
 // block_on_deploy policy can land here), not by total stack churn. Cleared
 // on process restart, which is the right scope for an informational warning.
 const trivyMissingNotifiedAt = new Map<string, number>();
+
+// Growth bounded the same way as trivyMissingNotifiedAt: by configured-policy
+// fanout over distinct (node, stack, reason) triples, not by total stack churn.
+const evidenceWarnedAt = new Map<string, number>();
 
 function notifyTrivyMissingOnce(nodeId: number, stackName: string): void {
     const key = `${nodeId}:${stackName}`;
@@ -110,6 +139,160 @@ function notifyTrivyMissingOnce(nodeId: number, stackName: string): void {
 
 export function _resetTrivyMissingNotificationStateForTests(): void {
     trivyMissingNotifiedAt.clear();
+    evidenceWarnedAt.clear();
+}
+
+/**
+ * One warning alert per node/stack/reason per hour. Shares the trivy-missing
+ * cooldown because it answers the same operator question ("this deploy went
+ * through on evidence you may not trust") and the same flood risk: the gate runs
+ * on every mutation path, and an unbounded notifier here would turn one
+ * misconfigured threshold into an alert storm.
+ */
+function notifyEvidenceWarningOnce(nodeId: number, stackName: string, rule: string, detail: string): void {
+    // Keyed by the rule that fired, never by the interpolated detail: a key
+    // carrying an image reference or a summary sentence would grow one entry per
+    // distinct string the process ever produced.
+    const key = `${nodeId}:${stackName}:${rule}`;
+    const now = Date.now();
+    const last = evidenceWarnedAt.get(key);
+    if (last !== undefined && now - last < TRIVY_MISSING_NOTIFY_COOLDOWN_MS) return;
+    evidenceWarnedAt.set(key, now);
+    NotificationService.getInstance().dispatchAlert(
+        'warning',
+        'scan_finding',
+        `Pre-deploy scan for "${stackName}" proceeded on incomplete evidence: ${detail}`,
+        { stackName, actor: 'system:policy' },
+    );
+}
+
+/**
+ * Read the instance's evidence-availability policy.
+ *
+ * A settings read that throws resolves to the shipped defaults rather than
+ * propagating. The deploy path cannot afford an unrelated database error to
+ * become a deploy failure, and the defaults are the documented operator-visible
+ * behaviour, so the decision stays attributable either way.
+ */
+/**
+ * Everything this gate reads from `global_settings`, resolved in one guarded
+ * pass. Reading it twice would leave the second read outside the guard, and an
+ * unrelated database error there would surface as a failed deploy rather than a
+ * documented default.
+ */
+interface GateSettings {
+    evidencePolicy: SecurityEvidencePolicy;
+    honorSuppressions: boolean;
+}
+
+function loadGateSettings(): GateSettings {
+    try {
+        const settings = DatabaseService.getInstance().getGlobalSettings();
+        return {
+            evidencePolicy: resolveSecurityEvidencePolicy(settings),
+            // Read in the same guarded pass. Honoring suppressions weakens a
+            // deploy block, so its default is the strict one: an unreadable
+            // setting must not quietly start suppressing.
+            honorSuppressions: settings['deploy_block_honor_suppressions'] === '1',
+        };
+    } catch (err) {
+        console.error(
+            '[Policy] Gate settings read failed; falling back to the documented defaults:',
+            getErrorMessage(err, 'settings read failed'),
+        );
+        return {
+            evidencePolicy: resolveSecurityEvidencePolicy(null),
+            honorSuppressions: false,
+        };
+    }
+}
+
+/** Audit-readable name for the rule that produced an outcome. */
+function ruleClause(key: string, outcome: EvidenceAvailabilityOutcome): string {
+    return `${key}=${outcome}`;
+}
+
+/** One synthetic violation standing in for "the evidence could not be obtained". */
+function unavailableViolation(imageRef: string, message: string): PolicyViolation {
+    return {
+        imageRef,
+        severity: 'UNKNOWN',
+        criticalCount: 0,
+        highCount: 0,
+        kevCount: 0,
+        fixableCount: 0,
+        reasons: [],
+        scanId: 0,
+        error: message,
+    };
+}
+
+/**
+ * Decide what an unavailable scanner means for this deploy.
+ *
+ * This is the branch that used to be a bare `if` returning `ok: true`. The
+ * operator-facing behaviour is unchanged at every setting value it shipped with
+ * (`allow` plus an hourly warning alert); what changed is that the reason is now
+ * a recorded fact rather than an accident of which `if` executed. The deploy
+ * path answers `trivyMissing`, the candidate path answers `unavailable`, and
+ * neither is reachable from the other.
+ */
+function decideScannerUnavailable(
+    policy: ScanPolicy,
+    evidencePolicy: SecurityEvidencePolicy,
+    nodeId: number,
+    stackName: string,
+    opts: PolicyEnforcementOptions,
+): PolicyEnforcementResult {
+    const classification = classifyScannerEvidence({ available: false, collectedAt: null });
+    const records: SecurityEvidenceRecord[] = [
+        {
+            source: 'scanner_availability',
+            state: classification.state,
+            target: 'node',
+            collectedAt: null,
+            reason: classification.reason,
+        },
+    ];
+    const decision = decideEvidenceGate(records, [
+        {
+            source: 'scanner_availability',
+            state: classification.state,
+            outcome: evidencePolicy.scannerUnavailable,
+            rule: ruleClause('security_scanner_unavailable', evidencePolicy.scannerUnavailable),
+        },
+    ]);
+
+    notifyTrivyMissingOnce(nodeId, stackName);
+
+    if (decision.outcome === 'block') {
+        // Every other refusal in this evaluator honors an authorized bypass
+        // before it returns, and this one has to as well: an operator who has
+        // configured `block` is expressing a default, not revoking the escape
+        // hatch that every other branch keeps. Without this the setting would
+        // silently strand a node whose scanner is missing.
+        if (opts.bypass) {
+            return { ok: true, bypassed: true, policy, violations: [], trivyMissing: true, evidence: decision };
+        }
+        console.warn(
+            '[Policy] Blocked deploy for "%s": the vulnerability scanner is unavailable and the configured policy blocks (policy "%s")',
+            sanitizeForLog(stackName), sanitizeForLog(policy.name),
+        );
+        return {
+            ok: false,
+            bypassed: false,
+            policy,
+            violations: [unavailableViolation('(scanner unavailable)', decision.summary)],
+            evidence: decision,
+        };
+    }
+
+    return { ok: true, bypassed: false, policy, violations: [], trivyMissing: true, evidence: decision };
+}
+
+/** The freshness bound in force, or null when the operator set none. */
+function freshnessThresholdMs(evidencePolicy: SecurityEvidencePolicy): number | null {
+    return evidencePolicy.maxScanAgeMs;
 }
 
 type PreflightScan = Pick<VulnerabilityScan, 'id' | 'highest_severity' | 'critical_count' | 'high_count' | 'total_vulnerabilities'>;
@@ -127,6 +310,13 @@ interface ImageRiskEvaluation {
     suppressedCves: string[];
     /** True when the same inputs would have matched if suppressions were ignored. */
     rawWouldBlock: boolean;
+    /**
+     * Set when the per-finding detail rows could not be trusted, which is the
+     * `partial` evidence state. Severity still gates from the aggregate counts;
+     * KEV and fixability cannot be read from aggregates, so the reason is
+     * recorded rather than left invisible.
+     */
+    partialEvidenceReason?: string;
 }
 
 interface SuppressionPass {
@@ -182,7 +372,7 @@ function evaluateImageRisk(
     const rawSeverity = scan.highest_severity ?? 'UNKNOWN';
     const needsDetails = inputs.blockOnKev || inputs.blockOnFixable || honorSuppressions;
     if (!needsDetails) {
-        return aggregateFallback(inputs, rawSeverity, scan, false);
+        return { ...aggregateFallback(inputs, rawSeverity, scan, false) };
     }
 
     const db = DatabaseService.getInstance();
@@ -198,7 +388,10 @@ function evaluateImageRisk(
         // KEV/fixable gate must not silently degrade to "allow" on a transient
         // read error. The admin bypass path stays available.
         console.error('[Policy] Detail read failed for %s; gating severity on aggregate, failing closed on KEV/fixable:', sanitizeForLog(imageRef), sanitizeForLog(getErrorMessage(err, 'db read failed')));
-        return aggregateFallback(inputs, rawSeverity, scan, true);
+        return {
+            ...aggregateFallback(inputs, rawSeverity, scan, true),
+            partialEvidenceReason: 'The scan findings could not be read, so known-exploited and fixability were treated as risky',
+        };
     }
 
     // The stored detail rows must reproduce the scan's full finding set before
@@ -214,7 +407,10 @@ function evaluateImageRisk(
                 scan.id, findings.length, scan.total_vulnerabilities,
             );
         }
-        return aggregateFallback(inputs, rawSeverity, scan, true);
+        return {
+            ...aggregateFallback(inputs, rawSeverity, scan, true),
+            partialEvidenceReason: 'The stored findings do not cover every vulnerability in this scan, so known-exploited and fixability were treated as risky',
+        };
     }
 
     // KEV membership is the same for the full set and the non-suppressed subset,
@@ -300,8 +496,7 @@ export async function enforcePolicyPreDeploy(
 
     const svc = TrivyService.getInstance();
     if (!svc.isTrivyAvailable()) {
-        notifyTrivyMissingOnce(nodeId, stackName);
-        return { ok: true, bypassed: false, policy, violations: [], trivyMissing: true };
+        return decideScannerUnavailable(policy, loadGateSettings().evidencePolicy, nodeId, stackName, opts);
     }
 
     let imageRefs: string[] = [];
@@ -351,11 +546,11 @@ export async function enforcePolicyForImageRefs(
 
     const svc = TrivyService.getInstance();
     if (!svc.isTrivyAvailable()) {
-        notifyTrivyMissingOnce(nodeId, stackName);
-        return { ok: true, bypassed: false, policy, violations: [], trivyMissing: true };
+        return decideScannerUnavailable(policy, loadGateSettings().evidencePolicy, nodeId, stackName, opts);
     }
 
-    const honorSuppressions = db.getGlobalSettings()['deploy_block_honor_suppressions'] === '1';
+    const { evidencePolicy, honorSuppressions } = loadGateSettings();
+    const thresholdMs = freshnessThresholdMs(evidencePolicy);
 
     const debug = isDebugEnabled();
     if (debug) {
@@ -367,20 +562,24 @@ export async function enforcePolicyForImageRefs(
 
     const violations: PolicyViolation[] = [];
     const suppressionPasses: SuppressionPass[] = [];
+    const evidenceRecords: SecurityEvidenceRecord[] = [];
+    const evidenceApplications: EvidenceRuleApplication[] = [];
     for (const imageRef of imageRefs) {
         if (!validateImageRef(imageRef)) {
+            // A reference that cannot be parsed is not an image, so the scanner
+            // never gets a chance to produce an answer. Recorded as
+            // `not_evaluated` so the decision record shows a gap rather than a
+            // silent omission; whether it blocks stays a caller decision, not
+            // this branch's.
+            evidenceRecords.push({
+                source: 'vulnerability_scan',
+                state: 'not_evaluated',
+                target: imageRef,
+                collectedAt: null,
+                reason: 'Not a valid image reference, so no scan was attempted',
+            });
             if (failClosedInvalidRefs) {
-                violations.push({
-                    imageRef,
-                    severity: 'UNKNOWN',
-                    criticalCount: 0,
-                    highCount: 0,
-                    kevCount: 0,
-                    fixableCount: 0,
-                    reasons: [],
-                    scanId: 0,
-                    error: 'Invalid image reference; the image could not be scanned',
-                });
+                violations.push(unavailableViolation(imageRef, 'Invalid image reference; the image could not be scanned'));
             }
             continue;
         }
@@ -390,18 +589,80 @@ export async function enforcePolicyForImageRefs(
         } catch (err) {
             const message = getErrorMessage(err, 'pre-flight scan failed');
             console.error(`[Policy] scanImagePreflight failed for ${imageRef}:`, message);
-            violations.push({
-                imageRef,
-                severity: 'UNKNOWN',
-                criticalCount: 0,
-                highCount: 0,
-                kevCount: 0,
-                fixableCount: 0,
-                reasons: [],
-                scanId: 0,
-                error: `Pre-flight scan failed: ${message}`,
+            const classification = classifyScanEvidence({
+                now: Date.now(),
+                collectedAt: null,
+                freshnessThresholdMs: null,
+                failed: true,
+                failureReason: `Pre-flight scan failed: ${message}`,
             });
+            evidenceRecords.push({
+                source: 'vulnerability_scan',
+                state: classification.state,
+                target: imageRef,
+                collectedAt: null,
+                reason: classification.reason,
+            });
+            const outcome = evidencePolicy.scanFailure;
+            evidenceApplications.push({
+                source: 'vulnerability_scan',
+                state: classification.state,
+                outcome,
+                rule: ruleClause('security_scan_failure', outcome),
+                target: imageRef,
+            });
+            // allow and warn both let the deploy through; warn additionally says
+            // so out loud, which is the only thing distinguishing it from allow
+            // at the call site. Neither is silent.
+            if (outcome === 'warn') {
+                notifyEvidenceWarningOnce(
+                    nodeId, stackName, 'security_scan_failure',
+                    `the scan of ${imageRef} did not complete`,
+                );
+            }
+            if (outcome !== 'block') {
+                continue;
+            }
+            violations.push(unavailableViolation(imageRef, `Pre-flight scan failed: ${message}`));
             continue;
+        }
+
+        const scanEvidence = classifyScanEvidence({
+            now: Date.now(),
+            collectedAt: scan.scanned_at,
+            freshnessThresholdMs: thresholdMs,
+        });
+        evidenceRecords.push({
+            source: 'vulnerability_scan',
+            state: scanEvidence.state,
+            target: imageRef,
+            collectedAt: scan.scanned_at,
+            digest: scan.image_digest ?? null,
+            freshnessThresholdMs: thresholdMs,
+            ...(scanEvidence.reason ? { reason: scanEvidence.reason } : {}),
+        });
+        if (scanEvidence.state === 'stale') {
+            const outcome = evidencePolicy.staleScan;
+            evidenceApplications.push({
+                source: 'vulnerability_scan',
+                state: 'stale',
+                outcome,
+                rule: ruleClause('security_stale_scan', outcome),
+                target: imageRef,
+            });
+            if (outcome === 'warn') {
+                notifyEvidenceWarningOnce(
+                    nodeId, stackName, 'security_stale_scan',
+                    `the scan of ${imageRef} is past its freshness limit`,
+                );
+            }
+            if (outcome === 'block') {
+                violations.push(unavailableViolation(imageRef, scanEvidence.reason ?? 'The scan is past its freshness limit'));
+                continue;
+            }
+            // allow and warn both fall through to the real evaluation below: a
+            // stale scan still reports its findings and still blocks on them.
+            // Age alone is what this branch decides, not risk.
         }
 
         try {
@@ -411,6 +672,28 @@ export async function enforcePolicyForImageRefs(
                     '[Policy:debug] %s scanned: severity=%s kev=%d fixable=%d matched=[%s]',
                     sanitizeForLog(imageRef), evaluated.severity, evaluated.kevCount, evaluated.fixableCount, evaluated.reasons.join(','),
                 );
+            }
+            // The same image carries two records: the scan's own freshness state
+            // above, and whether its finding set was complete enough to read
+            // KEV and fixability from. A clean result under partial evidence is
+            // not a clean result.
+            if (evaluated.partialEvidenceReason) {
+                evidenceRecords.push({
+                    source: 'vulnerability_scan',
+                    state: 'partial',
+                    target: imageRef,
+                    collectedAt: scan.scanned_at,
+                    digest: scan.image_digest ?? null,
+                    reason: evaluated.partialEvidenceReason,
+                });
+                // Deliberately a record and not an application. `outcome` reports
+                // what the availability POLICY decided, and the policy has no
+                // setting for partial evidence: the gate fails closed on the
+                // unproven inputs unconditionally, which is why this can block
+                // while the outcome reads `allow`. Recording it as an
+                // `allow` application would be worse, by implying a policy
+                // permitted something no policy governs. Consumers explain the
+                // block from the records, which carry the reason.
             }
             if (evaluated.reasons.length > 0) {
                 violations.push({
@@ -449,11 +732,30 @@ export async function enforcePolicyForImageRefs(
         }
     }
 
+    // Built once, before any return, so every exit carries the same account of
+    // what the evidence said. A decision with no violation can still have been
+    // made on `unavailable` or `stale` evidence, and that is exactly the case an
+    // operator cannot otherwise see.
+    // Built once, before any return below this point, so every exit carries the
+    // same account of what the evidence said. A decision with no violation can
+    // still have been made on `unavailable` or `stale` evidence, and that is
+    // exactly the case an operator cannot otherwise see.
+    //
+    // No notification here. Every rule that can produce `warn` already notified
+    // at the point it fired, keyed by (node, stack, rule), and one event must
+    // not alert twice under two different keys.
+    //
+    // Two earlier returns are deliberately not covered: the no-matching-policy
+    // case required no evidence, and the compose-parse failure never reached the
+    // point where an image could be examined (its violation carries its own
+    // `(compose parse error)` explanation).
+    const evidence = decideEvidenceGate(evidenceRecords, evidenceApplications);
+
     if (violations.length === 0) {
         if (suppressionPasses.length > 0) {
             recordSuppressionPassAudit(stackName, nodeId, policy, suppressionPasses, opts);
         }
-        return { ok: true, bypassed: false, policy, violations: [] };
+        return { ok: true, bypassed: false, policy, violations: [], evidence };
     }
 
     if (opts.bypass) {
@@ -477,14 +779,14 @@ export async function enforcePolicyForImageRefs(
                 sanitizeForLog(stackName), violations.length,
             );
         }
-        return { ok: true, bypassed: true, policy, violations };
+        return { ok: true, bypassed: true, policy, violations, evidence };
     }
 
     console.warn(
         '[Policy] Blocked deploy for "%s": %d image(s) matched %s (policy "%s")',
         sanitizeForLog(stackName), violations.length, describePolicyInputs(policyInputs(policy)), sanitizeForLog(policy.name),
     );
-    return { ok: false, bypassed: false, policy, violations };
+    return { ok: false, bypassed: false, policy, violations, evidence };
 }
 
 /**
@@ -517,8 +819,13 @@ export async function evaluateCandidatePolicy(
     // the one path that returns bypassed: false unconditionally; every other
     // branch of the shared evaluator already honors opts.bypass itself.
     if (result.trivyMissing) {
-        if (opts.bypass) return { status: 'allowed', policy: result.policy };
-        return { status: 'unavailable', policy: result.policy, reason: 'Vulnerability scanner is unavailable' };
+        if (opts.bypass) return { status: 'allowed', policy: result.policy, evidence: result.evidence };
+        return {
+            status: 'unavailable',
+            policy: result.policy,
+            evidence: result.evidence,
+            reason: 'Vulnerability scanner is unavailable',
+        };
     }
     if (!result.ok) {
         // A violation with no `error` is a genuine scanned policy match; one
@@ -527,9 +834,14 @@ export async function evaluateCandidatePolicy(
         // not a proven violation. All-unproven must not read as `blocked`.
         const hasGenuineViolation = result.violations.some((v) => !v.error);
         if (!hasGenuineViolation) {
-            return { status: 'unavailable', policy: result.policy, reason: 'Candidate could not be fully evaluated' };
+            return {
+                status: 'unavailable',
+                policy: result.policy,
+                evidence: result.evidence,
+                reason: 'Candidate could not be fully evaluated',
+            };
         }
-        return { status: 'blocked', policy: result.policy, violations: result.violations };
+        return { status: 'blocked', policy: result.policy, evidence: result.evidence, violations: result.violations };
     }
-    return { status: 'allowed', policy: result.policy };
+    return { status: 'allowed', policy: result.policy, evidence: result.evidence };
 }

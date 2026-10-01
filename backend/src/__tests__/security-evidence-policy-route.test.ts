@@ -1,0 +1,223 @@
+/**
+ * `/api/security/evidence-policy`: the read is permission-gated, the write is
+ * admin-only because every field can weaken a deploy block, and a malformed
+ * body must change nothing at all.
+ */
+import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from 'vitest';
+import request from 'supertest';
+import jwt from 'jsonwebtoken';
+import { setupTestDb, cleanupTestDb, loginAsTestAdmin, TEST_JWT_SECRET } from './helpers/setupTestDb';
+
+// The stack has no Compose file in a test DB, so the deploy path would fail on
+// filesystem reads before it ever reached the gate. Stubbed the same way the
+// sibling deploy-policy route test does.
+vi.mock('../services/FileSystemService', () => ({
+  FileSystemService: {
+    getInstance: () => ({
+      getStacks: vi.fn().mockResolvedValue([]),
+      getBaseDir: () => '/tmp/compose',
+      readComposeFile: vi.fn().mockResolvedValue(''),
+      hasComposeFile: vi.fn().mockResolvedValue(true),
+    }),
+  },
+}));
+
+let tmpDir: string;
+let app: import('express').Express;
+let authCookie: string;
+
+beforeAll(async () => {
+  tmpDir = await setupTestDb();
+  ({ app } = await import('../index'));
+  authCookie = await loginAsTestAdmin(app);
+});
+
+afterAll(() => {
+  cleanupTestDb(tmpDir);
+});
+
+beforeEach(async () => {
+  const { DatabaseService } = await import('../services/DatabaseService');
+  const db = DatabaseService.getInstance();
+  db.updateGlobalSetting('security_scanner_unavailable', 'allow');
+  db.updateGlobalSetting('security_scan_failure', 'block');
+  db.updateGlobalSetting('security_stale_scan', 'allow');
+  db.updateGlobalSetting('security_max_scan_age_days', '0');
+});
+
+describe('GET /api/security/evidence-policy', () => {
+  it('returns the resolved policy and states the shipped default alongside it', async () => {
+    const res = await request(app).get('/api/security/evidence-policy').set('Cookie', authCookie);
+    expect(res.status).toBe(200);
+    expect(res.body.policy).toMatchObject({
+      scannerUnavailable: 'allow',
+      scanFailure: 'block',
+      staleScan: 'allow',
+      maxScanAgeDays: 0,
+      isDefault: true,
+    });
+    // The UI has to be able to say what the default is, not just what is set.
+    expect(res.body.defaults).toMatchObject({ scannerUnavailable: 'allow', scanFailure: 'block' });
+    expect(res.body.outcomes).toEqual(['allow', 'warn', 'block']);
+  });
+
+  it('rejects an unauthenticated read', async () => {
+    const res = await request(app).get('/api/security/evidence-policy');
+    expect(res.status).toBe(401);
+  });
+});
+
+describe('PUT /api/security/evidence-policy', () => {
+  it('persists each outcome and the freshness bound', async () => {
+    const res = await request(app)
+      .put('/api/security/evidence-policy')
+      .set('Cookie', authCookie)
+      .send({ scannerUnavailable: 'warn', scanFailure: 'allow', staleScan: 'block', maxScanAgeDays: 7 });
+    expect(res.status).toBe(200);
+    expect(res.body.policy).toMatchObject({
+      scannerUnavailable: 'warn',
+      scanFailure: 'allow',
+      staleScan: 'block',
+      maxScanAgeDays: 7,
+      isDefault: false,
+    });
+
+    const readBack = await request(app).get('/api/security/evidence-policy').set('Cookie', authCookie);
+    expect(readBack.body.policy).toMatchObject({
+      scannerUnavailable: 'warn',
+      scanFailure: 'allow',
+      staleScan: 'block',
+      maxScanAgeDays: 7,
+    });
+  });
+
+  it('accepts a partial body and leaves the rest of the policy alone', async () => {
+    const res = await request(app)
+      .put('/api/security/evidence-policy')
+      .set('Cookie', authCookie)
+      .send({ scannerUnavailable: 'block' });
+    expect(res.status).toBe(200);
+    expect(res.body.policy).toMatchObject({ scannerUnavailable: 'block', scanFailure: 'block', staleScan: 'allow' });
+  });
+
+  it('accepts 0 days to disable the freshness bound', async () => {
+    const res = await request(app)
+      .put('/api/security/evidence-policy')
+      .set('Cookie', authCookie)
+      .send({ maxScanAgeDays: 0 });
+    expect(res.status).toBe(200);
+    expect(res.body.policy.maxScanAgeDays).toBe(0);
+  });
+
+  it('rejects an unknown outcome and writes nothing', async () => {
+    const res = await request(app)
+      .put('/api/security/evidence-policy')
+      .set('Cookie', authCookie)
+      .send({ scannerUnavailable: 'deny' });
+    expect(res.status).toBe(400);
+    const readBack = await request(app).get('/api/security/evidence-policy').set('Cookie', authCookie);
+    expect(readBack.body.policy.scannerUnavailable).toBe('allow');
+  });
+
+  it('rejects a non-boolean-ish outcome, so a stringy "1" cannot disable the gate', async () => {
+    const res = await request(app)
+      .put('/api/security/evidence-policy')
+      .set('Cookie', authCookie)
+      .send({ scannerUnavailable: 1 });
+    expect(res.status).toBe(400);
+  });
+
+  it('rejects an out-of-range freshness bound', async () => {
+    for (const days of [-1, 1.5, 4000]) {
+      const res = await request(app)
+        .put('/api/security/evidence-policy')
+        .set('Cookie', authCookie)
+        .send({ maxScanAgeDays: days });
+      expect(res.status, `days=${days}`).toBe(400);
+    }
+  });
+
+  it('rejects an unknown field rather than silently dropping it', async () => {
+    const res = await request(app)
+      .put('/api/security/evidence-policy')
+      .set('Cookie', authCookie)
+      .send({ scannerUnavailable: 'warn', everythingIsFine: true });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toContain('everythingIsFine');
+  });
+
+  it('writes nothing when one field in a multi-field body is invalid', async () => {
+    // A partial apply would leave the gate reading a policy nobody chose.
+    const res = await request(app)
+      .put('/api/security/evidence-policy')
+      .set('Cookie', authCookie)
+      .send({ scannerUnavailable: 'warn', staleScan: 'sometimes' });
+    expect(res.status).toBe(400);
+    const readBack = await request(app).get('/api/security/evidence-policy').set('Cookie', authCookie);
+    expect(readBack.body.policy.scannerUnavailable).toBe('allow');
+  });
+
+  it('refuses a non-admin write', async () => {
+    const bcrypt = await import('bcrypt');
+    const { DatabaseService } = await import('../services/DatabaseService');
+    DatabaseService.getInstance().addUser({
+      username: 'evidence-viewer',
+      password_hash: await bcrypt.default.hash('viewerpass', 1),
+      role: 'viewer',
+    });
+    const token = jwt.sign({ username: 'evidence-viewer', role: 'viewer' }, TEST_JWT_SECRET);
+
+    const res = await request(app)
+      .put('/api/security/evidence-policy')
+      .set('Authorization', `Bearer ${token}`)
+      .send({ scannerUnavailable: 'block' });
+    expect(res.status).toBe(403);
+
+    const readBack = await request(app).get('/api/security/evidence-policy').set('Cookie', authCookie);
+    expect(readBack.body.policy.scannerUnavailable).toBe('allow');
+  });
+});
+
+describe('evidence policy on the deploy gate, end to end', () => {
+  it('keeps a missing scanner allowing the deploy until an operator says otherwise', async () => {
+    const { ComposeService } = await import('../services/ComposeService');
+    const listImages = vi.spyOn(ComposeService.prototype, 'listStackImages').mockResolvedValue(['nginx:bad']);
+    const deploy = vi
+      .spyOn(ComposeService.prototype, 'deployStack')
+      .mockResolvedValue({ recoveryId: null, deployedGenerationId: null, gitopsOperationId: null });
+    const TrivyService = (await import('../services/TrivyService')).default;
+    const trivy = TrivyService.getInstance();
+    const available = vi.spyOn(trivy, 'isTrivyAvailable').mockReturnValue(false);
+
+    const { DatabaseService } = await import('../services/DatabaseService');
+    DatabaseService.getInstance().createScanPolicy({
+      name: 'evidence-default-block',
+      node_id: null,
+      node_identity: '',
+      stack_pattern: 'evidence-*',
+      max_severity: 'HIGH',
+      block_on_deploy: 1,
+      block_on_severity: 1,
+      block_on_kev: 0,
+      block_on_fixable: 0,
+      enabled: 1,
+      replicated_from_control: 0,
+    });
+
+    const allowed = await request(app).post('/api/stacks/evidence-demo/deploy').set('Cookie', authCookie);
+    expect(allowed.status).not.toBe(409);
+    expect(deploy).toHaveBeenCalled();
+
+    // The same install, with one setting changed, refuses instead.
+    DatabaseService.getInstance().updateGlobalSetting('security_scanner_unavailable', 'block');
+    const blocked = await request(app).post('/api/stacks/evidence-demo/deploy').set('Cookie', authCookie);
+    expect(blocked.status).toBe(409);
+    // The refusal has to be explainable, not just a 409.
+    expect(blocked.body.evidence).toMatchObject({ outcome: 'block' });
+    expect(blocked.body.evidence.applications[0].rule).toBe('security_scanner_unavailable=block');
+
+    listImages.mockRestore();
+    deploy.mockRestore();
+    available.mockRestore();
+  });
+});

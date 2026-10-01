@@ -2299,6 +2299,16 @@ export class DatabaseService {
         // convenience that degrades gracefully offline); operators on air-gapped
         // or firewalled hosts can turn it off.
         stmt.run('cve_intel_enabled', '1');
+        // Evidence-availability policy: what the deploy gate may do when it
+        // cannot prove a target is safe. These defaults reproduce the gate's
+        // pre-policy behavior exactly, so seeding them changes no outcome on an
+        // existing install. A missing scanner still allows the deploy (a tool
+        // outage must not lock an operator out); a failed scan still blocks;
+        // scan age is not yet consulted (0 = no freshness bound).
+        stmt.run('security_scanner_unavailable', 'allow');
+        stmt.run('security_scan_failure', 'block');
+        stmt.run('security_stale_scan', 'allow');
+        stmt.run('security_max_scan_age_days', '0');
         stmt.run('mesh_auto_recreate', '0');
         stmt.run('prune_on_update', '1');
         // Managed by /api/sso/auth-mode, not the generic /api/settings route
@@ -4061,8 +4071,23 @@ stmt.run('gitops_schema_version', '1');
     }
 
     public updateGlobalSetting(key: string, value: string): void {
+        this.updateGlobalSettings({ [key]: value });
+    }
+
+    /**
+     * Write several settings as one unit. A caller saving a group of related
+     * keys would otherwise leave half of them applied if the third statement
+     * failed, which is worse than applying none: the operator's saved intent
+     * becomes unrecoverable without knowing which half landed. Invalidates the
+     * settings cache once rather than per key.
+     */
+    public updateGlobalSettings(values: Readonly<Record<string, string>>): void {
+        const entries = Object.entries(values);
+        if (entries.length === 0) return;
         const stmt = this.db.prepare('INSERT OR REPLACE INTO global_settings (key, value) VALUES (?, ?)');
-        stmt.run(key, value);
+        this.db.transaction(() => {
+            for (const [key, value] of entries) stmt.run(key, value);
+        })();
         this.cachedGlobalSettings = null;
     }
 

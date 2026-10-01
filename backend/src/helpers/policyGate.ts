@@ -88,6 +88,10 @@ export async function runPolicyGate(
         blockOnFixable: gate.policy.block_on_fixable,
       },
       violations: gate.violations,
+      // Why the gate lacked the evidence it needed, and which configured rule
+      // turned that into the refusal. Without it the dialog can only say a scan
+      // did not complete, which reads the same as a proven violation.
+      ...(gate.evidence ? { evidence: gate.evidence } : {}),
     });
     return false;
   }
