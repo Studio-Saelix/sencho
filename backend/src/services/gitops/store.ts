@@ -259,13 +259,21 @@ export class GitOpsStore {
       ?? this.getLiveBlueprintApplicationBySourceStack(stackName);
   }
 
-  getLiveBlueprintModeApplicationByRepoUrl(repoUrl: string): GitOpsApplicationRow | undefined {
+  /**
+   * Every live application in Blueprint target mode.
+   *
+   * The one-repository-per-Blueprint guard reads this whole set rather than
+   * querying by URL, because a repository has an unbounded number of valid
+   * spellings and `configured_repo_url = ?` only ever proves byte equality.
+   * The set is bounded by the number of Blueprints: `idx_gitops_app_active_blueprint_any`
+   * already holds one live Blueprint application per Blueprint id.
+   */
+  listLiveBlueprintModeApplications(): GitOpsApplicationRow[] {
     return this.db().prepare(
       `SELECT * FROM gitops_applications
-       WHERE configured_repo_url = ?
-         AND target_mode = 'blueprint'
+       WHERE target_mode = 'blueprint'
          AND lifecycle_status IN ('active','creating')`,
-    ).get(repoUrl) as GitOpsApplicationRow | undefined;
+    ).all() as GitOpsApplicationRow[];
   }
 
   /**

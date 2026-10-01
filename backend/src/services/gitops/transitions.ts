@@ -18,6 +18,7 @@ import {
 } from './json';
 import { insertHistory, type DeployDispatchedPayload, type DeployIntentRefusedPayload, type GitOpsHistoryStage, type HistoryOutcome, type PromotionCommittedPayload } from './history';
 import { emptyTargetRow, GitOpsStore } from './store';
+import { canonicalRepoKeyFromUrl } from './repoIdentity';
 import { SopsIdentityStore } from './sops/identityStore';
 import type {
   ArtifactQualification,
@@ -208,8 +209,16 @@ export type HealthRunReservation = {
   runId: string | null;
 };
 
+/**
+ * A refused state change.
+ *
+ * `code` names which guard refused, for callers that have to branch on the
+ * reason. The message is for the operator and stays prose, because branching
+ * on prose is what forced `GitOpsBindingService` to test a message for the
+ * word "repo" to tell two refusals apart.
+ */
 export class GitOpsTransitionError extends Error {
-  constructor(message: string) {
+  constructor(message: string, readonly code?: string) {
     super(message);
     this.name = 'GitOpsTransitionError';
   }
@@ -318,16 +327,65 @@ export class GitOpsTransitions {
       assertReady: (app) => {
         const live = this.store().getLiveBlueprintApplication(args.blueprintId);
         if (live && live.id !== app.id) {
-          throw new GitOpsTransitionError('live blueprint application already exists');
+          throw new GitOpsTransitionError('live blueprint application already exists', 'live_blueprint_application');
         }
-        if (app.configured_repo_url) {
-          const sameRepo = this.store().getLiveBlueprintModeApplicationByRepoUrl(app.configured_repo_url);
-          if (sameRepo && sameRepo.id !== app.id) {
-            throw new GitOpsTransitionError('live blueprint application already claims this repo');
-          }
-        }
+        this.assertRepoClaimFree(app);
       },
     });
+  }
+
+  /**
+   * One live Blueprint-mode application may claim a given repository.
+   *
+   * Compared on the canonical repository identity, not the configured URL:
+   * a repository has an unbounded number of valid spellings (`https://` and
+   * scp-style SSH for the same clone, with or without `.git`, with or without
+   * a trailing slash, host case either way), and byte equality proves nothing
+   * about any of them.
+   *
+   * Fail-closed, which is why an unidentifiable URL refuses rather than
+   * passing. An application whose repository cannot be named may well be
+   * claiming this one, and a guard that assumed otherwise would hand out a
+   * second claim on the same repository. The cost is that one unidentifiable
+   * live claimant refuses every later conversion until it is retired,
+   * detached, or tombstoned, which is the intended trade: the refusal is
+   * loud, names the condition, and never silently allows a duplicate.
+   *
+   * Only `configured_repo_url` is read, because a Blueprint-mode row cannot
+   * go back to Direct and reconfigure: material configuration applies to
+   * Direct applications only, and the claim is fixed when the row enters this
+   * mode. The stored identity would answer the same question, from the same
+   * `RepoIdentity` shape, without a second column that can disagree.
+   */
+  private assertRepoClaimFree(app: GitOpsApplicationRow): void {
+    const key = canonicalRepoKeyFromUrl(app.configured_repo_url ?? '');
+    if (key === null) {
+      // The stored URL is the only thing to fix, and it is editable while the
+      // application is still Direct, so the message says so rather than
+      // describing the condition and stopping there.
+      throw new GitOpsTransitionError(
+        'this git source has no repository path to identify; set a repository URL on the git source first',
+        'live_blueprint_repo',
+      );
+    }
+    for (const other of this.store().listLiveBlueprintModeApplications()) {
+      if (other.id === app.id) continue;
+      const otherKey = canonicalRepoKeyFromUrl(other.configured_repo_url ?? '');
+      if (otherKey === null) {
+        // Naming the holding Blueprint is what makes this actionable: the
+        // operator retires or detaches that one to clear the refusal, and
+        // "a live blueprint application" alone sends them looking through every
+        // Git-managed Blueprint instead.
+        throw new GitOpsTransitionError(
+          `blueprint ${other.blueprint_id} claims a repository that cannot be identified; `
+          + 'retire or detach it to continue',
+          'live_blueprint_repo',
+        );
+      }
+      if (otherKey === key) {
+        throw new GitOpsTransitionError('live blueprint application already claims this repo', 'live_blueprint_repo');
+      }
+    }
   }
 
   convertBlueprintToDirect(args: {

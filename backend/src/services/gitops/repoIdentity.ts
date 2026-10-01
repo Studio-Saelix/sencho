@@ -122,9 +122,64 @@ export function secretFreeRepoUrlFromStorable(parsed: ParseStorableRepoUrlResult
   return `ssh://git@${ssh.host}${portSuffix}${ssh.pathname}`;
 }
 
+/**
+ * The canonical key for "is this the same repository?".
+ *
+ * `RepoIdentity` already unifies the transport: an HTTPS URL, an scp-style
+ * SSH URL, and an `ssh://` URL for one repository all serialize to the same
+ * host and pathname. What it does not unify is the spelling of that
+ * pathname, because each is a legitimate configured form:
+ *
+ *   - the `.git` suffix, which every Git host accepts and none requires;
+ *   - trailing slashes;
+ *   - host casing, which an scp-style URL preserves and an `https://` URL
+ *     lowercases.
+ *
+ * The three rules below are exactly what collapses those variants, and each
+ * stops short of guessing: a `.git` suffix is stripped once, from the last
+ * path segment only, so `/org.git/repo` and `repo.git.git` stay distinct
+ * repositories; the path is never case-folded because Git hosts treat it
+ * case-sensitively; and `..` is refused rather than resolved, since a caller
+ * asking about a traversal has a bug, not a repository.
+ *
+ * `null` means the URL names no repository the guard can reason about. A
+ * caller that is deciding exclusivity must read that as a refusal, never as
+ * "no match".
+ */
+export function canonicalRepoKey(identity: RepoIdentity): string | null {
+  const host = identity.host.trim().toLowerCase();
+  if (host === '' || host.includes('/')) return null;
+  const segments = identity.pathname.split('/');
+  if (segments.some((segment) => segment === '..')) return null;
+  while (segments.length > 1 && segments[segments.length - 1] === '') segments.pop();
+  const last = segments[segments.length - 1];
+  if (last !== undefined && last.endsWith('.git') && last !== '.git') {
+    segments[segments.length - 1] = last.slice(0, -'.git'.length);
+  }
+  const pathname = segments.join('/');
+  if (pathname === '' || pathname === '/') return null;
+  return `${host}${pathname}`;
+}
+
+/** `canonicalRepoKey` for a configured URL, or null when it names no repository. */
+export function canonicalRepoKeyFromUrl(raw: string): string | null {
+  const parsed = parseStorableRepoUrl(raw);
+  if (!parsed.ok) return null;
+  return canonicalRepoKey(serializeRepoIdentityFromStorable(parsed));
+}
+
 export function repoUrlRejectionMessage(raw: string): string | null {
   const parsed = parseStorableRepoUrl(raw);
-  if (parsed.ok) return null;
+  if (parsed.ok) {
+    // A URL that parses but names no repository (a bare host, a host with an
+    // empty path) cannot be compared against any other repository, so it could
+    // never be claimed by a Blueprint-mode application. Refusing it here is
+    // what keeps an unclaimable URL out of the store, rather than discovering
+    // it later at conversion time with nothing the operator can act on.
+    return canonicalRepoKeyFromUrl(raw) === null
+      ? 'Repository URL must include a repository path'
+      : null;
+  }
   switch (parsed.reason) {
     case 'too_long':
       return 'repo_url is too long';

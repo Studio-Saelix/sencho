@@ -246,6 +246,8 @@ Click **Edit** on the detail sheet. On an Inline Blueprint, editing the compose 
 
 The Git Source sheet for that stack becomes read-only until you **Detach Git** or **Retire to Direct**. Save, Remove, and Pull now are blocked there.
 
+One repository backs at most one Git-managed Blueprint. Sencho matches repositories across the forms a Git URL can take, so the HTTPS URL and the SSH URL for the same clone count as one repository, with or without a `.git` suffix and whatever the host casing. Converting a second Git source that points at a repository already claimed by a Git-managed Blueprint is refused; pick a different source, or **Retire to Direct** or **Detach Git** on the Blueprint that holds the claim first.
+
 ### Accept source, approve placement, authorize rollout
 
 A Git-managed Blueprint takes each authority step as its own action. The GitOps section of the Blueprint detail sheet, and the application's page in GitOps, offer the step that is outstanding; once every step is recorded they offer nothing.

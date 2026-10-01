@@ -185,7 +185,9 @@ export class GitOpsBindingService {
       });
     } catch (error) {
       if (error instanceof GitOpsTransitionError) {
-        const code = error.message.includes('repo') ? 'live_blueprint_repo' : 'live_blueprint_application';
+        const code = error.code === 'live_blueprint_repo'
+          ? 'live_blueprint_repo'
+          : 'live_blueprint_application';
         throw new GitOpsBindingError(code, error.message);
       }
       throw error;

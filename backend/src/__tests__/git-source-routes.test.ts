@@ -121,6 +121,9 @@ describe('PUT /api/stacks/:stackName/git-source — URL validation', () => {
             { repo_url: 'https://user:pass@github.com/example/repo.git', error: /userinfo/i },
             { repo_url: 'https://github.com/example/repo.git?token=1', error: /query/i },
             { repo_url: 'https://github.com/example/repo.git#head', error: /fragment/i },
+            // Parses as a URL but names no repository, so it could never be
+            // claimed by a Blueprint-mode application.
+            { repo_url: 'https://github.com/', error: /repository path/i },
         ];
         for (const c of cases) {
             const res = await request(app)

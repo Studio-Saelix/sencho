@@ -1,7 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import {
+  canonicalRepoKeyFromUrl,
   parseHttpsRepoUrl,
   parseLegacyRepoUrl,
+  repoUrlRejectionMessage,
   secretFreeRepoUrl,
   serializeRepoIdentity,
 } from '../services/gitops/repoIdentity';
@@ -54,6 +56,73 @@ describe('secret-free repository identity', () => {
       expect(parseLegacyRepoUrl('not a url at all').ok).toBe(false);
       expect(parseLegacyRepoUrl('').ok).toBe(false);
       expect(parseLegacyRepoUrl(`https://github.com/${'x'.repeat(2100)}`).ok).toBe(false);
+    });
+  });
+
+  describe('repo url ingress', () => {
+    it('refuses a url that names no repository', () => {
+      // A bare host parses, so without the canonical check it would be stored
+      // as a source that no Blueprint conversion could ever claim.
+      expect(repoUrlRejectionMessage('https://github.com/')).toMatch(/repository path/i);
+      expect(repoUrlRejectionMessage('https://github.com')).toMatch(/repository path/i);
+      expect(repoUrlRejectionMessage('git@foo/bar:org/repo')).toMatch(/repository path/i);
+      // Refused too, by the parser rather than the path check.
+      expect(repoUrlRejectionMessage('git@github.com:')).not.toBeNull();
+    });
+
+    it('accepts every spelling of a real repository', () => {
+      for (const url of [
+        'https://github.com/org/repo.git',
+        'https://github.com/org/repo',
+        'git@github.com:org/repo.git',
+        'ssh://git@github.com/org/repo.git',
+        'https://[::1]:8443/org/repo.git',
+      ]) {
+        expect(repoUrlRejectionMessage(url), url).toBeNull();
+      }
+    });
+  });
+
+  describe('canonical repository key', () => {
+    it('collapses every spelling of one repository', () => {
+      const expected = 'github.com/org/repo';
+      for (const url of [
+        'https://github.com/org/repo.git',
+        'https://github.com/org/repo',
+        'https://github.com/org/repo/',
+        'https://github.com/org/repo.git/',
+        'https://GitHub.com/org/repo.git',
+        'git@github.com:org/repo.git',
+        'git@github.com:org/repo',
+        'git@GitHub.COM:org/repo.git',
+        'ssh://git@github.com/org/repo.git',
+        'ssh://git@github.com:22/org/repo.git',
+      ]) {
+        expect(canonicalRepoKeyFromUrl(url), url).toBe(expected);
+      }
+    });
+
+    it('keeps different repositories apart', () => {
+      const key = (url: string) => canonicalRepoKeyFromUrl(url);
+      expect(key('https://github.com/org/repo.git')).not.toBe(key('https://gitlab.com/org/repo.git'));
+      expect(key('https://github.com/org/repo.git')).not.toBe(key('https://github.com/org/repo-b.git'));
+      expect(key('https://github.com/org.git/repo.git')).not.toBe(key('https://github.com/org/repo.git'));
+      expect(key('https://github.com/org/repo.GIT')).not.toBe(key('https://github.com/org/repo.git'));
+      expect(key('https://github.com/org/repo.git.git')).not.toBe(key('https://github.com/org/repo.git'));
+      expect(key('https://github.com/org/repo.git')).not.toBe(key('https://github.com:8443/org/repo.git'));
+    });
+
+    it('has no key for a url that names no repository', () => {
+      for (const url of [
+        'not a url at all',
+        'http://github.com/org/repo.git',
+        'https://github.com',
+        'https://github.com/',
+        'https://github.com?token=1',
+        '',
+      ]) {
+        expect(canonicalRepoKeyFromUrl(url), url).toBeNull();
+      }
     });
   });
 
