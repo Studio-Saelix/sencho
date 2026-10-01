@@ -1,13 +1,18 @@
 /**
- * Remote digest freeze/repair must use the leaf's rendered model and platform
- * over HTTP. Never interpret the remote node's compose_dir as a hub-local path.
+ * Remote digest freeze/repair and remote deploy observation must read the leaf
+ * over HTTP. Never interpret the remote node's compose_dir as a hub-local path,
+ * and never read a remote node's workload from the hub's own Docker.
  */
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import axios from 'axios';
 import { setupTestDb, cleanupTestDb } from './helpers/setupTestDb';
 import { GitOpsStore } from '../services/gitops/store';
 import { GitOpsTransitions, type EventEnvelope } from '../services/gitops/transitions';
-import { decodeArtifactEvidenceJson, encodeArtifactEvidenceJson } from '../services/gitops/json';
+import {
+  decodeArtifactEvidenceJson,
+  decodeObservedArtifactIdentity,
+  encodeArtifactEvidenceJson,
+} from '../services/gitops/json';
 import type { EffectiveArtifactContext } from '../services/gitops/effectiveArtifactContext';
 import type { GitOpsApplicationRow, GitOpsGenerationRow } from '../services/gitops/types';
 import { DEFAULT_PLACEMENT_POLICY, DEFAULT_ROLLOUT_AUTHORIZATION_POLICY } from '../services/gitops/policyComposition';
@@ -15,6 +20,9 @@ import { DEFAULT_PLACEMENT_POLICY, DEFAULT_ROLLOUT_AUTHORIZATION_POLICY } from '
 const mockBuildEffectiveServiceModel = vi.fn();
 const mockDockerInfo = vi.fn();
 const mockResolveRegistry = vi.fn();
+const mockListContainers = vi.fn();
+const mockContainerInspect = vi.fn();
+const mockImageInspect = vi.fn();
 
 vi.mock('../services/effectiveServiceModel', () => ({
   buildEffectiveServiceModel: (...args: unknown[]) => mockBuildEffectiveServiceModel(...args),
@@ -41,9 +49,9 @@ vi.mock('../services/DockerController', () => ({
     getInstance: () => ({
       getDocker: () => ({
         info: (...args: unknown[]) => mockDockerInfo(...args),
-        listContainers: vi.fn().mockResolvedValue([]),
-        getContainer: () => ({ inspect: vi.fn() }),
-        getImage: () => ({ inspect: vi.fn() }),
+        listContainers: (...args: unknown[]) => mockListContainers(...args),
+        getContainer: () => ({ inspect: (...args: unknown[]) => mockContainerInspect(...args) }),
+        getImage: () => ({ inspect: (...args: unknown[]) => mockImageInspect(...args) }),
       }),
     }),
   },
@@ -54,6 +62,7 @@ let DatabaseService: typeof import('../services/DatabaseService').DatabaseServic
 let NodeRegistry: typeof import('../services/NodeRegistry').NodeRegistry;
 let resolveAndRecordArtifactSet: typeof import('../services/gitops/artifactResolve').resolveAndRecordArtifactSet;
 let resolvePlatformLabelForNode: typeof import('../services/gitops/artifactResolve').resolvePlatformLabelForNode;
+let recordObservedRuntimeArtifactForDeploy: typeof import('../services/gitops/artifactResolve').recordObservedRuntimeArtifactForDeploy;
 let remoteNodeId: number;
 let counter = 0;
 
@@ -63,7 +72,7 @@ beforeAll(async () => {
   tmpDir = await setupTestDb();
   ({ DatabaseService } = await import('../services/DatabaseService'));
   ({ NodeRegistry } = await import('../services/NodeRegistry'));
-  ({ resolveAndRecordArtifactSet, resolvePlatformLabelForNode } = await import('../services/gitops/artifactResolve'));
+  ({ resolveAndRecordArtifactSet, resolvePlatformLabelForNode, recordObservedRuntimeArtifactForDeploy } = await import('../services/gitops/artifactResolve'));
   remoteNodeId = DatabaseService.getInstance().addNode({
     name: `remote-digest-${Date.now()}`,
     type: 'remote',
@@ -82,6 +91,9 @@ beforeEach(() => {
   mockBuildEffectiveServiceModel.mockReset();
   mockDockerInfo.mockReset();
   mockResolveRegistry.mockReset();
+  mockListContainers.mockReset();
+  mockContainerInspect.mockReset();
+  mockImageInspect.mockReset();
   mockBuildEffectiveServiceModel.mockResolvedValue({
     renderable: true,
     services: [{
@@ -94,6 +106,7 @@ beforeEach(() => {
     }],
   });
   mockDockerInfo.mockResolvedValue({ OSType: 'linux', Architecture: 'amd64' });
+  mockListContainers.mockResolvedValue([]);
   mockResolveRegistry.mockResolvedValue({
     ok: true,
     indexDigest: `sha256:${'1'.repeat(64)}`,
@@ -129,6 +142,9 @@ function mockLeafPlatform(platform: { os: string; architecture: string }) {
 function expectHubLocalSkipped(): void {
   expect(mockBuildEffectiveServiceModel).not.toHaveBeenCalled();
   expect(mockDockerInfo).not.toHaveBeenCalled();
+  expect(mockListContainers).not.toHaveBeenCalled();
+  expect(mockContainerInspect).not.toHaveBeenCalled();
+  expect(mockImageInspect).not.toHaveBeenCalled();
 }
 
 function seedDirectApp(ids: {
@@ -316,6 +332,125 @@ describe('remote effective artifact context for digest freeze', () => {
 
     expect(axiosGetSpy).toHaveBeenCalled();
     expectHubLocalSkipped();
+  });
+});
+
+describe('remote runtime observation after a deploy', () => {
+  const LEAF_IDENTITY = `sha256:${'b'.repeat(64)}`;
+
+  it('records the identity the leaf reports and never reads hub Docker', async () => {
+    const stackName = 'observed-remote-stack';
+    const applicationId = `app-observed-${counter}`;
+    const generationId = `gen-observed-${counter}`;
+    seedDirectApp({
+      applicationId,
+      generationId,
+      stackName,
+      artifactSetId: `art-observed-${counter}`,
+    });
+
+    const axiosGetSpy = vi.spyOn(axios, 'get').mockResolvedValue({
+      status: 200,
+      data: {
+        kind: 'exact',
+        identity: LEAF_IDENTITY,
+        observedAt: 1_700_000_000_000,
+        services: [{
+          serviceName: 'web',
+          authoredRef: 'nginx:1.27',
+          source: 'registry',
+          platform: 'linux/arm64',
+          indexDigest: null,
+          platformDigest: `sha256:${'a'.repeat(64)}`,
+          localDigests: [`sha256:${'a'.repeat(64)}`],
+          buildContextFingerprint: null,
+          producedImageId: 'imagedeadbeef',
+          failureClass: null,
+          resolvedAt: 1_700_000_000_000,
+        }],
+      },
+    });
+
+    await recordObservedRuntimeArtifactForDeploy({
+      stackName,
+      nodeId: remoteNodeId,
+      applicationId,
+      envelope: envelope(`op-observed-${counter}`),
+    });
+
+    expect(axiosGetSpy).toHaveBeenCalledWith(
+      `http://192.168.1.50:1852/api/stacks/${stackName}/runtime-artifact-identity`,
+      expect.objectContaining({
+        headers: expect.objectContaining({
+          Authorization: `Bearer ${'t'.repeat(64)}`,
+        }),
+      }),
+    );
+    expectHubLocalSkipped();
+
+    const observed = decodeObservedArtifactIdentity(
+      GitOpsStore.getInstance().getTarget(applicationId, remoteNodeId)?.observed_artifact_identity_json ?? null,
+    );
+    expect(observed).toMatchObject({
+      kind: 'exact',
+      identity: LEAF_IDENTITY,
+      observedAt: 1_700_000_000_000,
+    });
+    expect(observed).toHaveProperty('services', [
+      expect.objectContaining({ serviceName: 'web', platform: 'linux/arm64' }),
+    ]);
+  });
+
+  it('records an explicit unavailable when the leaf cannot be asked', async () => {
+    const stackName = 'unreachable-remote-stack';
+    const applicationId = `app-unreachable-${counter}`;
+    const generationId = `gen-unreachable-${counter}`;
+    seedDirectApp({
+      applicationId,
+      generationId,
+      stackName,
+      artifactSetId: `art-unreachable-${counter}`,
+    });
+
+    vi.spyOn(axios, 'get').mockRejectedValue(new Error('connect ECONNREFUSED'));
+
+    await expect(recordObservedRuntimeArtifactForDeploy({
+      stackName,
+      nodeId: remoteNodeId,
+      applicationId,
+      envelope: envelope(`op-unreachable-${counter}`),
+    })).resolves.toBeUndefined();
+
+    expectHubLocalSkipped();
+    expect(decodeObservedArtifactIdentity(
+      GitOpsStore.getInstance().getTarget(applicationId, remoteNodeId)?.observed_artifact_identity_json ?? null,
+    )).toEqual({ kind: 'unavailable' });
+  });
+
+  it('records an explicit unavailable when the leaf answers with an unreadable payload', async () => {
+    const stackName = 'malformed-remote-stack';
+    const applicationId = `app-malformed-${counter}`;
+    const generationId = `gen-malformed-${counter}`;
+    seedDirectApp({
+      applicationId,
+      generationId,
+      stackName,
+      artifactSetId: `art-malformed-${counter}`,
+    });
+
+    vi.spyOn(axios, 'get').mockResolvedValue({ status: 200, data: { kind: 'exact' } });
+
+    await expect(recordObservedRuntimeArtifactForDeploy({
+      stackName,
+      nodeId: remoteNodeId,
+      applicationId,
+      envelope: envelope(`op-malformed-${counter}`),
+    })).resolves.toBeUndefined();
+
+    expectHubLocalSkipped();
+    expect(decodeObservedArtifactIdentity(
+      GitOpsStore.getInstance().getTarget(applicationId, remoteNodeId)?.observed_artifact_identity_json ?? null,
+    )).toEqual({ kind: 'unavailable' });
   });
 });
 

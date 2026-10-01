@@ -1677,6 +1677,31 @@ function deriveTarget(
   const connectivity = connectivityFromObservation(target, observed, limitations);
   const artifact = deriveArtifact(app, target.desired_generation_id, target.expected_artifact_set_id, target.latest_artifact_set_id, limitations);
   const runtime = deriveRuntime(target, artifact, observed, healthDisabled, app);
+  // A withdrawal hides a failed recovery rather than resolving it. The tombstone
+  // answers before the runtime facet reads a recovery field, and the retirement
+  // cleared the failure columns without clearing the recovery ones, so the row
+  // still holds the failed recovery and nothing else reports it. The condition
+  // is the one `deriveRuntime` reads, so the caveat and the status cannot
+  // disagree about the same row.
+  //
+  // Only a retirement that carried one. After any withdrawal Sencho cannot
+  // prove the compose project came down, because the teardown is best effort
+  // and swallows its own error, but a caveat on every retirement would qualify
+  // the ordinary case and train a reader to skip the block. The rest of that is
+  // recorded in the internal architecture docs rather than asserted per target.
+  if (
+    target.target_status === 'tombstoned'
+    && (target.recovery_phase === 'failed' || target.failure_stage === 'recovery')
+  ) {
+    limitations.push({
+      code: 'withdrawal_residue',
+      message: 'target withdrawn while a recovery on it had failed',
+      // The node, because the operator copy names one and `limitationCaveats`
+      // deduplicates by sentence: without it, two withdrawn nodes collapse into
+      // one caveat that says "this node" without saying which.
+      evidence: { nodeId: target.node_id, recoveryRef: target.recovery_ref },
+    });
+  }
   // The generation the target is running, in the sense each target mode can
   // prove. Health reads it from here rather than from deployed_generation_id,
   // which a Blueprint target never has a writer for.

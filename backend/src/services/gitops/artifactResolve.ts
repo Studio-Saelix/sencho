@@ -20,6 +20,7 @@ import type { ArtifactQualification } from './types';
 import {
   computeArtifactSetFingerprint,
   decodeArtifactEvidenceJson,
+  decodeObservedArtifactIdentity,
   encodeArtifactEvidenceJson,
   isRecord,
   type ArtifactEvidenceJson,
@@ -27,6 +28,7 @@ import {
   type ObservedArtifactIdentity,
   type ServiceArtifactEvidence,
 } from './json';
+import { observationMatchesExpected } from './artifactIdentity';
 import { GitOpsStore } from './store';
 import { GitOpsTransitions, type EventEnvelope } from './transitions';
 import { newGitOpsId } from './directApplication';
@@ -381,6 +383,72 @@ export async function fetchRemoteEffectiveArtifactContext(
   }
 }
 
+/**
+ * Ask the leaf what it is actually running, over the node proxy.
+ * A remote node's Docker is not reachable from here, so the identity can only
+ * come from the leaf's own runtime-artifact-identity route. Returns null when
+ * the leaf cannot answer, so the caller records an explicit unavailable rather
+ * than a hub-local guess.
+ */
+export async function fetchRemoteRuntimeArtifactIdentity(
+  nodeId: number,
+  stackName: string,
+): Promise<ObservedArtifactIdentity | null> {
+  const target = NodeRegistry.getInstance().getProxyTarget(nodeId);
+  if (!target) {
+    console.warn(
+      '[GitOpsArtifactResolve] No proxy target for remote runtime identity on node %s (%s)',
+      nodeId,
+      sanitizeForLog(stackName),
+    );
+    return null;
+  }
+  const proxy = LicenseService.getInstance().getProxyHeaders();
+  const url = `${target.apiUrl.replace(/\/$/, '')}/api/stacks/${encodeURIComponent(stackName)}/runtime-artifact-identity`;
+  try {
+    const res = await axios.get(url, {
+      ...safeAxiosTransport(target.trustedLoopback),
+      headers: {
+        Authorization: `Bearer ${target.apiToken}`,
+        [PROXY_TIER_HEADER]: proxy.tier,
+        'Content-Type': 'application/json',
+      },
+      timeout: REMOTE_RESOLVE_TIMEOUT_MS,
+      validateStatus: () => true,
+    });
+    if (res.status !== 200) {
+      console.warn(
+        '[GitOpsArtifactResolve] Remote runtime-artifact-identity returned %s for %s on node %s',
+        res.status,
+        sanitizeForLog(stackName),
+        nodeId,
+      );
+      return null;
+    }
+    // A leaf that answers with something this module cannot read is no
+    // evidence. Decoding separately keeps an unreadable payload distinguishable
+    // in the log from a leaf that could not be reached at all.
+    try {
+      return decodeObservedArtifactIdentity(JSON.stringify(res.data));
+    } catch {
+      console.warn(
+        '[GitOpsArtifactResolve] Remote runtime-artifact-identity invalid shape for %s on node %s',
+        sanitizeForLog(stackName),
+        nodeId,
+      );
+      return null;
+    }
+  } catch (err) {
+    console.warn(
+      '[GitOpsArtifactResolve] Remote runtime-artifact-identity failed for %s on node %s: %s',
+      sanitizeForLog(stackName),
+      nodeId,
+      sanitizeForLog(err instanceof Error ? err.message : String(err)),
+    );
+    return null;
+  }
+}
+
 async function loadArtifactContextForNode(
   nodeId: number,
   stackName: string,
@@ -630,6 +698,27 @@ export async function resolveAndRecordArtifactSet(args: {
   }
 }
 
+/**
+ * Whether both sides describe the same set of services, by name and by kind.
+ *
+ * `observationMatchesExpected` only walks the expected services and weighs the
+ * registry ones, so it cannot tell an extra service, a rename, or a service that
+ * swapped a local build for a published image from an unchanged set. The probe
+ * resolves the live stack rather than the staged candidate, so a stack edited out
+ * of band can carry a different set than the one that was frozen, and that is a
+ * moved identity rather than a matching one.
+ */
+function sameServiceSet(
+  expected: readonly ServiceArtifactEvidence[],
+  observed: readonly ServiceArtifactEvidence[],
+): boolean {
+  const identityOf = (service: ServiceArtifactEvidence): string =>
+    `${service.serviceName}:${service.source}`;
+  const expectedIdentities = new Set(expected.map(identityOf));
+  if (expectedIdentities.size !== expected.length) return false;
+  return observed.every((service) => expectedIdentities.has(identityOf(service)));
+}
+
 export async function probeStaleArtifactEvidence(args: {
   stackName: string;
   nodeId: number;
@@ -651,6 +740,7 @@ export async function probeStaleArtifactEvidence(args: {
   }
   const expectedIdentity = 'identity' in expectedEvidence ? expectedEvidence.identity : null;
   if (!expectedIdentity) return;
+  const expectedServices = 'services' in expectedEvidence ? expectedEvidence.services : undefined;
 
   try {
     const resolvedAt = args.envelope.at;
@@ -663,6 +753,19 @@ export async function probeStaleArtifactEvidence(args: {
     const latestIdentity = 'identity' in evidence ? evidence.identity : null;
     if (!latestIdentity || latestIdentity === expectedIdentity) return;
     if (qualification === 'unresolved' || qualification === 'unavailable') return;
+    // The set fingerprint pins one platform child per service, so a target on a
+    // different architecture resolves a different fingerprint for the same
+    // multi-arch tag, and the fingerprint alone would report a moved identity.
+    // Membership is the test the Blueprint drift path applies: this platform's
+    // child is one of the expected set's own variants, so nothing moved. It
+    // answers only the digest question, so it is asked when both sides hold the
+    // same services; a set that grew, shrank, or changed what a service is, and
+    // an expected set that recorded no per-service evidence, all keep the
+    // fingerprint verdict.
+    if (expectedServices?.length
+      && evidence.services?.length
+      && sameServiceSet(expectedServices, evidence.services)
+      && observationMatchesExpected(expectedServices, evidence.services)) return;
     recordResolvedEvidence({
       applicationId: args.applicationId,
       generationId: args.generationId,
@@ -781,6 +884,10 @@ function recordRuntimeObservation(
  * Observe the running image identity for a stack on a node.
  * Does not require a GitOps application or generation; callers record when they have one.
  * Compose project labels use the lowercase stack name (Docker Compose convention).
+ *
+ * A remote node is asked over the proxy before anything is rendered or read
+ * here: a hub-local model of a remote stack and a hub-local Docker socket are
+ * both the wrong answer, and the second one throws.
  */
 export async function observeStackRuntimeArtifact(args: {
   stackName: string;
@@ -788,6 +895,13 @@ export async function observeStackRuntimeArtifact(args: {
   observedAt?: number;
 }): Promise<ObservedArtifactIdentity> {
   const observedAt = args.observedAt ?? Date.now();
+  const node = DatabaseService.getInstance().getNode(args.nodeId);
+  if (node?.type === 'remote') {
+    // The leaf's observedAt is authoritative: that is when it actually looked.
+    // The caller's timestamp belongs to the hub's envelope, not to this read.
+    const remote = await fetchRemoteRuntimeArtifactIdentity(args.nodeId, args.stackName);
+    return remote ?? { kind: 'unavailable' };
+  }
   const projectName = args.stackName.toLowerCase();
   try {
     const model = await buildEffectiveServiceModel(args.nodeId, args.stackName);
