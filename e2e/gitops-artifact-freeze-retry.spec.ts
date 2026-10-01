@@ -115,7 +115,9 @@ test.describe('GitOps artifact freeze retry', () => {
     await loginAs(page);
 
     await page.goto('/settings/stacks');
-    const nav = page.getByRole('link', { name: 'GitOps', exact: true });
+    // `button`, not `link`: SettingsSidebar renders every section as a button
+    // that calls onSectionChange, with no anchor behind it.
+    const nav = page.getByRole('button', { name: 'GitOps', exact: true });
     await expect(nav, 'the GitOps section must be listed under Infrastructure').toBeVisible();
     await nav.click();
     await expect(page).toHaveURL(/\/settings\/gitops$/);
