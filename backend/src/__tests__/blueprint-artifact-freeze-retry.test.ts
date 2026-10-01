@@ -337,11 +337,11 @@ function stubCleanRuntime(blueprint: Blueprint, observedDigest: string): void {
     containerHealth: () => Promise<{ kind: 'running' }>;
     observeRuntimeIdentity: () => Promise<import('../services/gitops/json').ObservedArtifactIdentity>;
   };
-  vi.spyOn(BlueprintService.getInstance(), 'readMarker').mockResolvedValue({
+  vi.spyOn(BlueprintService.getInstance(), 'readMarker').mockResolvedValue({ kind: 'present', marker: {
     blueprintId: blueprint.id,
     revision: blueprint.revision,
     lastApplied: Date.now(),
-  });
+  } });
   vi.spyOn(svc, 'containerHealth').mockResolvedValue({ kind: 'running' });
   vi.spyOn(svc, 'observeRuntimeIdentity').mockResolvedValue({
     kind: 'exact',
