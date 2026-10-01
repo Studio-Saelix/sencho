@@ -582,18 +582,32 @@ describe('BlueprintService marker edge cases', () => {
         const { BlueprintOwnershipProbeError } = await import('../services/BlueprintService');
         const remoteNode = seedRemoteNode();
         await stubProxyTarget(remoteNode);
+        // Only the marker read fails. The stack listing has to succeed, or the
+        // probe throws from its own list-failure catch and this asserts nothing
+        // about the marker. The listing URL is `${baseUrl}/api/stacks` with no
+        // query string, and the marker URL is the one carrying files/content.
+        const listUrl = 'https://leaf.example.test:1852/api/stacks';
         vi.spyOn(axios, 'get').mockImplementation((url: string) => {
-            // The stack listing answers, so the probe gets as far as the marker;
-            // only the marker read fails.
-            if (String(url).includes('/api/stacks?')) {
+            if (String(url) === listUrl) {
                 return Promise.resolve({ status: 200, data: [{ name: 'bp-edge-conflict' }] });
             }
+            expect(String(url), 'only the marker read may fail here').toContain('files/content');
             return Promise.reject(new Error('socket hang up'));
         });
 
-        await expect(
-            BlueprintService.getInstance().hasNameConflict('bp-edge-conflict', remoteNode, 1),
-        ).rejects.toBeInstanceOf(BlueprintOwnershipProbeError);
+        // Both the listing failure and the marker failure throw this same type, so
+        // the type alone cannot tell them apart. The message is what does: the
+        // listing failure names the node, the marker failure names the stack and
+        // carries the underlying read error.
+        const error = await BlueprintService.getInstance()
+            .hasNameConflict('bp-edge-conflict', remoteNode, 1)
+            .then(() => null, (err: unknown) => err);
+
+        expect(error, 'an unreadable marker must refuse the create').toBeInstanceOf(BlueprintOwnershipProbeError);
+        const message = error instanceof Error ? error.message : String(error);
+        expect(message, 'the refusal must name the marker read that failed').toContain('socket hang up');
+        expect(message, 'not the stack listing, which answered').toContain('bp-edge-conflict');
+        expect(message).not.toMatch(/verify stack ownership on remote node/i);
     });
 
     it('reads a local marker that is genuinely absent as missing, not failed', async () => {

@@ -699,7 +699,13 @@ export class BlueprintService {
      * Returns true when a stack directory by this name exists on the target
      * node and the on-disk marker is missing, malformed, or references a
      * different blueprint ID. Throws BlueprintOwnershipProbeError when the
-     * directory or marker cannot be probed (non-ENOENT I/O or remote list failure).
+     * directory or marker cannot be probed (non-ENOENT I/O, a remote list
+     * failure, or a marker read that failed).
+     *
+     * "Malformed" is local-only. A corrupt marker read off local disk is a fact
+     * about the node and reports a conflict, while a remote marker that could
+     * not be read is a failure to find out and throws, because calling it a
+     * conflict would tell the operator an unowned stack is sitting there.
      */
     async hasNameConflict(blueprintName: string, node: Node, blueprintId: number): Promise<boolean> {
         if (node.type === 'local') {
