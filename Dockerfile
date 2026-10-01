@@ -296,9 +296,17 @@ ARG APK_CACHE_BUST=unset
 # eliminating the curl dependency and all Go stdlib CVEs from the upstream
 # static binaries. npm is removed because it is not needed at runtime;
 # removing it also eliminates CVE-2026-33671 (picomatch ReDoS in npm).
+#
+# pcre2 arrives as a transitive dependency of git, so it is not present in the
+# base image and `apk upgrade` alone decides its version. The floor is here
+# because the daily cache-bust key is a date: a fix that lands in Alpine's repo
+# during the day is invisible to any build that reuses a `apk upgrade` layer
+# cached earlier the same day, and the scanned image kept shipping the previous
+# pcre2 (CVE-2026-103111, fixed in 10.49-r0). Naming the floor rebuilds this
+# layer and keeps a stale cache from serving a version below the fix again.
 RUN echo "apk cache bust: ${APK_CACHE_BUST}" && \
     apk upgrade --no-cache && \
-    apk add --no-cache bash su-exec git tini 'openssh-client>=10.3_p1-r1' && \
+    apk add --no-cache bash su-exec git tini 'openssh-client>=10.3_p1-r1' 'pcre2>=10.49-r0' && \
     mkdir -p /usr/local/lib/docker/cli-plugins
 
 # Copy the source-built Docker CLI and Compose plugin from their builder stages.
