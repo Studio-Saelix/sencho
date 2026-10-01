@@ -287,6 +287,13 @@ async function resolveInlineArtifactSet(args: {
   generationId: string;
   blueprintId: number;
   actor: string | null;
+  /**
+   * History trigger for the evidence this writes. The caller supplies it rather
+   * than this defaulting to the freeze's, because the two are different events:
+   * one pins identity at deploy time, the other recovers it from a later tick,
+   * and an audit trail that cannot tell them apart is not an audit trail.
+   */
+  trigger: string;
   approvedServices?: readonly EffectiveServiceSpec[];
 }): Promise<boolean> {
   const store = GitOpsStore.getInstance();
@@ -297,7 +304,7 @@ async function resolveInlineArtifactSet(args: {
     applicationId: args.applicationId,
     generationId: args.generationId,
     buildContexts: [],
-    envelope: envelopeFor(args.actor, 'inline_revision_frozen'),
+    envelope: envelopeFor(args.actor, args.trigger),
     ...(args.approvedServices ? { approvedServices: args.approvedServices } : {}),
   });
   const after = store.getTarget(args.applicationId, args.nodeId)?.expected_artifact_set_id ?? null;
@@ -375,11 +382,15 @@ export async function retryInlineArtifactFreeze(args: {
     );
     return false;
   }
-  const approvedServices = approvedInlineServiceSpecs(intent, blueprint);
-  if (!approvedServices) {
+  const approved = approvedInlineServiceSpecs(intent, blueprint);
+  if ('refusal' in approved) {
+    // Refused rather than resolved without specs: every refusal here is a compose
+    // shape whose authored text can disagree with the rendered model, and
+    // resolving from it would report a healthy stack as drifted.
     console.error(
-      '[GitOps] Inline artifact retry skipped for blueprint %s: the approved intent content is unreadable, or the Blueprint has been edited since it was approved',
+      '[GitOps] Inline artifact retry skipped for blueprint %s: %s',
       sanitizeForLog(String(args.blueprintId)),
+      sanitizeForLog(approved.refusal),
     );
     return false;
   }
@@ -391,12 +402,17 @@ export async function retryInlineArtifactFreeze(args: {
     generationId: args.generationId,
     blueprintId: args.blueprintId,
     actor: null,
-    approvedServices,
+    // Distinct from the freeze's `inline_revision_frozen`, so the history says
+    // this identity was recovered by a later reconcile tick rather than pinned by
+    // the deploy that applied the revision.
+    trigger: 'inline_artifact_freeze_retried',
+    approvedServices: approved.specs,
   });
 }
 
 /**
- * The service specs an intent's approved compose content declares.
+ * The service specs an intent's approved compose content declares, or the reason
+ * the authored content cannot stand in for the rendered model.
  *
  * Parsed from the stored content, never from the node's directory. That
  * distinction is the whole point of the retry: a reconcile tick can run days
@@ -406,14 +422,37 @@ export async function retryInlineArtifactFreeze(args: {
  * local change into fleet intent and would let drift read as converged against
  * content nobody approved.
  *
- * Returns null when the approved content cannot be parsed, which the caller
- * treats as "do not retry": an intent whose own content is unreadable is not
- * evidence that anything on the node is approved.
+ * **What it refuses, and why refusing is the whole design.** The freeze resolves
+ * the *rendered* model, which is what `docker compose config` produced on the
+ * node. This parses the authored text. Those agree for a plain stack and diverge
+ * for anything Compose expands, and a divergence is not cosmetic: a service the
+ * authored text declares but the rendered model excludes ends up in the expected
+ * set, is absent from the observation, and `observationMatchesExpected` reads a
+ * missing expected service as drift. That is a healthy stack reported as drifted,
+ * and under Enforce the repair cannot make it converge, so it would redeploy on
+ * every tick.
+ *
+ * So this returns a refusal instead of a best-effort parse for every construct
+ * that can change the rendered service set:
+ *
+ * - `include`, which merges services from other files the parse never sees.
+ * - `profiles`, which the node's `docker compose config` does not activate, so
+ *   the rendered model omits those services while a flat parse keeps them.
+ * - `extends`, which can import `profiles` (and other fields) onto a service
+ *   that shows no trace of them in its own body.
+ * - `<<` merge keys, which the YAML parser does not resolve at all: it leaves a
+ *   literal `<<` key, so the merged fields are invisible, `image` reads as null,
+ *   and the failure is silent rather than loud.
+ *
+ * Refusing leaves the target `unresolved` and therefore `unverified`, which is
+ * the honest state, and the projection already reports that as a limitation. The
+ * cost is that a Blueprint using these constructs recovers its expectation only
+ * through a redeploy, which is where it stood before this retry existed.
  */
 function approvedInlineServiceSpecs(
   intent: GitOpsIntentRevisionRow | undefined,
   blueprint: Blueprint | undefined,
-): EffectiveServiceSpec[] | null {
+): { specs: EffectiveServiceSpec[] } | { refusal: string } {
   // The intent records the hash of the content that was approved. If the
   // Blueprint has moved on since, the intent's content is the one that was
   // approved and the current Blueprint text is not, so the hash is what
@@ -421,15 +460,54 @@ function approvedInlineServiceSpecs(
   const content = intent && blueprint
     ? composeContentForIntent(intent, blueprint)
     : null;
-  if (content === null) return null;
-  try {
-    const doc = parseYaml(content) as { services?: Record<string, unknown> } | null;
-    const services = doc?.services;
-    if (!services || typeof services !== 'object' || Array.isArray(services)) return null;
-    return Object.entries(services).map(([name, raw]) => approvedServiceSpec(name, raw));
-  } catch {
-    return null;
+  if (content === null) {
+    return { refusal: 'the approved intent content is unreadable, or the Blueprint has been edited since it was approved' };
   }
+
+  let doc: { services?: unknown; include?: unknown } | null;
+  try {
+    doc = parseYaml(content) as { services?: unknown; include?: unknown } | null;
+  } catch {
+    return { refusal: 'the approved intent content does not parse as YAML' };
+  }
+  if (doc?.include !== undefined && doc.include !== null) {
+    return { refusal: 'the approved compose uses include, whose services the flat parse cannot see' };
+  }
+  const services = doc?.services;
+  if (!services || typeof services !== 'object' || Array.isArray(services)) {
+    return { refusal: 'the approved intent content declares no services' };
+  }
+
+  const specs: EffectiveServiceSpec[] = [];
+  for (const [name, raw] of Object.entries(services as Record<string, unknown>)) {
+    const hazard = authoredServiceHazard(raw);
+    if (hazard) return { refusal: `${hazard} (service ${name})` };
+    specs.push(approvedServiceSpec(name, raw));
+  }
+  return { specs };
+}
+
+/**
+ * The first construct on this service that makes the authored text an untrustworthy
+ * stand-in for the rendered model, or null when the service is safe to use.
+ *
+ * `profiles` is checked here rather than in the caller so the refusal can name the
+ * service, and `<<` is checked by key because the parser hands it back verbatim
+ * instead of merging it.
+ */
+function authoredServiceHazard(raw: unknown): string | null {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+  const svc = raw as Record<string, unknown>;
+  if ('<<' in svc) {
+    return 'the approved compose uses a merge key, which the YAML parse leaves unresolved';
+  }
+  if (svc.profiles !== undefined && svc.profiles !== null) {
+    return 'the approved compose gates a service on profiles, which the node does not activate when it renders';
+  }
+  if (svc.extends !== undefined && svc.extends !== null) {
+    return 'the approved compose uses extends, which can import fields the service body does not show';
+  }
+  return null;
 }
 
 /**
@@ -510,6 +588,7 @@ export async function freezeInlineRevisionAfterDeploy(args: {
     generationId,
     blueprintId: args.blueprintId,
     actor: args.actor,
+    trigger: 'inline_revision_frozen',
   });
 
   if (app.accepted_generation_id && app.artifact_set_id) {

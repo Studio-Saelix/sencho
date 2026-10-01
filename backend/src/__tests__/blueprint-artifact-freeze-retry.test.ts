@@ -262,26 +262,55 @@ function seedInlineWithUnresolvedFreeze(args: {
  * transition is the thing that decides whether the expectation advances, so the
  * tests use it.
  */
+/**
+ * The evidence a qualification carries, for a test that needs a row the real
+ * transition will accept.
+ *
+ * `local_build_unverified` carries a build-sourced service because that is what
+ * production records for a stack that builds on the node: the qualification is
+ * the weakest across services, and the build service is the reason.
+ */
+function evidenceForQualification(
+  qualification: 'exact' | 'unavailable' | 'unresolved' | 'local_build_unverified',
+  digest: string,
+): ArtifactEvidenceJson {
+  switch (qualification) {
+    case 'exact':
+      return { kind: 'exact', identity: `exact:${digest}`, services: [serviceEvidence(digest)] };
+    case 'local_build_unverified':
+      return {
+        kind: 'local_build_unverified',
+        identity: null,
+        services: [{
+          ...serviceEvidence(digest),
+          source: 'build',
+          authoredRef: null,
+          platformDigest: null,
+          failureClass: null,
+        }],
+      };
+    case 'unavailable':
+    case 'unresolved':
+      return { kind: qualification, services: [] };
+  }
+}
+
 function recordResolvedEvidenceForTarget(args: {
   appId: string;
   nodeId: number;
   generationId: string;
-  qualification: 'exact' | 'unavailable' | 'unresolved';
+  qualification: 'exact' | 'unavailable' | 'unresolved' | 'local_build_unverified';
   digest?: string;
 }): string {
   const store = GitOpsStore.getInstance();
   const digest = args.digest ?? DIGEST;
-  const resolved = args.qualification !== 'unavailable' && args.qualification !== 'unresolved';
-  const evidence = resolved
-    ? { kind: 'exact' as const, identity: `exact:${digest}`, services: [serviceEvidence(digest)] }
-    : { kind: args.qualification, services: [] };
   // Version is max+1, read the same way the producer reads it.
   const maxRow = DatabaseService.getInstance().getDb().prepare(
     'SELECT MAX(evidence_version) AS max FROM gitops_artifact_sets WHERE generation_id = ?',
   ).get(args.generationId) as { max: number | null };
-  const evidenceJson = args.qualification === 'exact'
-    ? encodeArtifactEvidenceJson(evidence as ArtifactEvidenceJson)
-    : encodeArtifactEvidenceJson({ kind: args.qualification, services: [] });
+  const evidenceJson = encodeArtifactEvidenceJson(
+    evidenceForQualification(args.qualification, digest),
+  );
   GitOpsTransitions.getInstance().recordArtifactEvidence({
     applicationId: args.appId,
     generationId: args.generationId,
@@ -293,6 +322,14 @@ function recordResolvedEvidenceForTarget(args: {
     envelope: envelopeFor(null, 'test_freeze_retry'),
   });
   return store.newestArtifactSetIdForGeneration(args.generationId)!;
+}
+
+/** Rows recorded for one generation, which is what a retry loop would grow. */
+function countArtifactRows(generationId: string): number {
+  const row = DatabaseService.getInstance().getDb().prepare(
+    'SELECT COUNT(*) AS n FROM gitops_artifact_sets WHERE generation_id = ?',
+  ).get(generationId) as { n: number };
+  return row.n;
 }
 
 function stubCleanRuntime(blueprint: Blueprint, observedDigest: string): void {
@@ -405,7 +442,7 @@ describe('unresolved artifact freeze', () => {
     const node = seedNode();
     const blueprint = seedBlueprint(node);
     seedInlineWithUnresolvedFreeze({ blueprint, node, qualification: 'unresolved' });
-    vi.spyOn(
+    const resolveSpy = vi.spyOn(
       await import('../services/gitops/artifactResolve'),
       'resolveAndRecordArtifactSet',
     ).mockRejectedValue(new Error('registry exploded'));
@@ -413,6 +450,13 @@ describe('unresolved artifact freeze', () => {
     const result = await BlueprintService.getInstance().checkForDrift(blueprint, node);
 
     expect(result.kind, 'a failed retry leaves exactly the state it found').toBe('unverified');
+    // Exactly one attempt, and it was inside the lock. A second attempt would run
+    // after `finally` released the lock, so it would race a concurrent deploy
+    // while doing the same registry work twice.
+    expect(
+      resolveSpy,
+      'a throwing retry must be attempted once, not again outside the lock',
+    ).toHaveBeenCalledTimes(1);
   });
 
   it('waits out the configured window before asking the registry again', async () => {
@@ -547,6 +591,126 @@ describe('unresolved artifact freeze', () => {
 
     expect(resolveSpy, 'the hash mismatch is the refusal').not.toHaveBeenCalled();
     expect(result.kind).toBe('unverified');
+  });
+
+  /**
+   * The retry parses authored compose; the freeze resolves the *rendered* model.
+   * Anything Compose expands can make those disagree, and a service the authored
+   * text declares but the rendered model excludes lands in the expected set, is
+   * absent from the observation, and `observationMatchesExpected` reads a missing
+   * expected service as drift. That is a healthy stack reported as drifted, and
+   * under Enforce the repair cannot make it converge, so it would redeploy every
+   * tick. Each shape below must therefore refuse the retry rather than guess.
+   */
+  describe('refuses authored compose it cannot faithfully model', () => {
+    const hazards: ReadonlyArray<{ label: string; compose: string }> = [
+      {
+        label: 'a profile-gated service, which the node does not activate when it renders',
+        compose: 'services:\n  web:\n    image: nginx:latest\n  debug:\n    image: busybox:latest\n    profiles: [debug]\n',
+      },
+      {
+        label: 'extends, which can import a profile onto a service that shows none',
+        compose: 'services:\n  web:\n    image: nginx:latest\n    extends:\n      service: base\n',
+      },
+      {
+        label: 'a merge key, which the YAML parse leaves unresolved',
+        compose: 'x-base: &base\n  image: nginx:latest\nservices:\n  web:\n    <<: *base\n',
+      },
+      {
+        label: 'include, whose services the parse never sees',
+        compose: 'include:\n  - other.yaml\nservices:\n  web:\n    image: nginx:latest\n',
+      },
+    ];
+
+    for (const hazard of hazards) {
+      it(`refuses ${hazard.label}, staying unverified rather than drifting`, async () => {
+        const node = seedNode();
+        const blueprint = seedBlueprint(node);
+        DatabaseService.getInstance().updateBlueprint(blueprint.id, { compose_content: hazard.compose });
+        const current = DatabaseService.getInstance().getBlueprint(blueprint.id)!;
+        // The intent approves the hazard content, so its hash matches and the
+        // refusal under test is the construct check rather than the hash check.
+        seedInlineWithUnresolvedFreeze({ blueprint: current, node, qualification: 'unresolved' });
+        const resolveSpy = vi.spyOn(
+          await import('../services/gitops/artifactResolve'),
+          'resolveAndRecordArtifactSet',
+        ).mockResolvedValue(undefined);
+
+        const result = await BlueprintService.getInstance().checkForDrift(current, node);
+
+        expect(resolveSpy, 'the refusal happens before any resolve').not.toHaveBeenCalled();
+        expect(
+          result.kind,
+          'refused, so unverified, and never drifted against a healthy stack',
+        ).toBe('unverified');
+      });
+    }
+  });
+
+  it('stops retrying a build-only stack, whose answer cannot change', async () => {
+    const node = seedNode();
+    const blueprint = seedBlueprint(node);
+    const seeded = seedInlineWithUnresolvedFreeze({ blueprint, node, qualification: 'unresolved' });
+    const resolveSpy = vi.spyOn(
+      await import('../services/gitops/artifactResolve'),
+      'resolveAndRecordArtifactSet',
+    ).mockImplementation(async (resolved) => {
+      recordResolvedEvidenceForTarget({
+        appId: resolved.applicationId,
+        nodeId: resolved.nodeId,
+        generationId: resolved.generationId,
+        qualification: 'local_build_unverified',
+      });
+    });
+
+    // First tick: the retry runs, and the resolve reports a local build. That row
+    // becomes the latest evidence but does not advance the expected pointer,
+    // because `allowedExpectedAdvance` refuses anything but exact/qualified. That
+    // asymmetry is exactly what made the old gate read the original freeze
+    // placeholder forever.
+    await BlueprintService.getInstance().checkForDrift(blueprint, node);
+    expect(resolveSpy).toHaveBeenCalledTimes(1);
+
+    // Age the recorded row past the window, so the throttle is open and only the
+    // failure-class gate can stop the next attempt.
+    DatabaseService.getInstance().getDb().prepare(
+      'UPDATE gitops_artifact_sets SET created_at = ? WHERE generation_id = ?',
+    ).run(Date.now() - 6 * 60_000, seeded.generationId);
+    const rowsBefore = countArtifactRows(seeded.generationId);
+
+    const second = await BlueprintService.getInstance().checkForDrift(blueprint, node);
+
+    expect(resolveSpy, 'a build stack is terminal, so no second attempt').toHaveBeenCalledTimes(1);
+    expect(
+      countArtifactRows(seeded.generationId),
+      'and no new evidence row per interval',
+    ).toBe(rowsBefore);
+    expect(second.kind).toBe('unverified');
+  });
+
+  it('does not caveat a build stack, whose condition the facet status already explains', async () => {
+    const node = seedNode();
+    const blueprint = seedBlueprint(node);
+    const seeded = seedInlineWithUnresolvedFreeze({ blueprint, node, qualification: 'unresolved' });
+    vi.spyOn(
+      await import('../services/gitops/artifactResolve'),
+      'resolveAndRecordArtifactSet',
+    ).mockImplementation(async (resolved) => {
+      recordResolvedEvidenceForTarget({
+        appId: resolved.applicationId,
+        nodeId: resolved.nodeId,
+        generationId: resolved.generationId,
+        qualification: 'local_build_unverified',
+      });
+    });
+
+    await BlueprintService.getInstance().checkForDrift(blueprint, node);
+
+    const projection = projectApplication(seeded.appId, false);
+    expect(
+      projection.limitations.map((l) => l.code),
+      'the expected set stays unresolved for a build stack, but the status says why',
+    ).not.toContain('artifact_expectation_unresolved');
   });
 
   it('does not retry while a deploy holds the target', async () => {

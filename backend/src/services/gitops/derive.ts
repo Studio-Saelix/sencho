@@ -1159,7 +1159,12 @@ function deriveArtifact(
   if (app.target_mode === 'inline_blueprint' && !generationId) return { status: 'not_applicable' };
   if (!generationId) return { status: 'not_applicable' };
   const store = GitOpsStore.getInstance();
-  const expected = expectedId ? toExpected(store, expectedId, limitations) : null;
+  // Read before `toExpected` because the expected set's limitation is decided by
+  // the latest evidence, and this is the only place that has both.
+  const latestRow = latestId ? store.getArtifactSet(latestId) : undefined;
+  const expected = expectedId
+    ? toExpected(store, expectedId, latestRow?.qualification ?? null, limitations)
+    : null;
   if (!latestId) {
     return {
       status: 'artifact_unresolved',
@@ -1169,7 +1174,6 @@ function deriveArtifact(
       limitation: 'artifact_pointer_missing',
     };
   }
-  const latestRow = store.getArtifactSet(latestId);
   if (!latestRow) {
     limitations.push({ code: 'artifact_pointer_missing', message: 'latest artifact row is missing', evidence: latestId });
     return {
@@ -1245,20 +1249,15 @@ function artifactStatus(
 /**
  * The artifact set a target or application expects, with its qualification.
  *
- * An expectation that carries no provable identity is reported as a limitation
- * here rather than only through the facet status, because the status already
- * says "unresolved" and the caveat is what tells an operator that drift between
- * what is running and what was intended is consequently not being checked. The
- * facet's `artifact_unresolved` / `artifact_resolution_pending` status carries
- * the classification; this carries the consequence.
- *
- * Derived rather than recorded at write time, so it disappears on its own the
- * moment a resolve advances the expectation, and it covers the legacy case
- * where a set was never resolved in the first place.
+ * `latestQualification` is the qualification of the row recorded last, and it is
+ * what decides the limitation below. Deliberate: the facet status one call away
+ * is derived from the same value, so the caveat and the status cannot disagree
+ * about the same target, and neither outlives the condition it describes.
  */
 function toExpected(
   store: GitOpsStore,
   id: string,
+  latestQualification: ArtifactQualification | null,
   limitations: GitOpsLimitation[],
 ): ArtifactExpectedIdentity | null {
   const row = store.getArtifactSet(id);
@@ -1266,15 +1265,23 @@ function toExpected(
     limitations.push({ code: 'artifact_pointer_missing', message: 'expected artifact row is missing', evidence: id });
     return null;
   }
-  // Only when nothing provable has been recorded at all.
+  // Fires when the *expectation* is not comparable, because that is the claim the
+  // copy makes: drift between what is running and what was intended is not being
+  // checked. `stale` is excluded because it reports itself through the facet
+  // status and the drift item, and it clears on acceptance rather than on time.
   //
-  // `local_build_unverified` is excluded deliberately. It is a permanent
-  // property of a stack that builds on the node: no resolve will ever produce a
-  // published digest for it, so the condition is real but it does not clear, and
-  // a caveat that promises clearing it would be false for as long as the stack
-  // exists. `stale` is excluded for the same reason from the operator's point
-  // of view: it already reports itself through the facet status and the drift
-  // item, and it clears on acceptance rather than on time.
+  // The latest evidence is consulted for one thing only: a stack that builds on
+  // the node keeps an `unresolved` expected row for the generation's whole life,
+  // while every recorded row says `local_build_unverified`. That is a permanent
+  // property of the stack rather than an unresolved state a resolve can clear, so
+  // a caveat there would be true forever and would duplicate a facet status that
+  // already explains it more precisely.
+  //
+  // It is deliberately *not* the sole condition. Reading only the latest row fired
+  // this caveat whenever newer evidence disagreed with an expectation that was
+  // itself comparable, which claims drift is unchecked at a moment it is being
+  // checked. The expectation decides whether the claim is true; the latest row
+  // only decides whether it is worth repeating.
   //
   // Deliberately not scoped to the target mode, and the copy therefore does not
   // promise a retry. The drift check re-resolves an expectation only for an
@@ -1282,7 +1289,9 @@ function toExpected(
   // through its own preflight and authorization path, and a Direct one through
   // the next apply. What the caveat reports, that what is running is not being
   // compared against what was intended, is true of all of them.
-  if (row.qualification === 'unresolved' || row.qualification === 'unavailable') {
+  const expectationIsComparable = row.qualification === 'exact' || row.qualification === 'qualified';
+  const isPermanentLocalBuild = latestQualification === 'local_build_unverified';
+  if (!expectationIsComparable && !isPermanentLocalBuild) {
     limitations.push({
       code: 'artifact_expectation_unresolved',
       message: 'the expected artifact set has no provable executable identity',

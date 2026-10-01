@@ -74,7 +74,9 @@ For a Blueprint applied from stored content, Sencho retries that resolution on i
 
 The retry resolves the images the Blueprint was approved at, not whatever compose happens to be in the stack directory at the time. If someone edits a file on the node directly, that change is drift to be reported, never an approved identity to be adopted.
 
-The tick that resolves a target waits before judging it. It reports unverified that pass, and compares on the following one, so a freshly resolved identity has a full interval to be seen before anything acts on it. If the registry resolves a tag that moved while the identity was unproven, the next tick reports that as drift for you to accept, rather than Sencho picking the new digest for you.
+Some Compose shapes are not recovered this way, and Sencho says so rather than guessing. The approved images are read from what you wrote, while a deploy resolves them the way Compose does, and the two can disagree for `profiles`, `extends`, `include`, and YAML merge keys. For those, the retry stands down and the target stays unverified until you redeploy the Blueprint.
+
+The tick that resolves a target waits before judging it. It reports unverified that pass, and compares on the following one. That is one reconciler interval, not a review window: if the registry resolves a tag that moved while the identity was unproven, the next tick reports it as drift, and Enforce mode repairs against it.
 
 <Note>
   A digest is compared, never pulled. When Sencho repairs a digest divergence it redeploys against the approved identity, so authored tags on disk stay as you wrote them.
