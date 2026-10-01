@@ -72,6 +72,10 @@ When a Blueprint is first applied, Sencho freezes the exact image identity it wa
 
 For a Blueprint applied from stored content, Sencho retries that resolution on its own, so the target recovers on its own schedule instead of waiting for you to redeploy it. A caveat under the state names the condition while it lasts, and clears once the identity is provable. The retry interval is yours to set under **Settings → GitOps**, and it has no effect while every target's identity is already resolved.
 
+The retry resolves the images the Blueprint was approved at, not whatever compose happens to be in the stack directory at the time. If someone edits a file on the node directly, that change is drift to be reported, never an approved identity to be adopted.
+
+The tick that resolves a target waits before judging it. It reports unverified that pass, and compares on the following one, so a freshly resolved identity has a full interval to be seen before anything acts on it. If the registry resolves a tag that moved while the identity was unproven, the next tick reports that as drift for you to accept, rather than Sencho picking the new digest for you.
+
 <Note>
   A digest is compared, never pulled. When Sencho repairs a digest divergence it redeploys against the approved identity, so authored tags on disk stay as you wrote them.
 </Note>

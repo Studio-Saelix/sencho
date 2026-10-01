@@ -27,7 +27,7 @@ import {
 import { GitSourceService, GitSourceError, repoHost as gitRepoHost, type SourcePolicy } from '../services/GitSourceService';
 import { repoUrlRejectionMessage } from '../services/gitops/repoIdentity';
 import { observeStackRuntimeArtifact } from '../services/gitops/artifactResolve';
-import { loadEffectiveArtifactContext } from '../services/gitops/effectiveArtifactContext';
+import { loadEffectiveArtifactContext, readNodePlatform } from '../services/gitops/effectiveArtifactContext';
 import { encodeObservedArtifactIdentity } from '../services/gitops/json';
 import { REF_MAX_LEN } from '../services/git/nativeGitTransport';
 import { validateCaBundlePem } from '../services/git/caBundle';
@@ -1340,6 +1340,25 @@ stacksRouter.get('/:stackName/effective-artifact-context', async (req: Request, 
       error,
     );
     res.status(500).json({ error: 'Failed to load effective artifact context' });
+  }
+});
+
+/**
+ * This node's Docker platform alone.
+ *
+ * Separate from the effective-artifact-context route because that one renders
+ * the stack, and a caller that only needs to know which manifest child this
+ * machine runs must not have to read a compose file to ask. `read` rather than
+ * `manage`: naming the platform exposes nothing an operator cannot already
+ * learn from the node, and a background reconciler on the hub needs it.
+ */
+stacksRouter.get('/platform/docker-context', async (req: Request, res: Response) => {
+  if (!requirePermission(req, res, 'stack:read')) return;
+  try {
+    res.json({ platform: await readNodePlatform(req.nodeId) });
+  } catch (error) {
+    console.error('[Stacks] Failed to read node platform:', error);
+    res.status(500).json({ error: 'Failed to read node platform' });
   }
 });
 

@@ -7,7 +7,7 @@ import axios from 'axios';
 import { setupTestDb, cleanupTestDb } from './helpers/setupTestDb';
 import { GitOpsStore } from '../services/gitops/store';
 import { GitOpsTransitions, type EventEnvelope } from '../services/gitops/transitions';
-import { encodeArtifactEvidenceJson } from '../services/gitops/json';
+import { decodeArtifactEvidenceJson, encodeArtifactEvidenceJson } from '../services/gitops/json';
 import type { EffectiveArtifactContext } from '../services/gitops/effectiveArtifactContext';
 import type { GitOpsApplicationRow, GitOpsGenerationRow } from '../services/gitops/types';
 import { DEFAULT_PLACEMENT_POLICY, DEFAULT_ROLLOUT_AUTHORIZATION_POLICY } from '../services/gitops/policyComposition';
@@ -121,6 +121,11 @@ function mockLeafContext(data: EffectiveArtifactContext) {
   return vi.spyOn(axios, 'get').mockResolvedValue({ status: 200, data });
 }
 
+/** The leaf's platform alone, which is all the approved-intent path needs from it. */
+function mockLeafPlatform(platform: { os: string; architecture: string }) {
+  return vi.spyOn(axios, 'get').mockResolvedValue({ status: 200, data: { platform } });
+}
+
 function expectHubLocalSkipped(): void {
   expect(mockBuildEffectiveServiceModel).not.toHaveBeenCalled();
   expect(mockDockerInfo).not.toHaveBeenCalled();
@@ -152,6 +157,70 @@ function seedDirectApp(ids: {
 }
 
 describe('remote effective artifact context for digest freeze', () => {
+  it('reads only the leaf platform when resolving approved intent, never its compose', async () => {
+    // The approved-intent path exists so a later reconcile tick does not read
+    // the node's compose directory. That has to hold for a remote node too, so
+    // it asks the leaf for the platform alone, over the platform route, rather
+    // than for a rendered context. If it asked for the context instead, a hand
+    // edit on the leaf would become the approved identity on the hub.
+    const stackName = 'remote-intent-stack';
+    const applicationId = `app-remote-intent-${counter}`;
+    const generationId = `gen-remote-intent-${counter}`;
+    seedDirectApp({
+      applicationId,
+      generationId,
+      stackName,
+      artifactSetId: `art-remote-intent-${counter}`,
+    });
+
+    const axiosGetSpy = mockLeafPlatform({ ...LEAF_PLATFORM });
+    mockResolveRegistry.mockResolvedValue({
+      ok: true,
+      indexDigest: `sha256:${'2'.repeat(64)}`,
+      platformDigest: `sha256:${'b'.repeat(64)}`,
+      platformLabel: 'linux/arm64',
+      qualification: 'exact',
+    });
+
+    await resolveAndRecordArtifactSet({
+      stackName,
+      nodeId: remoteNodeId,
+      applicationId,
+      generationId,
+      buildContexts: [],
+      envelope: envelope(`op-remote-intent-${counter}`),
+      approvedServices: [{
+        name: 'web',
+        declaredImage: 'nginx:1.27',
+        hasBuild: false,
+        expectedReplicas: 1,
+        dependsOn: [],
+        hasHealthcheck: false,
+      }],
+    });
+
+    expect(axiosGetSpy).toHaveBeenCalledWith(
+      'http://192.168.1.50:1852/api/stacks/platform/docker-context',
+      expect.objectContaining({
+        headers: expect.objectContaining({
+          Authorization: `Bearer ${'t'.repeat(64)}`,
+        }),
+      }),
+    );
+    expect(
+      axiosGetSpy.mock.calls.map((c) => String(c[0])),
+      'and never asks the leaf for a rendered compose model',
+    ).not.toContain(`http://192.168.1.50:1852/api/stacks/${stackName}/effective-artifact-context`);
+    expectHubLocalSkipped();
+
+    const latestId = GitOpsStore.getInstance().getApplication(applicationId)?.latest_artifact_set_id;
+    const latest = latestId ? GitOpsStore.getInstance().getArtifactSet(latestId) : undefined;
+    expect(latest?.qualification, 'the arm64 child the leaf runs is what was pinned').toBe('exact');
+    const decoded = latest ? decodeArtifactEvidenceJson(latest.evidence_json) : null;
+    const recorded = decoded && 'services' in decoded ? decoded.services ?? [] : [];
+    expect(recorded[0]?.platformDigest).toBe(`sha256:${'b'.repeat(64)}`);
+  });
+
   it('freezes from the leaf HTTP context and never reads hub-local model or Docker', async () => {
     const stackName = 'remote-only-stack';
     const applicationId = `app-remote-${counter}`;

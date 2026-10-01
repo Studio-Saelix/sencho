@@ -1266,19 +1266,22 @@ function toExpected(
     limitations.push({ code: 'artifact_pointer_missing', message: 'expected artifact row is missing', evidence: id });
     return null;
   }
-  // Only the two qualifications that mean the evidence was never obtained.
-  // `local_build_unverified` is a permanent property of a stack that builds on
-  // the node, and `stale` already reports itself through the facet status and
-  // the drift item; caveating either would name a condition the operator is not
-  // being kept in the dark about.
+  // Only when nothing provable has been recorded at all.
   //
-  // The code is unconditional on the target mode, and its copy therefore does not
-  // promise a retry. The drift check re-resolves this only for an Inline
-  // Blueprint (`retryInlineArtifactFreeze`); a Git-managed one recovers through
-  // its own preflight and authorization path, and a Direct one through the next
-  // apply. Both still deserve the caveat, because the thing it reports, that
-  // what is running is not being compared against what was intended, is true of
-  // all of them.
+  // `local_build_unverified` is excluded deliberately. It is a permanent
+  // property of a stack that builds on the node: no resolve will ever produce a
+  // published digest for it, so the condition is real but it does not clear, and
+  // a caveat that promises clearing it would be false for as long as the stack
+  // exists. `stale` is excluded for the same reason from the operator's point
+  // of view: it already reports itself through the facet status and the drift
+  // item, and it clears on acceptance rather than on time.
+  //
+  // Deliberately not scoped to the target mode, and the copy therefore does not
+  // promise a retry. The drift check re-resolves an expectation only for an
+  // Inline Blueprint (`retryInlineArtifactFreeze`); a Git-managed one recovers
+  // through its own preflight and authorization path, and a Direct one through
+  // the next apply. What the caveat reports, that what is running is not being
+  // compared against what was intended, is true of all of them.
   if (row.qualification === 'unresolved' || row.qualification === 'unavailable') {
     limitations.push({
       code: 'artifact_expectation_unresolved',

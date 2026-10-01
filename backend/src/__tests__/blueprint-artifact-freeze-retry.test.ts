@@ -13,11 +13,16 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vites
 import { setupTestDb, cleanupTestDb } from './helpers/setupTestDb';
 import { newGitOpsId } from '../services/gitops/directApplication';
 import { emptyTargetRow, GitOpsStore } from '../services/gitops/store';
-import { blankInlineApplication } from '../services/gitops/blueprintProducers';
+import { blankInlineApplication, envelopeFor, sha256 } from '../services/gitops/blueprintProducers';
 import { freezeInlineRevisionAfterDeploy } from '../services/gitops/blueprintDeploymentProducers';
-import { GitOpsTransitionError } from '../services/gitops/transitions';
+import { GitOpsTransitions } from '../services/gitops/transitions';
+
 import { projectApplication } from '../services/gitops/derive';
-import { encodeArtifactEvidenceJson, type ServiceArtifactEvidence } from '../services/gitops/json';
+import {
+  encodeArtifactEvidenceJson,
+  type ArtifactEvidenceJson,
+  type ServiceArtifactEvidence,
+} from '../services/gitops/json';
 import type { GitOpsGenerationRow } from '../services/gitops/types';
 import type { Blueprint, Node } from '../services/DatabaseService';
 
@@ -49,6 +54,18 @@ beforeEach(() => {
   // Reset through the service rather than a DELETE, because it owns the read
   // cache the reader consults.
   DatabaseService.getInstance().updateGlobalSetting('gitops_artifact_retry_interval_mins', '5');
+  // GitOps rows are not cleared per test above, so an application from an
+  // earlier case would still hold a live slot for its blueprint and
+  // `getLiveBlueprintApplication` would return that one instead of this test's.
+  for (const table of [
+    'gitops_target_current',
+    'gitops_artifact_sets',
+    'gitops_generations',
+    'gitops_intent_revisions',
+    'gitops_applications',
+  ]) {
+    db.prepare(`DELETE FROM ${table}`).run();
+  }
   counter += 1;
 });
 
@@ -145,20 +162,61 @@ function seedInlineWithUnresolvedFreeze(args: {
   /** Age of the expected set in minutes, which is what the throttle reads. */
   ageMinutes?: number;
   observedDigest?: string;
-}): { appId: string; generationId: string; artifactSetId: string } {
+  /** Per-service evidence to store, overriding the default for the qualification. */
+  services?: ServiceArtifactEvidence[];
+  /** Compose text the intent approves. Defaults to the Blueprint's own content. */
+  approvedCompose?: string;
+  /** Record an intent revision, which the retry needs to resolve approved specs. */
+  withIntent?: boolean;
+}): { appId: string; generationId: string; artifactSetId: string; intentId: string | null } {
   const { blueprint, node } = args;
   const store = GitOpsStore.getInstance();
   const appId = newGitOpsId();
-  store.insertApplication(blankInlineApplication(appId, blueprint.id, Date.now()));
+  const appRow = blankInlineApplication(appId, blueprint.id, Date.now());
+  store.insertApplication(appRow);
+
+  let intentId: string | null = null;
+  if (args.withIntent !== false) {
+    intentId = newGitOpsId();
+    const approved = args.approvedCompose ?? blueprint.compose_content;
+    // Written directly because the pointer writer does not carry the intent
+    // column, and the retry needs `intent_revision_id` set on the row it reads.
+    DatabaseService.getInstance().getDb()
+      .prepare('UPDATE gitops_applications SET intent_revision_id = ? WHERE id = ?')
+      .run(intentId, appId);
+    store.insertIntentRevision({
+      id: intentId,
+      application_id: appId,
+      blueprint_id: blueprint.id,
+      compose_content_sha256: sha256(approved),
+      blueprint_revision: blueprint.revision,
+      deploy_stack_name: blueprint.name,
+      selector_json: '{}',
+      pinned_node_id: null,
+      cordon_implications_json: '[]',
+      rollout_strategy_json: '{}',
+      runtime_drift_policy: null,
+      stateful_policy_json: null,
+      health_failure_rollback_policy_json: null,
+      operation_id: `op-${intentId}`,
+      actor: 'tester',
+      created_at: Date.now(),
+    });
+  }
 
   const generationId = newGitOpsId();
   const artifactSetId = newGitOpsId();
   store.insertGeneration(inlineGeneration(appId, blueprint.id, generationId));
 
   const resolvable = args.qualification === 'exact' || args.qualification === 'stale';
+  // `services: []` is the shape a freeze placeholder and a pre-attempt resolve
+  // actually record, so it is the default for the unresolved cases. A caller
+  // that wants to exercise per-service failure classes passes its own, which is
+  // what a resolve that ran and failed produces.
+  const services = args.services ?? (resolvable ? [serviceEvidence(DIGEST)] : []);
   const evidence = resolvable
-    ? { kind: args.qualification as 'exact' | 'stale', identity: `exact:${DIGEST}`, services: [serviceEvidence(DIGEST)] }
-    : { kind: args.qualification as 'unresolved' | 'unavailable', services: [] };
+    ? { kind: args.qualification as 'exact' | 'stale', identity: `exact:${DIGEST}`, services }
+    : { kind: args.qualification as 'unresolved' | 'unavailable', services };
   store.insertArtifactSet({
     id: artifactSetId,
     generation_id: generationId,
@@ -191,10 +249,52 @@ function seedInlineWithUnresolvedFreeze(args: {
     last_deployed_at: Date.now(),
   });
   stubCleanRuntime(blueprint, args.observedDigest ?? DIGEST);
-  return { appId, generationId, artifactSetId };
+  return { appId, generationId, artifactSetId, intentId };
 }
 
 /** Containers up, marker current, the given digest observed. */
+/**
+ * Advance a target's expectation the way the real transition does, running
+ * `recordArtifactEvidence` rather than hand-editing pointers.
+ *
+ * Hand-editing made these tests assert against the fixture's own idea of what a
+ * resolve records, which is exactly the assumption the audit found untested. The
+ * transition is the thing that decides whether the expectation advances, so the
+ * tests use it.
+ */
+function recordResolvedEvidenceForTarget(args: {
+  appId: string;
+  nodeId: number;
+  generationId: string;
+  qualification: 'exact' | 'unavailable' | 'unresolved';
+  digest?: string;
+}): string {
+  const store = GitOpsStore.getInstance();
+  const digest = args.digest ?? DIGEST;
+  const resolved = args.qualification !== 'unavailable' && args.qualification !== 'unresolved';
+  const evidence = resolved
+    ? { kind: 'exact' as const, identity: `exact:${digest}`, services: [serviceEvidence(digest)] }
+    : { kind: args.qualification, services: [] };
+  // Version is max+1, read the same way the producer reads it.
+  const maxRow = DatabaseService.getInstance().getDb().prepare(
+    'SELECT MAX(evidence_version) AS max FROM gitops_artifact_sets WHERE generation_id = ?',
+  ).get(args.generationId) as { max: number | null };
+  const evidenceJson = args.qualification === 'exact'
+    ? encodeArtifactEvidenceJson(evidence as ArtifactEvidenceJson)
+    : encodeArtifactEvidenceJson({ kind: args.qualification, services: [] });
+  GitOpsTransitions.getInstance().recordArtifactEvidence({
+    applicationId: args.appId,
+    generationId: args.generationId,
+    artifactSetId: newGitOpsId(),
+    evidenceVersion: (maxRow.max ?? 0) + 1,
+    qualification: args.qualification,
+    evidenceJson,
+    authoritative: 0,
+    envelope: envelopeFor(null, 'test_freeze_retry'),
+  });
+  return store.newestArtifactSetIdForGeneration(args.generationId)!;
+}
+
 function stubCleanRuntime(blueprint: Blueprint, observedDigest: string): void {
   const svc = BlueprintService.getInstance() as unknown as {
     containerHealth: () => Promise<{ kind: 'running' }>;
@@ -232,39 +332,35 @@ describe('unresolved artifact freeze', () => {
     const node = seedNode();
     const blueprint = seedBlueprint(node);
     const seeded = seedInlineWithUnresolvedFreeze({ blueprint, node, qualification: 'unresolved' });
-    // The registry answers this time, so the recorded set advances the target.
+    // The registry answers this time, recorded through the real transition rather
+    // than by moving the pointers, so the advance rule under test is the one
+    // production applies.
     vi.spyOn(
       await import('../services/gitops/artifactResolve'),
       'resolveAndRecordArtifactSet',
     ).mockImplementation(async (args) => {
-      const store = GitOpsStore.getInstance();
-      const nextId = newGitOpsId();
-      store.insertArtifactSet({
-        id: nextId,
-        generation_id: args.generationId,
-        evidence_version: 2,
-        authoritative: 0,
+      recordResolvedEvidenceForTarget({
+        appId: args.applicationId,
+        nodeId: args.nodeId,
+        generationId: args.generationId,
         qualification: 'exact',
-        evidence_json: encodeArtifactEvidenceJson({
-          kind: 'exact',
-          identity: `exact:${DIGEST}`,
-          services: [serviceEvidence(DIGEST)],
-        }),
-        created_at: Date.now(),
       });
-      const target = store.getTarget(args.applicationId, args.nodeId)!;
-      target.expected_artifact_set_id = nextId;
-      target.latest_artifact_set_id = nextId;
-      store.upsertTarget(target);
     });
 
-    const result = await BlueprintService.getInstance().checkForDrift(blueprint, node);
+    const first = await BlueprintService.getInstance().checkForDrift(blueprint, node);
 
-    expect(result.kind, 'a resolved expectation that matches is convergence').toBe('matched');
+    expect(
+      first.kind,
+      'the tick that produces a new expectation holds the comparison back, so Enforce cannot act on evidence nobody has seen',
+    ).toBe('unverified');
     expect(
       GitOpsStore.getInstance().getTarget(seeded.appId, node.id)?.expected_artifact_set_id,
       'and the target now points at the resolved set',
     ).not.toBe(seeded.artifactSetId);
+
+    // The next tick compares against the settled expectation.
+    const second = await BlueprintService.getInstance().checkForDrift(blueprint, node);
+    expect(second.kind, 'a resolved expectation that matches is convergence').toBe('matched');
   });
 
   it('re-resolves the generation that is already frozen, never minting a new one', async () => {
@@ -338,6 +434,121 @@ describe('unresolved artifact freeze', () => {
     expect(seeded.appId).toBeTruthy();
   });
 
+  it('does not retry a failure no retry can clear', async () => {
+    const node = seedNode();
+    const blueprint = seedBlueprint(node);
+    // `unsupported_registry` is a property of the authored reference, not of
+    // the registry's mood. Retrying it re-derives the same answer forever,
+    // spends registry traffic, and appends an evidence row each time to a table
+    // nothing prunes, while the caveat promises a clearing that cannot arrive.
+    seedInlineWithUnresolvedFreeze({
+      blueprint,
+      node,
+      qualification: 'unavailable',
+      services: [{
+        serviceName: 'web',
+        authoredRef: 'nginx:latest',
+        source: 'registry',
+        platform: 'linux/amd64',
+        indexDigest: null,
+        platformDigest: null,
+        platformVariants: null,
+        localDigests: null,
+        buildContextFingerprint: null,
+        producedImageId: null,
+        failureClass: 'unsupported_registry',
+        resolvedAt: 1,
+      }],
+    });
+    const resolveSpy = vi.spyOn(
+      await import('../services/gitops/artifactResolve'),
+      'resolveAndRecordArtifactSet',
+    ).mockResolvedValue(undefined);
+
+    const result = await BlueprintService.getInstance().checkForDrift(blueprint, node);
+
+    expect(resolveSpy).not.toHaveBeenCalled();
+    expect(result.kind).toBe('unverified');
+  });
+
+  it('retries a transient registry failure, whose cause a retry can clear', async () => {
+    const node = seedNode();
+    const blueprint = seedBlueprint(node);
+    seedInlineWithUnresolvedFreeze({
+      blueprint,
+      node,
+      qualification: 'unavailable',
+      services: [{
+        serviceName: 'web',
+        authoredRef: 'nginx:latest',
+        source: 'registry',
+        platform: 'linux/amd64',
+        indexDigest: null,
+        platformDigest: null,
+        platformVariants: null,
+        localDigests: null,
+        buildContextFingerprint: null,
+        producedImageId: null,
+        failureClass: 'registry_unavailable',
+        resolvedAt: 1,
+      }],
+    });
+    const resolveSpy = vi.spyOn(
+      await import('../services/gitops/artifactResolve'),
+      'resolveAndRecordArtifactSet',
+    ).mockResolvedValue(undefined);
+
+    await BlueprintService.getInstance().checkForDrift(blueprint, node);
+
+    expect(resolveSpy, 'a registry that was down can come back').toHaveBeenCalledTimes(1);
+  });
+
+  it('resolves the intent-approved refs, never the node directory', async () => {
+    const node = seedNode();
+    const blueprint = seedBlueprint(node);
+    seedInlineWithUnresolvedFreeze({ blueprint, node, qualification: 'unresolved' });
+    const resolveSpy = vi.spyOn(
+      await import('../services/gitops/artifactResolve'),
+      'resolveAndRecordArtifactSet',
+    ).mockResolvedValue(undefined);
+
+    await BlueprintService.getInstance().checkForDrift(blueprint, node);
+
+    expect(resolveSpy).toHaveBeenCalledTimes(1);
+    const approved = resolveSpy.mock.calls[0][0].approvedServices;
+    expect(approved, 'the retry pins what was approved, not what is on disk').toBeDefined();
+    expect(approved?.map((s) => s.declaredImage)).toEqual(['nginx:latest']);
+    expect(
+      approved?.map((s) => s.name),
+      'and only the services the intent declared',
+    ).toEqual(['web']);
+  });
+
+  it('does not resolve a Blueprint edited since its content was approved', async () => {
+    const node = seedNode();
+    const blueprint = seedBlueprint(node);
+    seedInlineWithUnresolvedFreeze({
+      blueprint,
+      node,
+      qualification: 'unresolved',
+      // The intent approved one compose text; the Blueprint now holds another.
+      // Resolving from the live row would approve the edit nobody deployed.
+      approvedCompose: 'services:\n  web:\n    image: nginx:1.27\n',
+    });
+    DatabaseService.getInstance().updateBlueprint(blueprint.id, {
+      compose_content: 'services:\n  web:\n    image: nginx:1.29\n',
+    });
+    const resolveSpy = vi.spyOn(
+      await import('../services/gitops/artifactResolve'),
+      'resolveAndRecordArtifactSet',
+    ).mockResolvedValue(undefined);
+
+    const result = await BlueprintService.getInstance().checkForDrift(blueprint, node);
+
+    expect(resolveSpy, 'the hash mismatch is the refusal').not.toHaveBeenCalled();
+    expect(result.kind).toBe('unverified');
+  });
+
   it('does not retry while a deploy holds the target', async () => {
     const node = seedNode();
     const blueprint = seedBlueprint(node);
@@ -393,36 +604,42 @@ describe('unresolved artifact freeze', () => {
     ).toBe(true);
   });
 
-  it('leaves a deploy that already applied alone when the evidence write races', async () => {
-    // A freeze whose resolve loses the evidence write race used to record
-    // `unavailable` and report success. `resolveAndRecordArtifactSet` now
-    // rethrows the transition error so a caller can tell a write race from a
-    // failed resolve, and the freeze must not let that escape: the workload is
-    // already applied and the generation is already frozen, so a rejected
-    // evidence row must not report the deploy as failed.
+  it('freezes against the node it just wrote, not the approved-intent path', async () => {
+    // The deploy-time freeze reads the node directory on purpose: it runs
+    // immediately after writing that directory, so the two are the same bytes by
+    // construction, and reading them is what makes the freeze describe exactly
+    // what Compose applied (interpolation and `extends` included). The retry is
+    // the opposite case and pins approved intent instead. Conflating them would
+    // lose the rendered fidelity the freeze depends on.
     const node = seedNode();
     const blueprint = seedBlueprint(node);
-    const store = GitOpsStore.getInstance();
-    store.insertApplication(blankInlineApplication(newGitOpsId(), blueprint.id, Date.now()));
-    vi.spyOn(
+    seedInlineWithUnresolvedFreeze({
+      blueprint,
+      node,
+      qualification: 'unresolved',
+      // A Blueprint whose intent exists and hashes correctly, so the retry path
+      // would happily resolve if it were the one running.
+      withIntent: true,
+    });
+    const resolveSpy = vi.spyOn(
       await import('../services/gitops/artifactResolve'),
       'resolveAndRecordArtifactSet',
-    ).mockRejectedValue(new GitOpsTransitionError('evidenceVersion must be max+1'));
+    ).mockResolvedValue(undefined);
 
-    await expect(freezeInlineRevisionAfterDeploy({
-      blueprintId: blueprint.id,
-      nodeId: node.id,
-      actor: null,
-    })).resolves.toBeUndefined();
+    await freezeInlineRevisionAfterDeploy({ blueprintId: blueprint.id, nodeId: node.id, actor: null });
+
+    const calls = resolveSpy.mock.calls.filter((c) => c[0].approvedServices === undefined);
+    expect(calls.length, 'at least one freeze resolve reads the node it wrote').toBeGreaterThan(0);
   });
 
-  it('still propagates a real resolve failure out of the freeze', async () => {
-    // The catch is narrow on purpose: a genuine resolve failure is not a race,
-    // and swallowing it would hide a real defect behind a logged line.
+  it('propagates a real resolve failure out of the freeze', async () => {
+    // The deploy path must not swallow a genuine failure: the workload is
+    // already applied, but a freeze that could not record its identity has to
+    // surface rather than read as a deploy that completed with proof.
     const node = seedNode();
     const blueprint = seedBlueprint(node);
-    const store = GitOpsStore.getInstance();
-    store.insertApplication(blankInlineApplication(newGitOpsId(), blueprint.id, Date.now()));
+    GitOpsStore.getInstance()
+      .insertApplication(blankInlineApplication(newGitOpsId(), blueprint.id, Date.now()));
     vi.spyOn(
       await import('../services/gitops/artifactResolve'),
       'resolveAndRecordArtifactSet',
@@ -441,27 +658,20 @@ describe('unresolved artifact freeze', () => {
     const seeded = seedInlineWithUnresolvedFreeze({ blueprint, node, qualification: 'unresolved', ageMinutes: 60 });
     const store = GitOpsStore.getInstance();
 
-    // A retry that cannot resolve records a fresh non-advancing evidence row.
-    // The expected pointer stays on the original freeze, so dating the window
-    // from it would leave the gate permanently open and every tick after the
-    // first would ask the registry again.
+    // A retry that cannot resolve records a fresh non-advancing evidence row
+    // through the real transition, which is what proves the expectation stays
+    // put: dating the window from it would leave the gate permanently open and
+    // every tick after the first would ask the registry again.
     vi.spyOn(
       await import('../services/gitops/artifactResolve'),
       'resolveAndRecordArtifactSet',
     ).mockImplementation(async (args) => {
-      const nextId = newGitOpsId();
-      store.insertArtifactSet({
-        id: nextId,
-        generation_id: args.generationId,
-        evidence_version: 2,
-        authoritative: 0,
+      recordResolvedEvidenceForTarget({
+        appId: args.applicationId,
+        nodeId: args.nodeId,
+        generationId: args.generationId,
         qualification: 'unavailable',
-        evidence_json: encodeArtifactEvidenceJson({ kind: 'unavailable' }),
-        created_at: Date.now(),
       });
-      const target = store.getTarget(args.applicationId, args.nodeId)!;
-      target.latest_artifact_set_id = nextId;
-      store.upsertTarget(target);
     });
 
     const resolveSpy = vi.spyOn(

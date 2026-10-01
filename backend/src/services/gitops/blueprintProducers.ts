@@ -50,7 +50,12 @@ function evaluateAutomaticPlacement(
     }
 }
 
-function sha256(value: string): string {
+/**
+ * Hex SHA-256 of authored compose content, the same function that mints the
+ * `compose_content_sha256` an intent revision records. Shared so a producer
+ * verifying content against that hash cannot drift from the one that wrote it.
+ */
+export function sha256(value: string): string {
   return createHash('sha256').update(value).digest('hex');
 }
 

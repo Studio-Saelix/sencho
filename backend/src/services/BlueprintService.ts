@@ -93,6 +93,26 @@ const RETRYABLE_ARTIFACT_QUALIFICATIONS: ReadonlySet<GitOpsArtifactSetRow['quali
     'unavailable',
 ]);
 
+/**
+ * Per-service failure classes a retry can actually clear.
+ *
+ * The qualification alone is too coarse to gate on: `unsupported_registry` and
+ * `platform_ambiguity` are properties of the authored reference, not of the
+ * registry's mood, so a set carrying either will resolve to the same answer
+ * forever. Retrying them burns registry traffic and appends an evidence row per
+ * attempt to a table nothing prunes, while the caveat promises a clearing that
+ * cannot arrive. `unresolved` is included because a service with no declared
+ * image genuinely may gain one when the Blueprint is edited, and `unresolved`
+ * on the whole set is also what a not-yet-attempted freeze produces.
+ */
+const RETRYABLE_SERVICE_FAILURES: ReadonlySet<ServiceArtifactEvidence['failureClass']> = new Set([
+    'registry_unavailable',
+    'credential_failure',
+    'digest_unavailable',
+    'stale_resolution',
+    'unresolved',
+]);
+
 export type DriftCause = 'revision' | 'container' | 'digest';
 
 /**
@@ -943,7 +963,7 @@ export class BlueprintService {
             // a target matching a generation it never acknowledged is not
             // converged.
             const expectedSetId = binding.artifactSetId;
-            let expectedRow = store.getArtifactSet(expectedSetId);
+            const expectedRow = store.getArtifactSet(expectedSetId);
             if (
                 !expectedRow
                 || (expectedRow.qualification !== 'exact' && expectedRow.qualification !== 'qualified')
@@ -954,19 +974,22 @@ export class BlueprintService {
                 // one, which makes an unrelated redeploy the price of proving what
                 // is running. The freeze is a no-op once minted, so retrying means
                 // re-resolving the generation that is already frozen.
-                await this.retryArtifactFreeze(blueprint, node, app.id, binding, expectedRow);
-                // Re-read the target rather than `binding.artifactSetId`: a
-                // successful retry moves the target's own pointer, and the old id
-                // still names the set that could not be resolved.
-                expectedRow = store.getArtifactSet(
-                    store.getTarget(app.id, node.id)?.expected_artifact_set_id ?? expectedSetId,
+                const retried = await this.retryArtifactFreeze(
+                    blueprint, node, app.id, binding, expectedRow,
                 );
-                if (
-                    !expectedRow
-                    || (expectedRow.qualification !== 'exact' && expectedRow.qualification !== 'qualified')
-                ) {
+                if (!retried) {
                     return unverified('expected artifact set is not comparable');
                 }
+                // The expectation the retry just produced has not been reviewed
+                // by anyone, and Enforce would act on it this same tick. A
+                // resolve that resolves a tag which moved while the identity was
+                // unproven would otherwise let Enforce redeploy the node onto a
+                // digest no approval ever saw, which is precisely the automatic
+                // advancement a retry must not cause. So the tick that produces a
+                // new expectation reports unverified and lets the next tick
+                // compare against evidence that has had a full interval to be
+                // seen, and to be backed out by an operator who disagrees.
+                return unverified('expected artifact set resolved on this pass, awaiting a settled comparison');
             }
             let expectedIdentity: string | null = null;
             let expectedServices: ServiceArtifactEvidence[] | undefined;
@@ -1005,7 +1028,49 @@ export class BlueprintService {
     }
 
     /**
+     * Whether the recorded failure is one a retry can clear.
+     *
+     * Decoded from the expected set's own evidence rather than inferred from its
+     * qualification, because the qualification collapses distinct causes. A set
+     * whose services all failed permanently is skipped: retrying it would
+     * re-derive the same answer on every interval, spend registry traffic, and
+     * append an evidence row each time to a table nothing prunes, while telling
+     * the operator it will clear.
+     *
+     * A set with no per-service evidence at all is retried. That is what the
+     * freeze placeholder looks like before any resolve has run, and it is
+     * exactly the case this path exists for. Genuine damage to the evidence
+     * blob is reported as its own limitation by the projection rather than
+     * being retried silently here.
+     */
+    private artifactRetryCanSucceed(expectedRow: GitOpsArtifactSetRow): boolean {
+        let services: ServiceArtifactEvidence[] | undefined;
+        try {
+            const decoded = decodeArtifactEvidenceJson(expectedRow.evidence_json);
+            services = 'services' in decoded ? decoded.services : undefined;
+        } catch {
+            // Unreadable evidence is a projection-level defect. Retrying cannot
+            // repair the blob, and the drift check reports it either way.
+            return false;
+        }
+        if (!services || services.length === 0) return true;
+        // Every service must have a clearable cause. One permanent failure is
+        // enough to hold the set back, because the resolve reduces to the
+        // weakest qualification across services.
+        return services.every((service) => {
+            // A resolved service (null failureClass) inside an otherwise
+            // unresolved set is the mixed case the freeze can still complete.
+            if (service.failureClass === null) return true;
+            return RETRYABLE_SERVICE_FAILURES.has(service.failureClass);
+        });
+    }
+
+    /**
      * Re-resolve a freeze whose registry resolve could not complete.
+     *
+     * Answers whether a *new* expectation was produced, so the caller can hold
+     * this tick's comparison back and let the next one judge evidence nobody has
+     * seen yet.
      *
      * Gated on how recently the unresolved expectation was recorded, because the
      * reconciler runs this whole check every 60 seconds and a registry that is
@@ -1023,11 +1088,11 @@ export class BlueprintService {
      * manage and no state to reconcile across restarts: the next attempt happens
      * once the current window has elapsed. The interval is the operator's to set.
      *
-     * Failure is logged and dropped rather than raised. A retry that cannot
-     * resolve leaves exactly the state it found, and the caller is about to
-     * report `unverified`, which is the honest answer for a target with no
-     * provable approved identity. Letting the rejection escape would fail the
-     * whole drift check, including the parts that had already answered.
+     * Failure is logged and dropped rather than raised, and answers false. A
+     * retry that cannot resolve leaves exactly the state it found, and the caller
+     * is about to report `unverified`, which is the honest answer for a target
+     * with no provable approved identity. Letting the rejection escape would fail
+     * the whole drift check, including the parts that had already answered.
      */
     private async retryArtifactFreeze(
         blueprint: Blueprint,
@@ -1035,14 +1100,15 @@ export class BlueprintService {
         applicationId: string,
         binding: Extract<ReturnType<typeof resolveRuntimeRepairBinding>, { kind: 'binding' }>,
         expectedRow: GitOpsArtifactSetRow | undefined,
-    ): Promise<void> {
+    ): Promise<boolean> {
         if (!expectedRow) {
             // No set to date the window from, so there is nothing to throttle
             // against. A missing pointer is a different defect from a failed
             // resolve, and re-resolving on every tick would paper over it.
-            return;
+            return false;
         }
-        if (!RETRYABLE_ARTIFACT_QUALIFICATIONS.has(expectedRow.qualification)) return;
+        if (!RETRYABLE_ARTIFACT_QUALIFICATIONS.has(expectedRow.qualification)) return false;
+        if (!this.artifactRetryCanSucceed(expectedRow)) return false;
 
         const store = GitOpsStore.getInstance();
         const target = store.getTarget(applicationId, node.id);
@@ -1060,14 +1126,14 @@ export class BlueprintService {
         // is the direction to be wrong in: a wrong-in-the-past stamp delays a
         // retry by one interval, a wrong-in-the-future one would hammer a
         // registry that is already struggling.
-        if (Date.now() - lastAttemptAt < intervalMs) return;
+        if (Date.now() - lastAttemptAt < intervalMs) return false;
 
         // Skipped, not blocked, when a deploy holds this target's lock. A
         // deploy resolves the freeze itself, so a concurrent retry would only
         // contend for the same artifact rows.
-        if (!this.acquireLock(blueprint.id, node.id)) return;
+        if (!this.acquireLock(blueprint.id, node.id)) return false;
         try {
-            await retryInlineArtifactFreeze({
+            return await retryInlineArtifactFreeze({
                 blueprintId: blueprint.id,
                 nodeId: node.id,
                 generationId: binding.acceptedGenerationId,
@@ -1082,6 +1148,17 @@ export class BlueprintService {
         } finally {
             this.releaseLock(blueprint.id, node.id);
         }
+
+        // Whether the expectation actually moved is what separates "resolved, so
+        // hold this tick's comparison" from "tried, and there was nothing to
+        // resolve". The producer reports it from the target's pointer rather than
+        // from the resolve's own outcome, because it is the pointer that the next
+        // tick compares against and that Enforce would pin to.
+        return await retryInlineArtifactFreeze({
+            blueprintId: blueprint.id,
+            nodeId: node.id,
+            generationId: binding.acceptedGenerationId,
+        });
     }
 
     /**

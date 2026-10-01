@@ -17,6 +17,10 @@ const STATIC_STACK_PATHS = new Set([
   '/stacks/import/move',
   '/stacks/bulk',
   '/stacks/from-git',
+  // Two-segment path under /stacks that is not a stack name. Without this the
+  // classifier would read `platform` as a stack called `platform` and demand an
+  // exact `stack:read` grant on it.
+  '/stacks/platform/docker-context',
 ]);
 
 /**

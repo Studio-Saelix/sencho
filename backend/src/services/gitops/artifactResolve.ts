@@ -28,12 +28,13 @@ import {
   type ServiceArtifactEvidence,
 } from './json';
 import { GitOpsStore } from './store';
-import { GitOpsTransitions, GitOpsTransitionError, type EventEnvelope } from './transitions';
+import { GitOpsTransitions, type EventEnvelope } from './transitions';
 import { newGitOpsId } from './directApplication';
 import { sanitizeForLog } from '../../utils/safeLog';
 import {
   loadEffectiveArtifactContext,
   platformLabelOf,
+  readNodePlatform,
   type EffectiveArtifactContext,
   type NodePlatform,
 } from './effectiveArtifactContext';
@@ -403,7 +404,16 @@ async function resolveServices(
   nodeId: number,
   buildContexts: readonly BuildContextPlan[],
   resolvedAt: number,
+  approvedServices?: readonly EffectiveServiceSpec[],
 ): Promise<{ services: ServiceArtifactEvidence[]; qualification: ArtifactQualification; evidence: ArtifactEvidenceJson }> {
+  // The platform always comes from the node, including on the approved-intent
+  // path: which manifest child is correct is a property of the machine, not of
+  // the intent. Only the service specs come from the intent.
+  const platform = await readNodePlatformOrNull(nodeId);
+  if (approvedServices) {
+    return resolveAgainstSpecs(approvedServices, platform, buildContexts, resolvedAt);
+  }
+
   const context = await loadArtifactContextForNode(nodeId, stackName);
   if (context && !context.renderable) {
     console.warn(
@@ -421,16 +431,91 @@ async function resolveServices(
     };
   }
 
-  const platform = context.platform;
-  const resolved = await Promise.all(
-    context.services.map((spec) => resolveOneService(spec, platform, buildContexts, resolvedAt)),
-  );
-  const serviceQuals = resolved.map((entry) => entry.qualification);
-  const services = resolved.map((entry) => entry.evidence);
+  return resolveAgainstSpecs(context.services, context.platform, buildContexts, resolvedAt);
+}
 
-  const qualification = weakestQualification(serviceQuals);
-  const evidence = buildArtifactEvidence(qualification, services);
-  return { services, qualification, evidence };
+/** Resolve each spec against `platform` and reduce to one qualification. */
+async function resolveAgainstSpecs(
+  specs: readonly EffectiveServiceSpec[],
+  platform: NodePlatform | null,
+  buildContexts: readonly BuildContextPlan[],
+  resolvedAt: number,
+): Promise<{ services: ServiceArtifactEvidence[]; qualification: ArtifactQualification; evidence: ArtifactEvidenceJson }> {
+  const entries = await Promise.all(
+    specs.map((spec) => resolveOneService(spec, platform, buildContexts, resolvedAt)),
+  );
+  const services = entries.map((entry) => entry.evidence);
+  const qualification = weakestQualification(entries.map((entry) => entry.qualification));
+  return { services, qualification, evidence: buildArtifactEvidence(qualification, services) };
+}
+
+/**
+ * This node's Docker platform, or null when it cannot be read.
+ *
+ * Separate from `loadArtifactContextForNode` because the approved-intent path
+ * needs the platform but must not render, and rendering is the step that reads
+ * the node's compose directory. For a remote node the platform comes off the
+ * existing effective-context call, which the leaf answers from its own daemon
+ * without reading any compose. An empty stack name is deliberate: that route
+ * resolves the platform before it needs the stack, and passing a real name
+ * would make a compose render the price of asking.
+ */
+async function readNodePlatformOrNull(nodeId: number): Promise<NodePlatform | null> {
+  const node = DatabaseService.getInstance().getNode(nodeId);
+  if (!node) return null;
+  if (node.type === 'remote') {
+    return fetchRemotePlatform(nodeId);
+  }
+  return readNodePlatform(nodeId);
+}
+
+/**
+ * A remote node's Docker platform, read from the leaf's own daemon.
+ *
+ * Its own route rather than the effective-artifact-context one, because that one
+ * also renders the stack. The leaf answers from `docker info` alone and never
+ * reads a compose file, which is the property that makes it safe to call from a
+ * path that is deliberately not reading the node's compose directory.
+ */
+async function fetchRemotePlatform(nodeId: number): Promise<NodePlatform | null> {
+  const target = NodeRegistry.getInstance().getProxyTarget(nodeId);
+  if (!target) {
+    console.warn(
+      '[GitOpsArtifactResolve] No proxy target for remote platform read on node %s',
+      nodeId,
+    );
+    return null;
+  }
+  const proxy = LicenseService.getInstance().getProxyHeaders();
+  const url = `${target.apiUrl.replace(/\/$/, '')}/api/stacks/platform/docker-context`;
+  try {
+    const res = await axios.get(url, {
+      ...safeAxiosTransport(target.trustedLoopback),
+      headers: {
+        Authorization: `Bearer ${target.apiToken}`,
+        [PROXY_TIER_HEADER]: proxy.tier,
+        'Content-Type': 'application/json',
+      },
+      timeout: REMOTE_RESOLVE_TIMEOUT_MS,
+      validateStatus: () => true,
+    });
+    if (res.status !== 200) {
+      console.warn(
+        '[GitOpsArtifactResolve] Remote platform read returned %s for node %s',
+        res.status,
+        nodeId,
+      );
+      return null;
+    }
+    return isNodePlatform(res.data?.platform) ? res.data.platform : null;
+  } catch (err) {
+    console.warn(
+      '[GitOpsArtifactResolve] Remote platform read failed for node %s: %s',
+      nodeId,
+      sanitizeForLog(err instanceof Error ? err.message : String(err)),
+    );
+    return null;
+  }
 }
 
 function buildArtifactEvidence(
@@ -481,6 +566,21 @@ function recordResolvedEvidence(args: {
   });
 }
 
+/**
+ * Resolve the artifact set for a generation and record it.
+ *
+ * `approvedServices` pins what is being resolved. Supplying it makes this a
+ * resolve of *approved intent* rather than of whatever is on the node's disk,
+ * which is the only form a caller may use outside the deploy that just wrote
+ * the compose: the node's directory is observable state that a later tick, a
+ * hand edit, or a restored backup can put out of step with what was approved,
+ * and recording that as the approved identity would let a local change become
+ * fleet intent. Callers that omit it are resolving immediately after their own
+ * deploy, where disk and intent are the same bytes by construction.
+ *
+ * Omitted, the node's rendered model supplies the specs, which is what the
+ * deploy-time freeze and the Direct apply paths want.
+ */
 export async function resolveAndRecordArtifactSet(args: {
   stackName: string;
   nodeId: number;
@@ -488,6 +588,11 @@ export async function resolveAndRecordArtifactSet(args: {
   generationId: string;
   buildContexts: readonly BuildContextPlan[];
   envelope: EventEnvelope;
+  /**
+   * Service specs from the approved intent, resolved against this node's
+   * platform. Omit only on a path that wrote the compose itself.
+   */
+  approvedServices?: readonly EffectiveServiceSpec[];
 }): Promise<void> {
   try {
     const resolvedAt = args.envelope.at;
@@ -496,6 +601,7 @@ export async function resolveAndRecordArtifactSet(args: {
       args.nodeId,
       args.buildContexts,
       resolvedAt,
+      args.approvedServices,
     );
     recordResolvedEvidence({
       applicationId: args.applicationId,
@@ -510,7 +616,6 @@ export async function resolveAndRecordArtifactSet(args: {
     // moment the registry was never asked, and it would move the latest pointer
     // on a row the winner is already writing. Rethrown so the caller decides:
     // the drift check treats it as contained, and a deploy reports it.
-    if (error instanceof GitOpsTransitionError) throw error;
     console.error(
       `[GitOpsArtifactResolve] Resolution failed for ${args.applicationId}/${args.generationId}:`,
       error instanceof Error ? error.message : String(error),

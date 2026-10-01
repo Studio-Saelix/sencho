@@ -12,10 +12,12 @@
  * projection nobody deployed, so recording it would report removals that never
  * happened.
  */
+import { parse as parseYaml } from 'yaml';
 import { DatabaseService, type BlueprintDeployment } from '../DatabaseService';
+import type { EffectiveServiceSpec } from '../effectiveServiceModel';
 import { GitOpsStore, emptyTargetRow } from './store';
 import { GitOpsTransitions, GitOpsTransitionError } from './transitions';
-import { envelopeFor, recordableApplication } from './blueprintProducers';
+import { envelopeFor, recordableApplication, sha256 } from './blueprintProducers';
 import { resolveAndRecordArtifactSet } from './artifactResolve';
 import { newGitOpsId } from './directApplication';
 import type { Blueprint } from '../DatabaseService';
@@ -261,6 +263,48 @@ export function commitBlueprintDeploymentRemoved(
 }
 
 /**
+ * Re-resolve an already-frozen Inline Blueprint generation against a node.
+ *
+ * One implementation, three callers: the deploy-time freeze, its same-revision
+ * re-tick, and the drift check's recovery. Keeping them together is what stops
+ * the deploy-time path (which may read the compose directory it just wrote) from
+ * drifting into the recovery path's (which must not), and vice versa.
+ *
+ * `approvedServices` is what separates them. The freeze omits it, reading the
+ * node's rendered model, because it runs immediately after writing that
+ * directory and the two are the same bytes by construction; reading the render
+ * is also what gives it Compose's own interpolation and `extends` resolution.
+ * The retry supplies it, because a reconcile tick can run long after the deploy
+ * and the directory is no longer evidence of what was approved.
+ *
+ * Returns whether the target's expectation actually moved, so the caller can
+ * tell "resolved" from "tried, and there was nothing to resolve".
+ */
+async function resolveInlineArtifactSet(args: {
+  stackName: string;
+  nodeId: number;
+  applicationId: string;
+  generationId: string;
+  blueprintId: number;
+  actor: string | null;
+  approvedServices?: readonly EffectiveServiceSpec[];
+}): Promise<boolean> {
+  const store = GitOpsStore.getInstance();
+  const before = store.getTarget(args.applicationId, args.nodeId)?.expected_artifact_set_id ?? null;
+  await resolveAndRecordArtifactSet({
+    stackName: args.stackName,
+    nodeId: args.nodeId,
+    applicationId: args.applicationId,
+    generationId: args.generationId,
+    buildContexts: [],
+    envelope: envelopeFor(args.actor, 'inline_revision_frozen'),
+    ...(args.approvedServices ? { approvedServices: args.approvedServices } : {}),
+  });
+  const after = store.getTarget(args.applicationId, args.nodeId)?.expected_artifact_set_id ?? null;
+  return after !== null && after !== before;
+}
+
+/**
  * The stack name an Inline Blueprint's artifact is resolved against.
  *
  * Prefers the intent's recorded stack name, because that is what the deploy
@@ -278,63 +322,149 @@ function inlineFreezeStackName(
 /**
  * Re-resolve an already-frozen Inline Blueprint generation, without re-freezing.
  *
- * This is the recovery half of `freezeInlineRevisionAfterDeploy`: the freeze
- * itself mints a generation and is a no-op once one exists, so a transient
- * registry failure at freeze time would otherwise park the target's approved
- * identity at `unresolved` until an unrelated redeploy of the same revision
- * happened to land. Resolving again against the generation that is already
- * frozen is the same operation the freeze performs, minus the mint.
+ * The recovery half of `freezeInlineRevisionAfterDeploy`, which mints a
+ * generation and is a replayed no-op once one exists. A transient registry
+ * failure at freeze time otherwise parks the target's approved identity at
+ * `unresolved` until an unrelated redeploy of the same revision re-runs the
+ * resolve, which makes an operator action the price of proving what a node is
+ * running.
  *
- * This is a deferred freeze, and it trusts exactly what a freeze trusts: the
- * registry, right now. Nothing here compares the result against an approval,
- * because the freeze that failed recorded no digests to compare against. So a
- * tag that moved between the failed freeze and this retry resolves to its new
- * digest, and that becomes the expectation, which is the same trust a redeploy
- * of this revision would extend and the same exposure the pre-existing redeploy
- * recovery already carries. What the transition does bound is narrower and
- * worth stating exactly: recording a fresh `exact`/`qualified` set moves an
- * expectation that is not already resolved and leaves a resolved one alone. So
- * a retry cannot redefine an identity that was ever approved, and it cannot
- * move an already-stale set either. It is not, and does not claim to be, a
- * second line of defence against a moving tag.
+ * **It resolves approved intent, not the node's directory.** The specs come
+ * from the compose text the intent hashed, and the only thing read from the
+ * node is its Docker platform, because which manifest child is correct is a
+ * property of the machine. The deploy-time freeze reads the directory
+ * legitimately because it runs immediately after writing it; a later tick
+ * cannot make that assumption, and reading the directory here would let a hand
+ * edit or a restored backup become the approved identity.
  *
- * No-op unless the application is a live Inline Blueprint, since a Git-managed
- * one resolves its artifact from the repository rather than from a node's
- * running compose model.
+ * **What it does not do.** It does not compare the result against a prior
+ * approval, because the freeze that failed recorded no digests to compare
+ * against. So a tag that moved between the failed freeze and this retry
+ * resolves to its new digest, exactly as the freeze would have had it resolve
+ * if the registry had answered. The transition bounds something narrower:
+ * recording a fresh `exact`/`qualified` set moves an expectation that is not
+ * already resolved and leaves a resolved one alone, so a retry cannot redefine
+ * an identity that was ever approved and cannot move an already-stale set.
+ *
+ * No-op unless the application is a live Inline Blueprint on the generation
+ * the caller named. A Git-managed one resolves from the repository rather than
+ * from a node, so its recovery runs through preflight and authorization.
  */
 export async function retryInlineArtifactFreeze(args: {
   blueprintId: number;
   nodeId: number;
   generationId: string;
-}): Promise<void> {
+}): Promise<boolean> {
   const store = GitOpsStore.getInstance();
   const app = store.getLiveBlueprintApplication(args.blueprintId);
-  if (!recordableApplication(app) || app.target_mode !== 'inline_blueprint') return;
+  if (!recordableApplication(app) || app.target_mode !== 'inline_blueprint') return false;
   // The generation is the one the caller compared the observation against. A
   // newer accepted generation makes that comparison stale, and the newer one
   // owns its own resolve.
-  if (app.accepted_generation_id !== args.generationId) return;
+  if (app.accepted_generation_id !== args.generationId) return false;
 
   const intent = app.intent_revision_id
     ? store.getIntentRevision(app.intent_revision_id)
     : undefined;
-  const stackName = inlineFreezeStackName(intent, DatabaseService.getInstance().getBlueprint(args.blueprintId));
+  const blueprint = DatabaseService.getInstance().getBlueprint(args.blueprintId);
+  const stackName = inlineFreezeStackName(intent, blueprint);
   if (!stackName) {
     console.error(
       '[GitOps] Inline artifact retry skipped for blueprint %s: no stack name on intent or blueprint',
       sanitizeForLog(String(args.blueprintId)),
     );
-    return;
+    return false;
+  }
+  const approvedServices = approvedInlineServiceSpecs(intent, blueprint);
+  if (!approvedServices) {
+    console.error(
+      '[GitOps] Inline artifact retry skipped for blueprint %s: the approved intent content is unreadable, or the Blueprint has been edited since it was approved',
+      sanitizeForLog(String(args.blueprintId)),
+    );
+    return false;
   }
 
-  await resolveAndRecordArtifactSet({
+  return resolveInlineArtifactSet({
     stackName,
     nodeId: args.nodeId,
     applicationId: app.id,
     generationId: args.generationId,
-    buildContexts: [],
-    envelope: envelopeFor(null, 'inline_revision_frozen'),
+    blueprintId: args.blueprintId,
+    actor: null,
+    approvedServices,
   });
+}
+
+/**
+ * The service specs an intent's approved compose content declares.
+ *
+ * Parsed from the stored content, never from the node's directory. That
+ * distinction is the whole point of the retry: a reconcile tick can run days
+ * after the deploy, by which time the node's compose may have been hand-edited,
+ * restored from a backup, or replaced wholesale. Resolving from the directory
+ * would record whatever it now holds as the approved identity, which turns a
+ * local change into fleet intent and would let drift read as converged against
+ * content nobody approved.
+ *
+ * Returns null when the approved content cannot be parsed, which the caller
+ * treats as "do not retry": an intent whose own content is unreadable is not
+ * evidence that anything on the node is approved.
+ */
+function approvedInlineServiceSpecs(
+  intent: GitOpsIntentRevisionRow | undefined,
+  blueprint: Blueprint | undefined,
+): EffectiveServiceSpec[] | null {
+  // The intent records the hash of the content that was approved. If the
+  // Blueprint has moved on since, the intent's content is the one that was
+  // approved and the current Blueprint text is not, so the hash is what
+  // decides, not the live row.
+  const content = intent && blueprint
+    ? composeContentForIntent(intent, blueprint)
+    : null;
+  if (content === null) return null;
+  try {
+    const doc = parseYaml(content) as { services?: Record<string, unknown> } | null;
+    const services = doc?.services;
+    if (!services || typeof services !== 'object' || Array.isArray(services)) return null;
+    return Object.entries(services).map(([name, raw]) => approvedServiceSpec(name, raw));
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The compose text an intent approved.
+ *
+ * Prefers the live Blueprint row only when it still hashes to what the intent
+ * recorded. An Inline intent is minted from the Blueprint's own content, so the
+ * two agree until the Blueprint is edited, and after an edit the intent's hash
+ * is the authority: the deploy applied the old text.
+ */
+function composeContentForIntent(intent: GitOpsIntentRevisionRow, blueprint: Blueprint): string | null {
+  if (sha256(blueprint.compose_content) !== intent.compose_content_sha256) {
+    return null;
+  }
+  return blueprint.compose_content;
+}
+
+/**
+ * Spec shape from *authored* YAML rather than from `docker compose config`
+ * output, so the three fields this needs (`image`, `build`) are read with the
+ * same tolerance the effective-model parser applies. Compose interpolation has
+ * already happened by the time the rendered model exists, but authored content
+ * is what the intent hashed, so a `${VAR}` image reference resolves to a ref
+ * that cannot be classified and stays unresolved rather than being guessed.
+ */
+function approvedServiceSpec(name: string, raw: unknown): EffectiveServiceSpec {
+  const svc = (raw ?? {}) as Record<string, unknown>;
+  return {
+    name,
+    declaredImage: typeof svc.image === 'string' ? svc.image : null,
+    hasBuild: svc.build !== undefined && svc.build !== null,
+    expectedReplicas: 1,
+    dependsOn: [],
+    hasHealthcheck: false,
+  };
 }
 
 /**
@@ -371,30 +501,16 @@ export async function freezeInlineRevisionAfterDeploy(args: {
 
   const envelope = envelopeFor(args.actor, 'inline_revision_frozen');
 
-  // A lost write race on the evidence row is not a failed resolve, so
-  // `resolveAndRecordArtifactSet` rethrows it rather than recording
-  // `unavailable`. A deploy has already applied the workload by this point, so
-  // letting that escape would report a successful deploy as failed; the
-  // generation is frozen either way and the next resolve picks it up.
-  const resolveFreezeSet = async (generationId: string): Promise<void> => {
-    try {
-      await resolveAndRecordArtifactSet({
-        stackName,
-        nodeId: args.nodeId,
-        applicationId: app.id,
-        generationId,
-        buildContexts: [],
-        envelope,
-      });
-    } catch (error) {
-      if (!(error instanceof GitOpsTransitionError)) throw error;
-      console.error(
-        '[GitOps] Inline freeze resolve lost a write race for blueprint %s on node %s; the generation stays frozen and unresolved',
-        sanitizeForLog(String(args.blueprintId)),
-        args.nodeId,
-      );
-    }
-  };
+  // Same-resolution seam as the retry, minus the approved specs: this path may
+  // read the compose directory because it just wrote it.
+  const resolveFreezeSet = (generationId: string) => resolveInlineArtifactSet({
+    stackName,
+    nodeId: args.nodeId,
+    applicationId: app.id,
+    generationId,
+    blueprintId: args.blueprintId,
+    actor: args.actor,
+  });
 
   if (app.accepted_generation_id && app.artifact_set_id) {
     const existing = store.getArtifactSet(app.artifact_set_id);
