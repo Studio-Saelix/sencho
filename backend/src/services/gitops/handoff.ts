@@ -429,10 +429,12 @@ export async function ensureRolloutAuthorization(
     // applies at the next authorization, never to a rollout already running.
     const strategyJson = frozenStrategyFor(store, app, ingredients.intentRevisionId);
     // The policy this mint is recorded under, read here rather than from the row
-    // this function opened with: the write transaction compares it against the
-    // policy configured at write time, and the preflight await above is long
-    // enough for a policy edit to land in between. An operator mint records no
-    // snapshot, because no policy decided it.
+    // this function opened with. Reading after the preflight await is what
+    // matters: that await is long enough for a policy edit to land, so a snapshot
+    // taken from the row read before it would already be stale by the time the
+    // write transaction compares it. What is left is the synchronous gap to the
+    // write, and an operator mint records no snapshot because no policy decided
+    // it.
     const policyProvenanceJson = authority === 'configured_policy'
       ? encodePolicySnapshot(configuredSnapshotFor(store.getApplication(applicationId) ?? app))
       : null;
@@ -462,9 +464,13 @@ export async function ensureRolloutAuthorization(
             applicationId: app.id,
             envelope: envelopeFor(actor, `${trigger}:preflight_race`),
           });
-          // The row read after the failed attempt, for the same reason as the
-          // read above: it is the newest one available, and the retry writes
-          // under whatever the operator has configured by now.
+          // Read again rather than reused from above: the failed attempt and the
+          // invalidation both happened after that read, and the retry is a
+          // separate mint that has to carry the snapshot for itself. Reading
+          // here also keeps the window the agreement check guards down to the
+          // write. The racing writer's row is preferred because it is the
+          // freshest, and the caller's row is the fallback for an application
+          // that could not be read at all.
           const racedPolicyProvenanceJson = authority === 'configured_policy'
             ? encodePolicySnapshot(configuredSnapshotFor(raced ?? app))
             : null;

@@ -865,6 +865,69 @@ describe('a rollout authorization records the policy that decided it', () => {
     // dispatch that hit the race simply did not happen this pass.
     expect(mint('auth-fresh', configuredSnapshotJsonFor(fixture.applicationId), 3)).not.toThrow();
   });
+
+  it('records the snapshot again when a racing writer wins and the retry remints', async () => {
+    // The retry path this PR changed, which nothing else in the suite reaches.
+    //
+    // A racing writer can authorize the same application between this one's
+    // evaluation and its write. The mint is refused as already live, the live
+    // binding's fingerprint is compared against this one's, and a drifted one
+    // is invalidated and reminted through a second call. That second call is a
+    // separate mint path with its own arguments, so it has to carry the snapshot
+    // for itself: the refusal on a policy mint with no snapshot is what a policy
+    // remint racing would hit if it did not, and the drift remint is the path
+    // that runs unattended with no operator present to see the failure.
+    //
+    // The racing writer is the real writer, not a stubbed refusal, so the state
+    // the retry finds is the state a real race produces rather than a shape
+    // invented to make the assertion reachable.
+    const fixture = seedAuthorizedReadyApp();
+    const store = GitOpsStore.getInstance();
+    const transitions = GitOpsTransitions.getInstance();
+    // A fingerprint that differs from the one this call evaluates, so the retry
+    // invalidates and remints rather than accepting the racing writer's binding
+    // as the answer.
+    const drifted = 'd'.repeat(64);
+
+    const realMint = transitions.rolloutAuthorized.bind(transitions);
+    let planted = false;
+    // The racing writer, planting a live authorization under a drifted
+    // fingerprint just before this one's mint, which is what makes the mint
+    // below refuse as already live.
+    vi.spyOn(transitions, 'rolloutAuthorized').mockImplementation((args) => {
+      if (!planted) {
+        planted = true;
+        realMint({
+          ...args,
+          approvalId: 'raced-approval',
+          rolloutGenerationId: 'raced-generation',
+          preflightFingerprint: drifted,
+        });
+      }
+      return realMint(args);
+    });
+
+    const result = await ensureRolloutAuthorization(fixture.applicationId, 'tester');
+    expect(result.ok).toBe(true);
+    // The retry is what ran, so the racing writer's approval is gone and this
+    // call's own is live.
+    const app = store.getApplication(fixture.applicationId)!;
+    expect(app.rollout_authorization_ref).toBeTruthy();
+    expect(app.rollout_authorization_ref).not.toBe('raced-approval');
+
+    const approval = store.getApproval(app.rollout_authorization_ref!)!;
+    expect(approval.authority).toBe('configured_policy');
+    // The assertion the branch exists for: the retry recorded a snapshot that
+    // decodes to the configured policy, rather than nothing.
+    expect(decodeApprovalPolicySnapshot(approval.policy_provenance_json)).toEqual({
+      version: 1,
+      source: 'manual',
+      placement: 'operator',
+      rolloutAuthorization: 'automatic',
+    });
+    expect(store.getRolloutGeneration(app.rollout_generation_id!)!.policy_snapshot_json)
+      .toBe(approval.policy_provenance_json);
+  });
 });
 
 describe('ensureRolloutAuthorization', () => {
