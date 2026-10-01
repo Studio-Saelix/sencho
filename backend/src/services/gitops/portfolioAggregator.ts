@@ -37,7 +37,7 @@ import type {
   GitOpsPortfolioTargetSummary,
 } from './portfolioTypes';
 import type { GitOpsRevisionProjection, GitOpsTargetProjection } from './types';
-import { canonicalizeServiceEvidence, isRecord } from './json';
+import { canonicalizeServiceEvidence, isArtifactServiceFailureClass, isRecord } from './json';
 import type { ServiceArtifactEvidence } from './json';
 
 /** Per-remote probe budget; mirrors the fleet overview probe so one dead node cannot stall the portfolio. */
@@ -148,15 +148,6 @@ const ARTIFACT_STATUS_QUALIFICATION: Readonly<Record<string, string>> = {
 };
 
 const ARTIFACT_SERVICE_SOURCES: ReadonlySet<string> = new Set(['registry', 'build', 'unsupported']);
-const ARTIFACT_SERVICE_FAILURE_CLASSES: ReadonlySet<string> = new Set([
-  'unresolved',
-  'registry_unavailable',
-  'credential_failure',
-  'unsupported_registry',
-  'platform_ambiguity',
-  'digest_unavailable',
-  'stale_resolution',
-]);
 const DRIFT_CLASSES: ReadonlySet<string> = new Set([
   'source',
   'managed_project',
@@ -1125,8 +1116,7 @@ function isServiceArtifactRecord(value: unknown): value is ServiceArtifactEviden
   }
   return isNullableString(value.buildContextFingerprint)
     && isNullableString(value.producedImageId)
-    && (value.failureClass === null
-      || typeof value.failureClass === 'string' && ARTIFACT_SERVICE_FAILURE_CLASSES.has(value.failureClass))
+    && (value.failureClass === null || isArtifactServiceFailureClass(value.failureClass))
     && isFiniteNumberOrNull(value.resolvedAt);
 }
 

@@ -547,6 +547,76 @@ describe('unresolved artifact freeze', () => {
     expect(resolveSpy, 'a registry that was down can come back').toHaveBeenCalledTimes(1);
   });
 
+  it('retries a platform the node could not report, unlike a leaf too old to ask', async () => {
+    // The two must not share a fate. `platform_unavailable` is a node that could
+    // not answer this time, and retrying is the entire point of this path;
+    // `platform_ambiguity` is a leaf too old to have the route, which no retry
+    // will change. The gate reads the class, so the classes must differ.
+    const node = seedNode();
+    const blueprint = seedBlueprint(node);
+    seedInlineWithUnresolvedFreeze({
+      blueprint,
+      node,
+      qualification: 'unavailable',
+      services: [{
+        serviceName: 'web',
+        authoredRef: 'nginx:latest',
+        source: 'registry',
+        platform: null,
+        indexDigest: null,
+        platformDigest: null,
+        platformVariants: null,
+        localDigests: null,
+        buildContextFingerprint: null,
+        producedImageId: null,
+        failureClass: 'platform_unavailable',
+        resolvedAt: 1,
+      }],
+    });
+    const resolveSpy = vi.spyOn(
+      await import('../services/gitops/artifactResolve'),
+      'resolveAndRecordArtifactSet',
+    ).mockResolvedValue(undefined);
+
+    await BlueprintService.getInstance().checkForDrift(blueprint, node);
+
+    expect(resolveSpy, 'a node that could not answer is worth asking again').toHaveBeenCalledTimes(1);
+  });
+
+  it('does not retry a leaf too old to report its platform', async () => {
+    // The other half of the same distinction: this class is permanent, so the
+    // loop stops rather than asking a route that will never exist.
+    const node = seedNode();
+    const blueprint = seedBlueprint(node);
+    seedInlineWithUnresolvedFreeze({
+      blueprint,
+      node,
+      qualification: 'unavailable',
+      services: [{
+        serviceName: 'web',
+        authoredRef: 'nginx:latest',
+        source: 'registry',
+        platform: null,
+        indexDigest: null,
+        platformDigest: null,
+        platformVariants: null,
+        localDigests: null,
+        buildContextFingerprint: null,
+        producedImageId: null,
+        failureClass: 'platform_ambiguity',
+        resolvedAt: 1,
+      }],
+    });
+    const resolveSpy = vi.spyOn(
+      await import('../services/gitops/artifactResolve'),
+      'resolveAndRecordArtifactSet',
+    ).mockResolvedValue(undefined);
+
+    await BlueprintService.getInstance().checkForDrift(blueprint, node);
+
+    expect(resolveSpy, 'an older leaf will not grow the route').not.toHaveBeenCalled();
+  });
+
   it('resolves the intent-approved refs, never the node directory', async () => {
     const node = seedNode();
     const blueprint = seedBlueprint(node);
@@ -620,6 +690,15 @@ describe('unresolved artifact freeze', () => {
         label: 'include, whose services the parse never sees',
         compose: 'include:\n  - other.yaml\nservices:\n  web:\n    image: nginx:latest\n',
       },
+      {
+        // Not a resolution failure, and that is the point: `parseImageRef`
+        // accepts the literal text, splits it on its last colon, and asks the
+        // registry about a reference that cannot exist. That comes back as a
+        // retryable registry error, so without this refusal the retry would run
+        // forever rather than never.
+        label: 'an interpolated image reference, which the authored parse cannot resolve',
+        compose: 'services:\n  web:\n    image: nginx:${TAG:-1.25}\n',
+      },
     ];
 
     for (const hazard of hazards) {
@@ -645,6 +724,72 @@ describe('unresolved artifact freeze', () => {
         ).toBe('unverified');
       });
     }
+
+    it('refuses an interpolated image once, not on every tick', async () => {
+      // The failure mode the refusal exists for is a loop, so it is not enough
+      // that one tick refuses. A refusal writes no evidence row, so the latest
+      // row's stamp never moves and a time-based throttle would stay open forever:
+      // the refusal has to be remembered per generation, or the same unmodellable
+      // Blueprint is re-parsed and re-logged every minute.
+      const node = seedNode();
+      const blueprint = seedBlueprint(node);
+      DatabaseService.getInstance().updateBlueprint(blueprint.id, {
+        compose_content: 'services:\n  web:\n    image: nginx:${TAG:-1.25}\n',
+      });
+      const current = DatabaseService.getInstance().getBlueprint(blueprint.id)!;
+      const seeded = seedInlineWithUnresolvedFreeze({ blueprint: current, node, qualification: 'unresolved' });
+      const resolveSpy = vi.spyOn(
+        await import('../services/gitops/artifactResolve'),
+        'resolveAndRecordArtifactSet',
+      ).mockResolvedValue(undefined);
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+
+      const rowsBefore = countArtifactRows(seeded.generationId);
+      for (let tick = 0; tick < 3; tick += 1) {
+        const result = await BlueprintService.getInstance().checkForDrift(current, node);
+        expect(result.kind).toBe('unverified');
+        // Opened deliberately each tick, so a refusal that only held because the
+        // throttle was shut would not pass this.
+        DatabaseService.getInstance().getDb().prepare(
+          'UPDATE gitops_artifact_sets SET created_at = ? WHERE generation_id = ?',
+        ).run(Date.now() - 6 * 60_000, seeded.generationId);
+      }
+
+      const refusals = errorSpy.mock.calls.filter((call) =>
+        String(call[0]).includes('Inline artifact retry skipped'));
+      expect(refusals, 'three ticks, one attempt: a refusal is a stable property').toHaveLength(1);
+      expect(resolveSpy, 'never asked, so the registry is never called').not.toHaveBeenCalled();
+      expect(countArtifactRows(seeded.generationId), 'and no row per tick').toBe(rowsBefore);
+    });
+
+    it('refuses the whole retry when one of several services is unmodellable', async () => {
+      // The atomic-unit tradeoff, pinned. A resolvable service beside an
+      // unmodellable one does not get a partial resolve: the set's qualification
+      // is the weakest across services, so resolving `db` alone would still leave
+      // the set uncomparable, and recording it would produce a plausible-looking
+      // row that proves nothing about `web`.
+      const node = seedNode();
+      const blueprint = seedBlueprint(node);
+      DatabaseService.getInstance().updateBlueprint(blueprint.id, {
+        compose_content:
+          'services:\n'
+          + '  db:\n'
+          + '    image: postgres:15\n'
+          + '  web:\n'
+          + '    image: nginx:${TAG:-1.25}\n',
+      });
+      const current = DatabaseService.getInstance().getBlueprint(blueprint.id)!;
+      seedInlineWithUnresolvedFreeze({ blueprint: current, node, qualification: 'unresolved' });
+      const resolveSpy = vi.spyOn(
+        await import('../services/gitops/artifactResolve'),
+        'resolveAndRecordArtifactSet',
+      ).mockResolvedValue(undefined);
+
+      const result = await BlueprintService.getInstance().checkForDrift(current, node);
+
+      expect(resolveSpy, 'not even the resolvable service is resolved').not.toHaveBeenCalled();
+      expect(result.kind).toBe('unverified');
+    });
   });
 
   it('stops retrying a build-only stack, whose answer cannot change', async () => {

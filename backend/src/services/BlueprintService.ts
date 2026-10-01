@@ -109,12 +109,19 @@ const RETRYABLE_ARTIFACT_QUALIFICATIONS: ReadonlySet<GitOpsArtifactSetRow['quali
  * cannot arrive. `unresolved` is included because a service with no declared
  * image genuinely may gain one when the Blueprint is edited, and `unresolved`
  * on the whole set is also what a not-yet-attempted freeze produces.
+ *
+ * `platform_unavailable` is the one that matters for remote nodes: it means the
+ * node could not answer when asked, which is transient, and it is deliberately
+ * distinct from `platform_ambiguity`, which means the leaf is too old to be asked
+ * at all. Collapsing them permanently disabled the retry for a remote target
+ * after a single timeout.
  */
 const RETRYABLE_SERVICE_FAILURES: ReadonlySet<ServiceArtifactEvidence['failureClass']> = new Set([
     'registry_unavailable',
     'credential_failure',
     'digest_unavailable',
     'stale_resolution',
+    'platform_unavailable',
     'unresolved',
 ]);
 
@@ -1040,6 +1047,23 @@ export class BlueprintService {
     }
 
     /**
+     * Generations whose retry has been refused, keyed `applicationId:nodeId`.
+     *
+     * A refusal is a statement about the authored content, so it stays true for
+     * that generation no matter how many times it is asked. Without this the
+     * refusal is re-derived on every reconcile tick: a refusal writes no evidence
+     * row, so the latest row's stamp never moves, the throttle never closes, and
+     * an unmodellable Blueprint would be re-parsed and re-logged every minute
+     * forever. Remembering the generation is enough because anything that could
+     * change the answer (an edit, a redeploy) mints a new one, and the deploy path
+     * resolves from the rendered model without consulting this.
+     *
+     * In memory on purpose: the worst case after a restart is one redundant
+     * refusal per affected target, which is not worth a persisted contract.
+     */
+    private readonly refusedFreezeRetries = new Map<string, string>();
+
+    /**
      * Whether the recorded failure is one a retry can clear.
      *
      * Read from the evidence of the row that was actually recorded last, not from
@@ -1129,6 +1153,12 @@ export class BlueprintService {
             // resolve, and re-resolving on every tick would paper over it.
             return false;
         }
+        // A generation whose retry was already refused is not asked again. See
+        // `refusedFreezeRetries` for why this cannot be a time-based gate.
+        if (this.refusedFreezeRetries.get(`${applicationId}:${node.id}`) === binding.acceptedGenerationId) {
+            return false;
+        }
+
         // Everything below judges the *latest* recorded evidence, which is the one
         // row a failed resolve can actually move. Reading the expected set here
         // was the bug in this gate: a failed resolve writes a new row without
@@ -1167,11 +1197,18 @@ export class BlueprintService {
             // to resolve". The producer reports it from the target's pointer,
             // because it is the pointer the next tick compares against and the one
             // Enforce would pin to.
-            return await retryInlineArtifactFreeze({
+            const outcome = await retryInlineArtifactFreeze({
                 blueprintId: blueprint.id,
                 nodeId: node.id,
                 generationId: binding.acceptedGenerationId,
             });
+            if (outcome === 'refused') {
+                this.refusedFreezeRetries.set(
+                    `${applicationId}:${node.id}`,
+                    binding.acceptedGenerationId,
+                );
+            }
+            return outcome === 'resolved';
         } catch (err) {
             // Nothing was resolved, so the caller keeps the expectation it had.
             // Answering false rather than falling through matters: this return is

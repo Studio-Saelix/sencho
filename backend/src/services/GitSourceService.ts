@@ -5755,14 +5755,6 @@ export class GitSourceService {
             // not leaving the operation open when the acceptance was rejected.
             if (!recorded) this.abandonGitOpsOperation(stackName, gitopsApp.id, gitopsEnv);
             else {
-                // Plain call, matching recordGitOps one line up: the files are on
-                // disk and the acceptance is recorded, and
-                // `resolveAndRecordArtifactSet` records its own failures as
-                // evidence rather than raising, so there is nothing here to
-                // catch. An earlier revision wrapped this in a catch for a
-                // `GitOpsTransitionError` race that cannot occur, since the
-                // evidence version is read and the row written with no `await`
-                // between them.
                 await resolveAndRecordArtifactSet({
                     stackName,
                     nodeId,
@@ -6829,10 +6821,6 @@ export class GitSourceService {
                 }
 
                 if (gitopsApplicationId && acceptedGenerationId && completeProjectManifest) {
-                    // Plain call. The create has already written the project, and
-                    // `resolveAndRecordArtifactSet` records its own failures as
-                    // evidence rather than raising, so there is nothing to catch
-                    // here. See the apply path above for the removed catch.
                     await resolveAndRecordArtifactSet({
                         stackName: input.stackName,
                         nodeId: NodeRegistry.getInstance().getDefaultNodeId(),

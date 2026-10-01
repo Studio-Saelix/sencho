@@ -209,8 +209,23 @@ export type ArtifactServiceFailureClass =
   | 'credential_failure'
   | 'unsupported_registry'
   | 'platform_ambiguity'
+  | 'platform_unavailable'
   | 'digest_unavailable'
   | 'stale_resolution';
+
+/**
+ * Whether a value is one of the failure classes this contract defines.
+ *
+ * Exported so the consumers that validate untrusted evidence have one list rather
+ * than a copy each. There were two copies, and adding a class to one of them
+ * silently left the other rejecting it: the field itself stayed readable but the
+ * guard that checks a leaf payload or a revision projection would fail the whole
+ * record, degrading a fleet row to unknown evidence. A predicate that reads the
+ * same set the type is declared beside cannot drift from it.
+ */
+export function isArtifactServiceFailureClass(value: unknown): value is ArtifactServiceFailureClass {
+  return typeof value === 'string' && ARTIFACT_SERVICE_FAILURES.has(value as ArtifactServiceFailureClass);
+}
 
 export interface ArtifactPlatformVariant {
   platform: string;
@@ -241,6 +256,7 @@ const ARTIFACT_SERVICE_FAILURES = new Set<ArtifactServiceFailureClass>([
   'credential_failure',
   'unsupported_registry',
   'platform_ambiguity',
+  'platform_unavailable',
   'digest_unavailable',
   'stale_resolution',
 ]);
@@ -380,10 +396,8 @@ function decodeServiceArtifactEvidence(value: unknown): ServiceArtifactEvidence 
   if (value.producedImageId !== null && typeof value.producedImageId !== 'string') {
     throw new GitOpsJsonError('service artifact evidence producedImageId must be a string or null');
   }
-  if (value.failureClass !== null) {
-    if (typeof value.failureClass !== 'string' || !ARTIFACT_SERVICE_FAILURES.has(value.failureClass as ArtifactServiceFailureClass)) {
-      throw new GitOpsJsonError('service artifact evidence failureClass is invalid');
-    }
+  if (value.failureClass !== null && !isArtifactServiceFailureClass(value.failureClass)) {
+    throw new GitOpsJsonError('service artifact evidence failureClass is invalid');
   }
   if (value.resolvedAt !== null) {
     if (typeof value.resolvedAt !== 'number' || !Number.isFinite(value.resolvedAt)) {

@@ -1267,8 +1267,7 @@ function toExpected(
   }
   // Fires when the *expectation* is not comparable, because that is the claim the
   // copy makes: drift between what is running and what was intended is not being
-  // checked. `stale` is excluded because it reports itself through the facet
-  // status and the drift item, and it clears on acceptance rather than on time.
+  // checked.
   //
   // The latest evidence is consulted for one thing only: a stack that builds on
   // the node keeps an `unresolved` expected row for the generation's whole life,
@@ -1282,6 +1281,12 @@ function toExpected(
   // itself comparable, which claims drift is unchecked at a moment it is being
   // checked. The expectation decides whether the claim is true; the latest row
   // only decides whether it is worth repeating.
+  //
+  // A `stale` expectation is not specially excluded, and does not need to be:
+  // `allowedExpectedAdvance` refuses stale the same way it refuses everything but
+  // exact/qualified, so the expected pointer never holds a stale row. Staleness
+  // is recorded on the latest row, which is why it reaches the operator through
+  // the facet status rather than through this caveat.
   //
   // Deliberately not scoped to the target mode, and the copy therefore does not
   // promise a retry. The drift check re-resolves an expectation only for an

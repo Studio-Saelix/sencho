@@ -152,6 +152,17 @@ function mockLeafWithoutPlatformRoute() {
   });
 }
 
+/**
+ * A leaf whose platform read failed this time, which is what a timeout, a 5xx, or
+ * a briefly unreachable daemon looks like.
+ */
+function mockLeafPlatformReadFailing(status = 503) {
+  return vi.spyOn(axios, 'get').mockResolvedValue({
+    status,
+    data: { error: 'temporarily unavailable' },
+  });
+}
+
 function expectHubLocalSkipped(): void {
   expect(mockBuildEffectiveServiceModel).not.toHaveBeenCalled();
   expect(mockDockerInfo).not.toHaveBeenCalled();
@@ -295,6 +306,51 @@ describe('remote effective artifact context for digest freeze', () => {
     const decoded = latest ? decodeArtifactEvidenceJson(latest.evidence_json) : null;
     const recorded = decoded && 'services' in decoded ? decoded.services ?? [] : [];
     expect(recorded[0]?.failureClass, 'and permanent, so the retry gate can stop').toBe('platform_ambiguity');
+  });
+
+  it('records a transient platform-read failure as retryable, not as a permanent stop', async () => {
+    // The distinction S9 collapsed. A leaf that answers 5xx or times out could
+    // answer on the next tick, and treating that like an older leaf switched the
+    // retry off for every remote target until an unrelated redeploy. The two must
+    // produce different failure classes, because the retry gate reads the class.
+    const stackName = 'remote-flaky-leaf-stack';
+    const applicationId = `app-remote-flaky-${counter}`;
+    const generationId = `gen-remote-flaky-${counter}`;
+    seedDirectApp({
+      applicationId,
+      generationId,
+      stackName,
+      artifactSetId: `art-remote-flaky-${counter}`,
+    });
+
+    mockLeafPlatformReadFailing(503);
+
+    await resolveAndRecordArtifactSet({
+      stackName,
+      nodeId: remoteNodeId,
+      applicationId,
+      generationId,
+      buildContexts: [],
+      envelope: envelope(`op-remote-flaky-${counter}`),
+      approvedServices: [{
+        name: 'web',
+        declaredImage: 'nginx:1.27',
+        hasBuild: false,
+        expectedReplicas: 1,
+        dependsOn: [],
+        hasHealthcheck: false,
+      }],
+    });
+
+    const latestId = GitOpsStore.getInstance().getApplication(applicationId)?.latest_artifact_set_id;
+    const latest = latestId ? GitOpsStore.getInstance().getArtifactSet(latestId) : undefined;
+    expect(latest?.qualification).toBe('unavailable');
+    const decoded = latest ? decodeArtifactEvidenceJson(latest.evidence_json) : null;
+    const recorded = decoded && 'services' in decoded ? decoded.services ?? [] : [];
+    expect(
+      recorded[0]?.failureClass,
+      'a leaf that could not answer is worth asking again',
+    ).toBe('platform_unavailable');
   });
 
   it('freezes from the leaf HTTP context and never reads hub-local model or Docker', async () => {

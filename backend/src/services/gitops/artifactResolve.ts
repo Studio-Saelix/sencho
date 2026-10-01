@@ -106,9 +106,12 @@ function mapRegistryFailure(reason: string): ArtifactServiceFailureClass {
 async function resolveRegistryService(
   serviceName: string,
   authoredRef: string,
-  platform: { os: string; architecture: string } | null,
+  platformRead: NodePlatformRead,
   resolvedAt: number,
 ): Promise<ServiceResolveResult> {
+  // A platform that could not be read is labelled as absent rather than guessed,
+  // and which failure class it produces is decided below.
+  const platform = platformRead.status === 'ok' ? platformRead.platform : null;
   const referenceKind = classifyReferenceKind(authoredRef);
   if (referenceKind === 'digest_pinned') {
     const match = authoredRef.match(DIGEST_PIN_RE);
@@ -136,7 +139,9 @@ async function resolveRegistryService(
         serviceName,
         authoredRef,
         source: 'registry',
-        platform: platform ? `${platform.os}/${platform.architecture}` : null,
+        platform: platformRead.status === 'ok' && platformRead.platform
+          ? `${platformRead.platform.os}/${platformRead.platform.architecture}`
+          : null,
         indexDigest: digest,
         platformDigest: digest,
         buildContextFingerprint: null,
@@ -166,6 +171,12 @@ async function resolveRegistryService(
     };
   }
   if (!platform) {
+    // Two different situations, and they must not share a class. `route_missing`
+    // is a leaf older than this hub: the route does not exist there and will not
+    // appear on its own, so the answer is permanent and the retry stops.
+    // Anything else is a daemon that could not answer this time, which is the
+    // transient case the retry exists for, and calling it permanent switched the
+    // retry off for every remote target until the next redeploy.
     return {
       qualification: 'unavailable',
       evidence: {
@@ -177,7 +188,9 @@ async function resolveRegistryService(
         platformDigest: null,
         buildContextFingerprint: null,
         producedImageId: null,
-        failureClass: 'platform_ambiguity',
+        failureClass: platformRead.status === 'route_missing'
+          ? 'platform_ambiguity'
+          : 'platform_unavailable',
         resolvedAt,
       },
     };
@@ -230,7 +243,7 @@ async function resolveRegistryService(
 
 async function resolveOneService(
   spec: EffectiveServiceSpec,
-  platform: { os: string; architecture: string } | null,
+  platformRead: NodePlatformRead,
   buildContexts: readonly BuildContextPlan[],
   resolvedAt: number,
 ): Promise<ServiceResolveResult> {
@@ -241,7 +254,9 @@ async function resolveOneService(
         serviceName: spec.name,
         authoredRef: spec.declaredImage,
         source: 'build',
-        platform: platform ? `${platform.os}/${platform.architecture}` : null,
+        platform: platformRead.status === 'ok' && platformRead.platform
+          ? `${platformRead.platform.os}/${platformRead.platform.architecture}`
+          : null,
         indexDigest: null,
         platformDigest: null,
         buildContextFingerprint: buildContextFingerprint(spec.name, buildContexts),
@@ -269,7 +284,7 @@ async function resolveOneService(
     };
   }
   try {
-    return await resolveRegistryService(spec.name, spec.declaredImage, platform, resolvedAt);
+    return await resolveRegistryService(spec.name, spec.declaredImage, platformRead, resolvedAt);
   } catch (error) {
     console.error(
       `[GitOpsArtifactResolve] Registry resolve failed for ${spec.name}:`,
@@ -281,7 +296,9 @@ async function resolveOneService(
         serviceName: spec.name,
         authoredRef: spec.declaredImage,
         source: 'registry',
-        platform: platform ? `${platform.os}/${platform.architecture}` : null,
+        platform: platformRead.status === 'ok' && platformRead.platform
+          ? `${platformRead.platform.os}/${platformRead.platform.architecture}`
+          : null,
         indexDigest: null,
         platformDigest: null,
         buildContextFingerprint: null,
@@ -477,7 +494,7 @@ async function resolveServices(
   // The platform always comes from the node, including on the approved-intent
   // path: which manifest child is correct is a property of the machine, not of
   // the intent. Only the service specs come from the intent.
-  const platform = await readNodePlatformOrNull(nodeId);
+  const platform = await readPlatformForNode(nodeId);
   if (approvedServices) {
     return resolveAgainstSpecs(approvedServices, platform, buildContexts, resolvedAt);
   }
@@ -499,13 +516,21 @@ async function resolveServices(
     };
   }
 
-  return resolveAgainstSpecs(context.services, context.platform, buildContexts, resolvedAt);
+  // The rendered path already read the platform as part of loading the context,
+  // so a 404 on the platform route cannot arise here: the older-leaf case only
+  // exists on the path that asks for the platform by itself.
+  return resolveAgainstSpecs(
+    context.services,
+    { status: 'ok', platform: context.platform },
+    buildContexts,
+    resolvedAt,
+  );
 }
 
-/** Resolve each spec against `platform` and reduce to one qualification. */
+/** Resolve each spec against the node's platform and reduce to one qualification. */
 async function resolveAgainstSpecs(
   specs: readonly EffectiveServiceSpec[],
-  platform: NodePlatform | null,
+  platform: NodePlatformRead,
   buildContexts: readonly BuildContextPlan[],
   resolvedAt: number,
 ): Promise<{ services: ServiceArtifactEvidence[]; qualification: ArtifactQualification; evidence: ArtifactEvidenceJson }> {
@@ -518,23 +543,28 @@ async function resolveAgainstSpecs(
 }
 
 /**
- * This node's Docker platform, or null when it cannot be read.
+ * How the node's platform read went.
  *
- * Separate from `loadArtifactContextForNode` because the approved-intent path
- * needs the platform but must not render, and rendering is the step that reads
- * the node's compose directory. For a remote node the platform comes off the
- * existing effective-context call, which the leaf answers from its own daemon
- * without reading any compose. An empty stack name is deliberate: that route
- * resolves the platform before it needs the stack, and passing a real name
- * would make a compose render the price of asking.
+ * The distinction exists because the two failure modes deserve opposite
+ * treatment. A leaf that cannot answer the platform route is a leaf older than
+ * this hub, and it will not start answering on its own, so retrying it forever is
+ * pure cost. A daemon that is unreachable, a timeout, or a 5xx is exactly the
+ * transient case the retry exists for, and treating those the same silently
+ * switched the retry off for every remote target until the next redeploy.
  */
-async function readNodePlatformOrNull(nodeId: number): Promise<NodePlatform | null> {
+type NodePlatformRead =
+  | { status: 'ok'; platform: NodePlatform | null }
+  | { status: 'route_missing' };
+
+async function readPlatformForNode(nodeId: number): Promise<NodePlatformRead> {
   const node = DatabaseService.getInstance().getNode(nodeId);
-  if (!node) return null;
+  if (!node) return { status: 'ok', platform: null };
   if (node.type === 'remote') {
     return fetchRemotePlatform(nodeId);
   }
-  return readNodePlatform(nodeId);
+  // A local daemon that cannot answer is transient by definition: the same call
+  // works once it is back.
+  return { status: 'ok', platform: await readNodePlatform(nodeId) };
 }
 
 /**
@@ -544,15 +574,19 @@ async function readNodePlatformOrNull(nodeId: number): Promise<NodePlatform | nu
  * also renders the stack. The leaf answers from `docker info` alone and never
  * reads a compose file, which is the property that makes it safe to call from a
  * path that is deliberately not reading the node's compose directory.
+ *
+ * A 404 is reported as `route_missing` and everything else as a readable-but-null
+ * platform, which is what separates "this leaf is too old to be asked" from "this
+ * leaf could not answer right now".
  */
-async function fetchRemotePlatform(nodeId: number): Promise<NodePlatform | null> {
+async function fetchRemotePlatform(nodeId: number): Promise<NodePlatformRead> {
   const target = NodeRegistry.getInstance().getProxyTarget(nodeId);
   if (!target) {
     console.warn(
       '[GitOpsArtifactResolve] No proxy target for remote platform read on node %s',
       nodeId,
     );
-    return null;
+    return { status: 'ok', platform: null };
   }
   const proxy = LicenseService.getInstance().getProxyHeaders();
   const url = `${target.apiUrl.replace(/\/$/, '')}/api/stacks/platform/docker-context`;
@@ -567,22 +601,25 @@ async function fetchRemotePlatform(nodeId: number): Promise<NodePlatform | null>
       timeout: REMOTE_RESOLVE_TIMEOUT_MS,
       validateStatus: () => true,
     });
+    if (res.status === 404) {
+      return { status: 'route_missing' };
+    }
     if (res.status !== 200) {
       console.warn(
         '[GitOpsArtifactResolve] Remote platform read returned %s for node %s',
         res.status,
         nodeId,
       );
-      return null;
+      return { status: 'ok', platform: null };
     }
-    return isNodePlatform(res.data?.platform) ? res.data.platform : null;
+    return { status: 'ok', platform: isNodePlatform(res.data?.platform) ? res.data.platform : null };
   } catch (err) {
     console.warn(
       '[GitOpsArtifactResolve] Remote platform read failed for node %s: %s',
       nodeId,
       sanitizeForLog(err instanceof Error ? err.message : String(err)),
     );
-    return null;
+    return { status: 'ok', platform: null };
   }
 }
 

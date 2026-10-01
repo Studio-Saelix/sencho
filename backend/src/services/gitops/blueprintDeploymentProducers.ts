@@ -357,18 +357,32 @@ function inlineFreezeStackName(
  * the caller named. A Git-managed one resolves from the repository rather than
  * from a node, so its recovery runs through preflight and authorization.
  */
+export type InlineFreezeRetryOutcome =
+  /** The target's expectation moved, so the next tick has something to compare. */
+  | 'resolved'
+  /**
+   * The authored content cannot stand in for the rendered model, and that is a
+   * stable property of this generation rather than a transient failure. The
+   * caller must not treat this as an attempt worth repeating on the next tick:
+   * nothing it could observe has changed, so a time-based throttle will never
+   * close and the retry would re-run and re-log every interval forever.
+   */
+  | 'refused'
+  /** Ran, and had nothing to record: no live Inline app, a newer generation, or a resolve that did not advance. */
+  | 'none';
+
 export async function retryInlineArtifactFreeze(args: {
   blueprintId: number;
   nodeId: number;
   generationId: string;
-}): Promise<boolean> {
+}): Promise<InlineFreezeRetryOutcome> {
   const store = GitOpsStore.getInstance();
   const app = store.getLiveBlueprintApplication(args.blueprintId);
-  if (!recordableApplication(app) || app.target_mode !== 'inline_blueprint') return false;
+  if (!recordableApplication(app) || app.target_mode !== 'inline_blueprint') return 'none';
   // The generation is the one the caller compared the observation against. A
   // newer accepted generation makes that comparison stale, and the newer one
   // owns its own resolve.
-  if (app.accepted_generation_id !== args.generationId) return false;
+  if (app.accepted_generation_id !== args.generationId) return 'none';
 
   const intent = app.intent_revision_id
     ? store.getIntentRevision(app.intent_revision_id)
@@ -380,7 +394,7 @@ export async function retryInlineArtifactFreeze(args: {
       '[GitOps] Inline artifact retry skipped for blueprint %s: no stack name on intent or blueprint',
       sanitizeForLog(String(args.blueprintId)),
     );
-    return false;
+    return 'none';
   }
   const approved = approvedInlineServiceSpecs(intent, blueprint);
   if ('refusal' in approved) {
@@ -392,10 +406,10 @@ export async function retryInlineArtifactFreeze(args: {
       sanitizeForLog(String(args.blueprintId)),
       sanitizeForLog(approved.refusal),
     );
-    return false;
+    return 'refused';
   }
 
-  return resolveInlineArtifactSet({
+  const resolved = await resolveInlineArtifactSet({
     stackName,
     nodeId: args.nodeId,
     applicationId: app.id,
@@ -408,6 +422,7 @@ export async function retryInlineArtifactFreeze(args: {
     trigger: 'inline_artifact_freeze_retried',
     approvedServices: approved.specs,
   });
+  return resolved ? 'resolved' : 'none';
 }
 
 /**
@@ -501,6 +516,14 @@ function authoredServiceHazard(raw: unknown): string | null {
   if ('<<' in svc) {
     return 'the approved compose uses a merge key, which the YAML parse leaves unresolved';
   }
+  if (typeof svc.image === 'string' && svc.image.includes('$')) {
+    // Refused rather than resolved. The deploy's rendered model has the
+    // substitution already applied; this parse has the literal text, and
+    // `parseImageRef` does not reject it, so the registry would be asked about a
+    // mangled reference. That fails as a retryable registry error, which means
+    // the retry would never stop rather than never starting.
+    return 'the approved compose interpolates an image reference, which the authored parse cannot resolve';
+  }
   if (svc.profiles !== undefined && svc.profiles !== null) {
     return 'the approved compose gates a service on profiles, which the node does not activate when it renders';
   }
@@ -527,11 +550,21 @@ function composeContentForIntent(intent: GitOpsIntentRevisionRow, blueprint: Blu
 
 /**
  * Spec shape from *authored* YAML rather than from `docker compose config`
- * output, so the three fields this needs (`image`, `build`) are read with the
- * same tolerance the effective-model parser applies. Compose interpolation has
- * already happened by the time the rendered model exists, but authored content
- * is what the intent hashed, so a `${VAR}` image reference resolves to a ref
- * that cannot be classified and stays unresolved rather than being guessed.
+ * output, so the fields this needs are read with the same tolerance the
+ * effective-model parser applies.
+ *
+ * Authored content is what the intent hashed, and it has *not* been through
+ * Compose interpolation, which is why `authoredServiceHazard` refuses an
+ * interpolated image reference rather than letting it through. It is worth being
+ * exact about why, because the naive expectation is wrong: a `${VAR}` reference
+ * does not fail safely on its own. `parseImageRef` accepts it, splits the string
+ * on its last colon, and the registry gets asked about a mangled reference that
+ * does not exist, which fails as an ordinary registry error and is retryable. The
+ * retry would then run forever against a reference that can never resolve.
+ *
+ * Only `name`, `declaredImage` and `hasBuild` are consumed on this path; the
+ * remaining fields are filled so the shape is complete rather than because the
+ * resolver reads them.
  */
 function approvedServiceSpec(name: string, raw: unknown): EffectiveServiceSpec {
   const svc = (raw ?? {}) as Record<string, unknown>;
