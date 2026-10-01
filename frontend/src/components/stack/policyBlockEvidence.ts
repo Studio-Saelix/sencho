@@ -1,0 +1,79 @@
+/**
+ * Wording for the deploy-block dialog's evidence explanation.
+ *
+ * Its own module, separate from `PolicyBlockDialog`, for two reasons. It is pure
+ * presentation logic over the gate's decision record, so it can be unit-tested
+ * without mounting a dialog; and a component module that also exports a runtime
+ * function stops being Fast-Refresh eligible, which the component-only rule
+ * enforces.
+ */
+import type { PolicyBlockPayload } from './PolicyBlockDialog';
+
+/** Spelled out rather than derived: 'allow' + 'd' is not a word. */
+const OUTCOME_PAST_TENSE: Record<'allow' | 'warn' | 'block', string> = {
+  allow: 'allowed',
+  warn: 'warned about',
+  block: 'blocked',
+};
+
+/** Human wording for one evidence state, for the block dialog's explanation. */
+const EVIDENCE_STATE_LABEL: Record<string, string> = {
+  current: 'current',
+  stale: 'too old',
+  unavailable: 'unavailable',
+  failed: 'failed',
+  partial: 'incomplete',
+  unsupported: 'not supported on this node',
+  not_evaluated: 'never evaluated',
+  unknown: 'indeterminate',
+};
+
+export interface EvidenceLine {
+  key: string;
+  text: string;
+}
+
+/**
+ * Turn the decision record into one sentence per piece of evidence that was not
+ * usable, preferring the rule application (which names the setting that acted)
+ * and falling back to the record's own reason for a state no setting governs.
+ *
+ * Applications come first because they explain why the gate acted. A record
+ * covers what no setting governs: partial evidence, for instance, is a state the
+ * gate fails closed on by definition, so it produces no application at all.
+ */
+export function buildEvidenceLines(evidence: PolicyBlockPayload['evidence']): EvidenceLine[] {
+  if (!evidence) return [];
+  const lines: EvidenceLine[] = [];
+  const explained = new Set<string>();
+
+  for (const a of evidence.applications ?? []) {
+    if (a.state === 'current') continue;
+    const what = a.source.replace(/_/g, ' ');
+    const state = EVIDENCE_STATE_LABEL[a.state] ?? a.state.replace(/_/g, ' ');
+    const who = a.target ? ` for ${a.target}` : '';
+    lines.push({
+      key: `app:${a.source}:${a.state}:${a.target ?? ''}`,
+      text: `${what} evidence${who} was ${state}, so it was ${OUTCOME_PAST_TENSE[a.outcome]} by ${a.rule}.`,
+    });
+    // Keyed by state as well as target: one image can legitimately have two
+    // distinct problems (a stale scan whose finding rows were also truncated),
+    // and collapsing them would drop the second explanation.
+    if (a.target) explained.add(`${a.source}:${a.state}:${a.target}`);
+  }
+
+  for (const r of evidence.records ?? []) {
+    if (r.state === 'current') continue;
+    // Skip a record already described by an application, so the same evidence is
+    // not explained twice in one dialog.
+    if (explained.has(`${r.source}:${r.state}:${r.target}`)) continue;
+    const what = r.source.replace(/_/g, ' ');
+    const state = EVIDENCE_STATE_LABEL[r.state] ?? r.state.replace(/_/g, ' ');
+    lines.push({
+      key: `rec:${r.source}:${r.state}:${r.target}`,
+      text: `${what} evidence for ${r.target} was ${state}${r.reason ? `: ${r.reason}` : '.'}`,
+    });
+  }
+
+  return lines;
+}
