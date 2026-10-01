@@ -276,6 +276,43 @@ describe('freezing the policy into rollout authorization', () => {
     expect(() => decodeFrozenRolloutStrategy('[]')).toThrow(/not a JSON object/i);
   });
 
+  it('an unsettled target refuses a new authorization, and a live one is untouched by it', async () => {
+    // The second reader of the same predicate. Minting is the moment a placement
+    // change would displace a rollout, so a target still awaiting its verdict has
+    // to hold it here too, and this is the path an operator takes by hand, so the
+    // refusal is what they will meet rather than a message about a health window.
+    const fixture = seedApp({ nodeCount: 1 });
+    await writeAppliedCompose(fixture.applicationId);
+    const store = GitOpsStore.getInstance();
+    store.upsertTarget({
+      ...targetRow(fixture.applicationId, fixture.nodeId!),
+      latest_stage: 'blueprint_ack_recorded',
+      pending_health_run_id: `run-${randomUUID()}`,
+    });
+
+    const refused = await ensureRolloutAuthorization(fixture.applicationId, 'tester', 'manual', undefined, 'operator');
+    expect(refused.ok).toBe(false);
+    if (!refused.ok) expect(refused.reason).toMatch(/in flight for a rollout target/i);
+    expect(store.getApplication(fixture.applicationId)!.rollout_authorization_ref).toBeNull();
+
+    // Authority that already exists is not re-litigated against what is running.
+    // A gated rollout is authorized before it deploys anything, so this is the
+    // state its own verdicts arrive in, and the gate above would otherwise hold
+    // every rollout off its own fleet.
+    store.upsertTarget({
+      ...store.getTarget(fixture.applicationId, fixture.nodeId!)!,
+      pending_health_run_id: null,
+    });
+    const minted = await ensureRolloutAuthorization(fixture.applicationId, 'tester', 'manual', undefined, 'operator');
+    expect(minted.ok).toBe(true);
+
+    store.upsertTarget({
+      ...store.getTarget(fixture.applicationId, fixture.nodeId!)!,
+      pending_health_run_id: `run-${randomUUID()}`,
+    });
+    expect((await ensureRolloutAuthorization(fixture.applicationId, 'tester')).ok).toBe(true);
+  });
+
   it('a policy change mid-rollout does not change the running rollout', async () => {
     const fixture = seedApp({ nodeCount: 1 });
     await writeAppliedCompose(fixture.applicationId);
@@ -321,6 +358,31 @@ describe('one target at a time under a non-observe policy', () => {
     await dispatch(fixture);
 
     expect(deploySpy).toHaveBeenCalledTimes(3);
+  });
+
+  it('observe reserves runs like every other policy, so it holds the same pointer', async () => {
+    // Observe decides nothing from a verdict, and the queue ignores a target that
+    // is waiting on one, so the run it reserves is pure observation. It is still
+    // a run the target is waiting on, which is what the placement gate reads, so
+    // this pins that the gate's answer does not depend on the policy: a gate that
+    // counted only gating policies would answer false here, and the difference
+    // between those two answers is a placement decision nobody chose to change.
+    const fixture = await authorizeWithPolicy('observe', 2);
+    vi.spyOn(BlueprintService.getInstance(), 'deployAuthorizedMaterialization')
+      .mockResolvedValue({ status: 'active' });
+
+    await dispatch(fixture);
+
+    const store = GitOpsStore.getInstance();
+    const target = store.getTarget(fixture.applicationId, fixture.nodeId!)!;
+    expect(target.pending_health_run_id).not.toBeNull();
+    expect(target.active_operation_stage).toBeNull();
+    expect(hasTargetOperationInFlight(store, fixture.applicationId)).toBe(true);
+    // Nothing about the rollout waits on it, which is the whole difference
+    // between observe and a gating policy and the reason the answer is a choice.
+    expect(decideHealthRolloutAction({
+      policy: 'observe', verdict: 'failed', attemptsUsed: 0, recoveryAvailable: true,
+    }).action).toBe('none');
   });
 
   it('a failed verdict on the second target pauses the rollout and never reaches the third', async () => {

@@ -260,13 +260,20 @@ function liveRolloutBinding(app: GitOpsApplicationRow): FutureRolloutAuthorizati
  * supersedes the generation that deploy is running under.
  *
  * An unresolved health run counts as in flight too. The stage covers the apply
- * and the acknowledgement that ends it, but not what follows: a health-gated
- * rollout is acked before its verdict lands, so its target sits
- * acked-but-unsettled for the rest of the observation window with the run still
- * outstanding, and the stage alone calls that idle. The pointer is the target's
- * own record of the run it awaits, the same one the dispatch queue and the
- * startup reconciliation read, and that reconciliation releases a pointer whose
- * run turned terminal without a verdict.
+ * and the acknowledgement that ends it, but not what follows: a rollout is acked
+ * before its verdict lands, so its target sits acked-but-unsettled for the rest
+ * of the observation window with the run still outstanding, and the stage alone
+ * calls that idle. The pointer is the target's own record of the run it awaits,
+ * the same one the dispatch queue and the startup reconciliation read, and the
+ * gate does not care which policy reserved it: observe decides nothing from a
+ * verdict and its queue does not wait for one, so the run it reserves is pure
+ * observation, and the only thing an approval during that window displaces is
+ * the rollout generation the run is bound to.
+ *
+ * A pointer that outlives its verdict does not hold anything up for ever. The
+ * startup reconciliation walks every target still pointing at a run: a run that
+ * went terminal has its recorded verdict replayed through the same transition a
+ * live one takes, and only a run whose row is gone needs the pointer released.
  */
 export function hasTargetOperationInFlight(store: GitOpsStore, applicationId: string): boolean {
   return store
