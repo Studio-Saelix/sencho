@@ -215,8 +215,9 @@ describe('resolveSecurityEvidencePolicy', () => {
     it('resolves to the values the gate hard-coded when nothing is configured', () => {
         // The deploy gate's equivalence to its previous hard-coded branches is
         // pinned by the 49 untouched tests in policy-enforcement.test.ts. The
-        // candidate path's one stricter change (an evaluation failure is held
-        // rather than accepted) has its own test in security-evidence-gate.test.ts.
+        // candidate path's outcomes are unchanged as well, its one difference
+        // being the reason string on a scanner-missing hold, pinned in
+        // security-evidence-gate.test.ts.
         const policy = resolveSecurityEvidencePolicy({});
         expect(policy).toEqual(DEFAULT_SECURITY_EVIDENCE_POLICY);
         expect(policy.scannerUnavailable).toBe('allow');

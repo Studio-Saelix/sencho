@@ -119,8 +119,21 @@ describe('describePolicyBlock', () => {
     expect(msg).toContain('images=[nginx:1.14]');
     // The unscanned image is named as its own clause, not folded into the match
     // count, which would overstate how many images matched.
-    expect(msg).toContain('1 image(s) could not be scanned');
+    expect(msg).toContain('1 image(s) could not be evaluated');
     expect(msg).toContain('images=[redis:7]');
+  });
+
+  it('calls an evaluation failure unevaluated rather than unscanned', async () => {
+    // The scan completed; the evaluation is what threw. "Could not be scanned"
+    // would point the operator at the scanner rather than at the failure, so the
+    // wording covers both unevaluated shapes.
+    const msg = describePolicyBlock(
+      policy,
+      [violation({ imageRef: 'redis:7', error: 'Policy evaluation failed: database is locked' })],
+      'update',
+    );
+    expect(msg).toContain('could not be evaluated');
+    expect(msg).not.toContain('could not be scanned');
   });
 
   it('names an image a rule blocked even when it produced no violation row', () => {
@@ -143,8 +156,50 @@ describe('describePolicyBlock', () => {
       },
     );
     expect(msg).toContain('1 image(s) matched');
-    expect(msg).toContain('1 image(s) could not be scanned');
+    expect(msg).toContain('1 image(s) could not be evaluated');
     expect(msg).toContain('images=[redis:7]');
+  });
+
+  it('names an image that happens to be called node', () => {
+    // `node` is a valid bare image name. The node-wide evidence sentinel is
+    // parenthesised precisely so filtering it out of this list cannot swallow a
+    // real image called `node`, whose failed scan is exactly what the operator
+    // needs named.
+    const msg = describePolicyBlock(
+      policy,
+      [violation({ imageRef: 'node', error: 'Pre-flight scan failed: timeout' })],
+      'update',
+      {
+        outcome: 'block',
+        records: [],
+        applications: [
+          { source: 'vulnerability_scan', state: 'failed', outcome: 'block', rule: 'security_scan_failure=block', target: 'node' },
+        ],
+        summary: 'Failed evidence for vulnerability_scan: block (security_scan_failure=block)',
+      },
+    );
+    expect(msg).toContain('images=[node]');
+  });
+
+  it('keeps a node-wide refusal out of the image list', () => {
+    // The other side: the sentinel itself must still be filtered out, or a
+    // scanner outage would be reported as though it were an image.
+    const msg = describePolicyBlock(
+      policy,
+      [violation({ imageRef: '(scanner unavailable)', error: 'Failed evidence for vulnerability_scan: block (security_scanner_unavailable=block)' })],
+      'deploy',
+      {
+        outcome: 'block',
+        records: [{ source: 'scanner_availability', state: 'unavailable', target: '(node)', collectedAt: null }],
+        applications: [
+          { source: 'scanner_availability', state: 'unavailable', outcome: 'block', rule: 'security_scanner_unavailable=block' },
+        ],
+        summary: 'Unavailable evidence for scanner_availability: block (security_scanner_unavailable=block)',
+      },
+    );
+    expect(msg).toContain('required security evidence was unavailable');
+    expect(msg).not.toContain('images=[');
+    expect(msg).not.toContain('(node)');
   });
 
   it('says nothing extra on a block with no evidence gap', () => {

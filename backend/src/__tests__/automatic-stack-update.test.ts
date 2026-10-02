@@ -28,6 +28,30 @@ beforeEach(() => {
 const input = { nodeId: 1, stackName: 'web', updatedImages: ['nginx:1'], policyOptions: { bypass: false, actor: 'automatic:test' } };
 
 describe('automatic stack apply pipeline', () => {
+  it('alerts with the same prefixed wording the scheduler uses', async () => {
+    // Two senders of the same sentence. The scheduler prefixes the action and the
+    // stack; dispatching the bare sentence here made one operator-visible message
+    // have two shapes depending on which path blocked, so an alert filter written
+    // against one silently missed the other.
+    mocks.policy.mockResolvedValue({
+      ok: false,
+      policy: { name: 'prod-gate' },
+      violations: [{
+        imageRef: 'nginx:1', severity: 'CRITICAL', criticalCount: 1, highCount: 0,
+        kevCount: 0, fixableCount: 0, reasons: ['severity'], scanId: 1,
+      }],
+    });
+    const result = await applyAutomaticStackUpdate({ ...input, verificationOwner: 'hub_authority' });
+
+    expect(result.result).toBe('policy_blocked');
+    const alert = mocks.alert.mock.calls.find((c) => c[1] === 'scan_finding');
+    expect(alert).toBeDefined();
+    expect(alert![2]).toBe(
+      'Auto-update blocked for "web": Policy "prod-gate" blocked update: 1 image(s) matched severity threshold images=[nginx:1]',
+    );
+    expect(mocks.execute).not.toHaveBeenCalled();
+  });
+
   it('verifies before policy and consumes immediately before mutation without target recheck', async () => {
     const order: string[] = [];
     mocks.policy.mockImplementation(async () => { order.push('policy'); return { ok: true, violations: [] }; });

@@ -685,13 +685,26 @@ describe('SourceController automatic acceptance', () => {
                     collectedAt: null,
                     reason: 'Pre-flight scan failed: timeout',
                 }],
-                applications: [{
-                    source: 'vulnerability_scan',
-                    state: 'failed',
-                    outcome: 'allow',
-                    rule: 'security_scan_failure=allow',
-                    target: 'nginx:1.27',
-                }],
+                applications: [
+                    {
+                        source: 'vulnerability_scan',
+                        state: 'failed',
+                        outcome: 'allow',
+                        rule: 'security_scan_failure=allow',
+                        target: 'nginx:1.27',
+                    },
+                    // The candidate rule as well. The evaluator adds one per
+                    // unproven target whatever the deploy gate recorded, so a stub
+                    // carrying only the scan-failure entry is not a decision this
+                    // evaluator can produce.
+                    {
+                        source: 'vulnerability_scan',
+                        state: 'failed',
+                        outcome: 'allow',
+                        rule: 'security_candidate_unproven=allow',
+                        target: 'nginx:1.27',
+                    },
+                ],
                 summary: 'Failed evidence for vulnerability_scan: allow (security_scan_failure=allow)',
             },
         });
@@ -710,9 +723,12 @@ describe('SourceController automatic acceptance', () => {
         // The replacement has to carry the rule, or the acceptance is
         // indistinguishable from the clean one it stands in for.
         const persisted = JSON.parse(replacement.security_policy_evidence_json!);
-        expect(persisted.evidenceApplications).toEqual([
-            expect.objectContaining({ rule: 'security_scan_failure=allow', target: 'nginx:1.27' }),
-        ]);
+        expect(persisted.evidenceApplications).toEqual(
+            expect.arrayContaining([
+                expect.objectContaining({ rule: 'security_scan_failure=allow', target: 'nginx:1.27' }),
+                expect.objectContaining({ rule: 'security_candidate_unproven=allow', target: 'nginx:1.27' }),
+            ]),
+        );
     });
 
     it('still reuses a legacy generation whose column predates the applications field', async () => {

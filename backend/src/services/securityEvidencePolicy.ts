@@ -14,14 +14,18 @@
  * `candidateUnproven` defaults to the value the candidate path already enforced,
  * which was to hold.
  *
- * The candidate path's behaviour changes at the defaults in exactly one place,
- * and it changes in the stricter direction: it reads the unprovable set from the
- * evidence records as well as from the violations, so a candidate whose policy
- * evaluation threw is now held rather than accepted. The scan had succeeded, so
- * the records said `current` and only the violations knew, which made an
- * evaluation error look like a clean pass on the one path with nobody watching.
- * That is the fail-open this module exists to close, and it is the reason the
- * deploy gate's equivalence is stated separately from the candidate gate's.
+ * The candidate path's outcomes at the defaults are unchanged too, with one
+ * wording difference: a candidate evaluated while the scanner was missing now
+ * reports `Candidate could not be fully evaluated` where it previously reported
+ * `Vulnerability scanner is unavailable`. Both hold it, because a missing scanner
+ * leaves nothing to prove the candidate safe, which is what `candidateUnproven`
+ * defaults to. Only the reason string an operator reads on the source's hold
+ * notice changed.
+ *
+ * The baseline for that is the pre-policy evaluator, not an earlier state of this
+ * module. An evaluation failure that the gate cannot classify was already held as
+ * `unavailable` then, because such an image produces a violation carrying an
+ * error and no genuine match.
  *
  * A settings read failure resolves to these same defaults rather than to the
  * strictest value. The strictest reading of an unreadable policy is to refuse

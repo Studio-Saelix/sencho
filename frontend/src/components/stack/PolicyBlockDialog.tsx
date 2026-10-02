@@ -202,10 +202,13 @@ export function PolicyBlockDialog({
                 // reason for the block, and saying otherwise would be the same
                 // false whole-block claim the paragraph above avoids. Said as two
                 // facts the operator can act on rather than one about what the
-                // block "may rest on": which images are unscanned, and that the
-                // counts above do not cover them. The recovery hint still applies
-                // either way.
-                'Some images could not be scanned. They are listed above without a finding count, so the counts above do not cover them. Resolve the failure and deploy again, or bypass if you accept the risk.'
+                // block "may rest on": which images are unevaluated, and that the
+                // counts above do not cover them. "Unevaluated" rather than
+                // "unscanned" because a row here also covers an image whose scan
+                // completed and whose policy evaluation failed, and calling that a
+                // scan failure would point at the wrong thing. The recovery hint
+                // still applies either way.
+                'Some images could not be evaluated. They are listed above without a finding count, so the counts above do not cover them. Resolve the failure and deploy again, or bypass if you accept the risk.'
               : 'The deploy was blocked because the scan did not complete. Resolve the issue above and deploy again, or bypass if you accept the risk.'}
           </p>
         )}

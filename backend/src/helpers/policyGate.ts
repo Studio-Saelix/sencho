@@ -8,18 +8,23 @@ import TrivyService, { DIGEST_CACHE_TTL_MS } from '../services/TrivyService';
 import { getErrorMessage } from '../utils/errors';
 import { sanitizeForLog } from '../utils/safeLog';
 import { summarizeBlockReasons } from '../utils/policy-risk';
-import type { EvidenceGateDecision } from '../services/securityEvidence';
+import { NODE_WIDE_EVIDENCE_TARGET, type EvidenceGateDecision } from '../services/securityEvidence';
 
 type BlockableAction = 'deploy' | 'update' | 'rollback';
 
 /**
- * Targets that stand for something other than an image. `node` is the
- * node-wide scanner availability record; the parenthesised entries are the
+ * Targets that stand for something other than an image. The node-wide sentinel is
+ * the target a scanner-availability record carries; the other two are the
  * placeholders a node-wide refusal puts in the violation list so the caller has
- * something to render. Neither is an image, so neither belongs in an
- * `images=[...]` list.
+ * something to render. None is an image, so none belongs in an `images=[...]`
+ * list. Every entry is parenthesised on purpose: `node` alone is a valid bare
+ * image name, so filtering on it would drop a real image from the message.
  */
-const NON_IMAGE_TARGETS: ReadonlySet<string> = new Set(['node', '(scanner unavailable)', '(compose parse error)']);
+const NON_IMAGE_TARGETS: ReadonlySet<string> = new Set([
+  NODE_WIDE_EVIDENCE_TARGET,
+  '(scanner unavailable)',
+  '(compose parse error)',
+]);
 
 /** The image references an evidence refusal is about, de-duplicated. */
 function unprovenImages(violations: PolicyViolation[], evidence?: EvidenceGateDecision): string[] {
@@ -33,17 +38,6 @@ function unprovenImages(violations: PolicyViolation[], evidence?: EvidenceGateDe
   return [...images];
 }
 
-/**
- * One-line block message, shared by the thrown-error and 409-response paths so
- * they never drift.
- *
- * A block is reached two ways, and the message has to tell them apart. Either a
- * scanned image matched a risk input, or the gate could not obtain the evidence
- * it needed and the configured availability policy refused. Reporting the
- * second as "matched scan policy conditions" is false and, on the unattended
- * paths that only have this sentence (bulk deploy, the scheduler, auto-update,
- * Git sources, rollback), it is the operator's only explanation.
- */
 /** Append `images=[...]` when there is at least one image to name. */
 function namedImages(images: readonly string[]): string {
   return images.length > 0 ? ` images=[${images.join(', ')}]` : '';
@@ -60,7 +54,12 @@ function namedImages(images: readonly string[]): string {
  * Naming only the matches leaves the second half of the block invisible here: the
  * operator fixes these, redeploys, and only then meets the other one. The matches
  * stay the subject of the sentence, since they are why the block happened, so the
- * unscanned images are a second clause rather than a rewrite.
+ * unevaluated images are a second clause rather than a rewrite.
+ *
+ * "could not be evaluated" rather than "could not be scanned", because the clause
+ * also covers an image whose scan completed and whose policy evaluation threw.
+ * Calling that a scan failure would send the operator to the scanner instead of
+ * to whatever made the evaluation fail.
  */
 function describeMatchedBlock(
   name: string,
@@ -74,9 +73,25 @@ function describeMatchedBlock(
     .join(', ');
   const matched = `Policy "${name}" blocked ${action}: ${genuine.length} image(s) matched ${summarizeBlockReasons(genuine)} images=[${images}]`;
   if (unscanned.length === 0) return matched;
-  return `${matched}; ${unscanned.length} image(s) could not be scanned images=[${unscanned.join(', ')}]`;
+  return `${matched}; ${unscanned.length} image(s) could not be evaluated images=[${unscanned.join(', ')}]`;
 }
 
+/**
+ * One-line block message, shared by the thrown-error and 409-response paths so
+ * they never drift.
+ *
+ * A block is reached two ways, and the message has to tell them apart. Either a
+ * scanned image matched a risk input, or the gate could not obtain the evidence
+ * it needed and the configured availability policy refused. Reporting the
+ * second as "matched scan policy conditions" is false and, on the unattended
+ * paths that only have this sentence (bulk deploy, the scheduler, auto-update,
+ * Git sources, rollback), it is the operator's only explanation.
+ *
+ * The images are named in every branch. On those same unattended paths this one
+ * sentence is the only account of which images were involved, so an image the
+ * gate could not examine has to appear even when the block happened for another
+ * reason on a sibling image.
+ */
 export function describePolicyBlock(
   policy: ScanPolicy | undefined,
   violations: PolicyViolation[],

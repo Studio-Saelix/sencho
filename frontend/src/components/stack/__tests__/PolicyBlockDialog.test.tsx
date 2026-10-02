@@ -97,7 +97,7 @@ describe('PolicyBlockDialog evidence', () => {
     expect(screen.queryByText(/blocked because the scan did not complete/i)).not.toBeInTheDocument();
     // And the replacement still tells the operator the failed image needs
     // resolving, so the gate does not cost them the recovery path.
-    expect(screen.getByText(/Some images could not be scanned\./i)).toBeInTheDocument();
+    expect(screen.getByText(/Some images could not be evaluated\./i)).toBeInTheDocument();
     expect(screen.getByText(/the counts above do not cover them/i)).toBeInTheDocument();
     expect(screen.getByText(/deploy again/i)).toBeInTheDocument();
     unmount();

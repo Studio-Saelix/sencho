@@ -260,6 +260,27 @@ describe('candidate acceptance applies its own rule', () => {
         expect(candidate.status).toBe('blocked');
     });
 
+    it('holds a candidate the scanner never ran against, and says why', async () => {
+        // The one candidate-path difference at the defaults, pinned so the
+        // equivalence claim in securityEvidencePolicy.ts has something behind it.
+        // The pre-policy evaluator held this too, with a reason naming the scanner;
+        // it now reports the candidate rule instead. Same outcome, and the reason
+        // an operator reads on the source's hold notice is what changed.
+        trivyStub.isTrivyAvailable.mockReturnValue(false);
+        const candidate = await evaluateCandidatePolicy('web', 1, ['nginx:1.27'], { bypass: false, actor: 'system' });
+        expect(candidate.status).toBe('unavailable');
+        if (candidate.status !== 'unavailable') throw new Error(`expected unavailable, got ${candidate.status}`);
+        expect(candidate.reason).toBe('Candidate could not be fully evaluated');
+        // The record is what makes the hold attributable: it names the node-wide
+        // scanner gap and the candidate rule that acted on it.
+        expect(candidate.evidence?.records).toContainEqual(
+            expect.objectContaining({ source: 'scanner_availability', state: 'unavailable' }),
+        );
+        expect(candidate.evidence?.applications).toContainEqual(
+            expect.objectContaining({ rule: 'security_candidate_unproven=block' }),
+        );
+    });
+
     it('holds a candidate whose policy evaluation threw, whatever the deploy settings say', async () => {
         // The release blocker this guards. The scan itself succeeded, so its
         // evidence record reads `current`; only the evaluation failed. Deriving
@@ -368,6 +389,32 @@ describe('candidate acceptance applies its own rule', () => {
         expect(candidate.status).toBe('allowed');
         expect(dbStub.getAllVulnerabilityDetails).not.toHaveBeenCalled();
         expect(candidate.evidence?.records.every((r) => r.state === 'current')).toBe(true);
+    });
+
+    it('describes one decision, not two, when the rule overrides the outcome', async () => {
+        // The summary and the outcome have to agree. The evaluator's own summary
+        // reports the deploy gate's verdict, and the candidate rule may decide
+        // something different, so the summary is rebuilt rather than carried over.
+        // Both the outcome and the applications are persisted with an accepted
+        // generation, so a record reader would otherwise see a summary describing
+        // a refusal beside an outcome reporting an acceptance.
+        dbStub.getGlobalSettings.mockReturnValue({ security_candidate_unproven: 'allow' });
+        trivyStub.scanImagePreflight.mockRejectedValue(new Error('scan process crashed'));
+        dbStub.getMatchingPolicy.mockReturnValue(mkPolicy({ block_on_severity: 0, block_on_kev: 1 }));
+        const candidate = await evaluateCandidatePolicy('web', 1, ['nginx:1.27'], { bypass: false, actor: 'system' });
+        expect(candidate.status).toBe('allowed');
+        expect(candidate.evidence?.outcome).toBe('allow');
+        // The summary names every rule that acted, including the one that let it
+        // through, and none of them reports a block.
+        expect(candidate.evidence?.summary).toContain('security_candidate_unproven=allow');
+        // The deploy-gate rules stay visible in their own right; what must not
+        // appear is one reporting an outcome the candidate decision overrode.
+        expect(candidate.evidence?.summary).not.toContain('security_candidate_unproven=block');
+        // Every application in the decision is represented in the sentence, so the
+        // summary cannot describe a subset of what the record holds.
+        for (const application of candidate.evidence?.applications ?? []) {
+            expect(candidate.evidence?.summary).toContain(application.rule);
+        }
     });
 
     it('accepts a candidate on an authorized bypass', async () => {

@@ -38,7 +38,17 @@ export async function applyAutomaticStackUpdate(input: AutomaticStackUpdateInput
         // Same wording as every other path, so a scanner outage is not reported
         // as a matched finding on an unattended update.
         const message = describePolicyBlock(policy.policy, policy.violations, 'update', policy.evidence);
-        NotificationService.getInstance().dispatchAlert('warning', 'scan_finding', message, { stackName, actor: 'system:image-update' });
+        // The scheduler prefixes this same sentence with the action and stack, and
+        // so does the checked and route-triggered auto-update. Dispatching the
+        // bare sentence here made one operator-visible message have two shapes
+        // depending on which path blocked, so an alert filter written against the
+        // prefixed one silently missed these.
+        NotificationService.getInstance().dispatchAlert(
+            'warning',
+            'scan_finding',
+            `Auto-update blocked for "${stackName}": ${message}`,
+            { stackName, actor: 'system:image-update' },
+        );
         return { result: 'policy_blocked' as const, applied: false, healthGateId: null, message: `Stack "${stackName}": ${message}` };
       }
       await input.observation?.consume();

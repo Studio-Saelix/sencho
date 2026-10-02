@@ -66,6 +66,19 @@ export const SECURITY_EVIDENCE_SOURCES = [
 
 export type SecurityEvidenceSource = (typeof SECURITY_EVIDENCE_SOURCES)[number];
 
+/**
+ * The `target` a record carries when its source describes the whole node rather
+ * than one image, as scanner availability does.
+ *
+ * A sentinel rather than a word, because `node` on its own is a valid bare image
+ * name. Consumers filter this value out of the per-image lists they build, so a
+ * bare `node` would silently drop a real image called `node` from a block message
+ * that exists to name it. It lives here, beside the record shape that uses it,
+ * rather than in the evaluator so that a test replacing the evaluator does not
+ * have to restate it to keep the module's other consumers working.
+ */
+export const NODE_WIDE_EVIDENCE_TARGET = '(node)';
+
 /** What an operator-configured rule decided to do about one evidence state. */
 export type EvidenceAvailabilityOutcome = 'allow' | 'warn' | 'block';
 

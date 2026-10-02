@@ -32,6 +32,7 @@ import {
     classifyScanEvidence,
     classifyScannerEvidence,
     decideEvidenceGate,
+    NODE_WIDE_EVIDENCE_TARGET,
     summarizeEvidenceApplications,
     type EvidenceAvailabilityOutcome,
     type EvidenceGateDecision,
@@ -251,7 +252,7 @@ function decideScannerUnavailable(
         {
             source: 'scanner_availability',
             state: classification.state,
-            target: 'node',
+            target: NODE_WIDE_EVIDENCE_TARGET,
             collectedAt: null,
             reason: classification.reason,
         },
@@ -942,8 +943,9 @@ function withCandidateRuleApplied(
         outcome,
         // Rebuilt rather than carried over. Carrying the pre-override summary
         // would leave this object claiming the outcome the deploy gate reached
-        // while its `outcome` field says the candidate rule's, and this decision
-        // is now persisted with a generation.
+        // while its `outcome` field says the candidate rule's. The outcome and the
+        // applications are persisted with an accepted generation, so a reader of
+        // that record sees one decision rather than two descriptions of it.
         summary: summarizeEvidenceApplications([...decision.applications, ...added]),
     };
 }
