@@ -20,11 +20,12 @@ export interface PolicyBlockViolation {
   highCount: number;
   kevCount: number;
   fixableCount: number;
-  /** Which inputs matched (empty when the image could not be scanned). */
+  /** Which inputs matched (empty when the image could not be evaluated). */
   reasons: PolicyBlockReason[];
   scanId: number;
-  /** Set when the gate blocked because the image could not be scanned or
-   *  evaluated (a scan/parse failure), rather than a policy input matching. */
+  /** Set when the gate blocked because the image could not be evaluated, which
+   *  covers a scan or parse failure and an evaluation that threw. The message
+   *  names which, so the row's subtitle does not have to distinguish them. */
   error?: string;
 }
 
@@ -167,7 +168,7 @@ export function PolicyBlockDialog({
                   {v.error ? (
                     <>
                       <div className="font-mono text-[10px] uppercase tracking-[0.18em] text-stat-subtitle">
-                        Could not be scanned
+                        Could not be evaluated
                       </div>
                       <div className="text-xs text-muted-foreground mt-1 break-words">{v.error}</div>
                     </>

@@ -104,7 +104,7 @@ The dialog shows:
 - A kicker with the stack name, the words **SCAN POLICY**, and **BLOCKED** in the destructive accent color.
 - The policy name and a sentence naming every condition the policy blocks on.
 - One row per offending image, with the image reference in monospace, the counts of critical and high findings (plus known-exploited and fixable counts when present), a badge for each matched condition (`Severity`, `KEV`, or `Fixable`), and a severity chip in the matching color.
-- If an image could not be scanned rather than failing a policy check, the row shows a **Could not be scanned** subtitle and the scan error text. A note below the list reads "The deploy was blocked because the scan did not complete. Resolve the issue above and deploy again, or bypass if you accept the risk." This is the default: a scan that started and did not finish blocks, so a transient scanner failure is retried rather than waved through.
+- If an image could not be evaluated rather than failing a policy check, the row shows a **Could not be evaluated** subtitle and the reason it could not be, which names whether the scan failed or the evaluation did. A note below the list reads "The deploy was blocked because the scan did not complete. Resolve the issue above and deploy again, or bypass if you accept the risk." This is the default: a scan that started and did not finish blocks, so a transient scanner failure is retried rather than waved through.
 - A **Close** button that dismisses the dialog without deploying.
 - A destructive **Deploy anyway** button when the current user is an admin (see bypass below). For non-admin sessions the primary slot is replaced by a disabled outline button labeled **Admin required to bypass**.
 

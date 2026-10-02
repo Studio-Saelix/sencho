@@ -215,4 +215,28 @@ describe('buildEvidenceLines', () => {
       expect(line.text).toMatch(/\S/);
     }
   });
+
+  it('names a node-wide target in words rather than showing the sentinel', () => {
+    // The record carries a sentinel so the server can tell a node-wide source
+    // from an image named `node`. An operator reading the dialog should not see
+    // the sentinel; "this node" says what actually failed.
+    const lines = buildEvidenceLines({
+      outcome: 'block',
+      records: [{ source: 'scanner_availability', state: 'unavailable', target: '(node)', collectedAt: null, reason: 'not responding' }],
+      applications: [{ source: 'scanner_availability', state: 'unavailable', outcome: 'block', rule: 'security_scanner_unavailable=block' }],
+      summary: '',
+    });
+    expect(lines.map((l) => l.text).join(' ')).toContain('for this node');
+    expect(lines.map((l) => l.text).join(' ')).not.toContain('(node)');
+  });
+
+  it('still shows an image that happens to be called node', () => {
+    const lines = buildEvidenceLines({
+      outcome: 'block',
+      records: [],
+      applications: [{ source: 'vulnerability_scan', state: 'failed', outcome: 'block', rule: 'security_scan_failure=block', target: 'node' }],
+      summary: '',
+    });
+    expect(lines[0].text).toContain('for node');
+  });
 });

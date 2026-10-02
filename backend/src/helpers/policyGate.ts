@@ -65,15 +65,15 @@ function describeMatchedBlock(
   name: string,
   action: BlockableAction,
   genuine: PolicyViolation[],
-  unscanned: readonly string[],
+  unevaluated: readonly string[],
 ): string {
   const images = genuine
     .map((v) => v.imageRef)
     .filter((ref) => !NON_IMAGE_TARGETS.has(ref))
     .join(', ');
   const matched = `Policy "${name}" blocked ${action}: ${genuine.length} image(s) matched ${summarizeBlockReasons(genuine)} images=[${images}]`;
-  if (unscanned.length === 0) return matched;
-  return `${matched}; ${unscanned.length} image(s) could not be evaluated images=[${unscanned.join(', ')}]`;
+  if (unevaluated.length === 0) return matched;
+  return `${matched}; ${unevaluated.length} image(s) could not be evaluated images=[${unevaluated.join(', ')}]`;
 }
 
 /**

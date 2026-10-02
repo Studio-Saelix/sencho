@@ -276,11 +276,11 @@ describe('PolicyBlockDialog', () => {
     // The matched row keeps its counts and reason badges.
     expect(screen.getByText(/1 KEV/)).toBeInTheDocument();
     expect(screen.getByText('Fixable')).toBeInTheDocument();
-    // The failed row shows its reason under the could-not-be-scanned label.
-    // Matched exactly and case-sensitively: the mixed-payload banner added
-    // later also contains the phrase, in sentence case.
+    // The failed row shows its reason under the unevaluated label. The label is
+    // the same one the mixed-payload banner uses in sentence case, so it is
+    // matched exactly rather than by a loose regex.
     expect(screen.getByText(/Pre-flight scan failed: timeout/i)).toBeInTheDocument();
-    expect(screen.getByText('Could not be scanned')).toBeInTheDocument();
+    expect(screen.getByText('Could not be evaluated')).toBeInTheDocument();
     // The recovery hint appears once for the whole list, not per failed row.
     expect(screen.getAllByText(/deploy again/i)).toHaveLength(1);
   });
@@ -298,7 +298,7 @@ describe('PolicyBlockDialog', () => {
     );
     // The actual failure reason is shown, not an unexplained "0 critical 0 high".
     expect(screen.getByText(/Pre-flight scan failed: trivy crashed/i)).toBeInTheDocument();
-    expect(screen.getByText(/could not be scanned/i)).toBeInTheDocument();
+    expect(screen.getByText('Could not be evaluated')).toBeInTheDocument();
     // A recovery hint points the operator at the fix-and-retry path.
     expect(screen.getByText(/deploy again/i)).toBeInTheDocument();
   });

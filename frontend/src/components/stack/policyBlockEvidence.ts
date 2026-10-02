@@ -61,6 +61,23 @@ function describeRule(rule: string): string {
 }
 
 /**
+ * Operator-facing wording for one evidence target.
+ *
+ * A node-wide source, such as scanner availability, has no image to point at, so
+ * its record carries a sentinel rather than a reference. Rendering that sentinel
+ * verbatim would put `(node)` in a sentence an operator reads, which reads like a
+ * placeholder rather than the thing that actually failed. An image reference
+ * passes through untouched, including one literally called `node`, which is why
+ * the sentinel is parenthesised on the server rather than matched by name here.
+ */
+const NODE_WIDE_TARGETS: ReadonlySet<string> = new Set(['(node)']);
+
+function describeTarget(target: string): string {
+  if (NODE_WIDE_TARGETS.has(target)) return 'this node';
+  return target;
+}
+
+/**
  * Turn the decision record into one sentence per piece of evidence that was not
  * usable, preferring the rule application (which names the setting that acted)
  * and falling back to the record's own reason for a state no setting governs.
@@ -78,7 +95,7 @@ export function buildEvidenceLines(evidence: PolicyBlockPayload['evidence']): Ev
     if (a.state === 'current') continue;
     const what = a.source.replace(/_/g, ' ');
     const state = EVIDENCE_STATE_LABEL[a.state] ?? a.state.replace(/_/g, ' ');
-    const who = a.target ? ` for ${a.target}` : '';
+    const who = a.target ? ` for ${describeTarget(a.target)}` : '';
     lines.push({
       key: `app:${a.source}:${a.state}:${a.target ?? ''}`,
       text: `${what} evidence${who} was ${state}, so it was ${OUTCOME_PAST_TENSE[a.outcome]} by ${describeRule(a.rule)}.`,
@@ -98,7 +115,7 @@ export function buildEvidenceLines(evidence: PolicyBlockPayload['evidence']): Ev
     const state = EVIDENCE_STATE_LABEL[r.state] ?? r.state.replace(/_/g, ' ');
     lines.push({
       key: `rec:${r.source}:${r.state}:${r.target}`,
-      text: `${what} evidence for ${r.target} was ${state}${r.reason ? `: ${r.reason}` : '.'}`,
+      text: `${what} evidence for ${describeTarget(r.target)} was ${state}${r.reason ? `: ${r.reason}` : '.'}`,
     });
   }
 
