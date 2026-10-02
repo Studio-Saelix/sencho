@@ -151,22 +151,28 @@ function storedCandidateContentSha256(raw: string | null): string | null {
  * The decision half of a stored security-policy evidence column, for the reuse
  * comparison.
  *
- * Compared as a projection rather than as raw text, for two reasons. The
- * comparison is then about the decision rather than its encoding, so key order
- * and whitespace cannot read as a change. And the applications are part of the
- * projection, which is the point: an acceptance on unproven evidence and a clean
- * one share a status and a policy id, so a verdict-only comparison would reuse
- * the generation recorded for one of them when the other is re-polled, leaving
- * the attribution column describing a decision this poll did not reach.
+ * Compared as a projection rather than as raw text, so the comparison is about
+ * the decision rather than its encoding. The applications are part of it, which
+ * is the point: an acceptance on unproven evidence and a clean one share a
+ * status and a policy id, so a verdict-only comparison would reuse the
+ * generation recorded for one of them when the other is re-polled, leaving the
+ * attribution column describing a decision this poll did not reach.
  *
- * A legacy column predating the applications field decodes to an absent one, and
- * this normalizes an absent list to `[]`, so the first poll after an upgrade that
- * reaches an unchanged verdict reuses its generation rather than minting a
- * replacement for every existing source. That is safe in the one direction it
- * can be wrong in: it is the *stored* row that keeps the older, thinner record,
- * and the next poll that reaches any different decision replaces it. An
- * unparseable or absent column yields null, which never matches, so auto-accept
- * re-evaluates and writes a fresh row instead of reusing an unreadable one.
+ * The application list is sorted before it is compared, because the order the
+ * evaluator happens to produce is not part of the decision. Two polls that reach
+ * the same set of rules in a different order describe the same outcome, and
+ * treating them as different would mint a replacement generation for it.
+ *
+ * Both evidence fields are normalized for a column written before they existed,
+ * so the first poll after an upgrade reuses its generation rather than minting a
+ * replacement for every existing source on an unchanged verdict. An absent list
+ * normalizes to empty and an absent outcome to `allow`, which is what
+ * `mostRestrictiveOutcome` returns for no applications at all, so a legacy clean
+ * acceptance and a freshly recorded one compare equal. That cannot hide a change:
+ * any outcome other than `allow`, or any rule that acted, differs from both
+ * defaults and replaces the row. An unparseable or absent column yields null,
+ * which never matches, so auto-accept re-evaluates and writes a fresh row instead
+ * of reusing an unreadable one.
  */
 function securityPolicyDecision(raw: string | null): string | null {
     if (!raw) return null;
@@ -178,11 +184,12 @@ function securityPolicyDecision(raw: string | null): string | null {
     }
     if (!isRecord(decoded)) return null;
     const applications = Array.isArray(decoded.evidenceApplications) ? decoded.evidenceApplications : [];
+    const ordered = [...applications].sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)));
     return JSON.stringify({
         status: decoded.status ?? null,
         policyId: decoded.policyId ?? null,
-        evidenceOutcome: decoded.evidenceOutcome ?? null,
-        evidenceApplications: applications,
+        evidenceOutcome: decoded.evidenceOutcome ?? 'allow',
+        evidenceApplications: ordered,
     });
 }
 

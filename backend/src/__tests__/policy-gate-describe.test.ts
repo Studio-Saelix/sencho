@@ -123,6 +123,30 @@ describe('describePolicyBlock', () => {
     expect(msg).toContain('images=[redis:7]');
   });
 
+  it('names an image a rule blocked even when it produced no violation row', () => {
+    // Both sources of an unproven image are collected before the branch, so the
+    // matched clause and the evidence clause cannot disagree about which images
+    // were involved. Today every blocking rule also pushes a violation, so this is
+    // robustness rather than a reachable case, which is exactly why it should not
+    // depend on the two branches happening to agree today.
+    const msg = describePolicyBlock(
+      policy,
+      [violation({ imageRef: 'nginx:1.14', reasons: ['kev'] })],
+      'update',
+      {
+        outcome: 'block',
+        records: [],
+        applications: [
+          { source: 'vulnerability_scan', state: 'failed', outcome: 'block', rule: 'security_scan_failure=block', target: 'redis:7' },
+        ],
+        summary: 'Failed evidence for vulnerability_scan: block (security_scan_failure=block)',
+      },
+    );
+    expect(msg).toContain('1 image(s) matched');
+    expect(msg).toContain('1 image(s) could not be scanned');
+    expect(msg).toContain('images=[redis:7]');
+  });
+
   it('says nothing extra on a block with no evidence gap', () => {
     const msg = describePolicyBlock(policy, [violation({ reasons: ['kev'] })], 'update');
     expect(msg).not.toContain('could not be scanned');

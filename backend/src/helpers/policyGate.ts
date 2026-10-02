@@ -44,6 +44,39 @@ function unprovenImages(violations: PolicyViolation[], evidence?: EvidenceGateDe
  * paths that only have this sentence (bulk deploy, the scheduler, auto-update,
  * Git sources, rollback), it is the operator's only explanation.
  */
+/** Append `images=[...]` when there is at least one image to name. */
+function namedImages(images: readonly string[]): string {
+  return images.length > 0 ? ` images=[${images.join(', ')}]` : '';
+}
+
+/**
+ * The sentence for a payload carrying at least one genuine match.
+ *
+ * The matched images are named, as they were before the evidence-aware message:
+ * on the unattended paths this sentence is the only account of which images were
+ * involved.
+ *
+ * A payload can carry a genuine match *and* images the gate could not examine.
+ * Naming only the matches leaves the second half of the block invisible here: the
+ * operator fixes these, redeploys, and only then meets the other one. The matches
+ * stay the subject of the sentence, since they are why the block happened, so the
+ * unscanned images are a second clause rather than a rewrite.
+ */
+function describeMatchedBlock(
+  name: string,
+  action: BlockableAction,
+  genuine: PolicyViolation[],
+  unscanned: readonly string[],
+): string {
+  const images = genuine
+    .map((v) => v.imageRef)
+    .filter((ref) => !NON_IMAGE_TARGETS.has(ref))
+    .join(', ');
+  const matched = `Policy "${name}" blocked ${action}: ${genuine.length} image(s) matched ${summarizeBlockReasons(genuine)} images=[${images}]`;
+  if (unscanned.length === 0) return matched;
+  return `${matched}; ${unscanned.length} image(s) could not be scanned images=[${unscanned.join(', ')}]`;
+}
+
 export function describePolicyBlock(
   policy: ScanPolicy | undefined,
   violations: PolicyViolation[],
@@ -54,24 +87,13 @@ export function describePolicyBlock(
   // A genuine match is one with no `error` set; an `error` marks a violation
   // standing in for evidence the gate could not obtain.
   const genuine = violations.filter((v) => !v.error);
+  // Collected before the branch, because a payload can carry both kinds and the
+  // unscanned images have to be named either way. Both sources of an unproven
+  // image are used here, not just the violations, so an image a rule blocked is
+  // named whether or not it also produced a violation row.
+  const unproven = unprovenImages(violations, evidence);
   if (genuine.length > 0) {
-    // The offending images are named, as they were before the evidence-aware
-    // message: on the unattended paths this sentence is the only account of which
-    // images were involved.
-    const images = genuine.map((v) => v.imageRef).join(', ');
-    const matched = `Policy "${name}" blocked ${action}: ${genuine.length} image(s) matched ${summarizeBlockReasons(genuine)} images=[${images}]`;
-    // A payload can carry a genuine match *and* images the gate could not examine.
-    // Naming only the matches leaves the second half of the block invisible here:
-    // the operator fixes these, redeploys, and only then meets the other one. The
-    // matches are still the reason the block happened, so they stay the subject
-    // and this is a second clause rather than a rewritten sentence.
-    const unscanned = violations
-      .filter((v) => v.error && !NON_IMAGE_TARGETS.has(v.imageRef))
-      .map((v) => v.imageRef);
-    if (unscanned.length > 0) {
-      return `${matched}; ${unscanned.length} image(s) could not be scanned images=[${unscanned.join(', ')}]`;
-    }
-    return matched;
+    return describeMatchedBlock(name, action, genuine, unproven);
   }
   // Only a rule that actually blocked makes this sentence the account of the
   // block. An application that merely allowed or warned about one image is not
@@ -85,13 +107,12 @@ export function describePolicyBlock(
     // The images are named here too. Before this, an evidence block on a
     // multi-image stack reported the rule and nothing else, so a scheduled
     // auto-update blocked by one failed scan could not say which image failed.
-    const images = unprovenImages(violations, evidence);
-    const named = images.length > 0 ? ` images=[${images.join(', ')}]` : '';
-    return `Policy "${name}" blocked ${action} because required security evidence was unavailable: ${evidence?.summary}${named}`;
+    return `Policy "${name}" blocked ${action} because required security evidence was unavailable: ${evidence?.summary}${namedImages(unproven)}`;
   }
-  const unevaluated = violations.map((v) => v.imageRef).filter((ref) => !NON_IMAGE_TARGETS.has(ref));
-  const named = unevaluated.length > 0 ? ` images=[${unevaluated.join(', ')}]` : '';
-  return `Policy "${name}" blocked ${action}: ${violations.length} image(s) could not be evaluated${named}`;
+  const unevaluated = violations
+    .map((v) => v.imageRef)
+    .filter((ref) => !NON_IMAGE_TARGETS.has(ref));
+  return `Policy "${name}" blocked ${action}: ${violations.length} image(s) could not be evaluated${namedImages(unevaluated)}`;
 }
 
 // Bypass requires `?ignorePolicy=true` AND `req.user.role === 'admin'`. The

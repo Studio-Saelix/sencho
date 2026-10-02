@@ -724,16 +724,26 @@ describe('SourceController automatic acceptance', () => {
         // unchanged verdict, which the operator would read as its source history
         // being rewritten.
         //
-        // The legacy column carries no outcome at all, so the verdict under test
-        // is one with no evidence object: a candidate the evaluator never
-        // examined. That is the case the absent-field normalization has to hold,
-        // since it is the only shape a pre-upgrade row can take for this path.
+        // The legacy column carries neither evidence field. The verdict under
+        // test is a real clean one, with the evidence object the evaluator always
+        // returns and the `allow` outcome it reports for no applications. A stub
+        // without an evidence field would not do: that shape never occurs, and it
+        // would let this pass while the real comparison still churned.
         const legacyJson = JSON.stringify({ status: 'allowed', policyId: 7 });
         stageCandidate('app-ev-legacy', 'ev-legacy-web', 'gen-ev-legacy', 'automatic', {
             securityEvidence: legacyJson,
         });
         mockDue([armDuePoll('app-ev-legacy')]);
-        evaluateCandidatePolicy.mockResolvedValue({ status: 'allowed', policy: policyRow() });
+        evaluateCandidatePolicy.mockResolvedValue({
+            status: 'allowed',
+            policy: policyRow(),
+            evidence: {
+                outcome: 'allow',
+                records: [{ source: 'vulnerability_scan', state: 'current', target: 'nginx:1.27', collectedAt: Date.now() }],
+                applications: [],
+                summary: 'No security evidence was required for this decision',
+            },
+        });
         spyOnReconcile().mockResolvedValue(okResult);
         spyOnDispatch();
 
@@ -745,6 +755,50 @@ describe('SourceController automatic acceptance', () => {
         // The legacy row is left exactly as it was, not rewritten to the new shape.
         expect(GitOpsStore.getInstance().getGeneration('gen-ev-legacy')!.security_policy_evidence_json)
             .toBe(legacyJson);
+    });
+
+    it('reuses the generation when the same rules are recorded in another order', async () => {
+        // The order the evaluator produces is not part of the decision. A
+        // comparison that reads it as one would mint a replacement generation for
+        // an unchanged outcome the first time image processing is reordered, which
+        // is the kind of churn an operator reads as its source history moving.
+        const application = (target: string) => ({
+            source: 'vulnerability_scan' as const,
+            state: 'failed' as const,
+            outcome: 'allow' as const,
+            rule: 'security_scan_failure=allow',
+            target,
+        });
+        const [a, b] = [application('nginx:1.27'), application('redis:7')];
+        const json = JSON.stringify({
+            status: 'allowed',
+            policyId: null,
+            evidenceOutcome: 'allow',
+            evidenceApplications: [a, b],
+        });
+        stageCandidate('app-ev-order', 'ev-order-web', 'gen-ev-order', 'automatic', {
+            securityEvidence: json,
+        });
+        mockDue([armDuePoll('app-ev-order')]);
+        // The same two rules, reached in the opposite order.
+        evaluateCandidatePolicy.mockResolvedValue({
+            status: 'allowed',
+            policy: undefined,
+            evidence: {
+                outcome: 'allow',
+                records: [],
+                applications: [b, a],
+                summary: 'Failed evidence for vulnerability_scan: allow (security_scan_failure=allow)',
+            },
+        });
+        spyOnReconcile().mockResolvedValue(okResult);
+        spyOnDispatch();
+
+        controller.start();
+        await advanceOneTick();
+
+        expect(getApp('app-ev-order').accepted_generation_id).toBe('gen-ev-order');
+        expect(GitOpsStore.getInstance().listGenerationsForApplication('app-ev-order')).toHaveLength(1);
     });
 
     it('does not accept when the application fingerprint changed after candidate creation', async () => {
