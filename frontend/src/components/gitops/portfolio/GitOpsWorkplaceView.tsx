@@ -7,6 +7,7 @@ import { PortfolioMasthead } from './PortfolioMasthead';
 import { useGitOpsPortfolio } from './useGitOpsPortfolio';
 import { useWorkplaceCapabilities } from './useWorkplaceCapabilities';
 import { WorkplaceActions } from './WorkplaceActions';
+import { GitOpsGitSourceHost } from './GitOpsGitSourceHost';
 import { GitOpsApplicationView } from '../application/GitOpsApplicationView';
 import type { GitOpsPortfolioResponse } from '@/types/gitopsPortfolio';
 import { useGitOpsApplicationSelection } from '../application/useGitOpsApplicationSelection';
@@ -30,12 +31,26 @@ import { useGitOpsApplicationSelection } from '../application/useGitOpsApplicati
  */
 export function GitOpsWorkplaceView() {
   const portfolio = useGitOpsPortfolio();
-  const { data, loading, error, staleSince, refreshing } = portfolio;
   const selectedApplication = useGitOpsApplicationSelection();
   const { canOpenFleet } = useWorkplaceCapabilities();
 
-  if (selectedApplication !== null) return <GitOpsApplicationView key={selectedApplication} id={selectedApplication} />;
+  // One stable mount above both branches, so "Open Git source" opens the sheet
+  // in place from either and switching between them never drops it.
+  return (
+    <>
+      <GitOpsGitSourceHost />
+      {selectedApplication !== null
+        ? <GitOpsApplicationView key={selectedApplication} id={selectedApplication} />
+        : <PortfolioList portfolio={portfolio} canOpenFleet={canOpenFleet} />}
+    </>
+  );
+}
 
+function PortfolioList({ portfolio, canOpenFleet }: {
+  portfolio: ReturnType<typeof useGitOpsPortfolio>;
+  canOpenFleet: boolean;
+}) {
+  const { data, loading, error, staleSince, refreshing } = portfolio;
   return (
     <div className="flex h-full min-h-0 flex-col overflow-hidden p-6">
       {loading && !data ? (

@@ -7,11 +7,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   APPLICATION_QUERY_PARAM,
   GITOPS_APPLICATION_EVENT,
+  GITOPS_GIT_SOURCE_EVENT,
   applicationIdFromSearch,
   attentionNextStep,
   closeGitOpsApplication,
   openGitOpsApplication,
   portfolioRowActions,
+  type GitOpsGitSourceTarget,
 } from './portfolioNavigation';
 import { portfolioRow } from '../application/applicationFixtures';
 import { BLUEPRINT_INTENT_EVENT, type BlueprintIntent } from '@/lib/blueprintIntent';
@@ -95,8 +97,18 @@ describe('portfolio row actions and attention next steps', () => {
     const labels = portfolioRowActions(direct, { canOpenFleet: true }).map(action => action.label);
     expect(labels).toEqual(['Open application', 'Open stack', 'Open Git source']);
     const git = portfolioRowActions(direct, { canOpenFleet: true }).find(action => action.label === 'Open Git source')!;
-    expect(captured<SenchoOpenStackDetail>(SENCHO_OPEN_STACK_EVENT, git.run))
-      .toEqual([{ nodeId: direct.nodeId, stackName: direct.stackName, destination: 'git' }]);
+    expect(captured<GitOpsGitSourceTarget>(GITOPS_GIT_SOURCE_EVENT, git.run))
+      .toEqual([{ nodeId: direct.nodeId, stackName: direct.stackName, applicationName: direct.name }]);
+    // In place: the Git source opens over the workplace, never by switching to the stack.
+    expect(captured<SenchoOpenStackDetail>(SENCHO_OPEN_STACK_EVENT, git.run)).toEqual([]);
+  });
+
+  it('opens a Direct source failure Git source in place', () => {
+    const next = attentionNextStep('source_failed', direct);
+    expect(next.label).toBe('Open Git source');
+    expect(captured<GitOpsGitSourceTarget>(GITOPS_GIT_SOURCE_EVENT, next.run))
+      .toEqual([{ nodeId: direct.nodeId, stackName: direct.stackName, applicationName: direct.name }]);
+    expect(captured<SenchoOpenStackDetail>(SENCHO_OPEN_STACK_EVENT, next.run)).toEqual([]);
   });
 
   it('offers a Blueprint row its Blueprint only when Fleet is reachable', () => {

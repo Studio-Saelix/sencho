@@ -115,4 +115,17 @@ describe('GitSourceSecretsSection', () => {
       );
     });
   });
+
+  it('sends every read and write to the node it is hosted for', async () => {
+    mockedFetch.mockResolvedValue(jsonRes(SECRETS));
+    render(<GitSourceSecretsSection stackName="web" canEdit linked nodeId={9} />);
+    await userEvent.click(await screen.findByRole('button', { name: /generate identity/i }));
+
+    await waitFor(() => {
+      expect(mockedFetch).toHaveBeenCalledWith('/stacks/web/git-source/sops-identities', expect.objectContaining({ method: 'POST' }));
+    });
+    for (const [url, options] of mockedFetch.mock.calls) {
+      expect({ url, nodeId: (options as { nodeId?: number } | undefined)?.nodeId }).toEqual({ url, nodeId: 9 });
+    }
+  });
 });

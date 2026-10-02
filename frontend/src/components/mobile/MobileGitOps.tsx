@@ -9,6 +9,7 @@ import { openPortfolioApplication } from '../gitops/portfolio/portfolioNavigatio
 import { useGitOpsPortfolio } from '../gitops/portfolio/useGitOpsPortfolio';
 import { WorkplaceActions } from '../gitops/portfolio/WorkplaceActions';
 import { GitOpsApplicationView } from '../gitops/application/GitOpsApplicationView';
+import { GitOpsGitSourceHost } from '../gitops/portfolio/GitOpsGitSourceHost';
 import { useGitOpsApplicationSelection } from '../gitops/application/useGitOpsApplicationSelection';
 
 /**
@@ -23,8 +24,18 @@ import { useGitOpsApplicationSelection } from '../gitops/application/useGitOpsAp
  * operations stay where they always were: on the owning detail surfaces the
  * application view hands off to. The application view itself is the same
  * read-only component the desktop workplace uses, reflowed to one column.
+ * The Git source sheet opens in place over both the list and an application view.
  */
 export function MobileGitOps({ headerActions }: { headerActions?: ReactNode }) {
+  return (
+    <>
+      <GitOpsGitSourceHost />
+      <MobileGitOpsBody headerActions={headerActions} />
+    </>
+  );
+}
+
+function MobileGitOpsBody({ headerActions }: { headerActions?: ReactNode }) {
   const portfolio = useGitOpsPortfolio();
   const { data, loading, error, staleSince } = portfolio;
   const selectedApplication = useGitOpsApplicationSelection();

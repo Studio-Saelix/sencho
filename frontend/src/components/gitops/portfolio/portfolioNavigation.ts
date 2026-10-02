@@ -2,10 +2,10 @@
  * Drill-down navigation for the GitOps portfolio rows.
  *
  * A row opens its application view inside the workplace: the full canonical
- * state for one application, read-only. Operator action still happens on the
- * owning surface, so the application view hands off from there: Direct
- * applications to their stack's Git source panel, Blueprint applications to
- * the Blueprint deployments surface that owns rollout decisions.
+ * state for one application. A Direct application's Git source sheet opens in
+ * place over the workplace (its host listens for GITOPS_GIT_SOURCE_EVENT), so
+ * acting on it never leaves GitOps; Blueprint applications hand off to the
+ * Blueprint deployments surface that owns rollout decisions.
  *
  * The open application lives in the `application` query parameter of the
  * GitOps path, a parameter the view owns (see VIEW_OWNED_QUERY in useUrlSync),
@@ -91,14 +91,31 @@ export function closeGitOpsApplicationIfOpen(): void {
 }
 
 /**
- * Open a Direct application's owning stack on its node, landing on the Git
- * panel. The shell consumes the event; a missing node or stack leaves the
- * operator wherever they were (the caller survives navigation failure).
+ * Open a Direct application's owning stack on its node. The shell consumes the
+ * event; a missing node or stack leaves the operator wherever they were (the
+ * caller survives navigation failure).
  */
-function openDirectStack(row: GitOpsPortfolioRow, destination: 'stack' | 'git'): void {
+function openDirectStack(row: GitOpsPortfolioRow): void {
   if (row.nodeId === null || row.stackName === null) return;
   window.dispatchEvent(new CustomEvent<SenchoOpenStackDetail>(SENCHO_OPEN_STACK_EVENT, {
-    detail: { nodeId: row.nodeId, stackName: row.stackName, destination },
+    detail: { nodeId: row.nodeId, stackName: row.stackName, destination: 'stack' },
+  }));
+}
+
+/** Asks the workplace's Git source host to open a Direct application's sheet in place. */
+export const GITOPS_GIT_SOURCE_EVENT = 'sencho:gitops-git-source';
+
+export interface GitOpsGitSourceTarget {
+  nodeId: number;
+  stackName: string;
+  applicationName: string;
+}
+
+/** Open a Direct application's Git source sheet over the workplace, on the application's own node. */
+function openGitSourceInPlace(row: GitOpsPortfolioRow): void {
+  if (row.nodeId === null || row.stackName === null) return;
+  window.dispatchEvent(new CustomEvent<GitOpsGitSourceTarget>(GITOPS_GIT_SOURCE_EVENT, {
+    detail: { nodeId: row.nodeId, stackName: row.stackName, applicationName: row.name },
   }));
 }
 
@@ -123,7 +140,7 @@ export function owningSurfaceHandoff(row: GitOpsPortfolioRow, opts: { canOpenBlu
   switch (row.targetMode) {
     case 'direct':
       if (row.nodeId === null || row.stackName === null) return null;
-      return { label: 'Open Git source', open: () => openDirectStack(row, 'git') };
+      return { label: 'Open Git source', open: () => openGitSourceInPlace(row) };
     case 'blueprint':
     case 'inline_blueprint':
       if (row.nodeId !== null || row.blueprintId === null || !opts.canOpenBlueprint) return null;
@@ -203,8 +220,8 @@ export interface PortfolioRowAction {
 export function portfolioRowActions(row: GitOpsPortfolioRow, opts: { canOpenFleet: boolean }): PortfolioRowAction[] {
   const actions: PortfolioRowAction[] = [{ label: 'Open application', run: () => openPortfolioApplication(row) }];
   if (row.targetMode === 'direct' && row.nodeId !== null && row.stackName !== null) {
-    actions.push({ label: 'Open stack', run: () => openDirectStack(row, 'stack') });
-    actions.push({ label: 'Open Git source', run: () => openDirectStack(row, 'git') });
+    actions.push({ label: 'Open stack', run: () => openDirectStack(row) });
+    actions.push({ label: 'Open Git source', run: () => openGitSourceInPlace(row) });
   }
   if (row.targetMode !== 'direct' && row.nodeId === null && row.blueprintId !== null && opts.canOpenFleet) {
     actions.push({ label: 'Open Blueprint', run: () => openBlueprint(row) });
@@ -256,8 +273,8 @@ export function attentionNextStep(reason: GitOpsAttentionReason, row: GitOpsPort
     return remoteBlueprint ? { label: 'Inspect', run: review.run } : review;
   }
   const direct = row.targetMode === 'direct' && row.nodeId !== null && row.stackName !== null;
-  if (direct && RUNTIME_FAILURE_REASONS.has(reason)) return { label: 'Open stack', run: () => openDirectStack(row, 'stack') };
-  if (direct && SOURCE_FAILURE_REASONS.has(reason)) return { label: 'Open Git source', run: () => openDirectStack(row, 'git') };
+  if (direct && RUNTIME_FAILURE_REASONS.has(reason)) return { label: 'Open stack', run: () => openDirectStack(row) };
+  if (direct && SOURCE_FAILURE_REASONS.has(reason)) return { label: 'Open Git source', run: () => openGitSourceInPlace(row) };
   return { label: 'Open', run: () => openPortfolioApplication(row) };
 }
 

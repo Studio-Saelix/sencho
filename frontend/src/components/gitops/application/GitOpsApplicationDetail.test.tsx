@@ -17,6 +17,7 @@ import { PLACEMENT_STATE, ROLLOUT_STATE } from '@/lib/gitopsState';
 import GitOpsApplicationDetail from './GitOpsApplicationDetail';
 import { GitOpsApplicationView } from './GitOpsApplicationView';
 import { detailResponse } from './applicationFixtures';
+import { GITOPS_GIT_SOURCE_EVENT } from '../portfolio/portfolioNavigation';
 
 vi.mock('@/lib/api', () => ({
   apiFetch: vi.fn(),
@@ -225,18 +226,22 @@ describe('GitOpsApplicationView', () => {
     expect(screen.getByTestId('rollout-controls')).toBeInTheDocument();
   });
 
-  it('hands a Direct application off to its stack Git panel', async () => {
+  it('opens a Direct application Git source in place, without leaving GitOps', async () => {
     mockFetch.mockResolvedValueOnce(ok(detailResponse()));
-    const listener = vi.fn();
-    window.addEventListener(SENCHO_OPEN_STACK_EVENT, listener);
+    const inPlace = vi.fn();
+    const navigate = vi.fn();
+    window.addEventListener(GITOPS_GIT_SOURCE_EVENT, inPlace);
+    window.addEventListener(SENCHO_OPEN_STACK_EVENT, navigate);
 
     render(<GitOpsApplicationView id="1:app-1" />);
     fireEvent.click(await screen.findByRole('button', { name: /open git source/i }));
 
     expect(screen.getByRole('heading', { name: 'bookstack' })).toBeInTheDocument();
     expect(screen.getByTestId('gitops-application-posture')).toHaveTextContent('converged');
-    expect((listener.mock.calls[0][0] as CustomEvent).detail).toEqual({ nodeId: 1, stackName: 'bookstack', destination: 'git' });
-    window.removeEventListener(SENCHO_OPEN_STACK_EVENT, listener);
+    expect((inPlace.mock.calls[0][0] as CustomEvent).detail).toEqual({ nodeId: 1, stackName: 'bookstack', applicationName: 'bookstack' });
+    expect(navigate).not.toHaveBeenCalled();
+    window.removeEventListener(GITOPS_GIT_SOURCE_EVENT, inPlace);
+    window.removeEventListener(SENCHO_OPEN_STACK_EVENT, navigate);
   });
 
   it('hands a Blueprint application off to its own Blueprint on the Fleet deployments tab', async () => {

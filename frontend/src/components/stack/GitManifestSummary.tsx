@@ -56,6 +56,8 @@ function stateVariant(state: string): 'default' | 'secondary' | 'destructive' | 
 interface GitManifestSummaryProps {
   stackName: string;
   summary: ManifestSummary | null;
+  /** Node the requests target; omitted means the active node. */
+  nodeId?: number | null;
 }
 
 /**
@@ -63,7 +65,7 @@ interface GitManifestSummaryProps {
  * input counts, and the materialized-file inventory. The full manifest is
  * fetched lazily, only when the section is expanded, to keep the panel light.
  */
-export function GitManifestSummary({ stackName, summary }: GitManifestSummaryProps) {
+export function GitManifestSummary({ stackName, summary, nodeId }: GitManifestSummaryProps) {
   const [expanded, setExpanded] = useState(false);
   const [manifest, setManifest] = useState<GitManifest | null>(null);
   const [loading, setLoading] = useState(false);
@@ -78,7 +80,7 @@ export function GitManifestSummary({ stackName, summary }: GitManifestSummaryPro
     if (!expanded || manifest !== null || attempted) return;
     setLoading(true);
     setError(null);
-    apiFetch(`/stacks/${encodeURIComponent(stackName)}/git-source/manifest`)
+    apiFetch(`/stacks/${encodeURIComponent(stackName)}/git-source/manifest`, { nodeId })
       .then(async (res) => {
         if (res.ok) {
           const data = (await res.json()) as { manifest: GitManifest };
@@ -92,7 +94,7 @@ export function GitManifestSummary({ stackName, summary }: GitManifestSummaryPro
         setLoading(false);
         setAttempted(true);
       });
-  }, [expanded, manifest, attempted, stackName]);
+  }, [expanded, manifest, attempted, stackName, nodeId]);
 
   if (!summary) return null;
 

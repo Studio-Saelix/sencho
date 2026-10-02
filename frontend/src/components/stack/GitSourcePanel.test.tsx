@@ -6,12 +6,15 @@
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, waitFor, fireEvent, within } from '@testing-library/react';
+import type { ComponentProps } from 'react';
 
 // Mutable controls so a deploy-mode test can set the active node and capture the
 // runWithLog params, while the load tests keep the default (no active node).
 const nodeCtl = vi.hoisted(() => ({
   activeNode: null as { id: number; type?: string } | null,
   hasCapability: vi.fn(() => true),
+  nodeMeta: new Map<number, { capabilities: string[] }>(),
+  nodes: [] as { id: number; type: 'local' | 'remote' }[],
 }));
 const dfCtl = vi.hoisted(() => ({ params: null as null | { stackName: string; action: string; nodeId: number | null } }));
 
@@ -30,7 +33,7 @@ vi.mock('@/context/DeployFeedbackContext', () => ({
   }),
 }));
 vi.mock('@/context/NodeContext', () => ({
-  useNodes: () => ({ activeNode: nodeCtl.activeNode, hasCapability: nodeCtl.hasCapability }),
+  useNodes: () => ({ activeNode: nodeCtl.activeNode, hasCapability: nodeCtl.hasCapability, nodeMeta: nodeCtl.nodeMeta, nodes: nodeCtl.nodes }),
 }));
 // Drive applyPull(commitSha, deploy=true) directly without standing up the real
 // diff UI; the panel passes applyPull as onApply.
@@ -76,7 +79,9 @@ vi.mock('@/components/ui/toast-store', () => ({
   },
 }));
 vi.mock('./GitSourceSecretsSection', () => ({
-  GitSourceSecretsSection: () => null,
+  GitSourceSecretsSection: ({ nodeId }: { nodeId?: number | null }) => (
+    <span data-testid="secrets-node">{String(nodeId)}</span>
+  ),
 }));
 
 import { apiFetch } from '@/lib/api';
@@ -95,6 +100,7 @@ import {
 } from '@/__tests__/gitopsFixtures';
 import { ARTIFACT_STATE, SOURCE_STATE } from '@/lib/gitopsState';
 import type { GitOpsAvailableAction } from '@/types/gitops';
+import { GITOPS_SOURCE_CONTROLLER_CAPABILITY } from '@/lib/capabilities';
 
 function jsonRes(body: unknown, ok = true, status = 200) {
   return { ok, status, json: async () => body, text: async () => '' } as unknown as Response;
@@ -168,6 +174,8 @@ beforeEach(() => {
   vi.mocked(apiFetch).mockReset();
   nodeCtl.activeNode = null;
   nodeCtl.hasCapability.mockReturnValue(true);
+  nodeCtl.nodeMeta.clear();
+  nodeCtl.nodes = [];
   dfCtl.params = null;
   vi.mocked(toast.success).mockClear();
   vi.mocked(toast.warning).mockClear();
@@ -259,6 +267,121 @@ describe('GitSourcePanel deploy-mode apply node binding', () => {
       });
     });
     expect(dfCtl.params).toEqual(expect.objectContaining({ action: 'deploy', nodeId: 4 }));
+  });
+});
+
+describe('GitSourcePanel hosted on an explicit node', () => {
+  beforeEach(() => {
+    // The active node is a different one, so any request that fell back to it would show.
+    nodeCtl.activeNode = { id: 4, type: 'local' };
+    vi.mocked(apiFetch).mockImplementation(async (url: string) => {
+      if (String(url).includes('/git-source/apply')) return jsonRes({ applied: true, deployed: true });
+      return jsonRes(LINKED_SOURCE);
+    });
+  });
+
+  function hostedPanel(extra: Partial<ComponentProps<typeof GitSourcePanel>> = {}) {
+    return (
+      <GitSourcePanel
+        open
+        onOpenChange={vi.fn()}
+        stackName="web"
+        canEdit
+        isDarkMode={false}
+        nodeId={9}
+        crumb={['GitOps', 'web', 'Git source']}
+        showPortfolioLink={false}
+        {...extra}
+      />
+    );
+  }
+
+  it('sends every read, pull, and apply to that node, not the active one', async () => {
+    render(hostedPanel());
+    fireEvent.click(await screen.findByRole('button', { name: /pull now/i }));
+    fireEvent.click(await screen.findByTestId('apply-deploy'));
+
+    await waitFor(() => expect(dfCtl.params).toEqual(expect.objectContaining({ nodeId: 9 })));
+    const calls = vi.mocked(apiFetch).mock.calls;
+    expect(calls.length).toBeGreaterThan(2);
+    for (const [url, options] of calls) {
+      expect({ url, nodeId: (options as { nodeId?: number } | undefined)?.nodeId }).toEqual({ url, nodeId: 9 });
+    }
+  });
+
+  it('sends every write to that node too: save, suspend, and detach', async () => {
+    nodeCtl.nodeMeta.set(9, { capabilities: [GITOPS_SOURCE_CONTROLLER_CAPABILITY] });
+    vi.mocked(apiFetch).mockImplementation(async (_url: string, options?: { method?: string }) => {
+      if (options?.method === 'DELETE') return jsonRes({ success: true });
+      return jsonRes(linkedWith(controllerRevision({ status: 'application_generation_accepted', actions: ['suspend'] })));
+    });
+    render(hostedPanel());
+
+    fireEvent.click(await screen.findByRole('button', { name: /update/i }));
+    await waitFor(() => expect(vi.mocked(apiFetch).mock.calls.some(([, o]) => (o as { method?: string })?.method === 'PUT')).toBe(true));
+
+    fireEvent.click(screen.getByRole('button', { name: /^suspend$/i }));
+    const suspendConfirm = await screen.findByRole('alertdialog');
+    fireEvent.click(within(suspendConfirm).getByRole('button', { name: /^suspend$/i }));
+    await waitFor(() => expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument());
+    fireEvent.click(screen.getByRole('button', { name: 'Remove' }));
+    fireEvent.click(await screen.findByRole('button', { name: /^detach$/i }));
+
+    await waitFor(() => {
+      const methods = vi.mocked(apiFetch).mock.calls.map(([url, o]) => `${(o as { method?: string })?.method ?? 'GET'} ${String(url)}`);
+      expect(methods).toEqual(expect.arrayContaining([
+        expect.stringMatching(/^PUT .*\/git-source$/),
+        expect.stringMatching(/^POST .*\/git-source\/suspend$/),
+        expect.stringMatching(/^DELETE .*\/git-source$/),
+      ]));
+    });
+    for (const [url, options] of vi.mocked(apiFetch).mock.calls) {
+      expect({ url, nodeId: (options as { nodeId?: number } | undefined)?.nodeId }).toEqual({ url, nodeId: 9 });
+    }
+  });
+
+  it('hands its node to the repository secrets section', async () => {
+    render(hostedPanel());
+    expect(await screen.findByTestId('secrets-node')).toHaveTextContent('9');
+  });
+
+  it('offers Adopt onto Blueprint only when that node is the hub, where adoption runs', async () => {
+    nodeCtl.nodes = [{ id: 9, type: 'remote' }];
+    const { unmount } = render(hostedPanel());
+    await screen.findByRole('button', { name: /pull now/i });
+    expect(screen.queryByRole('button', { name: /adopt onto blueprint/i })).not.toBeInTheDocument();
+    unmount();
+
+    nodeCtl.nodes = [{ id: 9, type: 'local' }];
+    render(hostedPanel());
+    expect(await screen.findByRole('button', { name: /adopt onto blueprint/i })).toBeInTheDocument();
+  });
+
+  it('names its host in the crumb and drops the link back to the workplace it is already on', async () => {
+    render(hostedPanel());
+    await screen.findByRole('button', { name: /update/i });
+    expect(screen.getByRole('navigation', { name: /sheet location/i })).toHaveTextContent('GitOps›web›Git source');
+    expect(screen.queryByRole('button', { name: /open in gitops portfolio/i })).not.toBeInTheDocument();
+  });
+
+  it('reads controller capability from that node, not the active one', async () => {
+    const suspendable = jsonRes(linkedWith(controllerRevision({ status: 'application_generation_accepted', actions: ['suspend'] })));
+    vi.mocked(apiFetch).mockResolvedValue(suspendable);
+
+    // The active node has the capability; the hosted node does not.
+    nodeCtl.hasCapability.mockReturnValue(true);
+    nodeCtl.nodeMeta.set(9, { capabilities: [] });
+    const { unmount } = render(hostedPanel());
+    await screen.findByRole('button', { name: /pull now/i });
+    expect(screen.queryByRole('button', { name: /^suspend$/i })).not.toBeInTheDocument();
+    unmount();
+
+    // And the reverse.
+    vi.mocked(apiFetch).mockResolvedValue(jsonRes(linkedWith(controllerRevision({ status: 'application_generation_accepted', actions: ['suspend'] }))));
+    nodeCtl.hasCapability.mockReturnValue(false);
+    nodeCtl.nodeMeta.set(9, { capabilities: [GITOPS_SOURCE_CONTROLLER_CAPABILITY] });
+    render(hostedPanel());
+    expect(await screen.findByRole('button', { name: /^suspend$/i })).toBeInTheDocument();
   });
 });
 

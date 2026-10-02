@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
-import { Loader2, Trash2, RefreshCw, Save, Pause, Play, GitBranch } from 'lucide-react';
+import { Trash2, RefreshCw, Save, Pause, Play, GitBranch } from 'lucide-react';
 import { ConfirmModal } from '@/components/ui/modal';
 import { Button } from '@/components/ui/button';
 import { openGitOpsWorkplace } from '@/components/gitops/portfolio/portfolioNavigation';
@@ -74,6 +74,12 @@ interface GitSourcePanelProps {
   /** Called after any change that may affect the sidebar pending-badge. */
   onSourceChanged?: () => void;
   canDeploy?: boolean;
+  /** Node the panel reads and writes; omitted means the active node. */
+  nodeId?: number | null;
+  /** Breadcrumb override for hosts outside the stack view. */
+  crumb?: string[];
+  /** Hide the link back to the GitOps workplace when the panel is already hosted there. */
+  showPortfolioLink?: boolean;
 }
 
 /**
@@ -138,6 +144,9 @@ export function GitSourcePanel({
   canEdit,
   canDeploy = canEdit,
   onSourceChanged,
+  nodeId,
+  crumb,
+  showPortfolioLink = true,
 }: GitSourcePanelProps) {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -178,7 +187,16 @@ export function GitSourcePanel({
   const [adoptOpen, setAdoptOpen] = useState(false);
 
   const { runWithLog } = useDeployFeedback();
-  const { activeNode, hasCapability } = useNodes();
+  const { activeNode, hasCapability, nodeMeta, nodes } = useNodes();
+  // The node this panel acts on: an explicit host node, else the active one.
+  const panelNodeId = nodeId !== undefined ? nodeId : activeNode?.id ?? null;
+  // An explicit node answers from its own meta, optimistic while unknown,
+  // exactly as hasCapability does for the active node.
+  const nodeHasCapability = (cap: typeof GITOPS_SOURCE_CONTROLLER_CAPABILITY): boolean => {
+    if (nodeId === undefined || nodeId === null) return hasCapability(cap);
+    const meta = nodeMeta.get(nodeId);
+    return meta ? meta.capabilities.includes(cap) : true;
+  };
   const applyMode = deriveApplyMode(source, applyModeOverride);
 
   const sourceFacet = liveSourceFacet(revision);
@@ -210,7 +228,7 @@ export function GitSourcePanel({
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const res = await apiFetch(`/stacks/${encodeURIComponent(stackName)}/git-source`);
+      const res = await apiFetch(`/stacks/${encodeURIComponent(stackName)}/git-source`, { nodeId });
       if (res.ok) {
         const data: GitSourceRead | GitSourceUnlinked = await res.json();
         setRevision(data.gitopsRevision);
@@ -254,7 +272,7 @@ export function GitSourcePanel({
     } finally {
       setLoading(false);
     }
-  }, [stackName, resetToUnlinked]);
+  }, [stackName, nodeId, resetToUnlinked]);
 
   useEffect(() => {
     if (open) {
@@ -307,6 +325,7 @@ export function GitSourcePanel({
 
   const persistGitSource = useCallback(async (body: Record<string, unknown>, successMessage: string) => {
     const res = await apiFetch(`/stacks/${encodeURIComponent(stackName)}/git-source`, {
+      nodeId,
       method: 'PUT',
       body: JSON.stringify(body),
     });
@@ -326,7 +345,7 @@ export function GitSourcePanel({
     onSourceChanged?.();
     await load();
     return true;
-  }, [load, onSourceChanged, stackName]);
+  }, [load, onSourceChanged, stackName, nodeId]);
 
   const save = async () => {
     if (!repoUrl.trim() || !branch.trim() || composePaths.length === 0) {
@@ -368,6 +387,7 @@ export function GitSourcePanel({
       }
       if (caBundle !== '') body.ca_bundle = caBundle;
       const res = await apiFetch(`/stacks/${encodeURIComponent(stackName)}/git-source/browse`, {
+        nodeId,
         method: 'POST',
         body: JSON.stringify(body),
       });
@@ -390,6 +410,7 @@ export function GitSourcePanel({
     setDeleting(true);
     try {
       const res = await apiFetch(`/stacks/${encodeURIComponent(stackName)}/git-source`, {
+        nodeId,
         method: 'DELETE',
       });
       if (res.ok) {
@@ -415,9 +436,9 @@ export function GitSourcePanel({
   const pullNow = async () => {
     if (!source) return;
     setPulling(true);
-    const loadingId = toast.loading('Fetching from Git...');
     try {
       const res = await apiFetch(`/stacks/${encodeURIComponent(stackName)}/git-source/pull`, {
+        nodeId,
         method: 'POST',
       });
       if (res.ok) {
@@ -435,7 +456,6 @@ export function GitSourcePanel({
     } catch (e) {
       toast.error((e as Error)?.message || 'Network error.');
     } finally {
-      toast.dismiss(loadingId);
       setPulling(false);
     }
   };
@@ -445,7 +465,7 @@ export function GitSourcePanel({
     const loadingId = toast.loading(deploy ? 'Applying and deploying...' : 'Applying changes...');
     // Snapshot the node once so the apply (and any deploy it triggers) stays
     // bound to it even if the active node changes while the operation runs.
-    const opNodeId = activeNode?.id ?? null;
+    const opNodeId = panelNodeId;
     try {
       const runApply = async (started: Promise<void>) => {
         if (deploy) await started;
@@ -504,6 +524,7 @@ export function GitSourcePanel({
   const dismissPending = async () => {
     try {
       const res = await apiFetch(`/stacks/${encodeURIComponent(stackName)}/git-source/dismiss-pending`, {
+        nodeId,
         method: 'POST',
       });
       if (res.ok) {
@@ -527,6 +548,7 @@ export function GitSourcePanel({
   ): Promise<boolean> => {
     try {
       const res = await apiFetch(`/stacks/${encodeURIComponent(stackName)}/git-source/${action}`, {
+        nodeId,
         method: 'POST',
         body: JSON.stringify(body ?? {}),
       });
@@ -602,7 +624,7 @@ export function GitSourcePanel({
     revision && revision.targetMode !== 'not_applicable' ? revision.availableActions : [];
   const offersController = (action: GitOpsAvailableAction): boolean => (
     canEdit
-    && hasCapability(GITOPS_SOURCE_CONTROLLER_CAPABILITY)
+    && nodeHasCapability(GITOPS_SOURCE_CONTROLLER_CAPABILITY)
     && availableActions.includes(action)
   );
   const offerSuspend = offersController('suspend');
@@ -624,8 +646,9 @@ export function GitSourcePanel({
       secondaryActions.push({
         label: pulling ? 'Pulling' : 'Pull now',
         onClick: () => { void pullNow(); },
-        disabled: pulling || saving,
-        icon: pulling ? Loader2 : RefreshCw,
+        disabled: saving,
+        pending: pulling,
+        icon: RefreshCw,
       });
     }
     if (offerSuspend) {
@@ -644,7 +667,10 @@ export function GitSourcePanel({
       });
     }
   }
-  if (canEdit && canDeploy && source && revision?.targetMode === 'direct') {
+  // Adoption always runs on the hub, so a panel hosted for another node's stack
+  // must not offer it: the call would land on the hub's same-named stack.
+  const adoptReachable = nodeId === undefined || nodes.some(n => n.id === nodeId && n.type === 'local');
+  if (canEdit && canDeploy && adoptReachable && source && revision?.targetMode === 'direct') {
     secondaryActions.push({
       label: 'Adopt onto Blueprint',
       onClick: () => setAdoptOpen(true),
@@ -658,15 +684,15 @@ export function GitSourcePanel({
       <SystemSheet
         open={open}
         onOpenChange={onOpenChange}
-        crumb={['Stack', stackName, 'Git source']}
+        crumb={crumb ?? ['Stack', stackName, 'Git source']}
         name="Git source"
         meta={sheetMeta}
         size="lg"
         primaryAction={canMutateSource ? {
           label: saving ? (source ? 'Updating' : 'Saving') : (source ? 'Update' : 'Save'),
           onClick: () => { void save(); },
-          disabled: saving,
-          icon: saving ? Loader2 : Save,
+          pending: saving,
+          icon: Save,
         } : undefined}
         secondaryActions={secondaryActions.length > 0 ? secondaryActions : undefined}
         destructiveAction={canMutateSource && source ? {
@@ -789,7 +815,7 @@ export function GitSourcePanel({
 
               <GitOpsCaveats revision={revision} />
 
-              {source && activeNode && (
+              {showPortfolioLink && source && panelNodeId !== null && (
                 // The portfolio view of this one application, next to every
                 // other GitOps application and its attention queue.
                 <Button
@@ -798,7 +824,7 @@ export function GitSourcePanel({
                   className="h-auto p-0 text-xs"
                   onClick={() => {
                     onOpenChange(false);
-                    openGitOpsWorkplace({ nodeId: activeNode.id, stack: stackName });
+                    openGitOpsWorkplace({ nodeId: panelNodeId, stack: stackName });
                   }}
                 >
                   Open in GitOps portfolio
@@ -870,13 +896,14 @@ export function GitSourcePanel({
                 onSshHostKeyFingerprintChange={setSshHostKeyFingerprint}
                 onApplyModeChange={setApplyModeOverride}
                 onBrowse={browseRepo}
+                nodeId={nodeId}
               />
               )}
             </SheetSection>
 
             {source && (
               <SheetSection title="Provider hooks">
-                <GitProviderHooksCard stackName={stackName} canEdit={canEdit} />
+                <GitProviderHooksCard stackName={stackName} canEdit={canEdit} nodeId={nodeId} />
               </SheetSection>
             )}
 
@@ -887,6 +914,7 @@ export function GitSourcePanel({
                   canEdit={canMutateSource}
                   linked
                   disabled={saving || loading}
+                  nodeId={nodeId}
                 />
               </SheetSection>
             )}
@@ -895,6 +923,7 @@ export function GitSourcePanel({
               <SheetSection title="Manifest">
                 <GitManifestSummary
                   stackName={stackName}
+                  nodeId={nodeId}
                   summary={
                     source.manifest ??
                     (source.manifest_state

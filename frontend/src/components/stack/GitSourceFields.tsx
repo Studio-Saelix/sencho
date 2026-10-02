@@ -65,6 +65,8 @@ export interface GitSourceFieldsProps extends GitSourceFieldsState {
   disabled?: boolean;
   /** When probing host keys from the edit panel, scopes the request to stack:edit. */
   stackName?: string;
+  /** Node the requests target; omitted means the active node. */
+  nodeId?: number | null;
   /** 'edit' for the per-stack panel, 'create' for the new-stack dialog. Changes apply-mode copy. */
   variant: 'edit' | 'create';
   onRepoUrlChange: (value: string) => void;
@@ -134,6 +136,7 @@ export function GitSourceFields({
   onApplyModeChange,
   onBrowse,
   stackName,
+  nodeId,
 }: GitSourceFieldsProps) {
   const copy = APPLY_MODE_COPY[variant];
   const primaryComposePath = composePaths[0] ?? '';
@@ -152,6 +155,7 @@ export function GitSourceFields({
     }
     try {
       const res = await apiFetch('/git-sources/ssh-host-key', {
+        nodeId,
         method: 'POST',
         body: JSON.stringify({
           repo_url: repoUrl.trim(),
