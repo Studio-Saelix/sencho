@@ -3,8 +3,8 @@
  * the runtime one: several names collide across the two facets with
  * different meaning, and the rest have no runtime entry at all.
  */
-import { describe, expect, it } from 'vitest';
-import { render, screen, within } from '@testing-library/react';
+import { describe, expect, it, vi } from 'vitest';
+import { fireEvent, render, screen, within } from '@testing-library/react';
 import { portfolioRow } from '../application/applicationFixtures';
 import { ApplicationsTable } from './ApplicationsTable';
 import { ROLLOUT_STATE, RUNTIME_STATE } from '@/lib/gitopsState';
@@ -58,5 +58,37 @@ describe('ApplicationsTable target counts', () => {
 
     expect(screen.getByText('1 target')).toBeInTheDocument();
     expect(screen.queryByText('2 targets')).toBeNull();
+  });
+});
+
+describe('ApplicationsTable row click', () => {
+  function renderRow(onDrillDown: () => void) {
+    render(
+      <ApplicationsTable rows={[portfolioRow()]} nextCursor={null} onPrevPage={() => {}} onNextPage={() => {}} pageLoaded={1} portfolioEmpty={false} onDrillDown={onDrillDown} />,
+    );
+    return screen.getAllByRole('row')[1] as HTMLElement;
+  }
+
+  it('opens the application from any cell of the row, once', () => {
+    const open = vi.fn();
+    const row = renderRow(open);
+    fireEvent.click(within(row).getAllByRole('cell')[3] as HTMLElement);
+    expect(open).toHaveBeenCalledTimes(1);
+  });
+
+  it('opens it once from the name button, which bubbles to the row', () => {
+    const open = vi.fn();
+    renderRow(open);
+    fireEvent.click(screen.getByRole('button', { name: 'bookstack' }));
+    expect(open).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not open the application when the actions menu is used', () => {
+    const open = vi.fn();
+    renderRow(open);
+    const trigger = screen.getByRole('button', { name: 'Actions for bookstack' });
+    fireEvent.pointerDown(trigger, { button: 0, ctrlKey: false });
+    fireEvent.click(trigger);
+    expect(open).not.toHaveBeenCalled();
   });
 });

@@ -1,15 +1,13 @@
 /**
  * Drill-down navigation for the GitOps portfolio rows.
  *
- * A row opens its application view inside the workplace: the full canonical
- * state for one application. A Direct application's Git source sheet opens in
- * place over the workplace (its host listens for GITOPS_GIT_SOURCE_EVENT), so
- * acting on it never leaves GitOps; Blueprint applications hand off to the
- * Blueprint deployments surface that owns rollout decisions.
- *
- * The open application lives in the `application` query parameter of the
- * GitOps path, a parameter the view owns (see VIEW_OWNED_QUERY in useUrlSync),
- * so an application view is a shareable link and Back returns to the list.
+ * Opening an application never leaves the workplace. A Direct application is
+ * its Git source, so its sheet opens in place over the list (the host listens
+ * for GITOPS_GIT_SOURCE_EVENT); any other application opens its own sheet, keyed
+ * by the `application` query parameter of the GitOps path, a parameter the view
+ * owns (see VIEW_OWNED_QUERY in useUrlSync), so it is a shareable link and Back
+ * returns to the list. A step that resolves a source problem runs right there
+ * when the server offers it, and only otherwise opens a surface.
  */
 import { openBlueprintIntent } from '@/lib/blueprintIntent';
 import {
@@ -18,6 +16,7 @@ import {
   type SenchoNavigateDetail,
   type SenchoOpenStackDetail,
 } from '@/lib/events';
+import { runSourceControllerAction, type SourceControllerAction } from '@/lib/gitSourceControllerAction';
 import type { GitOpsAttentionReason, GitOpsPortfolioRow } from '@/types/gitopsPortfolio';
 
 export const APPLICATION_QUERY_PARAM = 'application';
@@ -109,13 +108,20 @@ export interface GitOpsGitSourceTarget {
   nodeId: number;
   stackName: string;
   applicationName: string;
+  /** `review` pulls and opens the diff when a fetched update is waiting; otherwise the sheet just opens. */
+  intent?: 'review';
+}
+
+/** Whether a row is a Direct application whose stack and node are known, so its Git source sheet can open. */
+export function hasGitSourceSheet(row: GitOpsPortfolioRow): row is GitOpsPortfolioRow & { nodeId: number; stackName: string } {
+  return row.targetMode === 'direct' && row.nodeId !== null && row.stackName !== null;
 }
 
 /** Open a Direct application's Git source sheet over the workplace, on the application's own node. */
-function openGitSourceInPlace(row: GitOpsPortfolioRow): void {
-  if (row.nodeId === null || row.stackName === null) return;
+export function openGitSourceInPlace(row: GitOpsPortfolioRow, intent?: 'review'): void {
+  if (!hasGitSourceSheet(row)) return;
   window.dispatchEvent(new CustomEvent<GitOpsGitSourceTarget>(GITOPS_GIT_SOURCE_EVENT, {
-    detail: { nodeId: row.nodeId, stackName: row.stackName, applicationName: row.name },
+    detail: { nodeId: row.nodeId, stackName: row.stackName, applicationName: row.name, ...(intent ? { intent } : {}) },
   }));
 }
 
@@ -214,14 +220,17 @@ export interface PortfolioRowAction {
 
 /**
  * Every place a row can take the operator, for its action menu. All are
- * navigations: decisions (accept, approve, authorize) stay in the application
- * view, where the authority actions own their permission and confirmation.
+ * navigations: decisions (accept, approve, authorize) stay on the Git source
+ * sheet or the application sheet, which own their permission and confirmation.
  */
 export function portfolioRowActions(row: GitOpsPortfolioRow, opts: { canOpenFleet: boolean }): PortfolioRowAction[] {
-  const actions: PortfolioRowAction[] = [{ label: 'Open application', run: () => openPortfolioApplication(row) }];
-  if (row.targetMode === 'direct' && row.nodeId !== null && row.stackName !== null) {
-    actions.push({ label: 'Open stack', run: () => openDirectStack(row) });
+  const actions: PortfolioRowAction[] = [];
+  if (hasGitSourceSheet(row)) {
+    // A Direct application and its Git source are one object, so there is one way in.
     actions.push({ label: 'Open Git source', run: () => openGitSourceInPlace(row) });
+    actions.push({ label: 'Open stack', run: () => openDirectStack(row) });
+  } else {
+    actions.push({ label: 'Open application', run: () => openPortfolioApplication(row) });
   }
   if (row.targetMode !== 'direct' && row.nodeId === null && row.blueprintId !== null && opts.canOpenFleet) {
     actions.push({ label: 'Open Blueprint', run: () => openBlueprint(row) });
@@ -229,7 +238,7 @@ export function portfolioRowActions(row: GitOpsPortfolioRow, opts: { canOpenFlee
   return actions;
 }
 
-/** Reasons that wait on an operator decision the application view's authority actions record. */
+/** Reasons that wait on an operator decision the Git source or application sheet records. */
 const DECISION_REASONS: ReadonlySet<GitOpsAttentionReason> = new Set<GitOpsAttentionReason>([
   'source_review_pending',
   'source_conflict_blocker',
@@ -253,32 +262,82 @@ const RUNTIME_FAILURE_REASONS: ReadonlySet<GitOpsAttentionReason> = new Set<GitO
   'rollback_failed',
 ]);
 
-/** Failures of the Git source itself (fetch, auth, suspension). */
-const SOURCE_FAILURE_REASONS: ReadonlySet<GitOpsAttentionReason> = new Set<GitOpsAttentionReason>([
-  'source_failed',
-  'source_unknown_outcome',
-  'source_suspended',
+/** The controller verbs the queue can run without opening the sheet. */
+type SourceVerb = Exclude<SourceControllerAction, 'suspend'>;
+
+/** Failures of the Git source itself (fetch, auth, suspension), each with the verb that clears it. */
+const SOURCE_FAILURE_VERB: Partial<Record<GitOpsAttentionReason, SourceVerb>> = {
+  source_failed: 'retry',
+  source_unknown_outcome: 'retry',
+  source_retry_scheduled: 'retry',
+  source_suspended: 'resume',
+};
+
+/** A fetched commit waiting on the operator: the verb is reviewing the update. */
+const UPDATE_REVIEW_REASONS: ReadonlySet<GitOpsAttentionReason> = new Set<GitOpsAttentionReason>([
+  'source_review_pending',
+  'source_conflict_blocker',
+  'source_reconcile_required',
 ]);
 
-/**
- * The single most useful next step for one attention entry. A decision goes
- * to the application view (the authority actions live there); a Direct
- * application's runtime or source failure goes straight to the stack or its
- * Git source; everything else opens the application view.
- */
-export function attentionNextStep(reason: GitOpsAttentionReason, row: GitOpsPortfolioRow): PortfolioRowAction {
-  const review = { label: 'Review', run: () => openPortfolioApplication(row) };
-  const remoteBlueprint = row.targetMode !== 'direct' && row.nodeId !== null;
-  if (DECISION_REASONS.has(reason)) {
-    return remoteBlueprint ? { label: 'Inspect', run: review.run } : review;
-  }
-  const direct = row.targetMode === 'direct' && row.nodeId !== null && row.stackName !== null;
-  if (direct && RUNTIME_FAILURE_REASONS.has(reason)) return { label: 'Open stack', run: () => openDirectStack(row) };
-  if (direct && SOURCE_FAILURE_REASONS.has(reason)) return { label: 'Open Git source', run: () => openGitSourceInPlace(row) };
-  return { label: 'Open', run: () => openPortfolioApplication(row) };
+/** What this session may do to a Direct application's Git source without opening anything. */
+export interface SourceControl {
+  can: (action: SourceVerb) => boolean;
 }
 
-/** The drill-down for one row: its application view, keyed by the row's portfolio id. */
+/** A step either opens a surface (synchronously) or acts in place and settles when the server answers. */
+export interface AttentionStep {
+  label: string;
+  run: () => void | Promise<void>;
+}
+
+/**
+ * The single most useful next step for one attention entry, as a verb that runs
+ * where the operator already is.
+ *
+ * A Direct application's failed or suspended source is retried or resumed in
+ * place when the server offers it and the session may; its waiting update opens
+ * the Git source sheet, which pulls straight into the diff when an update is
+ * waiting; a runtime failure goes to the stack, where the logs are. A Blueprint
+ * decision opens the application sheet, whose authority actions own permission
+ * and confirmation, and any other Direct reason opens that application's Git
+ * source sheet. A retry or resume the server does not offer to this session
+ * falls back to opening the Git source, so those verbs never promise something
+ * that would be refused.
+ */
+export function attentionNextStep(reason: GitOpsAttentionReason, row: GitOpsPortfolioRow, control?: SourceControl): AttentionStep {
+  const open = (label: string): AttentionStep => ({ label, run: () => openPortfolioApplication(row) });
+  if (!hasGitSourceSheet(row)) {
+    const remoteBlueprint = row.targetMode !== 'direct' && row.nodeId !== null;
+    if (DECISION_REASONS.has(reason)) return open(remoteBlueprint ? 'Inspect' : 'Review');
+    return open('Open');
+  }
+  if (RUNTIME_FAILURE_REASONS.has(reason)) return { label: 'Open stack', run: () => openDirectStack(row) };
+  if (UPDATE_REVIEW_REASONS.has(reason)) {
+    return { label: 'Review update', run: () => openGitSourceInPlace(row, 'review') };
+  }
+  const verb = SOURCE_FAILURE_VERB[reason];
+  if (verb) {
+    if (control?.can(verb)) {
+      return {
+        label: verb === 'resume' ? 'Resume' : 'Retry',
+        run: async () => { await runSourceControllerAction(row.stackName, row.nodeId, verb); },
+      };
+    }
+    return { label: 'Open Git source', run: () => openGitSourceInPlace(row) };
+  }
+  return open(DECISION_REASONS.has(reason) ? 'Review' : 'Open');
+}
+
+/**
+ * The drill-down for one row. A Direct application is its Git source, so it
+ * opens that sheet in place; any other application opens its own sheet, keyed
+ * by the row's portfolio id in the address.
+ */
 export function openPortfolioApplication(row: GitOpsPortfolioRow): void {
+  if (hasGitSourceSheet(row)) {
+    openGitSourceInPlace(row);
+    return;
+  }
   openGitOpsApplication(row.id);
 }

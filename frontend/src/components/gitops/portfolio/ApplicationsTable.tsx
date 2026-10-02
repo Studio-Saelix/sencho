@@ -163,7 +163,9 @@ function ApplicationRow({ row, onOpen, canOpenFleet }: { row: GitOpsPortfolioRow
     : failureAttention ? 'bg-destructive/[0.04]' : 'bg-warning/[0.04]';
 
   return (
-    <TableRow className={cn('transition-colors hover:bg-muted/30', rowTint)}>
+    // The whole row opens the application. The name stays a real button so the row is
+    // reachable and activatable from the keyboard; its click bubbles to the row.
+    <TableRow className={cn('cursor-pointer transition-colors hover:bg-muted/30', rowTint)} onClick={onOpen}>
       <TableCell className="align-top">
         <span
           aria-hidden
@@ -184,7 +186,6 @@ function ApplicationRow({ row, onOpen, canOpenFleet }: { row: GitOpsPortfolioRow
           <button
             type="button"
             className="block min-w-0 truncate text-left font-mono text-xs hover:text-brand"
-            onClick={onOpen}
           >
             {row.name}
           </button>
@@ -279,7 +280,8 @@ function ApplicationRow({ row, onOpen, canOpenFleet }: { row: GitOpsPortfolioRow
         {row.evidence.unknown && <span className="block font-mono text-[10px] text-warning">evidence partial</span>}
       </TableCell>
 
-      <TableCell className="align-top">
+      {/* The menu is its own set of destinations, not a click on the row. */}
+      <TableCell className="align-top" onClick={event => event.stopPropagation()}>
         <RowActionsMenu row={row} canOpenFleet={canOpenFleet} />
       </TableCell>
     </TableRow>

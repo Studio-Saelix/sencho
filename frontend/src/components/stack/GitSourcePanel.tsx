@@ -6,6 +6,7 @@ import { openGitOpsWorkplace } from '@/components/gitops/portfolio/portfolioNavi
 import { Skeleton } from '@/components/ui/skeleton';
 import { SystemSheet, SheetSection, type SystemSheetAction, type SystemSheetTab } from '@/components/ui/system-sheet';
 import { apiFetch } from '@/lib/api';
+import { runSourceControllerAction } from '@/lib/gitSourceControllerAction';
 import { isSupportedGitRepoUrl, UNSUPPORTED_GIT_REPO_URL_MESSAGE } from '@/lib/gitRepoUrl';
 import { useDeployFeedback } from '@/context/DeployFeedbackContext';
 import { useNodes } from '@/context/NodeContext';
@@ -85,6 +86,8 @@ interface GitSourcePanelProps {
   crumb?: string[];
   /** Hide the link back to the GitOps workplace when the panel is already hosted there. */
   showPortfolioLink?: boolean;
+  /** Pull the waiting update and open its diff once the sheet has loaded, when one is waiting. */
+  autoReview?: boolean;
 }
 
 /**
@@ -148,6 +151,7 @@ export function GitSourcePanel({
   nodeId,
   crumb,
   showPortfolioLink = true,
+  autoReview = false,
 }: GitSourcePanelProps) {
   const [loading, setLoading] = useState(true);
   // A failed open is not "no source": it needs its own state so the sheet can say it could not read.
@@ -248,6 +252,7 @@ export function GitSourcePanel({
   // Only the latest request may touch state, so a slow answer for the stack the
   // sheet just left cannot overwrite the one it is now showing.
   const loadSeq = useRef(0);
+  const loadedForOpen = useRef(false);
 
   /**
    * Read the source and its status.
@@ -267,6 +272,7 @@ export function GitSourcePanel({
     if (fresh) {
       setLoading(true);
       setLoadError(null);
+      loadedForOpen.current = false;
     }
     const fail = (message: string) => {
       if (!fresh) {
@@ -306,7 +312,10 @@ export function GitSourcePanel({
       if (!current()) return;
       fail((e as Error)?.message || 'Network error.');
     } finally {
-      if (current() && fresh) setLoading(false);
+      if (current() && fresh) {
+        loadedForOpen.current = true;
+        setLoading(false);
+      }
     }
   }, [stackName, nodeId, resetToUnlinked, fillForm]);
 
@@ -589,31 +598,10 @@ export function GitSourcePanel({
     action: 'suspend' | 'resume' | 'retry',
     body?: Record<string, unknown>,
   ): Promise<boolean> => {
-    try {
-      const res = await apiFetch(`/stacks/${encodeURIComponent(stackName)}/git-source/${action}`, {
-        nodeId,
-        method: 'POST',
-        body: JSON.stringify(body ?? {}),
-      });
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({})) as { error?: string };
-        toast.error(err.error || `Could not ${action} this Git source.`);
-        return false;
-      }
-      toast.success(
-        action === 'suspend'
-          ? 'Reconciliation suspended.'
-          : action === 'resume'
-            ? 'Reconciliation resumed.'
-            : 'Retry started.',
-      );
-      onSourceChanged?.();
-      await load('refresh');
-      return true;
-    } catch (e) {
-      toast.error((e as Error)?.message || 'Network error.');
-      return false;
-    }
+    if (!(await runSourceControllerAction(stackName, nodeId, action, body))) return false;
+    onSourceChanged?.();
+    await load('refresh');
+    return true;
   };
 
   const suspendSource = async () => {
@@ -723,6 +711,21 @@ export function GitSourcePanel({
       </BusyButton>
     );
   }
+
+  // "Review update" from outside the sheet: do what its button would, once per opening.
+  const autoReviewed = useRef(false);
+  useEffect(() => {
+    if (!open) {
+      autoReviewed.current = false;
+      return;
+    }
+    // loadedForOpen: the state read for THIS opening, never what a reopened sheet still held.
+    if (!autoReview || loading || !loadedForOpen.current || autoReviewed.current || !showPendingReview) return;
+    autoReviewed.current = true;
+    void pullNow();
+    // pullNow is a fresh closure each render; the ref makes this run once per opening.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [autoReview, open, loading, showPendingReview]);
 
   const toolbarLive = !loading && loadError === null;
   const offerPull = toolbarLive && !claimedByBlueprint && source !== null && sourceFacet?.status !== 'source_suspended';

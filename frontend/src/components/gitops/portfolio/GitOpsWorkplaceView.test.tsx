@@ -1,13 +1,14 @@
 /**
- * The workplace's list-to-application round trip: a row opens the application
- * view in place, and returning (through the real history Back) restores the
- * list from hook state without refetching it.
+ * The workplace's list-to-application round trip: a Blueprint row opens its
+ * application sheet over the list (which stays mounted), and closing it returns
+ * to the same list without refetching it.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { apiFetch } from '@/lib/api';
-import { detailResponse, portfolioRow } from '../application/applicationFixtures';
+import { blueprintDetailResponse, portfolioRow } from '../application/applicationFixtures';
 import { GitOpsWorkplaceView } from './GitOpsWorkplaceView';
+import { closeGitOpsApplication } from './portfolioNavigation';
 import type { GitOpsPortfolioResponse } from '@/types/gitopsPortfolio';
 
 vi.mock('@/lib/api', () => ({
@@ -21,8 +22,11 @@ vi.mock('@/context/AuthContext', () => ({
 }));
 
 vi.mock('@/context/NodeContext', () => ({
-  useNodes: () => ({ hasCapability: () => false }),
+  useNodes: () => ({ hasCapability: () => false, nodeMeta: new Map() }),
 }));
+
+// The Git source host mounts with the workplace; this suite never opens it.
+vi.mock('./GitOpsGitSourceHost', () => ({ GitOpsGitSourceHost: () => null }));
 
 const mockFetch = vi.mocked(apiFetch);
 
@@ -37,7 +41,7 @@ const list: GitOpsPortfolioResponse = {
   coverage: [{ nodeId: 1, nodeName: 'local', state: 'ok' }],
   attentionQueue: [],
   attentionQueueTruncated: false,
-  applications: [portfolioRow()],
+  applications: [portfolioRow({ id: 'bp:3', name: 'shop', targetMode: 'blueprint', nodeId: null, stackName: null, blueprintId: 3 })],
   nextCursor: null,
   truncated: false,
 };
@@ -52,20 +56,21 @@ afterEach(() => {
 });
 
 describe('GitOpsWorkplaceView', () => {
-  it('opens a row in place and returns to the list without refetching it', async () => {
+  it('opens a row as a sheet over the list and closes back to it without refetching', async () => {
     window.history.replaceState({ senchoIdx: 0 }, '', '/nodes/local/gitops');
     mockFetch.mockImplementation(async (url: string) => (
-      url.startsWith('/gitops/applications/') ? ok(detailResponse()) : ok(list)
+      url.startsWith('/gitops/applications/') ? ok(blueprintDetailResponse()) : ok(list)
     ));
     render(<GitOpsWorkplaceView />);
 
-    fireEvent.click(await screen.findByRole('button', { name: 'bookstack' }));
-    expect(await screen.findByTestId('gitops-application-view')).toBeInTheDocument();
+    fireEvent.click(await screen.findByRole('button', { name: 'shop' }));
+    expect(await screen.findByTestId('gitops-application-detail')).toBeInTheDocument();
+    // The list stays mounted under the sheet (hidden from assistive tech while it is modal).
+    expect(screen.getAllByRole('button', { name: 'shop', hidden: true }).length).toBeGreaterThan(0);
     const listFetches = mockFetch.mock.calls.filter(([url]) => !String(url).startsWith('/gitops/applications/')).length;
 
-    fireEvent.click(screen.getByRole('button', { name: /all applications/i }));
-    await waitFor(() => expect(screen.queryByTestId('gitops-application-view')).toBeNull());
-    expect(screen.getByRole('button', { name: 'bookstack' })).toBeInTheDocument();
+    act(() => closeGitOpsApplication());
+    await waitFor(() => expect(screen.queryByTestId('gitops-application-detail')).toBeNull());
     expect(window.location.search).toBe('');
     expect(mockFetch.mock.calls.filter(([url]) => !String(url).startsWith('/gitops/applications/')).length).toBe(listFetches);
   });

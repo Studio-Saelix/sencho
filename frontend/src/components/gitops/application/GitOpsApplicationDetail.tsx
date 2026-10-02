@@ -61,7 +61,7 @@ export default function GitOpsApplicationDetail({ detail, actions }: {
   const nodeName = (id: number) => nodeNames.get(id) ?? (row.nodeId === id ? row.nodeName : null) ?? `node ${id}`;
 
   return (
-    <div data-testid="gitops-application-detail" className="grid gap-6 lg:grid-cols-2">
+    <div data-testid="gitops-application-detail" className="flex flex-col gap-6">
       <div className="flex min-w-0 flex-col gap-6">
         <Section label="Identity">
           <dl className={cn(CARD_SHELL, 'grid grid-cols-[auto_minmax(0,1fr)] gap-x-4 gap-y-1.5 px-3 py-2.5')}>

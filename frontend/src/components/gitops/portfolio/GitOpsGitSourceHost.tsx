@@ -32,13 +32,14 @@ export function GitOpsGitSourceHost() {
   }, []);
 
   if (target === null) return null;
-  const { nodeId, stackName, applicationName } = target;
+  const { nodeId, stackName, applicationName, intent } = target;
   return (
     <GitSourcePanel
       // A fresh panel per application, so one stack's form never shows under another's header.
       key={`${nodeId}:${stackName}`}
       open={open}
       onOpenChange={setOpen}
+      autoReview={intent === 'review'}
       stackName={stackName}
       nodeId={nodeId}
       crumb={['GitOps', applicationName, 'Git source']}

@@ -56,3 +56,14 @@ export function detailResponse(
 ): GitOpsPortfolioDetailResponse {
   return { schemaVersion: 1, generatedAt: Date.now(), application: portfolioRow(row), projection };
 }
+
+/** A readable detail response for Blueprint 3's application (`bp:3`), shaped like the server's. */
+export function blueprintDetailResponse(row: Partial<GitOpsPortfolioRow> = {}): GitOpsPortfolioDetailResponse {
+  return {
+    ...detailResponse(
+      { id: 'bp:3', name: 'shop', targetMode: 'blueprint', nodeId: null, stackName: null, blueprintId: 3, ...row },
+      liveRevision({ targetMode: 'blueprint', blueprintId: 3, stackName: null, applicationId: 'app-bp-3' }),
+    ),
+    blueprintEnabled: true,
+  };
+}

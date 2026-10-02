@@ -23,7 +23,7 @@ Every GitOps drift item carries a class. The class says which part of the chain 
 
 This is the model's vocabulary: the boundaries a drift item can fall into, and what each one would be measured against. A class appears only where Sencho holds the evidence for it and the rows prove a mismatch, so a class whose evidence is not held is absent rather than approximated. The table does not promise that every class is reported today; it says what each class means when it is.
 
-The [Drift tab](/features/stack-drift) and the application view show the classes they have evidence for. The portfolio's drift summary counts them by class, and its attention queue names the ones that are waiting on you.
+The [Drift tab](/features/stack-drift) and the application sheet show the classes they have evidence for. The portfolio's drift summary counts them by class, and its attention queue names the ones that are waiting on you.
 
 ## Reading an item
 
@@ -57,7 +57,7 @@ One does not: a hold because the rollout moved on stays until a later rollout in
 | Surface | What it shows |
 |---|---|
 | **Drift** tab on a stack | The spatial findings plus the GitOps state for that stack, one card per node, with the per-service digest comparison under each node. |
-| **GitOps application view** in the portfolio | The same drift items for one application, alongside its source, artifact, placement, and rollout state. |
+| **Application sheet** in the portfolio | The same drift items for one application, alongside its source, artifact, placement, and rollout state. |
 | **Portfolio application table** | A count and the classes involved, so you can narrow the list to one class. |
 
 The same projection feeds all three, so a class never reads differently depending on where you look.
@@ -128,7 +128,7 @@ Drift is derived from what Sencho has recorded, so missing evidence is never rou
 - A service built on the node has no published digest to compare, so the per-service view labels it **not compared** rather than matched or drifted.
 - A service running something the approved set does not name is outside the comparison, so it reads **not compared** rather than drift.
 
-Each of those is listed as a caveat under the state it applies to, on the Drift tab and in the application view, saying what could not be proven. The per-service digest view says the same in its own words: a target with no per-service evidence on either side says nothing rather than showing an empty comparison that would read as agreement.
+Each of those is listed as a caveat under the state it applies to, on the Drift tab and in the application sheet, saying what could not be proven. The per-service digest view says the same in its own words: a target with no per-service evidence on either side says nothing rather than showing an empty comparison that would read as agreement.
 
 ## The policy domains
 

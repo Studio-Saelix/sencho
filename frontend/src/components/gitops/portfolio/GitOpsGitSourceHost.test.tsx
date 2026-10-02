@@ -8,7 +8,7 @@ const can = vi.fn((action: string, _type?: string, _id?: string, nodeId?: number
 vi.mock('@/context/AuthContext', () => ({ useAuth: () => ({ can }) }));
 vi.mock('@/hooks/use-theme', () => ({ useTheme: () => ({ isDarkMode: false }) }));
 vi.mock('@/components/stack/GitSourcePanel', () => ({
-  GitSourcePanel: (props: { open: boolean; onOpenChange: (open: boolean) => void; onSourceChanged: () => void; stackName: string; nodeId: number; crumb: string[]; showPortfolioLink: boolean; canEdit: boolean; canDeploy: boolean }) => (
+  GitSourcePanel: (props: { open: boolean; onOpenChange: (open: boolean) => void; onSourceChanged: () => void; stackName: string; nodeId: number; crumb: string[]; showPortfolioLink: boolean; canEdit: boolean; canDeploy: boolean; autoReview?: boolean }) => (
     <div data-testid="panel" data-open={String(props.open)}>
       <button type="button" onClick={() => props.onOpenChange(false)}>close</button>
       <button type="button" onClick={props.onSourceChanged}>changed</button>
@@ -21,6 +21,7 @@ vi.mock('@/components/stack/GitSourcePanel', () => ({
         canDeploy: props.canDeploy,
       })}</span>
       <span data-testid="props">{JSON.stringify({ stackName: props.stackName, nodeId: props.nodeId })}</span>
+      <span data-testid="auto-review">{String(Boolean(props.autoReview))}</span>
     </div>
   ),
 }));
@@ -62,6 +63,15 @@ describe('GitOpsGitSourceHost', () => {
     request({ nodeId: 5, stackName: 'wiki', applicationName: 'wiki' });
     expect(screen.getByTestId('panel')).toHaveAttribute('data-open', 'true');
     expect(JSON.parse(screen.getByTestId('props').textContent ?? '')).toEqual({ stackName: 'wiki', nodeId: 5 });
+  });
+
+  it('asks the sheet to review the update when the request carries that intent, and only then', () => {
+    render(<GitOpsGitSourceHost />);
+    request({ nodeId: 2, stackName: 'bookstack', applicationName: 'bookstack', intent: 'review' });
+    expect(screen.getByTestId('auto-review')).toHaveTextContent('true');
+
+    request({ nodeId: 2, stackName: 'bookstack', applicationName: 'bookstack' });
+    expect(screen.getByTestId('auto-review')).toHaveTextContent('false');
   });
 
   it('raises the shared refresh signal when the sheet changes the source', () => {

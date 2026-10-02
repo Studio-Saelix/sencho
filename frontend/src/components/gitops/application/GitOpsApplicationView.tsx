@@ -3,26 +3,22 @@ import { ArrowLeft, ExternalLink, RefreshCw } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { Skeleton } from '@/components/ui/skeleton';
-import { useAuth } from '@/context/AuthContext';
 import { cn } from '@/lib/utils';
 import { useIsMobile } from '@/hooks/use-is-mobile';
 import { useWorkplaceCapabilities } from '../portfolio/useWorkplaceCapabilities';
 import { closeGitOpsApplication, owningSurfaceHandoff } from '../portfolio/portfolioNavigation';
 import GitOpsApplicationDetail from './GitOpsApplicationDetail';
-import GitOpsAuthorityActions from '@/components/gitops/GitOpsAuthorityActions';
-import GitOpsRolloutControls from '@/components/gitops/GitOpsRolloutControls';
-import { useGitOpsApplication, type GitOpsApplicationError } from './useGitOpsApplication';
+import { ApplicationLoadError } from './ApplicationLoadError';
+import { BlueprintOperations } from './BlueprintOperations';
+import { useGitOpsApplication } from './useGitOpsApplication';
 
 /**
- * One GitOps application inside the workplace: the read-only review surface a
- * portfolio row drills into. It never changes state; its only outbound action
- * is the hand-off to the surface that owns operator decisions for this
- * application (the stack's Git panel, or the Blueprint deployments tab).
- *
- * Used by both the desktop workplace and the phone screen; the layout reflows
- * to one column on a narrow viewport without a separate phone build, because
- * review is the part of the operate loop the phone supports and acting stays
- * on the owning surfaces.
+ * One GitOps application as a page of the phone screen (the desktop workplace
+ * opens GitOpsApplicationSheet over its list instead). On a phone it is read-only:
+ * BlueprintOperations renders nothing there, and the only outbound action is the
+ * hand-off to the surface that owns operator decisions for this application (the
+ * stack's Git panel, or the Blueprint deployments tab), because review is the part
+ * of the operate loop the phone supports and acting stays on the owning surfaces.
  */
 export function GitOpsApplicationView({ id, className, headerActions }: {
   id: string;
@@ -31,23 +27,10 @@ export function GitOpsApplicationView({ id, className, headerActions }: {
   headerActions?: ReactNode;
 }) {
   const { data, loading, error, staleSince, refreshing, refresh } = useGitOpsApplication(id);
-  const { can } = useAuth();
   const row = data?.application ?? null;
   const { canOpenFleet } = useWorkplaceCapabilities();
   const isMobile = useIsMobile();
   const handoff = row ? owningSurfaceHandoff(row, { canOpenBlueprint: canOpenFleet && !isMobile }) : null;
-  // Both Blueprint modes reach this block, not just the Git-managed one. A
-  // demoted application still has a placement policy the placement decision
-  // evaluates, so it needs the control that sets it; the Git-only actions inside
-  // gate themselves on the target mode. The rollout controls beside them are a
-  // different question and stay Git-only.
-  const canOperateBlueprint = data !== null
-    && row !== null
-    && !isMobile
-    && id.startsWith('bp:')
-    && (row.targetMode === 'blueprint' || row.targetMode === 'inline_blueprint')
-    && typeof data.blueprintEnabled === 'boolean';
-
   return (
     <div data-testid="gitops-application-view" className={cn('flex h-full min-h-0 flex-col overflow-hidden p-6', className)}>
       <div className="mb-4 flex flex-wrap items-center gap-3">
@@ -95,81 +78,10 @@ export function GitOpsApplicationView({ id, className, headerActions }: {
           </header>
           <GitOpsApplicationDetail
             detail={data}
-            actions={canOperateBlueprint ? (
-              <div className="flex flex-col gap-2">
-                <GitOpsAuthorityActions
-                  applicationId={id}
-                  blueprintId={row.blueprintId}
-                  blueprintName={row.name}
-                  projection={data.projection}
-                  onChanged={refresh}
-                  can={can}
-                  blueprintEnabled={data.blueprintEnabled ?? false}
-                />
-                {row.targetMode === 'blueprint' && (
-                <GitOpsRolloutControls
-                  applicationId={id}
-                  projection={data.projection}
-                  onChanged={refresh}
-                  can={can}
-                  blueprintEnabled={data.blueprintEnabled ?? false}
-                  rollbackGenerations={data.rollbackCandidates}
-                  nodeLabel={(nodeId) => {
-                    const target = row.targets.find(entry => entry.nodeId === nodeId);
-                    return target?.nodeName ?? `node ${nodeId}`;
-                  }}
-                />
-                )}
-              </div>
-            ) : null}
+            actions={<BlueprintOperations data={data} refresh={refresh} />}
           />
         </ScrollArea>
       ) : null}
-    </div>
-  );
-}
-
-function errorCopy(error: GitOpsApplicationError): { title: string; line: string } {
-  switch (error.kind) {
-    case 'not_readable':
-      return {
-        title: 'This application is not available',
-        line: 'It no longer exists, your account cannot read it, or its owning node is not reporting it right now.',
-      };
-    case 'invalid_link':
-      return {
-        title: 'This link does not point to a GitOps application',
-        line: 'Open the application from the portfolio list instead.',
-      };
-    case 'unsupported':
-      return {
-        title: 'The owning node cannot show this application',
-        line: `Its Sencho version cannot serve application reads; run the same version there as on this node (${error.message}).`,
-      };
-    case 'unreachable':
-      return {
-        title: 'The owning node did not answer',
-        line: `The application's state is unknown until the node reports again (${error.message}).`,
-      };
-    case 'evidence_unavailable':
-      return {
-        title: 'Evidence for this application is unavailable',
-        line: `Its owning node reports it, but not yet with state this node can read; retry once it reports again (${error.message}).`,
-      };
-    case 'failed':
-      return { title: 'The application could not be read', line: error.message };
-  }
-}
-
-function ApplicationLoadError({ error, onRetry }: { error: GitOpsApplicationError; onRetry: () => void }) {
-  const copy = errorCopy(error);
-  return (
-    <div data-testid="gitops-application-error" data-error={error.kind} className="flex flex-1 flex-col items-center justify-center gap-3 text-center">
-      <p className="font-heading text-xl text-stat-value">{copy.title}</p>
-      <p className="max-w-md font-mono text-xs text-stat-subtitle">{copy.line}</p>
-      {error.kind !== 'invalid_link' && error.kind !== 'unsupported' && (
-        <Button variant="outline" size="sm" className="max-md:min-h-11" onClick={onRetry}>Retry</Button>
-      )}
     </div>
   );
 }

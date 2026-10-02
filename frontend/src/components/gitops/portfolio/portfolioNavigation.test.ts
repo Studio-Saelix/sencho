@@ -93,9 +93,9 @@ describe('portfolio row actions and attention next steps', () => {
     return seen;
   }
 
-  it('offers a Direct row its application, stack, and Git source', () => {
+  it('offers a Direct row its Git source and stack, never a separate application page', () => {
     const labels = portfolioRowActions(direct, { canOpenFleet: true }).map(action => action.label);
-    expect(labels).toEqual(['Open application', 'Open stack', 'Open Git source']);
+    expect(labels).toEqual(['Open Git source', 'Open stack']);
     const git = portfolioRowActions(direct, { canOpenFleet: true }).find(action => action.label === 'Open Git source')!;
     expect(captured<GitOpsGitSourceTarget>(GITOPS_GIT_SOURCE_EVENT, git.run))
       .toEqual([{ nodeId: direct.nodeId, stackName: direct.stackName, applicationName: direct.name }]);
@@ -103,7 +103,7 @@ describe('portfolio row actions and attention next steps', () => {
     expect(captured<SenchoOpenStackDetail>(SENCHO_OPEN_STACK_EVENT, git.run)).toEqual([]);
   });
 
-  it('opens a Direct source failure Git source in place', () => {
+  it('opens a Direct source failure Git source in place when the session cannot retry it', () => {
     const next = attentionNextStep('source_failed', direct);
     expect(next.label).toBe('Open Git source');
     expect(captured<GitOpsGitSourceTarget>(GITOPS_GIT_SOURCE_EVENT, next.run))
@@ -145,6 +145,27 @@ describe('portfolio row actions and attention next steps', () => {
     expect(attentionNextStep('deploy_failed', direct).label).toBe('Open stack');
     expect(captured<SenchoOpenStackDetail>(SENCHO_OPEN_STACK_EVENT, attentionNextStep('health_failed', direct).run)[0]?.destination).toBe('stack');
     expect(attentionNextStep('source_failed', direct).label).toBe('Open Git source');
+  });
+
+  it.each([
+    ['source_failed', 'retry'],
+    ['source_retry_scheduled', 'retry'],
+    ['source_unknown_outcome', 'retry'],
+    ['source_suspended', 'resume'],
+  ] as const)('runs %s as %s in place when the session may', (reason, action) => {
+    const next = attentionNextStep(reason, direct, { can: wanted => wanted === action });
+    expect(next.label).toBe(action === 'resume' ? 'Resume' : 'Retry');
+  });
+
+  it('falls back to opening the Git source when the session may not run the verb', () => {
+    expect(attentionNextStep('source_suspended', direct, { can: () => false }).label).toBe('Open Git source');
+  });
+
+  it('opens a Direct pending update review in the Git source, which pulls and shows the diff', () => {
+    const next = attentionNextStep('source_review_pending', direct);
+    expect(next.label).toBe('Review update');
+    expect(captured<GitOpsGitSourceTarget>(GITOPS_GIT_SOURCE_EVENT, next.run))
+      .toEqual([{ nodeId: direct.nodeId, stackName: direct.stackName, applicationName: direct.name, intent: 'review' }]);
   });
 
   it('opens the application for a Blueprint failure, which has no single stack', () => {

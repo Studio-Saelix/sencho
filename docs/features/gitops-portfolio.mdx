@@ -34,7 +34,7 @@ Rows with pending or failed items are tinted so the list reads as a signal, not 
 
 ## The attention queue
 
-Above the list, the **Attention required** section groups everything currently waiting: failed reconciliations, pending reviews or authorizations, preflight blocks like an unready private registry, partial or paused rollouts, drift, stale or unreachable targets, and recovery states. Each entry names the application and states the reason in one inline line, so it is readable without hovering anything. Opening an entry shows that application's full state (see [One application](#one-application) below). Each entry also carries its next step: **Review** for a decision waiting on you on a hub-local Git-managed Blueprint (it opens the application, where the accept, approve, and authorize actions live), **Inspect** for a node-scoped remote Blueprint, **Open stack** for a failed deploy or health check on a stack, and **Open Git source** for a source that failed to fetch, which opens that stack's Git Source sheet over the portfolio on the stack's own node, so you can pull, review, and apply without leaving GitOps.
+Above the list, the **Attention required** section lists everything currently waiting: failed reconciliations, pending reviews or authorizations, preflight blocks like an unready private registry, partial or paused rollouts, drift, stale or unreachable targets, and recovery states. Each application appears once, with its most urgent reason in a line of its own (so it is readable without hovering anything) and a count of any others. Each entry carries the step that resolves it, and the step happens where you are: **Retry** for a source that failed to fetch and **Resume** for a suspended one run right there, **Review update** opens that stack's Git Source sheet over the portfolio, pulled and showing the diff when an update is waiting, so you can apply it without leaving GitOps, **Open stack** takes you to a failed deploy or health check on a stack, and **Review** opens a hub-local Git-managed Blueprint's own sheet, where the accept, approve, and authorize actions live. A node-scoped remote Blueprint offers **Inspect** instead. When your account cannot retry or resume a source, the entry opens the Git Source sheet instead of offering a button that would be refused.
 
 Failure-toned entries (failures, unreachable targets, failed rollbacks or recovery) sort ahead of pending decisions.
 
@@ -42,10 +42,10 @@ A stack whose health check failed stops asking for you while that same version i
 
 ## One application
 
-Selecting an application name in the list, or an entry in the attention queue, opens that application's view without leaving the portfolio. It is read-only and shows, in order:
+Selecting an application, from the list or the attention queue, opens it over the portfolio, which stays where it was underneath. A Direct application is its stack's Git source, so it opens that stack's Git Source sheet; a Blueprint application opens its own sheet, which shows, in order:
 
 <Frame>
-  <img src="/images/gitops-portfolio/application-view.png" alt="The application view for a Direct Git application: an identity card with repository, ref, commits and generations, a single status block reading needs attention with a row of stage states beneath it and an Evidence control, and one target card reading applied not deployed" />
+  <img src="/images/gitops-portfolio/application-view.png" alt="A Blueprint application sheet opened over the portfolio: a toolbar with Open Blueprint, an identity card, and an application state block with its stage row and an Evidence control" />
 </Frame>
 
 - **Identity**: the target (Direct node or Blueprint), the repository and ref, the desired and fetched commits, the candidate and accepted source generations, and for a Blueprint application the rollout generation.
@@ -54,13 +54,13 @@ Selecting an application name in the list, or an entry in the attention queue, o
 - **Drift**: each confirmed divergence, expected versus observed, classified by class. Work that is merely in progress (a staged candidate, a queued rollout, a deployed target still awaiting its health verdict) is not drift. The classes, what each is measured against, and where each one appears are documented in [the drift model](/features/gitops-drift-model).
 - Anything Sencho could not prove about the state shown is under **Evidence** in the application state, and the status block says how many items there are.
 
-When some targets could not be reached, a notice names them so their cards are not read as current. The view's URL carries the application, so it can be bookmarked or shared, and the browser's Back button (or **All applications**) returns to the list with its filters intact. If the owning node reports an application without evidence this hub can read yet, the view says evidence is unavailable and offers **Retry** instead of reporting the application as missing.
+When some targets could not be reached, a notice names them so their cards are not read as current. The sheet's URL carries the application, so it can be bookmarked or shared, and closing the sheet (or the browser's Back button) returns to the list with its filters and scroll intact. If the owning node reports an application without evidence this hub can read yet, the sheet says evidence is unavailable and offers **Retry** instead of reporting the application as missing.
 
-To act on the application, use the outstanding authority action in the state section when one is offered, or the button in the view's header: **Open Git source** opens a Direct application's Git Source sheet over the view, and **Open Blueprint deployments** takes a Blueprint application to the Fleet deployments tab.
+To act on a Blueprint application, use the outstanding authority action in the state section when one is offered, or **Open Blueprint** in the sheet's toolbar, which takes it to the Fleet deployments tab.
 
 ## Getting to related pages
 
-Every row ends in a menu that opens the application, its stack, or its Git source (the Git Source sheet opens in place over the portfolio); a Blueprint row also opens that Blueprint in **Fleet → Deployments**. Next to the filters, **Connect a stack to Git** opens the Create Stack dialog on its **From Git** tab, and **New Blueprint** opens the Blueprint create dialog; an empty portfolio offers the same two actions.
+Clicking anywhere on a row opens it. Every row also ends in a menu that opens its stack or its Git source (the Git Source sheet opens in place over the portfolio) or, for a Blueprint application, its sheet; a Blueprint row also opens that Blueprint in **Fleet → Deployments**. Next to the filters, **Connect a stack to Git** opens the Create Stack dialog on its **From Git** tab, and **New Blueprint** opens the Blueprint create dialog; an empty portfolio offers the same two actions.
 
 The way back works too: a stack's Git source panel and a Blueprint's detail each have an **Open in GitOps portfolio** link that opens the portfolio narrowed to that application, and a Fleet node card shows a **GitOps · N attention** chip that opens the applications needing attention on that node.
 
@@ -84,4 +84,4 @@ The portfolio refreshes on GitOps transitions, not on a timer. When a node canno
 - Verifying a rollout or webhook pipeline end to end, across stacks and nodes.
 - Finding drift concentrated on a node or in one class, for example all runtime drift across the fleet at once.
 
-A Git-managed Blueprint application can be acted on in place from its state section: the outstanding authority step, the rollout lifecycle controls, and rollout rollback. Everything else keeps its home on the owning stack or Blueprint surface, and the view links there instead of duplicating it.
+A Git-managed Blueprint application can be acted on in place from its sheet's state section: the outstanding authority step, the rollout lifecycle controls, and rollout rollback. Everything else keeps its home on the owning stack or Blueprint surface, and the sheet links there instead of duplicating it.

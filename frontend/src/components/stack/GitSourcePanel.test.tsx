@@ -857,6 +857,55 @@ describe('GitSourcePanel GitOps state', () => {
       vi.mocked(apiFetch).mock.calls.some(c => String(c[0]).includes('/git-source/pull')),
     ).toBe(true));
   });
+
+  describe('opened to review (autoReview)', () => {
+    const pullCalls = () => vi.mocked(apiFetch).mock.calls.filter(c => String(c[0]).includes('/git-source/pull')).length;
+
+    it('pulls once on opening when an update is waiting, with no extra click', async () => {
+      vi.mocked(apiFetch).mockResolvedValue(jsonRes(linkedWith(sourceRevision('candidate_ready'))));
+      render(panel({ autoReview: true }));
+
+      await waitFor(() => expect(pullCalls()).toBe(1));
+      // A refresh of the panel's own state must not start a second review.
+      await screen.findByRole('button', { name: 'Review update' });
+      expect(pullCalls()).toBe(1);
+    });
+
+    it('does not pull on a reopen from what the sheet held before, only from the fresh read', async () => {
+      vi.mocked(apiFetch).mockResolvedValue(jsonRes(linkedWith(sourceRevision('candidate_ready'))));
+      const { rerender } = render(panel({ autoReview: true }));
+      await waitFor(() => expect(pullCalls()).toBe(1));
+      await screen.findByRole('button', { name: 'Review update' });
+
+      rerender(panel({ autoReview: true, open: false }));
+      // On reopening, the update has since been applied elsewhere.
+      vi.mocked(apiFetch).mockResolvedValue(
+        jsonRes(linkedWith(sourceRevision('application_generation_accepted', { candidateGenerationId: null }))),
+      );
+      rerender(panel({ autoReview: true, open: true }));
+
+      await sheetLoaded();
+      expect(pullCalls()).toBe(1);
+    });
+
+    it('does nothing when no update is waiting', async () => {
+      vi.mocked(apiFetch).mockResolvedValue(
+        jsonRes(linkedWith(sourceRevision('application_generation_accepted', { candidateGenerationId: null }))),
+      );
+      render(panel({ autoReview: true }));
+
+      await sheetLoaded();
+      expect(pullCalls()).toBe(0);
+    });
+
+    it('stays a plain open without the flag', async () => {
+      vi.mocked(apiFetch).mockResolvedValue(jsonRes(linkedWith(sourceRevision('candidate_ready'))));
+      render(panel());
+
+      await screen.findByRole('button', { name: 'Review update' });
+      expect(pullCalls()).toBe(0);
+    });
+  });
 });
 
 function controllerRevision(args: {

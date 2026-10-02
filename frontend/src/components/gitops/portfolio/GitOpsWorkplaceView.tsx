@@ -8,7 +8,7 @@ import { useGitOpsPortfolio } from './useGitOpsPortfolio';
 import { useWorkplaceCapabilities } from './useWorkplaceCapabilities';
 import { WorkplaceActions } from './WorkplaceActions';
 import { GitOpsGitSourceHost } from './GitOpsGitSourceHost';
-import { GitOpsApplicationView } from '../application/GitOpsApplicationView';
+import { GitOpsApplicationSheet } from '../application/GitOpsApplicationSheet';
 import type { GitOpsPortfolioResponse } from '@/types/gitopsPortfolio';
 import { useGitOpsApplicationSelection } from '../application/useGitOpsApplicationSelection';
 
@@ -21,10 +21,10 @@ import { useGitOpsApplicationSelection } from '../application/useGitOpsApplicati
  * parallel status engine. Refresh is event-driven (gitops invalidate channel),
  * never a per-node browser poll.
  *
- * A row drills into its application view in place (the `application` query
- * parameter). The portfolio hook keeps running while the application view
- * replaces the list, so returning keeps its filters and page (both held in
- * hook state) without a reload.
+ * A row opens its sheet over the list (a Direct application's Git source, or a
+ * Blueprint application's own sheet keyed by the `application` query
+ * parameter), so nothing about the list is lost and a decision is made where the
+ * state is read.
  *
  * Desktop only by itself; the phone treatment is the bespoke screen in
  * components/mobile/MobileGitOps.tsx (mobile-treatments entry: bespoke).
@@ -34,14 +34,13 @@ export function GitOpsWorkplaceView() {
   const selectedApplication = useGitOpsApplicationSelection();
   const { canOpenFleet } = useWorkplaceCapabilities();
 
-  // One stable mount above both branches, so "Open Git source" opens the sheet
-  // in place from either and switching between them never drops it.
+  // The list stays mounted under both sheets, so closing one lands back on the
+  // same filters, page, and scroll without a reload.
   return (
     <>
       <GitOpsGitSourceHost />
-      {selectedApplication !== null
-        ? <GitOpsApplicationView key={selectedApplication} id={selectedApplication} />
-        : <PortfolioList portfolio={portfolio} canOpenFleet={canOpenFleet} />}
+      <PortfolioList portfolio={portfolio} canOpenFleet={canOpenFleet} />
+      {selectedApplication !== null && <GitOpsApplicationSheet key={selectedApplication} id={selectedApplication} />}
     </>
   );
 }
