@@ -103,8 +103,8 @@ describe('PUT /api/security/evidence-policy', () => {
       expect(summaries).toHaveLength(1);
       expect(summaries[0]).toContain('changed=[scanFailure]');
       // The previous value matters as much as the new one: "who loosened it,
-      // and from what".
-      expect(summaries[0]).toContain('was=[scanFailure=block]');
+      // and from what to what".
+      expect(summaries[0]).toContain('transitions=[scanFailure:block->allow]');
     } finally {
       audit.mockRestore();
     }

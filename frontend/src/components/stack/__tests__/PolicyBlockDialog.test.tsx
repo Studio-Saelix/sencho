@@ -248,8 +248,10 @@ describe('PolicyBlockDialog', () => {
     expect(screen.getByText(/1 KEV/)).toBeInTheDocument();
     expect(screen.getByText('Fixable')).toBeInTheDocument();
     // The failed row shows its reason under the could-not-be-scanned label.
+    // Matched exactly and case-sensitively: the mixed-payload banner added
+    // later also contains the phrase, in sentence case.
     expect(screen.getByText(/Pre-flight scan failed: timeout/i)).toBeInTheDocument();
-    expect(screen.getByText(/could not be scanned/i)).toBeInTheDocument();
+    expect(screen.getByText('Could not be scanned')).toBeInTheDocument();
     // The recovery hint appears once for the whole list, not per failed row.
     expect(screen.getAllByText(/deploy again/i)).toHaveLength(1);
   });

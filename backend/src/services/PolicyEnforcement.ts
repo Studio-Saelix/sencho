@@ -36,6 +36,7 @@ import {
     type EvidenceGateDecision,
     type EvidenceRuleApplication,
     type SecurityEvidenceRecord,
+    type SecurityEvidenceState,
 } from './securityEvidence';
 import {
     resolveSecurityEvidencePolicy,
@@ -727,6 +728,19 @@ export async function enforcePolicyForImageRefs(
         } catch (err) {
             const message = getErrorMessage(err, 'policy evaluation failed');
             console.error(`[Policy] policy evaluation failed for ${imageRef}:`, message);
+            // Recorded as evidence as well as a violation. The scan is current,
+            // but the decision it was supposed to support is not, and a consumer
+            // that reads only the evidence records (the candidate path does) must
+            // still see this image as unproven. Without this record an evaluation
+            // failure looked identical to a clean pass.
+            evidenceRecords.push({
+                source: 'vulnerability_scan',
+                state: 'failed',
+                target: imageRef,
+                collectedAt: scan.scanned_at,
+                digest: scan.image_digest ?? null,
+                reason: `Policy evaluation failed: ${message}`,
+            });
             violations.push({
                 imageRef,
                 severity: 'UNKNOWN',
@@ -831,26 +845,87 @@ export async function evaluateCandidatePolicy(
     // unattended automation to accept a candidate nothing proved safe. The
     // default holds, which is also what this path did before it was
     // configurable.
-    const unproven = (result.evidence?.records ?? []).filter((r) => r.state !== 'current');
+    // Unproven is read from BOTH the evidence records and the violations, not
+    // from the records alone. A violation carrying `error` is by construction a
+    // case the gate could not evaluate, and deriving this only from records made
+    // an evaluation failure look clean: the scan itself is `current`, so nothing
+    // in the records said otherwise. Two independent signals, so a future record
+    // that is missed cannot silently become authority to accept.
+    const unprovenTargets = new Set<string>();
+    for (const r of result.evidence?.records ?? []) {
+        if (r.state !== 'current') unprovenTargets.add(r.target);
+    }
+    for (const v of result.violations) {
+        if (v.error) unprovenTargets.add(v.imageRef);
+    }
+    const unproven = [...unprovenTargets];
     if (unproven.length > 0) {
         const { candidateUnproven } = loadGateSettings().evidencePolicy;
+        // The rule is recorded on the decision itself. An acceptance on unproven
+        // evidence that left no trace of which setting permitted it would
+        // contradict the whole point of resolving the rule into the record, and
+        // this is the one path where "allowed" and "proven clean" look alike
+        // downstream.
+        const evidence = withCandidateRuleApplied(result.evidence, candidateUnproven, unproven);
         if (candidateUnproven === 'allow') {
-            return { status: 'allowed', policy: result.policy, evidence: result.evidence };
+            return { status: 'allowed', policy: result.policy, evidence };
         }
         if (candidateUnproven === 'warn') {
             notifyEvidenceWarningOnce(
                 nodeId, stackName, 'security_candidate_unproven',
-                `a candidate image could not be fully evaluated (${unproven.map((r) => r.target).join(', ')})`,
+                `a candidate image could not be fully evaluated (${unproven.join(", ")})`,
             );
-            return { status: 'allowed', policy: result.policy, evidence: result.evidence };
+            return { status: 'allowed', policy: result.policy, evidence };
         }
         return {
             status: 'unavailable',
             policy: result.policy,
-            evidence: result.evidence,
+            evidence,
             reason: 'Candidate could not be fully evaluated',
         };
     }
 
     return { status: 'allowed', policy: result.policy, evidence: result.evidence };
+}
+
+/**
+ * Attach the candidate rule to a decision that had no application of its own.
+ *
+ * The shared evaluator only records applications for rules it applied, and it
+ * does not know about `candidateUnproven`. Without this the record for an
+ * accepted-on-unproven candidate is indistinguishable from a clean one.
+ */
+function withCandidateRuleApplied(
+    decision: EvidenceGateDecision | undefined,
+    outcome: EvidenceAvailabilityOutcome,
+    targets: string[],
+): EvidenceGateDecision | undefined {
+    if (!decision) return decision;
+    // One application per unproven target, even when the evaluator already
+    // recorded an application for it. Those name the deploy-gate rule that fired
+    // (a scan failure, say); this one names the candidate rule that decided what
+    // to do about it, and the two are different facts. The state is reused from
+    // whatever already described this target, so the entry does not restate it
+    // differently.
+    const stateFor = (target: string): SecurityEvidenceState =>
+        decision.applications.find((a) => a.target === target && a.state !== 'current')?.state ??
+        decision.records.find((r) => r.target === target && r.state !== 'current')?.state ??
+        'not_evaluated';
+    const added: EvidenceRuleApplication[] = targets.map((target) => ({
+        source: 'vulnerability_scan' as const,
+        state: stateFor(target),
+        outcome,
+        rule: ruleClause('security_candidate_unproven', outcome),
+        target,
+    }));
+    return {
+        ...decision,
+        applications: [...decision.applications, ...added],
+        // The candidate's own decision, not the most restrictive of the two.
+        // This object describes what happened to the candidate, and the two
+        // statuses must agree: reporting `block` beside a `status: 'allowed'`
+        // would say the candidate was both held and accepted. The deploy-gate
+        // rules remain visible per application, which is where they belong.
+        outcome,
+    };
 }

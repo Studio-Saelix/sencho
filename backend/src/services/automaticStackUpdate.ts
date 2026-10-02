@@ -1,4 +1,5 @@
 import { enforcePolicyPreDeploy, type PolicyEnforcementOptions } from './PolicyEnforcement';
+import { describePolicyBlock } from '../helpers/policyGate';
 import { StackOpLockService, stackOpSkipMessage } from './StackOpLockService';
 import { StackUpdateOrchestrator } from './StackUpdateOrchestrator';
 import { HealthGateService } from './HealthGateService';
@@ -7,7 +8,6 @@ import { ImageUpdateService, UPDATE_VERIFICATION_INCOMPLETE_WARNING } from './Im
 import { NotificationService } from './NotificationService';
 import { invalidateNodeCaches } from '../helpers/cacheInvalidation';
 import { getRegistryDeliveryLockContext } from '../helpers/registryDeliveryContext';
-import { summarizeBlockReasons } from '../utils/policy-risk';
 import { sanitizeForLog } from '../utils/safeLog';
 
 export interface AutomaticStackUpdateInput {
@@ -35,8 +35,9 @@ export async function applyAutomaticStackUpdate(input: AutomaticStackUpdateInput
       await input.observation?.verify();
       const policy = await enforcePolicyPreDeploy(stackName, nodeId, { ...input.policyOptions, bypass: false });
       if (!policy.ok) {
-        const images = policy.violations.map(v => v.imageRef).join(', ');
-        const message = `Policy "${policy.policy?.name}" blocked auto-update: ${policy.violations.length} image(s) matched ${summarizeBlockReasons(policy.violations)}${images ? ` (${images})` : ''}`;
+        // Same wording as every other path, so a scanner outage is not reported
+        // as a matched finding on an unattended update.
+        const message = describePolicyBlock(policy.policy, policy.violations, 'update', policy.evidence);
         NotificationService.getInstance().dispatchAlert('warning', 'scan_finding', message, { stackName, actor: 'system:image-update' });
         return { result: 'policy_blocked' as const, applied: false, healthGateId: null, message: `Stack "${stackName}": ${message}` };
       }

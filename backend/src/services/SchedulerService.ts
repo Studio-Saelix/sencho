@@ -43,6 +43,7 @@ import { filterContainersByComposeService } from '../helpers/composeServiceMatch
 import { excludeSelfContainers } from '../helpers/excludeSelfContainers';
 import { enforcePolicyPreDeploy } from './PolicyEnforcement';
 import { summarizeBlockReasons } from '../utils/policy-risk';
+import { describePolicyBlock } from '../helpers/policyGate';
 import { resolveTaskPermissionScope, type BackendScheduledAction, type TargetType } from './scheduledActionRegistry';
 import { checkPermissionForSubject, type PermissionSubject } from '../middleware/permissions';
 import { AutoUpdateRemoteCoordinator, type RemoteAutoUpdateInput } from './AutoUpdateRemoteCoordinator';
@@ -231,17 +232,20 @@ export class SchedulerService {
             buildSystemPolicyGateOptions(actor, { auditPath }),
         );
         if (gate.ok) return;
-        const images = gate.violations.map((v) => v.imageRef).join(', ');
-        const reasons = summarizeBlockReasons(gate.violations);
-        this.safeDispatch(
-            'warning',
-            'scan_finding',
-            `${action} blocked for "${stackName}" by policy "${gate.policy?.name}": ${gate.violations.length} image(s) matched ${reasons}${images ? ` (${images})` : ''}`,
-            stackName,
+        // describePolicyBlock distinguishes a matched finding from missing
+        // evidence. Composing the sentence here instead reported a scanner
+        // outage as a policy match on the unattended path.
+        // Mapped to the shared vocabulary: a scheduled auto-start is a start of
+        // the stack, and an auto-update is an update, so the message names the
+        // operation the operator scheduled rather than an internal label.
+        const message = describePolicyBlock(
+            gate.policy,
+            gate.violations,
+            action === 'Auto-update' ? 'update' : 'deploy',
+            gate.evidence,
         );
-        throw new Error(
-            `${action} blocked by policy "${gate.policy?.name}": ${gate.violations.length} image(s) matched ${reasons}`,
-        );
+        this.safeDispatch('warning', 'scan_finding', `${action} blocked for "${stackName}": ${message}`, stackName);
+        throw new Error(message);
     }
 
     private async tick(): Promise<void> {

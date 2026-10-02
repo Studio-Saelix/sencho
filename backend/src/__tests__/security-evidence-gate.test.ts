@@ -180,7 +180,12 @@ describe('scanner unavailability policy', () => {
     it('never reports an unavailable scanner as a clean scan on the candidate path', async () => {
         const candidate = await evaluateCandidatePolicy('web', 1, ['nginx:1.27'], { bypass: false, actor: 'system' });
         expect(candidate.status).toBe('unavailable');
-        expect(candidate.evidence?.outcome).toBe('allow');
+        // The outcome is the candidate's own decision, so it reflects the
+        // candidate rule that held it rather than the deploy gate's allowance.
+        expect(candidate.evidence?.outcome).toBe('block');
+        expect(candidate.evidence?.applications).toContainEqual(
+            expect.objectContaining({ rule: 'security_candidate_unproven=block' }),
+        );
     });
 
     it('behaves identically under warn and allow, because the alert fires either way', async () => {
@@ -253,6 +258,67 @@ describe('candidate acceptance applies its own rule', () => {
         // A relaxed candidate rule must not downgrade a proven finding into an
         // evidence gap.
         expect(candidate.status).toBe('blocked');
+    });
+
+    it('holds a candidate whose policy evaluation threw, whatever the deploy settings say', async () => {
+        // The release blocker this guards. The scan itself succeeded, so its
+        // evidence record reads `current`; only the evaluation failed. Deriving
+        // "unproven" from the records alone therefore came out empty and the
+        // candidate was auto-accepted: a fail-open on the unattended path, at the
+        // default settings, on an evaluation error.
+        dbStub.getGlobalSettings.mockReturnValue({
+            security_scanner_unavailable: 'allow',
+            security_scan_failure: 'allow',
+        });
+        dbStub.getMatchingPolicy.mockReturnValue(mkPolicy({ block_on_severity: 0, block_on_kev: 1 }));
+        primeCleanScan({ total_vulnerabilities: 1, highest_severity: 'LOW' });
+        dbStub.getAllVulnerabilityDetails.mockReturnValue([{ vulnerability_id: 'CVE-2024-0001' }]);
+        dbStub.getCveIntel.mockImplementation(() => {
+            throw new Error('database is locked');
+        });
+        const candidate = await evaluateCandidatePolicy('web', 1, ['nginx:1.27'], { bypass: false, actor: 'system' });
+        expect(candidate.status).toBe('unavailable');
+    });
+
+    it('follows its own setting for an evaluation failure too', async () => {
+        // The rule is one rule: an evaluation failure is unproven, so relaxing
+        // the candidate setting accepts it and nothing else does.
+        dbStub.getGlobalSettings.mockReturnValue({ security_candidate_unproven: 'allow' });
+        dbStub.getMatchingPolicy.mockReturnValue(mkPolicy({ block_on_severity: 0, block_on_kev: 1 }));
+        primeCleanScan({ total_vulnerabilities: 1, highest_severity: 'LOW' });
+        dbStub.getAllVulnerabilityDetails.mockReturnValue([{ vulnerability_id: 'CVE-2024-0001' }]);
+        dbStub.getCveIntel.mockImplementation(() => {
+            throw new Error('database is locked');
+        });
+        const candidate = await evaluateCandidatePolicy('web', 1, ['nginx:1.27'], { bypass: false, actor: 'system' });
+        expect(candidate.status).toBe('allowed');
+    });
+
+    it('records which setting permitted an accepted unproven candidate', async () => {
+        dbStub.getGlobalSettings.mockReturnValue({ security_candidate_unproven: 'allow' });
+        trivyStub.scanImagePreflight.mockRejectedValue(new Error('scan process crashed'));
+        const candidate = await evaluateCandidatePolicy('web', 1, ['nginx:1.27'], { bypass: false, actor: 'system' });
+        expect(candidate.status).toBe('allowed');
+        // An acceptance on unproven evidence must not be indistinguishable from a
+        // clean one once persisted.
+        expect(candidate.evidence?.applications).toContainEqual(
+            expect.objectContaining({
+                rule: 'security_candidate_unproven=allow',
+                target: 'nginx:1.27',
+                outcome: 'allow',
+            }),
+        );
+        expect(candidate.evidence?.outcome).toBe('allow');
+    });
+
+    it('reports the real evidence state on the application it adds', async () => {
+        // The added application must describe the state the evaluator found, not
+        // a generic one, or the record misstates what was wrong.
+        dbStub.getGlobalSettings.mockReturnValue({ security_candidate_unproven: 'allow' });
+        trivyStub.scanImagePreflight.mockRejectedValue(new Error('scan process crashed'));
+        const candidate = await evaluateCandidatePolicy('web', 1, ['nginx:1.27'], { bypass: false, actor: 'system' });
+        const app = candidate.evidence?.applications?.find((a) => a.rule.startsWith('security_candidate_unproven'));
+        expect(app?.state).toBe('failed');
     });
 
     it('accepts a candidate on an authorized bypass', async () => {

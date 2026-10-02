@@ -373,11 +373,12 @@ securityRouter.put('/evidence-policy', authMiddleware, (req: Request, res: Respo
     // Named by the field an operator sees, not by the settings row it is stored
     // in, so the audit reads as a record of the control that moved.
     const changed: string[] = [];
-    const previous: string[] = [];
+    const fromTo: string[] = [];
     for (const field of OUTCOME_FIELDS) {
-      if (next[SECURITY_EVIDENCE_SETTING_KEYS[field]] !== undefined) {
+      const written = next[SECURITY_EVIDENCE_SETTING_KEYS[field]];
+      if (written !== undefined) {
         changed.push(field);
-        previous.push(`${field}=${before[field]}`);
+        fromTo.push(`${field}:${before[field]}->${written}`);
       }
     }
     if (changed.length === 0) {
@@ -395,10 +396,11 @@ securityRouter.put('/evidence-policy', authMiddleware, (req: Request, res: Respo
       status_code: 200,
       node_id: typeof req.nodeId === 'number' ? req.nodeId : null,
       ip_address: req.ip ?? '',
-      // Records the previous values as well as the new ones. These fields
-      // decide whether a deploy is refused, so "who loosened it, when, and from
-      // what" has to be answerable from the audit log alone.
-      summary: `policy.evidence_availability changed=[${changed.join(',')}] was=[${previous.join(',')}]`,
+      // The previous value and the new one, per field. These settings decide
+      // whether a deploy is refused, so "who loosened it, when, and from what to
+      // what" has to be answerable from the audit log alone; a bare list of
+      // field names would not answer the last part.
+      summary: `policy.evidence_availability changed=[${changed.join(',')}] transitions=[${fromTo.join(',')}]`,
     });
     res.json({
       policy: serializeSecurityEvidencePolicy(resolveSecurityEvidencePolicy(db.getGlobalSettings())),

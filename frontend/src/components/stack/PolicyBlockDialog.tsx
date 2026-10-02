@@ -197,8 +197,14 @@ export function PolicyBlockDialog({
         </div>
         {violations.some((v) => v.error) && (
           <p className="text-sm text-muted-foreground mt-3">
-            The deploy was blocked because the scan did not complete. Resolve the issue above and
-            deploy again, or bypass if you accept the risk.
+            {hasGenuineViolation
+              ? // On a mixed payload this banner is additional context, not the
+                // reason for the block, and saying otherwise would be the same
+                // false whole-block claim the paragraph above avoids. The
+                // recovery hint below still applies: the unscanned image needs
+                // resolving either way.
+                'Some images could not be scanned as well. Those images are listed above without a finding count, so the block may rest on fewer images than the policy would otherwise have examined. Resolve the issue above and deploy again, or bypass if you accept the risk.'
+              : 'The deploy was blocked because the scan did not complete. Resolve the issue above and deploy again, or bypass if you accept the risk.'}
           </p>
         )}
         {evidenceLines.length > 0 && (

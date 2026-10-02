@@ -34,9 +34,17 @@ export function describePolicyBlock(
   // standing in for evidence the gate could not obtain.
   const genuine = violations.filter((v) => !v.error);
   if (genuine.length > 0) {
-    return `Policy "${name}" blocked ${action}: ${genuine.length} image(s) matched ${summarizeBlockReasons(genuine)}`;
+    // The offending images are named, as they were before the evidence-aware
+    // message: on the unattended paths this sentence is the only account of which
+    // images were involved.
+    const images = genuine.map((v) => v.imageRef).join(', ');
+    return `Policy "${name}" blocked ${action}: ${genuine.length} image(s) matched ${summarizeBlockReasons(genuine)} images=[${images}]`;
   }
-  if (evidence) {
+  // The summary is only meaningful when a rule actually decided something. On an
+  // evaluation or scan failure no application exists, and `decideEvidenceGate`
+  // reports "No security evidence was required", which would directly contradict
+  // the sentence it is appended to.
+  if (evidence && evidence.applications.length > 0) {
     return `Policy "${name}" blocked ${action} because required security evidence was unavailable: ${evidence.summary}`;
   }
   return `Policy "${name}" blocked ${action}: ${violations.length} image(s) could not be evaluated`;
