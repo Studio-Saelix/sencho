@@ -133,14 +133,18 @@ export function secretFreeRepoUrlFromStorable(parsed: ParseStorableRepoUrlResult
  *   - the `.git` suffix, which every Git host accepts and none requires;
  *   - trailing slashes;
  *   - host casing, which an scp-style URL preserves and an `https://` URL
- *     lowercases.
+ *     lowercases;
+ *   - the port, which an SSH URL carries and an HTTPS URL on the default port
+ *     omits.
  *
- * The three rules below are exactly what collapses those variants, and each
- * stops short of guessing: a `.git` suffix is stripped once, from the last
- * path segment only, so `/org.git/repo` and `repo.git.git` stay distinct
- * repositories; the path is never case-folded because Git hosts treat it
- * case-sensitively; and `..` is refused rather than resolved, since a caller
- * asking about a traversal has a bug, not a repository.
+ * The rules below are exactly what collapses those variants, and each stops
+ * short of guessing: a `.git` suffix is stripped once, from the last path
+ * segment only, so `/org.git/repo` and `repo.git.git` stay distinct
+ * repositories; the port is dropped rather than compared, because a forge
+ * serving HTTPS on 443 and SSH on 2222 is one repository reached two ways; the
+ * path is never case-folded because Git hosts treat it case-sensitively; and
+ * `..` is refused rather than resolved, since a caller asking about a traversal
+ * has a bug, not a repository.
  *
  * `null` means the URL names no repository the guard can reason about. A
  * caller that is deciding exclusivity must read that as a refusal, never as
@@ -149,6 +153,20 @@ export function secretFreeRepoUrlFromStorable(parsed: ParseStorableRepoUrlResult
 export function canonicalRepoKey(identity: RepoIdentity): string | null {
   const host = identity.host.trim().toLowerCase();
   if (host === '' || host.includes('/')) return null;
+  // The port is deliberately not part of the key. `RepoIdentity` folds an SSH
+  // port into `host`, and a self-hosted forge commonly serves HTTPS on 443
+  // and SSH on 2222, so keeping it would hand the HTTPS and SSH spellings of
+  // one repository two different keys, which is the bypass this key exists to
+  // close. Dropping it merges a pair that was genuinely different (two
+  // repositories on two ports of one host), which costs a refusal rather than
+  // a duplicate claim.
+  //
+  // The host of a bracketed IPv6 literal ends at the closing bracket; any other
+  // host carries at most one colon, the port separator, so cutting at the first
+  // one drops the port.
+  const bracket = host.indexOf(']');
+  const hostname = bracket >= 0 ? host.slice(0, bracket + 1) : host.split(':')[0];
+  if (hostname === '' || hostname === '[]') return null;
   const segments = identity.pathname.split('/');
   if (segments.some((segment) => segment === '..')) return null;
   while (segments.length > 1 && segments[segments.length - 1] === '') segments.pop();
@@ -158,7 +176,7 @@ export function canonicalRepoKey(identity: RepoIdentity): string | null {
   }
   const pathname = segments.join('/');
   if (pathname === '' || pathname === '/') return null;
-  return `${host}${pathname}`;
+  return `${hostname}${pathname}`;
 }
 
 /** `canonicalRepoKey` for a configured URL, or null when it names no repository. */
@@ -171,13 +189,22 @@ export function canonicalRepoKeyFromUrl(raw: string): string | null {
 export function repoUrlRejectionMessage(raw: string): string | null {
   const parsed = parseStorableRepoUrl(raw);
   if (parsed.ok) {
-    // A URL that parses but names no repository (a bare host, a host with an
-    // empty path) cannot be compared against any other repository, so it could
-    // never be claimed by a Blueprint-mode application. Refusing it here is
-    // what keeps an unclaimable URL out of the store, rather than discovering
-    // it later at conversion time with nothing the operator can act on.
-    return canonicalRepoKeyFromUrl(raw) === null
-      ? 'Repository URL must include a repository path'
+    // What gets persisted is the secret-free derived form, not the URL that was
+    // submitted, and a Blueprint-mode row is compared on that stored form later.
+    // So the stored form has to name the same repository the submission did, or
+    // ingress accepts a source the claim guard then refuses for a URL the
+    // operator never sees. The two disagree in both directions: an scp-style
+    // URL carries `?` and `#` verbatim, so it keys fine as given while the
+    // `ssh://` form actually stored cannot be parsed at all, and a host holding
+    // a slash (`git@foo/bar:org/repo`) reparses as host `foo` with the rest of
+    // the host absorbed into the path.
+    const stored = parseStorableRepoUrl(secretFreeRepoUrlFromStorable(parsed));
+    const submittedKey = canonicalRepoKey(serializeRepoIdentityFromStorable(parsed));
+    const storedKey = stored.ok
+      ? canonicalRepoKey(serializeRepoIdentityFromStorable(stored))
+      : null;
+    return submittedKey === null || storedKey === null || submittedKey !== storedKey
+      ? 'Repository URL must identify one repository'
       : null;
   }
   switch (parsed.reason) {

@@ -5,7 +5,7 @@ import { GitOpsStore } from '../services/gitops/store';
 import { GitOpsTransitions, GitOpsTransitionError, type EventEnvelope } from '../services/gitops/transitions';
 import { directApplicationFixture } from './helpers/gitopsFixtures';
 import { encodeGitOpsJson } from '../services/gitops/json';
-import { parseStorableRepoUrl, serializeRepoIdentityFromStorable } from '../services/gitops/repoIdentity';
+import { parseStorableRepoUrl, secretFreeRepoUrlFromStorable, serializeRepoIdentityFromStorable } from '../services/gitops/repoIdentity';
 import type { GitOpsApplicationRow } from '../services/gitops/types';
 
 describe('gitops binding transitions', () => {
@@ -318,13 +318,28 @@ function createBlueprint(name: string): number {
   }).id;
 }
 
+/**
+ * A Direct application row carrying the URL a real row would store.
+ *
+ * `directSourceIdentity` persists the secret-free derived form, not the URL the
+ * operator typed, so an SSH source is stored as `ssh://git@host/path` and never
+ * as the scp spelling. Passing the scp form through unchanged would store a row
+ * production cannot create, and would leave the guard untested against the one
+ * form it actually reads.
+ */
 function app(id: string, stackName: string, repoUrl?: string): GitOpsApplicationRow {
-  const url = repoUrl ?? `https://github.com/example/${stackName}.git`;
+  const raw = repoUrl ?? `https://github.com/example/${stackName}.git`;
   return {
     ...directApplicationFixture(id, stackName),
-    configured_repo_url: url,
-    repo_identity_json: encodeGitOpsJson(identityOf(url)),
+    configured_repo_url: storedRepoUrl(raw),
+    repo_identity_json: encodeGitOpsJson(identityOf(raw)),
   };
+}
+
+function storedRepoUrl(raw: string): string {
+  const parsed = parseStorableRepoUrl(raw);
+  if (!parsed.ok) throw new Error(`fixture repo url is not storable: ${parsed.reason}`);
+  return secretFreeRepoUrlFromStorable(parsed);
 }
 
 /**
