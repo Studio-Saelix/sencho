@@ -483,11 +483,15 @@ describe('aggregateGitOpsPortfolio', () => {
     const db = DatabaseService.getInstance();
     const localNodeId = db.getNodes()[0]!.id;
     const sharedId = addRemoteNode('port-shared-filter', 29989);
+    // A second node of this test's own, used only to tell when a read has reached
+    // its fan-out. A joined read never asks the shared node again, so nothing else
+    // observable marks that it arrived.
+    const markerId = addRemoteNode('port-shared-marker', 29987);
 
     // Two list reads, different callers, one leg. The payload carries an
     // ordinary row and one with no usable stack name, which classifies as
-    // admin-only. If the shared array were filtered in place, whichever caller
-    // went first would decide what the other saw.
+    // admin-only. If the shared array were filtered in place, whichever read went
+    // first would decide what the other saw.
     const readable = remoteSourceRow('app-shared-readable', 'shared-readable-web', remoteProjection('app-shared-readable', 'shared-readable-web'));
     const adminOnly = remoteSourceRow('app-shared-admin', '', remoteProjection('app-shared-admin', 'shared-admin-web'));
     const payload = [...readable, ...adminOnly];
@@ -501,25 +505,26 @@ describe('aggregateGitOpsPortfolio', () => {
         else resolve([]);
       }),
     );
-    // Each read probes every remote node once, except the shared node, which the
-    // second read joins rather than asks for. Waiting for the expected count is
-    // what puts the second reader inside the first reader's leg.
-    const remoteNodeCount = db.getNodes().filter(node => node.id !== localNodeId).length;
 
-    const asAdmin = aggregateGitOpsPortfolio(adminReq(localNodeId), { fetchRows });
-    await vi.waitFor(() => expect(asked).toHaveLength(remoteNodeCount));
+    // The restrictive read goes first on purpose. Its filter drops a row, so if
+    // it were splicing the shared array the admin's read would come back missing
+    // that row and this would fail.
     const asViewer = aggregateGitOpsPortfolio(fakeReq({ userId: 2, username: 'viewer', role: 'viewer' }, localNodeId), { fetchRows });
-    await vi.waitFor(() => expect(asked).toHaveLength(remoteNodeCount * 2 - 1));
+    await vi.waitFor(() => expect(asked.filter(nodeId => nodeId === markerId)).toHaveLength(1));
+    const asAdmin = aggregateGitOpsPortfolio(adminReq(localNodeId), { fetchRows });
+    // Asked twice now, so both reads have reached their fan-out and the admin is
+    // inside the viewer's leg.
+    await vi.waitFor(() => expect(asked.filter(nodeId => nodeId === markerId)).toHaveLength(2));
     for (const releaseLeg of release) releaseLeg();
 
-    const adminRows = (await asAdmin).rows.filter(candidate => candidate.nodeId === sharedId);
     const viewerRows = (await asViewer).rows.filter(candidate => candidate.nodeId === sharedId);
+    const adminRows = (await asAdmin).rows.filter(candidate => candidate.nodeId === sharedId);
 
     // One probe between them, and each caller filtered the payload for itself.
     expect(asked.filter(nodeId => nodeId === sharedId)).toHaveLength(1);
-    expect(adminRows.map(candidate => candidate.id)).toContain(`${sharedId}:app-shared-admin`);
     expect(viewerRows.map(candidate => candidate.id)).not.toContain(`${sharedId}:app-shared-admin`);
     expect(viewerRows.map(candidate => candidate.id)).toContain(`${sharedId}:app-shared-readable`);
+    expect(adminRows.map(candidate => candidate.id)).toContain(`${sharedId}:app-shared-admin`);
   });
 
   it('retires a cached dark verdict before walking a payload it cannot walk', async () => {

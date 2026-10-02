@@ -10,8 +10,8 @@
  *     budget, so repeated reads pay one round trip;
  *   - readers that overlap share one probe, because a verdict is only written
  *     once a probe settles and a dark node spends the whole budget settling;
- *   - sharing one leg is what orders the two writers, so a dark verdict cannot
- *     land after a newer answer;
+ *   - the leg is the single writer of a verdict, so no reader can record one
+ *     after a newer answer has retired it;
  *   - a node that came back is seen back as soon as the window has passed, and
  *     never stranded as unreachable;
  *   - a reachable verdict is never reused, so nothing can be reported as up
@@ -22,12 +22,18 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { CacheService } from '../services/CacheService';
 import {
   probeSilentNodeIds,
+  REACHABILITY_NAMESPACE,
   REACHABILITY_VERDICT_TTL_MS,
   REMOTE_PROBE_TIMEOUT_MS,
   resetReachabilityProbesForTests,
 } from '../services/gitops/portfolioAggregator';
 
 type ProbeResult = unknown[] | null | 'unsupported';
+
+/** The key this module writes for `nodeId`, named from the module's own constant. */
+function verdictKey(nodeId: number): string {
+  return `${REACHABILITY_NAMESPACE}:${nodeId}`;
+}
 
 /** Just past the reuse window, so the verdict is expired without guessing at it. */
 const AFTER_THE_WINDOW_MS = REACHABILITY_VERDICT_TTL_MS + 1;
@@ -128,7 +134,7 @@ describe('reachability verdict reuse', () => {
 
     const pending = probeSilentNodeIds([4], fetchRows);
     // Stands in for the fan-out leg, which writes the same entry.
-    CacheService.getInstance().set(`gitops-reachability:4`, true, REACHABILITY_VERDICT_TTL_MS);
+    CacheService.getInstance().set(verdictKey(4), true, REACHABILITY_VERDICT_TTL_MS);
     release([]);
 
     expect([...(await pending)]).toEqual([]);
@@ -157,23 +163,6 @@ describe('reachability verdict reuse', () => {
     expect(fetchRows).toHaveBeenCalledTimes(1);
   });
 
-  it('gives a reader that arrives late the probe already in flight', async () => {
-    let release: (rows: ProbeResult) => void = () => {};
-    const fetchRows = vi.fn<(nodeId: number) => Promise<ProbeResult>>(() => new Promise<ProbeResult>((resolve) => {
-      release = resolve;
-    }));
-
-    const first = probeSilentNodeIds([4], fetchRows);
-    // The second read only starts once the first leg is genuinely under way.
-    await Promise.resolve();
-    const second = probeSilentNodeIds([4], fetchRows);
-    release([]);
-
-    expect([...(await first)]).toEqual([]);
-    expect([...(await second)]).toEqual([]);
-    expect(fetchRows).toHaveBeenCalledTimes(1);
-  });
-
   it('records one verdict per probe rather than one per reader', async () => {
     // The ordering guarantee, pinned by what it costs rather than by when it
     // happens. Three readers share one leg; the leg owns the write, so the
@@ -192,34 +181,39 @@ describe('reachability verdict reuse', () => {
     ]);
 
     expect(fetchRows).toHaveBeenCalledTimes(1);
-    expect(set.mock.calls.filter(([key]) => key === 'gitops-reachability:4')).toHaveLength(1);
+    expect(set.mock.calls.filter(([key]) => key === verdictKey(4))).toHaveLength(1);
     expect(invalidate).not.toHaveBeenCalled();
     set.mockRestore();
     invalidate.mockRestore();
   });
 
-  it('does not let a reader that arrives late put its own verdict back', async () => {
-    // A reader collects its result long after the probe settled and a newer leg
-    // has seen the node answer. Its stale dark result must not overwrite that.
+  it('frees a settled leg so a later probe can retire its verdict', async () => {
+    // What this shows: a leg releases its slot when it settles, so once the reuse
+    // window lapses a later probe runs and can retire the verdict. It is not a
+    // test of who writes a verdict. That no reader can write one late is a
+    // property of the leg owning the write, which the per-probe spy above pins;
+    // there is no reader left here to intercept.
     let releaseDark: (rows: ProbeResult) => void = () => {};
     const fetchRows = vi.fn<(nodeId: number) => Promise<ProbeResult>>(() => new Promise<ProbeResult>((resolve) => {
       releaseDark = resolve;
     }));
 
-    const late = probeSilentNodeIds([4], fetchRows);
+    const first = probeSilentNodeIds([4], fetchRows);
     releaseDark(null);
-    await Promise.resolve();
+    expect([...(await first)]).toEqual([4]);
+    expect(fetchRows).toHaveBeenCalledTimes(1);
 
-    // Let the window lapse so a newer leg can start, and let it see the node
-    // answer, which retires the dark verdict.
+    // Inside the window the verdict is served and no probe runs.
+    expect([...(await probeSilentNodeIds([4], fetchRows))]).toEqual([4]);
+    expect(fetchRows).toHaveBeenCalledTimes(1);
+
+    // Once the window lapses a new leg runs, and this time the node answers.
+    // The empty answer is itself the proof a probe happened: the cached dark
+    // verdict would have reported this node unreachable.
     vi.useFakeTimers({ toFake: ['Date'] });
     vi.advanceTimersByTime(AFTER_THE_WINDOW_MS);
     expect([...(await probeSilentNodeIds([4], async () => []))]).toEqual([]);
     vi.useRealTimers();
-
-    // Only now does the late reader collect its own dark result.
-    expect([...(await late)]).toEqual([4]);
-    expect(CacheService.getInstance().peek('gitops-reachability:4')).toBeUndefined();
   });
 
   it('settles a joined reader even when the probe it joined rejects', async () => {

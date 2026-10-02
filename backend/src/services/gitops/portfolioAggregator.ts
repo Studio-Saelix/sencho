@@ -58,8 +58,12 @@ import type { ServiceArtifactEvidence } from './json';
 /** Per-remote probe budget; mirrors the fleet overview probe so one dead node cannot stall the portfolio. */
 export const REMOTE_PROBE_TIMEOUT_MS = 3000;
 
-/** Cache namespace for the per-node reachability verdict. */
-const REACHABILITY_NAMESPACE = 'gitops-reachability';
+/**
+ * Cache namespace for the per-node reachability verdict. Exported so a test that
+ * inspects an entry names the key this module writes rather than a copy of the
+ * string, which could drift and let the test pass vacuously.
+ */
+export const REACHABILITY_NAMESPACE = 'gitops-reachability';
 
 /**
  * How long one node's "did not answer" verdict may be reused.
@@ -76,9 +80,10 @@ const REACHABILITY_NAMESPACE = 'gitops-reachability';
  *
  * What that bound is and is not: it caps how long a *recorded* verdict is served,
  * not how old the underlying evidence is when it is served. A dark verdict is
- * recorded when its probe gives up, so a node that only just went dark can serve
- * evidence that is the probe budget plus this window old. The two numbers add up
- * for the worst case and neither alone describes it.
+ * recorded when its probe gives up, so a node that recovered a moment after that
+ * probe started is the long case, served as unreachable until the probe budget and
+ * this window have both elapsed. The two numbers add up for the worst case and
+ * neither alone describes it.
  *
  * Exported so the test can hold the window to this relationship rather than to a
  * literal.
@@ -1716,10 +1721,10 @@ function freeLeg(
  * settles, so a test that fails before releasing one would otherwise leave a
  * pending promise that every later read of that node id joins.
  *
- * A dropped leg cannot be cancelled, so one that settles afterwards still records
- * its single verdict, and its rejection gets a sink attached here so dropping it
- * never creates an unhandled rejection. Flushing the cache after this call
- * therefore clears that late write too.
+ * A dropped leg cannot be cancelled, so one that settles after this call still
+ * records its single verdict, which the next cache flush clears; the rejection
+ * sink here is what keeps that late settlement from surfacing as an unhandled
+ * rejection once nothing holds a reference to the leg.
  */
 export function resetReachabilityProbesForTests(): void {
   for (const leg of inflightProbeLegs.values()) {
@@ -1771,8 +1776,8 @@ function rememberUnanswered(nodeId: number): void {
  * `probeNodeOnce` for the sharing and for the single writer. This function and
  * the portfolio fan-out are both readers now: neither records nor retires a
  * verdict, because a leg records its own before it resolves. A reader that wrote
- * here would reopen the late-write gap that owns, and would re-arm the window once
- * per reader instead of once per probe.
+ * here would reopen the late-write gap and re-arm the window once per reader
+ * instead of once per probe.
  */
 export async function probeSilentNodeIds(
   nodeIds: readonly number[],
