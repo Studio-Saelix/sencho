@@ -18,8 +18,6 @@ import { rejectUpgrade as reject } from './reject';
 import { looksLikeApiToken } from '../utils/apiTokenFormat';
 import { validateApiToken, touchApiTokenLastUsed } from '../utils/apiTokenAuth';
 import { isDebugEnabled } from '../utils/debug';
-import { PROXY_TIER_HEADER } from '../services/license-headers';
-import { isLicenseTier, normalizeTier } from '../services/license-normalize';
 import { HOST_CONSOLE_COMMUNITY_CAPABILITY } from '../services/CapabilityRegistry';
 import { remoteAdvertisesCapability } from '../helpers/remoteCapabilities';
 
@@ -262,25 +260,10 @@ export function attachUpgrade(
       // decoded scope is undefined (isProxyToken=false, wsApiTokenScope=null).
       // Restricted api_token scopes (read-only, deploy-only) are blocked
       // earlier by the scope gate above before this branch is reached.
-      //
-      // Mesh entitlement is decided against the *central's* license, not
-      // the receiver's, matching every HTTP mesh route in routes/mesh.ts that
-      // uses `requirePaid` / `effectiveTier`. On the node_proxy path the
-      // central forwards `x-sencho-tier` and the WS dispatcher trusts it off
-      // the node_proxy credential (same rule as middleware/auth.ts for HTTP).
-      // On the full-admin api_token path no central is asserting tier, so we
-      // fall back to the receiver's own license. Both produce paid or the
-      // upgrade is rejected.
+      // Mesh is a Community capability: neither the receiver's license nor
+      // a forwarded x-sencho-tier header affects this upgrade.
       if (pathname === '/api/mesh/proxy-tunnel') {
         if (!isProxyToken && wsApiTokenScope !== 'full-admin') {
-          return reject(socket, 403, 'Forbidden');
-        }
-        const license = LicenseService.getInstance();
-        const tunnelTierHeader = req.headers[PROXY_TIER_HEADER] as string | undefined;
-        const tunnelTier = isProxyToken && isLicenseTier(tunnelTierHeader)
-          ? normalizeTier(tunnelTierHeader)
-          : license.getTier();
-        if (tunnelTier !== 'paid') {
           return reject(socket, 403, 'Forbidden');
         }
         await handleMeshProxyTunnel(req, socket, head);

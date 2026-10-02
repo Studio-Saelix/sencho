@@ -7,11 +7,6 @@ vi.mock('@/lib/api', () => ({
   apiFetch: (...args: unknown[]) => apiFetchMock(...args),
 }));
 
-const useLicenseMock = vi.fn();
-vi.mock('@/context/LicenseContext', () => ({
-  useLicense: () => useLicenseMock(),
-}));
-
 const useExperimentalMock = vi.fn(() => ({ experimental: true, experimentalReady: true }));
 vi.mock('@/hooks/useExperimental', () => ({
   useExperimental: () => useExperimentalMock(),
@@ -43,7 +38,6 @@ function statusJson(status: number, payload: unknown = {}): Response {
 
 beforeEach(() => {
   apiFetchMock.mockReset();
-  useLicenseMock.mockReset();
   useExperimentalMock.mockReset();
   useExperimentalMock.mockReturnValue({ experimental: true, experimentalReady: true });
 });
@@ -53,18 +47,7 @@ afterEach(() => {
 });
 
 describe('useMeshDataPlane', () => {
-  it('does not fetch /mesh/status when the session is on the free tier', async () => {
-    useLicenseMock.mockReturnValue({ isPaid: false });
-    const { result } = renderHook(() => useMeshDataPlane());
-    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
-
-    expect(apiFetchMock).not.toHaveBeenCalled();
-    expect(result.current.status).toBeNull();
-    expect(result.current.loading).toBe(false);
-  });
-
-  it('fetches once on mount and surfaces the localDataPlane payload for a paid tier', async () => {
-    useLicenseMock.mockReturnValue({ isPaid: true });
+  it('fetches once on mount and surfaces the localDataPlane payload', async () => {
     apiFetchMock.mockResolvedValue(okJson({
       localDataPlane: { ok: true, reason: null, lastChecked: 1000 },
     }));
@@ -78,7 +61,6 @@ describe('useMeshDataPlane', () => {
   });
 
   it('keeps status null on a 403 response without raising an error', async () => {
-    useLicenseMock.mockReturnValue({ isPaid: true });
     apiFetchMock.mockResolvedValue(statusJson(403, { error: 'forbidden' }));
 
     const { result } = renderHook(() => useMeshDataPlane());
@@ -89,7 +71,6 @@ describe('useMeshDataPlane', () => {
   });
 
   it('falls back to null when the response omits localDataPlane', async () => {
-    useLicenseMock.mockReturnValue({ isPaid: true });
     apiFetchMock.mockResolvedValue(okJson({ nodes: [] }));
 
     const { result } = renderHook(() => useMeshDataPlane());
@@ -98,8 +79,7 @@ describe('useMeshDataPlane', () => {
     expect(result.current.status).toBeNull();
     expect(result.current.loading).toBe(false);
   });
-it('does not fetch when paid but experimental discovery is off', async () => {
-    useLicenseMock.mockReturnValue({ isPaid: true });
+  it('does not fetch when experimental discovery is off', async () => {
     useExperimentalMock.mockReturnValue({ experimental: false, experimentalReady: true });
     const { result } = renderHook(() => useMeshDataPlane());
     await act(async () => { await Promise.resolve(); await Promise.resolve(); });
@@ -110,7 +90,6 @@ it('does not fetch when paid but experimental discovery is off', async () => {
   });
 
   it('does not fetch while experimental metadata is still loading', async () => {
-    useLicenseMock.mockReturnValue({ isPaid: true });
     useExperimentalMock.mockReturnValue({ experimental: false, experimentalReady: false });
     const { result } = renderHook(() => useMeshDataPlane());
     await act(async () => { await Promise.resolve(); await Promise.resolve(); });
