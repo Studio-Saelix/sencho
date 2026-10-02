@@ -124,10 +124,10 @@ export function deriveGitOpsRevision(
   // Resolved once here because it reads the application's intent revision and
   // the live Blueprint row, neither of which varies per target.
   const confirmationExpected = blueprintConfirmsOutcome(app, facts.healthDisabled);
-  // Also resolved once, and for the same reason: the application's accepted
-  // intent revision, which is what names a Blueprint target's stack for the
-  // health supersede rule. `collectHealthDrift` reads the same revision, so both
-  // answer with one lookup rather than each resolving its own.
+  // Also resolved once per application, for the same reason: the accepted intent
+  // revision is what names a Blueprint target's stack for the health supersede
+  // rule. `collectHealthDrift` resolves it again for the drift list, which is
+  // why this is read once here rather than once per target.
   const acceptedIntent = app.intent_revision_id
     ? GitOpsStore.getInstance().getIntentRevision(app.intent_revision_id)
     : undefined;
@@ -1921,15 +1921,13 @@ const LIVE_OPERATION_STATUS: Record<string, 'deploying' | 'withdrawing' | undefi
  *   there is no generation on either side of this comparison to make and the
  *   arm stays false for them.
  * - **The observation step: every mode.** A stack-scope health run for the same
- *   generation that is still `observing`. `deployBound` clears the active stage
- *   the moment the workload is up, while the gate's own run was reserved before
- *   the deploy and is still open, so without this arm the application would drop
- *   back to `failed` for the whole observation window and the reading would
- *   flip-flop: failed, in progress, failed, then the new verdict. This arm is
- *   what covers a Blueprint target, and it is also what covers the automatic
- *   retry the health rollout policy performs, which reserves its run before the
- *   apply and therefore only ever has the observation to be seen by. It reads a
- *   run that already exists; it changes no gate behavior, window, or decision.
+ *   generation that is still `observing`. Without it the application drops back
+ *   to `failed` for the whole observation window and the reading flip-flops:
+ *   failed, in progress, failed, then the new verdict. This arm is what covers a
+ *   Blueprint target, and what covers the automatic retry the health rollout
+ *   policy performs, since a rollout reserves its run *before* the apply and so
+ *   has an observation to be seen by for the whole deploy. It reads a run that
+ *   already exists and changes no gate behavior, window, or decision.
  *
  * The generation match is the whole rule, and it is the failure's own identity
  * rather than the running pointer, because `deriveHealth` judges a verdict
@@ -1939,17 +1937,33 @@ const LIVE_OPERATION_STATUS: Record<string, 'deploying' | 'withdrawing' | undefi
  * comparison from the projection, because the runtime facet collapses an
  * operation into a status and drops which generation it is for.
  *
- * What ends the suppression is a terminal verdict for either arm, the startup
- * sweep that finalizes an observation a previous process left open, or the next
- * verdict. An observation a newer stack operation supersedes is finalized by
- * that operation rather than left reading as open, so nothing here can keep a
- * failure out of the queue indefinitely.
+ * **A Direct redeploy has a short gap between the two moments.** A Direct deploy
+ * binds the generation and then does its baseline, drift and exposure
+ * bookkeeping before the route opens the observation, and in that window neither
+ * arm has anything to read, so the recorded failure shows again. It is the
+ * handover between the deploy and the gate, not a missing state: Blueprint
+ * rollouts reserve the run first and have no such gap. Closing it would mean
+ * opening the observation before the bind, which reorders the deploy path, so
+ * the gap is stated and pinned rather than closed.
+ *
+ * What ends the suppression is a terminal verdict for either arm, or the startup
+ * sweep that finalizes an observation a previous process left open. An
+ * observation a newer stack operation supersedes is finalized by that operation
+ * rather than left reading as open.
  */
 function healthFailureSuperseded(
   app: GitOpsApplicationRow,
   acceptedIntent: GitOpsIntentRevisionRow | undefined,
   target: GitOpsTargetCurrentRow,
 ): boolean {
+  // A tombstoned target has no failure left to supersede, and a recovery
+  // restores a generation rather than redeploying what runs, so its own run is
+  // not the successor of this failure either. Both are answered from the row
+  // before any lookup, which is also what keeps a healthy target off the store:
+  // a target whose own last verdict passed has nothing standing to supersede.
+  if (target.target_status !== 'active') return false;
+  if (target.last_health_status !== 'failed') return false;
+  if (recoveryInProgress(target.recovery_phase)) return false;
   const failedGenerationId = target.last_health_generation_id;
   if (failedGenerationId === null) return false;
   if (LIVE_OPERATION_STATUS[target.active_operation_stage ?? '']

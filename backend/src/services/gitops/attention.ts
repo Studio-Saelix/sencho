@@ -268,12 +268,12 @@ export function attentionReasons(projection: GitOpsRevisionProjection): GitOpsAt
     // reason, because any reason at all would read as `attention` rather than
     // `in_progress`, and progress is the honest answer while a redeploy runs.
     //
-    // Read as `=== true`, never as a bare negation: a target that reached this
-    // hub from an older remote instance does not carry the flag at all, and the
-    // failure on that target has to keep being reported. The remote boundary
-    // accepts only `undefined` or a boolean, so the two reads agree there, and
-    // the strict form is what makes that the rule rather than a coincidence.
-    if (target.health.status === 'failed' && target.healthFailureSuperseded !== true) {
+    // A target that reached this hub from an older remote instance carries no
+    // flag at all, which is falsy here, so its failure keeps being reported.
+    // That is the whole of the mixed-version story at this line; what stops a
+    // peer from suppressing a failure with a malformed value is the shape check
+    // in `isTargetRecord`, which accepts only an absent field or a boolean.
+    if (target.health.status === 'failed' && !target.healthFailureSuperseded) {
       reasons.add('health_failed');
     }
   }

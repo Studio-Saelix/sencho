@@ -5,6 +5,7 @@ import { GitOpsStore, emptyTargetRow } from '../services/gitops/store';
 import { GitOpsTransitions, type EventEnvelope } from '../services/gitops/transitions';
 import { deriveGitOpsRevision, projectApplication } from '../services/gitops/derive';
 import { attentionReasons } from '../services/gitops/attention';
+import { postureOf } from '../services/gitops/portfolioAggregator';
 import { DatabaseService } from '../services/DatabaseService';
 import type {
   FutureGitOpsEvidence,
@@ -2764,6 +2765,73 @@ describe('gitops derivation', () => {
     expect(project().healthFailureSuperseded).toBe(false);
   });
 
+  it('does not supersede a failure that is not standing, or is on a target recovering', () => {
+    const store = GitOpsStore.getInstance();
+    const db = DatabaseService.getInstance();
+    store.insertApplication(rawApp('app-health-notsuperseded', { stack_name: 'health-notsuperseded-web' }));
+    store.insertGeneration(gen('gen-ns', 'app-health-notsuperseded'));
+    const row = {
+      ...emptyTargetRow('app-health-notsuperseded', 1, 1),
+      desired_generation_id: 'gen-ns',
+      applied_generation_id: 'gen-ns',
+      deployed_generation_id: 'gen-ns',
+      last_health_generation_id: 'gen-ns',
+      observed_artifact_identity_json: JSON.stringify({
+        kind: 'exact', identity: 'sha256:expected', observedAt: 1,
+      }),
+    } as const;
+    const project = () => {
+      const projection = projectApplication('app-health-notsuperseded', false);
+      if (projection.targetMode === 'not_applicable') throw new Error('expected application');
+      return projection.targets[0]!;
+    };
+    const observing = {
+      id: 'run-ns',
+      node_id: 1,
+      stack_name: 'health-notsuperseded-web',
+      trigger_action: 'deploy' as const,
+      status: 'observing' as const,
+      reason: null,
+      window_seconds: 90,
+      containers_json: '[]',
+      started_at: 10,
+      ended_at: null,
+      created_by: 'tester',
+      target_scope: 'stack' as const,
+      service_name: null,
+      failure_source: null,
+      deployed_generation_id: 'gen-ns',
+    };
+    db.insertHealthGateRun(observing);
+
+    // The open observation exists, but this target's own last verdict passed, so
+    // there is no failure standing for it to supersede. Without that guard the
+    // flag is true here and pays a store read for every healthy target.
+    store.upsertTarget({
+      ...row,
+      healthy_generation_id: 'gen-ns',
+      last_health_status: 'passed',
+      last_health_run_id: 'run-ns',
+    });
+    expect(project().health.status).toBe('passed');
+    expect(project().healthFailureSuperseded).toBe(false);
+
+    // A failure the recovery is restoring is not superseded by the recovery's
+    // own observation: a recovery restores a generation rather than redeploying
+    // what runs, and the runtime facet reports it as a pending decision.
+    store.upsertTarget({
+      ...row,
+      last_health_status: 'failed',
+      last_health_run_id: 'run-ns',
+      recovery_phase: 'restoring',
+      recovery_generation_id: 'gen-ns',
+    });
+    expect(project().runtime.status).toBe('recovery_required');
+    expect(project().healthFailureSuperseded).toBe(false);
+
+    db.getDb().prepare('DELETE FROM health_gate_runs').run();
+  });
+
   it('leaves a redeployed Blueprint target reporting its recorded health failure', () => {
     const store = GitOpsStore.getInstance();
     const db = DatabaseService.getInstance();
@@ -2833,6 +2901,14 @@ describe('gitops derivation', () => {
       deployed_generation_id: 'gen-bp',
     });
     expect(project().healthFailureSuperseded).toBe(true);
+    // Posture as well as the flag: the classifier's suppression only reaches
+    // `in_progress` because the runtime facet already reads as in flight, so the
+    // aggregate is what has to be asserted rather than assumed. A Blueprint target
+    // bound with nothing deploying is fully deployed and awaiting its verdict,
+    // which the portfolio counts as work in flight.
+    expect(attentionReasons(projectApplication('app-health-supersede-bp', false)))
+      .not.toContain('health_failed');
+    expect(postureOf(projectApplication('app-health-supersede-bp', false))).toBe('in_progress');
 
     // An observation of another generation is not this failure's successor.
     db.getDb().prepare('DELETE FROM health_gate_runs').run();

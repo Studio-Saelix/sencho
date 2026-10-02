@@ -1184,6 +1184,14 @@ export class BlueprintTargetAdapter implements TargetAdapter {
             envelope: envelopeFor(generation.actor, trigger),
           });
         } catch (err) {
+          // The run was reserved above and is now armed by nobody, so it has to
+          // be abandoned here for the reason the ack catch below gives: leaving
+          // it open would make every later dispatch skip this target as awaiting
+          // a verdict nothing will ever report, and it would leave a run row
+          // claiming to observe a deploy that was never opened.
+          if (reserved.status === 'reserved' || reserved.status === 'replayed') {
+            abandonTargetHealthRun(node, reserved);
+          }
           return {
             status: 'blocked',
             reason: `Could not open deploy for node ${nodeId}: ${errorMessage(err)}`,

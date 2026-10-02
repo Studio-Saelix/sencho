@@ -980,9 +980,10 @@ export type GitOpsTargetProjection = {
    *
    * **Absent means not superseded.** A remote instance on an older build answers
    * without the field, and the value arrives as `undefined` even though this type
-   * requires a boolean. So a read is `=== true` and never a bare negation: the
-   * strict form is what makes a malformed truthy value from a peer fail the
-   * remote-boundary shape check instead of quietly hiding a failure.
+   * requires a boolean, so a falsy read is what reports the failure there. The
+   * protection against a peer suppressing a failure with a malformed truthy value
+   * is not in how this is read but in `isTargetRecord`, which accepts only an
+   * absent field or a boolean at the remote boundary.
    */
   healthFailureSuperseded: boolean;
   tombstoned: boolean;

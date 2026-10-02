@@ -1304,9 +1304,9 @@ describe('gitops derive to portfolio posture', () => {
   });
 
   /**
-   * An open health observation for a stack, as the gate records it before and
-   * during a deploy: durable, still `observing`, and bound to the generation it
-   * is watching.
+   * A stack health observation, as the gate records it: durable, bound to the
+   * generation it watches, and `observing` until it settles. Calling it again
+   * with the same id is how the gate ends one.
    */
   function observeRun(
     id: string,
@@ -1316,23 +1316,28 @@ describe('gitops derive to portfolio posture', () => {
     status: 'observing' | 'failed' | 'passed' | 'unknown' = 'observing',
     startedAt = 1_700_000_000_000,
   ): void {
-    DatabaseService.getInstance().insertHealthGateRun({
+    DatabaseService.getInstance().getDb().prepare(
+      'insert or replace into health_gate_runs '
+      + '(id, node_id, stack_name, trigger_action, status, reason, window_seconds, containers_json, '
+      + 'started_at, ended_at, created_by, target_scope, service_name, failure_source, deployed_generation_id) '
+      + 'values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+    ).run(
       id,
-      node_id: nodeId,
-      stack_name: stackName,
-      trigger_action: 'deploy',
+      nodeId,
+      stackName,
+      'deploy',
       status,
-      reason: null,
-      window_seconds: 90,
-      containers_json: '[]',
-      started_at: startedAt,
-      ended_at: status === 'observing' ? null : 1_700_000_090_000,
-      created_by: 'tester',
-      target_scope: 'stack',
-      service_name: null,
-      failure_source: null,
-      deployed_generation_id: deployedGenerationId,
-    });
+      null,
+      90,
+      '[]',
+      startedAt,
+      status === 'observing' ? null : startedAt + 90_000,
+      'tester',
+      'stack',
+      null,
+      null,
+      deployedGenerationId,
+    );
   }
 
   it('reads a failed generation as work in progress while that same generation is redeployed', () => {
@@ -1369,18 +1374,32 @@ describe('gitops derive to portfolio posture', () => {
     expect(attentionReasons(redeploying)).not.toContain('health_failed');
     expect(postureOf(redeploying)).toBe('in_progress');
 
-    // The deploy binds, which clears the active stage. The gate reserved its run
-    // before the deploy, so the observation is still open and the reading has to
-    // survive the bind. Without that, the application would report failed again
-    // for the whole observation window and an operator would watch it flip-flop:
-    // failed, in progress, failed, then the new verdict.
+    // The deploy binds, which clears the active stage. On this Direct path the gate
+    // opens its run only after the deploy returns, so there is a real handover
+    // window in which neither moment has anything to read and the recorded
+    // failure shows again. It is brief, and it is stated rather than papered
+    // over: closing it would mean opening the observation before the bind, which
+    // reorders the deploy path.
     tx.deployBound(applicationId, 1, generationId, envelope(`op-rd-${applicationId}`));
-    observeRun(`run-${applicationId}-watching`, 1, 'posture-healthredeploy-web', generationId);
+    const handover = projectApplication(applicationId, false);
 
+    expect(handover.targets[0]?.healthFailureSuperseded).toBe(false);
+    expect(attentionReasons(handover)).toContain('health_failed');
+    expect(postureOf(handover)).toBe('failed');
+
+    // Once the observation is open the reading has to survive to the verdict.
+    // Without that, the application would report failed for the whole window and
+    // an operator would watch it flip-flop: failed, in progress, failed, then the
+    // new verdict.
+    observeRun(`run-${applicationId}-watching`, 1, 'posture-healthredeploy-web', generationId);
     const observing = projectApplication(applicationId, false);
     expect(observing.targets[0]?.health.status).toBe('failed');
     expect(observing.targets[0]?.healthFailureSuperseded).toBe(true);
     expect(attentionReasons(observing)).not.toContain('health_failed');
+    // Posture, not just the reason: the suppression depends on the runtime facet
+    // already reading as in flight, so that is what has to be asserted here
+    // rather than assumed.
+    expect(observing.targets[0]?.runtime.status).toBe('fully_deployed_health_pending');
     expect(postureOf(observing)).toBe('in_progress');
 
     // An observation of some other generation is not this failure's successor,
@@ -1416,6 +1435,51 @@ describe('gitops derive to portfolio posture', () => {
     expect(retried.targets[0]?.health.status).toBe('passed');
     expect(attentionReasons(retried)).not.toContain('health_failed');
     expect(postureOf(retried)).toBe('converged');
+  });
+
+  it('hands a recorded failure back when the redeploy proves nothing', () => {
+    const tx = GitOpsTransitions.getInstance();
+    const applicationId = 'app-posture-healthunproven';
+    const generationId = 'gen-posture-healthunproven';
+    const stack = 'posture-healthunproven-web';
+    driveHealthyDirect(applicationId, stack, generationId);
+    tx.healthFinalized({
+      applicationId,
+      nodeId: 1,
+      healthRunId: `run-${applicationId}-fail`,
+      healthStatus: 'failed',
+      deployedGenerationId: generationId,
+      targetScope: 'stack',
+      envelope: envelope(`op-hf-${applicationId}`),
+    });
+    tx.deployStarted(applicationId, 1, generationId, envelope(`op-rd-${applicationId}`));
+    tx.deployBound(applicationId, 1, generationId, envelope(`op-rd-${applicationId}`));
+    observeRun(`run-${applicationId}-watching`, 1, stack, generationId);
+    expect(postureOf(projectApplication(applicationId, false))).toBe('in_progress');
+
+    // A redeploy that confirms nothing is not the verdict the suppression was
+    // standing in for. It only ever stood in for a verdict that was coming, so
+    // when none lands the recorded failure is what the operator is left with,
+    // rather than a settled success nobody measured. The gate settles its own run
+    // when the verdict lands, which is what ends the observation.
+    observeRun(
+      `run-${applicationId}-watching`, 1, stack, generationId, 'unknown', 1_700_000_100_000,
+    );
+    tx.healthFinalized({
+      applicationId,
+      nodeId: 1,
+      healthRunId: `run-${applicationId}-unproven`,
+      healthStatus: 'unknown',
+      deployedGenerationId: generationId,
+      targetScope: 'stack',
+      envelope: envelope(`op-hu-${applicationId}`),
+    });
+    const unproven = projectApplication(applicationId, false);
+
+    expect(unproven.targets[0]?.health.status).toBe('failed');
+    expect(unproven.targets[0]?.healthFailureSuperseded).toBe(false);
+    expect(attentionReasons(unproven)).toContain('health_failed');
+    expect(postureOf(unproven)).toBe('failed');
   });
 
   it('does not let a later unknown verdict erase a recorded failure', () => {
