@@ -71,6 +71,66 @@ describe('describePolicyBlock', () => {
     expect(msg).toContain('1 image(s) matched');
   });
 
+  it('names the unproven images on an evidence block', () => {
+    // The case an operator cannot otherwise resolve: a scheduled auto-update on a
+    // two-image stack is blocked because one image's scan failed. Only that image
+    // is a violation, because the other one scanned clean, so before this the
+    // sentence named the rule and not the image and nothing on screen said which
+    // of the two had failed.
+    const msg = describePolicyBlock(
+      policy,
+      [violation({ imageRef: 'nginx:1.14', error: 'Pre-flight scan failed: scanner crashed' })],
+      'update',
+      {
+        outcome: 'block',
+        records: [],
+        applications: [
+          { source: 'vulnerability_scan', state: 'failed', outcome: 'block', rule: 'security_scan_failure=block', target: 'nginx:1.14' },
+        ],
+        summary: 'Failed evidence for vulnerability_scan: block (security_scan_failure=block)',
+      },
+    );
+    expect(msg).toContain('required security evidence was unavailable');
+    expect(msg).toContain('images=[nginx:1.14]');
+    // The image that scanned clean is not named: it is not why the update was
+    // blocked, and naming it would send the operator to the wrong service.
+    expect(msg).not.toContain('redis:7');
+  });
+
+  it('names the images it could not evaluate when no rule blocked', () => {
+    // An evaluation failure produces a record and a violation but no
+    // application, so this is the sentence that has to name the image.
+    const msg = describePolicyBlock(
+      policy,
+      [violation({ imageRef: 'redis:7', error: 'Policy evaluation failed: database is locked' })],
+      'update',
+      { outcome: 'allow', records: [], applications: [], summary: 'No security evidence was required for this decision' },
+    );
+    expect(msg).toContain('could not be evaluated');
+    expect(msg).toContain('images=[redis:7]');
+  });
+
+  it('does not cite a rule that allowed or only warned', () => {
+    // Image A's scan failed with the setting on warn; image B's policy
+    // evaluation threw, which no setting governs. The block is B, so the message
+    // must not name A's rule as the reason.
+    const msg = describePolicyBlock(
+      policy,
+      [violation({ imageRef: 'redis:7', error: 'Policy evaluation failed: database is locked' })],
+      'update',
+      {
+        outcome: 'warn',
+        records: [],
+        applications: [
+          { source: 'vulnerability_scan', state: 'failed', outcome: 'warn', rule: 'security_scan_failure=warn', target: 'nginx:1.14' },
+        ],
+        summary: 'Failed evidence for vulnerability_scan: warn (security_scan_failure=warn)',
+      },
+    );
+    expect(msg).not.toContain('security_scan_failure=warn');
+    expect(msg).toContain('could not be evaluated');
+  });
+
   it('names the operation the caller asked about', () => {
     expect(describePolicyBlock(policy, [violation({ reasons: ['kev'] })], 'rollback')).toContain('blocked rollback');
   });

@@ -13,6 +13,27 @@ import type { EvidenceGateDecision } from '../services/securityEvidence';
 type BlockableAction = 'deploy' | 'update' | 'rollback';
 
 /**
+ * Targets that stand for something other than an image. `node` is the
+ * node-wide scanner availability record; the parenthesised entries are the
+ * placeholders a node-wide refusal puts in the violation list so the caller has
+ * something to render. Neither is an image, so neither belongs in an
+ * `images=[...]` list.
+ */
+const NON_IMAGE_TARGETS: ReadonlySet<string> = new Set(['node', '(scanner unavailable)', '(compose parse error)']);
+
+/** The image references an evidence refusal is about, de-duplicated. */
+function unprovenImages(violations: PolicyViolation[], evidence?: EvidenceGateDecision): string[] {
+  const images = new Set<string>();
+  for (const v of violations) {
+    if (v.error && !NON_IMAGE_TARGETS.has(v.imageRef)) images.add(v.imageRef);
+  }
+  for (const a of evidence?.applications ?? []) {
+    if (a.outcome === 'block' && a.target && !NON_IMAGE_TARGETS.has(a.target)) images.add(a.target);
+  }
+  return [...images];
+}
+
+/**
  * One-line block message, shared by the thrown-error and 409-response paths so
  * they never drift.
  *
@@ -40,14 +61,25 @@ export function describePolicyBlock(
     const images = genuine.map((v) => v.imageRef).join(', ');
     return `Policy "${name}" blocked ${action}: ${genuine.length} image(s) matched ${summarizeBlockReasons(genuine)} images=[${images}]`;
   }
-  // The summary is only meaningful when a rule actually decided something. On an
-  // evaluation or scan failure no application exists, and `decideEvidenceGate`
-  // reports "No security evidence was required", which would directly contradict
-  // the sentence it is appended to.
-  if (evidence && evidence.applications.length > 0) {
-    return `Policy "${name}" blocked ${action} because required security evidence was unavailable: ${evidence.summary}`;
+  // Only a rule that actually blocked makes this sentence the account of the
+  // block. An application that merely allowed or warned about one image is not
+  // why the deploy stopped, and citing it would name the wrong rule while
+  // omitting the cause that is: an image whose policy evaluation threw produces
+  // a record and a violation but no application at all, because no setting
+  // governs it. That case falls through to the sentence below, which says what
+  // it actually is.
+  const blocking = (evidence?.applications ?? []).filter((a) => a.outcome === 'block');
+  if (blocking.length > 0) {
+    // The images are named here too. Before this, an evidence block on a
+    // multi-image stack reported the rule and nothing else, so a scheduled
+    // auto-update blocked by one failed scan could not say which image failed.
+    const images = unprovenImages(violations, evidence);
+    const named = images.length > 0 ? ` images=[${images.join(', ')}]` : '';
+    return `Policy "${name}" blocked ${action} because required security evidence was unavailable: ${evidence?.summary}${named}`;
   }
-  return `Policy "${name}" blocked ${action}: ${violations.length} image(s) could not be evaluated`;
+  const unevaluated = violations.map((v) => v.imageRef).filter((ref) => !NON_IMAGE_TARGETS.has(ref));
+  const named = unevaluated.length > 0 ? ` images=[${unevaluated.join(', ')}]` : '';
+  return `Policy "${name}" blocked ${action}: ${violations.length} image(s) could not be evaluated${named}`;
 }
 
 // Bypass requires `?ignorePolicy=true` AND `req.user.role === 'admin'`. The

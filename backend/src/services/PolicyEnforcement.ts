@@ -32,6 +32,7 @@ import {
     classifyScanEvidence,
     classifyScannerEvidence,
     decideEvidenceGate,
+    summarizeEvidenceApplications,
     type EvidenceAvailabilityOutcome,
     type EvidenceGateDecision,
     type EvidenceRuleApplication,
@@ -853,7 +854,16 @@ export async function evaluateCandidatePolicy(
     // that is missed cannot silently become authority to accept.
     const unprovenTargets = new Set<string>();
     for (const r of result.evidence?.records ?? []) {
-        if (r.state !== 'current') unprovenTargets.add(r.target);
+        // `partial` is deliberately not counted here. It says the per-finding
+        // detail rows were truncated, which only affects a verdict that reads
+        // KEV or fixability out of them. When the policy has either input, the
+        // evaluator has already turned the truncation into a genuine violation,
+        // so the candidate is refused above on the merits and the record adds
+        // nothing. When it has neither, the only input is severity, which comes
+        // from the scan's complete aggregate, so a truncated read cannot change
+        // the verdict at all. Holding on it there would refuse a candidate the
+        // policy had in fact decided about.
+        if (r.state !== 'current' && r.state !== 'partial') unprovenTargets.add(r.target);
     }
     for (const v of result.violations) {
         if (v.error) unprovenTargets.add(v.imageRef);
@@ -927,5 +937,10 @@ function withCandidateRuleApplied(
         // would say the candidate was both held and accepted. The deploy-gate
         // rules remain visible per application, which is where they belong.
         outcome,
+        // Rebuilt rather than carried over. Carrying the pre-override summary
+        // would leave this object claiming the outcome the deploy gate reached
+        // while its `outcome` field says the candidate rule's, and this decision
+        // is now persisted with a generation.
+        summary: summarizeEvidenceApplications([...decision.applications, ...added]),
     };
 }

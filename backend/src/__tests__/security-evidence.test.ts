@@ -212,9 +212,11 @@ describe('decideEvidenceGate', () => {
 });
 
 describe('resolveSecurityEvidencePolicy', () => {
-    it('reproduces the pre-policy gate behavior when nothing is configured', () => {
-        // The whole first change rests on this: an untouched install must get
-        // byte-identical gate outcomes.
+    it('resolves to the values the gate hard-coded when nothing is configured', () => {
+        // The deploy gate's equivalence to its previous hard-coded branches is
+        // pinned by the 49 untouched tests in policy-enforcement.test.ts. The
+        // candidate path's one stricter change (an evaluation failure is held
+        // rather than accepted) has its own test in security-evidence-gate.test.ts.
         const policy = resolveSecurityEvidencePolicy({});
         expect(policy).toEqual(DEFAULT_SECURITY_EVIDENCE_POLICY);
         expect(policy.scannerUnavailable).toBe('allow');

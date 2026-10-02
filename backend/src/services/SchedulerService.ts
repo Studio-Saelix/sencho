@@ -216,8 +216,9 @@ export class SchedulerService {
      * block, dispatch the documented `scan_finding` warning naming the policy
      * and the offending images, then throw so the caller records the outcome:
      * the auto-update loop catches per stack and continues the rest of the run,
-     * while a single-stack auto-start surfaces as a task failure. The gate
-     * fails open when Trivy is missing.
+     * while a single-stack auto-start surfaces as a task failure. Whether a
+     * missing scanner blocks is the Scanner unavailable setting, which defaults
+     * to allow; a scan that ran and failed blocks by default instead.
      */
     private async enforceSchedulerPolicyGate(
         stackName: string,

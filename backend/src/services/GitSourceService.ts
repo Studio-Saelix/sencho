@@ -147,6 +147,31 @@ function storedCandidateContentSha256(raw: string | null): string | null {
     return decoded.candidateContentSha256;
 }
 
+/**
+ * The verdict half of a stored security-policy evidence column, for the reuse
+ * comparison.
+ *
+ * Compared as a projection rather than as raw text so the comparison is about
+ * the decision and not about its encoding. Two consequences, both intended: the
+ * column has grown fields since it was introduced, and a text comparison would
+ * then mint a replacement generation for every existing source the first time
+ * it polls after an upgrade, on an unchanged verdict; and two encodings of the
+ * same verdict differing only in key order would read as a change. An
+ * unparseable or absent column yields null, which never matches, so auto-accept
+ * re-evaluates and writes a fresh row instead of reusing an unreadable one.
+ */
+function securityPolicyVerdict(raw: string | null): string | null {
+    if (!raw) return null;
+    let decoded: unknown;
+    try {
+        decoded = decodeGitOpsJson(raw);
+    } catch {
+        return null;
+    }
+    if (!isRecord(decoded)) return null;
+    return JSON.stringify({ status: decoded.status ?? null, policyId: decoded.policyId ?? null });
+}
+
 function candidateContentSha256FromDisk(
     stackName: string,
     candidateRelPath: string,
@@ -4756,10 +4781,24 @@ export class GitSourceService {
         const securityEvidenceJson = encodeGitOpsJson({
             status: evaluation.status,
             policyId: evaluation.policy?.id ?? null,
+            // The rules that decided it, not just the verdict. A candidate held
+            // under the shipped defaults is recorded as `unavailable` either way,
+            // but an operator who sets the candidate rule to allow would
+            // otherwise leave a persisted row that reads exactly like a clean
+            // acceptance. Nothing downstream reads these applications, so this
+            // column is the only place an unattended acceptance on unproven
+            // evidence stays attributable.
+            //
+            // The applications rather than the whole decision, deliberately: the
+            // records carry scan timestamps, and a re-run that rescans the same
+            // candidate would then produce different JSON, append a generation
+            // for an unchanged verdict, and defeat the reuse comparison below.
+            evidenceOutcome: evaluation.evidence?.outcome ?? null,
+            evidenceApplications: evaluation.evidence?.applications ?? null,
         });
         if (
             generation.source_policy_evidence_json === sourceEvidenceJson
-            && generation.security_policy_evidence_json === securityEvidenceJson
+            && securityPolicyVerdict(generation.security_policy_evidence_json) === securityPolicyVerdict(securityEvidenceJson)
         ) {
             return { status: 'reuse', generation };
         }

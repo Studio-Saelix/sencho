@@ -117,15 +117,52 @@ it('shows a layout-matched placeholder while loading rather than a blank pane', 
   expect(container.querySelectorAll('[class*="animate-pulse"]').length).toBe(0);
 });
 
-it('surfaces a read failure and says the shipped default is in force', async () => {
+it('surfaces a read failure without claiming which values are in force', async () => {
   mockedFetch.mockResolvedValue(jsonResponse(500, {}));
   render(<EvidencePolicyPanel />);
   await waitFor(() => expect(screen.getByText(/could not be read/)).toBeInTheDocument());
-  // The fallback copy has to describe all three defaults, not just the first.
-  // It must not claim to know what the gate currently enforces: a failed read
-  // says nothing about the stored values.
+  // A failed read says nothing about the stored values, so the copy must not
+  // claim the gate fell back to anything. Only the server's own settings read
+  // falling back can do that, and this is the client that failed.
   expect(screen.getByText(/currently enforces is unknown/)).toBeInTheDocument();
-  expect(screen.getByText(/a read failure falls back to the shipped defaults/)).toBeInTheDocument();
+  expect(screen.getByText(/Deploys\s+are unaffected/)).toBeInTheDocument();
+  expect(screen.getByText(/only a\s+failure to read that too would fall back/)).toBeInTheDocument();
+});
+
+it('gives the load-failure card the same material as the loaded panel', async () => {
+  // The placeholder and the loaded card both carry the bevel and top border. The
+  // error card did not, so a read failure swapped the panel's shape at the moment
+  // the operator was least able to read it.
+  mockedFetch.mockResolvedValue(jsonResponse(500, {}));
+  const { container } = render(<EvidencePolicyPanel />);
+  await waitFor(() => expect(screen.getByText(/could not be read/)).toBeInTheDocument());
+  expect(container.querySelector('[class*="shadow-card-bevel"]')).not.toBeNull();
+  expect(container.querySelector('[class*="border-t-card-border-top"]')).not.toBeNull();
+});
+
+it('locks the retry control while its request is in flight', async () => {
+  // Repeated clicks used to fire repeated requests with no feedback at all.
+  mockedFetch.mockResolvedValue(jsonResponse(500, {}));
+  render(<EvidencePolicyPanel />);
+  await waitFor(() => expect(screen.getByText(/could not be read/)).toBeInTheDocument());
+
+  let release: ((value: Response) => void) | undefined;
+  mockedFetch.mockImplementation(
+    () => new Promise<Response>((resolve) => { release = resolve; }),
+  );
+  const retry = screen.getByRole('button', { name: 'Try again' });
+  fireEvent.click(retry);
+
+  // In flight: the control is locked and says so.
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Retrying…' })).toBeDisabled());
+  fireEvent.click(screen.getByRole('button', { name: 'Retrying…' }));
+  expect(mockedFetch.mock.calls.filter(([url]) => url === '/security/evidence-policy')).toHaveLength(2);
+
+  // A failed retry unlocks it again, so the operator is not left with a dead
+  // control and no way back.
+  release?.(jsonResponse(500, {}));
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Try again' })).toBeEnabled());
+  expect(screen.getByText(/could not be read/)).toBeInTheDocument();
 });
 
 it('accepts the write response, which carries the policy without the read envelope', async () => {

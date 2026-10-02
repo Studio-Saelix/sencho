@@ -321,6 +321,55 @@ describe('candidate acceptance applies its own rule', () => {
         expect(app?.state).toBe('failed');
     });
 
+    it('refuses a truncated-finding candidate on the merits when the policy reads KEV', async () => {
+        // The detail rows are what a KEV verdict is read from, so a truncated set
+        // is genuinely unprovable here. The refusal must come from the evaluator
+        // having failed it closed, not from the candidate rule, so the operator is
+        // pointed at the scan rather than at an evidence setting.
+        dbStub.getMatchingPolicy.mockReturnValue(mkPolicy({ block_on_severity: 0, block_on_kev: 1 }));
+        primeCleanScan({ total_vulnerabilities: 5, highest_severity: 'LOW' });
+        dbStub.getAllVulnerabilityDetails.mockReturnValue([{ vulnerability_id: 'CVE-2024-0001' }]);
+        const candidate = await evaluateCandidatePolicy('web', 1, ['nginx:1.27'], { bypass: false, actor: 'system' });
+        // Narrowed explicitly, because `expect(...).toBe` does not narrow: only
+        // the `blocked` arm of the result carries violations.
+        if (candidate.status !== 'blocked') throw new Error(`expected blocked, got ${candidate.status}`);
+        expect(candidate.violations[0].reasons).toContain('kev');
+        // The candidate rule never fired, so no application names it.
+        expect(candidate.evidence?.applications ?? []).toEqual([]);
+    });
+
+    it('accepts a truncated-finding candidate when the policy reads only the complete aggregate', async () => {
+        // Suppressions are honored so the detail rows are loaded, but the policy
+        // gates on neither KEV nor fixability, so its only input is the severity in
+        // the scan's complete aggregate. The truncation cannot change that verdict,
+        // so holding the candidate here would refuse a decision the policy already
+        // made. This is the one place the unprovable set could have produced a
+        // false positive, and it is deliberately not counted.
+        dbStub.getMatchingPolicy.mockReturnValue(mkPolicy({ block_on_severity: 1, block_on_kev: 0, block_on_fixable: 0 }));
+        dbStub.getGlobalSettings.mockReturnValue({ deploy_block_honor_suppressions: '1' });
+        primeCleanScan({ total_vulnerabilities: 5, highest_severity: 'LOW' });
+        dbStub.getAllVulnerabilityDetails.mockReturnValue([{ vulnerability_id: 'CVE-2024-0001' }]);
+        const candidate = await evaluateCandidatePolicy('web', 1, ['nginx:1.27'], { bypass: false, actor: 'system' });
+        expect(candidate.status).toBe('allowed');
+        // The record still carries the truncation, so the decision is auditable
+        // even though it did not change the verdict.
+        expect(candidate.evidence?.records).toContainEqual(
+            expect.objectContaining({ target: 'nginx:1.27', state: 'partial' }),
+        );
+    });
+
+    it('never reads the detail rows at all when no input needs them', async () => {
+        // A severity-only policy that does not honor suppressions keeps the cheap
+        // aggregate path, so there is no truncation to reason about in the first
+        // place.
+        dbStub.getMatchingPolicy.mockReturnValue(mkPolicy({ block_on_severity: 1, block_on_kev: 0, block_on_fixable: 0 }));
+        primeCleanScan({ total_vulnerabilities: 5, highest_severity: 'LOW' });
+        const candidate = await evaluateCandidatePolicy('web', 1, ['nginx:1.27'], { bypass: false, actor: 'system' });
+        expect(candidate.status).toBe('allowed');
+        expect(dbStub.getAllVulnerabilityDetails).not.toHaveBeenCalled();
+        expect(candidate.evidence?.records.every((r) => r.state === 'current')).toBe(true);
+    });
+
     it('accepts a candidate on an authorized bypass', async () => {
         trivyStub.scanImagePreflight.mockRejectedValue(new Error('scan process crashed'));
         const candidate = await evaluateCandidatePolicy('web', 1, ['nginx:1.27'], { bypass: true, actor: 'admin' });

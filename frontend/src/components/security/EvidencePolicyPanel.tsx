@@ -129,6 +129,7 @@ export function EvidencePolicyPanel() {
   const [state, setState] = useState<EvidencePolicyResponse | null>(null);
   const [loadFailed, setLoadFailed] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [retrying, setRetrying] = useState(false);
 
   /**
    * `isCancelled` lets the mount effect ignore a response that arrives after the
@@ -164,6 +165,23 @@ export function EvidencePolicyPanel() {
     };
   }, [load]);
 
+  /**
+   * The retry's own in-flight state, so a second click cannot fire a second
+   * request. The button disabling on it is what tells the operator their click
+   * landed: `load` sets `loadFailed` back to false on success, so without this
+   * the card would stay on screen for the length of the request looking
+   * untouched and a rapid second click would read as a dead control.
+   */
+  const retry = useCallback(async () => {
+    if (retrying) return;
+    setRetrying(true);
+    try {
+      await load();
+    } finally {
+      setRetrying(false);
+    }
+  }, [load, retrying]);
+
   const save = useCallback(
     // Only the writable fields. `EvidencePolicy` also carries `isDefault`, which
     // the server's unknown-field check rejects, so it must not be sendable here.
@@ -195,19 +213,21 @@ export function EvidencePolicyPanel() {
 
   if (loadFailed) {
     return (
-      <div className="rounded-lg border border-card-border bg-card px-4 py-3">
+      <div className="rounded-lg border border-card-border border-t-card-border-top bg-card shadow-card-bevel px-4 py-3">
         <Label className="text-sm">Evidence availability</Label>
         <p className="text-xs text-muted-foreground mt-1">
           The policy could not be read, so what this node currently enforces is unknown here. Deploys
-          continue; a read failure falls back to the shipped defaults, which allow a deploy when the
-          scanner is missing and block one whose scan failed. Reload to see the active values.
+          are unaffected: the gate keeps applying whatever this instance has stored, and only a
+          failure to read that too would fall back to the shipped defaults, which allow a deploy when
+          the scanner is missing and block one whose scan failed.
         </p>
         <button
           type="button"
-          onClick={() => void load()}
-          className="mt-2 text-xs underline underline-offset-2"
+          onClick={() => void retry()}
+          disabled={retrying}
+          className="mt-2 text-xs underline underline-offset-2 disabled:cursor-default disabled:no-underline"
         >
-          Try again
+          {retrying ? 'Retrying…' : 'Try again'}
         </button>
       </div>
     );

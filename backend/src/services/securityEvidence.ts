@@ -338,6 +338,25 @@ export const LEGACY_VOCABULARY_MAPPINGS: readonly LegacyVocabularyMapping[] = [
 ];
 
 /**
+ * One sentence naming every rule that acted, safe to show an operator verbatim.
+ *
+ * Split out from `decideEvidenceGate` because a caller may add an application
+ * of its own and set the outcome the caller actually reached. Folding the new
+ * applications in without rebuilding the sentence would leave the summary
+ * describing the pre-override decision, so the two fields of the same object
+ * would disagree.
+ */
+export function summarizeEvidenceApplications(
+  applications: readonly EvidenceRuleApplication[],
+): string {
+  return applications.length === 0
+    ? 'No security evidence was required for this decision'
+    : applications
+        .map((a) => `${describeEvidenceState(a.state)} evidence for ${a.source}: ${a.outcome} (${a.rule})`)
+        .join('; ');
+}
+
+/**
  * Fold every application into one decision. Pure, so the worst-case-wins rule
  * and the summary sentence are unit-testable without a gate, a database, or a
  * clock.
@@ -347,11 +366,5 @@ export function decideEvidenceGate(
     applications: readonly EvidenceRuleApplication[],
 ): EvidenceGateDecision {
     const outcome = mostRestrictiveOutcome(applications.map((a) => a.outcome));
-    const summary =
-        applications.length === 0
-            ? 'No security evidence was required for this decision'
-            : applications
-                  .map((a) => `${describeEvidenceState(a.state)} evidence for ${a.source}: ${a.outcome} (${a.rule})`)
-                  .join('; ');
-    return { outcome, records: [...records], applications: [...applications], summary };
+    return { outcome, records: [...records], applications: [...applications], summary: summarizeEvidenceApplications(applications) };
 }

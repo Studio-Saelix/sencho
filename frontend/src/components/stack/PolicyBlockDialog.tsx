@@ -200,10 +200,12 @@ export function PolicyBlockDialog({
             {hasGenuineViolation
               ? // On a mixed payload this banner is additional context, not the
                 // reason for the block, and saying otherwise would be the same
-                // false whole-block claim the paragraph above avoids. The
-                // recovery hint below still applies: the unscanned image needs
-                // resolving either way.
-                'Some images could not be scanned as well. Those images are listed above without a finding count, so the block may rest on fewer images than the policy would otherwise have examined. Resolve the issue above and deploy again, or bypass if you accept the risk.'
+                // false whole-block claim the paragraph above avoids. Said as two
+                // facts the operator can act on rather than one about what the
+                // block "may rest on": which images are unscanned, and that the
+                // counts above do not cover them. The recovery hint still applies
+                // either way.
+                'Some images could not be scanned. They are listed above without a finding count, so the counts above do not cover them. Resolve the failure and deploy again, or bypass if you accept the risk.'
               : 'The deploy was blocked because the scan did not complete. Resolve the issue above and deploy again, or bypass if you accept the risk.'}
           </p>
         )}

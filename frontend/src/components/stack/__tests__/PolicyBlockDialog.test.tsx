@@ -81,6 +81,35 @@ describe('PolicyBlockDialog evidence', () => {
     expect(screen.queryByText(/Evidence unavailable/i)).not.toBeInTheDocument();
   });
 
+  it('claims the whole block was a scan failure only when it was', () => {
+    // The gate: "the deploy was blocked because the scan did not complete" is a
+    // claim about the entire block. On a payload where an image matched on the
+    // merits, the scan is not why the deploy stopped, and the sentence would send
+    // the operator to fix a scan that was fine. Reverting the gate must fail
+    // here.
+    const mixed: PolicyBlockPayload = {
+      ...unavailablePayload,
+      violations: [...unavailablePayload.violations, publicPayload.violations[0]],
+    };
+    const { unmount } = render(
+      <PolicyBlockDialog open payload={mixed} stackName="web" canBypass={false} bypassing={false} onClose={vi.fn()} onBypass={vi.fn()} />,
+    );
+    expect(screen.queryByText(/blocked because the scan did not complete/i)).not.toBeInTheDocument();
+    // And the replacement still tells the operator the failed image needs
+    // resolving, so the gate does not cost them the recovery path.
+    expect(screen.getByText(/Some images could not be scanned\./i)).toBeInTheDocument();
+    expect(screen.getByText(/the counts above do not cover them/i)).toBeInTheDocument();
+    expect(screen.getByText(/deploy again/i)).toBeInTheDocument();
+    unmount();
+
+    // On an evidence-only payload the sentence is the whole account of the block,
+    // so it has to be there.
+    render(
+      <PolicyBlockDialog open payload={unavailablePayload} stackName="web" canBypass={false} bypassing={false} onClose={vi.fn()} onBypass={vi.fn()} />,
+    );
+    expect(screen.getByText(/blocked because the scan did not complete/i)).toBeInTheDocument();
+  });
+
   it('explains both problems when one image is stale and its findings incomplete', () => {
     // Regression: the de-duplication keyed only on source:target, so the second
     // problem on the same image was silently dropped from the dialog.

@@ -568,6 +568,95 @@ describe('SourceController automatic acceptance', () => {
         expect(dispatch.mock.calls[0][0].generationId).toBe(replacement!.id);
     });
 
+    it('records which rule permitted an acceptance on unproven evidence', async () => {
+        // The defect: with the candidate rule on allow, an unattended acceptance
+        // of a candidate nothing proved safe used to persist `allowed` and
+        // nothing else, which is exactly what a clean acceptance persists. The
+        // verdict alone cannot tell the two apart, and this column is the only
+        // place the difference can live, since nothing downstream reads the
+        // applications.
+        stageCandidate('app-ev-unproven', 'ev-unproven-web', 'gen-ev-unproven', 'automatic', {
+            securityEvidence: null,
+        });
+        mockDue([armDuePoll('app-ev-unproven')]);
+        evaluateCandidatePolicy.mockResolvedValue({
+            status: 'allowed',
+            policy: policyRow(),
+            evidence: {
+                outcome: 'allow',
+                records: [{
+                    source: 'vulnerability_scan',
+                    state: 'failed',
+                    target: 'nginx:1.27',
+                    collectedAt: null,
+                    reason: 'Pre-flight scan failed: timeout',
+                }],
+                applications: [{
+                    source: 'vulnerability_scan',
+                    state: 'failed',
+                    outcome: 'allow',
+                    rule: 'security_candidate_unproven=allow',
+                    target: 'nginx:1.27',
+                }],
+                summary: 'Failed evidence for vulnerability_scan: allow (security_candidate_unproven=allow)',
+            },
+        });
+        spyOnReconcile().mockResolvedValue(okResult);
+        spyOnDispatch();
+
+        controller.start();
+        await advanceOneTick();
+
+        const acceptedId = getApp('app-ev-unproven').accepted_generation_id;
+        expect(acceptedId).not.toBeNull();
+        const persisted = JSON.parse(
+            GitOpsStore.getInstance().getGeneration(acceptedId!)!.security_policy_evidence_json!,
+        );
+        expect(persisted.status).toBe('allowed');
+        expect(persisted.evidenceOutcome).toBe('allow');
+        // The rule and the target, so the record says which image was accepted
+        // unproven and which setting let it through.
+        expect(persisted.evidenceApplications).toEqual([
+            expect.objectContaining({ rule: 'security_candidate_unproven=allow', target: 'nginx:1.27' }),
+        ]);
+    });
+
+    it('leaves no candidate rule on the record when the evidence was clean', async () => {
+        // The other half of the pair: a clean acceptance must stay free of the
+        // rule, or the column would name a rule that never acted.
+        stageCandidate('app-ev-clean', 'ev-clean-web', 'gen-ev-clean', 'automatic', {
+            securityEvidence: null,
+        });
+        mockDue([armDuePoll('app-ev-clean')]);
+        evaluateCandidatePolicy.mockResolvedValue({
+            status: 'allowed',
+            policy: policyRow(),
+            evidence: {
+                outcome: 'allow',
+                records: [{
+                    source: 'vulnerability_scan',
+                    state: 'current',
+                    target: 'nginx:1.27',
+                    collectedAt: Date.now(),
+                }],
+                applications: [],
+                summary: 'No security evidence was required for this decision',
+            },
+        });
+        spyOnReconcile().mockResolvedValue(okResult);
+        spyOnDispatch();
+
+        controller.start();
+        await advanceOneTick();
+
+        const acceptedId = getApp('app-ev-clean').accepted_generation_id;
+        expect(acceptedId).not.toBeNull();
+        const persisted = JSON.parse(
+            GitOpsStore.getInstance().getGeneration(acceptedId!)!.security_policy_evidence_json!,
+        );
+        expect(persisted.evidenceApplications).toEqual([]);
+    });
+
     it('does not accept when the application fingerprint changed after candidate creation', async () => {
         stageCandidate('app-fp-changed', 'fp-changed-web', 'gen-fp-changed');
         DatabaseService.getInstance().getDb().prepare(

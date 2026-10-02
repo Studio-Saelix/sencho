@@ -125,6 +125,61 @@ describe('PUT /api/security/evidence-policy', () => {
     }
   });
 
+  it('writes no audit row when the body restates the values already in force', async () => {
+    // Re-saving the screen unchanged is the common case. Logging it would put a
+    // phantom `scanFailure:block->block` transition in the one record an incident
+    // review reads for what loosened and when.
+    const { DatabaseService } = await import('../services/DatabaseService');
+    await request(app)
+      .put('/api/security/evidence-policy')
+      .set('Cookie', authCookie)
+      .send({ scanFailure: 'block', candidateUnproven: 'block' });
+    const audit = vi.spyOn(DatabaseService.getInstance(), 'insertAuditLog');
+    try {
+      const res = await request(app)
+        .put('/api/security/evidence-policy')
+        .set('Cookie', authCookie)
+        .send({ scanFailure: 'block' });
+      expect(res.status).toBe(200);
+      // The response is still the resolved policy, so the caller can settle its
+      // screen without a second read.
+      expect(res.body.policy).toMatchObject({ scanFailure: 'block' });
+      const mine = audit.mock.calls
+        .map((c) => (c[0] as { summary?: string }).summary ?? '')
+        .filter((t) => t.startsWith('policy.evidence_availability'));
+      expect(mine).toEqual([]);
+    } finally {
+      audit.mockRestore();
+    }
+  });
+
+  it('audits only the field that moved when the rest restate current values', async () => {
+    const { DatabaseService } = await import('../services/DatabaseService');
+    await request(app)
+      .put('/api/security/evidence-policy')
+      .set('Cookie', authCookie)
+      .send({ scanFailure: 'warn' });
+    const audit = vi.spyOn(DatabaseService.getInstance(), 'insertAuditLog');
+    try {
+      // scanFailure is already warn, so only scannerUnavailable is a change. The
+      // audit must not name scanFailure at all, in either the list or the
+      // transitions.
+      await request(app)
+        .put('/api/security/evidence-policy')
+        .set('Cookie', authCookie)
+        .send({ scannerUnavailable: 'warn', scanFailure: 'warn' });
+      const summaries = audit.mock.calls
+        .map((c) => (c[0] as { summary?: string }).summary ?? '')
+        .filter((t) => t.startsWith('policy.evidence_availability'));
+      expect(summaries).toHaveLength(1);
+      expect(summaries[0]).toContain('changed=[scannerUnavailable]');
+      expect(summaries[0]).toContain('transitions=[scannerUnavailable:allow->warn]');
+      expect(summaries[0]).not.toContain('scanFailure');
+    } finally {
+      audit.mockRestore();
+    }
+  });
+
   it('accepts a partial body and leaves the rest of the policy alone', async () => {
     const res = await request(app)
       .put('/api/security/evidence-policy')

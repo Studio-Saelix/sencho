@@ -376,13 +376,18 @@ securityRouter.put('/evidence-policy', authMiddleware, (req: Request, res: Respo
     const fromTo: string[] = [];
     for (const field of OUTCOME_FIELDS) {
       const written = next[SECURITY_EVIDENCE_SETTING_KEYS[field]];
-      if (written !== undefined) {
+      // A field written to the value it already holds did not move, so it is not
+      // in `changed`. Re-saving the screen unchanged is the common case, and
+      // logging it would put phantom entries like `scanFailure:block->block` in
+      // the one record an incident review reads for what loosened and when.
+      if (written !== undefined && written !== before[field]) {
         changed.push(field);
         fromTo.push(`${field}:${before[field]}->${written}`);
       }
     }
     if (changed.length === 0) {
-      // An empty body changed nothing, so it audits nothing.
+      // Nothing moved, so nothing is written and nothing is audited. The response
+      // is the resolved policy, which is what the caller asked to see.
       res.json({ policy: serializeSecurityEvidencePolicy(before) });
       return;
     }

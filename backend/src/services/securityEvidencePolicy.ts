@@ -8,10 +8,20 @@
  * would mean restating scanner availability on every policy card and would give
  * one setting two unrelated meanings.
  *
- * Every default here reproduces the behaviour the deploy gate had before this
- * module existed, branch for branch. That is the contract that makes the first
- * change safe to land: the gate reads a policy instead of an `if`, and an
- * operator who changes nothing gets byte-identical outcomes.
+ * The `scannerUnavailable` and `scanFailure` defaults each reproduce the branch
+ * the deploy gate hard-coded before this module existed, branch for branch, so
+ * an operator who changes nothing keeps the deploy behaviour they had.
+ * `candidateUnproven` defaults to the value the candidate path already enforced,
+ * which was to hold.
+ *
+ * The candidate path's behaviour changes at the defaults in exactly one place,
+ * and it changes in the stricter direction: it reads the unprovable set from the
+ * evidence records as well as from the violations, so a candidate whose policy
+ * evaluation threw is now held rather than accepted. The scan had succeeded, so
+ * the records said `current` and only the violations knew, which made an
+ * evaluation error look like a clean pass on the one path with nobody watching.
+ * That is the fail-open this module exists to close, and it is the reason the
+ * deploy gate's equivalence is stated separately from the candidate gate's.
  *
  * A settings read failure resolves to these same defaults rather than to the
  * strictest value. The strictest reading of an unreadable policy is to refuse
