@@ -58,9 +58,9 @@ import type {
   RolloutFacet,
   SourceFacet,
 } from '@/types/gitops';
+import { STATUS_CARD_CLASS, type StatusTone } from '@/lib/statusTone';
 
-/** The five semantic slots the design system defines. Fuchsia is reserved for image updates. */
-export type GitOpsTone = 'brand' | 'success' | 'warning' | 'destructive' | 'neutral';
+export type GitOpsTone = StatusTone;
 
 export interface GitOpsStateMeta {
   /** Short name of the state, rendered in mono uppercase. */
@@ -72,13 +72,7 @@ export interface GitOpsStateMeta {
 }
 
 /** Card classes per tone. Identical to the drift status cards so the families read as one. */
-export const GITOPS_TONE_CLASS: Record<GitOpsTone, string> = {
-  brand: 'border-brand/40 bg-brand/[0.06] text-brand',
-  success: 'border-success/40 bg-success/[0.06] text-success',
-  warning: 'border-warning/40 bg-warning/[0.06] text-warning',
-  destructive: 'border-destructive/40 bg-destructive/[0.06] text-destructive',
-  neutral: 'border-muted bg-card/40 text-stat-subtitle',
-};
+export const GITOPS_TONE_CLASS: Record<GitOpsTone, string> = STATUS_CARD_CLASS;
 
 export const ARTIFACT_STATE: Record<GitOpsArtifactStatus, GitOpsStateMeta> = {
   not_applicable: {

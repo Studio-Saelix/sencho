@@ -2,20 +2,11 @@ import { useEffect, useRef, useState } from 'react';
 import { Modal, ModalHeader, ModalBody, ModalFooter } from '@/components/ui/modal';
 import { Button } from '@/components/ui/button';
 import { toast } from '@/components/ui/toast-store';
-import GitOpsApprovalChips from '@/components/gitops/GitOpsApprovalChips';
-import GitOpsCaveats from '@/components/gitops/GitOpsCaveats';
-import { GitOpsFacetCards } from '@/components/gitops/GitOpsFacetCards';
-import { GitOpsFaultCard } from '@/components/gitops/GitOpsStateCard';
+import { GitOpsStatus } from '@/components/gitops/GitOpsStatus';
 import { IdentityRow } from '@/components/gitops/GitOpsIdentityRow';
 import { ShortId } from '@/components/gitops/GitOpsShortId';
 import { GitOpsTargetCard } from '@/components/gitops/GitOpsTargetCard';
-import {
-    absentFault,
-    liveArtifactFacet,
-    livePlacementFacet,
-    liveRolloutFacet,
-    liveSourceFacet,
-} from '@/lib/gitopsState';
+import { absentFault, liveSourceFacet } from '@/lib/gitopsState';
 import {
     type BlueprintPreview,
     previewBlueprint,
@@ -342,9 +333,6 @@ function GitOpsEvidenceSection({ preview }: { preview: BlueprintPreview }) {
     const live = projection && projection.targetMode !== 'not_applicable' ? projection : null;
     const faults = projection ? absentFault(projection) : [];
     const source = liveSourceFacet(projection);
-    const artifact = liveArtifactFacet(projection);
-    const placement = livePlacementFacet(projection);
-    const rollout = liveRolloutFacet(projection);
     if (!live && faults.length === 0) return null;
 
     const nodeNames = new Map<number, string>();
@@ -355,13 +343,12 @@ function GitOpsEvidenceSection({ preview }: { preview: BlueprintPreview }) {
     return (
         <div className={`rounded-md border ${sectionBorderClass('neutral')} px-3 py-2`}>
             <div className="font-mono text-[10px] uppercase tracking-[0.2em] text-stat-subtitle mb-1.5">
-                {live ? 'GitOps authority and evidence' : 'GitOps state unavailable'}
+                GitOps authority and evidence
             </div>
             <div className="space-y-2">
-                {faults.length > 0 && <GitOpsFaultCard message={faults[0].message} />}
+                <GitOpsStatus revision={projection} nodeName={nodeName} includeTargets={false} />
                 {live && (
                     <>
-                        <GitOpsApprovalChips approvals={live.approvals} placement={placement} rollout={rollout} />
                         <dl className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-1">
                             {source && (
                                 <>
@@ -387,13 +374,6 @@ function GitOpsEvidenceSection({ preview }: { preview: BlueprintPreview }) {
                                 <ShortId value={live.rolloutGenerationId} />
                             </IdentityRow>
                         </dl>
-                        <GitOpsFacetCards
-                            source={source}
-                            artifact={artifact}
-                            placement={placement}
-                            rollout={rollout}
-                            authorityPolicies={live.authorityPolicies}
-                        />
                         {live.targets.length > 0 && (
                             <div className="space-y-2">
                                 <div className="font-mono text-[10px] uppercase tracking-[0.15em] text-stat-subtitle">
@@ -404,7 +384,6 @@ function GitOpsEvidenceSection({ preview }: { preview: BlueprintPreview }) {
                                 ))}
                             </div>
                         )}
-                        <GitOpsCaveats revision={projection} />
                     </>
                 )}
             </div>

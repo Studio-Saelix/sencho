@@ -175,7 +175,10 @@ describe('RolloutPreviewDialog', () => {
             />,
         );
 
-        await waitFor(() => expect(screen.getByTestId('gitops-approvals')).toBeInTheDocument());
+        await waitFor(() => expect(screen.getByTestId('gitops-placement')).toBeInTheDocument());
+        // The recorded grants are evidence behind the path, one click away.
+        await userEvent.click(screen.getByRole('button', { name: 'Evidence' }));
+        expect(screen.getByTestId('gitops-approvals')).toBeInTheDocument();
         expect(screen.getByTestId('gitops-placement')).toHaveAttribute('data-state', 'blueprint_bound');
         expect(screen.getByTestId('gitops-rollout')).toHaveAttribute('data-state', 'rollout_not_executable');
         // An Inline Blueprint has no Git source or executable artifact set: the

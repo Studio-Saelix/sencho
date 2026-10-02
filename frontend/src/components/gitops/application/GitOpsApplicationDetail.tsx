@@ -1,22 +1,13 @@
 import type { ReactNode } from 'react';
 import { CircleSlash } from 'lucide-react';
 
-import GitOpsApprovalChips from '@/components/gitops/GitOpsApprovalChips';
-import GitOpsCaveats from '@/components/gitops/GitOpsCaveats';
 import GitOpsDriftRow from '@/components/gitops/GitOpsDriftRow';
-import { GitOpsFacetCards } from '@/components/gitops/GitOpsFacetCards';
 import { IdentityRow } from '@/components/gitops/GitOpsIdentityRow';
-import GitOpsStateCard, { GitOpsFaultCard } from '@/components/gitops/GitOpsStateCard';
+import GitOpsStateCard from '@/components/gitops/GitOpsStateCard';
+import { GitOpsStatus } from '@/components/gitops/GitOpsStatus';
 import { ShortId } from '@/components/gitops/GitOpsShortId';
 import { GitOpsTargetCard } from '@/components/gitops/GitOpsTargetCard';
-import { attentionLabel, POSTURE_TONE_CLASS } from '@/lib/gitopsPortfolio';
-import {
-  absentFault,
-  liveArtifactFacet,
-  livePlacementFacet,
-  liveRolloutFacet,
-  liveSourceFacet,
-} from '@/lib/gitopsState';
+import { absentFault } from '@/lib/gitopsState';
 import { cn } from '@/lib/utils';
 import type { GitOpsPortfolioDetailResponse, GitOpsPortfolioRow } from '@/types/gitopsPortfolio';
 
@@ -66,10 +57,6 @@ export default function GitOpsApplicationDetail({ detail, actions }: {
   const { application: row, projection } = detail;
   const live = projection.targetMode === 'not_applicable' ? null : projection;
   const faults = absentFault(projection);
-  const source = liveSourceFacet(projection);
-  const artifact = liveArtifactFacet(projection);
-  const placement = livePlacementFacet(projection);
-  const rollout = liveRolloutFacet(projection);
   const nodeNames = new Map(row.targets.map(t => [t.nodeId, t.nodeName]));
   const nodeName = (id: number) => nodeNames.get(id) ?? (row.nodeId === id ? row.nodeName : null) ?? `node ${id}`;
 
@@ -102,32 +89,8 @@ export default function GitOpsApplicationDetail({ detail, actions }: {
           </dl>
         </Section>
 
-        {row.attention.length > 0 && (
-          <Section label={`Attention · ${row.attention.length}`}>
-            <ul data-testid="gitops-application-attention" className={cn(CARD_SHELL, 'divide-y divide-card-border/60')}>
-              {row.attention.map(reason => {
-                const label = attentionLabel(reason);
-                return (
-                  <li key={reason} className="flex items-start gap-3 px-3 py-2">
-                    <span
-                      className={cn(
-                        'mt-0.5 shrink-0 rounded-md border px-2 py-0.5 font-mono text-[10px] uppercase tracking-[0.12em]',
-                        POSTURE_TONE_CLASS[label.tone],
-                      )}
-                    >
-                      {label.label}
-                    </span>
-                    <span className="min-w-0 flex-1 text-xs text-stat-subtitle">{label.line}</span>
-                  </li>
-                );
-              })}
-            </ul>
-          </Section>
-        )}
-
         <Section label="Application state">
           <div className="flex flex-col gap-2">
-            {faults.length > 0 && <GitOpsFaultCard message={faults[0].message} />}
             {!live && faults.length === 0 && (
               <GitOpsStateCard
                 data-testid="gitops-no-revision"
@@ -140,28 +103,23 @@ export default function GitOpsApplicationDetail({ detail, actions }: {
                 }}
               />
             )}
-            {live && (
-              <GitOpsApprovalChips approvals={live.approvals} placement={placement} rollout={rollout} />
-            )}
-            {actions}
-            <GitOpsFacetCards
-              source={source}
-              artifact={artifact}
-              placement={placement}
-              rollout={rollout}
-              authorityPolicies={live?.authorityPolicies}
+            <GitOpsStatus
+              revision={projection}
+              row={row}
+              nodeName={nodeName}
+              includeTargets={false}
+              proofExtra={(row.evidence.partial || row.evidence.unknown) ? (
+                <p data-testid="gitops-application-evidence" className="font-mono text-[11px] text-warning">
+                  {evidenceLine(row.evidence, nodeName)}
+                </p>
+              ) : undefined}
             />
+            {actions}
           </div>
         </Section>
       </div>
 
       <div className="flex min-w-0 flex-col gap-6">
-        {(row.evidence.partial || row.evidence.unknown) && (
-          <div data-testid="gitops-application-evidence" className="rounded-lg border border-warning/40 bg-warning/[0.06] px-3 py-2">
-            <p className="font-mono text-[11px] text-warning">{evidenceLine(row.evidence, nodeName)}</p>
-          </div>
-        )}
-
         {live && live.targets.length > 0 && (
           <Section label={`Targets · ${live.targets.length}`}>
             <div className="flex flex-col gap-2">
@@ -177,8 +135,6 @@ export default function GitOpsApplicationDetail({ detail, actions }: {
             </div>
           </Section>
         )}
-
-        <GitOpsCaveats revision={projection} />
       </div>
     </div>
   );

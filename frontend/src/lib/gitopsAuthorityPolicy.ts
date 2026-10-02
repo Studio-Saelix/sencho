@@ -150,9 +150,9 @@ export function placementReasonText(reason: string): string {
 }
 
 /**
- * The line a facet card shows for its policy.
+ * The line a stage shows for its policy.
  *
- * Returns null when there is nothing worth saying, so a card never grows a line
+ * Returns null when there is nothing worth saying, so a stage never grows a line
  * that repeats its own state. The two cases that produce nothing are a policy
  * with no decision and no reason, and a domain that does not apply.
  */
@@ -171,6 +171,20 @@ export function policyReadFor(
 ): AuthorityPolicyRead | null {
   if (!policies) return null;
   return policies.find((entry) => entry.domain === domain) ?? null;
+}
+
+/**
+ * Whether a policy read has anything to print: a recorded decision, or a reason.
+ * The status block reads this before rendering, to know whether its Evidence
+ * control has anything behind it.
+ */
+export function policyLineVisible(read: AuthorityPolicyRead | null): boolean {
+  if (!read) return false;
+  return read.decision !== 'awaiting_operator' || Boolean(read.reason && placementReasonText(read.reason));
+}
+
+export function hasPolicyLines(policies?: readonly AuthorityPolicyRead[]): boolean {
+  return AUTHORITY_POLICY_DOMAINS.some((domain) => policyLineVisible(policyReadFor(policies, domain)));
 }
 
 export type { AuthorityPolicyDecision, AuthorityPolicyDomain, AuthorityPolicyRead };

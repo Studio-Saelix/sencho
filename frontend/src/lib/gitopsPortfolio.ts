@@ -6,9 +6,10 @@
  * facet statuses, so a reason code a newer server build introduces renders as
  * its raw code rather than crashing the page.
  */
+import type { StatusTone } from '@/lib/statusTone';
 import type { GitOpsAttentionReason, GitOpsPortfolioPosture, GitOpsPortfolioTargetSummary } from '@/types/gitopsPortfolio';
 
-export type PortfolioTone = 'brand' | 'success' | 'warning' | 'destructive' | 'neutral';
+export type PortfolioTone = StatusTone;
 
 export interface PortfolioLabel {
   /** Short label, rendered in tracked-mono chips. */

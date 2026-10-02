@@ -1,22 +1,16 @@
 /**
- * The policy line a facet card carries, and the one that it must not carry.
+ * The policy lines in the status evidence, and the ones they must not print.
  *
- * The card this lives in already states the facet's status, so the line earns
- * its place only by saying something the card does not: who is configured to
- * decide this stage, and what that policy actually did. The cases below are
- * mostly about the second, because a line that repeats the card's own state is
- * noise and a line that claims the current policy decided older work is a lie.
+ * The status already states each stage's state, so a line earns its place only
+ * by saying something the stage does not: who is configured to decide it, and
+ * what that policy actually did. A line that repeats the stage's own state is
+ * noise, and a line that claims the current policy decided older work is a lie.
  */
 import { describe, expect, it, vi } from 'vitest';
 import { render, screen } from '@testing-library/react';
 
-import { GitOpsFacetCards } from './GitOpsFacetCards';
-import { plainSource } from '@/__tests__/gitopsFixtures';
-import type { AuthorityPolicyRead, PlacementFacet } from '@/types/gitops';
-
-const SOURCE = plainSource('application_generation_accepted');
-const PLACEMENT_PENDING: PlacementFacet = { status: 'placement_review_pending' };
-const ROLLOUT = { status: 'rollout_not_executable', rolloutCandidateId: 'cand-1' } as const;
+import { GitOpsPolicyLines } from './GitOpsPolicyLines';
+import type { AuthorityPolicyRead } from '@/types/gitops';
 
 function read(overrides: Partial<AuthorityPolicyRead> = {}): AuthorityPolicyRead {
   return {
@@ -31,23 +25,15 @@ function read(overrides: Partial<AuthorityPolicyRead> = {}): AuthorityPolicyRead
   };
 }
 
-function renderCards(policies?: readonly AuthorityPolicyRead[], placement: PlacementFacet = PLACEMENT_PENDING) {
-  return render(
-    <GitOpsFacetCards
-      source={SOURCE}
-      artifact={null}
-      placement={placement}
-      rollout={ROLLOUT}
-      authorityPolicies={policies}
-    />,
-  );
+function renderLines(policies?: readonly AuthorityPolicyRead[]) {
+  return render(<GitOpsPolicyLines authorityPolicies={policies} />);
 }
 
-describe('the policy line on a facet card', () => {
+describe('the policy line in the status evidence', () => {
   it('says nothing when the policy has no decision and no reason', () => {
-    // The common case. A line here would restate the card's own state, and every
+    // The common case. A line here would restate the stage's own state, and every
     // settled application would carry it for no information.
-    renderCards([read()]);
+    renderLines([read()]);
     expect(screen.queryByTestId('gitops-policy-line')).toBeNull();
   });
 
@@ -55,7 +41,7 @@ describe('the policy line on a facet card', () => {
     // The distinction an operator needs: a policy that ran and declined needs a
     // decision about this change, and a policy that never fired needs a fix. The
     // two look identical without the reason.
-    renderCards([read({ decision: 'policy_declined', reason: 'stateful_workload' })]);
+    renderLines([read({ decision: 'policy_declined', reason: 'stateful_workload' })]);
     const line = screen.getByTestId('gitops-policy-line');
     expect(line).toHaveTextContent('One stateless change at a time');
     expect(line).toHaveTextContent('declined by policy');
@@ -68,27 +54,27 @@ describe('the policy line on a facet card', () => {
     // decision to decline with. A fixture carrying a `policy_is_operator`
     // reason described a state the backend stopped producing, which is how a
     // wrong claim can sit in a test and still pass.
-    renderCards([read({ configured: 'operator', decision: 'awaiting_operator', reason: null })]);
+    renderLines([read({ configured: 'operator', decision: 'awaiting_operator', reason: null })]);
     expect(screen.queryByTestId('gitops-policy-line')).toBeNull();
   });
 
   it('names the operator policy when something else is outstanding', () => {
     // The operator policy can still be configured while a decision is recorded
     // from the stage before it, so the line has to name the policy.
-    renderCards([read({ configured: 'operator', decision: 'operator_authorized', reason: null, decidedBy: 'operator' })]);
+    renderLines([read({ configured: 'operator', decision: 'operator_authorized', reason: null, decidedBy: 'operator' })]);
     expect(screen.getByTestId('gitops-policy-line')).toHaveTextContent('Operator approves each change');
   });
 
   it('reports the value the work in flight was decided under, when it differs', () => {
     // A policy edited after a generation opened does not retroactively claim it.
     // Showing only the configured value would read as though it had.
-    renderCards([read({ configured: 'operator', effectiveFrozen: 'bounded_auto', decision: 'operator_authorized', decidedBy: 'operator' })]);
+    renderLines([read({ configured: 'operator', effectiveFrozen: 'bounded_auto', decision: 'operator_authorized', decidedBy: 'operator' })]);
     expect(screen.getByTestId('gitops-policy-frozen')).toHaveTextContent('In flight under one stateless change at a time');
   });
 
   it('says nothing about a frozen value that matches the configuration', () => {
     // Reporting agreement on every application would be noise on the majority.
-    renderCards([read({ effectiveFrozen: 'bounded_auto', decision: 'policy_authorized', decidedBy: 'configured_policy' })]);
+    renderLines([read({ effectiveFrozen: 'bounded_auto', decision: 'policy_authorized', decidedBy: 'configured_policy' })]);
     expect(screen.queryByTestId('gitops-policy-frozen')).toBeNull();
   });
 
@@ -100,7 +86,7 @@ describe('the policy line on a facet card', () => {
     vi.useFakeTimers();
     try {
       vi.setSystemTime(new Date('2026-01-01T12:00:00Z'));
-      renderCards([
+      renderLines([
         read({
           decision: 'policy_declined',
           reason: 'conflicting_operation',
@@ -119,15 +105,15 @@ describe('the policy line on a facet card', () => {
     // A reason with no timestamp cannot be placed in time at all. Inventing "just
     // now" would assert a moment nobody recorded, which is the claim this clause
     // was added to stop making.
-    renderCards([read({ decision: 'policy_declined', reason: 'cordon_override', decidedAt: null })]);
+    renderLines([read({ decision: 'policy_declined', reason: 'cordon_override', decidedAt: null })]);
     expect(screen.getByTestId('gitops-policy-line')).toHaveTextContent('cordoned');
     expect(screen.queryByTestId('gitops-policy-recorded')).toBeNull();
   });
 
   it('says no date for a decision that carries no reason', () => {
-    // An approval is dated by the approval itself, not by this card. A date here
+    // An approval is dated by the approval itself, not by this line. A date here
     // would claim the policy line knows when an approval was granted.
-    renderCards([read({ decision: 'operator_authorized', reason: null, decidedBy: 'operator', decidedAt: 7 })]);
+    renderLines([read({ decision: 'operator_authorized', reason: null, decidedBy: 'operator', decidedAt: 7 })]);
     expect(screen.getByTestId('gitops-policy-line')).toBeInTheDocument();
     expect(screen.queryByTestId('gitops-policy-recorded')).toBeNull();
   });
@@ -135,29 +121,20 @@ describe('the policy line on a facet card', () => {
   it('shows a reason it has no wording for, rather than hiding it', () => {
     // A vocabulary this build predates must reach the operator as a name, not as
     // silence. Silence would read as "no reason recorded".
-    renderCards([read({ decision: 'policy_declined', reason: 'a_reason_from_a_newer_build' })]);
+    renderLines([read({ decision: 'policy_declined', reason: 'a_reason_from_a_newer_build' })]);
     expect(screen.getByTestId('gitops-policy-line')).toHaveTextContent('a_reason_from_a_newer_build');
   });
 
-  it('renders the cards unchanged when the build carries no reads', () => {
-    renderCards(undefined);
-    expect(screen.getByTestId('gitops-placement')).toBeInTheDocument();
+  it('prints nothing when the build carries no reads', () => {
+    renderLines(undefined);
     expect(screen.queryByTestId('gitops-policy-line')).toBeNull();
   });
 
-  it('puts no policy on the artifact card, which governs no decision', () => {
-    // The artifact facet reports what was built, not who may act. A policy there
-    // would attribute a decision to a stage that makes none.
-    render(
-      <GitOpsFacetCards
-        source={SOURCE}
-        artifact={{ status: 'not_applicable' } as never}
-        placement={PLACEMENT_PENDING}
-        rollout={ROLLOUT}
-        authorityPolicies={[read({ decision: 'policy_declined', reason: 'cordon_override' })]}
-      />,
-    );
-    const artifact = screen.getByTestId('gitops-artifact');
-    expect(artifact.querySelector('[data-testid="gitops-policy-line"]')).toBeNull();
+  it('prints one block per governed decision, and none for a domain without a read', () => {
+    renderLines([
+      read({ domain: 'source', decision: 'policy_declined', reason: 'cordon_override' }),
+      read({ domain: 'rollout_authorization', decision: 'operator_authorized', decidedBy: 'operator' }),
+    ]);
+    expect(screen.getAllByTestId('gitops-policy-line')).toHaveLength(2);
   });
 });

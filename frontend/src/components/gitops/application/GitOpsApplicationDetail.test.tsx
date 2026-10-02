@@ -93,7 +93,8 @@ describe('GitOpsApplicationDetail', () => {
     expect(screen.getByText('example.test/acme/infra')).toBeInTheDocument();
     expect(screen.getAllByText('a1b2c3d')).toHaveLength(2);
     expect(screen.getByTestId('gitops-source')).toHaveAttribute('data-state', 'candidate_ready');
-    expect(screen.getByTestId('gitops-placement')).toHaveAttribute('data-state', 'unbound_direct');
+    // Unbound placement and an absent rollout say nothing about this application.
+    expect(screen.queryByTestId('gitops-placement')).toBeNull();
     expect(screen.queryByTestId('gitops-rollout')).toBeNull();
     expect(screen.queryByText('Rollout generation')).toBeNull();
     const targets = screen.getAllByTestId('gitops-target');
@@ -104,17 +105,30 @@ describe('GitOpsApplicationDetail', () => {
   it('renders a Blueprint application with decomposed authority, placement and rollout apart', () => {
     render(<GitOpsApplicationDetail detail={detailResponse(blueprintRow, blueprintProjection)} />);
 
-    const chips = screen.getByTestId('gitops-approvals');
-    expect(within(chips).getByText('source accepted')).toBeInTheDocument();
-    expect(within(chips).getByText('placement approved')).toBeInTheDocument();
-
     expect(screen.getByTestId('gitops-placement')).toHaveTextContent(PLACEMENT_STATE.placement_review_pending.label);
     const rollout = screen.getByTestId('gitops-rollout');
     expect(rollout).toHaveTextContent(ROLLOUT_STATE.rollout_paused.label);
-    expect(rollout).toHaveTextContent('canary health gate failed');
+
+    // Recorded grants and the pause reason are evidence behind the path.
+    fireEvent.click(screen.getByRole('button', { name: 'Evidence' }));
+    const chips = screen.getByTestId('gitops-approvals');
+    expect(within(chips).getByText('Source accepted')).toBeInTheDocument();
+    expect(within(chips).getByText('Placement approved')).toBeInTheDocument();
+    expect(screen.getByTestId('gitops-stage-note-rollout')).toHaveTextContent('canary health gate failed');
 
     expect(screen.getByText('#3')).toBeInTheDocument();
     expect(screen.getByText('rollgen-')).toHaveAttribute('title', 'rollgen-0001-abcdef');
+  });
+
+  it('names every attention reason, the first in the answer and the rest in the evidence', () => {
+    const row = { ...blueprintRow, attention: ['placement_review_pending', 'drift', 'target_stale'] };
+    render(<GitOpsApplicationDetail detail={detailResponse(row, blueprintProjection)} />);
+
+    expect(screen.getByTestId('gitops-posture')).toHaveTextContent(ATTENTION_LABEL.placement_review_pending!.line);
+    fireEvent.click(screen.getByRole('button', { name: 'Evidence' }));
+    const others = screen.getByTestId('gitops-other-reasons');
+    expect(others).toHaveTextContent(ATTENTION_LABEL.drift!.line);
+    expect(others).toHaveTextContent(ATTENTION_LABEL.target_stale!.line);
   });
 
   it('keeps every target visible, with node names and observed artifact evidence', () => {
@@ -152,11 +166,14 @@ describe('GitOpsApplicationDetail', () => {
   it('states partial evidence by node, and keeps attention reasons inline', () => {
     render(<GitOpsApplicationDetail detail={detailResponse(blueprintRow, blueprintProjection)} />);
 
+    // Partial evidence is flagged on the answer itself and named by node in the evidence.
+    expect(screen.getByTestId('gitops-posture')).toHaveTextContent('evidence partial');
+    fireEvent.click(screen.getByRole('button', { name: 'Evidence' }));
     expect(screen.getByTestId('gitops-application-evidence')).toHaveTextContent('edge-b could not be reached');
-    const attention = screen.getByTestId('gitops-application-attention');
+    // The reason that needs an operator first is the answer's own sentence.
     const label = ATTENTION_LABEL.placement_review_pending;
     expect(label).toBeDefined();
-    expect(attention).toHaveTextContent(label!.line);
+    expect(screen.getByTestId('gitops-posture')).toHaveTextContent(label!.line);
   });
 
   it('renders classified drift through the shared drift row', () => {
@@ -174,7 +191,10 @@ describe('GitOpsApplicationDetail', () => {
 
   it('shows a fault, not the empty state, when the projection could not reach the application', () => {
     render(<GitOpsApplicationDetail detail={detailResponse({}, absentRevision([missingApplicationLimitation]))} />);
-    expect(screen.getByTestId('gitops-fault')).toHaveTextContent(missingApplicationLimitation.message);
+    // The portfolio posture still speaks for the application; the unreadable state is named beside it.
+    const answer = screen.getByTestId('gitops-posture');
+    expect(answer).toHaveTextContent(missingApplicationLimitation.message);
+    expect(answer).toHaveTextContent('state unavailable');
     expect(screen.queryByTestId('gitops-no-revision')).toBeNull();
   });
 });
@@ -193,7 +213,7 @@ describe('GitOpsApplicationView', () => {
   ])('offers no authority actions for %s', async (_label, id, build) => {
     mockFetch.mockResolvedValueOnce(ok(build()));
     render(<GitOpsApplicationView id={id} />);
-    await screen.findByTestId('gitops-application-posture');
+    await screen.findByTestId('gitops-posture');
     expect(screen.queryByTestId('authority-actions')).toBeNull();
     expect(screen.queryByTestId('rollout-controls')).toBeNull();
   });
@@ -211,7 +231,7 @@ describe('GitOpsApplicationView', () => {
       blueprintEnabled: true,
     }));
     render(<GitOpsApplicationView id="bp:3" />);
-    await screen.findByTestId('gitops-application-posture');
+    await screen.findByTestId('gitops-posture');
     expect(screen.getByTestId('authority-actions')).toBeInTheDocument();
     // The rollout lifecycle is the other half and stays Git-only, because an
     // inline application has no Git generation to authorize a rollout of.
@@ -221,7 +241,7 @@ describe('GitOpsApplicationView', () => {
   it('offers authority actions for a local Git-managed Blueprint', async () => {
     mockFetch.mockResolvedValueOnce(ok({ ...detailResponse(blueprintRow, blueprintProjection), blueprintEnabled: true }));
     render(<GitOpsApplicationView id="bp:3" />);
-    await screen.findByTestId('gitops-application-posture');
+    await screen.findByTestId('gitops-posture');
     expect(screen.getByTestId('authority-actions')).toBeInTheDocument();
     expect(screen.getByTestId('rollout-controls')).toBeInTheDocument();
   });
@@ -237,7 +257,7 @@ describe('GitOpsApplicationView', () => {
     fireEvent.click(await screen.findByRole('button', { name: /open git source/i }));
 
     expect(screen.getByRole('heading', { name: 'bookstack' })).toBeInTheDocument();
-    expect(screen.getByTestId('gitops-application-posture')).toHaveTextContent('converged');
+    expect(screen.getByTestId('gitops-posture')).toHaveTextContent('converged');
     expect((inPlace.mock.calls[0][0] as CustomEvent).detail).toEqual({ nodeId: 1, stackName: 'bookstack', applicationName: 'bookstack' });
     expect(navigate).not.toHaveBeenCalled();
     window.removeEventListener(GITOPS_GIT_SOURCE_EVENT, inPlace);
@@ -265,7 +285,7 @@ describe('GitOpsApplicationView', () => {
     try {
       mockFetch.mockResolvedValueOnce(ok({ ...detailResponse(blueprintRow, blueprintProjection), blueprintEnabled: true }));
       render(<GitOpsApplicationView id="bp:3" />);
-      await screen.findByTestId('gitops-application-posture');
+      await screen.findByTestId('gitops-posture');
       expect(screen.queryByRole('button', { name: /open blueprint/i })).toBeNull();
     } finally {
       fleet.reachable = true;
@@ -324,11 +344,11 @@ describe('GitOpsApplicationView', () => {
     expect(screen.getByRole('button', { name: 'Retry' })).toBeInTheDocument();
   });
 
-  it('names a posture this build does not know instead of dropping the chip', async () => {
+  it('names a posture this build does not know instead of dropping the answer', async () => {
     const unknownPosture = JSON.parse('"from_a_newer_node"') as ReturnType<typeof detailResponse>['application']['posture'];
     mockFetch.mockResolvedValueOnce(ok(detailResponse({ posture: unknownPosture })));
     render(<GitOpsApplicationView id="1:app-1" />);
-    expect(await screen.findByTestId('gitops-application-posture')).toHaveTextContent('unrecognized (from_a_newer_node)');
+    expect(await screen.findByTestId('gitops-posture')).toHaveTextContent('from_a_newer_node');
   });
 
   it('explains a malformed link without a retry, and a server failure with one', async () => {

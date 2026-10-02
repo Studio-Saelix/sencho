@@ -2,13 +2,11 @@ import { useEffect, useRef, useState, useCallback } from 'react';
 import { openGitOpsWorkplace } from '@/components/gitops/portfolio/portfolioNavigation';
 import { Pencil, Pin, Play, Power, Trash2, GitBranch, Unlink, CornerDownLeft } from 'lucide-react';
 import { SystemSheet, SheetSection } from '@/components/ui/system-sheet';
-import GitOpsStateCard, { GitOpsFaultCard } from '@/components/gitops/GitOpsStateCard';
-import GitOpsApprovalChips from '@/components/gitops/GitOpsApprovalChips';
+import { GitOpsStatus } from '@/components/gitops/GitOpsStatus';
 import GitOpsAuthorityActions from '@/components/gitops/GitOpsAuthorityActions';
 import GitOpsRolloutControls from '@/components/gitops/GitOpsRolloutControls';
-import GitOpsCaveats from '@/components/gitops/GitOpsCaveats';
 import { blueprintApplicationId } from '@/lib/gitopsAuthorityApi';
-import { ROLLOUT_STATE_LOOKUP, absentFault, liveCaveats, livePlacementFacet, liveRolloutFacet, placementStateMeta } from '@/lib/gitopsState';
+import { absentFault, liveCaveats, livePlacementFacet, liveRolloutFacet } from '@/lib/gitopsState';
 import { Modal, ModalDestructiveHeader, ModalBody, ModalFooter } from '@/components/ui/modal';
 import { Input } from '@/components/ui/input';
 import { Button } from '@/components/ui/button';
@@ -105,11 +103,10 @@ export function BlueprintDetail({ blueprintId, open, onOpenChange, onChanged, ca
     const gitopsCaveats = summary ? liveCaveats(summary.gitopsRevision) : [];
     const gitopsPlacement = livePlacementFacet(summary?.gitopsRevision ?? null);
     const gitopsRollout = liveRolloutFacet(summary?.gitopsRevision ?? null);
-    const gitopsApprovals = summary && summary.gitopsRevision.targetMode !== 'not_applicable'
-        ? summary.gitopsRevision.approvals
-        : null;
     const showGitops = gitopsFaults.length > 0 || gitopsCaveats.length > 0
-        || gitopsPlacement !== null || gitopsRollout !== null || gitopsApprovals !== null;
+        || gitopsPlacement !== null || gitopsRollout !== null
+        || (summary != null && summary.gitopsRevision.targetMode !== 'not_applicable'
+            && summary.gitopsRevision.approvals !== null);
     const gitManaged = blueprint?.content_origin === 'git';
     const hasActiveDeployments = summary?.deployments.some(
         (dep) => dep.status !== 'withdrawn',
@@ -370,31 +367,10 @@ export function BlueprintDetail({ blueprintId, open, onOpenChange, onChanged, ca
                                     >
                                         Open in GitOps portfolio
                                     </Button>
-                                    <GitOpsApprovalChips
-                                        approvals={gitopsApprovals}
-                                        placement={gitopsPlacement}
-                                        rollout={gitopsRollout}
+                                    <GitOpsStatus
+                                        revision={summary.gitopsRevision}
+                                        includeTargets={false}
                                     />
-                                    {gitopsPlacement && (
-                                        <GitOpsStateCard
-                                            data-testid="gitops-placement"
-                                            stateKey={gitopsPlacement.status}
-                                            state={placementStateMeta(gitopsPlacement)}
-                                        />
-                                    )}
-                                    {gitopsRollout && (
-                                        <GitOpsStateCard
-                                            data-testid="gitops-rollout"
-                                            stateKey={gitopsRollout.status}
-                                            state={ROLLOUT_STATE_LOOKUP[gitopsRollout.status]}
-                                        >
-                                            {gitopsRollout.status === 'rollout_paused' && gitopsRollout.pauseReason && (
-                                                <div className="mt-1 font-mono text-[11px] text-stat-subtitle">
-                                                    {gitopsRollout.pauseReason}
-                                                </div>
-                                            )}
-                                        </GitOpsStateCard>
-                                    )}
                                     <GitOpsAuthorityActions
                                         applicationId={blueprintApplicationId(blueprint.id)}
                                         blueprintId={blueprint.id}
@@ -412,8 +388,6 @@ export function BlueprintDetail({ blueprintId, open, onOpenChange, onChanged, ca
                                         blueprintEnabled={blueprint.enabled}
                                         rollbackGenerations={summary.rollbackCandidates}
                                     />
-                                    {gitopsFaults.length > 0 && <GitOpsFaultCard message={gitopsFaults[0].message} />}
-                                    <GitOpsCaveats revision={summary.gitopsRevision} />
                                 </div>
                             </SheetSection>
                         )}

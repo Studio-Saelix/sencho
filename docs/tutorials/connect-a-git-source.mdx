@@ -67,10 +67,10 @@ This tutorial covers linking an existing stack to a Git source and running one m
 
 Check from two places, since neither alone proves the pull was actually applied and deployed.
 
-**The Git Source sheet.** Reopen it. The Status section now shows the short SHA of the commit you just pulled, a **Source state** of `accepted`, meaning Sencho took that commit as the current generation rather than merely writing its files, and the footer shows when the source was last updated. Nothing is listed as pending at the top of Status, which is what a stack with complete evidence looks like.
+**The Git Source sheet.** Reopen it. The header now shows the short SHA of the commit you just pulled and a state of `accepted`, meaning Sencho took that commit as the current generation rather than merely writing its files, and the footer shows when the source was last updated. The Status block offers no **Review** button, because nothing is waiting; if Sencho could not prove something (an unresolved image reference, for example), the block says how many items under **Evidence**.
 
 <Frame>
-  <img src="/images/tutorials/connect-a-git-source/last-applied-commit.png" alt="Git Source sheet for marketing-site with Apply behavior still on Review only, Status showing a short commit SHA and Source state accepted, and a freshness line in the footer." />
+  <img src="/images/tutorials/connect-a-git-source/last-applied-commit.png" alt="Git Source sheet for marketing-site with Apply behavior still on Review only, the header showing a short commit SHA and the state accepted, a Status block with no Review button, and a freshness line in the footer." />
 </Frame>
 
 **The stack itself.** Reopen `marketing-site`. The container recreated on the new image: a fresh uptime, and its logs now start with `nginx/1.28.3` instead of `1.27.5`. The compose editor tab reflects the same change; if it still shows the old tag, reload the page, since the editor buffer doesn't refresh itself after a Git-driven write.

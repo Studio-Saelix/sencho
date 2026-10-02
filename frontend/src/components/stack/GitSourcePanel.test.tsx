@@ -493,7 +493,7 @@ describe('GitSourcePanel manifest summary', () => {
   it('renders the manifest section with the DB state when the source has no manifest file', async () => {
     vi.mocked(apiFetch).mockResolvedValue(jsonRes(LINKED_SOURCE));
     render(panel());
-    await waitFor(() => expect(screen.getByText('Last applied commit')).toBeTruthy());
+    await waitFor(() => expect(screen.getByText('Managed project')).toBeTruthy());
     // The section is driven by the DB manifest_state ('absent') when the file
     // has not been materialized yet.
     expect(screen.getByText('Managed project')).toBeTruthy();
@@ -509,11 +509,11 @@ describe('GitSourcePanel GitOps state', () => {
 
     render(panel());
 
-    const banner = await screen.findByTestId('git-pending');
-    expect(banner).toHaveAttribute('data-state', 'source_conflict_blocker');
-    expect(within(banner).getByText(SOURCE_STATE.source_conflict_blocker.line)).toBeInTheDocument();
+    const answer = await screen.findByTestId('gitops-answer');
+    expect(answer).toHaveAttribute('data-state', 'source_conflict_blocker');
+    expect(within(answer).getByText(SOURCE_STATE.source_conflict_blocker.line)).toBeInTheDocument();
     // The short sha stays, so the operator can still see which commit it is.
-    expect(within(banner).getByText('a1b2c3d')).toBeInTheDocument();
+    expect(answer).toHaveTextContent('a1b2c3d');
   });
 
   it('offers apply wording for a candidate that needs no review', async () => {
@@ -523,8 +523,8 @@ describe('GitSourcePanel GitOps state', () => {
 
     render(panel());
 
-    const banner = await screen.findByTestId('git-pending');
-    expect(within(banner).getByText(SOURCE_STATE.candidate_ready.line)).toBeInTheDocument();
+    const answer = await screen.findByTestId('gitops-answer');
+    expect(within(answer).getByText(SOURCE_STATE.candidate_ready.line)).toBeInTheDocument();
   });
 
   it('shows no banner when the accepted generation has no candidate behind it', async () => {
@@ -533,8 +533,8 @@ describe('GitSourcePanel GitOps state', () => {
     render(panel());
 
     await screen.findByRole('button', { name: /pull now/i });
-    expect(screen.queryByTestId('git-pending')).not.toBeInTheDocument();
-    expect(screen.getByTestId('git-source-state')).toHaveTextContent(
+    expect(screen.queryByRole('button', { name: 'Review update' })).not.toBeInTheDocument();
+    expect(screen.getByTestId('gitops-source')).toHaveTextContent(
       SOURCE_STATE.application_generation_accepted.label,
     );
   });
@@ -558,8 +558,7 @@ describe('GitSourcePanel GitOps state', () => {
 
     await screen.findByRole('button', { name: /^save$/i });
     expect(screen.queryByTestId('gitops-fault')).not.toBeInTheDocument();
-    expect(screen.queryByTestId('git-pending')).not.toBeInTheDocument();
-    expect(screen.queryByTestId('git-source-state')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('gitops-status')).not.toBeInTheDocument();
   });
 
   it('drops the pending card once the source is detached', async () => {
@@ -573,12 +572,13 @@ describe('GitSourcePanel GitOps state', () => {
       return jsonRes({ ok: true });
     });
     render(panel());
-    await screen.findByTestId('git-pending');
+    await screen.findByRole('button', { name: 'Review update' });
 
     fireEvent.click(screen.getByRole('button', { name: 'Remove' }));
     fireEvent.click(await screen.findByRole('button', { name: /^detach/i }));
 
-    await waitFor(() => expect(screen.queryByTestId('git-pending')).not.toBeInTheDocument());
+    await waitFor(() => expect(screen.queryByRole('button', { name: 'Review update' })).not.toBeInTheDocument());
+    expect(screen.queryByTestId('gitops-status')).not.toBeInTheDocument();
   });
 
   it('drops the revision when a later read fails, so one stack cannot report another stack state', async () => {
@@ -591,7 +591,7 @@ describe('GitSourcePanel GitOps state', () => {
     const { rerender } = render(
       <GitSourcePanel open onOpenChange={vi.fn()} stackName="web" canEdit isDarkMode={false} />,
     );
-    await screen.findByTestId('git-pending');
+    await screen.findByRole('button', { name: 'Review update' });
 
     vi.mocked(apiFetch).mockRejectedValue(new Error('offline'));
     rerender(<GitSourcePanel open onOpenChange={vi.fn()} stackName="api" canEdit isDarkMode={false} />);
@@ -600,7 +600,8 @@ describe('GitSourcePanel GitOps state', () => {
     // it is in flight, so an assertion there would pass without the fix.
     await waitFor(() => expect(toast.error).toHaveBeenCalled());
     await screen.findByLabelText(/repository url/i);
-    expect(screen.queryByTestId('git-pending')).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Review update' })).not.toBeInTheDocument();
+    expect(screen.queryByTestId('gitops-status')).not.toBeInTheDocument();
   });
 
   it('re-reads after a save and shows the state the server reports', async () => {
@@ -612,7 +613,7 @@ describe('GitSourcePanel GitOps state', () => {
       jsonRes(linkedWith(sourceRevision('candidate_ready'))),
     );
     render(panel());
-    await screen.findByTestId('git-pending');
+    await screen.findByRole('button', { name: 'Review update' });
 
     vi.mocked(apiFetch)
       // The PUT.
@@ -621,12 +622,12 @@ describe('GitSourcePanel GitOps state', () => {
       .mockResolvedValueOnce(jsonRes(linkedWith(
         sourceRevision('source_reconcile_required', { candidateGenerationId: null }),
       )));
-    fireEvent.click(screen.getByRole('button', { name: /update/i }));
+    fireEvent.click(screen.getByRole('button', { name: /^update$/i }));
 
-    await waitFor(() => expect(screen.getByTestId('git-source-state'))
+    await waitFor(() => expect(screen.getByTestId('gitops-source'))
       .toHaveTextContent(SOURCE_STATE.source_reconcile_required.label));
     // The staged candidate is gone, so nothing is offered to review.
-    expect(screen.queryByTestId('git-pending')).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Review update' })).not.toBeInTheDocument();
   });
 
   it('does not go blank after a save', async () => {
@@ -637,17 +638,17 @@ describe('GitSourcePanel GitOps state', () => {
       jsonRes(linkedWith(sourceRevision('application_generation_accepted', { candidateGenerationId: null }))),
     );
     render(panel());
-    await screen.findByTestId('git-source-state');
+    await screen.findByTestId('gitops-source');
 
     vi.mocked(apiFetch)
       .mockResolvedValueOnce(jsonRes({ ...LINKED_SOURCE, gitopsRevision: undefined }))
       .mockResolvedValueOnce(jsonRes(linkedWith(
         sourceRevision('application_generation_accepted', { candidateGenerationId: null }),
       )));
-    fireEvent.click(screen.getByRole('button', { name: /update/i }));
+    fireEvent.click(screen.getByRole('button', { name: /^update$/i }));
 
     await waitFor(() => expect(toast.success).toHaveBeenCalled());
-    expect(screen.getByTestId('git-source-state')).toBeInTheDocument();
+    expect(screen.getByTestId('gitops-source')).toBeInTheDocument();
   });
 
   it('shows no source card for an application that has no Git source', async () => {
@@ -664,9 +665,42 @@ describe('GitSourcePanel GitOps state', () => {
     render(panel());
 
     await screen.findByRole('button', { name: /pull now/i });
-    expect(screen.queryByTestId('git-pending')).not.toBeInTheDocument();
-    expect(screen.queryByTestId('git-source-state')).not.toBeInTheDocument();
-    expect(screen.queryByTestId('git-artifact-state')).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Review update' })).not.toBeInTheDocument();
+    expect(screen.queryByTestId('gitops-source')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('gitops-artifact')).not.toBeInTheDocument();
+  });
+
+  it('still reports placement, rollout, and what could not be proven for a source a Blueprint owns', async () => {
+    // A Blueprint application has no source stage, but the sheet must not go blank:
+    // its placement, rollout, and caveats are the whole of what is on record.
+    vi.mocked(apiFetch).mockResolvedValue(jsonRes(linkedWith(liveRevision({
+      targetMode: 'blueprint',
+      blueprintId: 1,
+      limitations: [{ code: 'repo_identity_invalid', message: 'Repository identity could not be read.', evidence: null }],
+      facets: facets({
+        source: { status: 'not_applicable' },
+        placement: { status: 'blueprint_bound', completion: 'unknown' },
+        rollout: { status: 'rollout_queued', rolloutGenerationId: 'rg-1' },
+      }),
+    }))));
+    render(panel());
+
+    expect(await screen.findByTestId('gitops-placement')).toHaveAttribute('data-state', 'blueprint_bound');
+    expect(screen.getByTestId('gitops-rollout')).toHaveAttribute('data-state', 'rollout_queued');
+    expect(screen.getByTestId('status-marker')).toHaveTextContent('1 unproven');
+    expect(screen.queryByTestId('gitops-source')).not.toBeInTheDocument();
+  });
+
+  it('says in the header when nothing has been applied, rather than showing a waiting commit as applied', async () => {
+    vi.mocked(apiFetch).mockResolvedValue(jsonRes({
+      ...linkedWith(sourceRevision('candidate_ready')),
+      last_applied_commit_sha: null,
+      pending_commit_sha: 'f00ba12345',
+    }));
+    render(panel());
+    await screen.findByRole('button', { name: 'Review update' });
+    expect(screen.getByRole('dialog')).toHaveTextContent('never applied');
+    expect(screen.getByRole('dialog')).toHaveTextContent('Commit a1b2c3d');
   });
 
   it('renders the artifact card with the frozen expected identity', async () => {
@@ -692,28 +726,32 @@ describe('GitSourcePanel GitOps state', () => {
     }))));
     render(panel());
 
-    const card = await screen.findByTestId('git-artifact-state');
-    expect(card).toHaveAttribute('data-state', 'artifact_identity_changed');
-    expect(card).toHaveTextContent(ARTIFACT_STATE.artifact_identity_changed.label);
-    expect(card).toHaveTextContent('sha256:eeeeeeeeeee');
-    expect(card).not.toHaveTextContent('sha256:fffffffffff');
+    const stage = await screen.findByTestId('gitops-artifact');
+    expect(stage).toHaveAttribute('data-state', 'artifact_identity_changed');
+    expect(stage).toHaveTextContent(ARTIFACT_STATE.artifact_identity_changed.label);
+    // The artifact is the loudest stage, so the answer carries the frozen identity.
+    const answer = screen.getByTestId('gitops-answer');
+    expect(answer).toHaveTextContent('sha256:eeeeeeeeeee');
+    expect(answer).not.toHaveTextContent('sha256:fffffffffff');
   });
 
   it('hides the artifact card when executable identity does not apply', async () => {
     vi.mocked(apiFetch).mockResolvedValue(jsonRes(LINKED_SOURCE));
     render(panel());
 
-    await screen.findByTestId('git-source-state');
-    expect(screen.queryByTestId('git-artifact-state')).not.toBeInTheDocument();
+    await screen.findByTestId('gitops-source');
+    expect(screen.queryByTestId('gitops-artifact')).not.toBeInTheDocument();
   });
 
-  it('shows the placement card for a Direct application and no rollout card', async () => {
+  it('leaves out the stages that do not apply to a plain Direct application', async () => {
+    // "Unbound direct" is true of every Direct stack and says nothing about this
+    // one, and there is no rollout to report, so neither takes a place in the path.
     vi.mocked(apiFetch).mockResolvedValue(jsonRes(linkedWith(liveRevision())));
     render(panel());
 
-    const card = await screen.findByTestId('git-placement-state');
-    expect(card).toHaveAttribute('data-state', 'unbound_direct');
-    expect(screen.queryByTestId('git-rollout-state')).not.toBeInTheDocument();
+    await screen.findByTestId('gitops-source');
+    expect(screen.queryByTestId('gitops-placement')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('gitops-rollout')).not.toBeInTheDocument();
   });
 
   it('renders the approval chips and the rollout card for an authorized rollout', async () => {
@@ -731,12 +769,13 @@ describe('GitSourcePanel GitOps state', () => {
     }))));
     render(panel());
 
-    const chips = await screen.findByTestId('gitops-approvals');
-    expect(within(chips).getByText('source accepted')).toBeInTheDocument();
-    expect(within(chips).getByText('placement approved')).toBeInTheDocument();
-    expect(within(chips).getByText('rollout authorized')).toBeInTheDocument();
-    expect(screen.getByTestId('git-rollout-state')).toHaveAttribute('data-state', 'rollout_queued');
-    expect(screen.getByTestId('git-placement-state')).toHaveAttribute('data-state', 'blueprint_bound');
+    expect(await screen.findByTestId('gitops-rollout')).toHaveAttribute('data-state', 'rollout_queued');
+    expect(screen.getByTestId('gitops-placement')).toHaveAttribute('data-state', 'blueprint_bound');
+    fireEvent.click(screen.getByRole('button', { name: 'Evidence' }));
+    const authority = await screen.findByTestId('gitops-approvals');
+    expect(within(authority).getByText('Source accepted')).toBeInTheDocument();
+    expect(within(authority).getByText('Placement approved')).toBeInTheDocument();
+    expect(within(authority).getByText('Rollout authorized')).toBeInTheDocument();
   });
 
   it('still reports a waiting commit when no projection answered', async () => {
@@ -759,18 +798,18 @@ describe('GitSourcePanel GitOps state', () => {
     }))));
     render(panel());
 
-    await screen.findByTestId('git-source-state');
+    await screen.findByTestId('gitops-source');
     expect(screen.queryByTestId('gitops-fault')).not.toBeInTheDocument();
   });
 
-  it('routes the pending card Review button to the pull endpoint', async () => {
+  it('routes the Review button to the pull endpoint', async () => {
     vi.mocked(apiFetch).mockResolvedValue(
       jsonRes(linkedWith(sourceRevision('candidate_ready'))),
     );
     render(panel());
-    const banner = await screen.findByTestId('git-pending');
+    const review = await screen.findByRole('button', { name: 'Review update' });
 
-    fireEvent.click(within(banner).getByRole('button', { name: 'Review' }));
+    fireEvent.click(review);
 
     await waitFor(() => expect(
       vi.mocked(apiFetch).mock.calls.some(c => String(c[0]).includes('/git-source/pull')),
@@ -890,7 +929,7 @@ describe('GitSourcePanel controller controls', () => {
     render(
       <GitSourcePanel open onOpenChange={vi.fn()} stackName="web" canEdit={false} isDarkMode={false} />,
     );
-    await screen.findByTestId('git-controller-state');
+    await screen.findByTestId('gitops-source');
     expect(screen.queryByRole('button', { name: /^resume$/i })).not.toBeInTheDocument();
   });
 
@@ -990,7 +1029,7 @@ describe('GitSourcePanel controller controls', () => {
     fireEvent.click(screen.getByRole('button', { name: /^Manual/ }));
 
     vi.mocked(apiFetch).mockResolvedValue(jsonRes({ ...LINKED_SOURCE, source_policy: 'manual', gitopsRevision: undefined }));
-    fireEvent.click(screen.getByRole('button', { name: /update/i }));
+    fireEvent.click(screen.getByRole('button', { name: /^update$/i }));
 
     await waitFor(() => {
       const put = vi.mocked(apiFetch).mock.calls.find((call) => call[1]?.method === 'PUT');
@@ -1027,7 +1066,7 @@ describe('GitSourcePanel controller controls', () => {
     await screen.findByRole('button', { name: /update/i });
 
     vi.mocked(apiFetch).mockResolvedValue(jsonRes({ ...LINKED_SOURCE, gitopsRevision: undefined }));
-    fireEvent.click(screen.getByRole('button', { name: /update/i }));
+    fireEvent.click(screen.getByRole('button', { name: /^update$/i }));
 
     await waitFor(() => {
       const put = vi.mocked(apiFetch).mock.calls.find((call) => call[1]?.method === 'PUT');

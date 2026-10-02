@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, type ReactNode } from 'react';
 import { Trash2, RefreshCw, Save, Pause, Play, GitBranch } from 'lucide-react';
 import { ConfirmModal } from '@/components/ui/modal';
 import { Button } from '@/components/ui/button';
@@ -16,11 +16,12 @@ import { GitSourceSecretsSection } from './GitSourceSecretsSection';
 import { GitManifestSummary, type ManifestSummary } from './GitManifestSummary';
 import type { GitBrowseResult } from './GitComposeFilePicker';
 import { AdoptBlueprintDialog } from '@/components/blueprints/AdoptBlueprintDialog';
-import GitOpsStateCard, { GitOpsFaultCard } from '@/components/gitops/GitOpsStateCard';
+import GitOpsStateCard from '@/components/gitops/GitOpsStateCard';
+import { GitOpsStatus } from '@/components/gitops/GitOpsStatus';
+import { buildGitOpsStatus } from '@/lib/gitopsStatus';
+import { BusyButton } from '@/components/ui/busy-button';
 import { GitProviderHooksCard } from './GitProviderHooksCard';
-import GitOpsCaveats from '@/components/gitops/GitOpsCaveats';
-import GitOpsApprovalChips from '@/components/gitops/GitOpsApprovalChips';
-import { ARTIFACT_STATE_LOOKUP, ROLLOUT_STATE_LOOKUP, SOURCE_STATE_LOOKUP, absentFault, liveArtifactFacet, livePlacementFacet, liveRolloutFacet, liveSourceFacet, placementStateMeta, type LiveSourceFacet } from '@/lib/gitopsState';
+import { SOURCE_STATE_LOOKUP, absentFault, liveSourceFacet, type LiveSourceFacet } from '@/lib/gitopsState';
 import { GITOPS_SOURCE_CONTROLLER_CAPABILITY } from '@/lib/capabilities';
 import type {
   GitOpsAvailableAction,
@@ -129,14 +130,6 @@ function derivePendingCommit(
   return { status: 'candidate_ready', sha: flatPendingSha };
 }
 
-function formatRetryWait(retryAt: number): string {
-  const ms = retryAt - Date.now();
-  if (ms <= 0) return 'Retry due';
-  const secs = Math.ceil(ms / 1000);
-  if (secs < 60) return `Retry in ${secs}s`;
-  return `Retry in ${Math.ceil(secs / 60)}m`;
-}
-
 export function GitSourcePanel({
   open,
   onOpenChange,
@@ -200,11 +193,8 @@ export function GitSourcePanel({
   const applyMode = deriveApplyMode(source, applyModeOverride);
 
   const sourceFacet = liveSourceFacet(revision);
-  const artifactFacet = liveArtifactFacet(revision);
-  const placementFacet = livePlacementFacet(revision);
-  const rolloutFacet = liveRolloutFacet(revision);
-  const approvals = revision && revision.targetMode !== 'not_applicable' ? revision.approvals : null;
-  const artifactIdentity = artifactFacet?.expected?.identity ?? null;
+  // Whatever the revision has to say (a Blueprint-claimed source has no source stage but still has placement, rollout, and caveats).
+  const statusModel = buildGitOpsStatus(revision);
   const faults = revision ? absentFault(revision) : [];
   const pending = derivePendingCommit(sourceFacet, faults.length, source?.pending_commit_sha ?? null);
 
@@ -605,9 +595,8 @@ export function GitSourcePanel({
     }
   };
 
-  const sha7 = source?.last_applied_commit_sha?.slice(0, 7)
-    ?? source?.pending_commit_sha?.slice(0, 7)
-    ?? null;
+  // The header names what is applied. A commit that is only waiting is the status's to announce.
+  const sha7 = source?.last_applied_commit_sha?.slice(0, 7) ?? 'never applied';
   const stateLabel = sourceFacet
     ? (SOURCE_STATE_LOOKUP[sourceFacet.status]?.label ?? sourceFacet.status)
     : null;
@@ -639,6 +628,35 @@ export function GitSourcePanel({
     ),
   );
   const showPendingReview = Boolean(pending && !showControllerCard && !claimedByBlueprint);
+  // The one verb the status offers: retry when the controller is holding the source back and allows it, else review the waiting commit.
+  let statusAction: ReactNode;
+  if (showControllerCard && offerRetry) {
+    statusAction = (
+      <BusyButton
+        size="sm"
+        variant="outline"
+        className="h-7"
+        pending={retrying}
+        busyLabel="Retrying"
+        onClick={() => { void retrySource(); }}
+      >
+        Retry
+      </BusyButton>
+    );
+  } else if (showPendingReview) {
+    statusAction = (
+      <BusyButton
+        size="sm"
+        variant="outline"
+        className="h-7"
+        pending={pulling}
+        busyLabel="Reviewing"
+        onClick={() => { void pullNow(); }}
+      >
+        Review update
+      </BusyButton>
+    );
+  }
 
   const secondaryActions: SystemSheetAction[] = [];
   if (!claimedByBlueprint) {
@@ -712,26 +730,20 @@ export function GitSourcePanel({
         ) : (
           <>
             <SheetSection title="Status">
-              {faults.length > 0 && <GitOpsFaultCard message={faults[0].message} />}
-
-              <GitOpsApprovalChips approvals={approvals} placement={placementFacet} rollout={rolloutFacet} />
-
-              {showPendingReview && pending && (
+              {statusModel && (
+                <GitOpsStatus
+                  revision={revision}
+                  focus={statusAction ? 'source' : undefined}
+                  action={statusAction}
+                />
+              )}
+              {!statusModel && showPendingReview && pending && (
+                // No projection answered but a commit is waiting: the flat pointer is all there is.
                 <GitOpsStateCard
                   data-testid="git-pending"
                   stateKey={pending.status}
                   state={SOURCE_STATE_LOOKUP[pending.status]}
-                  action={(
-                    <Button
-                      size="sm"
-                      variant="outline"
-                      className="h-7"
-                      onClick={() => pullNow()}
-                      disabled={pulling}
-                    >
-                      Review
-                    </Button>
-                  )}
+                  action={statusAction}
                 >
                   {pending.sha && (
                     <div className="mt-1 font-mono text-[11px] text-stat-subtitle">
@@ -740,80 +752,6 @@ export function GitSourcePanel({
                   )}
                 </GitOpsStateCard>
               )}
-
-              {artifactFacet && (
-                <GitOpsStateCard
-                  data-testid="git-artifact-state"
-                  stateKey={artifactFacet.status}
-                  state={ARTIFACT_STATE_LOOKUP[artifactFacet.status]}
-                >
-                  {artifactIdentity && (
-                    <div className="mt-1 font-mono text-[11px] text-stat-subtitle break-all max-md:text-[10px]">
-                      {artifactIdentity.slice(0, 19)}
-                    </div>
-                  )}
-                </GitOpsStateCard>
-              )}
-
-              {placementFacet && (
-                <GitOpsStateCard
-                  data-testid="git-placement-state"
-                  stateKey={placementFacet.status}
-                  state={placementStateMeta(placementFacet)}
-                />
-              )}
-
-              {rolloutFacet && (
-                <GitOpsStateCard
-                  data-testid="git-rollout-state"
-                  stateKey={rolloutFacet.status}
-                  state={ROLLOUT_STATE_LOOKUP[rolloutFacet.status]}
-                >
-                  {rolloutFacet.status === 'rollout_paused' && rolloutFacet.pauseReason && (
-                    <div className="mt-1 font-mono text-[11px] text-stat-subtitle">
-                      {rolloutFacet.pauseReason}
-                    </div>
-                  )}
-                </GitOpsStateCard>
-              )}
-
-              {showControllerCard && sourceFacet && (
-                <GitOpsStateCard
-                  data-testid="git-controller-state"
-                  stateKey={sourceFacet.status}
-                  state={SOURCE_STATE_LOOKUP[sourceFacet.status]}
-                  action={offerRetry ? (
-                    <Button
-                      size="sm"
-                      variant="outline"
-                      className="h-7"
-                      onClick={() => { void retrySource(); }}
-                      disabled={retrying}
-                    >
-                      {retrying ? 'Retrying' : 'Retry'}
-                    </Button>
-                  ) : undefined}
-                >
-                  {sourceFacet.status === 'source_failed' && (
-                    <div className="mt-1 font-mono text-[11px] text-stat-subtitle">
-                      {sourceFacet.failureClass}
-                      {sourceFacet.retryAt ? ` · ${formatRetryWait(sourceFacet.retryAt)}` : ''}
-                    </div>
-                  )}
-                  {sourceFacet.status === 'source_retry_scheduled' && (
-                    <div className="mt-1 font-mono text-[11px] text-stat-subtitle">
-                      {formatRetryWait(sourceFacet.retryAt)}
-                    </div>
-                  )}
-                  {sourceFacet.status === 'source_suspended' && sourceFacet.suspendedReason && (
-                    <div className="mt-1 font-mono text-[11px] text-stat-subtitle">
-                      {sourceFacet.suspendedReason}
-                    </div>
-                  )}
-                </GitOpsStateCard>
-              )}
-
-              <GitOpsCaveats revision={revision} />
 
               {showPortfolioLink && source && panelNodeId !== null && (
                 // The portfolio view of this one application, next to every
@@ -829,23 +767,6 @@ export function GitSourcePanel({
                 >
                   Open in GitOps portfolio
                 </Button>
-              )}
-
-              {source && (
-                <div className="text-[11px] text-stat-subtitle space-y-0.5">
-                  <div className="flex justify-between gap-2">
-                    <span>Last applied commit</span>
-                    <span className="font-mono tabular-nums">
-                      {source.last_applied_commit_sha ? source.last_applied_commit_sha.slice(0, 7) : 'never'}
-                    </span>
-                  </div>
-                  {sourceFacet && (
-                    <div className="flex justify-between gap-2">
-                      <span>Source state</span>
-                      <span data-testid="git-source-state">{SOURCE_STATE_LOOKUP[sourceFacet.status]?.label ?? sourceFacet.status}</span>
-                    </div>
-                  )}
-                </div>
               )}
             </SheetSection>
 

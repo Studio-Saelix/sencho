@@ -34,7 +34,7 @@ When this Git source belongs to a Git-managed Blueprint, the sheet is read-only.
 
 The body groups five sections:
 
-- **Status.** Faults, a pending-update card with **Review**, retry or suspended state with **Retry** when that action is offered, qualifications the projection could not prove, and the last-applied commit with the source state.
+- **Status.** One block: the source's state with the commit it concerns, and the action that resolves it right there (**Review** for a waiting update, **Retry** for a failed or retry-scheduled source when that action is offered). A row beneath names each stage that applies, and **Evidence** opens the recorded authority, targets, and anything the projection could not prove. The sheet header shows the last-applied commit (or **never applied**), the source's state, and the ref.
 - **Repository.** Repository URL, ref, the ordered compose-file picker, an optional project directory, optional sibling `.env` sync, authentication, and the apply behavior radio group.
 - **Provider hooks.** One endpoint per supported Git host (GitHub, GitLab, Gitea, Forgejo, Bitbucket Cloud). Shown when the stack owns a direct Git source; hidden while the source is read-only on a Git-managed Blueprint.
 - **Repository secrets.** Age identities for SOPS-encrypted env files and file-backed secrets, encrypted-source policy, and a readiness chip for whether this node can decrypt what the repository expects.

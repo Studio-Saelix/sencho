@@ -3,7 +3,6 @@ import { ArrowLeft, ExternalLink, RefreshCw } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { Skeleton } from '@/components/ui/skeleton';
-import { POSTURE_LABEL, POSTURE_TONE_CLASS } from '@/lib/gitopsPortfolio';
 import { useAuth } from '@/context/AuthContext';
 import { cn } from '@/lib/utils';
 import { useIsMobile } from '@/hooks/use-is-mobile';
@@ -48,10 +47,6 @@ export function GitOpsApplicationView({ id, className, headerActions }: {
     && id.startsWith('bp:')
     && (row.targetMode === 'blueprint' || row.targetMode === 'inline_blueprint')
     && typeof data.blueprintEnabled === 'boolean';
-  // A posture from a newer build still renders, as an explicit unknown.
-  const posture = row
-    ? POSTURE_LABEL[row.posture] ?? { label: `unrecognized (${row.posture})`, tone: 'neutral' as const }
-    : null;
 
   return (
     <div data-testid="gitops-application-view" className={cn('flex h-full min-h-0 flex-col overflow-hidden p-6', className)}>
@@ -79,17 +74,6 @@ export function GitOpsApplicationView({ id, className, headerActions }: {
             <div className="flex min-w-0 flex-col gap-1.5">
               <h1 className="truncate font-heading text-2xl leading-tight tracking-tight text-stat-value">{row.name}</h1>
               <div className="flex flex-wrap items-center gap-2">
-                {posture && (
-                  <span
-                    data-testid="gitops-application-posture"
-                    className={cn(
-                      'rounded-md border px-2 py-0.5 font-mono text-[10px] uppercase tracking-[0.12em]',
-                      POSTURE_TONE_CLASS[posture.tone],
-                    )}
-                  >
-                    {posture.label}
-                  </span>
-                )}
                 {staleSince !== null && (
                   <>
                     <span className="rounded-sm border border-warning/30 bg-warning/10 px-1.5 py-0.5 font-mono text-[10px] uppercase tracking-wide text-warning">

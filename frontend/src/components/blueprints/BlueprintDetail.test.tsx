@@ -257,10 +257,12 @@ describe('BlueprintDetail GitOps state', () => {
             }),
         }));
         render(detail());
-        const card = await screen.findByTestId('gitops-placement');
-        expect(card).toHaveAttribute('data-state', 'preflight_blocked');
-        expect(card).toHaveTextContent(reason);
-        expect(card.textContent).not.toMatch(/password|secret|token|Bearer|eyJ/i);
+        const stage = await screen.findByTestId('gitops-placement');
+        expect(stage).toHaveAttribute('data-state', 'preflight_blocked');
+        // The blocked placement is the loudest stage, so the answer carries its redacted reason.
+        const status = screen.getByTestId('gitops-status');
+        expect(screen.getByTestId('gitops-answer')).toHaveTextContent(reason);
+        expect(status.textContent).not.toMatch(/password|secret|token|Bearer|eyJ/i);
     });
 });
 

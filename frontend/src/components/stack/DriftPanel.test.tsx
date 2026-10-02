@@ -306,6 +306,9 @@ describe('DriftPanel', () => {
   });
 });
 
+/** The Evidence disclosure holds targets, recorded authority, caveats, and node freshness. */
+const openEvidence = async () => fireEvent.click(await screen.findByRole('button', { name: 'Evidence' }));
+
 describe('DriftPanel GitOps state', () => {
   it('renders the source state and one card per target for a Direct stack', async () => {
     mockDriftReads(report({
@@ -318,6 +321,9 @@ describe('DriftPanel GitOps state', () => {
 
     const source = await screen.findByTestId('gitops-source');
     expect(source).toHaveAttribute('data-state', 'candidate_ready');
+    // Targets are evidence behind the answer, so they sit behind the disclosure.
+    expect(screen.queryByTestId('gitops-target')).not.toBeInTheDocument();
+    await openEvidence();
     const targets = screen.getAllByTestId('gitops-target');
     expect(targets).toHaveLength(1);
     expect(targets[0]).toHaveAttribute('data-state', 'applied_not_deployed');
@@ -372,6 +378,7 @@ describe('DriftPanel GitOps state', () => {
     }));
     render(<DriftPanel stackName="web" />);
 
+    await openEvidence();
     await waitFor(() => expect(screen.getAllByTestId('gitops-target')).toHaveLength(2));
     expect(screen.queryByTestId('gitops-source')).not.toBeInTheDocument();
     expect(screen.getAllByTestId('gitops-target')[1]).toHaveTextContent('edge-02');
@@ -443,6 +450,7 @@ describe('DriftPanel GitOps state', () => {
     }));
     render(<DriftPanel stackName="web" />);
 
+    await openEvidence();
     expect(await screen.findByTestId('gitops-target')).toHaveTextContent('node 9');
   });
 
@@ -480,11 +488,13 @@ describe('DriftPanel GitOps state', () => {
 
     const placement = await screen.findByTestId('gitops-placement');
     expect(placement).toHaveAttribute('data-state', 'preflight_blocked');
-    expect(placement).toHaveTextContent('Image scan is still running.');
+    // The redacted reason is the blocking stage's line, and it is the loudest stage,
+    // so the Answer says it once.
+    expect(screen.getByTestId('gitops-answer')).toHaveTextContent('Image scan is still running.');
     expect(screen.getByTestId('gitops-rollout')).toHaveAttribute('data-state', 'rollout_not_executable');
   });
 
-  it('renders the approval chips from the recorded refs and the facets', async () => {
+  it('lists only the recorded grants as authority, and leaves pending steps to the path', async () => {
     mockDriftReads(report({
       gitopsRevision: liveRevision({
         approvals: {
@@ -501,13 +511,14 @@ describe('DriftPanel GitOps state', () => {
     }));
     render(<DriftPanel stackName="web" />);
 
-    const chips = await screen.findByTestId('gitops-approvals');
-    const source = within(chips).getByText('source accepted');
-    expect(source.closest('[data-approval]')).toHaveAttribute('data-state', 'granted');
-    const placement = within(chips).getByText('placement approval pending');
-    expect(placement.closest('[data-approval]')).toHaveAttribute('data-state', 'pending');
-    // No rollout ref and no facet saying it is outstanding: no rollout chip.
-    expect(within(chips).queryByText(/rollout/)).not.toBeInTheDocument();
+    // A pending step is a stage state, stated once in the path.
+    expect(await screen.findByTestId('gitops-placement')).toHaveAttribute('data-state', 'placement_review_pending');
+    await openEvidence();
+    const authority = await screen.findByTestId('gitops-approvals');
+    expect(within(authority).getByText('Source accepted').closest('[data-approval]')).toHaveAttribute('data-approval', 'source');
+    // A grant needs a recorded ref: no placement ref, no rollout ref, no row for either.
+    expect(within(authority).queryByText(/Placement approved/)).not.toBeInTheDocument();
+    expect(within(authority).queryByText(/Rollout/)).not.toBeInTheDocument();
   });
 });
 
@@ -546,7 +557,7 @@ describe('DriftPanel shows the canonical posture', () => {
     ['unknown', 'unknown'],
   ] as const)('reports the %s posture the portfolio computed', async (posture, label) => {
     const { card } = await renderWith(portfolioRow({ posture }));
-    expect(card).toHaveAttribute('data-posture', posture);
+    expect(card).toHaveAttribute('data-state', posture);
     expect(card).toHaveTextContent(label);
   });
 
@@ -558,7 +569,7 @@ describe('DriftPanel shows the canonical posture', () => {
       targets: [portfolioTarget({ evidence: 'fresh' })],
       evidence: { partial: false, unreachableNodes: [], unknown: false },
     }));
-    expect(card).toHaveAttribute('data-posture', 'converged');
+    expect(card).toHaveAttribute('data-state', 'converged');
     expect(card).toHaveTextContent(/complete, and current evidence/i);
     expect(card).toHaveTextContent('converged');
   });
@@ -569,8 +580,9 @@ describe('DriftPanel shows the canonical posture', () => {
       attention: ['target_stale'],
       targets: [portfolioTarget({ evidence: 'stale' })],
     }));
-    expect(card).toHaveAttribute('data-posture', 'unknown');
+    expect(card).toHaveAttribute('data-state', 'unknown');
     expect(card).not.toHaveTextContent('converged');
+    await openEvidence();
     const freshness = await screen.findByTestId('gitops-target-evidence');
     expect(freshness).toHaveAttribute('data-evidence', 'stale');
     expect(freshness).toHaveTextContent('evidence stale');
@@ -581,7 +593,8 @@ describe('DriftPanel shows the canonical posture', () => {
       posture: 'unknown',
       targets: [portfolioTarget({ evidence: 'unknown' })],
     }));
-    expect(card).toHaveAttribute('data-posture', 'unknown');
+    expect(card).toHaveAttribute('data-state', 'unknown');
+    await openEvidence();
     const freshness = await screen.findByTestId('gitops-target-evidence');
     expect(freshness).toHaveAttribute('data-evidence', 'unknown');
     expect(freshness).toHaveTextContent('evidence unknown');
@@ -594,8 +607,12 @@ describe('DriftPanel shows the canonical posture', () => {
       evidence: { partial: true, unreachableNodes: [7], unknown: false },
       targets: [portfolioTarget({ nodeId: 1, connectivity: 'unreachable', evidence: 'unknown' })],
     }));
-    expect(card).toHaveTextContent('Not reached: node 7.');
-    expect(card).toHaveTextContent('evidence behind this is incomplete');
+    // Partial evidence is flagged on the answer itself, and named in the evidence.
+    expect(card).toHaveTextContent('evidence partial');
+    await openEvidence();
+    const note = await screen.findByTestId('gitops-posture-evidence');
+    expect(note).toHaveTextContent('Not reached: node 7.');
+    expect(note).toHaveTextContent('evidence behind this is incomplete');
   });
 
   it('reports a recorded health failure as failed, and the target evidence as fresh', async () => {
@@ -608,8 +625,10 @@ describe('DriftPanel shows the canonical posture', () => {
       healthStatus: 'failed',
       targets: [portfolioTarget({ health: 'failed', evidence: 'fresh' })],
     }));
-    expect(card).toHaveAttribute('data-posture', 'failed');
-    expect(card).toHaveTextContent('Something was proven wrong');
+    expect(card).toHaveAttribute('data-state', 'failed');
+    // The answer names the reason that needs an operator first, not a generic sentence.
+    expect(card).toHaveTextContent('A health check on this application is failing.');
+    await openEvidence();
     const freshness = await screen.findByTestId('gitops-target-evidence');
     expect(freshness).toHaveAttribute('data-evidence', 'fresh');
   });
@@ -629,9 +648,10 @@ describe('DriftPanel shows the canonical posture', () => {
     );
     render(<DriftPanel stackName="web" />);
     const card = await screen.findByTestId('gitops-posture');
-    expect(card).toHaveAttribute('data-posture', 'converged');
+    expect(card).toHaveAttribute('data-state', 'converged');
     // The live target has no portfolio entry, so it reads as unknown rather
     // than inheriting the tombstoned target's stale evidence.
+    await openEvidence();
     const freshness = await screen.findByTestId('gitops-target-evidence');
     expect(freshness).toHaveAttribute('data-evidence', 'unknown');
   });
@@ -645,10 +665,26 @@ describe('DriftPanel shows the canonical posture', () => {
       { portfolio: { application: undefined, ok: false, status: 500 } },
     );
     render(<DriftPanel stackName="web" />);
-    const card = await screen.findByTestId('gitops-posture');
-    expect(card).toHaveAttribute('data-posture', 'unreadable');
-    expect(card).toHaveTextContent('describe one node, not the application');
-    expect(card).not.toHaveTextContent('converged');
+    // The answer is the node-local one, and says it cannot speak for the application.
+    await waitFor(() => expect(screen.getByTestId('gitops-answer')).toHaveTextContent('posture unreadable'));
+    expect(screen.getByTestId('gitops-answer')).not.toHaveTextContent('converged');
+    await openEvidence();
+    expect(await screen.findByTestId('gitops-posture-unreadable')).toHaveTextContent('describes one node, not the application');
+  });
+
+  it('still warns that the posture is unreadable when the revision has no stage to report', async () => {
+    // With no stage the status has nothing to render, but a failed posture read is
+    // exactly what an operator needs to be told, so it cannot go quiet with it.
+    mockDriftReads(
+      report({
+        status: 'in-sync',
+        gitopsRevision: liveRevision({ targets: [], facets: facets({ source: { status: 'not_applicable' } }) }),
+      }),
+      { portfolio: { application: undefined, ok: false, status: 500 } },
+    );
+    render(<DriftPanel stackName="web" />);
+    expect(await screen.findByTestId('gitops-posture-unreadable')).toHaveTextContent('describes one node, not the application');
+    expect(screen.queryByTestId('gitops-answer')).not.toBeInTheDocument();
   });
 
   it.each([
@@ -712,7 +748,7 @@ describe('DriftPanel shows the canonical posture', () => {
       ...portfolioRow(),
       posture: 'settled_by_a_newer_build',
     } as unknown as ReturnType<typeof portfolioRow>);
-    expect(card).toHaveAttribute('data-posture', 'settled_by_a_newer_build');
+    expect(card).toHaveAttribute('data-state', 'settled_by_a_newer_build');
     expect(card).toHaveTextContent('unknown');
     expect(card).toHaveTextContent('does not know');
   });
