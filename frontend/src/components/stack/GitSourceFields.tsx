@@ -61,7 +61,15 @@ export interface GitSourceFieldsState {
   applyMode: ApplyMode;
 }
 
+/**
+ * Which part of the form to render. The create dialog and an unlinked source
+ * need the whole form; a linked source splits it, with the connection fields on
+ * the Source tab and the apply behavior on the Automation tab.
+ */
+export type GitSourceFieldsPart = 'all' | 'connection' | 'apply';
+
 export interface GitSourceFieldsProps extends GitSourceFieldsState {
+  part?: GitSourceFieldsPart;
   disabled?: boolean;
   /** When probing host keys from the edit panel, scopes the request to stack:edit. */
   stackName?: string;
@@ -137,7 +145,10 @@ export function GitSourceFields({
   onBrowse,
   stackName,
   nodeId,
+  part = 'all',
 }: GitSourceFieldsProps) {
+  const showConnection = part !== 'apply';
+  const showApply = part !== 'connection';
   const copy = APPLY_MODE_COPY[variant];
   const primaryComposePath = composePaths[0] ?? '';
   const canBrowse = !!repoUrl?.trim() && !!branch?.trim();
@@ -224,226 +235,233 @@ export function GitSourceFields({
 
   return (
     <div className="space-y-5">
-      <div className="space-y-2">
-        <Label htmlFor="git-source-repo">Repository URL</Label>
-        <Input
-          id="git-source-repo"
-          placeholder="https://github.com/org/repo.git or user@host:org/repo.git"
-          value={repoUrl}
-          onChange={(e) => onRepoUrlChange(e.target.value)}
-          disabled={disabled}
-          className="font-mono text-xs"
-        />
-      </div>
-
-      <div className="space-y-2">
-        <Label htmlFor="git-source-branch">Ref</Label>
-        <Input
-          id="git-source-branch"
-          placeholder="main, v1.0, or commit SHA"
-          value={branch}
-          onChange={(e) => onBranchChange(e.target.value)}
-          disabled={disabled}
-          className="font-mono text-xs"
-        />
-      </div>
-
-      <GitComposeFilePicker
-        composePaths={composePaths}
-        contextDir={contextDir}
-        onComposePathsChange={onComposePathsChange}
-        onContextDirChange={onContextDirChange}
-        onBrowse={onBrowse}
-        canBrowse={canBrowse}
-        disabled={disabled}
-      />
-
-      <div className="space-y-1">
-        <div className="flex items-center gap-2">
-          <Checkbox
-            id="git-source-sync-env"
-            checked={syncEnv}
-            onCheckedChange={(c) => onSyncEnvChange(c === true)}
-            disabled={disabled}
-          />
-          <Label htmlFor="git-source-sync-env" className="text-xs cursor-pointer">
-            Also sync sibling <span className="font-mono">.env</span> file
-          </Label>
-        </div>
-        {syncEnv && primaryComposePath.trim() !== '' && (
-          <p className="text-[11px] text-stat-subtitle pl-6">
-            Will read{' '}
-            <span className="font-mono">
-              {computeDefaultEnvPath(primaryComposePath)}
-            </span>{' '}
-            from the repository.
-          </p>
-        )}
-      </div>
-
-      <div className="space-y-2">
-        <Label>Authentication</Label>
-        <div className="flex gap-2">
-          <button
-            type="button"
-            onClick={() => !disabled && onAuthTypeChange('none')}
-            disabled={disabled}
-            className={cn(
-              'flex-1 rounded-md border px-3 py-1.5 text-xs transition-colors',
-              authType === 'none'
-                ? 'border-brand/60 bg-brand/5'
-                : 'border-glass-border hover:border-card-border-hover',
-            )}
-          >
-            Public (no auth)
-          </button>
-          <button
-            type="button"
-            onClick={() => !disabled && onAuthTypeChange('token')}
-            disabled={disabled}
-            className={cn(
-              'flex-1 rounded-md border px-3 py-1.5 text-xs transition-colors',
-              authType === 'token'
-                ? 'border-brand/60 bg-brand/5'
-                : 'border-glass-border hover:border-card-border-hover',
-            )}
-          >
-            Personal Access Token
-          </button>
-          <button
-            type="button"
-            onClick={() => !disabled && onAuthTypeChange('deploy_key')}
-            disabled={disabled}
-            className={cn(
-              'flex-1 rounded-md border px-3 py-1.5 text-xs transition-colors',
-              authType === 'deploy_key'
-                ? 'border-brand/60 bg-brand/5'
-                : 'border-glass-border hover:border-card-border-hover',
-            )}
-          >
-            Deploy key (SSH)
-          </button>
-        </div>
-        {authType === 'token' && (
-          <div className="space-y-1.5">
+      {showConnection && (
+        <>
+          <div className="space-y-2">
+            <Label htmlFor="git-source-repo">Repository URL</Label>
             <Input
-              type="password"
-              placeholder={hasStoredToken ? '••••••••  (leave blank to keep current)' : 'ghp_xxx... or glpat-xxx...'}
-              value={token}
-              onChange={(e) => onTokenChange(e.target.value)}
+              id="git-source-repo"
+              placeholder="https://github.com/org/repo.git or user@host:org/repo.git"
+              value={repoUrl}
+              onChange={(e) => onRepoUrlChange(e.target.value)}
               disabled={disabled}
               className="font-mono text-xs"
-              autoComplete="off"
             />
-            <p className="text-[11px] text-stat-subtitle">
-              Token is encrypted at rest and never returned from the API.
-            </p>
           </div>
-        )}
-        {authType === 'deploy_key' && (
+
           <div className="space-y-2">
-            {hostKeyRotation && (
-              <div
-                data-testid="ssh-host-key-rotation-warning"
-                className="rounded-md border border-warning/30 bg-warning/[0.06] px-3 py-2 text-[12px] leading-relaxed text-warning"
+            <Label htmlFor="git-source-branch">Ref</Label>
+            <Input
+              id="git-source-branch"
+              placeholder="main, v1.0, or commit SHA"
+              value={branch}
+              onChange={(e) => onBranchChange(e.target.value)}
+              disabled={disabled}
+              className="font-mono text-xs"
+            />
+          </div>
+
+          <GitComposeFilePicker
+            composePaths={composePaths}
+            contextDir={contextDir}
+            onComposePathsChange={onComposePathsChange}
+            onContextDirChange={onContextDirChange}
+            onBrowse={onBrowse}
+            canBrowse={canBrowse}
+            disabled={disabled}
+          />
+
+          <div className="space-y-1">
+            <div className="flex items-center gap-2">
+              <Checkbox
+                id="git-source-sync-env"
+                checked={syncEnv}
+                onCheckedChange={(c) => onSyncEnvChange(c === true)}
+                disabled={disabled}
+              />
+              <Label htmlFor="git-source-sync-env" className="text-xs cursor-pointer">
+                Also sync sibling <span className="font-mono">.env</span> file
+              </Label>
+            </div>
+            {syncEnv && primaryComposePath.trim() !== '' && (
+              <p className="text-[11px] text-stat-subtitle pl-6">
+                Will read{' '}
+                <span className="font-mono">
+                  {computeDefaultEnvPath(primaryComposePath)}
+                </span>{' '}
+                from the repository.
+              </p>
+            )}
+          </div>
+
+          <div className="space-y-2">
+            <Label>Authentication</Label>
+            <div className="flex gap-2">
+              <button
+                type="button"
+                onClick={() => !disabled && onAuthTypeChange('none')}
+                disabled={disabled}
+                className={cn(
+                  'flex-1 rounded-md border px-3 py-1.5 text-xs transition-colors',
+                  authType === 'none'
+                    ? 'border-brand/60 bg-brand/5'
+                    : 'border-glass-border hover:border-card-border-hover',
+                )}
               >
-                <div className="flex items-start gap-2">
-                  <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" strokeWidth={1.5} aria-hidden />
-                  <div>
-                    <p className="font-medium">Host key fingerprint changed</p>
-                    <p className="mt-1">
-                      The server presented a different key than the one you trusted. Confirm this is an expected rotation before saving.
-                    </p>
-                    <p className="mt-2 font-mono text-[11px]">
-                      <span className="text-stat-subtitle">Previously trusted: </span>
-                      {hostKeyRotation.previous}
-                    </p>
-                    <p className="mt-1 font-mono text-[11px]">
-                      <span className="text-stat-subtitle">New fingerprint: </span>
-                      {hostKeyRotation.current}
-                    </p>
-                  </div>
-                </div>
+                Public (no auth)
+              </button>
+              <button
+                type="button"
+                onClick={() => !disabled && onAuthTypeChange('token')}
+                disabled={disabled}
+                className={cn(
+                  'flex-1 rounded-md border px-3 py-1.5 text-xs transition-colors',
+                  authType === 'token'
+                    ? 'border-brand/60 bg-brand/5'
+                    : 'border-glass-border hover:border-card-border-hover',
+                )}
+              >
+                Personal Access Token
+              </button>
+              <button
+                type="button"
+                onClick={() => !disabled && onAuthTypeChange('deploy_key')}
+                disabled={disabled}
+                className={cn(
+                  'flex-1 rounded-md border px-3 py-1.5 text-xs transition-colors',
+                  authType === 'deploy_key'
+                    ? 'border-brand/60 bg-brand/5'
+                    : 'border-glass-border hover:border-card-border-hover',
+                )}
+              >
+                Deploy key (SSH)
+              </button>
+            </div>
+            {authType === 'token' && (
+              <div className="space-y-1.5">
+                <Input
+                  type="password"
+                  placeholder={hasStoredToken ? '••••••••  (leave blank to keep current)' : 'ghp_xxx... or glpat-xxx...'}
+                  value={token}
+                  onChange={(e) => onTokenChange(e.target.value)}
+                  disabled={disabled}
+                  className="font-mono text-xs"
+                  autoComplete="off"
+                />
+                <p className="text-[11px] text-stat-subtitle">
+                  Token is encrypted at rest and never returned from the API.
+                </p>
               </div>
             )}
-            <div className="flex flex-wrap items-center gap-2">
-              <Button type="button" variant="outline" size="sm" disabled={disabled} onClick={() => void probeHostKey()}>
-                Fetch host key fingerprint
-              </Button>
-              {(sshHostKeyFingerprint || storedHostKeyFingerprint) && (
-                <span
-                  className={cn(
-                    'text-[11px] font-mono',
-                    hostKeyRotation ? 'text-warning' : 'text-stat-subtitle',
+            {authType === 'deploy_key' && (
+              <div className="space-y-2">
+                {hostKeyRotation && (
+                  <div
+                    data-testid="ssh-host-key-rotation-warning"
+                    className="rounded-md border border-warning/30 bg-warning/[0.06] px-3 py-2 text-[12px] leading-relaxed text-warning"
+                  >
+                    <div className="flex items-start gap-2">
+                      <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" strokeWidth={1.5} aria-hidden />
+                      <div>
+                        <p className="font-medium">Host key fingerprint changed</p>
+                        <p className="mt-1">
+                          The server presented a different key than the one you trusted. Confirm this is an expected rotation before saving.
+                        </p>
+                        <p className="mt-2 font-mono text-[11px]">
+                          <span className="text-stat-subtitle">Previously trusted: </span>
+                          {hostKeyRotation.previous}
+                        </p>
+                        <p className="mt-1 font-mono text-[11px]">
+                          <span className="text-stat-subtitle">New fingerprint: </span>
+                          {hostKeyRotation.current}
+                        </p>
+                      </div>
+                    </div>
+                  </div>
+                )}
+                <div className="flex flex-wrap items-center gap-2">
+                  <Button type="button" variant="outline" size="sm" disabled={disabled} onClick={() => void probeHostKey()}>
+                    Fetch host key fingerprint
+                  </Button>
+                  {(sshHostKeyFingerprint || storedHostKeyFingerprint) && (
+                    <span
+                      className={cn(
+                        'text-[11px] font-mono',
+                        hostKeyRotation ? 'text-warning' : 'text-stat-subtitle',
+                      )}
+                    >
+                      {sshHostKeyFingerprint || storedHostKeyFingerprint}
+                    </span>
                   )}
-                >
-                  {sshHostKeyFingerprint || storedHostKeyFingerprint}
-                </span>
-              )}
-            </div>
-            <textarea
-              placeholder={hasStoredDeployKey ? 'Private key stored (paste to replace)' : 'Paste PEM private key'}
-              value={deployKey}
-              onChange={(e) => onDeployKeyChange(e.target.value)}
-              disabled={disabled}
-              className="w-full min-h-[88px] rounded-md border border-glass-border bg-transparent px-3 py-2 font-mono text-xs"
-            />
-            <p className="text-[11px] text-stat-subtitle">
-              Deploy keys are encrypted at rest. Host keys are verified strictly; fetch the fingerprint before saving a new SSH URL.
-            </p>
+                </div>
+                <textarea
+                  placeholder={hasStoredDeployKey ? 'Private key stored (paste to replace)' : 'Paste PEM private key'}
+                  value={deployKey}
+                  onChange={(e) => onDeployKeyChange(e.target.value)}
+                  disabled={disabled}
+                  className="w-full min-h-[88px] rounded-md border border-glass-border bg-transparent px-3 py-2 font-mono text-xs"
+                />
+                <p className="text-[11px] text-stat-subtitle">
+                  Deploy keys are encrypted at rest. Host keys are verified strictly; fetch the fingerprint before saving a new SSH URL.
+                </p>
+              </div>
+            )}
           </div>
-        )}
-      </div>
 
-      {isHttpsRepo && (
-        <div className="space-y-2">
-          <Label htmlFor="git-source-ca-bundle">Custom CA certificate (optional)</Label>
-          <textarea
-            id="git-source-ca-bundle"
-            placeholder={hasStoredCaBundle ? 'CA bundle stored (paste to replace)' : 'Paste PEM certificate(s) for a private CA'}
-            value={caBundle}
-            onChange={(e) => onCaBundleChange(e.target.value)}
-            disabled={disabled}
-            className="w-full min-h-[72px] rounded-md border border-glass-border bg-transparent px-3 py-2 font-mono text-xs"
-          />
-          <p className="text-[11px] text-stat-subtitle">
-            By default Sencho trusts the system certificate store. Add a custom CA when your git server uses a private certificate authority. The bundle is encrypted at rest and never returned from the API.
-          </p>
-          {hasStoredCaBundle && (
-            <div className="flex items-center gap-2">
-              <Button
-                type="button"
-                variant="outline"
-                size="sm"
+          {isHttpsRepo && (
+            <div className="space-y-2">
+              <Label htmlFor="git-source-ca-bundle">Custom CA certificate (optional)</Label>
+              <textarea
+                id="git-source-ca-bundle"
+                placeholder={hasStoredCaBundle ? 'CA bundle stored (paste to replace)' : 'Paste PEM certificate(s) for a private CA'}
+                value={caBundle}
+                onChange={(e) => onCaBundleChange(e.target.value)}
                 disabled={disabled}
-                onClick={onRemoveCaBundle}
-              >
-                Remove stored CA
-              </Button>
-              {removeCaBundle && (
-                <Badge variant="destructive" className="text-[10px] h-5" data-testid="git-source-ca-remove-armed">
-                  Removal armed
-                </Badge>
+                className="w-full min-h-[72px] rounded-md border border-glass-border bg-transparent px-3 py-2 font-mono text-xs"
+              />
+              <p className="text-[11px] text-stat-subtitle">
+                By default Sencho trusts the system certificate store. Add a custom CA when your git server uses a private certificate authority. The bundle is encrypted at rest and never returned from the API.
+              </p>
+              {hasStoredCaBundle && (
+                <div className="flex items-center gap-2">
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    disabled={disabled}
+                    onClick={onRemoveCaBundle}
+                  >
+                    Remove stored CA
+                  </Button>
+                  {removeCaBundle && (
+                    <Badge variant="destructive" className="text-[10px] h-5" data-testid="git-source-ca-remove-armed">
+                      Removal armed
+                    </Badge>
+                  )}
+                  <span className="text-[11px] text-stat-subtitle">
+                    {removeCaBundle
+                      ? 'Will revoke trust for this CA on the next save. Paste a new PEM instead to replace it.'
+                      : 'Revokes trust for this CA on the next save. The textarea starts empty, so saving without changes will keep the stored CA.'}
+                  </span>
+                </div>
               )}
-              <span className="text-[11px] text-stat-subtitle">
-                {removeCaBundle
-                  ? 'Will revoke trust for this CA on the next save. Paste a new PEM instead to replace it.'
-                  : 'Revokes trust for this CA on the next save. The textarea starts empty, so saving without changes will keep the stored CA.'}
-              </span>
             </div>
           )}
-        </div>
+        </>
       )}
 
-      <div className="space-y-2">
-        <Label>Apply behavior</Label>
-        <div className="space-y-1.5">
-          {radioOption('manual')}
-          {radioOption('review')}
-          {radioOption('auto-write')}
-          {radioOption('auto-deploy')}
+      {showApply && (
+        <div className="space-y-2">
+          {/* Under the Automation tab the section title already says it. */}
+          {part === 'all' && <Label>Apply behavior</Label>}
+          <div className="space-y-1.5">
+            {radioOption('manual')}
+            {radioOption('review')}
+            {radioOption('auto-write')}
+            {radioOption('auto-deploy')}
+          </div>
         </div>
-      </div>
+      )}
     </div>
   );
 }

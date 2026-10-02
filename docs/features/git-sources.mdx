@@ -23,22 +23,22 @@ Writes land in the stack's existing directory using the same storage Sencho uses
 ## Anatomy of the sheet
 
 <Frame>
-  <img src="/images/git-sources/panel.png" alt="Git Source sheet opened from the stack editor, with crumb Stack, stack name, Git source, heading Git source, a toolbar of Update, Pull now, and Remove, and Status, Repository, and Manifest sections" />
+  <img src="/images/git-sources/panel.png" alt="Git Source sheet opened from the stack editor, with crumb Stack, stack name, Git source, heading Git source, a toolbar of Update, Pull now, and Detach and a body of Status, Repository, and Manifest sections" />
 </Frame>
 
-Git Source opens as a right-side sheet from the stack editor toolbar. It is not a centered dialog. The chrome is the same sheet used elsewhere in Sencho: a crumb (`Stack › {name} › Git source`), the heading **Git source**, a one-line summary of the linked ref, a toolbar, body sections, and a freshness line in the footer.
+Git Source opens as a right-side sheet from the stack editor toolbar. It is not a centered dialog. The chrome is the same sheet used elsewhere in Sencho: a crumb (`Stack › {name} › Git source`), the heading **Git source**, a one-line summary of the linked ref, a toolbar, tabs, and a freshness line in the footer. A stack with no source yet has no tabs: the sheet opens straight on the form.
 
-The toolbar carries **Save** or **Update**, **Pull now** when a source is linked and not suspended, **Suspend** or **Resume** when that action is offered, and **Remove** when a source is linked. Nested pull/apply and detach confirmations stay as separate dialogs on top of the sheet.
+The toolbar carries **Pull now** when a source is linked and not suspended, **Detach** when a source is linked, and **Save** for a stack with no source yet, and **Update** for a linked source only while something differs from what is stored, so it never sits there doing nothing. Nested pull/apply and detach confirmations stay as separate dialogs on top of the sheet.
 
-When this Git source belongs to a Git-managed Blueprint, the sheet is read-only. **Save**, **Remove**, and **Pull now** are withheld here. Use **Detach Git** or **Retire to Direct** on that Blueprint to restore stack-owned editing. A live Direct source can **Adopt onto Blueprint**, which moves this source onto an Inline Blueprint with the same move semantics as Convert.
+When this Git source belongs to a Git-managed Blueprint, the sheet is read-only. **Save**, **Detach**, and **Pull now** are withheld here. Use **Detach Git** or **Retire to Direct** on that Blueprint to restore stack-owned editing. A live Direct source can **Adopt onto Blueprint**, which moves this source onto an Inline Blueprint with the same move semantics as Convert.
 
-The body groups five sections:
+A linked source groups its sheet into tabs:
 
-- **Status.** One block: the source's state with the commit it concerns, and the action that resolves it right there (**Review** for a waiting update, **Retry** for a failed or retry-scheduled source when that action is offered). A row beneath names each stage that applies, and **Evidence** opens the recorded authority, targets, and anything the projection could not prove. The sheet header shows the last-applied commit (or **never applied**), the source's state, and the ref.
-- **Repository.** Repository URL, ref, the ordered compose-file picker, an optional project directory, optional sibling `.env` sync, authentication, and the apply behavior radio group.
-- **Provider hooks.** One endpoint per supported Git host (GitHub, GitLab, Gitea, Forgejo, Bitbucket Cloud). Shown when the stack owns a direct Git source; hidden while the source is read-only on a Git-managed Blueprint.
-- **Repository secrets.** Age identities for SOPS-encrypted env files and file-backed secrets, encrypted-source policy, and a readiness chip for whether this node can decrypt what the repository expects.
-- **Manifest.** The managed-project summary when a source is linked.
+- **Overview.** One block: the source's state with the commit it concerns, and the action that resolves it right there (**Review update** for a waiting update, **Retry** for a failed or retry-scheduled source, **Resume** for a suspended one, each when that action is offered). A row beneath names each stage that applies, and **Evidence** opens the recorded authority, targets, and anything the projection could not prove. The sheet header shows the last-applied commit (or **never applied**), the source's state, and the ref.
+- **Source.** The repository, ref, compose files, project directory, sibling `.env` sync, authentication and custom CA, read out as a summary. **Edit** opens the form, and **Update** appears in the toolbar once something differs from what is stored; **Cancel** puts it back. A live Direct source can also **Adopt onto Blueprint** from here. Below it, the managed-project manifest summary.
+- **Automation.** The apply behavior (Manual, Review only, Auto-write files, Auto-deploy), **Suspend** or **Resume** for the source's reconciliation when that action is offered, and the provider hooks: one endpoint per supported Git host (GitHub, GitLab, Gitea, Forgejo, Bitbucket Cloud), available when the stack owns a direct Git source; while the source is read-only on a Git-managed Blueprint the tab shows a notice instead of the endpoint controls. Changing the apply behavior also offers **Update**.
+- **Secrets.** Age identities for SOPS-encrypted env files and file-backed secrets, encrypted-source policy, and a readiness chip for whether this node can decrypt what the repository expects.
+- **Drift.** Only while the application has drift: each confirmed divergence, expected versus observed. See [the drift model](/features/gitops-drift-model).
 
 Polling interval lives in **Settings → GitOps**, not on this sheet. There is no per-source interval control; a source with no override inherits the node default.
 
@@ -160,7 +160,7 @@ Manual sources are not polled at all, so the interval does not reach them. Revie
 
 ## Suspend, resume, and retry
 
-**Suspend** pauses reconciliation for one source: polling, webhooks, and automatic apply stop until you resume. Save stays available; resume before pulling again. An optional reason is stored with the suspension.
+**Suspend** pauses reconciliation for one source: polling, webhooks, and automatic apply stop until you resume. **Suspend** and **Resume** are on the **Automation** tab (and **Resume** is also in the **Overview** status while the source is suspended); resume before pulling again. An optional reason is stored with the suspension.
 
 **Resume** clears the pause and re-evaluates the source immediately rather than waiting for the next poll.
 
@@ -204,7 +204,7 @@ Provider hooks apply only to **direct** stack-owned sources. A source that is re
 
 ### Create an endpoint
 
-1. Open the stack's **Git Source** sheet and scroll to **Provider hooks**.
+1. Open the stack's **Git Source** sheet and select the **Automation** tab, then find **Provider hooks**.
 2. Click **Add provider hook**, choose the Git host, and pick an **event scope**:
    - **Configured ref only** (default): react to push events on the branch or tag named in **Ref**.
    - **Configured ref and pull requests**: also accept pull request events from the same repository (useful when the ref tracks a long-lived branch and you want preview stacks from PR activity).
@@ -351,7 +351,7 @@ Pulls, applies, and create-from-git operations on the same stack are serialized 
 
 Some teams store sensitive env files or file-backed secrets in Git as [SOPS](https://github.com/getsops/sops)-encrypted documents. Sencho keeps ciphertext in the repository and on disk. Decryption happens only in a short-lived overlay during candidate validation, Git apply, Git deploy, or rollback. A manual Deploy or image Update on a SOPS-managed stack is refused so Compose never reads ciphertext from the live stack directory.
 
-Open **Git Source** on a linked stack and scroll to **Repository secrets**.
+Open **Git Source** on a linked stack and select the **Secrets** tab.
 
 - **Generate identity** or **Import identity** creates an age key pair on the node that owns this Git source. Sencho shows the public recipient (`age1…`) so you can add it to SOPS files in Git. Private key material never leaves the node and is never returned by the API.
 - **Encrypted source policy** defaults to allowing plaintext secret inputs. Switch to **Require SOPS encryption** when every managed secret-bearing input in the repository must be SOPS-encrypted with age.

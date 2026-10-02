@@ -244,7 +244,7 @@ Click **Edit** on the detail sheet. On an Inline Blueprint, editing the compose 
 
 **Convert to Git** moves an existing live Git source onto this Blueprint. Pick the source, review the preview, and confirm. The Blueprint becomes Git-managed: Git is the content authority, and the previous YAML is stored as a frozen detach snapshot only. Place never runs from that snapshot. When an accepted generation is ready, Sencho authorizes a rollout generation and places the materialized project from that generation onto the approved targets. Credentials stay with the Git source. Conversion also returns placement approval to pending.
 
-The Git Source sheet for that stack becomes read-only until you **Detach Git** or **Retire to Direct**. Save, Remove, and Pull now are blocked there.
+The Git Source sheet for that stack becomes read-only until you **Detach Git** or **Retire to Direct**. Save, Detach, and Pull now are blocked there.
 
 One repository backs at most one Git-managed Blueprint. Sencho matches repositories across the forms a Git URL can take, so the HTTPS URL and the SSH URL for the same clone count as one repository, whatever the port, with or without a `.git` suffix, and whatever the host casing. Converting a second Git source that points at a repository already claimed by a Git-managed Blueprint is refused; pick a different source, or **Retire to Direct** or **Detach Git** on the Blueprint that holds the claim first.
 

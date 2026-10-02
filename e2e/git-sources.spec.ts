@@ -1,5 +1,5 @@
 /**
- * Git Sources E2E - configure, save, pull, remove.
+ * Git Sources E2E - configure, save, pull, detach.
  *
  * These tests use a throwaway stack that is created via the browser's
  * authenticated fetch (so cookies are carried) and cleaned up in afterAll.
@@ -157,8 +157,8 @@ test.describe('Git Sources', () => {
     expect(JSON.stringify(body.body)).toMatch(/\.git|file/i);
   });
 
-  test('configure, view pending-empty state, and remove via AlertDialog', async ({ page }) => {
-    // Seed a git source directly via API so we can exercise the remove-confirm
+  test('configure, view pending-empty state, and detach via AlertDialog', async ({ page }) => {
+    // Seed a git source directly via API so we can exercise the detach-confirm
     // flow without depending on a reachable upstream.
     const putStatus = await page.evaluate(async (name) => {
       const res = await fetch(`/api/stacks/${name}/git-source`, {
@@ -179,21 +179,20 @@ test.describe('Git Sources', () => {
     }, TEST_STACK);
 
     // Either the dry-run succeeded (2xx) or the network blocked it (4xx/5xx).
-    // If it failed, skip the rest of the remove flow to keep the suite robust.
+    // If it failed, skip the rest of the detach flow to keep the suite robust.
     if (putStatus >= 400) {
-      test.skip(true, `Upstream dry-run returned ${putStatus}; skipping remove path`);
+      test.skip(true, `Upstream dry-run returned ${putStatus}; skipping detach path`);
       return;
     }
 
     await openGitSourcePanel(page);
 
-    // Source should render with the saved repo URL.
-    await expect(page.locator('#git-source-repo')).toHaveValue(/awesome-compose/);
+    // The Source tab reads out the saved repo URL; editing is a deliberate step.
+    await page.getByRole('tab', { name: 'Source' }).click();
+    await expect(page.getByTestId('git-source-summary')).toContainText(/awesome-compose/);
 
-    // Click Remove → AlertDialog appears → confirm → source cleared. Playwright's
-    // name match is substring by default, so require an exact match to select the
-    // footer button and not the picker's per-file "Remove <path>" buttons.
-    await page.getByRole('dialog').getByRole('button', { name: 'Remove', exact: true }).click();
+    // Click Detach → AlertDialog appears → confirm → source cleared.
+    await page.getByRole('dialog').getByRole('button', { name: 'Detach', exact: true }).click();
     await expect(page.getByRole('alertdialog')).toBeVisible({ timeout: 5_000 });
     await page.getByRole('alertdialog').getByRole('button', { name: /^Detach$/ }).click();
 
@@ -201,7 +200,7 @@ test.describe('Git Sources', () => {
     await expect(page.getByRole('dialog').getByRole('button', { name: /^Detach$/ })).not.toBeVisible({ timeout: 5_000 });
   });
 
-  test('sheet chrome offers suspend and resume for a linked source', async ({ page }) => {
+  test('the automation tab offers suspend and resume for a linked source', async ({ page }) => {
     const putStatus = await page.evaluate(async (name) => {
       const res = await fetch(`/api/stacks/${name}/git-source`, {
         method: 'PUT',
@@ -226,6 +225,8 @@ test.describe('Git Sources', () => {
 
     await openGitSourcePanel(page);
     await expect(page.getByRole('navigation', { name: /sheet location/i })).toContainText(TEST_STACK);
+    // Suspend and resume are controls of the source's automation.
+    await page.getByRole('tab', { name: 'Automation' }).click();
     await expect(page.getByRole('button', { name: /^suspend$/i })).toBeVisible();
 
     await page.getByRole('button', { name: /^suspend$/i }).click();
@@ -251,6 +252,7 @@ test.describe('Git Sources', () => {
     }, { timeout: 30_000, intervals: [1_000] }).toBeTruthy();
     await page.keyboard.press('Escape');
     await openGitSourcePanel(page);
+    await page.getByRole('tab', { name: 'Automation' }).click();
     await expect(page.getByRole('button', { name: /^suspend$/i })).toBeVisible({ timeout: 10_000 });
   });
 });
