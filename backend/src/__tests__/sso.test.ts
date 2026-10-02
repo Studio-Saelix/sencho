@@ -193,6 +193,76 @@ describe('SSOService.buildTokenExchangeUrl', () => {
   });
 });
 
+describe('SSOService.handleOIDCCallback (GitHub issuer identification)', () => {
+  const GITHUB_ISS = 'https://github.com/login/oauth';
+  const callbackUrl = 'http://sencho.example.com/api/auth/sso/oidc/oidc_github/callback';
+  let fetchSpy: MockInstance;
+
+  const fetchUrl = (input: Parameters<typeof fetch>[0]): string => (input instanceof Request ? input.url : String(input));
+
+  async function runCallback(iss?: string) {
+    const { SSOService } = await import('../services/SSOService');
+    return SSOService.getInstance().handleOIDCCallback(
+      'oidc_github', callbackUrl,
+      { code: 'test-code', state: 'test-state', ...(iss ? { iss } : {}) },
+      'test-state', 'test-verifier',
+    );
+  }
+
+  beforeEach(async () => {
+    const { SSOService } = await import('../services/SSOService');
+    SSOService.getInstance().saveProviderConfig({
+      provider: 'oidc_github',
+      displayName: 'GitHub',
+      enabled: true,
+      oidcClientId: 'test-client-id',
+      oidcClientSecret: 'test-client-secret',
+    });
+
+    // Stub GitHub's token endpoint and REST API; openid-client v6 uses global fetch.
+    fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+      const url = fetchUrl(input);
+      const json = (body: unknown) => new Response(JSON.stringify(body), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+      if (url === 'https://github.com/login/oauth/access_token') {
+        return json({ access_token: 'gho_test', token_type: 'bearer', scope: 'user:email' });
+      }
+      if (url === 'https://api.github.com/user') return json({ id: 4242, login: 'octocat', name: 'Octo Cat' });
+      if (url === 'https://api.github.com/user/emails') return json([{ email: 'octo@example.com', primary: true }]);
+      throw new Error(`unexpected fetch in test: ${url}`);
+    });
+  });
+
+  afterEach(async () => {
+    fetchSpy.mockRestore();
+    const { DatabaseService } = await import('../services/DatabaseService');
+    DatabaseService.getInstance().deleteSSOConfig('oidc_github');
+  });
+
+  it('accepts the iss GitHub sends on the authorization response', async () => {
+    const result = await runCallback(GITHUB_ISS);
+    expect(result.success).toBe(true);
+    expect(result.user?.providerId).toBe('4242');
+  });
+
+  it('rejects an iss that is not GitHub (mix-up protection stays on)', async () => {
+    const result = await runCallback('https://evil.example.com');
+    expect(result.success).toBe(false);
+    expect(result.error).toBe('Authentication failed. Please try again.');
+    // The mix-up check must reject before any code is exchanged for a token.
+    const fetchedUrls = fetchSpy.mock.calls.map(([input]) => fetchUrl(input));
+    expect(fetchedUrls).not.toContain('https://github.com/login/oauth/access_token');
+  });
+
+  it('still accepts a callback that carries no iss', async () => {
+    const result = await runCallback();
+    expect(result.success).toBe(true);
+    expect(result.user?.providerId).toBe('4242');
+  });
+});
+
 describe('SSO User Provisioning', () => {
   afterAll(() => {
     vi.restoreAllMocks();
