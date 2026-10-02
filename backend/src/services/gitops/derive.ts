@@ -120,10 +120,13 @@ export function deriveGitOpsRevision(
   // a stateful hold. The dependency is one-way: `deriveTarget` reads the
   // application row and the target's own evidence, never the placement facet,
   // so deriving them first introduces no cycle.
+  // Resolved once here because it reads the application's intent revision and
+  // the live Blueprint row, neither of which varies per target.
+  const confirmationExpected = facts.healthDisabled ? blueprintConfirmsOutcome(app) : true;
   const targets = facts.targets
     .slice()
     .sort((a, b) => a.node_id - b.node_id)
-    .map((target) => deriveTarget(app, target, facts.healthDisabled, limitations));
+    .map((target) => deriveTarget(app, target, facts.healthDisabled, limitations, confirmationExpected));
   const placement = derivePlacement(app, futureEvidence, targets);
   const rollout = deriveRollout(app, targets, artifact, facts.healthDisabled, futureEvidence);
   const availableActions = deriveActions(app, source, placement, targets);
@@ -1355,6 +1358,42 @@ function derivePlacement(
   futureEvidence: FutureGitOpsEvidence | null,
   targets: GitOpsTargetProjection[],
 ): PlacementFacet {
+  const authority = derivePlacementAuthority(app, futureEvidence);
+  // A node holding stateful changes for review blocks this placement, and the
+  // hold is per-target, so the application-level facet is the only place an
+  // operator sees that one node is waiting on them. The runtime facet reports
+  // the same fact per target, and the two agree by construction: the read is
+  // the derived status, not a second decode of the observation column.
+  //
+  // It replaces the settled answer only. Every earlier authority state outranks
+  // it, because ranking a hold above an outstanding approval or authorization
+  // hid the affordance that clears it: the authority actions are offered on
+  // those statuses, so an operator whose rollout was unauthorized and who also
+  // had one node held was shown a confirmation to perform and no way to
+  // authorize it, and neither clears the other. Authority first, then the hold,
+  // which is the order an operator works through anyway. A drift observation is
+  // deliberately not a hold: it is a fact about a node's runtime, which the
+  // runtime facet owns, and reporting it here would name one divergence at two
+  // altitudes.
+  if (authority.status === 'blueprint_bound'
+    && targets.some((target) => target.runtime.status === 'pending_state_review')) {
+    return { status: 'stateful_confirmation_required' };
+  }
+  return authority;
+}
+
+/**
+ * The authority chain for a placement, with no target evidence consulted.
+ *
+ * Split from `derivePlacement` so the stateful hold has exactly one place to
+ * apply. Inlined into the chain it would have had to be repeated at each of the
+ * three `blueprint_bound` returns, and a fourth copy is the kind of duplication
+ * that silently rots.
+ */
+function derivePlacementAuthority(
+  app: GitOpsApplicationRow,
+  futureEvidence: FutureGitOpsEvidence | null,
+): PlacementFacet {
   if (futureEvidence?.placement) {
     const ev = futureEvidence.placement;
     if (ev.kind === 'source_acceptance_pending') {
@@ -1426,24 +1465,6 @@ function derivePlacement(
   // whose source has not been accepted.
   if (app.target_mode === 'blueprint' && app.rollout_candidate_id && !app.placement_approval_ref) {
     return { status: 'placement_review_pending' };
-  }
-
-  // A node holding stateful changes for review blocks this placement, and the
-  // hold is per-target, so the application-level facet is the only place an
-  // operator sees that one node is waiting on them. The runtime facet reports
-  // the same fact per target, and the two agree by construction: the read is
-  // the derived status, not a second decode of the observation column, so they
-  // cannot drift apart the way a separate reader would.
-  //
-  // Placed after the placement approval gate above, not before it. Approving
-  // the blast radius is an earlier authority step than confirming a stateful
-  // outcome on one node within it, so reporting the hold over an unapproved
-  // placement would send the operator to confirm something they cannot act on
-  // yet. A drift observation is deliberately not a hold: it is a fact about a
-  // node's runtime, which the runtime facet owns, and treating it as a
-  // placement decision would report the same divergence at two altitudes.
-  if (targets.some((target) => target.runtime.status === 'pending_state_review')) {
-    return { status: 'stateful_confirmation_required' };
   }
 
   const ingredients = store.authorizationIngredients(app);
@@ -1731,12 +1752,13 @@ function deriveTarget(
   target: GitOpsTargetCurrentRow,
   healthDisabled: boolean,
   limitations: GitOpsLimitation[],
+  confirmationExpected: boolean,
 ): GitOpsTargetProjection {
   mergePersistedLimitations(target.evidence_limitations_json, limitations);
   const observed = decodeObservedSafe(target.observed_artifact_identity_json, limitations);
   const connectivity = connectivityFromObservation(target, observed, limitations);
   const artifact = deriveArtifact(app, target.desired_generation_id, target.expected_artifact_set_id, target.latest_artifact_set_id, limitations);
-  const runtime = deriveRuntime(target, artifact, observed, healthDisabled, app);
+  const runtime = deriveRuntime(target, artifact, observed, healthDisabled, app, confirmationExpected);
   // A withdrawal hides a failed recovery rather than resolving it. The tombstone
   // answers before the runtime facet reads a recovery field, and the retirement
   // cleared the failure columns without clearing the recovery ones, so the row
@@ -1934,14 +1956,37 @@ function blueprintAckStatus(
   target: GitOpsTargetCurrentRow,
   observed: ReturnType<typeof decodeObservedSafe>,
   healthDisabled: boolean,
+  confirmationExpected: boolean,
 ): 'stale_acknowledgement' | 'acknowledged_completion_unknown' | null {
   if (app.target_mode === 'direct') return null;
   if (target.target_status === 'tombstoned') return null;
   if (!target.applied_generation_id) return null;
-  // A Blueprint target the reconciler has looked at, or a health gate has
-  // judged, has an answer. This is the whole narrowing: without it every
-  // unconverged Blueprint would report an unknown outcome and flood the
-  // attention queue with failures that describe no fault.
+  // The identity test runs first, and runs on its own. Whether this node was
+  // asked to run something the application has since left is a fact about the
+  // request, not about what has been observed since, so a health verdict or a
+  // later drift check cannot make a superseded acknowledgement current again.
+  // Testing it after the evidence gates made a stale target read
+  // `synced_and_healthy`, which is the same over-report this change removes.
+  //
+  // Each leg is only a staleness claim when the application has something to
+  // have moved on from. A target that recorded an intent against an application
+  // that never established one is running an unplaced generation, not a
+  // superseded one, and reads as the unconfirmed acknowledgement it is.
+  const identityStale = (app.intent_revision_id !== null
+      && target.intent_revision_id !== null
+      && target.intent_revision_id !== app.intent_revision_id)
+    || (app.rollout_candidate_id !== null
+      && target.rollout_candidate_id !== null
+      && target.rollout_candidate_id !== app.rollout_candidate_id);
+  if (identityStale) return 'stale_acknowledgement';
+  // The outcome is only unconfirmed while something is going to confirm it.
+  // A Blueprint whose drift policy never observes and whose health contract is
+  // off has no confirmation coming, so claiming the outcome is unknown would
+  // pin the target, and every application built from it, to a failure-toned
+  // status for ever. That is worse than the honest pointer reading: the
+  // operator asked Sencho not to check, so the absence of a check says nothing
+  // about the workload.
+  if (!confirmationExpected) return null;
   if (!healthDisabled) {
     if (target.healthy_generation_id !== null) return null;
     if (target.last_health_status !== null && target.last_health_status !== 'unknown') return null;
@@ -1951,18 +1996,27 @@ function blueprintAckStatus(
   if (observed.kind !== 'unknown' && observed.kind !== 'missing' && observed.kind !== 'unavailable') {
     return null;
   }
-  // Each leg is only a staleness claim when the application has something to
-  // have moved on from. A target that recorded an intent against an
-  // application that never established one is not running a superseded
-  // generation; it is running an unplaced generation, which the other status
-  // names honestly.
-  const identityStale = (app.intent_revision_id !== null
-      && target.intent_revision_id !== null
-      && target.intent_revision_id !== app.intent_revision_id)
-    || (app.rollout_candidate_id !== null
-      && target.rollout_candidate_id !== null
-      && target.rollout_candidate_id !== app.rollout_candidate_id);
-  return identityStale ? 'stale_acknowledgement' : 'acknowledged_completion_unknown';
+  return 'acknowledged_completion_unknown';
+}
+
+/**
+ * Whether anything is going to confirm a Blueprint target's outcome.
+ *
+ * Two producers confirm it, and this is the honest question behind the
+ * unknown-outcome status: the reconciler's drift check, which runs only when
+ * the Blueprint's drift policy observes, and the health gate. When neither is in
+ * play the absence of an observation carries no information, because no
+ * observation was ever going to be recorded.
+ *
+ * Resolved once per application rather than per target, since it reads the
+ * application's intent revision and the live Blueprint row, neither of which
+ * varies across a target's fleet.
+ */
+function blueprintConfirmsOutcome(app: GitOpsApplicationRow): boolean {
+  if (app.blueprint_id === null) return false;
+  const intent = app.intent_revision_id ? GitOpsStore.getInstance().getIntentRevision(app.intent_revision_id) : undefined;
+  if (!intent) return false;
+  return blueprintDriftPolicy(app, intent) !== null;
 }
 
 function deriveRuntime(
@@ -1971,6 +2025,7 @@ function deriveRuntime(
   observed: ReturnType<typeof decodeObservedSafe>,
   healthDisabled: boolean,
   app: GitOpsApplicationRow,
+  confirmationExpected: boolean,
 ): RuntimeFacet {
   if (target.target_status === 'tombstoned') return { status: 'tombstoned' };
   if (target.recovery_phase === 'restoring' || target.recovery_phase === 'compensating') {
@@ -2050,7 +2105,7 @@ function deriveRuntime(
   if (!target.applied_generation_id) return { status: 'never_applied' };
   // What a Blueprint acknowledgement means, read before the pointer checks.
   // See `blueprintAckStatus` for what each status claims and why.
-  const ackStatus = blueprintAckStatus(app, target, observed, healthDisabled);
+  const ackStatus = blueprintAckStatus(app, target, observed, healthDisabled, confirmationExpected);
   if (ackStatus) return { status: ackStatus };
   // The generation this target actually runs, which is not the deployed pointer
   // in every mode. Reading `deployed_generation_id` directly is what made every

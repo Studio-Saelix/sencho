@@ -2905,6 +2905,18 @@ export class GitOpsTransitions {
         // derived from later evidence.
         target.desired_generation_id = app.accepted_generation_id;
         target.applied_generation_id = app.accepted_generation_id;
+        // The recorded identity described the previous artifact set, which is
+        // no longer the one this target is expected to satisfy. Keeping it would
+        // make the projection compare a stale identity against the new expected
+        // set and report confirmed artifact drift for a stack that has simply
+        // not been re-checked yet, so the observation is dropped and the target
+        // reads as awaiting verification until the reconciler looks again.
+        // Dropped rather than kept: an identity recorded against an expectation
+        // that no longer exists is not evidence about the current one.
+        if (target.expected_artifact_set_id !== null
+          && target.expected_artifact_set_id !== app.artifact_set_id) {
+          target.observed_artifact_identity_json = null;
+        }
         target.expected_artifact_set_id = app.artifact_set_id;
         target.latest_artifact_set_id = app.artifact_set_id;
         target.source_acceptance_ref = app.source_acceptance_ref;

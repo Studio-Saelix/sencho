@@ -441,6 +441,7 @@ describe('attentionReasons', () => {
       'rollout_completion_unknown',
       'rollout_partial',
       'rollout_paused',
+      'rollout_stale_acknowledgement',
       'source_conflict_blocker',
       'source_failed',
       'source_reconcile_required',

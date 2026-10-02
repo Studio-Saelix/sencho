@@ -710,6 +710,65 @@ describe('derive facets for authorization and convergence', () => {
     expect(projection.drift[0]?.affectedTargets[0]?.nodeId).toBe(fixture.nodeId);
   });
 
+  it('reports the stateful hold once the placement is authorized, and not before', () => {
+    // The hold replaces the settled answer only. An operator whose rollout is
+    // not yet authorized must still be offered the authorize action, so the
+    // hold cannot rank above the authorization statuses or it hides the very
+    // affordance that resolves them, and neither clears the other.
+    const authorized = seedAuthorizedReadyApp({ artifactQualification: 'exact' });
+    authorize(authorized.applicationId);
+    const settled = deriveGitOpsRevision({
+      application: GitOpsStore.getInstance().getApplication(authorized.applicationId)!,
+      targets: GitOpsStore.getInstance().listTargets(authorized.applicationId),
+      healthDisabled: false,
+    }, null);
+    if (settled.targetMode === 'not_applicable') throw new Error('expected application');
+    expect(settled.facets.placement.status).toBe('blueprint_bound');
+
+    // Same application, one target now holding stateful changes for review.
+    const store = GitOpsStore.getInstance();
+    const target = store.getTarget(authorized.applicationId, authorized.nodeId)!;
+    store.upsertTarget({ ...target, latest_stage: 'blueprint_state_review' });
+    const held = deriveGitOpsRevision({
+      application: store.getApplication(authorized.applicationId)!,
+      targets: store.listTargets(authorized.applicationId),
+      healthDisabled: false,
+    }, null);
+    if (held.targetMode === 'not_applicable') throw new Error('expected application');
+    expect(held.facets.placement.status).toBe('stateful_confirmation_required');
+    // The same fact is reported per target, read from the derived status so the
+    // two altitudes cannot disagree.
+    expect(held.targets[0]?.runtime.status).toBe('pending_state_review');
+  });
+
+  it('keeps the authorize affordance reachable while one node is held for state review', () => {
+    // The precedence that changed. A hold on one node must not outrank an
+    // outstanding rollout authorization: the authority actions are offered on
+    // that status, so ranking the hold above it removed the only affordance
+    // that resolves the authorization, and neither clears the other. The hold
+    // becomes the next action only once authority is settled, which the
+    // companion case above pins from the other side.
+    const fixture = seedAuthorizedReadyApp();
+    recordNonBlockingPreflight(fixture.applicationId);
+    const store = GitOpsStore.getInstance();
+    const target = store.getTarget(fixture.applicationId, fixture.nodeId)!;
+    store.upsertTarget({ ...target, latest_stage: 'blueprint_state_review' });
+
+    const projection = deriveGitOpsRevision({
+      application: store.getApplication(fixture.applicationId)!,
+      targets: store.listTargets(fixture.applicationId),
+      healthDisabled: false,
+    }, null);
+    if (projection.targetMode === 'not_applicable') throw new Error('expected application');
+
+    expect(projection.facets.placement.status).toBe('rollout_authorization_pending');
+    // The hold is still reported, per target, exactly as the operator sees it on
+    // the Blueprint screen: the two altitudes say complementary things rather
+    // than one of them going quiet.
+    expect(projection.targets[0]?.runtime.status).toBe('pending_state_review');
+    expect(projection.drift).toEqual([]);
+  });
+
   it('does not treat synced_and_healthy as healthy for a different generation', () => {
     const fixture = seedAuthorizedReadyApp({ artifactQualification: 'exact' });
     authorize(fixture.applicationId);

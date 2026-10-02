@@ -20,7 +20,11 @@ import { GitOpsTransitions } from '../services/gitops/transitions';
 import { projectApplication } from '../services/gitops/derive';
 import { attentionReasons } from '../services/gitops/attention';
 import { postureOf } from '../services/gitops/portfolioAggregator';
-import { encodeObservedArtifactIdentity, type ObservedArtifactIdentity } from '../services/gitops/json';
+import {
+  encodeArtifactEvidenceJson,
+  encodeObservedArtifactIdentity,
+  type ObservedArtifactIdentity,
+} from '../services/gitops/json';
 import type {
   GitOpsApplicationRow,
   GitOpsGenerationRow,
@@ -85,12 +89,12 @@ describe('the Blueprint acknowledgement statuses reach the projection', () => {
     return { applicationId };
   }
 
-  function project(applicationId: string): GitOpsRevisionProjection {
-    return projectApplication(applicationId, false);
+  function project(applicationId: string, healthDisabled = false): GitOpsRevisionProjection {
+    return projectApplication(applicationId, healthDisabled);
   }
 
-  function runtimeStatus(applicationId: string): string {
-    const projection = project(applicationId);
+  function runtimeStatus(applicationId: string, healthDisabled = false): string {
+    const projection = project(applicationId, healthDisabled);
     if (projection.targetMode === 'not_applicable') throw new Error('expected application');
     return projection.targets[0]?.runtime.status ?? 'no_target';
   }
@@ -159,6 +163,49 @@ describe('the Blueprint acknowledgement statuses reach the projection', () => {
       expect(runtimeStatus(applicationId)).toBe('tombstoned');
     });
 
+    it('survives a health verdict and a later drift check, which cannot make it current', () => {
+      // The identity test is about the request, not the evidence since. Testing
+      // it after the evidence gates let a superseded acknowledgement read
+      // `synced_and_healthy`, which is the over-report this change exists to
+      // remove, reintroduced through the evidence check.
+      const { applicationId } = ackedBlueprint('staleverdict', {
+        application: { intent_revision_id: 'ir-new' },
+        target: {
+          intent_revision_id: 'ir-old',
+          last_health_status: 'passed',
+          healthy_generation_id: 'gen-staleverdict',
+        },
+      });
+
+      expect(runtimeStatus(applicationId)).toBe('stale_acknowledgement');
+    });
+
+    it('survives an exact observation recorded after the acknowledgement', () => {
+      const { applicationId } = ackedBlueprint('staleseen', {
+        application: { intent_revision_id: 'ir-new' },
+        target: { intent_revision_id: 'ir-old' },
+        observed: { kind: 'exact', identity: `sha256:${'a'.repeat(64)}`, observedAt: 42 },
+      });
+
+      expect(runtimeStatus(applicationId)).toBe('stale_acknowledgement');
+    });
+
+    it('reaches the attention queue with its own reason, so an operator can act', () => {
+      // The reason is pending, not failure: nothing has gone wrong, and the
+      // newer rollout resolves it. `rollout_completion_unknown` would send the
+      // operator looking for a fault that does not exist.
+      const { applicationId } = ackedBlueprint('stalereason', {
+        application: { intent_revision_id: 'ir-new' },
+        target: { intent_revision_id: 'ir-old' },
+      });
+
+      const projection = project(applicationId);
+      const reasons = attentionReasons(projection);
+      expect(reasons).toContain('rollout_stale_acknowledgement');
+      expect(reasons).not.toContain('rollout_completion_unknown');
+      expect(postureOf(projection)).not.toBe('failed');
+    });
+
     it('reaches the canonical drift list, so the two surfaces cannot disagree', () => {
       // The runtime facet and the drift list are two readings of the same
       // rows. While the drift list required a populated deployed pointer, a
@@ -182,6 +229,22 @@ describe('the Blueprint acknowledgement statuses reach the projection', () => {
       expect(generationDrift?.observed).toEqual({ kind: 'generation', id: 'gen-older' });
       // And it reaches the attention queue through the confirmed-drift reason.
       expect(attentionReasons(projection)).toContain('drift');
+    });
+
+    it('does not claim a generation divergence no writer can produce', () => {
+      // Every Blueprint writer sets desired and applied together, so the
+      // generation-mismatch item is not what carries this fact. Pinning that
+      // here is what stops the next reader from re-adding the structurally
+      // impossible fixture the earlier version of this suite used.
+      const { applicationId } = ackedBlueprint('stalegen', {
+        application: { intent_revision_id: 'ir-new' },
+        target: { intent_revision_id: 'ir-old' },
+      });
+
+      const projection = project(applicationId);
+      if (projection.targetMode === 'not_applicable') throw new Error('expected application');
+      expect(projection.targets[0]?.runtime.status).toBe('stale_acknowledgement');
+      expect(projection.drift.find((item) => item.class === 'runtime')).toBeUndefined();
     });
 
     it('offers no deploy action, because a Blueprint target has none to offer', () => {
@@ -240,6 +303,89 @@ describe('the Blueprint acknowledgement statuses reach the projection', () => {
       expect(runtimeStatus(applicationId)).toBe('acknowledged_completion_unknown');
     });
 
+    it('does not report artifact drift for an identity recorded before the ack', () => {
+      // An image-changing rollout. The acknowledgement binds the new expected
+      // artifact set, while the recorded identity still describes the old one,
+      // so comparing them without dropping the stale observation reports
+      // confirmed drift for a stack that has simply not been re-checked yet.
+      // That comparison is unreachable for Blueprint targets before this change,
+      // because they stopped at the applied-not-deployed reading, so the
+      // projection change is what exposed it.
+      const store = GitOpsStore.getInstance();
+      const applicationId = 'app-ack-staleobs';
+      const generationId = 'gen-staleobs';
+      const blueprintId = 4600;
+      const oldSetId = 'art-staleobs-old';
+      const newSetId = 'art-staleobs-new';
+      store.insertGeneration(generation(generationId, applicationId));
+      store.insertArtifactSet({
+        id: oldSetId,
+        generation_id: generationId,
+        evidence_version: 1,
+        authoritative: 0,
+        qualification: 'exact',
+        evidence_json: encodeArtifactEvidenceJson({ kind: 'exact', identity: `sha256:${'a'.repeat(64)}` }),
+        created_at: 1,
+      });
+      store.insertArtifactSet({
+        id: newSetId,
+        generation_id: generationId,
+        evidence_version: 2,
+        authoritative: 0,
+        qualification: 'exact',
+        evidence_json: encodeArtifactEvidenceJson({ kind: 'exact', identity: `sha256:${'b'.repeat(64)}` }),
+        created_at: 1,
+      });
+      store.insertApplication({
+        ...blueprintApplicationFixture(applicationId, blueprintId),
+        intent_revision_id: 'ir-staleobs',
+        accepted_generation_id: generationId,
+        artifact_set_id: newSetId,
+        latest_artifact_set_id: newSetId,
+      });
+      store.upsertTarget({
+        ...emptyTargetRow(applicationId, 1, 1),
+        desired_generation_id: generationId,
+        applied_generation_id: generationId,
+        intent_revision_id: 'ir-staleobs',
+        // Expecting the old set, and holding an identity that matched it.
+        expected_artifact_set_id: oldSetId,
+        latest_artifact_set_id: oldSetId,
+        observed_artifact_identity_json: encodeObservedArtifactIdentity({
+          kind: 'exact',
+          identity: `sha256:${'a'.repeat(64)}`,
+          observedAt: 7,
+        }),
+      });
+
+      const tx = GitOpsTransitions.getInstance();
+      const app = store.getApplication(applicationId)!;
+      tx.blueprintDeployStarted({
+        applicationId,
+        nodeId: 1,
+        intentRevisionId: 'ir-staleobs',
+        rolloutCandidateId: null,
+        envelope: { operationId: 'op-staleobs-deploy', actor: 'tester', trigger: 'test', at: 2 },
+      });
+      tx.blueprintAckRecorded({
+        applicationId,
+        nodeId: 1,
+        intentRevisionId: 'ir-staleobs',
+        rolloutCandidateId: null,
+        legacyAppliedRevision: null,
+        envelope: { operationId: 'op-staleobs-ack', actor: 'tester', trigger: 'test', at: 3 },
+      });
+      expect(app.id).toBe(applicationId);
+
+      // The new expectation is bound, and the identity that described the old
+      // one is gone rather than compared against an expectation it never met.
+      const target = store.getTarget(applicationId, 1)!;
+      expect(target.expected_artifact_set_id).toBe(newSetId);
+      expect(target.observed_artifact_identity_json).toBeNull();
+      expect(runtimeStatus(applicationId)).not.toBe('rollout_artifact_drift');
+      expect(runtimeStatus(applicationId)).not.toBe('runtime_artifact_drift');
+    });
+
     it('is not reported once the reconciler has confirmed what the node runs', () => {
       // The narrow rule: a target the reconciler actually checked is not an
       // unconfirmed acknowledgement, however long ago that check was. Reporting
@@ -269,6 +415,32 @@ describe('the Blueprint acknowledgement statuses reach the projection', () => {
       const projection = project(applicationId);
       expect(attentionReasons(projection)).toContain('rollout_completion_unknown');
       expect(postureOf(projection)).toBe('failed');
+    });
+
+    it('is not reported when nothing is ever going to confirm the outcome', () => {
+      // The permanent-failure case, and the one the health gate off path hides:
+      // with no health contract, the only thing that could confirm an
+      // acknowledgement is the reconciler's drift check, and this fixture has no
+      // Blueprint row and no intent revision for it to read a drift policy from,
+      // so no observation is ever going to be recorded. Reporting the outcome as
+      // unknown would pin the target, and every application built from it, to a
+      // failure-toned status for ever. The operator asked Sencho not to check, so
+      // the absence of a check says nothing about the workload.
+      const { applicationId } = ackedBlueprint('unchecked', {
+        target: { intent_revision_id: 'ir-unchecked' },
+      });
+
+      expect(runtimeStatus(applicationId, true)).not.toBe('acknowledged_completion_unknown');
+    });
+
+    it('is still reported with the health gate on, where a verdict can arrive', () => {
+      // The counterpart to the case above, so the gate is proven to key off the
+      // confirmation that can arrive rather than off the health flag alone.
+      const { applicationId } = ackedBlueprint('healthon', {
+        target: { intent_revision_id: 'ir-healthon' },
+      });
+
+      expect(runtimeStatus(applicationId, false)).toBe('acknowledged_completion_unknown');
     });
 
     it('is reported for a target in Git-managed Blueprint mode, not only Inline', () => {

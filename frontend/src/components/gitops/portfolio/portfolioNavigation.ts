@@ -223,6 +223,9 @@ const DECISION_REASONS: ReadonlySet<GitOpsAttentionReason> = new Set<GitOpsAtten
   'rollout_authorization_stale',
   'rollout_paused',
   'recovery_required',
+  // The node applied something the application has moved past, so the next step
+  // is a decision about that rollout rather than an investigation of the stack.
+  'rollout_stale_acknowledgement',
 ]);
 
 /** Failures best investigated on the stack itself (containers, logs, health). */

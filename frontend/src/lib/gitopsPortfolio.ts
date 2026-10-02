@@ -44,6 +44,7 @@ export const ATTENTION_LABEL: Readonly<Partial<Record<GitOpsAttentionReason, Por
   rollout_paused: { label: 'rollout paused', tone: 'warning', line: 'The rollout is paused.' },
   rollout_partial: { label: 'partial rollout', tone: 'warning', line: 'The rollout completed on only some required targets.' },
   rollout_completion_unknown: { label: 'completion unknown', tone: 'warning', line: 'A rollout step was interrupted; Sencho cannot confirm where it stopped.' },
+  rollout_stale_acknowledgement: { label: 'stale acknowledgement', tone: 'warning', line: 'A node applied a generation the application has since moved past. Rolling the newer revision out to that node resolves it.' },
   rollback_failed: { label: 'rollback failed', tone: 'destructive', line: 'A rollback did not complete.' },
   target_stale: { label: 'stale target', tone: 'warning', line: 'A target is reporting evidence older than the current intent.' },
   target_unreachable: { label: 'target unreachable', tone: 'destructive', line: 'A required target could not be reached.' },

@@ -3,7 +3,7 @@
  * Executor cleanup helpers for clear_reversed_evict / clear_stale_guard live at the bottom.
  */
 
-import { createHash } from 'crypto';
+import { createHash, randomUUID } from 'crypto';
 import { parse as parseYaml } from 'yaml';
 import {
     DatabaseService,
@@ -12,6 +12,8 @@ import {
     type Node,
 } from './DatabaseService';
 import { BlueprintReconciler, type ReconcileDecision } from './BlueprintReconciler';
+import { GitOpsStore } from './gitops/store';
+import { GitOpsTransitions } from './gitops/transitions';
 import { projectBlueprintRevision } from '../helpers/gitopsResponse';
 import type {
     ArtifactFacet,
@@ -975,5 +977,56 @@ export function applyClearStaleGuard(blueprintId: number, nodeId: number): void 
     const db = DatabaseService.getInstance();
     const dep = db.getDeployment(blueprintId, nodeId);
     if (!dep || dep.status !== 'pending_state_review' || dep.last_deployed_at != null) return;
+    // Retire first. The guard row is what the clear path keys off, so deleting
+    // it before the target is retired strands the target on a hold whose only
+    // resolution has just been removed: the node keeps reporting a stateful
+    // confirmation and no tick will clear it again. Failing here leaves both in
+    // place, so the next tick retries instead.
+    if (!retireHeldTarget(blueprintId, nodeId)) return;
     db.deleteDeployment(blueprintId, nodeId);
+}
+
+/**
+ * Retire the revision-state target that was holding this node.
+ *
+ * Clearing the guard deletes the deployment row the hold was recorded against,
+ * so the target would otherwise keep reporting a stateful confirmation for a
+ * placement that no longer exists, and the projection would pin the whole
+ * application to awaiting a confirmation the operator has no way to perform:
+ * the clear path is the only thing that resolves the hold, and it has already
+ * run. Retiring rather than clearing the stage, because the node is no longer
+ * part of this placement and a later placement mints a fresh target on first
+ * contact.
+ *
+ * Best-effort by design. The projection is a read model and this guard row is
+ * authoritative on its own; refusing to delete it because the revision state
+ * could not be updated would strand the deployment the operator asked to clear.
+ */
+function retireHeldTarget(blueprintId: number, nodeId: number): boolean {
+    try {
+        const store = GitOpsStore.getInstance();
+        const app = store.getLiveBlueprintApplication(blueprintId);
+        if (!app) return true;
+        const target = store.getTarget(app.id, nodeId);
+        if (!target || target.target_status !== 'active') return true;
+        GitOpsTransitions.getInstance().targetTombstoned(app.id, nodeId, {
+            // Distinct per call rather than derived from the node, because
+            // history dedupes on the operation id: a deterministic one makes a
+            // second hold-and-clear cycle on the same node look like a replay
+            // and silently drop its audit row.
+            operationId: `op-stale-guard-clear-${randomUUID()}`,
+            actor: null,
+            trigger: 'blueprint_stale_guard_clear',
+            at: Date.now(),
+        });
+        return true;
+    } catch (error) {
+        console.error(
+            '[BlueprintPreview] could not retire the held target for blueprint %d on node %d:',
+            blueprintId,
+            nodeId,
+            error instanceof Error ? error.stack ?? error.message : String(error),
+        );
+        return false;
+    }
 }

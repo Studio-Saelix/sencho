@@ -43,6 +43,7 @@ export type GitOpsAttentionReason =
   | 'rollout_paused'
   | 'rollout_partial'
   | 'rollout_completion_unknown'
+  | 'rollout_stale_acknowledgement'
   | 'rollback_failed'
   | 'target_stale'
   | 'target_unreachable'
@@ -81,6 +82,7 @@ export const ATTENTION_TONE: Readonly<Record<GitOpsAttentionReason, 'failure' | 
   rollout_paused: 'pending',
   rollout_partial: 'failure',
   rollout_completion_unknown: 'failure',
+  rollout_stale_acknowledgement: 'pending',
   rollback_failed: 'failure',
   target_stale: 'pending',
   target_unreachable: 'failure',
@@ -226,6 +228,14 @@ export function attentionReasons(projection: GitOpsRevisionProjection): GitOpsAt
       case 'completion_unknown':
       case 'acknowledged_completion_unknown':
         reasons.add('rollout_completion_unknown');
+        break;
+      // A node that acknowledged something the application has since left.
+      // Its own reason rather than `rollout_completion_unknown`, because the
+      // operator action is the opposite: not "find out what happened", but
+      // "roll the newer intent out here". Pending tone, since the newer rollout
+      // resolves it and nothing has gone wrong.
+      case 'stale_acknowledgement':
+        reasons.add('rollout_stale_acknowledgement');
         break;
       case 'retry_scheduled':
         reasons.add('source_retry_scheduled');
