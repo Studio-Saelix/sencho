@@ -13,6 +13,7 @@ import { toast } from '@/components/ui/toast-store';
 import { apiFetch } from '@/lib/api';
 import { useAuth } from '@/context/AuthContext';
 import { Label } from '@/components/ui/label';
+import { Skeleton } from '@/components/ui/skeleton';
 import { SegmentedControl, type SegmentedControlOption } from '@/components/ui/segmented-control';
 
 type Outcome = 'allow' | 'warn' | 'block';
@@ -129,21 +130,38 @@ export function EvidencePolicyPanel() {
   const [loadFailed, setLoadFailed] = useState(false);
   const [busy, setBusy] = useState(false);
 
-  const load = useCallback(async () => {
+  /**
+   * `isCancelled` lets the mount effect ignore a response that arrives after the
+   * panel has gone: switching to a remote node unmounts it, and a late reply
+   * would otherwise set state on a component that is no longer there. The retry
+   * button passes nothing, because it only runs while mounted.
+   *
+   * Deliberately uncovered by a test. React 18 dropped the setState-after-unmount
+   * warning, so the guard has no observable effect through the UI and any test
+   * asserting one could not fail. It is kept as conformance with the pattern the
+   * sibling panel in this tab already uses.
+   */
+  const load = useCallback(async (isCancelled?: () => boolean) => {
     try {
       const res = await apiFetch('/security/evidence-policy');
       if (!res.ok) throw new Error(`Failed to load (${res.status})`);
       const data = parseEvidencePolicyResponse(await res.json());
+      if (isCancelled?.()) return;
       if (!data) throw new Error('unreadable policy payload');
       setState(data);
       setLoadFailed(false);
     } catch {
+      if (isCancelled?.()) return;
       setLoadFailed(true);
     }
   }, []);
 
   useEffect(() => {
-    void load();
+    const guard = { cancelled: false };
+    void load(() => guard.cancelled);
+    return () => {
+      guard.cancelled = true;
+    };
   }, [load]);
 
   const save = useCallback(
@@ -195,7 +213,25 @@ export function EvidencePolicyPanel() {
     );
   }
 
-  if (!state) return null;
+  if (!state) {
+    // Layout-matched placeholder rather than a blank pane, so the panel does not
+    // pop into existence or shift the tab when the policy arrives. Sized to the
+    // loaded card: a title block, three label/control rows, and the helper line.
+    return (
+      <div className="rounded-lg border border-card-border border-t-card-border-top bg-card shadow-card-bevel px-4 py-3">
+        <Skeleton className="h-4 w-40" />
+        <Skeleton className="h-3 w-72 mt-2" />
+        <div className="mt-4 space-y-4">
+          {[0, 1, 2].map((row) => (
+            <div key={row} className="flex flex-wrap items-center justify-between gap-2">
+              <Skeleton className="h-4 w-48" />
+              <Skeleton className="h-7 w-40 rounded-md" />
+            </div>
+          ))}
+        </div>
+      </div>
+    );
+  }
 
   const { policy, defaults } = state;
   const disabled = !isAdmin;

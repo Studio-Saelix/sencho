@@ -95,6 +95,28 @@ it('sends only the changed field', async () => {
   });
 });
 
+it('shows a layout-matched placeholder while loading rather than a blank pane', async () => {
+  // The panel sits inside a tab, so returning nothing would pop it into
+  // existence and shift the tab when the policy arrived.
+  let release: ((value: Response) => void) | undefined;
+  mockedFetch.mockImplementation(
+    () => new Promise<Response>((resolve) => { release = resolve; }),
+  );
+  const { container } = render(<EvidencePolicyPanel />);
+
+  // Loading: a placeholder is present and no controls are.
+  await waitFor(() => expect(container.querySelectorAll('[class*="animate-pulse"]').length).toBeGreaterThan(0));
+  expect(screen.queryByRole('radiogroup', { name: 'Scanner unavailable' })).not.toBeInTheDocument();
+  // Layout-matched, not a bare placeholder: it carries the same card material as
+  // the loaded panel, so there is no shift when the real content arrives.
+  expect(container.querySelector('[class*="shadow-card-bevel"]')).not.toBeNull();
+
+  release?.(jsonResponse(200, payload()));
+  // Loaded: the placeholder is gone and the controls are usable.
+  await waitFor(() => expect(screen.getByRole('radiogroup', { name: 'Scanner unavailable' })).toBeInTheDocument());
+  expect(container.querySelectorAll('[class*="animate-pulse"]').length).toBe(0);
+});
+
 it('surfaces a read failure and says the shipped default is in force', async () => {
   mockedFetch.mockResolvedValue(jsonResponse(500, {}));
   render(<EvidencePolicyPanel />);
