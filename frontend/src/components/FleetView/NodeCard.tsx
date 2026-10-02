@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import {
     Server, Cpu, MemoryStick, HardDrive, ChevronDown, ChevronRight,
-    Layers, Wifi, WifiOff, AlertTriangle, Download, Loader2,
+    Layers, WifiOff, AlertTriangle, Download, Loader2,
     MoreVertical, Ban, Pencil, Trash2, Info, FlaskConical,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
@@ -38,10 +38,6 @@ import { getNodeCpu, getNodeMem, getNodeMemUsed, getNodeMemTotal, getNodeDisk, i
 export interface NodeCardProps {
     node: FleetNode;
     onNavigate: (nodeId: number, stackName: string) => void;
-    /** Switches to this node and opens its Networking page. */
-    onOpenNetworking?: (nodeId: number) => void;
-    /** Networking posture signal from computeNodeNetworkingSummary, if loaded. */
-    networkingSignal?: { exposed: boolean; unknown: boolean; drift: boolean };
     /** GitOps applications needing attention that involve this node, if loaded. */
     gitopsAttention?: number;
     labelMap?: Record<string, StackLabel[]>;
@@ -73,7 +69,7 @@ function UsageBar({ percent, color }: { percent: number; color: string }) {
 
 // --- Main Export ---
 
-export function NodeCard({ node, onNavigate, onOpenNetworking, networkingSignal, gitopsAttention, labelMap, updateStatus, onUpdate, updatingNodeId, onRetryUpdate, onDismissUpdate, onCordonChange, onEdit, onDelete, onOpenMuteRulesWithPrefill, onOpenDetails }: NodeCardProps) {
+export function NodeCard({ node, onNavigate, gitopsAttention, labelMap, updateStatus, onUpdate, updatingNodeId, onRetryUpdate, onDismissUpdate, onCordonChange, onEdit, onDelete, onOpenMuteRulesWithPrefill, onOpenDetails }: NodeCardProps) {
     const [expanded, setExpanded] = useState(false);
     const [stacks, setStacks] = useState<string[] | null>(node.stacks);
     const [loadingStacks, setLoadingStacks] = useState(false);
@@ -103,6 +99,7 @@ export function NodeCard({ node, onNavigate, onOpenNetworking, networkingSignal,
 
     const isOnline = node.status === 'online';
     const isLocal = node.type === 'local';
+    const isPilot = (registryNode?.mode ?? node.mode) === 'pilot_agent';
     const formattedVersion = formatVersion(updateStatus?.version);
     const formattedLatest = formatVersion(updateStatus?.latestVersion);
     const cpuPercent = getNodeCpu(node);
@@ -167,9 +164,16 @@ export function NodeCard({ node, onNavigate, onOpenNetworking, networkingSignal,
         <div className={`rounded-xl border border-card-border border-t-card-border-top bg-card text-card-foreground shadow-card-bevel transition-colors hover:border-t-card-border-hover ${localRailClasses} ${isOnline ? '' : 'opacity-60'}`}>
             {/* Card Header */}
             <div className="relative p-4 pb-3">
-                {isLocal && (
+                {isLocal ? (
                     <span className="absolute top-3 right-9 font-mono text-[9px] uppercase tracking-[0.22em] text-brand">
                         ★ Local
+                    </span>
+                ) : (
+                    <span
+                        className="absolute top-3 right-9 font-mono text-[9px] uppercase tracking-[0.22em] text-muted-foreground"
+                        title={isPilot ? 'Pilot agent: this node connects out to the control instance over a tunnel' : 'Proxy: the control instance reaches this node over its API'}
+                    >
+                        {isPilot ? 'Pilot' : 'Proxy'}
                     </span>
                 )}
                 <div className="absolute top-2 right-2">
@@ -224,16 +228,11 @@ export function NodeCard({ node, onNavigate, onOpenNetworking, networkingSignal,
                         <div className="min-w-0">
                             <h3 className="text-sm font-medium truncate">{node.name}</h3>
                             <div className="flex items-center gap-1.5 mt-0.5 flex-wrap">
-                                <Badge variant={isOnline ? 'default' : 'secondary'} className="text-[10px] px-1.5 py-0 h-4 shrink-0">
-                                    {isOnline ? (
-                                        <><Wifi className="w-2.5 h-2.5 mr-0.5" /> Online</>
-                                    ) : (
-                                        <><WifiOff className="w-2.5 h-2.5 mr-0.5" /> Offline</>
-                                    )}
-                                </Badge>
-                                <Badge variant="outline" className="text-[10px] px-1.5 py-0 h-4 shrink-0">
-                                    {node.type}
-                                </Badge>
+                                {!isOnline && (
+                                    <Badge variant="secondary" className="text-[10px] px-1.5 py-0 h-4 shrink-0">
+                                        <WifiOff className="w-2.5 h-2.5 mr-0.5" /> Offline
+                                    </Badge>
+                                )}
                                 {formattedVersion && (
                                     <Badge variant="outline" className="text-[10px] px-1.5 py-0 h-4 font-mono tabular-nums shrink-0">
                                         {formattedVersion}
@@ -277,17 +276,6 @@ export function NodeCard({ node, onNavigate, onOpenNetworking, networkingSignal,
                                         title={node.cordoned_reason ?? 'Unschedulable: new blueprint deployments skip this node'}
                                     >
                                         <Ban className="w-2.5 h-2.5 mr-0.5" /> Cordoned
-                                    </Badge>
-                                )}
-                                {onOpenNetworking && networkingSignal && (networkingSignal.exposed || networkingSignal.unknown || networkingSignal.drift) && (
-                                    <Badge
-                                        variant="outline"
-                                        className="text-[10px] px-1.5 py-0 h-4 shrink-0 cursor-pointer bg-warning/10 text-warning border-warning/30 hover:bg-warning/20"
-                                        onClick={(event) => { event.stopPropagation(); onOpenNetworking(node.id); }}
-                                        title="Open this node's Networking page"
-                                    >
-                                        Networking ·
-                                        {networkingSignal.drift ? ' drift' : networkingSignal.exposed ? ' exposed' : ' unknown exposure'}
                                     </Badge>
                                 )}
                                 {gitopsAttention !== undefined && gitopsAttention > 0 && (

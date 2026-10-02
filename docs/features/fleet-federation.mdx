@@ -72,7 +72,7 @@ A confirmation dialog opens with an optional reason field. The reason is free-fo
 Click **Cordon node** to commit. The card immediately gains a `Cordoned` pill, and the Federation tab's Cordoned nodes summary picks the node up on the next refresh.
 
 <Frame caption="Node card carrying the Cordoned pill after confirming.">
-  <img src="/images/fleet-federation/node-card-cordoned-badge.png" alt="Fleet Overview grid with the Opsix node card showing the amber 'Cordoned' pill alongside the existing Online, remote, and version badges. The Local, Pitt-Moba, and SLX-Mars cards have no cordon indicator." />
+  <img src="/images/fleet-federation/node-card-cordoned-badge.png" alt="Fleet Overview grid with the Opsix node card showing the amber 'Cordoned' pill alongside the version badge and Proxy marker. The Local, Pitt-Moba, and SLX-Mars cards have no cordon indicator." />
 </Frame>
 
 Use **Uncordon node** from the same menu to lift the restriction. Uncordoning opens a short confirmation that reads *"Re-enable this node for new blueprint placements. Existing deployments are unchanged."* Confirming clears the flag and the pill disappears on the next refresh. If a blueprint's selector now matches the newly uncordoned node, that new placement waits in a `reapproval required` state until you confirm it in the blueprint's rollout preview.

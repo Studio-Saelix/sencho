@@ -35,8 +35,6 @@ function props(overrides: Partial<React.ComponentProps<typeof OverviewTab>> = {}
     fleetStackLabelMap: {},
     updateStatusMap: new Map(),
     onNavigateToNode: vi.fn(),
-    onOpenNodeNetworking: vi.fn(),
-    networkingByNode: new Map(),
     gitopsAttentionByNode: new Map(),
     onOpenNodeDetails: vi.fn(),
     updatingNodeId: null,

@@ -298,8 +298,6 @@ export function FleetView({
                         fleetStackLabelMap={overview.fleetStackLabelMap}
                         updateStatusMap={overview.updateStatusMap}
                         onNavigateToNode={onNavigateToNode}
-                        onOpenNodeNetworking={onOpenNodeNetworking}
-                        networkingByNode={overview.networkingByNode}
                         gitopsAttentionByNode={overview.gitopsAttentionByNode}
                         onUpdate={updateStatus.triggerNodeUpdate}
                         updatingNodeId={updateStatus.updatingNodeId}

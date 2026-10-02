@@ -10,7 +10,7 @@ The **Fleet** tab is the single page you open when you want to see the whole est
 </Note>
 
 <Frame>
-  <img src="/images/fleet-view/fleet-overview.png" alt="Fleet page showing the masthead with the editorial 'The fleet' word, a meta line reading '4 nodes · 4 online · last sync 5s', and CPU / MEM / CONTAINERS stat tiles next to a 0-alert counter. Below, the toolbar (collapsed search icon, sort, filters, Grid/Topology toggle, Node Update, Manage nodes) sits above a grid of four node cards: a pinned Local card with a cyan ★ Local rail, an Online badge, a version chip, and a 'Networking · exposed' pill, followed by Opsix, Pitt-Moba, and SLX-Mars." />
+  <img src="/images/fleet-view/fleet-overview.png" alt="Fleet page showing the masthead with the editorial 'The fleet' word, a meta line reading '4 nodes · 4 online · last sync 5s', and CPU / MEM / CONTAINERS stat tiles next to a 0-alert counter. Below, the toolbar (collapsed search icon, sort, filters, Grid/Topology toggle, Node Update, Manage nodes) sits above a grid of four node cards: a pinned Local card with a cyan ★ Local rail and a version chip, followed by Opsix, Pitt-Moba, and SLX-Mars, each carrying a Proxy or Pilot marker in the corner." />
 </Frame>
 
 ## Page layout
@@ -76,27 +76,26 @@ In **Grid** mode the toolbar exposes search, sort, filters, and the view toggle.
 | **Search** | Collapsed to a single icon button by default; click it to expand the input (it stays expanded while a query is entered and collapses again on blur once cleared). Filters in real time against node names and the names of stacks deployed on each node. Typing `plex` keeps only nodes that have a `plex` stack; typing `dev` keeps only nodes whose name contains `dev`. |
 | **Sort** | Combobox with five orderings: Name, CPU Usage, Memory Usage, Containers, Status. The selection persists in the browser. |
 | **Direction toggle** | Arrow button next to the sort combobox. The icon rotates 180° and the title flips between *Switch to ascending* / *Switch to descending* to confirm the current direction. |
-| **Filters** | Popover with five sections: **Status** (All / Online / Offline), **Type** (All / Local / Remote), **Severity** (Critical Only toggle), **Networking** (All / Exposed / Unknown / Drift, matching the [networking badge](#grid-view) on each card), and **Tags** (multi-select of fleet label palette, only visible if labels exist). The button shows a count badge for active filters; a **Clear all filters** action appears at the bottom of the popover when at least one filter is set. All filter and sort selections persist in the browser. |
+| **Filters** | Popover with five sections: **Status** (All / Online / Offline), **Type** (All / Local / Remote), **Severity** (Critical Only toggle), **Networking** (All / Exposed / Unknown / Drift, matching the Networking section of each node's details sheet), and **Tags** (multi-select of fleet label palette, only visible if labels exist). The button shows a count badge for active filters; a **Clear all filters** action appears at the bottom of the popover when at least one filter is set. All filter and sort selections persist in the browser. |
 | **Grid / Topology** | Segmented control, with a Grid icon and a Topology icon. The control resets to Grid when the page is reloaded. |
 | **Node Update** | Opens the [Node Updates sheet](#node-updates) and immediately re-checks every node's version, same as **Recheck** inside the sheet. |
 | **Manage nodes** | Admin-only. Navigates to **Settings → Infrastructure → Nodes**, where you register, edit, or remove nodes. |
 
 ### Grid view
 
-Every node renders as a card. The local node is pinned at the top of the grid with a cyan accent rail, a brand-tinted gradient wash, and a `★ Local` mono label in the top-right so it can never be confused with a remote.
+Every node renders as a card. The local node is pinned at the top of the grid with a cyan accent rail, a brand-tinted gradient wash, and a `★ Local` mono label in the top-right so it can never be confused with a remote. Every remote card carries a matching muted `Proxy` or `Pilot` label in the same corner, showing how the control instance reaches that node.
 
 | Element | Description |
 |---------|-------------|
 | **Server icon tile** | Green when online, muted when offline. Sits next to the node name. |
-| **Online / Offline badge** | Online (success palette, Wi-Fi icon) or Offline (secondary palette, Wi-Fi-off icon). |
-| **Type badge** | Outline pill reading `local` or `remote`. |
+| **Connection marker** | Corner label on remote cards: `Proxy` when the control instance reaches the node over its API, `Pilot` when the node connects out through a [Pilot Agent](/features/pilot-agent) tunnel. Hover it for a short explanation. |
+| **Offline** badge | Secondary pill with a Wi-Fi-off icon, shown only when the node is unreachable. Reachable nodes carry no status badge. |
 | **Version badge** | The node's Sencho version in mono tabular numerals (e.g. `v0.76.3`). Hidden if the node cannot report a version. |
 | **Update available** badge | Warning pill shown when a newer Sencho release is published for this node. |
 | **Pinned** badge | Shown instead of **Update available** when the node's own Sencho image is pinned to a digest (or an unrecognised pin) and cannot be updated automatically from here. A tooltip explains why. |
 | **Integration image** badge | Warning pill shown, for every role, whenever the local node's Sencho image is pinned to the `sencho-dev` integration repository (see [Verifying images](/operations/verifying-images)). Persistent: it shows whether or not a newer build is currently available. |
 | **Critical** badge | Destructive pill with a triangle icon, surfaced when the online node is above 90% CPU or 90% disk. |
 | **Cordoned** badge | Warning pill with a Ban icon, surfaced when the node is cordoned. The badge tooltip carries the cordon reason or the default *Unschedulable: new blueprint deployments skip this node*. See [Fleet Federation](/features/fleet-federation) for the full cordon and pin flow. |
-| **Networking** badge | Warning pill reading `Networking · exposed`, `Networking · drift`, or `Networking · unknown exposure`, shown when the node has a stack with published ports, detected network drift, or unresolved exposure. Click it to jump to that node's Networking page. |
 | **Updating / Updated / Failed / Timed out** badge | Update progress indicator, shown only while or just after an update flows through. Failed and timed-out states surface inline retry and dismiss buttons and a cursor-following error tooltip. |
 | **Skipped** badge | Shown on the card when an available update has been deferred from the [Node Updates sheet](#node-updates); the same skip state is reflected there. |
 | **Container stats grid** | Three cells: **Running** (active containers), **Stopped** (exited containers), **Stacks** (count, or `-` if the node has not reported). Hidden on offline nodes. |
