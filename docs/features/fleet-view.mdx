@@ -200,7 +200,7 @@ Nothing is scored. Every state comes from evidence the hub or the node actually 
 
 ### The summary
 
-The strip at the top names the fleet's worst state in a short phrase (`All clear`, `Partly verified`, `Partly checked`, `Degraded`, or `Needs attention`), says how many nodes have something to review, and counts nodes by state: needing attention, unverified, and healthy. The **last checked** tile keeps ticking while the tab stays open, so you can tell a fresh reading from an old one at a glance. The **Refresh** button in the Fleet toolbar runs the check again.
+The line under the tab strip names the fleet's worst state in a short phrase (`All clear`, `Partly verified`, `Partly checked`, `Degraded`, or `Needs attention`), then counts nodes by state (needing attention, degraded, unverified, and healthy) and findings. **Checked** on the right keeps ticking while the tab stays open, so you can tell a fresh reading from an old one at a glance, and reads `checking` while a new check runs. The check starts when you open Fleet, so the tab is usually ready by the time you reach it. The **Refresh** button in the Fleet toolbar runs the check again.
 
 The order is deliberate and worst-first: a known problem outranks a condition that could not be verified, and an unverified condition outranks a healthy one.
 

@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import {
     RefreshCw, Camera, FileDown,
     Network, Activity,
@@ -27,6 +27,7 @@ import { useExperimental } from '@/hooks/useExperimental';
 import { PaidGate } from './PaidGate';
 import FleetSnapshots from './FleetSnapshots';
 import { FleetReadiness } from './fleet/FleetReadiness';
+import { useFleetReadiness } from './fleet/readiness/useFleetReadiness';
 import { RoutingTab } from './fleet/RoutingTab';
 import { FederationTab } from './fleet/FederationTab';
 import { DeploymentsTab } from './blueprints/DeploymentsTab';
@@ -38,6 +39,9 @@ import { useNodeActions } from './nodes/useNodeActions';
 import type { FleetTab, SecurityTab } from '@/lib/events';
 import type { SectionId } from '@/components/settings/types';
 import type { MuteRuleDraft } from '@/lib/muteRules';
+
+/** A readiness result older than this is re-checked when the tab is reopened. */
+const READINESS_STALE_MS = 60_000;
 
 interface FleetViewProps {
     onNavigateToNode: (nodeId: number, stackName: string) => void;
@@ -105,9 +109,24 @@ export function FleetView({
     const [detailsNodeId, setDetailsNodeId] = useState<number | null>(null);
     // Bumped by the toolbar Refresh so the Readiness tab re-checks alongside the overview.
     const [readinessRefreshKey, setReadinessRefreshKey] = useState(0);
+    // Owned here, not by the tab, so the check runs while Fleet opens and a
+    // return to the tab shows the last result instead of a fresh skeleton.
+    const readiness = useFleetReadiness(readinessRefreshKey);
 
     const [internalTab, setInternalTab] = useState<FleetTab>('overview');
     const activeTab = controlledTab ?? internalTab;
+
+    // Coming back to Readiness re-checks a failed or stale result. A ref keeps
+    // the live state out of the dependency array so only a tab change fires it.
+    const readinessRef = useRef(readiness);
+    useEffect(() => { readinessRef.current = readiness; });
+    useEffect(() => {
+        if (activeTab !== 'readiness') return;
+        const { data, error, checking, retry } = readinessRef.current;
+        if (checking) return;
+        const stale = data !== null && Date.now() - data.generatedAt > READINESS_STALE_MS;
+        if (error !== null || stale) retry();
+    }, [activeTab]);
     const setActiveTab = (tab: FleetTab) => {
         onFleetActiveTabChange?.(tab);
         if (controlledTab === undefined) setInternalTab(tab);
@@ -244,7 +263,9 @@ export function FleetView({
                                         size="sm"
                                         onClick={() => {
                                             void overview.fetchOverview(true);
-                                            setReadinessRefreshKey(key => key + 1);
+                                            // Overview refreshes skip the fleet-wide readiness fan-out;
+                                            // returning to the tab re-checks a stale result instead.
+                                            if (activeTab === 'readiness') setReadinessRefreshKey(key => key + 1);
                                         }}
                                         disabled={refreshing}
                                         className="h-9 w-9 p-0"
@@ -325,7 +346,7 @@ export function FleetView({
                 )}
                 <TabsContent value="readiness">
                     <FleetReadiness
-                        refreshKey={readinessRefreshKey}
+                        readiness={readiness}
                         onOpenNodeDetails={setDetailsNodeId}
                         onOpenNodeSecurity={onOpenNodeSecurity}
                         onOpenSettingsSection={onOpenSettingsSection}

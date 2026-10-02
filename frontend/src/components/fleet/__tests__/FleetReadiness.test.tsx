@@ -18,6 +18,7 @@ vi.mock('@/lib/api', () => ({
 }));
 
 import { apiFetch } from '@/lib/api';
+import { useFleetReadiness } from '../readiness/useFleetReadiness';
 
 function healthyCell(counts: Record<string, number> = {}): NodeDomainCell {
   return { state: 'healthy', reasonCode: null, counts, evidenceAgeMs: 1_000, source: 'live' };
@@ -99,9 +100,16 @@ function findingRows(): HTMLElement[] {
   return within(section).getAllByRole('row').slice(1);
 }
 
-function renderReadiness(props: Partial<Parameters<typeof FleetReadiness>[0]> = {}) {
+type HarnessProps = Omit<Parameters<typeof FleetReadiness>[0], 'readiness'> & { refreshKey: number };
+
+/** Stands in for the Fleet shell, which owns the readiness check and hands it to the tab. */
+function Harness({ refreshKey, ...props }: HarnessProps) {
+  return <FleetReadiness readiness={useFleetReadiness(refreshKey)} {...props} />;
+}
+
+function renderReadiness(props: Partial<HarnessProps> = {}) {
   return render(
-    <FleetReadiness refreshKey={0} onOpenNodeDetails={vi.fn()} onOpenNodeSecurity={vi.fn()} isAdmin {...props} />,
+    <Harness refreshKey={0} onOpenNodeDetails={vi.fn()} onOpenNodeSecurity={vi.fn()} isAdmin {...props} />,
   );
 }
 
@@ -114,10 +122,11 @@ describe('FleetReadiness', () => {
     vi.restoreAllMocks();
   });
 
-  it('uses the shared Fleet tab heading', async () => {
+  it('carries no heading of its own under the Fleet masthead', async () => {
     mockResponse(response({ nodes: [node({ id: 1, name: 'Local', type: 'local', transport: 'local' })] }));
     renderReadiness();
-    expect(await screen.findByRole('heading', { name: 'Fleet Readiness' })).toBeInTheDocument();
+    expect(await screen.findByRole('region', { name: 'Readiness summary' })).toBeInTheDocument();
+    expect(screen.queryByRole('heading', { name: 'Fleet Readiness' })).toBeNull();
   });
 
   it('renders only the domains the payload carries, and names the withheld one', async () => {
@@ -235,7 +244,65 @@ describe('FleetReadiness', () => {
     renderReadiness();
 
     expect(await screen.findByText('Needs attention')).toBeInTheDocument();
-    expect(screen.getByText('3 of 4 nodes have something to review.')).toBeInTheDocument();
+    const summary = screen.getByRole('region', { name: 'Readiness summary' });
+    expect(summary).toHaveTextContent('2 attention · 1 unverified · 1 of 4 healthy');
+  });
+
+  it('reads an all-healthy fleet as all clear, dropping zero-count segments', async () => {
+    mockResponse(response({
+      summary: {
+        nodes: { attention: 0, degraded: 0, unavailable: 0, unknown: 0, healthy: 2 },
+        findings: { attention: 0, degraded: 0, unavailable: 0, unknown: 0 },
+      },
+      findings: [finding({ id: 'only', code: 'update_blocked' })],
+      nodes: [node({ id: 1, name: 'A' }), node({ id: 2, name: 'B' })],
+    }));
+    renderReadiness();
+
+    const summary = await screen.findByRole('region', { name: 'Readiness summary' });
+    expect(within(summary).getByText('All clear')).toBeInTheDocument();
+    expect(summary).toHaveTextContent('2 of 2 healthy · 1 finding');
+    expect(summary).not.toHaveTextContent('attention');
+  });
+
+  it('names degraded nodes when nothing needs attention', async () => {
+    mockResponse(response({
+      summary: {
+        nodes: { attention: 0, degraded: 1, unavailable: 0, unknown: 0, healthy: 1 },
+        findings: { attention: 0, degraded: 0, unavailable: 0, unknown: 0 },
+      },
+      nodes: [node({ id: 1, name: 'A' }), node({ id: 2, name: 'B' })],
+    }));
+    renderReadiness();
+
+    const summary = await screen.findByRole('region', { name: 'Readiness summary' });
+    expect(within(summary).getByText('Degraded')).toBeInTheDocument();
+    expect(summary).toHaveTextContent('1 degraded · 1 of 2 healthy');
+  });
+
+  it('says checking over existing data while a refresh is in flight', async () => {
+    mockResponse(response({ nodes: [node({ id: 1, name: 'A' })] }));
+    const { rerender } = renderReadiness();
+    await matrixRows();
+
+    vi.mocked(apiFetch).mockImplementationOnce(() => new Promise<Response>(() => undefined));
+    rerender(<Harness refreshKey={1} onOpenNodeDetails={vi.fn()} onOpenNodeSecurity={vi.fn()} isAdmin />);
+
+    expect(await screen.findByText('checking')).toBeInTheDocument();
+    expect(screen.getByRole('region', { name: 'Readiness findings' })).toBeInTheDocument();
+  });
+
+  it('holds the skeleton back until the check has been slow, so a fast answer never flashes it', async () => {
+    vi.useFakeTimers();
+    try {
+      vi.mocked(apiFetch).mockImplementation(() => new Promise<Response>(() => undefined));
+      renderReadiness();
+      expect(screen.queryByLabelText('Checking readiness')).toBeNull();
+      await act(async () => { await vi.advanceTimersByTimeAsync(300); });
+      expect(screen.getByLabelText('Checking readiness')).toBeInTheDocument();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('routes a stack finding to that stack on its own node', async () => {
@@ -388,7 +455,7 @@ describe('FleetReadiness', () => {
     await matrixRows();
 
     vi.mocked(apiFetch).mockResolvedValueOnce({ ok: false, status: 500, json: async () => ({}) } as Response);
-    rerender(<FleetReadiness refreshKey={1} onOpenNodeDetails={vi.fn()} onOpenNodeSecurity={vi.fn()} isAdmin />);
+    rerender(<Harness refreshKey={1} onOpenNodeDetails={vi.fn()} onOpenNodeSecurity={vi.fn()} isAdmin />);
 
     expect(await screen.findByText(/The readiness check could not be completed\. Showing the previous result\./)).toBeInTheDocument();
     expect(await matrixRows()).toHaveLength(1);
@@ -407,7 +474,7 @@ describe('FleetReadiness', () => {
         return okResponse(response({ nodes: [node({ id: 1, name: 'Newer' })] }));
       });
     const { rerender } = renderReadiness();
-    rerender(<FleetReadiness refreshKey={1} onOpenNodeDetails={vi.fn()} onOpenNodeSecurity={vi.fn()} isAdmin />);
+    rerender(<Harness refreshKey={1} onOpenNodeDetails={vi.fn()} onOpenNodeSecurity={vi.fn()} isAdmin />);
 
     expect(await screen.findByText('Newer')).toBeInTheDocument();
     expect(signals[0].aborted).toBe(true);

@@ -8,26 +8,30 @@ import { toSecurityTab } from '@/lib/router/senchoRoute';
 import type { SecurityTab } from '@/lib/events';
 import type { SectionId } from '@/components/settings/types';
 import type { ReadinessDomainKey, ReadinessFinding, ReadinessTarget } from '@/types/readiness';
-import { FleetEmptyCard, FleetEmptyState, FleetTabHeading } from './FleetEmptyState';
+import { useVisualBusy } from '@/hooks/useVisualBusy';
+import { FleetEmptyCard, FleetEmptyState } from './FleetEmptyState';
 import { TARGET_ACTION } from './readinessMeta';
-import { useFleetReadiness } from './readiness/useFleetReadiness';
+import type { FleetReadinessState } from './readiness/useFleetReadiness';
 import { ReadinessSummaryStrip } from './readiness/ReadinessSummaryStrip';
 import { ReadinessNodeMatrix } from './readiness/ReadinessNodeMatrix';
 import { ReadinessFindingsTable } from './readiness/ReadinessFindingsTable';
 import { ALL, EMPTY_FINDINGS_FILTER, type FindingsFilter } from './readiness/findingsFilter';
 import { useNow } from './readiness/useNow';
 
-const TITLE = 'Fleet Readiness';
-const SUBTITLE = 'What needs attention before you operate, update, or recover the fleet.';
-
 function navigate(detail: SenchoNavigateDetail): void {
   window.dispatchEvent(new CustomEvent<SenchoNavigateDetail>(SENCHO_NAVIGATE_EVENT, { detail }));
 }
 
+/** Status row and findings table, sized like the loaded layout so nothing shifts when data lands. */
 function ReadinessSkeleton() {
   return (
     <div className="space-y-4" aria-busy="true" aria-label="Checking readiness">
-      <Skeleton className="h-[104px] w-full rounded-lg" />
+      <div className="flex items-center gap-4 border-b border-card-border pb-3">
+        <Skeleton className="h-2 w-2 rounded-full" />
+        <Skeleton className="h-4 w-32" />
+        <Skeleton className="h-4 w-64" />
+        <Skeleton className="ml-auto h-4 w-24" />
+      </div>
       <div className="rounded-lg border border-card-border border-t-card-border-top bg-card p-4 shadow-card-bevel">
         <div className="space-y-3">
           {Array.from({ length: 4 }).map((_, i) => (
@@ -46,8 +50,11 @@ function ReadinessSkeleton() {
 }
 
 interface FleetReadinessProps {
-  /** Bumped by the Fleet toolbar's Refresh button to request a new check. */
-  refreshKey: number;
+  /**
+   * The hub's readiness check, owned by the Fleet shell so it starts when Fleet
+   * opens and survives switching tabs rather than reloading on every visit.
+   */
+  readiness: FleetReadinessState;
   /** Opens the in-view node details sheet. */
   onOpenNodeDetails: (nodeId: number) => void;
   /** Switches to a node and opens its Security view; absent when the shell did not provide one. */
@@ -67,13 +74,15 @@ interface FleetReadinessProps {
  * its remediation. Nothing here recomputes a verdict.
  */
 export function FleetReadiness({
-  refreshKey,
+  readiness,
   onOpenNodeDetails,
   onOpenNodeSecurity,
   onOpenSettingsSection,
   isAdmin,
 }: FleetReadinessProps) {
-  const { data, error, checking, retry } = useFleetReadiness(refreshKey);
+  const { data, error, checking, retry } = readiness;
+  // A fast answer never flashes the skeleton; the pane just holds its height.
+  const { showBusy } = useVisualBusy(!data && error === null);
   const [filter, setFilter] = useState<FindingsFilter>(EMPTY_FINDINGS_FILTER);
   const findingsRef = useRef<HTMLDivElement>(null);
   // Relative "seen Xm ago" stamps in the matrix move with the clock.
@@ -124,13 +133,11 @@ export function FleetReadiness({
     findingsRef.current?.scrollIntoView({ block: 'start' });
   }, [findings]);
 
-  const heading = <FleetTabHeading title={TITLE} subtitle={SUBTITLE} />;
-
   if (!data) {
     return (
-      <div className="space-y-4">
-        {heading}
-        {error === null ? <ReadinessSkeleton /> : (
+      <div className="min-h-[320px] space-y-4">
+        {error === null && showBusy && <ReadinessSkeleton />}
+        {error !== null && (
           <FleetEmptyState>
             <FleetEmptyCard
               icon={ServerOff}
@@ -151,7 +158,6 @@ export function FleetReadiness({
 
   return (
     <div className="space-y-4">
-      {heading}
       {/* A failed refresh keeps the last result on screen, so it has to say so:
           a readiness board that silently shows stale states is the one thing it
           must never do. */}
