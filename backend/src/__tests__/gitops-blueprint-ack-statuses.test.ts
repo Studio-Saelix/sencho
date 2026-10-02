@@ -14,6 +14,7 @@
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { setupTestDb, cleanupTestDb } from './helpers/setupTestDb';
+import { DatabaseService } from '../services/DatabaseService';
 import { blueprintApplicationFixture, directApplicationFixture } from './helpers/gitopsFixtures';
 import { GitOpsStore, emptyTargetRow } from '../services/gitops/store';
 import { GitOpsTransitions } from '../services/gitops/transitions';
@@ -25,9 +26,11 @@ import {
   encodeObservedArtifactIdentity,
   type ObservedArtifactIdentity,
 } from '../services/gitops/json';
+import { encodeIntentHealthPolicy } from '../services/gitops/healthPolicy';
 import type {
   GitOpsApplicationRow,
   GitOpsGenerationRow,
+  GitOpsIntentRevisionRow,
   GitOpsRevisionProjection,
 } from '../services/gitops/types';
 
@@ -58,6 +61,7 @@ describe('the Blueprint acknowledgement statuses reach the projection', () => {
       application?: Partial<GitOpsApplicationRow>;
       target?: Partial<ReturnType<typeof emptyTargetRow>>;
       observed?: ObservedArtifactIdentity;
+      intent?: Partial<GitOpsIntentRevisionRow>;
     } = {},
   ): { applicationId: string } {
     const store = GitOpsStore.getInstance();
@@ -66,9 +70,42 @@ describe('the Blueprint acknowledgement statuses reach the projection', () => {
     const applicationId = `app-ack-${suffix}`;
     const intentRevisionId = `ir-${suffix}`;
     const generationId = `gen-${suffix}`;
+    // The Blueprint row carries a drift policy that observes, which is what
+    // makes a confirmation actually expected: without a policy that observes and
+    // without a health contract, nothing will ever check this target and the
+    // unconfirmed status is correctly withheld. Seeded rather than assumed,
+    // because the withholding is the behaviour under test elsewhere in this
+    // file and a fixture that silently relied on it would hide that.
+    const blueprintRowId = createObservingBlueprint(blueprintId);
+    // A real acked Blueprint application always carries the intent revision it
+    // acknowledged against, and both its drift policy and its health policy
+    // resolve through that row. Omitting it made the fixture depend on defaults
+    // no production row has.
+    store.insertIntentRevision({
+      id: intentRevisionId,
+      application_id: applicationId,
+      blueprint_id: blueprintRowId,
+      compose_content_sha256: 'c'.repeat(64),
+      blueprint_revision: 1,
+      deploy_stack_name: `${applicationId}-stack`,
+      selector_json: '{"nodeIds":[1]}',
+      pinned_node_id: null,
+      cordon_implications_json: '[]',
+      rollout_strategy_json: '{}',
+      runtime_drift_policy: 'observe',
+      stateful_policy_json: null,
+      health_failure_rollback_policy_json: null,
+      operation_id: `op-${intentRevisionId}`,
+      actor: 'tester',
+      created_at: 1,
+      ...overrides.intent,
+    });
     store.insertGeneration(generation(generationId, applicationId));
     store.insertApplication({
-      ...blueprintApplicationFixture(applicationId, blueprintId),
+      // Wired to the live Blueprint row, not the counter, so the drift leg reads
+      // the branch production reads first rather than falling through to the
+      // intent snapshot.
+      ...blueprintApplicationFixture(applicationId, blueprintRowId),
       intent_revision_id: intentRevisionId,
       accepted_generation_id: generationId,
       ...overrides.application,
@@ -426,18 +463,47 @@ describe('the Blueprint acknowledgement statuses reach the projection', () => {
       // unknown would pin the target, and every application built from it, to a
       // failure-toned status for ever. The operator asked Sencho not to check, so
       // the absence of a check says nothing about the workload.
+      // A Blueprint row that no longer exists, which is the only real way a
+      // Blueprint application has nothing left to observe through: every drift
+      // mode a live row can carry observes. Its intent cannot stand in either,
+      // so no observation is ever recorded and no verdict is ever armed.
       const { applicationId } = ackedBlueprint('unchecked', {
-        target: { intent_revision_id: 'ir-unchecked' },
+        application: { blueprint_id: 999_999 },
+        intent: { runtime_drift_policy: null },
       });
 
       expect(runtimeStatus(applicationId, true)).not.toBe('acknowledged_completion_unknown');
     });
 
-    it('is still reported with the health gate on, where a verdict can arrive', () => {
-      // The counterpart to the case above, so the gate is proven to key off the
-      // confirmation that can arrive rather than off the health flag alone.
-      const { applicationId } = ackedBlueprint('healthon', {
-        target: { intent_revision_id: 'ir-healthon' },
+    it('is not reported with the health gate on but no policy that arms a run', () => {
+      // The default, and the case the first version of this got wrong: the gate
+      // being enabled globally does not mean a verdict will arrive. A run
+      // reaches a Blueprint target only through the rollout executor's
+      // reservation, which happens only under a policy that gates advancement,
+      // and the default `observe` arms nothing. Treating the gate flag as the
+      // answer pinned a target that nothing will ever check to a failure-toned
+      // status for ever.
+      const { applicationId } = ackedBlueprint('healthnopolicy', {
+        application: { blueprint_id: 999_998 },
+        intent: { runtime_drift_policy: null },
+      });
+
+      expect(runtimeStatus(applicationId, false)).not.toBe('acknowledged_completion_unknown');
+    });
+
+    it('is reported with the health gate on under a policy that arms a run', () => {
+      // The counterpart, so the rule is proven to key off a confirmation that
+      // can arrive rather than off the gate flag alone. A gating policy is what
+      // causes the executor to reserve a run, and the run carries the
+      // application id the verdict resolves through.
+      // With the drift path nulled too, or the case would pass through the
+      // drift leg and prove nothing about the health one.
+      const { applicationId } = ackedBlueprint('healthgated', {
+        application: { blueprint_id: 999_997 },
+        intent: {
+          runtime_drift_policy: null,
+          health_failure_rollback_policy_json: encodeIntentHealthPolicy('retry_once'),
+        },
       });
 
       expect(runtimeStatus(applicationId, false)).toBe('acknowledged_completion_unknown');
@@ -447,18 +513,38 @@ describe('the Blueprint acknowledgement statuses reach the projection', () => {
       // Both Blueprint modes lack a deploy-bound writer, so both were reading
       // the dead end. The narrowing is per-target-mode and must hold for the
       // Git-managed mode as well, which the Inline-only fixtures above cannot
-      // show.
+      // show. Given the same confirmation path a real row has.
       const store = GitOpsStore.getInstance();
       const applicationId = 'app-ack-gitmanaged';
       const generationId = 'gen-gitmanaged';
+      const intentRevisionId = 'ir-gitmanaged';
+      const blueprintRowId = createObservingBlueprint(4800);
+      store.insertIntentRevision({
+        id: intentRevisionId,
+        application_id: applicationId,
+        blueprint_id: blueprintRowId,
+        compose_content_sha256: 'c'.repeat(64),
+        blueprint_revision: 1,
+        deploy_stack_name: `${applicationId}-stack`,
+        selector_json: '{"nodeIds":[1]}',
+        pinned_node_id: null,
+        cordon_implications_json: '[]',
+        rollout_strategy_json: '{}',
+        runtime_drift_policy: 'observe',
+        stateful_policy_json: null,
+        health_failure_rollback_policy_json: null,
+        operation_id: 'op-ir-gitmanaged',
+        actor: 'tester',
+        created_at: 1,
+      });
       store.insertGeneration(generation(generationId, applicationId));
       store.insertApplication({
-        ...blueprintApplicationFixture(applicationId, ++blueprintId),
+        ...blueprintApplicationFixture(applicationId, blueprintRowId),
         target_mode: 'blueprint',
         configured_repo_url: 'https://github.com/org/repo.git',
         configured_ref: 'main',
         repo_identity_json: '{"host":"github.com","pathname":"/org/repo.git"}',
-        intent_revision_id: 'ir-gitmanaged',
+        intent_revision_id: intentRevisionId,
         accepted_generation_id: generationId,
       });
       store.upsertTarget({
@@ -466,7 +552,7 @@ describe('the Blueprint acknowledgement statuses reach the projection', () => {
         desired_generation_id: generationId,
         applied_generation_id: generationId,
         deployed_generation_id: null,
-        intent_revision_id: 'ir-gitmanaged',
+        intent_revision_id: intentRevisionId,
       });
 
       expect(runtimeStatus(applicationId)).toBe('acknowledged_completion_unknown');
@@ -479,7 +565,11 @@ describe('the Blueprint acknowledgement statuses reach the projection', () => {
         application: { intent_revision_id: null },
       });
 
-      expect(runtimeStatus(applicationId)).toBe('acknowledged_completion_unknown');
+      // Not stale, which is the trap: a target that recorded an intent against
+      // an application that never established one has nothing to have moved on
+      // from. With no intent there is also no policy to observe through, so no
+      // confirmation is expected either, and the target reads its pointers.
+      expect(runtimeStatus(applicationId)).not.toBe('stale_acknowledgement');
     });
 
     it('is not reported for a target that never acknowledged anything', () => {
@@ -562,6 +652,28 @@ describe('the Blueprint acknowledgement statuses reach the projection', () => {
     });
   });
 });
+
+/**
+ * A live Blueprint whose drift policy observes.
+ *
+ * The reconciler records an observation only when the Blueprint it belongs to
+ * has a drift policy that observes, so this is what makes a confirmation
+ * expected for the targets in this file. Created through the real service so
+ * the row carries every column the schema requires.
+ */
+function createObservingBlueprint(id: number): number {
+  return DatabaseService.getInstance().createBlueprint({
+    name: `ack-blueprint-${id}`,
+    description: null,
+    compose_content: 'services:\n  web:\n    image: nginx:1.27\n',
+    selector: { type: 'nodes', ids: [1] },
+    drift_mode: 'observe',
+    classification: 'stateful',
+    classification_reasons: [],
+    enabled: true,
+    created_by: null,
+  }).id;
+}
 
 /**
  * A generation row the target's desired pointer can bind to. The store refuses a

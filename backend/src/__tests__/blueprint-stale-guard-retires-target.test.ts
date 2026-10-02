@@ -93,6 +93,113 @@ describe('clearing a stale stateful guard', () => {
     expect(after.facets.placement.status).not.toBe('stateful_confirmation_required');
   });
 
+  it('lets a later hold on the same node reach the projection again', () => {
+    // The clear severs the target, and the node can come back: a stale guard is
+    // cleared only for a node no longer desired, while a state review is
+    // recorded only for a node that is, so the two cannot chase each other. A
+    // hold that arrives after a clear has to be visible, or the deployment row
+    // says "awaiting confirmation" while the projection says nothing, which is
+    // the under-reporting this whole line of work exists to remove.
+    const db = DatabaseService.getInstance();
+    const store = GitOpsStore.getInstance();
+    const nodeId = 1;
+    const applicationId = 'app-rehold';
+    const created = db.createBlueprint({
+      name: `guard-blueprint-rehold-${Date.now()}`,
+      description: null,
+      compose_content: 'services:\n  web:\n    image: nginx:1.27\n',
+      selector: { type: 'nodes', ids: [nodeId] },
+      drift_mode: 'observe',
+      classification: 'stateful',
+      classification_reasons: [],
+      enabled: true,
+      created_by: null,
+    });
+
+    db.upsertDeployment({
+      blueprint_id: created.id,
+      node_id: nodeId,
+      status: 'pending_state_review',
+      applied_revision: 1,
+      last_deployed_at: null,
+      last_checked_at: 1,
+      last_drift_at: null,
+      drift_summary: null,
+      last_error: null,
+    } as never);
+    store.insertGeneration(generation('gen-rehold', applicationId));
+    store.insertApplication({
+      ...directLikeApplication(applicationId, created.id),
+      intent_revision_id: 'ir-rehold',
+      accepted_generation_id: 'gen-rehold',
+    });
+    store.upsertTarget({
+      ...emptyTargetRow(applicationId, nodeId, 1),
+      intent_revision_id: 'ir-rehold',
+      applied_generation_id: 'gen-rehold',
+      latest_stage: 'blueprint_state_review',
+    });
+
+    applyClearStaleGuard(created.id, nodeId);
+    expect(store.getTarget(applicationId, nodeId)?.target_status).toBe('tombstoned');
+
+    // The node is wanted again, so the reconciler holds it for confirmation once
+    // more. This is the re-hold the first version of the retirement lost.
+    GitOpsTransitions.getInstance().blueprintObservation({
+      applicationId,
+      nodeId,
+      stage: 'blueprint_state_review',
+      envelope: { operationId: 'op-rehold-2', actor: null, trigger: 'reconcile', at: Date.now() },
+    });
+
+    expect(store.getTarget(applicationId, nodeId)?.target_status).toBe('active');
+    const after = projectApplication(applicationId, false);
+    if (after.targetMode === 'not_applicable') throw new Error('expected application');
+    expect(after.targets[0]?.runtime.status).toBe('pending_state_review');
+    expect(after.facets.placement.status).toBe('stateful_confirmation_required');
+  });
+
+  it('refuses to revive a severed target for an observation that only reports', () => {
+    // Only the hold re-opens a placement. A drift report about a node nobody
+    // wants must not resurrect it, or a retired target would come back to life
+    // because the reconciler looked at it.
+    const db = DatabaseService.getInstance();
+    const store = GitOpsStore.getInstance();
+    const nodeId = 1;
+    const applicationId = 'app-norevive';
+    const created = db.createBlueprint({
+      name: `guard-blueprint-norevive-${Date.now()}`,
+      description: null,
+      compose_content: 'services:\n  web:\n    image: nginx:1.27\n',
+      selector: { type: 'nodes', ids: [nodeId] },
+      drift_mode: 'observe',
+      classification: 'stateful',
+      classification_reasons: [],
+      enabled: true,
+      created_by: null,
+    });
+    store.insertApplication({
+      ...directLikeApplication(applicationId, created.id),
+      intent_revision_id: 'ir-norevive',
+      accepted_generation_id: 'gen-norevive',
+    });
+    store.insertGeneration(generation('gen-norevive', applicationId));
+    store.upsertTarget({
+      ...emptyTargetRow(applicationId, nodeId, 1),
+      intent_revision_id: 'ir-norevive',
+      applied_generation_id: 'gen-norevive',
+      target_status: 'tombstoned',
+    });
+
+    expect(() => GitOpsTransitions.getInstance().blueprintObservation({
+      applicationId,
+      nodeId,
+      stage: 'blueprint_drifted',
+      envelope: { operationId: 'op-norevive', actor: null, trigger: 'reconcile', at: Date.now() },
+    })).toThrow(/cannot observe a tombstoned target/);
+    expect(store.getTarget(applicationId, nodeId)?.target_status).toBe('tombstoned');
+  });
+
   it('leaves a deployed target alone, since its hold is not a stale guard', () => {
     const db = DatabaseService.getInstance();
     const nodeId = 1;

@@ -21,6 +21,7 @@ import {
   DEFAULT_HEALTH_ROLLOUT_POLICY,
   decodeFrozenRolloutStrategy,
   decodeIntentHealthPolicy,
+  gatesAdvancement,
   type HealthRolloutPolicy,
 } from './healthPolicy';
 import { parseSecretCapabilityFromJson } from './sops/capability';
@@ -122,7 +123,7 @@ export function deriveGitOpsRevision(
   // so deriving them first introduces no cycle.
   // Resolved once here because it reads the application's intent revision and
   // the live Blueprint row, neither of which varies per target.
-  const confirmationExpected = facts.healthDisabled ? blueprintConfirmsOutcome(app) : true;
+  const confirmationExpected = blueprintConfirmsOutcome(app, facts.healthDisabled);
   const targets = facts.targets
     .slice()
     .sort((a, b) => a.node_id - b.node_id)
@@ -2002,21 +2003,59 @@ function blueprintAckStatus(
 /**
  * Whether anything is going to confirm a Blueprint target's outcome.
  *
- * Two producers confirm it, and this is the honest question behind the
- * unknown-outcome status: the reconciler's drift check, which runs only when
- * the Blueprint's drift policy observes, and the health gate. When neither is in
- * play the absence of an observation carries no information, because no
- * observation was ever going to be recorded.
+ * This is the honest question behind the unknown-outcome status, and it has two
+ * answers rather than one, because two producers confirm a target and either is
+ * enough. The reconciler's drift check records an observation whenever the
+ * Blueprint's drift policy observes. A health verdict arrives only for a target
+ * the rollout executor reserved a run against, which happens only under a policy
+ * that gates advancement: the default `observe` arms no run, and the verdict
+ * path resolves a Blueprint target through the run's own application id, since
+ * there is no Direct application for a Blueprint-managed stack to fall back to.
  *
- * Resolved once per application rather than per target, since it reads the
- * application's intent revision and the live Blueprint row, neither of which
- * varies across a target's fleet.
+ * Getting this wrong in either direction is expensive. Treating every target as
+ * confirmed leaves a genuine unknown unmarked; treating every target as
+ * confirmable, which is where the first version of this landed, pins a target
+ * that nothing will ever check to a failure-toned status for ever, and takes the
+ * whole application's posture with it.
+ *
+ * Resolved once per application rather than per target: everything it reads is
+ * application-scoped.
  */
-function blueprintConfirmsOutcome(app: GitOpsApplicationRow): boolean {
-  if (app.blueprint_id === null) return false;
-  const intent = app.intent_revision_id ? GitOpsStore.getInstance().getIntentRevision(app.intent_revision_id) : undefined;
-  if (!intent) return false;
-  return blueprintDriftPolicy(app, intent) !== null;
+function blueprintConfirmsOutcome(app: GitOpsApplicationRow, healthDisabled: boolean): boolean {
+  if (app.blueprint_id !== null && app.intent_revision_id) {
+    const intent = GitOpsStore.getInstance().getIntentRevision(app.intent_revision_id);
+    if (intent && blueprintDriftPolicy(app, intent) !== null) return true;
+  }
+  if (healthDisabled) return false;
+  // Either policy is enough, and they are read separately on purpose. A run is
+  // reserved under the policy frozen into the authorized rollout generation,
+  // which is what is actually arming verdicts right now, while the configured
+  // policy is what the next authorization would freeze. Reading only the
+  // configured one made a policy change flip this answer before any run existed
+  // to justify it, in both directions: gating-to-observe hid a real unknown that
+  // the still-gating rollout was about to confirm, and observe-to-gating
+  // reported one that nothing had been armed to answer.
+  return gatesAdvancement(configuredPolicyForApp(GitOpsStore.getInstance(), app))
+    || rolloutGenerationGatesHealth(GitOpsStore.getInstance(), app);
+}
+
+/**
+ * Whether the app's active rollout generation froze a health policy that gates.
+ *
+ * Unreadable or missing reads as not gating, which withholds the unknown-outcome
+ * status rather than asserting a confirmation that may never arrive. The other
+ * direction would put a failure-toned status on a target for a run nobody
+ * armed.
+ */
+function rolloutGenerationGatesHealth(store: GitOpsStore, app: GitOpsApplicationRow): boolean {
+  if (!app.rollout_generation_id) return false;
+  const generation = store.getRolloutGeneration(app.rollout_generation_id);
+  if (!generation || generation.application_id !== app.id) return false;
+  try {
+    return gatesAdvancement(decodeFrozenRolloutStrategy(generation.rollout_strategy_json).healthPolicy);
+  } catch {
+    return false;
+  }
 }
 
 function deriveRuntime(
