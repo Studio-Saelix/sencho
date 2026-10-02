@@ -58,10 +58,12 @@ const SHARED_PROBE_CEILING_MS = 3000;
 
 describe('reachability verdict reuse', () => {
   it('keeps the reuse window under the shared probe ceiling', () => {
-    // The safety argument rests on this: a served verdict may never outlive the
-    // longest a fresh probe could have taken. The live comparison catches a
-    // window that outgrew this read model's own budget, and the literal catches
-    // one that outgrew the ceiling the rest of the product still assumes.
+    // The window caps how long a recorded verdict is served. It does not bound
+    // how old the evidence behind it is: a dark verdict is recorded when its
+    // probe gives up, so the worst case is the probe budget plus this window.
+    // The live comparison catches a window that outgrew this read model's own
+    // budget, and the literal catches one that outgrew the ceiling the rest of
+    // the product still assumes.
     expect(REACHABILITY_VERDICT_TTL_MS).toBeLessThan(REMOTE_PROBE_TIMEOUT_MS);
     expect(REACHABILITY_VERDICT_TTL_MS).toBeLessThan(SHARED_PROBE_CEILING_MS);
   });
@@ -172,33 +174,52 @@ describe('reachability verdict reuse', () => {
     expect(fetchRows).toHaveBeenCalledTimes(1);
   });
 
-  it('cannot write a dark verdict from a probe that a newer answer outran', async () => {
-    // The late-write ordering case. This hub proves the node answers while a
-    // dark leg is still in flight, and that leg settles dark afterwards. One
-    // shared leg per node is what makes the case unrepresentable: a second
-    // reader joins the leg already running rather than starting a newer one, so
-    // there is never a dark write to order against the answer.
+  it('records one verdict per probe rather than one per reader', async () => {
+    // The ordering guarantee, pinned by what it costs rather than by when it
+    // happens. Three readers share one leg; the leg owns the write, so the
+    // verdict is recorded once. A reader that wrote its own answer would record it
+    // three times, which both reopens the late-write gap and re-arms the reuse
+    // window once per read instead of once per probe.
+    const cache = CacheService.getInstance();
+    const set = vi.spyOn(cache, 'set');
+    const invalidate = vi.spyOn(cache, 'invalidate');
+    const fetchRows = vi.fn<(nodeId: number) => Promise<ProbeResult>>(async () => null);
+
+    await Promise.all([
+      probeSilentNodeIds([4], fetchRows),
+      probeSilentNodeIds([4], fetchRows),
+      probeSilentNodeIds([4], fetchRows),
+    ]);
+
+    expect(fetchRows).toHaveBeenCalledTimes(1);
+    expect(set.mock.calls.filter(([key]) => key === 'gitops-reachability:4')).toHaveLength(1);
+    expect(invalidate).not.toHaveBeenCalled();
+    set.mockRestore();
+    invalidate.mockRestore();
+  });
+
+  it('does not let a reader that arrives late put its own verdict back', async () => {
+    // A reader collects its result long after the probe settled and a newer leg
+    // has seen the node answer. Its stale dark result must not overwrite that.
     let releaseDark: (rows: ProbeResult) => void = () => {};
     const fetchRows = vi.fn<(nodeId: number) => Promise<ProbeResult>>(() => new Promise<ProbeResult>((resolve) => {
       releaseDark = resolve;
     }));
 
-    const slow = probeSilentNodeIds([4], fetchRows);
-    // A reader arriving mid-flight is handed the same leg, so its answer is the
-    // same answer: there is no second, newer probe that could overtake the dark
-    // one, and therefore no dark write left to drop after the fact.
-    const during = probeSilentNodeIds([4], fetchRows);
-    expect(fetchRows).toHaveBeenCalledTimes(1);
+    const late = probeSilentNodeIds([4], fetchRows);
     releaseDark(null);
+    await Promise.resolve();
 
-    expect([...(await slow)]).toEqual([4]);
-    expect([...(await during)]).toEqual([4]);
+    // Let the window lapse so a newer leg can start, and let it see the node
+    // answer, which retires the dark verdict.
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.advanceTimersByTime(AFTER_THE_WINDOW_MS);
+    expect([...(await probeSilentNodeIds([4], async () => []))]).toEqual([]);
+    vi.useRealTimers();
 
-    // Both surfaces now hold the one verdict that was ever established for this
-    // node, and the next read reuses it rather than starting a rival probe.
-    const after = vi.fn<(nodeId: number) => Promise<ProbeResult>>(async () => []);
-    expect([...(await probeSilentNodeIds([4], after))]).toEqual([4]);
-    expect(after).not.toHaveBeenCalled();
+    // Only now does the late reader collect its own dark result.
+    expect([...(await late)]).toEqual([4]);
+    expect(CacheService.getInstance().peek('gitops-reachability:4')).toBeUndefined();
   });
 
   it('settles a joined reader even when the probe it joined rejects', async () => {

@@ -479,6 +479,78 @@ describe('aggregateGitOpsPortfolio', () => {
     expect(asked.filter(nodeId => nodeId === sharedId)).toHaveLength(1);
   });
 
+  it('filters a shared leg per caller instead of letting one caller siphon it', async () => {
+    const db = DatabaseService.getInstance();
+    const localNodeId = db.getNodes()[0]!.id;
+    const sharedId = addRemoteNode('port-shared-filter', 29989);
+
+    // Two list reads, different callers, one leg. The payload carries an
+    // ordinary row and one with no usable stack name, which classifies as
+    // admin-only. If the shared array were filtered in place, whichever caller
+    // went first would decide what the other saw.
+    const readable = remoteSourceRow('app-shared-readable', 'shared-readable-web', remoteProjection('app-shared-readable', 'shared-readable-web'));
+    const adminOnly = remoteSourceRow('app-shared-admin', '', remoteProjection('app-shared-admin', 'shared-admin-web'));
+    const payload = [...readable, ...adminOnly];
+
+    const release: (() => void)[] = [];
+    const asked: number[] = [];
+    const fetchRows = vi.fn<(nodeId: number) => Promise<unknown[] | null | 'unsupported'>>(
+      (nodeId) => new Promise<unknown[] | null | 'unsupported'>((resolve) => {
+        asked.push(nodeId);
+        if (nodeId === sharedId) release.push(() => resolve(payload));
+        else resolve([]);
+      }),
+    );
+    // Each read probes every remote node once, except the shared node, which the
+    // second read joins rather than asks for. Waiting for the expected count is
+    // what puts the second reader inside the first reader's leg.
+    const remoteNodeCount = db.getNodes().filter(node => node.id !== localNodeId).length;
+
+    const asAdmin = aggregateGitOpsPortfolio(adminReq(localNodeId), { fetchRows });
+    await vi.waitFor(() => expect(asked).toHaveLength(remoteNodeCount));
+    const asViewer = aggregateGitOpsPortfolio(fakeReq({ userId: 2, username: 'viewer', role: 'viewer' }, localNodeId), { fetchRows });
+    await vi.waitFor(() => expect(asked).toHaveLength(remoteNodeCount * 2 - 1));
+    for (const releaseLeg of release) releaseLeg();
+
+    const adminRows = (await asAdmin).rows.filter(candidate => candidate.nodeId === sharedId);
+    const viewerRows = (await asViewer).rows.filter(candidate => candidate.nodeId === sharedId);
+
+    // One probe between them, and each caller filtered the payload for itself.
+    expect(asked.filter(nodeId => nodeId === sharedId)).toHaveLength(1);
+    expect(adminRows.map(candidate => candidate.id)).toContain(`${sharedId}:app-shared-admin`);
+    expect(viewerRows.map(candidate => candidate.id)).not.toContain(`${sharedId}:app-shared-admin`);
+    expect(viewerRows.map(candidate => candidate.id)).toContain(`${sharedId}:app-shared-readable`);
+  });
+
+  it('retires a cached dark verdict before walking a payload it cannot walk', async () => {
+    const db = DatabaseService.getInstance();
+    const localNodeId = db.getNodes()[0]!.id;
+    const walkFailsId = addRemoteNode('port-walk-fails', 29988);
+
+    await aggregateGitOpsPortfolio(adminReq(localNodeId), {
+      fetchRows: async (nodeId: number) => (nodeId === walkFailsId ? null : []),
+    });
+
+    // The node answers, but a row that throws while the read rules are applied
+    // makes this build unable to walk the payload. The answer still retired the
+    // dark verdict first, because retirement happens when the payload arrives
+    // rather than after the walk.
+    const hostile = remoteSourceRow('app-walk-fails', 'walk-fails-web', remoteProjection('app-walk-fails', 'walk-fails-web'));
+    Object.defineProperty(hostile[0] as object, 'stack_name', { get() { throw new Error('row cannot be read'); } });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const { coverage } = await aggregateGitOpsPortfolio(adminReq(localNodeId), {
+      fetchRows: async (nodeId: number) => (nodeId === walkFailsId ? hostile : []),
+    });
+    expect(coverage.find(candidate => candidate.nodeId === walkFailsId)?.state).toBe('unsupported');
+
+    // So the detail probe is free to ask again rather than serve the dark verdict
+    // the walk failure left behind.
+    const detailProbe = vi.fn<(nodeId: number) => Promise<unknown[] | null | 'unsupported'>>(async () => []);
+    expect([...(await probeSilentNodeIds([walkFailsId], detailProbe))]).toEqual([]);
+    expect(detailProbe).toHaveBeenCalledTimes(1);
+    warn.mockRestore();
+  });
+
   it('shares its reachability verdict with the application detail probe', async () => {
     const db = DatabaseService.getInstance();
     const localNodeId = db.getNodes()[0]!.id;
@@ -542,34 +614,15 @@ describe('aggregateGitOpsPortfolio', () => {
     });
     expect(coverage.find(candidate => candidate.nodeId === throwingId)?.state).toBe('unsupported');
 
-    // The earlier dark verdict therefore stands, which is the honest outcome:
-    // nothing since has proved the node came back, and the detail probe reports
-    // the same thing the list does not contradict.
+    // The earlier dark verdict therefore stands. That is the honest outcome:
+    // nothing since has proved the node came back. The list calls the node
+    // unreadable and the detail panel calls it unreachable, which is a gap in
+    // what each can say rather than a contradiction, and neither claims the node
+    // is up.
     const detailProbe = vi.fn<(nodeId: number) => Promise<unknown[] | null | 'unsupported'>>(async () => []);
     expect([...(await probeSilentNodeIds([throwingId], detailProbe))]).toEqual([throwingId]);
     expect(detailProbe).not.toHaveBeenCalled();
     warn.mockRestore();
-  });
-
-  it('retires a cached dark verdict once the fan-out gets a payload back', async () => {
-    const db = DatabaseService.getInstance();
-    const localNodeId = db.getNodes()[0]!.id;
-    const recoveredId = addRemoteNode('port-payload-after-dark', 29991);
-
-    await aggregateGitOpsPortfolio(adminReq(localNodeId), {
-      fetchRows: async (nodeId: number) => (nodeId === recoveredId ? null : []),
-    });
-
-    // A payload arrived, so the node answered. The verdict is retired before the
-    // payload is walked, so the detail probe is free to ask again.
-    const { coverage } = await aggregateGitOpsPortfolio(adminReq(localNodeId), {
-      fetchRows: async (nodeId: number) => (nodeId === recoveredId ? [] : []),
-    });
-    expect(coverage.find(candidate => candidate.nodeId === recoveredId)?.state).toBe('ok');
-
-    const detailProbe = vi.fn<(nodeId: number) => Promise<unknown[] | null | 'unsupported'>>(async () => null);
-    expect([...(await probeSilentNodeIds([recoveredId], detailProbe))]).toEqual([recoveredId]);
-    expect(detailProbe).toHaveBeenCalledTimes(1);
   });
 
   it('merges remote rows with hub node ids applied', async () => {

@@ -72,11 +72,16 @@ const REACHABILITY_NAMESPACE = 'gitops-reachability';
  *
  * The window is strictly under `REMOTE_PROBE_TIMEOUT_MS`, which mirrors the
  * fleet overview and fleet readiness probe budgets, so the bound is the ceiling
- * the product's live probes share rather than one surface's own budget. Long
- * enough that the reads following one dark answer do not each pay the timeout,
- * short enough that a node which came back is seen back within the freshness the
- * rest of the read model assumes. Exported so the test can hold the window to
- * this relationship rather than to a literal.
+ * the product's live probes share rather than one surface's own budget.
+ *
+ * What that bound is and is not: it caps how long a *recorded* verdict is served,
+ * not how old the underlying evidence is when it is served. A dark verdict is
+ * recorded when its probe gives up, so a node that only just went dark can serve
+ * evidence that is the probe budget plus this window old. The two numbers add up
+ * for the worst case and neither alone describes it.
+ *
+ * Exported so the test can hold the window to this relationship rather than to a
+ * literal.
  */
 export const REACHABILITY_VERDICT_TTL_MS = 1500;
 
@@ -869,34 +874,35 @@ export async function aggregateGitOpsPortfolio(req: Request, options: AggregateO
     try {
       remoteRows = await probeNodeOnce(node.id, fetchRows);
     } catch {
-      // A leg that threw is a node this build could not read, not a node that
-      // did not answer, so it is evidence in neither direction: it records no
-      // verdict and retires none, the same as the detail probe's throw. The leg
-      // logs it once for every joined reader. The default seam never rejects (it
-      // reports a failure as a null answer), so this is the injected-seam path.
+      // A leg that threw is a node this build could not read, not a node that did
+      // not answer, so this is evidence in neither direction and the leg recorded
+      // nothing. The default seam catches its own failures and reports them as a
+      // null answer rather than rejecting, apart from resolving its proxy target,
+      // so a rejection is close to unreachable in production and this is the
+      // injected-seam path.
       remoteProbes.set(node.id, { state: 'unsupported', rows: null });
       coverage.push({ nodeId: node.id, nodeName: nodeLabel, state: 'unsupported' });
       return;
     }
+    // The leg recorded its own verdict: a null answer is recorded dark, anything
+    // else retired the dark verdict this node may have been carrying, before this
+    // payload is walked. Whether the walk then succeeds is a separate question.
     if (remoteRows === null) {
-      rememberUnanswered(node.id);
       remoteProbes.set(node.id, { state: 'unreachable', rows: null });
       coverage.push({ nodeId: node.id, nodeName: nodeLabel, state: 'unreachable' });
       return;
     }
-    // A payload arrived, so the node answered, and the dark verdict it may have
-    // been carrying is retired before the payload is walked. Whether the walk
-    // then succeeds is a separate question with its own answer below.
-    rememberAnswered(node.id);
     try {
       if (remoteRows === 'unsupported') {
         remoteProbes.set(node.id, { state: 'unsupported', rows: null });
         coverage.push({ nodeId: node.id, nodeName: nodeLabel, state: 'unsupported' });
         return;
       }
-      // In place, on the array a joined reader also holds. Sound because the rewrite
-      // is the same hub id for every consumer of this node, and because the
-      // per-caller filter below copies rather than splices; see `probeNodeOnce`.
+      // In place, on the array a joined reader also holds. That is safe only
+      // because the rewrite is the same hub id for every consumer of this node
+      // and the per-caller filter below copies rather than splices; a row mutated
+      // differently here, or an await between these two lines, would corrupt a
+      // concurrent reader. See `probeNodeOnce`.
       rewriteIdentityPayload(remoteRows, node.id);
       const filtered = filterRemoteIdentityPayload(
         '/git-sources',
@@ -1633,26 +1639,28 @@ function startProbe(
  * Two properties this rests on, both of which a later edit could break silently:
  *
  * 1. **Joined rows are one array, not a copy.** Every reader of a leg receives
- *    the same array, so the fan-out's in-place identity rewrite reaches the other
- *    readers too. That is sound only because the rewrite assigns the same hub
- *    node id for a given remote node, so every consumer writes the identical
- *    result, and because per-caller read filtering happens afterwards on a copy
- *    (`filterRemoteIdentityPayload` filters rather than splices). A consumer that
- *    mutated a joined payload differently, or awaited between the rewrite and the
- *    filter, would corrupt the others.
- * 2. **A verdict is written in the settling continuation, with no await in
- *    between.** One leg per node means a probe that saw a node answer settles and
- *    writes before the next probe of that node can start, so a dark verdict can
- *    never land after a newer answer. That holds only while both writers call
- *    `rememberUnanswered` / `rememberAnswered` synchronously on the leg settling
- *    and do not re-enter `probeNodeOnce` for the same node first. Insert one
- *    await in that gap and the ordering guarantee is gone, which is why there is
- *    no timestamp comparison here instead.
+ *    the same array, and the fan-out rewrites identity in place on it, so the
+ *    rewrite reaches the other readers too. That holds today because the rewrite
+ *    assigns the same hub node id for a given remote node, so every consumer
+ *    writes the identical result, and because per-caller read filtering happens
+ *    afterwards on a copy (`filterRemoteIdentityPayload` filters rather than
+ *    splices). It is not a deep copy: rows are shared between two fan-outs too,
+ *    and a joiner that only null-checks the result is safe because it never reads
+ *    the payload. A consumer that mutated a row differently, or awaited between
+ *    the rewrite and the filter, would corrupt the others.
+ * 2. **The leg records its own verdict before it resolves.** One leg per node
+ *    means a probe that saw a node answer settles and records before the next
+ *    probe of that node can start, so a dark verdict cannot land after a newer
+ *    answer. Recording happens on the leg rather than in each reader's
+ *    continuation, so no await a reader might add between awaiting a leg and
+ *    writing a verdict can reopen that gap, and there is no timestamp to
+ *    compare.
  *
  * The seam is per node rather than per caller, which is right because the
  * default one authenticates as the machine credential and applies no per-user
  * rule; an injected seam is shared the same way, so a test must not pass one
- * reader a different seam than the other for the same node.
+ * reader a different seam than the other for the same node, and must not re-enter
+ * this function for the same node while its own fetch is starting.
  */
 function probeNodeOnce(
   nodeId: number,
@@ -1660,33 +1668,63 @@ function probeNodeOnce(
 ): Promise<unknown[] | null | 'unsupported'> {
   const existing = inflightProbeLegs.get(nodeId);
   if (existing) return existing;
-  // Started in this tick, so a second reader in the same tick joins a leg that
-  // is already running. A seam that throws synchronously becomes a rejection the
+  // Started in this tick, so a second reader in the same tick joins a leg that is
+  // already running. A seam that throws synchronously becomes a rejection the
   // caller already handles, rather than escaping past the handler that owns it.
-  const leg = startProbe(nodeId, fetchRows);
-  inflightProbeLegs.set(nodeId, leg);
-  const release = () => {
-    if (inflightProbeLegs.get(nodeId) === leg) inflightProbeLegs.delete(nodeId);
-  };
-  // The rejection arm logs once for the whole leg rather than once per joiner,
-  // so a single failed probe reads as one attempt. Both arms settle the promise
-  // this produces, so it leaves no unhandled rejection behind.
-  void leg.then(release, (error: unknown) => {
-    release();
-    console.warn(
-      `[GitOps portfolio] Reachability probe for node ${nodeId} failed:`,
-      error instanceof Error ? error.message : error,
-    );
-  });
-  return leg;
+  const settled = startProbe(nodeId, fetchRows).then(
+    (rows) => {
+      try {
+        // Recorded on the leg rather than by each reader, so the write happens
+        // before any reader's continuation runs, and once no matter how many
+        // readers joined. A leg that answered retires the dark verdict it may
+        // have been carrying; a leg that did not records one.
+        if (rows === null) rememberUnanswered(nodeId);
+        else rememberAnswered(nodeId);
+      } finally {
+        // Released even if the write ever throws, so a leg can never leak its
+        // slot and wedge every later read of this node on a settled promise.
+        freeLeg(nodeId, settled);
+      }
+      return rows;
+    },
+    (error: unknown) => {
+      // A leg that threw is evidence in neither direction, so it records nothing
+      // and retires nothing. Logged once for the whole leg rather than once per
+      // joiner, so a single failed probe reads as one attempt.
+      console.warn(
+        `[GitOps portfolio] Reachability probe for node ${nodeId} failed:`,
+        error instanceof Error ? error.message : error,
+      );
+      freeLeg(nodeId, settled);
+      throw error;
+    },
+  );
+  inflightProbeLegs.set(nodeId, settled);
+  return settled;
+}
+
+/** Free the slot for `nodeId`, identity-guarded so a leg can only free its own. */
+function freeLeg(
+  nodeId: number,
+  leg: Promise<unknown[] | null | 'unsupported'>,
+): void {
+  if (inflightProbeLegs.get(nodeId) === leg) inflightProbeLegs.delete(nodeId);
 }
 
 /**
  * Drop every in-flight leg. For tests only: a leg is normally released when it
  * settles, so a test that fails before releasing one would otherwise leave a
  * pending promise that every later read of that node id joins.
+ *
+ * A dropped leg cannot be cancelled, so one that settles afterwards still records
+ * its single verdict, and its rejection gets a sink attached here so dropping it
+ * never creates an unhandled rejection. Flushing the cache after this call
+ * therefore clears that late write too.
  */
 export function resetReachabilityProbesForTests(): void {
+  for (const leg of inflightProbeLegs.values()) {
+    void leg.catch(() => {});
+  }
   inflightProbeLegs.clear();
 }
 
@@ -1730,9 +1768,11 @@ function rememberUnanswered(nodeId: number): void {
  * A node this hub already found silent inside the reuse window is not asked
  * again, and a reader arriving while a probe is in flight joins that probe
  * rather than starting one; see `REACHABILITY_VERDICT_TTL_MS` for the rule and
- * `probeNodeOnce` for the sharing. Two writers keep the window honest, this
- * probe and the portfolio fan-out: both record a dark verdict and both retire it
- * on an answer, and both treat a thrown leg as evidence in neither direction.
+ * `probeNodeOnce` for the sharing and for the single writer. This function and
+ * the portfolio fan-out are both readers now: neither records nor retires a
+ * verdict, because a leg records its own before it resolves. A reader that wrote
+ * here would reopen the late-write gap that owns, and would re-arm the window once
+ * per reader instead of once per probe.
  */
 export async function probeSilentNodeIds(
   nodeIds: readonly number[],
@@ -1742,16 +1782,15 @@ export async function probeSilentNodeIds(
   const outcomes = await Promise.all(unique.map(async (nodeId) => {
     if (knownUnreachable(nodeId)) return { nodeId, silent: true };
     try {
+      // The leg records its own verdict before this resolves, so nothing here
+      // writes: the read only reports what the probe established.
       const rows = await probeNodeOnce(nodeId, fetchRows);
-      if (rows === null) rememberUnanswered(nodeId);
-      else rememberAnswered(nodeId);
       return { nodeId, silent: rows === null };
     } catch {
       // A leg that throws is a node this build could not read, not a node that
-      // is down, so it is left out of the silent set rather than guessed at. It
-      // also writes nothing: the verdict this read reports is already the only
-      // evidence a throw is allowed to be. The leg logs it once for every reader
-      // that joined it.
+      // is down, so it is left out of the silent set rather than guessed at. The
+      // leg recorded nothing, and logged once per leg rather than once per
+      // joiner.
       return { nodeId, silent: false };
     }
   }));
