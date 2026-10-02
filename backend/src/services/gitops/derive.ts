@@ -117,17 +117,24 @@ export function deriveGitOpsRevision(
   mergePersistedLimitations(app.evidence_limitations_json, limitations);
   const source = deriveSource(app, limitations);
   const artifact = deriveArtifact(app, app.accepted_generation_id, app.artifact_set_id, app.latest_artifact_set_id, limitations);
-  // Targets are derived before the placement facet, which reads them to report
+// Targets are derived before the placement facet, which reads them to report
   // a stateful hold. The dependency is one-way: `deriveTarget` reads the
   // application row and the target's own evidence, never the placement facet,
   // so deriving them first introduces no cycle.
   // Resolved once here because it reads the application's intent revision and
   // the live Blueprint row, neither of which varies per target.
   const confirmationExpected = blueprintConfirmsOutcome(app, facts.healthDisabled);
+  // Also resolved once, and for the same reason: the application's accepted
+  // intent revision, which is what names a Blueprint target's stack for the
+  // health supersede rule. `collectHealthDrift` reads the same revision, so both
+  // answer with one lookup rather than each resolving its own.
+  const acceptedIntent = app.intent_revision_id
+    ? GitOpsStore.getInstance().getIntentRevision(app.intent_revision_id)
+    : undefined;
   const targets = facts.targets
     .slice()
     .sort((a, b) => a.node_id - b.node_id)
-    .map((target) => deriveTarget(app, target, facts.healthDisabled, limitations, confirmationExpected));
+    .map((target) => deriveTarget(app, acceptedIntent, target, facts.healthDisabled, limitations, confirmationExpected));
   const placement = derivePlacement(app, futureEvidence, targets);
   const rollout = deriveRollout(app, targets, artifact, facts.healthDisabled, futureEvidence);
   const availableActions = deriveActions(app, source, placement, targets);
@@ -1750,6 +1757,7 @@ function connectivityFromObservation(
 
 function deriveTarget(
   app: GitOpsApplicationRow,
+  acceptedIntent: GitOpsIntentRevisionRow | undefined,
   target: GitOpsTargetCurrentRow,
   healthDisabled: boolean,
   limitations: GitOpsLimitation[],
@@ -1818,7 +1826,7 @@ function deriveTarget(
     legacyAppliedRevision: target.legacy_applied_revision,
     runtime,
     health: deriveHealth(target, healthDisabled, runningGenerationId),
-    healthFailureSuperseded: healthFailureSuperseded(target),
+    healthFailureSuperseded: healthFailureSuperseded(app, acceptedIntent, target),
     // What the health-gated rollout has decided for this target, and whether a
     // rollback has anything to restore from. Surfaced here rather than as a
     // separate surface so the rollout controls read the same evidence the
@@ -1893,47 +1901,68 @@ const LIVE_OPERATION_STATUS: Record<string, 'deploying' | 'withdrawing' | undefi
 >>;
 
 /**
- * Whether a live operation is redeploying the very generation a recorded health
- * failure is about.
+ * Whether work already under way is producing the verdict that will replace a
+ * recorded health failure.
  *
- * A recorded failure keeps being reported until a newer verdict lands, and the
- * verdict it is waiting for is usually a redeploy of the same generation: the
- * health rollout policy answers a failure by re-running that generation. So
- * while that redeploy runs, the failure is the thing being worked on rather than
- * something an operator has to act on, and the fleet should read it as work in
- * progress. `collectHealthDrift` already withholds the drift item for the same
- * window and for the same reason.
+ * A recorded failure is reported until a newer verdict lands, which is right. But
+ * once something is under way that is going to produce that verdict, the failure
+ * is the thing being worked on rather than something an operator has to act on,
+ * and the fleet should read it as work in progress. `collectHealthDrift` already
+ * withholds the drift item for the same window and for the same reason.
  *
- * The generation match is the whole rule. A redeploy of a *different* generation
- * is not this failure's successor, and matching on it would leave a known-bad
- * workload looking like progress towards something else. The identity compared
- * against is the one the failure was recorded against, not the running pointer:
- * `deriveHealth` judges a verdict against the desired generation when there is
- * one, so the two can differ while a newer generation waits to be deployed, and
- * it is the failure's own record that the operation has to be about to supersede
- * it. A consumer cannot make this comparison from the projection, because the
- * runtime facet collapses an operation into a status and drops which generation
- * it is for.
+ * Two moments count, because they are the two halves of one redeploy, and they
+ * are not reachable by the same targets:
  *
- * The scope is the stages in `LIVE_OPERATION_STATUS` against a target whose
- * operation recorded a generation, which is what only a Direct `deployStarted`
- * writes. A Blueprint deploy and withdrawal record their intent and candidate
- * instead of a generation, so this stays false for them and a redeployed
- * Blueprint target keeps reporting its failure, as it did before. The withdrawal
- * stage is therefore in the table but unreachable here.
+ * - **The deploy step: Direct only.** A live operation whose recorded generation
+ *   is the one the failure was recorded against. Gated on
+ *   `LIVE_OPERATION_STATUS` and on a non-null `active_generation_id`, which is
+ *   what only a Direct `deployStarted` writes. A Blueprint deploy and withdrawal
+ *   record their intent and candidate instead and leave that column alone, so
+ *   there is no generation on either side of this comparison to make and the
+ *   arm stays false for them.
+ * - **The observation step: every mode.** A stack-scope health run for the same
+ *   generation that is still `observing`. `deployBound` clears the active stage
+ *   the moment the workload is up, while the gate's own run was reserved before
+ *   the deploy and is still open, so without this arm the application would drop
+ *   back to `failed` for the whole observation window and the reading would
+ *   flip-flop: failed, in progress, failed, then the new verdict. This arm is
+ *   what covers a Blueprint target, and it is also what covers the automatic
+ *   retry the health rollout policy performs, which reserves its run before the
+ *   apply and therefore only ever has the observation to be seen by. It reads a
+ *   run that already exists; it changes no gate behavior, window, or decision.
  *
- * It also stays false once the deploy binds, before the retry's own verdict
- * lands: the health gate runs after the deploy, and nothing reserves a run yet,
- * so there is no second operation to read. That window belongs to the gate's own
- * observation, which is deliberately not touched here. What ends the suppression
- * is any terminal for the operation (`deployBound`, `deployUnbound`,
- * `deployFailed`), the startup reclassification that turns an operation nobody
- * finished into an interruption, or the next verdict.
+ * The generation match is the whole rule, and it is the failure's own identity
+ * rather than the running pointer, because `deriveHealth` judges a verdict
+ * against the desired generation when there is one, so the two can differ while
+ * a newer generation waits to be deployed. It is the failure's own record that
+ * the work has to be about in order to supersede it. A consumer cannot make this
+ * comparison from the projection, because the runtime facet collapses an
+ * operation into a status and drops which generation it is for.
+ *
+ * What ends the suppression is a terminal verdict for either arm, the startup
+ * sweep that finalizes an observation a previous process left open, or the next
+ * verdict. An observation a newer stack operation supersedes is finalized by
+ * that operation rather than left reading as open, so nothing here can keep a
+ * failure out of the queue indefinitely.
  */
-function healthFailureSuperseded(target: GitOpsTargetCurrentRow): boolean {
-  if (!LIVE_OPERATION_STATUS[target.active_operation_stage ?? '']) return false;
-  if (target.active_generation_id === null) return false;
-  return target.active_generation_id === target.last_health_generation_id;
+function healthFailureSuperseded(
+  app: GitOpsApplicationRow,
+  acceptedIntent: GitOpsIntentRevisionRow | undefined,
+  target: GitOpsTargetCurrentRow,
+): boolean {
+  const failedGenerationId = target.last_health_generation_id;
+  if (failedGenerationId === null) return false;
+  if (LIVE_OPERATION_STATUS[target.active_operation_stage ?? '']
+    && target.active_generation_id !== null
+    && target.active_generation_id === failedGenerationId) {
+    return true;
+  }
+  const stackName = targetStackName(app, acceptedIntent, target);
+  if (!stackName) return false;
+  const run = GitOpsStore.getInstance().getLatestStackHealthRun(target.node_id, stackName);
+  return run !== undefined
+    && run.status === 'observing'
+    && run.deployed_generation_id === failedGenerationId;
 }
 
 /**

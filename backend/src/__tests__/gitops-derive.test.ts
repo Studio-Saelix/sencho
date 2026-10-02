@@ -2610,7 +2610,27 @@ describe('gitops derivation', () => {
   });
 
   it('marks a recorded health failure superseded only by a redeploy of its own generation', () => {
+    // A health observation the gate reserved for a generation and has not
+    // finished reading, in the durable shape `beginStack` writes.
+    const observingRun = (id: string, deployedGenerationId: string) => ({
+      id,
+      node_id: 1,
+      stack_name: 'health-supersede-web',
+      trigger_action: 'deploy' as const,
+      status: 'observing' as const,
+      reason: null,
+      window_seconds: 90,
+      containers_json: '[]',
+      started_at: 10,
+      ended_at: null,
+      created_by: 'tester',
+      target_scope: 'stack' as const,
+      service_name: null,
+      failure_source: null,
+      deployed_generation_id: deployedGenerationId,
+    });
     const store = GitOpsStore.getInstance();
+    const db = DatabaseService.getInstance();
     store.insertApplication(rawApp('app-health-supersede', { stack_name: 'health-supersede-web' }));
     store.insertGeneration(gen('gen-running', 'app-health-supersede'));
     store.insertGeneration(gen('gen-incoming', 'app-health-supersede'));
@@ -2674,6 +2694,62 @@ describe('gitops derivation', () => {
     expect(project().health.status).toBe('failed');
     expect(project().healthFailureSuperseded).toBe(false);
 
+    // The deploy has bound and the active stage is gone, but the gate reserved
+    // its run before the deploy and is still observing the same generation, so
+    // the failure is still the thing being worked on.
+    db.getDb().prepare('DELETE FROM health_gate_runs').run();
+    db.insertHealthGateRun(observingRun('run-supersede-watch', 'gen-running'));
+    store.upsertTarget(failed);
+    expect(project().runtime.status).toBe('fully_deployed_health_pending');
+    expect(project().health.status).toBe('failed');
+    expect(project().healthFailureSuperseded).toBe(true);
+
+    // An observation of a different generation is not this failure's successor,
+    // and neither is one that has already settled: both leave the failure
+    // standing.
+    db.getDb().prepare('DELETE FROM health_gate_runs').run();
+    db.insertHealthGateRun(observingRun('run-supersede-other', 'gen-incoming'));
+    expect(project().healthFailureSuperseded).toBe(false);
+
+    db.getDb().prepare('DELETE FROM health_gate_runs').run();
+    db.insertHealthGateRun({
+      ...observingRun('run-supersede-settled', 'gen-running'),
+      status: 'passed',
+      ended_at: 20,
+    });
+    expect(project().healthFailureSuperseded).toBe(false);
+    db.getDb().prepare('DELETE FROM health_gate_runs').run();
+
+    // The observation arm is judged against the failure's own record, not the
+    // running pointer, and this is the only case that tells the two apart: a
+    // verdict about a newer generation is waiting to deploy while the old one
+    // still runs and is still being watched. Comparing the run against the
+    // running pointer would answer true here.
+    store.upsertTarget({
+      ...failed,
+      desired_generation_id: 'gen-incoming',
+      last_health_generation_id: 'gen-incoming',
+    });
+    db.insertHealthGateRun(observingRun('run-supersede-newer', 'gen-incoming'));
+    expect(project().healthFailureSuperseded).toBe(true);
+
+    // The mirror: watching the generation that is running is not watching the one
+    // the failure is about.
+    db.getDb().prepare('DELETE FROM health_gate_runs').run();
+    db.insertHealthGateRun(observingRun('run-supersede-stale-watch', 'gen-running'));
+    expect(project().healthFailureSuperseded).toBe(false);
+
+    // An update that reserved its observation without naming a generation cannot
+    // supersede anything, since there is nothing to compare it to.
+    db.getDb().prepare('DELETE FROM health_gate_runs').run();
+    db.insertHealthGateRun({
+      ...observingRun('run-supersede-unnamed', 'gen-incoming'),
+      deployed_generation_id: null,
+    });
+    expect(project().healthFailureSuperseded).toBe(false);
+    db.getDb().prepare('DELETE FROM health_gate_runs').run();
+    store.upsertTarget(failed);
+
     // A recovery capture writes the live operation columns too, but it restores
     // a generation rather than redeploying what runs, and the runtime facet
     // claims it from the recovery phase before the live-operation table is read.
@@ -2690,6 +2766,7 @@ describe('gitops derivation', () => {
 
   it('leaves a redeployed Blueprint target reporting its recorded health failure', () => {
     const store = GitOpsStore.getInstance();
+    const db = DatabaseService.getInstance();
     // The blueprint CHECK requires a blueprint id, a null stack name, and a
     // configured repo URL, which the shared app fixture already carries.
     store.insertApplication(rawApp('app-health-supersede-bp', {
@@ -2699,13 +2776,17 @@ describe('gitops derivation', () => {
       stack_name: null,
     }));
     store.insertGeneration(gen('gen-bp', 'app-health-supersede-bp'));
-
-    // A Blueprint deploy records the intent and candidate it is for, never the
-    // generation: there is no writer of `active_generation_id` on that path. With
-    // nothing to compare, the rule cannot claim the failure is being superseded,
-    // so a redeployed Blueprint target keeps reading failed. Stated here so the
-    // gap is a pinned limitation rather than a silent hole.
-    store.upsertTarget({
+    const frozen = intentRev('ir-bp', 'app-health-supersede-bp', 'e'.repeat(64));
+    store.insertIntentRevision({
+      ...frozen,
+      deploy_stack_name: 'bp-check-web',
+    });
+    const project = () => {
+      const projection = projectApplication('app-health-supersede-bp', false);
+      if (projection.targetMode === 'not_applicable') throw new Error('expected application');
+      return projection.targets[0]!;
+    };
+    const failed = {
       ...emptyTargetRow('app-health-supersede-bp', 1, 1),
       intent_revision_id: 'ir-bp',
       applied_generation_id: 'gen-bp',
@@ -2713,15 +2794,89 @@ describe('gitops derivation', () => {
       last_health_status: 'failed',
       last_health_generation_id: 'gen-bp',
       last_health_run_id: 'run-bp',
+    } as const;
+
+    // A Blueprint deploy records the intent and candidate it is for, never the
+    // generation: there is no writer of `active_generation_id` on that path. With
+    // nothing to compare, the deploy arm cannot claim the failure is being
+    // superseded. Stated here so the gap is a pinned limitation rather than a
+    // silent hole.
+    db.getDb().prepare('DELETE FROM health_gate_runs').run();
+    store.upsertTarget({
+      ...failed,
       active_operation_stage: 'blueprint_deploy_started',
       active_intent_revision_id: 'ir-bp',
     });
-    const projection = projectApplication('app-health-supersede-bp', false);
-    if (projection.targetMode === 'not_applicable') throw new Error('expected application');
+    expect(project().runtime.status).toBe('deploying');
+    expect(project().health.status).toBe('failed');
+    expect(project().healthFailureSuperseded).toBe(false);
 
-    expect(projection.targets[0]?.runtime.status).toBe('deploying');
-    expect(projection.targets[0]?.health.status).toBe('failed');
-    expect(projection.targets[0]?.healthFailureSuperseded).toBe(false);
+    // The observation arm is the one that covers this mode, because a
+    // health-gated retry reserves its run before the apply and so is only ever
+    // visible here.
+    db.getDb().prepare('DELETE FROM health_gate_runs').run();
+    db.insertHealthGateRun({
+      id: 'run-bp-watch',
+      node_id: 1,
+      stack_name: 'bp-check-web',
+      trigger_action: 'rollout',
+      status: 'observing',
+      reason: null,
+      window_seconds: 90,
+      containers_json: '[]',
+      started_at: 10,
+      ended_at: null,
+      created_by: 'tester',
+      target_scope: 'stack',
+      service_name: null,
+      failure_source: null,
+      deployed_generation_id: 'gen-bp',
+    });
+    expect(project().healthFailureSuperseded).toBe(true);
+
+    // An observation of another generation is not this failure's successor.
+    db.getDb().prepare('DELETE FROM health_gate_runs').run();
+    db.insertHealthGateRun({
+      id: 'run-bp-watch-other',
+      node_id: 1,
+      stack_name: 'bp-check-web',
+      trigger_action: 'rollout',
+      status: 'observing',
+      reason: null,
+      window_seconds: 90,
+      containers_json: '[]',
+      started_at: 10,
+      ended_at: null,
+      created_by: 'tester',
+      target_scope: 'stack',
+      service_name: null,
+      failure_source: null,
+      deployed_generation_id: 'gen-other',
+    });
+    expect(project().healthFailureSuperseded).toBe(false);
+
+    // An update that reserved its observation without naming a generation cannot
+    // supersede anything, since there is nothing to compare it to.
+    db.getDb().prepare('DELETE FROM health_gate_runs').run();
+    db.insertHealthGateRun({
+      id: 'run-bp-watch-null',
+      node_id: 1,
+      stack_name: 'bp-check-web',
+      trigger_action: 'update',
+      status: 'observing',
+      reason: null,
+      window_seconds: 90,
+      containers_json: '[]',
+      started_at: 10,
+      ended_at: null,
+      created_by: 'tester',
+      target_scope: 'stack',
+      service_name: null,
+      failure_source: null,
+      deployed_generation_id: null,
+    });
+    expect(project().healthFailureSuperseded).toBe(false);
+    db.getDb().prepare('DELETE FROM health_gate_runs').run();
   });
 
   it('says why it cannot compare placement when the required targets are unreadable', () => {

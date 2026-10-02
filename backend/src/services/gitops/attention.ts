@@ -260,14 +260,20 @@ export function attentionReasons(projection: GitOpsRevisionProjection): GitOpsAt
       default:
         break;
     }
-    // A live operation on the generation this failure is about is producing the
-    // verdict that will replace it, so the target reads as work in progress
-    // rather than as a failure waiting on an operator. The facet still reports
-    // `failed`, which stays true: the last verdict really did fail, and its
-    // promotion really was withdrawn. Nothing is added in place of the reason,
-    // because any reason at all would read as `attention` rather than
+    // Work already under way on the generation this failure is about is
+    // producing the verdict that will replace it, so the target reads as work in
+    // progress rather than as a failure waiting on an operator. The facet still
+    // reports `failed`, which stays true: the last verdict really did fail, and
+    // its promotion really was withdrawn. Nothing is added in place of the
+    // reason, because any reason at all would read as `attention` rather than
     // `in_progress`, and progress is the honest answer while a redeploy runs.
-    if (target.health.status === 'failed' && !target.healthFailureSuperseded) {
+    //
+    // Read as `=== true`, never as a bare negation: a target that reached this
+    // hub from an older remote instance does not carry the flag at all, and the
+    // failure on that target has to keep being reported. The remote boundary
+    // accepts only `undefined` or a boolean, so the two reads agree there, and
+    // the strict form is what makes that the rule rather than a coincidence.
+    if (target.health.status === 'failed' && target.healthFailureSuperseded !== true) {
       reasons.add('health_failed');
     }
   }

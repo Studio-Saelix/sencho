@@ -398,6 +398,20 @@ describe('attentionReasons', () => {
     expect(attentionReasons(projection)).toContain('health_failed');
   });
 
+  it('flags a failure on a target whose projection carries no supersede flag at all', () => {
+    // What a remote instance on an older build answers with. The field is
+    // absent, so it arrives as `undefined` against a type that requires a
+    // boolean, and the failure has to keep being reported rather than being read
+    // as superseded.
+    const projection = liveProjection({
+      targets: [{
+        ...target({ runtime: runtimeAt('deploying'), health: healthAt('failed') }),
+        healthFailureSuperseded: undefined as unknown as boolean,
+      }],
+    });
+    expect(attentionReasons(projection)).toContain('health_failed');
+  });
+
   it('does not flag a failure a live operation on its own generation is about to replace', () => {
     const projection = liveProjection({
       targets: [target({

@@ -1268,6 +1268,13 @@ function isTargetRecord(value: unknown): value is Record<string, unknown> {
     // the operator the evidence is unavailable when it is merely unfamiliar.
     && (value.lkgUnavailableReason === null || isNonEmptyString(value.lkgUnavailableReason))
     && lkgMirrorsAreConsistent(value.lkg, value)
+    // Optional, and only ever read as `=== true`, because a remote instance on
+    // an older build does not send it. Accepting a truthy non-boolean here would
+    // let a malformed peer suppress a real health failure, which is the one
+    // outcome this field must never produce, so the shape is checked rather than
+    // trusted.
+    && (value.healthFailureSuperseded === undefined
+      || typeof value.healthFailureSuperseded === 'boolean')
     && typeof value.runtime.status === 'string';
 }
 

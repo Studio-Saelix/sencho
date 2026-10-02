@@ -1303,6 +1303,38 @@ describe('gitops derive to portfolio posture', () => {
     expect(attentionReasons(projection)).toContain('health_failed');
   });
 
+  /**
+   * An open health observation for a stack, as the gate records it before and
+   * during a deploy: durable, still `observing`, and bound to the generation it
+   * is watching.
+   */
+  function observeRun(
+    id: string,
+    nodeId: number,
+    stackName: string,
+    deployedGenerationId: string,
+    status: 'observing' | 'failed' | 'passed' | 'unknown' = 'observing',
+    startedAt = 1_700_000_000_000,
+  ): void {
+    DatabaseService.getInstance().insertHealthGateRun({
+      id,
+      node_id: nodeId,
+      stack_name: stackName,
+      trigger_action: 'deploy',
+      status,
+      reason: null,
+      window_seconds: 90,
+      containers_json: '[]',
+      started_at: startedAt,
+      ended_at: status === 'observing' ? null : 1_700_000_090_000,
+      created_by: 'tester',
+      target_scope: 'stack',
+      service_name: null,
+      failure_source: null,
+      deployed_generation_id: deployedGenerationId,
+    });
+  }
+
   it('reads a failed generation as work in progress while that same generation is redeployed', () => {
     const tx = GitOpsTransitions.getInstance();
     const applicationId = 'app-posture-healthredeploy';
@@ -1319,34 +1351,56 @@ describe('gitops derive to portfolio posture', () => {
     });
     expect(postureOf(projectApplication(applicationId, false))).toBe('failed');
 
-    // A retry of the failed generation, which is what the health rollout policy
-    // answers a failure with. The recorded verdict still says failed, because
-    // the redeploy has not produced one of its own yet.
+    // A redeploy of the failed generation. On this Direct path that is an
+    // operator's own redeploy: the automatic retry the health rollout policy
+    // performs dispatches through the Blueprint adapter, which refuses a Direct
+    // application, so it never opens this stage. The recorded verdict still says
+    // failed, because the redeploy has not produced one of its own yet.
     tx.deployStarted(applicationId, 1, generationId, envelope(`op-rd-${applicationId}`));
     const redeploying = projectApplication(applicationId, false);
 
     expect(redeploying.targets[0]?.runtime.status).toBe('deploying');
     expect(redeploying.targets[0]?.health.status).toBe('failed');
     // The verdict has not been overturned, so it must not be reported as needing
-    // an operator while the run that will overturn it is on the node. Progress
+    // an operator while the work that will overturn it is running. Progress
     // rather than failure: the failure reading is what the operator sees today,
     // and it names a settled state nobody is working on.
     expect(redeploying.targets[0]?.healthFailureSuperseded).toBe(true);
     expect(attentionReasons(redeploying)).not.toContain('health_failed');
     expect(postureOf(redeploying)).toBe('in_progress');
 
-    // The redeploy's own verdict is what the target reports once it lands, and
-    // the promotion it earns is not held back by the failure it replaces. The
-    // window between the bind and that verdict belongs to the health gate's own
-    // observation, which this change leaves alone: nothing is reserved yet, so
-    // the recorded failure is reported again until the new run settles.
+    // The deploy binds, which clears the active stage. The gate reserved its run
+    // before the deploy, so the observation is still open and the reading has to
+    // survive the bind. Without that, the application would report failed again
+    // for the whole observation window and an operator would watch it flip-flop:
+    // failed, in progress, failed, then the new verdict.
     tx.deployBound(applicationId, 1, generationId, envelope(`op-rd-${applicationId}`));
-    const bound = projectApplication(applicationId, false);
+    observeRun(`run-${applicationId}-watching`, 1, 'posture-healthredeploy-web', generationId);
 
-    expect(bound.targets[0]?.health.status).toBe('failed');
-    expect(bound.targets[0]?.healthFailureSuperseded).toBe(false);
-    expect(postureOf(bound)).toBe('failed');
+    const observing = projectApplication(applicationId, false);
+    expect(observing.targets[0]?.health.status).toBe('failed');
+    expect(observing.targets[0]?.healthFailureSuperseded).toBe(true);
+    expect(attentionReasons(observing)).not.toContain('health_failed');
+    expect(postureOf(observing)).toBe('in_progress');
 
+    // An observation of some other generation is not this failure's successor,
+    // so a settled failure stays a failure even while something is being watched.
+    // Started later, so it is the run a reader would take as the latest.
+    observeRun(
+      `run-${applicationId}-other`,
+      1,
+      'posture-healthredeploy-web',
+      'gen-posture-healthredeploy-other',
+      'observing',
+      1_700_000_100_000,
+    );
+    const watchingOther = projectApplication(applicationId, false);
+    expect(watchingOther.targets[0]?.healthFailureSuperseded).toBe(false);
+    expect(attentionReasons(watchingOther)).toContain('health_failed');
+    expect(postureOf(watchingOther)).toBe('failed');
+
+    // The redeploy's own verdict is what the target reports once it lands, and
+    // the promotion it earns is not held back by the failure it replaces.
     tx.healthFinalized({
       applicationId,
       nodeId: 1,

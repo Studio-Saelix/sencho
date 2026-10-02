@@ -1839,6 +1839,30 @@ describe('postureOf', () => {
     expect(row.limitations).not.toContain('evidence_unavailable');
   });
 
+  it('rejects a supersede flag that is not a boolean, and accepts it absent', () => {
+    // A truthy non-boolean from a peer must not be able to suppress a real
+    // health failure, so the row is refused rather than believed. Absent is the
+    // older-peer shape and has to keep working, which is why the field is
+    // optional at this boundary at all.
+    const projection = remoteProjection('app-bad-supersede-flag', 'bad-supersede-flag');
+    const target = remoteTarget(projection, 'reachable');
+    Object.assign(target, { healthFailureSuperseded: 'yes' });
+    projection.targets = [target];
+    expect(isUsableRevision(projection)).toBe(false);
+
+    const absent = remoteProjection('app-absent-supersede-flag', 'absent-supersede-flag');
+    const absentTarget = remoteTarget(absent, 'reachable');
+    Object.assign(absentTarget, { healthFailureSuperseded: undefined });
+    absent.targets = [absentTarget];
+    expect(isUsableRevision(absent)).toBe(true);
+
+    const boolean = remoteProjection('app-boolean-supersede-flag', 'boolean-supersede-flag');
+    const booleanTarget = remoteTarget(boolean, 'reachable');
+    Object.assign(booleanTarget, { healthFailureSuperseded: true });
+    boolean.targets = [booleanTarget];
+    expect(isUsableRevision(boolean)).toBe(true);
+  });
+
   it('rejects an empty last-known-good reason rather than reading it as one', () => {
     const projection = remoteProjection('app-empty-lkg-reason', 'empty-lkg-reason');
     const target = remoteTarget(projection, 'reachable');
