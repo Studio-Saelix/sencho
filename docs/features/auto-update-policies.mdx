@@ -10,23 +10,27 @@ description: "Review pending container updates across your fleet, with risk badg
 
 ## Overview
 
-Auto-Update Policies are the launchpad for every pending update across your stacks. Instead of a list of CRUD policies, the view surfaces one card per stack with an available update and tells you, at a glance, whether it is safe to apply.
+Auto-Update Policies are the launchpad for every pending update across your stacks. Instead of a list of CRUD policies, the view surfaces every stack with an available update and tells you, at a glance, whether it is safe to apply.
 
-Each card shows:
+Updates are listed as a table by default, one row per stack across every node. Use the **Table** / **Cards** switch above the list to change views; Sencho remembers your choice in this browser. Each row shows:
 
-- The current tag and (for semver updates) the next tag, with the new version highlighted in cyan. For digest-only updates (same tag name, new registry content), the card shows the current tag with a **Rebuild available** marker instead of a version diff. See [Tags vs digests](/features/vulnerability-scanning#tags-vs-digests).
+- The current tag and (for semver updates) the next tag, with the new version highlighted in cyan. For digest-only updates (same tag name, new registry content), the update shows the current tag with a **Rebuild available** marker instead of a version diff. See [Tags vs digests](/features/vulnerability-scanning#tags-vs-digests).
 - A **risk badge** derived from the version delta: `Safe · patch` (green), `Review · minor` (amber), `Blocked · major` (red), or `Digest rebuild` (gray) for non-semver tags.
-- The primary image reference, plus a count of additional services if more than one image in the stack has an update.
-- A one-line changelog preview when the registry publishes one. Registries that omit changelog metadata render the card with "No changelog available from the registry yet."
-- The next scheduled run for the matching auto-update task, if one exists, or "No schedule".
+- The node the stack runs on and the next scheduled run for the matching auto-update task. Stacks with no covering schedule show an **Auto: Off** marker.
+- The primary image reference, plus a count of additional services if more than one image in the stack has an update. On narrower windows the image reference moves into the row's details.
+- **Apply now** for the whole stack.
+
+Click a column header (Stack, Node, Risk, or Schedule) to sort. The default order puts the highest risk first. Expand a row with the chevron to read the one-line changelog preview (registries that omit changelog metadata show "No changelog available from the registry yet."), the reason an update is blocked, and, on stacks with several updating services, a per-service **Apply** button.
+
+The **Cards** view shows the same information as one card per stack, grouped by node, with the changelog and per-service **Apply** buttons inline.
 
 <Frame>
-  <img src="/images/auto-update/readiness-board.png" alt="Readiness board with hero counter, per-node groups, and risk badges" />
+  <img src="/images/auto-update/readiness-board.png" alt="Readiness board with hero counter and a sortable table of pending updates with risk badges" />
 </Frame>
 
 The hero at the top counts pending updates across every node in your fleet and tells you how many are ready to apply without human review. Its subtitle reads `X of Y ready to apply automatically across N nodes`. Stacks with a major version bump are surfaced as a separate count (`· Z blocked by major bump`) so they can be reviewed before the scheduler runs.
 
-Cards are grouped by node, with a section header for each node that has at least one pending update. The header shows the node name, a `local` or `remote` pill, and the stack count. The local node is listed first, followed by remote nodes alphabetically. If any of your online nodes is unreachable when the page loads, a small line under the hero reads `X of Y nodes reachable. Unreachable nodes are not shown.`
+In the **Cards** view, cards are grouped by node, with a section header for each node that has at least one pending update. The header shows the node name, a `local` or `remote` pill, and the stack count. The local node is listed first, followed by remote nodes alphabetically. If any of your online nodes is unreachable when the page loads, a small line under the hero reads `X of Y nodes reachable. Unreachable nodes are not shown.`
 
 ## Empty state
 
@@ -53,7 +57,7 @@ A registry check can fail for reasons that have nothing to do with whether an up
 Where it shows:
 
 - **Sidebar.** A stack whose latest check could not be determined shows a muted indicator on its row. Hover it to read the reason (for example, "Authentication failed for ghcr.io/acme/api:v1" or "Registry unreachable for ghcr.io/acme/api:v1").
-- **Update board.** Stacks whose check failed appear in a "could not be checked" advisory above the card grid, each with its reason, so a stack with no confirmed update is never silently absent.
+- **Update board.** Stacks whose check failed appear in a "could not be checked" advisory above the list of updates, each with its reason, so a stack with no confirmed update is never silently absent.
 
 A confirmed update from an earlier successful check is kept through a later failed check, so a momentary registry blip does not make a pending update vanish.
 
@@ -68,8 +72,8 @@ Once the cause is resolved, the next check (on the interval, or via **Recheck**)
 ## Workflow
 
 1. Open **Update** from the top nav strip.
-2. Skim the card grid. The badge tells you the risk at a glance: `Safe · patch` is green, `Review · minor` is amber, `Blocked · major` is red, a digest-only rebuild on a non-semver tag shows the gray `Digest rebuild` badge, `Check uncertain` appears when the last preview check was incomplete or failed, and `Newer tag · edit Compose` marks a higher tag that requires editing the Compose pin.
-3. For a **Digest rebuild** (same Compose tag, new registry content), click **Apply now** on the card to pull and recreate the stack immediately. **Apply now** stays disabled for tag-only advisories and for uncertain checks.
+2. Skim the table. The badge tells you the risk at a glance: `Safe · patch` is green, `Review · minor` is amber, `Blocked · major` is red, a digest-only rebuild on a non-semver tag shows the gray `Digest rebuild` badge, `Check uncertain` appears when the last preview check was incomplete or failed, and `Newer tag · edit Compose` marks a higher tag that requires editing the Compose pin.
+3. For a **Digest rebuild** (same Compose tag, new registry content), click **Apply now** on its row to pull and recreate the stack immediately. **Apply now** stays disabled for tag-only advisories and for uncertain checks.
 4. For a higher pinned semver tag (a version diff such as `1.2.3` → `1.2.4`, including major bumps), edit the Compose `image:` reference to the next tag, then deploy the stack from the editor. **Apply now** and the lifecycle **Update** action pull the currently pinned tag only; they do not rewrite the pin.
 5. For a major bump, review the changelog preview and upstream release notes before changing the pin and deploying. **Apply now** is disabled on blocked cards.
 
@@ -84,7 +88,7 @@ On multi-service stacks, the Updates view can also apply a single service when t
 |-------|-------|-----------------|
 | `Safe · patch` | Green (Shield icon) | Patch-level semver bump (e.g. `1.2.3` to `1.2.4`). Resolve by editing the Compose pin, then deploying. |
 | `Review · minor` | Amber (AlertTriangle icon) | Minor semver bump (e.g. `1.2.3` to `1.3.0`). Resolve by editing the Compose pin, then deploying. |
-| `Blocked · major` | Red (ShieldAlert icon) | Major semver bump (e.g. `1.2.3` to `2.0.0`). **Apply now** is disabled; the card surfaces the reason "Major version jumps require human review before applying." After review, edit the Compose pin, then deploy. |
+| `Blocked · major` | Red (ShieldAlert icon) | Major semver bump (e.g. `1.2.3` to `2.0.0`). **Apply now** is disabled; the row's details surface the reason "Major version jumps require human review before applying." After review, edit the Compose pin, then deploy. |
 | `Digest rebuild` | Gray | Non-semver tag (e.g. `main`, `stable`) with an updated digest (tag name unchanged; content changed; see [Tags vs digests](/features/vulnerability-scanning#tags-vs-digests)). **Apply now** pulls this rebuild. |
 | `Check uncertain` | Amber | Preview check incomplete or failed; **Apply now** stays disabled until a full successful check. |
 | `Newer tag · edit Compose` | Amber | A higher tag exists than the Compose pin; edit Compose (do not use **Apply now**). |
@@ -139,7 +143,7 @@ For each stack with a pending image update, Sencho computes a preview by:
 
 1. Parsing the compose file to enumerate every service that pulls a registry image (a service declaring only `build:`, with no `image:` key, has no registry reference to check and is excluded from this preview).
 2. Calling the registry with your configured credentials to fetch the current tag list and remote digest.
-3. Picking the highest semver tag greater than the current tag (keeping the same prefix and suffix). If a higher tag exists, the card surfaces as a tag-only advisory (`Newer tag · edit Compose`); scheduled auto-update and **Apply now** do not rewrite Compose pins. If the highest available tag matches the current one but the remote digest has changed, the card surfaces as a Compose-actionable `Rebuild available` / digest update. Sencho checks both a newer semver tag and a digest change behind the same tag; see [Tags vs digests](/features/vulnerability-scanning#tags-vs-digests).
+3. Picking the highest semver tag greater than the current tag (keeping the same prefix and suffix). If a higher tag exists, the stack surfaces as a tag-only advisory (`Newer tag · edit Compose`); scheduled auto-update and **Apply now** do not rewrite Compose pins. If the highest available tag matches the current one but the remote digest has changed, the stack surfaces as a Compose-actionable `Rebuild available` / digest update. Sencho checks both a newer semver tag and a digest change behind the same tag; see [Tags vs digests](/features/vulnerability-scanning#tags-vs-digests).
 4. Scoring the overall stack by the most severe image bump. Any major bump marks the stack as blocked.
 5. Normalizing Docker Hub library paths so credentials and changelog lookups resolve correctly.
 
@@ -151,7 +155,7 @@ A stack that mixes registry images and `build:` services still gets a card, scor
 
 <AccordionGroup>
   <Accordion title='Card shows "No changelog available"'>
-    Sencho reads changelog metadata from the registry's manifest and OCI annotations. Registries that do not publish this metadata (most private registries and many self-hosted ones) render the card without a changelog. The risk badge is still accurate because it is computed from the tag itself.
+    Sencho reads changelog metadata from the registry's manifest and OCI annotations. Registries that do not publish this metadata (most private registries and many self-hosted ones) render the update without a changelog. The risk badge is still accurate because it is computed from the tag itself.
   </Accordion>
   <Accordion title='Apply now is disabled with a "Blocked · major" tooltip'>
     The stack has a major version bump and is blocked on the readiness board by policy: major updates never auto-apply without human review. After reviewing the upstream release notes, edit the Compose `image:` pin to the reviewed next tag, then deploy the stack from the editor. **Apply now** and lifecycle **Update** pull the currently pinned tag only; they do not bump the pin.
@@ -171,7 +175,7 @@ A stack that mixes registry images and `build:` services still gets a card, scor
     The registry publishes a higher pinned semver tag than the one written in Compose. The readiness board and sidebar keep that advisory visible. Scheduled auto-update leaves Compose as the source of truth, so it skips pull and recreate until the pin is updated. Edit the Compose `image:` reference to the next tag, then deploy the stack. **Apply now** and lifecycle **Update** cannot rewrite the pin.
   </Accordion>
   <Accordion title='Apply now finished but the readiness card still shows a newer tag'>
-    Compose still pins the older tag. Apply pulls and recreates that pinned tag only. To move to the next tag shown on the card, edit the Compose `image:` reference, then deploy.
+    Compose still pins the older tag. Apply pulls and recreates that pinned tag only. To move to the next tag shown for the stack, edit the Compose `image:` reference, then deploy.
   </Accordion>
   <Accordion title='Apply now finished but the digest rebuild badge stays'>
     The badge means new image content is published behind the same tag. If an update does not clear it, your Docker daemon may be pulling through a registry mirror that still serves the old content, or the container may still run the previous image. Check your daemon configuration for a `registry-mirrors` entry, or recreate the service with `docker compose up -d --force-recreate` on the affected stack.

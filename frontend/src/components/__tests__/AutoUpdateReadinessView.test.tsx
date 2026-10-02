@@ -537,6 +537,7 @@ describe('AutoUpdateReadinessView desktop Apply now', () => {
   const mockedFetchForNode = fetchForNode as unknown as ReturnType<typeof vi.fn>;
 
   afterEach(() => {
+    localStorage.clear();
     mockedFetch.mockReset();
     mockedFetchForNode.mockReset();
     mockNodeMeta.clear();
@@ -655,6 +656,8 @@ describe('AutoUpdateReadinessView desktop Apply now', () => {
       recoveryAvailable: false,
     });
 
+    // Per-service Apply sits inline on the card; the table keeps it in the expanded row.
+    localStorage.setItem('sencho-readiness-view', 'cards');
     render(<AutoUpdateReadinessView />);
     const serviceApply = await screen.findByRole('button', { name: /^Apply$/i });
     // Digest-rebuild headline opens an accessible popover (not hover-only title).
@@ -994,6 +997,8 @@ describe('AutoUpdateReadinessView desktop Apply now', () => {
       recoveryAvailable: false,
     });
 
+    // Per-service Apply sits inline on the card; the table keeps it in the expanded row.
+    localStorage.setItem('sencho-readiness-view', 'cards');
     render(<AutoUpdateReadinessView />);
 
     const applyBtn = await screen.findByRole('button', { name: /Apply now/i });

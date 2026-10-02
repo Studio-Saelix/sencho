@@ -2,7 +2,10 @@ import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } fro
 import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
-import { RefreshCw, Shield, AlertTriangle, ShieldAlert, CircleSlash, Clock, Play, CalendarClock, Monitor, Globe } from 'lucide-react';
+import { SegmentedControl } from '@/components/ui/segmented-control';
+import { SortableTableHead } from '@/components/ui/sortable-table';
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
+import { RefreshCw, Shield, AlertTriangle, ShieldAlert, CircleSlash, Clock, Play, CalendarClock, Monitor, Globe, ChevronRight } from 'lucide-react';
 import { toast } from '@/components/ui/toast-store';
 import { apiFetch, fetchForNode } from '@/lib/api';
 import { formatTimeAgo } from '@/lib/relativeTime';
@@ -23,6 +26,8 @@ import { DigestRebuildHint } from '@/components/DigestRebuildHint';
 import { useNodes } from '@/context/NodeContext';
 import { useAuth } from '@/context/AuthContext';
 import { useIsMobile } from '@/hooks/use-is-mobile';
+import { useTableSort } from '@/hooks/useTableSort';
+import { useReadinessViewMode } from '@/hooks/useReadinessViewMode';
 import { Masthead, Kicker } from '@/components/mobile/mobile-ui';
 import { ImageSourceMenu } from './ImageSourceMenu';
 import type { ScheduledTask } from '@/types/scheduling';
@@ -592,6 +597,294 @@ function NodeGroupSection({
   );
 }
 
+// --- desktop table view -------------------------------------------------------
+
+interface ReadinessRow {
+  card: StackCard;
+  nodeName: string;
+  canServiceUpdate: boolean;
+}
+
+/** Higher means more attention needed; drives the default Risk sort. */
+function riskRank(card: StackCard): number {
+  if (!card.previewLoaded) return 0;
+  if (card.verificationNote) return 4;
+  const p = card.preview;
+  if (!p) return 3;
+  if (p.summary.blocked || p.summary.semver_bump === 'major') return 5;
+  if (isReviewRequiredUpdatePreview(p) || isPreviewUncertain(p)) return 4;
+  if (p.summary.semver_bump === 'minor') return 2;
+  if (p.summary.semver_bump === 'patch') return 1;
+  return 0;
+}
+
+const READINESS_COMPARATORS = {
+  stack: (a: ReadinessRow, b: ReadinessRow) => a.card.stack.localeCompare(b.card.stack),
+  node: (a: ReadinessRow, b: ReadinessRow) => a.nodeName.localeCompare(b.nodeName),
+  risk: (a: ReadinessRow, b: ReadinessRow) => riskRank(a.card) - riskRank(b.card),
+  schedule: (a: ReadinessRow, b: ReadinessRow) =>
+    (a.card.scheduledTask?.next_run_at ?? Number.MAX_SAFE_INTEGER)
+    - (b.card.scheduledTask?.next_run_at ?? Number.MAX_SAFE_INTEGER),
+};
+
+const HEAD_CLASS = 'font-mono text-[10px] uppercase tracking-[0.18em] [&_button]:uppercase';
+const COLUMN_COUNT = 8;
+
+function ReadinessTableRow({
+  row,
+  expanded,
+  onToggle,
+  onApply,
+  onApplyService,
+}: {
+  row: ReadinessRow;
+  expanded: boolean;
+  onToggle: () => void;
+  onApply: (stack: string, nodeId: number) => void;
+  onApplyService: (stack: string, nodeId: number, serviceName: string) => void;
+}) {
+  const { card, nodeName, canServiceUpdate } = row;
+  const { stack, nodeId, preview, previewLoaded, scheduledTask, applying, applyingService, autoUpdateEnabled, verificationNote } = card;
+  const loading = !previewLoaded;
+  const uncertain = previewLoaded && !!verificationNote;
+  const failed = previewLoaded && preview === null && !verificationNote;
+  const hasDetail = previewLoaded && !verificationNote && preview !== null;
+  const blocked = preview?.summary.blocked ?? false;
+  const reviewRequired = isReviewRequiredUpdatePreview(preview);
+  const verificationOnly = isVerificationOnlyPreview(preview);
+  const updatingImages = preview?.images.filter(i => i.has_update) ?? [];
+  const showServiceApply = canServiceUpdate && declaredServiceCount(preview) > 1 && updatingImages.length > 0;
+  const nextRun = scheduledTask?.next_run_at ?? null;
+  const applyDisabled = !isActionableUpdatePreview(preview) || applying || applyingService !== null;
+  let applyTitle: string | undefined;
+  if (blocked) applyTitle = preview?.summary.blocked_reason ?? undefined;
+  else if (verificationOnly) applyTitle = 'Digest verification failed';
+  else if (reviewRequired) applyTitle = 'Another image in this stack failed digest verification; apply the confirmed service individually or resolve verification first.';
+
+  let change: ReactNode;
+  if (loading) {
+    change = <span className="font-mono text-xs text-stat-subtitle/80">Checking registry...</span>;
+  } else if (uncertain) {
+    change = <span className="block max-w-[20rem] truncate font-mono text-xs text-warning" title={verificationNote ?? undefined}>{verificationNote}</span>;
+  } else if (failed || !preview) {
+    change = <span className="font-mono text-xs text-destructive/80">Preview failed. Registry may be unreachable.</span>;
+  } else if (preview.summary.verification_failed && !preview.summary.has_update) {
+    change = (
+      <span className="font-mono text-xs text-warning" data-testid="readiness-verification-failed">
+        {withErrorDetail('Digest verification failed', preview.summary.verification_error)}
+      </span>
+    );
+  } else if (preview.summary.update_kind === 'digest') {
+    change = (
+      <span className="inline-flex items-baseline gap-2 font-mono text-xs">
+        <span className="text-stat-subtitle">{preview.summary.current_tag}</span>
+        <DigestRebuildHint className="text-brand text-[10px] leading-3 uppercase tracking-[0.18em]">
+          Rebuild available
+        </DigestRebuildHint>
+      </span>
+    );
+  } else {
+    change = <VersionDiff current={preview.summary.current_tag} next={preview.summary.next_tag} />;
+  }
+
+  let schedule: ReactNode = null;
+  if (loading) {
+    // Nothing to show until the registry check settles.
+  } else if (hasDetail && nextRun) {
+    schedule = (
+      <span className="tabular-nums">
+        <span className="text-stat-value">{formatClock(nextRun)}</span>
+        <span className="text-stat-subtitle/70"> · {formatRelative(nextRun)}</span>
+      </span>
+    );
+  } else if (!autoUpdateEnabled) {
+    schedule = (
+      <span className="inline-flex items-center gap-1 rounded-full border border-card-border bg-muted/30 px-2 py-0.5 font-mono text-[10px] leading-3 uppercase tracking-[0.18em] whitespace-nowrap">
+        <CircleSlash className="h-3 w-3" strokeWidth={1.5} aria-hidden="true" />
+        Auto: Off
+      </span>
+    );
+  } else if (hasDetail) {
+    schedule = 'No schedule';
+  }
+
+  return (
+    <>
+      <TableRow data-testid="readiness-row">
+        <TableCell className="w-8 pr-0">
+          {hasDetail && (
+            <button
+              type="button"
+              onClick={onToggle}
+              aria-expanded={expanded}
+              aria-label={`${expanded ? 'Hide' : 'Show'} details for ${stack}`}
+              className="flex h-6 w-6 items-center justify-center rounded text-stat-subtitle hover:text-stat-value focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            >
+              <ChevronRight
+                className={`h-4 w-4 transition-transform duration-[var(--duration-base)] ${expanded ? 'rotate-90' : ''}`}
+                strokeWidth={1.5}
+                aria-hidden="true"
+              />
+            </button>
+          )}
+        </TableCell>
+        <TableCell>
+          <span className="font-mono text-sm text-stat-value whitespace-nowrap" data-testid="readiness-stack">{stack}</span>
+        </TableCell>
+        <TableCell className="font-mono text-xs text-stat-subtitle">
+          {nodeName}
+        </TableCell>
+        <TableCell className="max-2xl:hidden">
+          {preview && hasDetail && (
+            <span className="inline-flex max-w-[18rem] items-center gap-1.5 font-mono text-[11px] text-stat-subtitle/80">
+              <span className="truncate">{preview.summary.primary_image ?? '-'}</span>
+              {updatingImages.length > 1 && (
+                <span className="text-stat-subtitle/60">· {updatingImages.length} services</span>
+              )}
+              <ImageSourceMenu imageRef={preview.summary.primary_image} />
+            </span>
+          )}
+        </TableCell>
+        <TableCell className="whitespace-nowrap">{change}</TableCell>
+        <TableCell className="whitespace-nowrap">
+          {previewLoaded && preview && (
+            <RiskBadge
+              bump={preview.summary.semver_bump}
+              blocked={blocked}
+              reviewRequired={reviewRequired}
+              uncertain={isPreviewUncertain(preview)}
+              tagOnly={isTagOnlyAdvisory(preview)}
+            />
+          )}
+        </TableCell>
+        <TableCell className="font-mono text-[11px] text-stat-subtitle">
+          {schedule}
+        </TableCell>
+        <TableCell className="text-right">
+          {hasDetail && (
+            <Button
+              size="sm"
+              onClick={() => onApply(stack, nodeId)}
+              disabled={applyDisabled}
+              title={applyTitle}
+              aria-label={`Apply now to ${stack}`}
+              className="gap-1.5"
+            >
+              <Play className="h-3.5 w-3.5" strokeWidth={1.5} aria-hidden="true" />
+              {applying ? 'Applying...' : 'Apply now'}
+            </Button>
+          )}
+        </TableCell>
+      </TableRow>
+      {hasDetail && expanded && preview && (
+        <TableRow className="hover:bg-transparent bg-muted/10" data-testid="readiness-row-detail">
+          <TableCell />
+          <TableCell colSpan={COLUMN_COUNT - 1} className="space-y-3">
+            <div className="inline-flex items-center gap-1.5 font-mono text-[11px] text-stat-subtitle/80 2xl:hidden">
+              <span>{preview.summary.primary_image ?? '-'}</span>
+              <ImageSourceMenu imageRef={preview.summary.primary_image} />
+            </div>
+            {preview.summary.verification_failed && preview.summary.has_update && (
+              <div className="font-mono text-[11px] text-warning" data-testid="readiness-verification-warning">
+                {withErrorDetail('Digest check could not be verified', preview.summary.verification_error)}
+              </div>
+            )}
+            <div className="text-xs text-stat-subtitle/90 leading-relaxed">
+              {preview.changelog ?? 'No changelog available from the registry yet.'}
+            </div>
+            {blocked && preview.summary.blocked_reason && (
+              <div className="rounded border border-destructive/25 bg-destructive/5 px-3 py-2 text-[11px] text-destructive/90">
+                {preview.summary.blocked_reason}
+              </div>
+            )}
+            {showServiceApply && (
+              <div className="flex flex-col gap-1.5 rounded-md border border-card-border bg-muted/20 p-2">
+                {updatingImages.map(img => (
+                  <div key={img.service} className="flex items-center justify-between gap-2">
+                    <span className="truncate font-mono text-[11px] text-stat-subtitle">{img.service}</span>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      className="h-6 gap-1 rounded-md px-2 text-[11px]"
+                      onClick={() => onApplyService(stack, nodeId, img.service)}
+                      disabled={blocked || applying || applyingService !== null || !isServiceApplyActionable(preview, img.service)}
+                    >
+                      {applyingService === img.service ? 'Applying...' : 'Apply'}
+                    </Button>
+                  </div>
+                ))}
+              </div>
+            )}
+          </TableCell>
+        </TableRow>
+      )}
+    </>
+  );
+}
+
+function ReadinessTable({
+  groups,
+  serviceScopedNodeIds,
+  onApply,
+  onApplyService,
+}: {
+  groups: NodeGroup[];
+  serviceScopedNodeIds: Set<number>;
+  onApply: (stack: string, nodeId: number) => void;
+  onApplyService: (stack: string, nodeId: number, serviceName: string) => void;
+}) {
+  const rows = useMemo<ReadinessRow[]>(
+    () => groups.flatMap(g => g.cards.map(card => ({
+      card,
+      nodeName: g.nodeName,
+      canServiceUpdate: serviceScopedNodeIds.has(g.nodeId),
+    }))),
+    [groups, serviceScopedNodeIds],
+  );
+  const { sorted, sortKey, sortDir, toggleSort } = useTableSort(rows, READINESS_COMPARATORS, 'risk', 'desc');
+  const [expanded, setExpanded] = useState<Set<string>>(() => new Set());
+  const toggleRow = (key: string) => setExpanded(prev => {
+    const next = new Set(prev);
+    if (next.has(key)) next.delete(key);
+    else next.add(key);
+    return next;
+  });
+
+  return (
+    <Card className="overflow-hidden" data-testid="readiness-table">
+      <Table>
+        <TableHeader>
+          <TableRow className="hover:bg-transparent">
+            <TableHead className="w-8 pr-0"><span className="sr-only">Details</span></TableHead>
+            <SortableTableHead label="Stack" columnKey="stack" activeKey={sortKey} dir={sortDir} onSort={toggleSort} className={HEAD_CLASS} />
+            <SortableTableHead label="Node" columnKey="node" activeKey={sortKey} dir={sortDir} onSort={toggleSort} className={HEAD_CLASS} />
+            <TableHead className={`${HEAD_CLASS} max-2xl:hidden`}>Image</TableHead>
+            <TableHead className={HEAD_CLASS}>Change</TableHead>
+            <SortableTableHead label="Risk" columnKey="risk" activeKey={sortKey} dir={sortDir} onSort={toggleSort} className={HEAD_CLASS} />
+            <SortableTableHead label="Schedule" columnKey="schedule" activeKey={sortKey} dir={sortDir} onSort={toggleSort} className={HEAD_CLASS} />
+            <TableHead className={`${HEAD_CLASS} text-right`}>Action</TableHead>
+          </TableRow>
+        </TableHeader>
+        <TableBody>
+          {sorted.map(row => {
+            const key = `${row.card.nodeId}::${row.card.stack}`;
+            return (
+              <ReadinessTableRow
+                key={key}
+                row={row}
+                expanded={expanded.has(key)}
+                onToggle={() => toggleRow(key)}
+                onApply={onApply}
+                onApplyService={onApplyService}
+              />
+            );
+          })}
+        </TableBody>
+      </Table>
+    </Card>
+  );
+}
+
 // --- mobile (<md) bespoke pieces ---------------------------------------------
 
 /** One-up readiness card for the phone screen. Reuses RiskBadge + VersionDiff
@@ -1101,6 +1394,8 @@ function AutoUpdateReadinessContent({ headerActions }: AutoUpdateReadinessProps)
     }
   }, [loadReadiness, loadCadence]);
 
+  const { mode: viewMode, setMode: setViewMode } = useReadinessViewMode();
+
   // Nodes that advertise service-scoped updates, resolved per node (not just
   // the active one) since this view spans the whole fleet.
   const serviceScopedNodeIds = useMemo(
@@ -1399,16 +1694,38 @@ function AutoUpdateReadinessContent({ headerActions }: AutoUpdateReadinessProps)
           </div>
         </div>
       ) : (
-        <div className="flex flex-col gap-8">
-          {groups.map(group => (
-            <NodeGroupSection
-              key={group.nodeId}
-              group={group}
-              canServiceUpdate={serviceScopedNodeIds.has(group.nodeId)}
+        <div className="flex flex-col gap-4">
+          <div className="flex justify-end">
+            <SegmentedControl
+              ariaLabel="Update view"
+              value={viewMode}
+              onChange={setViewMode}
+              options={[
+                { value: 'table', label: 'Table' },
+                { value: 'cards', label: 'Cards' },
+              ]}
+            />
+          </div>
+          {viewMode === 'table' ? (
+            <ReadinessTable
+              groups={groups}
+              serviceScopedNodeIds={serviceScopedNodeIds}
               onApply={handleApply}
               onApplyService={handleApplyService}
             />
-          ))}
+          ) : (
+            <div className="flex flex-col gap-8">
+              {groups.map(group => (
+                <NodeGroupSection
+                  key={group.nodeId}
+                  group={group}
+                  canServiceUpdate={serviceScopedNodeIds.has(group.nodeId)}
+                  onApply={handleApply}
+                  onApplyService={handleApplyService}
+                />
+              ))}
+            </div>
+          )}
         </div>
       )}
     </div>
