@@ -148,19 +148,27 @@ function storedCandidateContentSha256(raw: string | null): string | null {
 }
 
 /**
- * The verdict half of a stored security-policy evidence column, for the reuse
+ * The decision half of a stored security-policy evidence column, for the reuse
  * comparison.
  *
- * Compared as a projection rather than as raw text so the comparison is about
- * the decision and not about its encoding. Two consequences, both intended: the
- * column has grown fields since it was introduced, and a text comparison would
- * then mint a replacement generation for every existing source the first time
- * it polls after an upgrade, on an unchanged verdict; and two encodings of the
- * same verdict differing only in key order would read as a change. An
+ * Compared as a projection rather than as raw text, for two reasons. The
+ * comparison is then about the decision rather than its encoding, so key order
+ * and whitespace cannot read as a change. And the applications are part of the
+ * projection, which is the point: an acceptance on unproven evidence and a clean
+ * one share a status and a policy id, so a verdict-only comparison would reuse
+ * the generation recorded for one of them when the other is re-polled, leaving
+ * the attribution column describing a decision this poll did not reach.
+ *
+ * A legacy column predating the applications field decodes to an absent one, and
+ * this normalizes an absent list to `[]`, so the first poll after an upgrade that
+ * reaches an unchanged verdict reuses its generation rather than minting a
+ * replacement for every existing source. That is safe in the one direction it
+ * can be wrong in: it is the *stored* row that keeps the older, thinner record,
+ * and the next poll that reaches any different decision replaces it. An
  * unparseable or absent column yields null, which never matches, so auto-accept
  * re-evaluates and writes a fresh row instead of reusing an unreadable one.
  */
-function securityPolicyVerdict(raw: string | null): string | null {
+function securityPolicyDecision(raw: string | null): string | null {
     if (!raw) return null;
     let decoded: unknown;
     try {
@@ -169,7 +177,13 @@ function securityPolicyVerdict(raw: string | null): string | null {
         return null;
     }
     if (!isRecord(decoded)) return null;
-    return JSON.stringify({ status: decoded.status ?? null, policyId: decoded.policyId ?? null });
+    const applications = Array.isArray(decoded.evidenceApplications) ? decoded.evidenceApplications : [];
+    return JSON.stringify({
+        status: decoded.status ?? null,
+        policyId: decoded.policyId ?? null,
+        evidenceOutcome: decoded.evidenceOutcome ?? null,
+        evidenceApplications: applications,
+    });
 }
 
 function candidateContentSha256FromDisk(
@@ -4798,7 +4812,7 @@ export class GitSourceService {
         });
         if (
             generation.source_policy_evidence_json === sourceEvidenceJson
-            && securityPolicyVerdict(generation.security_policy_evidence_json) === securityPolicyVerdict(securityEvidenceJson)
+            && securityPolicyDecision(generation.security_policy_evidence_json) === securityPolicyDecision(securityEvidenceJson)
         ) {
             return { status: 'reuse', generation };
         }

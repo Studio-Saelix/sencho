@@ -97,6 +97,38 @@ describe('describePolicyBlock', () => {
     expect(msg).not.toContain('redis:7');
   });
 
+  it('names the unscanned images alongside the matches on a mixed block', () => {
+    // A payload can carry both a real match and an image the gate could not scan.
+    // Naming only the match leaves the operator fixing what they can see, then
+    // redeploying into the same block, and on the unattended paths this sentence
+    // is all they get.
+    const msg = describePolicyBlock(
+      policy,
+      [violation({ imageRef: 'nginx:1.14', reasons: ['kev'] }), violation({ imageRef: 'redis:7', error: 'Pre-flight scan failed: timeout' })],
+      'update',
+      {
+        outcome: 'block',
+        records: [],
+        applications: [
+          { source: 'vulnerability_scan', state: 'failed', outcome: 'block', rule: 'security_scan_failure=block', target: 'redis:7' },
+        ],
+        summary: 'Failed evidence for vulnerability_scan: block (security_scan_failure=block)',
+      },
+    );
+    expect(msg).toContain('1 image(s) matched');
+    expect(msg).toContain('images=[nginx:1.14]');
+    // The unscanned image is named as its own clause, not folded into the match
+    // count, which would overstate how many images matched.
+    expect(msg).toContain('1 image(s) could not be scanned');
+    expect(msg).toContain('images=[redis:7]');
+  });
+
+  it('says nothing extra on a block with no evidence gap', () => {
+    const msg = describePolicyBlock(policy, [violation({ reasons: ['kev'] })], 'update');
+    expect(msg).not.toContain('could not be scanned');
+    expect(msg).not.toContain('could not be evaluated');
+  });
+
   it('names the images it could not evaluate when no rule blocked', () => {
     // An evaluation failure produces a record and a violation but no
     // application, so this is the sentence that has to name the image.

@@ -59,7 +59,19 @@ export function describePolicyBlock(
     // message: on the unattended paths this sentence is the only account of which
     // images were involved.
     const images = genuine.map((v) => v.imageRef).join(', ');
-    return `Policy "${name}" blocked ${action}: ${genuine.length} image(s) matched ${summarizeBlockReasons(genuine)} images=[${images}]`;
+    const matched = `Policy "${name}" blocked ${action}: ${genuine.length} image(s) matched ${summarizeBlockReasons(genuine)} images=[${images}]`;
+    // A payload can carry a genuine match *and* images the gate could not examine.
+    // Naming only the matches leaves the second half of the block invisible here:
+    // the operator fixes these, redeploys, and only then meets the other one. The
+    // matches are still the reason the block happened, so they stay the subject
+    // and this is a second clause rather than a rewritten sentence.
+    const unscanned = violations
+      .filter((v) => v.error && !NON_IMAGE_TARGETS.has(v.imageRef))
+      .map((v) => v.imageRef);
+    if (unscanned.length > 0) {
+      return `${matched}; ${unscanned.length} image(s) could not be scanned images=[${unscanned.join(', ')}]`;
+    }
+    return matched;
   }
   // Only a rule that actually blocked makes this sentence the account of the
   // block. An application that merely allowed or warned about one image is not

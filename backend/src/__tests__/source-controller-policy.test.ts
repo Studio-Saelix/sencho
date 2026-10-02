@@ -657,6 +657,96 @@ describe('SourceController automatic acceptance', () => {
         expect(persisted.evidenceApplications).toEqual([]);
     });
 
+    it('replaces the generation when the recorded rule applications change', async () => {
+        // The defect a verdict-only comparison leaves open. An acceptance on
+        // unproven evidence and a clean one share a status and a policy id, so a
+        // re-poll that reached the other verdict reused the generation recorded
+        // for the first, and the attribution column kept describing a decision
+        // this poll never reached. Same candidate, polled twice, the scan failing
+        // on the second pass.
+        stageCandidate('app-ev-rule', 'ev-rule-web', 'gen-ev-rule', 'automatic', {
+            securityEvidence: JSON.stringify({
+                status: 'allowed',
+                policyId: null,
+                evidenceOutcome: 'allow',
+                evidenceApplications: [],
+            }),
+        });
+        mockDue([armDuePoll('app-ev-rule')]);
+        evaluateCandidatePolicy.mockResolvedValue({
+            status: 'allowed',
+            policy: undefined,
+            evidence: {
+                outcome: 'allow',
+                records: [{
+                    source: 'vulnerability_scan',
+                    state: 'failed',
+                    target: 'nginx:1.27',
+                    collectedAt: null,
+                    reason: 'Pre-flight scan failed: timeout',
+                }],
+                applications: [{
+                    source: 'vulnerability_scan',
+                    state: 'failed',
+                    outcome: 'allow',
+                    rule: 'security_scan_failure=allow',
+                    target: 'nginx:1.27',
+                }],
+                summary: 'Failed evidence for vulnerability_scan: allow (security_scan_failure=allow)',
+            },
+        });
+        spyOnReconcile().mockResolvedValue(okResult);
+        spyOnDispatch();
+
+        controller.start();
+        await advanceOneTick();
+
+        const acceptedId = getApp('app-ev-rule').accepted_generation_id;
+        expect(acceptedId).not.toBe('gen-ev-rule');
+        const generations = GitOpsStore.getInstance().listGenerationsForApplication('app-ev-rule');
+        expect(generations).toHaveLength(2);
+        const replacement = generations.find((row) => row.id === acceptedId)!;
+        expect(replacement.previous_generation_id).toBe('gen-ev-rule');
+        // The replacement has to carry the rule, or the acceptance is
+        // indistinguishable from the clean one it stands in for.
+        const persisted = JSON.parse(replacement.security_policy_evidence_json!);
+        expect(persisted.evidenceApplications).toEqual([
+            expect.objectContaining({ rule: 'security_scan_failure=allow', target: 'nginx:1.27' }),
+        ]);
+    });
+
+    it('still reuses a legacy generation whose column predates the applications field', async () => {
+        // The other side of that comparison, and the reason it is a projection
+        // rather than raw text. A column written before the applications existed
+        // decodes to an absent one, which normalizes to the same empty list a
+        // clean verdict now stores. Without that, the first poll after an upgrade
+        // would mint a replacement generation for every existing source on an
+        // unchanged verdict, which the operator would read as its source history
+        // being rewritten.
+        //
+        // The legacy column carries no outcome at all, so the verdict under test
+        // is one with no evidence object: a candidate the evaluator never
+        // examined. That is the case the absent-field normalization has to hold,
+        // since it is the only shape a pre-upgrade row can take for this path.
+        const legacyJson = JSON.stringify({ status: 'allowed', policyId: 7 });
+        stageCandidate('app-ev-legacy', 'ev-legacy-web', 'gen-ev-legacy', 'automatic', {
+            securityEvidence: legacyJson,
+        });
+        mockDue([armDuePoll('app-ev-legacy')]);
+        evaluateCandidatePolicy.mockResolvedValue({ status: 'allowed', policy: policyRow() });
+        spyOnReconcile().mockResolvedValue(okResult);
+        spyOnDispatch();
+
+        controller.start();
+        await advanceOneTick();
+
+        expect(getApp('app-ev-legacy').accepted_generation_id).toBe('gen-ev-legacy');
+        expect(GitOpsStore.getInstance().listGenerationsForApplication('app-ev-legacy')).toHaveLength(1);
+        // The legacy row is left exactly as it was, not rewritten to the new shape.
+        expect(GitOpsStore.getInstance().getGeneration('gen-ev-legacy')!.security_policy_evidence_json)
+            .toBe(legacyJson);
+    });
+
     it('does not accept when the application fingerprint changed after candidate creation', async () => {
         stageCandidate('app-fp-changed', 'fp-changed-web', 'gen-fp-changed');
         DatabaseService.getInstance().getDb().prepare(

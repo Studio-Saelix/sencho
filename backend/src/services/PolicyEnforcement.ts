@@ -855,14 +855,15 @@ export async function evaluateCandidatePolicy(
     const unprovenTargets = new Set<string>();
     for (const r of result.evidence?.records ?? []) {
         // `partial` is deliberately not counted here. It says the per-finding
-        // detail rows were truncated, which only affects a verdict that reads
-        // KEV or fixability out of them. When the policy has either input, the
-        // evaluator has already turned the truncation into a genuine violation,
-        // so the candidate is refused above on the merits and the record adds
-        // nothing. When it has neither, the only input is severity, which comes
-        // from the scan's complete aggregate, so a truncated read cannot change
-        // the verdict at all. Holding on it there would refuse a candidate the
-        // policy had in fact decided about.
+        // detail rows were truncated, which only reaches a verdict that reads
+        // known-exploited or fixability out of them. When the policy has either
+        // input, the evaluator has already turned the truncation into a genuine
+        // violation, so the candidate is refused above on the merits and this
+        // record adds nothing. When it has neither, the only input is severity,
+        // which comes from the scan's complete aggregate: a truncated read can
+        // only withhold the suppressions that would have *removed* a finding, so
+        // it cannot turn an allowed image into a blocked one. Holding on it there
+        // would refuse a candidate the policy had already decided about.
         if (r.state !== 'current' && r.state !== 'partial') unprovenTargets.add(r.target);
     }
     for (const v of result.violations) {
@@ -899,11 +900,13 @@ export async function evaluateCandidatePolicy(
 }
 
 /**
- * Attach the candidate rule to a decision that had no application of its own.
+ * Attach the candidate rule to a decision.
  *
- * The shared evaluator only records applications for rules it applied, and it
- * does not know about `candidateUnproven`. Without this the record for an
- * accepted-on-unproven candidate is indistinguishable from a clean one.
+ * The shared evaluator does not know about `candidateUnproven`, so it never
+ * records an application for it, whether or not the decision already carries the
+ * deploy gate's. This adds one per unproven target either way: without it, an
+ * acceptance on unproven evidence is recorded with no rule that permitted it,
+ * and is indistinguishable from a clean one.
  */
 function withCandidateRuleApplied(
     decision: EvidenceGateDecision | undefined,
