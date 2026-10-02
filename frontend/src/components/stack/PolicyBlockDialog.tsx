@@ -208,7 +208,7 @@ export function PolicyBlockDialog({
           </p>
         )}
         {evidenceLines.length > 0 && (
-          <div className="mt-3 rounded-lg border border-glass-border bg-card/60 px-3 py-2.5">
+          <div className="mt-3 rounded-lg border border-glass-border bg-card/60 shadow-card-bevel px-3 py-2.5">
             <div className="font-mono text-[10px] uppercase tracking-[0.18em] text-stat-subtitle">
               Evidence unavailable
             </div>
