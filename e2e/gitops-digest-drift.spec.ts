@@ -420,6 +420,8 @@ test.describe('GitOps digest drift', () => {
     await page.goto(`/nodes/local/stacks/${blueprintName}`);
     await page.getByRole('tab', { name: 'Anatomy' }).click();
     await page.getByRole('tab', { name: 'Drift' }).click();
+    // The per-service digests are evidence behind the answer, so they sit under Evidence.
+    await page.getByRole('button', { name: 'Evidence' }).click();
     const digestRow = page.getByTestId('gitops-digest-row').first();
     await expect(digestRow).toBeVisible({ timeout: 20_000 });
     await expect(digestRow).toHaveAttribute('data-state', 'drifted');
