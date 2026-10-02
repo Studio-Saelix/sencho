@@ -2829,6 +2829,17 @@ describe('gitops derivation', () => {
     expect(project().runtime.status).toBe('recovery_required');
     expect(project().healthFailureSuperseded).toBe(false);
 
+    // A tombstoned target keeps its row but has no workload left, so there is no
+    // failure standing for anything to supersede even with the observation open.
+    store.upsertTarget({
+      ...row,
+      last_health_status: 'failed',
+      last_health_run_id: 'run-ns',
+      target_status: 'tombstoned',
+    });
+    expect(project().tombstoned).toBe(true);
+    expect(project().healthFailureSuperseded).toBe(false);
+
     db.getDb().prepare('DELETE FROM health_gate_runs').run();
   });
 

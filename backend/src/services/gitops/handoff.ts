@@ -1184,11 +1184,16 @@ export class BlueprintTargetAdapter implements TargetAdapter {
             envelope: envelopeFor(generation.actor, trigger),
           });
         } catch (err) {
-          // The run was reserved above and is now armed by nobody, so it has to
-          // be abandoned here for the reason the ack catch below gives: leaving
-          // it open would make every later dispatch skip this target as awaiting
-          // a verdict nothing will ever report, and it would leave a run row
-          // claiming to observe a deploy that was never opened.
+          // The reservation above is now armed by nobody, so this run has to be
+          // abandoned here. Not for the reason the ack catch gives: that throw
+          // happens after the deploy-start row is written, so the pointer is set
+          // and a later dispatch really does skip this target. This one throws
+          // *inside* the mutate, before `pending_health_run_id` is written, so
+          // nothing is skipped. The hazard is the row itself: an observing run
+          // for a deploy that was never opened, which reads as an open
+          // observation of the accepted generation and would hide a health
+          // failure on it until a later run replaced the row or a restart swept
+          // it. Finalizing the row is what keeps that from being possible.
           if (reserved.status === 'reserved' || reserved.status === 'replayed') {
             abandonTargetHealthRun(node, reserved);
           }

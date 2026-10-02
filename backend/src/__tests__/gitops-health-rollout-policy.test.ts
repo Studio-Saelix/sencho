@@ -1121,6 +1121,35 @@ describe('retry, stop, and rollback', () => {
       .toBe(run!.rollout_generation_id);
   });
 
+  it('abandons the reserved run when the deploy could not be opened at all', async () => {
+    const fixture = await authorizeWithPolicy('pause', 1);
+    // The transition that claims the operation throws before the target row is
+    // written, which is the shape a conflicting operation on the same target
+    // takes. Nothing is skipped afterwards, because the pending pointer was
+    // never set, so what is left behind is the run row itself.
+    vi.spyOn(GitOpsTransitions.getInstance(), 'blueprintDeployStarted').mockImplementation(() => {
+      throw new Error('conflicting target operation');
+    });
+
+    const result = await dispatch(fixture);
+
+    expect(result.status).toBe('blocked');
+    expect(result.status === 'blocked' && result.reason).toMatch(/Could not open deploy/);
+
+    // The reservation is finalized rather than left reading as an open
+    // observation. An observing row here would name the accepted generation, and
+    // the health projection reads an open observation of the failed generation
+    // as work that is about to produce its replacement verdict, so a real failure
+    // on it would stop being reported until a later run replaced the row or a
+    // restart swept it.
+    const reserved = finishedRolloutRuns(fixture);
+    expect(reserved).toHaveLength(1);
+    expect(reserved[0].status).not.toBe('observing');
+    expect(reserved[0].ended_at).not.toBeNull();
+    expect(GitOpsStore.getInstance().getTarget(fixture.applicationId, fixture.nodeId!)!
+      .pending_health_run_id).toBeNull();
+  });
+
   it('a verdict for a target on an earlier rollout is evidence, even when the application has moved on', async () => {
     // The case the unacked-attempt rule must not swallow. The target names an
     // older rollout generation than the run's and the application has left the

@@ -38,7 +38,7 @@ Above the list, the **Attention required** section groups everything currently w
 
 Failure-toned entries (failures, unreachable targets, failed rollbacks or recovery) sort ahead of pending decisions.
 
-A stack whose health check failed stops asking for you while that same version is deployed again and while Sencho watches the replacement start. The reading ends once that redeploy's own health check settles, whichever way it went, so a redeploy that cannot confirm anything leaves the earlier failure standing.
+A stack whose health check failed stops asking for you while that same version is deployed again and while Sencho watches the replacement start. The reading ends once that redeploy's own health check settles, whichever way it went, so a redeploy that cannot confirm anything leaves the earlier failure standing. On a stack deployed straight from a Git source there is a brief moment between the deploy finishing and that check opening where the earlier failure shows again.
 
 ## One application
 

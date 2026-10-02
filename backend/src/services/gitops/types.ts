@@ -972,7 +972,9 @@ export type GitOpsTargetProjection = {
   /**
    * Whether work already under way is producing the verdict that will replace a
    * recorded health failure: a live operation on the generation the failure was
-   * recorded against, or an open health observation of that same generation.
+   * recorded against, or a stack-scope health run for that generation that is
+   * still observing. The second arm reads the health-run table, not the target
+   * row, because the run is what the gate holds open.
    *
    * Only meaningful while `health.status` is `failed`. It is a fact about the
    * row columns and the recorded generation, not a tone: the consumer still

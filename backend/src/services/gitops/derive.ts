@@ -124,10 +124,11 @@ export function deriveGitOpsRevision(
   // Resolved once here because it reads the application's intent revision and
   // the live Blueprint row, neither of which varies per target.
   const confirmationExpected = blueprintConfirmsOutcome(app, facts.healthDisabled);
-  // Also resolved once per application, for the same reason: the accepted intent
-  // revision is what names a Blueprint target's stack for the health supersede
-  // rule. `collectHealthDrift` resolves it again for the drift list, which is
-  // why this is read once here rather than once per target.
+  // Also resolved once per application, for the same reason: it is the accepted
+  // intent revision, and a Blueprint target's stack name is read from it rather
+  // than from the application, so the health supersede rule needs it. Resolved
+  // here so a fleet of targets costs one read. `collectHealthDrift` reads the
+  // same revision again for its own stack name.
   const acceptedIntent = app.intent_revision_id
     ? GitOpsStore.getInstance().getIntentRevision(app.intent_revision_id)
     : undefined;
@@ -1946,10 +1947,11 @@ const LIVE_OPERATION_STATUS: Record<string, 'deploying' | 'withdrawing' | undefi
  * opening the observation before the bind, which reorders the deploy path, so
  * the gap is stated and pinned rather than closed.
  *
- * What ends the suppression is a terminal verdict for either arm, or the startup
- * sweep that finalizes an observation a previous process left open. An
- * observation a newer stack operation supersedes is finalized by that operation
- * rather than left reading as open.
+ * What ends the suppression: arm one ends at any terminal for the operation
+ * (`deployBound`, `deployUnbound`, `deployFailed`); arm two ends at a terminal
+ * verdict for the run, or the startup sweep that finalizes an observation a
+ * previous process left open. An observation a newer stack operation supersedes
+ * is finalized by that operation rather than left reading as open.
  */
 function healthFailureSuperseded(
   app: GitOpsApplicationRow,

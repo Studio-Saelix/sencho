@@ -1468,7 +1468,7 @@ describe('gitops derive to portfolio posture', () => {
     tx.healthFinalized({
       applicationId,
       nodeId: 1,
-      healthRunId: `run-${applicationId}-unproven`,
+      healthRunId: `run-${applicationId}-watching`,
       healthStatus: 'unknown',
       deployedGenerationId: generationId,
       targetScope: 'stack',
