@@ -4,7 +4,9 @@ import { toast } from '@/components/ui/toast-store';
 import { SystemSheet } from '@/components/ui/system-sheet';
 import { Button } from '@/components/ui/button';
 import { ConfirmModal } from '@/components/ui/modal';
-import type { MeshStackEntry } from '@/types/mesh';
+import type { MeshNodeStatus, MeshStackEntry } from '@/types/mesh';
+import { computeMeshMembershipImpact, describeMeshMembershipImpact, type MeshMembershipChange } from './meshImpact';
+import { describeMembershipError } from './meshMessages';
 import { Loader2 } from 'lucide-react';
 
 interface Props {
@@ -15,9 +17,15 @@ interface Props {
     onChanged: () => void;
     /** Whether the user may start the mesh-wide membership cascade. */
     canManage: boolean;
+    /**
+     * Every node's mesh status, used to show what the change restarts.
+     * Required for the same reason as the node card's fleet snapshot: the
+     * confirmation must not report an empty cascade it cannot see.
+     */
+    status: MeshNodeStatus[];
 }
 
-export function MeshOptInSheet({ open, onOpenChange, nodeId, nodeName, onChanged, canManage }: Props) {
+export function MeshOptInSheet({ open, onOpenChange, nodeId, nodeName, onChanged, canManage, status }: Props) {
     const [stacks, setStacks] = useState<MeshStackEntry[]>([]);
     const [loading, setLoading] = useState(false);
     const [error, setError] = useState<string | null>(null);
@@ -53,31 +61,30 @@ export function MeshOptInSheet({ open, onOpenChange, nodeId, nodeName, onChanged
                 `/mesh/nodes/${nodeId}/stacks/${encodeURIComponent(stack.name)}/${action}`,
                 { method: 'POST', localOnly: true },
             );
-            if (res.status === 409) {
+            if (!res.ok) {
                 const body = await res.json().catch(() => ({})) as { error?: string };
-                setError(body.error || 'Port already claimed by another mesh stack');
+                setError(describeMembershipError(res.status, body.error));
                 return;
             }
-            if (res.status === 503) {
-                const body = await res.json().catch(() => ({})) as { error?: string };
-                setError(body.error || 'Mesh data plane unavailable on this node');
-                return;
-            }
-            if (!res.ok) throw new Error(`status ${res.status}`);
             setStacks((prev) => prev.map((s) => s.name === stack.name ? { ...s, optedIn: !stack.optedIn } : s));
             onChanged();
             toast.success(stack.optedIn
-                ? `${stack.name} removed from mesh, redeploying`
-                : `${stack.name} added to mesh, redeploying`);
+                ? `${stack.name} removed from the mesh. Restarting affected stacks.`
+                : `${stack.name} added to the mesh. Restarting affected stacks.`);
         } catch (err) {
-            setError((err as Error).message);
-            toast.error('Mesh update failed');
+            setError(`Mesh update failed: ${(err as Error).message}`);
         } finally {
             setPendingStack(null);
         }
     };
 
     const inMeshCount = stacks.filter((s) => s.optedIn).length;
+    const confirmChange: MeshMembershipChange | null = confirmStack
+        ? { kind: confirmStack.optedIn ? 'opt-out' : 'opt-in', nodeId, stackName: confirmStack.name }
+        : null;
+    const confirmDescription = confirmChange
+        ? describeMeshMembershipImpact(computeMeshMembershipImpact(status, confirmChange), confirmChange)
+        : undefined;
     const meta = `${inMeshCount} of ${stacks.length} in mesh`;
 
     return (
@@ -93,7 +100,7 @@ export function MeshOptInSheet({ open, onOpenChange, nodeId, nodeName, onChanged
                 <div className="space-y-4">
                     <p className="text-sm text-stat-subtitle leading-snug">
                         Adding a stack lets its services be reached from other meshed stacks by hostname.
-                        Toggling a stack triggers a redeploy on its node so the routing override applies.
+                        Adding or removing a stack restarts it, and restarts the other meshed stacks so they learn the new hostnames.
                         {!canManage && ' Changing mesh membership requires an administrator.'}
                     </p>
 
@@ -151,20 +158,21 @@ export function MeshOptInSheet({ open, onOpenChange, nodeId, nodeName, onChanged
                         ? `Remove ${confirmStack.name} from mesh?`
                         : `Add ${confirmStack?.name ?? ''} to mesh?`
                 }
-                description={
-                    confirmStack?.optedIn
-                        ? `${confirmStack.name} will be redeployed on ${nodeName} so its containers drop the mesh routing entries from /etc/hosts.`
-                        : confirmStack
-                            ? `${confirmStack.name} will be redeployed on ${nodeName} so its containers pick up the mesh routing entries.`
-                            : undefined
-                }
-                confirmLabel={confirmStack?.optedIn ? 'Remove and redeploy' : 'Add and redeploy'}
+                description={confirmDescription}
+                confirmLabel={confirmStack?.optedIn ? 'Remove and restart' : 'Add and restart'}
                 onConfirm={() => {
                     if (confirmStack) void performToggle(confirmStack);
                     setConfirmStack(null);
                 }}
                 onCancel={() => setConfirmStack(null)}
-            />
+            >
+                {/* `description` is the screen-reader-only dialog description, so
+                    the visible text has to be a body child or the operator never
+                    sees what is about to restart. */}
+                {confirmDescription !== undefined && (
+                    <p className="text-sm text-stat-subtitle leading-snug">{confirmDescription}</p>
+                )}
+            </ConfirmModal>
         </>
     );
 }
