@@ -85,7 +85,9 @@ describe('unattended paths use the shared block message', () => {
         .enforceSchedulerPolicyGate('web', 1, 'Auto-update', '/api/schedules/1/run'),
     ).rejects.toThrow();
     expect(mockDescribePolicyBlock).toHaveBeenCalled();
-    const [policy, violations, action, evidence] = mockDescribePolicyBlock.mock.calls[0] as unknown[];
+    // Only the action and the decision are asserted; the leading slots are
+    // skipped rather than bound, which would leave two unused locals.
+    const [, , action, evidence] = mockDescribePolicyBlock.mock.calls[0] as unknown[];
     expect(action).toBe('update');
     // The evidence decision is what lets the message say "unavailable" rather
     // than "matched", so it must be passed.
@@ -102,7 +104,9 @@ describe('unattended paths use the shared block message', () => {
     });
     expect(result.result).toBe('policy_blocked');
     expect(mockDescribePolicyBlock).toHaveBeenCalled();
-    const [policy, violations, action, evidence] = mockDescribePolicyBlock.mock.calls[0] as unknown[];
+    // Only the action and the decision are asserted; the leading slots are
+    // skipped rather than bound, which would leave two unused locals.
+    const [, , action, evidence] = mockDescribePolicyBlock.mock.calls[0] as unknown[];
     expect(action).toBe('update');
     expect(evidence).toBeDefined();
   });
