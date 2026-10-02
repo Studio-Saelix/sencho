@@ -8,7 +8,11 @@
  *
  *   - a dark verdict is reused inside a window strictly shorter than the probe
  *     budget, so repeated reads pay one round trip;
- *   - a node that came back is seen back as soon as that window has passed, and
+ *   - readers that overlap share one probe, because a verdict is only written
+ *     once a probe settles and a dark node spends the whole budget settling;
+ *   - sharing one leg is what orders the two writers, so a dark verdict cannot
+ *     land after a newer answer;
+ *   - a node that came back is seen back as soon as the window has passed, and
  *     never stranded as unreachable;
  *   - a reachable verdict is never reused, so nothing can be reported as up
  *     after it went dark;
@@ -16,7 +20,12 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { CacheService } from '../services/CacheService';
-import { probeSilentNodeIds, REACHABILITY_VERDICT_TTL_MS, REMOTE_PROBE_TIMEOUT_MS } from '../services/gitops/portfolioAggregator';
+import {
+  probeSilentNodeIds,
+  REACHABILITY_VERDICT_TTL_MS,
+  REMOTE_PROBE_TIMEOUT_MS,
+  resetReachabilityProbesForTests,
+} from '../services/gitops/portfolioAggregator';
 
 type ProbeResult = unknown[] | null | 'unsupported';
 
@@ -25,6 +34,10 @@ const AFTER_THE_WINDOW_MS = REACHABILITY_VERDICT_TTL_MS + 1;
 
 beforeEach(() => {
   CacheService.getInstance().flush();
+  // A leg is normally released when it settles, so a test that failed before
+  // releasing one would otherwise leave a pending promise every later read of
+  // that node id joins.
+  resetReachabilityProbesForTests();
 });
 
 afterEach(() => {
@@ -100,11 +113,11 @@ describe('reachability verdict reuse', () => {
     expect(fetchRows).toHaveBeenCalledTimes(3);
   });
 
-  it('lets a live answer retire a dark verdict the fan-out wrote meanwhile', async () => {
-    // Two surfaces probe the same node at once. The portfolio fan-out records
-    // dark while this panel's leg is still in flight, and this leg's answer is
-    // the newer evidence, so the entry has to be retired rather than left to
-    // make the panel report a node the hub has just proved is up.
+  it('lets a live answer retire a dark verdict written by another writer', async () => {
+    // Pinning the write itself: whatever put a dark verdict in the cache, a
+    // probe that sees the node answer has to retire it. The entry is written
+    // directly rather than through a second leg because one leg per node is the
+    // rule now, so no other writer can be mid-probe while this one runs.
     let release: (rows: ProbeResult) => void = () => {};
     const fetchRows = vi.fn<(nodeId: number) => Promise<ProbeResult>>(() => {
       if (fetchRows.mock.calls.length > 1) return Promise.resolve<ProbeResult>([]);
@@ -119,6 +132,91 @@ describe('reachability verdict reuse', () => {
     expect([...(await pending)]).toEqual([]);
     expect([...(await probeSilentNodeIds([4], fetchRows))]).toEqual([]);
     expect(fetchRows).toHaveBeenCalledTimes(2);
+  });
+
+  it('gives overlapping readers one probe of a node', async () => {
+    // The panel, the drift panel and the list all ask about the same node at
+    // once, and a dark node takes the whole probe budget to settle. Readers
+    // that arrive while a leg is in flight have to join it, not start their own,
+    // or the cache never gets a chance to answer anyone.
+    let release: (rows: ProbeResult) => void = () => {};
+    const fetchRows = vi.fn<(nodeId: number) => Promise<ProbeResult>>(() => new Promise<ProbeResult>((resolve) => {
+      release = resolve;
+    }));
+
+    const first = probeSilentNodeIds([4], fetchRows);
+    const second = probeSilentNodeIds([4], fetchRows);
+    const third = probeSilentNodeIds([4], fetchRows);
+    release(null);
+
+    expect([...(await first)]).toEqual([4]);
+    expect([...(await second)]).toEqual([4]);
+    expect([...(await third)]).toEqual([4]);
+    expect(fetchRows).toHaveBeenCalledTimes(1);
+  });
+
+  it('gives a reader that arrives late the probe already in flight', async () => {
+    let release: (rows: ProbeResult) => void = () => {};
+    const fetchRows = vi.fn<(nodeId: number) => Promise<ProbeResult>>(() => new Promise<ProbeResult>((resolve) => {
+      release = resolve;
+    }));
+
+    const first = probeSilentNodeIds([4], fetchRows);
+    // The second read only starts once the first leg is genuinely under way.
+    await Promise.resolve();
+    const second = probeSilentNodeIds([4], fetchRows);
+    release([]);
+
+    expect([...(await first)]).toEqual([]);
+    expect([...(await second)]).toEqual([]);
+    expect(fetchRows).toHaveBeenCalledTimes(1);
+  });
+
+  it('cannot write a dark verdict from a probe that a newer answer outran', async () => {
+    // The late-write ordering case. This hub proves the node answers while a
+    // dark leg is still in flight, and that leg settles dark afterwards. One
+    // shared leg per node is what makes the case unrepresentable: a second
+    // reader joins the leg already running rather than starting a newer one, so
+    // there is never a dark write to order against the answer.
+    let releaseDark: (rows: ProbeResult) => void = () => {};
+    const fetchRows = vi.fn<(nodeId: number) => Promise<ProbeResult>>(() => new Promise<ProbeResult>((resolve) => {
+      releaseDark = resolve;
+    }));
+
+    const slow = probeSilentNodeIds([4], fetchRows);
+    // A reader arriving mid-flight is handed the same leg, so its answer is the
+    // same answer: there is no second, newer probe that could overtake the dark
+    // one, and therefore no dark write left to drop after the fact.
+    const during = probeSilentNodeIds([4], fetchRows);
+    expect(fetchRows).toHaveBeenCalledTimes(1);
+    releaseDark(null);
+
+    expect([...(await slow)]).toEqual([4]);
+    expect([...(await during)]).toEqual([4]);
+
+    // Both surfaces now hold the one verdict that was ever established for this
+    // node, and the next read reuses it rather than starting a rival probe.
+    const after = vi.fn<(nodeId: number) => Promise<ProbeResult>>(async () => []);
+    expect([...(await probeSilentNodeIds([4], after))]).toEqual([4]);
+    expect(after).not.toHaveBeenCalled();
+  });
+
+  it('settles a joined reader even when the probe it joined rejects', async () => {
+    // One shared leg means one rejection reaches every joined reader. Each has
+    // to report the throw the same way, or the surfaces would disagree about
+    // which of them saw the failure.
+    const fetchRows = vi.fn<(nodeId: number) => Promise<ProbeResult>>(() => Promise.reject(new Error('probe blew up')));
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    const [first, second] = await Promise.all([
+      probeSilentNodeIds([4], fetchRows),
+      probeSilentNodeIds([4], fetchRows),
+    ]);
+
+    expect([...first]).toEqual([]);
+    expect([...second]).toEqual([]);
+    expect(fetchRows).toHaveBeenCalledTimes(1);
+    warn.mockRestore();
   });
 
   it('never reuses a reachable verdict', async () => {

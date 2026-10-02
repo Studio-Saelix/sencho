@@ -19,7 +19,7 @@ import { DatabaseService } from '../services/DatabaseService';
 import { GitOpsStore, emptyTargetRow } from '../services/gitops/store';
 import { GitOpsTransitions, type EventEnvelope } from '../services/gitops/transitions';
 import { encodeObservedArtifactIdentity } from '../services/gitops/json';
-import { aggregateGitOpsPortfolio, freshestFacetTimestamp, isUsableRevision, PORTFOLIO_MERGE_CAP, postureOf, probeSilentNodeIds, rowFromProjection } from '../services/gitops/portfolioAggregator';
+import { aggregateGitOpsPortfolio, freshestFacetTimestamp, isUsableRevision, PORTFOLIO_MERGE_CAP, postureOf, probeSilentNodeIds, resetReachabilityProbesForTests, rowFromProjection } from '../services/gitops/portfolioAggregator';
 import { directApplicationFixture } from './helpers/gitopsFixtures';
 import type { GitOpsIdentityRef, GitOpsRevisionProjection, GitOpsTargetProjection } from '../services/gitops/types';
 import type { ArtifactFacet } from '../services/gitops/types';
@@ -33,10 +33,12 @@ beforeAll(async () => {
   GitOpsTransitions.resetForTests();
 });
 
-// The reachability verdict is process state, so a verdict recorded by one test
-// would otherwise be read by the next one in this file.
+// The reachability verdict and any leg still in flight are process state, so
+// one test would otherwise be read by the next: a verdict recorded by one test,
+// or a leg a failed test never released.
 beforeEach(() => {
   CacheService.getInstance().flush();
+  resetReachabilityProbesForTests();
 });
 
 afterAll(() => {
@@ -444,6 +446,39 @@ describe('aggregateGitOpsPortfolio', () => {
     expect(withdrawn?.evidence.partial).toBe(true);
   });
 
+  it('probes a node once for a list read and a detail read that overlap', async () => {
+    const db = DatabaseService.getInstance();
+    const localNodeId = db.getNodes()[0]!.id;
+    const sharedId = addRemoteNode('port-shared-leg', 29990);
+
+    // Opening a Blueprint panel over the workplace is the case this is for: the
+    // list read and the detail read ask about the same node in the same instant,
+    // and the detail read joins the leg the list already started rather than
+    // probing a second time.
+    const release: ((rows: unknown[] | null) => void)[] = [];
+    const asked: number[] = [];
+    const fetchRows = vi.fn<(nodeId: number) => Promise<unknown[] | null | 'unsupported'>>(
+      (nodeId) => new Promise<unknown[] | null | 'unsupported'>((resolve) => {
+        asked.push(nodeId);
+        release.push(() => resolve(nodeId === sharedId ? null : []));
+      }),
+    );
+
+    const listing = aggregateGitOpsPortfolio(adminReq(localNodeId), { fetchRows });
+    // The aggregate reads stack state before it fans out, so the list leg only
+    // starts once that has resolved. Waiting for it is what makes the two reads
+    // overlap rather than run in sequence.
+    await vi.waitFor(() => expect(asked).toContain(sharedId));
+    const detail = probeSilentNodeIds([sharedId], fetchRows);
+    for (const releaseLeg of release) releaseLeg(null);
+
+    const { coverage } = await listing;
+    expect(coverage.find(candidate => candidate.nodeId === sharedId)?.state).toBe('unreachable');
+    expect([...(await detail)]).toEqual([sharedId]);
+    // One probe of this node across both readers, not one per reader.
+    expect(asked.filter(nodeId => nodeId === sharedId)).toHaveLength(1);
+  });
+
   it('shares its reachability verdict with the application detail probe', async () => {
     const db = DatabaseService.getInstance();
     const localNodeId = db.getNodes()[0]!.id;
@@ -485,28 +520,55 @@ describe('aggregateGitOpsPortfolio', () => {
     expect(detailProbe).toHaveBeenCalledTimes(1);
   });
 
-  it('retires a cached dark verdict when a remote payload cannot be walked', async () => {
+  it('treats a thrown fan-out leg as evidence in neither direction', async () => {
     const db = DatabaseService.getInstance();
     const localNodeId = db.getNodes()[0]!.id;
-    const unreadableId = addRemoteNode('port-unreadable-after-dark', 29992);
+    const throwingId = addRemoteNode('port-throwing-after-dark', 29992);
 
     await aggregateGitOpsPortfolio(adminReq(localNodeId), {
-      fetchRows: async (nodeId: number) => (nodeId === unreadableId ? null : []),
+      fetchRows: async (nodeId: number) => (nodeId === throwingId ? null : []),
     });
 
-    // The leg cannot be walked this time. A throw is not evidence that the node
-    // is down anywhere in this module, so it must not leave a dark verdict
-    // behind for the detail panel to serve.
+    // The leg throws this time. A throw says this build could not read the node,
+    // which is not proof it is down and not proof it is up, so the fan-out
+    // records no verdict and retires none. The default seam never rejects, so
+    // this is the injected path.
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     const { coverage } = await aggregateGitOpsPortfolio(adminReq(localNodeId), {
       fetchRows: async (nodeId: number) => {
-        if (nodeId === unreadableId) throw new Error('payload this build cannot walk');
+        if (nodeId === throwingId) throw new Error('seam threw');
         return [];
       },
     });
-    expect(coverage.find(candidate => candidate.nodeId === unreadableId)?.state).toBe('unsupported');
+    expect(coverage.find(candidate => candidate.nodeId === throwingId)?.state).toBe('unsupported');
 
+    // The earlier dark verdict therefore stands, which is the honest outcome:
+    // nothing since has proved the node came back, and the detail probe reports
+    // the same thing the list does not contradict.
     const detailProbe = vi.fn<(nodeId: number) => Promise<unknown[] | null | 'unsupported'>>(async () => []);
-    expect([...(await probeSilentNodeIds([unreadableId], detailProbe))]).toEqual([]);
+    expect([...(await probeSilentNodeIds([throwingId], detailProbe))]).toEqual([throwingId]);
+    expect(detailProbe).not.toHaveBeenCalled();
+    warn.mockRestore();
+  });
+
+  it('retires a cached dark verdict once the fan-out gets a payload back', async () => {
+    const db = DatabaseService.getInstance();
+    const localNodeId = db.getNodes()[0]!.id;
+    const recoveredId = addRemoteNode('port-payload-after-dark', 29991);
+
+    await aggregateGitOpsPortfolio(adminReq(localNodeId), {
+      fetchRows: async (nodeId: number) => (nodeId === recoveredId ? null : []),
+    });
+
+    // A payload arrived, so the node answered. The verdict is retired before the
+    // payload is walked, so the detail probe is free to ask again.
+    const { coverage } = await aggregateGitOpsPortfolio(adminReq(localNodeId), {
+      fetchRows: async (nodeId: number) => (nodeId === recoveredId ? [] : []),
+    });
+    expect(coverage.find(candidate => candidate.nodeId === recoveredId)?.state).toBe('ok');
+
+    const detailProbe = vi.fn<(nodeId: number) => Promise<unknown[] | null | 'unsupported'>>(async () => null);
+    expect([...(await probeSilentNodeIds([recoveredId], detailProbe))]).toEqual([recoveredId]);
     expect(detailProbe).toHaveBeenCalledTimes(1);
   });
 
