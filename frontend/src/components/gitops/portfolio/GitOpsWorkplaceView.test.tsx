@@ -109,4 +109,27 @@ describe('GitOpsWorkplaceView', () => {
     expect(String(mockFetch.mock.calls.at(-1)?.[0])).toContain('nodeId=1');
     expect(window.location.search).toBe('?nodeId=1');
   });
+
+  it('offers Retry when the portfolio cannot be read, and reads it again', async () => {
+    mockFetch.mockResolvedValueOnce({ ok: false, status: 500, json: async () => ({ error: 'boom' }) } as unknown as Response);
+    mockFetch.mockResolvedValue(ok(list));
+    render(<GitOpsWorkplaceView />);
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Retry' }));
+
+    expect(await screen.findByText('GITOPS')).toBeInTheDocument();
+    expect(mockFetch).toHaveBeenCalledTimes(2);
+  });
+
+  it('says refreshing in the masthead while a newer answer is coming, with no separate indicator', async () => {
+    mockFetch.mockResolvedValueOnce(ok(list));
+    render(<GitOpsWorkplaceView />);
+    await screen.findByText(/node reporting · updated/);
+
+    mockFetch.mockImplementation(() => new Promise<Response>(() => {}));
+    act(() => { window.dispatchEvent(new CustomEvent('sencho:state-invalidate', { detail: { scope: 'gitops' } })); });
+
+    expect(await screen.findByText(/node reporting · refreshing/)).toBeInTheDocument();
+    expect(screen.queryByText('Refreshing')).toBeNull();
+  });
 });

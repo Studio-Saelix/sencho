@@ -92,3 +92,29 @@ describe('ApplicationsTable row click', () => {
     expect(open).not.toHaveBeenCalled();
   });
 });
+
+describe('ApplicationsTable attention', () => {
+  it('leaves attention to the queue and the row tint instead of repeating it in a column', () => {
+    const row = portfolioRow({ attention: ['source_failed', 'drift'], posture: 'failed' });
+    render(
+      <ApplicationsTable rows={[row]} nextCursor={null} onPrevPage={() => {}} onNextPage={() => {}} pageLoaded={1} portfolioEmpty={false} onDrillDown={() => {}} />,
+    );
+    expect(screen.queryByRole('columnheader', { name: 'Attention' })).toBeNull();
+    expect(screen.getAllByRole('row')[1]).toHaveClass('bg-destructive/[0.04]');
+  });
+
+  it('names the most urgent reason on the state dot, so a row past the queue cap is still explained', () => {
+    const row = portfolioRow({ attention: ['source_review_pending', 'source_failed'], posture: 'failed' });
+    render(
+      <ApplicationsTable rows={[row]} nextCursor={null} onPrevPage={() => {}} onNextPage={() => {}} pageLoaded={1} portfolioEmpty={false} onDrillDown={() => {}} />,
+    );
+    expect(screen.getByRole('img', { name: 'source failed, 1 more' })).toHaveAttribute('title', 'source failed, 1 more');
+  });
+
+  it('leaves the dot decorative when nothing needs attention', () => {
+    render(
+      <ApplicationsTable rows={[portfolioRow()]} nextCursor={null} onPrevPage={() => {}} onNextPage={() => {}} pageLoaded={1} portfolioEmpty={false} onDrillDown={() => {}} />,
+    );
+    expect(screen.queryByRole('img')).toBeNull();
+  });
+});

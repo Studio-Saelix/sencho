@@ -1,4 +1,4 @@
-import { RefreshCw } from 'lucide-react';
+import { Button } from '@/components/ui/button';
 import { Skeleton } from '@/components/ui/skeleton';
 import { AttentionQueue } from './AttentionQueue';
 import { ApplicationsTable } from './ApplicationsTable';
@@ -62,7 +62,7 @@ function PortfolioList({ portfolio, canOpenFleet }: {
         <PortfolioLoadError message={error} onRetry={portfolio.refresh} />
       ) : data ? (
         <>
-          <PortfolioMasthead data={data} staleSince={staleSince} />
+          <PortfolioMasthead data={data} staleSince={staleSince} refreshing={refreshing} />
 
           <div className="flex min-h-0 flex-1 flex-col gap-4">
             <CoverageNotices data={data} />
@@ -107,13 +107,6 @@ function PortfolioList({ portfolio, canOpenFleet }: {
           </div>
         </>
       ) : null}
-
-      {refreshing && data && (
-        <div className="pointer-events-none fixed right-4 top-4 flex items-center gap-2 rounded-md border border-card-border bg-popover/95 px-3 py-1.5 font-mono text-[10px] uppercase tracking-[0.12em] text-stat-subtitle shadow-md backdrop-blur-[10px] backdrop-saturate-[1.15]">
-          <RefreshCw className="h-3 w-3 animate-spin" strokeWidth={1.5} />
-          Refreshing
-        </div>
-      )}
     </div>
   );
 }
@@ -129,13 +122,7 @@ function PortfolioLoadError({ message, onRetry }: { message: string; onRetry: ()
     <div className="flex h-full flex-col items-center justify-center gap-3 text-center">
       <p className="font-heading text-xl text-stat-value">The portfolio could not be read</p>
       <p className="max-w-md font-mono text-xs text-stat-subtitle">{message}</p>
-      <button
-        type="button"
-        onClick={onRetry}
-        className="rounded-md border border-card-border bg-card px-3 py-1.5 font-mono text-[10px] uppercase tracking-[0.14em] text-stat-value shadow-btn-glow transition-colors hover:border-card-border-hover"
-      >
-        Retry
-      </button>
+      <Button variant="outline" size="sm" onClick={onRetry}>Retry</Button>
     </div>
   );
 }

@@ -16,10 +16,10 @@ Select **GitOps** in the main navigation (next to Fleet), or navigate to `/nodes
 ## Reading the page
 
 <Frame>
-  <img src="/images/gitops-portfolio/workplace.png" alt="The GitOps portfolio: a masthead reading Needs action with application and attention counts, a coverage notice naming an unreachable node, a filter bar, an Attention required list of source failed and review required entries, and an application table with source, runtime, health, drift, and attention columns" />
+  <img src="/images/gitops-portfolio/workplace.png" alt="The GitOps portfolio: a masthead reading Needs action with application and attention counts, a coverage notice naming an unreachable node, a filter bar, an Attention required list of source failed and review required entries, and an application table with source, runtime, health, drift, and last activity columns" />
 </Frame>
 
-The masthead leads with the portfolio's verdict (`Converged`, `In progress`, `Needs attention`, `Needs action`, or `Unknown` when evidence is missing), followed by counts for applications, attention-required, drifted, in-progress, and converged applications. Qualified convergence counts separately from exact convergence: an application whose runtime matches its intent but whose executable artifact could not be proven bit-identical is shown as `Converged · qualified`, never as fully exact.
+The masthead leads with the portfolio's verdict (`Converged`, `In progress`, `Needs attention`, `Needs action`, or `Unknown` when evidence is missing), followed by counts for applications, pending (in-progress), drifted, converged, and attention-required applications. Its meta line says how many nodes are reporting and when the data was last updated, and reads `refreshing` while a refresh is in flight. Qualified convergence counts separately from exact convergence: an application whose runtime matches its intent but whose executable artifact could not be proven bit-identical is shown as `Converged · qualified`, never as fully exact.
 
 The application list shows, per application:
 
@@ -28,9 +28,8 @@ The application list shows, per application:
 - canonical source, placement/rollout, runtime, and health states, using the same words as the Git Source sheet everywhere else in Sencho
 - confirmed drift, with its class (source, runtime, placement, and so on)
 - the freshest activity timestamp Sencho holds for it
-- attention chips when something is waiting on an operator
 
-Rows with pending or failed items are tinted so the list reads as a signal, not a spreadsheet. Statuses that arrived from a node running a newer Sencho build are shown with their raw state and flagged as unknown evidence rather than being reinterpreted as something else.
+Rows with pending or failed items are tinted so the list reads as a signal, not a spreadsheet; the reasons are in the **Attention required** list above it (and, for a row beyond the list's cap, on hovering the state dot and in the application's own sheet). Statuses that arrived from a node running a newer Sencho build are shown with their raw state and flagged as unknown evidence rather than being reinterpreted as something else.
 
 ## The attention queue
 

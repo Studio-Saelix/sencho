@@ -47,11 +47,7 @@ function FacetChip({ status, lookup }: { status: string; lookup?: Partial<Record
       title={meta?.line}
       className={cn(
         'inline-block max-w-full truncate rounded-md border px-1.5 py-0.5 font-mono text-[10px] leading-4',
-        tone === 'success' && 'border-success/40 bg-success/[0.06] text-success',
-        tone === 'brand' && 'border-brand/40 bg-brand/[0.06] text-brand',
-        tone === 'warning' && 'border-warning/40 bg-warning/[0.06] text-warning',
-        tone === 'destructive' && 'border-destructive/40 bg-destructive/[0.06] text-destructive',
-        tone === 'neutral' && 'border-card-border bg-card/40 text-stat-subtitle',
+        POSTURE_TONE_CLASS[tone],
       )}
     >
       {label}
@@ -108,7 +104,6 @@ export function ApplicationsTable({
                 <TableHead className="text-[10px] uppercase tracking-[0.18em]">Runtime</TableHead>
                 <TableHead className="text-[10px] uppercase tracking-[0.18em]">Health</TableHead>
                 <TableHead className="text-[10px] uppercase tracking-[0.18em]">Drift</TableHead>
-                <TableHead className="text-[10px] uppercase tracking-[0.18em]">Attention</TableHead>
                 <TableHead className="text-[10px] uppercase tracking-[0.18em]">Last activity</TableHead>
                 <TableHead className="w-10" aria-label="Actions" />
               </TableRow>
@@ -157,7 +152,15 @@ export function ApplicationsTable({
 
 function ApplicationRow({ row, onOpen, canOpenFleet }: { row: GitOpsPortfolioRow; onOpen: () => void; canOpenFleet: boolean }) {
   const currentTargetCount = countCurrentTargets(row.targets);
-  const failureAttention = row.attention.some(reason => attentionLabel(reason).tone === 'destructive');
+  // The row carries no attention column (the queue above lists them), so the dot names
+  // the most urgent reason for screen readers and hover, including rows past the queue's cap.
+  const topReason = row.attention.find(reason => attentionLabel(reason).tone === 'destructive') ?? row.attention[0];
+  const topLabel = topReason === undefined ? undefined : attentionLabel(topReason);
+  const failureAttention = topLabel?.tone === 'destructive';
+  const moreReasons = row.attention.length - 1;
+  const dotLabel = topLabel === undefined
+    ? undefined
+    : `${topLabel.label}${moreReasons > 0 ? `, ${moreReasons} more` : ''}`;
   const rowTint = row.attention.length === 0
     ? ''
     : failureAttention ? 'bg-destructive/[0.04]' : 'bg-warning/[0.04]';
@@ -168,7 +171,7 @@ function ApplicationRow({ row, onOpen, canOpenFleet }: { row: GitOpsPortfolioRow
     <TableRow className={cn('cursor-pointer transition-colors hover:bg-muted/30', rowTint)} onClick={onOpen}>
       <TableCell className="align-top">
         <span
-          aria-hidden
+          {...(dotLabel ? { role: 'img', 'aria-label': dotLabel, title: dotLabel } : { 'aria-hidden': true })}
           className={cn(
             'mt-1 inline-block h-2 w-2 rounded-full',
             row.posture === 'failed' && 'bg-destructive shadow-[0_0_6px_0_var(--destructive)]',
@@ -245,30 +248,6 @@ function ApplicationRow({ row, onOpen, canOpenFleet }: { row: GitOpsPortfolioRow
         ) : (
           <span className="font-mono text-[11px] text-stat-icon">none</span>
         )}
-      </TableCell>
-
-      <TableCell className="align-top">
-        <span className="flex min-w-0 max-w-[190px] flex-wrap gap-1">
-          {row.attention.slice(0, 2).map(reason => {
-            const label = attentionLabel(reason);
-            return (
-              <span
-                key={reason}
-                title={label.line}
-                className={cn(
-                  'truncate rounded border px-1.5 py-px font-mono text-[9px] uppercase tracking-[0.08em]',
-                  POSTURE_TONE_CLASS[label.tone],
-                )}
-              >
-                {label.label}
-              </span>
-            );
-          })}
-          {row.attention.length > 2 && (
-            <span className="font-mono text-[10px] text-stat-icon">+{row.attention.length - 2}</span>
-          )}
-          {row.attention.length === 0 && <span className="font-mono text-[11px] text-stat-icon">--</span>}
-        </span>
       </TableCell>
 
       <TableCell className="align-top">
