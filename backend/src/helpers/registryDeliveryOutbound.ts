@@ -19,6 +19,7 @@ import {
   classifyRegistryDeliveryRouteClass,
   getRegistryDeliveryTotalBodyLimit,
   REGISTRY_DELIVERY_BODY_FIELD,
+  REGISTRY_DELIVERY_DISCOVER_BODY_LIMIT_BYTES,
   REGISTRY_DELIVERY_FIELD_LIMIT_BYTES,
 } from './registryDeliveryBodyLimits';
 import { classifyRegistryDeliveryOp } from './registryOpClassifier';
@@ -250,7 +251,7 @@ async function callTargetDiscover(
     ...safeAxiosTransport(target.trustedLoopback),
     headers: { Authorization: `Bearer ${target.apiToken}` },
     timeout: 30_000,
-    maxBodyLength: REGISTRY_DELIVERY_FIELD_LIMIT_BYTES,
+    maxBodyLength: REGISTRY_DELIVERY_DISCOVER_BODY_LIMIT_BYTES,
     maxContentLength: REGISTRY_DELIVERY_FIELD_LIMIT_BYTES,
     signal: abortSignal,
     validateStatus: () => true,

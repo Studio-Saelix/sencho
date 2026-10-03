@@ -7,6 +7,7 @@ import { RegistryDeliveryService } from '../services/RegistryDeliveryService';
 import { PreparedSourceStore } from '../services/preparedSourceStore';
 import { NodeRegistry } from '../services/NodeRegistry';
 import { runWithRegistryDeliveryContext } from '../helpers/registryDeliveryContext';
+import { prepareGitCandidateSource } from '../helpers/registryDeliveryPrepare';
 import {
   writeGitCandidatePreparedMeta,
 } from '../helpers/registryDeliveryGitCandidate';
@@ -148,5 +149,125 @@ describe('createStackFromGit prepared git candidate consumption', () => {
 
     fetchSpy.mockRestore();
     restoreSpy.mockRestore();
+  });
+
+  it('maps discover git credentials into the candidate input', async () => {
+    const svc = GitSourceService.getInstance();
+    const prepareSpy = vi.spyOn(svc, 'prepareRegistryDeliveryFromGit')
+      .mockResolvedValue({ prepId: 'prep-1', sourceHash: 'hash-1' });
+
+    const result = await prepareGitCandidateSource({
+      op: 'from-git-deploy-now',
+      sourceKind: 'git-candidate',
+      stack: 'demo',
+      stackName: 'demo',
+      actionSetHash: hashActionSet(['stack:deploy', 'stack:create']),
+      git: {
+        repo_url: 'git@github.com:acme/demo.git',
+        branch: 'main',
+        compose_paths: ['compose.yaml'],
+        auth_type: 'deploy_key',
+        deploy_key: 'PRIVATE KEY MATERIAL',
+        ssh_known_hosts_entry: 'github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITestOnly',
+        ssh_host_key_fingerprint: 'SHA256:test-only',
+        ca_bundle: 'PEM CERTIFICATE MATERIAL',
+      },
+    });
+
+    expect(result).toEqual({ prepId: 'prep-1', sourceHash: 'hash-1' });
+    expect(prepareSpy).toHaveBeenCalledWith(expect.objectContaining({
+      stackName: 'demo',
+      repoUrl: 'git@github.com:acme/demo.git',
+      branch: 'main',
+      authType: 'deploy_key',
+      deployKey: 'PRIVATE KEY MATERIAL',
+      sshKnownHostsEntry: 'github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITestOnly',
+      sshHostKeyFingerprint: 'SHA256:test-only',
+      caBundle: 'PEM CERTIFICATE MATERIAL',
+    }));
+
+    prepareSpy.mockRestore();
+  });
+
+  it('passes deploy-key ssh auth to the discovery fetch', async () => {
+    const svc = GitSourceService.getInstance();
+    const fetchSpy = vi.spyOn(
+      svc as unknown as { fetchFromGit: (params: Record<string, unknown>) => Promise<unknown> },
+      'fetchFromGit',
+    ).mockResolvedValue({
+      composeFiles: [],
+      envContent: null,
+      commitSha: 'a'.repeat(40),
+      resolvedRefKind: 'branch',
+      warnings: [],
+    });
+
+    await expect(svc.prepareRegistryDeliveryFromGit({
+      stackName: 'demo',
+      repoUrl: 'git@github.com:acme/demo.git',
+      branch: 'main',
+      composePaths: ['compose.yaml'],
+      contextDir: null,
+      syncEnv: false,
+      envPath: null,
+      authType: 'deploy_key',
+      token: null,
+      deployKey: 'PRIVATE KEY MATERIAL',
+      sshKnownHostsEntry: 'github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITestOnly',
+      caBundle: null,
+      autoApplyOnWebhook: false,
+      autoDeployOnApply: false,
+    })).rejects.toThrow(/compose validation failed/i);
+
+    expect(fetchSpy).toHaveBeenCalledWith(expect.objectContaining({
+      sshAuth: {
+        privateKey: 'PRIVATE KEY MATERIAL',
+        knownHostsEntry: 'github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITestOnly',
+      },
+      caBundlePem: null,
+    }));
+
+    fetchSpy.mockRestore();
+  });
+
+  it('refuses deploy-key discovery without a key, host trust, or a matching fingerprint', async () => {
+    const svc = GitSourceService.getInstance();
+    const base = {
+      stackName: 'demo',
+      repoUrl: 'git@github.com:acme/demo.git',
+      branch: 'main',
+      composePaths: ['compose.yaml'],
+      contextDir: null,
+      syncEnv: false,
+      envPath: null,
+      authType: 'deploy_key' as const,
+      token: null,
+      caBundle: null,
+      autoApplyOnWebhook: false,
+      autoDeployOnApply: false,
+    };
+
+    await expect(svc.prepareRegistryDeliveryFromGit({
+      ...base,
+      deployKey: null,
+      sshKnownHostsEntry: null,
+    })).rejects.toMatchObject({ code: 'GIT_ERROR' });
+
+    await expect(svc.prepareRegistryDeliveryFromGit({
+      ...base,
+      deployKey: 'PRIVATE KEY MATERIAL',
+      sshKnownHostsEntry: 'github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITestOnly',
+      sshHostKeyFingerprint: 'SHA256:does-not-match',
+    })).rejects.toMatchObject({ code: 'GIT_ERROR' });
+  });
+
+  it('refuses a git candidate discovery that omits required fields', async () => {
+    await expect(prepareGitCandidateSource({
+      op: 'from-git-deploy-now',
+      sourceKind: 'git-candidate',
+      stack: 'demo',
+      actionSetHash: hashActionSet(['stack:deploy', 'stack:create']),
+      git: {},
+    })).rejects.toMatchObject({ code: 'GIT_ERROR' });
   });
 });

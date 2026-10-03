@@ -7725,13 +7725,41 @@ export class GitSourceService {
         const materialization: { value: MaterializationResult | null } = { value: null };
         const encryptedCaBundle = this.resolveEncryptedCaBundle(input.caBundle, undefined);
         const caBundlePem = this.decryptCaBundlePem(encryptedCaBundle);
+        // Mirror createStackFromGit's fetch auth: discovery is a full fetch, so
+        // it needs the same transport credentials the create will later run
+        // with. Without this, SSH and private-CA repos fail as unauthenticated
+        // before the create can consume the prepared candidate.
+        const deployKeyTrust = input.authType === 'deploy_key'
+            ? (() => {
+                if (!input.deployKey?.trim() || !input.sshKnownHostsEntry?.trim()) {
+                    throw new GitSourceError(
+                        'GIT_ERROR',
+                        'Deploy key authentication requires a private key and a trusted SSH host key.',
+                    );
+                }
+                return this.resolveSshTrustFromKnownHostsEntry(
+                    input.sshKnownHostsEntry,
+                    input.sshHostKeyFingerprint,
+                );
+            })()
+            : null;
+        const fetchAuth = input.authType === 'token'
+            ? { token: input.token, caBundlePem }
+            : deployKeyTrust
+                ? {
+                    sshAuth: {
+                        privateKey: input.deployKey!.trim(),
+                        knownHostsEntry: deployKeyTrust.sshKnownHostsEntry,
+                    },
+                    caBundlePem,
+                }
+                : { token: null, caBundlePem };
         const fetched = await this.fetchFromGit({
             repoUrl: input.repoUrl,
             branch: input.branch,
             composePaths: input.composePaths,
             envPath: input.syncEnv ? input.envPath : null,
-            token: input.token,
-            caBundlePem,
+            ...fetchAuth,
             onClone: async (cloneDir, commitSha, envContent) => {
                 materialization.value = await this.buildMaterialization(
                     input.stackName,

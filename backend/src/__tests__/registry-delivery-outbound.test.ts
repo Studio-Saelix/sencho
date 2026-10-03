@@ -5,7 +5,7 @@ import { RegistryDeliveryService } from '../services/RegistryDeliveryService';
 import { NodeRegistry } from '../services/NodeRegistry';
 import { DatabaseService } from '../services/DatabaseService';
 import { RegistryService } from '../services/RegistryService';
-import { REGISTRY_DELIVERY_BODY_FIELD, REGISTRY_DELIVERY_FIELD_LIMIT_BYTES } from '../helpers/registryDeliveryBodyLimits';
+import { REGISTRY_DELIVERY_BODY_FIELD, REGISTRY_DELIVERY_DISCOVER_BODY_LIMIT_BYTES, REGISTRY_DELIVERY_FIELD_LIMIT_BYTES } from '../helpers/registryDeliveryBodyLimits';
 import { classifyRegistryDeliveryOp } from '../helpers/registryOpClassifier';
 import { UnsafeRegistryHopError } from '../helpers/registrySafeProbe';
 import { hashPullRefList } from '../helpers/registryDeliveryHashes';
@@ -750,9 +750,60 @@ describe('registryDeliveryOutbound', () => {
     expect(url).toBe('http://remote:1852/api/registry-delivery/discover');
     expect(body.contractVersion).toBe(1);
     expect(body.stack).toBe('demo');
-    expect(config.maxBodyLength).toBe(REGISTRY_DELIVERY_FIELD_LIMIT_BYTES);
+    expect(config.maxBodyLength).toBe(REGISTRY_DELIVERY_DISCOVER_BODY_LIMIT_BYTES);
     expect(config.maxContentLength).toBe(REGISTRY_DELIVERY_FIELD_LIMIT_BYTES);
     expect(config.timeout).toBe(30_000);
+  });
+
+  it('forwards git auth fields in the create-from-git discover payload', async () => {
+    mockProbeRemoteCapability.mockResolvedValue({ kind: 'supported' });
+    const delivery = RegistryDeliveryService.getInstance();
+    mockAxiosPost.mockResolvedValue({
+      status: 200,
+      data: {
+        ...makeDiscover(delivery),
+        referencedHosts: [],
+        referencedPullRefs: [],
+        coveredHosts: [],
+      },
+    });
+
+    const nodeId = NodeRegistry.getInstance().getDefaultNodeId();
+    const node = DatabaseService.getInstance().getNode(nodeId)!;
+    const body = {
+      stack_name: 'demo',
+      repo_url: 'git@github.com:acme/demo.git',
+      branch: 'main',
+      compose_paths: ['compose.yaml'],
+      auth_type: 'deploy_key',
+      deploy_key: 'PRIVATE KEY MATERIAL',
+      ssh_known_hosts_entry: 'github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITestOnly',
+      ssh_host_key_fingerprint: 'SHA256:test-only',
+      ca_bundle: 'PEM CERTIFICATE MATERIAL',
+    };
+
+    const result = await augmentJsonBodyForRegistryDelivery({
+      method: 'POST',
+      apiPath: '/api/stacks/from-git',
+      nodeId, node,
+      target: TEST_TARGET,
+      body,
+    });
+
+    expect(result).toEqual({ ok: true, body, augmented: false });
+    expect(mockAxiosPost).toHaveBeenCalledTimes(1);
+    const [url, discoverBody] = mockAxiosPost.mock.calls[0];
+    expect(url).toBe('http://remote:1852/api/registry-delivery/discover');
+    expect(discoverBody.git).toMatchObject({
+      repo_url: 'git@github.com:acme/demo.git',
+      branch: 'main',
+      compose_paths: ['compose.yaml'],
+      auth_type: 'deploy_key',
+      deploy_key: 'PRIVATE KEY MATERIAL',
+      ssh_known_hosts_entry: 'github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITestOnly',
+      ssh_host_key_fingerprint: 'SHA256:test-only',
+      ca_bundle: 'PEM CERTIFICATE MATERIAL',
+    });
   });
 
   it('maps a 5xx discover response to a generic failure without echoing hostile detail', async () => {
