@@ -4,8 +4,8 @@
   "author": "Studio Saelix",
   "role": "Vendor",
   "timestamp": "2026-05-18T00:00:00Z",
-  "last_updated": "2026-05-24T12:00:00Z",
-  "version": 8,
+  "last_updated": "2026-10-03T00:00:00Z",
+  "version": 9,
   "statements": [
     {
       "vulnerability": {
@@ -96,6 +96,21 @@
       "status": "not_affected",
       "justification": "vulnerable_code_not_in_execute_path",
       "impact_statement": "The vulnerability is a glob-negation operator mismatch (`^` in in-toto-golang versus `!` in in-toto-python) that can cause an in-toto layout authored against one implementation to evaluate differently in the other. It manifests only when a supply-chain attestation layout authored with one in-toto implementation is then verified with another in the same pipeline. in-toto-golang v0.10.0 enters compose's module graph transitively through the SLSA/attestation verification helpers in buildkit and sigstore-go. Compose only invokes those helpers when verifying image attestations during `docker compose build` or pull-with-verification flows. Sencho invokes compose only for `up`, `down`, and `ps` against pre-built images on local user-authored compose files; it does not invoke `compose build`, does not perform image attestation verification, and does not author or evaluate in-toto layouts. The vulnerable glob-evaluation code path is not reached. Fixed in in-toto-golang v0.11.0; pending an upstream compose tag that pulls the bump, the v0.10.0 module remains in compose v5.1.3's graph."
+    },
+    {
+      "vulnerability": {
+        "@id": "https://github.com/advisories/GHSA-vfj7-8cjw-p6xm",
+        "name": "CVE-2026-93687",
+        "description": "braces is vulnerable to stack-exhaustion denial of service through deeply nested glob patterns (GHSA-vfj7-8cjw-p6xm)"
+      },
+      "products": [
+        {
+          "@id": "pkg:npm/braces@3.0.3"
+        }
+      ],
+      "status": "not_affected",
+      "justification": "vulnerable_code_cannot_be_controlled_by_adversary",
+      "impact_statement": "braces 3.0.3 can exhaust the stack while parsing a deeply nested glob pattern, so exploitation requires an adversary to control the pattern text that braces compiles. In Sencho, braces enters the production image through micromatch, which http-proxy-middleware uses to compile the proxy context and path-filter patterns once at startup from static configuration; request URLs are matched against the compiled matcher and are never compiled as patterns. The remaining occurrences are development-time watchers (chokidar under nodemon and the TypeScript watcher) watching fixed paths. No request-controlled input reaches the braces parser, so the vulnerable code cannot be triggered by a remote adversary. No patched release exists: 3.0.3 is the newest published version and the advisory lists no fixed version, so the dependency audit gate honors this statement instead of blocking every change."
     }
   ]
 }

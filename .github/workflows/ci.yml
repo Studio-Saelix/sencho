@@ -96,7 +96,7 @@ jobs:
 
       - name: Audit Dependencies
         working-directory: ./backend
-        run: npm audit --audit-level=high
+        run: node ../scripts/audit-with-vex.mjs
 
   # Real-Docker integration tests, split out of the backend job so their
   # ~1 minute of serial container work runs alongside the unit tests instead
@@ -185,7 +185,7 @@ jobs:
 
       - name: Audit Dependencies
         working-directory: ./frontend
-        run: npm audit --audit-level=high
+        run: node ../scripts/audit-with-vex.mjs
 
   docker-validate:
     name: Docker Build & Scan
@@ -354,8 +354,10 @@ jobs:
         run: |
           node --check scripts/credit-changelog-contributors.mjs
           node --check scripts/release-notes-from-changelog.mjs
+          node --check scripts/audit-with-vex.mjs
 
       - name: Unit tests
         run: |
           node --test scripts/credit-changelog-contributors.test.mjs
           node --test scripts/release-notes-from-changelog.test.mjs
+          node --test scripts/audit-with-vex.test.mjs
