@@ -141,10 +141,12 @@ describe('StackHealthTable GitOps badge', () => {
     });
 
     it.each([
-      ['This node', 'this-node', 1162],
-      ['All nodes', 'all-nodes', 1266],
-    ] as const)('keeps a readable stack name in the %s minimum width', (_name, scope, expected) => {
-      const rows = rowsFromStatuses(stackStatuses, { app: 'candidate_ready' });
+      ['This node', 'this-node', true, 1162],
+      ['All nodes', 'all-nodes', true, 1266],
+      ['This node without GitOps states', 'this-node', false, 998],
+      ['All nodes without GitOps states', 'all-nodes', false, 1102],
+    ] as const)('keeps a readable stack name in the %s minimum width', (_name, scope, gitops, expected) => {
+      const rows = rowsFromStatuses(stackStatuses, gitops ? { app: 'candidate_ready' } : {});
       render(<StackHealthTable {...tableProps({ rows, scope, coverage: { k: 1, m: 1, n: rows.length } })} />);
 
       const header = screen.getByText('STACK').closest('div');
