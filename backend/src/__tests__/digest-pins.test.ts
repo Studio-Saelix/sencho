@@ -10,7 +10,11 @@ import {
   approvedPlatformDigest,
   observationMatchesExpected,
 } from '../services/gitops/artifactIdentity';
-import type { ServiceArtifactEvidence } from '../services/gitops/json';
+import {
+  decodeArtifactEvidenceJson,
+  encodeArtifactEvidenceJson,
+  type ServiceArtifactEvidence,
+} from '../services/gitops/json';
 
 const DIGEST_A = `sha256:${'a'.repeat(64)}`;
 const DIGEST_B = `sha256:${'b'.repeat(64)}`;
@@ -134,5 +138,26 @@ describe('artifact identity membership', () => {
       platformVariants: null,
     });
     expect(observationMatchesExpected([expected], [observed])).toBe(false);
+  });
+
+  it('matches a stored set that recorded the pre-normalization docker-info spelling', () => {
+    const legacyRaw = encodeArtifactEvidenceJson({
+      kind: 'qualified',
+      identity: INDEX,
+      services: [registryService({
+        platform: 'linux/x86_64',
+        platformDigest: DIGEST_A,
+        platformVariants: [{ platform: 'linux/x86_64', digest: DIGEST_A }],
+      })],
+    });
+    const expected = decodeArtifactEvidenceJson(legacyRaw).services![0];
+    const observed = registryService({
+      platform: 'linux/amd64',
+      platformDigest: DIGEST_A,
+      localDigests: [DIGEST_A],
+      platformVariants: null,
+    });
+    expect(approvedPlatformDigest(expected, 'linux/amd64')).toBe(DIGEST_A);
+    expect(observationMatchesExpected([expected], [observed])).toBe(true);
   });
 });

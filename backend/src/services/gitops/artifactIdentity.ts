@@ -1,4 +1,5 @@
 import type { ObservedArtifactIdentity, ServiceArtifactEvidence } from './json';
+import { canonicalPlatformLabel } from './platformNames';
 
 const SHA256_DIGEST_RE = /^sha256:[0-9a-f]{64}$/i;
 
@@ -19,6 +20,10 @@ export function observedCandidateDigests(service: ServiceArtifactEvidence): Set<
  * The approved child digest for this target's platform.
  * When freeze recorded platformVariants, a missing or unknown platform is
  * not a match: do not fall back to another architecture's child.
+ *
+ * Labels are compared with the docker-info spellings canonicalized away on
+ * both sides: a stored set and the platform a leaf reports can each predate
+ * the translation, so linux/x86_64 and linux/amd64 must find the same child.
  */
 export function approvedPlatformDigest(
   expected: ServiceArtifactEvidence,
@@ -26,7 +31,10 @@ export function approvedPlatformDigest(
 ): string | null {
   if (expected.platformVariants && expected.platformVariants.length > 0) {
     if (!observedPlatform) return null;
-    const hit = expected.platformVariants.find((variant) => variant.platform === observedPlatform);
+    const observed = canonicalPlatformLabel(observedPlatform);
+    const hit = expected.platformVariants.find(
+      (variant) => canonicalPlatformLabel(variant.platform) === observed,
+    );
     return hit?.digest ?? null;
   }
   return expected.platformDigest;

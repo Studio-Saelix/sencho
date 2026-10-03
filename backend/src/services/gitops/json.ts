@@ -1,4 +1,5 @@
 import crypto from 'crypto';
+import { canonicalPlatformLabel } from './platformNames';
 
 export class GitOpsJsonError extends Error {
   constructor(message: string) {
@@ -318,7 +319,24 @@ function decodePlatformVariants(value: unknown): ArtifactPlatformVariant[] | nul
       throw new GitOpsJsonError('platform variants must be sorted by platform');
     }
   }
-  return sorted;
+  // Labels are historical: a stored row written before the read translated
+  // docker-info spellings says linux/x86_64. Validation runs on the stored
+  // strings so a legacy row stays decodable, and the caller receives canonical
+  // labels, re-sorted because a translation can move a name across its
+  // neighbours (x86_64 sorts after arm64; amd64 sorts before it). Two stored
+  // spellings can collapse to one name, and the row would then be ambiguous,
+  // so the canonical labels carry the same uniqueness rule as the stored ones.
+  const canonical = variants
+    .map((variant) => ({ platform: canonicalPlatformLabel(variant.platform), digest: variant.digest }))
+    .sort((a, b) => a.platform.localeCompare(b.platform));
+  const canonicalSeen = new Set<string>();
+  for (const variant of canonical) {
+    if (canonicalSeen.has(variant.platform)) {
+      throw new GitOpsJsonError('platform variants must be unique by platform');
+    }
+    canonicalSeen.add(variant.platform);
+  }
+  return canonical;
 }
 
 function decodeLocalDigests(value: unknown): string[] | null {
@@ -408,7 +426,7 @@ function decodeServiceArtifactEvidence(value: unknown): ServiceArtifactEvidence 
     serviceName: value.serviceName,
     authoredRef: value.authoredRef,
     source: value.source as ArtifactServiceSource,
-    platform: value.platform,
+    platform: value.platform === null ? null : canonicalPlatformLabel(value.platform),
     indexDigest: value.indexDigest,
     platformDigest: value.platformDigest,
     platformVariants,

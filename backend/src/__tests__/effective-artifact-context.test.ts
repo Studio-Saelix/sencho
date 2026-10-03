@@ -28,13 +28,11 @@ describe('readNodePlatform', () => {
   it.each([
     ['x86_64', 'amd64'],
     ['aarch64', 'arm64'],
-    ['armv6l', 'arm'],
-    ['armv7l', 'arm'],
-    ['armv8l', 'arm'],
     ['i386', '386'],
     ['i486', '386'],
     ['i586', '386'],
     ['i686', '386'],
+    ['loongarch64', 'loong64'],
   ])('reports the OCI architecture for the docker-info spelling %s', async (reported, expected) => {
     mockDockerInfo.mockResolvedValue({ OSType: 'linux', Architecture: reported });
     await expect(readNodePlatform(1)).resolves.toEqual({ os: 'linux', architecture: expected });
@@ -51,8 +49,16 @@ describe('readNodePlatform', () => {
   });
 
   it('passes an unknown architecture through rather than guessing', async () => {
-    mockDockerInfo.mockResolvedValue({ OSType: 'linux', Architecture: 'loongarch64' });
-    await expect(readNodePlatform(1)).resolves.toEqual({ os: 'linux', architecture: 'loongarch64' });
+    mockDockerInfo.mockResolvedValue({ OSType: 'linux', Architecture: 'mips64r2' });
+    await expect(readNodePlatform(1)).resolves.toEqual({ os: 'linux', architecture: 'mips64r2' });
+  });
+
+  it('leaves 32-bit ARM spellings unmapped so the resolver fails closed', async () => {
+    // OCI distinguishes arm variants and this code does not model the variant,
+    // so translating armv6l/armv7l/armv8l to `arm` could qualify a child built
+    // for a different ABI. They pass through and never match a descriptor.
+    mockDockerInfo.mockResolvedValue({ OSType: 'linux', Architecture: 'armv7l' });
+    await expect(readNodePlatform(1)).resolves.toEqual({ os: 'linux', architecture: 'armv7l' });
   });
 
   it('returns null when the daemon omits the platform', async () => {
