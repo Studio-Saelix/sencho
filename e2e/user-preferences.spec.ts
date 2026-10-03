@@ -385,4 +385,57 @@ test.describe('User preferences across browsers', () => {
       await admin.dispose();
     }
   });
+
+  test('signing out then signing in as a different account never shows or saves the previous look', async ({ browser }) => {
+    // The live appearance store is not storage-backed: wiping localStorage
+    // alone left the previous account's theme on screen and wrote it into the
+    // next account's row. A foreign-account claim must reset both.
+    const admin = await adminApiContext();
+    const suffix = Date.now();
+    const userA = `pref-switch-a-${suffix}`;
+    const userB = `pref-switch-b-${suffix}`;
+    const password = 'pref-switch-password-123';
+    const idA = await ensureE2EUser(admin, userA, password, 'viewer');
+    const idB = await ensureE2EUser(admin, userB, password, 'viewer');
+
+    const context = await browser.newContext();
+    try {
+      const page = await context.newPage();
+      await loginAs(page, userA, password, { viewerSafe: true });
+
+      // Give account A a distinctive look, then reload so the live stores hold it.
+      await putDomain(page.request, idA, 'appearance', APPEARANCE_DOC);
+      await page.reload();
+      await waitForShellReady(page);
+      await expect(page.locator('html')).toHaveAttribute('data-theme', 'oled');
+      await expect(page.locator('body')).toHaveClass(/density-compact/);
+
+      // Sign out through the real UI. The cache and marker stay by design.
+      await page.getByRole('button', { name: 'Profile' }).click();
+      await page.getByRole('button', { name: 'Log Out' }).click();
+      await expect(page.locator('#username')).toBeVisible({ timeout: 10_000 });
+
+      // Account B is brand-new: the page must reset to defaults instead of
+      // rendering A's look or persisting it into B's row.
+      await loginAs(page, userB, password, { viewerSafe: true });
+      await expect(page.locator('html')).toHaveAttribute('data-theme', 'dim');
+      await expect(page.locator('body')).not.toHaveClass(/density-compact/);
+
+      await expect.poll(async () => {
+        const rows = await getPreferences(page.request, idB);
+        return rows.preferences.appearance?.data?.theme;
+      }, { timeout: 15_000 }).toBe('dim');
+      const rows = await getPreferences(page.request, idB);
+      expect(rows.preferences.appearance?.data).toMatchObject({
+        theme: 'dim',
+        accent: 'cyan',
+        density: 'comfortable',
+      });
+    } finally {
+      await context.close();
+      await deleteE2EUser(admin, idA);
+      await deleteE2EUser(admin, idB);
+      await admin.dispose();
+    }
+  });
 });

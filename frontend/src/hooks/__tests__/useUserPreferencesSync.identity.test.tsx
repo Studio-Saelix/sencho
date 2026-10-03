@@ -40,7 +40,11 @@ import {
   setHydratingDomains,
   queueReset,
 } from '@/lib/preferences/syncBus';
-import { PREFERENCES_OWNER_KEY } from '@/lib/preferences/preferencesDocuments';
+import {
+  PREFERENCES_OWNER_KEY,
+  defaultAppearanceDocument,
+  hydrateAppearanceDocument,
+} from '@/lib/preferences/preferencesDocuments';
 
 interface MockResponse {
   ok: boolean;
@@ -111,6 +115,43 @@ describe('useUserPreferencesSync: identity guards', () => {
     expect(calls).toHaveLength(0);
     // Hydration ran for the new account (a GET went out).
     expect(apiFetch.mock.calls.some(([path]) => String(path) === '/user-preferences')).toBe(true);
+  });
+
+  it('a different account claims a browser holding the previous account\'s live values: they are reset', async () => {
+    // The previous account's hydration left its values in the live stores
+    // (theme state and density class), not only in localStorage.
+    hydrateAppearanceDocument({
+      ...defaultAppearanceDocument(),
+      theme: 'oled',
+      accent: 'violet',
+      density: 'compact',
+    });
+    localStorage.setItem(PREFERENCES_OWNER_KEY, JSON.stringify({ userId: 7, schema: 1 }));
+
+    // Account 3 signs in with no server rows: its migration must carry
+    // defaults, never account 7's live values.
+    apiFetch.mockImplementation(async () => jsonResponse(200, {
+      preferences: { appearance: null, navigation: null },
+    }));
+
+    authState.user = { userId: 3 };
+    authState.appStatus = 'authenticated';
+    render(<SyncOwner />);
+    await act(async () => {
+      await vi.waitFor(() => {
+        expect(apiFetch.mock.calls.some(([path]) => String(path) === '/user-preferences')).toBe(true);
+      });
+    });
+
+    // The live stores were reset with the cache, so nothing of account 7's
+    // look can render or be written under account 3.
+    expect(document.body.classList.contains('density-compact')).toBe(false);
+    const migrateCall = apiFetch.mock.calls.find(
+      ([path, opts]) => String(path).endsWith('/appearance/migrate') && (opts as RequestInit | undefined)?.method === 'POST',
+    );
+    await vi.waitFor(() => expect(migrateCall).toBeDefined());
+    const body = JSON.parse(((migrateCall?.[1] as RequestInit).body) as string);
+    expect(body).toMatchObject({ theme: 'dim', accent: 'cyan', density: 'comfortable' });
   });
 
   it('a failed write of the old account cannot be retried after the identity transition', async () => {

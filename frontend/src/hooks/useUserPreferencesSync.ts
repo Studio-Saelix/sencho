@@ -5,8 +5,9 @@
  *
  * Responsibilities:
  * - Cache ownership: the localStorage preference cache is keyed to the account
- *   (marker sencho.preferences.owner). A different account wipes the cache to
- *   defaults before hydration, so no account ever renders another's values. A
+ *   (marker sencho.preferences.owner). A different account wipes the cache and
+ *   resets the live appearance and navigation stores to defaults before
+ *   hydration, so no account ever renders or migrates another's values. A
  *   profile with no marker (an upgraded browser, or a fresh one) keeps its
  *   cache: it is that account's migration source on first sync.
  * - Hydration: on authentication, GET both domains and hydrate through the
@@ -138,11 +139,15 @@ export function useUserPreferencesSync(): void {
       marker = null;
     }
     // A valid marker naming a different account means the cache is foreign:
-    // wipe it before hydration so no account ever renders another's values.
-    // No marker means this profile has never synced (an upgraded browser or a
-    // fresh one), so the cache is this account's migration source and stays.
+    // wipe it and reset the live stores to defaults before hydration. The
+    // stores are not storage-backed, so clearing localStorage alone would let
+    // the previous account's look keep rendering and get migrated under the
+    // new account. No marker means this profile has never synced (an upgraded
+    // browser or a fresh one), so the cache is the migration source and stays.
     if (marker !== null && marker.userId !== userId) {
       clearPreferenceCache();
+      adoptDefaults('appearance');
+      adoptDefaults('navigation');
     }
     if (marker === null || marker.userId !== userId) {
       try {
