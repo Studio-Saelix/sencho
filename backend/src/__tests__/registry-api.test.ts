@@ -1655,4 +1655,40 @@ describe('resolveRegistryImageDigestForPlatform', () => {
       expect(result.qualification).toBe('qualified');
     }
   });
+
+  it('rejects the raw docker-info architecture spelling that the read boundary must translate', async () => {
+    // This pins why readNodePlatform normalizes: the resolver filters index
+    // descriptors by exact os/architecture string, so a host spelling like
+    // x86_64 can never match an amd64 descriptor.
+    const body = JSON.stringify({
+      schemaVersion: 2,
+      mediaType: INDEX_CONTENT_TYPE,
+      manifests: [{
+        digest: CHILD_AMD64,
+        mediaType: 'application/vnd.oci.image.manifest.v1+json',
+        platform: { os: 'linux', architecture: 'amd64' },
+      }],
+    });
+    const indexDigest = `sha256:${createHash('sha256').update(body, 'utf8').digest('hex')}`;
+    route = (url, method) => {
+      const token = tokenOk(url);
+      if (token) return token;
+      if (url === MANIFEST_URL_TAG && method === 'HEAD') {
+        return { statusCode: 200, headers: { 'docker-content-digest': indexDigest, 'content-type': INDEX_CONTENT_TYPE } };
+      }
+      if (url === `https://${REGISTRY}/v2/${REPO}/manifests/${indexDigest}` && method === 'GET') {
+        return { statusCode: 200, headers: { 'docker-content-digest': indexDigest }, body };
+      }
+      return { statusCode: 500, headers: {} };
+    };
+
+    const result = await resolveRegistryImageDigestForPlatform(
+      REGISTRY,
+      REPO,
+      TAG,
+      { os: 'linux', architecture: 'x86_64' },
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.reason).toContain('linux/x86_64');
+  });
 });
