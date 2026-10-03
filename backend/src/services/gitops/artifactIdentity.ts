@@ -40,10 +40,59 @@ export function approvedPlatformDigest(
   return expected.platformDigest;
 }
 
+/** Child digests the expectation recorded, whether as its own or as variants. */
+function expectedChildDigests(expected: ServiceArtifactEvidence): Set<string> {
+  const out = new Set<string>();
+  addDigest(out, expected.platformDigest);
+  for (const variant of expected.platformVariants ?? []) addDigest(out, variant.digest);
+  return out;
+}
+
+/**
+ * True when the observation names no child of the expectation but does carry
+ * the frozen index digest and declares a platform the expectation has a child
+ * for.
+ *
+ * The containerd image store exposes only the index digest locally: the image
+ * Id, RepoDigests and descriptor all carry it, so the platform child digest is
+ * never visible. The child is still determined by the index and the platform,
+ * which is what this proves. It cannot stand in for a wrong child: the fallback
+ * requires that every other digest the observation recorded is a child of the
+ * expectation, and the caller has already refused a wrong one.
+ */
+function observedIndexProvesChild(
+  expected: ServiceArtifactEvidence,
+  observed: ServiceArtifactEvidence,
+  candidates: ReadonlySet<string>,
+  childDigests: ReadonlySet<string>,
+): boolean {
+  if (!observed.platform) return false;
+  const indexDigest = expected.indexDigest?.toLowerCase();
+  if (!indexDigest || !candidates.has(indexDigest)) return false;
+  for (const digest of candidates) {
+    if (digest !== indexDigest && !childDigests.has(digest)) return false;
+  }
+  const observedPlatform = canonicalPlatformLabel(observed.platform);
+  if (expected.platformVariants && expected.platformVariants.length > 0) {
+    return expected.platformVariants.some(
+      (variant) => canonicalPlatformLabel(variant.platform) === observedPlatform,
+    );
+  }
+  return expected.platform !== null
+    && canonicalPlatformLabel(expected.platform) === observedPlatform;
+}
+
 /**
  * True when every expected registry service is present in the observation and
- * at least one observed candidate equals that target's approved platform child.
- * The frozen index digest is not sufficient on its own.
+ * that observation proves the target runs the expectation's child for the
+ * platform it reports.
+ *
+ * The usual proof is the child digest itself. When the observation names no
+ * child of the expected set, the frozen index digest together with the platform
+ * the running image declares proves the same child, which is the strongest
+ * proof a containerd-store node can give. An observation that does name a child
+ * of the expected set must name the approved one; the index never stands in for
+ * a wrong child.
  */
 export function observationMatchesExpected(
   expectedServices: readonly ServiceArtifactEvidence[],
@@ -59,6 +108,9 @@ export function observationMatchesExpected(
     if (candidates.size === 0) return false;
     const approved = approvedPlatformDigest(expected, observed.platform);
     if (approved && candidates.has(approved.toLowerCase())) continue;
+    const childDigests = expectedChildDigests(expected);
+    if ([...candidates].some((digest) => childDigests.has(digest))) return false;
+    if (observedIndexProvesChild(expected, observed, candidates, childDigests)) continue;
     return false;
   }
   return true;

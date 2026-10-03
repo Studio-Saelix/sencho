@@ -40,3 +40,13 @@ export function canonicalPlatformLabel(label: string): string {
   if (!os || !architecture) return label;
   return [os.trim().toLowerCase(), toOciArchitecture(architecture), ...rest].join('/');
 }
+
+/** Canonicalize a node's OS/architecture read into the same label vocabulary. */
+export function canonicalNodePlatform(
+  platform: { os: string; architecture: string },
+): { os: string; architecture: string } {
+  return {
+    os: platform.os.trim().toLowerCase(),
+    architecture: toOciArchitecture(platform.architecture),
+  };
+}

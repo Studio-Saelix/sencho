@@ -441,6 +441,54 @@ describe('gitops artifact resolve', () => {
     expect(observationMatchesExpected(expected, observed.services ?? [])).toBe(true);
   });
 
+  it('matches an index-only observation the containerd store records for a multi-arch image', async () => {
+    // The containerd image store exposes only the index digest locally (image
+    // Id, RepoDigests and descriptor all carry it), so the observation cannot
+    // name the platform child. The frozen index plus the observed platform
+    // prove the same child.
+    const indexDigest = `sha256:${'1'.repeat(64)}`;
+    const platformDigest = `sha256:${'a'.repeat(64)}`;
+    mockBuildEffectiveServiceModel.mockResolvedValue(singleServiceModel());
+    mockListContainers.mockResolvedValue([{
+      Id: 'ctr-web',
+      State: 'running',
+      Labels: {
+        'com.docker.compose.project': 'obs-index-only',
+        'com.docker.compose.service': 'web',
+      },
+    }]);
+    mockContainerInspect.mockResolvedValue({ Image: `sha256:${'2'.repeat(64)}` });
+    mockImageInspect.mockResolvedValue({
+      Os: 'linux',
+      Architecture: 'amd64',
+      RepoDigests: [`nginx@${indexDigest}`],
+    });
+
+    const observed = await observeStackRuntimeArtifact({ stackName: 'obs-index-only', nodeId: 1, observedAt: 9 });
+    expect(observed.kind).toBe('exact');
+    if (observed.kind !== 'exact' && observed.kind !== 'qualified') throw new Error('expected comparable observation');
+    expect(observed.services?.[0]?.localDigests).toEqual([indexDigest]);
+
+    const expected = [{
+      serviceName: 'web',
+      authoredRef: 'nginx:latest',
+      source: 'registry' as const,
+      platform: 'linux/amd64',
+      indexDigest,
+      platformDigest,
+      platformVariants: [
+        { platform: 'linux/amd64', digest: platformDigest },
+        { platform: 'linux/arm64', digest: `sha256:${'b'.repeat(64)}` },
+      ],
+      localDigests: null,
+      buildContextFingerprint: null,
+      producedImageId: null,
+      failureClass: null,
+      resolvedAt: 1,
+    }];
+    expect(observationMatchesExpected(expected, observed.services ?? [])).toBe(true);
+  });
+
   it('keeps an arm64 target on a multi-arch expected set out of the stale bucket', async () => {
     seedDirectApp({ applicationId: 'app-memb', generationId: 'gen-memb', stackName: 'memb-web', artifactSetId: 'art-memb-seed' });
     mockBuildEffectiveServiceModel.mockResolvedValue(singleServiceModel());

@@ -1351,7 +1351,12 @@ function toExpected(
       identity: 'identity' in decoded ? decoded.identity : null,
       ...(decoded.services ? { services: decoded.services } : {}),
     };
-  } catch {
+  } catch (error) {
+    console.warn(
+      '[GitOpsProjection] Invalid artifact evidence for set %s: %s',
+      id,
+      error instanceof Error ? error.message : String(error),
+    );
     limitations.push({ code: 'artifact_evidence_json_invalid', message: 'expected artifact evidence is invalid', evidence: id });
     return {
       artifactSetId: row.id,

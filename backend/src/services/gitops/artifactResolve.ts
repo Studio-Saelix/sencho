@@ -40,6 +40,7 @@ import {
   type EffectiveArtifactContext,
   type NodePlatform,
 } from './effectiveArtifactContext';
+import { canonicalNodePlatform } from './platformNames';
 
 const REMOTE_RESOLVE_TIMEOUT_MS = 30_000;
 
@@ -318,6 +319,17 @@ function isNodePlatform(value: unknown): value is NodePlatform {
     && value.architecture.length > 0;
 }
 
+/**
+ * A platform payload from a leaf, translated to the OCI names the digest
+ * resolver compares. A leaf older than this build still reports the raw
+ * docker-info spelling, so the hub translates at this boundary rather than
+ * failing every resolve against it.
+ */
+function decodeNodePlatform(value: unknown): NodePlatform | null {
+  if (!isNodePlatform(value)) return null;
+  return canonicalNodePlatform({ os: value.os, architecture: value.architecture });
+}
+
 function isEffectiveServiceSpec(value: unknown): value is EffectiveServiceSpec {
   return isRecord(value)
     && typeof value.name === 'string'
@@ -388,7 +400,10 @@ export async function fetchRemoteEffectiveArtifactContext(
       );
       return null;
     }
-    return res.data;
+    return {
+      ...res.data,
+      platform: res.data.platform ? canonicalNodePlatform(res.data.platform) : null,
+    };
   } catch (err) {
     console.warn(
       '[GitOpsArtifactResolve] Remote effective-artifact-context failed for %s on node %s: %s',
@@ -612,7 +627,7 @@ async function fetchRemotePlatform(nodeId: number): Promise<NodePlatformRead> {
       );
       return { status: 'ok', platform: null };
     }
-    return { status: 'ok', platform: isNodePlatform(res.data?.platform) ? res.data.platform : null };
+    return { status: 'ok', platform: decodeNodePlatform(res.data?.platform) };
   } catch (err) {
     console.warn(
       '[GitOpsArtifactResolve] Remote platform read failed for node %s: %s',

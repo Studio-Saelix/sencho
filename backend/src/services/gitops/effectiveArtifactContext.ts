@@ -5,7 +5,7 @@
  */
 import { buildEffectiveServiceModel, type EffectiveServiceSpec } from '../effectiveServiceModel';
 import DockerController from '../DockerController';
-import { toOciArchitecture } from './platformNames';
+import { canonicalNodePlatform } from './platformNames';
 
 export type NodePlatform = { os: string; architecture: string };
 
@@ -33,10 +33,12 @@ export type EffectiveArtifactContext =
 export async function readNodePlatform(nodeId: number): Promise<NodePlatform | null> {
   try {
     const info = await DockerController.getInstance(nodeId).getDocker().info();
-    const os = typeof info.OSType === 'string' ? info.OSType.trim().toLowerCase() : '';
-    const architecture = typeof info.Architecture === 'string' ? toOciArchitecture(info.Architecture) : '';
-    if (!os || !architecture) return null;
-    return { os, architecture };
+    const platform = canonicalNodePlatform({
+      os: typeof info.OSType === 'string' ? info.OSType : '',
+      architecture: typeof info.Architecture === 'string' ? info.Architecture : '',
+    });
+    if (!platform.os || !platform.architecture) return null;
+    return platform;
   } catch {
     return null;
   }
