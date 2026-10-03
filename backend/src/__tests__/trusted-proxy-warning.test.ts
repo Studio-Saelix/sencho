@@ -88,6 +88,32 @@ describe('trustedProxyWarning', () => {
     expect(warning).toContain('SENCHO_TRUSTED_PROXY_CIDRS=fe80::1/128');
   });
 
+  it('tells an operator with a configured list to add the peer, not replace the list', () => {
+    process.env.SENCHO_TRUSTED_PROXY_CIDRS = '10.0.0.0/8';
+    resetTrustedProxyBlockListCache();
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const middleware = createTrustedProxyWarning();
+
+    middleware(makeRequest('172.18.0.1', { 'x-forwarded-for': '203.0.113.7' }), {} as Response, vi.fn() as NextFunction);
+
+    const warning = trustProxyWarnings(warn)[0];
+    expect(warning).toContain('add 172.18.0.1/32 to SENCHO_TRUSTED_PROXY_CIDRS');
+    expect(warning).not.toContain('set SENCHO_TRUSTED_PROXY_CIDRS=');
+  });
+
+  it('points at the rejected entries when the configured list is invalid', () => {
+    process.env.SENCHO_TRUSTED_PROXY_CIDRS = '192.168.1.50';
+    resetTrustedProxyBlockListCache();
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const middleware = createTrustedProxyWarning();
+
+    middleware(makeRequest('172.18.0.1', { 'x-forwarded-for': '203.0.113.7' }), {} as Response, vi.fn() as NextFunction);
+
+    const warning = trustProxyWarnings(warn)[0];
+    expect(warning).toContain('fix the rejected SENCHO_TRUSTED_PROXY_CIDRS entries');
+    expect(warning).not.toContain('add 172.18.0.1/32');
+  });
+
   it('caps distinct logged peers and says so once', () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     const middleware = createTrustedProxyWarning();

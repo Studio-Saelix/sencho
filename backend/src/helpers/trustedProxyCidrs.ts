@@ -3,6 +3,9 @@ import { sanitizeForLog } from '../utils/safeLog';
 
 const ENV_KEY = 'SENCHO_TRUSTED_PROXY_CIDRS';
 
+/** Headers a reverse proxy sets to describe the original client and scheme. */
+export const FORWARDING_HEADER_NAMES = ['x-forwarded-for', 'x-forwarded-proto', 'x-forwarded-host', 'x-real-ip'] as const;
+
 /** One rejected SENCHO_TRUSTED_PROXY_CIDRS entry and the reason it was rejected. */
 export interface TrustedProxyRejection {
   entry: string;

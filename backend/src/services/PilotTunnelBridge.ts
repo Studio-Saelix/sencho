@@ -19,6 +19,7 @@ import {
 } from '../pilot/protocol';
 import { isDebugEnabled } from '../utils/debug';
 import { sanitizeForLog } from '../utils/safeLog';
+import { FORWARDING_HEADER_NAMES } from '../helpers/trustedProxyCidrs';
 import { PilotMetrics } from './PilotMetrics';
 import { startWsHeartbeat } from '../utils/wsHeartbeat';
 import { TUNNEL_SEND_BUFFER_HIGH_WATER_MARK } from '../mesh/tcpStreamSwitchboard';
@@ -32,6 +33,29 @@ const PING_INTERVAL_MS = 30_000;
  * paused, so steady-state cost is zero.
  */
 const DRAIN_CHECK_INTERVAL_MS = 100;
+
+const FORWARDING_HEADER_SET = new Set<string>([...FORWARDING_HEADER_NAMES, 'forwarded']);
+
+/**
+ * Copy request headers into a tunnel frame, dropping forwarding headers.
+ *
+ * Forwarding headers have no trust context across the tunnel: the agent's
+ * loopback listener sees the replayed request from its own loopback peer, so
+ * relaying `X-Forwarded-*` would ask the agent to trust a client address it
+ * cannot verify. The hub's own request pipeline has already applied its
+ * trusted-proxy policy to the original request. `Forwarded` (RFC 7239) is
+ * stripped defensively: no reader honors it today, and it must not become a
+ * spoofable client address if one ever does.
+ */
+function tunnelFrameHeaders(req: IncomingMessage): Record<string, string> {
+    const headers: Record<string, string> = {};
+    for (const [k, v] of Object.entries(req.headers)) {
+        if (FORWARDING_HEADER_SET.has(k)) continue;
+        if (typeof v === 'string') headers[k] = v;
+        else if (Array.isArray(v)) headers[k] = v.join(', ');
+    }
+    return headers;
+}
 
 interface StreamMeta {
     idleTimer?: NodeJS.Timeout;
@@ -343,11 +367,7 @@ export class PilotTunnelBridge extends EventEmitter implements MeshTunnelHandle 
         this.streams.set(streamId, state);
         this.refreshIdleTimer(streamId, state);
 
-        const headers: Record<string, string> = {};
-        for (const [k, v] of Object.entries(req.headers)) {
-            if (typeof v === 'string') headers[k] = v;
-            else if (Array.isArray(v)) headers[k] = v.join(', ');
-        }
+        const headers = tunnelFrameHeaders(req);
 
         this.sendJson({
             t: 'http_req',
@@ -419,11 +439,7 @@ export class PilotTunnelBridge extends EventEmitter implements MeshTunnelHandle 
         this.streams.set(streamId, state);
         this.refreshIdleTimer(streamId, state);
 
-        const headers: Record<string, string> = {};
-        for (const [k, v] of Object.entries(req.headers)) {
-            if (typeof v === 'string') headers[k] = v;
-            else if (Array.isArray(v)) headers[k] = v.join(', ');
-        }
+        const headers = tunnelFrameHeaders(req);
 
         this.sendJson({
             t: 'ws_open',

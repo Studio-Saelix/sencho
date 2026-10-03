@@ -85,4 +85,19 @@ describe('Express trusted proxy configuration', () => {
       warn.mockRestore();
     }
   });
+
+  it('logs the trusted-proxy policy when the app is built', () => {
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {});
+    try {
+      createApp();
+
+      const bootLines = log.mock.calls
+        .map(call => String(call[0]))
+        .filter(message => message.includes('[TrustProxy]'));
+      expect(bootLines).toHaveLength(1);
+      expect(bootLines[0]).toContain('SENCHO_TRUSTED_PROXY_CIDRS is not set');
+    } finally {
+      log.mockRestore();
+    }
+  });
 });

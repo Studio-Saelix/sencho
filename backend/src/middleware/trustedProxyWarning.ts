@@ -1,10 +1,9 @@
 import net from 'net';
 import type { NextFunction, Request, RequestHandler, Response } from 'express';
-import { isTrustedProxyPeer } from '../helpers/trustedProxyCidrs';
+import { FORWARDING_HEADER_NAMES, getTrustedProxyPolicy, isTrustedProxyPeer } from '../helpers/trustedProxyCidrs';
 import { sanitizeForLog } from '../utils/safeLog';
 
-/** Headers a reverse proxy sets to describe the original client and scheme. */
-const FORWARDING_HEADERS = ['x-forwarded-for', 'x-forwarded-proto', 'x-forwarded-host', 'x-real-ip'] as const;
+const FORWARDING_HEADERS = FORWARDING_HEADER_NAMES;
 
 /** Cap on distinct peers warned about, so a directly exposed instance cannot flood the log. */
 const MAX_LOGGED_PEERS = 16;
@@ -53,9 +52,18 @@ export function createTrustedProxyWarning(): RequestHandler {
       if (peer && !isTrustedProxyPeer(peer)) {
         if (!loggedPeers.has(peer) && loggedPeers.size < MAX_LOGGED_PEERS) {
           loggedPeers.add(peer);
+          const policy = getTrustedProxyPolicy();
+          let suggestion: string;
+          if (!policy.configured) {
+            suggestion = `set SENCHO_TRUSTED_PROXY_CIDRS=${sanitizeForLog(peerCidr(peer))} and restart`;
+          } else if (policy.blockList) {
+            suggestion = `add ${sanitizeForLog(peerCidr(peer))} to SENCHO_TRUSTED_PROXY_CIDRS and restart`;
+          } else {
+            suggestion = 'fix the rejected SENCHO_TRUSTED_PROXY_CIDRS entries reported at startup and restart';
+          }
           console.warn(
             `[TrustProxy] Ignoring X-Forwarded-* headers from untrusted peer ${sanitizeForLog(peer)}. `
-            + `If that is your reverse proxy, set SENCHO_TRUSTED_PROXY_CIDRS=${sanitizeForLog(peerCidr(peer))} and restart. `
+            + `If that is your reverse proxy, ${suggestion}. `
             + 'Until then client addresses, secure cookies, SSO callback URLs, and rate-limit keys reflect the proxy, not the client.',
           );
         } else if (!loggedPeers.has(peer) && !capWarned) {
