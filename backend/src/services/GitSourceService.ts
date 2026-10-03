@@ -110,24 +110,30 @@ import type { SecretCapability } from './gitops/sops/types';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
-export type GitSourceErrorCode =
-    | 'REPO_NOT_FOUND'
-    | 'AUTH_FAILED'
-    | 'REF_NOT_FOUND'
-    | 'REF_DELETED'
-    | 'UNSUPPORTED_REF'
-    | 'SSH_HOST_KEY_FAILED'
-    | 'FILE_NOT_FOUND'
-    | 'RATE_LIMITED'
-    | 'NETWORK_TIMEOUT'
-    | 'GIT_ERROR'
-    | 'STALE_PLAN'
-    | 'PLAN_FINGERPRINT_REQUIRED'
-    | 'PLAN_BLOCKED'
-    | 'LEGACY_PENDING'
-    | 'PLAN_UNAVAILABLE'
-    | 'OPERATION_IN_FLIGHT'
-    | 'SOURCE_CLAIMED_BY_BLUEPRINT';
+// The runtime list and the type share one source, so a new code cannot be
+// added to the union without also reaching every runtime consumer (the
+// status map and the closed-set guard in utils/gitSourceHttp.ts).
+export const GIT_SOURCE_ERROR_CODE_VALUES = [
+    'REPO_NOT_FOUND',
+    'AUTH_FAILED',
+    'REF_NOT_FOUND',
+    'REF_DELETED',
+    'UNSUPPORTED_REF',
+    'SSH_HOST_KEY_FAILED',
+    'FILE_NOT_FOUND',
+    'RATE_LIMITED',
+    'NETWORK_TIMEOUT',
+    'GIT_ERROR',
+    'STALE_PLAN',
+    'PLAN_FINGERPRINT_REQUIRED',
+    'PLAN_BLOCKED',
+    'LEGACY_PENDING',
+    'PLAN_UNAVAILABLE',
+    'OPERATION_IN_FLIGHT',
+    'SOURCE_CLAIMED_BY_BLUEPRINT',
+] as const;
+
+export type GitSourceErrorCode = (typeof GIT_SOURCE_ERROR_CODE_VALUES)[number];
 
 export type SourceRevalidationResult =
     | { status: 'reuse'; generation: GitOpsGenerationRow }

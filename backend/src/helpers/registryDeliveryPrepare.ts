@@ -8,7 +8,7 @@ import { NodeRegistry } from '../services/NodeRegistry';
 import { PreparedSourceStore } from '../services/preparedSourceStore';
 import { hashDeliverySourceDir, hashBlueprintPostApplySource, hashProjectSource } from './registryDeliveryHashes';
 import type { RegistryDeliveryDiscoverRequest } from '../services/RegistryDeliveryService';
-import { GitSourceError, type CreateStackFromGitInput } from '../services/GitSourceService';
+import type { CreateStackFromGitInput } from '../services/GitSourceService';
 import { isValidStackName } from '../utils/validation';
 import { loadDotEnv } from '../services/ImageUpdateService';
 import { discoverRegistryReferencesFromComposeContent } from '../services/registryReferenceDiscovery';
@@ -183,15 +183,14 @@ function gitInputFromDiscover(request: RegistryDeliveryDiscoverRequest): CreateS
 export async function prepareGitCandidateSource(
   request: RegistryDeliveryDiscoverRequest,
 ): Promise<PreparedSourceResult> {
+  const { GitSourceError, GitSourceService } = await import('../services/GitSourceService');
   if (request.gitApply === true && request.stack) {
-    const { GitSourceService } = await import('../services/GitSourceService');
     return GitSourceService.getInstance().prepareRegistryDeliveryFromPending(request.stack);
   }
   const input = gitInputFromDiscover(request);
   if (!input) {
     throw new GitSourceError('GIT_ERROR', 'Git candidate discovery is missing required fields');
   }
-  const { GitSourceService } = await import('../services/GitSourceService');
   return GitSourceService.getInstance().prepareRegistryDeliveryFromGit(input);
 }
 

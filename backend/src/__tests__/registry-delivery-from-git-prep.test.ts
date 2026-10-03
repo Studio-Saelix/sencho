@@ -232,6 +232,10 @@ describe('createStackFromGit prepared git candidate consumption', () => {
 
   it('refuses deploy-key discovery without a key, host trust, or a matching fingerprint', async () => {
     const svc = GitSourceService.getInstance();
+    const fetchSpy = vi.spyOn(
+      svc as unknown as { fetchFromGit: (params: Record<string, unknown>) => Promise<unknown> },
+      'fetchFromGit',
+    ).mockRejectedValue(new Error('fetchFromGit must not run without valid deploy-key auth'));
     const base = {
       stackName: 'demo',
       repoUrl: 'git@github.com:acme/demo.git',
@@ -251,14 +255,23 @@ describe('createStackFromGit prepared git candidate consumption', () => {
       ...base,
       deployKey: null,
       sshKnownHostsEntry: null,
-    })).rejects.toMatchObject({ code: 'GIT_ERROR' });
+    })).rejects.toMatchObject({
+      code: 'GIT_ERROR',
+      message: 'Deploy key authentication requires a private key and a trusted SSH host key.',
+    });
 
     await expect(svc.prepareRegistryDeliveryFromGit({
       ...base,
       deployKey: 'PRIVATE KEY MATERIAL',
       sshKnownHostsEntry: 'github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITestOnly',
       sshHostKeyFingerprint: 'SHA256:does-not-match',
-    })).rejects.toMatchObject({ code: 'GIT_ERROR' });
+    })).rejects.toMatchObject({
+      code: 'GIT_ERROR',
+      message: 'SSH host key fingerprint does not match the trusted key entry.',
+    });
+
+    expect(fetchSpy).not.toHaveBeenCalled();
+    fetchSpy.mockRestore();
   });
 
   it('refuses a git candidate discovery that omits required fields', async () => {
@@ -268,6 +281,9 @@ describe('createStackFromGit prepared git candidate consumption', () => {
       stack: 'demo',
       actionSetHash: hashActionSet(['stack:deploy', 'stack:create']),
       git: {},
-    })).rejects.toMatchObject({ code: 'GIT_ERROR' });
+    })).rejects.toMatchObject({
+      code: 'GIT_ERROR',
+      message: 'Git candidate discovery is missing required fields',
+    });
   });
 });
