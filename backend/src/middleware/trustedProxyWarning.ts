@@ -63,7 +63,7 @@ export function createTrustedProxyWarning(): RequestHandler {
           }
           console.warn(
             `[TrustProxy] Ignoring X-Forwarded-* headers from untrusted peer ${sanitizeForLog(peer)}. `
-            + `If that is your reverse proxy, ${suggestion}. `
+            + `If that peer forwards traffic to this instance (a reverse proxy or another Sencho instance), ${suggestion}. `
             + 'Until then client addresses, secure cookies, SSO callback URLs, and rate-limit keys reflect the proxy, not the client.',
           );
         } else if (!loggedPeers.has(peer) && !capWarned) {

@@ -164,7 +164,7 @@ Traefik handles WebSocket upgrades automatically for HTTP/1.1 backends, so no ex
 
 **Symptom:** A few failed sign-ins lock out every user for 15 minutes, the audit log records the proxy's address instead of each operator's, the sign-in cookie is not marked `Secure`, or an SSO callback is built with `http://`.
 
-**Cause:** Sencho accepts `X-Forwarded-*` headers only from peers listed in `SENCHO_TRUSTED_PROXY_CIDRS`. When the variable is unset, or the direct proxy is missing from it, Sencho uses the proxy's own address for the client address, the request scheme, and rate-limit keys. Look for `[TrustProxy]` lines in the logs: one at startup for an invalid or missing list, and one per unlisted peer that sends forwarding headers.
+**Cause:** Sencho accepts `X-Forwarded-*` headers only from peers listed in `SENCHO_TRUSTED_PROXY_CIDRS`. When the variable is unset, or the direct proxy is missing from it, Sencho uses the proxy's own address for the client address, the request scheme, and rate-limit keys. Look for `[TrustProxy]` lines in the logs: one at startup for an invalid or missing list, and one per unlisted peer when an HTTP request carries forwarding headers.
 
 **Fix:** Set `SENCHO_TRUSTED_PROXY_CIDRS` to the direct proxy's address, using `/32` for one IPv4 address or `/128` for one IPv6 address, or to the proxy network CIDR, then restart. See [Reverse proxy setup](/getting-started/configuration#reverse-proxy-setup).
 
