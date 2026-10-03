@@ -11,7 +11,7 @@ import { resolveRegistryAuthAtSeam } from '../helpers/registryDeliverySeam';
 import { hashActionSet, hashProjectSource, hashPullRefList } from '../helpers/registryDeliveryHashes';
 import { discoverRegistryReferences } from '../services/registryReferenceDiscovery';
 import { normalizePullRefList } from '../helpers/registryPullReference';
-import { normalizeImageHost } from '../services/RegistryService';
+import { RegistryService, normalizeImageHost } from '../services/RegistryService';
 import {
   buildSealedAuthsAad,
   getOrCreateSealingKey,
@@ -96,6 +96,128 @@ describe('registryDeliverySeam', () => {
 
     const ghcrKey = referencedHosts.map(normalizeImageHost).find(h => h.includes('ghcr')) ?? 'ghcr.io';
     expect(result.auths[ghcrKey]).toBeDefined();
+  });
+
+  it('keys delivered Docker Hub credentials under the legacy v1 auths key', async () => {
+    const nodeId = NodeRegistry.getInstance().getDefaultNodeId();
+    const stackName = 'regcred-dockerhub-key';
+    const composeDir = NodeRegistry.getInstance().getComposeDir(nodeId);
+    const stackDir = path.join(composeDir, stackName);
+    fs.mkdirSync(stackDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(stackDir, 'compose.yaml'),
+      'services:\n'
+      + '  app:\n'
+      + '    image: index.docker.io/acme/private/app:latest\n'
+      + '  helper:\n'
+      + '    image: ghcr.io/example/private/helper:latest\n',
+    );
+
+    const sourceHash = hashProjectSource(stackDir);
+    const discovery = await discoverRegistryReferences(stackDir);
+    const referencedHosts = discovery.referencedHosts;
+    const delivery = RegistryDeliveryService.getInstance();
+    const attestation = delivery.signAttestation({
+      nodeIdClaim: nodeId,
+      stack: stackName,
+      op: 'stack-deploy',
+      sourceHash,
+      referencedHostsHash: delivery.hashHostList(referencedHosts),
+      referencedPullRefsHash: hashPullRefList(normalizePullRefList(discovery.referencedPullRefs)),
+      coveredHostsHash: delivery.hashHostList([]),
+      actionSetHash: hashActionSet(['stack:deploy']),
+      deliveryContractVersion: 1,
+    });
+
+    const envelope = {
+      attestation,
+      auths: [
+        { host: 'index.docker.io', username: 'hub-user', password: 'hub-pass' },
+        { host: 'ghcr.io', username: 'ghcr-user', password: 'ghcr-pass' },
+      ],
+      notAfter: Date.now() + 60_000,
+      deliverySourceId: delivery.getDeliverySourceId(),
+    };
+
+    acquireLockForAttestation(nodeId, stackName, attestation, 'stack-deploy');
+
+    const result = await resolveRegistryAuthAtSeam({
+      envelope,
+      nodeId,
+      stack: stackName,
+      stage: 'stack-deploy',
+    });
+
+    // Docker reads Hub credentials only under the legacy v1 auths key; the
+    // normalized `index.docker.io` key is ignored by the Docker CLI.
+    const hubAuth = Buffer.from('hub-user:hub-pass').toString('base64');
+    expect(result.auths['https://index.docker.io/v1/']).toEqual({ auth: hubAuth });
+    expect(result.auths['index.docker.io']).toBeUndefined();
+    expect(result.auths['ghcr.io']).toBeDefined();
+  });
+
+  it('keeps target-local Docker Hub credentials over delivered ones', async () => {
+    const nodeId = NodeRegistry.getInstance().getDefaultNodeId();
+    const registry = RegistryService.getInstance();
+    const registryId = registry.create({
+      name: 'hub-local',
+      url: '',
+      type: 'dockerhub',
+      username: 'target-user',
+      secret: 'target-pass',
+    });
+
+    try {
+      const stackName = 'regcred-dockerhub-local-wins';
+      const composeDir = NodeRegistry.getInstance().getComposeDir(nodeId);
+      const stackDir = path.join(composeDir, stackName);
+      fs.mkdirSync(stackDir, { recursive: true });
+      fs.writeFileSync(
+        path.join(stackDir, 'compose.yaml'),
+        'services:\n  app:\n    image: index.docker.io/acme/private/app:latest\n',
+      );
+
+      const sourceHash = hashProjectSource(stackDir);
+      const discovery = await discoverRegistryReferences(stackDir);
+      const referencedHosts = discovery.referencedHosts;
+      const delivery = RegistryDeliveryService.getInstance();
+      const attestation = delivery.signAttestation({
+        nodeIdClaim: nodeId,
+        stack: stackName,
+        op: 'stack-deploy',
+        sourceHash,
+        referencedHostsHash: delivery.hashHostList(referencedHosts),
+        referencedPullRefsHash: hashPullRefList(normalizePullRefList(discovery.referencedPullRefs)),
+        // The hub signs the covered-host list the target reported, which here
+        // includes the target's own Docker Hub row.
+        coveredHostsHash: delivery.hashHostList(['index.docker.io']),
+        actionSetHash: hashActionSet(['stack:deploy']),
+        deliveryContractVersion: 1,
+      });
+
+      const envelope = {
+        attestation,
+        auths: [{ host: 'index.docker.io', username: 'hub-user', password: 'hub-pass' }],
+        notAfter: Date.now() + 60_000,
+        deliverySourceId: delivery.getDeliverySourceId(),
+      };
+
+      acquireLockForAttestation(nodeId, stackName, attestation, 'stack-deploy');
+
+      const result = await resolveRegistryAuthAtSeam({
+        envelope,
+        nodeId,
+        stack: stackName,
+        stage: 'stack-deploy',
+      });
+
+      expect(result.auths['https://index.docker.io/v1/']).toEqual({
+        auth: Buffer.from('target-user:target-pass').toString('base64'),
+      });
+      expect(result.auths['index.docker.io']).toBeUndefined();
+    } finally {
+      registry.delete(registryId);
+    }
   });
 
   it('rejects replayed jti at the seam', async () => {
