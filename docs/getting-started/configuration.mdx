@@ -285,6 +285,8 @@ services:
 
 Sencho works behind any reverse proxy. Forward WebSocket upgrades, the original client address, and the original request scheme. Set `SENCHO_TRUSTED_PROXY_CIDRS` to the direct proxy as a CIDR (for example, `192.168.1.50/32` for one IPv4 address or `fd12:3456:789a::50/128` for one IPv6 address), or to the proxy network CIDR, so Sencho accepts those forwarding headers only from that peer.
 
+Until the direct peer is listed, Sencho ignores the forwarding headers: requests appear to come from the proxy, the sign-in cookie is not marked `Secure`, SSO callbacks are built on the scheme Sencho sees, and rate limits are shared across every client behind the proxy. Sencho logs its trusted-proxy policy at startup and warns once per unlisted peer that sends forwarding headers, naming the value to set.
+
 Every instance keeps its own list. On a remote node, the instance forwarding a request is its direct peer, so add the forwarding instance's address there as well if you want that node's audit trail to name the operator's address rather than the forwarding one. The operator is recorded either way: a console session opened through another instance records that instance's operator in `acting_as`. Trust the narrowest range that works. A node that trusts a forwarding instance also accepts the client address that instance forwards, so a shared or over-broad range makes the audit trail easy to misreport.
 
 ### Nginx

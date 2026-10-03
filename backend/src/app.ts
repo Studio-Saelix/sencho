@@ -6,48 +6,57 @@ import helmet from 'helmet';
 import { globalApiLimiter, pollingLimiter } from './middleware/rateLimiters';
 import { conditionalJsonParser } from './middleware/jsonParser';
 import { nodeContextMiddleware } from './middleware/nodeContext';
-import { isTrustedProxyPeer } from './helpers/trustedProxyCidrs';
+import { isTrustedProxyPeer, logTrustedProxyConfiguration } from './helpers/trustedProxyCidrs';
+import { createTrustedProxyWarning } from './middleware/trustedProxyWarning';
 import { normalizeAcceptEncoding } from './middleware/normalizeAcceptEncoding';
 import './types/express';
 
 /**
  * Build an Express app with the full middleware pipeline installed.
  *
- * Canonical middleware order (19 steps). Do not reorder without re-running the
+ * Canonical middleware order (20 steps). Do not reorder without re-running the
  * regression checklist in `docs/internal/architecture/middleware-order.md`.
  *
- *   1.  trust proxy
- *   2.  helmet
- *   3.  cors
- *   4.  normalizeAcceptEncoding
- *   5.  compression
- *   6.  cookieParser
- *   7.  globalApiLimiter (at /api)
- *   8.  pollingLimiter (at /api)
- *   9.  conditionalJsonParser
- *   10. nodeContextMiddleware
- *   11. authGate (at /api)                -- registered in index.ts
- *   12. auditLog (at /api)                -- registered in index.ts
- *   13. enforceApiTokenScope (at /api)    -- registered in index.ts
- *   14. hubOnlyGuard (at /api)            -- middleware/hubOnlyGuard.ts, registered in index.ts
- *   15. registryDeliveryMiddleware (at /api) -- middleware/registryDelivery.ts, registered in index.ts
- *   16. createRemoteProxyMiddleware       -- proxy/remoteNodeProxy.ts, registered in index.ts
- *   17. routes                            -- registered in index.ts from routes/*
- *   18. static serving + SPA fallback     -- registered in index.ts
- *   19. errorHandler                      -- registered in index.ts
+ *   1.  trust proxy + trusted-proxy policy log
+ *   2.  trustedProxyWarning
+ *   3.  helmet
+ *   4.  cors
+ *   5.  normalizeAcceptEncoding
+ *   6.  compression
+ *   7.  cookieParser
+ *   8.  globalApiLimiter (at /api)
+ *   9.  pollingLimiter (at /api)
+ *   10. conditionalJsonParser
+ *   11. nodeContextMiddleware
+ *   12. authGate (at /api)                -- registered in index.ts
+ *   13. auditLog (at /api)                -- registered in index.ts
+ *   14. enforceApiTokenScope (at /api)    -- registered in index.ts
+ *   15. hubOnlyGuard (at /api)            -- middleware/hubOnlyGuard.ts, registered in index.ts
+ *   16. registryDeliveryMiddleware (at /api) -- middleware/registryDelivery.ts, registered in index.ts
+ *   17. createRemoteProxyMiddleware       -- proxy/remoteNodeProxy.ts, registered in index.ts
+ *   18. routes                            -- registered in index.ts from routes/*
+ *   19. static serving + SPA fallback     -- registered in index.ts
+ *   20. errorHandler                      -- registered in index.ts
  *
- * Steps 11 to 14 and 16 must run after the public auth routers (meta, auth,
+ * Steps 12 to 15 and 17 must run after the public auth routers (meta, auth,
  * mfa, sso) are registered so those routes stay reachable without a session
- * cookie. index.ts mounts those public routers before step 11 to preserve
+ * cookie. index.ts mounts those public routers before step 12 to preserve
  * that invariant.
  */
 export function createApp(): express.Express {
   const app = express();
 
   // 1. Trust forwarding headers only from explicitly configured proxy peers.
+  // Log the effective policy once at boot so a missing or invalid list does
+  // not silently change how client addresses and schemes are resolved.
   app.set('trust proxy', (address: string) => isTrustedProxyPeer(address));
+  logTrustedProxyConfiguration();
 
-  // 2. Security headers.
+  // 2. Warn once per untrusted peer when forwarding headers arrive that the
+  // policy is ignoring, so a reverse proxy missing from the list is visible.
+  app.use(createTrustedProxyWarning());
+
+  // 3. Security headers.
   // crossOriginEmbedderPolicy: disabled because Monaco editor workers lack COEP headers.
   // hsts: disabled. HSTS must only be set over HTTPS; enabling over HTTP
   //   permanently breaks browser access for 1 year.
@@ -92,7 +101,7 @@ export function createApp(): express.Express {
     },
   }));
 
-  // 3. CORS: production restricts to FRONTEND_URL; dev mirrors the request
+  // 4. CORS: production restricts to FRONTEND_URL; dev mirrors the request
   // origin so Vite's dev server works.
   const corsOrigin = process.env.NODE_ENV === 'production'
     ? (process.env.FRONTEND_URL || false)
@@ -102,12 +111,12 @@ export function createApp(): express.Express {
     credentials: true,
   }));
 
-  // 4. Drop unknown Accept-Encoding tokens (e.g. `zstd` from Chromium 123+)
+  // 5. Drop unknown Accept-Encoding tokens (e.g. `zstd` from Chromium 123+)
   // before compression negotiates. See middleware/normalizeAcceptEncoding.ts
   // for the symptom this prevents.
   app.use(normalizeAcceptEncoding);
 
-  // 5. Compression. SSE streams (Content-Type: text/event-stream) MUST NOT be
+  // 6. Compression. SSE streams (Content-Type: text/event-stream) MUST NOT be
   // compressed because compression buffers output and would delay event delivery
   // until a flush, breaking live log and status streams.
   app.use(compression({
@@ -120,18 +129,18 @@ export function createApp(): express.Express {
     },
   }));
 
-  // 6. Cookie parser must run before the rate limiters so the hybrid key
+  // 7. Cookie parser must run before the rate limiters so the hybrid key
   // generator can read req.cookies for per-user rate limit bucketing.
   app.use(cookieParser());
 
-  // 7-8. Tiered rate limiting (see middleware/rateLimiters.ts for the model).
+  // 8-9. Tiered rate limiting (see middleware/rateLimiters.ts for the model).
   app.use('/api/', globalApiLimiter);
   app.use('/api/', pollingLimiter);
 
-  // 9. Parse JSON on local requests; preserve the raw stream for remote proxy.
+  // 10. Parse JSON on local requests; preserve the raw stream for remote proxy.
   app.use(conditionalJsonParser);
 
-  // 10. Resolve req.nodeId and short-circuit requests to deleted nodes.
+  // 11. Resolve req.nodeId and short-circuit requests to deleted nodes.
   app.use(nodeContextMiddleware);
 
   return app;

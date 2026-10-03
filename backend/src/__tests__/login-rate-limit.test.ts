@@ -1,4 +1,3 @@
-import express from 'express';
 import request from 'supertest';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import {
@@ -14,13 +13,17 @@ let app: import('express').Express;
 
 beforeAll(async () => {
   vi.stubEnv('NODE_ENV', 'production');
+  // The login limiter keys on req.ip, which only reflects X-Forwarded-For when
+  // the direct peer is a trusted proxy. Supertest connects from loopback, so
+  // list it and drive the real createApp pipeline instead of setting
+  // `trust proxy` by hand, which would hide a regression in the policy itself.
+  vi.stubEnv('SENCHO_TRUSTED_PROXY_CIDRS', '127.0.0.0/8');
   vi.resetModules();
   tmpDir = await setupTestDb();
   ({ authRouter } = await import('../routes/auth'));
+  const { createApp } = await import('../app');
 
-  app = express();
-  app.set('trust proxy', 1);
-  app.use(express.json());
+  app = createApp();
   app.use('/api/auth', authRouter);
 });
 
