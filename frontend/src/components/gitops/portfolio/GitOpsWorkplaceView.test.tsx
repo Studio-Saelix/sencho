@@ -15,10 +15,11 @@ vi.mock('@/lib/api', () => ({
   apiFetch: vi.fn(),
 }));
 
-// The application view reads the session's permissions for its authority
-// actions; this suite drives navigation, not authorization.
+// The application sheet and the queue read the session's permissions. The suite is
+// read-only by default (`allowed` is false); a test that needs an action opts in.
+const session = vi.hoisted(() => ({ allowed: false }));
 vi.mock('@/context/AuthContext', () => ({
-  useAuth: () => ({ can: () => false }),
+  useAuth: () => ({ can: () => session.allowed }),
 }));
 
 vi.mock('@/context/NodeContext', () => ({
@@ -51,6 +52,7 @@ function ok(body: unknown): Response {
 }
 
 afterEach(() => {
+  session.allowed = false;
   mockFetch.mockReset();
   window.history.replaceState({}, '', '/');
 });
@@ -131,5 +133,29 @@ describe('GitOpsWorkplaceView', () => {
 
     expect(await screen.findByText(/node reporting · refreshing/)).toBeInTheDocument();
     expect(screen.queryByText('Refreshing')).toBeNull();
+  });
+
+  it('reads the portfolio again after Retry in the queue, without waiting for a server announcement', async () => {
+    session.allowed = true;
+    const failing = portfolioRow({ attention: ['source_failed'], posture: 'failed', availableActions: ['retry'] });
+    const withQueue: GitOpsPortfolioResponse = {
+      ...list,
+      summary: { ...list.summary, attentionRequired: 1, failed: 1, converged: 0 },
+      attentionQueue: [failing],
+      applications: [failing],
+    };
+    mockFetch.mockImplementation(async (url: string) => (
+      String(url).includes('/git-source/retry') ? ok({}) : ok(withQueue)
+    ));
+    render(<GitOpsWorkplaceView />);
+    const listReads = () => mockFetch.mock.calls.filter(([url]) => String(url).startsWith('/gitops/applications')).length;
+    const retry = await screen.findByRole('button', { name: 'Retry' });
+    await waitFor(() => expect(retry).toBeEnabled());
+    const before = listReads();
+
+    fireEvent.click(retry);
+
+    await waitFor(() => expect(mockFetch.mock.calls.some(([url]) => String(url).includes('/stacks/bookstack/git-source/retry'))).toBe(true));
+    await waitFor(() => expect(listReads()).toBeGreaterThan(before));
   });
 });

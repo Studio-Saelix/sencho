@@ -81,6 +81,8 @@ describe('GitOpsGitSourceHost', () => {
     request({ nodeId: 2, stackName: 'bookstack', applicationName: 'bookstack' });
     fireEvent.click(screen.getByRole('button', { name: 'changed' }));
     expect(invalidated).toHaveBeenCalledTimes(1);
+    // On the gitops channel, for the sheet's own node, so the portfolio, an open application view and the dashboard hear it.
+    expect((invalidated.mock.calls[0]![0] as CustomEvent).detail).toEqual({ scope: 'gitops', nodeId: 2 });
     window.removeEventListener('sencho:state-invalidate', invalidated);
   });
 });

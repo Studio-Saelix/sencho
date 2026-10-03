@@ -10,6 +10,17 @@ const SUCCESS_COPY: Record<SourceControllerAction, string> = {
 };
 
 /**
+ * Tell every GitOps view that a change just happened on a node, in the shape the
+ * server's announcement uses (`scope` plus `nodeId`): the GitOps views listen on
+ * the `gitops` channel, and the dashboard's per-node hooks also need the node.
+ */
+export function raiseGitOpsStateInvalidate(nodeId: number | null | undefined): void {
+  window.dispatchEvent(new CustomEvent('sencho:state-invalidate', {
+    detail: { scope: 'gitops', ...(typeof nodeId === 'number' ? { nodeId } : {}) },
+  }));
+}
+
+/**
  * Suspend, resume, or retry one stack's Git source on the node that owns it.
  *
  * The single handler behind every affordance for these actions (the Git source
@@ -37,8 +48,7 @@ export async function runSourceControllerAction(
       return false;
     }
     toast.success(`${SUCCESS_COPY[action]} for ${stackName}`);
-    // Every consumer of GitOps state refetches on this.
-    window.dispatchEvent(new Event('sencho:state-invalidate'));
+    raiseGitOpsStateInvalidate(nodeId);
     return true;
   } catch (e) {
     console.error(`Git source ${action} failed for ${stackName}:`, e);

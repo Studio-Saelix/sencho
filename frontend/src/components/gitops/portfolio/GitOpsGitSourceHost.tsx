@@ -2,19 +2,17 @@ import { useEffect, useState } from 'react';
 import { useAuth } from '@/context/AuthContext';
 import { useTheme } from '@/hooks/use-theme';
 import { GitSourcePanel } from '@/components/stack/GitSourcePanel';
+import { raiseGitOpsStateInvalidate } from '@/lib/gitSourceControllerAction';
 import { GITOPS_GIT_SOURCE_EVENT, type GitOpsGitSourceTarget } from './portfolioNavigation';
-
-function notifySourceChanged(): void {
-  window.dispatchEvent(new Event('sencho:state-invalidate'));
-}
 
 /**
  * Hosts a Direct application's Git source sheet over the GitOps workplace, so
  * opening it never leaves GitOps. The panel targets the application's own
  * node, which need not be the active one.
  *
- * A change in the sheet raises the shared state-invalidate signal, which both
- * the portfolio list and an open application view refresh on.
+ * A change in the sheet announces a gitops change on the application's node
+ * (raiseGitOpsStateInvalidate), which the portfolio list, an open application
+ * view and the dashboard's Git source states refresh on.
  */
 export function GitOpsGitSourceHost() {
   const { can } = useAuth();
@@ -47,7 +45,7 @@ export function GitOpsGitSourceHost() {
       canEdit={can('stack:edit', 'stack', stackName, nodeId)}
       canDeploy={can('stack:deploy', 'stack', stackName, nodeId)}
       isDarkMode={isDarkMode}
-      onSourceChanged={notifySourceChanged}
+      onSourceChanged={() => raiseGitOpsStateInvalidate(nodeId)}
     />
   );
 }

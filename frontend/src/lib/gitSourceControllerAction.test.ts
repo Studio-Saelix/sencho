@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { apiFetch } from '@/lib/api';
 import { toast } from '@/components/ui/toast-store';
-import { runSourceControllerAction } from './gitSourceControllerAction';
+import { raiseGitOpsStateInvalidate, runSourceControllerAction } from './gitSourceControllerAction';
 
 vi.mock('@/lib/api', () => ({ apiFetch: vi.fn() }));
 vi.mock('@/components/ui/toast-store', () => ({ toast: { success: vi.fn(), error: vi.fn() } }));
@@ -12,11 +12,11 @@ function res(ok: boolean, body: unknown = {}): Response {
   return { ok, status: ok ? 200 : 409, json: async () => body } as unknown as Response;
 }
 
-function invalidations(): { count: () => number; stop: () => void } {
-  let n = 0;
-  const on = () => { n += 1; };
+function invalidations(): { count: () => number; details: () => unknown[]; stop: () => void } {
+  const seen: unknown[] = [];
+  const on = (e: Event) => { seen.push((e as CustomEvent).detail); };
   window.addEventListener('sencho:state-invalidate', on);
-  return { count: () => n, stop: () => window.removeEventListener('sencho:state-invalidate', on) };
+  return { count: () => seen.length, details: () => seen, stop: () => window.removeEventListener('sencho:state-invalidate', on) };
 }
 
 afterEach(() => {
@@ -35,6 +35,8 @@ describe('runSourceControllerAction', () => {
     expect(mockFetch).toHaveBeenCalledWith('/stacks/my%20stack/git-source/resume', { nodeId: 4, method: 'POST', body: '{}' });
     expect(toast.success).toHaveBeenCalledWith('Reconciliation resumed for my stack');
     expect(seen.count()).toBe(1);
+    // Scope and node are what the GitOps listeners filter on.
+    expect(seen.details()).toEqual([{ scope: 'gitops', nodeId: 4 }]);
     seen.stop();
   });
 
@@ -71,6 +73,22 @@ describe('runSourceControllerAction', () => {
 
     expect(toast.error).toHaveBeenCalledWith('web: offline');
     expect(seen.count()).toBe(0);
+    seen.stop();
+  });
+});
+
+describe('raiseGitOpsStateInvalidate', () => {
+  it('announces a gitops change on the node it happened on', () => {
+    const seen = invalidations();
+    raiseGitOpsStateInvalidate(7);
+    expect(seen.details()).toEqual([{ scope: 'gitops', nodeId: 7 }]);
+    seen.stop();
+  });
+
+  it.each([undefined, null])('still announces on the gitops channel when the node is %s', (unknownNode) => {
+    const seen = invalidations();
+    raiseGitOpsStateInvalidate(unknownNode);
+    expect(seen.details()).toEqual([{ scope: 'gitops' }]);
     seen.stop();
   });
 });
