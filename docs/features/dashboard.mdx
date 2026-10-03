@@ -67,10 +67,11 @@ The row itself carries the health tint (see below); there is no separate status-
 
 | Column | Description |
 |--------|-------------|
-| **STACK** | Stack name with an orange "Update available" badge when a newer image has been detected on the active node. When per-service status is known, the badge narrows to the outdated service name or a count (for example `2 updates`); hover for the full breakdown. The badge appears regardless of the sidebar indicator setting. Also carries the GitOps source-state chip when Sencho has state for the stack (see below). Sortable. |
+| **STACK** | Stack name with an orange "Update available" badge when a newer image has been detected on the active node. When per-service status is known, the badge narrows to the outdated service name or a count (for example `2 updates`); hover for the full breakdown. The badge appears regardless of the sidebar indicator setting. Sortable. |
 | **NODE** | Node name. Shown only in **All nodes** so identical stack names on different nodes stay distinct. |
 | **STATE** | Canonical container state: `running`, `partial`, `exited`, or `unknown`. |
 | **SOURCE** | `Git` when the stack is linked to a [Git source](/features/git-sources), `Local` otherwise |
+| **GITOPS** | The stack's GitOps source state when Sencho has one for it (see below); click it to open the stack in the GitOps portfolio. Shown only while at least one stack in the table (including rows behind **Show all**) has a state, and reads `--` for the others. |
 | **NETWORKS** | Runtime Docker networks attached to the stack's containers. Multiple names collapse to the first plus `+N`; hover for the full list. Reads `--` when no network membership was observed. |
 | **PORT** | The stack's main published port, or `--` when it does not publish one |
 | **UP** | How long the oldest running container has been up, in compact units (`s` / `m` / `h` / `d`); a stopped or never-started stack reads `--`. Sortable. |
@@ -84,13 +85,13 @@ The table shows the first eight rows and a **Show all N stacks** footer when the
 
 The phone dashboard uses the same eight-row collapse, shared state classifier, and composite navigation. When more than one node is available it shows the same **This node | All nodes** control; **Show all** / **Show less** expand and collapse the list in place.
 
-### GitOps state chip
+### GitOps state
 
-A stack linked to a [Git source](/features/git-sources) carries a small chip beside its name naming its current source state: **pending update**, **review required**, **applying**, **source failed**, and so on. The wording is the same one the Git Source panel and the Drift tab use, so a stack reads the same way wherever you look at it.
+A stack linked to a [Git source](/features/git-sources) shows a small chip in the **GITOPS** column naming its current source state: **pending update**, **review required**, **applying**, **source failed**, and so on. The wording is the same one the Git Source panel and the Drift tab use, so a stack reads the same way wherever you look at it.
 
 The chip and the row tint answer different questions and are independent. The tint is about containers and load right now. The chip is about what Sencho has reconciled and accepted, so a healthy row can carry **pending update** (containers fine, a new commit waiting) and a red row can carry **accepted** (the current generation is the right one and something has since crashed).
 
-Hover the chip for the full sentence. A stack with no Git source carries no chip, including one delivered by a [Blueprint](/features/blueprint-model): a Blueprint stack has no Git source of its own, so there is no source state to name. The **SOURCE** column still says where the files come from either way. The chip updates as soon as Sencho records a change, without waiting for the next refresh.
+Hover the chip for the full sentence. A stack with no Git source reads `--` in the column, including one delivered by a [Blueprint](/features/blueprint-model): a Blueprint stack has no Git source of its own, so there is no source state to name. The **SOURCE** column still says where the files come from either way. When no stack in the table has a state, the **GITOPS** column is not shown at all. The chip updates as soon as Sencho records a change, without waiting for the next refresh.
 
 The phone dashboard shows the same chip on its stack rows, beside the node name.
 
