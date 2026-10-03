@@ -550,7 +550,7 @@ async function runStackBulkOp(
         return {
           stackName,
           ok: false,
-          error: describePolicyBlock(gate.policy, gate.violations, 'update'),
+          error: describePolicyBlock(gate.policy, gate.violations, 'update', gate.evidence),
           code: 'policy_blocked',
         };
       }
@@ -1180,7 +1180,7 @@ stacksRouter.post('/from-git', async (req: Request, res: Response) => {
         buildPolicyGateOptions(req),
       );
       if (!gate.ok) {
-        deployError = describePolicyBlock(gate.policy, gate.violations);
+        deployError = describePolicyBlock(gate.policy, gate.violations, 'deploy', gate.evidence);
       } else {
         try {
           await ComposeService.getInstance(req.nodeId).deployStack(

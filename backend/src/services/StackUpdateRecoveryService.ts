@@ -1178,7 +1178,7 @@ export class StackUpdateRecoveryService {
       });
       if (!gate.ok) {
         throw Object.assign(
-          new Error(describePolicyBlock(gate.policy, gate.violations, 'rollback')),
+          new Error(describePolicyBlock(gate.policy, gate.violations, 'rollback', gate.evidence)),
           { code: 'ROLLBACK_PROHIBITED', policy: gate.policy, violations: gate.violations },
         );
       }
