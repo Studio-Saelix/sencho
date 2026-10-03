@@ -106,9 +106,13 @@ describe('registryDeliverySeam', () => {
     fs.mkdirSync(stackDir, { recursive: true });
     fs.writeFileSync(
       path.join(stackDir, 'compose.yaml'),
+      // Both Hub services use alias spellings; discovery folds them to
+      // index.docker.io before the seam sees the hosts.
       'services:\n'
       + '  app:\n'
-      + '    image: index.docker.io/acme/private/app:latest\n'
+      + '    image: docker.io/acme/private/app:latest\n'
+      + '  alias:\n'
+      + '    image: registry-1.docker.io/acme/private/alias:latest\n'
       + '  helper:\n'
       + '    image: ghcr.io/example/private/helper:latest\n',
     );
