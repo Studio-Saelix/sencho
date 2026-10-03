@@ -241,11 +241,13 @@ export function hydrateNavigationDefaults(): void {
 }
 
 // ── cache keys ─────────────────────────────────────────────────────────────
-/** Every localStorage key the preference domains own. Cleared on identity
- *  switch and when no user is signed in (another account must never see this
- *  browser's cached values); tombstone and corrupt hydration instead rewrite
- *  each key to its default through the apply paths. theme-init.js re-reads the
- *  theme key at next paint, so a cleared key paints defaults. */
+/** Every localStorage key the preference domains own. Cleared when a different
+ *  account claims the browser (another account must never see this browser's
+ *  cached values); a marker-less cache is kept as the first-sync migration
+ *  source, and signing out leaves the cache for the owner's next login.
+ *  Tombstone and corrupt hydration instead rewrite each key to its default
+ *  through the apply paths. theme-init.js re-reads the theme key at next paint,
+ *  so a cleared key paints defaults. */
 export const PREFERENCE_CACHE_KEYS = [
   'sencho.appearance.theme',
   'sencho-theme', // legacy theme key
@@ -263,6 +265,9 @@ export const PREFERENCE_CACHE_KEYS = [
 
 export const PREFERENCES_OWNER_KEY = 'sencho.preferences.owner';
 
+/** Wipe every preference cache key including the owner marker. Called only
+ *  when a valid marker names a different account; the caller restamps the
+ *  marker for the new owner immediately after. */
 export function clearPreferenceCache(): void {
   if (typeof window === 'undefined') return;
   try {

@@ -10,8 +10,9 @@
  *   account.
  * - While auth is resolving (loading), the owner touches nothing: a normal
  *   boot must not erase cached values.
- * - A resolved-unauthenticated state wipes the cache so a later login never
- *   renders the previous account's values.
+ * - A resolved-unauthenticated state keeps the cache and its owner marker (a
+ *   same-account re-login still owns them); the marker mismatch at the next
+ *   login is what wipes a different account's values.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, act, cleanup } from '@testing-library/react';
@@ -180,8 +181,59 @@ describe('useUserPreferencesSync: identity guards', () => {
     expect(apiFetch).not.toHaveBeenCalled();
   });
 
-  it('resolved-unauthenticated wipes the cache and bumps the generation', () => {
+  it('a marker-less upgraded profile keeps the legacy cache and migrates those values', async () => {
+    // Pre-sync profile: explicit prefs written by the local-only app, and no
+    // owner marker (the marker shipped with server-backed sync). The first
+    // sync must treat the cache as this account's migration source, not as a
+    // foreign cache to wipe. The seeded keys are the ones the document
+    // builders read live from localStorage (theme fields come from the theme
+    // store's module state and are covered end to end in the E2E suite).
+    localStorage.setItem('sencho.appearance.density', 'compact');
+    localStorage.setItem('sencho.appearance.topNavMode', 'smart');
+    localStorage.setItem('sencho.appearance.topNavLabels', 'false');
+    localStorage.setItem('sencho.appearance.topNavAlign', 'center');
+    localStorage.setItem('sencho.log-chip-color-mode', 'per-service');
+    localStorage.setItem('sencho.appearance.topNavQuickLinks', JSON.stringify(['dashboard', 'fleet']));
+
+    // Absent server rows: the upgrade path is the migration path.
+    apiFetch.mockImplementation(async () => jsonResponse(200, {
+      preferences: { appearance: null, navigation: null },
+    }));
+
+    authState.user = { userId: 3 };
+    authState.appStatus = 'authenticated';
+    render(<SyncOwner />);
+    await act(async () => {
+      await vi.waitFor(() => {
+        expect(apiFetch.mock.calls.some(([path]) => String(path) === '/user-preferences')).toBe(true);
+      });
+    });
+
+    // The cache survived and now names this account as its owner.
+    expect(localStorage.getItem('sencho.appearance.density')).toBe('compact');
+    expect(localStorage.getItem('sencho.appearance.topNavMode')).toBe('smart');
+    expect(localStorage.getItem('sencho.appearance.topNavLabels')).toBe('false');
+    expect(localStorage.getItem('sencho.appearance.topNavAlign')).toBe('center');
+    expect(localStorage.getItem('sencho.log-chip-color-mode')).toBe('per-service');
+    expect(JSON.parse(localStorage.getItem(PREFERENCES_OWNER_KEY) as string)).toMatchObject({ userId: 3 });
+
+    // Both migrate documents carry the explicit values, not defaults.
+    const migrateCall = (suffix: string) => apiFetch.mock.calls.find(
+      ([path, opts]) => String(path).endsWith(suffix) && (opts as RequestInit | undefined)?.method === 'POST',
+    );
+    await vi.waitFor(() => expect(migrateCall('/appearance/migrate')).toBeDefined());
+    await vi.waitFor(() => expect(migrateCall('/navigation/migrate')).toBeDefined());
+    const appearanceBody = JSON.parse(((migrateCall('/appearance/migrate')?.[1] as RequestInit).body) as string);
+    expect(appearanceBody).toMatchObject({ density: 'compact', logChipColorMode: 'per-service' });
+    const navigationBody = JSON.parse(((migrateCall('/navigation/migrate')?.[1] as RequestInit).body) as string);
+    expect(navigationBody).toMatchObject({
+      mode: 'smart', labels: false, align: 'center', quickLinks: ['dashboard', 'fleet'],
+    });
+  });
+
+  it('resolved-unauthenticated keeps the cache and marker and bumps the generation', () => {
     localStorage.setItem('sencho.appearance.theme', JSON.stringify({ theme: 'oled' }));
+    localStorage.setItem('sencho.appearance.density', 'compact');
     localStorage.setItem(PREFERENCES_OWNER_KEY, JSON.stringify({ userId: 7, schema: 1 }));
     const generationBefore = currentGeneration();
 
@@ -189,8 +241,12 @@ describe('useUserPreferencesSync: identity guards', () => {
     authState.appStatus = 'unauthenticated';
     render(<SyncOwner />);
 
-    expect(localStorage.getItem('sencho.appearance.theme')).toBeNull();
-    expect(localStorage.getItem(PREFERENCES_OWNER_KEY)).toBeNull();
+    // The owner marker is what proves ownership at the next login, so signing
+    // out must not destroy it: a same-account re-login may still hydrate from
+    // or migrate the cache, while a different account is wiped at claim time.
+    expect(localStorage.getItem('sencho.appearance.theme')).not.toBeNull();
+    expect(localStorage.getItem('sencho.appearance.density')).toBe('compact');
+    expect(JSON.parse(localStorage.getItem(PREFERENCES_OWNER_KEY) as string)).toMatchObject({ userId: 7 });
     expect(currentGeneration()).toBeGreaterThan(generationBefore);
     expect(apiFetch).not.toHaveBeenCalled();
   });

@@ -6,7 +6,9 @@
  * Responsibilities:
  * - Cache ownership: the localStorage preference cache is keyed to the account
  *   (marker sencho.preferences.owner). A different account wipes the cache to
- *   defaults before hydration, so no account ever renders another's values.
+ *   defaults before hydration, so no account ever renders another's values. A
+ *   profile with no marker (an upgraded browser, or a fresh one) keeps its
+ *   cache: it is that account's migration source on first sync.
  * - Hydration: on authentication, GET both domains and hydrate through the
  *   hooks' apply paths: live doc → per-field sanitize + apply; tombstone →
  *   defaults via the apply paths; absent → migrate via the bus; corrupt →
@@ -110,9 +112,11 @@ export function useUserPreferencesSync(): void {
     if (appStatus === 'loading') return; // boot in flight: touch nothing
 
     if (userId === null) {
-      // Resolved unauthenticated (logout / 401 / boot failure): the cache may
-      // hold the previous account's values; drop it so a later login never
-      // renders them. (Do NOT clear when merely loading.)
+      // Resolved unauthenticated (logout / 401 / boot failure): keep the cache
+      // and its owner marker so a same-account re-login can still hydrate from
+      // or migrate them; a different account triggers the wipe in the claim
+      // below before any of these values can render. (Do NOT touch anything
+      // while merely loading.)
       setCurrentSyncUser(null);
       return;
     }
@@ -133,8 +137,14 @@ export function useUserPreferencesSync(): void {
     } catch {
       marker = null;
     }
-    if (!marker || marker.userId !== userId) {
+    // A valid marker naming a different account means the cache is foreign:
+    // wipe it before hydration so no account ever renders another's values.
+    // No marker means this profile has never synced (an upgraded browser or a
+    // fresh one), so the cache is this account's migration source and stays.
+    if (marker !== null && marker.userId !== userId) {
       clearPreferenceCache();
+    }
+    if (marker === null || marker.userId !== userId) {
       try {
         localStorage.setItem(PREFERENCES_OWNER_KEY, JSON.stringify({ userId, schema: 1 } satisfies OwnerMarker));
       } catch {
@@ -491,11 +501,14 @@ export function useUserPreferencesSync(): void {
 
   // Identity transition: bump the generation so in-flight preference work is
   // invalidated (the AuthContext already bumps; this covers direct logouts).
+  // The cache and its owner marker stay: the marker is what proves ownership
+  // at the next login. A same-account login keeps its own cache (the server
+  // row still wins during hydration); a different account triggers the wipe
+  // in the claim above before any of these values can render.
   useEffect(() => {
     if (appStatus === 'loading') return;
     if (userId === null) {
       bumpGeneration();
-      clearPreferenceCache();
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [appStatus]);

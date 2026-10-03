@@ -10,7 +10,8 @@
 import { test, expect, type Page } from '@playwright/test';
 import { loginAs, waitForShellReady, waitForStacksLoaded, TEST_USERNAME, TEST_PASSWORD } from './helpers';
 import {
-  APPEARANCE_DOC, NAVIGATION_DOC, currentUserId, ensureE2EUser, getPreferences, prefHeaders, putDomain,
+  APPEARANCE_DOC, NAVIGATION_DOC, adminApiContext, currentUserId, deleteE2EUser, ensureE2EUser,
+  getPreferences, prefHeaders, putDomain,
   type PreferenceEnvelope,
 } from './preferences-helpers';
 
@@ -293,5 +294,95 @@ test.describe('User preferences across browsers', () => {
     await waitForStacksLoaded(page);
     await expect(page.locator('[data-sn-chrome="topbar"]')).toHaveAttribute('data-sn-nav-mode', 'compact');
     await context.close();
+  });
+
+  test('a marker-less profile upgrades in place: explicit prefs migrate instead of resetting', async ({ browser }) => {
+    // Simulate a browser profile from before per-account sync: explicit prefs
+    // in localStorage, and no owner marker (the local-only app never wrote
+    // one). The first authenticated load must migrate those values to the
+    // account, not wipe them and persist defaults.
+    const admin = await adminApiContext();
+    const username = `pref-upgrade-${Date.now()}`;
+    const password = 'pref-upgrade-password-123';
+    const userId = await ensureE2EUser(admin, username, password, 'viewer');
+
+    const context = await browser.newContext();
+    try {
+      // Authenticate through the API first, so the first page load is the
+      // signed-in upgrade path. The init script then seeds the pre-sync cache
+      // before any app script runs. It is one-shot: after the first sync
+      // stamps the owner marker, later navigations leave the cache alone.
+      const login = await context.request.post('/api/auth/login', {
+        data: { username, password },
+      });
+      expect(login.ok()).toBeTruthy();
+      await context.addInitScript(() => {
+        if (window.localStorage.getItem('sencho.preferences.owner') !== null) return;
+        window.localStorage.setItem('sencho.appearance.theme', JSON.stringify({ theme: 'oled', accent: 'violet' }));
+        window.localStorage.setItem('sencho.appearance.density', 'compact');
+        window.localStorage.setItem('sencho.appearance.topNavMode', 'smart');
+        window.localStorage.setItem('sencho.appearance.topNavLabels', 'false');
+        window.localStorage.setItem('sencho.appearance.topNavAlign', 'center');
+        window.localStorage.setItem('sencho.log-chip-color-mode', 'per-service');
+        window.localStorage.setItem(
+          'sencho.appearance.topNavQuickLinks',
+          JSON.stringify(['dashboard', 'networking', 'auto-updates']),
+        );
+      });
+
+      const page = await context.newPage();
+      await page.goto('/');
+      await waitForShellReady(page);
+
+      // The explicit values are applied, not reset to defaults.
+      await expect(page.locator('html')).toHaveAttribute('data-theme', 'oled');
+      await expect(page.locator('html')).toHaveAttribute('data-accent', 'violet');
+      await expect(page.locator('body')).toHaveClass(/density-compact/);
+      await expect(page.locator('[data-sn-chrome="topbar"]')).toHaveAttribute('data-sn-nav-mode', 'smart');
+
+      // The cache survived and now names this account as its owner.
+      const cache = await page.evaluate(() => ({
+        density: window.localStorage.getItem('sencho.appearance.density'),
+        mode: window.localStorage.getItem('sencho.appearance.topNavMode'),
+        labels: window.localStorage.getItem('sencho.appearance.topNavLabels'),
+        align: window.localStorage.getItem('sencho.appearance.topNavAlign'),
+        logChip: window.localStorage.getItem('sencho.log-chip-color-mode'),
+        marker: window.localStorage.getItem('sencho.preferences.owner'),
+      }));
+      expect(cache.density).toBe('compact');
+      expect(cache.mode).toBe('smart');
+      expect(cache.labels).toBe('false');
+      expect(cache.align).toBe('center');
+      expect(cache.logChip).toBe('per-service');
+      expect(JSON.parse(cache.marker as string)).toMatchObject({ userId });
+
+      // The account's first sync carried those values to the server.
+      await expect.poll(async () => {
+        const rows = await getPreferences(page.request, userId);
+        return rows.preferences.appearance?.data?.density;
+      }, { timeout: 15_000 }).toBe('compact');
+      const appearanceRows = await getPreferences(page.request, userId);
+      expect(appearanceRows.preferences.appearance?.data).toMatchObject({
+        theme: 'oled',
+        accent: 'violet',
+        logChipColorMode: 'per-service',
+      });
+
+      await expect.poll(async () => {
+        const rows = await getPreferences(page.request, userId);
+        return rows.preferences.navigation?.data?.mode;
+      }, { timeout: 15_000 }).toBe('smart');
+      const navigationRows = await getPreferences(page.request, userId);
+      expect(navigationRows.preferences.navigation?.data).toMatchObject({
+        mode: 'smart',
+        labels: false,
+        align: 'center',
+        quickLinks: ['dashboard', 'networking', 'auto-updates'],
+      });
+    } finally {
+      await context.close();
+      await deleteE2EUser(admin, userId);
+      await admin.dispose();
+    }
   });
 });
