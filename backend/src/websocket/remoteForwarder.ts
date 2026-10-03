@@ -2,6 +2,7 @@ import type { IncomingMessage } from 'http';
 import type { Duplex } from 'stream';
 import { PROXY_TIER_HEADER } from '../services/license-headers';
 import { LicenseService } from '../services/LicenseService';
+import { resolveUpgradeClientIp, resolveUpgradeProtocol } from '../helpers/clientIp';
 import { wsProxyServer } from '../proxy/websocketProxy';
 import { getErrorMessage } from '../utils/errors';
 import { rejectUpgrade as reject } from './reject';
@@ -107,6 +108,20 @@ export async function handleRemoteForwarder(
   // and would fail verification on the remote. Auth is handled exclusively
   // via the Bearer token (or, for pilot loopback, the tunnel itself).
   delete req.headers['cookie'];
+  // Forwarding headers must describe what THIS instance validated, not what
+  // the caller sent: a remote that trusts this instance resolves the client
+  // from them. Same rule as the HTTP proxy hop in remoteNodeProxy.ts. Resolve
+  // the validated values first, then strip every x-forwarded-* name so the
+  // invariant does not depend on which names this file knows about.
+  const validatedClientIp = resolveUpgradeClientIp(req);
+  const validatedProtocol = resolveUpgradeProtocol(req);
+  for (const name of Object.keys(req.headers)) {
+    if (name.startsWith('x-forwarded-')) delete req.headers[name];
+  }
+  delete req.headers['x-real-ip'];
+  delete req.headers['forwarded'];
+  if (validatedClientIp) req.headers['x-forwarded-for'] = validatedClientIp;
+  req.headers['x-forwarded-proto'] = validatedProtocol;
   const fwdHeaders = LicenseService.getInstance().getProxyHeaders();
   req.headers[PROXY_TIER_HEADER] = fwdHeaders.tier;
   // Strip nodeId from the forwarded URL so the remote treats the request as

@@ -1,7 +1,7 @@
 import { IncomingMessage } from 'http';
 import { Socket } from 'net';
 import { beforeEach, describe, expect, it } from 'vitest';
-import { resolveUpgradeClientIp } from '../helpers/clientIp';
+import { resolveUpgradeClientIp, resolveUpgradeProtocol } from '../helpers/clientIp';
 import { resetTrustedProxyBlockListCache } from '../helpers/trustedProxyCidrs';
 
 /** An upgrade request as Node hands it to a WebSocket handler. */
@@ -12,6 +12,20 @@ function upgradeRequest(peer: string | undefined, forwardedFor?: string): Incomi
   Object.defineProperty(socket, 'remoteAddress', { value: peer, configurable: true });
   const req = new IncomingMessage(socket);
   if (forwardedFor !== undefined) req.headers['x-forwarded-for'] = forwardedFor;
+  return req;
+}
+
+/** An upgrade request carrying a scheme header, optionally over TLS. */
+function upgradeRequestWithScheme(
+  peer: string | undefined,
+  forwardedProto?: string,
+  encrypted = false,
+): IncomingMessage {
+  const socket = new Socket();
+  Object.defineProperty(socket, 'remoteAddress', { value: peer, configurable: true });
+  Object.defineProperty(socket, 'encrypted', { value: encrypted, configurable: true });
+  const req = new IncomingMessage(socket);
+  if (forwardedProto !== undefined) req.headers['x-forwarded-proto'] = forwardedProto;
   return req;
 }
 
@@ -122,5 +136,53 @@ describe('resolveUpgradeClientIp', () => {
     process.env.SENCHO_TRUSTED_PROXY_CIDRS = '10.0.0.0/8';
     resetTrustedProxyBlockListCache();
     expect(resolveUpgradeClientIp(upgradeRequest(undefined, '203.0.113.50'))).toBe('');
+  });
+});
+
+describe('resolveUpgradeProtocol', () => {
+  beforeEach(() => {
+    delete process.env.SENCHO_TRUSTED_PROXY_CIDRS;
+    resetTrustedProxyBlockListCache();
+  });
+
+  it('ignores a forwarded scheme from an untrusted peer', () => {
+    expect(resolveUpgradeProtocol(upgradeRequestWithScheme('198.51.100.7', 'https'))).toBe('http');
+  });
+
+  it('honors a forwarded https scheme from a trusted proxy', () => {
+    process.env.SENCHO_TRUSTED_PROXY_CIDRS = '10.0.0.0/8';
+    resetTrustedProxyBlockListCache();
+    expect(resolveUpgradeProtocol(upgradeRequestWithScheme('10.0.0.5', 'https'))).toBe('https');
+  });
+
+  it('takes the first value of a comma-separated scheme header', () => {
+    process.env.SENCHO_TRUSTED_PROXY_CIDRS = '10.0.0.0/8';
+    resetTrustedProxyBlockListCache();
+    expect(resolveUpgradeProtocol(upgradeRequestWithScheme('10.0.0.5', 'https, http'))).toBe('https');
+  });
+
+  it('passes a trusted proxy scheme through verbatim, as Express does', () => {
+    process.env.SENCHO_TRUSTED_PROXY_CIDRS = '10.0.0.0/8';
+    resetTrustedProxyBlockListCache();
+    expect(resolveUpgradeProtocol(upgradeRequestWithScheme('10.0.0.5', 'wss'))).toBe('wss');
+  });
+
+  it('is http for a trusted peer with no scheme header', () => {
+    process.env.SENCHO_TRUSTED_PROXY_CIDRS = '10.0.0.0/8';
+    resetTrustedProxyBlockListCache();
+    expect(resolveUpgradeProtocol(upgradeRequestWithScheme('10.0.0.5'))).toBe('http');
+  });
+
+  it('honors a forwarded scheme for an IPv6 trusted peer', () => {
+    process.env.SENCHO_TRUSTED_PROXY_CIDRS = 'fd12:3456:789a::50/128';
+    resetTrustedProxyBlockListCache();
+    expect(resolveUpgradeProtocol(upgradeRequestWithScheme('fd12:3456:789a::50', 'https'))).toBe('https');
+  });
+
+  it('is https on an encrypted connection with no scheme header', () => {
+    process.env.SENCHO_TRUSTED_PROXY_CIDRS = '10.0.0.0/8';
+    resetTrustedProxyBlockListCache();
+    expect(resolveUpgradeProtocol(upgradeRequestWithScheme('10.0.0.5', undefined, true))).toBe('https');
+    expect(resolveUpgradeProtocol(upgradeRequestWithScheme('198.51.100.7', undefined, true))).toBe('https');
   });
 });

@@ -148,6 +148,25 @@ export function createRemoteProxyMiddleware(): RequestHandler {
       //   Authentication is handled exclusively via the Bearer token below.
       proxyReq.removeHeader('x-node-id');
       proxyReq.removeHeader('cookie');
+      // Forwarding headers must describe what THIS instance validated, not
+      // what the caller sent. A remote that trusts this instance resolves the
+      // client from these headers, so relaying a caller-supplied
+      // X-Forwarded-For would let the caller choose the address the remote
+      // records. Replace them with the values Express resolved under this
+      // instance's own trusted-proxy policy. Strip every x-forwarded-* name
+      // first so the invariant does not depend on which names this handler
+      // happens to know about, then set the two this instance vouches for.
+      const validatedClientIp = req.ip;
+      const validatedProtocol = req.protocol;
+      for (const name of Object.keys(proxyReq.getHeaders())) {
+        if (name.startsWith('x-forwarded-')) proxyReq.removeHeader(name);
+      }
+      proxyReq.removeHeader('x-real-ip');
+      proxyReq.removeHeader('forwarded');
+      if (validatedClientIp) {
+        proxyReq.setHeader('x-forwarded-for', validatedClientIp);
+      }
+      proxyReq.setHeader('x-forwarded-proto', validatedProtocol);
       // Pilot-agent targets carry an empty token; see NodeRegistry.getProxyTarget.
       if (req.proxyTarget?.apiToken) {
         proxyReq.setHeader('Authorization', `Bearer ${req.proxyTarget.apiToken}`);

@@ -26,3 +26,22 @@ export function resolveUpgradeClientIp(req: IncomingMessage): string {
   }
   return hops[0];
 }
+
+/**
+ * Request scheme for a WebSocket upgrade, mirroring Express's `req.protocol`:
+ * the connection scheme unless the direct peer is a trusted proxy, in which
+ * case the first `X-Forwarded-Proto` value is passed through verbatim, exactly
+ * as Express does, falling back to the connection scheme when the header is
+ * absent. Express middleware never runs on an upgrade, so a handler that
+ * forwards the scheme resolves it here.
+ */
+export function resolveUpgradeProtocol(req: IncomingMessage): string {
+  const encrypted = (req.socket as { encrypted?: boolean }).encrypted === true;
+  const fallback = encrypted ? 'https' : 'http';
+  const peer = req.socket.remoteAddress ?? '';
+  if (!isTrustedProxyPeer(peer)) return fallback;
+
+  const header = req.headers['x-forwarded-proto'];
+  const first = (Array.isArray(header) ? header[0] : header)?.split(',')[0]?.trim();
+  return first || fallback;
+}
