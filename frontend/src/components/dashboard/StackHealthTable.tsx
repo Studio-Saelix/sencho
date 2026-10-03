@@ -31,12 +31,16 @@ interface StackHealthTableProps {
 type SortKey = 'stack' | 'up' | 'cpu' | 'mem';
 
 // Full class names so Tailwind sees them. The GitOps column is only in the template
-// while some stack has a state to show in it; it adds 148px plus one 16px gap, which is
-// why the minimum widths are 164px wider than their plain counterparts.
+// while some stack has a state to show in it; it adds 148px plus one 16px gap. A grid's
+// minimum width also has to cover the gaps and its own horizontal padding
+// (--density-row-x, 40px at comfortable density, which border-box folds into min-width)
+// plus a 160px floor for the stack-name track, so the name stays readable when the
+// table hits its minimum and scrolls: 802 + 160 + 40 + 160 = 1162 for this node and
+// 890 + 176 + 40 + 160 = 1266 for all nodes (fixed tracks + gaps + padding + name).
 const THIS_NODE_GRID = 'grid-cols-[minmax(0,1fr)_64px_64px_168px_56px_52px_52px_72px_110px_16px] min-w-[840px]';
-const THIS_NODE_GITOPS_GRID = 'grid-cols-[minmax(0,1fr)_64px_64px_148px_168px_56px_52px_52px_72px_110px_16px] min-w-[1004px]';
+const THIS_NODE_GITOPS_GRID = 'grid-cols-[minmax(0,1fr)_64px_64px_148px_168px_56px_52px_52px_72px_110px_16px] min-w-[1162px]';
 const ALL_NODES_GRID = 'grid-cols-[minmax(0,1fr)_88px_64px_64px_168px_56px_52px_52px_72px_110px_16px] min-w-[940px]';
-const ALL_NODES_GITOPS_GRID = 'grid-cols-[minmax(0,1fr)_88px_64px_64px_148px_168px_56px_52px_52px_72px_110px_16px] min-w-[1104px]';
+const ALL_NODES_GITOPS_GRID = 'grid-cols-[minmax(0,1fr)_88px_64px_64px_148px_168px_56px_52px_52px_72px_110px_16px] min-w-[1266px]';
 
 /** Whether a stack's GitOps state is one this build can render as a badge (a newer node's may not be). */
 function hasGitOpsBadge(state: StackHealthRow['gitopsSourceState']): state is NonNullable<StackHealthRow['gitopsSourceState']> {

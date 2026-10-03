@@ -140,6 +140,30 @@ describe('StackHealthTable GitOps badge', () => {
       expect(cellsOf('plain')).toHaveLength(columns.length);
     });
 
+    it.each([
+      ['This node', 'this-node', 1162],
+      ['All nodes', 'all-nodes', 1266],
+    ] as const)('keeps a readable stack name in the %s minimum width', (_name, scope, expected) => {
+      const rows = rowsFromStatuses(stackStatuses, { app: 'candidate_ready' });
+      render(<StackHealthTable {...tableProps({ rows, scope, coverage: { k: 1, m: 1, n: rows.length } })} />);
+
+      const header = screen.getByText('STACK').closest('div');
+      if (!header) throw new Error('no stack health header');
+      const minWidth = Number(/(?:^|\s)min-w-\[(\d+)px\]/.exec(header.className)?.[1]);
+      const tracks = /grid-cols-\[([^\]]+)\]/.exec(header.className)?.[1].split('_') ?? [];
+      const fixedPx = tracks.filter(t => t.endsWith('px')).reduce((sum, t) => sum + Number.parseFloat(t), 0);
+
+      // The floor covers the fixed tracks, the gaps and the grid's own horizontal
+      // padding (40px at comfortable density, folded into min-width by border-box)
+      // before the stack-name track gets its share. Leaving out the padding once
+      // crushed the name to 2px at 1280 wide.
+      expect(minWidth).toBe(expected);
+      expect(minWidth - fixedPx - (tracks.length - 1) * 16 - 40).toBeGreaterThanOrEqual(140);
+      const row = screen.getByText('app').closest('li');
+      if (!row) throw new Error('no row for app');
+      expect(row.className).toContain(`min-w-[${expected}px]`);
+    });
+
     it('sends the badge to the portfolio for that stack and node, without opening the stack', () => {
       const open = vi.fn();
       const seen: Array<{ view?: string }> = [];
