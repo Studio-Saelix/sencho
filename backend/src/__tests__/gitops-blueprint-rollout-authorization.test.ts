@@ -229,6 +229,59 @@ describe('BlueprintTargetAdapter unlock', () => {
     expect(GitOpsStore.getInstance().getApplication(fixture.applicationId)?.rollout_authorization_ref).toBeTruthy();
   });
 
+  it('creates a target row for every frozen node before the first deploy', async () => {
+    const fixture = seedAuthorizedReadyApp({ nodeCount: 2 });
+    await writeAppliedCompose(fixture.applicationId, fixture.generationId, 'services:\n  web:\n    image: alpine:3.20\n');
+    // Model a converted source: the frozen set names a node that never
+    // received a Direct deploy, so it has no target row yet. Without the
+    // dispatch-boundary materialization this is the audit's
+    // "Could not open deploy for node N: target not found".
+    const store = GitOpsStore.getInstance();
+    DatabaseService.getInstance().getDb().prepare(
+      'DELETE FROM gitops_target_current WHERE application_id = ? AND node_id = ?',
+    ).run(fixture.applicationId, fixture.nodeIds[1]);
+    expect(store.getTarget(fixture.applicationId, fixture.nodeIds[1])).toBeUndefined();
+
+    const deploySpy = vi.spyOn(BlueprintService.getInstance(), 'deployAuthorizedMaterialization')
+      .mockResolvedValue({ status: 'active' });
+    const gen = buildAcceptedGeneration(store.getGeneration(fixture.generationId)!);
+    const result = await new BlueprintTargetAdapter().dispatch(gen, {
+      targetMode: 'blueprint',
+      nodeId: fixture.nodeId,
+      bindingRevision: null,
+    });
+    expect(result.status).toBe('dispatched');
+    expect(deploySpy).toHaveBeenCalledTimes(2);
+    const created = store.getTarget(fixture.applicationId, fixture.nodeIds[1]);
+    expect(created?.target_status).toBe('active');
+    expect(created?.applied_generation_id).toBe(fixture.generationId);
+  });
+
+  it('refuses a frozen node that no longer exists without inventing a row', async () => {
+    const fixture = seedAuthorizedReadyApp({ nodeCount: 2 });
+    await writeAppliedCompose(fixture.applicationId, fixture.generationId, 'services:\n  web:\n    image: alpine:3.20\n');
+    const store = GitOpsStore.getInstance();
+    const db = DatabaseService.getInstance().getDb();
+    db.prepare('DELETE FROM gitops_target_current WHERE application_id = ? AND node_id = ?')
+      .run(fixture.applicationId, fixture.nodeIds[1]);
+    db.prepare('DELETE FROM nodes WHERE id = ?').run(fixture.nodeIds[1]);
+
+    const deploySpy = vi.spyOn(BlueprintService.getInstance(), 'deployAuthorizedMaterialization')
+      .mockResolvedValue({ status: 'active' });
+    const gen = buildAcceptedGeneration(store.getGeneration(fixture.generationId)!);
+    const result = await new BlueprintTargetAdapter().dispatch(gen, {
+      targetMode: 'blueprint',
+      nodeId: fixture.nodeId,
+      bindingRevision: null,
+    });
+    expect(result.status).toBe('blocked');
+    if (result.status === 'blocked') {
+      expect(result.reason).toMatch(new RegExp(`node ${fixture.nodeIds[1]} is missing`));
+    }
+    expect(store.getTarget(fixture.applicationId, fixture.nodeIds[1])).toBeUndefined();
+    expect(deploySpy).toHaveBeenCalledTimes(1);
+  });
+
   it('restart mid-place does not re-issue deploy for an already-acked target', async () => {
     const fixture = seedAuthorizedReadyApp({ nodeCount: 2 });
     await writeAppliedCompose(fixture.applicationId, fixture.generationId, 'services:\n  web:\n    image: alpine:3.20\n');

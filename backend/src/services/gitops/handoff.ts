@@ -9,7 +9,7 @@ import type {
   GitOpsGenerationRow,
   GitOpsTargetCurrentRow,
 } from './types';
-import { GitOpsStore } from './store';
+import { emptyTargetRow, GitOpsStore } from './store';
 import { GitOpsTransitions, type EventEnvelope } from './transitions';
 import {
   decodePreflightEvidenceJson,
@@ -1086,6 +1086,29 @@ export class BlueprintTargetAdapter implements TargetAdapter {
         const refusal = await refuseUngatedRemoteTarget(node, healthPolicy);
         if (refusal) return { status: 'blocked', reason: refusal };
       }
+    }
+
+    // Every frozen target gets its row before the first deploy, the same
+    // first-contact write the Inline producer makes on `deploy_start`. A
+    // Blueprint application has no targets until something is sent somewhere,
+    // and this path sends to the frozen set rather than one node at a time:
+    // without these rows a multi-node rollout dispatched against
+    // `requiredNodeIds` fails on the first target whose row was never created,
+    // because `blueprintDeployStarted` resolves through the target row and
+    // refuses an unknown target. A node that no longer exists is skipped here;
+    // the gated preflight refuses it before any row is created, and the deploy
+    // loop refuses it by name for the other policies. A row already present is
+    // left untouched, so a tombstoned target, a fence, or a spent retry budget
+    // survives row creation and only an actual deploy revives the target.
+    // Rows are written before the per-target lock and pause checks on purpose:
+    // an authorized rollout whose first target is briefly held still has a
+    // frozen set, and the projection should read it as queued rather than
+    // absent.
+    const now = Date.now();
+    for (const nodeId of binding.requiredNodeIds) {
+      if (store.getTarget(liveApp.id, nodeId)) continue;
+      if (!DatabaseService.getInstance().getNode(nodeId)) continue;
+      store.upsertTarget(emptyTargetRow(liveApp.id, nodeId, now));
     }
 
     for (const nodeId of queue) {
