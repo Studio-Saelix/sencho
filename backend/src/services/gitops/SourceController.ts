@@ -4,6 +4,7 @@ import { GitOpsTransitions } from './transitions';
 import { GitSourceService } from '../GitSourceService';
 import { buildAcceptedGeneration } from './handoff';
 import { checkStatefulWithdrawal, holdForStatefulReview, readStagedGeneration } from './statefulGuard';
+import { prepareAcceptedGitManagedGeneration } from './gitManagedMaterialization';
 import { DatabaseService } from '../DatabaseService';
 import type { GitOpsApplicationRow, GitOpsGenerationRow } from './types';
 import { classifyFailure, nextRetryAt, isGitSourceErrorCode, effectivePollIntervalSecs } from './backoff';
@@ -527,6 +528,25 @@ export class SourceController {
         } catch (e) {
             this.warnSkipped(app.id, 'automatic acceptance failed', e);
             return;
+        }
+        // A Git-managed Blueprint needs its accepted generation materialized and
+        // its artifact set resolved before the dispatch boundary can authorize
+        // the rollout: the dispatch reads the applied materialization and the
+        // preflight refuses an unresolved artifact set. Both steps are
+        // idempotent and the reconciler retries them, so a failure here is
+        // reported and the dispatch below still runs (and refuses truthfully).
+        if (app.target_mode === 'blueprint') {
+            const prepared = await prepareAcceptedGitManagedGeneration({
+                applicationId: app.id,
+                generationId: acceptGeneration.id,
+                actor: 'system:source-controller',
+                trigger,
+            });
+            if (prepared.note) {
+                console.warn(
+                    `[SourceController] Git-managed preparation incomplete for ${sanitizeForLog(app.id)}: ${sanitizeForLog(prepared.note)}`,
+                );
+            }
         }
         // The acceptance cleared the candidate pointer; hand the accepted
         // generation to the shared dispatch boundary, which revalidates the

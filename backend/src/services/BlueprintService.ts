@@ -50,7 +50,10 @@ import {
     observeStackRuntimeArtifact,
     resolvePlatformLabelForNode,
 } from './gitops/artifactResolve';
-import { stackManagedRoot } from './gitops/directApplication';
+import {
+    materializeAndFreezeGitManagedArtifactSet,
+    readAppliedComposeContent,
+} from './gitops/gitManagedMaterialization';
 import {
     buildDigestPinsFromArtifactSet,
     DigestPinsMismatchError,
@@ -74,9 +77,7 @@ import {
 import { GitOpsTransitions } from './gitops/transitions';
 import { envelopeFor, recordableApplication } from './gitops/blueprintProducers';
 import type {
-    GitOpsApplicationRow,
     GitOpsArtifactSetRow,
-    GitOpsGenerationRow,
 } from './gitops/types';
 
 /** On-disk compose name for Blueprint applies. Must match createStack scaffold and Sencho discovery priority. */
@@ -345,7 +346,7 @@ export class BlueprintService {
                 return { status: 'failed', error: 'acknowledged generation missing for authorized reapply' };
             }
             try {
-                composeContent = await this.readGitManagedAppliedCompose(app, generation);
+                composeContent = await readAppliedComposeContent(app, generation);
             } catch (err) {
                 return { status: 'failed', error: BlueprintService.formatError(err) };
             }
@@ -358,29 +359,6 @@ export class BlueprintService {
             auditPath: `/api/blueprints/${blueprint.id}/enforce-reapply`,
             digestPins,
         });
-    }
-
-    private async readGitManagedAppliedCompose(
-        app: GitOpsApplicationRow,
-        generation: GitOpsGenerationRow,
-    ): Promise<string> {
-        const stackName = app.configured_source_stack_name;
-        if (!stackName) {
-            throw new Error('bound application has no retained source stack identity');
-        }
-        if (!generation.applied_dir || generation.applied_dir.trim() === '') {
-            throw new Error('accepted generation has no applied materialization directory');
-        }
-        const managedRoot = stackManagedRoot(stackName);
-        const appliedAbs = path.resolve(managedRoot, generation.applied_dir);
-        if (!appliedAbs.startsWith(managedRoot + path.sep)) {
-            throw new Error('applied materialization path escapes the managed root');
-        }
-        const composePath = path.resolve(appliedAbs, 'compose.yaml');
-        if (!composePath.startsWith(appliedAbs + path.sep)) {
-            throw new Error('compose path escapes the applied materialization directory');
-        }
-        return fsPromises.readFile(composePath, 'utf8');
     }
 
     /**
@@ -1282,12 +1260,25 @@ export class BlueprintService {
             // so hold this tick's comparison" from "tried, and there was nothing
             // to resolve". The producer reports it from the target's pointer,
             // because it is the pointer the next tick compares against and the one
-            // Enforce would pin to.
-            const outcome = await retryInlineArtifactFreeze({
-                blueprintId: blueprint.id,
-                nodeId: node.id,
-                generationId: binding.acceptedGenerationId,
-            });
+            // Enforce would pin to. A Git-managed Blueprint resolves from the
+            // accepted generation's own materialization through the same
+            // approved-content parser the Inline retry uses; its accepted
+            // generation is the binding's, and the application-level set it
+            // advances is what rollout authorization reads.
+            const liveApp = store.getLiveBlueprintApplication(blueprint.id);
+            const outcome = liveApp?.target_mode === 'blueprint'
+                ? (await materializeAndFreezeGitManagedArtifactSet({
+                    applicationId,
+                    generationId: binding.acceptedGenerationId,
+                    actor: null,
+                    trigger: 'git_managed_artifact_freeze_retried',
+                    nodeId: node.id,
+                })).status
+                : await retryInlineArtifactFreeze({
+                    blueprintId: blueprint.id,
+                    nodeId: node.id,
+                    generationId: binding.acceptedGenerationId,
+                });
             if (outcome === 'refused') {
                 this.refusedFreezeRetries.set(
                     `${applicationId}:${node.id}`,

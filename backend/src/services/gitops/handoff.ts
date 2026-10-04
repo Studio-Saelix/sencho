@@ -1,5 +1,3 @@
-import { promises as fsPromises } from 'fs';
-import path from 'path';
 import { randomUUID } from 'crypto';
 import type { RepoIdentity } from './repoIdentity';
 import type { RefKind } from '../git/types';
@@ -24,7 +22,7 @@ import {
   setRegistryReadinessDepsForTests,
   type RegistryReadinessDeps,
 } from './registryReadiness';
-import { stackManagedRoot } from './directApplication';
+import { readAppliedComposeContent } from './gitManagedMaterialization';
 import { decodeGitOpsRequiredTargetsJson } from './json';
 import { configuredSnapshotFor, encodePolicySnapshot } from './policyComposition';
 import { recoveryBindingForTarget } from './recoveryCapture';
@@ -527,37 +525,6 @@ export async function ensureRolloutAuthorization(
     }
     return { ok: true, binding };
   });
-}
-
-async function readAppliedComposeContent(
-  app: GitOpsApplicationRow,
-  genRow: GitOpsGenerationRow,
-): Promise<string> {
-  const stackName = app.configured_source_stack_name;
-  if (!stackName) {
-    throw new Error('Bound application has no retained source stack identity');
-  }
-  if (!genRow.applied_dir || genRow.applied_dir.trim() === '') {
-    throw new Error('accepted generation has no applied materialization directory');
-  }
-  const managedRoot = stackManagedRoot(stackName);
-  const appliedAbs = path.resolve(managedRoot, genRow.applied_dir);
-  if (!appliedAbs.startsWith(managedRoot + path.sep)) {
-    throw new Error('applied materialization path escapes the managed root');
-  }
-  const composePath = path.resolve(appliedAbs, 'compose.yaml');
-  if (!composePath.startsWith(appliedAbs + path.sep)) {
-    throw new Error('compose path escapes the applied materialization directory');
-  }
-  try {
-    return await fsPromises.readFile(composePath, 'utf8');
-  } catch (err) {
-    const code = (err as NodeJS.ErrnoException).code;
-    if (code === 'ENOENT') {
-      throw new Error('accepted generation materialization is missing compose.yaml', { cause: err });
-    }
-    throw err;
-  }
 }
 
 /**

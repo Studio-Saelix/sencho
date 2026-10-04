@@ -47,6 +47,7 @@ import {
   type RolloutRollbackTargetResult,
 } from '../services/gitops/rolloutRecovery';
 import { placementEffectCompatible } from '../services/gitops/store';
+import { prepareAcceptedGitManagedGeneration } from '../services/gitops/gitManagedMaterialization';
 import { GitOpsTransitions, GitOpsTransitionError } from '../services/gitops/transitions';
 import { newGitOpsId } from '../services/gitops/directApplication';
 import { HEALTH_ROLLOUT_POLICIES, isHealthRolloutPolicy } from '../services/gitops/healthPolicy';
@@ -813,7 +814,43 @@ gitopsApplicationsRouter.get('/:id', async (req: Request, res: Response): Promis
  * no longer the current candidate, so a stale review cannot accept different
  * content than it named.
  */
-gitopsApplicationsRouter.post('/:id/source/accept', (req: Request, res: Response): void => {
+/**
+ * Bound the wait on post-acceptance preparation.
+ *
+ * The acceptance is already committed when this runs, so a slow registry must
+ * not hold the request open until a proxy times out and the operator reads a
+ * failure for work that actually landed. The underlying preparation keeps
+ * running and the reconciler retries it either way; on timeout the response
+ * says so rather than pretending the acceptance failed.
+ */
+const PREPARE_TIMEOUT_MS = 15_000;
+
+async function prepareAcceptanceWithinTimeout(
+  applicationId: string,
+  generationId: string,
+  actor: string | null,
+): Promise<Awaited<ReturnType<typeof prepareAcceptedGitManagedGeneration>>> {
+  const fallback = {
+    materialized: false,
+    artifact: 'none' as const,
+    note: 'preparation is still running; the rollout becomes authorizable when it completes',
+  };
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => resolve(fallback), PREPARE_TIMEOUT_MS);
+    void prepareAcceptedGitManagedGeneration({ applicationId, generationId, actor, trigger: 'manual' })
+      .then((prepared) => {
+        clearTimeout(timer);
+        resolve(prepared);
+      })
+      .catch((err: unknown) => {
+        clearTimeout(timer);
+        console.error('[GitOps authority] Source preparation failed:', err);
+        resolve(fallback);
+      });
+  });
+}
+
+gitopsApplicationsRouter.post('/:id/source/accept', async (req: Request, res: Response): Promise<void> => {
   if (!requirePermission(req, res, 'stack:create')) return;
   const target = resolveAuthorityTarget(req, res);
   if (!target) return;
@@ -841,7 +878,19 @@ gitopsApplicationsRouter.post('/:id/source/accept', (req: Request, res: Response
     res.status(500).json({ error: 'Failed to accept the source revision' });
     return;
   }
-  res.json({ ok: true });
+  // The acceptance stands even when this follow-up is incomplete. Materialize
+  // the accepted generation and resolve its artifact set so the operator's next
+  // step (approve placement, authorize rollout) acts on a prepared generation;
+  // both steps are idempotent and the reconciler retries them, so a failure is
+  // reported as a note rather than undoing the acceptance. The wait is bounded:
+  // a slow registry must not hold an already-committed acceptance open.
+  const prepared = await prepareAcceptanceWithinTimeout(target.application.id, generationId, actor);
+  res.json({
+    ok: true,
+    materialized: prepared.materialized,
+    artifactResolved: prepared.artifact === 'resolved',
+    note: prepared.note,
+  });
 });
 
 /**
