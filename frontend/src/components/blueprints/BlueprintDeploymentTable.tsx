@@ -5,6 +5,7 @@ import {
     type BlueprintDeployment,
     type BlueprintClassification,
     type BlueprintDeploymentStatus,
+    DEPLOYMENT_STATUS_LABEL,
 } from '@/lib/blueprintsApi';
 import { useNodes } from '@/context/NodeContext';
 import { formatTimeAgo } from '@/lib/relativeTime';
@@ -22,21 +23,6 @@ interface BlueprintDeploymentTableProps {
     onRetry: (nodeId: number) => void;
     pinnedNodeId?: number | null;
 }
-
-const STATUS_LABEL: Record<BlueprintDeploymentStatus, string> = {
-    pending: 'Pending',
-    pending_state_review: 'Awaiting confirmation',
-    deploying: 'Deploying',
-    active: 'Active',
-    drifted: 'Drifted',
-    correcting: 'Correcting',
-    repair_held: 'Repair held',
-    failed: 'Failed',
-    withdrawing: 'Withdrawing',
-    withdrawn: 'Withdrawn',
-    evict_blocked: 'Evict blocked',
-    name_conflict: 'Name conflict',
-};
 
 function statusDotClass(status: BlueprintDeploymentStatus): string {
     switch (status) {
@@ -128,7 +114,7 @@ export function BlueprintDeploymentTable({
                                 <TableCell className="align-top">
                                     <div className="flex items-center gap-2">
                                         <span className={`inline-block w-2 h-2 rounded-full ${statusDotClass(dep.status)}`} aria-hidden />
-                                        <span className="text-xs">{STATUS_LABEL[dep.status]}</span>
+                                        <span className="text-xs">{DEPLOYMENT_STATUS_LABEL[dep.status]}</span>
                                     </div>
                                 </TableCell>
                                 <TableCell className="text-xs text-stat-subtitle align-top">

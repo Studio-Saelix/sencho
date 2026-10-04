@@ -5,14 +5,14 @@ description: "Fleet-wide compose templates that Sencho keeps in sync across the 
 
 A **Blueprint** bundles Compose YAML with a node selector and a drift policy. You declare a stack once; Sencho handles the distribution and the reconciliation loop. A Blueprint's compose is either **Inline** (edited here) or **Git-managed** (bound to one live Git source). For an Inline Blueprint, every minute Sencho compares the live state on each targeted node against the desired revision, and either reports the drift, dispatches a notification, or auto-corrects, depending on the mode you picked. Git-managed Blueprints take content from an accepted Git generation: fleet place runs only after that generation is authorized for rollout, and never from the frozen detach snapshot stored on the Blueprint row.
 
-Blueprints live under **Fleet · Deployments**.
+Blueprints live under **Fleet · Blueprints**.
 
 <Note>
   Blueprints are Sencho's Compose-first orchestration model. Creating, editing, withdrawing, and applying blueprints requires an admin role; operators and viewers can read the catalog and the detail sheet. Pinning a blueprint to a specific node lives under **Fleet · Federation** (admin role required).
 </Note>
 
-<Frame caption="Fleet · Deployments catalog with blueprint tiles, the All / Drifted / Observe / Suggest / Enforce filter chips, and the New Blueprint action in the top-right.">
-  <img src="/images/blueprint-model/catalog.png" alt="Blueprint catalog in Fleet Deployments" />
+<Frame caption="Fleet · Blueprints catalog with blueprint tiles, the All / Needs attention / Observe / Suggest / Enforce filter chips, and the New Blueprint action in the top-right of a one-line header that counts the blueprints.">
+  <img src="/images/blueprint-model/catalog.png" alt="Blueprint catalog in Fleet Blueprints" />
 </Frame>
 
 ## Mental model
@@ -66,16 +66,16 @@ Drift detection runs on every tick for every Active deployment regardless of pol
 
 ## The catalog
 
-The Deployments tab opens on a catalog of every blueprint configured on this instance. Each tile shows the name, an optional description, the classification chip (stateless, stateful, or unknown), an Inline or Git-managed badge, the active-vs-targeted node count, and the current drift mode. Filter chips at the top break the catalog down by drift mode and let you isolate any tile that has drift.
+The Blueprints tab opens on a catalog of every blueprint configured on this instance. Each tile shows the name, an optional description, the classification chip (stateless, stateful, or unknown), an Inline or Git-managed badge, the active-vs-targeted node count with its dominant non-active state (for example failed, drifted, repair held or deploying), and the current drift mode. Filter chips at the top break the catalog down by drift mode, and **Needs attention** isolates every tile with a failed, conflicting, drifted, held, blocked or awaiting row, or one that needs its rollout reconfirmed. The catalog stays on screen while it refreshes; a failed refresh shows a notice and keeps the last list.
 
 <Frame caption="Catalog tiles. Each tile carries the classification chip, an Inline or Git-managed badge, the active-over-targeted count, the selector summary, and the drift mode. The filter chips above the grid pivot the view.">
-  <img src="/images/blueprint-model/catalog.png" alt="Deployments tab catalog with classification chips and filter chips" />
+  <img src="/images/blueprint-model/catalog.png" alt="Blueprints tab catalog with classification chips and filter chips" />
 </Frame>
 
 The first time you visit the tab, the catalog is empty and a three-step explainer walks you through Author, Target, and Reconcile, with a **Create your first Blueprint** button at the bottom.
 
-<Frame caption="Empty Deployments tab. Three numbered cards (01 Author, 02 Target, 03 Reconcile) explain the model before you create the first blueprint.">
-  <img src="/images/blueprint-model/empty-state.png" alt="Empty Deployments tab with three-step explainer" />
+<Frame caption="Empty Blueprints tab. Three numbered cards (01 Author, 02 Target, 03 Reconcile) explain the model before you create the first blueprint.">
+  <img src="/images/blueprint-model/empty-state.png" alt="Empty Blueprints tab with three-step explainer" />
 </Frame>
 
 ## Anatomy of a Blueprint
@@ -224,7 +224,7 @@ The common paths through the status enum.
 
 ### Create
 
-1. Go to **Fleet · Deployments**.
+1. Go to **Fleet · Blueprints**.
 2. Click **New Blueprint**.
 3. Fill in the name, description, compose YAML, selector, and drift policy.
 4. Watch the classification banner update as you type. It tells you whether the blueprint is portable or pinned to data.
@@ -435,7 +435,7 @@ A future Volume Migration feature will automate this with app-aware backup tooli
 
 **Single-node managed Postgres.** A stateful `pg-fleet` blueprint with a `nodes` selector pointing at one database node and drift mode **Suggest**. The first deploy enters **Awaiting confirmation** so the operator chooses **Deploy fresh**. Subsequent compose changes (image bump, config change) re-enter **Awaiting confirmation** on the same node so the operator can decide whether the new revision is safe for the existing volume. Drift on the running container fires a `blueprint_drift_detected` notification but never auto-redeploys.
 
-**Pin a blueprint to a specific node despite the selector.** Open **Fleet · Federation**, find the blueprint in the pin policy table, and pick the target node from the **Pinned to** dropdown. The pin saves immediately but also clears approval, so nothing moves until you open the blueprint here in Deployments, click **Apply now**, and **Confirm Apply**. Once confirmed, the pin overrides the selector for that blueprint, deploys only to the pinned node, and also overrides cordon on that node. Useful for relocating a stateful service to a specific host without rewriting the selector. Clear the pin (and confirm again) to restore selector-driven placement.
+**Pin a blueprint to a specific node despite the selector.** Open **Fleet · Federation**, find the blueprint in the pin policy table, and pick the target node from the **Pinned to** dropdown. The pin saves immediately but also clears approval, so nothing moves until you open the blueprint here in Blueprints, click **Apply now**, and **Confirm Apply**. Once confirmed, the pin overrides the selector for that blueprint, deploys only to the pinned node, and also overrides cordon on that node. Useful for relocating a stateful service to a specific host without rewriting the selector. Clear the pin (and confirm again) to restore selector-driven placement.
 
 **Observe-only audit blueprint.** A stateless monitoring stack (Vector, Promtail, a Prometheus exporter) with drift mode **Observe**. Drift is recorded silently in the deployment table; no notification fires and no auto-fix runs. Useful when you want Sencho to track placement and detect divergence on a low-signal stack without paging anyone.
 
@@ -492,7 +492,7 @@ A future Volume Migration feature will automate this with app-aware backup tooli
 
 <AccordionGroup>
   <Accordion title="Do Blueprints replace my existing stacks?">
-    No. Stacks created in the per-stack lane (the **Stacks** sidebar) and Blueprints (the **Deployments** tab) coexist on every node. A Blueprint is identified by its `.blueprint.json` marker; the reconciler refuses to touch any directory that does not carry one with a matching blueprint ID, so user-authored stacks are safe from blueprint actions.
+    No. Stacks created in the per-stack lane (the **Stacks** sidebar) and Blueprints (the **Blueprints** tab) coexist on every node. A Blueprint is identified by its `.blueprint.json` marker; the reconciler refuses to touch any directory that does not carry one with a matching blueprint ID, so user-authored stacks are safe from blueprint actions.
   </Accordion>
   <Accordion title="Is a Blueprint the same as a Stack?">
     A Blueprint is a fleet-wide declaration: one compose YAML targeting a set of nodes. Each node where the blueprint resolves materializes as a Stack on that node, in the same compose directory layout the rest of the per-stack lane uses, with a `.blueprint.json` marker added. You can browse the materialized stack in the per-node Stacks view; the Blueprint is the source of truth that drives it.

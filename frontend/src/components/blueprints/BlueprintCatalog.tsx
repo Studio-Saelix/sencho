@@ -5,6 +5,7 @@ import {
     type BlueprintListItem,
     type BlueprintDeploymentStatus,
     describeSelector,
+    DEPLOYMENT_STATUS_LABEL,
 } from '@/lib/blueprintsApi';
 import { ContentOriginBadge } from './ContentOriginBadge';
 
@@ -15,7 +16,7 @@ interface BlueprintCatalogProps {
     canCreate: boolean;
 }
 
-type ModeFilter = 'all' | 'observe' | 'suggest' | 'enforce' | 'drifted';
+type ModeFilter = 'all' | 'observe' | 'suggest' | 'enforce' | 'attention';
 
 // A held repair outranks a plain drifted row: both need attention, but a hold
 // is one Sencho declined to fix, so it is the one an operator has to act on.
@@ -26,6 +27,32 @@ function dominantStatus(counts: Partial<Record<BlueprintDeploymentStatus, number
         if ((counts[status] ?? 0) > 0) return status;
     }
     return null;
+}
+
+// Statuses that need an operator decision. A held repair is drift Sencho declined to
+// fix, and a failed, conflicting or blocked row is as much a problem as drift. In-flight
+// states (deploying, correcting) resolve on their own, and a reapproval requirement is
+// checked separately.
+const ATTENTION_STATUSES: readonly BlueprintDeploymentStatus[] = ['failed', 'name_conflict', 'evict_blocked', 'pending_state_review', 'repair_held', 'drifted'];
+
+function needsAttention(b: BlueprintListItem): boolean {
+    return ATTENTION_STATUSES.some(s => (b.deploymentCounts[s] ?? 0) > 0) || b.effectiveApproval === 'reapproval_required';
+}
+
+function statusTextClass(status: BlueprintDeploymentStatus | null): string {
+    switch (status) {
+        case 'failed':
+        case 'name_conflict': return 'text-destructive';
+        case 'drifted':
+        case 'repair_held':
+        case 'pending':
+        case 'pending_state_review':
+        case 'evict_blocked':
+        case 'withdrawing': return 'text-warning';
+        case 'deploying':
+        case 'correcting': return 'text-brand';
+        default: return 'text-stat-subtitle';
+    }
 }
 
 function statusDot(status: BlueprintDeploymentStatus | null): string {
@@ -50,13 +77,10 @@ export function BlueprintCatalog({ blueprints, onSelect, onCreate, canCreate }: 
     const [filter, setFilter] = useState<ModeFilter>('all');
 
     const counts = useMemo(() => {
-        const c = { all: blueprints.length, observe: 0, suggest: 0, enforce: 0, drifted: 0 };
+        const c = { all: blueprints.length, observe: 0, suggest: 0, enforce: 0, attention: 0 };
         for (const b of blueprints) {
             c[b.drift_mode] = (c[b.drift_mode] ?? 0) + 1;
-            // A held row counts as drift on this chip, because the chip is how an
-            // operator finds it. The tile's own state comes from the status
-            // priority list, which already ranks a hold.
-            if ((b.deploymentCounts.drifted ?? 0) > 0 || (b.deploymentCounts.repair_held ?? 0) > 0) c.drifted += 1;
+            if (needsAttention(b)) c.attention += 1;
         }
         return c;
     }, [blueprints]);
@@ -64,10 +88,7 @@ export function BlueprintCatalog({ blueprints, onSelect, onCreate, canCreate }: 
     const filtered = useMemo(() => {
         switch (filter) {
             case 'all': return blueprints;
-            // A held row is drift too, so the Drifted chip has to count it or a
-            // Blueprint that is only held disappears from the filter that exists
-            // to find exactly that.
-            case 'drifted': return blueprints.filter(b => (b.deploymentCounts.drifted ?? 0) > 0 || (b.deploymentCounts.repair_held ?? 0) > 0);
+            case 'attention': return blueprints.filter(needsAttention);
             default: return blueprints.filter(b => b.drift_mode === filter);
         }
     }, [blueprints, filter]);
@@ -75,11 +96,9 @@ export function BlueprintCatalog({ blueprints, onSelect, onCreate, canCreate }: 
     return (
         <div className="space-y-5">
             <div className="flex items-center justify-between flex-wrap gap-3">
-                <div className="flex items-center gap-2">
-                    <span className="font-mono text-[10px] uppercase tracking-[0.18em] text-stat-icon">
-                        Deployments · Blueprints
-                    </span>
-                </div>
+                <span className="font-mono text-[10px] uppercase tracking-[0.18em] text-stat-icon">
+                    {blueprints.length} {blueprints.length === 1 ? 'Blueprint' : 'Blueprints'}
+                </span>
                 {canCreate && (
                     <Button size="sm" onClick={onCreate} className="gap-2">
                         <Plus className="h-4 w-4" strokeWidth={1.5} />
@@ -90,7 +109,7 @@ export function BlueprintCatalog({ blueprints, onSelect, onCreate, canCreate }: 
 
             <div className="flex items-center gap-1 flex-wrap">
                 <FilterChip active={filter === 'all'} count={counts.all} label="All" onClick={() => setFilter('all')} />
-                <FilterChip active={filter === 'drifted'} count={counts.drifted} label="Drifted" onClick={() => setFilter('drifted')} tone="warning" />
+                <FilterChip active={filter === 'attention'} count={counts.attention} label="Needs attention" onClick={() => setFilter('attention')} tone="warning" />
                 <span className="mx-2 text-stat-icon">·</span>
                 <FilterChip active={filter === 'observe'} count={counts.observe} label="Observe" onClick={() => setFilter('observe')} />
                 <FilterChip active={filter === 'suggest'} count={counts.suggest} label="Suggest" onClick={() => setFilter('suggest')} />
@@ -104,6 +123,7 @@ export function BlueprintCatalog({ blueprints, onSelect, onCreate, canCreate }: 
                 {filtered.length === 0 && (
                     <div className="md:col-span-2 xl:col-span-3 rounded-lg border border-dashed border-border p-8 text-center">
                         <p className="text-sm text-stat-subtitle">No blueprints match this filter.</p>
+                        <Button variant="outline" size="sm" className="mt-3" onClick={() => setFilter('all')}>Show all</Button>
                     </div>
                 )}
             </div>
@@ -155,6 +175,12 @@ function BlueprintTile({ blueprint, onClick }: { blueprint: BlueprintListItem; o
             <div className="flex items-center gap-2 font-mono text-[10px] uppercase tracking-[0.18em] text-stat-icon">
                 <span className="tabular-nums text-stat-value">{active}/{blueprint.deploymentTotal}</span>
                 <span>active</span>
+                {dom && dom !== 'active' && (
+                    <>
+                        <span>·</span>
+                        <span className={statusTextClass(dom)}>{DEPLOYMENT_STATUS_LABEL[dom].toLowerCase()}</span>
+                    </>
+                )}
                 <span>·</span>
                 <span className="truncate" title={describeSelector(blueprint.selector)}>{describeSelector(blueprint.selector)}</span>
             </div>

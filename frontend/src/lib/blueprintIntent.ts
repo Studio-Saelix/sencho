@@ -3,7 +3,7 @@
  * create dialog, from anywhere in the shell (the GitOps workplace's row menu
  * and masthead, for example).
  *
- * The intent travels two ways because the Deployments tab may or may not be
+ * The intent travels two ways because the Blueprints tab may or may not be
  * mounted: a mounted tab hears the event, a mounting one reads the pending
  * value in its state initializer. The pending value expires, so a navigation
  * that never lands (Fleet hidden for this role) cannot fire later.

@@ -6,7 +6,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { clearBlueprintIntent, openBlueprintIntent } from '@/lib/blueprintIntent';
-import { addNodeLabel, createBlueprint } from '@/lib/blueprintsApi';
+import { addNodeLabel, createBlueprint, listBlueprints, type BlueprintListItem } from '@/lib/blueprintsApi';
 import { toast } from '@/components/ui/toast-store';
 import { DeploymentsTab } from './DeploymentsTab';
 
@@ -20,13 +20,17 @@ vi.mock('@/lib/blueprintsApi', () => ({
   listAllNodeLabels: vi.fn(async () => ({})),
   createBlueprint: vi.fn(async () => ({ id: 9 })),
   addNodeLabel: vi.fn(async () => ({ nodeId: 2, label: 'edge', gitopsRevisions: [] })),
+  describeSelector: () => 'selector',
 }));
 vi.mock('@/components/ui/toast-store', () => ({
   toast: { error: vi.fn(), success: vi.fn(), warning: vi.fn() },
 }));
 vi.mock('./BlueprintDetail', () => ({
-  BlueprintDetail: ({ blueprintId, reviewOnOpen }: { blueprintId: number; reviewOnOpen?: boolean }) => (
-    <div data-testid="blueprint-detail" data-review={String(reviewOnOpen)}>{blueprintId}</div>
+  BlueprintDetail: ({ blueprintId, reviewOnOpen, onChanged }: { blueprintId: number; reviewOnOpen?: boolean; onChanged: () => void }) => (
+    <div data-testid="blueprint-detail" data-review={String(reviewOnOpen)}>
+      {blueprintId}
+      <button type="button" onClick={onChanged}>changed</button>
+    </div>
   ),
 }));
 vi.mock('./BlueprintEditor', () => ({
@@ -106,5 +110,135 @@ describe('DeploymentsTab create', () => {
     expect(screen.getByTestId('blueprint-editor')).toBeInTheDocument();
     expect(screen.queryByTestId('blueprint-detail')).toBeNull();
     expect(vi.mocked(addNodeLabel)).not.toHaveBeenCalled();
+  });
+});
+
+const item = (id: number, name: string) => ({
+  id, name, description: null, compose_content: '', selector: { type: 'nodes', ids: [1] }, drift_mode: 'suggest',
+  classification: 'stateless', enabled: true, deploymentCounts: { active: 1 }, deploymentTotal: 1, gitopsRevision: null,
+}) as unknown as BlueprintListItem;
+
+describe('DeploymentsTab loading', () => {
+  it('shows a layout-matched skeleton only when the first load is slow', async () => {
+    let resolve: (v: BlueprintListItem[]) => void = () => {};
+    vi.mocked(listBlueprints).mockImplementationOnce(() => new Promise(r => { resolve = r; }));
+    render(<DeploymentsTab />);
+    expect(screen.queryByTestId('catalog-skeleton')).toBeNull();
+    expect(await screen.findByTestId('catalog-skeleton', undefined, { timeout: 1500 })).toBeInTheDocument();
+    await act(async () => { resolve([item(1, 'web')]); });
+    expect(await screen.findByText('web')).toBeInTheDocument();
+    expect(screen.queryByTestId('catalog-skeleton')).toBeNull();
+  });
+
+  it('never flashes the skeleton for a fast load', async () => {
+    vi.mocked(listBlueprints).mockImplementationOnce(() => new Promise(r => setTimeout(() => r([item(1, 'web')]), 100)));
+    render(<DeploymentsTab />);
+    await new Promise(r => setTimeout(r, 40));
+    expect(screen.queryByTestId('catalog-skeleton')).toBeNull();
+    expect(await screen.findByText('web')).toBeInTheDocument();
+    expect(screen.queryByTestId('catalog-skeleton')).toBeNull();
+  });
+
+  it('keeps the catalog on screen while a refetch is in flight', async () => {
+    let resolve: (v: BlueprintListItem[]) => void = () => {};
+    vi.mocked(listBlueprints)
+      .mockResolvedValueOnce([item(1, 'web')])
+      .mockImplementationOnce(() => new Promise(r => { resolve = r; }));
+    render(<DeploymentsTab />);
+    await screen.findByText('web');
+    await act(async () => { openBlueprintIntent({ kind: 'create' }); });
+    fireEvent.click(await screen.findByRole('button', { name: 'draft' }));
+    await waitFor(() => expect(listBlueprints).toHaveBeenCalledTimes(2));
+    expect(screen.getByText('web')).toBeInTheDocument();
+    expect(screen.queryByTestId('catalog-skeleton')).toBeNull();
+    await act(async () => { resolve([item(1, 'web'), item(9, 'fresh')]); });
+    expect(await screen.findByText('fresh')).toBeInTheDocument();
+  });
+
+  it('shows an error card with a working Retry when nothing could be loaded', async () => {
+    vi.mocked(listBlueprints).mockRejectedValueOnce(new Error('node unreachable'));
+    render(<DeploymentsTab />);
+    expect(await screen.findByRole('alert')).toHaveTextContent('node unreachable');
+    vi.mocked(listBlueprints).mockResolvedValueOnce([item(1, 'web')]);
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+    expect(await screen.findByText('web')).toBeInTheDocument();
+    expect(screen.queryByRole('alert')).toBeNull();
+  });
+
+  it('keeps the catalog and only toasts when a later refetch fails', async () => {
+    vi.mocked(listBlueprints)
+      .mockResolvedValueOnce([item(1, 'web')])
+      .mockRejectedValueOnce(new Error('blip'));
+    render(<DeploymentsTab />);
+    await screen.findByText('web');
+    await act(async () => { openBlueprintIntent({ kind: 'create' }); });
+    fireEvent.click(await screen.findByRole('button', { name: 'draft' }));
+    await waitFor(() => expect(toast.error).toHaveBeenCalledWith('blip'));
+    expect(screen.getByText('web')).toBeInTheDocument();
+    expect(screen.queryByRole('alert')).toBeNull();
+  });
+
+  it('offers one create action on an empty tab', async () => {
+    render(<DeploymentsTab />);
+    await screen.findByText(/Declare once/);
+    expect(screen.getAllByRole('button', { name: /new blueprint|create your first/i })).toHaveLength(1);
+  });
+
+  it('keeps an open sheet mounted while a change is picked up', async () => {
+    let resolve: (v: BlueprintListItem[]) => void = () => {};
+    vi.mocked(listBlueprints)
+      .mockResolvedValueOnce([item(5, 'web')])
+      .mockImplementationOnce(() => new Promise(r => { resolve = r; }));
+    openBlueprintIntent({ kind: 'open', blueprintId: 5 });
+    render(<DeploymentsTab />);
+    fireEvent.click(await screen.findByRole('button', { name: 'changed' }));
+    await waitFor(() => expect(listBlueprints).toHaveBeenCalledTimes(2));
+    expect(screen.getByTestId('blueprint-detail')).toBeInTheDocument();
+    await act(async () => { resolve([item(5, 'web')]); });
+    expect(screen.getByTestId('blueprint-detail')).toBeInTheDocument();
+  });
+
+  it('shows a persistent notice with Retry when a refresh fails over a catalog', async () => {
+    vi.mocked(listBlueprints)
+      .mockResolvedValueOnce([item(1, 'web')])
+      .mockRejectedValueOnce(new Error('blip'))
+      .mockResolvedValueOnce([item(1, 'web')]);
+    render(<DeploymentsTab />);
+    await screen.findByText('web');
+    await act(async () => { openBlueprintIntent({ kind: 'create' }); });
+    fireEvent.click(await screen.findByRole('button', { name: 'draft' }));
+    expect(await screen.findByRole('status')).toHaveTextContent('Showing the last list');
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+    await waitFor(() => expect(screen.queryByText(/Showing the last list/)).toBeNull());
+  });
+
+  it('does not open the new Blueprint, now or after a later Retry, when the refresh after creating fails', async () => {
+    vi.mocked(listBlueprints)
+      .mockResolvedValueOnce([])
+      .mockRejectedValueOnce(new Error('blip'))
+      .mockResolvedValueOnce([item(9, 'web')]);
+    render(<DeploymentsTab />);
+    await screen.findByText(/Declare once/);
+    await act(async () => { openBlueprintIntent({ kind: 'create' }); });
+    fireEvent.click(await screen.findByRole('button', { name: 'review' }));
+    expect(await screen.findByRole('alert')).toHaveTextContent('blip');
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+    await screen.findByText('web');
+    expect(screen.queryByTestId('blueprint-detail')).toBeNull();
+  });
+
+  it('offers no create action on an empty tab for a role that cannot create', async () => {
+    grants.create = false;
+    render(<DeploymentsTab />);
+    await screen.findByText(/Declare once/);
+    expect(screen.queryAllByRole('button', { name: /new blueprint|create your first/i })).toHaveLength(0);
+  });
+
+  it('has one New Blueprint action once there is a catalog', async () => {
+    vi.mocked(listBlueprints).mockResolvedValueOnce([item(1, 'web')]);
+    render(<DeploymentsTab />);
+    await screen.findByText('web');
+    expect(screen.getAllByRole('button', { name: /new blueprint/i })).toHaveLength(1);
+    expect(screen.queryByText(/Deployments · Blueprints/)).toBeNull();
   });
 });

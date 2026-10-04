@@ -118,7 +118,7 @@ describe('FleetView tab discovery and deep-link fallback', () => {
     render(<FleetView onNavigateToNode={vi.fn()} onOpenNodeNetworking={vi.fn()} />);
     expect(screen.queryByRole('tab', { name: /routing/i })).toBeNull();
     expect(screen.getByRole('tab', { name: /secrets/i })).toBeTruthy();
-    expect(screen.getByRole('tab', { name: /deployments/i })).toBeTruthy();
+    expect(screen.getByRole('tab', { name: /blueprints/i })).toBeTruthy();
     expect(screen.getByRole('tab', { name: /federation/i })).toBeTruthy();
     expect(screen.getByRole('tab', { name: /actions/i })).toBeTruthy();
   });
@@ -198,6 +198,6 @@ describe('FleetView tab discovery and deep-link fallback', () => {
     // Routing still visible (gated on experimental + paid, not admin)
     expect(screen.getByRole('tab', { name: /routing/i })).toBeTruthy();
     // Unrelated tabs still visible
-    expect(screen.getByRole('tab', { name: /deployments/i })).toBeTruthy();
+    expect(screen.getByRole('tab', { name: /blueprints/i })).toBeTruthy();
   });
 });

@@ -3,7 +3,7 @@ title: Fleet View
 description: Monitor every node in your Sencho deployment from one screen, drill into stacks and containers, and orchestrate Sencho version updates across the fleet.
 ---
 
-The **Fleet** tab is the single page you open when you want to see the whole estate at once: every node's health, every stack, every container, and which boxes need a Sencho update. It is the home for fleet-wide tabs that go beyond monitoring (Snapshots, Docker Labels, Deployments, Routing, Federation, Actions, Secrets), each linking out to its own dedicated page.
+The **Fleet** tab is the single page you open when you want to see the whole estate at once: every node's health, every stack, every container, and which boxes need a Sencho update. It is the home for fleet-wide tabs that go beyond monitoring (Snapshots, Docker Labels, Blueprints, Routing, Federation, Actions, Secrets), each linking out to its own dedicated page.
 
 <Note>
   Fleet is hub-only and is hidden from the nav strip when a remote node is the active selection. See [Multi-Node Management](/features/multi-node#what-top-level-views-show-when-a-remote-node-is-active).
@@ -37,7 +37,7 @@ A single rail summarises the state of every registered node so you can read the 
 
 ### Tabs
 
-The Fleet view is a tab strip. Every tier sees Overview, Readiness, Map, Docker Labels, Deployments, Federation, and Actions. Snapshots appears for admins. Secrets appears for admins. Routing is a limited-availability fleet surface and is not part of the default tab strip. A vertical separator after **Docker Labels** (or after **Map** when Docker Labels is not present) divides the per-node monitoring tabs from the fleet-wide orchestration tabs.
+The Fleet view is a tab strip. Every tier sees Overview, Readiness, Map, Docker Labels, Blueprints, Federation, and Actions. Snapshots appears for admins. Secrets appears for admins. Routing is a limited-availability fleet surface and is not part of the default tab strip. A vertical separator after **Docker Labels** (or after **Map** when Docker Labels is not present) divides the per-node monitoring tabs from the fleet-wide orchestration tabs.
 
 | Tab | Tier | What it does |
 |-----|------|--------------|
@@ -46,7 +46,7 @@ The Fleet view is a tab strip. Every tier sees Overview, Readiness, Map, Docker 
 | **Readiness** | Community | What across the fleet needs attention before you operate, update, or recover it. Covered below. |
 | **Map** | Community | A read-only map of how stacks, services, networks, volumes, and ports relate across the fleet, with anomaly flags. Covered below. |
 | **Docker Labels** | Community | Estate-wide audit of Docker and Compose labels across every node. See [Docker Label Audit](/features/docker-label-audit). |
-| **Deployments** | Community | Blueprint deployments and reconciler state. See [Blueprints](/features/blueprint-model). |
+| **Blueprints** | Community | Blueprint deployments and reconciler state. See [Blueprints](/features/blueprint-model). |
 | **Routing** | Limited availability | Cross-node service routing via Sencho Mesh when that surface is enabled on the instance. See [Sencho Mesh](/features/sencho-mesh). |
 | **Federation** | Community | Cordon nodes and pin blueprints to specific hosts. See [Fleet Federation](/features/fleet-federation). |
 | **Actions** | Community (admin role) | Fleet-wide bulk operations: stop stacks by label, bulk-assign labels, prune Docker resources. See [Fleet Actions](/features/fleet-actions). |

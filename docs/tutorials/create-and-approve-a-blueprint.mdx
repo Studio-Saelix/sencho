@@ -15,7 +15,7 @@ This tutorial does not cover stateful Blueprints (the extra confirmation step fo
 
 <Steps>
   <Step title="Author the Blueprint">
-    Go to **Fleet → Deployments** and click **New Blueprint**. Fill in:
+    Go to **Fleet → Blueprints** and click **New Blueprint**. Fill in:
 
     - **Name**: `whoami-edge`
     - **Description**: `Minimal identity endpoint for the edge tier`
@@ -62,10 +62,10 @@ This tutorial does not cover stateful Blueprints (the extra confirmation step fo
 
 Check from two places, since a single stale UI element could tell you the wrong thing.
 
-**The Deployments tab.** Back on **Fleet → Deployments**, the `whoami-edge` tile now shows a green dot, the **stateless** chip, and `1/1 active · any=[edge]`. Open the tile: the deployment table lists **Local**, status **Active**, with a **Withdraw** action now available. The stack also appears in the left sidebar's stack list like any other running stack, materialized on disk the same way a per-stack deploy would be.
+**The Blueprints tab.** Back on **Fleet → Blueprints**, the `whoami-edge` tile now shows a green dot, the **stateless** chip, and `1/1 active · any=[edge]`. Open the tile: the deployment table lists **Local**, status **Active**, with a **Withdraw** action now available. The stack also appears in the left sidebar's stack list like any other running stack, materialized on disk the same way a per-stack deploy would be.
 
-<Frame caption="The Deployments tab after the rollout: one active deployment, stateless, matched on the edge label.">
-  <img src="/images/tutorials/create-and-approve-a-blueprint/catalog-active.png" alt="Deployments · Blueprints catalog with one tile: whoami-edge, stateless, 1/1 active, any=[edge], drift suggest. The left sidebar stack list now includes whoami-edge alongside the node's other stacks." />
+<Frame caption="The Blueprints tab after the rollout: one active deployment, stateless, matched on the edge label.">
+  <img src="/images/tutorials/create-and-approve-a-blueprint/catalog-active.png" alt="Blueprints catalog with one tile: whoami-edge, stateless, 1/1 active, any=[edge], drift suggest. The left sidebar stack list now includes whoami-edge alongside the node's other stacks." />
 </Frame>
 
 <Frame caption="The detail sheet's deployment table: Local, Active, with Withdraw available.">
