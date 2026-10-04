@@ -10,7 +10,7 @@ import type { BlueprintSummary } from '@/lib/blueprintsApi';
 
 vi.mock('@/lib/blueprintsApi', async (importOriginal) => {
     const actual = await importOriginal<typeof import('@/lib/blueprintsApi')>();
-    return { ...actual, getBlueprint: vi.fn(), applyBlueprint: vi.fn(), previewBlueprint: vi.fn(), deleteBlueprint: vi.fn() };
+    return { ...actual, getBlueprint: vi.fn(), applyBlueprint: vi.fn(), previewBlueprint: vi.fn(), deleteBlueprint: vi.fn(), pinBlueprint: vi.fn(), updateBlueprint: vi.fn() };
 });
 
 vi.mock('@/context/NodeContext', () => ({ useNodes: () => ({ nodes: [] }) }));
@@ -26,6 +26,18 @@ vi.mock('./BlueprintDeploymentTable', () => ({
 vi.mock('./RolloutPreviewDialog', () => ({
     RolloutPreviewDialog: ({ open }: { open: boolean }) => (
         open ? <div data-testid="rollout-preview-dialog">preview</div> : null
+    ),
+}));
+
+vi.mock('./EvictionDialog', () => ({
+    EvictionDialog: ({ open, nodeName }: { open: boolean; nodeName: string }) => (
+        open ? <div data-testid="eviction-dialog">{nodeName}</div> : null
+    ),
+}));
+
+vi.mock('./StateReviewDialog', () => ({
+    StateReviewDialog: ({ open, nodeName }: { open: boolean; nodeName: string }) => (
+        open ? <div data-testid="state-review-dialog">{nodeName}</div> : null
     ),
 }));
 
@@ -47,7 +59,7 @@ vi.mock('./RetireBlueprintDialog', () => ({
     ),
 }));
 
-import { deleteBlueprint, getBlueprint } from '@/lib/blueprintsApi';
+import { deleteBlueprint, getBlueprint, pinBlueprint, updateBlueprint } from '@/lib/blueprintsApi';
 import { toast } from '@/components/ui/toast-store';
 import { BlueprintDetail } from './BlueprintDetail';
 import { absentRevision, facets, liveRevision, missingApplicationLimitation } from '@/__tests__/gitopsFixtures';
@@ -419,3 +431,157 @@ describe('BlueprintDetail delete', () => {
         expect(onOpenChange).not.toHaveBeenCalledWith(false);
     });
 });
+
+describe('BlueprintDetail status and actions', () => {
+    const failedDeployment = {
+        id: 1, blueprint_id: 1, node_id: 2, status: 'failed' as const, applied_revision: 1,
+        last_deployed_at: null, last_checked_at: null, last_drift_at: null, drift_summary: null,
+        last_error: 'Error response from daemon: port is already allocated',
+    };
+
+    it('leads with the Blueprint answer, and its verb opens the rollout plan', async () => {
+        vi.mocked(getBlueprint).mockResolvedValue(summary({ deployments: [failedDeployment], effectiveApproval: 'approved' }));
+        render(<BlueprintDetail blueprintId={1} open onOpenChange={noop} onChanged={noop} canEdit nodeLabels={{}} />);
+        expect(await screen.findByTestId('blueprint-answer')).toHaveTextContent('failed');
+        fireEvent.click(screen.getByTestId('blueprint-verb'));
+        expect(screen.getByTestId('rollout-preview-dialog')).toBeInTheDocument();
+    });
+
+    it('states approval once, in the status path, not again in the footer', async () => {
+        vi.mocked(getBlueprint).mockResolvedValue(summary({ effectiveApproval: 'approved' }));
+        render(<BlueprintDetail blueprintId={1} open onOpenChange={noop} onChanged={noop} canEdit nodeLabels={{}} />);
+        await screen.findByTestId('blueprint-status');
+        const footer = screen.getByText(/^Updated/);
+        expect(footer.textContent).toMatch(/^Updated/);
+        expect(footer.textContent).not.toMatch(/approved|pending|reconciler/i);
+    });
+
+    it('moves Git conversion out of the toolbar and into the Content row', async () => {
+        render(<BlueprintDetail blueprintId={1} open onOpenChange={noop} onChanged={noop} canEdit nodeLabels={{}} />);
+        const convert = await screen.findByRole('button', { name: /convert to git/i });
+        const apply = screen.getByRole('button', { name: /apply now/i });
+        // Same container would mean they share the toolbar band.
+        expect(convert.parentElement).not.toBe(apply.parentElement);
+    });
+
+    it('unpins a pinned Blueprint in place', async () => {
+        vi.mocked(pinBlueprint).mockResolvedValue(undefined as never);
+        const onChanged = vi.fn();
+        const base = summary();
+        vi.mocked(getBlueprint).mockResolvedValue(summary({ blueprint: { ...base.blueprint, pinned_node_id: 2 } }));
+        render(<BlueprintDetail blueprintId={1} open onOpenChange={noop} onChanged={onChanged} canEdit nodeLabels={{}} />);
+        fireEvent.click(await screen.findByRole('button', { name: 'Unpin' }));
+        await waitFor(() => expect(pinBlueprint).toHaveBeenCalledWith(1, null));
+        await waitFor(() => expect(onChanged).toHaveBeenCalled());
+    });
+
+    it('hides Unpin from a session that cannot manage nodes', async () => {
+        const base = summary();
+        vi.mocked(getBlueprint).mockResolvedValue(summary({ blueprint: { ...base.blueprint, pinned_node_id: 2 } }));
+        const can = vi.fn((action: string) => action !== 'node:manage');
+        render(<BlueprintDetail blueprintId={1} open onOpenChange={noop} onChanged={noop} canEdit can={can} nodeLabels={{}} />);
+        await screen.findByText(/Pinned to/);
+        expect(screen.queryByRole('button', { name: 'Unpin' })).toBeNull();
+    });
+});
+
+describe('BlueprintDetail status verbs and gating', () => {
+    const row = (status: string, over: Record<string, unknown> = {}) => ({
+        id: 1, blueprint_id: 1, node_id: 2, status, applied_revision: 1,
+        last_deployed_at: null, last_checked_at: null, last_drift_at: null, drift_summary: null, last_error: null, ...over,
+    });
+
+    beforeEach(() => {
+        vi.mocked(updateBlueprint).mockReset().mockResolvedValue(undefined as never);
+    });
+
+    it('opens the state review for the node the status names, even if the node list lacks it', async () => {
+        vi.mocked(getBlueprint).mockResolvedValue(summary({ deployments: [row('pending_state_review')] as never }));
+        render(<BlueprintDetail blueprintId={1} open onOpenChange={noop} onChanged={noop} canEdit nodeLabels={{}} />);
+        fireEvent.click(await screen.findByRole('button', { name: 'Review state on node 2' }));
+        expect(screen.getByTestId('state-review-dialog')).toHaveTextContent('node 2');
+    });
+
+    it('opens the eviction dialog from the Evict verb', async () => {
+        vi.mocked(getBlueprint).mockResolvedValue(summary({ deployments: [row('evict_blocked')] as never }));
+        render(<BlueprintDetail blueprintId={1} open onOpenChange={noop} onChanged={noop} canEdit nodeLabels={{}} />);
+        fireEvent.click(await screen.findByRole('button', { name: 'Evict on node 2' }));
+        expect(screen.getByTestId('eviction-dialog')).toBeInTheDocument();
+    });
+
+    it('turns the reconciler on from the status verb', async () => {
+        const base = summary();
+        vi.mocked(getBlueprint).mockResolvedValue(summary({
+            blueprint: { ...base.blueprint, enabled: false }, effectiveApproval: 'approved', deployments: [row('active')] as never,
+        }));
+        render(<BlueprintDetail blueprintId={1} open onOpenChange={noop} onChanged={noop} canEdit nodeLabels={{}} />);
+        fireEvent.click(await screen.findByTestId('blueprint-verb'));
+        await waitFor(() => expect(updateBlueprint).toHaveBeenCalledWith(1, { enabled: true }));
+    });
+
+    it('offers Enable instead of Re-apply on a failed Blueprint that is switched off', async () => {
+        const base = summary();
+        vi.mocked(getBlueprint).mockResolvedValue(summary({
+            blueprint: { ...base.blueprint, enabled: false }, deployments: [row('failed', { last_error: 'boom' })] as never,
+        }));
+        render(<BlueprintDetail blueprintId={1} open onOpenChange={noop} onChanged={noop} canEdit nodeLabels={{}} />);
+        expect(await screen.findByTestId('blueprint-verb')).toHaveTextContent('Enable');
+        expect(screen.queryByRole('button', { name: 'Re-apply' })).toBeNull();
+    });
+
+    it('offers no verb a read-only session could not run', async () => {
+        vi.mocked(getBlueprint).mockResolvedValue(summary({ deployments: [row('failed', { last_error: 'boom' })] as never }));
+        const can = vi.fn(() => false);
+        render(<BlueprintDetail blueprintId={1} open onOpenChange={noop} onChanged={noop} canEdit={false} can={can} nodeLabels={{}} />);
+        expect(await screen.findByTestId('blueprint-answer')).toHaveTextContent('failed');
+        expect(screen.queryByTestId('blueprint-verb')).toBeNull();
+    });
+
+    it('reports a failed unpin and leaves the button usable', async () => {
+        vi.mocked(pinBlueprint).mockRejectedValue(new Error('node offline'));
+        const onChanged = vi.fn();
+        const base = summary();
+        vi.mocked(getBlueprint).mockResolvedValue(summary({ blueprint: { ...base.blueprint, pinned_node_id: 2 } }));
+        render(<BlueprintDetail blueprintId={1} open onOpenChange={noop} onChanged={onChanged} canEdit nodeLabels={{}} />);
+        fireEvent.click(await screen.findByRole('button', { name: 'Unpin' }));
+        await waitFor(() => expect(toast.error).toHaveBeenCalledWith('node offline'));
+        expect(onChanged).not.toHaveBeenCalled();
+        expect(screen.getByRole('button', { name: 'Unpin' })).toBeEnabled();
+    });
+
+    it('tells the operator the selector applies again after an unpin', async () => {
+        vi.mocked(pinBlueprint).mockResolvedValue(undefined as never);
+        const base = summary();
+        vi.mocked(getBlueprint).mockResolvedValue(summary({ blueprint: { ...base.blueprint, pinned_node_id: 2 } }));
+        render(<BlueprintDetail blueprintId={1} open onOpenChange={noop} onChanged={noop} canEdit nodeLabels={{}} />);
+        fireEvent.click(await screen.findByRole('button', { name: 'Unpin' }));
+        await waitFor(() => expect(toast.success).toHaveBeenCalledWith('Blueprint unpinned. Review the rollout to apply the selector.'));
+    });
+
+    it('keeps the GitOps status, with its conversion actions in the Content row, for Git content', async () => {
+        const base = summary();
+        vi.mocked(getBlueprint).mockResolvedValue(summary({
+            blueprint: { ...base.blueprint, content_origin: 'git', application_id: 'app-web', enabled: false },
+            gitopsRevision: liveRevision({
+                targetMode: 'blueprint', blueprintId: 1,
+                facets: facets({ source: { status: 'not_applicable' }, placement: { status: 'blueprint_bound', completion: 'unknown' } }),
+            }),
+        }));
+        render(<BlueprintDetail blueprintId={1} open onOpenChange={noop} onChanged={noop} canEdit nodeLabels={{}} />);
+        await screen.findByTestId('gitops-status');
+        expect(screen.queryByTestId('blueprint-status')).toBeNull();
+        expect(screen.getByRole('button', { name: /detach git/i })).toBeInTheDocument();
+        // Without a Blueprint status, the footer still says the reconciler is off.
+        expect(screen.getByText(/^Updated/).textContent).toMatch(/reconciler disabled/);
+    });
+
+    it('shows no status block for Git content with nothing to project', async () => {
+        const base = summary();
+        vi.mocked(getBlueprint).mockResolvedValue(summary({ blueprint: { ...base.blueprint, content_origin: 'git', application_id: 'app-web' } }));
+        render(<BlueprintDetail blueprintId={1} open onOpenChange={noop} onChanged={noop} canEdit nodeLabels={{}} />);
+        await screen.findByText('Git-managed');
+        expect(screen.queryByTestId('blueprint-status')).toBeNull();
+        expect(screen.queryByTestId('gitops-status')).toBeNull();
+    });
+});
+

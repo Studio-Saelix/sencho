@@ -10,6 +10,7 @@ import { absentFault, liveCaveats, livePlacementFacet, liveRolloutFacet } from '
 import { ConfirmModal } from '@/components/ui/modal';
 import { Input } from '@/components/ui/input';
 import { Button } from '@/components/ui/button';
+import { BusyButton } from '@/components/ui/busy-button';
 import { Skeleton } from '@/components/ui/skeleton';
 import { toast } from '@/components/ui/toast-store';
 import {
@@ -23,9 +24,11 @@ import {
     deleteBlueprint,
     withdrawDeployment,
     acceptDeployment,
+    pinBlueprint,
     describeSelector,
 } from '@/lib/blueprintsApi';
 import { BlueprintEditor, type BlueprintSubmitOptions } from './BlueprintEditor';
+import { BlueprintStatus } from './BlueprintStatus';
 import { BlueprintDeploymentTable } from './BlueprintDeploymentTable';
 import { EvictionDialog } from './EvictionDialog';
 import { StateReviewDialog } from './StateReviewDialog';
@@ -67,6 +70,7 @@ export function BlueprintDetail({ blueprintId, open, onOpenChange, onChanged, ca
     const [convertOpen, setConvertOpen] = useState(false);
     const [detachOpen, setDetachOpen] = useState(false);
     const [retireOpen, setRetireOpen] = useState(false);
+    const [unpinning, setUnpinning] = useState(false);
     const { nodes } = useNodes();
 
     // Hold the latest onOpenChange without making it a refresh dependency. Parents
@@ -125,6 +129,7 @@ export function BlueprintDetail({ blueprintId, open, onOpenChange, onChanged, ca
         (dep) => dep.status !== 'withdrawn',
     ) ?? false;
     const canApply = !!blueprint && !gitManaged && (can ? can('stack:create') && can('stack:deploy') : canEdit);
+    const canManagePin = can ? can('node:manage') : canEdit;
     const canDeleteBlueprint = !!blueprint && !gitManaged && (can ? can('stack:delete') : canEdit);
     const canDeployOnNode = (nodeId: number) => !!blueprint
         && !gitManaged
@@ -237,8 +242,8 @@ export function BlueprintDetail({ blueprintId, open, onOpenChange, onChanged, ca
     }
 
     /**
-     * Row-level retry isn't a backend primitive: the reconciler operates on the whole
-     * blueprint, not a single deployment. We surface the row's "Retry" button and
+     * Row-level re-apply isn't a backend primitive: the reconciler operates on the whole
+     * blueprint, not a single deployment. We surface the row's "Re-apply" button and
      * open the rollout preview so the operator confirms the full plan.
      * The nodeId argument satisfies BlueprintDeploymentTable.onRetry's signature.
      */
@@ -247,29 +252,46 @@ export function BlueprintDetail({ blueprintId, open, onOpenChange, onChanged, ca
         setPreviewOpen(true);
     }
 
+    // A node missing from the list (removed, or not yet loaded) still has a deployment
+    // row, so the dialogs open under a generic name instead of the button doing nothing.
+    const nodeLabel = (nodeId: number) => nodes.find(n => n.id === nodeId)?.name ?? `node ${nodeId}`;
+
     function openWithdraw(nodeId: number) {
-        const node = nodes.find(n => n.id === nodeId);
-        if (!node) return;
-        setEvictTarget({ nodeId, nodeName: node.name });
+        setEvictTarget({ nodeId, nodeName: nodeLabel(nodeId) });
     }
 
     function openAcceptStateReview(nodeId: number) {
-        const node = nodes.find(n => n.id === nodeId);
-        if (!node) return;
-        setStateReviewTarget({ nodeId, nodeName: node.name });
+        setStateReviewTarget({ nodeId, nodeName: nodeLabel(nodeId) });
+    }
+
+    async function handleUnpin() {
+        if (!blueprint) return;
+        setUnpinning(true);
+        try {
+            await pinBlueprint(blueprint.id, null);
+            toast.success('Blueprint unpinned. Review the rollout to apply the selector.');
+            await refresh();
+            onChanged();
+        } catch (err) {
+            toast.error(err instanceof Error ? err.message : 'Failed to unpin blueprint');
+        } finally {
+            setUnpinning(false);
+        }
     }
 
     const meta = blueprint
         ? `${describeSelector(blueprint.selector)} · ${blueprint.drift_mode} · rev ${blueprint.revision}`
         : (loading ? 'Loading…' : '');
 
+    // An Inline Blueprint states approval and the reconciler switch once, in the status
+    // above the table; a Git-managed one has no such status, so its footer keeps them.
     const approvalLabel = summary?.effectiveApproval === 'reapproval_required'
         ? 'reapproval required'
         : summary?.effectiveApproval ?? 'pending';
-
-    const footerContext = blueprint
-        ? `Updated ${formatTimeAgo(blueprint.updated_at)}${blueprint.enabled ? '' : ' · reconciler disabled'} · ${approvalLabel}`
-        : undefined;
+    const gitFooter = blueprint && gitManaged
+        ? `${blueprint.enabled ? '' : ' · reconciler disabled'} · ${approvalLabel}`
+        : '';
+    const footerContext = blueprint ? `Updated ${formatTimeAgo(blueprint.updated_at)}${gitFooter}` : undefined;
 
     const secondaryActions = blueprint && canEdit
         ? [
@@ -278,18 +300,6 @@ export function BlueprintDetail({ blueprintId, open, onOpenChange, onChanged, ca
                 icon: Pencil,
                 onClick: () => setEditMode(true),
                 disabled: submitting,
-            }] : []),
-            {
-                label: gitManaged ? 'Detach Git' : 'Convert to Git',
-                icon: gitManaged ? Unlink : GitBranch,
-                onClick: () => { if (gitManaged) setDetachOpen(true); else setConvertOpen(true); },
-                disabled: submitting || editMode,
-            },
-            ...(gitManaged && !hasActiveDeployments ? [{
-                label: 'Retire to Direct',
-                icon: CornerDownLeft,
-                onClick: () => setRetireOpen(true),
-                disabled: submitting || editMode,
             }] : []),
             {
                 label: blueprint.enabled ? 'Disable' : 'Enable',
@@ -344,18 +354,105 @@ export function BlueprintDetail({ blueprintId, open, onOpenChange, onChanged, ca
                     </SheetSection>
                 ) : (
                     <>
+                        {(!gitManaged || showGitops) && (
+                            <SheetSection title={gitManaged ? 'GitOps' : 'Status'} hideHeader={!gitManaged}>
+                                <div className="space-y-2">
+                                    {gitManaged ? (
+                                        <GitOpsStatus
+                                            revision={summary.gitopsRevision}
+                                            includeTargets={false}
+                                        />
+                                    ) : (
+                                        <BlueprintStatus
+                                            summary={summary}
+                                            nodeName={nodeLabel}
+                                            busy={submitting || unpinning || busyNodeId !== null}
+                                            handlers={{
+                                                reapply: canApply ? () => setPreviewOpen(true) : undefined,
+                                                enable: canEdit ? () => void handleToggleEnabled() : undefined,
+                                                reviewState: openAcceptStateReview,
+                                                evict: openWithdraw,
+                                                canDeployOnNode,
+                                                canWithdrawFromNode,
+                                            }}
+                                        />
+                                    )}
+                                    {showGitops && (
+                                        <>
+                                            <GitOpsAuthorityActions
+                                                applicationId={blueprintApplicationId(blueprint.id)}
+                                                blueprintId={blueprint.id}
+                                                blueprintName={blueprint.name}
+                                                projection={summary.gitopsRevision}
+                                                onChanged={handleRolloutApplied}
+                                                can={can}
+                                                blueprintEnabled={blueprint.enabled}
+                                            />
+                                            <GitOpsRolloutControls
+                                                applicationId={blueprintApplicationId(blueprint.id)}
+                                                projection={summary.gitopsRevision}
+                                                onChanged={handleRolloutApplied}
+                                                can={can}
+                                                blueprintEnabled={blueprint.enabled}
+                                                rollbackGenerations={summary.rollbackCandidates}
+                                            />
+                                            {/* This Blueprint's application in the portfolio, beside
+                                                every other GitOps application and the attention queue. */}
+                                            <Button
+                                                variant="link"
+                                                size="sm"
+                                                className="h-auto p-0 text-xs"
+                                                onClick={() => {
+                                                    onOpenChange(false);
+                                                    openGitOpsWorkplace({ blueprintId: blueprint.id });
+                                                }}
+                                            >
+                                                Open in GitOps portfolio
+                                            </Button>
+                                        </>
+                                    )}
+                                </div>
+                            </SheetSection>
+                        )}
+
                         <SheetSection title="Content" hideHeader>
-                            <ContentOriginBadge origin={blueprint.content_origin} />
+                            <div className="flex flex-wrap items-center gap-2">
+                                <ContentOriginBadge origin={blueprint.content_origin} />
+                                {canEdit && (gitManaged ? (
+                                    <>
+                                        <Button variant="outline" size="sm" className="gap-1.5" disabled={submitting} onClick={() => setDetachOpen(true)}>
+                                            <Unlink className="h-3.5 w-3.5" strokeWidth={1.5} />
+                                            Detach Git
+                                        </Button>
+                                        {!hasActiveDeployments && (
+                                            <Button variant="outline" size="sm" className="gap-1.5" disabled={submitting} onClick={() => setRetireOpen(true)}>
+                                                <CornerDownLeft className="h-3.5 w-3.5" strokeWidth={1.5} />
+                                                Retire to Direct
+                                            </Button>
+                                        )}
+                                    </>
+                                ) : (
+                                    <Button variant="outline" size="sm" className="gap-1.5" disabled={submitting} onClick={() => setConvertOpen(true)}>
+                                        <GitBranch className="h-3.5 w-3.5" strokeWidth={1.5} />
+                                        Convert to Git
+                                    </Button>
+                                ))}
+                            </div>
                         </SheetSection>
 
                         {blueprint.pinned_node_id !== null && (
                             <SheetSection title="Pin" hideHeader>
                                 <div className="flex items-start gap-2 rounded-md border border-card-border bg-glass-highlight px-3 py-2">
                                     <Pin className="w-3.5 h-3.5 mt-0.5 text-foreground shrink-0" />
-                                    <div className="text-xs text-stat-value">
+                                    <div className="min-w-0 flex-1 text-xs text-stat-value">
                                         <span className="font-medium">Pinned to {nodes.find(n => n.id === blueprint.pinned_node_id)?.name ?? `node ${blueprint.pinned_node_id}`}.</span>{' '}
-                                        <span className="text-stat-subtitle">Selector is overridden. Manage in the Federation tab.</span>
+                                        <span className="text-stat-subtitle">The selector is overridden while it is pinned.</span>
                                     </div>
+                                    {canManagePin && (
+                                        <BusyButton variant="outline" size="sm" pending={unpinning} busyLabel="Unpinning…" onClick={() => void handleUnpin()}>
+                                            Unpin
+                                        </BusyButton>
+                                    )}
                                 </div>
                             </SheetSection>
                         )}
@@ -366,54 +463,13 @@ export function BlueprintDetail({ blueprintId, open, onOpenChange, onChanged, ca
                             </SheetSection>
                         )}
 
-                        {showGitops && (
-                            <SheetSection title="GitOps">
-                                <div className="space-y-2">
-                                    {/* This Blueprint's application in the portfolio, beside
-                                        every other GitOps application and the attention queue. */}
-                                    <Button
-                                        variant="link"
-                                        size="sm"
-                                        className="h-auto p-0 text-xs"
-                                        onClick={() => {
-                                            onOpenChange(false);
-                                            openGitOpsWorkplace({ blueprintId: blueprint.id });
-                                        }}
-                                    >
-                                        Open in GitOps portfolio
-                                    </Button>
-                                    <GitOpsStatus
-                                        revision={summary.gitopsRevision}
-                                        includeTargets={false}
-                                    />
-                                    <GitOpsAuthorityActions
-                                        applicationId={blueprintApplicationId(blueprint.id)}
-                                        blueprintId={blueprint.id}
-                                        blueprintName={blueprint.name}
-                                        projection={summary.gitopsRevision}
-                                        onChanged={handleRolloutApplied}
-                                        can={can}
-                                        blueprintEnabled={blueprint.enabled}
-                                    />
-                                    <GitOpsRolloutControls
-                                        applicationId={blueprintApplicationId(blueprint.id)}
-                                        projection={summary.gitopsRevision}
-                                        onChanged={handleRolloutApplied}
-                                        can={can}
-                                        blueprintEnabled={blueprint.enabled}
-                                        rollbackGenerations={summary.rollbackCandidates}
-                                    />
-                                </div>
-                            </SheetSection>
-                        )}
-
                         <SheetSection title="Deployments">
                             <BlueprintDeploymentTable
                                 deployments={summary.deployments}
                                 classification={blueprint.classification}
                                 canDeploy={canDeployOnNode}
                                 canWithdraw={canWithdrawFromNode}
-                                canRetry={canApply}
+                                canRetry={canApply && blueprint.enabled}
                                 busyNodeId={busyNodeId}
                                 onWithdraw={openWithdraw}
                                 onAcceptStateReview={openAcceptStateReview}

@@ -80,13 +80,13 @@ Check from two places, since a single stale UI element could tell you the wrong 
 
 ## If something goes wrong
 
-The most common first-time failure is a host port that's already taken. `8080` is a common default that other containers on the same node may already be bound to. If that happens, the deployment row moves to **Failed**, and the notes column carries the real Docker error, ending in something like `Bind for 0.0.0.0:8080 failed: port is already allocated`.
+The most common first-time failure is a host port that's already taken. `8080` is a common default that other containers on the same node may already be bound to. If that happens, the status block at the top of the sheet turns red and names the node, the deployment row moves to **Failed**, and the notes column carries the real Docker error, ending in something like `Bind for 0.0.0.0:8080 failed: port is already allocated`.
 
-<Frame caption="A failed first deploy: the notes column carries the exact daemon error, including the port conflict.">
-  <img src="/images/tutorials/create-and-approve-a-blueprint/deployment-failed-port-conflict.png" alt="Blueprint deployment row for Local in Failed status, with a Retry action, and a notes column showing the full container startup log ending in 'Bind for 0.0.0.0:8080 failed: port is already allocated'." />
+<Frame caption="A failed first deploy: the notes column carries the daemon error, including the port conflict; when the log runs longer, the full output sits behind a control.">
+  <img src="/images/tutorials/create-and-approve-a-blueprint/deployment-failed-port-conflict.png" alt="Blueprint deployment row for Local in Failed status, with a Re-apply action, and a notes column showing the failure reason ending in 'Bind for 0.0.0.0:8080 failed: port is already allocated' above a Full output control when the log runs longer." />
 </Frame>
 
-To recover, click **Edit**, change the host-side port in the `ports` mapping to something free (`8091:80`, for instance), and **Save changes**. Saving bumps the revision and clears approval back to pending, so click **Apply now** again: the preview this time shows an `update` action instead of `create`. Confirm it, and the deployment moves through **Deploying** to **Active** on the new port.
+To recover, click **Edit**, change the host-side port in the `ports` mapping to something free (`8091:80`, for instance), and **Save changes**. Saving bumps the revision and clears approval back to pending, so click **Apply now** again (or **Re-apply** in the status block): the preview this time shows an `update` action instead of `create`. Confirm it, and the deployment moves through **Deploying** to **Active** on the new port.
 
 ## Related
 

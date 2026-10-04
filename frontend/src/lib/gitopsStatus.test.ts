@@ -41,6 +41,31 @@ describe('applicableStages', () => {
     expect(stages.map(s => s.id)).toEqual(['source', 'artifact', 'placement', 'rollout', 'runtime']);
   });
 
+  it('leaves out only the statuses a surface says are uninformative', () => {
+    const revision = liveRevision({
+      targetMode: 'inline_blueprint',
+      facets: facets({
+        source: { status: 'not_applicable' },
+        placement: { status: 'placement_review_pending' },
+        rollout: { status: 'rollout_not_executable', rolloutCandidateId: 'rc-1' },
+      }),
+      targets: [target({ runtime: { status: 'never_applied' } })],
+    });
+    const omit = { rollout: ['rollout_not_executable'], runtime: ['never_applied'] };
+    expect(applicableStages(revision).map(s => s.id)).toEqual(['placement', 'rollout', 'runtime']);
+    expect(applicableStages(revision, omit).map(s => s.id)).toEqual(['placement']);
+  });
+
+  it('keeps a stage whose status is not the omitted one', () => {
+    const revision = liveRevision({
+      targetMode: 'inline_blueprint',
+      facets: facets({ source: { status: 'not_applicable' }, rollout: { status: 'rollout_paused', pauseReason: 'operator pause' } as never }),
+      targets: [target({ runtime: { status: 'drifted' } })],
+    });
+    const omit = { rollout: ['rollout_not_executable'], runtime: ['never_applied'] };
+    expect(applicableStages(revision, omit).map(s => s.id)).toEqual(['rollout', 'runtime']);
+  });
+
   it('is empty on the absent arm', () => {
     expect(applicableStages(absentRevision())).toEqual([]);
     expect(applicableStages(null)).toEqual([]);
@@ -319,5 +344,17 @@ describe('pending authority steps', () => {
       facets: facets({ source: plainSource('application_generation_accepted', { candidateGenerationId: null }) }),
     }));
     expect(model?.stages.find(s => s.id === 'placement')).toBeUndefined();
+  });
+});
+
+describe('omitted statuses and the Answer', () => {
+  it('does not let an omitted status speak for the Answer', () => {
+    const revision = liveRevision({
+      targetMode: 'inline_blueprint',
+      facets: facets({ source: { status: 'not_applicable' }, rollout: { status: 'rollout_not_executable', rolloutCandidateId: 'rc-1' } }),
+      targets: [target({ runtime: { status: 'never_applied' } })],
+    });
+    expect(buildGitOpsStatus(revision)?.answer.status).toBe('rollout_not_executable');
+    expect(buildGitOpsStatus(revision, null, undefined, { rollout: ['rollout_not_executable'], runtime: ['never_applied'] })?.stages ?? []).toEqual([]);
   });
 });

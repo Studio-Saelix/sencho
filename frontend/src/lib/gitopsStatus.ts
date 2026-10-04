@@ -13,6 +13,7 @@
 import { FileCheck2, FileQuestion, RefreshCw, TriangleAlert, type LucideIcon } from 'lucide-react';
 
 import { limitationCaveats } from '@/lib/gitopsLimitations';
+import { toneRank } from '@/lib/statusTone';
 import { attentionLabel, hasKnownPosture, POSTURE_LABEL, type PortfolioLabel } from '@/lib/gitopsPortfolio';
 import {
   absentFault,
@@ -80,15 +81,6 @@ export interface GitOpsStatusModel {
   marker: string | null;
 }
 
-/** Higher means louder. Success is quietest because a settled stage needs no attention. */
-const TONE_RANK: Record<GitOpsTone, number> = {
-  destructive: 4,
-  warning: 3,
-  brand: 2,
-  neutral: 1,
-  success: 0,
-};
-
 /**
  * Whether a placement status tells the reader anything about this application.
  * "Unbound direct" says a stack is not a Blueprint, which is true of every
@@ -133,8 +125,20 @@ function stage(
   return { id, label: id, tone: state.tone, word: state.label, line: state.line, status, detail, icon: state.icon };
 }
 
-/** The stages that apply to this revision, in reading order. Empty on the absent arm. */
-export function applicableStages(revision: GitOpsRevisionProjection | null): readonly GitOpsStatusStage[] {
+/** Per stage, statuses a surface leaves out because they say nothing true about its object. */
+export type GitOpsOmissions = Partial<Record<GitOpsStageId, readonly string[]>>;
+
+/**
+ * The stages that apply to this revision, in reading order. Empty on the absent arm.
+ * `omit` lists, per stage, statuses the calling surface judges say nothing true
+ * about its object, such as the Blueprint sheet leaving out "rollout not
+ * executable" for a Blueprint that is applied rather than rolled out. Any other
+ * status of that stage still appears.
+ */
+export function applicableStages(
+  revision: GitOpsRevisionProjection | null,
+  omit: GitOpsOmissions = {},
+): readonly GitOpsStatusStage[] {
   if (!revision || revision.targetMode === 'not_applicable') return [];
   const stages: GitOpsStatusStage[] = [];
 
@@ -155,7 +159,7 @@ export function applicableStages(revision: GitOpsRevisionProjection | null): rea
   }
 
   const rollout = liveRolloutFacet(revision);
-  if (rollout) {
+  if (rollout && !omit.rollout?.includes(rollout.status)) {
     const paused = rollout.status === 'rollout_paused' && rollout.pauseReason ? rollout.pauseReason : null;
     stages.push(stage('rollout', rollout.status, stateOrUnrecognized(ROLLOUT_STATE_LOOKUP[rollout.status], rollout.status), paused));
   }
@@ -166,7 +170,7 @@ export function applicableStages(revision: GitOpsRevisionProjection | null): rea
   const runtime = loudest(targets.map(t => (
     stage('runtime', t.runtime.status, stateOrUnrecognized(RUNTIME_STATE_LOOKUP[t.runtime.status], t.runtime.status), runtimeDetail)
   )));
-  if (runtime) stages.push(runtime);
+  if (runtime && !omit.runtime?.includes(runtime.status)) stages.push(runtime);
   return stages;
 }
 
@@ -174,7 +178,7 @@ export function applicableStages(revision: GitOpsRevisionProjection | null): rea
 function loudest(stages: readonly GitOpsStatusStage[]): GitOpsStatusStage | null {
   let best: GitOpsStatusStage | null = null;
   for (const candidate of stages) {
-    if (best === null || TONE_RANK[candidate.tone] > TONE_RANK[best.tone]) best = candidate;
+    if (best === null || toneRank(candidate.tone) > toneRank(best.tone)) best = candidate;
   }
   return best;
 }
@@ -300,13 +304,15 @@ export function buildGitOpsStatus(
    * Ignored when the portfolio row speaks, which answers for the whole application.
    */
   focus?: GitOpsStageId,
+  /** Statuses this surface leaves out because they say nothing true about its object. */
+  omit: GitOpsOmissions = {},
 ): GitOpsStatusModel | null {
   if (!revision) return null;
 
   const faults = absentFault(revision);
   if (row) {
     const { answer, otherReasons } = postureAnswer(row, faults.length > 0 ? faults[0].message : null);
-    const stages = applicableStages(revision);
+    const stages = applicableStages(revision, omit);
     return {
       kind: 'posture',
       answer,
@@ -338,13 +344,13 @@ export function buildGitOpsStatus(
   // The absent arm with no fault is the ordinary stack outside GitOps.
   if (revision.targetMode === 'not_applicable') return null;
 
-  const stages = applicableStages(revision);
+  const stages = applicableStages(revision, omit);
   const marker = markerFor(revision, undefined);
   const loudestStage = loudest(stages);
   // The focused stage speaks only if it is at least as loud as anything else, so a
   // verb never quiets a failure elsewhere.
   const focused = focus ? stages.find(s => s.id === focus && s.tone !== 'success') : undefined;
-  const speaking = focused && loudestStage && TONE_RANK[focused.tone] >= TONE_RANK[loudestStage.tone]
+  const speaking = focused && loudestStage && toneRank(focused.tone) >= toneRank(loudestStage.tone)
     ? focused
     : loudestStage;
   // No stage to report, but a caveat still qualifies that silence and must not be dropped.

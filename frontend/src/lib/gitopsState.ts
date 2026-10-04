@@ -656,6 +656,9 @@ export function placementStateMeta(facet: PlacementFacet): GitOpsStateMeta | und
   return base;
 }
 
+/** The word for a status this build has no wording for. */
+export const UNRECOGNIZED_STATE_LABEL = 'unrecognized state';
+
 /**
  * The state for a status, or an explicit unrecognized state when this build
  * does not know it. The shared card renders nothing for an unknown status,
@@ -665,7 +668,7 @@ export function placementStateMeta(facet: PlacementFacet): GitOpsStateMeta | und
  */
 export function stateOrUnrecognized(state: GitOpsStateMeta | undefined, status: string): GitOpsStateMeta {
   return state ?? {
-    label: 'unrecognized state',
+    label: UNRECOGNIZED_STATE_LABEL,
     tone: 'neutral',
     line: `Reported as "${status}", a state this version of Sencho does not recognize.`,
     icon: CircleHelp,

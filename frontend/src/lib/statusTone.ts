@@ -24,3 +24,10 @@ export const STATUS_DOT_CLASS: Record<StatusTone, string> = {
   destructive: 'bg-destructive',
   neutral: 'bg-stat-subtitle/50',
 };
+
+const TONE_RANK: Record<StatusTone, number> = { destructive: 4, warning: 3, brand: 2, neutral: 1, success: 0 };
+
+/** Higher means louder. Success is quietest because a settled state needs no attention. */
+export function toneRank(tone: StatusTone): number {
+  return TONE_RANK[tone];
+}
