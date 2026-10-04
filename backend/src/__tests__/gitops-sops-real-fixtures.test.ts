@@ -66,7 +66,18 @@ describe('real sops fixtures (v3.13.3)', () => {
     expect(detectSopsContent(fixture).kind).toBe('sops-age');
 
     const decrypted = await decryptSopsAgeDocument(fixture, identity);
-    expect(decrypted).toBe('NL=line1\\nline2\nPLAIN=x\n');
+    expect(decrypted).toBe('NL="line1\\nline2"\nPLAIN=x\n');
+  });
+
+  it('quotes dotenv values that Compose would otherwise rewrite', async () => {
+    const fixture = readFixture('metachar.enc.env');
+    expect(detectSopsContent(fixture).kind).toBe('sops-age');
+
+    const decrypted = await decryptSopsAgeDocument(fixture, identity);
+    expect(decrypted).toBe(
+      'DOLLAR="a$$B"\nQUOTE="say \\"hi\\""\nSPACE=" padded"\n'
+      + 'HASH="a #b"\nTAB="a\\tb"\nCR="a\\rb"\nPLAIN=x\n',
+    );
   });
 
   it('keeps a nested map key named sops', async () => {

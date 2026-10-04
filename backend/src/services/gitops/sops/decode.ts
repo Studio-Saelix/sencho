@@ -130,8 +130,24 @@ function unescapeDotenvValue(raw: string): string {
   return value.replace(/\\n/g, '\n').replace(/\\r/g, '\r');
 }
 
-function escapeDotenvValue(value: string): string {
-  return value.replace(/\n/g, '\\n');
+/**
+ * Format a decrypted dotenv value so Compose's env_file parser returns the
+ * exact plaintext. Compose expands escapes only in double-quoted values and
+ * interpolates $, so values it would otherwise rewrite are quoted and escaped.
+ */
+function formatDotenvValue(value: string): string {
+  const needsQuoting = /[\n\r\t"\\$#]/.test(value)
+    || value.startsWith("'")
+    || value !== value.trim();
+  if (!needsQuoting) return value;
+  const escaped = value
+    .replace(/\\/g, '\\\\')
+    .replace(/"/g, '\\"')
+    .replace(/\$/g, () => '$$')
+    .replace(/\n/g, '\\n')
+    .replace(/\r/g, '\\r')
+    .replace(/\t/g, '\\t');
+  return `"${escaped}"`;
 }
 
 function parseFlatAgeEntries(content: string): Array<{ recipient: string; enc: string }> {
@@ -205,7 +221,7 @@ async function decryptUnstructuredSops(content: string, identity: string): Promi
       // their section, with the implicit default section named DEFAULT.
       const aad = isIni ? `${section ?? 'DEFAULT'}:${key}:` : `${key}:`;
       const plaintext = decryptEncValue(value, fileKey, aad);
-      lines.push(`${key}=${isIni ? plaintext : escapeDotenvValue(plaintext)}`);
+      lines.push(`${key}=${isIni ? plaintext : formatDotenvValue(plaintext)}`);
     } else {
       lines.push(rawLine);
     }
