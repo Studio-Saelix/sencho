@@ -76,7 +76,7 @@ export function classifyRegistryDeliveryOp(method: string, apiPath: string): Reg
   if (apiPath === '/api/templates/deploy') {
     return { eligible: true, stage: 'template-deploy' };
   }
-  if (apiPath === '/api/stacks/from-git') {
+  if (apiPath.match(/^\/api\/stacks\/from-git\/?$/)) {
     return { eligible: true, stage: 'from-git-deploy-now' };
   }
   if (apiPath.match(/^\/api\/stacks\/[^/]+\/git-source\/apply$/)) {

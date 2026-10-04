@@ -64,6 +64,7 @@ import {
   classifyRegistryDeliveryRouteClass,
   getRegistryDeliveryTotalBodyLimit,
 } from '../helpers/registryDeliveryBodyLimits';
+import { classifyRegistryDeliveryOp } from '../helpers/registryOpClassifier';
 import { augmentRemoteProxyWithRegistryDelivery, evaluateRegistryDeliveryProxyGate } from '../helpers/registryDeliveryProxy';
 
 /**
@@ -832,6 +833,15 @@ export function createRemoteProxyMiddleware(): RequestHandler {
               }
               throw err;
             }
+            // Create-from-git authorization gate. Hop-1 discovery runs a full
+            // git fetch on the target with the caller's credentials, before
+            // the target's own permission check. Verify the caller on the hub
+            // first, mirroring the direct route's checks; the target still
+            // enforces both. Only the create-from-git stage carries a fetch.
+            const stage = classifyRegistryDeliveryOp(req.method, deliveryApiPath).stage;
+            if (stage === 'from-git-deploy-now' && !authorizeFromGitOnHub(req, res, req.rawBody)) {
+              return;
+            }
             const deliveryResult = await augmentRemoteProxyWithRegistryDelivery(
               req,
               req.nodeId,
@@ -926,6 +936,37 @@ function checkNodeManageOnHub(req: Request): boolean {
     return checkPermission(req, 'node:manage', 'node', String(req.nodeId));
   }
   return checkPermission(req, 'node:manage');
+}
+
+/**
+ * Hub-side authorization for create-from-git before hop-1 discovery runs.
+ * The permission check runs first, regardless of body shape, matching the
+ * direct route: stack:create globally, then stack:deploy when the request
+ * asks to deploy. Returns false after answering 403 when the caller is not
+ * authorized. For an authorized caller, a body without a stack name skips
+ * only the deploy sub-check; the target's field validation answers before
+ * its own fetch.
+ */
+function authorizeFromGitOnHub(req: Request, res: Response, rawBody: Buffer): boolean {
+  if (!checkPermission(req, 'stack:create')) {
+    res.status(403).json({ error: 'Permission denied.', code: 'PERMISSION_DENIED' });
+    return false;
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(rawBody.toString('utf-8'));
+  } catch {
+    return true;
+  }
+  if (parsed === null || typeof parsed !== 'object') return true;
+  const body = parsed as Record<string, unknown>;
+  const stackName = typeof body.stack_name === 'string' ? body.stack_name : null;
+  const deployRequested = body.deploy_now === true || body.auto_deploy_on_apply === true;
+  if (stackName && deployRequested && !checkPermission(req, 'stack:deploy', 'stack', stackName)) {
+    res.status(403).json({ error: 'Permission denied.', code: 'PERMISSION_DENIED' });
+    return false;
+  }
+  return true;
 }
 
 /**
