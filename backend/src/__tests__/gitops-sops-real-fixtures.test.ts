@@ -56,12 +56,28 @@ describe('real sops fixtures (v3.13.3)', () => {
     expect(detectSopsContent(fixture).kind).toBe('sops-age');
 
     const decrypted = await decryptSopsAgeDocument(fixture, identity);
-    expect(decrypted).toContain('default_key=default-secret');
-    expect(decrypted).toContain('[database]');
-    expect(decrypted).toContain('password=ini-secret');
-    expect(decrypted).toContain('host=db.internal');
-    expect(decrypted).not.toContain('[sops]');
-    expect(decrypted).not.toContain('age__list');
+    expect(decrypted).toBe(
+      'default_key=default-secret\n[database]\npassword=ini-secret\nhost=db.internal\n',
+    );
+  });
+
+  it('escapes a newline value onto one line in a dotenv store', async () => {
+    const fixture = readFixture('newline.enc.env');
+    expect(detectSopsContent(fixture).kind).toBe('sops-age');
+
+    const decrypted = await decryptSopsAgeDocument(fixture, identity);
+    expect(decrypted).toBe('NL=line1\\nline2\nPLAIN=x\n');
+  });
+
+  it('keeps a nested map key named sops', async () => {
+    const fixture = readFixture('nested-sops.enc.yaml');
+    expect(detectSopsContent(fixture).kind).toBe('sops-age');
+
+    const decrypted = await decryptSopsAgeDocument(fixture, identity);
+    expect(parseYaml(decrypted)).toEqual({
+      app: { sops: 'nested-secret', child: 'c' },
+      top: 't',
+    });
   });
 
   it('rejects a value whose key path was renamed', async () => {

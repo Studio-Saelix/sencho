@@ -112,7 +112,6 @@ function decryptNode(node: unknown, key: Buffer, path: string[]): unknown {
   if (isRecord(node)) {
     const out: Record<string, unknown> = {};
     for (const [k, v] of Object.entries(node)) {
-      if (k === 'sops') continue;
       out[k] = decryptNode(v, key, [...path, k]);
     }
     return out;
@@ -129,6 +128,10 @@ function unescapeDotenvValue(raw: string): string {
     value = value.slice(1, -1);
   }
   return value.replace(/\\n/g, '\n').replace(/\\r/g, '\r');
+}
+
+function escapeDotenvValue(value: string): string {
+  return value.replace(/\n/g, '\\n');
 }
 
 function parseFlatAgeEntries(content: string): Array<{ recipient: string; enc: string }> {
@@ -201,7 +204,8 @@ async function decryptUnstructuredSops(content: string, identity: string): Promi
       // Dotenv values are authenticated with their flat key. INI values carry
       // their section, with the implicit default section named DEFAULT.
       const aad = isIni ? `${section ?? 'DEFAULT'}:${key}:` : `${key}:`;
-      lines.push(`${key}=${decryptEncValue(value, fileKey, aad)}`);
+      const plaintext = decryptEncValue(value, fileKey, aad);
+      lines.push(`${key}=${isIni ? plaintext : escapeDotenvValue(plaintext)}`);
     } else {
       lines.push(rawLine);
     }
@@ -237,7 +241,10 @@ export async function decryptSopsAgeDocument(content: string, identity: string):
   }
   const fileKey = await unwrapMatchingAgeFileKey(encodings, identity);
 
-  const plaintextDoc = decryptNode(doc, fileKey, []);
+  // The top-level sops key is metadata; a nested key named sops is data.
+  const data = { ...doc };
+  delete data.sops;
+  const plaintextDoc = decryptNode(data, fileKey, []);
   if (typeof plaintextDoc === 'string') {
     return plaintextDoc;
   }
