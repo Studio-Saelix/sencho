@@ -338,14 +338,16 @@ describe('gitlab display-style event headers', () => {
     {
       label: 'Push Hook',
       eventType: 'push',
+      eventAction: null,
       payload: { ref: 'refs/heads/main', after: 'c'.repeat(40) },
     },
     {
       label: 'Merge Request Hook',
       eventType: 'merge_request',
+      eventAction: 'open',
       payload: { object_attributes: { action: 'open', iid: 7 } },
     },
-  ])('normalizes the $label fallback when the payload omits object_kind', async ({ label, eventType, payload }) => {
+  ])('normalizes the $label fallback when the payload omits object_kind', async ({ label, eventType, eventAction, payload }) => {
     const handleSpy = vi.spyOn(GitSourceService.getInstance(), 'handleWebhookPull')
       .mockResolvedValue({ status: 'success', message: 'Queued for reconciliation.' });
     try {
@@ -382,6 +384,121 @@ describe('gitlab display-style event headers', () => {
       );
       const delivery = GitProviderWebhookStore.getInstance().listDeliveries(id)[0];
       expect(delivery?.event_type).toBe(eventType);
+      expect(delivery?.event_action).toBe(eventAction);
+    } finally {
+      handleSpy.mockRestore();
+    }
+  });
+
+  it('ignores a tag push outside the configured ref', async () => {
+    const handleSpy = vi.spyOn(GitSourceService.getInstance(), 'handleWebhookPull')
+      .mockResolvedValue({ status: 'success', message: 'Queued for reconciliation.' });
+    try {
+      const stackName = 'gitlab-tag-push-outside-ref';
+      seedGitSource(stackName, 'https://gitlab.com/example/repo.git', 'main');
+      const { id, secret } = ProviderWebhookService.getInstance().createEndpoint({
+        stackName,
+        provider: 'gitlab',
+      });
+      const deliveryId = crypto.randomUUID();
+      const rawBody = Buffer.from(JSON.stringify({
+        object_kind: 'tag_push',
+        ref: 'refs/tags/v1.0.0',
+        after: 'c'.repeat(40),
+        project: { http_url: 'https://gitlab.com/example/repo.git' },
+      }), 'utf-8');
+
+      const outcome = await ProviderWebhookService.getInstance().ingestLocal({
+        endpointId: id,
+        rawBody,
+        headers: {
+          'x-gitlab-token': secret,
+          'x-gitlab-event': 'Tag Push Hook',
+          'idempotency-key': deliveryId,
+        },
+      });
+
+      expect(outcome.httpStatus).toBe(202);
+      expect(outcome.state).toBe('ignored_by_policy');
+      expect(handleSpy).not.toHaveBeenCalled();
+      const delivery = GitProviderWebhookStore.getInstance().listDeliveries(id)[0];
+      expect(delivery?.event_type).toBe('tag_push');
+      expect(delivery?.outcome_class).toBe('ref_policy');
+    } finally {
+      handleSpy.mockRestore();
+    }
+  });
+
+  it('records an unknown label as unsupported when the payload has no object_kind', async () => {
+    const handleSpy = vi.spyOn(GitSourceService.getInstance(), 'handleWebhookPull')
+      .mockResolvedValue({ status: 'success', message: 'Queued for reconciliation.' });
+    try {
+      const stackName = 'gitlab-unknown-label';
+      seedGitSource(stackName, 'https://gitlab.com/example/repo.git', 'main');
+      const { id, secret } = ProviderWebhookService.getInstance().createEndpoint({
+        stackName,
+        provider: 'gitlab',
+      });
+      const deliveryId = crypto.randomUUID();
+      const rawBody = Buffer.from(JSON.stringify({
+        ref: 'refs/heads/main',
+        after: 'c'.repeat(40),
+        project: { http_url: 'https://gitlab.com/example/repo.git' },
+      }), 'utf-8');
+
+      const outcome = await ProviderWebhookService.getInstance().ingestLocal({
+        endpointId: id,
+        rawBody,
+        headers: {
+          'x-gitlab-token': secret,
+          'x-gitlab-event': 'Pipeline Hook',
+          'idempotency-key': deliveryId,
+        },
+      });
+
+      expect(outcome.httpStatus).toBe(202);
+      expect(outcome.state).toBe('unsupported');
+      expect(handleSpy).not.toHaveBeenCalled();
+      const delivery = GitProviderWebhookStore.getInstance().listDeliveries(id)[0];
+      expect(delivery?.outcome_class).toBe('pipeline');
+    } finally {
+      handleSpy.mockRestore();
+    }
+  });
+
+  it('prefers the payload object_kind over a disagreeing header label', async () => {
+    const handleSpy = vi.spyOn(GitSourceService.getInstance(), 'handleWebhookPull')
+      .mockResolvedValue({ status: 'success', message: 'Queued for reconciliation.' });
+    try {
+      const stackName = 'gitlab-object-kind-wins';
+      seedGitSource(stackName, 'https://gitlab.com/example/repo.git', 'main');
+      const { id, secret } = ProviderWebhookService.getInstance().createEndpoint({
+        stackName,
+        provider: 'gitlab',
+      });
+      const deliveryId = crypto.randomUUID();
+      const rawBody = Buffer.from(JSON.stringify({
+        object_kind: 'push',
+        ref: 'refs/heads/main',
+        after: 'c'.repeat(40),
+        project: { http_url: 'https://gitlab.com/example/repo.git' },
+      }), 'utf-8');
+
+      const outcome = await ProviderWebhookService.getInstance().ingestLocal({
+        endpointId: id,
+        rawBody,
+        headers: {
+          'x-gitlab-token': secret,
+          'x-gitlab-event': 'Merge Request Hook',
+          'idempotency-key': deliveryId,
+        },
+      });
+
+      expect(outcome.httpStatus).toBe(202);
+      expect(outcome.state).toBe('queued');
+      expect(handleSpy).toHaveBeenCalledTimes(1);
+      const delivery = GitProviderWebhookStore.getInstance().listDeliveries(id)[0];
+      expect(delivery?.event_type).toBe('push');
     } finally {
       handleSpy.mockRestore();
     }
