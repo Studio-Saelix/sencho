@@ -5,17 +5,19 @@ import { Button } from '@/components/ui/button';
 import { toast } from '@/components/ui/toast-store';
 import {
     type BlueprintListItem,
+    type BlueprintMutationResult,
     type CreateBlueprintInput,
     type UpdateBlueprintInput,
     listBlueprints,
     createBlueprint,
-    listDistinctLabels,
+    listAllNodeLabels,
 } from '@/lib/blueprintsApi';
+import { type NodeLabelMap, describeStagedWrite, writeStagedLabels } from '@/lib/blueprintTargets';
 import { BlueprintCatalog } from './BlueprintCatalog';
 import { BlueprintEmptyState } from './BlueprintEmptyState';
 import { FleetTabHeading, FleetEmptyState } from '../fleet/FleetEmptyState';
 import { BlueprintDetail } from './BlueprintDetail';
-import { BlueprintEditor } from './BlueprintEditor';
+import { BlueprintEditor, type BlueprintSubmitOptions } from './BlueprintEditor';
 import { useAuth } from '@/context/AuthContext';
 import {
     BLUEPRINT_INTENT_EVENT,
@@ -28,8 +30,11 @@ export function DeploymentsTab() {
     const { can } = useAuth();
     const canCreate = can('stack:create');
     const canEdit = can('stack:edit');
+    const canReview = canCreate && can('stack:deploy');
     const [blueprints, setBlueprints] = useState<BlueprintListItem[]>([]);
-    const [distinctLabels, setDistinctLabels] = useState<string[]>([]);
+    const [nodeLabels, setNodeLabels] = useState<NodeLabelMap>({});
+    // The Blueprint just created through Review rollout; its sheet opens on the preview.
+    const [reviewId, setReviewId] = useState<number | null>(null);
     const [loading, setLoading] = useState(true);
     const [loadError, setLoadError] = useState<string | null>(null);
     // Another surface (the GitOps workplace) may have asked for one Blueprint
@@ -60,10 +65,13 @@ export function DeploymentsTab() {
         try {
             const [list, labels] = await Promise.all([
                 listBlueprints(),
-                listDistinctLabels().catch(() => [] as string[]),
+                listAllNodeLabels().catch((err: unknown) => {
+                    console.error('[Blueprints] node label fetch failed:', err);
+                    return null;
+                }),
             ]);
             setBlueprints(list);
-            setDistinctLabels(labels);
+            if (labels) setNodeLabels(labels);
         } catch (err) {
             const message = err instanceof Error ? err.message : 'Failed to load blueprints';
             setLoadError(message);
@@ -77,16 +85,27 @@ export function DeploymentsTab() {
         void refresh();
     }, [refresh]);
 
-    async function handleCreate(input: CreateBlueprintInput | UpdateBlueprintInput) {
+    async function handleCreate(input: CreateBlueprintInput | UpdateBlueprintInput, options: BlueprintSubmitOptions) {
         setSubmitting(true);
+        let created: BlueprintMutationResult;
         try {
-            const created = await createBlueprint(input as CreateBlueprintInput);
-            toast.success('Blueprint created');
-            setCreateOpen(false);
-            await refresh();
-            setSelectedId(created.id);
+            created = await createBlueprint(input as CreateBlueprintInput);
         } catch (err) {
             toast.error(err instanceof Error ? err.message : 'Failed to create blueprint');
+            setSubmitting(false);
+            return;
+        }
+        try {
+            toast.success('Blueprint created');
+            const written = await writeStagedLabels(options.staged, created.id);
+            const notice = describeStagedWrite(written);
+            if (notice) toast[notice.tone](notice.message);
+            setCreateOpen(false);
+            await refresh();
+            // A plan built on fewer labels than the operator staged is not the plan
+            // they reviewed, so a failed label write opens the sheet without it.
+            setReviewId(options.intent === 'review' && written.failed.length === 0 ? created.id : null);
+            setSelectedId(created.id);
         } finally {
             setSubmitting(false);
         }
@@ -149,11 +168,12 @@ export function DeploymentsTab() {
                 <BlueprintDetail
                     blueprintId={selectedId}
                     open={selectedId !== null}
-                    onOpenChange={(o) => { if (!o) setSelectedId(null); }}
+                    onOpenChange={(o) => { if (!o) { setSelectedId(null); setReviewId(null); } }}
                     onChanged={refresh}
                     canEdit={canEdit}
                     can={can}
-                    distinctLabels={distinctLabels}
+                    nodeLabels={nodeLabels}
+                    reviewOnOpen={reviewId === selectedId}
                 />
             )}
 
@@ -166,7 +186,8 @@ export function DeploymentsTab() {
                 <ModalBody>
                     <BlueprintEditor
                         mode="create"
-                        distinctLabels={distinctLabels}
+                        nodeLabels={nodeLabels}
+                        canReview={canReview}
                         onCancel={() => setCreateOpen(false)}
                         onSubmit={handleCreate}
                         submitting={submitting}

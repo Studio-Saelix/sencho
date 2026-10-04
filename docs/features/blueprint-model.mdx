@@ -96,9 +96,9 @@ Before a local Blueprint deploy starts, Sencho applies the same pre-deploy [vuln
 
 ## The editor
 
-**New Blueprint** opens a single editor dialog with everything inline: name and description fields, a Monaco YAML editor with the classification banner sitting above it, the selector picker (Labels or Specific nodes), the drift policy cards, and the Reconciler enabled toggle.
+**New Blueprint** opens a single editor dialog with everything inline: name and description fields, a Monaco YAML editor with the classification banner sitting above it, the targets picker (By node label or Specific nodes), the drift policy cards, and the Reconciler enabled toggle.
 
-<Frame caption="The Blueprint editor. Name and description fields, the classification banner pinned above the compose editor, and the Specific nodes selector below. Drift policy cards and the Reconciler enabled toggle sit further down in the same scrollable dialog.">
+<Frame caption="The Blueprint editor. Name and description fields, the classification banner pinned above the compose editor, and the targets picker below. Drift policy cards and the Reconciler enabled toggle sit further down in the same scrollable dialog.">
   <img src="/images/blueprint-model/editor-dialog.png" alt="Blueprint editor dialog with name, description, classification banner, compose editor, and node selector" />
 </Frame>
 
@@ -118,11 +118,15 @@ Click the signals toggle on the right of the banner (`1 SIGNAL`, `2 SIGNALS`, et
 
 ### Selector
 
-A **Labels** selector matches any node whose labels satisfy the expression. The picker is split into two pill rows: **Match nodes with ANY of these labels** (the OR set), and **AND ALSO require ALL of these** (the AND set). Either side may be empty. The dialog renders a one-line summary just below the pills, so you can see exactly which nodes the expression resolves to before you save.
+**By node label** shows one row of label pills for every label that exists on a node. Select the labels you want, then choose **Match any** (a node needs at least one selected label) or **Match all** (a node needs every selected label). Below the pills, the dialog lists the nodes the selection reaches now ("Matches 2 nodes"), so you can see the blast radius before you save.
 
-A **Specific nodes** selector picks nodes by ID with a checkbox list. Use it when you want a one-off blueprint that runs only on a known node, or when no labels exist yet.
+If the label you need does not exist yet, click **+ Label** beside the pills. Type the label name, tick the nodes that should carry it, and click **Add label**. The label is selected for you and the match list includes the tagged nodes straight away, but nothing is written to the nodes until you continue: **Review rollout** (or **Create blueprint** where a rollout cannot be reviewed) adds the labels to the nodes, then opens the plan. The pending tags are listed under the match list and can be removed one by one. **Save as draft** stores the Blueprint only and does not add the new labels. Adding a label can move other Blueprints that already select it; Sencho reports how many were re-placed when the labels are written.
 
-Add labels to nodes from **Settings · Infrastructure · Nodes**. Each node row carries a Labels column with a `+` button.
+A Blueprint saved with both an any-of list and an all-of list keeps showing two rows when you edit it: nodes with any of the first row, and also all of the second.
+
+**Specific nodes** picks nodes by name with a pill for each node. Use it for a one-off blueprint that runs only on a known node.
+
+You can also manage labels from **Settings · Infrastructure · Nodes**. Each node row carries a Labels column with a `+` button.
 
 <Frame caption="Settings · Infrastructure · Nodes. The Labels column carries pills per node; the `+` button opens an inline add-label popover.">
   <img src="/images/blueprint-model/node-labels.png" alt="Settings Infrastructure Nodes page with the Labels column and add-label popover" />
@@ -224,7 +228,7 @@ The common paths through the status enum.
 2. Click **New Blueprint**.
 3. Fill in the name, description, compose YAML, selector, and drift policy.
 4. Watch the classification banner update as you type. It tells you whether the blueprint is portable or pinned to data.
-5. Click **Create blueprint**. The blueprint starts with approval **pending**. No fleet mutation runs until you confirm a rollout preview.
+5. Click **Review rollout**. Sencho saves the Blueprint, adds any labels you created in the dialog to their nodes, and opens the rollout preview. The blueprint starts with approval **pending**, and no fleet mutation runs until you confirm the preview. Choose **Save as draft** instead to store the Blueprint without a preview.
 
 If the YAML is malformed or larger than 96 KiB, Sencho rejects the save before creating a Blueprint row.
 

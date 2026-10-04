@@ -25,7 +25,7 @@ import {
     acceptDeployment,
     describeSelector,
 } from '@/lib/blueprintsApi';
-import { BlueprintEditor } from './BlueprintEditor';
+import { BlueprintEditor, type BlueprintSubmitOptions } from './BlueprintEditor';
 import { BlueprintDeploymentTable } from './BlueprintDeploymentTable';
 import { EvictionDialog } from './EvictionDialog';
 import { StateReviewDialog } from './StateReviewDialog';
@@ -36,6 +36,7 @@ import { RetireBlueprintDialog } from './RetireBlueprintDialog';
 import { ContentOriginBadge } from './ContentOriginBadge';
 import { useNodes } from '@/context/NodeContext';
 import { formatTimeAgo } from '@/lib/relativeTime';
+import { type NodeLabelMap, describeStagedWrite, writeStagedLabels } from '@/lib/blueprintTargets';
 import type { PermissionAction } from '@/context/AuthContext';
 
 type PermissionResolver = (action: PermissionAction, resourceType?: string, resourceId?: string, nodeId?: number | null) => boolean;
@@ -47,10 +48,12 @@ interface BlueprintDetailProps {
     onChanged: () => void;
     canEdit: boolean;
     can?: PermissionResolver;
-    distinctLabels: string[];
+    nodeLabels: NodeLabelMap;
+    /** Open the rollout preview as soon as the Blueprint loads (set after Review rollout). */
+    reviewOnOpen?: boolean;
 }
 
-export function BlueprintDetail({ blueprintId, open, onOpenChange, onChanged, canEdit, can, distinctLabels }: BlueprintDetailProps) {
+export function BlueprintDetail({ blueprintId, open, onOpenChange, onChanged, canEdit, can, nodeLabels, reviewOnOpen = false }: BlueprintDetailProps) {
     const [summary, setSummary] = useState<BlueprintSummary | null>(null);
     const [loading, setLoading] = useState(false);
     const [editMode, setEditMode] = useState(false);
@@ -92,6 +95,16 @@ export function BlueprintDetail({ blueprintId, open, onOpenChange, onChanged, ca
         }
     }, [open, refresh]);
 
+    // Review rollout lands here straight from the create form: once the Blueprint
+    // has loaded, show the plan without another click. Fires once per mount.
+    const autoPreviewed = useRef(false);
+    useEffect(() => {
+        if (reviewOnOpen && summary && !autoPreviewed.current) {
+            autoPreviewed.current = true;
+            setPreviewOpen(true);
+        }
+    }, [reviewOnOpen, summary]);
+
     if (!open) return null;
 
     const blueprint = summary?.blueprint;
@@ -129,12 +142,14 @@ export function BlueprintDetail({ blueprintId, open, onOpenChange, onChanged, ca
         onChanged();
     }
 
-    async function handleSaveEdit(input: CreateBlueprintInput | UpdateBlueprintInput) {
+    async function handleSaveEdit(input: CreateBlueprintInput | UpdateBlueprintInput, options: BlueprintSubmitOptions) {
         if (!blueprint) return;
         setSubmitting(true);
         try {
             await updateBlueprint(blueprint.id, input as UpdateBlueprintInput);
             toast.success('Blueprint saved');
+            const notice = describeStagedWrite(await writeStagedLabels(options.staged, blueprint.id));
+            if (notice) toast[notice.tone](notice.message);
             setEditMode(false);
             await refresh();
             onChanged();
@@ -321,7 +336,7 @@ export function BlueprintDetail({ blueprintId, open, onOpenChange, onChanged, ca
                         <BlueprintEditor
                             mode="edit"
                             initial={blueprint}
-                            distinctLabels={distinctLabels}
+                            nodeLabels={nodeLabels}
                             onCancel={() => setEditMode(false)}
                             onSubmit={handleSaveEdit}
                             submitting={submitting}

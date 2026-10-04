@@ -89,7 +89,7 @@ beforeEach(() => {
 describe('BlueprintDetail data fetching', () => {
     it('does not refetch when the parent re-renders with new callback identities', async () => {
         const { rerender } = render(
-            <BlueprintDetail blueprintId={1} open onOpenChange={() => {}} onChanged={noop} canEdit distinctLabels={[]} />,
+            <BlueprintDetail blueprintId={1} open onOpenChange={() => {}} onChanged={noop} canEdit nodeLabels={{}} />,
         );
 
         // Let the initial load settle so the body content is on screen.
@@ -102,10 +102,10 @@ describe('BlueprintDetail data fetching', () => {
         // flickered the body through its loading skeleton. It must now keep showing the
         // data it already has instead of refetching.
         rerender(
-            <BlueprintDetail blueprintId={1} open onOpenChange={() => {}} onChanged={noop} canEdit distinctLabels={[]} />,
+            <BlueprintDetail blueprintId={1} open onOpenChange={() => {}} onChanged={noop} canEdit nodeLabels={{}} />,
         );
         rerender(
-            <BlueprintDetail blueprintId={1} open onOpenChange={() => {}} onChanged={noop} canEdit distinctLabels={[]} />,
+            <BlueprintDetail blueprintId={1} open onOpenChange={() => {}} onChanged={noop} canEdit nodeLabels={{}} />,
         );
         await Promise.resolve();
 
@@ -114,7 +114,7 @@ describe('BlueprintDetail data fetching', () => {
 
     it('refetches when blueprintId changes while the sheet stays open', async () => {
         const { rerender } = render(
-            <BlueprintDetail blueprintId={1} open onOpenChange={noop} onChanged={noop} canEdit distinctLabels={[]} />,
+            <BlueprintDetail blueprintId={1} open onOpenChange={noop} onChanged={noop} canEdit nodeLabels={{}} />,
         );
         expect(await screen.findByText('Show compose source')).toBeInTheDocument();
         const callsAfterLoad = vi.mocked(getBlueprint).mock.calls.length;
@@ -122,7 +122,7 @@ describe('BlueprintDetail data fetching', () => {
         // Opening a different blueprint without closing the sheet must load the new one,
         // so blueprintId has to stay a refresh dependency.
         rerender(
-            <BlueprintDetail blueprintId={2} open onOpenChange={noop} onChanged={noop} canEdit distinctLabels={[]} />,
+            <BlueprintDetail blueprintId={2} open onOpenChange={noop} onChanged={noop} canEdit nodeLabels={{}} />,
         );
         await screen.findByText('Show compose source');
 
@@ -132,7 +132,7 @@ describe('BlueprintDetail data fetching', () => {
 
     it('opens the rollout preview dialog when Apply now is clicked', async () => {
         render(
-            <BlueprintDetail blueprintId={1} open onOpenChange={noop} onChanged={noop} canEdit distinctLabels={[]} />,
+            <BlueprintDetail blueprintId={1} open onOpenChange={noop} onChanged={noop} canEdit nodeLabels={{}} />,
         );
         expect(await screen.findByText('Show compose source')).toBeInTheDocument();
         const callsAfterLoad = vi.mocked(getBlueprint).mock.calls.length;
@@ -150,7 +150,7 @@ describe('BlueprintDetail data fetching', () => {
 describe('BlueprintDetail action gating', () => {
     it('shows the Apply / Edit / Delete actions for an admin (canEdit)', async () => {
         render(
-            <BlueprintDetail blueprintId={1} open onOpenChange={noop} onChanged={noop} canEdit distinctLabels={[]} />,
+            <BlueprintDetail blueprintId={1} open onOpenChange={noop} onChanged={noop} canEdit nodeLabels={{}} />,
         );
 
         expect(await screen.findByText('Show compose source')).toBeInTheDocument();
@@ -161,7 +161,7 @@ describe('BlueprintDetail action gating', () => {
 
     it('hides every mutating action for a non-admin (read-only)', async () => {
         render(
-            <BlueprintDetail blueprintId={1} open onOpenChange={noop} onChanged={noop} canEdit={false} distinctLabels={[]} />,
+            <BlueprintDetail blueprintId={1} open onOpenChange={noop} onChanged={noop} canEdit={false} nodeLabels={{}} />,
         );
 
         expect(await screen.findByText('Show compose source')).toBeInTheDocument();
@@ -184,7 +184,7 @@ describe('BlueprintDetail action gating', () => {
                 onChanged={noop}
                 canEdit={false}
                 can={can}
-                distinctLabels={[]}
+                nodeLabels={{}}
             />,
         );
 
@@ -204,7 +204,7 @@ describe('BlueprintDetail GitOps state', () => {
                 onOpenChange={noop}
                 onChanged={noop}
                 canEdit
-                distinctLabels={[]}
+                nodeLabels={{}}
             />
         );
     }
@@ -276,7 +276,7 @@ describe('BlueprintDetail Git-managed content', () => {
             },
         }));
         render(
-            <BlueprintDetail blueprintId={1} open onOpenChange={noop} onChanged={noop} canEdit distinctLabels={[]} />,
+            <BlueprintDetail blueprintId={1} open onOpenChange={noop} onChanged={noop} canEdit nodeLabels={{}} />,
         );
         expect(await screen.findByText('Git-managed')).toBeInTheDocument();
         expect(screen.queryByRole('button', { name: /apply now/i })).not.toBeInTheDocument();
@@ -310,7 +310,7 @@ describe('BlueprintDetail Git-managed content', () => {
             }],
         }));
         render(
-            <BlueprintDetail blueprintId={1} open onOpenChange={noop} onChanged={noop} canEdit distinctLabels={[]} />,
+            <BlueprintDetail blueprintId={1} open onOpenChange={noop} onChanged={noop} canEdit nodeLabels={{}} />,
         );
         await screen.findByText('Git-managed');
         expect(screen.queryByRole('button', { name: /retire to direct/i })).not.toBeInTheDocument();
@@ -334,7 +334,7 @@ describe('BlueprintDetail Git-managed content', () => {
                 onChanged={noop}
                 canEdit={false}
                 can={can}
-                distinctLabels={[]}
+                nodeLabels={{}}
             />,
         );
         expect(await screen.findByText('Git-managed')).toBeInTheDocument();
@@ -344,11 +344,28 @@ describe('BlueprintDetail Git-managed content', () => {
 
     it('offers Convert to Git for Inline content', async () => {
         render(
-            <BlueprintDetail blueprintId={1} open onOpenChange={noop} onChanged={noop} canEdit distinctLabels={[]} />,
+            <BlueprintDetail blueprintId={1} open onOpenChange={noop} onChanged={noop} canEdit nodeLabels={{}} />,
         );
         expect(await screen.findByRole('button', { name: /convert to git/i })).toBeInTheDocument();
         expect(screen.queryByRole('button', { name: /detach git/i })).not.toBeInTheDocument();
         fireEvent.click(screen.getByRole('button', { name: /convert to git/i }));
         expect(screen.getByTestId('convert-dialog')).toBeInTheDocument();
+    });
+});
+
+describe('BlueprintDetail review handoff', () => {
+    it('opens the rollout preview once the Blueprint loads after Review rollout', async () => {
+        render(
+            <BlueprintDetail blueprintId={1} open onOpenChange={noop} onChanged={noop} canEdit reviewOnOpen nodeLabels={{}} />,
+        );
+        expect(await screen.findByTestId('rollout-preview-dialog')).toBeInTheDocument();
+    });
+
+    it('shows the sheet without a preview when the Blueprint was only saved', async () => {
+        render(
+            <BlueprintDetail blueprintId={1} open onOpenChange={noop} onChanged={noop} canEdit nodeLabels={{}} />,
+        );
+        expect(await screen.findByText('Show compose source')).toBeInTheDocument();
+        expect(screen.queryByTestId('rollout-preview-dialog')).not.toBeInTheDocument();
     });
 });

@@ -1,16 +1,17 @@
 import { Suspense, useEffect, useMemo, useRef, useState } from 'react';
 import { AlertTriangle, Save, Sparkles, Zap } from 'lucide-react';
 import { Button } from '@/components/ui/button';
+import { BusyButton } from '@/components/ui/busy-button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Skeleton } from '@/components/ui/skeleton';
 import { toast } from '@/components/ui/toast-store';
 import { Editor } from '@/lib/monacoLoader';
 import { useNodes } from '@/context/NodeContext';
+import { useAuth } from '@/context/AuthContext';
 import {
     type AnalyzerResult,
     type Blueprint,
-    type BlueprintSelector,
     type ContentBindingView,
     type DriftMode,
     type CreateBlueprintInput,
@@ -19,14 +20,37 @@ import {
     getContentBinding,
 } from '@/lib/blueprintsApi';
 import { GITOPS_LIMITATION_COPY } from '@/lib/gitopsLimitations';
+import {
+    type NodeLabelMap,
+    type StagedLabel,
+    draftFromSelector,
+    isDraftEmpty,
+    matchNodes,
+    selectorFromDraft,
+    stagedInUse,
+    withStagedLabels,
+} from '@/lib/blueprintTargets';
+import { BlueprintTargets } from './BlueprintTargets';
 import { BlueprintClassificationBanner } from './BlueprintClassificationBanner';
 import { ContentOriginBadge } from './ContentOriginBadge';
 
+/**
+ * What the operator chose to do with the form. `review` continues into the
+ * rollout preview; `save` only stores the Blueprint. Staged node labels are
+ * written by whichever primary action commits the form, never by a draft save.
+ */
+export interface BlueprintSubmitOptions {
+    intent: 'save' | 'review';
+    staged: StagedLabel[];
+}
+
 interface BlueprintEditorProps {
     initial?: Blueprint;
-    distinctLabels: string[];
+    nodeLabels: NodeLabelMap;
+    /** Whether this operator can continue into a rollout review after creating. */
+    canReview?: boolean;
     onCancel: () => void;
-    onSubmit: (input: CreateBlueprintInput | UpdateBlueprintInput) => Promise<void>;
+    onSubmit: (input: CreateBlueprintInput | UpdateBlueprintInput, options: BlueprintSubmitOptions) => Promise<void>;
     submitting: boolean;
     mode: 'create' | 'edit';
 }
@@ -48,18 +72,17 @@ const DRIFT_MODES: Array<{ value: DriftMode; kicker: string; title: string; tagl
     { value: 'enforce', kicker: 'Enforce', title: 'Detect & auto-fix', tagline: 'silent on success' },
 ];
 
-export function BlueprintEditor({ initial, distinctLabels, onCancel, onSubmit, submitting, mode }: BlueprintEditorProps) {
+export function BlueprintEditor({ initial, nodeLabels, canReview = false, onCancel, onSubmit, submitting, mode }: BlueprintEditorProps) {
     const { nodes } = useNodes();
+    const { can } = useAuth();
     const [name, setName] = useState(initial?.name ?? '');
     const [description, setDescription] = useState(initial?.description ?? '');
     const [composeContent, setComposeContent] = useState(initial?.compose_content ?? DEFAULT_COMPOSE);
     const [driftMode, setDriftMode] = useState<DriftMode>(initial?.drift_mode ?? 'suggest');
     const [enabled, setEnabled] = useState(initial?.enabled ?? true);
-    const initialSelector: BlueprintSelector = initial?.selector ?? { type: 'labels', any: [], all: [] };
-    const [selectorType, setSelectorType] = useState<'labels' | 'nodes'>(initialSelector.type);
-    const [labelsAny, setLabelsAny] = useState<string[]>(initialSelector.type === 'labels' ? initialSelector.any : []);
-    const [labelsAll, setLabelsAll] = useState<string[]>(initialSelector.type === 'labels' ? initialSelector.all : []);
-    const [nodeIds, setNodeIds] = useState<number[]>(initialSelector.type === 'nodes' ? initialSelector.ids : []);
+    const [draft, setDraft] = useState(() => draftFromSelector(initial?.selector ?? { type: 'labels', any: [], all: [] }));
+    const [staged, setStaged] = useState<StagedLabel[]>([]);
+    const [pendingIntent, setPendingIntent] = useState<'draft' | 'primary' | null>(null);
 
     const [analysis, setAnalysis] = useState<AnalyzerResult | null>(null);
     const [analyzing, setAnalyzing] = useState(false);
@@ -110,25 +133,12 @@ export function BlueprintEditor({ initial, distinctLabels, onCancel, onSubmit, s
         return () => { cancelled = true; };
     }, [gitManaged, initial?.id]);
 
-    const selector: BlueprintSelector = useMemo(() => {
-        if (selectorType === 'nodes') return { type: 'nodes', ids: nodeIds };
-        return { type: 'labels', any: labelsAny, all: labelsAll };
-    }, [selectorType, nodeIds, labelsAny, labelsAll]);
-
-    const isStatefulMulti = analysis?.classification === 'stateful' && (
-        (selectorType === 'labels' && (labelsAny.length > 0 || labelsAll.length > 0)) ||
-        (selectorType === 'nodes' && nodeIds.length > 1)
+    const selector = useMemo(() => selectorFromDraft(draft), [draft]);
+    const matchedCount = useMemo(
+        () => matchNodes(selector, nodes, withStagedLabels(nodeLabels, staged)).length,
+        [selector, nodes, nodeLabels, staged],
     );
-
-    function toggleLabel(list: string[], setList: (v: string[]) => void, label: string) {
-        if (list.includes(label)) setList(list.filter(l => l !== label));
-        else setList([...list, label]);
-    }
-
-    function toggleNode(id: number) {
-        if (nodeIds.includes(id)) setNodeIds(nodeIds.filter(n => n !== id));
-        else setNodeIds([...nodeIds, id]);
-    }
+    const isStatefulMulti = analysis?.classification === 'stateful' && matchedCount > 1;
 
     function validate(): string | null {
         if (mode === 'create') {
@@ -136,12 +146,16 @@ export function BlueprintEditor({ initial, distinctLabels, onCancel, onSubmit, s
             if (!/^[a-z0-9][a-z0-9_-]*$/.test(name.trim())) return 'Name must be lowercase letters, digits, hyphens, or underscores (must start with a letter or digit)';
         }
         if (!composeContent.trim()) return 'Compose content cannot be empty';
-        if (selectorType === 'labels' && labelsAny.length === 0 && labelsAll.length === 0) return 'Pick at least one label';
-        if (selectorType === 'nodes' && nodeIds.length === 0) return 'Pick at least one node';
+        if (isDraftEmpty(draft)) return draft.type === 'labels' ? 'Pick at least one label' : 'Pick at least one node';
         return null;
     }
 
-    async function handleSubmit() {
+    // Create mode offers a draft save only when the operator can review a rollout
+    // and the Blueprint is enabled; otherwise one primary action commits the form.
+    const offersDraft = mode === 'create' && canReview && enabled;
+    const primaryIntent: BlueprintSubmitOptions['intent'] = offersDraft ? 'review' : 'save';
+
+    async function handleSubmit(which: 'draft' | 'primary') {
         const err = validate();
         if (err) { toast.error(err); return; }
         const fields = {
@@ -151,11 +165,17 @@ export function BlueprintEditor({ initial, distinctLabels, onCancel, onSubmit, s
             drift_mode: driftMode,
             enabled,
         };
-        if (mode === 'edit' && gitManaged) {
-            await onSubmit(fields);
-            return;
+        const options: BlueprintSubmitOptions = which === 'draft'
+            ? { intent: 'save', staged: [] }
+            : { intent: primaryIntent, staged: stagedInUse(staged, selector) };
+        setPendingIntent(which);
+        try {
+            // A Git-managed Blueprint's compose lives in its Git source, never in this form.
+            const input = mode === 'edit' && gitManaged ? fields : { ...fields, compose_content: composeContent };
+            await onSubmit(input, options);
+        } finally {
+            setPendingIntent(null);
         }
-        await onSubmit({ ...fields, compose_content: composeContent });
     }
 
     return (
@@ -246,91 +266,16 @@ export function BlueprintEditor({ initial, distinctLabels, onCancel, onSubmit, s
             </div>
 
             <div className="space-y-2">
-                <Label className="font-mono text-[10px] uppercase tracking-[0.18em] text-stat-icon">Selector</Label>
-                <div className="flex gap-1">
-                    <Button
-                        size="sm"
-                        variant={selectorType === 'labels' ? 'default' : 'outline'}
-                        onClick={() => setSelectorType('labels')}
-                    >
-                        Labels
-                    </Button>
-                    <Button
-                        size="sm"
-                        variant={selectorType === 'nodes' ? 'default' : 'outline'}
-                        onClick={() => setSelectorType('nodes')}
-                    >
-                        Specific nodes
-                    </Button>
-                </div>
-                {selectorType === 'labels' ? (
-                    <div className="space-y-3 rounded-lg border border-card-border bg-card p-3">
-                        <div>
-                            <p className="font-mono text-[10px] uppercase tracking-[0.18em] text-stat-icon mb-1.5">Match nodes with ANY of these labels</p>
-                            <div className="flex flex-wrap gap-1.5">
-                                {distinctLabels.length === 0 && (
-                                    <span className="text-[10px] text-muted-foreground">
-                                        No node labels yet. Add labels in Settings → Nodes.
-                                    </span>
-                                )}
-                                {distinctLabels.map(l => (
-                                    <button
-                                        key={`any-${l}`}
-                                        type="button"
-                                        onClick={() => toggleLabel(labelsAny, setLabelsAny, l)}
-                                        className={`cursor-pointer rounded-md border px-2 py-0.5 font-mono text-[10px] uppercase tracking-[0.18em] transition-colors ${labelsAny.includes(l)
-                                            ? 'border-brand bg-brand/10 text-brand'
-                                            : 'border-card-border text-stat-subtitle hover:text-stat-value'
-                                        }`}
-                                    >
-                                        {l}
-                                    </button>
-                                ))}
-                            </div>
-                        </div>
-                        <div>
-                            <p className="font-mono text-[10px] uppercase tracking-[0.18em] text-stat-icon mb-1.5">AND ALSO require ALL of these</p>
-                            <div className="flex flex-wrap gap-1.5">
-                                {distinctLabels.map(l => (
-                                    <button
-                                        key={`all-${l}`}
-                                        type="button"
-                                        onClick={() => toggleLabel(labelsAll, setLabelsAll, l)}
-                                        className={`cursor-pointer rounded-md border px-2 py-0.5 font-mono text-[10px] uppercase tracking-[0.18em] transition-colors ${labelsAll.includes(l)
-                                            ? 'border-brand bg-brand/10 text-brand'
-                                            : 'border-card-border text-stat-subtitle hover:text-stat-value'
-                                        }`}
-                                    >
-                                        {l}
-                                    </button>
-                                ))}
-                            </div>
-                        </div>
-                        {(labelsAny.length > 0 || labelsAll.length > 0) && (
-                            <p className="font-mono text-[10px] text-stat-icon">
-                                Resolves to nodes labelled {[
-                                    labelsAll.length > 0 ? `all of [${labelsAll.join(', ')}]` : '',
-                                    labelsAny.length > 0 ? `any of [${labelsAny.join(', ')}]` : '',
-                                ].filter(Boolean).join(' AND ')}.
-                            </p>
-                        )}
-                    </div>
-                ) : (
-                    <div className="space-y-2 rounded-lg border border-card-border bg-card p-3">
-                        {nodes.map(n => (
-                            <label key={n.id} className="flex items-center gap-2 text-sm cursor-pointer">
-                                <input
-                                    type="checkbox"
-                                    checked={nodeIds.includes(n.id)}
-                                    onChange={() => toggleNode(n.id)}
-                                    className="cursor-pointer"
-                                />
-                                <span>{n.name}</span>
-                                <span className="text-[10px] text-muted-foreground font-mono uppercase">{n.type}</span>
-                            </label>
-                        ))}
-                    </div>
-                )}
+                <Label className="font-mono text-[10px] uppercase tracking-[0.18em] text-stat-icon">Targets</Label>
+                <BlueprintTargets
+                    draft={draft}
+                    onDraftChange={setDraft}
+                    nodes={nodes}
+                    nodeLabels={nodeLabels}
+                    staged={staged}
+                    onStagedChange={setStaged}
+                    canLabelNode={(id) => can('node:manage', 'node', String(id))}
+                />
             </div>
 
             <div className="space-y-2">
@@ -367,12 +312,37 @@ export function BlueprintEditor({ initial, distinctLabels, onCancel, onSubmit, s
                 </label>
                 <div className="flex items-center gap-2">
                     <Button variant="outline" size="sm" onClick={onCancel} disabled={submitting}>Cancel</Button>
-                    <Button size="sm" onClick={handleSubmit} disabled={submitting} className="gap-2">
+                    {offersDraft && (
+                        <BusyButton
+                            variant="outline"
+                            size="sm"
+                            pending={submitting && pendingIntent === 'draft'}
+                            disabled={submitting}
+                            busyLabel="Saving…"
+                            onClick={() => void handleSubmit('draft')}
+                        >
+                            Save as draft
+                        </BusyButton>
+                    )}
+                    <BusyButton
+                        size="sm"
+                        className="gap-2"
+                        pending={submitting && pendingIntent === 'primary'}
+                        disabled={submitting}
+                        busyLabel={mode === 'create' ? 'Creating…' : 'Saving…'}
+                        onClick={() => void handleSubmit('primary')}
+                    >
                         {mode === 'create' ? <Sparkles className="h-4 w-4" /> : <Save className="h-4 w-4" />}
-                        {submitting ? 'Saving…' : mode === 'create' ? 'Create blueprint' : 'Save changes'}
-                    </Button>
+                        {offersDraft ? 'Review rollout' : mode === 'create' ? 'Create blueprint' : 'Save changes'}
+                    </BusyButton>
                 </div>
             </div>
+
+            {offersDraft && staged.length > 0 && (
+                <p className="text-right text-[11px] text-stat-subtitle">
+                    A draft saves the Blueprint only, so it matches no nodes until the new node labels are added when you review the rollout.
+                </p>
+            )}
 
             {!analysis?.parseError && analysis?.classification === 'stateful' && (
                 <div className="flex items-start gap-2 text-xs text-stat-subtitle">
