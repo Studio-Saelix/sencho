@@ -771,6 +771,12 @@ export class GitOpsTransitions {
       const targets = this.acceptanceTargets(app, args);
       this.invalidateAuthorizationOnSourceChange(app, args.envelope, extras);
       this.applySourceAcceptanceMutation(app, args);
+      // Shared with `sourceAccepted` so both acceptance entry points leave the
+      // candidate naming the generation they just accepted. In production
+      // `applied` is Direct-only, where this is a no-op; keeping the call here
+      // means a future blueprint caller cannot reintroduce the stranded-binding
+      // state this pair exists to prevent.
+      this.rebindRolloutCandidateOnAcceptance(app, args.generationId);
       for (const target of targets) {
         if (app.target_mode === 'direct') {
           this.applyTargetAcceptanceMutation(target, args);
@@ -802,6 +808,9 @@ export class GitOpsTransitions {
       this.requireAcceptableCandidate(app, args);
       this.invalidateAuthorizationOnSourceChange(app, args.envelope, extras);
       this.applySourceAcceptanceMutation(app, args);
+      // Blueprint-only in effect: a Direct application has no rollout
+      // candidate, so the helper returns without touching anything.
+      this.rebindRolloutCandidateOnAcceptance(app, args.generationId);
     }, {
       generationId: args.generationId,
       artifactSetId: args.artifactSetId,
@@ -4025,6 +4034,34 @@ export class GitOpsTransitions {
     this.clearActive(app);
     this.clearAppFailure(app, ['apply', 'fetch', 'validation']);
     this.clearInterruption(app, 'apply_started');
+  }
+
+  /**
+   * Move the current rollout candidate onto the generation an acceptance just
+   * bound.
+   *
+   * The first authorization stamps the candidate with the generation and
+   * artifact it authorized (`bindRolloutCandidateSource`). A later source
+   * acceptance clears that authorization but keeps placement, so the candidate
+   * must name the new generation or `authorizationIngredients` refuses. The
+   * artifact binding is cleared rather than pointed at the acceptance's seed
+   * set: the freeze that follows advances the application's set to the resolved
+   * one, and a candidate pinned to the seed would then disagree with the
+   * application for ever. Authorization re-stamps both from the resolved set,
+   * the same way it does for a candidate opened before its first acceptance.
+   * Only a candidate that describes the current intent is moved; a candidate
+   * minted for an older intent belongs to a placement that was already
+   * invalidated and will be replaced by the next intent revision.
+   */
+  private rebindRolloutCandidateOnAcceptance(
+    app: GitOpsApplicationRow,
+    acceptedGenerationId: string,
+  ): void {
+    if (app.target_mode !== 'blueprint' || !app.rollout_candidate_id) return;
+    const candidate = this.store().getRolloutCandidate(app.rollout_candidate_id);
+    if (!candidate || candidate.application_id !== app.id) return;
+    if (candidate.intent_revision_id !== app.intent_revision_id) return;
+    this.store().rebindRolloutCandidateSource(app.id, candidate.id, acceptedGenerationId);
   }
 
   /** The Direct-only target-row mutation `applied` and `targetApplied` share. */

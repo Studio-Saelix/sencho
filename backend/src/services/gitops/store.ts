@@ -1290,6 +1290,36 @@ export class GitOpsStore {
   }
 
   /**
+   * Move a candidate's generation binding to the generation an acceptance just
+   * recorded, clearing its artifact binding.
+   *
+   * Distinct from `bindRolloutCandidateSource`, which is the first binding and
+   * refuses to overwrite a different one. This is the source-change path: the
+   * acceptance cleared the rollout authorization in the same transaction, so
+   * the candidate's previous binding describes content nothing may execute any
+   * more, and leaving it would make `authorizationIngredients` refuse the new
+   * generation for ever. The artifact binding is cleared rather than pointed at
+   * the acceptance's seed set, because the freeze that follows advances the
+   * application's set to the resolved one and authorization re-stamps both from
+   * that resolved set.
+   */
+  rebindRolloutCandidateSource(applicationId: string, candidateId: string, acceptedGenerationId: string): void {
+    const candidate = this.getRolloutCandidate(candidateId);
+    if (!candidate) throw new Error('rollout candidate not found');
+    if (candidate.application_id !== applicationId) {
+      throw new Error('rollout candidate belongs to another application');
+    }
+    if (candidate.accepted_generation_id === acceptedGenerationId && candidate.artifact_set_id === null) {
+      return;
+    }
+    this.db().prepare(
+      `UPDATE gitops_rollout_candidates
+       SET accepted_generation_id = ?, artifact_set_id = NULL
+       WHERE id = ?`,
+    ).run(acceptedGenerationId, candidateId);
+  }
+
+  /**
    * Authorization ingredients excluding the preflight fingerprint, so a
    * caller can decide whether minting authorization is possible before
    * writing one.

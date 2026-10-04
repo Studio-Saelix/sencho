@@ -167,6 +167,21 @@ describe('rollout authorization transition', () => {
     expect(after.accepted_generation_id).toBe(nextGenId);
     expect(after.rollout_authorization_ref).toBeNull();
     expect(after.preflight_fingerprint).toBeNull();
+
+    // The candidate the first authorization stamped must move with the
+    // acceptance, or `authorizationIngredients` refuses the new generation and
+    // the rollout can never be authorized again. Its artifact binding is
+    // cleared, not pointed at the seed set: the freeze that follows advances the
+    // application's set, and authorization re-stamps both from the resolved one.
+    const candidate = after.rollout_candidate_id
+      ? store.getRolloutCandidate(after.rollout_candidate_id)
+      : undefined;
+    expect(candidate?.accepted_generation_id).toBe(nextGenId);
+    expect(candidate?.artifact_set_id).toBeNull();
+    expect(
+      store.authorizationIngredients(after),
+      'the rebound candidate and the kept placement form a binding the next authorization can use',
+    ).not.toBeNull();
   });
 
   it('rejects reusing authorization when artifact identity changes', () => {
@@ -1077,6 +1092,49 @@ describe('ensureRolloutAuthorization', () => {
     expect(ref).toBeTruthy();
     expect(() => authorize(fixture.applicationId)).toThrow(/already live/);
     expect(GitOpsStore.getInstance().getApplication(fixture.applicationId)!.rollout_authorization_ref).toBe(ref);
+  });
+
+  it('re-authorizes after a source-only change once the new generation is executable', async () => {
+    const fixture = seedAuthorizedReadyApp();
+    authorize(fixture.applicationId);
+    const store = GitOpsStore.getInstance();
+    const before = store.getApplication(fixture.applicationId)!;
+    const nextGenId = `gen-${randomUUID().slice(0, 8)}`;
+    const artId = `art-${randomUUID().slice(0, 8)}`;
+    insertGeneration(nextGenId, fixture.applicationId, before.materialization_fingerprint!);
+    const envelope = { operationId: randomUUID(), actor: 'tester', trigger: 'manual', at: 500 };
+    GitOpsTransitions.getInstance().candidateReady(fixture.applicationId, nextGenId, false, envelope);
+    GitOpsTransitions.getInstance().sourceAccepted({
+      applicationId: fixture.applicationId,
+      generationId: nextGenId,
+      artifactSetId: artId,
+      sourceAcceptanceId: `acc-${randomUUID().slice(0, 8)}`,
+      authority: 'operator',
+      envelope,
+    });
+    // The freeze producer would resolve this in production; here the test
+    // records the resolved set directly so the authorization path is what runs.
+    const exactId = `art-${randomUUID().slice(0, 8)}`;
+    store.insertArtifactSet(artifact(exactId, nextGenId, 'exact', 2));
+    GitOpsTransitions.getInstance().acceptArtifactExpectation({
+      applicationId: fixture.applicationId,
+      generationId: nextGenId,
+      artifactSetId: exactId,
+      envelope,
+    });
+
+    const result = await ensureRolloutAuthorization(fixture.applicationId, 'tester', 'manual', undefined, 'operator');
+
+    expect(result.ok, result.ok ? '' : result.reason).toBe(true);
+    if (result.ok) {
+      expect(result.binding.acceptedGenerationId).toBe(nextGenId);
+      expect(result.binding.artifactSetId).toBe(exactId);
+      // Authorization re-stamps the candidate from the resolved set, which is
+      // what the next source change will move again.
+      const rebound = store.getRolloutCandidate(result.binding.rolloutCandidateId);
+      expect(rebound?.accepted_generation_id).toBe(nextGenId);
+      expect(rebound?.artifact_set_id).toBe(exactId);
+    }
   });
 
   it('refuses any policy-authorized mint that reaches the transition on a manual policy', () => {
