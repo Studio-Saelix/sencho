@@ -1,8 +1,9 @@
 import crypto from 'crypto';
 
-function sopsEncField(value: string, fileKey: Buffer): string {
+function sopsEncField(value: string, fileKey: Buffer, aad: string): string {
   const iv = crypto.randomBytes(16);
   const cipher = crypto.createCipheriv('aes-256-gcm', fileKey, iv);
+  cipher.setAAD(Buffer.from(aad, 'utf8'));
   const encrypted = Buffer.concat([cipher.update(Buffer.from(value, 'utf8')), cipher.final()]);
   const tag = cipher.getAuthTag();
   return `ENC[AES256_GCM,data:${encrypted.toString('base64')},iv:${iv.toString('base64')},tag:${tag.toString('base64')},type:str]`;
@@ -22,7 +23,7 @@ export async function buildSopsAgeDocument(args: {
 }): Promise<string> {
   const fileKey = crypto.randomBytes(32);
   const lines = Object.entries(args.values).map(
-    ([key, value]) => `${key}: ${sopsEncField(value, fileKey)}`,
+    ([key, value]) => `${key}: ${sopsEncField(value, fileKey, `${key}:`)}`,
   );
   const indentedEnc = (await armorAgeFileKey(fileKey, args.recipient))
     .split('\n')
@@ -47,7 +48,7 @@ export async function buildSopsAgeDotenvDocument(args: {
 }): Promise<string> {
   const fileKey = crypto.randomBytes(32);
   const lines = Object.entries(args.values).map(
-    ([key, value]) => `${key}=${sopsEncField(value, fileKey)}`,
+    ([key, value]) => `${key}=${sopsEncField(value, fileKey, `${key}:`)}`,
   );
   const escapedEnc = (await armorAgeFileKey(fileKey, args.recipient)).replace(/\n/g, '\\n');
 
@@ -66,7 +67,8 @@ export async function buildSopsAgeIniDocument(args: {
 }): Promise<string> {
   const fileKey = crypto.randomBytes(32);
   const lines = Object.entries(args.values).map(
-    ([key, value]) => `${key} = ${sopsEncField(value, fileKey)}`,
+    // Keys before any section live in the implicit DEFAULT section.
+    ([key, value]) => `${key} = ${sopsEncField(value, fileKey, `DEFAULT:${key}:`)}`,
   );
   const escapedEnc = (await armorAgeFileKey(fileKey, args.recipient)).replace(/\n/g, '\\n');
 

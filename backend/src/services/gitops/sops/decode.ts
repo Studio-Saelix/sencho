@@ -22,7 +22,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
-function decryptEncValue(encValue: string, key: Buffer): string {
+function decryptEncValue(encValue: string, key: Buffer, aad: string): string {
   const match = ENC_FIELD_RE.exec(encValue);
   if (!match) {
     throw new SopsDecryptError('invalid_ciphertext', 'Malformed encrypted value');
@@ -33,11 +33,17 @@ function decryptEncValue(encValue: string, key: Buffer): string {
     key,
     Buffer.from(ivB64, 'base64'),
   );
+  decipher.setAAD(Buffer.from(aad, 'utf8'));
   decipher.setAuthTag(Buffer.from(tagB64, 'base64'));
-  const decrypted = Buffer.concat([
-    decipher.update(Buffer.from(dataB64, 'base64')),
-    decipher.final(),
-  ]);
+  let decrypted: Buffer;
+  try {
+    decrypted = Buffer.concat([
+      decipher.update(Buffer.from(dataB64, 'base64')),
+      decipher.final(),
+    ]);
+  } catch {
+    throw new SopsDecryptError('decrypt_failed', 'SOPS value authentication failed');
+  }
   return decrypted.toString('utf8');
 }
 
@@ -78,21 +84,36 @@ function withTrailingNewline(text: string): string {
   return text.replace(/\n$/, '') + '\n';
 }
 
-function decryptNode(node: unknown, key: Buffer): unknown {
+function isSopsSectionName(name: string): boolean {
+  return /^sops(?:\.[^\]]+)?$/i.test(name);
+}
+
+function headerName(line: string): string | null {
+  const match = /^\[([^\]]+)\]$/.exec(line.trim());
+  return match ? match[1] : null;
+}
+
+/** sops authenticates every value with its colon-joined key path plus a trailing colon. */
+function aadForPath(path: string[]): string {
+  return `${path.join(':')}:`;
+}
+
+function decryptNode(node: unknown, key: Buffer, path: string[]): unknown {
   if (typeof node === 'string') {
     if (ENC_FIELD_RE.test(node)) {
-      return decryptEncValue(node, key);
+      return decryptEncValue(node, key, aadForPath(path));
     }
     return node;
   }
   if (Array.isArray(node)) {
-    return node.map((item) => decryptNode(item, key));
+    // sops authenticates array elements with the path of the array itself.
+    return node.map((item) => decryptNode(item, key, path));
   }
   if (isRecord(node)) {
     const out: Record<string, unknown> = {};
     for (const [k, v] of Object.entries(node)) {
       if (k === 'sops') continue;
-      out[k] = decryptNode(v, key);
+      out[k] = decryptNode(v, key, [...path, k]);
     }
     return out;
   }
@@ -136,17 +157,37 @@ async function decryptUnstructuredSops(content: string, identity: string): Promi
 
   const fileKey = await unwrapMatchingAgeFileKey(ageEntries.map((entry) => entry.enc), identity);
 
+  // INI stores flatten metadata below a [sops] section; dotenv stores flatten
+  // it into sops_* keys. The distinction decides how values are authenticated.
+  const contentLines = content.split(/\r?\n/);
+  const isIni = contentLines.some((line) => {
+    const name = headerName(line);
+    return name !== null && isSopsSectionName(name);
+  });
+
   const lines: string[] = [];
   let inSopsSection = false;
-  for (const rawLine of content.split(/\r?\n/)) {
+  let section: string | null = null;
+  for (const rawLine of contentLines) {
     const trimmed = rawLine.trim();
-    if (/^\[sops(?:\.[^\]]+)?\]$/i.test(trimmed)) {
-      inSopsSection = true;
+    const header = headerName(rawLine);
+    if (header !== null && !inSopsSection) {
+      if (isSopsSectionName(header)) {
+        inSopsSection = true;
+        continue;
+      }
+      section = header;
+      lines.push(rawLine);
       continue;
     }
     if (inSopsSection) {
-      if (trimmed.startsWith('[') && trimmed.endsWith(']')) inSopsSection = false;
-      else continue;
+      if (header !== null) {
+        inSopsSection = false;
+        section = header;
+        lines.push(rawLine);
+        continue;
+      }
+      continue;
     }
     if (/^(?:sops_|age__list_)/.test(trimmed)) continue;
     const eq = rawLine.indexOf('=');
@@ -157,7 +198,10 @@ async function decryptUnstructuredSops(content: string, identity: string): Promi
     const key = rawLine.slice(0, eq).trimEnd();
     const value = unescapeDotenvValue(rawLine.slice(eq + 1).trim());
     if (ENC_FIELD_RE.test(value)) {
-      lines.push(`${key}=${decryptEncValue(value, fileKey)}`);
+      // Dotenv values are authenticated with their flat key. INI values carry
+      // their section, with the implicit default section named DEFAULT.
+      const aad = isIni ? `${section ?? 'DEFAULT'}:${key}:` : `${key}:`;
+      lines.push(`${key}=${decryptEncValue(value, fileKey, aad)}`);
     } else {
       lines.push(rawLine);
     }
@@ -193,7 +237,7 @@ export async function decryptSopsAgeDocument(content: string, identity: string):
   }
   const fileKey = await unwrapMatchingAgeFileKey(encodings, identity);
 
-  const plaintextDoc = decryptNode(doc, fileKey);
+  const plaintextDoc = decryptNode(doc, fileKey, []);
   if (typeof plaintextDoc === 'string') {
     return plaintextDoc;
   }
