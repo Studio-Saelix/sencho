@@ -1,9 +1,10 @@
 import crypto from 'crypto';
-import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from 'vitest';
 import { setupTestDb, cleanupTestDb } from './helpers/setupTestDb';
 import { verifyProviderSignature } from '../services/gitops/providerWebhooks/verify';
 import { ProviderWebhookService } from '../services/gitops/providerWebhooks/ProviderWebhookService';
 import { GitProviderWebhookStore } from '../services/gitops/providerWebhooks/store';
+import { GitSourceService } from '../services/GitSourceService';
 import type { GitProviderKind } from '../services/gitops/providerWebhooks/types';
 
 let tmpDir: string;
@@ -51,7 +52,7 @@ const PROVIDER_FIXTURES: ProviderFixture[] = [
     provider: 'gitlab',
     repoUrl: 'https://gitlab.com/example/repo.git',
     eventHeader: 'x-gitlab-event',
-    eventValue: 'push',
+    eventValue: 'Push Hook',
     deliveryHeader: 'idempotency-key',
     sign: (_rawBody, secret) => ({ 'x-gitlab-token': secret }),
     pushBody: (ref = 'refs/heads/main') => ({
@@ -247,5 +248,142 @@ describe.each(PROVIDER_FIXTURES)('$provider adapter signatures', (fixture) => {
     const delivery = GitProviderWebhookStore.getInstance().listDeliveries(id)[0];
     expect(delivery?.outcome_class).toBe('ref_policy');
     expect(delivery?.delivery_id).toBe(deliveryId);
+  });
+
+  it('queues a push event on the configured ref', async () => {
+    const handleSpy = vi.spyOn(GitSourceService.getInstance(), 'handleWebhookPull')
+      .mockResolvedValue({ status: 'success', message: 'Queued for reconciliation.' });
+    try {
+      const stackName = `${fixture.provider}-queued`;
+      seedGitSource(stackName, fixture.repoUrl, 'main');
+      const { id, secret } = ProviderWebhookService.getInstance().createEndpoint({
+        stackName,
+        provider: fixture.provider,
+      });
+      const deliveryId = crypto.randomUUID();
+      const rawBody = Buffer.from(JSON.stringify(fixture.pushBody('refs/heads/main')), 'utf-8');
+      const headers = {
+        ...fixture.sign(rawBody, secret),
+        [fixture.eventHeader]: fixture.eventValue,
+        [fixture.deliveryHeader]: deliveryId,
+      };
+
+      const outcome = await ProviderWebhookService.getInstance().ingestLocal({
+        endpointId: id,
+        rawBody,
+        headers,
+      });
+
+      expect(outcome.httpStatus).toBe(202);
+      expect(outcome.state).toBe('queued');
+      expect(handleSpy).toHaveBeenCalledWith(
+        stackName,
+        true,
+        `provider:${id}:${deliveryId}`,
+        { trigger: 'provider_event', actor: 'system:provider_event' },
+      );
+    } finally {
+      handleSpy.mockRestore();
+    }
+  });
+});
+
+describe('gitlab display-style event headers', () => {
+  it('queues a merge request delivered with the Merge Request Hook label when PR scope is enabled', async () => {
+    const handleSpy = vi.spyOn(GitSourceService.getInstance(), 'handleWebhookPull')
+      .mockResolvedValue({ status: 'success', message: 'Queued for reconciliation.' });
+    try {
+      const stackName = 'gitlab-merge-request-queued';
+      seedGitSource(stackName, 'https://gitlab.com/example/repo.git', 'main');
+      const { id, secret } = ProviderWebhookService.getInstance().createEndpoint({
+        stackName,
+        provider: 'gitlab',
+        eventScope: 'configured_ref_and_prs',
+      });
+      const deliveryId = crypto.randomUUID();
+      const rawBody = Buffer.from(JSON.stringify({
+        object_kind: 'merge_request',
+        event_name: 'merge_request',
+        object_attributes: { action: 'open', iid: 7 },
+        project: { http_url: 'https://gitlab.com/example/repo.git' },
+      }), 'utf-8');
+
+      const outcome = await ProviderWebhookService.getInstance().ingestLocal({
+        endpointId: id,
+        rawBody,
+        headers: {
+          'x-gitlab-token': secret,
+          'x-gitlab-event': 'Merge Request Hook',
+          'idempotency-key': deliveryId,
+        },
+      });
+
+      expect(outcome.httpStatus).toBe(202);
+      expect(outcome.state).toBe('queued');
+      expect(handleSpy).toHaveBeenCalledWith(
+        stackName,
+        true,
+        `provider:${id}:${deliveryId}`,
+        { trigger: 'provider_event', actor: 'system:provider_event' },
+      );
+      const delivery = GitProviderWebhookStore.getInstance().listDeliveries(id)[0];
+      expect(delivery?.event_type).toBe('merge_request');
+      expect(delivery?.event_action).toBe('open');
+    } finally {
+      handleSpy.mockRestore();
+    }
+  });
+
+  it.each([
+    {
+      label: 'Push Hook',
+      eventType: 'push',
+      payload: { ref: 'refs/heads/main', after: 'c'.repeat(40) },
+    },
+    {
+      label: 'Merge Request Hook',
+      eventType: 'merge_request',
+      payload: { object_attributes: { action: 'open', iid: 7 } },
+    },
+  ])('normalizes the $label fallback when the payload omits object_kind', async ({ label, eventType, payload }) => {
+    const handleSpy = vi.spyOn(GitSourceService.getInstance(), 'handleWebhookPull')
+      .mockResolvedValue({ status: 'success', message: 'Queued for reconciliation.' });
+    try {
+      const stackName = `gitlab-${eventType}-label-fallback`;
+      seedGitSource(stackName, 'https://gitlab.com/example/repo.git', 'main');
+      const { id, secret } = ProviderWebhookService.getInstance().createEndpoint({
+        stackName,
+        provider: 'gitlab',
+        eventScope: 'configured_ref_and_prs',
+      });
+      const deliveryId = crypto.randomUUID();
+      const rawBody = Buffer.from(JSON.stringify({
+        ...payload,
+        project: { http_url: 'https://gitlab.com/example/repo.git' },
+      }), 'utf-8');
+
+      const outcome = await ProviderWebhookService.getInstance().ingestLocal({
+        endpointId: id,
+        rawBody,
+        headers: {
+          'x-gitlab-token': secret,
+          'x-gitlab-event': label,
+          'idempotency-key': deliveryId,
+        },
+      });
+
+      expect(outcome.httpStatus).toBe(202);
+      expect(outcome.state).toBe('queued');
+      expect(handleSpy).toHaveBeenCalledWith(
+        stackName,
+        true,
+        `provider:${id}:${deliveryId}`,
+        { trigger: 'provider_event', actor: 'system:provider_event' },
+      );
+      const delivery = GitProviderWebhookStore.getInstance().listDeliveries(id)[0];
+      expect(delivery?.event_type).toBe(eventType);
+    } finally {
+      handleSpy.mockRestore();
+    }
   });
 });
