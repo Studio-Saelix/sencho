@@ -185,7 +185,11 @@ export class GitOpsDecryptOverlay {
           const identity = args.identityByRecipient.get(recipient);
           if (!identity) continue;
           try {
-            decrypted = await decryptSopsAgeDocument(ciphertext, identity);
+            decrypted = await decryptSopsAgeDocument(
+              ciphertext,
+              identity,
+              input.role === 'env' ? 'compose-env' : 'sops',
+            );
             break;
           } catch (err) {
             lastErr = err;

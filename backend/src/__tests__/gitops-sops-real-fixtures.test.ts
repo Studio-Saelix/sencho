@@ -65,7 +65,7 @@ describe('real sops fixtures (v3.13.3)', () => {
     const fixture = readFixture('newline.enc.env');
     expect(detectSopsContent(fixture).kind).toBe('sops-age');
 
-    const decrypted = await decryptSopsAgeDocument(fixture, identity);
+    const decrypted = await decryptSopsAgeDocument(fixture, identity, 'compose-env');
     expect(decrypted).toBe('NL="line1\\nline2"\nPLAIN=x\n');
   });
 
@@ -73,10 +73,21 @@ describe('real sops fixtures (v3.13.3)', () => {
     const fixture = readFixture('metachar.enc.env');
     expect(detectSopsContent(fixture).kind).toBe('sops-age');
 
-    const decrypted = await decryptSopsAgeDocument(fixture, identity);
+    const decrypted = await decryptSopsAgeDocument(fixture, identity, 'compose-env');
     expect(decrypted).toBe(
       'DOLLAR="a$$B"\nQUOTE="say \\"hi\\""\nSPACE=" padded"\n'
       + 'HASH="a #b"\nTAB="a\\tb"\nCR="a\\rb"\nPLAIN=x\n',
+    );
+  });
+
+  it('keeps sops-faithful dotenv output when the file is consumed verbatim', async () => {
+    const newline = readFixture('newline.enc.env');
+    expect(await decryptSopsAgeDocument(newline, identity)).toBe(
+      'NL=line1\\nline2\nPLAIN=x\n',
+    );
+    const metachar = readFixture('metachar.enc.env');
+    expect(await decryptSopsAgeDocument(metachar, identity)).toBe(
+      'DOLLAR=a$B\nQUOTE=say "hi"\nSPACE= padded\nHASH=a #b\nTAB=a\tb\nCR=a\rb\nPLAIN=x\n',
     );
   });
 

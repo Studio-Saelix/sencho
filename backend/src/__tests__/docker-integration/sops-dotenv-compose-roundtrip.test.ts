@@ -54,10 +54,12 @@ describe.skipIf(!hasDocker)('decrypted dotenv values survive the Compose env_fil
     const newline = await decryptSopsAgeDocument(
       fs.readFileSync(path.join(fixturesDir, 'newline.enc.env'), 'utf8'),
       identity,
+      'compose-env',
     );
     const metachar = await decryptSopsAgeDocument(
       fs.readFileSync(path.join(fixturesDir, 'metachar.enc.env'), 'utf8'),
       identity,
+      'compose-env',
     );
     fs.writeFileSync(path.join(tmpDir, '.env'), newline + metachar);
     fs.writeFileSync(
