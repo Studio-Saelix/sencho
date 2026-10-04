@@ -405,7 +405,7 @@ describe('git transport support matrix', () => {
             'TransportFacingCode',
         );
         const gitSourceErrorCodes = extractStringArrayMembers(
-            path.join(REPO_ROOT, 'backend', 'src', 'services', 'GitSourceService.ts'),
+            path.join(REPO_ROOT, 'backend', 'src', 'types', 'gitSourceErrorCode.ts'),
             'GIT_SOURCE_ERROR_CODE_VALUES',
         );
 

@@ -28,6 +28,7 @@ import { buildCandidateComposeInvocation } from '../utils/candidateComposeInvoca
 import type { ComposeInputEntry, GitProjectManifest, GitSourceManifestState, InventoryResult, ManifestSummary, RefusalInfo } from '../types/gitProjectManifest';
 import type { GitChangePlan, PublicGitChangePlan, GitChangePlanCounts, PublicGitChangePlanOperation } from '../types/gitChangePlan';
 import { GIT_CHANGE_PLAN_SCHEMA_VERSION } from '../types/gitChangePlan';
+import type { GitSourceErrorCode } from '../types/gitSourceErrorCode';
 import type { NotificationCategory } from './NotificationService';
 import { classifyGitFailure, isTransportFailure, type TransportFailureReason } from './git/errors';
 import type { RefKind, SshDeployKeyAuth } from './git/types';
@@ -110,30 +111,11 @@ import type { SecretCapability } from './gitops/sops/types';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
-// The runtime list and the type share one source, so a new code cannot be
-// added to the union without also reaching every runtime consumer (the
-// status map and the closed-set guard in utils/gitSourceHttp.ts).
-export const GIT_SOURCE_ERROR_CODE_VALUES = [
-    'REPO_NOT_FOUND',
-    'AUTH_FAILED',
-    'REF_NOT_FOUND',
-    'REF_DELETED',
-    'UNSUPPORTED_REF',
-    'SSH_HOST_KEY_FAILED',
-    'FILE_NOT_FOUND',
-    'RATE_LIMITED',
-    'NETWORK_TIMEOUT',
-    'GIT_ERROR',
-    'STALE_PLAN',
-    'PLAN_FINGERPRINT_REQUIRED',
-    'PLAN_BLOCKED',
-    'LEGACY_PENDING',
-    'PLAN_UNAVAILABLE',
-    'OPERATION_IN_FLIGHT',
-    'SOURCE_CLAIMED_BY_BLUEPRINT',
-] as const;
-
-export type GitSourceErrorCode = (typeof GIT_SOURCE_ERROR_CODE_VALUES)[number];
+// The runtime list and the type share one source in a leaf module, so a new
+// code cannot be added without reaching every runtime consumer (the status
+// map and the closed-set guard in utils/gitSourceHttp.ts), and the list is
+// never read through a module cycle.
+export { GIT_SOURCE_ERROR_CODE_VALUES, type GitSourceErrorCode } from '../types/gitSourceErrorCode';
 
 export type SourceRevalidationResult =
     | { status: 'reuse'; generation: GitOpsGenerationRow }

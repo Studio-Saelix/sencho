@@ -12,7 +12,8 @@
  * UI can distinguish them by the body field, not the status.
  */
 import type { Response } from 'express';
-import { GitSourceError, GIT_SOURCE_ERROR_CODE_VALUES, type GitSourceErrorCode } from '../services/GitSourceService';
+import { GitSourceError } from '../services/GitSourceService';
+import { GIT_SOURCE_ERROR_CODE_VALUES, type GitSourceErrorCode } from '../types/gitSourceErrorCode';
 
 export function gitSourceStatus(code: GitSourceErrorCode): number {
   switch (code) {
