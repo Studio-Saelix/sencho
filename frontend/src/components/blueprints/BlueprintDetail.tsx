@@ -7,7 +7,7 @@ import GitOpsAuthorityActions from '@/components/gitops/GitOpsAuthorityActions';
 import GitOpsRolloutControls from '@/components/gitops/GitOpsRolloutControls';
 import { blueprintApplicationId } from '@/lib/gitopsAuthorityApi';
 import { absentFault, liveCaveats, livePlacementFacet, liveRolloutFacet } from '@/lib/gitopsState';
-import { Modal, ModalDestructiveHeader, ModalBody, ModalFooter } from '@/components/ui/modal';
+import { ConfirmModal } from '@/components/ui/modal';
 import { Input } from '@/components/ui/input';
 import { Button } from '@/components/ui/button';
 import { Skeleton } from '@/components/ui/skeleton';
@@ -489,47 +489,35 @@ export function BlueprintDetail({ blueprintId, open, onOpenChange, onChanged, ca
                     </>
                 )}
                 {blueprint && (
-                    <Modal open={deleteOpen} onOpenChange={(o) => { if (!o) { setDeleteOpen(false); setDeleteConfirmText(''); } }} size="md">
-                        <ModalDestructiveHeader
-                            kicker="BLUEPRINT · DELETE · IRREVERSIBLE"
-                            title={`Delete ${blueprint.name}`}
-                            description="Stateless and not-yet-deployed deployments are withdrawn automatically. Live stateful deployments must be withdrawn from the deployment table first, or delete is refused."
-                        />
-                        <ModalBody>
-                            <p className="text-sm text-stat-subtitle">
-                                Stateless and not-yet-deployed deployments are withdrawn for you. A stateful deployment that is live on a node must be withdrawn from the deployment table first, so you choose whether to snapshot or destroy its data.
+                    <ConfirmModal
+                        open={deleteOpen}
+                        onOpenChange={(o) => { if (!o) { setDeleteOpen(false); setDeleteConfirmText(''); } }}
+                        variant="destructive"
+                        size="md"
+                        kicker="BLUEPRINT · DELETE · IRREVERSIBLE"
+                        title={`Delete ${blueprint.name}`}
+                        confirmLabel="Delete blueprint"
+                        busyConfirmLabel="Deleting…"
+                        confirming={submitting}
+                        confirmDisabled={!deleteTypedOk}
+                        onConfirm={performDelete}
+                    >
+                        <p className="text-sm text-stat-subtitle">
+                            Stateless and not-yet-deployed deployments are withdrawn for you. A stateful deployment that is live on a node must be withdrawn from the deployment table first, so you choose whether to snapshot or destroy its data.
+                        </p>
+                        <div className="space-y-2">
+                            <p className="text-xs text-stat-subtitle leading-relaxed">
+                                Type <span className="font-mono text-stat-value">{blueprint.name}</span> to confirm.
                             </p>
-                            <div className="space-y-2">
-                                <p className="text-xs text-stat-subtitle leading-relaxed">
-                                    Type <span className="font-mono text-stat-value">{blueprint.name}</span> to confirm.
-                                </p>
-                                <Input
-                                    value={deleteConfirmText}
-                                    onChange={(e) => setDeleteConfirmText(e.target.value)}
-                                    placeholder={blueprint.name}
-                                    className="font-mono text-xs"
-                                    disabled={submitting}
-                                />
-                            </div>
-                        </ModalBody>
-                        <ModalFooter
-                            secondary={
-                                <Button variant="outline" size="sm" onClick={() => { setDeleteOpen(false); setDeleteConfirmText(''); }} disabled={submitting}>
-                                    Cancel
-                                </Button>
-                            }
-                            primary={
-                                <Button
-                                    variant="destructive"
-                                    size="sm"
-                                    disabled={!deleteTypedOk || submitting}
-                                    onClick={performDelete}
-                                >
-                                    Delete blueprint
-                                </Button>
-                            }
-                        />
-                    </Modal>
+                            <Input
+                                value={deleteConfirmText}
+                                onChange={(e) => setDeleteConfirmText(e.target.value)}
+                                placeholder={blueprint.name}
+                                className="font-mono text-xs"
+                                disabled={submitting}
+                            />
+                        </div>
+                    </ConfirmModal>
                 )}
         </>
     );

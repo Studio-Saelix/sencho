@@ -96,9 +96,9 @@ Before a local Blueprint deploy starts, Sencho applies the same pre-deploy [vuln
 
 ## The editor
 
-**New Blueprint** opens a single editor dialog with everything inline: name and description fields, a Monaco YAML editor with the classification banner sitting above it, the targets picker (By node label or Specific nodes), the drift policy cards, and the Reconciler enabled toggle.
+**New Blueprint** opens a single editor dialog with everything inline: name and description fields, a Monaco YAML editor with the classification banner sitting above it, the targets picker (By node label or Specific nodes), the drift policy cards, and the Reconciler enabled switch. The action row stays pinned at the bottom of the dialog: Cancel, Save as draft and Review rollout when you can review rollouts and the reconciler is on, otherwise Cancel and Create blueprint. A line on its left notes whether the action adds node labels or deploys nothing yet. A field that blocks submitting shows its message below it; the name field takes focus, and the editor or targets picker scrolls into view.
 
-<Frame caption="The Blueprint editor. Name and description fields, the classification banner pinned above the compose editor, and the targets picker below. Drift policy cards and the Reconciler enabled toggle sit further down in the same scrollable dialog.">
+<Frame caption="The Blueprint editor. Name and description fields, the classification banner pinned above the compose editor, and the targets picker below. Drift policy cards and the Reconciler enabled switch sit further down in the same scrollable dialog.">
   <img src="/images/blueprint-model/editor-dialog.png" alt="Blueprint editor dialog with name, description, classification banner, compose editor, and node selector" />
 </Frame>
 
@@ -138,9 +138,9 @@ The three policy cards in the editor map exactly to the three modes the reconcil
 
 | Card label | Reconciler behavior |
 |---|---|
-| **Observe** · Detect & display, no notifications | Drift surfaces in the deployment table; no notification, no auto-fix. |
-| **Suggest** · Detect & notify, operator decides | Sencho dispatches a `blueprint_drift_detected` notification through your notification routes, if any. |
-| **Enforce** · Detect & auto-fix, silent on success | Sencho re-deploys the blueprint silently when drift is detected, and retries on each following tick for as long as the row stays **Drifted**. A `blueprint_drift_correction_failed` notification fires when an auto-fix attempt fails, once for that reason rather than on every retry, and a `blueprint_drift_repair_held` notification fires when auto-fix is declined. |
+| **Observe** · Detect & display, shown here, no alerts | Drift surfaces in the deployment table; no notification, no auto-fix. |
+| **Suggest** · Detect & notify, you are alerted and decide | Sencho dispatches a `blueprint_drift_detected` notification through your notification routes, if any. |
+| **Enforce** · Detect & auto-fix, redeployed to match, quietly | Sencho re-deploys the blueprint silently when drift is detected, and retries on each following tick for as long as the row stays **Drifted**. A `blueprint_drift_correction_failed` notification fires when an auto-fix attempt fails, once for that reason rather than on every retry, and a `blueprint_drift_repair_held` notification fires when auto-fix is declined. |
 
 Even **Observe** keeps Sencho honest about what it found: the deployment row shows "drifted 3h ago: service caddy exited code 1". Silence would forfeit Sencho's authority over your fleet.
 

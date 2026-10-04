@@ -4,6 +4,7 @@ import userEvent from '@testing-library/user-event';
 import type { Blueprint, CreateBlueprintInput, UpdateBlueprintInput } from '@/lib/blueprintsApi';
 
 let lastEditorOptions: { readOnly?: boolean } | undefined;
+let nextEditValue = 'evil compose';
 
 vi.mock('@/lib/monacoLoader', () => ({
   Editor: ({
@@ -16,7 +17,7 @@ vi.mock('@/lib/monacoLoader', () => ({
     lastEditorOptions = options;
     return (
       <div data-testid="monaco-editor">
-        <button type="button" data-testid="monaco-edit-trigger" onClick={() => onChange?.('evil compose')}>
+        <button type="button" data-testid="monaco-edit-trigger" onClick={() => onChange?.(nextEditValue)}>
           edit
         </button>
       </div>
@@ -52,7 +53,6 @@ vi.mock('@/components/ui/toast-store', () => ({
 }));
 
 import { analyzeCompose, getContentBinding } from '@/lib/blueprintsApi';
-import { toast } from '@/components/ui/toast-store';
 import { BlueprintEditor, type BlueprintSubmitOptions } from './BlueprintEditor';
 
 const inlineBlueprint: Blueprint = {
@@ -82,6 +82,7 @@ const gitBlueprint: Blueprint = {
 
 beforeEach(() => {
   lastEditorOptions = undefined;
+  nextEditValue = 'evil compose';
   vi.mocked(analyzeCompose).mockResolvedValue({
     classification: 'stateless',
     reasons: [],
@@ -251,7 +252,7 @@ describe('BlueprintEditor targets', () => {
     const user = userEvent.setup();
     const onSubmit = renderCreate();
     await stageLabel(user, 'edge', 'beta');
-    await user.click(screen.getByRole('checkbox', { name: /reconciler enabled/i }));
+    await user.click(screen.getByRole('switch', { name: /reconciler enabled/i }));
     expect(screen.queryByRole('button', { name: 'Review rollout' })).toBeNull();
     await user.click(screen.getByRole('button', { name: 'Create blueprint' }));
     await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(1));
@@ -281,7 +282,7 @@ describe('BlueprintEditor targets', () => {
   it('refuses to continue without a target', async () => {
     const onSubmit = renderCreate();
     fireEvent.click(screen.getByRole('button', { name: 'Review rollout' }));
-    await waitFor(() => expect(toast.error).toHaveBeenCalledWith('Pick at least one label'));
+    expect(await screen.findByRole('alert')).toHaveTextContent('Pick at least one label');
     expect(onSubmit).not.toHaveBeenCalled();
   });
 
@@ -300,5 +301,159 @@ describe('BlueprintEditor targets', () => {
     fireEvent.click(await screen.findByRole('button', { name: /save changes/i }));
     await waitFor(() => expect(onSubmit).toHaveBeenCalled());
     expect(onSubmit.mock.calls[0][0]).toMatchObject({ selector: { type: 'labels', any: ['prod'], all: ['edge'] } });
+  });
+});
+
+describe('BlueprintEditor form feedback', () => {
+  type Submit = (input: CreateBlueprintInput | UpdateBlueprintInput, options: BlueprintSubmitOptions) => Promise<void>;
+
+  function renderCreate(canReview = true) {
+    const onSubmit = vi.fn<Submit>(async () => {});
+    render(
+      <BlueprintEditor mode="create" nodeLabels={{ 1: ['prod'], 2: ['prod'] }} canReview={canReview} onCancel={vi.fn()} onSubmit={onSubmit} submitting={false} />,
+    );
+    return onSubmit;
+  }
+
+  it('flags a missing name beside the field and clears it once typed', async () => {
+    const onSubmit = renderCreate();
+    fireEvent.click(screen.getByRole('button', { name: 'Review rollout' }));
+    expect(await screen.findByText('Give the Blueprint a name')).toBeInTheDocument();
+    expect(screen.getByPlaceholderText('caddy-edge')).toHaveFocus();
+    expect(screen.getByText('Pick at least one label')).toBeInTheDocument();
+    expect(screen.getByPlaceholderText('caddy-edge')).toHaveAttribute('aria-invalid', 'true');
+    fireEvent.change(screen.getByPlaceholderText('caddy-edge'), { target: { value: 'web' } });
+    expect(screen.queryByText('Give the Blueprint a name')).toBeNull();
+    expect(screen.getByText('Pick at least one label')).toBeInTheDocument();
+    expect(onSubmit).not.toHaveBeenCalled();
+  });
+
+  it('rejects a name the server would refuse, inline', async () => {
+    renderCreate();
+    fireEvent.change(screen.getByPlaceholderText('caddy-edge'), { target: { value: 'Web Edge' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Review rollout' }));
+    expect(await screen.findByText(/lowercase letters, digits, hyphens or underscores/)).toBeInTheDocument();
+  });
+
+  it('says what the primary action will do to node labels', async () => {
+    const user = userEvent.setup();
+    renderCreate();
+    expect(screen.getByText('Nothing deploys until you confirm')).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: /^label$/i }));
+    await user.type(await screen.findByLabelText('Label'), 'edge');
+    await user.click(screen.getByRole('checkbox', { name: /beta/ }));
+    await user.click(screen.getByRole('button', { name: 'Add label' }));
+    expect(screen.getByText('Review adds 1 node label. A draft does not')).toBeInTheDocument();
+  });
+
+  it('turns the reconciler off with a switch and explains the consequence', () => {
+    renderCreate();
+    const toggle = screen.getByRole('switch', { name: /reconciler enabled/i });
+    expect(toggle).toHaveAttribute('aria-checked', 'true');
+    fireEvent.click(toggle);
+    expect(toggle).toHaveAttribute('aria-checked', 'false');
+    expect(screen.getByText(/never deployed or repaired/)).toBeInTheDocument();
+  });
+
+  it('shows when the compose could not be analyzed', async () => {
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    vi.mocked(analyzeCompose).mockRejectedValue(new Error('offline'));
+    renderCreate();
+    expect(await screen.findByText('Could not analyze', undefined, { timeout: 3000 })).toBeInTheDocument();
+    expect(spy).toHaveBeenCalled();
+    spy.mockRestore();
+  });
+
+  it('shows one stateful warning, not three', async () => {
+    vi.mocked(analyzeCompose).mockResolvedValue({
+      classification: 'stateful', reasons: [], hasNamedVolumes: true, hasBindMounts: false, hasExternalVolumes: false, hasTmpfsOnly: false,
+    });
+    renderCreate();
+    fireEvent.click(screen.getByRole('button', { name: 'prod' }));
+    expect(await screen.findByText(/stateful and targets more than one node/, undefined, { timeout: 3000 })).toBeInTheDocument();
+    expect(screen.queryByText(/Stateful blueprints require explicit confirmation/)).toBeNull();
+  });
+
+  it('flags an empty compose beside the editor and clears it on edit', async () => {
+    const onSubmit = renderCreate();
+    fireEvent.change(screen.getByPlaceholderText('caddy-edge'), { target: { value: 'web' } });
+    fireEvent.click(screen.getByRole('button', { name: 'prod' }));
+    nextEditValue = '';
+    fireEvent.click(screen.getByTestId('monaco-edit-trigger'));
+    fireEvent.click(screen.getByRole('button', { name: 'Review rollout' }));
+    expect(await screen.findByText('Compose content cannot be empty')).toBeInTheDocument();
+    expect(screen.getByPlaceholderText('caddy-edge')).not.toHaveFocus();
+    expect(onSubmit).not.toHaveBeenCalled();
+    nextEditValue = 'services: {}';
+    fireEvent.click(screen.getByTestId('monaco-edit-trigger'));
+    expect(screen.queryByText('Compose content cannot be empty')).toBeNull();
+  });
+
+  it('clears the target error as soon as a label is chosen', async () => {
+    renderCreate();
+    fireEvent.change(screen.getByPlaceholderText('caddy-edge'), { target: { value: 'web' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Review rollout' }));
+    expect(await screen.findByText('Pick at least one label')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'prod' }));
+    expect(screen.queryByText('Pick at least one label')).toBeNull();
+  });
+
+  it('cancels from the create footer', () => {
+    const onCancel = vi.fn();
+    render(
+      <BlueprintEditor mode="create" nodeLabels={{}} canReview onCancel={onCancel} onSubmit={vi.fn()} submitting={false} />,
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+    expect(onCancel).toHaveBeenCalledTimes(1);
+  });
+
+  it('hints the label write on the single create action when no rollout can be reviewed', async () => {
+    const user = userEvent.setup();
+    renderCreate(false);
+    await user.click(screen.getByRole('button', { name: /^label$/i }));
+    await user.type(await screen.findByLabelText('Label'), 'edge');
+    await user.click(screen.getByRole('checkbox', { name: /beta/ }));
+    await user.click(screen.getByRole('button', { name: 'Add label' }));
+    expect(screen.getByText('Adds 1 node label')).toBeInTheDocument();
+  });
+
+  it('keeps edit actions inline with no draft or review action, and hints staged labels on save', async () => {
+    const user = userEvent.setup();
+    const onCancel = vi.fn();
+    render(
+      <BlueprintEditor mode="edit" initial={inlineBlueprint} nodeLabels={{ 1: ['prod'], 2: [] }} canReview onCancel={onCancel} onSubmit={vi.fn()} submitting={false} />,
+    );
+    expect(screen.queryByRole('button', { name: 'Save as draft' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Review rollout' })).toBeNull();
+    expect(screen.queryByText(/on save/)).toBeNull();
+    await user.click(screen.getByRole('button', { name: /^label$/i }));
+    await user.type(await screen.findByLabelText('Label'), 'edge');
+    await user.click(screen.getByRole('checkbox', { name: /beta/ }));
+    await user.click(screen.getByRole('button', { name: 'Add label' }));
+    expect(screen.getByText('Adds 1 node label on save')).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: 'Cancel' }));
+    expect(onCancel).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not warn about multiple nodes when the selector reaches one', async () => {
+    vi.mocked(analyzeCompose).mockResolvedValue({
+      classification: 'stateful', reasons: [], hasNamedVolumes: true, hasBindMounts: false, hasExternalVolumes: false, hasTmpfsOnly: false,
+    });
+    render(
+      <BlueprintEditor mode="create" nodeLabels={{ 1: ['prod'], 2: [] }} canReview onCancel={vi.fn()} onSubmit={vi.fn()} submitting={false} />,
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'prod' }));
+    expect(await screen.findByText(/Persistent volumes detected/, undefined, { timeout: 3000 })).toBeInTheDocument();
+    expect(screen.queryByText(/stateful and targets more than one node/)).toBeNull();
+  });
+
+  it('drops the analysis failure notice once a later analysis succeeds', async () => {
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    vi.mocked(analyzeCompose).mockRejectedValueOnce(new Error('offline'));
+    renderCreate();
+    expect(await screen.findByText('Could not analyze', undefined, { timeout: 3000 })).toBeInTheDocument();
+    fireEvent.click(screen.getByTestId('monaco-edit-trigger'));
+    await waitFor(() => expect(screen.queryByText('Could not analyze')).toBeNull(), { timeout: 3000 });
+    spy.mockRestore();
   });
 });

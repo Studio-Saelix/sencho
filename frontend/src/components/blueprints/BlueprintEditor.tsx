@@ -1,9 +1,11 @@
 import { Suspense, useEffect, useMemo, useRef, useState } from 'react';
-import { AlertTriangle, Save, Sparkles, Zap } from 'lucide-react';
+import { AlertTriangle, Save, Sparkles } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { BusyButton } from '@/components/ui/busy-button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
+import { ModalBody, ModalFooter } from '@/components/ui/modal';
+import { TogglePill } from '@/components/ui/toggle-pill';
 import { Skeleton } from '@/components/ui/skeleton';
 import { toast } from '@/components/ui/toast-store';
 import { Editor } from '@/lib/monacoLoader';
@@ -26,6 +28,7 @@ import {
     draftFromSelector,
     isDraftEmpty,
     matchNodes,
+    plural,
     selectorFromDraft,
     stagedInUse,
     withStagedLabels,
@@ -55,8 +58,13 @@ interface BlueprintEditorProps {
     mode: 'create' | 'edit';
 }
 
-const DEFAULT_COMPOSE = `# Blueprint compose. Sencho writes this file plus a .blueprint.json marker
-# to <COMPOSE_DIR>/<blueprint-name>/ on every targeted node.
+interface FormErrors {
+    name?: string;
+    compose?: string;
+    targets?: string;
+}
+
+const DEFAULT_COMPOSE = `# Sencho deploys this file to every node the Blueprint targets.
 
 services:
   app:
@@ -67,9 +75,9 @@ services:
 `;
 
 const DRIFT_MODES: Array<{ value: DriftMode; kicker: string; title: string; tagline: string }> = [
-    { value: 'observe', kicker: 'Observe', title: 'Detect & display', tagline: 'no notifications' },
-    { value: 'suggest', kicker: 'Suggest', title: 'Detect & notify', tagline: 'operator decides' },
-    { value: 'enforce', kicker: 'Enforce', title: 'Detect & auto-fix', tagline: 'silent on success' },
+    { value: 'observe', kicker: 'Observe', title: 'Detect & display', tagline: 'Shown here, no alerts' },
+    { value: 'suggest', kicker: 'Suggest', title: 'Detect & notify', tagline: 'You are alerted and decide' },
+    { value: 'enforce', kicker: 'Enforce', title: 'Detect & auto-fix', tagline: 'Redeployed to match, quietly' },
 ];
 
 export function BlueprintEditor({ initial, nodeLabels, canReview = false, onCancel, onSubmit, submitting, mode }: BlueprintEditorProps) {
@@ -83,9 +91,14 @@ export function BlueprintEditor({ initial, nodeLabels, canReview = false, onCanc
     const [draft, setDraft] = useState(() => draftFromSelector(initial?.selector ?? { type: 'labels', any: [], all: [] }));
     const [staged, setStaged] = useState<StagedLabel[]>([]);
     const [pendingIntent, setPendingIntent] = useState<'draft' | 'primary' | null>(null);
+    const [errors, setErrors] = useState<FormErrors>({});
+    const nameRef = useRef<HTMLInputElement>(null);
+    const composeRef = useRef<HTMLDivElement>(null);
+    const targetsRef = useRef<HTMLDivElement>(null);
 
     const [analysis, setAnalysis] = useState<AnalyzerResult | null>(null);
     const [analyzing, setAnalyzing] = useState(false);
+    const [analyzeFailed, setAnalyzeFailed] = useState(false);
     const [binding, setBinding] = useState<ContentBindingView | null>(null);
     const [bindingError, setBindingError] = useState(false);
     const gitManaged = initial?.content_origin === 'git';
@@ -97,7 +110,10 @@ export function BlueprintEditor({ initial, nodeLabels, canReview = false, onCanc
     useEffect(() => {
         const t = setTimeout(async () => {
             if (!composeContent.trim()) {
+                analyzeGen.current += 1;
                 setAnalysis(null);
+                setAnalyzing(false);
+                setAnalyzeFailed(false);
                 return;
             }
             const gen = ++analyzeGen.current;
@@ -106,8 +122,14 @@ export function BlueprintEditor({ initial, nodeLabels, canReview = false, onCanc
                 const result = await analyzeCompose(composeContent);
                 if (gen !== analyzeGen.current) return; // a newer request superseded us
                 setAnalysis(result);
-            } catch {
-                // Silent fail; banner shows "not analyzed yet" until next try
+                setAnalyzeFailed(false);
+            } catch (err) {
+                console.error('[Blueprints] compose analysis failed:', err);
+                if (gen === analyzeGen.current) {
+                    // A stale classification beside "Could not analyze" would describe the previous compose.
+                    setAnalysis(null);
+                    setAnalyzeFailed(true);
+                }
             } finally {
                 if (gen === analyzeGen.current) setAnalyzing(false);
             }
@@ -140,14 +162,21 @@ export function BlueprintEditor({ initial, nodeLabels, canReview = false, onCanc
     );
     const isStatefulMulti = analysis?.classification === 'stateful' && matchedCount > 1;
 
-    function validate(): string | null {
+    function validate(): FormErrors {
+        const found: FormErrors = {};
         if (mode === 'create') {
-            if (!name.trim()) return 'Blueprint needs a name';
-            if (!/^[a-z0-9][a-z0-9_-]*$/.test(name.trim())) return 'Name must be lowercase letters, digits, hyphens, or underscores (must start with a letter or digit)';
+            if (!name.trim()) found.name = 'Give the Blueprint a name';
+            else if (!/^[a-z0-9][a-z0-9_-]*$/.test(name.trim())) found.name = 'Use lowercase letters, digits, hyphens or underscores, starting with a letter or digit';
         }
-        if (!composeContent.trim()) return 'Compose content cannot be empty';
-        if (isDraftEmpty(draft)) return draft.type === 'labels' ? 'Pick at least one label' : 'Pick at least one node';
-        return null;
+        if (!composeContent.trim()) found.compose = 'Compose content cannot be empty';
+        if (isDraftEmpty(draft)) found.targets = draft.type === 'labels' ? 'Pick at least one label' : 'Pick at least one node';
+        return found;
+    }
+
+    function revealFirstError(found: FormErrors) {
+        if (found.name) nameRef.current?.focus();
+        else if (found.compose) composeRef.current?.scrollIntoView?.({ block: 'center' });
+        else targetsRef.current?.scrollIntoView?.({ block: 'center' });
     }
 
     // Create mode offers a draft save only when the operator can review a rollout
@@ -156,8 +185,9 @@ export function BlueprintEditor({ initial, nodeLabels, canReview = false, onCanc
     const primaryIntent: BlueprintSubmitOptions['intent'] = offersDraft ? 'review' : 'save';
 
     async function handleSubmit(which: 'draft' | 'primary') {
-        const err = validate();
-        if (err) { toast.error(err); return; }
+        const found = validate();
+        setErrors(found);
+        if (Object.keys(found).length > 0) { revealFirstError(found); return; }
         const fields = {
             name: name.trim(),
             description: description.trim() || null,
@@ -178,18 +208,57 @@ export function BlueprintEditor({ initial, nodeLabels, canReview = false, onCanc
         }
     }
 
-    return (
-        <div className="space-y-5">
+    const tags = stagedInUse(staged, selector).length;
+    function footerHint(): string | undefined {
+        const labels = plural(tags, 'node label');
+        if (offersDraft) return tags > 0 ? `Review adds ${labels}. A draft does not` : 'Nothing deploys until you confirm';
+        if (tags === 0) return undefined;
+        return mode === 'edit' ? `Adds ${labels} on save` : `Adds ${labels}`;
+    }
+    const hint = footerHint();
+
+    const cancelButton = <Button variant="outline" size="sm" onClick={onCancel} disabled={submitting}>Cancel</Button>;
+    const draftButton = offersDraft ? (
+        <BusyButton
+            variant="outline"
+            size="sm"
+            pending={submitting && pendingIntent === 'draft'}
+            disabled={submitting}
+            busyLabel="Saving…"
+            onClick={() => void handleSubmit('draft')}
+        >
+            Save as draft
+        </BusyButton>
+    ) : null;
+    const primaryButton = (
+        <BusyButton
+            size="sm"
+            className="gap-2"
+            pending={submitting && pendingIntent === 'primary'}
+            disabled={submitting}
+            busyLabel={mode === 'create' ? 'Creating…' : 'Saving…'}
+            onClick={() => void handleSubmit('primary')}
+        >
+            {mode === 'create' ? <Sparkles className="h-4 w-4" /> : <Save className="h-4 w-4" />}
+            {offersDraft ? 'Review rollout' : mode === 'create' ? 'Create blueprint' : 'Save changes'}
+        </BusyButton>
+    );
+
+    const fieldsBlock = (
+        <>
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                 <div className="space-y-1.5">
                     <Label className="font-mono text-[10px] uppercase tracking-[0.18em] text-stat-icon">Name</Label>
                     <Input
+                        ref={nameRef}
                         value={name}
-                        onChange={e => setName(e.target.value)}
+                        onChange={e => { setName(e.target.value); setErrors(prev => ({ ...prev, name: undefined })); }}
                         placeholder="caddy-edge"
-                        className="font-mono"
+                        className={`font-mono ${errors.name ? 'border-destructive' : ''}`}
+                        aria-invalid={errors.name ? true : undefined}
                         disabled={mode === 'edit'}
                     />
+                    {errors.name && <p role="alert" className="text-[11px] text-destructive">{errors.name}</p>}
                     {mode === 'edit' && (
                         <p className="text-[10px] text-muted-foreground">Name is fixed once a blueprint exists.</p>
                     )}
@@ -216,6 +285,11 @@ export function BlueprintEditor({ initial, nodeLabels, canReview = false, onCanc
                                 Analyzing…
                             </span>
                         )}
+                        {analyzeFailed && !analyzing && (
+                            <span className="font-mono text-[10px] text-warning uppercase tracking-[0.18em]">
+                                Could not analyze
+                            </span>
+                        )}
                     </div>
                 </div>
                 {gitManaged && (
@@ -237,13 +311,13 @@ export function BlueprintEditor({ initial, nodeLabels, canReview = false, onCanc
                     </div>
                 )}
                 <BlueprintClassificationBanner analysis={analysis} />
-                <div className="rounded-lg border border-card-border overflow-hidden">
+                <div ref={composeRef} className="rounded-lg border border-card-border overflow-hidden">
                     <Suspense fallback={<Skeleton className="h-[320px] w-full" />}>
                         <Editor
                             height="320px"
                             language="yaml"
                             value={composeContent}
-                            onChange={(v) => { if (!gitManaged) setComposeContent(v ?? ''); }}
+                            onChange={(v) => { if (!gitManaged) { setComposeContent(v ?? ''); setErrors(prev => ({ ...prev, compose: undefined })); } }}
                             options={{
                                 minimap: { enabled: false },
                                 scrollBeyondLastLine: false,
@@ -255,27 +329,27 @@ export function BlueprintEditor({ initial, nodeLabels, canReview = false, onCanc
                         />
                     </Suspense>
                 </div>
+                {errors.compose && <p role="alert" className="text-[11px] text-destructive">{errors.compose}</p>}
                 {isStatefulMulti && (
-                    <div className="flex items-start gap-2 rounded-lg border border-warning/30 bg-warning/5 p-3">
-                        <AlertTriangle className="w-4 h-4 text-warning shrink-0 mt-0.5" strokeWidth={1.5} />
-                        <p className="text-xs text-stat-subtitle leading-relaxed">
-                            This blueprint is stateful and targets multiple nodes. Each node will hold its own data; Sencho does not replicate volumes between nodes.
-                        </p>
-                    </div>
+                    <p className="flex items-start gap-2 text-xs leading-relaxed text-stat-subtitle">
+                        <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-warning" strokeWidth={1.5} />
+                        This blueprint is stateful and targets more than one node. Each node keeps its own data; Sencho does not replicate volumes.
+                    </p>
                 )}
             </div>
 
-            <div className="space-y-2">
+            <div ref={targetsRef} className="space-y-2">
                 <Label className="font-mono text-[10px] uppercase tracking-[0.18em] text-stat-icon">Targets</Label>
                 <BlueprintTargets
                     draft={draft}
-                    onDraftChange={setDraft}
+                    onDraftChange={(next) => { setDraft(next); if (!isDraftEmpty(next)) setErrors(prev => ({ ...prev, targets: undefined })); }}
                     nodes={nodes}
                     nodeLabels={nodeLabels}
                     staged={staged}
                     onStagedChange={setStaged}
                     canLabelNode={(id) => can('node:manage', 'node', String(id))}
                 />
+                {errors.targets && <p role="alert" className="text-[11px] text-destructive">{errors.targets}</p>}
             </div>
 
             <div className="space-y-2">
@@ -303,53 +377,45 @@ export function BlueprintEditor({ initial, nodeLabels, canReview = false, onCanc
                         );
                     })}
                 </div>
+                <div className="flex items-center justify-between gap-3 rounded-lg border border-card-border bg-card px-3 py-2">
+                    <div className="min-w-0">
+                        <p className="font-mono text-[10px] uppercase tracking-[0.18em] text-stat-icon">Reconciler</p>
+                        <p className="text-[11px] text-stat-subtitle">
+                            {enabled
+                                ? 'Sencho keeps targeted nodes in sync once you confirm a rollout.'
+                                : 'Off: the Blueprint is saved but never deployed or repaired.'}
+                        </p>
+                    </div>
+                    <TogglePill checked={enabled} onChange={setEnabled} aria-label="Reconciler enabled" />
+                </div>
             </div>
+        </>
+    );
 
-            <div className="flex items-center justify-between border-t border-border pt-4">
-                <label className="flex items-center gap-2 cursor-pointer">
-                    <input type="checkbox" checked={enabled} onChange={e => setEnabled(e.target.checked)} />
-                    <span className="text-xs text-stat-subtitle">Reconciler enabled</span>
-                </label>
+    // Create renders inside a Modal, so its actions are the Modal's pinned footer;
+    // edit renders inside the detail sheet, where the actions follow the fields.
+    const isCreate = mode === 'create';
+    if (isCreate) {
+        return (
+            <>
+                <ModalBody fill className="space-y-5">
+                    {fieldsBlock}
+                </ModalBody>
+                <ModalFooter hint={hint} secondary={<>{cancelButton}{draftButton}</>} primary={primaryButton} />
+            </>
+        );
+    }
+
+    return (
+        <div className="space-y-5">
+            {fieldsBlock}
+            <div className="flex items-center justify-between gap-3 border-t border-border pt-4">
+                <span className="font-mono text-[10px] uppercase tracking-[0.18em] text-stat-subtitle">{hint}</span>
                 <div className="flex items-center gap-2">
-                    <Button variant="outline" size="sm" onClick={onCancel} disabled={submitting}>Cancel</Button>
-                    {offersDraft && (
-                        <BusyButton
-                            variant="outline"
-                            size="sm"
-                            pending={submitting && pendingIntent === 'draft'}
-                            disabled={submitting}
-                            busyLabel="Saving…"
-                            onClick={() => void handleSubmit('draft')}
-                        >
-                            Save as draft
-                        </BusyButton>
-                    )}
-                    <BusyButton
-                        size="sm"
-                        className="gap-2"
-                        pending={submitting && pendingIntent === 'primary'}
-                        disabled={submitting}
-                        busyLabel={mode === 'create' ? 'Creating…' : 'Saving…'}
-                        onClick={() => void handleSubmit('primary')}
-                    >
-                        {mode === 'create' ? <Sparkles className="h-4 w-4" /> : <Save className="h-4 w-4" />}
-                        {offersDraft ? 'Review rollout' : mode === 'create' ? 'Create blueprint' : 'Save changes'}
-                    </BusyButton>
+                    {cancelButton}
+                    {primaryButton}
                 </div>
             </div>
-
-            {offersDraft && staged.length > 0 && (
-                <p className="text-right text-[11px] text-stat-subtitle">
-                    A draft saves the Blueprint only, so it matches no nodes until the new node labels are added when you review the rollout.
-                </p>
-            )}
-
-            {!analysis?.parseError && analysis?.classification === 'stateful' && (
-                <div className="flex items-start gap-2 text-xs text-stat-subtitle">
-                    <Zap className="h-3 w-3 text-warning shrink-0 mt-0.5" strokeWidth={1.5} />
-                    <span>Stateful blueprints require explicit confirmation on first deploy and on eviction. The deployment table will surface those prompts.</span>
-                </div>
-            )}
         </div>
     );
 }

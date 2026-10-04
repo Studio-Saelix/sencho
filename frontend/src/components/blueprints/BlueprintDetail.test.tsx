@@ -5,12 +5,12 @@
  * gates so each role sees only actions accepted by the API.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, fireEvent } from '@testing-library/react';
+import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import type { BlueprintSummary } from '@/lib/blueprintsApi';
 
 vi.mock('@/lib/blueprintsApi', async (importOriginal) => {
     const actual = await importOriginal<typeof import('@/lib/blueprintsApi')>();
-    return { ...actual, getBlueprint: vi.fn(), applyBlueprint: vi.fn(), previewBlueprint: vi.fn() };
+    return { ...actual, getBlueprint: vi.fn(), applyBlueprint: vi.fn(), previewBlueprint: vi.fn(), deleteBlueprint: vi.fn() };
 });
 
 vi.mock('@/context/NodeContext', () => ({ useNodes: () => ({ nodes: [] }) }));
@@ -47,7 +47,8 @@ vi.mock('./RetireBlueprintDialog', () => ({
     ),
 }));
 
-import { getBlueprint } from '@/lib/blueprintsApi';
+import { deleteBlueprint, getBlueprint } from '@/lib/blueprintsApi';
+import { toast } from '@/components/ui/toast-store';
 import { BlueprintDetail } from './BlueprintDetail';
 import { absentRevision, facets, liveRevision, missingApplicationLimitation } from '@/__tests__/gitopsFixtures';
 import type { FutureRolloutAuthorizationBinding } from '@/types/gitops';
@@ -367,5 +368,54 @@ describe('BlueprintDetail review handoff', () => {
         );
         expect(await screen.findByText('Show compose source')).toBeInTheDocument();
         expect(screen.queryByTestId('rollout-preview-dialog')).not.toBeInTheDocument();
+    });
+});
+
+describe('BlueprintDetail delete', () => {
+    it('keeps Delete disabled until the Blueprint name is typed, then deletes and closes', async () => {
+        vi.mocked(deleteBlueprint).mockResolvedValue(undefined as never);
+        const onChanged = vi.fn();
+        const onOpenChange = vi.fn();
+        render(
+            <BlueprintDetail blueprintId={1} open onOpenChange={onOpenChange} onChanged={onChanged} canEdit nodeLabels={{}} />,
+        );
+        fireEvent.click(await screen.findByRole('button', { name: /^delete$/i }));
+        const confirm = await screen.findByRole('button', { name: 'Delete blueprint' });
+        expect(confirm).toBeDisabled();
+        fireEvent.change(screen.getByPlaceholderText('web-blueprint'), { target: { value: 'web-blueprint' } });
+        expect(confirm).toBeEnabled();
+        fireEvent.click(confirm);
+        await waitFor(() => expect(deleteBlueprint).toHaveBeenCalledWith(1));
+        await waitFor(() => expect(onOpenChange).toHaveBeenCalledWith(false));
+        expect(onChanged).toHaveBeenCalled();
+    });
+
+    it('does not accept a near-miss name', async () => {
+        render(
+            <BlueprintDetail blueprintId={1} open onOpenChange={noop} onChanged={noop} canEdit nodeLabels={{}} />,
+        );
+        fireEvent.click(await screen.findByRole('button', { name: /^delete$/i }));
+        const confirm = await screen.findByRole('button', { name: 'Delete blueprint' });
+        fireEvent.change(screen.getByPlaceholderText('web-blueprint'), { target: { value: 'Web-Blueprint' } });
+        expect(confirm).toBeDisabled();
+        fireEvent.change(screen.getByPlaceholderText('web-blueprint'), { target: { value: 'web' } });
+        expect(confirm).toBeDisabled();
+    });
+
+    it('keeps the dialog open and reports the error when delete fails', async () => {
+        vi.mocked(deleteBlueprint).mockRejectedValue(new Error('Live stateful deployments exist'));
+        const onChanged = vi.fn();
+        const onOpenChange = vi.fn();
+        render(
+            <BlueprintDetail blueprintId={1} open onOpenChange={onOpenChange} onChanged={onChanged} canEdit nodeLabels={{}} />,
+        );
+        fireEvent.click(await screen.findByRole('button', { name: /^delete$/i }));
+        fireEvent.change(await screen.findByPlaceholderText('web-blueprint'), { target: { value: 'web-blueprint' } });
+        fireEvent.click(screen.getByRole('button', { name: 'Delete blueprint' }));
+        await waitFor(() => expect(toast.error).toHaveBeenCalledWith('Live stateful deployments exist'));
+        expect(screen.getByRole('button', { name: 'Delete blueprint' })).toBeEnabled();
+        expect(screen.getByPlaceholderText('web-blueprint')).toHaveValue('web-blueprint');
+        expect(onChanged).not.toHaveBeenCalled();
+        expect(onOpenChange).not.toHaveBeenCalledWith(false);
     });
 });

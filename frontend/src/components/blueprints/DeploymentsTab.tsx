@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import { Plus } from 'lucide-react';
-import { Modal, ModalHeader, ModalBody } from '@/components/ui/modal';
+import { Modal, ModalHeader } from '@/components/ui/modal';
 import { Button } from '@/components/ui/button';
 import { toast } from '@/components/ui/toast-store';
 import {
@@ -177,22 +177,20 @@ export function DeploymentsTab() {
                 />
             )}
 
-            <Modal open={createOpen} onOpenChange={setCreateOpen} className="max-w-3xl max-h-[85vh] overflow-y-auto">
+            <Modal open={createOpen} onOpenChange={setCreateOpen} className="flex max-h-[85dvh] max-w-3xl flex-col">
                 <ModalHeader
                     kicker="BLUEPRINTS · NEW"
                     title="Declare a fleet-wide compose template"
                     description="Create a blueprint that can be deployed across the fleet."
                 />
-                <ModalBody>
-                    <BlueprintEditor
-                        mode="create"
-                        nodeLabels={nodeLabels}
-                        canReview={canReview}
-                        onCancel={() => setCreateOpen(false)}
-                        onSubmit={handleCreate}
-                        submitting={submitting}
-                    />
-                </ModalBody>
+                <BlueprintEditor
+                    mode="create"
+                    nodeLabels={nodeLabels}
+                    canReview={canReview}
+                    onCancel={() => setCreateOpen(false)}
+                    onSubmit={handleCreate}
+                    submitting={submitting}
+                />
             </Modal>
         </div>
     );
