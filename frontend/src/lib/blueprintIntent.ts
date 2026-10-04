@@ -1,7 +1,7 @@
 /**
  * Open the Fleet Blueprints surface on one Blueprint's detail, or on the
- * create dialog, from anywhere in the shell (the GitOps workplace's row menu
- * and masthead, for example).
+ * create dialog, from anywhere in the shell. The GitOps workplace opens them over
+ * itself and comes here only when it cannot host the sheets.
  *
  * The intent travels two ways because the Blueprints tab may or may not be
  * mounted: a mounted tab hears the event, a mounting one reads the pending

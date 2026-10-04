@@ -54,9 +54,11 @@ interface BlueprintDetailProps {
     nodeLabels: NodeLabelMap;
     /** Open the rollout preview as soon as the Blueprint loads (set after Review rollout). */
     reviewOnOpen?: boolean;
+    /** False where the sheet already sits over the GitOps workplace, so a link back to it would go nowhere. */
+    showPortfolioLink?: boolean;
 }
 
-export function BlueprintDetail({ blueprintId, open, onOpenChange, onChanged, canEdit, can, nodeLabels, reviewOnOpen = false }: BlueprintDetailProps) {
+export function BlueprintDetail({ blueprintId, open, onOpenChange, onChanged, canEdit, can, nodeLabels, reviewOnOpen = false, showPortfolioLink = true }: BlueprintDetailProps) {
     const [summary, setSummary] = useState<BlueprintSummary | null>(null);
     const [loading, setLoading] = useState(false);
     const [editMode, setEditMode] = useState(false);
@@ -398,17 +400,19 @@ export function BlueprintDetail({ blueprintId, open, onOpenChange, onChanged, ca
                                             />
                                             {/* This Blueprint's application in the portfolio, beside
                                                 every other GitOps application and the attention queue. */}
-                                            <Button
-                                                variant="link"
-                                                size="sm"
-                                                className="h-auto p-0 text-xs"
-                                                onClick={() => {
-                                                    onOpenChange(false);
-                                                    openGitOpsWorkplace({ blueprintId: blueprint.id });
-                                                }}
-                                            >
-                                                Open in GitOps portfolio
-                                            </Button>
+                                            {showPortfolioLink && (
+                                                <Button
+                                                    variant="link"
+                                                    size="sm"
+                                                    className="h-auto p-0 text-xs"
+                                                    onClick={() => {
+                                                        onOpenChange(false);
+                                                        openGitOpsWorkplace({ blueprintId: blueprint.id });
+                                                    }}
+                                                >
+                                                    Open in GitOps portfolio
+                                                </Button>
+                                            )}
                                         </>
                                     )}
                                 </div>

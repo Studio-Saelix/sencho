@@ -585,3 +585,26 @@ describe('BlueprintDetail status verbs and gating', () => {
     });
 });
 
+describe('BlueprintDetail GitOps link', () => {
+    const inlineGitOps = () => summary({
+        gitopsRevision: liveRevision({
+            targetMode: 'inline_blueprint',
+            blueprintId: 1,
+            facets: facets({ source: { status: 'not_applicable' }, placement: { status: 'blueprint_bound', completion: 'unknown' } }),
+        }),
+    });
+
+    it('offers the link to the GitOps portfolio by default', async () => {
+        vi.mocked(getBlueprint).mockResolvedValue(inlineGitOps());
+        render(<BlueprintDetail blueprintId={1} open onOpenChange={noop} onChanged={noop} canEdit nodeLabels={{}} />);
+        expect(await screen.findByRole('button', { name: 'Open in GitOps portfolio' })).toBeInTheDocument();
+    });
+
+    it('leaves the link out where the sheet already sits over the workplace', async () => {
+        vi.mocked(getBlueprint).mockResolvedValue(inlineGitOps());
+        render(<BlueprintDetail blueprintId={1} open onOpenChange={noop} onChanged={noop} canEdit nodeLabels={{}} showPortfolioLink={false} />);
+        await screen.findByTestId('blueprint-status');
+        expect(screen.queryByRole('button', { name: 'Open in GitOps portfolio' })).toBeNull();
+    });
+});
+

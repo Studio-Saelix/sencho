@@ -9,6 +9,8 @@ import { apiFetch } from '@/lib/api';
 import { blueprintDetailResponse, portfolioRow } from '../application/applicationFixtures';
 import { GitOpsWorkplaceView } from './GitOpsWorkplaceView';
 import { closeGitOpsApplication } from './portfolioNavigation';
+import { SENCHO_NAVIGATE_EVENT } from '@/lib/events';
+import { clearBlueprintIntent, peekBlueprintIntent } from '@/lib/blueprintIntent';
 import type { GitOpsPortfolioResponse } from '@/types/gitopsPortfolio';
 
 vi.mock('@/lib/api', () => ({
@@ -17,17 +19,29 @@ vi.mock('@/lib/api', () => ({
 
 // The application sheet and the queue read the session's permissions. The suite is
 // read-only by default (`allowed` is false); a test that needs an action opts in.
-const session = vi.hoisted(() => ({ allowed: false }));
+const session = vi.hoisted(() => ({ allowed: false, fleet: false }));
 vi.mock('@/context/AuthContext', () => ({
   useAuth: () => ({ can: () => session.allowed }),
 }));
 
 vi.mock('@/context/NodeContext', () => ({
-  useNodes: () => ({ hasCapability: () => false, nodeMeta: new Map() }),
+  useNodes: () => ({ hasCapability: () => session.fleet, nodeMeta: new Map() }),
 }));
 
 // The Git source host mounts with the workplace; this suite never opens it.
 vi.mock('./GitOpsGitSourceHost', () => ({ GitOpsGitSourceHost: () => null }));
+
+// The Blueprint sheets are real hosts here; only their heavy bodies are stood in for.
+vi.mock('@/components/blueprints/BlueprintDetail', () => ({
+  BlueprintDetail: ({ blueprintId }: { blueprintId: number }) => <div data-testid="blueprint-detail">{blueprintId}</div>,
+}));
+vi.mock('@/components/blueprints/BlueprintEditor', () => ({
+  BlueprintEditor: () => <div data-testid="blueprint-editor" />,
+}));
+vi.mock('@/lib/blueprintsApi', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/lib/blueprintsApi')>()),
+  listAllNodeLabels: vi.fn(async () => ({})),
+}));
 
 const mockFetch = vi.mocked(apiFetch);
 
@@ -53,6 +67,8 @@ function ok(body: unknown): Response {
 
 afterEach(() => {
   session.allowed = false;
+  session.fleet = false;
+  clearBlueprintIntent();
   mockFetch.mockReset();
   window.history.replaceState({}, '', '/');
 });
@@ -157,5 +173,41 @@ describe('GitOpsWorkplaceView', () => {
 
     await waitFor(() => expect(mockFetch.mock.calls.some(([url]) => String(url).includes('/stacks/bookstack/git-source/retry'))).toBe(true));
     await waitFor(() => expect(listReads()).toBeGreaterThan(before));
+  });
+
+  it('declares a Blueprint over the portfolio without leaving GitOps', async () => {
+    session.allowed = true;
+    session.fleet = true;
+    window.history.replaceState({ senchoIdx: 0 }, '', '/nodes/local/gitops');
+    mockFetch.mockResolvedValue(ok(list));
+    const navigated: unknown[] = [];
+    const onNavigate = (e: Event) => navigated.push((e as CustomEvent).detail);
+    window.addEventListener(SENCHO_NAVIGATE_EVENT, onNavigate);
+    try {
+      render(<GitOpsWorkplaceView />);
+      fireEvent.click(await screen.findByRole('button', { name: /new blueprint/i }));
+      expect(await screen.findByTestId('blueprint-editor')).toBeInTheDocument();
+    } finally {
+      window.removeEventListener(SENCHO_NAVIGATE_EVENT, onNavigate);
+    }
+    expect(navigated).toEqual([]);
+    expect(peekBlueprintIntent()).toBeNull();
+  });
+
+  it('hands a Blueprint application sheet over to the Blueprint sheet, in place', async () => {
+    session.allowed = true;
+    session.fleet = true;
+    window.history.replaceState({ senchoIdx: 0 }, '', '/nodes/local/gitops');
+    mockFetch.mockImplementation(async (url: string) => (
+      url.startsWith('/gitops/applications/') ? ok(blueprintDetailResponse()) : ok(list)
+    ));
+    render(<GitOpsWorkplaceView />);
+
+    fireEvent.click(await screen.findByRole('button', { name: 'shop' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Open Blueprint' }));
+
+    expect(await screen.findByTestId('blueprint-detail')).toHaveTextContent('3');
+    await waitFor(() => expect(screen.queryByTestId('gitops-application-detail')).toBeNull());
+    expect(peekBlueprintIntent()).toBeNull();
   });
 });

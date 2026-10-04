@@ -7,17 +7,21 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   APPLICATION_QUERY_PARAM,
   GITOPS_APPLICATION_EVENT,
+  GITOPS_BLUEPRINT_EVENT,
   GITOPS_GIT_SOURCE_EVENT,
   applicationIdFromSearch,
   attentionNextStep,
   closeGitOpsApplication,
+  openBlueprintInPlace,
   openGitOpsApplication,
   portfolioRowActions,
+  type GitOpsBlueprintRequest,
   type GitOpsGitSourceTarget,
 } from './portfolioNavigation';
 import { portfolioRow } from '../application/applicationFixtures';
 import { BLUEPRINT_INTENT_EVENT, type BlueprintIntent } from '@/lib/blueprintIntent';
-import { SENCHO_OPEN_STACK_EVENT, type SenchoOpenStackDetail } from '@/lib/events';
+import { SENCHO_NAVIGATE_EVENT, SENCHO_OPEN_STACK_EVENT, type SenchoNavigateDetail, type SenchoOpenStackDetail } from '@/lib/events';
+import { clearBlueprintIntent } from '@/lib/blueprintIntent';
 
 beforeEach(() => {
   window.history.replaceState({ senchoIdx: 4 }, '', '/nodes/local/gitops?mode=direct');
@@ -172,3 +176,46 @@ describe('portfolio row actions and attention next steps', () => {
     expect(attentionNextStep('deploy_failed', blueprint).label).toBe('Open');
   });
 });
+
+describe('openBlueprintInPlace', () => {
+  afterEach(() => clearBlueprintIntent());
+
+  function listen<T>(type: string, run: () => void, take?: (detail: T) => void): T[] {
+    const seen: T[] = [];
+    const handler = (e: Event) => {
+      const detail = (e as CustomEvent<T>).detail;
+      seen.push(detail);
+      take?.(detail);
+    };
+    window.addEventListener(type, handler);
+    try { run(); } finally { window.removeEventListener(type, handler); }
+    return seen;
+  }
+
+  it('stays in the workplace when a host takes the request', () => {
+    let navigated: SenchoNavigateDetail[] = [];
+    let intents: BlueprintIntent[] = [];
+    const requests = listen<GitOpsBlueprintRequest>(GITOPS_BLUEPRINT_EVENT, () => {
+      navigated = listen<SenchoNavigateDetail>(SENCHO_NAVIGATE_EVENT, () => {
+        intents = listen<BlueprintIntent>(BLUEPRINT_INTENT_EVENT, () => openBlueprintInPlace({ kind: 'open', blueprintId: 4 }));
+      });
+    }, request => { request.handled = true; });
+    expect(requests).toHaveLength(1);
+    expect(requests[0].intent).toEqual({ kind: 'open', blueprintId: 4 });
+    expect(navigated).toEqual([]);
+    expect(intents).toEqual([]);
+  });
+
+  it('falls back to the Fleet Blueprints tab when nothing hosts it', () => {
+    const navigated = listen<SenchoNavigateDetail>(SENCHO_NAVIGATE_EVENT, () => openBlueprintInPlace({ kind: 'create' }));
+    expect(navigated).toEqual([{ view: 'fleet', fleetTab: 'deployments' }]);
+  });
+
+  it('is what a Blueprint row opens', () => {
+    const row = portfolioRow({ id: 'bp:3', targetMode: 'blueprint', nodeId: null, stackName: null, blueprintId: 3 });
+    const open = portfolioRowActions(row, { canOpenFleet: true }).find(action => action.label === 'Open Blueprint')!;
+    const requests = listen<GitOpsBlueprintRequest>(GITOPS_BLUEPRINT_EVENT, open.run, r => { r.handled = true; });
+    expect(requests.map(r => r.intent)).toEqual([{ kind: 'open', blueprintId: 3 }]);
+  });
+});
+

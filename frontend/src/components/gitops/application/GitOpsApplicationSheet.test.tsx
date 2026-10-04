@@ -4,15 +4,17 @@
  * read-only copy, and a failed read says so.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { render, screen, waitFor } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { apiFetch } from '@/lib/api';
-import { GITOPS_GIT_SOURCE_EVENT, type GitOpsGitSourceTarget } from '../portfolio/portfolioNavigation';
+import { GITOPS_BLUEPRINT_EVENT, GITOPS_GIT_SOURCE_EVENT, type GitOpsBlueprintRequest, type GitOpsGitSourceTarget } from '../portfolio/portfolioNavigation';
 import { blueprintDetailResponse, detailResponse } from './applicationFixtures';
 import { GitOpsApplicationSheet } from './GitOpsApplicationSheet';
 
 vi.mock('@/lib/api', () => ({ apiFetch: vi.fn() }));
-vi.mock('@/context/AuthContext', () => ({ useAuth: () => ({ can: () => false }) }));
-vi.mock('@/context/NodeContext', () => ({ useNodes: () => ({ hasCapability: () => false, nodeMeta: new Map() }) }));
+const grants = { fleet: false };
+
+vi.mock('@/context/AuthContext', () => ({ useAuth: () => ({ can: (action: string) => grants.fleet && action === 'node:read' }) }));
+vi.mock('@/context/NodeContext', () => ({ useNodes: () => ({ hasCapability: () => grants.fleet, nodeMeta: new Map() }) }));
 
 const mockFetch = vi.mocked(apiFetch);
 
@@ -21,6 +23,7 @@ function ok(body: unknown): Response {
 }
 
 afterEach(() => {
+  grants.fleet = false;
   mockFetch.mockReset();
   window.history.replaceState({}, '', '/');
 });
@@ -56,5 +59,26 @@ describe('GitOpsApplicationSheet', () => {
 
     expect(await screen.findByRole('button', { name: 'Retry' })).toBeInTheDocument();
     expect(screen.queryByTestId('gitops-application-detail')).toBeNull();
+  });
+
+  it('opens a Blueprint application\'s Blueprint in place and hands the sheet over to it', async () => {
+    grants.fleet = true;
+    const seen: GitOpsBlueprintRequest[] = [];
+    const onRequest = (e: Event) => {
+      const request = (e as CustomEvent<GitOpsBlueprintRequest>).detail;
+      request.handled = true;
+      seen.push(request);
+    };
+    window.addEventListener(GITOPS_BLUEPRINT_EVENT, onRequest);
+    window.history.replaceState({}, '', '/nodes/local/gitops?application=bp%3A3');
+    mockFetch.mockResolvedValue(ok(blueprintDetailResponse()));
+
+    render(<GitOpsApplicationSheet id="bp:3" />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Open Blueprint' }));
+
+    expect(seen.map(r => r.intent)).toEqual([{ kind: 'open', blueprintId: 3 }]);
+    // The Blueprint's own sheet replaces this one, as a Direct application's Git source does.
+    await waitFor(() => expect(window.location.search).toBe(''));
+    window.removeEventListener(GITOPS_BLUEPRINT_EVENT, onRequest);
   });
 });
