@@ -39,6 +39,10 @@ let buildAcceptedGeneration: typeof import('../services/gitops/handoff').buildAc
 let ensureRolloutAuthorization: typeof import('../services/gitops/handoff').ensureRolloutAuthorization;
 let backfillMissingPreflightEvaluations: typeof import('../services/gitops/handoff').backfillMissingPreflightEvaluations;
 let setRegistryReadinessDepsForTests: typeof import('../services/gitops/handoff').setRegistryReadinessDepsForTests;
+let prepareAcceptedGitManagedGeneration: typeof import('../services/gitops/gitManagedMaterialization').prepareAcceptedGitManagedGeneration;
+let readAppliedComposeContent: typeof import('../services/gitops/gitManagedMaterialization').readAppliedComposeContent;
+let stackManagedRoot: typeof import('../services/gitops/directApplication').stackManagedRoot;
+let CANDIDATE_COMPLETE_MARKER: typeof import('../services/GitProjectManifestService').CANDIDATE_COMPLETE_MARKER;
 let reconstructBlueprintRolloutQueue: typeof import('../services/gitops/handoff').reconstructBlueprintRolloutQueue;
 let BlueprintService: typeof import('../services/BlueprintService').BlueprintService;
 let DatabaseService: typeof import('../services/DatabaseService').DatabaseService;
@@ -61,6 +65,10 @@ beforeAll(async () => {
   } = await import('../services/gitops/handoff'));
   ({ BlueprintService } = await import('../services/BlueprintService'));
   ({ DatabaseService } = await import('../services/DatabaseService'));
+  ({ prepareAcceptedGitManagedGeneration } = await import('../services/gitops/gitManagedMaterialization'));
+  ({ readAppliedComposeContent } = await import('../services/gitops/gitManagedMaterialization'));
+  ({ stackManagedRoot } = await import('../services/gitops/directApplication'));
+  ({ CANDIDATE_COMPLETE_MARKER } = await import('../services/GitProjectManifestService'));
 });
 
 afterAll(() => cleanupTestDb(tmpDir));
@@ -379,6 +387,104 @@ describe('BlueprintTargetAdapter unlock', () => {
     });
     expect(result.status).toBe('dispatched');
     expect(deploySpy).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('second source commit', () => {
+  it('re-materializes, re-freezes, and redeploys the new generation to every frozen target', async () => {
+    const fixture = seedAuthorizedReadyApp({ nodeCount: 2 });
+    await writeAppliedCompose(fixture.applicationId, fixture.generationId, 'services:\n  web:\n    image: alpine:3.20\n');
+    authorize(fixture.applicationId);
+    const store = GitOpsStore.getInstance();
+    const firstAuthRef = store.getApplication(fixture.applicationId)!.rollout_authorization_ref;
+    const deploySpy = vi.spyOn(BlueprintService.getInstance(), 'deployAuthorizedMaterialization')
+      .mockResolvedValue({ status: 'active' });
+    const firstDispatch = await new BlueprintTargetAdapter().dispatch(
+      buildAcceptedGeneration(store.getGeneration(fixture.generationId)!),
+      { targetMode: 'blueprint', nodeId: fixture.nodeId, bindingRevision: null },
+    );
+    expect(firstDispatch.status).toBe('dispatched');
+    expect(deploySpy).toHaveBeenCalledTimes(2);
+
+    // A second commit: the poll stages a candidate, the operator (or policy)
+    // accepts it, and the Git-managed preparation must promote and resolve it.
+    const app = store.getApplication(fixture.applicationId)!;
+    const nextGenId = `gen-${randomUUID().slice(0, 8)}`;
+    const artId = `art-${randomUUID().slice(0, 8)}`;
+    const gen2 = insertGeneration(nextGenId, fixture.applicationId, app.materialization_fingerprint!);
+    await writeCandidateCompose(app.configured_source_stack_name!, gen2, 'services:\n  web:\n    image: alpine:3.21\n');
+    const envelope = { operationId: randomUUID(), actor: 'tester', trigger: 'manual', at: 900 };
+    GitOpsTransitions.getInstance().candidateReady(fixture.applicationId, nextGenId, false, envelope);
+    GitOpsTransitions.getInstance().sourceAccepted({
+      applicationId: fixture.applicationId,
+      generationId: nextGenId,
+      artifactSetId: artId,
+      sourceAcceptanceId: `acc-${randomUUID().slice(0, 8)}`,
+      authority: 'operator',
+      envelope,
+    });
+    const encodeArtifactEvidenceJson = (await import('../services/gitops/json')).encodeArtifactEvidenceJson;
+    vi.spyOn(await import('../services/gitops/artifactResolve'), 'resolveAndRecordArtifactSet')
+      .mockImplementation(async (call) => {
+        GitOpsTransitions.getInstance().recordArtifactEvidence({
+          applicationId: call.applicationId,
+          generationId: call.generationId,
+          artifactSetId: `resolved-${nextGenId}`,
+          evidenceVersion: 2,
+          qualification: 'exact',
+          evidenceJson: encodeArtifactEvidenceJson({ kind: 'exact', identity: 'sha256:cafebabe' }),
+          authoritative: 0,
+          envelope: { operationId: randomUUID(), actor: 'tester', trigger: 'test', at: 901 },
+        });
+      });
+
+    const prepared = await prepareAcceptedGitManagedGeneration({
+      applicationId: fixture.applicationId,
+      generationId: nextGenId,
+      actor: 'tester',
+      trigger: 'manual',
+    });
+    expect(prepared.materialized).toBe(true);
+    expect(prepared.artifact).toBe('resolved');
+    // The candidate was actually promoted: the applied directory holds the new
+    // compose and the candidate directory is gone.
+    const stackName = store.getApplication(fixture.applicationId)!.configured_source_stack_name!;
+    await expect(fsPromises.access(path.join(stackManagedRoot(stackName), gen2.candidate_dir))).rejects.toBeTruthy();
+    expect(await readAppliedComposeContent(store.getApplication(fixture.applicationId)!, gen2)).toContain('alpine:3.21');
+
+    const auth = await ensureRolloutAuthorization(fixture.applicationId, 'system:source-controller');
+    expect(auth.ok, auth.ok ? '' : auth.reason).toBe(true);
+    const authorizedApp = store.getApplication(fixture.applicationId)!;
+    expect(authorizedApp.rollout_authorization_ref).toBeTruthy();
+    expect(authorizedApp.rollout_authorization_ref).not.toBe(firstAuthRef);
+    if (auth.ok) {
+      expect(auth.binding.acceptedGenerationId).toBe(nextGenId);
+      const candidate = store.getRolloutCandidate(auth.binding.rolloutCandidateId)!;
+      expect(candidate.accepted_generation_id).toBe(nextGenId);
+      expect(candidate.artifact_set_id).toBe(`resolved-${nextGenId}`);
+    }
+
+    const deployed: string[] = [];
+    deploySpy.mockClear();
+    deploySpy.mockImplementation(async (args) => {
+      deployed.push(args.composeContent);
+      return { status: 'active' };
+    });
+    const secondDispatch = await new BlueprintTargetAdapter().dispatch(
+      buildAcceptedGeneration(store.getGeneration(nextGenId)!),
+      { targetMode: 'blueprint', nodeId: fixture.nodeId, bindingRevision: null },
+    );
+    expect(secondDispatch.status).toBe('dispatched');
+    expect(deploySpy).toHaveBeenCalledTimes(2);
+    const calledNodeIds = deploySpy.mock.calls.map((call) => call[0].node.id).sort((a, b) => a - b);
+    expect(calledNodeIds).toEqual([...fixture.nodeIds].sort((a, b) => a - b));
+    for (const content of deployed) {
+      expect(content).toContain('alpine:3.21');
+      expect(content).not.toContain('alpine:3.20');
+    }
+    for (const nodeId of fixture.nodeIds) {
+      expect(store.getTarget(fixture.applicationId, nodeId)?.applied_generation_id).toBe(nextGenId);
+    }
   });
 });
 
@@ -1612,6 +1718,18 @@ async function writeAppliedCompose(applicationId: string, generationId: string, 
   const dir = path.join(dataDir, 'git-managed', String(nodeId), stackName, gen.applied_dir);
   await fsPromises.mkdir(dir, { recursive: true });
   await fsPromises.writeFile(path.join(dir, 'compose.yaml'), content, 'utf8');
+}
+
+/** A staged candidate as the poller leaves it: compose plus the completeness marker. */
+async function writeCandidateCompose(
+  stackName: string,
+  generation: GitOpsGenerationRow,
+  content: string,
+): Promise<void> {
+  const dir = path.join(stackManagedRoot(stackName), generation.candidate_dir);
+  await fsPromises.mkdir(dir, { recursive: true });
+  await fsPromises.writeFile(path.join(dir, 'compose.yaml'), content, 'utf8');
+  await fsPromises.writeFile(path.join(dir, CANDIDATE_COMPLETE_MARKER), generation.commit_sha, 'utf8');
 }
 
 function artifact(
