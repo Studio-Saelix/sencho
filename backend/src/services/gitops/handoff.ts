@@ -1363,11 +1363,52 @@ function holdReconstructedRollout(applicationId: string, why: string): void {
   const store = GitOpsStore.getInstance();
   if (store.getApplication(applicationId)?.pause_at) return;
   GitOpsTransitions.getInstance().rolloutPaused(applicationId, null, why, {
-    operationId: `health-rollout-reconstruct-${applicationId}`,
+    // Fresh per hold for the same reason `holdBlockedRolloutDispatch` mints
+    // one: a deterministic id makes a repeated hold history-silent.
+    operationId: randomUUID(),
     actor: 'system:health-rollout-policy',
     trigger: 'startup_reconstruct',
     at: Date.now(),
   });
+}
+
+/**
+ * Hold an authorized rollout whose dispatch was refused.
+ *
+ * A refusal returned only as a note is a rollout that stops with no durable
+ * reason: the projection still reads `rollout_queued`, and the workplace has
+ * nothing to act on. The hold is the same application pause the health executor
+ * uses, so there is one reason to read and one verb (Resume) to clear it. No-op
+ * when the application is already paused (its reason is the current one) or
+ * when no authorization is live: a refusal before the mint is the caller's to
+ * report, and pausing there would hold a rollout nothing has authorized.
+ */
+export function holdBlockedRolloutDispatch(applicationId: string, reason: string): void {
+  const store = GitOpsStore.getInstance();
+  const app = store.getApplication(applicationId);
+  if (!app || app.pause_at) return;
+  if (!liveRolloutBinding(app)) return;
+  try {
+    GitOpsTransitions.getInstance().rolloutPaused(applicationId, null, reason, {
+      // Fresh per hold, not derived from the application: history and the
+      // outbox dedupe on (application, operation, stage), so a deterministic id
+      // would let a second hold after a resume commit the pause while writing
+      // no history and announcing nothing.
+      operationId: randomUUID(),
+      actor: 'system:rollout-dispatch',
+      trigger: 'blueprint_dispatch',
+      at: Date.now(),
+    });
+  } catch (err) {
+    // A hold that cannot be recorded must not turn a refused dispatch into a
+    // thrown one: the refusal is the answer, and the hold is only its durable
+    // copy. A tombstoned application is the realistic case.
+    console.error(
+      '[GitOps] Could not hold blocked rollout %s: %s',
+      sanitizeForLog(applicationId),
+      sanitizeForLog(err instanceof Error ? err.message : String(err)),
+    );
+  }
 }
 
 export async function reconstructBlueprintRolloutQueue(): Promise<number> {
@@ -1445,6 +1486,11 @@ export async function reconstructBlueprintRolloutQueue(): Promise<number> {
       sanitizeForLog(app.id),
       sanitizeForLog(result.reason),
     );
+    // A restart is a place refusals cluster (locks still held, targets not yet
+    // reachable), so the same durable hold the manual and automatic paths place
+    // belongs here too: otherwise the rollout resumes as queued with the reason
+    // only in the server log.
+    holdBlockedRolloutDispatch(app.id, `The rollout could not advance after a restart: ${result.reason}`);
   }
   return resumed;
 }

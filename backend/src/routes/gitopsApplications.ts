@@ -61,6 +61,7 @@ import {
   buildAcceptedGeneration,
   ensureRolloutAuthorization,
   frozenStrategyFor,
+  holdBlockedRolloutDispatch,
 } from '../services/gitops/handoff';
 import { GitSourceService } from '../services/GitSourceService';
 import { sanitizeForLog } from '../utils/safeLog';
@@ -1074,7 +1075,14 @@ gitopsApplicationsRouter.post('/:id/rollout/authorize', async (req: Request, res
       { trigger: 'manual', actor: actor ?? 'operator' },
     );
     dispatched = result.status === 'dispatched';
-    if (result.status === 'blocked') note = result.reason;
+    if (result.status === 'blocked') {
+      note = result.reason;
+      // A refusal returned only as a note leaves the rollout queued with no
+      // reason an operator can act on. Hold it through the same application
+      // pause the health executor uses, so the Answer carries the reason and
+      // Resume is the resolving verb.
+      holdBlockedRolloutDispatch(app.id, result.reason);
+    }
   } catch (error) {
     console.error(
       '[GitOps authority] Rollout dispatch failed after authorization:',
@@ -1473,7 +1481,14 @@ gitopsApplicationsRouter.post('/:id/rollout/resume', async (req: Request, res: R
       { trigger: 'manual', actor: actor ?? 'operator' },
     );
     dispatched = result.status === 'dispatched';
-    if (result.status === 'blocked') note = result.reason;
+    if (result.status === 'blocked') {
+      note = result.reason;
+      // Resume clears the previous hold before this dispatch runs, so a refusal
+      // here would otherwise dissolve the durable reason and leave the rollout
+      // queued again. Re-hold through the same helper the authorize route uses,
+      // so a hold that was answered but not resolved stays answered by state.
+      holdBlockedRolloutDispatch(app.id, result.reason);
+    }
   } catch (error) {
     console.error(
       '[GitOps authority] Rollout dispatch failed after resume:',

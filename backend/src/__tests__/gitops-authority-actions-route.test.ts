@@ -37,6 +37,7 @@ let GitOpsStore: typeof import('../services/gitops/store').GitOpsStore;
 let GitOpsTransitions: typeof import('../services/gitops/transitions').GitOpsTransitions;
 let GitSourceService: typeof import('../services/GitSourceService').GitSourceService;
 let setRegistryReadinessDepsForTests: typeof import('../services/gitops/handoff').setRegistryReadinessDepsForTests;
+let holdBlockedRolloutDispatch: typeof import('../services/gitops/handoff').holdBlockedRolloutDispatch;
 let adminCookie: string;
 let viewerCookie: string;
 let scopedCookie: string;
@@ -309,6 +310,7 @@ beforeAll(async () => {
   ({ GitOpsTransitions } = await import('../services/gitops/transitions'));
   ({ GitSourceService } = await import('../services/GitSourceService'));
   ({ setRegistryReadinessDepsForTests } = await import('../services/gitops/handoff'));
+  ({ holdBlockedRolloutDispatch } = await import('../services/gitops/handoff'));
   ({ app } = await import('../index'));
   adminCookie = await loginAsTestAdmin(app);
   viewerCookie = await seedAndLoginRole('auth-viewer', 'auth-viewer-pass', 'viewer');
@@ -761,7 +763,25 @@ describe('POST /api/gitops/applications/:id/rollout/authorize', () => {
     expect(res.status).toBe(200);
     expect(res.body.dispatched).toBe(false);
     expect(res.body.note).toBe('Another operation is already in progress.');
-    expect(GitOpsStore.getInstance().getApplication(seeded.applicationId)!.rollout_authorization_ref).toBeTruthy();
+    const held = GitOpsStore.getInstance().getApplication(seeded.applicationId)!;
+    expect(held.rollout_authorization_ref).toBeTruthy();
+    // The refusal is durable: a note alone leaves the projection reading
+    // `rollout_queued` with nothing to act on, so the rollout is held with the
+    // reason the operator needs and Resume as the resolving verb.
+    expect(held.pause_at).not.toBeNull();
+    expect(held.pause_reason).toBe('Another operation is already in progress.');
+    // An existing hold is never overwritten: the first reason is the incident
+    // the operator has to answer.
+    holdBlockedRolloutDispatch(seeded.applicationId, 'a different reason');
+    expect(GitOpsStore.getInstance().getApplication(seeded.applicationId)!.pause_reason)
+      .toBe('Another operation is already in progress.');
+  });
+
+  it('does not hold a dispatch refusal that never reached an authorization', () => {
+    const seeded = seedGitManagedBlueprint({ sourceAccepted: true });
+    holdBlockedRolloutDispatch(seeded.applicationId, 'nothing authorized yet');
+    const app = GitOpsStore.getInstance().getApplication(seeded.applicationId)!;
+    expect(app.pause_at).toBeNull();
   });
 
   it('refuses a disabled Blueprint before recording rollout authority', async () => {

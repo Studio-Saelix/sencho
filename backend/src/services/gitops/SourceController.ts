@@ -5,6 +5,7 @@ import { GitSourceService } from '../GitSourceService';
 import { buildAcceptedGeneration } from './handoff';
 import { checkStatefulWithdrawal, holdForStatefulReview, readStagedGeneration } from './statefulGuard';
 import { prepareAcceptedGitManagedGeneration } from './gitManagedMaterialization';
+import { holdBlockedRolloutDispatch } from './handoff';
 import { DatabaseService } from '../DatabaseService';
 import type { GitOpsApplicationRow, GitOpsGenerationRow } from './types';
 import { classifyFailure, nextRetryAt, isGitSourceErrorCode, effectivePollIntervalSecs } from './backoff';
@@ -564,9 +565,14 @@ export class SourceController {
             if (dispatch.status === 'blocked') {
                 // The acceptance stands while the apply is refused, so the
                 // row alone cannot explain why nothing moved: log the reason.
+                // A refusal after the mint is also held, so the rollout stops
+                // with a durable reason and a Resume verb rather than reading
+                // as queued for ever; the helper no-ops when nothing was
+                // authorized (an unresolved artifact is the caller's answer).
                 console.warn(
                     `[SourceController] automatic dispatch blocked for ${sanitizeForLog(app.id)}: ${sanitizeForLog(dispatch.reason)}`,
                 );
+                holdBlockedRolloutDispatch(app.id, dispatch.reason);
             }
         } catch (e) {
             // Reaching here means nothing was reserved, so no durable row
