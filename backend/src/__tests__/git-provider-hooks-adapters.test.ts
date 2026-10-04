@@ -503,4 +503,52 @@ describe('gitlab display-style event headers', () => {
       handleSpy.mockRestore();
     }
   });
+
+  it('deduplicates a redelivery by the GitLab event UUID header', async () => {
+    const handleSpy = vi.spyOn(GitSourceService.getInstance(), 'handleWebhookPull')
+      .mockResolvedValue({ status: 'success', message: 'Queued for reconciliation.' });
+    try {
+      const stackName = 'gitlab-event-uuid-dedupe';
+      seedGitSource(stackName, 'https://gitlab.com/example/repo.git', 'main');
+      const { id, secret } = ProviderWebhookService.getInstance().createEndpoint({
+        stackName,
+        provider: 'gitlab',
+      });
+      const deliveryId = crypto.randomUUID();
+      const rawBody = Buffer.from(JSON.stringify({
+        object_kind: 'push',
+        ref: 'refs/heads/main',
+        after: 'c'.repeat(40),
+        project: { http_url: 'https://gitlab.com/example/repo.git' },
+      }), 'utf-8');
+      const headers = {
+        'x-gitlab-token': secret,
+        'x-gitlab-event': 'Push Hook',
+        'x-gitlab-event-uuid': deliveryId,
+      };
+
+      const first = await ProviderWebhookService.getInstance().ingestLocal({
+        endpointId: id,
+        rawBody,
+        headers,
+      });
+      const second = await ProviderWebhookService.getInstance().ingestLocal({
+        endpointId: id,
+        rawBody,
+        headers,
+      });
+
+      expect(first.state).toBe('queued');
+      expect(second.state).toBe('duplicate');
+      expect(handleSpy).toHaveBeenCalledTimes(1);
+      expect(handleSpy).toHaveBeenCalledWith(
+        stackName,
+        true,
+        `provider:${id}:${deliveryId}`,
+        { trigger: 'provider_event', actor: 'system:provider_event' },
+      );
+    } finally {
+      handleSpy.mockRestore();
+    }
+  });
 });
