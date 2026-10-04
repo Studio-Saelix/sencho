@@ -280,13 +280,13 @@ export class ProviderWebhookService {
     if (!target) {
       return { httpStatus: 500, state: 'processing_failed', message: 'Remote node is unreachable.' };
     }
-    const forwardHeaders: Record<string, string> = { 'Content-Type': 'application/json' };
-    if (target.apiToken) forwardHeaders.Authorization = `Bearer ${target.apiToken}`;
+    const forwardHeaders: Record<string, string> = { 'content-type': 'application/json' };
+    if (target.apiToken) forwardHeaders.authorization = `Bearer ${target.apiToken}`;
     for (const [key, value] of Object.entries(args.headers)) {
       if (!value) continue;
       const lower = key.toLowerCase();
-      if (lower === 'host' || lower === 'content-length' || lower === 'authorization') continue;
-      forwardHeaders[key] = Array.isArray(value) ? value[0] : value;
+      if (lower === 'host' || lower === 'content-length' || lower === 'authorization' || lower === 'content-type') continue;
+      forwardHeaders[lower] = Array.isArray(value) ? value[0] : value;
     }
     try {
       const baseUrl = target.apiUrl.replace(/\/$/, '');

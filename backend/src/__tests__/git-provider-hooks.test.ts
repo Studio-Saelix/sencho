@@ -1,4 +1,7 @@
+import './helpers/allowLoopbackTargets';
 import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from 'vitest';
+import http from 'http';
+import express from 'express';
 import request from 'supertest';
 import crypto from 'crypto';
 import jwt from 'jsonwebtoken';
@@ -6,6 +9,8 @@ import { setupTestDb, cleanupTestDb, TEST_USERNAME, TEST_JWT_SECRET } from './he
 import { PROVIDER_WEBHOOK_BODY_LIMIT } from '../services/gitops/providerWebhooks/types';
 import { GitProviderWebhookStore } from '../services/gitops/providerWebhooks/store';
 import { ProviderWebhookService } from '../services/gitops/providerWebhooks/ProviderWebhookService';
+import { conditionalJsonParser } from '../middleware/jsonParser';
+import { gitProviderHooksRouter } from '../routes/gitProviderHooks';
 import { commitBlueprintCreate } from '../services/gitops/blueprintProducers';
 import { GitOpsBindingService } from '../services/gitops/binding';
 import { GitOpsStore } from '../services/gitops/store';
@@ -205,6 +210,71 @@ describe('git provider hooks audit R6: unreachable remote node', () => {
 
     expect(res.status).toBeGreaterThanOrEqual(500);
     expect(GitProviderWebhookStore.getInstance().listDeliveries(id)).toHaveLength(0);
+  });
+});
+
+describe('git provider hooks remote forwarding', () => {
+  it('delivers a signed push through the owning node ingest pipeline', async () => {
+    const { GitSourceService } = await import('../services/GitSourceService');
+    const handleSpy = vi.spyOn(GitSourceService.getInstance(), 'handleWebhookPull')
+      .mockResolvedValue({ status: 'success', message: 'Queued for reconciliation.' });
+    const stackName = 'provider-hook-remote-forward';
+    seedGitSource(stackName);
+    const { id, secret } = createGithubEndpoint(stackName);
+    const body = JSON.stringify(githubPushPayload());
+
+    // Stand-in for the owning node: the real JSON parser and internal hook
+    // router, with machine auth supplied the way the node hop would.
+    let authorization: string | undefined;
+    let contentType: string | undefined;
+    const owningNode = express();
+    owningNode.use((req, _res, next) => {
+      authorization = req.headers.authorization;
+      contentType = req.headers['content-type'];
+      req.machineAuthScope = 'node_proxy';
+      next();
+    });
+    owningNode.use(conditionalJsonParser);
+    owningNode.use('/api/gitops', gitProviderHooksRouter);
+    const server = http.createServer(owningNode);
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const port = (server.address() as import('net').AddressInfo).port;
+    const deliveryId = crypto.randomUUID();
+
+    try {
+      const remoteNodeId = DatabaseService.getInstance().addNode({
+        name: 'provider-hook-remote-forward',
+        type: 'remote',
+        mode: 'proxy',
+        compose_dir: '/tmp',
+        is_default: false,
+        api_url: `http://127.0.0.1:${port}`,
+        api_token: 'remote-forward-token',
+      });
+
+      const res = await request(app)
+        .post(`/api/gitops/hooks/${remoteNodeId}/${id}`)
+        .set('Content-Type', 'application/json')
+        .set('x-github-event', 'push')
+        .set('x-github-delivery', deliveryId)
+        .set('x-hub-signature-256', githubSign(body, secret))
+        .send(body);
+
+      expect(res.status).toBe(202);
+      expect(res.body.state).toBe('queued');
+      expect(contentType).toBe('application/json');
+      expect(authorization).toBe('Bearer remote-forward-token');
+      expect(handleSpy).toHaveBeenCalledTimes(1);
+      expect(handleSpy).toHaveBeenCalledWith(
+        stackName,
+        true,
+        `provider:${id}:${deliveryId}`,
+        { trigger: 'provider_event', actor: 'system:provider_event' },
+      );
+    } finally {
+      handleSpy.mockRestore();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
   });
 });
 
