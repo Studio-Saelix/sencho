@@ -929,18 +929,23 @@ gitopsApplicationsRouter.post('/:id/source/accept', async (req: Request, res: Re
   // `stack:create`, so a create-only caller gets the accepted and prepared
   // generation and a note that the rollout was not started.
   const mayStartRollout = checkPermission(req, 'stack:deploy');
+  const permissionNote = 'the rollout was not started: starting it needs the stack deploy permission';
   const handoff = mayStartRollout
     ? await dispatchAcceptanceWithinTimeout(target.application.id, generationId, actor)
-    : {
-        status: 'skipped' as const,
-        reason: 'the rollout was not started: starting it needs the stack deploy permission',
-      };
+    : { status: 'skipped' as const, reason: permissionNote };
+  // Both halves can have something to say; neither may hide the other. The
+  // preparation note comes first because it is about the accepted content, and
+  // the permission note follows because it is about the rollout that did not
+  // start.
+  const notes: Array<string | null> = [prepared.note];
+  if (!mayStartRollout) notes.push(permissionNote);
+  else if (handoff.status === 'blocked') notes.push(handoff.reason);
   res.json({
     ok: true,
     materialized: prepared.materialized,
     artifactResolved: prepared.artifact === 'resolved',
     dispatched: handoff.status === 'dispatched',
-    note: prepared.note ?? (handoff.status === 'blocked' || !mayStartRollout ? handoff.reason : null),
+    note: notes.filter((note): note is string => note !== null).join(' ') || null,
   });
 });
 

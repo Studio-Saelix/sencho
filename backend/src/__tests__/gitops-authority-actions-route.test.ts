@@ -374,6 +374,8 @@ describe('POST /api/gitops/applications/:id/source/accept', () => {
 
     expect(res.status).toBe(200);
     expect(res.body.dispatched).toBe(false);
+    // Both halves report: the preparation note and the withheld dispatch.
+    expect(res.body.note).toContain('deploy permission');
     // The handoff is the deploy half, and that is what the missing grant
     // withholds; the acceptance itself stands.
     expect(handoffSpy).not.toHaveBeenCalled();

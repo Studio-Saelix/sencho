@@ -4222,15 +4222,17 @@ export class GitOpsTransitions {
     // operator pause and a health-policy hold are deliberate stops and survive;
     // only the operator's own resume clears those.
     //
-    // An unfinished roll back is the exception: its target fence is scoped to
-    // the old rollout generation, so the next dispatch's guard no longer sees
-    // it, and lifting the hold here would deploy over a target whose rollback
-    // never finished. The clear is skipped while the fence exists; finishing or
-    // undoing the rollback, then resuming and authorizing, is what moves the
-    // rollout on. That is the honest boundary of this guard.
+    // An unfinished roll back is the exception: while its target fence is
+    // scoped to the live rollout generation, lifting the hold here would deploy
+    // over a target whose rollback never finished. A fence left on an older
+    // generation is not this acceptance's to answer: the dispatch queue moves
+    // past it the same way, so blocking the clear would only cost a second
+    // Resume. Finishing or undoing the rollback, then resuming and authorizing,
+    // is what moves the rollout on.
     const rollbackPending = app.target_mode === 'blueprint'
       && this.store().listTargets(app.id).some(
-        (target) => target.health_stop_reason === 'rollback_pending',
+        (target) => target.health_stop_reason === 'rollback_pending'
+          && target.rollout_generation_id === app.rollout_generation_id,
       );
     if (app.pause_at !== null && app.pause_origin === 'system' && !rollbackPending) {
       const before = { pauseAt: app.pause_at, pauseReason: app.pause_reason, pauseOrigin: app.pause_origin };

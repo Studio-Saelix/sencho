@@ -287,7 +287,9 @@ export class BlueprintReconciler {
             // waiting. Detaching it keeps a slow registry or a sequential
             // rollout from holding the tick's `running` guard, which would stop
             // drift observation and Enforce for every Blueprint.
-            for (const app of GitOpsStore.getInstance().listLiveGitManagedApplications()) {
+            const liveApps = GitOpsStore.getInstance().listLiveGitManagedApplications();
+            const liveAppIds = new Set(liveApps.map((app) => app.id));
+            for (const app of liveApps) {
                 if (this.gitManagedPreparationInFlight.has(app.id)) continue;
                 this.gitManagedPreparationInFlight.add(app.id);
                 void this.reconcileGitManagedApplication(app)
@@ -297,6 +299,14 @@ export class BlueprintReconciler {
                     .finally(() => {
                         this.gitManagedPreparationInFlight.delete(app.id);
                     });
+            }
+            // Per-application memory for applications that no longer exist would
+            // otherwise grow for the process's lifetime.
+            for (const id of this.gitManagedPreparationFloor.keys()) {
+                if (!liveAppIds.has(id)) this.gitManagedPreparationFloor.delete(id);
+            }
+            for (const id of this.refusedGitManagedPreparations.keys()) {
+                if (!liveAppIds.has(id)) this.refusedGitManagedPreparations.delete(id);
             }
             if (blueprints.length === 0) return;
             const nodes = db.getNodes();
@@ -443,11 +453,23 @@ export class BlueprintReconciler {
             trigger: 'retry',
         });
         if (handoff.status === 'blocked') {
-            console.warn(
-                '[BlueprintReconciler] Git-managed dispatch blocked for %s: %s',
-                sanitizeForLog(fresh.id),
-                sanitizeForLog(handoff.reason ?? 'unknown'),
-            );
+            // A durable refusal placed a hold, which is the operator-visible
+            // record; a transient one (lock contention, a store refusal) is
+            // expected to clear on the next pass, so it is diagnostic rather
+            // than a warning on every tick.
+            const held = store.getApplication(fresh.id)?.pause_at !== null;
+            if (held) {
+                console.warn(
+                    '[BlueprintReconciler] Git-managed dispatch blocked for %s: %s',
+                    sanitizeForLog(fresh.id),
+                    sanitizeForLog(handoff.reason ?? 'unknown'),
+                );
+            } else {
+                diagnosticLog('Git-managed redrive refused without a hold', {
+                    applicationId: fresh.id,
+                    reason: handoff.reason,
+                });
+            }
         }
     }
 

@@ -1513,8 +1513,20 @@ export function holdBlockedRolloutDispatch(
  */
 export function gitManagedDispatchWarranted(app: GitOpsApplicationRow): boolean {
   const store = GitOpsStore.getInstance();
+  const blueprint = app.blueprint_id !== null
+    ? DatabaseService.getInstance().getBlueprint(app.blueprint_id)
+    : undefined;
+  if (!blueprint?.enabled) return false;
   const artifact = app.artifact_set_id ? store.getArtifactSet(app.artifact_set_id) : undefined;
   if (!artifact || (artifact.qualification !== 'exact' && artifact.qualification !== 'qualified')) {
+    return false;
+  }
+  // A target with an operation in flight is already being advanced, so a second
+  // dispatch would only race the per-target lock and re-run the preflight. A
+  // stage left behind by a crash belongs to the boot sweep, which finalizes it.
+  if (store.listTargets(app.id).some(
+    (target) => target.target_status === 'active' && target.active_operation_stage !== null,
+  )) {
     return false;
   }
   // A withdrawn authorization is an operator decision, not a pending handoff.
@@ -1547,12 +1559,20 @@ export function gitManagedDispatchWarranted(app: GitOpsApplicationRow): boolean 
   const gated = frozen.kind === 'policy' && gatesAdvancement(frozen.policy);
   const remaining = binding.requiredNodeIds.filter((nodeId) => {
     const target = store.getTarget(app.id, nodeId);
+    // A fenced target's turn is over: the dispatch queue moves past it, so
+    // counting it as remaining would re-drive a rollout with nothing to do.
+    if (fencedOutOfTheQueue(target, app)) return false;
     return gated
       ? !settledForGatedRollout(target, binding, authRef)
       : !targetAlreadyAcked(target, binding, authRef);
   });
   if (remaining.length === 0) return false;
-  return !remaining.some((nodeId) => awaitingHealthVerdict(store.getTarget(app.id, nodeId)));
+  // An open run under a gating policy is already bringing this target its
+  // verdict; a second dispatch would adopt the same run and race the gate.
+  if (gated && remaining.some((nodeId) => awaitingHealthVerdict(store.getTarget(app.id, nodeId)))) {
+    return false;
+  }
+  return true;
 }
 
 export async function reconstructBlueprintRolloutQueue(): Promise<number> {
@@ -1640,8 +1660,11 @@ export async function reconstructBlueprintRolloutQueue(): Promise<number> {
     // A restart is a place refusals cluster (locks still held, targets not yet
     // reachable), so the same durable hold the manual and automatic paths place
     // belongs here too: otherwise the rollout resumes as queued with the reason
-    // only in the server log.
-    holdBlockedRolloutDispatch(app.id, { reason: `The rollout could not advance after a restart: ${result.reason}`, holdable: result.holdable });
+    // only in the server log. The origin is explicit: a restart dispatch refusal
+    // is a system hold, cleared by a source acceptance like any other.
+    holdBlockedRolloutDispatch(app.id, { reason: `The rollout could not advance after a restart: ${result.reason}`, holdable: result.holdable }, {
+      origin: 'system',
+    });
   }
   return resumed;
 }

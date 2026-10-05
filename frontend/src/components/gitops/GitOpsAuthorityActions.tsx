@@ -91,12 +91,14 @@ export default function GitOpsAuthorityActions({
   //
   // Accepting the source is a `stack:create` write. Under the Automatic rollout
   // authorization policy the same press also authorizes and starts the rollout,
-  // which is a deploy, so the action asks for `stack:deploy` as well. The server
-  // keeps the acceptance for a create-only caller and skips only the dispatch
-  // half, so the gate here is the stricter UI reading of one combined action.
+  // which is a deploy, so the action asks for `stack:deploy` as well. When the
+  // projection cannot name the policy, the UI fails closed: the server would
+  // otherwise accept and skip the dispatch half, and a button that half-works is
+  // worse than one that asks for the grant that completes it.
   const rolloutAuthorizationRead = policyReadFor(live?.authorityPolicies, 'rollout_authorization');
-  const acceptAlsoStartsRollout = rolloutAuthorizationRead?.configured === 'automatic'
-    || rolloutAuthorizationRead?.effectiveFrozen === 'automatic';
+  const acceptAlsoStartsRollout = rolloutAuthorizationRead === null
+    || rolloutAuthorizationRead.configured === 'automatic'
+    || rolloutAuthorizationRead.effectiveFrozen === 'automatic';
   const canAcceptSource = projection.targetMode === 'blueprint'
     && candidateGenerationId !== null
     && allowed('stack:create')

@@ -101,13 +101,16 @@ function withPlacementPolicy(projection: GitOpsRevisionLive): GitOpsRevisionLive
 }
 
 /** An application whose rollout authorization policy is configured and read. */
-function withAutomaticRolloutPolicy(projection: GitOpsRevisionLive): GitOpsRevisionLive {
+function withRolloutPolicy(
+  projection: GitOpsRevisionLive,
+  configured: 'manual' | 'automatic',
+): GitOpsRevisionLive {
   return {
     ...projection,
     authorityPolicies: [
       {
         domain: 'rollout_authorization',
-        configured: 'automatic',
+        configured,
         effectiveFrozen: null,
         decision: 'awaiting_operator',
         reason: null,
@@ -190,7 +193,7 @@ describe('GitOpsAuthorityActions', () => {
     // Accepting under Automatic also authorizes and starts the rollout, which
     // is a deploy; offering a button that half-works would be worse.
     renderActions(
-      withAutomaticRolloutPolicy(sourcePending()),
+      withRolloutPolicy(sourcePending(), 'automatic'),
       (action) => action === 'stack:create',
     );
     expect(screen.queryByTestId('gitops-action-accept-source')).toBeNull();
@@ -199,8 +202,18 @@ describe('GitOpsAuthorityActions', () => {
   it('offers source acceptance to a create-only caller when the rollout policy is manual', () => {
     // The acceptance itself is `stack:create`; without an automatic handoff it
     // starts nothing, so the create grant is enough.
-    renderActions(sourcePending(), (action) => action === 'stack:create');
+    renderActions(
+      withRolloutPolicy(sourcePending(), 'manual'),
+      (action) => action === 'stack:create',
+    );
     expect(screen.getByTestId('gitops-action-accept-source')).toBeInTheDocument();
+  });
+
+  it('fails closed when the rollout policy is not readable', () => {
+    // The server would accept and skip the dispatch half; without a readable
+    // policy the UI cannot know, so it asks for the grant that completes it.
+    renderActions(sourcePending(), (action) => action === 'stack:create');
+    expect(screen.queryByTestId('gitops-action-accept-source')).toBeNull();
   });
 
   it('opens the reviewed plan for placement approval', async () => {

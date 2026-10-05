@@ -291,9 +291,13 @@ describe('rollout authorization transition', () => {
     authorize(fixture.applicationId);
     const store = GitOpsStore.getInstance();
     holdBlockedRolloutDispatch(fixture.applicationId, { reason: 'Deploy to node 2 failed: boom', holdable: true });
+    // A real rollback fence is scoped to the rollout generation that deployed
+    // the target; without that the scoped guard would (correctly) read it as a
+    // fence from an older rollout.
     store.upsertTarget({
       ...store.getTarget(fixture.applicationId, fixture.nodeId)!,
       health_stop_reason: 'rollback_pending',
+      rollout_generation_id: store.getApplication(fixture.applicationId)!.rollout_generation_id,
     });
 
     acceptNextGeneration(fixture, 400);
@@ -1015,6 +1019,10 @@ describe('application-driven preparation retry', () => {
 
     await reconciler.getInstance().tick();
     await vi.waitFor(() => expect(attempts()).toBe(1));
+    // Let the detached pass release the in-flight entry; a tick while it is
+    // still running would skip this application and the floor assertion would
+    // never see the second due check.
+    await new Promise((resolve) => setTimeout(resolve, 10));
 
     await reconciler.getInstance().tick();
     // The call-through spy is the positive control: the second pass evaluated
@@ -1022,6 +1030,56 @@ describe('application-driven preparation retry', () => {
     await vi.waitFor(() => expect(dueChecks()).toBe(2));
     expect(attempts()).toBe(1);
     freezeSpy.mockRestore();
+  });
+
+  it('does not re-drive while a target has an operation in flight', async () => {
+    const fixture = seedAuthorizedReadyApp();
+    authorize(fixture.applicationId);
+    const store = GitOpsStore.getInstance();
+    store.upsertTarget({
+      ...store.getTarget(fixture.applicationId, fixture.nodeId)!,
+      active_operation_stage: 'deploy_started',
+    });
+    const dispatchSpy = vi.spyOn(GitSourceService.getInstance(), 'dispatchAcceptedGeneration');
+    const warrantedSpy = vi.spyOn(await import('../services/gitops/handoff'), 'gitManagedDispatchWarranted');
+    const reconciler = (await import('../services/BlueprintReconciler')).BlueprintReconciler;
+
+    await reconciler.getInstance().tick();
+
+    // The predicate is the positive control: the detached pass reached the
+    // decision, and an in-flight deploy is why it said no.
+    await vi.waitFor(() => {
+      expect(warrantedSpy.mock.calls.some((call) => call[0].id === fixture.applicationId)).toBe(true);
+    });
+    expect(dispatchSpy).not.toHaveBeenCalled();
+    dispatchSpy.mockRestore();
+    warrantedSpy.mockRestore();
+  });
+
+  it('does not re-authorize a withdrawn rollout', async () => {
+    const fixture = seedAuthorizedReadyApp();
+    authorize(fixture.applicationId);
+    GitOpsTransitions.getInstance().rolloutSuperseded({
+      applicationId: fixture.applicationId,
+      envelope: { operationId: randomUUID(), actor: 'tester', trigger: 'manual', at: 500 },
+    });
+    const store = GitOpsStore.getInstance();
+    expect(store.getApplication(fixture.applicationId)!.rollout_authorization_ref).toBeNull();
+    const dispatchSpy = vi.spyOn(GitSourceService.getInstance(), 'dispatchAcceptedGeneration');
+    const warrantedSpy = vi.spyOn(await import('../services/gitops/handoff'), 'gitManagedDispatchWarranted');
+    const reconciler = (await import('../services/BlueprintReconciler')).BlueprintReconciler;
+
+    await reconciler.getInstance().tick();
+
+    // The withdrawn generation stays named on the application, so the predicate
+    // refuses and the automatic policy cannot mint a replacement until a new
+    // commit arrives.
+    await vi.waitFor(() => {
+      expect(warrantedSpy.mock.calls.some((call) => call[0].id === fixture.applicationId)).toBe(true);
+    });
+    expect(dispatchSpy).not.toHaveBeenCalled();
+    dispatchSpy.mockRestore();
+    warrantedSpy.mockRestore();
   });
 });
 
