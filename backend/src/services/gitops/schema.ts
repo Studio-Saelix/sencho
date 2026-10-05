@@ -100,10 +100,10 @@ CREATE TABLE IF NOT EXISTS gitops_applications (
   active_generation_id TEXT NULL,
   pause_at INTEGER NULL,
   pause_reason TEXT NULL,
-  -- Who placed the pause. A system hold (a refused dispatch, a health fence)
-  -- belongs to the rollout it was holding, so a source acceptance clears it
-  -- when it supersedes that rollout; an operator pause survives.
-  pause_origin TEXT NOT NULL DEFAULT 'operator' CHECK (pause_origin IN ('operator','system')),
+  -- Who placed the pause. A system hold (a refused dispatch) belongs to the
+  -- rollout it was holding, so a source acceptance clears it when it supersedes
+  -- that rollout; an operator pause and a health-policy hold survive.
+  pause_origin TEXT NOT NULL DEFAULT 'operator' CHECK (pause_origin IN ('operator','system','health')),
   -- Distinct from pause_reason: sourceSuspended/sourceUnsuspended write this
   -- field, not the one rolloutPaused/rolloutUnpaused share across app and
   -- target rows, so suspending a source can never clobber an unrelated

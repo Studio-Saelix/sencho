@@ -53,13 +53,32 @@ async function postAuthorityAction(
   return isRecord(payload) ? payload : { ok: true };
 }
 
+/** What the accept route prepared, and whether it started the rollout. */
+export interface GitOpsSourceAcceptResult {
+  ok: boolean;
+  materialized: boolean;
+  artifactResolved: boolean;
+  dispatched: boolean;
+  note: string | null;
+}
+
 /** Accept the waiting candidate generation as source content. */
-export async function acceptGitOpsSource(applicationId: string, generationId: string): Promise<void> {
-  await postAuthorityAction(
+export async function acceptGitOpsSource(
+  applicationId: string,
+  generationId: string,
+): Promise<GitOpsSourceAcceptResult> {
+  const payload = await postAuthorityAction(
     `/gitops/applications/${encodeURIComponent(applicationId)}/source/accept`,
     { generationId },
     'Failed to accept the source revision',
   );
+  return {
+    ok: payload.ok === true,
+    materialized: payload.materialized === true,
+    artifactResolved: payload.artifactResolved === true,
+    dispatched: payload.dispatched === true,
+    note: typeof payload.note === 'string' && payload.note.length > 0 ? payload.note : null,
+  };
 }
 
 /** Approve the reviewed placement plan for the current intent and candidate. */

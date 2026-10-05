@@ -420,9 +420,9 @@ describe('one target at a time under a non-observe policy', () => {
     });
 
     expect(store.getApplication(fixture.applicationId)?.pause_at).not.toBeNull();
-    // The executor's hold is a system hold, so a later source acceptance may
-    // lift it with the rollout it was holding.
-    expect(store.getApplication(fixture.applicationId)?.pause_origin).toBe('system');
+    // The executor's hold is a health hold, so a later source acceptance leaves
+    // it waiting for the operator.
+    expect(store.getApplication(fixture.applicationId)?.pause_origin).toBe('health');
     expect(store.getTarget(fixture.applicationId, third!)?.applied_generation_id).toBeNull();
     expect(deploySpy).toHaveBeenCalledTimes(2);
   });
@@ -1114,9 +1114,9 @@ describe('retry, stop, and rollback', () => {
     // leave a released pointer beside a fence nothing acts on, under a rollout
     // still authorized to re-apply the generation.
     expect(GitOpsStore.getInstance().getApplication(fixture.applicationId)!.pause_at).not.toBeNull();
-    // The fence path writes its pause with system origin too, so an acceptance
-    // can lift it with the superseded rollout.
-    expect(GitOpsStore.getInstance().getApplication(fixture.applicationId)!.pause_origin).toBe('system');
+    // The fence path writes its pause with health origin, so an acceptance
+    // leaves it for the operator.
+    expect(GitOpsStore.getInstance().getApplication(fixture.applicationId)!.pause_origin).toBe('health');
 
     // Replaying the same verdict changes nothing: the run this target was
     // awaiting is already consumed, so the second report is history and never a

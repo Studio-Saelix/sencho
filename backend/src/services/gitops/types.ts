@@ -116,11 +116,12 @@ export type GitOpsApplicationRow = {
   pause_at: number | null;
   pause_reason: string | null;
   /**
-   * Who placed the pause. A system hold belongs to the rollout it was holding,
-   * so a source acceptance that supersedes that rollout clears it; an operator
-   * pause survives until the operator resumes.
+   * Who placed the pause. A system hold (a refused dispatch) belongs to the
+   * rollout it was holding, so a source acceptance that supersedes that rollout
+   * clears it; an operator pause and a health-policy hold survive until a
+   * person resumes.
    */
-  pause_origin: 'operator' | 'system';
+  pause_origin: 'operator' | 'system' | 'health';
   /** sourceSuspended/sourceUnsuspended's own reason field; independent of pause_reason. */
   source_suspended_reason: string | null;
   /** Controller-owned. See gitops/SourceController.ts. */

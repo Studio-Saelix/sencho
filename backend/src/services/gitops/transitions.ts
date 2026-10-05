@@ -1375,7 +1375,7 @@ export class GitOpsTransitions {
                 null,
                 healthHoldReason(decision.reason),
                 args.envelope,
-                'system',
+                'health',
               );
             } catch (error) {
               if (!(error instanceof GitOpsTransitionError)) throw error;
@@ -2020,7 +2020,7 @@ export class GitOpsTransitions {
     nodeId: number | null,
     reason: string,
     envelope: EventEnvelope,
-    origin: 'operator' | 'system' = 'operator',
+    origin: 'operator' | 'system' | 'health' = 'operator',
   ): TransitionResult {
     if (nodeId === null) {
       return this.mutateApp(applicationId, envelope, 'rollout_paused', 'committed', (app) => {
@@ -4216,11 +4216,20 @@ export class GitOpsTransitions {
   ): void {
     // A system hold belongs to the rollout this acceptance supersedes, and its
     // reason describes that rollout. Cleared for every target mode: a Direct
-    // application can carry a health-executor hold too, and the hold is about
-    // the superseded rollout rather than the Blueprint content model. An
-    // operator pause is a deliberate stop and survives; only the operator's own
-    // resume clears it.
-    if (app.pause_at !== null && app.pause_origin === 'system') {
+    // application can carry a system hold too, and the hold is about the
+    // superseded rollout rather than the Blueprint content model. An operator
+    // pause and a health-policy hold are deliberate stops and survive; only the
+    // operator's own resume clears those.
+    //
+    // An unfinished roll back is the exception: its target fence is scoped to
+    // the old rollout generation, so the next dispatch's guard no longer sees
+    // it, and lifting the hold here would deploy over a target whose rollback
+    // never finished. The hold stays until the rollback is finished or undone.
+    const rollbackPending = app.target_mode === 'blueprint'
+      && this.store().listTargets(app.id).some(
+        (target) => target.health_stop_reason === 'rollback_pending',
+      );
+    if (app.pause_at !== null && app.pause_origin === 'system' && !rollbackPending) {
       const before = { pauseAt: app.pause_at, pauseReason: app.pause_reason, pauseOrigin: app.pause_origin };
       app.pause_at = null;
       app.pause_reason = null;

@@ -77,6 +77,7 @@ import {
 import { GitOpsTransitions } from './gitops/transitions';
 import { envelopeFor, recordableApplication } from './gitops/blueprintProducers';
 import type {
+    GitOpsApplicationRow,
     GitOpsArtifactSetRow,
 } from './gitops/types';
 
@@ -1173,6 +1174,35 @@ export class BlueprintService {
             if (service.failureClass === null) return true;
             return RETRYABLE_SERVICE_FAILURES.has(service.failureClass);
         });
+    }
+
+    /**
+     * Whether a Git-managed application's accepted generation still needs a
+     * preparation retry.
+     *
+     * Same durable gate as the per-target artifact retry: a set whose recorded
+     * evidence says every service failed permanently is not retried, because
+     * each attempt appends an evidence row to a table nothing prunes. The clock
+     * is the latest recorded evidence row, not an in-memory timestamp, so a
+     * restart does not bypass the interval.
+     */
+    gitManagedPreparationRetryDue(app: GitOpsApplicationRow): boolean {
+        if (app.target_mode !== 'blueprint' || !app.accepted_generation_id) return false;
+        const store = GitOpsStore.getInstance();
+        const expected = app.artifact_set_id ? store.getArtifactSet(app.artifact_set_id) : undefined;
+        if (expected && (expected.qualification === 'exact' || expected.qualification === 'qualified')) {
+            return false;
+        }
+        const latest = app.latest_artifact_set_id
+            ? store.getArtifactSet(app.latest_artifact_set_id)
+            : expected;
+        if (latest) {
+            if (!RETRYABLE_ARTIFACT_QUALIFICATIONS.has(latest.qualification)) return false;
+            if (!this.artifactRetryCanSucceed(latest)) return false;
+            const intervalMs = DatabaseService.getInstance().getGitOpsArtifactRetryIntervalMins() * 60_000;
+            if (Date.now() - latest.created_at < intervalMs) return false;
+        }
+        return true;
     }
 
     /**

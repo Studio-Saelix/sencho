@@ -48,6 +48,7 @@ import {
 } from '../services/gitops/rolloutRecovery';
 import { placementEffectCompatible } from '../services/gitops/store';
 import { prepareAcceptedGitManagedGeneration } from '../services/gitops/gitManagedMaterialization';
+import { dispatchPreparedGitManagedGeneration } from '../services/gitops/gitManagedHandoff';
 import { GitOpsTransitions, GitOpsTransitionError } from '../services/gitops/transitions';
 import { newGitOpsId } from '../services/gitops/directApplication';
 import { HEALTH_ROLLOUT_POLICIES, isHealthRolloutPolicy } from '../services/gitops/healthPolicy';
@@ -843,6 +844,38 @@ async function prepareAcceptanceWithinTimeout(
 }
 
 /**
+ * Bound the wait on the post-acceptance dispatch.
+ *
+ * A sequential rollout can take minutes across the frozen targets, so the
+ * request must not hold it open. The dispatch keeps running in the background;
+ * the response reports it as not yet started, and the application view carries
+ * the progress and any hold.
+ */
+async function dispatchAcceptanceWithinTimeout(
+  applicationId: string,
+  generationId: string,
+  actor: string | null,
+): Promise<Awaited<ReturnType<typeof dispatchPreparedGitManagedGeneration>>> {
+  const fallback = {
+    status: 'skipped' as const,
+    reason: 'the rollout is starting; watch the application for progress',
+  };
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => resolve(fallback), PREPARE_TIMEOUT_MS);
+    void dispatchPreparedGitManagedGeneration({ applicationId, generationId, actor: actor ?? 'operator', trigger: 'manual' })
+      .then((handoff) => {
+        clearTimeout(timer);
+        resolve(handoff);
+      })
+      .catch((err: unknown) => {
+        clearTimeout(timer);
+        console.error('[GitOps authority] Source dispatch failed:', err);
+        resolve(fallback);
+      });
+  });
+}
+
+/**
  * Record an operator source acceptance for the waiting candidate generation.
  *
  * The operator path for a manual source policy: the controller never accepts
@@ -886,11 +919,17 @@ gitopsApplicationsRouter.post('/:id/source/accept', async (req: Request, res: Re
   // reported as a note rather than undoing the acceptance. The wait is bounded:
   // a slow registry must not hold an already-committed acceptance open.
   const prepared = await prepareAcceptanceWithinTimeout(target.application.id, generationId, actor);
+  // The same handoff the automatic paths use: under an automatic rollout policy
+  // it authorizes and starts the rollout, under a manual policy it skips and
+  // the operator authorizes. A durable refusal is held by the handoff. The wait
+  // is bounded: a sequential rollout must not hold the request open.
+  const handoff = await dispatchAcceptanceWithinTimeout(target.application.id, generationId, actor);
   res.json({
     ok: true,
     materialized: prepared.materialized,
     artifactResolved: prepared.artifact === 'resolved',
-    note: prepared.note,
+    dispatched: handoff.status === 'dispatched',
+    note: prepared.note ?? (handoff.status === 'blocked' ? handoff.reason : null),
   });
 });
 

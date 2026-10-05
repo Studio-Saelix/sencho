@@ -2919,8 +2919,8 @@ stmt.run('gitops_schema_version', '1');
     private migrateGitOpsPauseOrigin(): void {
         // SQLite cannot add a CHECK through ALTER TABLE, so an upgraded database
         // enforces the enum in application code only; the fresh-install DDL
-        // carries it. Rows that already held a system pause backfill as
-        // 'operator', the safe direction: they survive an acceptance until an
+        // carries it. Rows that already held a system or health pause backfill
+        // as 'operator', the safe direction: they survive an acceptance until an
         // operator resumes once, rather than being lifted unannounced.
         this.tryAddColumn('gitops_applications', 'pause_origin', "TEXT NOT NULL DEFAULT 'operator'");
     }

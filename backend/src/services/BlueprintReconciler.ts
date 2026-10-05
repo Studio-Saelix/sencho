@@ -31,8 +31,7 @@ import {
 import { GitOpsStore, placementEffectCompatible } from './gitops/store';
 import { isGitManagedBlueprint } from './gitops/gitManaged';
 import { materializeAndFreezeGitManagedArtifactSet } from './gitops/gitManagedMaterialization';
-import { buildAcceptedGeneration, holdBlockedRolloutDispatch } from './gitops/handoff';
-import { GitSourceService } from './GitSourceService';
+import { dispatchPreparedGitManagedGeneration } from './gitops/gitManagedHandoff';
 import type { GitOpsApplicationRow } from './gitops/types';
 
 const RECONCILER_INTERVAL_MS = 60_000;
@@ -167,11 +166,10 @@ export class BlueprintReconciler {
     private running = false;
     private stopped = false;
     /**
-     * The last preparation attempt per application, keyed to the generation it
-     * was for, so the retry is bounded by the artifact retry interval instead
-     * of probing the registry on every tick.
+     * Applications whose preparation retry is running, so an overlapping tick
+     * does not start a second attempt for the same application.
      */
-    private readonly gitManagedPreparationAttempts = new Map<string, { generationId: string; at: number }>();
+    private readonly gitManagedPreparationInFlight = new Set<string>();
     /**
      * A generation whose preparation was refused by the authored-text parser.
      * The refusal is a statement about the content, so it is remembered per
@@ -274,20 +272,27 @@ export class BlueprintReconciler {
         try {
             const db = DatabaseService.getInstance();
             const blueprints = db.listEnabledBlueprints();
+            // The content pass runs first, before the enabled check and without
+            // being awaited: preparation belongs to the accepted generation, and
+            // a fleet whose only Git-managed Blueprint is disabled still has one
+            // waiting. Detaching it keeps a slow registry or a sequential
+            // rollout from holding the tick's `running` guard, which would stop
+            // drift observation and Enforce for every Blueprint.
+            for (const app of GitOpsStore.getInstance().listLiveGitManagedApplications()) {
+                if (this.gitManagedPreparationInFlight.has(app.id)) continue;
+                this.gitManagedPreparationInFlight.add(app.id);
+                void this.retryGitManagedPreparation(app)
+                    .catch((err) => {
+                        console.error(`[BlueprintReconciler] Git-managed preparation retry failed for ${app.id}:`, err);
+                    })
+                    .finally(() => {
+                        this.gitManagedPreparationInFlight.delete(app.id);
+                    });
+            }
             if (blueprints.length === 0) return;
             const nodes = db.getNodes();
             console.info('[BlueprintReconciler] tick start blueprints=%s nodes=%s', blueprints.length, nodes.length);
             diagnosticLog('tick inputs', { blueprintCount: blueprints.length, nodeCount: nodes.length });
-            // The content pass runs for every live Git-managed application,
-            // enabled or not: preparation belongs to the accepted generation,
-            // and a disabled Blueprint still has one waiting to be resolved.
-            for (const app of GitOpsStore.getInstance().listLiveGitManagedApplications()) {
-                try {
-                    await this.retryGitManagedPreparation(app);
-                } catch (err) {
-                    console.error(`[BlueprintReconciler] Git-managed preparation retry failed for ${app.id}:`, err);
-                }
-            }
             for (const blueprint of blueprints) {
                 try {
                     await this.reconcileBlueprint(blueprint, nodes);
@@ -370,7 +375,6 @@ export class BlueprintReconciler {
      * limitation by the freeze, so the surface names the cause.
      */
     private async retryGitManagedPreparation(app: GitOpsApplicationRow): Promise<void> {
-        const store = GitOpsStore.getInstance();
         if (app.target_mode !== 'blueprint' || !app.accepted_generation_id) return;
         // Suspension freezes automation for this source, exactly as it does for
         // the SourceController's own acceptance and for GitSourceService.retry.
@@ -378,13 +382,11 @@ export class BlueprintReconciler {
         if (app.suspended_at) return;
         const generationId = app.accepted_generation_id;
         if (this.refusedGitManagedPreparations.get(app.id) === generationId) return;
-        const artifact = app.artifact_set_id ? store.getArtifactSet(app.artifact_set_id) : undefined;
-        if (artifact && (artifact.qualification === 'exact' || artifact.qualification === 'qualified')) return;
-
-        const intervalMs = DatabaseService.getInstance().getGitOpsArtifactRetryIntervalMins() * 60_000;
-        const last = this.gitManagedPreparationAttempts.get(app.id);
-        if (last && last.generationId === generationId && Date.now() - last.at < intervalMs) return;
-        this.gitManagedPreparationAttempts.set(app.id, { generationId, at: Date.now() });
+        // The same durable gate the per-target retry uses: a set whose recorded
+        // evidence says every service failed permanently is not retried, and the
+        // interval is dated from the latest recorded row, so a restart does not
+        // bypass it.
+        if (!BlueprintService.getInstance().gitManagedPreparationRetryDue(app)) return;
 
         const outcome = await materializeAndFreezeGitManagedArtifactSet({
             applicationId: app.id,
@@ -398,45 +400,20 @@ export class BlueprintReconciler {
         }
         if (outcome.status !== 'resolved') return;
 
-        // Prepared now. Under the automatic policy, complete the handoff the
-        // acceptance attempt could not: mint the authorization and dispatch. A
-        // pause or suspension is an execution hold and still wins; a manual
-        // policy leaves the authorization to the operator. The application is
-        // re-read after the freeze's await: a newer acceptance landing in that
-        // window supersedes this generation, and dispatching it would hold the
-        // healthy successor behind a stale reason.
-        const fresh = store.getApplication(app.id);
-        if (!fresh || fresh.suspended_at || fresh.pause_at) return;
-        if (fresh.accepted_generation_id !== generationId) return;
-        if (fresh.rollout_authorization_policy !== 'automatic') return;
-        // Preparation runs for a disabled Blueprint (content is not execution),
-        // but its execution authority is withheld until it is enabled again,
-        // the same rule the authorize route enforces.
-        const blueprintRow = fresh.blueprint_id !== null
-            ? DatabaseService.getInstance().getBlueprint(fresh.blueprint_id)
-            : undefined;
-        if (!blueprintRow?.enabled) return;
-        const genRow = store.getGeneration(generationId);
-        if (!genRow) return;
-        try {
-            const dispatch = await GitSourceService.getInstance().dispatchAcceptedGeneration(
-                buildAcceptedGeneration(genRow),
-                GitSourceService.dispatchContextFor(fresh),
-                { trigger: 'retry', actor: 'system:blueprint-reconciler' },
-            );
-            if (dispatch.status === 'blocked') {
-                console.warn(
-                    '[BlueprintReconciler] Git-managed dispatch blocked for %s: %s',
-                    sanitizeForLog(app.id),
-                    sanitizeForLog(dispatch.reason),
-                );
-                holdBlockedRolloutDispatch(app.id, dispatch);
-            }
-        } catch (err) {
-            console.error(
-                '[BlueprintReconciler] Git-managed dispatch failed for %s:',
+        // Prepared now. The one handoff applies the same gates the accept paths
+        // use (policy, enabled, pause, suspension, generation currency) and
+        // holds a durable refusal.
+        const handoff = await dispatchPreparedGitManagedGeneration({
+            applicationId: app.id,
+            generationId,
+            actor: 'system:blueprint-reconciler',
+            trigger: 'retry',
+        });
+        if (handoff.status === 'blocked') {
+            console.warn(
+                '[BlueprintReconciler] Git-managed dispatch blocked for %s: %s',
                 sanitizeForLog(app.id),
-                err instanceof Error ? err.message : String(err),
+                sanitizeForLog(handoff.reason ?? 'unknown'),
             );
         }
     }

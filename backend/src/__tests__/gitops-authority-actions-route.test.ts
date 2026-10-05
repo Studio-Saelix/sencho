@@ -755,7 +755,7 @@ describe('POST /api/gitops/applications/:id/rollout/authorize', () => {
       provenance: 'placement_approval',
     });
     vi.spyOn(GitSourceService.getInstance(), 'dispatchAcceptedGeneration')
-      .mockResolvedValue({ status: 'blocked', reason: 'Deploy to node 2 failed: registry unreachable.' });
+      .mockResolvedValue({ status: 'blocked', reason: 'Deploy to node 2 failed: registry unreachable.', holdable: true });
     const res = await request(app)
       .post(`/api/gitops/applications/bp:${seeded.blueprintId}/rollout/authorize`)
       .set('Cookie', adminCookie)
@@ -772,7 +772,7 @@ describe('POST /api/gitops/applications/:id/rollout/authorize', () => {
     expect(held.pause_reason).toBe('Deploy to node 2 failed: registry unreachable.');
     // An existing hold is never overwritten: the first reason is the incident
     // the operator has to answer.
-    holdBlockedRolloutDispatch(seeded.applicationId, { reason: 'a different reason' });
+    holdBlockedRolloutDispatch(seeded.applicationId, { reason: 'a different reason', holdable: true });
     expect(GitOpsStore.getInstance().getApplication(seeded.applicationId)!.pause_reason)
       .toBe('Deploy to node 2 failed: registry unreachable.');
   });
@@ -818,7 +818,7 @@ describe('POST /api/gitops/applications/:id/rollout/authorize', () => {
 
   it('does not hold a dispatch refusal that never reached an authorization', () => {
     const seeded = seedGitManagedBlueprint({ sourceAccepted: true });
-    holdBlockedRolloutDispatch(seeded.applicationId, { reason: 'nothing authorized yet' });
+    holdBlockedRolloutDispatch(seeded.applicationId, { reason: 'nothing authorized yet', holdable: true });
     const app = GitOpsStore.getInstance().getApplication(seeded.applicationId)!;
     expect(app.pause_at).toBeNull();
   });

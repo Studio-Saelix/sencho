@@ -46,6 +46,9 @@ let stackManagedRoot: typeof import('../services/gitops/directApplication').stac
 let CANDIDATE_COMPLETE_MARKER: typeof import('../services/GitProjectManifestService').CANDIDATE_COMPLETE_MARKER;
 let reconstructBlueprintRolloutQueue: typeof import('../services/gitops/handoff').reconstructBlueprintRolloutQueue;
 let holdBlockedRolloutDispatch: typeof import('../services/gitops/handoff').holdBlockedRolloutDispatch;
+let liveHealthRolloutExecutor: typeof import('../services/gitops/handoff').liveHealthRolloutExecutor;
+let dispatchPreparedGitManagedGeneration: typeof import('../services/gitops/gitManagedHandoff').dispatchPreparedGitManagedGeneration;
+let GitSourceService: typeof import('../services/GitSourceService').GitSourceService;
 let BlueprintService: typeof import('../services/BlueprintService').BlueprintService;
 let DatabaseService: typeof import('../services/DatabaseService').DatabaseService;
 let dataDir: string;
@@ -66,7 +69,10 @@ beforeAll(async () => {
     setRegistryReadinessDepsForTests,
     backfillMissingPreflightEvaluations,
     holdBlockedRolloutDispatch,
+    liveHealthRolloutExecutor,
   } = await import('../services/gitops/handoff'));
+  ({ dispatchPreparedGitManagedGeneration } = await import('../services/gitops/gitManagedHandoff'));
+  ({ GitSourceService } = await import('../services/GitSourceService'));
   ({ BlueprintService } = await import('../services/BlueprintService'));
   ({ DatabaseService } = await import('../services/DatabaseService'));
   ({ prepareAcceptedGitManagedGeneration } = await import('../services/gitops/gitManagedMaterialization'));
@@ -230,7 +236,7 @@ describe('rollout authorization transition', () => {
     const fixture = seedAuthorizedReadyApp();
     authorize(fixture.applicationId);
     const store = GitOpsStore.getInstance();
-    holdBlockedRolloutDispatch(fixture.applicationId, { reason: 'Deploy to node 2 failed: boom' });
+    holdBlockedRolloutDispatch(fixture.applicationId, { reason: 'Deploy to node 2 failed: boom', holdable: true });
     expect(store.getApplication(fixture.applicationId)!.pause_at).not.toBeNull();
     expect(store.getApplication(fixture.applicationId)!.pause_origin).toBe('system');
 
@@ -260,6 +266,77 @@ describe('rollout authorization transition', () => {
     const after = store.getApplication(fixture.applicationId)!;
     expect(after.pause_at).not.toBeNull();
     expect(after.pause_reason).toBe('maintenance window');
+  });
+
+  it('keeps a health-policy hold across a source acceptance', () => {
+    const fixture = seedAuthorizedReadyApp();
+    authorize(fixture.applicationId);
+    const store = GitOpsStore.getInstance();
+    GitOpsTransitions.getInstance().rolloutPaused(fixture.applicationId, null, 'health hold', {
+      operationId: randomUUID(), actor: 'tester', trigger: 'test', at: 300,
+    }, 'health');
+    expect(store.getApplication(fixture.applicationId)!.pause_origin).toBe('health');
+
+    acceptNextGeneration(fixture, 400);
+
+    // A health-policy hold is a deliberate stop; a new commit must not resume
+    // it behind the operator's back.
+    const after = store.getApplication(fixture.applicationId)!;
+    expect(after.pause_at).not.toBeNull();
+    expect(after.pause_origin).toBe('health');
+  });
+
+  it('leaves a system hold in place while a target has an unfinished rollback', () => {
+    const fixture = seedAuthorizedReadyApp();
+    authorize(fixture.applicationId);
+    const store = GitOpsStore.getInstance();
+    holdBlockedRolloutDispatch(fixture.applicationId, { reason: 'Deploy to node 2 failed: boom', holdable: true });
+    store.upsertTarget({
+      ...store.getTarget(fixture.applicationId, fixture.nodeId)!,
+      health_stop_reason: 'rollback_pending',
+    });
+
+    acceptNextGeneration(fixture, 400);
+
+    // The target's rollback fence is scoped to the old rollout generation, so
+    // the next dispatch's guard no longer sees it. Lifting the hold here would
+    // deploy over a target whose rollback never finished.
+    expect(store.getApplication(fixture.applicationId)!.pause_at).not.toBeNull();
+  });
+
+  it('the health executor holds a transient advance refusal with the health origin', async () => {
+    const fixture = seedAuthorizedReadyApp();
+    authorize(fixture.applicationId);
+    const dispatchSpy = vi.spyOn(BlueprintTargetAdapter.prototype, 'dispatch')
+      .mockResolvedValue({ status: 'blocked', reason: 'Deploy to node 1 is already in progress.', holdable: false });
+
+    await liveHealthRolloutExecutor().advance(fixture.applicationId, null);
+
+    // On this path the dispatch is the only thing that brings the next target,
+    // so a transient refusal is held rather than left queued with no reason.
+    const app = GitOpsStore.getInstance().getApplication(fixture.applicationId)!;
+    expect(app.pause_at).not.toBeNull();
+    expect(app.pause_origin).toBe('health');
+    dispatchSpy.mockRestore();
+  });
+
+  it('the health executor does not escalate a per-target pause', async () => {
+    const fixture = seedAuthorizedReadyApp();
+    authorize(fixture.applicationId);
+    const dispatchSpy = vi.spyOn(BlueprintTargetAdapter.prototype, 'dispatch')
+      .mockResolvedValue({
+        status: 'blocked',
+        reason: 'The rollout is paused on 1 target.',
+        holdable: false,
+        alreadyPaused: true,
+      });
+
+    await liveHealthRolloutExecutor().advance(fixture.applicationId, null);
+
+    // The pause is already on record on the target; an application pause would
+    // need a second, broader Resume to undo one node's decision.
+    expect(GitOpsStore.getInstance().getApplication(fixture.applicationId)!.pause_at).toBeNull();
+    dispatchSpy.mockRestore();
   });
 
   it('rejects reusing authorization when artifact identity changes', () => {
@@ -695,11 +772,16 @@ describe('application-driven preparation retry', () => {
     const reconciler = (await import('../services/BlueprintReconciler')).BlueprintReconciler;
     await reconciler.getInstance().tick();
 
-    expect(store.getApplication(fixture.applicationId)?.artifact_set_id).toBe(`resolved-${nextGenId}`);
-    expect(deploySpy).toHaveBeenCalledTimes(2);
-    for (const nodeId of fixture.nodeIds) {
-      expect(store.getTarget(fixture.applicationId, nodeId)?.applied_generation_id).toBe(nextGenId);
-    }
+    // The preparation pass is detached from the tick so a slow registry or a
+    // sequential rollout cannot hold the reconciler's running guard; wait for
+    // it to settle before asserting.
+    await vi.waitFor(() => {
+      expect(store.getApplication(fixture.applicationId)?.artifact_set_id).toBe(`resolved-${nextGenId}`);
+      expect(deploySpy).toHaveBeenCalledTimes(2);
+      for (const nodeId of fixture.nodeIds) {
+        expect(store.getTarget(fixture.applicationId, nodeId)?.applied_generation_id).toBe(nextGenId);
+      }
+    });
   });
 
   it('prepares a disabled Blueprint but withholds its dispatch', async () => {
@@ -715,7 +797,11 @@ describe('application-driven preparation retry', () => {
     );
 
     const { nextGenId, resolveNow } = await acceptSecondCommitWithFailedPreparation(fixture);
+    // A disabled-only fleet: no enabled Blueprint at all, so this fails if the
+    // content pass still runs after the enabled check.
+    DatabaseService.getInstance().getDb().prepare('UPDATE blueprints SET enabled = 0').run();
     DatabaseService.getInstance().updateBlueprint(fixture.blueprintId, { enabled: false });
+    expect(DatabaseService.getInstance().listEnabledBlueprints()).toHaveLength(0);
     resolveNow();
     deploySpy.mockClear();
     const reconciler = (await import('../services/BlueprintReconciler')).BlueprintReconciler;
@@ -723,11 +809,186 @@ describe('application-driven preparation retry', () => {
 
     // Content is not execution: the generation is prepared so it is ready when
     // the Blueprint is enabled again, but nothing deploys while it is disabled.
-    expect(store.getApplication(fixture.applicationId)?.artifact_set_id).toBe(`resolved-${nextGenId}`);
+    await vi.waitFor(() => {
+      expect(store.getApplication(fixture.applicationId)?.artifact_set_id).toBe(`resolved-${nextGenId}`);
+    });
     expect(deploySpy).not.toHaveBeenCalled();
     for (const nodeId of fixture.nodeIds) {
       expect(store.getTarget(fixture.applicationId, nodeId)?.applied_generation_id).toBe(fixture.generationId);
     }
+  });
+
+  it('does not retry a generation whose artifact evidence is permanently unresolvable', async () => {
+    const fixture = seedAuthorizedReadyApp();
+    const store = GitOpsStore.getInstance();
+    const encodeArtifactEvidenceJson = (await import('../services/gitops/json')).encodeArtifactEvidenceJson;
+    store.insertArtifactSet({
+      id: 'art-permanent',
+      generation_id: fixture.generationId,
+      evidence_version: 2,
+      authoritative: 0,
+      qualification: 'unavailable',
+      evidence_json: encodeArtifactEvidenceJson({
+        kind: 'unavailable',
+        services: [{
+          serviceName: 'web',
+          authoredRef: 'nginx:latest',
+          source: 'registry',
+          platform: 'linux/amd64',
+          indexDigest: null,
+          platformDigest: null,
+          platformVariants: null,
+          localDigests: null,
+          buildContextFingerprint: null,
+          producedImageId: null,
+          failureClass: 'unsupported_registry',
+          resolvedAt: 1,
+        }],
+      }),
+      created_at: 1,
+    });
+    DatabaseService.getInstance().getDb().prepare(
+      'UPDATE gitops_applications SET artifact_set_id = ?, latest_artifact_set_id = ? WHERE id = ?',
+    ).run('art-permanent', 'art-permanent', fixture.applicationId);
+    const resolveSpy = vi.spyOn(await import('../services/gitops/artifactResolve'), 'resolveAndRecordArtifactSet')
+      .mockResolvedValue(undefined);
+    const dueSpy = vi.spyOn(BlueprintService.getInstance(), 'gitManagedPreparationRetryDue');
+
+    const reconciler = (await import('../services/BlueprintReconciler')).BlueprintReconciler;
+    await reconciler.getInstance().tick();
+
+    // `unsupported_registry` is a property of the reference, not of the
+    // registry's mood: the gate refuses before any probe, so no evidence row is
+    // appended and no registry traffic is spent. The call-through spy is the
+    // positive control: the detached pass has evaluated the application, so a
+    // not-called resolver is the gate's decision rather than a race.
+    await vi.waitFor(() => expect(dueSpy).toHaveBeenCalled());
+    expect(resolveSpy).not.toHaveBeenCalled();
+  });
+
+  it('does not let a slow preparation or dispatch hold the tick', async () => {
+    const fixture = seedAuthorizedReadyApp();
+    vi.spyOn(BlueprintService.getInstance(), 'gitManagedPreparationRetryDue').mockReturnValue(true);
+    vi.spyOn(await import('../services/gitops/gitManagedMaterialization'), 'materializeAndFreezeGitManagedArtifactSet')
+      .mockResolvedValue({ status: 'resolved', reason: null });
+    let release: () => void = () => {};
+    const pending = new Promise<void>((resolve) => { release = resolve; });
+    const dispatchSpy = vi.spyOn(BlueprintTargetAdapter.prototype, 'dispatch')
+      .mockImplementation(async () => {
+        await pending;
+        return { status: 'blocked', reason: 'released', holdable: true };
+      });
+
+    const reconciler = (await import('../services/BlueprintReconciler')).BlueprintReconciler;
+    // If the tick awaited the pass, this would hang until release().
+    await reconciler.getInstance().tick();
+    await vi.waitFor(() => expect(dispatchSpy).toHaveBeenCalled());
+    release();
+    dispatchSpy.mockRestore();
+  });
+});
+
+describe('the one Git-managed handoff', () => {
+  it('skips a disabled Blueprint', async () => {
+    const fixture = seedAuthorizedReadyApp();
+    DatabaseService.getInstance().updateBlueprint(fixture.blueprintId, { enabled: false });
+    const dispatchSpy = vi.spyOn(GitSourceService.getInstance(), 'dispatchAcceptedGeneration');
+
+    const outcome = await dispatchPreparedGitManagedGeneration({
+      applicationId: fixture.applicationId,
+      generationId: fixture.generationId,
+      actor: 'tester',
+      trigger: 'manual',
+    });
+
+    expect(outcome.status).toBe('skipped');
+    expect(dispatchSpy).not.toHaveBeenCalled();
+  });
+
+  it('skips a paused rollout', async () => {
+    const fixture = seedAuthorizedReadyApp();
+    authorize(fixture.applicationId);
+    GitOpsTransitions.getInstance().rolloutPaused(fixture.applicationId, null, 'hold', {
+      operationId: randomUUID(), actor: 'tester', trigger: 'manual', at: Date.now(),
+    });
+    const dispatchSpy = vi.spyOn(GitSourceService.getInstance(), 'dispatchAcceptedGeneration');
+
+    const outcome = await dispatchPreparedGitManagedGeneration({
+      applicationId: fixture.applicationId,
+      generationId: fixture.generationId,
+      actor: 'tester',
+      trigger: 'manual',
+    });
+
+    expect(outcome.status).toBe('skipped');
+    expect(dispatchSpy).not.toHaveBeenCalled();
+  });
+
+  it('skips a manual authorization policy', async () => {
+    const fixture = seedAuthorizedReadyApp();
+    DatabaseService.getInstance().getDb().prepare(
+      'UPDATE gitops_applications SET rollout_authorization_policy = ? WHERE id = ?',
+    ).run('manual', fixture.applicationId);
+    const dispatchSpy = vi.spyOn(GitSourceService.getInstance(), 'dispatchAcceptedGeneration');
+
+    const outcome = await dispatchPreparedGitManagedGeneration({
+      applicationId: fixture.applicationId,
+      generationId: fixture.generationId,
+      actor: 'tester',
+      trigger: 'manual',
+    });
+
+    expect(outcome.status).toBe('skipped');
+    expect(dispatchSpy).not.toHaveBeenCalled();
+  });
+
+  it('skips a suspended source', async () => {
+    const fixture = seedAuthorizedReadyApp();
+    DatabaseService.getInstance().getDb().prepare(
+      'UPDATE gitops_applications SET suspended_at = ? WHERE id = ?',
+    ).run(Date.now(), fixture.applicationId);
+    const dispatchSpy = vi.spyOn(GitSourceService.getInstance(), 'dispatchAcceptedGeneration');
+
+    const outcome = await dispatchPreparedGitManagedGeneration({
+      applicationId: fixture.applicationId,
+      generationId: fixture.generationId,
+      actor: 'tester',
+      trigger: 'manual',
+    });
+
+    expect(outcome.status).toBe('skipped');
+    expect(dispatchSpy).not.toHaveBeenCalled();
+  });
+
+  it('skips a generation the application has moved past', async () => {
+    const fixture = seedAuthorizedReadyApp();
+    const dispatchSpy = vi.spyOn(GitSourceService.getInstance(), 'dispatchAcceptedGeneration');
+
+    const outcome = await dispatchPreparedGitManagedGeneration({
+      applicationId: fixture.applicationId,
+      generationId: 'some-older-generation',
+      actor: 'tester',
+      trigger: 'manual',
+    });
+
+    expect(outcome.status).toBe('skipped');
+    expect(dispatchSpy).not.toHaveBeenCalled();
+  });
+
+  it('dispatches under the automatic policy', async () => {
+    const fixture = seedAuthorizedReadyApp();
+    const dispatchSpy = vi.spyOn(GitSourceService.getInstance(), 'dispatchAcceptedGeneration')
+      .mockResolvedValue({ status: 'dispatched' });
+
+    const outcome = await dispatchPreparedGitManagedGeneration({
+      applicationId: fixture.applicationId,
+      generationId: fixture.generationId,
+      actor: 'tester',
+      trigger: 'manual',
+    });
+
+    expect(outcome.status).toBe('dispatched');
+    expect(dispatchSpy).toHaveBeenCalledTimes(1);
   });
 });
 

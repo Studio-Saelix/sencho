@@ -4804,17 +4804,17 @@ export class GitSourceService {
     ): Promise<DispatchResult> {
         const app = GitOpsStore.getInstance().getApplication(generation.applicationId);
         if (!app) {
-            return { status: 'blocked', reason: 'The application could not be read; dispatch is unavailable.' };
+            return { status: 'blocked', reason: 'The application could not be read; dispatch is unavailable.', holdable: false };
         }
         if (app.target_mode !== 'direct') {
             return new BlueprintTargetAdapter().dispatch(generation, { ...context, targetMode: 'blueprint' });
         }
         if (!app.stack_name) {
-            return { status: 'blocked', reason: 'No Direct stack is bound to this application.' };
+            return { status: 'blocked', reason: 'No Direct stack is bound to this application.', holdable: false };
         }
         const stackName = app.stack_name;
         if (!DatabaseService.getInstance().getGitSource(stackName)) {
-            return { status: 'blocked', reason: `No Git source is configured for ${stackName}.` };
+            return { status: 'blocked', reason: `No Git source is configured for ${stackName}.`, holdable: false };
         }
         const nodeId = NodeRegistry.getInstance().getDefaultNodeId();
         // Nothing is reserved until the stack lock is held: a dispatch
@@ -4831,6 +4831,7 @@ export class GitSourceService {
         if (!lock.ran) {
             return {
                 status: 'blocked',
+                holdable: false,
                 reason: `Another operation (${lock.existing.action}) is already in progress for ${stackName}.`,
             };
         }
@@ -4854,7 +4855,7 @@ export class GitSourceService {
         const store = GitOpsStore.getInstance();
         const src = DatabaseService.getInstance().getGitSource(stackName);
         if (!src) {
-            return { status: 'blocked', reason: `No Git source is configured for ${stackName}.` };
+            return { status: 'blocked', reason: `No Git source is configured for ${stackName}.`, holdable: false };
         }
         // One local feeds both the reservation's deploy-request fact and
         // the pipeline's deploy argument, so the durable fact the recovery
@@ -4891,6 +4892,7 @@ export class GitSourceService {
                 );
                 return {
                     status: 'blocked',
+                    holdable: false,
                     reason: 'A dispatch attempt for this stack is already recorded; check its outcome before dispatching again.',
                 };
             }
@@ -4902,6 +4904,7 @@ export class GitSourceService {
             );
             return {
                 status: 'blocked',
+                holdable: false,
                 reason: "This stack's GitOps tracking is unavailable; reconfigure the source before dispatching again.",
             };
         }
@@ -4919,7 +4922,7 @@ export class GitSourceService {
             // that way.
             const reason = scrubCredentials(raw);
             this.settleAttempt(generation.applicationId, envelope, { outcome, reason, nextAction });
-            return { status: 'blocked', reason };
+            return { status: 'blocked', reason, holdable: false };
         };
         // A refusal before the promotion boundary settles blocked with
         // resolve_conflict; the call sites past that boundary settle
@@ -5092,7 +5095,7 @@ export class GitSourceService {
                     nextAction: 'view_target_results',
                     commitSha: generation.commitSha,
                 });
-                return { status: 'blocked', reason };
+                return { status: 'blocked', reason, holdable: false };
             }
             if (result.deployIntentUnavailable) {
                 // The promotion and the bind completed, but the deploy
@@ -5114,7 +5117,7 @@ export class GitSourceService {
                     nextAction: 'view_target_results',
                     commitSha: generation.commitSha,
                 });
-                return { status: 'blocked', reason };
+                return { status: 'blocked', reason, holdable: false };
             }
             if (!result.applied) {
                 // Defensive parity with the promotion boundary: a pipeline
@@ -5141,7 +5144,7 @@ export class GitSourceService {
                         ? { deployGitopsOperationId: result.deployGitopsOperationId }
                         : {}),
                 });
-                return { status: 'blocked', reason };
+                return { status: 'blocked', reason, holdable: false };
             }
             const settledResult = this.finalizeReconcileOutcome(stackName, undefined);
             // The successful tracked deploy's GitOps operation id rides on
@@ -5186,7 +5189,7 @@ export class GitSourceService {
                     reason: promotedReason,
                     nextAction: 'view_target_results',
                 });
-                return { status: 'blocked', reason: promotedReason };
+                return { status: 'blocked', reason: promotedReason, holdable: false };
             }
             return settleBlocked(reason);
         }

@@ -118,8 +118,16 @@ export default function GitOpsAuthorityActions({
     if (!candidateGenerationId) return;
     setPending('source');
     try {
-      await acceptGitOpsSource(applicationId, candidateGenerationId);
-      toast.success('Source revision accepted');
+      const result = await acceptGitOpsSource(applicationId, candidateGenerationId);
+      if (result.note) {
+        // The acceptance stands; the note names what is still missing (an
+        // unresolved artifact identity, or a preparation still running).
+        toast.warning(result.note);
+      } else if (result.dispatched) {
+        toast.success('Source revision accepted and the rollout started');
+      } else {
+        toast.success('Source revision accepted');
+      }
       onChanged();
     } catch (error) {
       toast.error(errorMessage(error, 'Failed to accept the source revision'));

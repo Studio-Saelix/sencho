@@ -445,7 +445,7 @@ describe('POST /api/gitops/applications/:id/rollout/resume', () => {
       operationId: randomUUID(), actor: 'tester', trigger: 'test', at: Date.now(),
     });
     vi.spyOn((await import('../services/GitSourceService')).GitSourceService.getInstance(), 'dispatchAcceptedGeneration')
-      .mockResolvedValue({ status: 'blocked', reason: 'Deploy to node 2 failed: registry unreachable.' });
+      .mockResolvedValue({ status: 'blocked', reason: 'Deploy to node 2 failed: registry unreachable.', holdable: true });
     const res = await request(app)
       .post(`/api/gitops/applications/bp:${seeded.blueprintId}/rollout/resume`)
       .set('Cookie', adminCookie)
