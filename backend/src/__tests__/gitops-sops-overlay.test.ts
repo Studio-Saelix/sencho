@@ -118,6 +118,7 @@ describe('GitOpsDecryptOverlay', () => {
     fs.mkdirSync(sourceRoot, { recursive: true });
     fs.writeFileSync(path.join(sourceRoot, 'svc.env'), sopsDoc, { mode: 0o600 });
     fs.writeFileSync(path.join(sourceRoot, 'cred.env'), sopsDoc, { mode: 0o600 });
+    fs.writeFileSync(path.join(sourceRoot, 'sec.env'), sopsDoc, { mode: 0o600 });
 
     const base = {
       sourcePath: null as string | null,
@@ -135,6 +136,7 @@ describe('GitOpsDecryptOverlay', () => {
     const inputs: ComposeInputEntry[] = [
       { ...base, sourcePath: 'svc.env', materializedPath: 'svc.env', role: 'env', dependencyKind: 'env_file' },
       { ...base, sourcePath: 'cred.env', materializedPath: 'cred.env', role: 'config', dependencyKind: 'config' },
+      { ...base, sourcePath: 'sec.env', materializedPath: 'sec.env', role: 'secret', dependencyKind: 'secret' },
     ];
 
     await importTestIdentity(identity);
@@ -152,6 +154,8 @@ describe('GitOpsDecryptOverlay', () => {
     expect(fs.readFileSync(path.join(overlay!.overlayDir, 'svc.env'), 'utf8'))
       .toBe('PASSWORD="pa$$word"\n');
     expect(fs.readFileSync(path.join(overlay!.overlayDir, 'cred.env'), 'utf8'))
+      .toBe('PASSWORD=pa$word\n');
+    expect(fs.readFileSync(path.join(overlay!.overlayDir, 'sec.env'), 'utf8'))
       .toBe('PASSWORD=pa$word\n');
   });
 
