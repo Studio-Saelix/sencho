@@ -660,4 +660,49 @@ describe('a Suggest-mode drift episode is announced once', () => {
       'a hold is a decision about the repair, not a new episode',
     ).toHaveLength(0);
   });
+
+  it('stamps the episode start when a hold began it and the drift resumes', async () => {
+    const node = seedNode();
+    const blueprint = seedDriftBlueprint(node, 'enforce');
+    approvePlace(blueprint, node.id);
+    // A deployed row carries no drift start until something drifts.
+    writeRow(blueprint, node.id, 'active', { last_drift_at: null, drift_summary: null });
+    const alerts = countAlerts();
+    let checks = 0;
+    vi.spyOn(BlueprintService.getInstance(), 'checkForDrift').mockImplementation(async () => {
+      checks += 1;
+      // The first check carries an evidence block, so Enforce holds the target
+      // before any drift write; the second finds the block cleared while the
+      // drift is still there.
+      return checks === 1
+        ? {
+            kind: 'drifted',
+            reason: DRIFT_REASON,
+            cause: 'digest',
+            repairBlock: { reason: 'evidence_incomplete', detail: 'the marker names no generation' },
+          }
+        : { kind: 'drifted', reason: DRIFT_REASON, cause: 'digest' };
+    });
+
+    await BlueprintReconciler.getInstance().reconcileOne(blueprint.id);
+    const held = DatabaseService.getInstance().getDeployment(blueprint.id, node.id);
+    expect(held?.status).toBe('repair_held');
+    expect(held?.last_drift_at, 'a hold carries no drift start of its own').toBeNull();
+
+    // The operator moves to Suggest, where a resumed drift would be announced
+    // if it counted as a new episode, then the hold clears.
+    DatabaseService.getInstance().updateBlueprint(blueprint.id, { drift_mode: 'suggest' });
+    const switched = DatabaseService.getInstance().getBlueprint(blueprint.id)!;
+    approvePlace(switched, node.id);
+
+    await BlueprintReconciler.getInstance().reconcileOne(blueprint.id);
+
+    const resumed = DatabaseService.getInstance().getDeployment(blueprint.id, node.id);
+    expect(resumed?.status).toBe('drifted');
+    expect(resumed?.last_drift_at, 'the episode start is recorded when the drift resumes').not.toBeNull();
+    expect(
+      alerts.categories().filter((category) => category === 'blueprint_drift_detected'),
+      'the hold began the episode, so the resumed drift is not a new one',
+    ).toHaveLength(0);
+  });
 });
