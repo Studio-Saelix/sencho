@@ -205,6 +205,63 @@ describe('rollout authorization transition', () => {
     ).not.toBeNull();
   });
 
+  function acceptNextGeneration(
+    fixture: { applicationId: string; generationId: string },
+    at: number,
+  ): string {
+    const store = GitOpsStore.getInstance();
+    const before = store.getApplication(fixture.applicationId)!;
+    const nextGenId = `gen-${randomUUID().slice(0, 8)}`;
+    insertGeneration(nextGenId, fixture.applicationId, before.materialization_fingerprint!);
+    const envelope = { operationId: randomUUID(), actor: 'tester', trigger: 'manual', at };
+    GitOpsTransitions.getInstance().candidateReady(fixture.applicationId, nextGenId, false, envelope);
+    GitOpsTransitions.getInstance().sourceAccepted({
+      applicationId: fixture.applicationId,
+      generationId: nextGenId,
+      artifactSetId: `art-${randomUUID().slice(0, 8)}`,
+      sourceAcceptanceId: `acc-${randomUUID().slice(0, 8)}`,
+      authority: 'operator',
+      envelope,
+    });
+    return nextGenId;
+  }
+
+  it('clears a system hold when a source acceptance supersedes its rollout', () => {
+    const fixture = seedAuthorizedReadyApp();
+    authorize(fixture.applicationId);
+    const store = GitOpsStore.getInstance();
+    holdBlockedRolloutDispatch(fixture.applicationId, { reason: 'Deploy to node 2 failed: boom' });
+    expect(store.getApplication(fixture.applicationId)!.pause_at).not.toBeNull();
+    expect(store.getApplication(fixture.applicationId)!.pause_origin).toBe('system');
+
+    acceptNextGeneration(fixture, 400);
+
+    // The hold belonged to the rollout this acceptance supersedes, and its
+    // reason described that rollout. Leaving it would block the new generation
+    // with a stale reason until a person resumed.
+    const after = store.getApplication(fixture.applicationId)!;
+    expect(after.pause_at).toBeNull();
+    expect(after.pause_origin).toBe('operator');
+  });
+
+  it('keeps an operator pause across a source acceptance', () => {
+    const fixture = seedAuthorizedReadyApp();
+    authorize(fixture.applicationId);
+    const store = GitOpsStore.getInstance();
+    GitOpsTransitions.getInstance().rolloutPaused(fixture.applicationId, null, 'maintenance window', {
+      operationId: randomUUID(), actor: 'tester', trigger: 'manual', at: 300,
+    });
+    expect(store.getApplication(fixture.applicationId)!.pause_origin).toBe('operator');
+
+    acceptNextGeneration(fixture, 400);
+
+    // A deliberate stop is the operator's, and only the operator's own resume
+    // clears it.
+    const after = store.getApplication(fixture.applicationId)!;
+    expect(after.pause_at).not.toBeNull();
+    expect(after.pause_reason).toBe('maintenance window');
+  });
+
   it('rejects reusing authorization when artifact identity changes', () => {
     const fixture = seedAuthorizedReadyApp();
     authorize(fixture.applicationId);

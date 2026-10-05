@@ -807,15 +807,6 @@ gitopsApplicationsRouter.get('/:id', async (req: Request, res: Response): Promis
 });
 
 /**
- * Record an operator source acceptance for the waiting candidate generation.
- *
- * The operator path for a manual source policy: the controller never accepts
- * on a policy's behalf when the policy says a human must look. The body echoes
- * the generation the caller reviewed; the transition refuses anything that is
- * no longer the current candidate, so a stale review cannot accept different
- * content than it named.
- */
-/**
  * Bound the wait on post-acceptance preparation.
  *
  * The acceptance is already committed when this runs, so a slow registry must
@@ -851,6 +842,15 @@ async function prepareAcceptanceWithinTimeout(
   });
 }
 
+/**
+ * Record an operator source acceptance for the waiting candidate generation.
+ *
+ * The operator path for a manual source policy: the controller never accepts
+ * on a policy's behalf when the policy says a human must look. The body echoes
+ * the generation the caller reviewed; the transition refuses anything that is
+ * no longer the current candidate, so a stale review cannot accept different
+ * content than it named.
+ */
 gitopsApplicationsRouter.post('/:id/source/accept', async (req: Request, res: Response): Promise<void> => {
   if (!requirePermission(req, res, 'stack:create')) return;
   const target = resolveAuthorityTarget(req, res);

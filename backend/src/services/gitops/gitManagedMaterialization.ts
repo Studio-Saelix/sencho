@@ -222,7 +222,6 @@ export async function freezeGitManagedArtifactSet(args: {
   }
 
   const nodeId = args.nodeId ?? firstLiveTargetNode(store, app);
-  if (nodeId === null) return { status: 'none', reason: 'no live target node to resolve against' };
   const stackName = app.configured_source_stack_name;
   if (!stackName) return { status: 'none', reason: 'the application has no retained source stack identity' };
 
@@ -342,7 +341,9 @@ export async function prepareAcceptedGitManagedGeneration(args: {
     artifact: artifact.status,
     note: artifact.status === 'resolved'
       ? null
-      : artifact.reason ?? 'the artifact identity could not be resolved yet; the next reconcile retries it',
+      : artifact.status === 'refused'
+        ? `the artifact identity cannot be resolved for this content: ${artifact.reason ?? 'the approved compose cannot be modelled'}`
+        : artifact.reason ?? 'the artifact identity could not be resolved yet; the next reconcile retries it',
   };
 }
 
@@ -399,7 +400,15 @@ function composeFileOrderLength(composeInputsJson: string | null): number | null
   }
 }
 
-function firstLiveTargetNode(store: GitOpsStore, app: GitOpsApplicationRow): number | null {
+/**
+ * The node whose platform decides how a multi-arch reference resolves.
+ *
+ * The first live target when there is one, otherwise the hub's default node:
+ * a Blueprint application has no targets until its first dispatch, and the
+ * platform read is a property of the machine rather than of the target set, so
+ * resolving against the hub is the honest default for the first acceptance.
+ */
+function firstLiveTargetNode(store: GitOpsStore, app: GitOpsApplicationRow): number {
   for (const target of store.listTargets(app.id)) {
     if (target.target_status !== 'active') continue;
     if (DatabaseService.getInstance().getNode(target.node_id)) return target.node_id;

@@ -266,9 +266,11 @@ A Git-managed Blueprint keeps tracking its source. When the source fetches a new
 
 - **Accept source** takes the new generation. Accepting it materializes the generation and attempts to resolve its executable artifact identity; if resolution cannot complete, the reconciler retries it before the next authorization.
 - **Placement stays approved.** A content change does not move the target set, so the recorded placement approval still applies. A selector or roster change is what requires a fresh review.
-- **Authorize rollout** records the authorization for the new generation and starts the sequential rollout across the approved targets. Under **Authorizes without an operator** the system attempts authorization after acceptance; if registry preflight or artifact evidence is not ready, the rollout is held with the reason.
+- **Authorize rollout** records the authorization for the new generation and starts the sequential rollout across the approved targets. Under **Authorizes without an operator** the system attempts authorization after acceptance; when the artifact identity or registry preflight is not ready yet, the reconciler retries the preparation and authorizes once it resolves. A dispatch refused after authorization is held with the reason, and **Resume rollout** answers it.
 
 If an authorized dispatch is refused, Sencho holds the rollout with the reason instead of leaving it reading as queued. The hold appears as a pause with that reason; **Resume rollout** answers it, and a resume whose dispatch is refused again records the new reason.
+
+A generation whose approved compose the artifact resolver cannot model is refused rather than resolved from a guess. That covers an interpolated image reference, `profiles`, `extends`, `include`, and YAML merge keys. The reason is recorded on the Blueprint and shown with its evidence, and that generation waits for a later commit whose compose the resolver can read.
 
 ### Who decides each step
 

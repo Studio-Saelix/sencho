@@ -1370,7 +1370,13 @@ export class GitOpsTransitions {
             && app.pause_at === null
           ) {
             try {
-              this.rolloutPaused(args.applicationId, null, healthHoldReason(decision.reason), args.envelope);
+              this.rolloutPaused(
+                args.applicationId,
+                null,
+                healthHoldReason(decision.reason),
+                args.envelope,
+                'system',
+              );
             } catch (error) {
               if (!(error instanceof GitOpsTransitionError)) throw error;
               console.warn(
@@ -2014,17 +2020,20 @@ export class GitOpsTransitions {
     nodeId: number | null,
     reason: string,
     envelope: EventEnvelope,
+    origin: 'operator' | 'system' = 'operator',
   ): TransitionResult {
     if (nodeId === null) {
       return this.mutateApp(applicationId, envelope, 'rollout_paused', 'committed', (app) => {
         if (app.lifecycle_status !== 'active') throw new GitOpsTransitionError('application is not live');
         app.pause_at = envelope.at;
         app.pause_reason = reason;
+        app.pause_origin = origin;
       }, {
         // The reason is operator-authored evidence for the hold. The compact
         // app snapshot omits it, so it is merged into the delta explicitly and
-        // the notification carries it.
-        historyAfter: { pauseReason: reason },
+        // the notification carries it. The origin travels with it so a reader
+        // can tell a hold a source change may clear from one only a person can.
+        historyAfter: { pauseReason: reason, pauseOrigin: origin },
       });
     }
     return this.mutateTarget(applicationId, nodeId, envelope, 'rollout_paused', null, (target) => {
@@ -2042,6 +2051,7 @@ export class GitOpsTransitions {
         if (!app.pause_at) throw new GitOpsTransitionError('application is not paused');
         app.pause_at = null;
         app.pause_reason = null;
+        app.pause_origin = 'operator';
         // A resume answers a *hold*: the operator has seen it and wants the
         // rollout to carry on, so the target the hold was about is deployed again
         // and the policy decides afresh. `health_attempts` is deliberately kept, so
@@ -4204,6 +4214,25 @@ export class GitOpsTransitions {
     envelope: EventEnvelope,
     extras: { historyIds: string[] },
   ): void {
+    // A system hold belongs to the rollout this acceptance supersedes, and its
+    // reason describes that rollout. Cleared for every target mode: a Direct
+    // application can carry a health-executor hold too, and the hold is about
+    // the superseded rollout rather than the Blueprint content model. An
+    // operator pause is a deliberate stop and survives; only the operator's own
+    // resume clears it.
+    if (app.pause_at !== null && app.pause_origin === 'system') {
+      const before = { pauseAt: app.pause_at, pauseReason: app.pause_reason, pauseOrigin: app.pause_origin };
+      app.pause_at = null;
+      app.pause_reason = null;
+      app.pause_origin = 'operator';
+      const cleared = this.history(app, envelope, {
+        stage: 'rollout_unpaused',
+        outcome: 'committed',
+        before,
+        after: { pauseAt: null, pauseReason: null, pauseOrigin: 'operator' },
+      });
+      if (cleared) extras.historyIds.push(cleared);
+    }
     if (app.target_mode !== 'blueprint') return;
     if (!app.rollout_authorization_ref && !app.preflight_fingerprint) return;
     app.rollout_authorization_ref = null;
@@ -4693,7 +4722,7 @@ export class GitOpsTransitions {
         legacy_combined_approval_ref=?, preflight_fingerprint=?, latest_preflight_evidence_json=?,
         latest_operation_id=?, active_operation_id=?,
         active_operation_stage=?, active_operation_at=?, active_generation_id=?,
-        pause_at=?, pause_reason=?, source_suspended_reason=?,
+        pause_at=?, pause_reason=?, pause_origin=?, source_suspended_reason=?,
         source_policy=?, placement_policy=?, rollout_authorization_policy=?,
         placement_policy_refusal_reason=?, placement_policy_refused_at=?,
         poll_interval_secs=?, next_poll_at=?, attempt_seq=?, partial_json=?,
@@ -4713,7 +4742,7 @@ export class GitOpsTransitions {
       app.legacy_combined_approval_ref, app.preflight_fingerprint, app.latest_preflight_evidence_json,
       app.latest_operation_id, app.active_operation_id,
       app.active_operation_stage, app.active_operation_at, app.active_generation_id,
-      app.pause_at, app.pause_reason, app.source_suspended_reason,
+      app.pause_at, app.pause_reason, app.pause_origin, app.source_suspended_reason,
       app.source_policy, app.placement_policy, app.rollout_authorization_policy,
       app.placement_policy_refusal_reason, app.placement_policy_refused_at,
       app.poll_interval_secs, app.next_poll_at, app.attempt_seq, app.partial_json,

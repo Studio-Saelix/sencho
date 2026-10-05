@@ -456,6 +456,7 @@ export function blankInlineApplication(id: string, blueprintId: number, at: numb
     active_generation_id: null,
     pause_at: null,
     pause_reason: null,
+    pause_origin: 'operator',
     source_suspended_reason: null,
     source_policy: 'manual',
     // An Inline Blueprint has no Git source, so source policy is manual by

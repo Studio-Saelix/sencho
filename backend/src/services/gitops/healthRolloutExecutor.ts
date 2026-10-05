@@ -307,6 +307,7 @@ function holdRollout(
     null,
     healthHoldReason(decision.reason),
     envelope,
+    'system',
   );
 }
 

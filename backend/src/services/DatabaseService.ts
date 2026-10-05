@@ -1210,6 +1210,7 @@ export class DatabaseService {
         this.migrateGitSourceChangePlan();
         this.migrateGitOpsRecoveryColumns();
         this.migrateGitOpsCreateCheckpointSshDeployKey();
+        this.migrateGitOpsPauseOrigin();
         this.migrateNodeUpdateSkips();
         this.migrateNodeSealingKeys();
         this.migrateStackAlertServiceScope();
@@ -2913,6 +2914,15 @@ stmt.run('gitops_schema_version', '1');
         this.tryAddColumn('stack_update_recovery_generations', 'gitops_generation_id', 'TEXT');
         this.tryAddColumn('stack_update_recovery_generations', 'gitops_artifact_set_id', 'TEXT');
         this.tryAddColumn('stack_update_recovery_generations', 'gitops_source_acceptance_ref', 'TEXT');
+    }
+
+    private migrateGitOpsPauseOrigin(): void {
+        // SQLite cannot add a CHECK through ALTER TABLE, so an upgraded database
+        // enforces the enum in application code only; the fresh-install DDL
+        // carries it. Rows that already held a system pause backfill as
+        // 'operator', the safe direction: they survive an acceptance until an
+        // operator resumes once, rather than being lifted unannounced.
+        this.tryAddColumn('gitops_applications', 'pause_origin', "TEXT NOT NULL DEFAULT 'operator'");
     }
 
     private migrateGitOpsCreateCheckpointSshDeployKey(): void {

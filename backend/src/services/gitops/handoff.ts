@@ -1404,18 +1404,13 @@ function holdReconstructedRollout(
   applicationId: string,
   blocked: { reason: string; holdable?: boolean },
 ): void {
-  // Transient refusals are not holds here either; the classification is shared
-  // with every other dispatch caller.
-  if (blocked.holdable === false) return;
-  const store = GitOpsStore.getInstance();
-  if (store.getApplication(applicationId)?.pause_at) return;
-  GitOpsTransitions.getInstance().rolloutPaused(applicationId, null, blocked.reason, {
-    // Fresh per hold for the same reason `holdBlockedRolloutDispatch` mints
-    // one: a deterministic id makes a repeated hold history-silent.
-    operationId: randomUUID(),
+  // The health executor holds even when the binding cannot be resolved: its
+  // dispatch is the only thing that brings the next target, so a durable
+  // refusal must not be dropped. Transient refusals are still skipped.
+  holdBlockedRolloutDispatch(applicationId, blocked, {
     actor: 'system:health-rollout-policy',
     trigger: 'startup_reconstruct',
-    at: Date.now(),
+    requireLiveBinding: false,
   });
 }
 
@@ -1429,10 +1424,15 @@ function holdReconstructedRollout(
  * when the application is already paused (its reason is the current one) or
  * when no authorization is live: a refusal before the mint is the caller's to
  * report, and pausing there would hold a rollout nothing has authorized.
+ *
+ * The hold is recorded with origin `system`, which is what lets a source
+ * acceptance clear it when it supersedes the rollout the hold was about. An
+ * operator pause carries `operator` and survives until the operator resumes.
  */
 export function holdBlockedRolloutDispatch(
   applicationId: string,
   blocked: { reason: string; holdable?: boolean },
+  options: { actor?: string; trigger?: string; requireLiveBinding?: boolean } = {},
 ): void {
   // A refusal that says nothing durable about the rollout is not a hold. Lock
   // contention resolves when the holder finishes, and a pause is already the
@@ -1442,7 +1442,7 @@ export function holdBlockedRolloutDispatch(
   const store = GitOpsStore.getInstance();
   const app = store.getApplication(applicationId);
   if (!app || app.pause_at) return;
-  if (!liveRolloutBinding(app)) return;
+  if ((options.requireLiveBinding ?? true) && !liveRolloutBinding(app)) return;
   try {
     GitOpsTransitions.getInstance().rolloutPaused(applicationId, null, blocked.reason, {
       // Fresh per hold, not derived from the application: history and the
@@ -1450,10 +1450,10 @@ export function holdBlockedRolloutDispatch(
       // would let a second hold after a resume commit the pause while writing
       // no history and announcing nothing.
       operationId: randomUUID(),
-      actor: 'system:rollout-dispatch',
-      trigger: 'blueprint_dispatch',
+      actor: options.actor ?? 'system:rollout-dispatch',
+      trigger: options.trigger ?? 'blueprint_dispatch',
       at: Date.now(),
-    });
+    }, 'system');
   } catch (err) {
     // A hold that cannot be recorded must not turn a refused dispatch into a
     // thrown one: the refusal is the answer, and the hold is only its durable

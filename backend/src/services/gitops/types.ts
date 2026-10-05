@@ -115,6 +115,12 @@ export type GitOpsApplicationRow = {
   active_generation_id: string | null;
   pause_at: number | null;
   pause_reason: string | null;
+  /**
+   * Who placed the pause. A system hold belongs to the rollout it was holding,
+   * so a source acceptance that supersedes that rollout clears it; an operator
+   * pause survives until the operator resumes.
+   */
+  pause_origin: 'operator' | 'system';
   /** sourceSuspended/sourceUnsuspended's own reason field; independent of pause_reason. */
   source_suspended_reason: string | null;
   /** Controller-owned. See gitops/SourceController.ts. */
