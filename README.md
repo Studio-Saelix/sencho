@@ -1,4 +1,6 @@
 <div align="center">
+
+[![Deploy to Railyard](https://app.railyard.run/deploy/badge)](https://app.railyard.run/deploy?repo=https://github.com/Studio-Saelix/sencho)
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="frontend/public/sencho-logo-dark.svg">
     <img src="frontend/public/sencho-logo-light.svg" alt="Sencho" width="220">
