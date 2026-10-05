@@ -264,7 +264,7 @@ A Git-managed Blueprint takes each authority step as its own action. The GitOps 
 
 A Git-managed Blueprint keeps tracking its source. When the source fetches a newer commit, that commit becomes a new candidate generation and the authority chain runs again for it:
 
-- **Accept source** takes the new generation. Accepting it materializes the generation and attempts to resolve its executable artifact identity; if resolution cannot complete, the reconciler retries it before the next authorization.
+- **Accept source** takes the new generation. Accepting it materializes the generation and attempts to resolve its executable artifact identity; if resolution cannot complete, the reconciler retries it before the next authorization. Under **Authorizes without an operator** the system starts the rollout from the accepted generation, so accepting is the whole operator step.
 - **Placement stays approved.** A content change does not move the target set, so the recorded placement approval still applies. A selector or roster change is what requires a fresh review.
 - **Authorize rollout** records the authorization for the new generation and starts the sequential rollout across the approved targets. Under **Authorizes without an operator** the system attempts authorization after acceptance and keeps trying: the reconciler retries a preparation whose artifact identity is not ready, and re-drives a handoff that was skipped (a slow preparation, a disabled Blueprint) or transiently refused. A blocked registry preflight is shown on the rollout and is re-checked when authorization runs again.
 

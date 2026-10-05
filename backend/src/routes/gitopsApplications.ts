@@ -924,28 +924,19 @@ gitopsApplicationsRouter.post('/:id/source/accept', async (req: Request, res: Re
   // the operator authorizes. A durable refusal is held by the handoff. The wait
   // is bounded: a sequential rollout must not hold the request open.
   //
-  // Starting the rollout is a deploy, and the authorize and resume routes gate
-  // it on `stack:deploy`; this half keeps that gate. The acceptance itself stays
-  // `stack:create`, so a create-only caller gets the accepted and prepared
-  // generation and a note that the rollout was not started.
-  const mayStartRollout = checkPermission(req, 'stack:deploy');
-  const permissionNote = 'the rollout was not started: starting it needs the stack deploy permission';
-  const handoff = mayStartRollout
-    ? await dispatchAcceptanceWithinTimeout(target.application.id, generationId, actor)
-    : { status: 'skipped' as const, reason: permissionNote };
-  // Both halves can have something to say; neither may hide the other. The
-  // preparation note comes first because it is about the accepted content, and
-  // the permission note follows because it is about the rollout that did not
-  // start.
-  const notes: Array<string | null> = [prepared.note];
-  if (!mayStartRollout) notes.push(permissionNote);
-  else if (handoff.status === 'blocked') notes.push(handoff.reason);
+  // The configured Automatic policy is the authority for starting the rollout,
+  // exactly as it is for the SourceController's automatic acceptance: the
+  // acceptance is `stack:create`, and the policy (which someone with deploy
+  // configured) decides that the rollout starts. The authorize, pause, resume
+  // and policy routes keep `stack:deploy`, because those are operator
+  // decisions, and the reconciler completes a skipped handoff within a tick.
+  const handoff = await dispatchAcceptanceWithinTimeout(target.application.id, generationId, actor);
   res.json({
     ok: true,
     materialized: prepared.materialized,
     artifactResolved: prepared.artifact === 'resolved',
     dispatched: handoff.status === 'dispatched',
-    note: notes.filter((note): note is string => note !== null).join(' ') || null,
+    note: prepared.note ?? (handoff.status === 'blocked' ? handoff.reason : null),
   });
 });
 

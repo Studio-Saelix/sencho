@@ -1531,12 +1531,17 @@ export function gitManagedDispatchWarranted(app: GitOpsApplicationRow): boolean 
   }
   // A withdrawn authorization is an operator decision, not a pending handoff.
   // Supersede leaves the generation pointer on the abandoned generation and
-  // marks it, so the automatic policy must not mint a replacement until a new
-  // commit arrives (which clears the pointer).
+  // marks it, so the automatic policy must not mint a replacement for the same
+  // accepted source. The check is generation-aware: once a new commit is
+  // accepted, the abandoned generation belongs to the superseded source and
+  // must not keep this one inert (the acceptance detaches the pointer too, but
+  // this is the predicate's own guarantee).
   const named = app.rollout_generation_id
     ? store.getRolloutGeneration(app.rollout_generation_id)
     : undefined;
-  if (named && named.superseded_at !== null) return false;
+  if (named && named.superseded_at !== null && named.accepted_generation_id === app.accepted_generation_id) {
+    return false;
+  }
   const binding = store.currentAuthorizationBinding(app);
   if (!binding) {
     // The handoff mints under the automatic policy, but only from a state that
@@ -1562,6 +1567,10 @@ export function gitManagedDispatchWarranted(app: GitOpsApplicationRow): boolean 
     // A fenced target's turn is over: the dispatch queue moves past it, so
     // counting it as remaining would re-drive a rollout with nothing to do.
     if (fencedOutOfTheQueue(target, app)) return false;
+    // A per-target pause is a recorded operator decision. The queue skips it,
+    // so counting it as remaining would run the full authorization path on
+    // every tick with nothing to deploy.
+    if (target?.pause_at) return false;
     return gated
       ? !settledForGatedRollout(target, binding, authRef)
       : !targetAlreadyAcked(target, binding, authRef);

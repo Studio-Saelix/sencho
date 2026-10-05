@@ -291,13 +291,9 @@ describe('rollout authorization transition', () => {
     authorize(fixture.applicationId);
     const store = GitOpsStore.getInstance();
     holdBlockedRolloutDispatch(fixture.applicationId, { reason: 'Deploy to node 2 failed: boom', holdable: true });
-    // A real rollback fence is scoped to the rollout generation that deployed
-    // the target; without that the scoped guard would (correctly) read it as a
-    // fence from an older rollout.
     store.upsertTarget({
       ...store.getTarget(fixture.applicationId, fixture.nodeId)!,
       health_stop_reason: 'rollback_pending',
-      rollout_generation_id: store.getApplication(fixture.applicationId)!.rollout_generation_id,
     });
 
     acceptNextGeneration(fixture, 400);
@@ -993,8 +989,11 @@ describe('application-driven preparation retry', () => {
     // A transient refusal is not a hold: the rollout must not read as paused.
     expect(GitOpsStore.getInstance().getApplication(fixture.applicationId)!.pause_at).toBeNull();
 
-    // The holder finishes; the next tick re-drives instead of leaving the
-    // rollout queued until a restart.
+    // The holder finishes; a later pass re-drives instead of leaving the
+    // rollout queued until a restart. The production backoff is cleared so the
+    // test observes the next attempt without waiting out the interval.
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    reconciler.getInstance().clearGitManagedHandoffFloorForTests();
     await reconciler.getInstance().tick();
     await vi.waitFor(() => expect(dispatchSpy).toHaveBeenCalledTimes(2));
     dispatchSpy.mockRestore();
@@ -1079,6 +1078,103 @@ describe('application-driven preparation retry', () => {
     });
     expect(dispatchSpy).not.toHaveBeenCalled();
     dispatchSpy.mockRestore();
+    warrantedSpy.mockRestore();
+  });
+
+  it('re-drives a new commit after the operator superseded the previous rollout', async () => {
+    const fixture = seedAuthorizedReadyApp({ nodeCount: 2 });
+    await writeAppliedCompose(fixture.applicationId, fixture.generationId, 'services:\n  web:\n    image: alpine:3.20\n');
+    authorize(fixture.applicationId);
+    const store = GitOpsStore.getInstance();
+    const deploySpy = vi.spyOn(BlueprintService.getInstance(), 'deployAuthorizedMaterialization')
+      .mockResolvedValue({ status: 'active' });
+    const first = await new BlueprintTargetAdapter().dispatch(
+      buildAcceptedGeneration(store.getGeneration(fixture.generationId)!),
+      { targetMode: 'blueprint', nodeId: fixture.nodeId, bindingRevision: null },
+    );
+    expect(first.status).toBe('dispatched');
+    GitOpsTransitions.getInstance().rolloutSuperseded({
+      applicationId: fixture.applicationId,
+      envelope: { operationId: randomUUID(), actor: 'tester', trigger: 'manual', at: 500 },
+    });
+    deploySpy.mockClear();
+
+    const { nextGenId, resolveNow } = await acceptSecondCommitWithFailedPreparation(fixture);
+    // The acceptance detaches the abandoned generation, so the next dispatch
+    // does not read the frozen strategy as moved on and refuse.
+    expect(store.getApplication(fixture.applicationId)!.rollout_generation_id).toBeNull();
+    resolveNow();
+    const reconciler = (await import('../services/BlueprintReconciler')).BlueprintReconciler;
+    await reconciler.getInstance().tick();
+
+    await vi.waitFor(() => {
+      expect(deploySpy.mock.calls.filter((call) => call[0].blueprint.id === fixture.blueprintId))
+        .toHaveLength(fixture.nodeIds.length);
+    });
+    for (const nodeId of fixture.nodeIds) {
+      expect(store.getTarget(fixture.applicationId, nodeId)?.applied_generation_id).toBe(nextGenId);
+    }
+  });
+
+  it('does not re-drive a rollout whose only remaining target is paused', async () => {
+    const fixture = seedAuthorizedReadyApp();
+    authorize(fixture.applicationId);
+    const store = GitOpsStore.getInstance();
+    store.upsertTarget({
+      ...store.getTarget(fixture.applicationId, fixture.nodeId)!,
+      pause_at: Date.now(),
+      pause_reason: 'operator hold',
+    });
+    const dispatchSpy = vi.spyOn(GitSourceService.getInstance(), 'dispatchAcceptedGeneration');
+    const warrantedSpy = vi.spyOn(await import('../services/gitops/handoff'), 'gitManagedDispatchWarranted');
+    const reconciler = (await import('../services/BlueprintReconciler')).BlueprintReconciler;
+
+    await reconciler.getInstance().tick();
+
+    // The paused target is a recorded decision the queue skips, so the
+    // predicate is the positive control and the full authorization path is not
+    // re-run on every tick.
+    await vi.waitFor(() => {
+      expect(warrantedSpy.mock.calls.some((call) => call[0].id === fixture.applicationId)).toBe(true);
+    });
+    expect(dispatchSpy).not.toHaveBeenCalled();
+    dispatchSpy.mockRestore();
+    warrantedSpy.mockRestore();
+  });
+
+  it('does not re-run the handoff before the floor', async () => {
+    const fixture = seedAuthorizedReadyApp();
+    const { nextGenId } = await acceptSecondCommitWithFailedPreparation(fixture);
+    // The background preparation finished: the artifact is resolved and no
+    // authorization is live, which is exactly a warranted state.
+    const encodeArtifactEvidenceJson = (await import('../services/gitops/json')).encodeArtifactEvidenceJson;
+    GitOpsTransitions.getInstance().recordArtifactEvidence({
+      applicationId: fixture.applicationId,
+      generationId: nextGenId,
+      artifactSetId: `resolved-${nextGenId}`,
+      evidenceVersion: 2,
+      qualification: 'exact',
+      evidenceJson: encodeArtifactEvidenceJson({ kind: 'exact', identity: 'sha256:cafebabe' }),
+      authoritative: 0,
+      envelope: { operationId: randomUUID(), actor: 'tester', trigger: 'test', at: 901 },
+    });
+    const handoffSpy = vi.spyOn(await import('../services/gitops/gitManagedHandoff'), 'dispatchPreparedGitManagedGeneration')
+      .mockResolvedValue({ status: 'blocked', reason: 'the registry preflight is blocked' });
+    const warrantedSpy = vi.spyOn(await import('../services/gitops/handoff'), 'gitManagedDispatchWarranted');
+    const reconciler = (await import('../services/BlueprintReconciler')).BlueprintReconciler;
+    const warrantedChecks = (): number => warrantedSpy.mock.calls
+      .filter((call) => call[0].id === fixture.applicationId).length;
+
+    await reconciler.getInstance().tick();
+    await vi.waitFor(() => expect(handoffSpy).toHaveBeenCalledTimes(1));
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    await reconciler.getInstance().tick();
+    // The predicate ran again (positive control); the floor is what stopped the
+    // handoff, so a steady blocked state is not re-evaluated every tick.
+    await vi.waitFor(() => expect(warrantedChecks()).toBe(2));
+    expect(handoffSpy).toHaveBeenCalledTimes(1);
+    handoffSpy.mockRestore();
     warrantedSpy.mockRestore();
   });
 });

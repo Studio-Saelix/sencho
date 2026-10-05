@@ -100,27 +100,6 @@ function withPlacementPolicy(projection: GitOpsRevisionLive): GitOpsRevisionLive
   };
 }
 
-/** An application whose rollout authorization policy is configured and read. */
-function withRolloutPolicy(
-  projection: GitOpsRevisionLive,
-  configured: 'manual' | 'automatic',
-): GitOpsRevisionLive {
-  return {
-    ...projection,
-    authorityPolicies: [
-      {
-        domain: 'rollout_authorization',
-        configured,
-        effectiveFrozen: null,
-        decision: 'awaiting_operator',
-        reason: null,
-        decidedBy: null,
-        decidedAt: null,
-      },
-    ],
-  };
-}
-
 function renderActions(
   projection: GitOpsRevisionLive,
   can: (action: PermissionAction) => boolean = () => true,
@@ -187,33 +166,6 @@ describe('GitOpsAuthorityActions', () => {
     // The acceptance stands; the note names what is still missing.
     await waitFor(() => expect(toast.warning).toHaveBeenCalledWith(note));
     expect(onChanged).toHaveBeenCalled();
-  });
-
-  it('hides source acceptance from a create-only caller when the rollout policy is automatic', () => {
-    // Accepting under Automatic also authorizes and starts the rollout, which
-    // is a deploy; offering a button that half-works would be worse.
-    renderActions(
-      withRolloutPolicy(sourcePending(), 'automatic'),
-      (action) => action === 'stack:create',
-    );
-    expect(screen.queryByTestId('gitops-action-accept-source')).toBeNull();
-  });
-
-  it('offers source acceptance to a create-only caller when the rollout policy is manual', () => {
-    // The acceptance itself is `stack:create`; without an automatic handoff it
-    // starts nothing, so the create grant is enough.
-    renderActions(
-      withRolloutPolicy(sourcePending(), 'manual'),
-      (action) => action === 'stack:create',
-    );
-    expect(screen.getByTestId('gitops-action-accept-source')).toBeInTheDocument();
-  });
-
-  it('fails closed when the rollout policy is not readable', () => {
-    // The server would accept and skip the dispatch half; without a readable
-    // policy the UI cannot know, so it asks for the grant that completes it.
-    renderActions(sourcePending(), (action) => action === 'stack:create');
-    expect(screen.queryByTestId('gitops-action-accept-source')).toBeNull();
   });
 
   it('opens the reviewed plan for placement approval', async () => {

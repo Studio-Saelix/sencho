@@ -4222,17 +4222,15 @@ export class GitOpsTransitions {
     // operator pause and a health-policy hold are deliberate stops and survive;
     // only the operator's own resume clears those.
     //
-    // An unfinished roll back is the exception: while its target fence is
-    // scoped to the live rollout generation, lifting the hold here would deploy
-    // over a target whose rollback never finished. A fence left on an older
-    // generation is not this acceptance's to answer: the dispatch queue moves
-    // past it the same way, so blocking the clear would only cost a second
-    // Resume. Finishing or undoing the rollback, then resuming and authorizing,
-    // is what moves the rollout on.
+    // An unfinished roll back is the exception: lifting the hold here would let
+    // the next dispatch deploy over a target whose rollback never finished. The
+    // dispatch queue does not skip a fence written by an older rollout
+    // generation, so the clear stays conservative and blocks while any target
+    // still carries the fence. Finishing or undoing the rollback, then resuming
+    // and authorizing, is what moves the rollout on.
     const rollbackPending = app.target_mode === 'blueprint'
       && this.store().listTargets(app.id).some(
-        (target) => target.health_stop_reason === 'rollback_pending'
-          && target.rollout_generation_id === app.rollout_generation_id,
+        (target) => target.health_stop_reason === 'rollback_pending',
       );
     if (app.pause_at !== null && app.pause_origin === 'system' && !rollbackPending) {
       const before = { pauseAt: app.pause_at, pauseReason: app.pause_reason, pauseOrigin: app.pause_origin };
@@ -4248,13 +4246,20 @@ export class GitOpsTransitions {
       if (cleared) extras.historyIds.push(cleared);
     }
     if (app.target_mode !== 'blueprint') return;
-    if (!app.rollout_authorization_ref && !app.preflight_fingerprint) return;
     app.rollout_authorization_ref = null;
     app.preflight_fingerprint = null;
     if (!app.rollout_generation_id) return;
     const live = this.store().getRolloutGeneration(app.rollout_generation_id);
     if (!live || live.provenance !== 'rollout_authorization') return;
-    this.recordRolloutGenerationSuperseded(app, app.rollout_generation_id, null, envelope, extras);
+    // A generation the operator already superseded keeps its pointer until this
+    // acceptance detaches it. Leaving it would make the next dispatch read the
+    // frozen strategy as moved on and refuse, which is how an earlier rollback
+    // or supersede disabled the automatic handoff for every later commit. The
+    // row is only marked, and the event only recorded, when it is not already
+    // superseded, so an acceptance does not append a duplicate.
+    if (live.superseded_at === null) {
+      this.recordRolloutGenerationSuperseded(app, app.rollout_generation_id, null, envelope, extras);
+    }
     app.rollout_generation_id = null;
   }
 

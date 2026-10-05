@@ -37,6 +37,12 @@ import type { GitOpsApplicationRow } from './gitops/types';
 
 const RECONCILER_INTERVAL_MS = 60_000;
 const RECONCILER_INITIAL_DELAY_MS = 5_000;
+/**
+ * Concurrent automatic handoffs. Each one runs a registry preflight, which is
+ * network-bound; the startup backfill caps its own at three for the same reason.
+ * Applications over the cap keep their state and are picked up by a later tick.
+ */
+const GIT_MANAGED_HANDOFF_CONCURRENCY = 3;
 
 export type ConfirmedActionOutcomeStatus = 'ok' | 'failed' | 'name_conflict' | 'pending' | 'skipped';
 
@@ -180,6 +186,16 @@ export class BlueprintReconciler {
      */
     private readonly gitManagedPreparationFloor = new Map<string, { generationId: string; at: number }>();
     /**
+     * An in-memory floor between automatic handoff attempts, so a steady no-op
+     * state (a persistent non-holdable refusal, a blocked registry preflight)
+     * does not run the full authorization path on every 60-second tick. Dated
+     * from the last attempt; not durable by design, so a restart is allowed one
+     * immediate attempt.
+     */
+    private readonly gitManagedHandoffFloor = new Map<string, { generationId: string; at: number }>();
+    /** Automatic handoffs running right now, bounded by the concurrency cap. */
+    private gitManagedHandoffInFlight = 0;
+    /**
      * A generation whose preparation was refused by the authored-text parser.
      * The refusal is a statement about the content, so it is remembered per
      * generation and never retried; the reason itself is persisted as an
@@ -304,6 +320,9 @@ export class BlueprintReconciler {
             // otherwise grow for the process's lifetime.
             for (const id of this.gitManagedPreparationFloor.keys()) {
                 if (!liveAppIds.has(id)) this.gitManagedPreparationFloor.delete(id);
+            }
+            for (const id of this.gitManagedHandoffFloor.keys()) {
+                if (!liveAppIds.has(id)) this.gitManagedHandoffFloor.delete(id);
             }
             for (const id of this.refusedGitManagedPreparations.keys()) {
                 if (!liveAppIds.has(id)) this.refusedGitManagedPreparations.delete(id);
@@ -446,31 +465,56 @@ export class BlueprintReconciler {
         if (fresh.accepted_generation_id !== generationId) return;
         if (fresh.rollout_authorization_policy !== 'automatic') return;
         if (!gitManagedDispatchWarranted(fresh)) return;
-        const handoff = await dispatchPreparedGitManagedGeneration({
-            applicationId: fresh.id,
-            generationId,
-            actor: 'system:blueprint-reconciler',
-            trigger: 'retry',
-        });
-        if (handoff.status === 'blocked') {
-            // A durable refusal placed a hold, which is the operator-visible
-            // record; a transient one (lock contention, a store refusal) is
-            // expected to clear on the next pass, so it is diagnostic rather
-            // than a warning on every tick.
-            const held = store.getApplication(fresh.id)?.pause_at !== null;
-            if (held) {
-                console.warn(
-                    '[BlueprintReconciler] Git-managed dispatch blocked for %s: %s',
-                    sanitizeForLog(fresh.id),
-                    sanitizeForLog(handoff.reason ?? 'unknown'),
-                );
-            } else {
-                diagnosticLog('Git-managed redrive refused without a hold', {
-                    applicationId: fresh.id,
-                    reason: handoff.reason,
-                });
+        // A steady no-op state (a persistent refusal, a blocked registry
+        // preflight) must not run the full authorization path, including its
+        // network preflight, on every 60-second tick. The floor is dated from
+        // the last attempt and is not durable by design: a restart is allowed
+        // one immediate attempt.
+        const intervalMs = DatabaseService.getInstance().getGitOpsArtifactRetryIntervalMins() * 60_000;
+        const last = this.gitManagedHandoffFloor.get(fresh.id);
+        if (last && last.generationId === generationId && Date.now() - last.at < intervalMs) return;
+        if (this.gitManagedHandoffInFlight >= GIT_MANAGED_HANDOFF_CONCURRENCY) return;
+        this.gitManagedHandoffFloor.set(fresh.id, { generationId, at: Date.now() });
+        this.gitManagedHandoffInFlight += 1;
+        try {
+            const handoff = await dispatchPreparedGitManagedGeneration({
+                applicationId: fresh.id,
+                generationId,
+                actor: 'system:blueprint-reconciler',
+                trigger: 'retry',
+            });
+            if (handoff.status === 'blocked') {
+                // A durable refusal placed a hold, which is the operator-visible
+                // record; a transient one (lock contention, a store refusal) is
+                // expected to clear on a later pass, so it is diagnostic rather
+                // than a warning on every tick.
+                const held = (store.getApplication(fresh.id)?.pause_at ?? null) !== null;
+                if (held) {
+                    console.warn(
+                        '[BlueprintReconciler] Git-managed dispatch blocked for %s: %s',
+                        sanitizeForLog(fresh.id),
+                        sanitizeForLog(handoff.reason ?? 'unknown'),
+                    );
+                } else {
+                    diagnosticLog('Git-managed redrive refused without a hold', {
+                        applicationId: fresh.id,
+                        reason: handoff.reason,
+                    });
+                }
             }
+        } finally {
+            this.gitManagedHandoffInFlight -= 1;
         }
+    }
+
+    /**
+     * Clear the in-memory handoff floor for every application.
+     *
+     * The floor is a production backoff; a test that needs to observe the next
+     * attempt without waiting out the interval clears it instead of sleeping.
+     */
+    clearGitManagedHandoffFloorForTests(): void {
+        this.gitManagedHandoffFloor.clear();
     }
 
     private async executeAuthorizedActions(
