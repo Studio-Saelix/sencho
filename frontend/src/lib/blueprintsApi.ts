@@ -18,6 +18,22 @@ export type BlueprintDeploymentStatus =
     | 'evict_blocked'
     | 'name_conflict';
 
+/** How each deployment status reads to an operator, shared by the catalog and the sheet. */
+export const DEPLOYMENT_STATUS_LABEL: Record<BlueprintDeploymentStatus, string> = {
+    pending: 'Pending',
+    pending_state_review: 'Awaiting confirmation',
+    deploying: 'Deploying',
+    active: 'Active',
+    drifted: 'Drifted',
+    correcting: 'Correcting',
+    repair_held: 'Repair held',
+    failed: 'Failed',
+    withdrawing: 'Withdrawing',
+    withdrawn: 'Withdrawn',
+    evict_blocked: 'Evict blocked',
+    name_conflict: 'Name conflict',
+};
+
 export type BlueprintSelector =
     | { type: 'labels'; any: string[]; all: string[] }
     | { type: 'nodes'; ids: number[] };

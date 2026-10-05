@@ -5,6 +5,7 @@ const DELIVERY_ID_HEADERS = [
   'x-github-delivery',
   'x-gitea-delivery',
   'x-forgejo-delivery',
+  'x-gitlab-event-uuid',
   'webhook-id',
   'idempotency-key',
   'x-request-uuid',

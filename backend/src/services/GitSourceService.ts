@@ -28,6 +28,7 @@ import { buildCandidateComposeInvocation } from '../utils/candidateComposeInvoca
 import type { ComposeInputEntry, GitProjectManifest, GitSourceManifestState, InventoryResult, ManifestSummary, RefusalInfo } from '../types/gitProjectManifest';
 import type { GitChangePlan, PublicGitChangePlan, GitChangePlanCounts, PublicGitChangePlanOperation } from '../types/gitChangePlan';
 import { GIT_CHANGE_PLAN_SCHEMA_VERSION } from '../types/gitChangePlan';
+import type { GitSourceErrorCode } from '../types/gitSourceErrorCode';
 import type { NotificationCategory } from './NotificationService';
 import { classifyGitFailure, isTransportFailure, type TransportFailureReason } from './git/errors';
 import type { RefKind, SshDeployKeyAuth } from './git/types';
@@ -111,25 +112,11 @@ import type { SecretCapability } from './gitops/sops/types';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
-export type GitSourceErrorCode =
-    | 'REPO_NOT_FOUND'
-    | 'AUTH_FAILED'
-    | 'REF_NOT_FOUND'
-    | 'REF_DELETED'
-    | 'UNSUPPORTED_REF'
-    | 'SSH_HOST_KEY_FAILED'
-    | 'FILE_NOT_FOUND'
-    | 'RATE_LIMITED'
-    | 'NETWORK_TIMEOUT'
-    | 'GIT_ERROR'
-    | 'STALE_PLAN'
-    | 'PLAN_FINGERPRINT_REQUIRED'
-    | 'PLAN_BLOCKED'
-    | 'LEGACY_PENDING'
-    | 'PLAN_UNAVAILABLE'
-    | 'OPERATION_IN_FLIGHT'
-    | 'SOURCE_CLAIMED_BY_BLUEPRINT'
-    | 'SOPS_DECRYPT_FAILED';
+// The runtime list and the type share one source in a leaf module, so a new
+// code cannot be added without reaching every runtime consumer (the status
+// map and the closed-set guard in utils/gitSourceHttp.ts), and the list is
+// never read through a module cycle.
+export { GIT_SOURCE_ERROR_CODE_VALUES, type GitSourceErrorCode } from '../types/gitSourceErrorCode';
 
 export type SourceRevalidationResult =
     | { status: 'reuse'; generation: GitOpsGenerationRow }
@@ -7744,13 +7731,41 @@ export class GitSourceService {
         const materialization: { value: MaterializationResult | null } = { value: null };
         const encryptedCaBundle = this.resolveEncryptedCaBundle(input.caBundle, undefined);
         const caBundlePem = this.decryptCaBundlePem(encryptedCaBundle);
+        // Mirror createStackFromGit's fetch auth: discovery is a full fetch, so
+        // it needs the same transport credentials the create will later run
+        // with. Without this, SSH and private-CA repos fail as unauthenticated
+        // before the create can consume the prepared candidate.
+        const deployKeyTrust = input.authType === 'deploy_key'
+            ? (() => {
+                if (!input.deployKey?.trim() || !input.sshKnownHostsEntry?.trim()) {
+                    throw new GitSourceError(
+                        'GIT_ERROR',
+                        'Deploy key authentication requires a private key and a trusted SSH host key.',
+                    );
+                }
+                return this.resolveSshTrustFromKnownHostsEntry(
+                    input.sshKnownHostsEntry,
+                    input.sshHostKeyFingerprint,
+                );
+            })()
+            : null;
+        const fetchAuth = input.authType === 'token'
+            ? { token: input.token, caBundlePem }
+            : deployKeyTrust
+                ? {
+                    sshAuth: {
+                        privateKey: input.deployKey!.trim(),
+                        knownHostsEntry: deployKeyTrust.sshKnownHostsEntry,
+                    },
+                    caBundlePem,
+                }
+                : { token: null, caBundlePem };
         const fetched = await this.fetchFromGit({
             repoUrl: input.repoUrl,
             branch: input.branch,
             composePaths: input.composePaths,
             envPath: input.syncEnv ? input.envPath : null,
-            token: input.token,
-            caBundlePem,
+            ...fetchAuth,
             onClone: async (cloneDir, commitSha, envContent) => {
                 materialization.value = await this.buildMaterialization(
                     input.stackName,

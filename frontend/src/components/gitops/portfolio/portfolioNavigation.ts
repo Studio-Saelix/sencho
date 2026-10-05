@@ -9,7 +9,7 @@
  * returns to the list. A step that resolves a source problem runs right there
  * when the server offers it, and only otherwise opens a surface.
  */
-import { openBlueprintIntent } from '@/lib/blueprintIntent';
+import { openBlueprintIntent, type BlueprintIntent } from '@/lib/blueprintIntent';
 import {
   SENCHO_NAVIGATE_EVENT,
   SENCHO_OPEN_STACK_EVENT,
@@ -125,10 +125,29 @@ export function openGitSourceInPlace(row: GitOpsPortfolioRow, intent?: 'review')
   }));
 }
 
-/** Open the Blueprint-backed application's own Blueprint detail on the Fleet view. */
+/** Asks the workplace's Blueprint host to open a Blueprint's sheet or the create dialog in place. */
+export const GITOPS_BLUEPRINT_EVENT = 'sencho:gitops-blueprint';
+
+export interface GitOpsBlueprintRequest {
+  intent: BlueprintIntent;
+  /** Set by a host that took the request; without one, the Fleet Blueprints tab opens instead. */
+  handled: boolean;
+}
+
+/**
+ * Open a Blueprint's detail or the create dialog over the workplace. Where no host
+ * is mounted to take it, it falls back to the Fleet Blueprints tab, which can.
+ */
+export function openBlueprintInPlace(intent: BlueprintIntent): void {
+  const request: GitOpsBlueprintRequest = { intent, handled: false };
+  window.dispatchEvent(new CustomEvent<GitOpsBlueprintRequest>(GITOPS_BLUEPRINT_EVENT, { detail: request }));
+  if (!request.handled) openBlueprintIntent(intent);
+}
+
+/** Open the Blueprint-backed application's own Blueprint detail, in place when the workplace can host it. */
 function openBlueprint(row: GitOpsPortfolioRow): void {
   if (row.blueprintId === null) return;
-  openBlueprintIntent({ kind: 'open', blueprintId: row.blueprintId });
+  openBlueprintInPlace({ kind: 'open', blueprintId: row.blueprintId });
 }
 
 export interface OwningSurfaceHandoff {
@@ -139,8 +158,8 @@ export interface OwningSurfaceHandoff {
 /**
  * The owning surface for an application, by target mode, or null when the
  * row carries no identity that surface could open, or the caller cannot
- * reach it (a Blueprint lives in Fleet, which needs the fleet read grant and
- * has no Blueprints tab on a phone).
+ * reach it (opening a Blueprint needs the fleet read grant and is not offered
+ * on a phone).
  */
 export function owningSurfaceHandoff(row: GitOpsPortfolioRow, opts: { canOpenBlueprint: boolean }): OwningSurfaceHandoff | null {
   switch (row.targetMode) {

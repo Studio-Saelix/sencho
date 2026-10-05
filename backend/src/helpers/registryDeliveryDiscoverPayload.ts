@@ -87,6 +87,13 @@ export function buildRegistryDiscoverPayload(options: {
       env_path: options.body.env_path,
       auth_type: options.body.auth_type,
       token: options.body.token,
+      // Every credential field the create route accepts must ride discovery too.
+      // The target fetches through this payload before it can answer; omitting
+      // a field makes SSH and private-CA repos fail as if unauthenticated.
+      deploy_key: options.body.deploy_key,
+      ssh_known_hosts_entry: options.body.ssh_known_hosts_entry,
+      ssh_host_key_fingerprint: options.body.ssh_host_key_fingerprint,
+      ca_bundle: options.body.ca_bundle,
       auto_apply_on_webhook: options.body.auto_apply_on_webhook,
       auto_deploy_on_apply: options.body.auto_deploy_on_apply,
     };

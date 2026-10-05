@@ -7,6 +7,7 @@ import { PortfolioMasthead } from './PortfolioMasthead';
 import { useGitOpsPortfolio } from './useGitOpsPortfolio';
 import { useWorkplaceCapabilities } from './useWorkplaceCapabilities';
 import { WorkplaceActions } from './WorkplaceActions';
+import { GitOpsBlueprintHost } from './GitOpsBlueprintHost';
 import { GitOpsGitSourceHost } from './GitOpsGitSourceHost';
 import { GitOpsApplicationSheet } from '../application/GitOpsApplicationSheet';
 import type { GitOpsPortfolioResponse } from '@/types/gitopsPortfolio';
@@ -21,10 +22,10 @@ import { useGitOpsApplicationSelection } from '../application/useGitOpsApplicati
  * parallel status engine. Refresh is event-driven (gitops invalidate channel),
  * never a per-node browser poll.
  *
- * A row opens its sheet over the list (a Direct application's Git source, or a
- * Blueprint application's own sheet keyed by the `application` query
- * parameter), so nothing about the list is lost and a decision is made where the
- * state is read.
+ * A row opens its sheet over the list (a Direct application's Git source, a
+ * Blueprint application's own sheet keyed by the `application` query parameter,
+ * or the Blueprint's detail sheet itself), so nothing about the list is lost and
+ * a decision is made where the state is read.
  *
  * Desktop only by itself; the phone treatment is the bespoke screen in
  * components/mobile/MobileGitOps.tsx (mobile-treatments entry: bespoke).
@@ -34,11 +35,12 @@ export function GitOpsWorkplaceView() {
   const selectedApplication = useGitOpsApplicationSelection();
   const { canOpenFleet } = useWorkplaceCapabilities();
 
-  // The list stays mounted under both sheets, so closing one lands back on the
+  // The list stays mounted under the sheets, so closing one lands back on the
   // same filters, page, and scroll without a reload.
   return (
     <>
       <GitOpsGitSourceHost />
+      <GitOpsBlueprintHost />
       <PortfolioList portfolio={portfolio} canOpenFleet={canOpenFleet} />
       {selectedApplication !== null && <GitOpsApplicationSheet key={selectedApplication} id={selectedApplication} />}
     </>

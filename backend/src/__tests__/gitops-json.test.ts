@@ -88,6 +88,84 @@ describe('gitops json codecs', () => {
     expect(() => decodeArtifactEvidenceJson('{"kind":"exact","identity":"sha256:abc","extra":1}')).toThrow(GitOpsJsonError);
   });
 
+  it('canonicalizes stored evidence written with docker-info platform spellings', () => {
+    const raw = JSON.stringify({
+      kind: 'qualified',
+      identity: `sha256:${'1'.repeat(64)}`,
+      services: [{
+        serviceName: 'web',
+        authoredRef: 'nginx:latest',
+        source: 'registry',
+        platform: 'linux/x86_64',
+        indexDigest: null,
+        platformDigest: `sha256:${'a'.repeat(64)}`,
+        platformVariants: [{ platform: 'linux/x86_64', digest: `sha256:${'a'.repeat(64)}` }],
+        localDigests: null,
+        buildContextFingerprint: null,
+        producedImageId: null,
+        failureClass: null,
+        resolvedAt: 1,
+      }],
+    });
+    const decoded = decodeArtifactEvidenceJson(raw);
+    expect(decoded.services?.[0]?.platform).toBe('linux/amd64');
+    expect(decoded.services?.[0]?.platformVariants).toEqual([
+      { platform: 'linux/amd64', digest: `sha256:${'a'.repeat(64)}` },
+    ]);
+  });
+
+  it('re-sorts legacy variants whose canonical labels order differently', () => {
+    const raw = JSON.stringify({
+      kind: 'qualified',
+      identity: `sha256:${'1'.repeat(64)}`,
+      services: [{
+        serviceName: 'web',
+        authoredRef: 'nginx:latest',
+        source: 'registry',
+        platform: 'linux/x86_64',
+        indexDigest: null,
+        platformDigest: `sha256:${'a'.repeat(64)}`,
+        platformVariants: [
+          { platform: 'linux/aarch64', digest: `sha256:${'b'.repeat(64)}` },
+          { platform: 'linux/x86_64', digest: `sha256:${'a'.repeat(64)}` },
+        ],
+        localDigests: null,
+        buildContextFingerprint: null,
+        producedImageId: null,
+        failureClass: null,
+        resolvedAt: 1,
+      }],
+    });
+    const decoded = decodeArtifactEvidenceJson(raw);
+    expect(decoded.services?.[0]?.platformVariants?.map((variant) => variant.platform))
+      .toEqual(['linux/amd64', 'linux/arm64']);
+  });
+
+  it('rejects a stored row whose legacy variants collapse to one canonical platform', () => {
+    const raw = JSON.stringify({
+      kind: 'qualified',
+      identity: `sha256:${'1'.repeat(64)}`,
+      services: [{
+        serviceName: 'web',
+        authoredRef: 'nginx:latest',
+        source: 'registry',
+        platform: 'linux/amd64',
+        indexDigest: null,
+        platformDigest: `sha256:${'a'.repeat(64)}`,
+        platformVariants: [
+          { platform: 'linux/amd64', digest: `sha256:${'a'.repeat(64)}` },
+          { platform: 'linux/x86_64', digest: `sha256:${'b'.repeat(64)}` },
+        ],
+        localDigests: null,
+        buildContextFingerprint: null,
+        producedImageId: null,
+        failureClass: null,
+        resolvedAt: 1,
+      }],
+    });
+    expect(() => decodeArtifactEvidenceJson(raw)).toThrow(GitOpsJsonError);
+  });
+
   it('keeps artifact fingerprints stable under service reordering', () => {
     const a: ServiceArtifactEvidence = {
       serviceName: 'api',

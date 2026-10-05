@@ -71,3 +71,40 @@ describe('a held repair is visible in the deployment table', () => {
     expect(screen.getByRole('button', { name: /withdraw/i })).toBeDefined();
   });
 });
+
+describe('a failed deploy is readable in the deployment table', () => {
+  const log = 'Network a Creating\nContainer a-1 Starting\nError response from daemon: Bind for 0.0.0.0:8080 failed: port is already allocated';
+
+  it('shows the cause on one line and keeps the full output behind a disclosure', () => {
+    renderTable([deployment({ status: 'failed', drift_summary: null, last_error: log })]);
+    expect(screen.getByText('Error response from daemon: Bind for 0.0.0.0:8080 failed: port is already allocated')).toBeInTheDocument();
+    expect(screen.getByText('Full output')).toBeInTheDocument();
+  });
+
+  it('names the row action Re-apply, the same name the status verb uses', () => {
+    renderTable([deployment({ status: 'failed', drift_summary: null, last_error: log })]);
+    expect(screen.getByRole('button', { name: 'Re-apply' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Retry' })).toBeNull();
+  });
+
+  it('shows no disclosure for a one-line error', () => {
+    renderTable([deployment({ status: 'failed', drift_summary: null, last_error: 'image pull denied' })]);
+    expect(screen.getByText('image pull denied')).toBeInTheDocument();
+    expect(screen.queryByText('Full output')).toBeNull();
+  });
+
+  it('says so when a failed row recorded no error output', () => {
+    renderTable([deployment({ status: 'failed', drift_summary: null, last_error: '  ' })]);
+    expect(screen.getByText('No error output recorded')).toBeInTheDocument();
+  });
+
+  it('falls back to the drift summary for a failed row with no usable error', () => {
+    renderTable([deployment({ status: 'failed', drift_summary: 'image changed on the node', last_error: '' })]);
+    expect(screen.getByText('image changed on the node')).toBeInTheDocument();
+  });
+
+  it('says nothing is deployed yet instead of asking for a node ID', () => {
+    renderTable([]);
+    expect(screen.getByText(/No deployments yet/)).toBeInTheDocument();
+  });
+});

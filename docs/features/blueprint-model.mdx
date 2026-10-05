@@ -5,14 +5,14 @@ description: "Fleet-wide compose templates that Sencho keeps in sync across the 
 
 A **Blueprint** bundles Compose YAML with a node selector and a drift policy. You declare a stack once; Sencho handles the distribution and the reconciliation loop. A Blueprint's compose is either **Inline** (edited here) or **Git-managed** (bound to one live Git source). For an Inline Blueprint, every minute Sencho compares the live state on each targeted node against the desired revision, and either reports the drift, dispatches a notification, or auto-corrects, depending on the mode you picked. Git-managed Blueprints take content from an accepted Git generation: fleet place runs only after that generation is authorized for rollout, and never from the frozen detach snapshot stored on the Blueprint row.
 
-Blueprints live under **Fleet · Deployments**.
+Blueprints live under **Fleet · Blueprints**.
 
 <Note>
   Blueprints are Sencho's Compose-first orchestration model. Creating, editing, withdrawing, and applying blueprints requires an admin role; operators and viewers can read the catalog and the detail sheet. Pinning a blueprint to a specific node lives under **Fleet · Federation** (admin role required).
 </Note>
 
-<Frame caption="Fleet · Deployments catalog with blueprint tiles, the All / Drifted / Observe / Suggest / Enforce filter chips, and the New Blueprint action in the top-right.">
-  <img src="/images/blueprint-model/catalog.png" alt="Blueprint catalog in Fleet Deployments" />
+<Frame caption="Fleet · Blueprints catalog with blueprint tiles, the All / Needs attention / Observe / Suggest / Enforce filter chips, and the New Blueprint action in the top-right of a one-line header that counts the blueprints.">
+  <img src="/images/blueprint-model/catalog.png" alt="Blueprint catalog in Fleet Blueprints" />
 </Frame>
 
 ## Mental model
@@ -66,16 +66,16 @@ Drift detection runs on every tick for every Active deployment regardless of pol
 
 ## The catalog
 
-The Deployments tab opens on a catalog of every blueprint configured on this instance. Each tile shows the name, an optional description, the classification chip (stateless, stateful, or unknown), an Inline or Git-managed badge, the active-vs-targeted node count, and the current drift mode. Filter chips at the top break the catalog down by drift mode and let you isolate any tile that has drift.
+The Blueprints tab opens on a catalog of every blueprint configured on this instance. Each tile shows the name, an optional description, the classification chip (stateless, stateful, or unknown), an Inline or Git-managed badge, the active-vs-targeted node count with its dominant non-active state (for example failed, drifted, repair held or deploying), and the current drift mode. Filter chips at the top break the catalog down by drift mode, and **Needs attention** isolates every tile with a failed, conflicting, drifted, held, blocked or awaiting row, or one that needs its rollout reconfirmed. The catalog stays on screen while it refreshes; a failed refresh shows a notice and keeps the last list.
 
 <Frame caption="Catalog tiles. Each tile carries the classification chip, an Inline or Git-managed badge, the active-over-targeted count, the selector summary, and the drift mode. The filter chips above the grid pivot the view.">
-  <img src="/images/blueprint-model/catalog.png" alt="Deployments tab catalog with classification chips and filter chips" />
+  <img src="/images/blueprint-model/catalog.png" alt="Blueprints tab catalog with classification chips and filter chips" />
 </Frame>
 
 The first time you visit the tab, the catalog is empty and a three-step explainer walks you through Author, Target, and Reconcile, with a **Create your first Blueprint** button at the bottom.
 
-<Frame caption="Empty Deployments tab. Three numbered cards (01 Author, 02 Target, 03 Reconcile) explain the model before you create the first blueprint.">
-  <img src="/images/blueprint-model/empty-state.png" alt="Empty Deployments tab with three-step explainer" />
+<Frame caption="Empty Blueprints tab. Three numbered cards (01 Author, 02 Target, 03 Reconcile) explain the model before you create the first blueprint.">
+  <img src="/images/blueprint-model/empty-state.png" alt="Empty Blueprints tab with three-step explainer" />
 </Frame>
 
 ## Anatomy of a Blueprint
@@ -96,9 +96,9 @@ Before a local Blueprint deploy starts, Sencho applies the same pre-deploy [vuln
 
 ## The editor
 
-**New Blueprint** opens a single editor dialog with everything inline: name and description fields, a Monaco YAML editor with the classification banner sitting above it, the selector picker (Labels or Specific nodes), the drift policy cards, and the Reconciler enabled toggle.
+**New Blueprint** opens a single editor dialog with everything inline: name and description fields, a Monaco YAML editor with the classification banner sitting above it, the targets picker (By node label or Specific nodes), the drift policy cards, and the Reconciler enabled switch. The action row stays pinned at the bottom of the dialog: Cancel, Save as draft and Review rollout when you can review rollouts and the reconciler is on, otherwise Cancel and Create blueprint. A line on its left notes whether the action adds node labels or deploys nothing yet. A field that blocks submitting shows its message below it; the name field takes focus, and the editor or targets picker scrolls into view.
 
-<Frame caption="The Blueprint editor. Name and description fields, the classification banner pinned above the compose editor, and the Specific nodes selector below. Drift policy cards and the Reconciler enabled toggle sit further down in the same scrollable dialog.">
+<Frame caption="The Blueprint editor. Name and description fields, the classification banner pinned above the compose editor, and the targets picker below. Drift policy cards and the Reconciler enabled switch sit further down in the same scrollable dialog.">
   <img src="/images/blueprint-model/editor-dialog.png" alt="Blueprint editor dialog with name, description, classification banner, compose editor, and node selector" />
 </Frame>
 
@@ -118,11 +118,15 @@ Click the signals toggle on the right of the banner (`1 SIGNAL`, `2 SIGNALS`, et
 
 ### Selector
 
-A **Labels** selector matches any node whose labels satisfy the expression. The picker is split into two pill rows: **Match nodes with ANY of these labels** (the OR set), and **AND ALSO require ALL of these** (the AND set). Either side may be empty. The dialog renders a one-line summary just below the pills, so you can see exactly which nodes the expression resolves to before you save.
+**By node label** shows one row of label pills for every label that exists on a node. Select the labels you want, then choose **Match any** (a node needs at least one selected label) or **Match all** (a node needs every selected label). Below the pills, the dialog lists the nodes the selection reaches now ("Matches 2 nodes"), so you can see the blast radius before you save.
 
-A **Specific nodes** selector picks nodes by ID with a checkbox list. Use it when you want a one-off blueprint that runs only on a known node, or when no labels exist yet.
+If the label you need does not exist yet, click **+ Label** beside the pills. Type the label name, tick the nodes that should carry it, and click **Add label**. The label is selected for you and the match list includes the tagged nodes straight away, but nothing is written to the nodes until you continue: **Review rollout** (or **Create blueprint** where a rollout cannot be reviewed) adds the labels to the nodes, then opens the plan. The pending tags are listed under the match list and can be removed one by one. **Save as draft** stores the Blueprint only and does not add the new labels. Adding a label can move other Blueprints that already select it; Sencho reports how many were re-placed when the labels are written.
 
-Add labels to nodes from **Settings · Infrastructure · Nodes**. Each node row carries a Labels column with a `+` button.
+A Blueprint saved with both an any-of list and an all-of list keeps showing two rows when you edit it: nodes with any of the first row, and also all of the second.
+
+**Specific nodes** picks nodes by name with a pill for each node. Use it for a one-off blueprint that runs only on a known node.
+
+You can also manage labels from **Settings · Infrastructure · Nodes**. Each node row carries a Labels column with a `+` button.
 
 <Frame caption="Settings · Infrastructure · Nodes. The Labels column carries pills per node; the `+` button opens an inline add-label popover.">
   <img src="/images/blueprint-model/node-labels.png" alt="Settings Infrastructure Nodes page with the Labels column and add-label popover" />
@@ -134,9 +138,9 @@ The three policy cards in the editor map exactly to the three modes the reconcil
 
 | Card label | Reconciler behavior |
 |---|---|
-| **Observe** · Detect & display, no notifications | Drift surfaces in the deployment table; no notification, no auto-fix. |
-| **Suggest** · Detect & notify, operator decides | Sencho dispatches a `blueprint_drift_detected` notification through your notification routes, if any. |
-| **Enforce** · Detect & auto-fix, silent on success | Sencho re-deploys the blueprint silently when drift is detected, and retries on each following tick for as long as the row stays **Drifted**. A `blueprint_drift_correction_failed` notification fires when an auto-fix attempt fails, once for that reason rather than on every retry, and a `blueprint_drift_repair_held` notification fires when auto-fix is declined. |
+| **Observe** · Detect & display, shown here, no alerts | Drift surfaces in the deployment table; no notification, no auto-fix. |
+| **Suggest** · Detect & notify, you are alerted and decide | Sencho dispatches a `blueprint_drift_detected` notification through your notification routes, if any. |
+| **Enforce** · Detect & auto-fix, redeployed to match, quietly | Sencho re-deploys the blueprint silently when drift is detected, and retries on each following tick for as long as the row stays **Drifted**. A `blueprint_drift_correction_failed` notification fires when an auto-fix attempt fails, once for that reason rather than on every retry, and a `blueprint_drift_repair_held` notification fires when auto-fix is declined. |
 
 Even **Observe** keeps Sencho honest about what it found: the deployment row shows "drifted 3h ago: service caddy exited code 1". Silence would forfeit Sencho's authority over your fleet.
 
@@ -174,10 +178,10 @@ A compose file names images by tag, and a tag is a promise rather than an identi
 
 ## The detail sheet
 
-Click any tile in the catalog to open the blueprint detail sheet on the right. The sheet header shows the name, the meta line (`<selector> · <drift mode> · rev <n>`), the action bar, the Inline or Git-managed badge, the description, the deployment table, and a collapsible compose source. Inline Blueprints offer **Apply now**, **Edit**, **Convert to Git**, **Disable**, and **Delete**. Git-managed Blueprints offer **Edit**, **Detach Git**, **Retire to Direct** (when no live deployments remain), and **Disable**, and the sheet's GitOps section carries the outstanding authority action. **Apply now** is withheld because place for Git-managed content runs from an authorized accepted generation, not from Confirm Apply on the detach snapshot. **Delete** waits until you Detach Git or Retire to Direct, because the Git source still belongs to this Blueprint.
+Click any tile in the catalog to open the blueprint detail sheet on the right. The sheet header shows the name, the meta line (`<selector> · <drift mode> · rev <n>`), and the action bar. For an Inline Blueprint, one status block below it answers whether the Blueprint is in sync and, when it is not, names the nodes and offers the verb that resolves it (**Re-apply**, **Review rollout**, **Review state**, **Evict**, or **Enable**); a quiet row under it shows approval and how many nodes are active. A Git-managed Blueprint shows its GitOps status block instead. After the status come the Inline or Git-managed badge with its conversion actions, the pin note when the Blueprint is pinned, the description, the deployment table, and a collapsible compose source. The action bar offers **Apply now**, **Edit**, **Disable** (or **Enable**), and **Delete**. **Convert to Git** sits beside the Inline badge; for a Git-managed Blueprint **Detach Git** and **Retire to Direct** (when no live deployments remain) sit beside its badge, and the sheet's GitOps section carries the outstanding authority action. **Apply now** is withheld because place for Git-managed content runs from an authorized accepted generation, not from Confirm Apply on the detach snapshot. **Delete** waits until you Detach Git or Retire to Direct, because the Git source still belongs to this Blueprint.
 
-<Frame caption="An Inline Blueprint detail sheet. Header carries the selector and revision; the action bar offers Apply now, Edit, Convert to Git, Disable, and Delete; the deployment table lists one row per resolved node.">
-  <img src="/images/blueprint-model/detail-sheet.png" alt="Blueprint detail sheet showing header, action bar, and deployment table" />
+<Frame caption="An Inline Blueprint detail sheet. Header carries the selector and revision; the status block names what needs attention and the action bar offers Apply now, Edit, Disable, and Delete; the deployment table lists one row per resolved node.">
+  <img src="/images/blueprint-model/detail-sheet.png" alt="Blueprint detail sheet showing header, action bar, status, and deployment table" />
 </Frame>
 
 The deployment table lists every node currently in the blueprint's resolved selector set. Each row carries the node name, the deployment status, the last-activity timestamp, a notes column (drift summary or the last error message), and the action available for that row.
@@ -220,17 +224,17 @@ The common paths through the status enum.
 
 ### Create
 
-1. Go to **Fleet · Deployments**.
+1. Go to **Fleet · Blueprints**.
 2. Click **New Blueprint**.
 3. Fill in the name, description, compose YAML, selector, and drift policy.
 4. Watch the classification banner update as you type. It tells you whether the blueprint is portable or pinned to data.
-5. Click **Create blueprint**. The blueprint starts with approval **pending**. No fleet mutation runs until you confirm a rollout preview.
+5. Click **Review rollout**. Sencho saves the Blueprint, adds any labels you created in the dialog to their nodes, and opens the rollout preview. The blueprint starts with approval **pending**, and no fleet mutation runs until you confirm the preview. Choose **Save as draft** instead to store the Blueprint without a preview.
 
 If the YAML is malformed or larger than 96 KiB, Sencho rejects the save before creating a Blueprint row.
 
 ### Apply on demand
 
-The reconciler runs every minute, but only for Inline blueprints whose live placement approval still matches the resolved targets. To authorize or re-authorize a placement, click **Apply now** on the detail sheet (or **Retry** on a failed row). Sencho opens a rollout preview that lists place and remove outcomes, requirements, and health notes. **Confirm Apply** stores that placement approval and runs the confirmed executor actions. If some nodes fail (for example a remote host is unreachable) or an unmanaged same-name stack blocks placement, Confirm still records approval, but the response and toast report those per-node outcomes instead of a clean success. Changing the compose, selector, name, pin, drift mode, or enabled flag clears placement approval back to pending. Catalog tiles show **pending** or **reapproval required** when confirmation is needed again (for example after a label change adds a new target node).
+The reconciler runs every minute, but only for Inline blueprints whose live placement approval still matches the resolved targets. To authorize or re-authorize a placement, click **Apply now** on the detail sheet (or **Re-apply** on a failed row or in the status block). Sencho opens a rollout preview that lists place and remove outcomes, requirements, and health notes. **Confirm Apply** stores that placement approval and runs the confirmed executor actions. If some nodes fail (for example a remote host is unreachable) or an unmanaged same-name stack blocks placement, Confirm still records approval, but the response and toast report those per-node outcomes instead of a clean success. Changing the compose, selector, name, pin, drift mode, or enabled flag clears placement approval back to pending. Catalog tiles show **pending** or **reapproval required** when confirmation is needed again (for example after a label change adds a new target node).
 
 The preview also reads out the application's recorded GitOps authority: a single status block with the application's state and a row of the stages that apply, and under **Evidence** the **Source accepted**, **Placement approved**, and **Rollout authorized** steps that have a recorded grant, with the settled stages and anything Sencho could not prove. The source, ref, and commits and the per-target observations are listed below the status block. An approval recorded as a single combined decision rather than as separate authority steps is labelled a legacy combined approval and is never merged into those steps. An Inline Blueprint has no Git source or executable artifact set, so those two facets are omitted as not applicable while placement and rollout still report what is on record. Confirming binds to the evidence shown: if any recorded authority fact changes before the confirmation is stored, the apply is refused as stale and the dialog refreshes with the new evidence.
 
@@ -350,7 +354,7 @@ Click **Delete** on the detail sheet, then type the blueprint's name to confirm.
 
 ## Federation: pin a blueprint to a single node
 
-Admins can pin a blueprint to a specific node from **Fleet · Federation**. A pinned blueprint deploys only to its pinned node, regardless of the configured selector, and overrides the cordon flag on that node. The Blueprint detail sheet shows a read-only `Pin` section when a pin is in place; pin management itself lives in the Federation tab.
+Admins can pin a blueprint to a specific node from **Fleet · Federation**. A pinned blueprint deploys only to its pinned node, regardless of the configured selector, and overrides the cordon flag on that node. The Blueprint detail sheet shows a `Pin` section when a pin is in place, with an **Unpin** button; choosing a different node still happens in the Federation tab.
 
 <Frame caption="Fleet · Federation, Blueprints subsection. Each row shows the blueprint, its configured selector, the Pinned to dropdown, and the effective placement that the reconciler will use.">
   <img src="/images/blueprint-model/federation-pin.png" alt="Federation tab pin policy table with one blueprint pinned and one unpinned" />
@@ -431,7 +435,7 @@ A future Volume Migration feature will automate this with app-aware backup tooli
 
 **Single-node managed Postgres.** A stateful `pg-fleet` blueprint with a `nodes` selector pointing at one database node and drift mode **Suggest**. The first deploy enters **Awaiting confirmation** so the operator chooses **Deploy fresh**. Subsequent compose changes (image bump, config change) re-enter **Awaiting confirmation** on the same node so the operator can decide whether the new revision is safe for the existing volume. Drift on the running container fires a `blueprint_drift_detected` notification but never auto-redeploys.
 
-**Pin a blueprint to a specific node despite the selector.** Open **Fleet · Federation**, find the blueprint in the pin policy table, and pick the target node from the **Pinned to** dropdown. The pin saves immediately but also clears approval, so nothing moves until you open the blueprint here in Deployments, click **Apply now**, and **Confirm Apply**. Once confirmed, the pin overrides the selector for that blueprint, deploys only to the pinned node, and also overrides cordon on that node. Useful for relocating a stateful service to a specific host without rewriting the selector. Clear the pin (and confirm again) to restore selector-driven placement.
+**Pin a blueprint to a specific node despite the selector.** Open **Fleet · Federation**, find the blueprint in the pin policy table, and pick the target node from the **Pinned to** dropdown. The pin saves immediately but also clears approval, so nothing moves until you open the blueprint here in Blueprints, click **Apply now**, and **Confirm Apply**. Once confirmed, the pin overrides the selector for that blueprint, deploys only to the pinned node, and also overrides cordon on that node. Useful for relocating a stateful service to a specific host without rewriting the selector. Clear the pin (and confirm again) to restore selector-driven placement.
 
 **Observe-only audit blueprint.** A stateless monitoring stack (Vector, Promtail, a Prometheus exporter) with drift mode **Observe**. Drift is recorded silently in the deployment table; no notification fires and no auto-fix runs. Useful when you want Sencho to track placement and detect divergence on a low-signal stack without paging anyone.
 
@@ -488,7 +492,7 @@ A future Volume Migration feature will automate this with app-aware backup tooli
 
 <AccordionGroup>
   <Accordion title="Do Blueprints replace my existing stacks?">
-    No. Stacks created in the per-stack lane (the **Stacks** sidebar) and Blueprints (the **Deployments** tab) coexist on every node. A Blueprint is identified by its `.blueprint.json` marker; the reconciler refuses to touch any directory that does not carry one with a matching blueprint ID, so user-authored stacks are safe from blueprint actions.
+    No. Stacks created in the per-stack lane (the **Stacks** sidebar) and Blueprints (the **Blueprints** tab) coexist on every node. A Blueprint is identified by its `.blueprint.json` marker; the reconciler refuses to touch any directory that does not carry one with a matching blueprint ID, so user-authored stacks are safe from blueprint actions.
   </Accordion>
   <Accordion title="Is a Blueprint the same as a Stack?">
     A Blueprint is a fleet-wide declaration: one compose YAML targeting a set of nodes. Each node where the blueprint resolves materializes as a Stack on that node, in the same compose directory layout the rest of the per-stack lane uses, with a `.blueprint.json` marker added. You can browse the materialized stack in the per-node Stacks view; the Blueprint is the source of truth that drives it.

@@ -4,6 +4,14 @@ export const REGISTRY_DELIVERY_BODY_FIELD = '__sencho_registry_delivery';
 /** Maximum UTF-8 size of the delivery field alone. */
 export const REGISTRY_DELIVERY_FIELD_LIMIT_BYTES = 64 * 1024;
 
+/**
+ * Request-body cap for the hub's discover call. The from-git route accepts a
+ * deploy key up to 16 KB and a CA bundle up to 64 KB, so the discover body
+ * that carries them needs headroom beyond the delivery-field limit; this
+ * matches the target's default JSON parser limit, which is the real ceiling.
+ */
+export const REGISTRY_DELIVERY_DISCOVER_BODY_LIMIT_BYTES = 100 * 1024;
+
 const KIB = 1024;
 
 export type RegistryDeliveryRouteClass =

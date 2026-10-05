@@ -76,7 +76,13 @@ export function parseProviderPayload(
       };
     }
     case 'gitlab': {
-      const eventType = (eventTypeHeader ?? (typeof body.object_kind === 'string' ? body.object_kind : '')).toLowerCase();
+      // GitLab's X-Gitlab-Event header is a display label ("Push Hook",
+      // "Merge Request Hook"); the payload's object_kind is the canonical id,
+      // with the label normalized as a fallback when it is absent.
+      const headerEvent = eventTypeHeader?.trim().toLowerCase().replace(/\s+hook$/, '').replace(/\s+/g, '_');
+      const eventType = (typeof body.object_kind === 'string' && body.object_kind
+        ? body.object_kind
+        : headerEvent ?? '').toLowerCase();
       const ref = typeof body.ref === 'string' ? body.ref : null;
       const after = typeof body.after === 'string' ? body.after : null;
       const attrs = body.object_attributes as { action?: string; iid?: number } | undefined;

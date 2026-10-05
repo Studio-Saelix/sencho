@@ -55,6 +55,7 @@ let augmentJsonBodyForRegistryDelivery: typeof import('../helpers/registryDelive
 let wouldAttemptRegistryDelivery: typeof import('../helpers/registryDeliveryOutbound').wouldAttemptRegistryDelivery;
 let augmentRemoteProxyWithRegistryDelivery: typeof import('../helpers/registryDeliveryProxy').augmentRemoteProxyWithRegistryDelivery;
 let registryDeliveryRefusal: typeof import('../helpers/registryDeliveryOutbound').registryDeliveryRefusal;
+let throwRegistryDeliveryRefusal: typeof import('../helpers/registryDeliveryOutbound').throwRegistryDeliveryRefusal;
 
 const TEST_TARGET = { apiUrl: 'http://remote:1852', apiToken: 'token', trustedLoopback: false } as const;
 
@@ -108,7 +109,7 @@ describe('registryDeliveryOutbound', () => {
   });
 
   beforeEach(async () => {
-    ({ augmentJsonBodyForRegistryDelivery, wouldAttemptRegistryDelivery, registryDeliveryRefusal } = await import('../helpers/registryDeliveryOutbound'));
+    ({ augmentJsonBodyForRegistryDelivery, wouldAttemptRegistryDelivery, registryDeliveryRefusal, throwRegistryDeliveryRefusal } = await import('../helpers/registryDeliveryOutbound'));
     ({ augmentRemoteProxyWithRegistryDelivery } = await import('../helpers/registryDeliveryProxy'));
     const delivery = RegistryDeliveryService.getInstance();
     vi.spyOn(delivery, 'isProxyTransportConfidential').mockImplementation(
@@ -750,9 +751,60 @@ describe('registryDeliveryOutbound', () => {
     expect(url).toBe('http://remote:1852/api/registry-delivery/discover');
     expect(body.contractVersion).toBe(1);
     expect(body.stack).toBe('demo');
-    expect(config.maxBodyLength).toBe(REGISTRY_DELIVERY_FIELD_LIMIT_BYTES);
+    expect(config.maxBodyLength).toBe(100 * 1024);
     expect(config.maxContentLength).toBe(REGISTRY_DELIVERY_FIELD_LIMIT_BYTES);
     expect(config.timeout).toBe(30_000);
+  });
+
+  it('forwards git auth fields in the create-from-git discover payload', async () => {
+    mockProbeRemoteCapability.mockResolvedValue({ kind: 'supported' });
+    const delivery = RegistryDeliveryService.getInstance();
+    mockAxiosPost.mockResolvedValue({
+      status: 200,
+      data: {
+        ...makeDiscover(delivery),
+        referencedHosts: [],
+        referencedPullRefs: [],
+        coveredHosts: [],
+      },
+    });
+
+    const nodeId = NodeRegistry.getInstance().getDefaultNodeId();
+    const node = DatabaseService.getInstance().getNode(nodeId)!;
+    const body = {
+      stack_name: 'demo',
+      repo_url: 'git@github.com:acme/demo.git',
+      branch: 'main',
+      compose_paths: ['compose.yaml'],
+      auth_type: 'deploy_key',
+      deploy_key: 'PRIVATE KEY MATERIAL',
+      ssh_known_hosts_entry: 'github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITestOnly',
+      ssh_host_key_fingerprint: 'SHA256:test-only',
+      ca_bundle: 'PEM CERTIFICATE MATERIAL',
+    };
+
+    const result = await augmentJsonBodyForRegistryDelivery({
+      method: 'POST',
+      apiPath: '/api/stacks/from-git',
+      nodeId, node,
+      target: TEST_TARGET,
+      body,
+    });
+
+    expect(result).toEqual({ ok: true, body, augmented: false });
+    expect(mockAxiosPost).toHaveBeenCalledTimes(1);
+    const [url, discoverBody] = mockAxiosPost.mock.calls[0];
+    expect(url).toBe('http://remote:1852/api/registry-delivery/discover');
+    expect(discoverBody.git).toMatchObject({
+      repo_url: 'git@github.com:acme/demo.git',
+      branch: 'main',
+      compose_paths: ['compose.yaml'],
+      auth_type: 'deploy_key',
+      deploy_key: 'PRIVATE KEY MATERIAL',
+      ssh_known_hosts_entry: 'github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITestOnly',
+      ssh_host_key_fingerprint: 'SHA256:test-only',
+      ca_bundle: 'PEM CERTIFICATE MATERIAL',
+    });
   });
 
   it('maps a 5xx discover response to a generic failure without echoing hostile detail', async () => {
@@ -791,6 +843,107 @@ describe('registryDeliveryOutbound', () => {
 
     expect(result).toEqual({ ok: false, status: 400, code: 'REGISTRY_DELIVERY_FAILED', error: 'Registry delivery contract version not supported' });
     expect(probeError).toHaveBeenCalledWith('[registryDeliveryOutbound] hop-1 failed:', 'Registry delivery contract version not supported');
+  });
+
+  it('propagates a classified git code and message from a 404 discover response', async () => {
+    mockProbeRemoteCapability.mockResolvedValue({ kind: 'supported' });
+    const message = 'The configured branch, tag, or commit was not found in the repository.';
+    mockAxiosPost.mockResolvedValue({ status: 404, data: { error: message, code: 'REF_NOT_FOUND' } });
+    const probeError = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    const nodeId = NodeRegistry.getInstance().getDefaultNodeId();
+    const node = DatabaseService.getInstance().getNode(nodeId)!;
+    const result = await augmentJsonBodyForRegistryDelivery({
+      method: 'POST',
+      apiPath: '/api/stacks/demo/deploy',
+      nodeId, node,
+      target: TEST_TARGET,
+      body: {},
+    });
+
+    expect(result).toEqual({ ok: false, status: 404, code: 'REF_NOT_FOUND', error: message });
+    expect(probeError).toHaveBeenCalledWith('[registryDeliveryOutbound] hop-1 failed:', message);
+  });
+
+  it('keeps the classified message and code from a 504 discover response', async () => {
+    mockProbeRemoteCapability.mockResolvedValue({ kind: 'supported' });
+    const message = 'Timed out reaching the repository host.';
+    mockAxiosPost.mockResolvedValue({ status: 504, data: { error: message, code: 'NETWORK_TIMEOUT' } });
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    const nodeId = NodeRegistry.getInstance().getDefaultNodeId();
+    const node = DatabaseService.getInstance().getNode(nodeId)!;
+    const result = await augmentJsonBodyForRegistryDelivery({
+      method: 'POST',
+      apiPath: '/api/stacks/demo/deploy',
+      nodeId, node,
+      target: TEST_TARGET,
+      body: {},
+    });
+
+    expect(result).toEqual({ ok: false, status: 504, code: 'NETWORK_TIMEOUT', error: message });
+  });
+
+  it('keeps statuses above 504 generic even when the body names a git code', async () => {
+    mockProbeRemoteCapability.mockResolvedValue({ kind: 'supported' });
+    mockAxiosPost.mockResolvedValue({ status: 500, data: { error: 'hostile detail', code: 'GIT_ERROR' } });
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    const nodeId = NodeRegistry.getInstance().getDefaultNodeId();
+    const node = DatabaseService.getInstance().getNode(nodeId)!;
+    const result = await augmentJsonBodyForRegistryDelivery({
+      method: 'POST',
+      apiPath: '/api/stacks/demo/deploy',
+      nodeId, node,
+      target: TEST_TARGET,
+      body: {},
+    });
+
+    expect(result).toEqual({ ok: false, status: 500, code: 'REGISTRY_DELIVERY_FAILED', error: 'Registry delivery failed' });
+  });
+
+  it('never forwards a target status that would sign the user out', async () => {
+    mockProbeRemoteCapability.mockResolvedValue({ kind: 'supported' });
+    const message = 'Repository authentication failed. Check your deploy key or token.';
+    mockAxiosPost.mockResolvedValue({ status: 401, data: { error: message, code: 'AUTH_FAILED' } });
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    const nodeId = NodeRegistry.getInstance().getDefaultNodeId();
+    const node = DatabaseService.getInstance().getNode(nodeId)!;
+    const result = await augmentJsonBodyForRegistryDelivery({
+      method: 'POST',
+      apiPath: '/api/stacks/demo/deploy',
+      nodeId, node,
+      target: TEST_TARGET,
+      body: {},
+    });
+
+    // The hub re-derives the status from the classified code, so a target
+    // cannot answer 401 and log the operator out.
+    expect(result).toEqual({ ok: false, status: 400, code: 'AUTH_FAILED', error: message });
+  });
+
+  it('maps an unclassified target 401 to an upstream failure instead of signing the user out', async () => {
+    mockProbeRemoteCapability.mockResolvedValue({ kind: 'supported' });
+    mockAxiosPost.mockResolvedValue({ status: 401, data: { error: 'Invalid or expired token' } });
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    const nodeId = NodeRegistry.getInstance().getDefaultNodeId();
+    const node = DatabaseService.getInstance().getNode(nodeId)!;
+    const result = await augmentJsonBodyForRegistryDelivery({
+      method: 'POST',
+      apiPath: '/api/stacks/demo/deploy',
+      nodeId, node,
+      target: TEST_TARGET,
+      body: {},
+    });
+
+    expect(result).toEqual({
+      ok: false,
+      status: 502,
+      code: 'REGISTRY_DELIVERY_FAILED',
+      error: 'Target node authentication failed. Check the node token.',
+    });
   });
 
   it('skips probing and credentialed a host the target already covers', async () => {
@@ -980,6 +1133,22 @@ describe('registryDeliveryOutbound', () => {
       code: 'REGISTRY_DELIVERY_BODY_LIMIT',
       status: 413,
     });
+  });
+
+  it('registryDeliveryRefusal accepts a classified git code only with its mapped status', () => {
+    let refusalError: unknown;
+    try {
+      throwRegistryDeliveryRefusal({ ok: false, status: 404, code: 'REF_NOT_FOUND', error: 'missing ref' });
+    } catch (error) {
+      refusalError = error;
+    }
+    expect(registryDeliveryRefusal(refusalError)).toEqual({ code: 'REF_NOT_FOUND', status: 404 });
+
+    // A git code on a status it never maps to, or without a status at all, is
+    // not a delivery refusal: an unrelated GitSourceError must not be
+    // relabeled by catch sites outside registry delivery.
+    expect(registryDeliveryRefusal(Object.assign(new Error('spoofed'), { code: 'REF_NOT_FOUND', status: 401 }))).toBeNull();
+    expect(registryDeliveryRefusal(Object.assign(new Error('local git failure'), { code: 'REF_NOT_FOUND' }))).toBeNull();
   });
 
   it('refuses 409 TRANSPORT_NOT_CONFIDENTIAL when the pilot tunnel is not confidential', async () => {

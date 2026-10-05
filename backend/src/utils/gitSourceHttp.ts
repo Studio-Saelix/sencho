@@ -12,9 +12,9 @@
  * UI can distinguish them by the body field, not the status.
  */
 import type { Response } from 'express';
-import type { GitSourceErrorCode } from '../services/GitSourceService';
 import { GitSourceError } from '../services/GitSourceService';
 import { SopsDecryptError } from '../services/gitops/sops/decode';
+import { GIT_SOURCE_ERROR_CODE_VALUES, type GitSourceErrorCode } from '../types/gitSourceErrorCode';
 
 export function gitSourceStatus(code: GitSourceErrorCode): number {
   switch (code) {
@@ -52,6 +52,19 @@ export function gitSourceStatus(code: GitSourceErrorCode): number {
       return 400;
     }
   }
+}
+
+/**
+ * Run-time mirror of the GitSourceErrorCode union. A discovery failure is
+ * relayed through JSON, so a code arriving from a remote is an unknown string
+ * and must be checked against this closed set before it can be forwarded.
+ * The set is built from the same list that declares the union, so the two
+ * cannot drift.
+ */
+const GIT_SOURCE_ERROR_CODES: ReadonlySet<string> = new Set(GIT_SOURCE_ERROR_CODE_VALUES);
+
+export function isGitSourceErrorCode(value: unknown): value is GitSourceErrorCode {
+  return typeof value === 'string' && GIT_SOURCE_ERROR_CODES.has(value);
 }
 
 /**

@@ -5,6 +5,7 @@
  */
 import { buildEffectiveServiceModel, type EffectiveServiceSpec } from '../effectiveServiceModel';
 import DockerController from '../DockerController';
+import { canonicalNodePlatform } from './platformNames';
 
 export type NodePlatform = { os: string; architecture: string };
 
@@ -21,14 +22,23 @@ export type EffectiveArtifactContext =
       error: string;
     };
 
-/** Docker OS/arch for this node, or null when the daemon is unreachable. */
+/**
+ * Docker OS/arch for this node, or null when the daemon is unreachable.
+ *
+ * The architecture is translated to its OCI name here, because the digest
+ * resolver compares platform labels by exact string. A platform payload a hub
+ * accepts from an older leaf arrives exactly as that leaf sent it, so remote
+ * targets keep failing closed until their leaf is upgraded.
+ */
 export async function readNodePlatform(nodeId: number): Promise<NodePlatform | null> {
   try {
     const info = await DockerController.getInstance(nodeId).getDocker().info();
-    const os = typeof info.OSType === 'string' ? info.OSType : '';
-    const architecture = typeof info.Architecture === 'string' ? info.Architecture : '';
-    if (!os || !architecture) return null;
-    return { os, architecture };
+    const platform = canonicalNodePlatform({
+      os: typeof info.OSType === 'string' ? info.OSType : '',
+      architecture: typeof info.Architecture === 'string' ? info.Architecture : '',
+    });
+    if (!platform.os || !platform.architecture) return null;
+    return platform;
   } catch {
     return null;
   }

@@ -225,7 +225,7 @@ export function FleetView({
                             <span aria-hidden className="self-center mx-1 h-4 w-px bg-border" />
                             <TabsHighlightItem value="deployments">
                                     <TabsTrigger value="deployments">
-                                        <Send className="w-4 h-4 mr-1.5" />Deployments
+                                        <Send className="w-4 h-4 mr-1.5" />Blueprints
                                     </TabsTrigger>
                                 </TabsHighlightItem>
                             {canDiscoverRouting && (

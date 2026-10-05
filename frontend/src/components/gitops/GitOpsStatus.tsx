@@ -8,6 +8,7 @@ import {
   buildGitOpsStatus,
   grantedAuthority,
   isSpeakingStage,
+  type GitOpsOmissions,
   type GitOpsStageId,
   type GitOpsStatusKind,
   type GitOpsStatusStage,
@@ -126,6 +127,7 @@ export function GitOpsStatus({
   extraMarker,
   heading,
   focus,
+  omit,
   className,
 }: {
   revision: GitOpsRevisionProjection | null;
@@ -144,9 +146,11 @@ export function GitOpsStatus({
   heading?: string;
   /** The stage the `action` resolves, so the Answer speaks for it. */
   focus?: GitOpsStageId;
+  /** Statuses that say nothing true about this object; they are left out of the Answer and the Path. */
+  omit?: GitOpsOmissions;
   className?: string;
 }) {
-  const model = buildGitOpsStatus(revision, row, focus);
+  const model = buildGitOpsStatus(revision, row, focus, omit);
   if (!model || !revision) return null;
 
   const live = revision.targetMode === 'not_applicable' ? null : revision;

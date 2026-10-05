@@ -65,7 +65,12 @@ export function GitOpsApplicationSheet({ id }: { id: string }) {
           )}
         </span>
       )}
-      secondaryActions={handoff ? [{ label: handoff.label, icon: ExternalLink, onClick: handoff.open }] : undefined}
+      secondaryActions={handoff ? [{
+        label: handoff.label,
+        icon: ExternalLink,
+        // The owning sheet replaces this one, as a Direct application's Git source does.
+        onClick: () => { handoff.open(); closeGitOpsApplication(); },
+      }] : undefined}
     >
       <div data-testid="gitops-application-sheet">
         {(loading && !data) || redirectsToGitSource ? (

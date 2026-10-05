@@ -261,6 +261,61 @@ describe('remote effective artifact context for digest freeze', () => {
     expect(recorded[0]?.platformDigest).toBe(`sha256:${'b'.repeat(64)}`);
   });
 
+  it('translates a raw docker-info platform an older leaf still reports', async () => {
+    const stackName = 'remote-raw-leaf-stack';
+    const applicationId = `app-remote-raw-${counter}`;
+    const generationId = `gen-remote-raw-${counter}`;
+    seedDirectApp({
+      applicationId,
+      generationId,
+      stackName,
+      artifactSetId: `art-remote-raw-${counter}`,
+    });
+
+    mockLeafPlatform({ os: 'linux', architecture: 'x86_64' });
+    mockResolveRegistry.mockImplementation(async (
+      _registry: string,
+      _repo: string,
+      _tag: string,
+      platform: { os: string; architecture: string },
+    ) => ({
+      ok: true,
+      indexDigest: `sha256:${'2'.repeat(64)}`,
+      platformDigest: `sha256:${'a'.repeat(64)}`,
+      platformLabel: `${platform.os}/${platform.architecture}`,
+      qualification: 'exact',
+    }));
+
+    await resolveAndRecordArtifactSet({
+      stackName,
+      nodeId: remoteNodeId,
+      applicationId,
+      generationId,
+      buildContexts: [],
+      envelope: envelope(`op-remote-raw-${counter}`),
+      approvedServices: [{
+        name: 'web',
+        declaredImage: 'nginx:1.27',
+        hasBuild: false,
+        expectedReplicas: 1,
+        dependsOn: [],
+        hasHealthcheck: false,
+      }],
+    });
+
+    expect(mockResolveRegistry).toHaveBeenCalledWith(
+      'registry-1.docker.io',
+      'library/nginx',
+      '1.27',
+      { os: 'linux', architecture: 'amd64' },
+      null,
+    );
+    const latestId = GitOpsStore.getInstance().getApplication(applicationId)?.latest_artifact_set_id;
+    const latest = latestId ? GitOpsStore.getInstance().getArtifactSet(latestId) : undefined;
+    const recorded = latest ? decodeArtifactEvidenceJson(latest.evidence_json).services ?? [] : [];
+    expect(recorded[0]?.platform).toBe('linux/amd64');
+  });
+
   it('records a moving tag as unavailable when the leaf cannot report its platform', async () => {
     // A hub running ahead of its leaves: the platform route does not exist there,
     // so an approved-intent resolve can still parse the intent but cannot learn
@@ -405,6 +460,64 @@ describe('remote effective artifact context for digest freeze', () => {
     };
     expect(decoded.services.map((s) => s.serviceName)).toEqual(['web']);
     expect(decoded.services.every((s) => s.platform === 'linux/arm64')).toBe(true);
+  });
+
+  it('translates a raw docker-info platform in the leaf context an older leaf sends', async () => {
+    const stackName = 'remote-raw-context-stack';
+    const applicationId = `app-remote-raw-ctx-${counter}`;
+    const generationId = `gen-remote-raw-ctx-${counter}`;
+    seedDirectApp({
+      applicationId,
+      generationId,
+      stackName,
+      artifactSetId: `art-remote-raw-ctx-${counter}`,
+    });
+
+    mockLeafContext({
+      renderable: true,
+      platform: { os: 'linux', architecture: 'x86_64' },
+      services: [{
+        name: 'web',
+        declaredImage: 'nginx:1.27',
+        hasBuild: false,
+        expectedReplicas: 1,
+        dependsOn: [],
+        hasHealthcheck: false,
+      }],
+    });
+    mockResolveRegistry.mockImplementation(async (
+      _registry: string,
+      _repo: string,
+      _tag: string,
+      platform: { os: string; architecture: string },
+    ) => ({
+      ok: true,
+      indexDigest: `sha256:${'2'.repeat(64)}`,
+      platformDigest: `sha256:${'a'.repeat(64)}`,
+      platformLabel: `${platform.os}/${platform.architecture}`,
+      qualification: 'exact',
+    }));
+
+    await resolveAndRecordArtifactSet({
+      stackName,
+      nodeId: remoteNodeId,
+      applicationId,
+      generationId,
+      buildContexts: [],
+      envelope: envelope(`op-remote-raw-ctx-${counter}`),
+    });
+
+    expect(mockResolveRegistry).toHaveBeenCalledWith(
+      'registry-1.docker.io',
+      'library/nginx',
+      '1.27',
+      { os: 'linux', architecture: 'amd64' },
+      null,
+    );
+    const latestId = GitOpsStore.getInstance().getApplication(applicationId)?.latest_artifact_set_id;
+    const latest = latestId ? GitOpsStore.getInstance().getArtifactSet(latestId) : undefined;
+    const recorded = latest ? decodeArtifactEvidenceJson(latest.evidence_json).services ?? [] : [];
+    expect(recorded[0]?.platform).toBe('linux/amd64');
   });
 
   it('reads platform label for digest repair from the leaf, not hub Docker', async () => {

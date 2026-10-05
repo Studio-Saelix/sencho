@@ -176,6 +176,54 @@ function extractStringUnionMembers(filePath: string, typeName: string): string[]
     return members;
 }
 
+/**
+ * Reads the members of a `const [...] as const` array. GitSourceErrorCode is
+ * derived from such an array, so the array is the single source the matrix
+ * must be checked against; reading it directly also fails loudly if the array
+ * is removed.
+ */
+function unwrapExpression(node: ts.Expression): ts.Expression {
+    let current = node;
+    while (
+        ts.isParenthesizedExpression(current)
+        || ts.isAsExpression(current)
+        || ts.isSatisfiesExpression(current)
+    ) {
+        current = current.expression;
+    }
+    return current;
+}
+
+function extractStringArrayMembers(filePath: string, constName: string): string[] {
+    const sourceText = fs.readFileSync(filePath, 'utf8');
+    const sourceFile = ts.createSourceFile(filePath, sourceText, ts.ScriptTarget.Latest, true);
+    const members: string[] = [];
+    const visit = (node: ts.Node): void => {
+        if (
+            ts.isVariableDeclaration(node)
+            && ts.isIdentifier(node.name)
+            && node.name.text === constName
+            && node.initializer
+            // Only a top-level declaration can define the shared code list; a
+            // nested local of the same name must not satisfy the guard.
+            && ts.isVariableDeclarationList(node.parent)
+            && ts.isVariableStatement(node.parent.parent)
+            && ts.isSourceFile(node.parent.parent.parent)
+        ) {
+            const initializer = unwrapExpression(node.initializer);
+            if (ts.isArrayLiteralExpression(initializer)) {
+                for (const element of initializer.elements) {
+                    if (ts.isStringLiteral(element)) members.push(element.text);
+                }
+            }
+        }
+        ts.forEachChild(node, visit);
+    };
+    visit(sourceFile);
+    if (members.length === 0) throw new Error(`Const array ${constName} not found (or has no string-literal members) in ${filePath}`);
+    return members;
+}
+
 describe('git transport support matrix', () => {
     const { support, attestations } = loadClaimSet() as { support: { claims: Claim[]; limitations: { id: string; title: string; statement: string }[]; error_model: { code: string; label: string; status: number; meaning: string }[]; reconciliation_only_codes: string[]; implementation_baseline: string }; attestations: { attestations: Attestation[] } };
     const limitationIds = new Set(support.limitations.map((l) => l.id));
@@ -356,9 +404,9 @@ describe('git transport support matrix', () => {
             path.join(REPO_ROOT, 'backend', 'src', 'services', 'git', 'errors.ts'),
             'TransportFacingCode',
         );
-        const gitSourceErrorCodes = extractStringUnionMembers(
-            path.join(REPO_ROOT, 'backend', 'src', 'services', 'GitSourceService.ts'),
-            'GitSourceErrorCode',
+        const gitSourceErrorCodes = extractStringArrayMembers(
+            path.join(REPO_ROOT, 'backend', 'src', 'types', 'gitSourceErrorCode.ts'),
+            'GIT_SOURCE_ERROR_CODE_VALUES',
         );
 
         it('the matrix error_model is exactly TransportFacingCode plus REF_DELETED and FILE_NOT_FOUND', () => {

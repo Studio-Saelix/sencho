@@ -10,7 +10,11 @@ import {
   approvedPlatformDigest,
   observationMatchesExpected,
 } from '../services/gitops/artifactIdentity';
-import type { ServiceArtifactEvidence } from '../services/gitops/json';
+import {
+  decodeArtifactEvidenceJson,
+  encodeArtifactEvidenceJson,
+  type ServiceArtifactEvidence,
+} from '../services/gitops/json';
 
 const DIGEST_A = `sha256:${'a'.repeat(64)}`;
 const DIGEST_B = `sha256:${'b'.repeat(64)}`;
@@ -134,5 +138,127 @@ describe('artifact identity membership', () => {
       platformVariants: null,
     });
     expect(observationMatchesExpected([expected], [observed])).toBe(false);
+  });
+
+  it('matches a stored set that recorded the pre-normalization docker-info spelling', () => {
+    const legacyRaw = encodeArtifactEvidenceJson({
+      kind: 'qualified',
+      identity: INDEX,
+      services: [registryService({
+        platform: 'linux/x86_64',
+        platformDigest: DIGEST_A,
+        platformVariants: [{ platform: 'linux/x86_64', digest: DIGEST_A }],
+      })],
+    });
+    const expected = decodeArtifactEvidenceJson(legacyRaw).services![0];
+    const observed = registryService({
+      platform: 'linux/amd64',
+      platformDigest: DIGEST_A,
+      localDigests: [DIGEST_A],
+      platformVariants: null,
+    });
+    expect(approvedPlatformDigest(expected, 'linux/amd64')).toBe(DIGEST_A);
+    expect(observationMatchesExpected([expected], [observed])).toBe(true);
+  });
+
+  it('matches an index-only observation when the local store exposes no platform child', () => {
+    // The containerd image store reports the index digest as the image Id and
+    // in RepoDigests, so the platform child digest is not visible locally.
+    const expected = registryService({
+      platformDigest: DIGEST_A,
+      indexDigest: INDEX,
+      platformVariants: [
+        { platform: 'linux/amd64', digest: DIGEST_A },
+        { platform: 'linux/arm64', digest: DIGEST_B },
+      ],
+    });
+    const observed = registryService({
+      platform: 'linux/amd64',
+      platformDigest: INDEX,
+      indexDigest: null,
+      localDigests: [INDEX],
+      platformVariants: null,
+    });
+    expect(observationMatchesExpected([expected], [observed])).toBe(true);
+  });
+
+  it('does not match an index-only observation that runs a different index', () => {
+    const expected = registryService({
+      platformDigest: DIGEST_A,
+      indexDigest: INDEX,
+      platformVariants: [{ platform: 'linux/amd64', digest: DIGEST_A }],
+    });
+    const observed = registryService({
+      platform: 'linux/amd64',
+      platformDigest: DIGEST_C,
+      indexDigest: null,
+      localDigests: [DIGEST_C],
+      platformVariants: null,
+    });
+    expect(observationMatchesExpected([expected], [observed])).toBe(false);
+  });
+
+  it('does not match an index-only observation for a platform the set does not name', () => {
+    const expected = registryService({
+      platformDigest: DIGEST_B,
+      indexDigest: INDEX,
+      platformVariants: [{ platform: 'linux/arm64', digest: DIGEST_B }],
+    });
+    const observed = registryService({
+      platform: 'linux/amd64',
+      platformDigest: INDEX,
+      indexDigest: null,
+      localDigests: [INDEX],
+      platformVariants: null,
+    });
+    expect(observationMatchesExpected([expected], [observed])).toBe(false);
+  });
+
+  it('does not match when the observation records a different local digest beside the index', () => {
+    const expected = registryService({
+      platformDigest: DIGEST_A,
+      indexDigest: INDEX,
+      platformVariants: [{ platform: 'linux/amd64', digest: DIGEST_A }],
+    });
+    const observed = registryService({
+      platform: 'linux/amd64',
+      platformDigest: DIGEST_C,
+      indexDigest: INDEX,
+      localDigests: [DIGEST_C],
+      platformVariants: null,
+    });
+    expect(observationMatchesExpected([expected], [observed])).toBe(false);
+  });
+
+  it('does not match an index-only observation with no observed platform', () => {
+    const expected = registryService({
+      platformDigest: DIGEST_A,
+      indexDigest: INDEX,
+      platformVariants: [{ platform: 'linux/amd64', digest: DIGEST_A }],
+    });
+    const observed = registryService({
+      platform: null,
+      platformDigest: INDEX,
+      indexDigest: null,
+      localDigests: [INDEX],
+      platformVariants: null,
+    });
+    expect(observationMatchesExpected([expected], [observed])).toBe(false);
+  });
+
+  it('matches a digest-pinned observation by the pinned digest', () => {
+    const expected = registryService({
+      platformDigest: DIGEST_A,
+      indexDigest: DIGEST_A,
+      platformVariants: null,
+    });
+    const observed = registryService({
+      platform: 'linux/amd64',
+      platformDigest: DIGEST_A,
+      indexDigest: null,
+      localDigests: [DIGEST_A],
+      platformVariants: null,
+    });
+    expect(observationMatchesExpected([expected], [observed])).toBe(true);
   });
 });

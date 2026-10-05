@@ -167,6 +167,52 @@ describe('gitops artifact resolve', () => {
     expect(byName.get('worker')?.source).toBe('build');
   });
 
+  it('normalizes the docker-info architecture before resolving a registry image', async () => {
+    // Docker reports the daemon host's `uname -m` spelling (x86_64, aarch64);
+    // registry index descriptors use OCI names (amd64, arm64). The resolver
+    // compares them by exact string, so a raw spelling can never match and the
+    // whole artifact set lands as unavailable.
+    seedDirectApp({ applicationId: 'app-arch', generationId: 'gen-arch', stackName: 'arch-web', artifactSetId: 'art-arch-v1' });
+    mockBuildEffectiveServiceModel.mockResolvedValue(singleServiceModel());
+    mockDockerInfo.mockResolvedValue({ OSType: 'linux', Architecture: 'x86_64' });
+    mockResolveRegistryImageDigestForPlatform.mockImplementation(async (
+      _registry: string,
+      _repo: string,
+      _tag: string,
+      platform: { os: string; architecture: string },
+    ) => ({
+      ok: true,
+      indexDigest: INDEX_DIGEST,
+      platformDigest: AMD64_DIGEST,
+      platformLabel: `${platform.os}/${platform.architecture}`,
+      qualification: 'qualified',
+      platformVariants: [{ platform: `${platform.os}/${platform.architecture}`, digest: AMD64_DIGEST }],
+    }));
+
+    await resolveAndRecordArtifactSet({
+      stackName: 'arch-web',
+      nodeId: 1,
+      applicationId: 'app-arch',
+      generationId: 'gen-arch',
+      buildContexts: [],
+      envelope: envelope('op-resolve-arch'),
+    });
+
+    expect(mockResolveRegistryImageDigestForPlatform).toHaveBeenCalledWith(
+      'registry-1.docker.io',
+      'library/nginx',
+      'latest',
+      { os: 'linux', architecture: 'amd64' },
+      null,
+    );
+    const latestId = GitOpsStore.getInstance().getApplication('app-arch')?.latest_artifact_set_id;
+    const latest = latestId ? GitOpsStore.getInstance().getArtifactSet(latestId) : undefined;
+    expect(latest?.qualification).toBe('qualified');
+    const decoded = latest ? decodeArtifactEvidenceJson(latest.evidence_json) : null;
+    const recorded = decoded && 'services' in decoded ? decoded.services ?? [] : [];
+    expect(recorded[0]?.platform).toBe('linux/amd64');
+  });
+
   it('records independently failing registry services in one pass', async () => {
     seedDirectApp({ applicationId: 'app-par', generationId: 'gen-par', stackName: 'par-web', artifactSetId: 'art-par-v1' });
 
@@ -386,6 +432,54 @@ describe('gitops artifact resolve', () => {
       indexDigest,
       platformDigest,
       platformVariants: [{ platform: 'linux/amd64', digest: platformDigest }],
+      localDigests: null,
+      buildContextFingerprint: null,
+      producedImageId: null,
+      failureClass: null,
+      resolvedAt: 1,
+    }];
+    expect(observationMatchesExpected(expected, observed.services ?? [])).toBe(true);
+  });
+
+  it('matches an index-only observation the containerd store records for a multi-arch image', async () => {
+    // The containerd image store exposes only the index digest locally (image
+    // Id, RepoDigests and descriptor all carry it), so the observation cannot
+    // name the platform child. The frozen index plus the observed platform
+    // prove the same child.
+    const indexDigest = `sha256:${'1'.repeat(64)}`;
+    const platformDigest = `sha256:${'a'.repeat(64)}`;
+    mockBuildEffectiveServiceModel.mockResolvedValue(singleServiceModel());
+    mockListContainers.mockResolvedValue([{
+      Id: 'ctr-web',
+      State: 'running',
+      Labels: {
+        'com.docker.compose.project': 'obs-index-only',
+        'com.docker.compose.service': 'web',
+      },
+    }]);
+    mockContainerInspect.mockResolvedValue({ Image: `sha256:${'2'.repeat(64)}` });
+    mockImageInspect.mockResolvedValue({
+      Os: 'linux',
+      Architecture: 'amd64',
+      RepoDigests: [`nginx@${indexDigest}`],
+    });
+
+    const observed = await observeStackRuntimeArtifact({ stackName: 'obs-index-only', nodeId: 1, observedAt: 9 });
+    expect(observed.kind).toBe('exact');
+    if (observed.kind !== 'exact' && observed.kind !== 'qualified') throw new Error('expected comparable observation');
+    expect(observed.services?.[0]?.localDigests).toEqual([indexDigest]);
+
+    const expected = [{
+      serviceName: 'web',
+      authoredRef: 'nginx:latest',
+      source: 'registry' as const,
+      platform: 'linux/amd64',
+      indexDigest,
+      platformDigest,
+      platformVariants: [
+        { platform: 'linux/amd64', digest: platformDigest },
+        { platform: 'linux/arm64', digest: `sha256:${'b'.repeat(64)}` },
+      ],
       localDigests: null,
       buildContextFingerprint: null,
       producedImageId: null,
