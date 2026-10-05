@@ -95,6 +95,7 @@ function generation(
     provenance,
     supersedes_generation_id: null,
     superseded_at: null,
+    withdrawn_at: null,
     operation_id: 'op-rg',
     actor: 'tester',
     trigger: 'manual',

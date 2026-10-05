@@ -119,6 +119,7 @@ function seedRolloutGeneration(app: GitOpsApplicationRow, nodeIds: number[]): Gi
     provenance: 'placement_approval',
     supersedes_generation_id: null,
     superseded_at: null,
+    withdrawn_at: null,
     operation_id: 'op-rgen',
     actor: 'tester',
     trigger: 'test',

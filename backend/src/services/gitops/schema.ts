@@ -354,6 +354,11 @@ CREATE TABLE IF NOT EXISTS gitops_rollout_generations (
   )),
   supersedes_generation_id TEXT NULL,
   superseded_at INTEGER NULL,
+  -- Set only by the operator's Supersede or Rollback. A system supersede (a
+  -- preflight drift, a placement invalidation, a re-authorization) leaves this
+  -- null, which is what lets the automatic policy tell a withdrawal from a
+  -- supersede it may re-mint.
+  withdrawn_at INTEGER NULL,
   operation_id TEXT NOT NULL,
   actor TEXT NULL,
   trigger TEXT NOT NULL,

@@ -1513,6 +1513,7 @@ export function holdBlockedRolloutDispatch(
  */
 export function gitManagedDispatchWarranted(app: GitOpsApplicationRow): boolean {
   const store = GitOpsStore.getInstance();
+  if (!app.accepted_generation_id) return false;
   const blueprint = app.blueprint_id !== null
     ? DatabaseService.getInstance().getBlueprint(app.blueprint_id)
     : undefined;
@@ -1530,33 +1531,25 @@ export function gitManagedDispatchWarranted(app: GitOpsApplicationRow): boolean 
     return false;
   }
   // A withdrawn authorization is an operator decision, not a pending handoff.
-  // The check is durable rather than pointer-based: the latest rollout
-  // authorization recorded for this accepted source, if superseded, blocks an
-  // automatic replacement until something newer is authorized. The pointer
-  // alone is not enough, because a placement re-approval can move it onto a
-  // generation that is not superseded and quietly revive the withdrawn rollout.
-  const latestAuthorization = store
-    .listRolloutGenerationsForApplication(app.id)
-    .filter((generation) => generation.provenance === 'rollout_authorization'
-      && generation.accepted_generation_id === app.accepted_generation_id)
-    .sort((a, b) => b.created_at - a.created_at)[0];
-  if (latestAuthorization && latestAuthorization.superseded_at !== null) return false;
+  // Only `rolloutSuperseded` writes `withdrawn_at`; a system supersede (a
+  // preflight drift, a placement invalidation, a re-authorization) leaves it
+  // null and stays eligible for the automatic policy to re-mint. The pointer
+  // alone cannot tell the two apart, and a placement re-approval can move it
+  // onto a generation that is not superseded.
+  const latestAuthorization = store.latestRolloutAuthorizationForAcceptedGeneration(
+    app.id,
+    app.accepted_generation_id,
+  );
+  if (latestAuthorization && latestAuthorization.withdrawn_at !== null) return false;
   const binding = store.currentAuthorizationBinding(app);
   if (!binding) {
-    // A target whose rollback never finished must not be deployed over by an
-    // automatic mint, whichever rollout generation wrote the fence: the
-    // dispatch's own fence guard is scoped to the live generation, so this is
-    // the one place the older fence is still visible. Retired rows do not
-    // count; their rollback can never be finished and would wedge the app.
-    const rollbackPending = store.listTargets(app.id).some(
-      (target) => target.target_status === 'active' && target.health_stop_reason === 'rollback_pending',
-    );
-    if (rollbackPending) return false;
     // The handoff mints under the automatic policy, but only from a state that
     // is actually authorizable. A missing placement approval is the operator's
     // next step (the approve route is where that happens), so calling the
     // handoff every tick would only record its refusal. Once the approval is
-    // there, this arm authorizes and dispatches without a person.
+    // there, this arm authorizes and dispatches without a person. An unfinished
+    // rollback is refused inside the handoff itself, so every caller shares
+    // that gate.
     return app.placement_approval_ref !== null;
   }
   const authRef = app.rollout_authorization_ref;

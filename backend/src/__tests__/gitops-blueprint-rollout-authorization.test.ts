@@ -1070,9 +1070,9 @@ describe('application-driven preparation retry', () => {
 
     await reconciler.getInstance().tick();
 
-    // The withdrawn generation stays named on the application, so the predicate
-    // refuses and the automatic policy cannot mint a replacement until a new
-    // commit arrives.
+    // The withdrawn generation carries the operator's withdrawal marker, so the
+    // predicate refuses and the automatic policy cannot mint a replacement
+    // until a new commit arrives.
     await vi.waitFor(() => {
       expect(warrantedSpy.mock.calls.some((call) => call[0].id === fixture.applicationId)).toBe(true);
     });
@@ -1129,6 +1129,70 @@ describe('application-driven preparation retry', () => {
     warrantedSpy.mockRestore();
   });
 
+  it('re-drives after a system preflight-drift supersede', async () => {
+    const fixture = seedAuthorizedReadyApp();
+    authorize(fixture.applicationId);
+    const store = GitOpsStore.getInstance();
+    GitOpsTransitions.getInstance().invalidateAuthorizationOnPreflightDrift({
+      applicationId: fixture.applicationId,
+      envelope: { operationId: randomUUID(), actor: 'system:reconciler', trigger: 'poll', at: 500 },
+    });
+    expect(store.getApplication(fixture.applicationId)!.rollout_authorization_ref).toBeNull();
+
+    const handoffSpy = vi.spyOn(await import('../services/gitops/gitManagedHandoff'), 'dispatchPreparedGitManagedGeneration')
+      .mockResolvedValue({ status: 'dispatched', reason: null });
+    const reconciler = (await import('../services/BlueprintReconciler')).BlueprintReconciler;
+    await reconciler.getInstance().tick();
+
+    // A system supersede carries no withdrawal marker, so the automatic policy
+    // still re-mints when the registry is healthy again.
+    await vi.waitFor(() => {
+      expect(handoffSpy.mock.calls.filter((call) => call[0].applicationId === fixture.applicationId)).toHaveLength(1);
+    });
+    handoffSpy.mockRestore();
+  });
+
+  it('re-drives after a system placement invalidation and a re-approval', async () => {
+    const fixture = seedAuthorizedReadyApp();
+    authorize(fixture.applicationId);
+    const store = GitOpsStore.getInstance();
+    GitOpsTransitions.getInstance().placementInvalidated({
+      applicationId: fixture.applicationId,
+      envelope: { operationId: randomUUID(), actor: 'system:reconciler', trigger: 'poll', at: 500 },
+    });
+    const app = store.getApplication(fixture.applicationId)!;
+    expect(app.placement_approval_ref).toBeNull();
+    GitOpsTransitions.getInstance().placementApproved({
+      applicationId: fixture.applicationId,
+      approvalId: `place-${randomUUID().slice(0, 8)}`,
+      intentRevisionId: app.intent_revision_id!,
+      blastJson: encodeGitOpsApprovedTargetEffectJson(
+        fixture.nodeIds.map((nodeId) => ({ nodeId, outcome: 'place' as const })),
+      ),
+      requiredNodeIds: fixture.nodeIds,
+      fingerprint: null,
+      actor: 'tester',
+      envelope: { operationId: randomUUID(), actor: 'tester', trigger: 'manual', at: 600 },
+      rolloutGenerationId: `rgen-${randomUUID().slice(0, 8)}`,
+      candidateId: app.rollout_candidate_id!,
+      authority: 'operator',
+      policyProvenanceJson: null,
+      provenance: 'placement_approval',
+    });
+
+    const handoffSpy = vi.spyOn(await import('../services/gitops/gitManagedHandoff'), 'dispatchPreparedGitManagedGeneration')
+      .mockResolvedValue({ status: 'dispatched', reason: null });
+    const reconciler = (await import('../services/BlueprintReconciler')).BlueprintReconciler;
+    await reconciler.getInstance().tick();
+
+    // The re-approval moved the pointer onto a generation with no withdrawal
+    // marker, so the automatic policy completes the rollout without a person.
+    await vi.waitFor(() => {
+      expect(handoffSpy.mock.calls.filter((call) => call[0].applicationId === fixture.applicationId)).toHaveLength(1);
+    });
+    handoffSpy.mockRestore();
+  });
+
   it('does not mint a new rollout over an unfinished rollback after a resume', async () => {
     const fixture = seedAuthorizedReadyApp();
     authorize(fixture.applicationId);
@@ -1151,20 +1215,25 @@ describe('application-driven preparation retry', () => {
 
     const dispatchSpy = vi.spyOn(GitSourceService.getInstance(), 'dispatchAcceptedGeneration');
     const warrantedSpy = vi.spyOn(await import('../services/gitops/handoff'), 'gitManagedDispatchWarranted');
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
     const reconciler = (await import('../services/BlueprintReconciler')).BlueprintReconciler;
     await reconciler.getInstance().tick();
     await vi.waitFor(() => {
       expect(warrantedSpy.mock.calls.some((call) => call[0].id === fixture.applicationId)).toBe(true);
     });
-    // The fence is scoped to the superseded generation, so the predicate is the
-    // one guard that still sees it and refuses the automatic mint.
+    // The fence is scoped to the superseded generation, so the shared handoff
+    // gate is what refuses the mint; the predicate itself is satisfied.
     const decision = warrantedSpy.mock.results.find(
       (_result, index) => warrantedSpy.mock.calls[index]?.[0].id === fixture.applicationId,
     );
-    expect(decision?.value).toBe(false);
+    expect(decision?.value).toBe(true);
+    await vi.waitFor(() => {
+      expect(warnSpy.mock.calls.some((call) => String(call[0]).includes('unfinished rollback'))).toBe(true);
+    });
     expect(dispatchSpy).not.toHaveBeenCalled();
     dispatchSpy.mockRestore();
     warrantedSpy.mockRestore();
+    warnSpy.mockRestore();
   });
 
   it('re-drives a new commit after the operator superseded the previous rollout', async () => {
@@ -1370,6 +1439,33 @@ describe('the one Git-managed handoff', () => {
 
     expect(outcome.status).toBe('dispatched');
     expect(dispatchSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('skips a handoff while a target has an unfinished rollback', async () => {
+    const fixture = seedAuthorizedReadyApp();
+    const store = GitOpsStore.getInstance();
+    store.upsertTarget({
+      ...store.getTarget(fixture.applicationId, fixture.nodeId)!,
+      health_stop_reason: 'rollback_pending',
+    });
+    const dispatchSpy = vi.spyOn(GitSourceService.getInstance(), 'dispatchAcceptedGeneration');
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+
+    const outcome = await dispatchPreparedGitManagedGeneration({
+      applicationId: fixture.applicationId,
+      generationId: fixture.generationId,
+      actor: 'tester',
+      trigger: 'manual',
+    });
+
+    // The shared gate, so the accept route and the SourceController refuse the
+    // same way the reconciler does, and the refusal is written to the log.
+    expect(outcome.status).toBe('skipped');
+    expect(outcome.reason).toContain('unfinished rollback');
+    expect(dispatchSpy).not.toHaveBeenCalled();
+    expect(warnSpy.mock.calls.some((call) => String(call[0]).includes('unfinished rollback'))).toBe(true);
+    dispatchSpy.mockRestore();
+    warnSpy.mockRestore();
   });
 });
 

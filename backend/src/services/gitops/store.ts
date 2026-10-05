@@ -1032,15 +1032,15 @@ export class GitOpsStore {
         artifact_set_id, placement_approval_ref, source_acceptance_ref, rollout_authorization_ref,
         required_targets_json, preflight_fingerprint, preflight_evidence_json, rollout_strategy_json,
         policy_snapshot_json,
-        provenance, supersedes_generation_id, superseded_at, operation_id, actor, trigger, created_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        provenance, supersedes_generation_id, superseded_at, withdrawn_at, operation_id, actor, trigger, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     ).run(
       row.id, row.application_id, row.intent_revision_id, row.rollout_candidate_id,
       row.accepted_generation_id, row.artifact_set_id, row.placement_approval_ref,
       row.source_acceptance_ref, row.rollout_authorization_ref, row.required_targets_json,
       row.preflight_fingerprint, row.preflight_evidence_json, row.rollout_strategy_json,
       row.policy_snapshot_json,
-      row.provenance, row.supersedes_generation_id, row.superseded_at, row.operation_id,
+      row.provenance, row.supersedes_generation_id, row.superseded_at, row.withdrawn_at, row.operation_id,
       row.actor, row.trigger, row.created_at,
     );
   }
@@ -1049,6 +1049,38 @@ export class GitOpsStore {
     this.db().prepare(
       'UPDATE gitops_rollout_generations SET superseded_at = ? WHERE id = ? AND superseded_at IS NULL',
     ).run(supersededAt, id);
+  }
+
+  /**
+   * Record that the operator withdrew this rollout.
+   *
+   * Separate from `superseded_at` on purpose: system supersedes (a preflight
+   * drift, a placement invalidation, a re-authorization) must stay
+   * distinguishable from the operator's Supersede and Rollback, because only
+   * the latter blocks the automatic policy from minting a replacement.
+   */
+  markRolloutGenerationWithdrawn(id: string, withdrawnAt: number): void {
+    this.db().prepare(
+      'UPDATE gitops_rollout_generations SET withdrawn_at = ? WHERE id = ? AND withdrawn_at IS NULL',
+    ).run(withdrawnAt, id);
+  }
+
+  /**
+   * The newest rollout authorization opened for one accepted source, if any.
+   *
+   * Ordered by `rowid` as the tie-break: two generations opened in the same
+   * millisecond would otherwise have no defined order, and a wrong pick would
+   * silently read the wrong withdrawal marker.
+   */
+  latestRolloutAuthorizationForAcceptedGeneration(
+    applicationId: string,
+    acceptedGenerationId: string,
+  ): GitOpsRolloutGenerationRow | undefined {
+    return this.db().prepare(
+      `SELECT * FROM gitops_rollout_generations
+       WHERE application_id = ? AND provenance = 'rollout_authorization' AND accepted_generation_id = ?
+       ORDER BY created_at DESC, rowid DESC LIMIT 1`,
+    ).get(applicationId, acceptedGenerationId) as GitOpsRolloutGenerationRow | undefined;
   }
 
   upsertTarget(row: GitOpsTargetCurrentRow): void {

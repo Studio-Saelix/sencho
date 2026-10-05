@@ -1211,6 +1211,7 @@ export class DatabaseService {
         this.migrateGitOpsRecoveryColumns();
         this.migrateGitOpsCreateCheckpointSshDeployKey();
         this.migrateGitOpsPauseOrigin();
+        this.migrateGitOpsRolloutWithdrawal();
         this.migrateNodeUpdateSkips();
         this.migrateNodeSealingKeys();
         this.migrateStackAlertServiceScope();
@@ -2923,6 +2924,20 @@ stmt.run('gitops_schema_version', '1');
         // as 'operator', the safe direction: they survive an acceptance until an
         // operator resumes once, rather than being lifted unannounced.
         this.tryAddColumn('gitops_applications', 'pause_origin', "TEXT NOT NULL DEFAULT 'operator'");
+    }
+
+    private migrateGitOpsRolloutWithdrawal(): void {
+        const added = this.tryAddColumn('gitops_rollout_generations', 'withdrawn_at', 'INTEGER NULL');
+        if (!added) return;
+        // A generation superseded before this column existed cannot say whether
+        // the operator or a system path superseded it. Backfill every
+        // superseded authorization as withdrawn, the safe direction: the
+        // automatic policy waits for a person once after the upgrade rather
+        // than re-minting a rollout the operator may have withdrawn.
+        this.db.prepare(
+            `UPDATE gitops_rollout_generations SET withdrawn_at = superseded_at
+             WHERE superseded_at IS NOT NULL AND provenance = 'rollout_authorization'`,
+        ).run();
     }
 
     private migrateGitOpsCreateCheckpointSshDeployKey(): void {

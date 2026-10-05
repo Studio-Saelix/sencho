@@ -931,16 +931,18 @@ gitopsApplicationsRouter.post('/:id/source/accept', async (req: Request, res: Re
   // and policy routes keep `stack:deploy`, because those are operator
   // decisions, and the reconciler completes a skipped handoff within a tick.
   const handoff = await dispatchAcceptanceWithinTimeout(target.application.id, generationId, actor);
-  // Both can have something to say; neither may hide the other. The preparation
-  // note is about the accepted content, the refusal about the rollout.
-  const notes: Array<string | null> = [prepared.note];
-  if (handoff.status === 'blocked') notes.push(handoff.reason);
+  // Both can have something to say; neither may hide the other, and the parts
+  // are joined as sentences so the note does not run on. The preparation note
+  // is about the accepted content, the refusal about the rollout.
+  const notes = [prepared.note, handoff.status === 'blocked' ? handoff.reason : null]
+    .filter((part): part is string => part !== null && part.trim().length > 0)
+    .map((part) => part.trim().replace(/\.+$/, ''));
   res.json({
     ok: true,
     materialized: prepared.materialized,
     artifactResolved: prepared.artifact === 'resolved',
     dispatched: handoff.status === 'dispatched',
-    note: notes.filter((note): note is string => note !== null).join(' ') || null,
+    note: notes.length > 0 ? `${notes.join('. ')}.` : null,
   });
 });
 

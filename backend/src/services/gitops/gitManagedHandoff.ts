@@ -50,6 +50,21 @@ export async function dispatchPreparedGitManagedGeneration(args: {
     ? DatabaseService.getInstance().getBlueprint(app.blueprint_id)
     : undefined;
   if (!blueprint?.enabled) return { status: 'skipped', reason: 'the Blueprint is disabled' };
+  // A target whose rollback never finished must not be deployed over by any
+  // handoff. The dispatch's own fence guard is scoped to the live generation,
+  // so an older fence is invisible there; this shared gate is what keeps the
+  // accept route, the controller and the reconciler from crossing it. Retired
+  // rows do not count: their rollback can never be finished.
+  const rollbackPending = store.listTargets(app.id).some(
+    (target) => target.target_status === 'active' && target.health_stop_reason === 'rollback_pending',
+  );
+  if (rollbackPending) {
+    console.warn(
+      '[GitOps] Git-managed handoff withheld for %s: a target has an unfinished rollback',
+      sanitizeForLog(app.id),
+    );
+    return { status: 'skipped', reason: 'a target has an unfinished rollback' };
+  }
   const genRow = store.getGeneration(args.generationId);
   if (!genRow) return { status: 'skipped', reason: 'the accepted generation could not be read' };
   // Authorization needs resolved executable artifact evidence, so an unresolved

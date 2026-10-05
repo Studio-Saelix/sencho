@@ -318,6 +318,7 @@ describe('gitops approvals', () => {
       provenance: 'legacy_inline',
       supersedes_generation_id: null,
       superseded_at: null,
+      withdrawn_at: null,
       operation_id: 'op-churn-place',
       actor: 'admin',
       trigger: 'blueprint_apply',

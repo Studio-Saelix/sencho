@@ -2478,6 +2478,7 @@ export class GitOpsTransitions {
           provenance: args.provenance ?? 'legacy_inline',
           supersedes_generation_id: previousGenerationId,
           superseded_at: null,
+          withdrawn_at: null,
           operation_id: args.envelope.operationId,
           actor: args.actor,
           trigger: args.envelope.trigger,
@@ -2693,6 +2694,7 @@ export class GitOpsTransitions {
           provenance: 'rollout_authorization',
           supersedes_generation_id: previousGenerationId,
           superseded_at: null,
+          withdrawn_at: null,
           operation_id: args.envelope.operationId,
           actor: args.actor,
           trigger: args.envelope.trigger,
@@ -2764,8 +2766,11 @@ export class GitOpsTransitions {
         app.rollout_authorization_ref = null;
         app.preflight_fingerprint = null;
         // The generation pointer stays: the projection reports the abandoned
-        // rollout rather than pretending the application never had one.
+        // rollout rather than pretending the application never had one. The
+        // withdrawal marker is what tells the automatic policy this was an
+        // operator decision, not a system supersede it may re-mint.
         this.store().markRolloutGenerationSuperseded(app.rollout_generation_id, args.envelope.at);
+        this.store().markRolloutGenerationWithdrawn(app.rollout_generation_id, args.envelope.at);
       },
       named ? { rolloutGenerationId: named } : {},
     );

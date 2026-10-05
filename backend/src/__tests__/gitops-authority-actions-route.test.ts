@@ -384,6 +384,32 @@ describe('POST /api/gitops/applications/:id/source/accept', () => {
     handoffSpy.mockRestore();
   });
 
+  it('withholds the automatic handoff while a target has an unfinished rollback', async () => {
+    const seeded = seedGitManagedBlueprint({ sourceAccepted: false });
+    DatabaseService.getInstance().getDb().prepare(
+      "UPDATE gitops_target_current SET health_stop_reason = 'rollback_pending' WHERE application_id = ? AND node_id = ?",
+    ).run(seeded.applicationId, seeded.nodeIds[0]);
+    DatabaseService.getInstance().getDb().prepare(
+      'UPDATE gitops_applications SET rollout_authorization_policy = ? WHERE id = ?',
+    ).run('automatic', seeded.applicationId);
+    const dispatchSpy = vi.spyOn(GitSourceService.getInstance(), 'dispatchAcceptedGeneration');
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+
+    const res = await request(app)
+      .post(`/api/gitops/applications/bp:${seeded.blueprintId}/source/accept`)
+      .set('Cookie', adminCookie)
+      .send({ generationId: seeded.generationId });
+
+    expect(res.status).toBe(200);
+    expect(res.body.dispatched).toBe(false);
+    // The accept path shares the handoff gate, so the fence is respected here
+    // even though the dispatch's own guard is scoped to the live generation.
+    expect(dispatchSpy).not.toHaveBeenCalled();
+    expect(warnSpy.mock.calls.some((call) => String(call[0]).includes('unfinished rollback'))).toBe(true);
+    dispatchSpy.mockRestore();
+    warnSpy.mockRestore();
+  });
+
   it('reports the preparation note and the dispatch refusal together', async () => {
     const seeded = seedGitManagedBlueprint({ sourceAccepted: false });
     const handoffSpy = vi.spyOn(await import('../services/gitops/gitManagedHandoff'), 'dispatchPreparedGitManagedGeneration')
