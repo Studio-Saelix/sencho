@@ -384,6 +384,24 @@ describe('POST /api/gitops/applications/:id/source/accept', () => {
     handoffSpy.mockRestore();
   });
 
+  it('reports the preparation note and the dispatch refusal together', async () => {
+    const seeded = seedGitManagedBlueprint({ sourceAccepted: false });
+    const handoffSpy = vi.spyOn(await import('../services/gitops/gitManagedHandoff'), 'dispatchPreparedGitManagedGeneration')
+      .mockResolvedValue({ status: 'blocked', reason: 'Deploy to node 2 failed: registry unreachable.' });
+
+    const res = await request(app)
+      .post(`/api/gitops/applications/bp:${seeded.blueprintId}/source/accept`)
+      .set('Cookie', adminCookie)
+      .send({ generationId: seeded.generationId });
+
+    expect(res.status).toBe(200);
+    expect(res.body.dispatched).toBe(false);
+    // The fixture's preparation leaves a note, so this is the case where the
+    // refusal would otherwise be hidden.
+    expect(res.body.note).toContain('Deploy to node 2 failed: registry unreachable.');
+    handoffSpy.mockRestore();
+  });
+
   it('refuses a generation that is not the current candidate', async () => {
     const seeded = seedGitManagedBlueprint({ sourceAccepted: false });
     const res = await request(app)

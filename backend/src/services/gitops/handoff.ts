@@ -1530,20 +1530,28 @@ export function gitManagedDispatchWarranted(app: GitOpsApplicationRow): boolean 
     return false;
   }
   // A withdrawn authorization is an operator decision, not a pending handoff.
-  // Supersede leaves the generation pointer on the abandoned generation and
-  // marks it, so the automatic policy must not mint a replacement for the same
-  // accepted source. The check is generation-aware: once a new commit is
-  // accepted, the abandoned generation belongs to the superseded source and
-  // must not keep this one inert (the acceptance detaches the pointer too, but
-  // this is the predicate's own guarantee).
-  const named = app.rollout_generation_id
-    ? store.getRolloutGeneration(app.rollout_generation_id)
-    : undefined;
-  if (named && named.superseded_at !== null && named.accepted_generation_id === app.accepted_generation_id) {
-    return false;
-  }
+  // The check is durable rather than pointer-based: the latest rollout
+  // authorization recorded for this accepted source, if superseded, blocks an
+  // automatic replacement until something newer is authorized. The pointer
+  // alone is not enough, because a placement re-approval can move it onto a
+  // generation that is not superseded and quietly revive the withdrawn rollout.
+  const latestAuthorization = store
+    .listRolloutGenerationsForApplication(app.id)
+    .filter((generation) => generation.provenance === 'rollout_authorization'
+      && generation.accepted_generation_id === app.accepted_generation_id)
+    .sort((a, b) => b.created_at - a.created_at)[0];
+  if (latestAuthorization && latestAuthorization.superseded_at !== null) return false;
   const binding = store.currentAuthorizationBinding(app);
   if (!binding) {
+    // A target whose rollback never finished must not be deployed over by an
+    // automatic mint, whichever rollout generation wrote the fence: the
+    // dispatch's own fence guard is scoped to the live generation, so this is
+    // the one place the older fence is still visible. Retired rows do not
+    // count; their rollback can never be finished and would wedge the app.
+    const rollbackPending = store.listTargets(app.id).some(
+      (target) => target.target_status === 'active' && target.health_stop_reason === 'rollback_pending',
+    );
+    if (rollbackPending) return false;
     // The handoff mints under the automatic policy, but only from a state that
     // is actually authorizable. A missing placement approval is the operator's
     // next step (the approve route is where that happens), so calling the

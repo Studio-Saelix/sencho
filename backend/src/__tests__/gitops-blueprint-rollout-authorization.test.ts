@@ -1081,6 +1081,92 @@ describe('application-driven preparation retry', () => {
     warrantedSpy.mockRestore();
   });
 
+  it('does not re-mint a withdrawn rollout after a placement re-approval', async () => {
+    const fixture = seedAuthorizedReadyApp();
+    authorize(fixture.applicationId);
+    const store = GitOpsStore.getInstance();
+    GitOpsTransitions.getInstance().rolloutSuperseded({
+      applicationId: fixture.applicationId,
+      envelope: { operationId: randomUUID(), actor: 'tester', trigger: 'manual', at: 500 },
+    });
+    const app = store.getApplication(fixture.applicationId)!;
+    GitOpsTransitions.getInstance().placementApproved({
+      applicationId: fixture.applicationId,
+      approvalId: `place-${randomUUID().slice(0, 8)}`,
+      intentRevisionId: app.intent_revision_id!,
+      blastJson: encodeGitOpsApprovedTargetEffectJson(
+        fixture.nodeIds.map((nodeId) => ({ nodeId, outcome: 'place' as const })),
+      ),
+      requiredNodeIds: fixture.nodeIds,
+      fingerprint: null,
+      actor: 'tester',
+      envelope: { operationId: randomUUID(), actor: 'tester', trigger: 'manual', at: 600 },
+      rolloutGenerationId: `rgen-${randomUUID().slice(0, 8)}`,
+      candidateId: app.rollout_candidate_id!,
+      authority: 'operator',
+      policyProvenanceJson: null,
+      provenance: 'placement_approval',
+    });
+    // The re-approval moved the pointer onto a generation that is not
+    // superseded, which is exactly what defeats a pointer-based check.
+    const reapproved = store.getApplication(fixture.applicationId)!;
+    expect(reapproved.rollout_generation_id).not.toBeNull();
+    expect(store.getRolloutGeneration(reapproved.rollout_generation_id!)!.superseded_at).toBeNull();
+
+    const dispatchSpy = vi.spyOn(GitSourceService.getInstance(), 'dispatchAcceptedGeneration');
+    const warrantedSpy = vi.spyOn(await import('../services/gitops/handoff'), 'gitManagedDispatchWarranted');
+    const reconciler = (await import('../services/BlueprintReconciler')).BlueprintReconciler;
+    await reconciler.getInstance().tick();
+    await vi.waitFor(() => {
+      expect(warrantedSpy.mock.calls.some((call) => call[0].id === fixture.applicationId)).toBe(true);
+    });
+    const decision = warrantedSpy.mock.results.find(
+      (_result, index) => warrantedSpy.mock.calls[index]?.[0].id === fixture.applicationId,
+    );
+    expect(decision?.value).toBe(false);
+    expect(dispatchSpy).not.toHaveBeenCalled();
+    dispatchSpy.mockRestore();
+    warrantedSpy.mockRestore();
+  });
+
+  it('does not mint a new rollout over an unfinished rollback after a resume', async () => {
+    const fixture = seedAuthorizedReadyApp();
+    authorize(fixture.applicationId);
+    const store = GitOpsStore.getInstance();
+    holdBlockedRolloutDispatch(fixture.applicationId, { reason: 'Deploy to node 2 failed: boom', holdable: true });
+    store.upsertTarget({
+      ...store.getTarget(fixture.applicationId, fixture.nodeId)!,
+      health_stop_reason: 'rollback_pending',
+    });
+
+    const { resolveNow } = await acceptSecondCommitWithFailedPreparation(fixture);
+    // The conservative clear kept the hold through the acceptance; the operator
+    // resumes, which clears it and leaves the automatic policy to continue.
+    expect(store.getApplication(fixture.applicationId)!.pause_at).not.toBeNull();
+    GitOpsTransitions.getInstance().rolloutUnpaused(fixture.applicationId, null, {
+      operationId: randomUUID(), actor: 'tester', trigger: 'manual', at: 700,
+    });
+    expect(store.getApplication(fixture.applicationId)!.pause_at).toBeNull();
+    resolveNow();
+
+    const dispatchSpy = vi.spyOn(GitSourceService.getInstance(), 'dispatchAcceptedGeneration');
+    const warrantedSpy = vi.spyOn(await import('../services/gitops/handoff'), 'gitManagedDispatchWarranted');
+    const reconciler = (await import('../services/BlueprintReconciler')).BlueprintReconciler;
+    await reconciler.getInstance().tick();
+    await vi.waitFor(() => {
+      expect(warrantedSpy.mock.calls.some((call) => call[0].id === fixture.applicationId)).toBe(true);
+    });
+    // The fence is scoped to the superseded generation, so the predicate is the
+    // one guard that still sees it and refuses the automatic mint.
+    const decision = warrantedSpy.mock.results.find(
+      (_result, index) => warrantedSpy.mock.calls[index]?.[0].id === fixture.applicationId,
+    );
+    expect(decision?.value).toBe(false);
+    expect(dispatchSpy).not.toHaveBeenCalled();
+    dispatchSpy.mockRestore();
+    warrantedSpy.mockRestore();
+  });
+
   it('re-drives a new commit after the operator superseded the previous rollout', async () => {
     const fixture = seedAuthorizedReadyApp({ nodeCount: 2 });
     await writeAppliedCompose(fixture.applicationId, fixture.generationId, 'services:\n  web:\n    image: alpine:3.20\n');

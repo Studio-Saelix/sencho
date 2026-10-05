@@ -4225,12 +4225,14 @@ export class GitOpsTransitions {
     // An unfinished roll back is the exception: lifting the hold here would let
     // the next dispatch deploy over a target whose rollback never finished. The
     // dispatch queue does not skip a fence written by an older rollout
-    // generation, so the clear stays conservative and blocks while any target
-    // still carries the fence. Finishing or undoing the rollback, then resuming
+    // generation, so the clear stays conservative and blocks while any live
+    // target still carries the fence. A retired row does not count: its
+    // rollback can never be finished, and blocking on it would wedge the
+    // application for ever. Finishing or undoing the rollback, then resuming
     // and authorizing, is what moves the rollout on.
     const rollbackPending = app.target_mode === 'blueprint'
       && this.store().listTargets(app.id).some(
-        (target) => target.health_stop_reason === 'rollback_pending',
+        (target) => target.target_status === 'active' && target.health_stop_reason === 'rollback_pending',
       );
     if (app.pause_at !== null && app.pause_origin === 'system' && !rollbackPending) {
       const before = { pauseAt: app.pause_at, pauseReason: app.pause_reason, pauseOrigin: app.pause_origin };
@@ -4255,11 +4257,9 @@ export class GitOpsTransitions {
     // acceptance detaches it. Leaving it would make the next dispatch read the
     // frozen strategy as moved on and refuse, which is how an earlier rollback
     // or supersede disabled the automatic handoff for every later commit. The
-    // row is only marked, and the event only recorded, when it is not already
-    // superseded, so an acceptance does not append a duplicate.
-    if (live.superseded_at === null) {
-      this.recordRolloutGenerationSuperseded(app, app.rollout_generation_id, null, envelope, extras);
-    }
+    // helper records the event only once, so an acceptance does not append a
+    // duplicate.
+    this.recordRolloutGenerationSuperseded(app, app.rollout_generation_id, null, envelope, extras);
     app.rollout_generation_id = null;
   }
 
@@ -4392,7 +4392,7 @@ export class GitOpsTransitions {
       app.preflight_fingerprint = null;
       if (app.rollout_generation_id) {
         const live = this.store().getRolloutGeneration(app.rollout_generation_id);
-        if (live && live.provenance === 'rollout_authorization' && live.superseded_at === null) {
+        if (live && live.provenance === 'rollout_authorization') {
           this.recordRolloutGenerationSuperseded(
             app,
             app.rollout_generation_id,
@@ -4427,6 +4427,11 @@ export class GitOpsTransitions {
     envelope: EventEnvelope,
     extras: { historyIds: string[] },
   ): void {
+    // Idempotent per generation: a row that is already marked must not append a
+    // second history row and notification, whichever caller reaches it again
+    // (a repeat drift invalidation, a re-approval, a re-authorization).
+    const existing = this.store().getRolloutGeneration(previousGenerationId);
+    if (!existing || existing.superseded_at !== null) return;
     this.store().markRolloutGenerationSuperseded(previousGenerationId, envelope.at);
     const superseded = this.history(app, envelope, {
       stage: 'rollout_generation_superseded',
