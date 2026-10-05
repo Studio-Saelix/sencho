@@ -868,6 +868,7 @@ describe('application-driven preparation retry', () => {
 
   it('does not let a slow preparation or dispatch hold the tick', async () => {
     const fixture = seedAuthorizedReadyApp();
+    authorize(fixture.applicationId);
     vi.spyOn(BlueprintService.getInstance(), 'gitManagedPreparationRetryDue').mockReturnValue(true);
     vi.spyOn(await import('../services/gitops/gitManagedMaterialization'), 'materializeAndFreezeGitManagedArtifactSet')
       .mockResolvedValue({ status: 'resolved', reason: null });
@@ -884,6 +885,11 @@ describe('application-driven preparation retry', () => {
     await reconciler.getInstance().tick();
     await vi.waitFor(() => expect(dispatchSpy).toHaveBeenCalled());
     release();
+    // The released refusal is durable and the binding is live, so the helper
+    // holds it; this also proves the detached pass reached the dispatch.
+    await vi.waitFor(() => {
+      expect(GitOpsStore.getInstance().getApplication(fixture.applicationId)!.pause_at).not.toBeNull();
+    });
     dispatchSpy.mockRestore();
   });
 });
