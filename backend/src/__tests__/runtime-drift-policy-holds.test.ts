@@ -1087,6 +1087,62 @@ describe('the runtime drift policy holds what it must not repair', () => {
     );
   });
 
+  it('announces a persistent Suggest-mode drift once, not once per tick', async () => {
+    const { NotificationService } = await import('../services/NotificationService');
+    const alertSpy = vi
+      .spyOn(NotificationService.getInstance(), 'dispatchAlert')
+      .mockResolvedValue({ persisted: true });
+    const node = seedNode();
+    const blueprint = seedBlueprint(node, 'suggest', 'stateful');
+    const seeded = await seedDeployedGitManaged({ blueprint, node, compose: COMPOSE });
+    DatabaseService.getInstance().upsertDeployment({
+      blueprint_id: blueprint.id,
+      node_id: node.id,
+      status: 'active',
+      applied_revision: blueprint.revision,
+      last_deployed_at: Date.now(),
+    });
+    stubDriftedRuntime(blueprint, seeded.generationId, seeded.artifactSetId, seeded.rolloutGenerationId);
+
+    await tick(blueprint, node);
+    await tick(blueprint, node);
+
+    expect(
+      alertSpy.mock.calls.filter(([, category]) => category === 'blueprint_drift_detected'),
+      'one episode, one alert',
+    ).toHaveLength(1);
+  });
+
+  it('treats a held Git-managed target as the same episode when the check resumes', async () => {
+    const { NotificationService } = await import('../services/NotificationService');
+    const alertSpy = vi
+      .spyOn(NotificationService.getInstance(), 'dispatchAlert')
+      .mockResolvedValue({ persisted: true });
+    const node = seedNode();
+    const blueprint = seedBlueprint(node, 'suggest', 'stateful');
+    const seeded = await seedDeployedGitManaged({ blueprint, node, compose: COMPOSE });
+    const firstSeen = Date.now() - 60_000;
+    DatabaseService.getInstance().upsertDeployment({
+      blueprint_id: blueprint.id,
+      node_id: node.id,
+      status: 'repair_held',
+      applied_revision: blueprint.revision,
+      last_deployed_at: Date.now(),
+      last_drift_at: firstSeen,
+    });
+    stubDriftedRuntime(blueprint, seeded.generationId, seeded.artifactSetId, seeded.rolloutGenerationId);
+
+    await tick(blueprint, node);
+
+    const dep = deploymentOf(blueprint, node);
+    expect(dep?.status).toBe('drifted');
+    expect(dep?.last_drift_at, 'the episode keeps its start time through a hold').toBe(firstSeen);
+    expect(
+      alertSpy.mock.calls.filter(([, category]) => category === 'blueprint_drift_detected'),
+      'a hold is a decision about the repair, not a new episode',
+    ).toHaveLength(0);
+  });
+
   it('records drift in Observe mode without claiming auto-fix was declined', async () => {
     const node = seedNode();
     const blueprint = seedBlueprint(node, 'observe', 'stateful');

@@ -809,7 +809,7 @@ describe('BlueprintService marker parsing + name-conflict guard', () => {
 
 describe('BlueprintReconciler drift alert node wording', () => {
     type ReconcilerWithDrift = {
-        handleDrift: (blueprint: Blueprint, node: Node, reason: string, cause: 'revision' | 'container' | 'digest') => Promise<void>;
+        handleDrift: (blueprint: Blueprint, node: Node, reason: string, cause: 'revision' | 'container' | 'digest', isNewEpisode: boolean) => Promise<void>;
     };
 
     function seedRemoteNode(name: string): number {
@@ -830,7 +830,7 @@ describe('BlueprintReconciler drift alert node wording', () => {
         const node = DatabaseService.getInstance().getNode(nodeId)!;
         const reconciler = BlueprintReconciler.getInstance() as unknown as ReconcilerWithDrift;
 
-        await reconciler.handleDrift(bp, node, 'compose changed', 'revision');
+        await reconciler.handleDrift(bp, node, 'compose changed', 'revision', true);
 
         expect(dispatchSpy).toHaveBeenCalledWith(
             'warning',
@@ -848,7 +848,7 @@ describe('BlueprintReconciler drift alert node wording', () => {
         const node = DatabaseService.getInstance().getNode(nodeId)!;
         const reconciler = BlueprintReconciler.getInstance() as unknown as ReconcilerWithDrift;
 
-        await reconciler.handleDrift(bp, node, 'compose changed', 'revision');
+        await reconciler.handleDrift(bp, node, 'compose changed', 'revision', true);
 
         expect(dispatchSpy).toHaveBeenCalledWith(
             'warning',
@@ -856,6 +856,19 @@ describe('BlueprintReconciler drift alert node wording', () => {
             'Blueprint "drift-remote" drifted on node "sencho-test-02": compose changed',
             { stackName: 'drift-remote', actor: 'system:blueprint' },
         );
+    });
+
+    it('suggest-mode repeat of the same drift is not re-announced', async () => {
+        const { NotificationService } = await import('../services/NotificationService');
+        const dispatchSpy = vi.spyOn(NotificationService.getInstance(), 'dispatchAlert').mockResolvedValue({ persisted: true });
+        const nodeId = seedNode();
+        const bp = seedBlueprint({ name: 'drift-repeat', drift_mode: 'suggest', nodeIds: [nodeId] });
+        const node = DatabaseService.getInstance().getNode(nodeId)!;
+        const reconciler = BlueprintReconciler.getInstance() as unknown as ReconcilerWithDrift;
+
+        await reconciler.handleDrift(bp, node, 'compose changed', 'revision', false);
+
+        expect(dispatchSpy).not.toHaveBeenCalled();
     });
 
     it('stateful marker-loss on local uses on this node', async () => {
@@ -872,7 +885,7 @@ describe('BlueprintReconciler drift alert node wording', () => {
         const node = DatabaseService.getInstance().getNode(nodeId)!;
         const reconciler = BlueprintReconciler.getInstance() as unknown as ReconcilerWithDrift;
 
-        await reconciler.handleDrift(bp, node, 'volumes diverged', 'revision');
+        await reconciler.handleDrift(bp, node, 'volumes diverged', 'revision', true);
 
         // A declined repair is a hold, not a detection notice: it says the policy
         // refused to act and leaves the deployment row in that state. The text
@@ -907,7 +920,7 @@ describe('BlueprintReconciler drift alert node wording', () => {
         const node = DatabaseService.getInstance().getNode(nodeId)!;
         const reconciler = BlueprintReconciler.getInstance() as unknown as ReconcilerWithDrift;
 
-        await reconciler.handleDrift(bp, node, 'volumes diverged', 'revision');
+        await reconciler.handleDrift(bp, node, 'volumes diverged', 'revision', true);
 
         expect(dispatchSpy).toHaveBeenCalledWith(
             'warning',
@@ -953,7 +966,7 @@ describe('BlueprintReconciler drift alert node wording', () => {
         });
         const reconciler = BlueprintReconciler.getInstance() as unknown as ReconcilerWithDrift;
 
-        await reconciler.handleDrift(bp, node, 'image identity differs', 'digest');
+        await reconciler.handleDrift(bp, node, 'image identity differs', 'digest', true);
 
         expect(dispatchSpy).toHaveBeenCalledWith(
             'warning',
@@ -990,7 +1003,7 @@ describe('BlueprintReconciler drift alert node wording', () => {
         const node = DatabaseService.getInstance().getNode(nodeId)!;
         const reconciler = BlueprintReconciler.getInstance() as unknown as ReconcilerWithDrift;
 
-        await reconciler.handleDrift(bp, node, 'compose changed', 'digest');
+        await reconciler.handleDrift(bp, node, 'compose changed', 'digest', true);
 
         expect(dispatchSpy).toHaveBeenCalledWith(
             'error',
@@ -1017,7 +1030,7 @@ describe('BlueprintReconciler drift alert node wording', () => {
         const node = DatabaseService.getInstance().getNode(nodeId)!;
         const reconciler = BlueprintReconciler.getInstance() as unknown as ReconcilerWithDrift;
 
-        await reconciler.handleDrift(bp, node, 'no containers running for this blueprint', 'container');
+        await reconciler.handleDrift(bp, node, 'no containers running for this blueprint', 'container', true);
 
         expect(deploySpy).toHaveBeenCalledTimes(1);
         expect(digestSpy).not.toHaveBeenCalled();
@@ -1043,7 +1056,7 @@ describe('BlueprintReconciler drift alert node wording', () => {
         const node = DatabaseService.getInstance().getNode(nodeId)!;
         const reconciler = BlueprintReconciler.getInstance() as unknown as ReconcilerWithDrift;
 
-        await reconciler.handleDrift(gitBp, node, 'no containers running for this blueprint', 'container');
+        await reconciler.handleDrift(gitBp, node, 'no containers running for this blueprint', 'container', true);
 
         expect(reapplySpy).toHaveBeenCalledTimes(1);
         expect(deploySpy).not.toHaveBeenCalled();

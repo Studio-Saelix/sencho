@@ -366,7 +366,7 @@ Cordoning a node prevents the reconciler from selecting it for **new** placement
 
 Two notification events fire from the reconciler:
 
-- `blueprint_drift_detected` (warning severity), in Observe and Suggest modes when drift is detected. In Observe the row updates silently in the table; in Suggest the notification is also dispatched through your notification routes.
+- `blueprint_drift_detected` (warning severity), in Observe and Suggest modes when drift is detected. In Observe the row updates silently in the table; in Suggest the notification is also dispatched through your notification routes, once when the drift is detected and again only if the drift clears and then returns.
 - `blueprint_drift_correction_failed` (error severity), in Enforce mode when an auto-fix attempt fails.
 - `blueprint_drift_repair_held` (warning severity), in Enforce mode when a repair is declined. The deployment row reads **Repair held** with the reason.
 

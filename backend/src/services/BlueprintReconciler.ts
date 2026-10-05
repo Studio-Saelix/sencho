@@ -428,13 +428,16 @@ export class BlueprintReconciler {
                     }
                 }
                 const reason = driftResult.reason;
-                // The drift episode began when the row first read drifted, so a
-                // tick that re-observes the same drift must not restamp it.
+                // The drift episode began when the row first read a drift state,
+                // so a tick that re-observes the same drift must not restamp it.
                 // Restamping made a drift that outlived one tick report itself
                 // as just found, forever, which is the one thing the drift age
-                // on the row exists to say.
-                const alreadyDrifted =
-                    DatabaseService.getInstance().getDeployment(blueprint.id, node.id)?.status === 'drifted';
+                // on the row exists to say. A hold is one of those states: it is
+                // a decision about the repair, not a resolution of the drift, so
+                // the episode continues through it.
+                const priorStatus =
+                    DatabaseService.getInstance().getDeployment(blueprint.id, node.id)?.status;
+                const alreadyDrifted = priorStatus === 'drifted' || priorStatus === 'repair_held';
                 commitBlueprintDeploymentCause('drift_observed', blueprint.id, node.id, {
                     status: 'drifted',
                     last_checked_at: Date.now(),
@@ -445,7 +448,7 @@ export class BlueprintReconciler {
                 // so the drift is recorded and the mode's own response runs. A
                 // stateful or unclassifiable workload is never auto-repaired,
                 // and that is decided at the mutation site, inside handleDrift.
-                await this.handleDrift(blueprint, node, reason, driftResult.cause);
+                await this.handleDrift(blueprint, node, reason, driftResult.cause, !alreadyDrifted);
                 return { ...base, status: 'ok' };
             }
             default:
@@ -817,11 +820,20 @@ export class BlueprintReconciler {
         return decision;
     }
 
+    /**
+     * Apply the Blueprint's drift-mode response to a drift the check found.
+     *
+     * `isNewEpisode` is true only when this check is the first to observe the
+     * current drift episode, computed from the row's status before the tick's
+     * drift write. Suggest announces an episode once; Observe and Enforce do
+     * not read the flag.
+     */
     private async handleDrift(
         blueprint: Blueprint,
         node: Node,
         reason: string,
         cause: DriftCause,
+        isNewEpisode: boolean,
     ): Promise<void> {
         const notifications = NotificationService.getInstance();
         switch (blueprint.drift_mode) {
@@ -829,6 +841,13 @@ export class BlueprintReconciler {
                 return; // detection only; UI surfaces the drift
 
             case 'suggest':
+                // The check re-runs every tick so a drift that resolves is
+                // noticed, so a repeat of the same drift is not news. Announcing
+                // it per check would fill the bell and every routed channel with
+                // one identical alert per interval for as long as the drift
+                // lasts. A new episode, after the drift cleared, announces
+                // again.
+                if (!isNewEpisode) return;
                 notifications.dispatchAlert(
                     'warning',
                     'blueprint_drift_detected',
@@ -1098,15 +1117,19 @@ export class BlueprintReconciler {
                 }
             }
             const reason = driftResult.reason;
-            const alreadyDrifted =
-                DatabaseService.getInstance().getDeployment(blueprint.id, node.id)?.status === 'drifted';
+            // The same episode definition as the Inline path: a hold is a
+            // decision about the repair, not a resolution of the drift, so the
+            // episode continues through it.
+            const priorStatus =
+                DatabaseService.getInstance().getDeployment(blueprint.id, node.id)?.status;
+            const alreadyDrifted = priorStatus === 'drifted' || priorStatus === 'repair_held';
             commitBlueprintDeploymentCause('drift_observed', blueprint.id, node.id, {
                 status: 'drifted',
                 last_checked_at: Date.now(),
                 ...(alreadyDrifted ? {} : { last_drift_at: Date.now() }),
                 drift_summary: reason,
             }, null);
-            await this.handleDrift(blueprint, node, reason, driftResult.cause);
+            await this.handleDrift(blueprint, node, reason, driftResult.cause, !alreadyDrifted);
         }
     }
 
