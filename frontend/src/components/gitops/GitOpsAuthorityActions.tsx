@@ -88,9 +88,19 @@ export default function GitOpsAuthorityActions({
   // Each of these acts on a Git source generation, which an Inline Blueprint
   // does not have, and the routes behind them refuse anything but a Git-managed
   // application. Offering one would be a button whose every press is a 409.
+  //
+  // Accepting the source is a `stack:create` write. Under the Automatic rollout
+  // authorization policy the same press also authorizes and starts the rollout,
+  // which is a deploy, so the action asks for `stack:deploy` as well. The server
+  // keeps the acceptance for a create-only caller and skips only the dispatch
+  // half, so the gate here is the stricter UI reading of one combined action.
+  const rolloutAuthorizationRead = policyReadFor(live?.authorityPolicies, 'rollout_authorization');
+  const acceptAlsoStartsRollout = rolloutAuthorizationRead?.configured === 'automatic'
+    || rolloutAuthorizationRead?.effectiveFrozen === 'automatic';
   const canAcceptSource = projection.targetMode === 'blueprint'
     && candidateGenerationId !== null
-    && allowed('stack:create');
+    && allowed('stack:create')
+    && (!acceptAlsoStartsRollout || allowed('stack:deploy'));
 
   const canApprovePlacement = projection.targetMode === 'blueprint'
     && blueprintId !== null

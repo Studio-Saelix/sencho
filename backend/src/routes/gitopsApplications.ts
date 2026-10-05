@@ -923,13 +923,24 @@ gitopsApplicationsRouter.post('/:id/source/accept', async (req: Request, res: Re
   // it authorizes and starts the rollout, under a manual policy it skips and
   // the operator authorizes. A durable refusal is held by the handoff. The wait
   // is bounded: a sequential rollout must not hold the request open.
-  const handoff = await dispatchAcceptanceWithinTimeout(target.application.id, generationId, actor);
+  //
+  // Starting the rollout is a deploy, and the authorize and resume routes gate
+  // it on `stack:deploy`; this half keeps that gate. The acceptance itself stays
+  // `stack:create`, so a create-only caller gets the accepted and prepared
+  // generation and a note that the rollout was not started.
+  const mayStartRollout = checkPermission(req, 'stack:deploy');
+  const handoff = mayStartRollout
+    ? await dispatchAcceptanceWithinTimeout(target.application.id, generationId, actor)
+    : {
+        status: 'skipped' as const,
+        reason: 'the rollout was not started: starting it needs the stack deploy permission',
+      };
   res.json({
     ok: true,
     materialized: prepared.materialized,
     artifactResolved: prepared.artifact === 'resolved',
     dispatched: handoff.status === 'dispatched',
-    note: prepared.note ?? (handoff.status === 'blocked' ? handoff.reason : null),
+    note: prepared.note ?? (handoff.status === 'blocked' || !mayStartRollout ? handoff.reason : null),
   });
 });
 

@@ -304,7 +304,7 @@ describe('rollout authorization transition', () => {
     expect(store.getApplication(fixture.applicationId)!.pause_at).not.toBeNull();
   });
 
-  it('the health executor holds a transient advance refusal with the health origin', async () => {
+  it('the health executor holds a transient advance refusal with the system origin', async () => {
     const fixture = seedAuthorizedReadyApp();
     authorize(fixture.applicationId);
     const dispatchSpy = vi.spyOn(BlueprintTargetAdapter.prototype, 'dispatch')
@@ -314,9 +314,13 @@ describe('rollout authorization transition', () => {
 
     // On this path the dispatch is the only thing that brings the next target,
     // so a transient refusal is held rather than left queued with no reason.
+    // It is a dispatch refusal, not a health verdict, so it carries the system
+    // origin and a new commit clears it.
     const app = GitOpsStore.getInstance().getApplication(fixture.applicationId)!;
     expect(app.pause_at).not.toBeNull();
-    expect(app.pause_origin).toBe('health');
+    expect(app.pause_origin).toBe('system');
+    acceptNextGeneration(fixture, 400);
+    expect(GitOpsStore.getInstance().getApplication(fixture.applicationId)!.pause_at).toBeNull();
     dispatchSpy.mockRestore();
   });
 
@@ -777,7 +781,7 @@ describe('application-driven preparation retry', () => {
     // it to settle before asserting.
     await vi.waitFor(() => {
       expect(store.getApplication(fixture.applicationId)?.artifact_set_id).toBe(`resolved-${nextGenId}`);
-      expect(deploySpy).toHaveBeenCalledTimes(2);
+      expect(deploySpy.mock.calls.filter((call) => call[0].blueprint.id === fixture.blueprintId)).toHaveLength(2);
       for (const nodeId of fixture.nodeIds) {
         expect(store.getTarget(fixture.applicationId, nodeId)?.applied_generation_id).toBe(nextGenId);
       }
@@ -812,7 +816,7 @@ describe('application-driven preparation retry', () => {
     await vi.waitFor(() => {
       expect(store.getApplication(fixture.applicationId)?.artifact_set_id).toBe(`resolved-${nextGenId}`);
     });
-    expect(deploySpy).not.toHaveBeenCalled();
+    expect(deploySpy.mock.calls.filter((call) => call[0].blueprint.id === fixture.blueprintId)).toHaveLength(0);
     for (const nodeId of fixture.nodeIds) {
       expect(store.getTarget(fixture.applicationId, nodeId)?.applied_generation_id).toBe(fixture.generationId);
     }
@@ -891,6 +895,133 @@ describe('application-driven preparation retry', () => {
       expect(GitOpsStore.getInstance().getApplication(fixture.applicationId)!.pause_at).not.toBeNull();
     });
     dispatchSpy.mockRestore();
+  });
+
+  it('dispatches a generation whose preparation finished after the accept returned', async () => {
+    const fixture = seedAuthorizedReadyApp({ nodeCount: 2 });
+    await writeAppliedCompose(fixture.applicationId, fixture.generationId, 'services:\n  web:\n    image: alpine:3.20\n');
+    authorize(fixture.applicationId);
+    const store = GitOpsStore.getInstance();
+    const deploySpy = vi.spyOn(BlueprintService.getInstance(), 'deployAuthorizedMaterialization')
+      .mockResolvedValue({ status: 'active' });
+    const first = await new BlueprintTargetAdapter().dispatch(
+      buildAcceptedGeneration(store.getGeneration(fixture.generationId)!),
+      { targetMode: 'blueprint', nodeId: fixture.nodeId, bindingRevision: null },
+    );
+    expect(first.status).toBe('dispatched');
+    deploySpy.mockClear();
+
+    const { nextGenId } = await acceptSecondCommitWithFailedPreparation(fixture);
+    // The background preparation finishes on its own after the route's bounded
+    // wait: the artifact pointer moves, and nothing dispatches it. The next tick
+    // must, because the policy is automatic.
+    const encodeArtifactEvidenceJson = (await import('../services/gitops/json')).encodeArtifactEvidenceJson;
+    GitOpsTransitions.getInstance().recordArtifactEvidence({
+      applicationId: fixture.applicationId,
+      generationId: nextGenId,
+      artifactSetId: `resolved-${nextGenId}`,
+      evidenceVersion: 2,
+      qualification: 'exact',
+      evidenceJson: encodeArtifactEvidenceJson({ kind: 'exact', identity: 'sha256:cafebabe' }),
+      authoritative: 0,
+      envelope: { operationId: randomUUID(), actor: 'tester', trigger: 'test', at: 901 },
+    });
+    expect(store.getApplication(fixture.applicationId)?.artifact_set_id).toBe(`resolved-${nextGenId}`);
+
+    const reconciler = (await import('../services/BlueprintReconciler')).BlueprintReconciler;
+    await reconciler.getInstance().tick();
+
+    await vi.waitFor(() => {
+      expect(deploySpy.mock.calls.filter((call) => call[0].blueprint.id === fixture.blueprintId))
+        .toHaveLength(fixture.nodeIds.length);
+    });
+    for (const nodeId of fixture.nodeIds) {
+      expect(store.getTarget(fixture.applicationId, nodeId)?.applied_generation_id).toBe(nextGenId);
+    }
+  });
+
+  it('dispatches when a disabled Blueprint is enabled again', async () => {
+    const fixture = seedAuthorizedReadyApp({ nodeCount: 2 });
+    await writeAppliedCompose(fixture.applicationId, fixture.generationId, 'services:\n  web:\n    image: alpine:3.20\n');
+    authorize(fixture.applicationId);
+    const store = GitOpsStore.getInstance();
+    const deploySpy = vi.spyOn(BlueprintService.getInstance(), 'deployAuthorizedMaterialization')
+      .mockResolvedValue({ status: 'active' });
+    const first = await new BlueprintTargetAdapter().dispatch(
+      buildAcceptedGeneration(store.getGeneration(fixture.generationId)!),
+      { targetMode: 'blueprint', nodeId: fixture.nodeId, bindingRevision: null },
+    );
+    expect(first.status).toBe('dispatched');
+    deploySpy.mockClear();
+
+    const { nextGenId, resolveNow } = await acceptSecondCommitWithFailedPreparation(fixture);
+    DatabaseService.getInstance().updateBlueprint(fixture.blueprintId, { enabled: false });
+    resolveNow();
+    const reconciler = (await import('../services/BlueprintReconciler')).BlueprintReconciler;
+    await reconciler.getInstance().tick();
+    await vi.waitFor(() => {
+      expect(store.getApplication(fixture.applicationId)?.artifact_set_id).toBe(`resolved-${nextGenId}`);
+    });
+    // Content is not execution: prepared while disabled, nothing deploys.
+    expect(deploySpy.mock.calls.filter((call) => call[0].blueprint.id === fixture.blueprintId)).toHaveLength(0);
+
+    DatabaseService.getInstance().updateBlueprint(fixture.blueprintId, { enabled: true });
+    await reconciler.getInstance().tick();
+
+    // Enabling it again is the missing handoff: the pass dispatches without a
+    // person clicking Authorize.
+    await vi.waitFor(() => {
+      expect(deploySpy.mock.calls.filter((call) => call[0].blueprint.id === fixture.blueprintId))
+        .toHaveLength(fixture.nodeIds.length);
+    });
+  });
+
+  it('re-drives a transiently refused dispatch on the next tick', async () => {
+    const fixture = seedAuthorizedReadyApp();
+    authorize(fixture.applicationId);
+    const dispatchSpy = vi.spyOn(GitSourceService.getInstance(), 'dispatchAcceptedGeneration')
+      .mockResolvedValueOnce({ status: 'blocked', reason: 'Deploy to node 1 is already in progress.', holdable: false })
+      .mockResolvedValue({ status: 'dispatched' });
+    const reconciler = (await import('../services/BlueprintReconciler')).BlueprintReconciler;
+
+    await reconciler.getInstance().tick();
+    await vi.waitFor(() => expect(dispatchSpy).toHaveBeenCalledTimes(1));
+    // A transient refusal is not a hold: the rollout must not read as paused.
+    expect(GitOpsStore.getInstance().getApplication(fixture.applicationId)!.pause_at).toBeNull();
+
+    // The holder finishes; the next tick re-drives instead of leaving the
+    // rollout queued until a restart.
+    await reconciler.getInstance().tick();
+    await vi.waitFor(() => expect(dispatchSpy).toHaveBeenCalledTimes(2));
+    dispatchSpy.mockRestore();
+  });
+
+  it('throttles a preparation failure that records no evidence row', async () => {
+    const fixture = seedAuthorizedReadyApp();
+    await acceptSecondCommitWithFailedPreparation(fixture);
+    // A failure before the freeze writes anything (an unreadable applied
+    // compose) is invisible to the durable gate, so the in-memory floor has to
+    // bound it; without that it would probe the filesystem every 60s tick.
+    const freezeSpy = vi.spyOn(await import('../services/gitops/gitManagedMaterialization'), 'materializeAndFreezeGitManagedArtifactSet')
+      .mockResolvedValue({ status: 'none', reason: 'applied compose unreadable' });
+    const dueSpy = vi.spyOn(BlueprintService.getInstance(), 'gitManagedPreparationRetryDue');
+    const reconciler = (await import('../services/BlueprintReconciler')).BlueprintReconciler;
+    // Counts are per application: one tick covers every live Git-managed
+    // application, including the ones earlier tests left behind.
+    const attempts = (): number => freezeSpy.mock.calls
+      .filter((call) => call[0].applicationId === fixture.applicationId).length;
+    const dueChecks = (): number => dueSpy.mock.calls
+      .filter((call) => call[0].id === fixture.applicationId).length;
+
+    await reconciler.getInstance().tick();
+    await vi.waitFor(() => expect(attempts()).toBe(1));
+
+    await reconciler.getInstance().tick();
+    // The call-through spy is the positive control: the second pass evaluated
+    // the application, so a freeze that was not attempted is the floor.
+    await vi.waitFor(() => expect(dueChecks()).toBe(2));
+    expect(attempts()).toBe(1);
+    freezeSpy.mockRestore();
   });
 });
 

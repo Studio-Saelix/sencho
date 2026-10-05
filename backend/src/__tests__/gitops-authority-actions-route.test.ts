@@ -356,6 +356,47 @@ describe('POST /api/gitops/applications/:id/source/accept', () => {
     expect(approval.generation_id).toBe(seeded.generationId);
   });
 
+  it('accepts the source without starting the rollout when the caller cannot deploy', async () => {
+    const seeded = seedGitManagedBlueprint({ sourceAccepted: false });
+    // The default role matrix has no create-only role, so the deploy refusal is
+    // injected: the acceptance is `stack:create`, and only the automatic-policy
+    // dispatch half is `stack:deploy`.
+    const permissions = await import('../middleware/permissions');
+    const checkSpy = vi.spyOn(permissions, 'checkPermission')
+      .mockImplementation(((_req, action) => action !== 'stack:deploy') as typeof permissions.checkPermission);
+    const handoffSpy = vi.spyOn(await import('../services/gitops/gitManagedHandoff'), 'dispatchPreparedGitManagedGeneration');
+
+    const res = await request(app)
+      .post(`/api/gitops/applications/bp:${seeded.blueprintId}/source/accept`)
+      .set('Cookie', adminCookie)
+      .send({ generationId: seeded.generationId });
+    checkSpy.mockRestore();
+
+    expect(res.status).toBe(200);
+    expect(res.body.dispatched).toBe(false);
+    // The handoff is the deploy half, and that is what the missing grant
+    // withholds; the acceptance itself stands.
+    expect(handoffSpy).not.toHaveBeenCalled();
+    expect(GitOpsStore.getInstance().getApplication(seeded.applicationId)!.accepted_generation_id)
+      .toBe(seeded.generationId);
+    handoffSpy.mockRestore();
+  });
+
+  it('attempts the handoff when the caller can deploy', async () => {
+    const seeded = seedGitManagedBlueprint({ sourceAccepted: false });
+    const handoffSpy = vi.spyOn(await import('../services/gitops/gitManagedHandoff'), 'dispatchPreparedGitManagedGeneration')
+      .mockResolvedValue({ status: 'skipped', reason: 'test' });
+
+    const res = await request(app)
+      .post(`/api/gitops/applications/bp:${seeded.blueprintId}/source/accept`)
+      .set('Cookie', adminCookie)
+      .send({ generationId: seeded.generationId });
+
+    expect(res.status).toBe(200);
+    expect(handoffSpy).toHaveBeenCalledTimes(1);
+    handoffSpy.mockRestore();
+  });
+
   it('refuses a generation that is not the current candidate', async () => {
     const seeded = seedGitManagedBlueprint({ sourceAccepted: false });
     const res = await request(app)

@@ -1394,10 +1394,21 @@ export function liveHealthRolloutExecutor(): HealthRolloutExecutor {
       // budget is already spent. Transient refusals are held too, restoring what
       // this path always did; a pause that is already on record is skipped so one
       // decision never needs two Resumes.
-      holdReconstructedRollout(applicationId, {
+      //
+      // Origin `system`: this is a dispatch refusal, not a health verdict. A
+      // stale or transient one describes the rollout it was about, so a source
+      // acceptance that supersedes that rollout clears it. Only a real policy
+      // decision (a stop, a pause, a rollback) carries the health origin.
+      holdBlockedRolloutDispatch(applicationId, {
         reason: `The rollout could not advance: ${result.reason}`,
         holdable: result.holdable,
         alreadyPaused: result.alreadyPaused,
+      }, {
+        actor: 'system:health-rollout-policy',
+        trigger: 'startup_reconstruct',
+        requireLiveBinding: false,
+        holdTransient: true,
+        origin: 'system',
       });
       console.warn(
         '[GitOps] Health-gated rollout could not advance %s: %s',
@@ -1413,25 +1424,6 @@ export function liveHealthRolloutExecutor(): HealthRolloutExecutor {
 }
 
 /**
- * Hold a rollout discovered at startup, through the same application-wide pause
- * the executor uses, so there is one hold an operator can read and clear.
- */
-function holdReconstructedRollout(
-  applicationId: string,
-  blocked: { reason: string; holdable: boolean; alreadyPaused?: boolean },
-): void {
-  // The health executor holds transient refusals as it always has, because its
-  // dispatch is the only thing that brings the next target. It skips only a
-  // pause that is already on record, so one decision never needs two Resumes.
-  holdBlockedRolloutDispatch(applicationId, blocked, {
-    actor: 'system:health-rollout-policy',
-    trigger: 'startup_reconstruct',
-    requireLiveBinding: false,
-    holdTransient: true,
-  });
-}
-
-/**
  * Hold an authorized rollout whose dispatch was refused.
  *
  * A refusal returned only as a note is a rollout that stops with no durable
@@ -1442,9 +1434,11 @@ function holdReconstructedRollout(
  * when no authorization is live: a refusal before the mint is the caller's to
  * report, and pausing there would hold a rollout nothing has authorized.
  *
- * The hold is recorded with origin `system`, which is what lets a source
- * acceptance clear it when it supersedes the rollout the hold was about. An
- * operator pause carries `operator` and survives until the operator resumes.
+ * The origin is chosen by the refusal's kind, never by the caller. A dispatch
+ * refusal carries `system`, which is what lets a source acceptance clear it when
+ * it supersedes the rollout the hold was about. A real health decision (a stop,
+ * a pause, a rollback) carries `health` and survives until the operator resumes;
+ * an operator pause carries `operator` and does the same.
  */
 export function holdBlockedRolloutDispatch(
   applicationId: string,
@@ -1458,9 +1452,16 @@ export function holdBlockedRolloutDispatch(
      * needs this: its dispatch is the only thing that brings the next target,
      * and on this path a transient refusal used to hold, so dropping it would
      * leave the rollout queued with no reason and no re-drive. An
-     * already-recorded pause is still skipped.
+     * already-recorded pause is still skipped. This decides whether to hold, not
+     * the origin: an executor dispatch refusal is still a `system` hold.
      */
     holdTransient?: boolean;
+    /**
+     * Who the hold belongs to. `system` for a dispatch refusal (cleared by a
+     * source acceptance that supersedes the rollout), `health` for a policy
+     * decision. Defaults to `system`.
+     */
+    origin?: 'system' | 'health';
   } = {},
 ): void {
   // A refusal that says nothing durable about the rollout is not a hold for the
@@ -1484,7 +1485,7 @@ export function holdBlockedRolloutDispatch(
       actor: options.actor ?? 'system:rollout-dispatch',
       trigger: options.trigger ?? 'blueprint_dispatch',
       at: Date.now(),
-    }, options.holdTransient ? 'health' : 'system');
+    }, options.origin ?? 'system');
   } catch (err) {
     // A hold that cannot be recorded must not turn a refused dispatch into a
     // thrown one: the refusal is the answer, and the hold is only its durable
@@ -1495,6 +1496,63 @@ export function holdBlockedRolloutDispatch(
       sanitizeForLog(err instanceof Error ? err.message : String(err)),
     );
   }
+}
+
+/**
+ * Whether an automatic-policy rollout still has dispatch work to do.
+ *
+ * The reconciler's content pass uses this to re-drive a handoff that skipped or
+ * was transiently refused: a resolved generation with no live authorization
+ * (the slow accept, the re-enabled Blueprint), or one whose authorized rollout
+ * still has unacked targets (a refusal that nothing else retries).
+ *
+ * False when the artifact is not resolved, when every required target is
+ * settled, or when a remaining target already has an open health run: the gate
+ * owns that target, and a second dispatch would adopt the same run and race the
+ * verdict for it.
+ */
+export function gitManagedDispatchWarranted(app: GitOpsApplicationRow): boolean {
+  const store = GitOpsStore.getInstance();
+  const artifact = app.artifact_set_id ? store.getArtifactSet(app.artifact_set_id) : undefined;
+  if (!artifact || (artifact.qualification !== 'exact' && artifact.qualification !== 'qualified')) {
+    return false;
+  }
+  // A withdrawn authorization is an operator decision, not a pending handoff.
+  // Supersede leaves the generation pointer on the abandoned generation and
+  // marks it, so the automatic policy must not mint a replacement until a new
+  // commit arrives (which clears the pointer).
+  const named = app.rollout_generation_id
+    ? store.getRolloutGeneration(app.rollout_generation_id)
+    : undefined;
+  if (named && named.superseded_at !== null) return false;
+  const binding = store.currentAuthorizationBinding(app);
+  if (!binding) {
+    // The handoff mints under the automatic policy, but only from a state that
+    // is actually authorizable. A missing placement approval is the operator's
+    // next step (the approve route is where that happens), so calling the
+    // handoff every tick would only record its refusal. Once the approval is
+    // there, this arm authorizes and dispatches without a person.
+    return app.placement_approval_ref !== null;
+  }
+  const authRef = app.rollout_authorization_ref;
+  if (!authRef) return true;
+  let frozen: FrozenHealthPolicy;
+  try {
+    frozen = frozenHealthPolicy(store, app, binding);
+  } catch {
+    // A frozen policy that cannot be read is a damaged authority pointer; a
+    // re-drive could run the wrong gating, so it waits for a person.
+    return false;
+  }
+  const gated = frozen.kind === 'policy' && gatesAdvancement(frozen.policy);
+  const remaining = binding.requiredNodeIds.filter((nodeId) => {
+    const target = store.getTarget(app.id, nodeId);
+    return gated
+      ? !settledForGatedRollout(target, binding, authRef)
+      : !targetAlreadyAcked(target, binding, authRef);
+  });
+  if (remaining.length === 0) return false;
+  return !remaining.some((nodeId) => awaitingHealthVerdict(store.getTarget(app.id, nodeId)));
 }
 
 export async function reconstructBlueprintRolloutQueue(): Promise<number> {
@@ -1529,7 +1587,14 @@ export async function reconstructBlueprintRolloutQueue(): Promise<number> {
       .map((nodeId) => store.getTarget(app.id, nodeId))
       .find((target) => holdableHealthFence(target) && target!.rollout_generation_id === app.rollout_generation_id);
     if (fenced) {
-      holdReconstructedRollout(app.id, { reason: 'a target was fenced by its health rollout policy', holdable: true });
+      // A fence is a health decision, so the hold carries the health origin and
+      // waits for the operator even across a later source acceptance.
+      holdBlockedRolloutDispatch(app.id, { reason: 'a target was fenced by its health rollout policy', holdable: true }, {
+        actor: 'system:health-rollout-policy',
+        trigger: 'startup_reconstruct',
+        requireLiveBinding: false,
+        origin: 'health',
+      });
       continue;
     }
     // Under a health-gated policy an acked target is still unverified until its

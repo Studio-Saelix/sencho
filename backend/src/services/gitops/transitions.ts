@@ -4215,16 +4215,19 @@ export class GitOpsTransitions {
     extras: { historyIds: string[] },
   ): void {
     // A system hold belongs to the rollout this acceptance supersedes, and its
-    // reason describes that rollout. Cleared for every target mode: a Direct
-    // application can carry a system hold too, and the hold is about the
-    // superseded rollout rather than the Blueprint content model. An operator
-    // pause and a health-policy hold are deliberate stops and survive; only the
-    // operator's own resume clears those.
+    // reason describes that rollout. The clear runs for every target mode even
+    // though only Blueprint applications reach the hold helper today: the hold
+    // is about the superseded rollout rather than the content model, and a
+    // target-mode check here would be a second place to keep in step. An
+    // operator pause and a health-policy hold are deliberate stops and survive;
+    // only the operator's own resume clears those.
     //
     // An unfinished roll back is the exception: its target fence is scoped to
     // the old rollout generation, so the next dispatch's guard no longer sees
     // it, and lifting the hold here would deploy over a target whose rollback
-    // never finished. The hold stays until the rollback is finished or undone.
+    // never finished. The clear is skipped while the fence exists; finishing or
+    // undoing the rollback, then resuming and authorizing, is what moves the
+    // rollout on. That is the honest boundary of this guard.
     const rollbackPending = app.target_mode === 'blueprint'
       && this.store().listTargets(app.id).some(
         (target) => target.health_stop_reason === 'rollback_pending',

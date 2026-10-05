@@ -32,6 +32,7 @@ import { GitOpsStore, placementEffectCompatible } from './gitops/store';
 import { isGitManagedBlueprint } from './gitops/gitManaged';
 import { materializeAndFreezeGitManagedArtifactSet } from './gitops/gitManagedMaterialization';
 import { dispatchPreparedGitManagedGeneration } from './gitops/gitManagedHandoff';
+import { gitManagedDispatchWarranted } from './gitops/handoff';
 import type { GitOpsApplicationRow } from './gitops/types';
 
 const RECONCILER_INTERVAL_MS = 60_000;
@@ -171,6 +172,14 @@ export class BlueprintReconciler {
      */
     private readonly gitManagedPreparationInFlight = new Set<string>();
     /**
+     * An in-memory floor between preparation attempts, for failures that write
+     * no evidence row (a missing candidate, an unreadable applied compose). The
+     * durable gate cannot see those, so without this they would be retried every
+     * 60-second tick; this bounds them to the artifact retry interval. Not
+     * durable by design: a restart is allowed one immediate attempt.
+     */
+    private readonly gitManagedPreparationFloor = new Map<string, { generationId: string; at: number }>();
+    /**
      * A generation whose preparation was refused by the authored-text parser.
      * The refusal is a statement about the content, so it is remembered per
      * generation and never retried; the reason itself is persisted as an
@@ -281,9 +290,9 @@ export class BlueprintReconciler {
             for (const app of GitOpsStore.getInstance().listLiveGitManagedApplications()) {
                 if (this.gitManagedPreparationInFlight.has(app.id)) continue;
                 this.gitManagedPreparationInFlight.add(app.id);
-                void this.retryGitManagedPreparation(app)
+                void this.reconcileGitManagedApplication(app)
                     .catch((err) => {
-                        console.error(`[BlueprintReconciler] Git-managed preparation retry failed for ${app.id}:`, err);
+                        console.error(`[BlueprintReconciler] Git-managed content pass failed for ${app.id}:`, err);
                     })
                     .finally(() => {
                         this.gitManagedPreparationInFlight.delete(app.id);
@@ -359,34 +368,54 @@ export class BlueprintReconciler {
     }
 
     /**
-     * Retry an accepted generation whose preparation did not finish.
+     * Drive the content pass for one live Git-managed application.
      *
-     * The accept paths prepare once and then either dispatch or report a note.
-     * A registry outage, or a crash between the acceptance commit and the
-     * materialize call, would otherwise strand that generation: re-accepting is
-     * refused (it is already accepted), and the per-target artifact retry only
-     * looks at the generation a target has acknowledged, which is still the
-     * previous one until a new rollout reaches it. This tick is the
-     * application-driven retry that closes that hole.
+     * Two arms, both idempotent and both ending at the one handoff:
      *
-     * A refusal (a compose shape the authored-text parser cannot model) is
-     * remembered per generation: it is a statement about the content and no
-     * number of retries changes it. The reason is persisted as an evidence
-     * limitation by the freeze, so the surface names the cause.
+     * - Preparation, for a generation whose artifact identity did not resolve.
+     *   A registry outage, or a crash between the acceptance commit and the
+     *   materialize call, would otherwise strand that generation: re-accepting
+     *   is refused (it is already accepted), and the per-target artifact retry
+     *   only looks at the generation a target has acknowledged, which is still
+     *   the previous one until a new rollout reaches it.
+     * - Handoff, for a resolved generation the automatic policy has not finished
+     *   dispatching. Without it a skipped handoff (a slow accept, a re-enabled
+     *   Blueprint) and a transiently refused one (lock contention, a store
+     *   refusal) wait for a person, which is the stall this pass exists to
+     *   close. The warranted predicate keeps it from re-driving a settled or
+     *   progressing rollout.
+     *
+     * A preparation refusal (a compose shape the authored-text parser cannot
+     * model) is remembered per generation: it is a statement about the content
+     * and no number of retries changes it. The reason is persisted as an
+     * evidence limitation by the freeze, so the surface names the cause.
      */
-    private async retryGitManagedPreparation(app: GitOpsApplicationRow): Promise<void> {
+    private async reconcileGitManagedApplication(app: GitOpsApplicationRow): Promise<void> {
         if (app.target_mode !== 'blueprint' || !app.accepted_generation_id) return;
         // Suspension freezes automation for this source, exactly as it does for
         // the SourceController's own acceptance and for GitSourceService.retry.
         // Preparing and dispatching around it would bypass that hold.
         if (app.suspended_at) return;
         const generationId = app.accepted_generation_id;
+        await this.retryGitManagedPreparation(app, generationId);
+        await this.redriveGitManagedHandoff(app.id, generationId);
+    }
+
+    private async retryGitManagedPreparation(app: GitOpsApplicationRow, generationId: string): Promise<void> {
         if (this.refusedGitManagedPreparations.get(app.id) === generationId) return;
         // The same durable gate the per-target retry uses: a set whose recorded
         // evidence says every service failed permanently is not retried, and the
         // interval is dated from the latest recorded row, so a restart does not
         // bypass it.
         if (!BlueprintService.getInstance().gitManagedPreparationRetryDue(app)) return;
+        // Failures that write no evidence row are invisible to the durable gate,
+        // so the in-memory floor bounds them to the same interval. A restart is
+        // allowed one immediate attempt, which is the correct trade: a process
+        // that just started has no in-memory history to trust.
+        const intervalMs = DatabaseService.getInstance().getGitOpsArtifactRetryIntervalMins() * 60_000;
+        const last = this.gitManagedPreparationFloor.get(app.id);
+        if (last && last.generationId === generationId && Date.now() - last.at < intervalMs) return;
+        this.gitManagedPreparationFloor.set(app.id, { generationId, at: Date.now() });
 
         const outcome = await materializeAndFreezeGitManagedArtifactSet({
             applicationId: app.id,
@@ -396,15 +425,19 @@ export class BlueprintReconciler {
         });
         if (outcome.status === 'refused') {
             this.refusedGitManagedPreparations.set(app.id, generationId);
-            return;
         }
-        if (outcome.status !== 'resolved') return;
+    }
 
-        // Prepared now. The one handoff applies the same gates the accept paths
-        // use (policy, enabled, pause, suspension, generation currency) and
-        // holds a durable refusal.
+    private async redriveGitManagedHandoff(applicationId: string, generationId: string): Promise<void> {
+        const store = GitOpsStore.getInstance();
+        const fresh = store.getApplication(applicationId);
+        if (!fresh || fresh.target_mode !== 'blueprint') return;
+        if (fresh.suspended_at || fresh.pause_at) return;
+        if (fresh.accepted_generation_id !== generationId) return;
+        if (fresh.rollout_authorization_policy !== 'automatic') return;
+        if (!gitManagedDispatchWarranted(fresh)) return;
         const handoff = await dispatchPreparedGitManagedGeneration({
-            applicationId: app.id,
+            applicationId: fresh.id,
             generationId,
             actor: 'system:blueprint-reconciler',
             trigger: 'retry',
@@ -412,7 +445,7 @@ export class BlueprintReconciler {
         if (handoff.status === 'blocked') {
             console.warn(
                 '[BlueprintReconciler] Git-managed dispatch blocked for %s: %s',
-                sanitizeForLog(app.id),
+                sanitizeForLog(fresh.id),
                 sanitizeForLog(handoff.reason ?? 'unknown'),
             );
         }
