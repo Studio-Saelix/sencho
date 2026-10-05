@@ -1554,35 +1554,37 @@ export class ComposeService {
    * project beside the one the stack already runs.
    */
   private composeDeclaresProjectName(args: string[], stackDir: string): boolean {
+    const resolvedStackDir = path.resolve(stackDir);
     const files: string[] = [];
     for (let i = 0; i < args.length - 1; i++) {
       if (args[i] === '-f' || args[i] === '--file') files.push(args[i + 1]);
     }
     if (files.length === 0) {
-      for (const candidate of [
+      files.push(
         'compose.yaml', 'compose.yml',
         'compose.override.yaml', 'compose.override.yml',
         'docker-compose.yaml', 'docker-compose.yml',
         'docker-compose.override.yaml', 'docker-compose.override.yml',
-      ]) {
-        const abs = path.join(stackDir, candidate);
-        if (fs.existsSync(abs)) files.push(abs);
-      }
+      );
     }
     for (const file of files) {
-      const abs = path.isAbsolute(file) ? file : path.resolve(stackDir, file);
+      const abs = path.resolve(resolvedStackDir, file);
+      // Canonical inline js/path-injection barrier at the read sink: only the
+      // stack tree is read. Generated overlay layers (digest pin, mesh,
+      // recovery) live outside it and cannot declare a project name.
+      if (!abs.startsWith(resolvedStackDir + path.sep)) continue;
       try {
-        const stat = fs.statSync(abs);
+        const content = fs.readFileSync(abs, 'utf8');
         // A compose layer is small; anything larger is not one, and the read is
         // synchronous on the deploy path.
-        if (!stat.isFile() || stat.size > 1_048_576) continue;
-        const doc: unknown = parseYaml(fs.readFileSync(abs, 'utf8'));
+        if (content.length > 1_048_576) continue;
+        const doc: unknown = parseYaml(content);
         if (doc !== null && typeof doc === 'object' && !Array.isArray(doc)) {
           const name = (doc as Record<string, unknown>).name;
           if (typeof name === 'string' && name.trim() !== '') return true;
         }
       } catch {
-        // An unreadable or non-YAML layer cannot declare a name; the pin stands.
+        // A missing, unreadable, or non-YAML layer cannot declare a name.
       }
     }
     return false;
