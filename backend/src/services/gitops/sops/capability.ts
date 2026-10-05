@@ -139,7 +139,7 @@ export function buildSecretCapability(args: {
   const requiredRecipients = new Set<string>();
 
   for (const input of args.inputs) {
-    if (input.sensitivity !== 'high' && input.encryption === 'none') continue;
+    if (input.sensitivity !== 'high' && (input.encryption ?? 'none') === 'none') continue;
     const encryption = input.encryption ?? 'none';
     const recipients = input.sopsRecipients ?? [];
     if (encryption === 'sops-age') {
@@ -171,7 +171,7 @@ export function buildSecretCapability(args: {
       args.policy === 'require_encrypted'
       && input.ownership === 'managed'
       && input.sensitivity === 'high'
-      && input.encryption === 'none'
+      && (input.encryption ?? 'none') === 'none'
     ) {
       // The policy governs managed repository content. Unmanaged entries are
       // not materialized by Sencho, so an absent project env file cannot make

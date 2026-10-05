@@ -2,6 +2,7 @@ import { spawn } from 'child_process';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
+import { parse as parseYaml } from 'yaml';
 import WebSocket from 'ws';
 import DockerController from './DockerController';
 import { DatabaseService } from './DatabaseService';
@@ -1541,8 +1542,50 @@ export class ComposeService {
     if (!stackDirOverride) return;
     if (path.resolve(stackDirOverride) === this.resolveValidatedStackDir(stackName)) return;
     if (this.hasProjectNameFlag(args)) return;
+    if (this.composeDeclaresProjectName(args, path.resolve(stackDirOverride))) return;
     const composeIdx = args.indexOf('compose');
     args.splice(composeIdx >= 0 ? composeIdx + 1 : 0, 0, '-p', stackName);
+  }
+
+  /**
+   * A compose file with a top-level `name:` already fixes the project name, so
+   * an overlay's working-directory basename cannot leak into it. The pin must
+   * not override the authored name, or a SOPS deploy would start a second
+   * project beside the one the stack already runs.
+   */
+  private composeDeclaresProjectName(args: string[], stackDir: string): boolean {
+    const files: string[] = [];
+    for (let i = 0; i < args.length - 1; i++) {
+      if (args[i] === '-f' || args[i] === '--file') files.push(args[i + 1]);
+    }
+    if (files.length === 0) {
+      for (const candidate of [
+        'compose.yaml', 'compose.yml',
+        'compose.override.yaml', 'compose.override.yml',
+        'docker-compose.yaml', 'docker-compose.yml',
+        'docker-compose.override.yaml', 'docker-compose.override.yml',
+      ]) {
+        const abs = path.join(stackDir, candidate);
+        if (fs.existsSync(abs)) files.push(abs);
+      }
+    }
+    for (const file of files) {
+      const abs = path.isAbsolute(file) ? file : path.resolve(stackDir, file);
+      try {
+        const stat = fs.statSync(abs);
+        // A compose layer is small; anything larger is not one, and the read is
+        // synchronous on the deploy path.
+        if (!stat.isFile() || stat.size > 1_048_576) continue;
+        const doc: unknown = parseYaml(fs.readFileSync(abs, 'utf8'));
+        if (doc !== null && typeof doc === 'object' && !Array.isArray(doc)) {
+          const name = (doc as Record<string, unknown>).name;
+          if (typeof name === 'string' && name.trim() !== '') return true;
+        }
+      } catch {
+        // An unreadable or non-YAML layer cannot declare a name; the pin stands.
+      }
+    }
+    return false;
   }
 
   /**

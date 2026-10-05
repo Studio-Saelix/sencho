@@ -112,6 +112,16 @@ describe('SOPS capability readiness', () => {
     expect(result.refusal?.failureClass).toBe('invalid_ciphertext');
   });
 
+  it('requires encryption for a managed synced stack-root .env', () => {
+    const result = buildSecretCapability({
+      policy: 'require_encrypted',
+      inputs: [plaintextInput({ materializedPath: '.env', sourcePath: null, dependencyKind: 'sync-env' })],
+      applicationId: 'app-policy-sync',
+      stackName: 'stack-policy-sync',
+    });
+    expect(result.refusal?.failureClass).toBe('invalid_ciphertext');
+  });
+
   it('blocks LKG only when no recipient of a file is available', () => {
     const cap = {
       policy: 'allow_plaintext' as const,

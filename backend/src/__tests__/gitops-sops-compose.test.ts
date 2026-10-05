@@ -187,6 +187,26 @@ describe('ComposeService SOPS overlay args and mutation guards', () => {
     expect(args[args.indexOf('-p') + 1]).toBe(stackName);
   });
 
+  it('does not pin over a compose-declared project name', async () => {
+    const stackName = 'sops-compose-name';
+    const stackDir = path.join(process.env.COMPOSE_DIR!, stackName);
+    fs.mkdirSync(stackDir, { recursive: true });
+    const composeBody = 'name: customproj\nservices:\n  x:\n    image: nginx\n';
+    fs.writeFileSync(path.join(stackDir, 'compose.yaml'), composeBody);
+    const overlayDir = path.join(tmpDir, 'overlay-compose-name');
+    fs.mkdirSync(overlayDir, { recursive: true });
+    fs.writeFileSync(path.join(overlayDir, 'compose.yaml'), composeBody);
+
+    const args = await ComposeService.getInstance().buildComposeArgsWithRecoveryOverride(
+      stackName,
+      ['up', '-d'],
+      null,
+      null,
+      overlayDir,
+    );
+    expect(args).not.toContain('-p');
+  });
+
   it('refuses a manual deploy of a SOPS-managed stack without an overlay', async () => {
     const stackName = 'sops-refuse-deploy';
     seedSopsStack(stackName, 'gen-sops-refuse-deploy');

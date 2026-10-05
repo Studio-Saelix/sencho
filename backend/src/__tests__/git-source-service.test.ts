@@ -10799,6 +10799,41 @@ describe('GitSourceService sync-env stacks with a repo .env (audit C-2)', () => 
             await cleanupStackDir('sync-env-double');
         }
     });
+    it('refuses a plaintext synced .env under require_encrypted', async () => {
+        const sha = 'abcd3333abcd3333abcd3333abcd3333abcd3333';
+        const svc = GitSourceService.getInstance();
+        const runSpy = vi
+            .spyOn(svc as unknown as { runDockerCompose: (a: string[], c: string, t: number) => Promise<{ code: number; stdout: string; stderr: string }> }, 'runDockerCompose')
+            .mockResolvedValue({ code: 0, stdout: '', stderr: '' });
+        const { FileSystemService } = await import('../services/FileSystemService');
+        await FileSystemService.getInstance().createStack('sync-env-policy');
+        mockSuccessfulClone({
+            compose: 'services:\n  web:\n    image: nginx\n',
+            env: 'PLAINVAR=top-secret-plaintext\n',
+            envPath: '.env',
+            sha,
+        });
+        try {
+            await svc.upsert({
+                stackName: 'sync-env-policy',
+                repoUrl: 'https://github.com/example/repo.git',
+                branch: 'main',
+                composePaths: ['compose.yaml'],
+                contextDir: null,
+                syncEnv: true,
+                envPath: '.env',
+                authType: 'none',
+                autoApplyOnWebhook: false,
+                autoDeployOnApply: false,
+            });
+            const { setEncryptedSourcePolicy } = await import('../services/gitops/sops/identityStore');
+            setEncryptedSourcePolicy('sync-env-policy', 'require_encrypted');
+            await expect(svc.pull('sync-env-policy')).rejects.toThrow(/requires SOPS-encrypted/i);
+        } finally {
+            runSpy.mockRestore();
+            await cleanupStackDir('sync-env-policy');
+        }
+    });
 });
 
 describe('GitSourceService classified plan fingerprint', () => {

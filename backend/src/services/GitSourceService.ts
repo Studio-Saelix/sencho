@@ -1816,9 +1816,16 @@ export class GitSourceService {
         }
         inventory.inputs = classified.inputs;
 
+        const capabilityInputs = src.sync_env && envContent !== null
+            // The synced stack-root .env is written by Sencho from repository
+            // content, so the encrypted-source policy must judge it even though
+            // discovery records the repository's interpolation .env as
+            // unmanaged. Without this a plaintext .env is synced and accepted.
+            ? mergeSyncEnvEntry(inventory.inputs, this.syncEnvEntryFor(envContent))
+            : inventory.inputs;
         const capabilityResult = buildSecretCapability({
             policy,
-            inputs: inventory.inputs,
+            inputs: capabilityInputs,
             applicationId,
             stackName,
         });
@@ -5424,6 +5431,8 @@ export class GitSourceService {
             state: 'present',
             deletionAuthority: 'sencho',
             note: null,
+            encryption: 'none',
+            sopsRecipients: [],
         };
     }
 
