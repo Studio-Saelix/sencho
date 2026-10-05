@@ -28,6 +28,35 @@ export function requiredRecipientsFromCapability(cap: SecretCapability | null): 
   return cap.requiredRecipients ?? [];
 }
 
+/**
+ * Encrypted inputs whose recipients have no overlap with the identities on
+ * this node. A file encrypted to several recipients is decryptable by any one
+ * of them, so readiness is per input, not per recipient.
+ */
+export function undecryptableInputs(
+  cap: SecretCapability,
+  available: Set<string>,
+): SecretCapability['inputs'] {
+  return cap.inputs.filter((input) => {
+    const recipients = input.recipientIds ?? [];
+    return input.encryption === 'sops-age'
+      && recipients.length > 0
+      && !recipients.some((recipient) => available.has(recipient));
+  });
+}
+
+/** Recipients named by inputs that no available identity can decrypt. */
+export function missingRecipientsForCapability(
+  cap: SecretCapability,
+  available: Set<string>,
+): string[] {
+  const missing = new Set<string>();
+  for (const input of undecryptableInputs(cap, available)) {
+    for (const recipient of input.recipientIds ?? []) missing.add(recipient);
+  }
+  return [...missing];
+}
+
 export function classifyInputEncryption(
   fileContent: string,
   role: string,
@@ -138,7 +167,15 @@ export function buildSecretCapability(args: {
         refusal: { reason: 'Unsupported SOPS backend or encrypted compose file', failureClass: 'unsupported_backend' },
       };
     }
-    if (args.policy === 'require_encrypted' && input.sensitivity === 'high' && input.encryption === 'none') {
+    if (
+      args.policy === 'require_encrypted'
+      && input.ownership === 'managed'
+      && input.sensitivity === 'high'
+      && input.encryption === 'none'
+    ) {
+      // The policy governs managed repository content. Unmanaged entries are
+      // not materialized by Sencho, so an absent project env file cannot make
+      // every stack fail the policy.
       return {
         capability: {
           policy: args.policy,
@@ -156,15 +193,15 @@ export function buildSecretCapability(args: {
     applicationId: args.applicationId,
     stackName: args.stackName,
     policy: args.policy,
-    requiredRecipients: [...requiredRecipients],
+    inputs: secretInputs,
   });
 
   const capability: SecretCapability = {
     policy: args.policy,
     inputs: secretInputs,
-    ready: requiredRecipients.size === 0 ? true : readiness.ready,
+    ready: readiness.ready,
     failureClass: readiness.failureClass,
-    requiredRecipients: [...requiredRecipients],
+    requiredRecipients: readiness.requiredRecipients,
   };
 
   if (!capability.ready && requiredRecipients.size > 0) {
@@ -186,9 +223,31 @@ export function lkgBlockedByMissingRecipients(
 ): boolean {
   const cap = parseSecretCapabilityFromJson(secretCapabilityJson);
   if (!cap) return false;
-  const required = cap.requiredRecipients ?? [];
-  if (required.length === 0) return false;
-  return required.some((r) => !identityRecipients.has(r));
+  if (cap.inputs.length === 0) {
+    // Legacy capability shape without per-input recipients.
+    const required = cap.requiredRecipients ?? [];
+    return required.some((recipient) => !identityRecipients.has(recipient));
+  }
+  return undecryptableInputs(cap, identityRecipients).length > 0;
+}
+
+/** Active generation's secret capability for the node in scope. */
+export function resolveActiveCapability(args: {
+  stackName: string;
+  nodeId: number;
+  gitopsGenerationId?: string | null;
+}): SecretCapability | null {
+  const store = GitOpsStore.getInstance();
+  const app = store.getLiveDirectApplication(args.stackName);
+  if (!app) return null;
+
+  const generationId = args.gitopsGenerationId
+    ?? store.getTarget(app.id, args.nodeId)?.deployed_generation_id
+    ?? app.accepted_generation_id
+    ?? app.candidate_generation_id;
+  if (!generationId) return null;
+
+  return parseSecretCapabilityFromJson(store.getGeneration(generationId)?.secret_capability_json ?? null);
 }
 
 /** Union of required age recipients for the generation in scope on this node. */
@@ -197,16 +256,5 @@ export function resolveActiveRequiredRecipients(args: {
   nodeId: number;
   gitopsGenerationId?: string | null;
 }): string[] {
-  const store = GitOpsStore.getInstance();
-  const app = store.getLiveDirectApplication(args.stackName);
-  if (!app) return [];
-
-  const generationId = args.gitopsGenerationId
-    ?? store.getTarget(app.id, args.nodeId)?.deployed_generation_id
-    ?? app.accepted_generation_id
-    ?? app.candidate_generation_id;
-  if (!generationId) return [];
-
-  const cap = parseSecretCapabilityFromJson(store.getGeneration(generationId)?.secret_capability_json ?? null);
-  return cap?.requiredRecipients ?? [];
+  return resolveActiveCapability(args)?.requiredRecipients ?? [];
 }

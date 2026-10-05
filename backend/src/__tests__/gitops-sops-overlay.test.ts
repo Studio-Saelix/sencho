@@ -5,6 +5,7 @@ import path from 'path';
 import crypto from 'crypto';
 import { GitOpsDecryptOverlay } from '../services/gitops/sops/overlay';
 import { buildGitOpsDecryptOverlay } from '../services/gitops/sops/prepareOverlay';
+import { SopsDecryptError } from '../services/gitops/sops/decode';
 import type { ComposeInputEntry } from '../types/gitProjectManifest';
 import { buildSopsAgeDocument, buildSopsAgeDotenvDocument } from './helpers/sopsFixtures';
 import { setupTestDb, cleanupTestDb } from './helpers/setupTestDb';
@@ -157,6 +158,53 @@ describe('GitOpsDecryptOverlay', () => {
       .toBe('PASSWORD=pa$word\n');
     expect(fs.readFileSync(path.join(overlay!.overlayDir, 'sec.env'), 'utf8'))
       .toBe('PASSWORD=pa$word\n');
+  });
+
+  it('preserves the decrypt failure class through the overlay', async () => {
+    const age = await import('age-encryption');
+    const identity = await age.generateIdentity();
+    const recipient = await age.identityToRecipient(identity);
+    const sopsDoc = await buildSopsAgeDocument({
+      values: { DB_PASSWORD: 'plain' },
+      identity,
+      recipient,
+    });
+    const tampered = sopsDoc.replace(/^DB_PASSWORD:/m, 'RENAMED_PASSWORD:');
+    expect(tampered).not.toBe(sopsDoc);
+
+    const sourceRoot = path.join(dataDir, 'git-managed', '1', 'demo', 'candidate-tampered');
+    fs.mkdirSync(sourceRoot, { recursive: true });
+    fs.writeFileSync(path.join(sourceRoot, '.env'), tampered, { mode: 0o600 });
+
+    const inputs: ComposeInputEntry[] = [{
+      sourcePath: '.env',
+      materializedPath: '.env',
+      role: 'env',
+      dependencyKind: 'env_file',
+      ownership: 'managed',
+      provenance: 'fetch',
+      sensitivity: 'high',
+      contentSha256: null,
+      sizeBytes: null,
+      state: 'present',
+      deletionAuthority: 'sencho',
+      note: null,
+      encryption: 'sops-age',
+      sopsRecipients: [recipient],
+    }];
+
+    await importTestIdentity(identity);
+    const rejection = await buildGitOpsDecryptOverlay({
+      stackName: 'demo',
+      nodeId: 1,
+      applicationId: 'app-1',
+      generationId: 'gen-tampered',
+      commitSha: 'f'.repeat(40),
+      sourceRoot,
+      manifest: { inputs },
+    }).catch((err: unknown) => err);
+    expect(rejection).toBeInstanceOf(SopsDecryptError);
+    expect(rejection).toMatchObject({ code: 'decrypt_failed' });
   });
 
   it('sweepStale removes leftover overlay directories', async () => {

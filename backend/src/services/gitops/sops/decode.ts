@@ -262,6 +262,18 @@ export async function decryptSopsAgeDocument(
   identity: string,
   dotenvOutput: SopsDotenvOutput = 'sops',
 ): Promise<string> {
+  // JSON documents are valid YAML; detect the source encoding so the output
+  // keeps it instead of converting every JSON secret to YAML.
+  let jsonDoc: unknown;
+  try {
+    jsonDoc = JSON.parse(content);
+  } catch {
+    jsonDoc = null;
+  }
+  if (isRecord(jsonDoc) && isRecord(jsonDoc.sops)) {
+    return decryptStructuredDocument(jsonDoc, identity, 'json');
+  }
+
   let doc: unknown;
   try {
     doc = parseYaml(content);
@@ -271,8 +283,18 @@ export async function decryptSopsAgeDocument(
   if (!isRecord(doc) || !isRecord(doc.sops)) {
     return decryptUnstructuredSops(content, identity, dotenvOutput);
   }
+  return decryptStructuredDocument(doc, identity, 'yaml');
+}
 
+async function decryptStructuredDocument(
+  doc: Record<string, unknown>,
+  identity: string,
+  format: 'yaml' | 'json',
+): Promise<string> {
   const sopsMeta = doc.sops;
+  if (!isRecord(sopsMeta)) {
+    throw new SopsDecryptError('invalid_ciphertext', 'SOPS metadata is malformed');
+  }
   const ageEntries = sopsMeta.age;
   if (!Array.isArray(ageEntries) || ageEntries.length === 0) {
     throw new SopsDecryptError('invalid_ciphertext', 'No age entries in SOPS metadata');
@@ -291,5 +313,7 @@ export async function decryptSopsAgeDocument(
   if (typeof plaintextDoc === 'string') {
     return plaintextDoc;
   }
-  return withTrailingNewline(stringifyYaml(plaintextDoc));
+  return format === 'json'
+    ? withTrailingNewline(JSON.stringify(plaintextDoc, null, '\t'))
+    : withTrailingNewline(stringifyYaml(plaintextDoc));
 }

@@ -24,7 +24,7 @@ import {
   gatesAdvancement,
   type HealthRolloutPolicy,
 } from './healthPolicy';
-import { parseSecretCapabilityFromJson } from './sops/capability';
+import { missingRecipientsForCapability, parseSecretCapabilityFromJson } from './sops/capability';
 import { SopsIdentityStore } from './sops/identityStore';
 import {
   buildPreflightEvidence,
@@ -2406,7 +2406,7 @@ function deriveLkg(target: GitOpsTargetCurrentRow, limitations: GitOpsLimitation
         const known = new Set(
           SopsIdentityStore.getInstance().listPublic(target.application_id, stackName).map((i) => i.recipient),
         );
-        const missing = cap.requiredRecipients.filter((recipient) => !known.has(recipient));
+        const missing = missingRecipientsForCapability(cap, known);
         if (missing.length > 0) {
           limitations.push({
             code: 'lkg_missing_sops_key',

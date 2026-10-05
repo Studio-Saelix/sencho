@@ -96,6 +96,7 @@ const CODE_DISPOSITION: Record<GitSourceErrorCode, FailureDisposition> = {
   PLAN_UNAVAILABLE: { class: 'operator_action_required' },
   OPERATION_IN_FLIGHT: { class: 'reconcile' },
   SOURCE_CLAIMED_BY_BLUEPRINT: { class: 'operator_action_required' },
+  SOPS_DECRYPT_FAILED: { class: 'operator_action_required' },
 };
 
 export function classifyFailure(evidence: FailureEvidence): FailureDisposition {

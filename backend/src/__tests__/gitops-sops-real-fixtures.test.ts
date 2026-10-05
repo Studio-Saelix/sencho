@@ -43,6 +43,19 @@ describe('real sops fixtures (v3.13.3)', () => {
     expect(decrypted).not.toContain('sops:');
   });
 
+  it('keeps JSON output in JSON instead of re-emitting YAML', async () => {
+    const fixture = readFixture('secrets.enc.json');
+    expect(detectSopsContent(fixture).kind).toBe('sops-age');
+
+    const decrypted = await decryptSopsAgeDocument(fixture, identity);
+    expect(decrypted.trimStart().startsWith('{')).toBe(true);
+    expect(JSON.parse(decrypted)).toEqual({
+      api_key: 'json-key',
+      database: { password: 'json-secret' },
+    });
+    expect(decrypted).toContain('"password": "json-secret"');
+  });
+
   it('decrypts a dotenv store without its flattened sops_* metadata', async () => {
     const fixture = readFixture('secrets.enc.env');
     expect(detectSopsContent(fixture).kind).toBe('sops-age');

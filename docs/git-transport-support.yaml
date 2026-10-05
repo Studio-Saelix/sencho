@@ -622,7 +622,7 @@ error_model:
 reconciliation_only_codes:
   # Not part of this transport matrix; listed so the partition of
   # GitSourceErrorCode is visible and auditable. Owned by the GitOps
-  # change-plan lifecycle, not by repository transport.
+  # change-plan and repository-secret lifecycle, not by repository transport.
   - STALE_PLAN
   - PLAN_FINGERPRINT_REQUIRED
   - PLAN_BLOCKED
@@ -630,3 +630,4 @@ reconciliation_only_codes:
   - PLAN_UNAVAILABLE
   - OPERATION_IN_FLIGHT
   - SOURCE_CLAIMED_BY_BLUEPRINT
+  - SOPS_DECRYPT_FAILED

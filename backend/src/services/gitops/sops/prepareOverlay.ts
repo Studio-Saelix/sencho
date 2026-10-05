@@ -4,7 +4,7 @@ import { GitOpsDecryptOverlay, newOverlayOperationId, scrubOverlayPaths } from '
 import { SopsIdentityStore } from './identityStore';
 import type { OverlayBinding, SecretCapability, SopsFailureClass } from './types';
 import { SopsDecryptError } from './decode';
-import { parseSecretCapabilityFromJson } from './capability';
+import { missingRecipientsForCapability, parseSecretCapabilityFromJson } from './capability';
 import { GitOpsStore } from '../store';
 import { NodeRegistry } from '../../NodeRegistry';
 
@@ -110,7 +110,7 @@ export async function buildGitOpsDecryptOverlay(args: {
   } catch (err) {
     const dataDir = process.env.DATA_DIR || path.join(process.cwd(), 'data');
     if (err instanceof SopsDecryptError) {
-      throw new Error(scrubOverlayPaths(err.message, dataDir));
+      throw new SopsDecryptError(err.code, scrubOverlayPaths(err.message, dataDir));
     }
     throw err;
   }
@@ -134,7 +134,7 @@ export async function prepareRecoveryComposeOverlay(args: {
   if (!cap || cap.requiredRecipients.length === 0) return null;
 
   const identityMap = SopsIdentityStore.getInstance().getIdentityMap(app.id, args.stackName);
-  const missing = cap.requiredRecipients.filter((recipient) => !identityMap.has(recipient));
+  const missing = missingRecipientsForCapability(cap, new Set(identityMap.keys()));
   if (missing.length > 0) {
     return {
       error: `Rollback requires age recipient(s) that are not available on this node: ${missing.join(', ')}`,

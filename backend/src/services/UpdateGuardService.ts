@@ -274,7 +274,7 @@ export class UpdateGuardService {
       const gitSource = db.getGitSource(stackName);
       if (!gitSource) return null;
 
-      const { resolveActiveRequiredRecipients } = await import('./gitops/sops/capability');
+      const { missingRecipientsForCapability, resolveActiveCapability } = await import('./gitops/sops/capability');
       const { SopsIdentityStore } = await import('./gitops/sops/identityStore');
       const { GitOpsStore } = await import('./gitops/store');
       const app = GitOpsStore.getInstance().getLiveDirectApplication(stackName);
@@ -282,19 +282,19 @@ export class UpdateGuardService {
         return { ready: true, detail: 'No GitOps application is linked yet.' };
       }
 
-      const required = resolveActiveRequiredRecipients({
+      const capability = resolveActiveCapability({
         stackName,
         nodeId,
         gitopsGenerationId: currentGen?.gitops_generation_id ?? null,
       });
-      if (required.length === 0) {
+      if (!capability || capability.requiredRecipients.length === 0) {
         return { ready: true, detail: 'The restore target does not require SOPS decryption on this node.' };
       }
 
       const known = new Set(
         SopsIdentityStore.getInstance().listPublic(app.id, stackName).map((identity) => identity.recipient),
       );
-      const missing = required.filter((recipient) => !known.has(recipient));
+      const missing = missingRecipientsForCapability(capability, known);
       if (missing.length > 0) {
         return {
           ready: false,

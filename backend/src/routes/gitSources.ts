@@ -1160,8 +1160,8 @@ stackGitSourceRouter.get('/:stackName/git-source/sops-identities', async (req: R
   const applicationId = resolveSopsApplicationId(stackName);
   const policy = getEncryptedSourcePolicy(stackName);
   const identities = SopsIdentityStore.getInstance().listPublic(applicationId, stackName);
-  const { resolveActiveRequiredRecipients } = await import('../services/gitops/sops/capability');
-  const requiredRecipients = resolveActiveRequiredRecipients({
+  const { resolveActiveCapability } = await import('../services/gitops/sops/capability');
+  const capability = resolveActiveCapability({
     stackName,
     nodeId: req.nodeId ?? 0,
   });
@@ -1169,7 +1169,7 @@ stackGitSourceRouter.get('/:stackName/git-source/sops-identities', async (req: R
     applicationId,
     stackName,
     policy,
-    requiredRecipients,
+    inputs: capability?.inputs ?? [],
   });
   res.json({
     encrypted_source_policy: policy,

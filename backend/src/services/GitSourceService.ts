@@ -98,6 +98,7 @@ import {
     manifestInputsNeedOverlay,
 } from './gitops/sops/prepareOverlay';
 import { newOverlayOperationId } from './gitops/sops/overlay';
+import { SopsDecryptError } from './gitops/sops/decode';
 import type { SecretCapability } from './gitops/sops/types';
 
 /**
@@ -127,7 +128,8 @@ export type GitSourceErrorCode =
     | 'LEGACY_PENDING'
     | 'PLAN_UNAVAILABLE'
     | 'OPERATION_IN_FLIGHT'
-    | 'SOURCE_CLAIMED_BY_BLUEPRINT';
+    | 'SOURCE_CLAIMED_BY_BLUEPRINT'
+    | 'SOPS_DECRYPT_FAILED';
 
 export type SourceRevalidationResult =
     | { status: 'reuse'; generation: GitOpsGenerationRow }
@@ -180,6 +182,17 @@ function composeInputsForCandidate(
     return candidateContentSha256
         ? { composeFileOrder, candidateContentSha256 }
         : { composeFileOrder };
+}
+
+/**
+ * Map a SOPS decrypt failure to its Git-source error code. Used by the fetch,
+ * apply, and reconcile failure paths so all three record and classify the same
+ * way: a decrypt failure is operator action, never a transient git fault.
+ */
+export function asGitSourceFailure(failure: unknown): unknown {
+    return failure instanceof SopsDecryptError
+        ? new GitSourceError('SOPS_DECRYPT_FAILED', failure.message)
+        : failure;
 }
 
 export class GitSourceError extends Error {
@@ -2497,9 +2510,13 @@ export class GitSourceService {
                 abandon: closeFetch,
             });
         } catch (e) {
-            if (e instanceof GitSourceError) fetchFailureCode = e.code;
+            // A decrypt failure is a repository-content failure with its own
+            // class, not an unclassified fetch error: the operator must see it
+            // and the controller must not treat it as a transient git fault.
+            const failure = asGitSourceFailure(e);
+            if (failure instanceof GitSourceError) fetchFailureCode = failure.code;
             closeFetch();
-            throw e;
+            throw failure;
         }
     }
 
@@ -3844,7 +3861,8 @@ export class GitSourceService {
      * failure is never reported with nextAction: 'retry'.
      */
     private reconcileFailureResult(failure: unknown): ReconcileResult {
-        if (!(failure instanceof GitSourceError)) {
+        const normalized = asGitSourceFailure(failure);
+        if (!(normalized instanceof GitSourceError)) {
             return {
                 outcome: 'failed_previous_intact',
                 reason: 'The reconcile attempt failed unexpectedly.',
@@ -3853,18 +3871,18 @@ export class GitSourceService {
         }
         const disposition = classifyFailure({
             kind: 'git_source_error',
-            code: failure.code,
-            transportReason: failure.extras?.transportReason,
+            code: normalized.code,
+            transportReason: normalized.extras?.transportReason,
         });
         switch (disposition.class) {
             case 'supersession':
-                return { outcome: 'superseded', reason: failure.message, nextAction: 'none' };
+                return { outcome: 'superseded', reason: normalized.message, nextAction: 'none' };
             case 'permanent':
-                return { outcome: 'failed_previous_intact', reason: failure.message, nextAction: 'configure_credentials' };
+                return { outcome: 'failed_previous_intact', reason: normalized.message, nextAction: 'configure_credentials' };
             case 'operator_action_required':
-                return { outcome: 'blocked', reason: failure.message, nextAction: 'resolve_conflict' };
+                return { outcome: 'blocked', reason: normalized.message, nextAction: 'resolve_conflict' };
             case 'reconcile':
-                return { outcome: 'unknown', reason: failure.message, nextAction: 'none' };
+                return { outcome: 'unknown', reason: normalized.message, nextAction: 'none' };
             // 'degraded'/'target_*'/'blocked' are not reachable from a
             // git_source_error classification today, but are grouped with
             // 'transient' so this switch stays exhaustive if that changes.
@@ -3874,7 +3892,7 @@ export class GitSourceService {
             case 'target_transient':
             case 'target_mutation_failed':
             case 'blocked':
-                return { outcome: 'failed_previous_intact', reason: failure.message, nextAction: 'retry' };
+                return { outcome: 'failed_previous_intact', reason: normalized.message, nextAction: 'retry' };
         }
     }
 
@@ -5474,18 +5492,19 @@ export class GitSourceService {
         try {
             return await this.applyLockedBody(stackName, commitSha, opts, started, operationId);
         } catch (e) {
+            const failure = asGitSourceFailure(e);
             if (started.app && started.env && !started.settled) {
                 const app = started.app;
                 const env = started.env;
                 this.recordGitOps(stackName, 'apply failure', () => {
                     GitOpsTransitions.getInstance().applyFailed(
                         app.id,
-                        e instanceof GitSourceError ? e.code : 'apply',
+                        failure instanceof GitSourceError ? failure.code : 'apply',
                         env,
                     );
                 });
             }
-            throw e;
+            throw failure;
         }
     }
 
