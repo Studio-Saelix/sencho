@@ -361,6 +361,9 @@ describe('POST /api/gitops/applications/:id/source/accept', () => {
     // The Automatic rollout policy is the authority for starting the rollout,
     // as it is for the SourceController's automatic acceptance; the acceptance
     // is `stack:create` and the deploy grant is not part of it.
+    DatabaseService.getInstance().getDb().prepare(
+      'UPDATE gitops_applications SET rollout_authorization_policy = ? WHERE id = ?',
+    ).run('automatic', seeded.applicationId);
     const permissions = await import('../middleware/permissions');
     const checkSpy = vi.spyOn(permissions, 'checkPermission')
       .mockImplementation(((_req, action) => action !== 'stack:deploy') as typeof permissions.checkPermission);

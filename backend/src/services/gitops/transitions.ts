@@ -4392,7 +4392,7 @@ export class GitOpsTransitions {
       app.preflight_fingerprint = null;
       if (app.rollout_generation_id) {
         const live = this.store().getRolloutGeneration(app.rollout_generation_id);
-        if (live && live.provenance === 'rollout_authorization') {
+        if (live && live.provenance === 'rollout_authorization' && live.superseded_at === null) {
           this.recordRolloutGenerationSuperseded(
             app,
             app.rollout_generation_id,

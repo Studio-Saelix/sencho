@@ -1137,6 +1137,10 @@ describe('application-driven preparation retry', () => {
     await vi.waitFor(() => {
       expect(warrantedSpy.mock.calls.some((call) => call[0].id === fixture.applicationId)).toBe(true);
     });
+    const fixtureDecision = warrantedSpy.mock.results.find(
+      (_result, index) => warrantedSpy.mock.calls[index]?.[0].id === fixture.applicationId,
+    );
+    expect(fixtureDecision?.value).toBe(false);
     expect(dispatchSpy).not.toHaveBeenCalled();
     dispatchSpy.mockRestore();
     warrantedSpy.mockRestore();
