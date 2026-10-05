@@ -222,6 +222,22 @@ export class GitOpsStore {
   }
 
   /**
+   * Every live Git-managed Blueprint application, enabled or not.
+   *
+   * The reconciler's content pass uses this rather than the enabled-Blueprint
+   * list: preparation is a property of the accepted generation, and a
+   * Blueprint the operator disabled still has one waiting to be materialized
+   * and resolved.
+   */
+  listLiveGitManagedApplications(): GitOpsApplicationRow[] {
+    return this.db().prepare(
+      `SELECT * FROM gitops_applications
+       WHERE target_mode = 'blueprint' AND lifecycle_status = 'active'
+       ORDER BY created_at ASC`,
+    ).all() as GitOpsApplicationRow[];
+  }
+
+  /**
    * The live Blueprint application whose current intent deploys this stack.
    *
    * A Blueprint-managed stack carries no application id on disk, so the stack

@@ -24,6 +24,7 @@ import { stackManagedRoot } from './directApplication';
 import { resolveAndRecordArtifactSet } from './artifactResolve';
 import { parseApprovedServiceSpecs } from './approvedServiceSpecs';
 import { envelopeFor } from './blueprintProducers';
+import { GitOpsTransitions } from './transitions';
 import { validateCandidateRelPath } from './createStagingMarker';
 import { CANDIDATE_COMPLETE_MARKER, GENERATIONS_DIR } from '../GitProjectManifestService';
 import { DatabaseService } from '../DatabaseService';
@@ -180,10 +181,12 @@ export async function freezeGitManagedArtifactSet(args: {
   // healthy stack as drifted.
   const composeFileCount = composeFileOrderLength(genRow.compose_inputs_json);
   if (composeFileCount !== null && composeFileCount > 1) {
-    return {
-      status: 'refused',
-      reason: `the accepted generation materializes ${composeFileCount} compose files, which this freeze cannot model`,
-    };
+    const reason = `the accepted generation materializes ${composeFileCount} compose files, which this freeze cannot model`;
+    GitOpsTransitions.getInstance().setGitManagedArtifactLimitation({
+      applicationId: args.applicationId,
+      detail: reason,
+    });
+    return { status: 'refused', reason };
   }
 
   let composeContent: string;
@@ -203,12 +206,18 @@ export async function freezeGitManagedArtifactSet(args: {
   if ('refusal' in parsed) {
     // Refused rather than resolved without specs: recording a best-effort parse
     // as the approved identity would let a healthy stack read as drifted. The
-    // projection reports the unresolved set, which is the honest state.
+    // projection reports the unresolved set, which is the honest state, and the
+    // persisted limitation is what names the cause instead of leaving only the
+    // generic unresolved-artifact refusal on the surface.
     console.warn(
       '[GitOps] Git-managed artifact freeze skipped for %s: %s',
       sanitizeForLog(args.applicationId),
       sanitizeForLog(parsed.refusal),
     );
+    GitOpsTransitions.getInstance().setGitManagedArtifactLimitation({
+      applicationId: args.applicationId,
+      detail: parsed.refusal,
+    });
     return { status: 'refused', reason: parsed.refusal };
   }
 
@@ -236,6 +245,15 @@ export async function freezeGitManagedArtifactSet(args: {
   const afterTarget = store.getTarget(app.id, nodeId)?.expected_artifact_set_id ?? null;
   const appMoved = afterApp !== null && afterApp !== beforeApp;
   const targetMoved = afterTarget !== null && afterTarget !== beforeTarget;
+  if (appMoved || targetMoved) {
+    // A resolve proves the shape is modellable, so any prior refusal reason is
+    // stale. Cleared here rather than on the next acceptance so the surface
+    // stops naming a cause that no longer applies.
+    GitOpsTransitions.getInstance().setGitManagedArtifactLimitation({
+      applicationId: args.applicationId,
+      detail: null,
+    });
+  }
   return {
     status: appMoved || targetMoved ? 'resolved' : 'none',
     reason: null,

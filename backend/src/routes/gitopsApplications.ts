@@ -1081,7 +1081,7 @@ gitopsApplicationsRouter.post('/:id/rollout/authorize', async (req: Request, res
       // reason an operator can act on. Hold it through the same application
       // pause the health executor uses, so the Answer carries the reason and
       // Resume is the resolving verb.
-      holdBlockedRolloutDispatch(app.id, result.reason);
+      holdBlockedRolloutDispatch(app.id, result);
     }
   } catch (error) {
     console.error(
@@ -1487,7 +1487,7 @@ gitopsApplicationsRouter.post('/:id/rollout/resume', async (req: Request, res: R
       // here would otherwise dissolve the durable reason and leave the rollout
       // queued again. Re-hold through the same helper the authorize route uses,
       // so a hold that was answered but not resolved stays answered by state.
-      holdBlockedRolloutDispatch(app.id, result.reason);
+      holdBlockedRolloutDispatch(app.id, result);
     }
   } catch (error) {
     console.error(

@@ -445,7 +445,7 @@ describe('POST /api/gitops/applications/:id/rollout/resume', () => {
       operationId: randomUUID(), actor: 'tester', trigger: 'test', at: Date.now(),
     });
     vi.spyOn((await import('../services/GitSourceService')).GitSourceService.getInstance(), 'dispatchAcceptedGeneration')
-      .mockResolvedValue({ status: 'blocked', reason: 'Another operation is already in progress.' });
+      .mockResolvedValue({ status: 'blocked', reason: 'Deploy to node 2 failed: registry unreachable.' });
     const res = await request(app)
       .post(`/api/gitops/applications/bp:${seeded.blueprintId}/rollout/resume`)
       .set('Cookie', adminCookie)
@@ -454,7 +454,7 @@ describe('POST /api/gitops/applications/:id/rollout/resume', () => {
     expect(res.body).toMatchObject({ ok: true, dispatched: false });
     const held = GitOpsStore.getInstance().getApplication(seeded.applicationId)!;
     expect(held.pause_at).not.toBeNull();
-    expect(held.pause_reason).toBe('Another operation is already in progress.');
+    expect(held.pause_reason).toBe('Deploy to node 2 failed: registry unreachable.');
   });
 
   it('reports that nothing started when no authorization is live', async () => {    const seeded = seedGitManagedBlueprint();

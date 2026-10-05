@@ -572,7 +572,7 @@ export class SourceController {
                 console.warn(
                     `[SourceController] automatic dispatch blocked for ${sanitizeForLog(app.id)}: ${sanitizeForLog(dispatch.reason)}`,
                 );
-                holdBlockedRolloutDispatch(app.id, dispatch.reason);
+                holdBlockedRolloutDispatch(app.id, dispatch);
             }
         } catch (e) {
             // Reaching here means nothing was reserved, so no durable row

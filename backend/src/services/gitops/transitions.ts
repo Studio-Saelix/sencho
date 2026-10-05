@@ -4020,6 +4020,14 @@ export class GitOpsTransitions {
   /** The mode-neutral application-row mutation `applied` and `sourceAccepted` share. */
   private applySourceAcceptanceMutation(app: GitOpsApplicationRow, args: AppliedArgs): void {
     this.insertAcceptanceRecords(app, args);
+    // A new acceptance replaces the content the previous refusal described, so
+    // that reason goes with it. The freeze that follows records its own refusal
+    // if this generation has one.
+    app.evidence_limitations_json = encodeGitOpsEvidenceLimitations(
+      decodeGitOpsEvidenceLimitations(app.evidence_limitations_json),
+      'git_managed_artifact_unmodellable',
+      null,
+    );
     app.accepted_generation_id = args.generationId;
     app.artifact_set_id = args.artifactSetId;
     app.latest_artifact_set_id = args.artifactSetId;
@@ -4279,6 +4287,34 @@ export class GitOpsTransitions {
         decodeGitOpsEvidenceLimitations(app.evidence_limitations_json),
         'registry_preflight_blocked',
         args.detail === null ? null : { code: 'registry_preflight_blocked', detail: args.detail },
+      );
+      app.updated_at = args.at ?? Date.now();
+      this.writeApplication(app);
+    })();
+  }
+
+  /**
+   * Record or clear why a Git-managed generation's artifact identity cannot be
+   * modelled from its authored content.
+   *
+   * The freeze refuses compose shapes whose authored text can diverge from the
+   * rendered model, and a refusal is permanent for that generation. Persisting
+   * it is what keeps the cause visible: without it the refusal reaches only the
+   * accept response and the server log, and the surface shows the generic
+   * unresolved-artifact refusal instead.
+   */
+  setGitManagedArtifactLimitation(args: {
+    applicationId: string;
+    detail: string | null;
+    at?: number;
+  }): void {
+    this.raw().transaction(() => {
+      const app = this.store().getApplication(args.applicationId);
+      if (!app) throw new GitOpsTransitionError('application not found');
+      app.evidence_limitations_json = encodeGitOpsEvidenceLimitations(
+        decodeGitOpsEvidenceLimitations(app.evidence_limitations_json),
+        'git_managed_artifact_unmodellable',
+        args.detail === null ? null : { code: 'git_managed_artifact_unmodellable', detail: args.detail },
       );
       app.updated_at = args.at ?? Date.now();
       this.writeApplication(app);

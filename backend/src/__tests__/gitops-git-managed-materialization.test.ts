@@ -21,6 +21,7 @@ let materializeAcceptedGeneration: typeof import('../services/gitops/gitManagedM
 let freezeGitManagedArtifactSet: typeof import('../services/gitops/gitManagedMaterialization').freezeGitManagedArtifactSet;
 let prepareAcceptedGitManagedGeneration: typeof import('../services/gitops/gitManagedMaterialization').prepareAcceptedGitManagedGeneration;
 let stackManagedRoot: typeof import('../services/gitops/directApplication').stackManagedRoot;
+let projectApplication: typeof import('../services/gitops/derive').projectApplication;
 let CANDIDATE_COMPLETE_MARKER: typeof import('../services/GitProjectManifestService').CANDIDATE_COMPLETE_MARKER;
 
 beforeAll(async () => {
@@ -34,6 +35,7 @@ beforeAll(async () => {
     prepareAcceptedGitManagedGeneration,
   } = await import('../services/gitops/gitManagedMaterialization'));
   ({ stackManagedRoot } = await import('../services/gitops/directApplication'));
+  ({ projectApplication } = await import('../services/gitops/derive'));
   ({ CANDIDATE_COMPLETE_MARKER } = await import('../services/GitProjectManifestService'));
 });
 
@@ -303,6 +305,48 @@ describe('Git-managed artifact freeze', () => {
 
     expect(outcome.status).toBe('refused');
     expect(resolveSpy).not.toHaveBeenCalled();
+
+    // The refusal is a permanent statement about this generation's content, so
+    // it is persisted where the projection can name the cause instead of
+    // leaving only the generic unresolved-artifact refusal on the surface.
+    const decode = (await import('../services/gitops/json')).decodeGitOpsEvidenceLimitations;
+    const store = GitOpsStore.getInstance();
+    const persisted = decode(store.getApplication(seeded.applicationId)!.evidence_limitations_json);
+    const entry = persisted.find((item) => item.code === 'git_managed_artifact_unmodellable');
+    expect(entry?.detail).toMatch(/include/);
+    const projection = projectApplication(seeded.applicationId, false);
+    expect(projection.limitations.some((item) => item.code === 'git_managed_artifact_unmodellable')).toBe(true);
+
+    // The same generation re-read with a modellable compose resolves, and the
+    // stale reason goes with it.
+    await fsPromises.writeFile(
+      path.join(stackManagedRoot(seeded.stackName), seeded.generation.applied_dir, 'compose.yaml'),
+      'services:\n  web:\n    image: alpine:3.21\n',
+      'utf8',
+    );
+    const encodeArtifactEvidenceJson = (await import('../services/gitops/json')).encodeArtifactEvidenceJson;
+    resolveSpy.mockImplementation(async (call) => {
+      GitOpsTransitions.getInstance().recordArtifactEvidence({
+        applicationId: call.applicationId,
+        generationId: call.generationId,
+        artifactSetId: 'resolved-after-refusal',
+        evidenceVersion: 1,
+        qualification: 'exact',
+        evidenceJson: encodeArtifactEvidenceJson({ kind: 'exact', identity: 'sha256:deadbeef' }),
+        authoritative: 0,
+        envelope: { operationId: randomUUID(), actor: 'tester', trigger: 'test', at: Date.now() },
+      });
+    });
+    const resolved = await freezeGitManagedArtifactSet({
+      applicationId: seeded.applicationId,
+      generationId: seeded.generationId,
+      actor: 'tester',
+      trigger: 'test',
+      nodeId: seeded.nodeId,
+    });
+    expect(resolved.status).toBe('resolved');
+    const cleared = decode(store.getApplication(seeded.applicationId)!.evidence_limitations_json);
+    expect(cleared.find((item) => item.code === 'git_managed_artifact_unmodellable')).toBeUndefined();
   });
 
   it('refuses a candidate path that is not a candidate generation path', async () => {

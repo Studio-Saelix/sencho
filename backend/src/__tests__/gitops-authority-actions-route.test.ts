@@ -755,31 +755,70 @@ describe('POST /api/gitops/applications/:id/rollout/authorize', () => {
       provenance: 'placement_approval',
     });
     vi.spyOn(GitSourceService.getInstance(), 'dispatchAcceptedGeneration')
-      .mockResolvedValue({ status: 'blocked', reason: 'Another operation is already in progress.' });
+      .mockResolvedValue({ status: 'blocked', reason: 'Deploy to node 2 failed: registry unreachable.' });
     const res = await request(app)
       .post(`/api/gitops/applications/bp:${seeded.blueprintId}/rollout/authorize`)
       .set('Cookie', adminCookie)
       .send({});
     expect(res.status).toBe(200);
     expect(res.body.dispatched).toBe(false);
-    expect(res.body.note).toBe('Another operation is already in progress.');
+    expect(res.body.note).toBe('Deploy to node 2 failed: registry unreachable.');
     const held = GitOpsStore.getInstance().getApplication(seeded.applicationId)!;
     expect(held.rollout_authorization_ref).toBeTruthy();
     // The refusal is durable: a note alone leaves the projection reading
     // `rollout_queued` with nothing to act on, so the rollout is held with the
     // reason the operator needs and Resume as the resolving verb.
     expect(held.pause_at).not.toBeNull();
-    expect(held.pause_reason).toBe('Another operation is already in progress.');
+    expect(held.pause_reason).toBe('Deploy to node 2 failed: registry unreachable.');
     // An existing hold is never overwritten: the first reason is the incident
     // the operator has to answer.
-    holdBlockedRolloutDispatch(seeded.applicationId, 'a different reason');
+    holdBlockedRolloutDispatch(seeded.applicationId, { reason: 'a different reason' });
     expect(GitOpsStore.getInstance().getApplication(seeded.applicationId)!.pause_reason)
-      .toBe('Another operation is already in progress.');
+      .toBe('Deploy to node 2 failed: registry unreachable.');
+  });
+
+  it('does not hold a transient dispatch refusal such as lock contention', async () => {
+    const seeded = seedGitManagedBlueprint({ sourceAccepted: true });
+    const transitions = GitOpsTransitions.getInstance();
+    transitions.placementApproved({
+      applicationId: seeded.applicationId,
+      approvalId: `place-${randomUUID().slice(0, 8)}`,
+      intentRevisionId: seeded.intentId,
+      blastJson: encodeGitOpsApprovedTargetEffectJson(
+        seeded.nodeIds.map(nodeId => ({ nodeId, outcome: 'place' as const })),
+      ),
+      requiredNodeIds: seeded.nodeIds,
+      fingerprint: null,
+      actor: 'tester',
+      envelope: { operationId: randomUUID(), actor: 'tester', trigger: 'manual', at: Date.now() },
+      rolloutGenerationId: `rgen-${randomUUID().slice(0, 8)}`,
+      candidateId: seeded.candidateId,
+      authority: 'operator',
+      policyProvenanceJson: null,
+      provenance: 'placement_approval',
+    });
+    vi.spyOn(GitSourceService.getInstance(), 'dispatchAcceptedGeneration')
+      .mockResolvedValue({
+        status: 'blocked',
+        reason: 'Deploy to node 2 is already in progress.',
+        holdable: false,
+      });
+    const res = await request(app)
+      .post(`/api/gitops/applications/bp:${seeded.blueprintId}/rollout/authorize`)
+      .set('Cookie', adminCookie)
+      .send({});
+    expect(res.status).toBe(200);
+    expect(res.body.dispatched).toBe(false);
+    const stored = GitOpsStore.getInstance().getApplication(seeded.applicationId)!;
+    expect(stored.rollout_authorization_ref).toBeTruthy();
+    // Lock contention resolves when the holder finishes; pausing here would
+    // stop a healthy rollout that another dispatch is already advancing.
+    expect(stored.pause_at).toBeNull();
   });
 
   it('does not hold a dispatch refusal that never reached an authorization', () => {
     const seeded = seedGitManagedBlueprint({ sourceAccepted: true });
-    holdBlockedRolloutDispatch(seeded.applicationId, 'nothing authorized yet');
+    holdBlockedRolloutDispatch(seeded.applicationId, { reason: 'nothing authorized yet' });
     const app = GitOpsStore.getInstance().getApplication(seeded.applicationId)!;
     expect(app.pause_at).toBeNull();
   });

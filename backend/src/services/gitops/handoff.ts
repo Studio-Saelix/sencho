@@ -205,7 +205,18 @@ export type DispatchContext = {
 
 export type DispatchResult =
   | { status: 'dispatched' }
-  | { status: 'blocked'; reason: string };
+  | {
+      status: 'blocked';
+      reason: string;
+      /**
+       * False for refusals that say nothing durable about the rollout: a deploy
+       * lock another dispatch already holds, or a pause that is already on
+       * record. Callers that hold a refused dispatch read this, because a
+       * transient contention must not pause a rollout another dispatch is
+       * already advancing. Undefined means holdable.
+       */
+      holdable?: boolean;
+    };
 
 export interface TargetAdapter {
   dispatch(generation: AcceptedGeneration, context: DispatchContext): Promise<DispatchResult>;
@@ -933,6 +944,12 @@ export class BlueprintTargetAdapter implements TargetAdapter {
     if (app.target_mode !== 'blueprint') {
       return { status: 'blocked', reason: 'Blueprint dispatch requires Blueprint target mode.' };
     }
+    // Suspension freezes automation for this source, the same way it stops the
+    // SourceController's acceptance and GitSourceService.retry. Refusing here
+    // covers every caller, including a future one that forgets to check.
+    if (app.suspended_at) {
+      return { status: 'blocked', reason: 'The source is suspended.', holdable: false };
+    }
     const blueprintId = app.blueprint_id;
     if (blueprintId === null) {
       return { status: 'blocked', reason: 'No Blueprint is bound to this application.' };
@@ -941,7 +958,7 @@ export class BlueprintTargetAdapter implements TargetAdapter {
     // while it is set, including the boot-time reconstruction that resumes
     // authorized rollouts.
     if (app.pause_at) {
-      return { status: 'blocked', reason: 'The rollout is paused.' };
+      return { status: 'blocked', reason: 'The rollout is paused.', holdable: false };
     }
 
     const trigger = generation.trigger || 'blueprint_dispatch';
@@ -957,21 +974,29 @@ export class BlueprintTargetAdapter implements TargetAdapter {
     const binding = auth.binding;
 
     if (generation.generationId !== binding.acceptedGenerationId) {
+      // The caller dispatched a generation the live binding has moved past.
+      // That is the caller's staleness, not a state of this rollout, so it must
+      // not pause the successor the binding now names.
       return {
         status: 'blocked',
         reason: 'The accepted generation does not match the authorized application generation.',
+        holdable: false,
       };
     }
 
     const liveApp = store.getApplication(app.id);
     if (!liveApp?.rollout_authorization_ref) {
-      return { status: 'blocked', reason: 'Rollout authorization is missing after mint.' };
+      return { status: 'blocked', reason: 'Rollout authorization is missing after mint.', holdable: false };
     }
     if (!resolvesRolloutAuthorization(liveApp, binding)) {
-      return { status: 'blocked', reason: 'The current rollout authorization no longer matches the live binding.' };
+      return {
+        status: 'blocked',
+        reason: 'The current rollout authorization no longer matches the live binding.',
+        holdable: false,
+      };
     }
     if (liveApp.pause_at) {
-      return { status: 'blocked', reason: 'The rollout is paused.' };
+      return { status: 'blocked', reason: 'The rollout is paused.', holdable: false };
     }
     const liveAuthorizationRef = liveApp.rollout_authorization_ref;
 
@@ -984,7 +1009,10 @@ export class BlueprintTargetAdapter implements TargetAdapter {
     try {
       composeContent = await readAppliedComposeContent(liveApp, genRow);
     } catch (err) {
-      return { status: 'blocked', reason: errorMessage(err) };
+      // The reconciler's application-driven retry heals a missing
+      // materialization, so this refusal is not a hold: pausing would outlive
+      // the cause and need a Resume after the retry had already fixed it.
+      return { status: 'blocked', reason: errorMessage(err), holdable: false };
     }
 
     const blueprint = DatabaseService.getInstance().getBlueprint(blueprintId);
@@ -1082,7 +1110,7 @@ export class BlueprintTargetAdapter implements TargetAdapter {
       // Re-read before every target: a pause that lands while this loop runs
       // stops the rollout at the next target rather than after the fleet.
       if (store.getApplication(liveApp.id)?.pause_at) {
-        return { status: 'blocked', reason: 'The rollout was paused while it was running.' };
+        return { status: 'blocked', reason: 'The rollout was paused while it was running.', holdable: false };
       }
       const target = store.getTarget(liveApp.id, nodeId);
       // A per-target pause holds that target alone: the rest of the queue
@@ -1160,6 +1188,7 @@ export class BlueprintTargetAdapter implements TargetAdapter {
         return {
           status: 'blocked',
           reason: `Deploy to node ${nodeId} is already in progress.`,
+          holdable: false,
         };
       }
 
@@ -1190,6 +1219,10 @@ export class BlueprintTargetAdapter implements TargetAdapter {
           return {
             status: 'blocked',
             reason: `Could not open deploy for node ${nodeId}: ${errorMessage(err)}`,
+            // A refused transition here is a store contention or an invariant
+            // refusal, not a verdict on the rollout; the next dispatch retries
+            // it, so it must not pause the rollout.
+            holdable: false,
           };
         }
 
@@ -1282,6 +1315,9 @@ export class BlueprintTargetAdapter implements TargetAdapter {
           return {
             status: 'blocked',
             reason: `Could not record ack for node ${nodeId}: ${errorMessage(err)}`,
+            // Same as the deploy-open refusal: a store refusal is retried by
+            // the next dispatch and must not pause the rollout.
+            holdable: false,
           };
         }
         // A replayed run is armed too, for the same reason the id was kept: it is
@@ -1296,11 +1332,15 @@ export class BlueprintTargetAdapter implements TargetAdapter {
     }
 
     // Nothing ran because every remaining target is paused: report the hold
-    // rather than a dispatch, so the caller does not count it as progress.
+    // rather than a dispatch, so the caller does not count it as progress. The
+    // pause is already the durable record, and escalating a per-target pause to
+    // an application pause would need two Resumes (the target's and the
+    // fleet's) to undo one decision, so this refusal is not holdable.
     if (!anyDispatched && pausedTargets.length > 0) {
       return {
         status: 'blocked',
         reason: `The rollout is paused on ${pausedTargets.length} target${pausedTargets.length === 1 ? '' : 's'}.`,
+        holdable: false,
       };
     }
     return { status: 'dispatched' };
@@ -1337,11 +1377,12 @@ export function liveHealthRolloutExecutor(): HealthRolloutExecutor {
       // only thing that brings the next target, so a refusal left unheld is a
       // rollout that stops with no hold and no recorded reason, and a retry whose
       // budget is already spent. The hold is what makes the refusal visible and
-      // resumable.
-      holdReconstructedRollout(
-        applicationId,
-        `The rollout could not advance: ${result.reason}`,
-      );
+      // resumable. A refusal classified as transient (lock contention, a pause
+      // already on record) is not held, the same as every other dispatch caller.
+      holdReconstructedRollout(applicationId, {
+        reason: `The rollout could not advance: ${result.reason}`,
+        holdable: result.holdable,
+      });
       console.warn(
         '[GitOps] Health-gated rollout could not advance %s: %s',
         sanitizeForLog(applicationId),
@@ -1359,10 +1400,16 @@ export function liveHealthRolloutExecutor(): HealthRolloutExecutor {
  * Hold a rollout discovered at startup, through the same application-wide pause
  * the executor uses, so there is one hold an operator can read and clear.
  */
-function holdReconstructedRollout(applicationId: string, why: string): void {
+function holdReconstructedRollout(
+  applicationId: string,
+  blocked: { reason: string; holdable?: boolean },
+): void {
+  // Transient refusals are not holds here either; the classification is shared
+  // with every other dispatch caller.
+  if (blocked.holdable === false) return;
   const store = GitOpsStore.getInstance();
   if (store.getApplication(applicationId)?.pause_at) return;
-  GitOpsTransitions.getInstance().rolloutPaused(applicationId, null, why, {
+  GitOpsTransitions.getInstance().rolloutPaused(applicationId, null, blocked.reason, {
     // Fresh per hold for the same reason `holdBlockedRolloutDispatch` mints
     // one: a deterministic id makes a repeated hold history-silent.
     operationId: randomUUID(),
@@ -1383,13 +1430,21 @@ function holdReconstructedRollout(applicationId: string, why: string): void {
  * when no authorization is live: a refusal before the mint is the caller's to
  * report, and pausing there would hold a rollout nothing has authorized.
  */
-export function holdBlockedRolloutDispatch(applicationId: string, reason: string): void {
+export function holdBlockedRolloutDispatch(
+  applicationId: string,
+  blocked: { reason: string; holdable?: boolean },
+): void {
+  // A refusal that says nothing durable about the rollout is not a hold. Lock
+  // contention resolves when the holder finishes, and a pause is already the
+  // durable record; pausing on either would stop a healthy rollout that
+  // another dispatch is advancing.
+  if (blocked.holdable === false) return;
   const store = GitOpsStore.getInstance();
   const app = store.getApplication(applicationId);
   if (!app || app.pause_at) return;
   if (!liveRolloutBinding(app)) return;
   try {
-    GitOpsTransitions.getInstance().rolloutPaused(applicationId, null, reason, {
+    GitOpsTransitions.getInstance().rolloutPaused(applicationId, null, blocked.reason, {
       // Fresh per hold, not derived from the application: history and the
       // outbox dedupe on (application, operation, stage), so a deterministic id
       // would let a second hold after a resume commit the pause while writing
@@ -1443,7 +1498,7 @@ export async function reconstructBlueprintRolloutQueue(): Promise<number> {
       .map((nodeId) => store.getTarget(app.id, nodeId))
       .find((target) => holdableHealthFence(target) && target!.rollout_generation_id === app.rollout_generation_id);
     if (fenced) {
-      holdReconstructedRollout(app.id, 'a target was fenced by its health rollout policy');
+      holdReconstructedRollout(app.id, { reason: 'a target was fenced by its health rollout policy' });
       continue;
     }
     // Under a health-gated policy an acked target is still unverified until its
@@ -1490,7 +1545,7 @@ export async function reconstructBlueprintRolloutQueue(): Promise<number> {
     // reachable), so the same durable hold the manual and automatic paths place
     // belongs here too: otherwise the rollout resumes as queued with the reason
     // only in the server log.
-    holdBlockedRolloutDispatch(app.id, `The rollout could not advance after a restart: ${result.reason}`);
+    holdBlockedRolloutDispatch(app.id, { reason: `The rollout could not advance after a restart: ${result.reason}`, holdable: result.holdable });
   }
   return resumed;
 }

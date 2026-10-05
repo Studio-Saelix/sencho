@@ -30,6 +30,9 @@ import {
 } from './gitops/json';
 import { GitOpsStore, placementEffectCompatible } from './gitops/store';
 import { isGitManagedBlueprint } from './gitops/gitManaged';
+import { materializeAndFreezeGitManagedArtifactSet } from './gitops/gitManagedMaterialization';
+import { buildAcceptedGeneration, holdBlockedRolloutDispatch } from './gitops/handoff';
+import { GitSourceService } from './GitSourceService';
 import type { GitOpsApplicationRow } from './gitops/types';
 
 const RECONCILER_INTERVAL_MS = 60_000;
@@ -163,6 +166,19 @@ export class BlueprintReconciler {
     private initialTimer: ReturnType<typeof setTimeout> | null = null;
     private running = false;
     private stopped = false;
+    /**
+     * The last preparation attempt per application, keyed to the generation it
+     * was for, so the retry is bounded by the artifact retry interval instead
+     * of probing the registry on every tick.
+     */
+    private readonly gitManagedPreparationAttempts = new Map<string, { generationId: string; at: number }>();
+    /**
+     * A generation whose preparation was refused by the authored-text parser.
+     * The refusal is a statement about the content, so it is remembered per
+     * generation and never retried; the reason itself is persisted as an
+     * evidence limitation by the freeze.
+     */
+    private readonly refusedGitManagedPreparations = new Map<string, string>();
 
     static getInstance(): BlueprintReconciler {
         if (!BlueprintReconciler.instance) {
@@ -262,6 +278,16 @@ export class BlueprintReconciler {
             const nodes = db.getNodes();
             console.info('[BlueprintReconciler] tick start blueprints=%s nodes=%s', blueprints.length, nodes.length);
             diagnosticLog('tick inputs', { blueprintCount: blueprints.length, nodeCount: nodes.length });
+            // The content pass runs for every live Git-managed application,
+            // enabled or not: preparation belongs to the accepted generation,
+            // and a disabled Blueprint still has one waiting to be resolved.
+            for (const app of GitOpsStore.getInstance().listLiveGitManagedApplications()) {
+                try {
+                    await this.retryGitManagedPreparation(app);
+                } catch (err) {
+                    console.error(`[BlueprintReconciler] Git-managed preparation retry failed for ${app.id}:`, err);
+                }
+            }
             for (const blueprint of blueprints) {
                 try {
                     await this.reconcileBlueprint(blueprint, nodes);
@@ -279,6 +305,8 @@ export class BlueprintReconciler {
         if (isGitManagedBlueprint(blueprint)) {
             // Skip place/withdraw/content apply; still observe runtime identity
             // and run Observe/Suggest/Enforce against the authorized generation.
+            // The content retry runs once per tick for every live Git-managed
+            // application, ahead of this loop.
             await this.reconcileGitManagedDriftObservation(blueprint, allNodes);
             return;
         }
@@ -323,6 +351,94 @@ export class BlueprintReconciler {
 
         const byId = new Map(allNodes.map(n => [n.id, n]));
         await this.executeAuthorizedActions(blueprint, byId, authorized);
+    }
+
+    /**
+     * Retry an accepted generation whose preparation did not finish.
+     *
+     * The accept paths prepare once and then either dispatch or report a note.
+     * A registry outage, or a crash between the acceptance commit and the
+     * materialize call, would otherwise strand that generation: re-accepting is
+     * refused (it is already accepted), and the per-target artifact retry only
+     * looks at the generation a target has acknowledged, which is still the
+     * previous one until a new rollout reaches it. This tick is the
+     * application-driven retry that closes that hole.
+     *
+     * A refusal (a compose shape the authored-text parser cannot model) is
+     * remembered per generation: it is a statement about the content and no
+     * number of retries changes it. The reason is persisted as an evidence
+     * limitation by the freeze, so the surface names the cause.
+     */
+    private async retryGitManagedPreparation(app: GitOpsApplicationRow): Promise<void> {
+        const store = GitOpsStore.getInstance();
+        if (app.target_mode !== 'blueprint' || !app.accepted_generation_id) return;
+        // Suspension freezes automation for this source, exactly as it does for
+        // the SourceController's own acceptance and for GitSourceService.retry.
+        // Preparing and dispatching around it would bypass that hold.
+        if (app.suspended_at) return;
+        const generationId = app.accepted_generation_id;
+        if (this.refusedGitManagedPreparations.get(app.id) === generationId) return;
+        const artifact = app.artifact_set_id ? store.getArtifactSet(app.artifact_set_id) : undefined;
+        if (artifact && (artifact.qualification === 'exact' || artifact.qualification === 'qualified')) return;
+
+        const intervalMs = DatabaseService.getInstance().getGitOpsArtifactRetryIntervalMins() * 60_000;
+        const last = this.gitManagedPreparationAttempts.get(app.id);
+        if (last && last.generationId === generationId && Date.now() - last.at < intervalMs) return;
+        this.gitManagedPreparationAttempts.set(app.id, { generationId, at: Date.now() });
+
+        const outcome = await materializeAndFreezeGitManagedArtifactSet({
+            applicationId: app.id,
+            generationId,
+            actor: 'system:blueprint-reconciler',
+            trigger: 'git_managed_preparation_retried',
+        });
+        if (outcome.status === 'refused') {
+            this.refusedGitManagedPreparations.set(app.id, generationId);
+            return;
+        }
+        if (outcome.status !== 'resolved') return;
+
+        // Prepared now. Under the automatic policy, complete the handoff the
+        // acceptance attempt could not: mint the authorization and dispatch. A
+        // pause or suspension is an execution hold and still wins; a manual
+        // policy leaves the authorization to the operator. The application is
+        // re-read after the freeze's await: a newer acceptance landing in that
+        // window supersedes this generation, and dispatching it would hold the
+        // healthy successor behind a stale reason.
+        const fresh = store.getApplication(app.id);
+        if (!fresh || fresh.suspended_at || fresh.pause_at) return;
+        if (fresh.accepted_generation_id !== generationId) return;
+        if (fresh.rollout_authorization_policy !== 'automatic') return;
+        // Preparation runs for a disabled Blueprint (content is not execution),
+        // but its execution authority is withheld until it is enabled again,
+        // the same rule the authorize route enforces.
+        const blueprintRow = fresh.blueprint_id !== null
+            ? DatabaseService.getInstance().getBlueprint(fresh.blueprint_id)
+            : undefined;
+        if (!blueprintRow?.enabled) return;
+        const genRow = store.getGeneration(generationId);
+        if (!genRow) return;
+        try {
+            const dispatch = await GitSourceService.getInstance().dispatchAcceptedGeneration(
+                buildAcceptedGeneration(genRow),
+                GitSourceService.dispatchContextFor(fresh),
+                { trigger: 'retry', actor: 'system:blueprint-reconciler' },
+            );
+            if (dispatch.status === 'blocked') {
+                console.warn(
+                    '[BlueprintReconciler] Git-managed dispatch blocked for %s: %s',
+                    sanitizeForLog(app.id),
+                    sanitizeForLog(dispatch.reason),
+                );
+                holdBlockedRolloutDispatch(app.id, dispatch);
+            }
+        } catch (err) {
+            console.error(
+                '[BlueprintReconciler] Git-managed dispatch failed for %s:',
+                sanitizeForLog(app.id),
+                err instanceof Error ? err.message : String(err),
+            );
+        }
     }
 
     private async executeAuthorizedActions(

@@ -33,6 +33,7 @@ let GitOpsStore: typeof import('../services/gitops/store').GitOpsStore;
 let emptyTargetRow: typeof import('../services/gitops/store').emptyTargetRow;
 let GitOpsTransitions: typeof import('../services/gitops/transitions').GitOpsTransitions;
 let deriveGitOpsRevision: typeof import('../services/gitops/derive').deriveGitOpsRevision;
+let projectApplication: typeof import('../services/gitops/derive').projectApplication;
 let FACET_EVIDENCE_SOURCE: typeof import('../services/gitops/types').FACET_EVIDENCE_SOURCE;
 let BlueprintTargetAdapter: typeof import('../services/gitops/handoff').BlueprintTargetAdapter;
 let buildAcceptedGeneration: typeof import('../services/gitops/handoff').buildAcceptedGeneration;
@@ -44,6 +45,7 @@ let readAppliedComposeContent: typeof import('../services/gitops/gitManagedMater
 let stackManagedRoot: typeof import('../services/gitops/directApplication').stackManagedRoot;
 let CANDIDATE_COMPLETE_MARKER: typeof import('../services/GitProjectManifestService').CANDIDATE_COMPLETE_MARKER;
 let reconstructBlueprintRolloutQueue: typeof import('../services/gitops/handoff').reconstructBlueprintRolloutQueue;
+let holdBlockedRolloutDispatch: typeof import('../services/gitops/handoff').holdBlockedRolloutDispatch;
 let BlueprintService: typeof import('../services/BlueprintService').BlueprintService;
 let DatabaseService: typeof import('../services/DatabaseService').DatabaseService;
 let dataDir: string;
@@ -54,6 +56,7 @@ beforeAll(async () => {
   ({ GitOpsStore, emptyTargetRow } = await import('../services/gitops/store'));
   ({ GitOpsTransitions } = await import('../services/gitops/transitions'));
   ({ deriveGitOpsRevision } = await import('../services/gitops/derive'));
+  ({ projectApplication } = await import('../services/gitops/derive'));
   ({ FACET_EVIDENCE_SOURCE } = await import('../services/gitops/types'));
   ({
     BlueprintTargetAdapter,
@@ -62,6 +65,7 @@ beforeAll(async () => {
     reconstructBlueprintRolloutQueue,
     setRegistryReadinessDepsForTests,
     backfillMissingPreflightEvaluations,
+    holdBlockedRolloutDispatch,
   } = await import('../services/gitops/handoff'));
   ({ BlueprintService } = await import('../services/BlueprintService'));
   ({ DatabaseService } = await import('../services/DatabaseService'));
@@ -161,6 +165,12 @@ describe('rollout authorization transition', () => {
     insertGeneration(nextGenId, fixture.applicationId, fingerprint);
     const envelope = { operationId: randomUUID(), actor: 'tester', trigger: 'manual', at: 200 };
     GitOpsTransitions.getInstance().candidateReady(fixture.applicationId, nextGenId, false, envelope);
+    GitOpsTransitions.getInstance().setGitManagedArtifactLimitation({
+      applicationId: fixture.applicationId,
+      detail: 'the approved compose interpolates an image reference',
+    });
+    expect(store.getApplication(fixture.applicationId)!.evidence_limitations_json)
+      .toContain('git_managed_artifact_unmodellable');
     GitOpsTransitions.getInstance().sourceAccepted({
       applicationId: fixture.applicationId,
       generationId: nextGenId,
@@ -186,6 +196,9 @@ describe('rollout authorization transition', () => {
       : undefined;
     expect(candidate?.accepted_generation_id).toBe(nextGenId);
     expect(candidate?.artifact_set_id).toBeNull();
+    // A new acceptance replaces the content the previous refusal described, so
+    // the stale reason goes with it before the new freeze runs.
+    expect(after.evidence_limitations_json ?? '').not.toContain('git_managed_artifact_unmodellable');
     expect(
       store.authorizationIngredients(after),
       'the rebound candidate and the kept placement form a binding the next authorization can use',
@@ -350,11 +363,20 @@ describe('BlueprintTargetAdapter unlock', () => {
       expect(result.status).toBe('blocked');
       if (result.status === 'blocked') {
         expect(result.reason).toMatch(/already in progress/i);
+        // Lock contention resolves when the holder finishes; it must not be
+        // escalated into an application pause.
+        expect(result.holdable).toBe(false);
       }
       expect(failedSpy).not.toHaveBeenCalled();
       const target = GitOpsStore.getInstance().getTarget(fixture.applicationId, fixture.nodeId);
       expect(target?.failure_stage).toBeNull();
       expect(target?.active_operation_stage).toBeNull();
+      // The joint the classification exists for: this real blocked result goes
+      // through the real hold helper and must not pause the rollout.
+      if (result.status === 'blocked') {
+        holdBlockedRolloutDispatch(fixture.applicationId, result);
+      }
+      expect(GitOpsStore.getInstance().getApplication(fixture.applicationId)?.pause_at).toBeNull();
     } finally {
       svc.releaseAuthorizedDeployLock(fixture.blueprintId, fixture.nodeId);
     }
@@ -485,6 +507,170 @@ describe('second source commit', () => {
     for (const nodeId of fixture.nodeIds) {
       expect(store.getTarget(fixture.applicationId, nodeId)?.applied_generation_id).toBe(nextGenId);
     }
+
+    // A converged second commit must not read as managed-project drift. The
+    // Direct manifest cache still describes the first generation, and the
+    // Blueprint path deliberately never writes it, so the comparison would
+    // report drift no writer could ever clear.
+    seedStaleManifestCache(
+      app.configured_source_stack_name!,
+      store.getGeneration(fixture.generationId)!.applied_dir,
+      'a'.repeat(40),
+    );
+    const projection = projectApplication(fixture.applicationId, false);
+    expect(projection.drift.some((item) => item.class === 'managed_project')).toBe(false);
+  });
+});
+
+describe('application-driven preparation retry', () => {
+  /** Stage and accept a second commit whose first preparation fails. */
+  async function acceptSecondCommitWithFailedPreparation(fixture: {
+    applicationId: string;
+    generationId: string;
+    blueprintId: number;
+  }): Promise<{ nextGenId: string; resolveNow: () => void }> {
+    const store = GitOpsStore.getInstance();
+    const app = store.getApplication(fixture.applicationId)!;
+    const nextGenId = `gen-${randomUUID().slice(0, 8)}`;
+    const artId = `art-${randomUUID().slice(0, 8)}`;
+    const gen2 = insertGeneration(nextGenId, fixture.applicationId, app.materialization_fingerprint!);
+    await writeCandidateCompose(app.configured_source_stack_name!, gen2, 'services:\n  web:\n    image: alpine:3.21\n');
+    const envelope = { operationId: randomUUID(), actor: 'tester', trigger: 'manual', at: 900 };
+    GitOpsTransitions.getInstance().candidateReady(fixture.applicationId, nextGenId, false, envelope);
+    GitOpsTransitions.getInstance().sourceAccepted({
+      applicationId: fixture.applicationId,
+      generationId: nextGenId,
+      artifactSetId: artId,
+      sourceAcceptanceId: `acc-${randomUUID().slice(0, 8)}`,
+      authority: 'operator',
+      envelope,
+    });
+    const resolveSpy = vi.spyOn(await import('../services/gitops/artifactResolve'), 'resolveAndRecordArtifactSet')
+      .mockResolvedValue(undefined);
+    const failed = await prepareAcceptedGitManagedGeneration({
+      applicationId: fixture.applicationId,
+      generationId: nextGenId,
+      actor: 'tester',
+      trigger: 'manual',
+    });
+    expect(failed.materialized).toBe(true);
+    expect(failed.artifact).toBe('none');
+    const encodeArtifactEvidenceJson = (await import('../services/gitops/json')).encodeArtifactEvidenceJson;
+    const resolveNow = (): void => {
+      resolveSpy.mockImplementation(async (call) => {
+        GitOpsTransitions.getInstance().recordArtifactEvidence({
+          applicationId: call.applicationId,
+          generationId: call.generationId,
+          artifactSetId: `resolved-${nextGenId}`,
+          evidenceVersion: 2,
+          qualification: 'exact',
+          evidenceJson: encodeArtifactEvidenceJson({ kind: 'exact', identity: 'sha256:cafebabe' }),
+          authoritative: 0,
+          envelope: { operationId: randomUUID(), actor: 'tester', trigger: 'test', at: 901 },
+        });
+      });
+    };
+    return { nextGenId, resolveNow };
+  }
+
+  it('recovers a failed preparation of a newly accepted generation without a new commit', async () => {
+    const fixture = seedAuthorizedReadyApp({ nodeCount: 2 });
+    await writeAppliedCompose(fixture.applicationId, fixture.generationId, 'services:\n  web:\n    image: alpine:3.20\n');
+    authorize(fixture.applicationId);
+    const store = GitOpsStore.getInstance();
+    const deploySpy = vi.spyOn(BlueprintService.getInstance(), 'deployAuthorizedMaterialization')
+      .mockResolvedValue({ status: 'active' });
+    const first = await new BlueprintTargetAdapter().dispatch(
+      buildAcceptedGeneration(store.getGeneration(fixture.generationId)!),
+      { targetMode: 'blueprint', nodeId: fixture.nodeId, bindingRevision: null },
+    );
+    expect(first.status).toBe('dispatched');
+
+    // A second commit is accepted while the registry is down: the resolver
+    // records nothing, so the application stays on the unresolved seed set.
+    const app = store.getApplication(fixture.applicationId)!;
+    const nextGenId = `gen-${randomUUID().slice(0, 8)}`;
+    const artId = `art-${randomUUID().slice(0, 8)}`;
+    const gen2 = insertGeneration(nextGenId, fixture.applicationId, app.materialization_fingerprint!);
+    await writeCandidateCompose(app.configured_source_stack_name!, gen2, 'services:\n  web:\n    image: alpine:3.21\n');
+    const envelope = { operationId: randomUUID(), actor: 'tester', trigger: 'manual', at: 900 };
+    GitOpsTransitions.getInstance().candidateReady(fixture.applicationId, nextGenId, false, envelope);
+    GitOpsTransitions.getInstance().sourceAccepted({
+      applicationId: fixture.applicationId,
+      generationId: nextGenId,
+      artifactSetId: artId,
+      sourceAcceptanceId: `acc-${randomUUID().slice(0, 8)}`,
+      authority: 'operator',
+      envelope,
+    });
+    const resolveSpy = vi.spyOn(await import('../services/gitops/artifactResolve'), 'resolveAndRecordArtifactSet')
+      .mockResolvedValue(undefined);
+    const failed = await prepareAcceptedGitManagedGeneration({
+      applicationId: fixture.applicationId,
+      generationId: nextGenId,
+      actor: 'tester',
+      trigger: 'manual',
+    });
+    expect(failed.materialized).toBe(true);
+    expect(failed.artifact).toBe('none');
+    // The targets still hold the previous generation, which is exactly the
+    // state the per-target artifact retry cannot see past.
+    for (const nodeId of fixture.nodeIds) {
+      expect(store.getTarget(fixture.applicationId, nodeId)?.desired_generation_id).toBe(fixture.generationId);
+    }
+
+    // The registry comes back. The reconciler tick alone must make the new
+    // generation authorizable and, under the automatic policy, dispatch it.
+    const encodeArtifactEvidenceJson = (await import('../services/gitops/json')).encodeArtifactEvidenceJson;
+    resolveSpy.mockImplementation(async (call) => {
+      GitOpsTransitions.getInstance().recordArtifactEvidence({
+        applicationId: call.applicationId,
+        generationId: call.generationId,
+        artifactSetId: `resolved-${nextGenId}`,
+        evidenceVersion: 2,
+        qualification: 'exact',
+        evidenceJson: encodeArtifactEvidenceJson({ kind: 'exact', identity: 'sha256:cafebabe' }),
+        authoritative: 0,
+        envelope: { operationId: randomUUID(), actor: 'tester', trigger: 'test', at: 901 },
+      });
+    });
+    deploySpy.mockClear();
+    const reconciler = (await import('../services/BlueprintReconciler')).BlueprintReconciler;
+    await reconciler.getInstance().tick();
+
+    expect(store.getApplication(fixture.applicationId)?.artifact_set_id).toBe(`resolved-${nextGenId}`);
+    expect(deploySpy).toHaveBeenCalledTimes(2);
+    for (const nodeId of fixture.nodeIds) {
+      expect(store.getTarget(fixture.applicationId, nodeId)?.applied_generation_id).toBe(nextGenId);
+    }
+  });
+
+  it('prepares a disabled Blueprint but withholds its dispatch', async () => {
+    const fixture = seedAuthorizedReadyApp();
+    await writeAppliedCompose(fixture.applicationId, fixture.generationId, 'services:\n  web:\n    image: alpine:3.20\n');
+    authorize(fixture.applicationId);
+    const store = GitOpsStore.getInstance();
+    const deploySpy = vi.spyOn(BlueprintService.getInstance(), 'deployAuthorizedMaterialization')
+      .mockResolvedValue({ status: 'active' });
+    await new BlueprintTargetAdapter().dispatch(
+      buildAcceptedGeneration(store.getGeneration(fixture.generationId)!),
+      { targetMode: 'blueprint', nodeId: fixture.nodeId, bindingRevision: null },
+    );
+
+    const { nextGenId, resolveNow } = await acceptSecondCommitWithFailedPreparation(fixture);
+    DatabaseService.getInstance().updateBlueprint(fixture.blueprintId, { enabled: false });
+    resolveNow();
+    deploySpy.mockClear();
+    const reconciler = (await import('../services/BlueprintReconciler')).BlueprintReconciler;
+    await reconciler.getInstance().tick();
+
+    // Content is not execution: the generation is prepared so it is ready when
+    // the Blueprint is enabled again, but nothing deploys while it is disabled.
+    expect(store.getApplication(fixture.applicationId)?.artifact_set_id).toBe(`resolved-${nextGenId}`);
+    expect(deploySpy).not.toHaveBeenCalled();
+    for (const nodeId of fixture.nodeIds) {
+      expect(store.getTarget(fixture.applicationId, nodeId)?.applied_generation_id).toBe(fixture.generationId);
+    }
   });
 });
 
@@ -605,6 +791,10 @@ describe('rollout pause holds execution', () => {
     const resumed = await reconstructBlueprintRolloutQueue();
     expect(resumed).toBe(0);
     expect(deploySpy).not.toHaveBeenCalled();
+    // A per-target pause stays per-target: reconstruction must not escalate it
+    // to an application pause, which would need a second, broader Resume to
+    // undo one node's decision.
+    expect(store.getApplication(fixture.applicationId)!.pause_at).toBeNull();
   });
 });
 
@@ -1730,6 +1920,41 @@ async function writeCandidateCompose(
   await fsPromises.mkdir(dir, { recursive: true });
   await fsPromises.writeFile(path.join(dir, 'compose.yaml'), content, 'utf8');
   await fsPromises.writeFile(path.join(dir, CANDIDATE_COMPLETE_MARKER), generation.commit_sha, 'utf8');
+}
+
+/**
+ * A retained Git source whose Direct manifest cache still describes an earlier
+ * generation. This is the state a converted source is in after a second
+ * commit, because the Direct promotion that would refresh the cache is exactly
+ * what the Blueprint path does not run.
+ */
+function seedStaleManifestCache(stackName: string, appliedDir: string, commitSha: string): void {
+  DatabaseService.getInstance().upsertGitSource({
+    stack_name: stackName,
+    repo_url: `https://github.com/example/${stackName}.git`,
+    branch: 'main',
+    compose_path: 'compose.yaml',
+    compose_paths: ['compose.yaml'],
+    context_dir: null,
+    sync_env: false,
+    env_path: null,
+    auth_type: 'none',
+    encrypted_token: null,
+    encrypted_deploy_key: null,
+    ssh_known_hosts_entry: null,
+    ssh_host_key_fingerprint: null,
+    encrypted_ca_bundle: null,
+    auto_apply_on_webhook: false,
+    auto_deploy_on_apply: false,
+    last_applied_commit_sha: commitSha,
+    last_applied_content_hash: null,
+    pending_commit_sha: null,
+    pending_compose_content: null,
+    pending_env_content: null,
+    pending_fetched_at: null,
+    last_debounce_at: null,
+  });
+  DatabaseService.getInstance().setGitSourceManifestState(stackName, 1, 'active', appliedDir);
 }
 
 function artifact(
