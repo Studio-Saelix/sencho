@@ -7,8 +7,8 @@ import type { OverlayBinding } from './types';
 import { decryptSopsAgeDocument, SopsDecryptError } from './decode';
 import { isValidRelativeStackPath, isValidStackName } from '../../../utils/validation';
 import { NodeRegistry } from '../../NodeRegistry';
+import { GIT_SECRETS_ROOT_NAME, gitSecretsAreaBase } from '../managedPaths';
 
-const OVERLAY_ROOT = 'git-secrets';
 const OVERLAY_OPERATION_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 function assertSafeNodeId(nodeId: number): void {
@@ -52,7 +52,7 @@ export class GitOpsDecryptOverlay {
   }
 
   private rootDir(): string {
-    return path.join(process.env.DATA_DIR || path.join(process.cwd(), 'data'), OVERLAY_ROOT);
+    return gitSecretsAreaBase();
   }
 
   private resolveOverlayDir(nodeId: number, stackName: string, operationId: string): string {
@@ -295,7 +295,7 @@ export class GitOpsDecryptOverlay {
 }
 
 export function scrubOverlayPaths(message: string, dataDir: string): string {
-  const overlayRoot = path.join(dataDir, OVERLAY_ROOT);
+  const overlayRoot = path.join(dataDir, GIT_SECRETS_ROOT_NAME);
   return message.split(overlayRoot).join('[git-secrets-overlay]');
 }
 

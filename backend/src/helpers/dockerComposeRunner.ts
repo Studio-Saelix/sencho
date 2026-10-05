@@ -1,7 +1,7 @@
 import { spawn } from 'child_process';
 import os from 'os';
 import path from 'path';
-import { managedAreaBase } from '../services/gitops/managedPaths';
+import { gitSecretsAreaBase, managedAreaBase } from '../services/gitops/managedPaths';
 
 export function runDockerCompose(
   args: string[],
@@ -10,15 +10,20 @@ export function runDockerCompose(
 ): Promise<{ code: number; stdout: string; stderr: string }> {
   const resolvedCwd = path.resolve(cwd);
   const managedBase = path.resolve(managedAreaBase());
+  const secretsBase = path.resolve(gitSecretsAreaBase());
   const tmpBase = path.resolve(os.tmpdir());
   // Canonical inline js/path-injection barrier, kept in the same scope as the
   // spawn cwd sink below. CodeQL does not credit a barrier separated from the
   // sink by the Promise-executor closure, so spawn is hoisted out of it.
-  // Two sequential single-condition guards, not one compound negated-AND,
-  // since CodeQL's barrier-guard recognizer only credits the simple shape.
+  // Sequential single-condition guards, not one compound negated-AND, since
+  // CodeQL's barrier-guard recognizer only credits the simple shape. The
+  // git-secrets area is allowed because Compose validation and deploy run
+  // inside a SOPS decrypt overlay so they read decrypted inputs.
   if (!resolvedCwd.startsWith(managedBase + path.sep)) {
-    if (!resolvedCwd.startsWith(tmpBase + path.sep)) {
-      return Promise.resolve({ code: -1, stdout: '', stderr: 'Invalid working directory' });
+    if (!resolvedCwd.startsWith(secretsBase + path.sep)) {
+      if (!resolvedCwd.startsWith(tmpBase + path.sep)) {
+        return Promise.resolve({ code: -1, stdout: '', stderr: 'Invalid working directory' });
+      }
     }
   }
   const child = spawn('docker', args, { cwd: resolvedCwd });

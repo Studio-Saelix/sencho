@@ -17,6 +17,19 @@ import { sanitizeForLog } from '../../utils/safeLog';
 
 export const MANAGED_ROOT_NAME = 'git-managed';
 export const GENERATIONS_DIR = 'generations';
+export const GIT_SECRETS_ROOT_NAME = 'git-secrets';
+
+/**
+ * The directory every SOPS decrypt overlay lives under.
+ *
+ * Compose must run inside an overlay so it reads decrypted env files, which
+ * puts its working directory outside the managed area. Callers that allowlist
+ * working directories need this root, not the managed one.
+ */
+export function gitSecretsAreaBase(): string {
+  const dataDir = process.env.DATA_DIR || path.join(process.cwd(), 'data');
+  return path.resolve(dataDir, GIT_SECRETS_ROOT_NAME);
+}
 
 /**
  * The directory every stack's managed area lives under.

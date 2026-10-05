@@ -317,6 +317,7 @@ export class ComposeService {
       args.push('-f', overridePath);
     }
     args.push(...action);
+    this.pinProjectNameForOverride(stackName, args, stackDirOverride);
     return args;
   }
 
@@ -1524,6 +1525,42 @@ export class ComposeService {
     return stackDir;
   }
 
+  /**
+   * Pin `-p <stack>` when Compose runs from an override directory.
+   *
+   * The project name normally comes from the working-directory basename, so a
+   * single-file stack carries no `-p` in its live or captured prefix. A SOPS
+   * decrypt overlay changes that basename to the operation id; without the pin
+   * Compose creates a stray project and leaves the real stack untouched.
+   */
+  private pinProjectNameForOverride(
+    stackName: string,
+    args: string[],
+    stackDirOverride?: string,
+  ): void {
+    if (!stackDirOverride) return;
+    if (path.resolve(stackDirOverride) === this.resolveValidatedStackDir(stackName)) return;
+    if (this.hasProjectNameFlag(args)) return;
+    const composeIdx = args.indexOf('compose');
+    args.splice(composeIdx >= 0 ? composeIdx + 1 : 0, 0, '-p', stackName);
+  }
+
+  /**
+   * Positional scan: a compose file or env file literally named `-p` is a flag
+   * value, not a project-name flag, so skip each flag's value token.
+   */
+  private hasProjectNameFlag(args: string[]): boolean {
+    for (let i = 0; i < args.length; i++) {
+      const token = args[i];
+      if (token === '-f' || token === '--file' || token === '--env-file' || token === '--project-directory') {
+        i++;
+        continue;
+      }
+      if (token === '-p' || token === '--project-name') return true;
+    }
+    return false;
+  }
+
   /** Rebase a captured absolute stack path onto the overlay root when present. */
   private remapCapturedAbsToRoot(abs: string, stackDir: string, pathRoot: string): string | null {
     const remapped = path.resolve(pathRoot, path.relative(stackDir, abs));
@@ -1601,6 +1638,7 @@ export class ComposeService {
       }
       throw new Error(`Unsupported captured compose flag "${token}" for stack "${stackName}"`);
     }
+    this.pinProjectNameForOverride(stackName, out, overlayDir);
     return out;
   }
 
