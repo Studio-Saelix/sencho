@@ -1567,11 +1567,13 @@ gitopsApplicationsRouter.post('/:id/rollout/supersede', (req: Request, res: Resp
 
 /**
  * One target's rollback attempt, carrying whether the failure can have mutated
- * the target. The route needs that to decide whether the failure may hold the
- * application; it is not part of the response shape.
+ * the target and whether its refusal record (and the settle it performs) did
+ * not land. The route needs both to decide application state; neither is part
+ * of the response shape.
  */
 type RollbackTargetAttempt = RolloutRollbackTargetResult & {
   mutationPossible: boolean;
+  settleMissed: boolean;
 };
 
 /**
@@ -1612,6 +1614,8 @@ async function runRollbackTarget(
       error: error instanceof Error ? error.message : 'The rollback could not be opened.',
       // The restore was never requested, so nothing can have been touched.
       mutationPossible: false,
+      // The open is transactional: no restoring stamp was written.
+      settleMissed: false,
     };
   }
 
@@ -1650,7 +1654,7 @@ async function runRollbackTarget(
         capturedSourceAcceptanceRef: store.newestSourceAcceptanceId(ctx.app.id, ctx.generationId),
         envelope: ctx.envelope,
       });
-      return { nodeId, status: 'restored', mutationPossible: false };
+      return { nodeId, status: 'restored', mutationPossible: false, settleMissed: false };
     } catch (error) {
       console.error(
         '[GitOps authority] Restore succeeded but its completion could not be recorded:',
@@ -1671,6 +1675,7 @@ async function runRollbackTarget(
   // including a transport failure that may have landed after the restore,
   // keeps the hold.
   const mutationPossible = restoreFailureMutated(outcome);
+  let settleMissed = false;
   try {
     tx.rollbackPartialFailed({
       applicationId: ctx.app.id,
@@ -1680,12 +1685,15 @@ async function runRollbackTarget(
       envelope: ctx.envelope,
     });
   } catch (error) {
+    // The refusal's own settle travels with this write. If it did not land,
+    // the route settles it once at the end rather than leaving the stamp.
+    settleMissed = !mutationPossible;
     console.error(
       '[GitOps authority] Could not record the failed rollback target:',
       sanitizeForLog(error instanceof Error ? error.message : String(error)),
     );
   }
-  return { nodeId, status: 'failed', error: outcome.error, mutationPossible };
+  return { nodeId, status: 'failed', error: outcome.error, mutationPossible, settleMissed };
 }
 
 /**
@@ -1820,6 +1828,27 @@ gitopsApplicationsRouter.post('/:id/rollout/rollback', async (req: Request, res:
     } catch (error) {
       console.error(
         '[GitOps authority] Could not record the partial rollback failure:',
+        sanitizeForLog(error instanceof Error ? error.message : String(error)),
+      );
+    }
+  }
+  // A refusal whose own record did not land left the restoring stamp that
+  // nothing else lifts: boot reclassification only sweeps rows with an active
+  // operation stage, and this path sets none. Settle them once here.
+  const missedSettleNodeIds = results
+    .filter(result => result.status === 'failed' && result.settleMissed)
+    .map(result => result.nodeId);
+  if (missedSettleNodeIds.length > 0) {
+    try {
+      GitOpsTransitions.getInstance().rollbackRefusalSettled({
+        applicationId: app.id,
+        nodeIds: missedSettleNodeIds,
+        recoveryRef: ctx.recoveryRef,
+        envelope,
+      });
+    } catch (error) {
+      console.error(
+        '[GitOps authority] Could not settle a rollback refusal whose record failed:',
         sanitizeForLog(error instanceof Error ? error.message : String(error)),
       );
     }

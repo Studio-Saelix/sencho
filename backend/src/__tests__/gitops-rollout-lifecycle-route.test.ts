@@ -640,8 +640,8 @@ describe('POST /api/gitops/applications/:id/rollout/rollback', () => {
     await authorizeRollout(seeded);
     insertRecoveryPoint(seeded, seeded.nodeIds[0], seeded.generationId);
     const compensateSpy = vi
-      .spyOn(StackUpdateRecoveryService.getInstance(), 'compensateWithCandidate')
-      .mockResolvedValue(true);
+      .spyOn(StackUpdateRecoveryService.getInstance(), 'compensateWithCandidateOutcome')
+      .mockResolvedValue({ rolledBack: true });
 
     const res = await request(app)
       .post(`/api/gitops/applications/bp:${seeded.blueprintId}/rollout/rollback`)
@@ -688,7 +688,8 @@ describe('POST /api/gitops/applications/:id/rollout/rollback', () => {
     const seeded = seedGitManagedBlueprint({ nodeCount: 2 });
     await authorizeRollout(seeded);
     insertRecoveryPoint(seeded, seeded.nodeIds[0], seeded.generationId);
-    vi.spyOn(StackUpdateRecoveryService.getInstance(), 'compensateWithCandidate').mockResolvedValue(true);
+    vi.spyOn(StackUpdateRecoveryService.getInstance(), 'compensateWithCandidateOutcome')
+      .mockResolvedValue({ rolledBack: true });
 
     const res = await request(app)
       .post(`/api/gitops/applications/bp:${seeded.blueprintId}/rollout/rollback`)
@@ -734,7 +735,8 @@ describe('POST /api/gitops/applications/:id/rollout/rollback', () => {
     const seeded = seedGitManagedBlueprint();
     await authorizeRollout(seeded);
     insertRecoveryPoint(seeded, seeded.nodeIds[0], seeded.generationId);
-    vi.spyOn(StackUpdateRecoveryService.getInstance(), 'compensateWithCandidate').mockResolvedValue(true);
+    vi.spyOn(StackUpdateRecoveryService.getInstance(), 'compensateWithCandidateOutcome')
+      .mockResolvedValue({ rolledBack: true });
     const { GitOpsTransitions } = await import('../services/gitops/transitions');
     vi.spyOn(GitOpsTransitions.getInstance(), 'rollbackCompleted').mockImplementation(() => {
       throw new Error('db write failed');
@@ -754,6 +756,52 @@ describe('POST /api/gitops/applications/:id/rollout/rollback', () => {
     expect(projectApplication(seeded.applicationId, false).facets?.rollout.status).toBe('rollback_partial_failed');
     // The restore itself may have landed, so the application hold stays.
     expect(GitOpsStore.getInstance().getApplication(seeded.applicationId)?.recovery_phase).toBe('failed');
+  });
+
+  it('settles the application when a refused target record cannot be written', async () => {
+    const seeded = seedGitManagedBlueprint();
+    await authorizeRollout(seeded);
+    const { GitOpsTransitions } = await import('../services/gitops/transitions');
+    vi.spyOn(GitOpsTransitions.getInstance(), 'rollbackPartialFailed')
+      .mockImplementation(() => {
+        throw new Error('db write failed');
+      });
+
+    const res = await request(app)
+      .post(`/api/gitops/applications/bp:${seeded.blueprintId}/rollout/rollback`)
+      .set('Cookie', adminCookie)
+      .send({ generationId: seeded.generationId, scope: { kind: 'all_changed' } });
+
+    // The refusal never reached the target row, so its own settle never ran.
+    // Nothing else lifts the stamp the open wrote, so the route must.
+    expect(res.status).toBe(200);
+    expect(res.body.results[0].status).toBe('failed');
+    const application = GitOpsStore.getInstance().getApplication(seeded.applicationId)!;
+    expect(application.recovery_phase).not.toBe('restoring');
+    expect(application.recovery_phase).not.toBe('failed');
+  });
+
+  it('settles the application when a restore reports no completion before moving anything', async () => {
+    const seeded = seedGitManagedBlueprint();
+    await authorizeRollout(seeded);
+    insertRecoveryPoint(seeded, seeded.nodeIds[0], seeded.generationId);
+    vi.spyOn(StackUpdateRecoveryService.getInstance(), 'compensateWithCandidateOutcome')
+      .mockResolvedValue({ rolledBack: false, failureClass: 'pre_mutation' });
+
+    const res = await request(app)
+      .post(`/api/gitops/applications/bp:${seeded.blueprintId}/rollout/rollback`)
+      .set('Cookie', adminCookie)
+      .send({ generationId: seeded.generationId, scope: { kind: 'all_changed' } });
+
+    // A false from the service now carries its class, so the route records a
+    // refusal rather than an anonymous failure that has to hold.
+    expect(res.status).toBe(200);
+    expect(res.body.results[0].status).toBe('failed');
+    const application = GitOpsStore.getInstance().getApplication(seeded.applicationId)!;
+    expect(application.recovery_phase).not.toBe('failed');
+    expect(application.failure_stage).not.toBe('recovery');
+    expect(GitOpsStore.getInstance().getTarget(seeded.applicationId, seeded.nodeIds[0])?.failure_class)
+      .toBe('pre_mutation');
   });
 
   it('refuses a failed-target scope when nothing failed', async () => {

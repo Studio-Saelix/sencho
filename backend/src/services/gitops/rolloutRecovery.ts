@@ -66,19 +66,20 @@ export type RestoreTargetOutcome =
     };
 
 /**
- * Restore refusal codes that prove the restore itself moved nothing: each is
- * answered before this restore touches the project, so no half-restored state
- * of its making can exist.
+ * Restore refusal codes that prove this restore moved nothing: each is
+ * answered before it touches the project, so no half-restored state of its
+ * making can exist.
  *
- * Every other failure, including a transport error that may have landed after
- * the restore completed, stays mutable: the application-wide recovery hold is
- * for exactly the case where the target may have moved.
+ * The stack-busy codes are deliberately absent: a busy answer means another
+ * operation is moving that stack right now, so it cannot prove the target is
+ * unchanged. Every other failure, including a transport error that may have
+ * landed after the restore, stays mutable too.
  */
 const PRE_MUTATION_REFUSAL_CODES: ReadonlySet<string> = new Set([
   'NO_RECOVERY_POINT',
   'RECOVERY_POINT_MISMATCH',
-  'STACK_BUSY',
-  'stack_op_in_progress',
+  'STACK_NOT_FOUND',
+  'self_stack_protected',
   'PERMISSION_DENIED',
 ]);
 
@@ -310,17 +311,18 @@ function restoreLocal(args: {
         };
       }
       try {
-        const rolledBack = await recovery.compensateWithCandidate(
+        const compensation = await recovery.compensateWithCandidateOutcome(
           current.id,
           (overridePath, invocation, overlay) => ComposeService.getInstance(args.nodeId)
             .composeUpWithRecoveryOverride(args.stackName, overridePath, undefined, invocation, overlay),
           policyOptions(args.actor, args.app.id),
         );
-        if (!rolledBack) {
+        if (!compensation.rolledBack) {
           return {
             ok: false as const,
             code: 'ROLLBACK_FAILED',
             error: 'The restore did not complete.',
+            failureClass: compensation.failureClass,
           };
         }
         return { ok: true as const };
@@ -355,7 +357,14 @@ async function restoreRemote(args: {
 }): Promise<RestoreTargetOutcome> {
   const target = NodeRegistry.getInstance().getProxyTarget(args.nodeId);
   if (!target) {
-    return { ok: false, code: 'NODE_UNREACHABLE', error: 'The owning node is unreachable.' };
+    // No request left the hub, so this restore moved nothing. A transport
+    // failure after a request goes out is different and keeps the hold.
+    return {
+      ok: false,
+      code: 'RESTORE_NOT_SENT',
+      error: 'The owning node is unreachable.',
+      failureClass: 'pre_mutation',
+    };
   }
   const baseUrl = target.apiUrl.replace(/\/$/, '');
   const headers: Record<string, string> = {

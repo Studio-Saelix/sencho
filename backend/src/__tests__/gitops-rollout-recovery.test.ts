@@ -432,7 +432,14 @@ describe('restoreTargetToGeneration on a remote node', () => {
       scopedActions: ['stack:deploy'],
     });
 
-    expect(outcome).toEqual({ ok: false, code: 'NODE_UNREACHABLE', error: 'The owning node is unreachable.' });
+    // No request left the hub, so this restore moved nothing: the caller can
+    // settle instead of holding for a restore that never ran.
+    expect(outcome).toEqual({
+      ok: false,
+      code: 'RESTORE_NOT_SENT',
+      error: 'The owning node is unreachable.',
+      failureClass: 'pre_mutation',
+    });
   });
 });
 
@@ -440,9 +447,13 @@ describe('restoreFailureMutated', () => {
   it.each([
     ['NO_RECOVERY_POINT', undefined, false],
     ['RECOVERY_POINT_MISMATCH', undefined, false],
-    ['STACK_BUSY', undefined, false],
-    ['stack_op_in_progress', undefined, false],
+    ['STACK_NOT_FOUND', undefined, false],
+    ['self_stack_protected', undefined, false],
     ['PERMISSION_DENIED', undefined, false],
+    // A busy stack means another operation is moving it right now, so the
+    // refusal cannot prove the target is unchanged.
+    ['STACK_BUSY', undefined, true],
+    ['stack_op_in_progress', undefined, true],
     // The node answered 2xx without an echo: it restored something unproven.
     ['RECOVERY_POINT_UNCONFIRMED', undefined, true],
     // Thrown on both sides of the file move, so the code alone cannot decide.

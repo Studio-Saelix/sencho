@@ -1928,6 +1928,35 @@ describe('retry, stop, and rollback', () => {
     expect(app.pause_at).not.toBeNull();
   });
 
+  it('keeps an earlier mutated hold when a health rollback is refused elsewhere', async () => {
+    const fixture = await gatedAttempt('rollback');
+    const store = GitOpsStore.getInstance();
+    const otherNode = fixture.nodeIds.find((nodeId) => nodeId !== fixture.nodeId)!;
+    // Another target already failed after a possible mutation and owns the hold.
+    store.upsertTarget({
+      ...store.getTarget(fixture.applicationId, otherNode)!,
+      recovery_phase: 'failed',
+      failure_stage: 'recovery',
+      failure_class: 'partial',
+      recovery_ref: 'rb-other',
+      failure_at: 7,
+    });
+    markRecoveryPoint(fixture, 'rec-pre-rollout', genId(fixture, 'pre-rollout'));
+    await mockRestore({ ok: false, code: 'NO_RECOVERY_POINT', error: 'This stack has no recovery point to restore.' });
+
+    const outcome = await decide(fixture, 'failed', spyExecutor(), 'rollback');
+
+    // This refusal moved nothing, but it must not release the hold another
+    // target's possible mutation still needs.
+    expect(outcome.action).toBe('rollback_partial_failed');
+    const app = store.getApplication(fixture.applicationId)!;
+    expect(app.recovery_phase).toBe('failed');
+    expect(app.failure_stage).toBe('recovery');
+    expect(app.failure_class).toBe('partial');
+    expect(app.recovery_ref).toBe('rb-other');
+    expect(store.getTarget(fixture.applicationId, fixture.nodeId!)!.failure_class).toBe('pre_mutation');
+  });
+
   it('a health failure never creates source, placement, or artifact authority', async () => {
     const fixture = await gatedAttempt('stop');
     const store = GitOpsStore.getInstance();

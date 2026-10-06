@@ -3410,15 +3410,24 @@ export class GitOpsTransitions {
    * alias adds over `recovery_failed`: some targets came back and some did not,
    * which is neither of the recovery classes. `pre_mutation` records a restore
    * the node refused before it could move anything: the failure stays visible
-   * on the target, but it does not hold the application, because there is no
-   * half-restored state for the hold to protect and no restore that can ever
-   * complete.
+   * on the target, but it does not hold the application by itself. A target
+   * that already carries a class that may have moved it keeps that class; a
+   * later refusal cannot downgrade a failure the target already proved.
+   *
+   * The no-target alias accepts only the classes that assert an application
+   * hold, so a refusal with nothing to record is not representable.
    */
   rollbackPartialFailed(args: {
     applicationId: string;
-    nodeId: number | null;
+    nodeId: number;
     recoveryRef: string;
     failureClass: 'pre_mutation' | 'post_mutation' | 'partial';
+    envelope: EventEnvelope;
+  } | {
+    applicationId: string;
+    nodeId: null;
+    recoveryRef: string;
+    failureClass: 'post_mutation' | 'partial';
     envelope: EventEnvelope;
   }): TransitionResult {
     const applyFailure = (row: {
@@ -3440,23 +3449,38 @@ export class GitOpsTransitions {
         applyFailure(app);
       });
     }
-    const nodeId = args.nodeId;
     const refusedBeforeMutation = args.failureClass === 'pre_mutation';
     const result = this.mutateTarget(
       args.applicationId,
-      nodeId,
+      args.nodeId,
       args.envelope,
       'rollback_partial_failed',
       null,
       (target) => {
         const before = { recoveryPhase: target.recovery_phase, failureStage: target.failure_stage };
-        applyFailure(target);
+        // Only a refusal the node proved moved nothing defers to an earlier
+        // failure. A fresh failure that may have moved the target overwrites
+        // the record: its class and timestamp are the newer truth.
+        const priorMoved = refusedBeforeMutation
+          && (target.recovery_phase === 'failed' || target.failure_stage === 'recovery')
+          && target.failure_class !== 'pre_mutation';
+        if (priorMoved) {
+          // The stronger fact is the one the hold was opened for. Keep its
+          // class and timestamp; a refusal about a restore that never ran must
+          // not erase a failure that may have moved this target.
+          target.recovery_phase = 'failed';
+          target.failure_stage = 'recovery';
+        } else {
+          applyFailure(target);
+        }
         if (refusedBeforeMutation) {
           // Settled in the same transaction as the target write: a crash
           // between the two would otherwise leave the application restoring.
-          this.settleRefusedRollback(args.applicationId, args.recoveryRef, nodeId, args.envelope);
+          // The target row is not flushed yet, so its in-memory state is what
+          // the settle reasons about.
+          this.settleRefusedRollback(args.applicationId, args.recoveryRef, target, args.envelope);
         }
-        return { before, after: { recoveryPhase: 'failed', failureClass: args.failureClass } };
+        return { before, after: { recoveryPhase: 'failed', failureClass: target.failure_class } };
       },
       'failed',
     );
@@ -3475,34 +3499,107 @@ export class GitOpsTransitions {
   }
 
   /**
+   * Settle a rollback whose per-target refusal record could not be written.
+   *
+   * The route records each refusal through `rollbackPartialFailed`; if those
+   * writes throw, the `restoring` stamp `rollbackInProgress` opened would
+   * otherwise stay forever, because boot reclassification only sweeps rows
+   * that carry an active operation stage and this path never sets one. Every
+   * named target is one whose record failed, so its stale `restoring` row is
+   * not read as a restore still in flight, and a target that already carries
+   * a moved failure still holds the application.
+   */
+  rollbackRefusalSettled(args: {
+    applicationId: string;
+    nodeIds: number[];
+    recoveryRef: string;
+    envelope: EventEnvelope;
+  }): TransitionResult {
+    return this.mutateApp(args.applicationId, args.envelope, 'rollback_refusal_settled', 'committed', (app) => {
+      this.applyRefusedRollbackSettle(
+        app,
+        args.recoveryRef,
+        args.envelope.at,
+        args.nodeIds
+          .map((nodeId) => this.store().getTarget(args.applicationId, nodeId))
+          .filter((row): row is GitOpsTargetCurrentRow => row !== undefined),
+        new Set(args.nodeIds),
+      );
+    });
+  }
+
+  /**
    * Release the application-level `restoring` stamp a refused rollback opened.
    *
    * Scoped to the operation's own recovery ref, so a concurrent rollback keeps
-   * its own stamp. When another target of the same operation completed, its
-   * settled receipt is kept; otherwise there is no recovery to report and the
-   * phase clears rather than claiming one failed.
+   * its own stamp. A restore still moving on any other target owns the
+   * application, and a target whose failure may have moved it still owns the
+   * hold, even when that target failed in an earlier operation. Only when
+   * neither exists does the refusal settle: a completed sibling of the same
+   * operation keeps its receipt, and otherwise there is no recovery to report.
+   *
+   * `refused` carries the refusing targets' rows as the refusals intend them.
+   * When the write happens in the same transaction, the database still holds
+   * the pre-write rows, so the intent has to be passed in; the route's settle
+   * passes the best available rows instead.
    */
   private settleRefusedRollback(
     applicationId: string,
     recoveryRef: string,
-    excludedNodeId: number,
+    current: GitOpsTargetCurrentRow,
     envelope: EventEnvelope,
   ): void {
     this.withApplication(applicationId, envelope, (app) => {
-      if (app.recovery_phase !== 'restoring' || app.recovery_ref !== recoveryRef) return;
-      const restoredInThisOperation = this.store().listTargets(applicationId).some((row) =>
-        row.node_id !== excludedNodeId
-        && row.target_status !== 'tombstoned'
-        && row.recovery_phase === 'complete'
-        && row.recovery_ref === recoveryRef);
-      if (restoredInThisOperation) {
-        app.recovery_phase = 'complete';
-      } else {
-        app.recovery_phase = null;
-        app.recovery_ref = null;
-      }
-      this.clearAppFailure(app, ['recovery']);
+      this.applyRefusedRollbackSettle(
+        app,
+        recoveryRef,
+        envelope.at,
+        [current],
+        new Set([current.node_id]),
+      );
     });
+  }
+
+  private applyRefusedRollbackSettle(
+    app: GitOpsApplicationRow,
+    recoveryRef: string,
+    at: number,
+    refused: GitOpsTargetCurrentRow[],
+    excludedNodeIds: ReadonlySet<number>,
+  ): void {
+    if (app.recovery_phase !== 'restoring' || app.recovery_ref !== recoveryRef) return;
+    const others = this.store().listTargets(app.id).filter((row) =>
+      row.target_status !== 'tombstoned' && !excludedNodeIds.has(row.node_id));
+    const refusedSurvives = refused.find((row) =>
+      row.target_status !== 'tombstoned'
+      && row.failure_class !== 'pre_mutation'
+      && (row.recovery_phase === 'failed' || row.failure_stage === 'recovery')) ?? null;
+    if (!refusedSurvives
+      && others.some((row) => row.recovery_phase === 'restoring' || row.recovery_phase === 'compensating')) {
+      // A restore is still moving on some target; the operation that opened it
+      // settles the application, not this refusal.
+      return;
+    }
+    const surviving = refusedSurvives
+      ?? others.find((row) => row.failure_class !== 'pre_mutation'
+        && (row.recovery_phase === 'failed' || row.failure_stage === 'recovery'));
+    if (surviving) {
+      app.recovery_phase = 'failed';
+      app.recovery_ref = surviving.recovery_ref ?? recoveryRef;
+      app.failure_stage = 'recovery';
+      app.failure_class = surviving.failure_class ?? 'partial';
+      app.failure_at = surviving.failure_at ?? at;
+      return;
+    }
+    const restoredInThisOperation = others.some((row) =>
+      row.recovery_phase === 'complete' && row.recovery_ref === recoveryRef);
+    if (restoredInThisOperation) {
+      app.recovery_phase = 'complete';
+    } else {
+      app.recovery_phase = null;
+      app.recovery_ref = null;
+    }
+    this.clearAppFailure(app, ['recovery']);
   }
 
   /**

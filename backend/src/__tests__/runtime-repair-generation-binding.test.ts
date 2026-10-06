@@ -392,6 +392,30 @@ describe('runtime repair reads the target\'s acknowledged generation', () => {
     expect(deploySpy).not.toHaveBeenCalled();
   });
 
+  it('proceeds while a recovery failed before it could move anything', async () => {
+    // A refused rollback records `failed` on the target so the refusal stays
+    // visible, but it moved nothing by construction and deliberately sets no
+    // application hold. Auto-repair follows the same distinction.
+    const { bp, node } = seedBlueprint();
+    const fixture = await seedGitManagedMidRollout(bp, node);
+    const store = GitOpsStore.getInstance();
+    const target = store.getTarget(fixture.appId, node.id)!;
+    store.upsertTarget({
+      ...target,
+      recovery_phase: 'failed',
+      failure_class: 'pre_mutation',
+      failure_stage: 'recovery',
+    });
+    const deploySpy = vi
+      .spyOn(BlueprintService.getInstance(), 'deployAuthorizedMaterialization')
+      .mockResolvedValue({ status: 'active' });
+
+    const outcome = await BlueprintService.getInstance().enforceDigestRepair(bp, node);
+
+    expect(outcome.status).toBe('active');
+    expect(deploySpy).toHaveBeenCalledTimes(1);
+  });
+
   it('holds while a recovery is still moving on the target', async () => {
     const { bp, node } = seedBlueprint();
     const fixture = await seedGitManagedMidRollout(bp, node);

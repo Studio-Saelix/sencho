@@ -296,24 +296,281 @@ describe('gitops deferred state', () => {
     const store = GitOpsStore.getInstance();
     const tx = GitOpsTransitions.getInstance();
     seedApplied('app-rb-owner2', 'rb-owner2-web');
+    store.upsertTarget(emptyTargetRow('app-rb-owner2', 2, 1));
 
+    // Two overlapping rollbacks: each opens its own target under its own ref,
+    // so the application carries the second one's stamp when the first one's
+    // refusal lands.
     tx.rollbackInProgress({
       applicationId: 'app-rb-owner2',
       nodeId: 1,
-      recoveryRef: 'rb-owner2',
+      recoveryRef: 'rb-owner2-a',
       recoveryGenerationId: 'gen-app-rb-owner2',
-      envelope: env('op-rb-owner2-start'),
+      envelope: env('op-rb-owner2-a'),
     });
+    tx.rollbackInProgress({
+      applicationId: 'app-rb-owner2',
+      nodeId: 2,
+      recoveryRef: 'rb-owner2-b',
+      recoveryGenerationId: 'gen-app-rb-owner2',
+      envelope: env('op-rb-owner2-b'),
+    });
+
     tx.rollbackPartialFailed({
       applicationId: 'app-rb-owner2',
       nodeId: 1,
-      recoveryRef: 'rb-intruder',
+      recoveryRef: 'rb-owner2-a',
       failureClass: 'pre_mutation',
-      envelope: env('op-rb-intruder-fail'),
+      envelope: env('op-rb-owner2-a-fail'),
     });
 
     expect(store.getApplication('app-rb-owner2')?.recovery_phase).toBe('restoring');
-    expect(store.getApplication('app-rb-owner2')?.recovery_ref).toBe('rb-owner2');
+    expect(store.getApplication('app-rb-owner2')?.recovery_ref).toBe('rb-owner2-b');
+  });
+
+  it('keeps an earlier mutated hold when a later target is refused', () => {
+    const store = GitOpsStore.getInstance();
+    const tx = GitOpsTransitions.getInstance();
+    seedApplied('app-rb-earlier', 'rb-earlier-web');
+    store.upsertTarget(emptyTargetRow('app-rb-earlier', 2, 1));
+
+    // Target 1 failed after a possible mutation and holds the application.
+    tx.rollbackInProgress({
+      applicationId: 'app-rb-earlier',
+      nodeId: 1,
+      recoveryRef: 'rb-earlier-a',
+      recoveryGenerationId: 'gen-app-rb-earlier',
+      envelope: env('op-rb-earlier-a'),
+    });
+    tx.rollbackPartialFailed({
+      applicationId: 'app-rb-earlier',
+      nodeId: 1,
+      recoveryRef: 'rb-earlier-a',
+      failureClass: 'partial',
+      envelope: env('op-rb-earlier-a-fail'),
+    });
+    const mutated = store.getTarget('app-rb-earlier', 1)!;
+    expect(store.getApplication('app-rb-earlier')?.recovery_phase).toBe('failed');
+
+    // A later rollback opens target 2 under its own ref and is refused.
+    tx.rollbackInProgress({
+      applicationId: 'app-rb-earlier',
+      nodeId: 2,
+      recoveryRef: 'rb-earlier-b',
+      recoveryGenerationId: 'gen-app-rb-earlier',
+      envelope: env('op-rb-earlier-b'),
+    });
+    tx.rollbackPartialFailed({
+      applicationId: 'app-rb-earlier',
+      nodeId: 2,
+      recoveryRef: 'rb-earlier-b',
+      failureClass: 'pre_mutation',
+      envelope: env('op-rb-earlier-b-fail'),
+    });
+
+    // The refusal released nothing: target 1's failure may have moved it, so
+    // the hold survives with that failure's own class and reference.
+    const app = store.getApplication('app-rb-earlier')!;
+    expect(app.recovery_phase).toBe('failed');
+    expect(app.failure_stage).toBe('recovery');
+    expect(app.failure_class).toBe('partial');
+    expect(app.recovery_ref).toBe('rb-earlier-a');
+    const after = store.getTarget('app-rb-earlier', 1)!;
+    expect(after.recovery_phase).toBe(mutated.recovery_phase);
+    expect(after.failure_class).toBe('partial');
+    expect(after.failure_at).toBe(mutated.failure_at);
+    // The refused target keeps its own visible marker.
+    expect(store.getTarget('app-rb-earlier', 2)?.failure_class).toBe('pre_mutation');
+  });
+
+  it('keeps a restore that is still moving from being settled by another refusal', () => {
+    const store = GitOpsStore.getInstance();
+    const tx = GitOpsTransitions.getInstance();
+    seedApplied('app-rb-moving', 'rb-moving-web');
+    store.upsertTarget(emptyTargetRow('app-rb-moving', 2, 1));
+
+    // Target 1 is still restoring; target 2's refusal under the application's
+    // own ref must not clear the stamp while that restore runs.
+    tx.rollbackInProgress({
+      applicationId: 'app-rb-moving',
+      nodeId: 1,
+      recoveryRef: 'rb-moving-a',
+      recoveryGenerationId: 'gen-app-rb-moving',
+      envelope: env('op-rb-moving-a'),
+    });
+    tx.rollbackInProgress({
+      applicationId: 'app-rb-moving',
+      nodeId: 2,
+      recoveryRef: 'rb-moving-b',
+      recoveryGenerationId: 'gen-app-rb-moving',
+      envelope: env('op-rb-moving-b'),
+    });
+    tx.rollbackPartialFailed({
+      applicationId: 'app-rb-moving',
+      nodeId: 2,
+      recoveryRef: 'rb-moving-b',
+      failureClass: 'pre_mutation',
+      envelope: env('op-rb-moving-b-fail'),
+    });
+
+    expect(store.getApplication('app-rb-moving')?.recovery_phase).toBe('restoring');
+    expect(store.getApplication('app-rb-moving')?.recovery_ref).toBe('rb-moving-b');
+  });
+
+  it('does not let a retry refusal downgrade a target that already failed after mutation', () => {
+    const store = GitOpsStore.getInstance();
+    const tx = GitOpsTransitions.getInstance();
+    seedApplied('app-rb-retry', 'rb-retry-web');
+
+    tx.rollbackInProgress({
+      applicationId: 'app-rb-retry',
+      nodeId: 1,
+      recoveryRef: 'rb-retry-a',
+      recoveryGenerationId: 'gen-app-rb-retry',
+      envelope: env('op-rb-retry-a'),
+    });
+    tx.rollbackPartialFailed({
+      applicationId: 'app-rb-retry',
+      nodeId: 1,
+      recoveryRef: 'rb-retry-a',
+      failureClass: 'partial',
+      envelope: env('op-rb-retry-a-fail'),
+    });
+    const failedAt = store.getTarget('app-rb-retry', 1)!.failure_at;
+
+    // The operator retries that target and the node refuses before moving
+    // anything. The refusal must not erase the earlier failure's class.
+    tx.rollbackInProgress({
+      applicationId: 'app-rb-retry',
+      nodeId: 1,
+      recoveryRef: 'rb-retry-b',
+      recoveryGenerationId: 'gen-app-rb-retry',
+      envelope: env('op-rb-retry-b'),
+    });
+    tx.rollbackPartialFailed({
+      applicationId: 'app-rb-retry',
+      nodeId: 1,
+      recoveryRef: 'rb-retry-b',
+      failureClass: 'pre_mutation',
+      envelope: env('op-rb-retry-b-fail'),
+    });
+
+    const target = store.getTarget('app-rb-retry', 1)!;
+    expect(target.recovery_phase).toBe('failed');
+    expect(target.failure_class).toBe('partial');
+    expect(target.failure_at).toBe(failedAt);
+    const app = store.getApplication('app-rb-retry')!;
+    expect(app.recovery_phase).toBe('failed');
+    expect(app.failure_class).toBe('partial');
+  });
+
+  it('settles a refused rollback whose per-target record never landed', () => {
+    const store = GitOpsStore.getInstance();
+    const tx = GitOpsTransitions.getInstance();
+    seedApplied('app-rb-missed', 'rb-missed-web');
+
+    tx.rollbackInProgress({
+      applicationId: 'app-rb-missed',
+      nodeId: 1,
+      recoveryRef: 'rb-missed',
+      recoveryGenerationId: 'gen-app-rb-missed',
+      envelope: env('op-rb-missed-start'),
+    });
+    expect(store.getApplication('app-rb-missed')?.recovery_phase).toBe('restoring');
+
+    // The route calls this when `rollbackPartialFailed` threw and its own
+    // in-transaction settle never ran.
+    tx.rollbackRefusalSettled({
+      applicationId: 'app-rb-missed',
+      nodeIds: [1],
+      recoveryRef: 'rb-missed',
+      envelope: env('op-rb-missed-settle'),
+    });
+
+    expect(store.getApplication('app-rb-missed')?.recovery_phase).toBeNull();
+    expect(store.getApplication('app-rb-missed')?.failure_stage).toBeNull();
+  });
+
+  it('settles several missed refusal records at once', () => {
+    const store = GitOpsStore.getInstance();
+    const tx = GitOpsTransitions.getInstance();
+    seedApplied('app-rb-missed2', 'rb-missed2-web');
+    store.upsertTarget(emptyTargetRow('app-rb-missed2', 2, 1));
+
+    // Both refusals open their target and neither terminal record lands, so
+    // both targets still read as restoring. Settling one without excluding the
+    // other would leave the stamp stuck on the sibling.
+    tx.rollbackInProgress({
+      applicationId: 'app-rb-missed2',
+      nodeId: 1,
+      recoveryRef: 'rb-missed2',
+      recoveryGenerationId: 'gen-app-rb-missed2',
+      envelope: env('op-rb-missed2-a'),
+    });
+    tx.rollbackInProgress({
+      applicationId: 'app-rb-missed2',
+      nodeId: 2,
+      recoveryRef: 'rb-missed2',
+      recoveryGenerationId: 'gen-app-rb-missed2',
+      envelope: env('op-rb-missed2-b'),
+    });
+
+    tx.rollbackRefusalSettled({
+      applicationId: 'app-rb-missed2',
+      nodeIds: [1, 2],
+      recoveryRef: 'rb-missed2',
+      envelope: env('op-rb-missed2-settle'),
+    });
+
+    expect(store.getApplication('app-rb-missed2')?.recovery_phase).toBeNull();
+    expect(store.getApplication('app-rb-missed2')?.failure_stage).toBeNull();
+  });
+
+  it('lets a fresh mutated failure replace an earlier one on a retry', () => {
+    const store = GitOpsStore.getInstance();
+    const tx = GitOpsTransitions.getInstance();
+    seedApplied('app-rb-fresh', 'rb-fresh-web');
+    const envAt = (operationId: string, at: number): EventEnvelope => ({
+      operationId, actor: 'tester', trigger: 'manual', at,
+    });
+
+    tx.rollbackInProgress({
+      applicationId: 'app-rb-fresh',
+      nodeId: 1,
+      recoveryRef: 'rb-fresh-a',
+      recoveryGenerationId: 'gen-app-rb-fresh',
+      envelope: envAt('op-rb-fresh-a', 100),
+    });
+    tx.rollbackPartialFailed({
+      applicationId: 'app-rb-fresh',
+      nodeId: 1,
+      recoveryRef: 'rb-fresh-a',
+      failureClass: 'partial',
+      envelope: envAt('op-rb-fresh-a-fail', 100),
+    });
+
+    // The retry fails again, after a possible mutation. Its record is the
+    // newer truth; only a refusal that moved nothing defers to the earlier one.
+    tx.rollbackInProgress({
+      applicationId: 'app-rb-fresh',
+      nodeId: 1,
+      recoveryRef: 'rb-fresh-b',
+      recoveryGenerationId: 'gen-app-rb-fresh',
+      envelope: envAt('op-rb-fresh-b', 200),
+    });
+    tx.rollbackPartialFailed({
+      applicationId: 'app-rb-fresh',
+      nodeId: 1,
+      recoveryRef: 'rb-fresh-b',
+      failureClass: 'partial',
+      envelope: envAt('op-rb-fresh-b-fail', 200),
+    });
+
+    const target = store.getTarget('app-rb-fresh', 1)!;
+    expect(target.failure_class).toBe('partial');
+    expect(target.failure_at).toBe(200);
+    expect(target.recovery_ref).toBe('rb-fresh-b');
+    expect(store.getApplication('app-rb-fresh')?.failure_at).toBe(200);
   });
 
   it('completes a rollback only against a generation it can prove', () => {

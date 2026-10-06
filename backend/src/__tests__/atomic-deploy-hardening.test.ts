@@ -198,11 +198,11 @@ describe('Rollback holds the stack lifecycle lock (H-1)', () => {
     mockComposeUpWithRecoveryOverride.mockImplementation(async () => { order.push('compose up'); return undefined; });
     // The restore stands in for one that passes every check and reaches its
     // compose up, which is the point at which the runtime is about to change.
-    const compensate = vi.spyOn(StackUpdateRecoveryService.prototype, 'compensateWithCandidate')
+    const compensate = vi.spyOn(StackUpdateRecoveryService.prototype, 'compensateWithCandidateOutcome')
       .mockImplementation(async (_id, composeUp) => {
         order.push('restore permitted');
         await composeUp('rollback-override-path', null, undefined);
-        return true;
+        return { rolledBack: true };
       });
     try {
       const res = await request(app).post('/api/stacks/web/rollback').set('Cookie', authCookie);

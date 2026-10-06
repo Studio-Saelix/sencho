@@ -278,6 +278,25 @@ function opaqueRollbackTag(generationId: string, serviceName: string): string {
   return `sencho-rb/${shortGenerationId(generationId)}/${sanitizeServiceSlug(serviceName)}:hold`;
 }
 
+/**
+ * What a compensation attempt proves, for callers that must classify the
+ * failure. The boolean `compensateWithCandidate` stays for callers that only
+ * branch on completion.
+ */
+export type CompensationOutcome =
+  | { rolledBack: true }
+  | { rolledBack: false; failureClass: 'pre_mutation' | 'post_mutation' };
+
+/**
+ * The compose-up a compensation drives, passed through by the caller so the
+ * service never reaches for a node's runtime itself.
+ */
+export type CompensationComposeUp = (
+  overridePath: string,
+  invocation: RollbackInvocationRecord | null,
+  overlay?: { overlayDir: string; overlayBinding: import('./gitops/sops/types').OverlayBinding },
+) => Promise<ComposeMutationResult | void>;
+
 export class StackUpdateRecoveryService {
   private static instance: StackUpdateRecoveryService;
   private started = false;
@@ -1087,17 +1106,22 @@ export class StackUpdateRecoveryService {
     }
   }
 
-  public async compensateWithCandidate(
+  /**
+   * Whether the restore completed, with the class the caller needs when it did
+   * not. `compensateWithCandidate` keeps the boolean shape for callers that
+   * only decide what to do next; rollback callers that must not guess the
+   * class from an error code use this one.
+   */
+  public async compensateWithCandidateOutcome(
     generationId: string,
-    composeUp: (
-      overridePath: string,
-      invocation: RollbackInvocationRecord | null,
-      overlay?: { overlayDir: string; overlayBinding: import('./gitops/sops/types').OverlayBinding },
-    ) => Promise<ComposeMutationResult | void>,
+    composeUp: CompensationComposeUp,
     policyOptions?: PolicyEnforcementOptions,
-  ): Promise<boolean> {
+  ): Promise<CompensationOutcome> {
     const row = this.get(generationId);
-    if (!row) return false;
+    // No row means there is nothing to restore here, so the failure moved
+    // nothing; the underlying error this used to collapse into a bare `false`
+    // cannot happen before the row exists.
+    if (!row) return { rolledBack: false, failureClass: 'pre_mutation' };
     // Finish any leftover restore transaction for this generation before a new
     // restore can overwrite pre-restore/ with an already-restored tree.
     if (row.content_path) {
@@ -1261,7 +1285,7 @@ export class StackUpdateRecoveryService {
         composeResult?.mutatedByCompose ? 'bound' : 'unbound',
       ) ?? null;
       this.armReservedRecoveryRun(reservation, row);
-      return true;
+      return { rolledBack: true };
     } catch (error) {
       const code = (error as { code?: string }).code;
       // Classified by whether the files had already moved. Only a failure
@@ -1270,7 +1294,12 @@ export class StackUpdateRecoveryService {
       // stack route, or the hub restoring through it): this catch is the only
       // place that knows, and a code such as ROLLBACK_PROHIBITED is thrown on
       // both sides of the file move.
-      const failureClass = filesRestored ? 'post_mutation' : 'pre_mutation';
+      //
+      // A failed restore's own revert counts as movement even before this
+      // function saw a clean return: the live files may be a mix of the
+      // generation and the pre-restore snapshot, so the failure has to hold.
+      const revertFailed = (error as { restoreRevertFailed?: unknown }).restoreRevertFailed === true;
+      const failureClass = filesRestored || revertFailed ? 'post_mutation' : 'pre_mutation';
       gitopsRecovery?.failed(failureClass);
       if (typeof error === 'object' && error !== null) {
         Object.assign(error, { failureClass });
@@ -1313,8 +1342,24 @@ export class StackUpdateRecoveryService {
           { code: 'HELD_IMAGE_MISSING', failureClass },
         );
       }
-      return false;
+      return { rolledBack: false, failureClass };
     }
+  }
+
+  /**
+   * The boolean shape, for callers that only decide what to do next.
+   *
+   * A caller that has to classify the failure uses
+   * `compensateWithCandidateOutcome` instead, so it never guesses from an
+   * error code what only this service could prove.
+   */
+  public async compensateWithCandidate(
+    generationId: string,
+    composeUp: CompensationComposeUp,
+    policyOptions?: PolicyEnforcementOptions,
+  ): Promise<boolean> {
+    const outcome = await this.compensateWithCandidateOutcome(generationId, composeUp, policyOptions);
+    return outcome.rolledBack;
   }
 
   /**
