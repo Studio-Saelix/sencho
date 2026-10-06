@@ -48,7 +48,10 @@ import {
 } from '../services/gitops/rolloutRecovery';
 import { placementEffectCompatible } from '../services/gitops/store';
 import { prepareAcceptedGitManagedGeneration } from '../services/gitops/gitManagedMaterialization';
-import { dispatchPreparedGitManagedGeneration } from '../services/gitops/gitManagedHandoff';
+import {
+  dispatchPreparedGitManagedGeneration,
+  GIT_MANAGED_ARTIFACT_UNRESOLVED_REASON,
+} from '../services/gitops/gitManagedHandoff';
 import { GitOpsTransitions, GitOpsTransitionError } from '../services/gitops/transitions';
 import { newGitOpsId } from '../services/gitops/directApplication';
 import { HEALTH_ROLLOUT_POLICIES, isHealthRolloutPolicy } from '../services/gitops/healthPolicy';
@@ -946,13 +949,19 @@ gitopsApplicationsRouter.post('/:id/source/accept', async (req: Request, res: Re
   // Both can have something to say; neither may hide the other. A skipped
   // handoff is surfaced too: its reason is what tells the operator whether the
   // rollout is starting, waiting for authorization, paused, or held, instead of
-  // a plain "accepted" that reads the same in every case.
+  // a plain "accepted" that reads the same in every case. The one exception is
+  // the unresolved-artifact skip: when the preparation did not resolve the
+  // identity, its own note already says so, and repeating it reads as noise.
+  const handoffNote = handoff.status === 'dispatched'
+    || (prepared.artifact !== 'resolved' && handoff.reason === GIT_MANAGED_ARTIFACT_UNRESOLVED_REASON)
+    ? null
+    : handoff.reason;
   res.json({
     ok: true,
     materialized: prepared.materialized,
     artifactResolved: prepared.artifact === 'resolved',
     dispatched: handoff.status === 'dispatched',
-    note: joinAcceptNotes([prepared.note, handoff.status === 'dispatched' ? null : handoff.reason]),
+    note: joinAcceptNotes([prepared.note, handoffNote]),
   });
 });
 

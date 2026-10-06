@@ -448,6 +448,25 @@ describe('POST /api/gitops/applications/:id/source/accept', () => {
     handoffSpy.mockRestore();
   });
 
+  it('does not repeat the artifact reason when the preparation note already covers it', async () => {
+    const seeded = seedGitManagedBlueprint({ sourceAccepted: false });
+    const handoffSpy = vi.spyOn(await import('../services/gitops/gitManagedHandoff'), 'dispatchPreparedGitManagedGeneration')
+      .mockResolvedValue({ status: 'skipped', reason: 'the artifact identity is not resolved yet' });
+
+    const res = await request(app)
+      .post(`/api/gitops/applications/bp:${seeded.blueprintId}/source/accept`)
+      .set('Cookie', adminCookie)
+      .send({ generationId: seeded.generationId });
+
+    expect(res.status).toBe(200);
+    expect(res.body.dispatched).toBe(false);
+    // The preparation note already says the identity is unresolved; the handoff
+    // skip is the same fact and must not be repeated.
+    expect(res.body.note).not.toContain('is not resolved yet');
+    expect(res.body.note).toContain('staged candidate');
+    handoffSpy.mockRestore();
+  });
+
   it('refuses a generation that is not the current candidate', async () => {
     const seeded = seedGitManagedBlueprint({ sourceAccepted: false });
     const res = await request(app)

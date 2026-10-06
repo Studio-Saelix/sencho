@@ -22,6 +22,13 @@ export interface GitManagedDispatchOutcome {
 }
 
 /**
+ * The skip reason for a handoff whose accepted generation has no resolved
+ * artifact identity. Exported so the accept route can tell it apart from a
+ * preparation note that already says the same thing.
+ */
+export const GIT_MANAGED_ARTIFACT_UNRESOLVED_REASON = 'the artifact identity is not resolved yet';
+
+/**
  * Dispatch an accepted, prepared generation under the configured policies.
  *
  * `skipped` means a gate withheld the handoff (the generation moved on, the
@@ -82,7 +89,7 @@ export async function dispatchPreparedGitManagedGeneration(args: {
   // all three callers: the route, the controller, and the reconciler.
   const artifact = app.artifact_set_id ? store.getArtifactSet(app.artifact_set_id) : undefined;
   if (!artifact || (artifact.qualification !== 'exact' && artifact.qualification !== 'qualified')) {
-    return { status: 'skipped', reason: 'the artifact identity is not resolved yet' };
+    return { status: 'skipped', reason: GIT_MANAGED_ARTIFACT_UNRESOLVED_REASON };
   }
 
   try {
