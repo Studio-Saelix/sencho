@@ -581,18 +581,24 @@ blueprintsRouter.post('/apply-local', async (req: Request, res: Response): Promi
         // leaf's rendered model (compose + override + multi-file specs).
         digestPins = body.digestPins;
     }
+    // Both node_proxy and pilot_tunnel are the hub-to-leaf machine hop: a
+    // Pilot-forwarded request is authenticated by the agent's loopback token
+    // rather than the hub's node token, and the auth middleware treats the two
+    // as the same credential. Browser sessions and opaque API tokens hold
+    // neither scope, so they still cannot opt a git-managed Blueprint into
+    // snapshot compose writes.
+    const isHubLeafMachineHop = req.machineAuthScope === 'node_proxy'
+        || req.machineAuthScope === 'pilot_tunnel';
     const allowGitManaged = body.allowGitManagedContent === true
         && typeof marker.applicationId === 'string'
         && marker.applicationId.length > 0
-        // Hub-to-leaf proxy only. Browser sessions and opaque API tokens must
-        // not opt a git-managed Blueprint into snapshot compose writes.
-        && req.machineAuthScope === 'node_proxy';
+        && isHubLeafMachineHop;
     // A recovery capture on a Blueprint apply is a hub-driven rollout feature:
     // a leaf has no GitOps rows of its own, so the hub both asks for the
     // capture and supplies the binding it should record. Only the machine-auth
     // hub hop may request it, on the same rule as git-managed content.
     const captureRecovery = body.captureRecovery === true
-        && req.machineAuthScope === 'node_proxy';
+        && isHubLeafMachineHop;
     try {
         const outcome = await BlueprintService.getInstance().applyLocalUnderLock(
             req.nodeId,
