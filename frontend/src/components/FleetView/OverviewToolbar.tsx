@@ -18,6 +18,7 @@ import type { ViewMode, SortField, FilterStatus, FilterType, FilterNetworking, F
 const FILTER_SECTION_LABEL_CLASS = 'text-[10px] leading-3 font-mono uppercase tracking-[0.18em] text-stat-subtitle';
 
 const SORT_OPTIONS = [
+    { value: 'attention', label: 'Attention' },
     { value: 'name', label: 'Name' },
     { value: 'cpu', label: 'CPU Usage' },
     { value: 'memory', label: 'Memory Usage' },

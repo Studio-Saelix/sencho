@@ -102,6 +102,41 @@ describe('useFleetOverview', () => {
     expect(result.current.processedNodes.map(n => n.name)).toEqual(['Bravo', 'Alpha', 'Charlie']);
   });
 
+  it('sorts offline first, then critical, then the rest by name in attention order', async () => {
+    const { result } = setup({ sortBy: 'attention' });
+    await act(async () => { await result.current.fetchOverview(); });
+    // Charlie is offline, Bravo is critical (95% CPU), Alpha is fine.
+    expect(result.current.processedNodes.map(n => n.name)).toEqual(['Charlie', 'Bravo', 'Alpha']);
+  });
+
+  it('breaks attention ties by name and flips that with the direction', async () => {
+    const two = [
+      { ...NODES[0] },
+      { ...NODES[1], id: 4, name: 'Delta', systemStats: sys('10.0') },
+      { ...NODES[1], id: 5, name: 'Echo', systemStats: sys('10.0') },
+    ];
+    apiFetchMock.mockImplementation((path: string) => Promise.resolve(okJson(path === '/fleet/overview' ? two : {})));
+    const asc = setup({ sortBy: 'attention', sortDir: 'asc' });
+    await act(async () => { await asc.result.current.fetchOverview(); });
+    // Same rank for Delta and Echo, so the name decides; Local stays pinned first in the grid list.
+    expect(asc.result.current.processedNodes.map(n => n.name)).toEqual(['Alpha', 'Delta', 'Echo']);
+    const desc = setup({ sortBy: 'attention', sortDir: 'desc' });
+    await act(async () => { await desc.result.current.fetchOverview(); });
+    expect(desc.result.current.processedNodes.map(n => n.name)).toEqual(['Echo', 'Delta', 'Alpha']);
+  });
+
+  it('keeps the Local node first in the grid list whatever the attention order', async () => {
+    const { result } = setup({ sortBy: 'attention' });
+    await act(async () => { await result.current.fetchOverview(); });
+    expect(result.current.allNodes.map(n => n.name)).toEqual(['Alpha', 'Charlie', 'Bravo']);
+  });
+
+  it('reverses attention order when the direction is descending', async () => {
+    const { result } = setup({ sortBy: 'attention', sortDir: 'desc' });
+    await act(async () => { await result.current.fetchOverview(); });
+    expect(result.current.processedNodes.map(n => n.name)).toEqual(['Alpha', 'Bravo', 'Charlie']);
+  });
+
   it('ignores an aborted fetch without surfacing an error', async () => {
     const { result } = setup();
     apiFetchMock.mockImplementationOnce(() => Promise.reject(new DOMException('aborted', 'AbortError')));

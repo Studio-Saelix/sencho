@@ -21,19 +21,16 @@ The page has three rails stacked top to bottom: a status masthead, a tab strip p
 
 A single rail summarises the state of every registered node so you can read the whole estate without scrolling.
 
-- A **state word** that always reads `The fleet`, set in the editorial display face. The word changes color with the fleet's overall state: foreground when **Healthy** (every node online, none critical), warning when **Degraded** (any node offline), destructive when **Critical** (any online node above the CPU or disk threshold).
-- A **rail tint** down the left edge of the masthead that mirrors the state colour, plus a subtle gradient wash across the bar. When Healthy, the rail carries a slow ambient shimmer; when Degraded or Critical, it switches to a steady glow instead, so an alert state reads as calm, sustained emphasis rather than a distracting pulse.
-- A **meta line** in uppercase mono tracking that reads `<n> nodes · <m> online · last sync Xs`, where the sync delta uses compact units (`s` / `m` / `h`). While data is loading the line reads `syncing…` instead.
-- A **reasons line** below the meta line that names exactly what is wrong, e.g. `1 offline · 1 critical`. The reasons line is hidden when the fleet is Healthy.
+- A small **FLEET** label above the **state word**, set in the editorial display face. The word is the fleet's verdict and its color follows it: **Healthy** (every node online, none critical), **Degraded** (any node offline, shown in warning), **Critical** (any online node above the CPU or disk threshold, shown in destructive). It reads **Checking** until the first overview arrives, **Unavailable** if that first overview could not be loaded, and **No nodes** when none are registered, so an empty or unknown fleet never looks healthy.
+- A **rail tint** down the left edge of the masthead that mirrors the state colour, plus a subtle gradient wash across the bar. When Healthy, the rail carries a slow ambient shimmer; when Degraded or Critical, it switches to a steady glow instead.
+- A **detail line** under the state word that reads `<n> nodes · <m> offline · <k> critical · synced Xs ago`. Offline and critical appear only when they are above zero, and the sync delta uses compact units (`s` / `m` / `h` / `d`). The node count and sync age are replaced by `syncing…` while data loads and `not synced` if nothing has loaded yet.
 - Three **stat tiles** on the right edge, in mono tabular numerals:
 
 | Tile | What it shows |
 |------|---------------|
-| **CPU** | Average CPU across online nodes, with a sub-line that names the peak node (`peak <name> <percent>%`). The value tints amber once average CPU is at or above 80%. |
-| **MEM** | Total RAM used across online nodes, with `of <total> · <percent>%` underneath. |
-| **CONTAINERS** | Active running container count across online nodes, with `of <total> total` underneath. |
-
-- An **alerts indicator** pinned to the far right: a bell icon next to the current critical-node count, with an `alert` / `alerts` mono label. The icon and number tint destructive while the count is above zero.
+| **CPU** | Average CPU across online nodes. The value tints amber once the average is at or above 80%. |
+| **MEM** | Total RAM used across online nodes. |
+| **CONTAINERS** | Running containers across online nodes as `<running>/<total>`. |
 
 ### Tabs
 
@@ -74,7 +71,7 @@ In **Grid** mode the toolbar exposes search, sort, filters, and the view toggle.
 | Control | Behaviour |
 |---------|-----------|
 | **Search** | Collapsed to a single icon button by default; click it to expand the input (it stays expanded while a query is entered and collapses again on blur once cleared). Filters in real time against node names and the names of stacks deployed on each node. Typing `plex` keeps only nodes that have a `plex` stack; typing `dev` keeps only nodes whose name contains `dev`. |
-| **Sort** | Combobox with five orderings: Name, CPU Usage, Memory Usage, Containers, Status. The selection persists in the browser. |
+| **Sort** | Combobox with six orderings: Attention (the default; in ascending order offline nodes come first, then critical ones, then the rest by name), Name, CPU Usage, Memory Usage, Containers, Status. In the grid the Local node always stays first and the sort orders the remote nodes after it. The selection persists in the browser. |
 | **Direction toggle** | Arrow button next to the sort combobox. The icon rotates 180° and the title flips between *Switch to ascending* / *Switch to descending* to confirm the current direction. |
 | **Filters** | Popover with five sections: **Status** (All / Online / Offline), **Type** (All / Local / Remote), **Severity** (Critical Only toggle), **Networking** (All / Exposed / Unknown / Drift, matching the Networking section of each node's details sheet), and **Tags** (multi-select of fleet label palette, only visible if labels exist). The button shows a count badge for active filters; a **Clear all filters** action appears at the bottom of the popover when at least one filter is set. All filter and sort selections persist in the browser. |
 | **Grid / Topology** | Segmented control, with a Grid icon and a Topology icon. The control resets to Grid when the page is reloaded. |

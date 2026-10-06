@@ -180,9 +180,7 @@ export function FleetView({
                 onlineCount={mastheadStats.onlineCount}
                 criticalCount={mastheadStats.criticalCount}
                 totalCpuPercent={mastheadStats.avgCpuNum}
-                worstCpu={mastheadStats.worstCpu}
                 totalMemUsed={mastheadStats.totalMemUsed}
-                totalMemTotal={mastheadStats.totalMemTotal}
                 activeContainers={mastheadStats.totalContainers}
                 totalContainers={mastheadStats.totalContainersAll}
                 lastSyncAt={lastSyncAt}

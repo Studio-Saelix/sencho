@@ -2,7 +2,7 @@ import { useState, useCallback, useMemo, useRef } from 'react';
 import { apiFetch } from '@/lib/api';
 import { useFleetLabels, labelPaletteKey } from './useFleetLabels';
 import { useNodeLabels } from './useNodeLabels';
-import { isCritical, getNodeCpu, getNodeMem, getNodeMemUsed, getNodeMemTotal, getNodeDisk } from '../nodeUtils';
+import { attentionRank, isCritical, getNodeCpu, getNodeMem, getNodeMemUsed, getNodeDisk } from '../nodeUtils';
 import type { FleetNode, ViewMode, FleetPreferences, NodeUpdateStatus } from '../types';
 
 interface MastheadStats {
@@ -12,9 +12,7 @@ interface MastheadStats {
     totalContainers: number;
     totalContainersAll: number;
     avgCpuNum: number;
-    worstCpu: { name: string; percent: number } | null;
     totalMemUsed: number;
-    totalMemTotal: number;
 }
 
 interface UseFleetOverviewOptions {
@@ -128,14 +126,7 @@ export function useFleetOverview({ prefs, updatePrefs, updateStatuses }: UseFlee
         const avgCpuNum = onlineNodes.length > 0
             ? onlineNodes.reduce((sum, n) => sum + getNodeCpu(n), 0) / onlineNodes.length
             : 0;
-        const worstCpuNode = onlineNodes.length > 0
-            ? onlineNodes.reduce((worst, n) => getNodeCpu(n) > getNodeCpu(worst) ? n : worst, onlineNodes[0])
-            : null;
-        const worstCpu = worstCpuNode
-            ? { name: worstCpuNode.name, percent: getNodeCpu(worstCpuNode) }
-            : null;
         const totalMemUsed = onlineNodes.reduce((sum, n) => sum + getNodeMemUsed(n), 0);
-        const totalMemTotal = onlineNodes.reduce((sum, n) => sum + getNodeMemTotal(n), 0);
         return {
             nodeCount: nodes.length,
             onlineCount,
@@ -143,9 +134,7 @@ export function useFleetOverview({ prefs, updatePrefs, updateStatuses }: UseFlee
             totalContainers,
             totalContainersAll,
             avgCpuNum,
-            worstCpu,
             totalMemUsed,
-            totalMemTotal,
         };
     }, [nodes, onlineNodes]);
 
@@ -197,6 +186,9 @@ export function useFleetOverview({ prefs, updatePrefs, updateStatuses }: UseFlee
         filtered.sort((a, b) => {
             let cmp = 0;
             switch (prefs.sortBy) {
+                case 'attention':
+                    cmp = attentionRank(a) - attentionRank(b) || a.name.localeCompare(b.name);
+                    break;
                 case 'name':
                     cmp = a.name.localeCompare(b.name);
                     break;

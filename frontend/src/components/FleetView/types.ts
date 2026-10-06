@@ -88,7 +88,7 @@ export interface NodeUpdateStatus {
 }
 
 export type ViewMode = 'grid' | 'topology';
-export type SortField = 'name' | 'cpu' | 'memory' | 'containers' | 'status';
+export type SortField = 'attention' | 'name' | 'cpu' | 'memory' | 'containers' | 'status';
 export type SortDir = 'asc' | 'desc';
 export type FilterStatus = 'all' | 'online' | 'offline';
 export type FilterType = 'all' | 'local' | 'remote';
