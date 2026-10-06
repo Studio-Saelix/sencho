@@ -48,7 +48,7 @@ The **Skip** button next to Update hides the update prompt for that node and exc
   <img src="/images/fleet-view/node-card-opsix-online.png" alt="Node card for the Opsix remote showing a Proxy marker, the version chip 'v0.95.0', the Running / Stopped / Stacks counters (4 / 0 / 3), and CPU / RAM / Disk usage bars." />
 </Frame>
 
-When an update is available, this same card gains a warning **Update available** pill next to the version chip and an outline **Update to vX.Y.Z** button across the bottom (not pictured above, since every node in this fleet is currently up to date). Either surface dispatches the same backend call. While the call is in flight, the button reads **Triggering...** with a spinning icon, then settles into the **Updating** badge once the gateway has accepted the request.
+When an update is available, this same card gains an **Update available** chip next to the version and an outline **Update to vX.Y.Z** button across the bottom (not pictured above, since every node in this fleet is currently up to date). Either surface dispatches the same backend call. While the call is in flight, the button reads **Triggering...** with a spinning icon, then settles into the **Updating** badge once the gateway has accepted the request.
 
 The gateway switches to a fast 5-second polling loop while any node is in the `Updating` state, so the badge advances in near real time without waiting for the next 30-second fleet refresh.
 

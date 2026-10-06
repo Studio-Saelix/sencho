@@ -1,13 +1,12 @@
 import { useState } from 'react';
 import {
     Server, Cpu, MemoryStick, HardDrive, ChevronDown, ChevronRight,
-    Layers, WifiOff, AlertTriangle, Download, Loader2,
-    MoreVertical, Ban, Pencil, Trash2, Info, FlaskConical,
+    Layers, WifiOff, Ban,
+    MoreVertical, Pencil, Trash2, Info,
 } from 'lucide-react';
-import { Button } from '@/components/ui/button';
-import { Badge, badgeVariants } from '@/components/ui/badge';
+import { Badge } from '@/components/ui/badge';
+import { BusyButton } from '@/components/ui/busy-button';
 import { Skeleton } from '@/components/ui/skeleton';
-import { ConfirmModal } from '@/components/ui/modal';
 import {
     DropdownMenu,
     DropdownMenuContent,
@@ -22,16 +21,18 @@ import { cn, formatBytes } from '@/lib/utils';
 import { apiFetch } from '@/lib/api';
 import { toast } from '@/components/ui/toast-store';
 import { formatVersion } from '@/lib/version';
+import type { StatusTone } from '@/lib/statusTone';
 import { useAuth } from '@/context/AuthContext';
 import { useNodes, type Node } from '@/context/NodeContext';
-import { cordonNode, uncordonNode } from '@/lib/nodesApi';
 import { UpdateStatusBadge } from './UpdateStatusBadge';
-import { PinnedUpdateBadge } from './PinnedUpdateBadge';
 import { StackSection } from './NodeCardStackList';
-import { openGitOpsWorkplace } from '@/components/gitops/portfolio/portfolioNavigation';
+import { NodeCordonModal } from './NodeCordonModal';
+import { useNodeVerbs } from './hooks/useNodeVerbs';
+import { deriveNodeStatus, type NetworkingSignal } from './nodeStatus';
+import { VERB_ICON } from './verbIcons';
 import type { Label as StackLabel } from '../label-types';
 import type { FleetNode, NodeUpdateStatus } from './types';
-import { getNodeCpu, getNodeMem, getNodeMemUsed, getNodeMemTotal, getNodeDisk, isCritical } from './nodeUtils';
+import { getNodeCpu, getNodeMem, getNodeMemUsed, getNodeMemTotal, getNodeDisk } from './nodeUtils';
 
 // --- Types ---
 
@@ -40,6 +41,8 @@ export interface NodeCardProps {
     onNavigate: (nodeId: number, stackName: string) => void;
     /** GitOps applications needing attention that involve this node, if loaded. */
     gitopsAttention?: number;
+    /** Which networking signals this node carries, if loaded. */
+    networkingSignal?: NetworkingSignal;
     labelMap?: Record<string, StackLabel[]>;
     updateStatus?: NodeUpdateStatus;
     onUpdate?: (nodeId: number) => void;
@@ -50,9 +53,22 @@ export interface NodeCardProps {
     onEdit?: (node: Node) => void;
     onDelete?: (node: Node) => void;
     onOpenMuteRulesWithPrefill?: (draft: MuteRuleDraft) => void;
-    /** Opens the read-only Node details sheet. Available to any role that can see the card. */
+    /** Switches to the node's Networking page. */
+    onOpenNetworking?: (nodeId: number) => void;
+    /** Runs after a connection test so the overview picks up the new state. */
+    onTested?: () => void;
+    /** Opens the Node details sheet. Available to any role that can see the card. */
     onOpenDetails?: (nodeId: number) => void;
 }
+
+/** Card chip colours per tone: tinted outline, never a solid fill. */
+const CHIP_TONE: Record<StatusTone, string> = {
+    destructive: 'bg-destructive/10 text-destructive border-destructive/30',
+    warning: 'bg-warning/15 text-warning border-warning/30',
+    brand: 'bg-brand/10 text-brand border-brand/30',
+    neutral: 'bg-muted text-muted-foreground border-card-border/40',
+    success: '',
+};
 
 // --- Sub-Components ---
 
@@ -69,13 +85,11 @@ function UsageBar({ percent, color }: { percent: number; color: string }) {
 
 // --- Main Export ---
 
-export function NodeCard({ node, onNavigate, gitopsAttention, labelMap, updateStatus, onUpdate, updatingNodeId, onRetryUpdate, onDismissUpdate, onCordonChange, onEdit, onDelete, onOpenMuteRulesWithPrefill, onOpenDetails }: NodeCardProps) {
+export function NodeCard({ node, onNavigate, gitopsAttention, networkingSignal, labelMap, updateStatus, onUpdate, updatingNodeId, onRetryUpdate, onDismissUpdate, onCordonChange, onEdit, onDelete, onOpenMuteRulesWithPrefill, onOpenNetworking, onTested, onOpenDetails }: NodeCardProps) {
     const [expanded, setExpanded] = useState(false);
     const [stacks, setStacks] = useState<string[] | null>(node.stacks);
     const [loadingStacks, setLoadingStacks] = useState(false);
     const [cordonModalOpen, setCordonModalOpen] = useState(false);
-    const [cordonReason, setCordonReason] = useState('');
-    const [cordonSubmitting, setCordonSubmitting] = useState(false);
 
     const { isAdmin, can } = useAuth();
     const { nodes: registryNodes } = useNodes();
@@ -100,38 +114,27 @@ export function NodeCard({ node, onNavigate, gitopsAttention, labelMap, updateSt
     const isOnline = node.status === 'online';
     const isLocal = node.type === 'local';
     const isPilot = (registryNode?.mode ?? node.mode) === 'pilot_agent';
+    const status = deriveNodeStatus({ node, isPilot, updateStatus, gitopsAttention, networking: networkingSignal });
+    const { answer } = status;
+    const hasReadings = isOnline && (node.stats !== null || node.systemStats !== null);
+    const verbs = useNodeVerbs({
+        node,
+        handlers: { onUpdate, updatingNodeId, onRetryUpdate, onOpenNetworking, onTested },
+        openCordon: () => setCordonModalOpen(true),
+    });
+    // An update record (running, failed, just finished) keeps its own badge with
+    // Retry and Dismiss, even when a louder state such as Offline is the chip.
+    // When the update is itself the Answer the badge IS the chip, and its verb is
+    // not repeated as a button.
+    const updateIsAnswer = answer.kind === 'update-failed' || answer.kind === 'updating';
+    const verb = answer.verb && answer.verb.id !== 'retry-update' && verbs.isAllowed(answer.verb) ? answer.verb : null;
+    const VerbIcon = verb ? VERB_ICON[verb.id] : null;
     const formattedVersion = formatVersion(updateStatus?.version);
-    const formattedLatest = formatVersion(updateStatus?.latestVersion);
     const cpuPercent = getNodeCpu(node);
     const memPercent = getNodeMem(node);
     const memUsed = getNodeMemUsed(node);
     const memTotal = getNodeMemTotal(node);
     const diskPercent = getNodeDisk(node);
-
-    const openCordonModal = () => {
-        setCordonReason('');
-        setCordonModalOpen(true);
-    };
-
-    const handleCordonConfirm = async () => {
-        setCordonSubmitting(true);
-        try {
-            if (node.cordoned) {
-                await uncordonNode(node.id);
-                toast.success(`Uncordoned ${node.name}`);
-            } else {
-                await cordonNode(node.id, cordonReason.trim() || null);
-                toast.success(`Cordoned ${node.name}`);
-            }
-            setCordonModalOpen(false);
-            onCordonChange?.();
-        } catch (error) {
-            const message = error instanceof Error ? error.message : 'Failed to update cordon state';
-            toast.error(message);
-        } finally {
-            setCordonSubmitting(false);
-        }
-    };
 
     const handleExpand = async () => {
         const next = !expanded;
@@ -160,8 +163,33 @@ export function NodeCard({ node, onNavigate, gitopsAttention, labelMap, updateSt
         ? 'relative overflow-hidden ring-1 ring-brand/30 before:absolute before:inset-y-0 before:left-0 before:w-[2px] before:bg-brand before:rounded-l-xl after:pointer-events-none after:absolute after:inset-0 after:bg-gradient-to-r after:from-brand/[0.06] after:via-transparent after:to-transparent'
         : '';
 
+    const verbButton = verb && VerbIcon ? (
+        verb.id === 'update-dev' ? (
+            <BusyButton
+                size="sm"
+                className="w-full h-7 text-xs bg-brand text-brand-foreground hover:bg-brand/90 border-0"
+                onClick={() => verbs.run(verb)}
+                pending={verbs.isPending(verb)}
+                busyLabel="Triggering..."
+            >
+                <VerbIcon className="w-3 h-3 mr-1.5" strokeWidth={1.5} />{verb.label}
+            </BusyButton>
+        ) : (
+            <BusyButton
+                variant="outline"
+                size="sm"
+                className="w-full h-7 text-xs"
+                onClick={() => verbs.run(verb)}
+                pending={verbs.isPending(verb)}
+                busyLabel={verb.id === 'test-connection' ? 'Testing...' : 'Triggering...'}
+            >
+                <VerbIcon className="w-3 h-3 mr-1.5" strokeWidth={1.5} />{verb.label}
+            </BusyButton>
+        )
+    ) : null;
+
     return (
-        <div className={`rounded-xl border border-card-border border-t-card-border-top bg-card text-card-foreground shadow-card-bevel transition-colors hover:border-t-card-border-hover ${localRailClasses} ${isOnline ? '' : 'opacity-60'}`}>
+        <div className={`rounded-xl border border-card-border border-t-card-border-top bg-card text-card-foreground shadow-card-bevel transition-colors hover:border-t-card-border-hover ${localRailClasses}`}>
             {/* Card Header */}
             <div className="relative p-4 pb-3">
                 {isLocal ? (
@@ -211,7 +239,7 @@ export function NodeCard({ node, onNavigate, gitopsAttention, labelMap, updateSt
                                 </DropdownMenuItem>
                             )}
                             {canCordon && (
-                                <DropdownMenuItem onSelect={openCordonModal}>
+                                <DropdownMenuItem onSelect={() => setCordonModalOpen(true)}>
                                     <Ban className="w-3.5 h-3.5 mr-2" />
                                     {node.cordoned ? 'Uncordon node' : 'Cordon node'}
                                 </DropdownMenuItem>
@@ -228,14 +256,19 @@ export function NodeCard({ node, onNavigate, gitopsAttention, labelMap, updateSt
                         <div className="min-w-0">
                             <h3 className="text-sm font-medium truncate">{node.name}</h3>
                             <div className="flex items-center gap-1.5 mt-0.5 flex-wrap">
-                                {!isOnline && (
-                                    <Badge variant="secondary" className="text-[10px] px-1.5 py-0 h-4 shrink-0">
-                                        <WifiOff className="w-2.5 h-2.5 mr-0.5" /> Offline
-                                    </Badge>
-                                )}
                                 {formattedVersion && (
-                                    <Badge variant="outline" className="text-[10px] px-1.5 py-0 h-4 font-mono tabular-nums shrink-0">
-                                        {formattedVersion}
+                                    <span className="font-mono text-[10px] tabular-nums text-stat-subtitle">
+                                        {formattedVersion}{updateStatus?.isDevImage ? ' · integration' : ''}
+                                    </span>
+                                )}
+                                {answer.kind !== 'healthy' && !updateIsAnswer && (
+                                    <Badge
+                                        variant="outline"
+                                        className={cn('text-[10px] px-1.5 py-0 h-4 shrink-0', CHIP_TONE[answer.tone])}
+                                        title={answer.line}
+                                    >
+                                        {answer.kind === 'offline' && <WifiOff className="w-2.5 h-2.5 mr-0.5" />}
+                                        {answer.title}
                                     </Badge>
                                 )}
                                 {updateStatus?.updateStatus && (
@@ -246,49 +279,15 @@ export function NodeCard({ node, onNavigate, gitopsAttention, labelMap, updateSt
                                         onDismiss={isAdmin && onDismissUpdate ? () => onDismissUpdate(node.id) : undefined}
                                     />
                                 )}
-                                {updateStatus?.updateAvailable && !updateStatus.updateStatus && !updateStatus?.skipActive && !(updateStatus?.updateBlocked && updateStatus?.imageChannel !== 'hardened') && (
-                                    <Badge className="text-[10px] px-1.5 py-0 h-4 bg-warning/15 text-warning border-warning/30 shrink-0">
-                                        Update available
-                                    </Badge>
-                                )}
-                                {(updateStatus?.updateBlocked && updateStatus?.imageChannel !== 'hardened') && updateStatus?.updateAvailable && !updateStatus.updateStatus && !updateStatus?.skipActive && (
-                                    <PinnedUpdateBadge reason={updateStatus.updateBlockedReason} />
-                                )}
-                                {updateStatus?.skipActive && (
-                                    <Badge className="text-[10px] px-1.5 py-0 h-4 bg-muted text-muted-foreground border-card-border/40 shrink-0">
-                                        Skipped
-                                    </Badge>
-                                )}
-                                {updateStatus?.isDevImage && (
-                                    <Badge className="text-[10px] px-1.5 py-0 h-4 bg-warning/15 text-warning border-warning/30 shrink-0">
-                                        <FlaskConical className="w-2.5 h-2.5 mr-0.5" strokeWidth={1.5} /> Integration image
-                                    </Badge>
-                                )}
-                                {isOnline && isCritical(node) && (
-                                    <Badge variant="destructive" className="text-[10px] px-1.5 py-0 h-4 shrink-0">
-                                        <AlertTriangle className="w-2.5 h-2.5 mr-0.5" /> Critical
-                                    </Badge>
-                                )}
-                                {node.cordoned && (
-                                    <Badge
-                                        variant="outline"
-                                        className="text-[10px] px-1.5 py-0 h-4 shrink-0 bg-warning/15 text-warning border-warning/30"
-                                        title={node.cordoned_reason ?? 'Unschedulable: new blueprint deployments skip this node'}
-                                    >
-                                        <Ban className="w-2.5 h-2.5 mr-0.5" /> Cordoned
-                                    </Badge>
-                                )}
-                                {gitopsAttention !== undefined && gitopsAttention > 0 && (
+                                {status.otherCount > 0 && onOpenDetails && (
                                     <button
                                         type="button"
-                                        className={cn(
-                                            badgeVariants({ variant: 'outline' }),
-                                            'text-[10px] px-1.5 py-0 h-4 shrink-0 cursor-pointer bg-warning/10 text-warning border-warning/30 hover:bg-warning/20',
-                                        )}
-                                        onClick={(event) => { event.stopPropagation(); openGitOpsWorkplace({ nodeId: node.id, attention: true }); }}
-                                        title="Open the GitOps applications needing attention on this node"
+                                        className="rounded-sm px-1 font-mono text-[10px] text-stat-subtitle hover:text-foreground transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand/50"
+                                        title={`${status.otherCount} more: ${status.conditions.slice(1).map(c => c.title).join(', ')}`}
+                                        aria-label={`+${status.otherCount} more states: ${status.conditions.slice(1).map(c => c.title).join(', ')}. Open node details`}
+                                        onClick={() => onOpenDetails(node.id)}
                                     >
-                                        GitOps · {gitopsAttention} attention
+                                        +{status.otherCount}
                                     </button>
                                 )}
                             </div>
@@ -297,7 +296,7 @@ export function NodeCard({ node, onNavigate, gitopsAttention, labelMap, updateSt
                 </div>
 
                 {/* Container Stats */}
-                {isOnline && node.stats && (
+                {hasReadings && node.stats && (
                     <div className="grid grid-cols-3 mb-3 rounded-md border border-card-border overflow-hidden">
                         <div className="border-r border-card-border bg-card px-2.5 py-2 text-center">
                             <div className="text-lg font-medium leading-none tabular-nums text-stat-value">{node.stats.active}</div>
@@ -315,7 +314,7 @@ export function NodeCard({ node, onNavigate, gitopsAttention, labelMap, updateSt
                 )}
 
                 {/* Resource Usage Bars */}
-                {isOnline && node.systemStats && (
+                {hasReadings && node.systemStats && (
                     <div className="space-y-2">
                         <div>
                             <div className="flex items-center justify-between text-xs mb-1">
@@ -349,89 +348,29 @@ export function NodeCard({ node, onNavigate, gitopsAttention, labelMap, updateSt
                     </div>
                 )}
 
-                {/* Update button (mutating action: admin only, matches the requireAdmin route guard) */}
-                {isOnline && updateStatus?.updateAvailable && !updateStatus.updateStatus && !updateStatus?.skipActive && !(updateStatus?.updateBlocked && updateStatus?.imageChannel !== 'hardened') && onUpdate && isAdmin && (
-                    <div className="mt-3 pt-3 border-t border-border/50">
-                        <Button
-                            variant="outline"
-                            size="sm"
-                            className="w-full h-7 text-xs"
-                            onClick={() => onUpdate(node.id)}
-                            disabled={updatingNodeId === node.id}
-                        >
-                            {updatingNodeId === node.id ? (
-                                <><Loader2 className="w-3 h-3 mr-1.5 animate-spin" />Triggering...</>
-                            ) : (
-                                <><Download className="w-3 h-3 mr-1.5" strokeWidth={1.5} />{formattedLatest ? `Update to ${formattedLatest}` : 'Update'}</>
-                            )}
-                        </Button>
+                {/* No readings: say why, once, and offer the one verb that helps */}
+                {!hasReadings && (
+                    <div className="space-y-3 pt-1">
+                        <p className="text-sm text-muted-foreground text-center">{answer.line}</p>
+                        {verbButton}
                     </div>
                 )}
 
-                {/* Dev-build update button: mutating action, admin only, same requireAdmin
-                    route as the stable update above. No skipActive term: the backend
-                    already clears skipActive for a dev row (fleet.ts), so adding it here
-                    would reintroduce that stale-skip leak. */}
-                {isOnline && updateStatus?.devBuildUpdateAvailable && !updateStatus.updateStatus && onUpdate && isAdmin && (
-                    <div className="mt-3 pt-3 border-t border-border/50">
-                        <Button
-                            size="sm"
-                            className="w-full h-7 text-xs bg-brand text-brand-foreground hover:bg-brand/90 border-0"
-                            onClick={() => onUpdate(node.id)}
-                            disabled={updatingNodeId === node.id}
-                        >
-                            {updatingNodeId === node.id ? (
-                                <><Loader2 className="w-3 h-3 mr-1.5 animate-spin" />Triggering...</>
-                            ) : (
-                                <><FlaskConical className="w-3 h-3 mr-1.5" strokeWidth={1.5} />Update dev build</>
-                            )}
-                        </Button>
-                    </div>
-                )}
-
-                {/* Offline placeholder */}
-                {!isOnline && (
-                    <div className="flex items-center justify-center py-6 text-muted-foreground text-sm">
-                        Node unreachable
-                    </div>
+                {/* The Answer's resolving verb (mutating actions are gated by the session's permission) */}
+                {hasReadings && verbButton && (
+                    <div className="mt-3 pt-3 border-t border-border/50">{verbButton}</div>
                 )}
             </div>
 
-            <ConfirmModal
+            <NodeCordonModal
+                node={node}
                 open={cordonModalOpen}
-                onOpenChange={(open) => {
-                    if (!cordonSubmitting) setCordonModalOpen(open);
-                }}
-                kicker="Federation"
-                title={node.cordoned ? `Uncordon ${node.name}` : `Cordon ${node.name}`}
-                description={node.cordoned
-                    ? 'Re-enable this node for new blueprint placements. Existing deployments are unchanged.'
-                    : 'Mark this node as unschedulable. New blueprint deployments will skip it. Existing deployments remain in place.'}
-                confirmLabel={node.cordoned ? 'Uncordon node' : 'Cordon node'}
-                confirming={cordonSubmitting}
-                onConfirm={handleCordonConfirm}
-            >
-                {!node.cordoned && (
-                    <div className="space-y-1.5">
-                        <label htmlFor={`cordon-reason-${node.id}`} className="text-xs font-medium text-muted-foreground">
-                            Reason (optional)
-                        </label>
-                        <input
-                            id={`cordon-reason-${node.id}`}
-                            type="text"
-                            maxLength={256}
-                            value={cordonReason}
-                            onChange={(e) => setCordonReason(e.target.value)}
-                            placeholder="e.g. draining for maintenance"
-                            className="w-full h-8 px-2 text-sm rounded-md border border-input bg-background"
-                            disabled={cordonSubmitting}
-                        />
-                    </div>
-                )}
-            </ConfirmModal>
+                onOpenChange={setCordonModalOpen}
+                onChanged={onCordonChange}
+            />
 
             {/* Expandable Stack List with Container Drill-Down */}
-            {isOnline && (
+            {hasReadings && (
                 <div className="border-t">
                     <button
                         onClick={handleExpand}
@@ -459,7 +398,7 @@ export function NodeCard({ node, onNavigate, gitopsAttention, labelMap, updateSt
                                             stackName={stack}
                                             nodeId={node.id}
                                             onNavigate={onNavigate}
-                                            labelMap={labelMap}
+                                            labelMap={labelMap ?? {}}
                                         />
                                     ))}
                                 </div>

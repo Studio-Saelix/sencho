@@ -7,9 +7,11 @@ const useNodesMock = vi.fn();
 
 vi.mock('@/context/AuthContext', () => ({ useAuth: () => useAuthMock() }));
 vi.mock('@/context/NodeContext', () => ({ useNodes: () => useNodesMock() }));
-vi.mock('@/lib/api', () => ({ apiFetch: vi.fn() }));
+const apiFetchMock = vi.fn();
+vi.mock('@/lib/api', () => ({ apiFetch: (...args: unknown[]) => apiFetchMock(...args) }));
 vi.mock('@/lib/nodesApi', () => ({ cordonNode: vi.fn(), uncordonNode: vi.fn() }));
-vi.mock('@/components/ui/toast-store', () => ({ toast: { success: vi.fn(), error: vi.fn() } }));
+const toastMock = vi.hoisted(() => ({ success: vi.fn(), error: vi.fn() }));
+vi.mock('@/components/ui/toast-store', () => ({ toast: toastMock }));
 
 import { NodeCard } from '../NodeCard';
 import { GITOPS_PORTFOLIO_SCOPE_EVENT } from '@/components/gitops/portfolio/portfolioNavigation';
@@ -48,14 +50,15 @@ describe('NodeCard', () => {
     expect(screen.queryByText('Node unreachable')).not.toBeInTheDocument();
   });
 
-  it('opens the GitOps applications needing attention on this node, without opening the card', () => {
+  it('names the GitOps attention once and opens the applications from its verb, without opening the card', () => {
     const props = baseProps(onlineNode());
     const scopes: unknown[] = [];
     const onScope = (e: Event) => scopes.push((e as CustomEvent).detail);
     window.addEventListener(GITOPS_PORTFOLIO_SCOPE_EVENT, onScope);
     try {
       render(<NodeCard {...props} gitopsAttention={2} />);
-      fireEvent.click(screen.getByText('GitOps · 2 attention'));
+      expect(screen.getByText('GitOps')).toBeInTheDocument();
+      fireEvent.click(screen.getByRole('button', { name: /Open GitOps/ }));
     } finally {
       window.removeEventListener(GITOPS_PORTFOLIO_SCOPE_EVENT, onScope);
     }
@@ -63,15 +66,110 @@ describe('NodeCard', () => {
     expect(props.onOpenDetails).not.toHaveBeenCalled();
   });
 
-  it('shows no GitOps chip when nothing on the node needs attention', () => {
+  it('shows no state chip and no verb when nothing on the node needs attention', () => {
     render(<NodeCard {...baseProps(onlineNode())} gitopsAttention={0} />);
-    expect(screen.queryByText(/GitOps ·/)).not.toBeInTheDocument();
+    expect(screen.queryByText('GitOps')).not.toBeInTheDocument();
+    expect(screen.queryByText('Healthy')).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Open GitOps|Update|Test connection/ })).not.toBeInTheDocument();
   });
 
-  it('shows the unreachable placeholder and hides stats for an offline node', () => {
+  it('shows one chip for the loudest state and counts the rest, opening details from the count', async () => {
+    const props = baseProps({ ...onlineNode(), cordoned: true, cordoned_reason: 'patching' });
+    render(<NodeCard {...props} gitopsAttention={1} networkingSignal={{ exposed: true, unknown: false, drift: false }} />);
+    expect(screen.getByText('GitOps')).toBeInTheDocument();
+    expect(screen.queryByText('Cordoned')).not.toBeInTheDocument();
+    expect(screen.queryByText('Networking')).not.toBeInTheDocument();
+    await userEvent.click(screen.getByRole('button', { name: /2 more states/ }));
+    expect(props.onOpenDetails).toHaveBeenCalledWith(2);
+  });
+
+  it('says why an offline Proxy node is unreachable, with one Test connection verb and no stats', () => {
     render(<NodeCard {...baseProps(offlineNode())} />);
     expect(screen.getByText('Offline')).toBeInTheDocument();
-    expect(screen.getByText('Node unreachable')).toBeInTheDocument();
+    expect(screen.getByText('Proxy unreachable · never connected')).toBeInTheDocument();
+    expect(screen.queryByText('Node unreachable')).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /Test connection/ })).toBeInTheDocument();
+    expect(screen.queryByText('Running')).not.toBeInTheDocument();
+  });
+
+  it('says a Pilot is disconnected with its last-seen age', () => {
+    const seen = Math.floor(Date.now() / 1000) - 12 * 60;
+    render(<NodeCard {...baseProps({ ...offlineNode(), mode: 'pilot_agent', pilot_last_seen: seen })} />);
+    expect(screen.getByText('Pilot disconnected · last seen 12m ago')).toBeInTheDocument();
+  });
+
+  it('hides Test connection from a user who cannot manage the node', () => {
+    useAuthMock.mockReturnValue({ isAdmin: false, can: vi.fn(() => false) });
+    render(<NodeCard {...baseProps(offlineNode())} />);
+    expect(screen.getByText('Proxy unreachable · never connected')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Test connection/ })).not.toBeInTheDocument();
+  });
+
+  it('runs the connection test in place, reports the result, and refreshes the overview', async () => {
+    const onTested = vi.fn();
+    apiFetchMock.mockResolvedValue(new Response(JSON.stringify({ success: false, error: 'Pilot agent is not connected.' }), { status: 200 }));
+    render(<NodeCard {...baseProps(offlineNode())} onTested={onTested} />);
+    await userEvent.click(screen.getByRole('button', { name: /Test connection/ }));
+    await vi.waitFor(() => expect(onTested).toHaveBeenCalledTimes(1));
+    expect(apiFetchMock).toHaveBeenCalledWith('/nodes/2/test', expect.objectContaining({ method: 'POST', localOnly: true }));
+    expect(toastMock.error).toHaveBeenCalledWith('Pilot agent is not connected.');
+  });
+
+  it('keeps the stale update reading off an offline node', () => {
+    render(<NodeCard {...baseProps(offlineNode())} updateStatus={updateAvailableStatus} onUpdate={vi.fn()} />);
+    expect(screen.queryByText('Update available')).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Update/ })).not.toBeInTheDocument();
+  });
+
+  it('keeps the update progress badge, with Retry and Dismiss, beside an Offline chip', async () => {
+    const onRetryUpdate = vi.fn();
+    const onDismissUpdate = vi.fn();
+    render(
+      <NodeCard
+        {...baseProps(offlineNode())}
+        updateStatus={{ ...updateAvailableStatus, updateAvailable: false, updateStatus: 'timeout', error: 'node never returned' }}
+        onRetryUpdate={onRetryUpdate}
+        onDismissUpdate={onDismissUpdate}
+      />,
+    );
+    expect(screen.getByText('Offline')).toBeInTheDocument();
+    expect(screen.getByText('Timed out')).toBeInTheDocument();
+    await userEvent.click(screen.getByRole('button', { name: 'Retry update' }));
+    await userEvent.click(screen.getByRole('button', { name: 'Dismiss' }));
+    expect(onRetryUpdate).toHaveBeenCalledWith(2);
+    expect(onDismissUpdate).toHaveBeenCalledWith(2);
+  });
+
+  it('keeps Retry reachable for a failed update that a Critical state outranks', async () => {
+    const onRetryUpdate = vi.fn();
+    const node = { ...onlineNode(), systemStats: { ...onlineNode().systemStats!, cpu: { usage: '95.0', cores: 4 } } };
+    render(
+      <NodeCard
+        {...baseProps(node)}
+        updateStatus={{ ...updateAvailableStatus, updateAvailable: false, updateStatus: 'failed' }}
+        onRetryUpdate={onRetryUpdate}
+      />,
+    );
+    expect(screen.getByText('Critical')).toBeInTheDocument();
+    await userEvent.click(screen.getByRole('button', { name: 'Retry update' }));
+    expect(onRetryUpdate).toHaveBeenCalledWith(2);
+  });
+
+  it('shows the just-finished update as Updated, on a node with nothing else to say', () => {
+    render(<NodeCard {...baseProps(onlineNode())} updateStatus={{ ...updateAvailableStatus, updateAvailable: false, updateStatus: 'completed' }} />);
+    expect(screen.getByText('Updated')).toBeInTheDocument();
+  });
+
+  it('locks the update button while that node is updating, with a progressive label', () => {
+    render(<NodeCard {...baseProps(onlineNode())} updateStatus={updateAvailableStatus} onUpdate={vi.fn()} updatingNodeId={2} />);
+    expect(screen.getByRole('button', { name: /Update to/ })).toBeDisabled();
+  });
+
+  it('shows a reconnecting Pilot inside its grace window with Test connection, not empty stats', () => {
+    const seen = Math.floor(Date.now() / 1000) - 5;
+    render(<NodeCard {...baseProps({ ...onlineNode(), mode: 'pilot_agent', stats: null, systemStats: null, pilot_last_seen: seen })} />);
+    expect(screen.getByText('Reconnecting')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /Test connection/ })).toBeInTheDocument();
     expect(screen.queryByText('Running')).not.toBeInTheDocument();
   });
 
@@ -138,7 +236,7 @@ describe('NodeCard', () => {
     render(<NodeCard {...baseProps({ ...onlineNode(), cordoned: true, cordoned_reason: 'patching' })} />);
 
     await userEvent.click(screen.getByRole('button', { name: 'Node actions' }));
-    expect(await screen.findByText('Uncordon node')).toBeInTheDocument();
+    expect(await screen.findByRole('menuitem', { name: 'Uncordon node' })).toBeInTheDocument();
   });
 
   const updateAvailableStatus = {
@@ -161,23 +259,24 @@ describe('NodeCard', () => {
         onUpdate={vi.fn()}
       />,
     );
-    expect(screen.getByText('Pinned')).toBeInTheDocument();
+    expect(screen.getByText('Update pinned')).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /Update/ })).not.toBeInTheDocument();
   });
 
-  it('shows the Integration image badge regardless of update availability', () => {
+  it('marks an integration image quietly beside the version, regardless of update availability', () => {
     render(
       <NodeCard
         {...baseProps(onlineNode())}
         updateStatus={{ ...updateAvailableStatus, updateAvailable: false, isDevImage: true, devBuildUpdateAvailable: false }}
       />,
     );
-    expect(screen.getByText('Integration image')).toBeInTheDocument();
+    expect(screen.getByText(/v1\.0\.0 · integration/)).toBeInTheDocument();
+    expect(screen.queryByText('Integration image')).not.toBeInTheDocument();
   });
 
-  it('does not show the Integration image badge for a non-dev node', () => {
+  it('does not mark a non-dev node as an integration image', () => {
     render(<NodeCard {...baseProps(onlineNode())} updateStatus={updateAvailableStatus} onUpdate={vi.fn()} />);
-    expect(screen.queryByText('Integration image')).not.toBeInTheDocument();
+    expect(screen.queryByText(/integration/)).not.toBeInTheDocument();
   });
 
   it('shows the dev-build update button for an admin when a dev build is available', async () => {
@@ -192,7 +291,7 @@ describe('NodeCard', () => {
     );
     const button = screen.getByRole('button', { name: /Update dev build/ });
     expect(button).toBeInTheDocument();
-    expect(screen.getByText('Integration image')).toBeInTheDocument();
+    expect(screen.getByText('New dev build')).toBeInTheDocument();
     await user.click(button);
     expect(onUpdate).toHaveBeenCalledWith(2);
   });
@@ -207,7 +306,7 @@ describe('NodeCard', () => {
       />,
     );
     expect(screen.queryByRole('button', { name: /Update dev build/ })).not.toBeInTheDocument();
-    expect(screen.getByText('Integration image')).toBeInTheDocument();
+    expect(screen.getByText('New dev build')).toBeInTheDocument();
   });
 
   it('hides the dev-build update button when no dev build is available', () => {

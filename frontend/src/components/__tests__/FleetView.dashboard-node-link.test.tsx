@@ -65,6 +65,7 @@ vi.mock('../FleetView/hooks/useFleetOverview', () => ({
     fleetStackLabelMap: {},
     updateStatusMap: new Map(),
     networkingByNode: new Map(),
+    gitopsAttentionByNode: new Map(),
     mastheadStats: {
       nodeCount: 1,
       onlineCount: 0,
