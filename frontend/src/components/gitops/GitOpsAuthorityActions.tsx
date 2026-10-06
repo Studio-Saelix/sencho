@@ -126,9 +126,9 @@ export default function GitOpsAuthorityActions({
     try {
       const result = await acceptGitOpsSource(applicationId, candidateGenerationId);
       if (result.note) {
-        // The acceptance stands; the note names what is still missing (an
-        // unresolved artifact identity, or a preparation still running).
-        toast.warning(result.note);
+        // The acceptance stands; the note says whether the rollout is starting,
+        // waiting for an operator, paused, or held.
+        toast.warning(`Source revision accepted. ${result.note}`);
       } else if (result.dispatched) {
         toast.success('Source revision accepted and the rollout started');
       } else {

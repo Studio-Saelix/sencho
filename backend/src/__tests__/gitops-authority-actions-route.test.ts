@@ -430,6 +430,24 @@ describe('POST /api/gitops/applications/:id/source/accept', () => {
     handoffSpy.mockRestore();
   });
 
+  it('reports a skipped handoff reason in the accept note', async () => {
+    const seeded = seedGitManagedBlueprint({ sourceAccepted: false });
+    const handoffSpy = vi.spyOn(await import('../services/gitops/gitManagedHandoff'), 'dispatchPreparedGitManagedGeneration')
+      .mockResolvedValue({ status: 'skipped', reason: 'the rollout authorization policy requires an operator' });
+
+    const res = await request(app)
+      .post(`/api/gitops/applications/bp:${seeded.blueprintId}/source/accept`)
+      .set('Cookie', adminCookie)
+      .send({ generationId: seeded.generationId });
+
+    expect(res.status).toBe(200);
+    expect(res.body.dispatched).toBe(false);
+    // A skipped handoff is not a plain success: the operator needs to know the
+    // rollout is waiting for them.
+    expect(res.body.note).toContain('requires an operator');
+    handoffSpy.mockRestore();
+  });
+
   it('refuses a generation that is not the current candidate', async () => {
     const seeded = seedGitManagedBlueprint({ sourceAccepted: false });
     const res = await request(app)

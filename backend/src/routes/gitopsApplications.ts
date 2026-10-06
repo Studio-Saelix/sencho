@@ -943,14 +943,16 @@ gitopsApplicationsRouter.post('/:id/source/accept', async (req: Request, res: Re
   // and policy routes keep `stack:deploy`, because those are operator
   // decisions, and the reconciler completes a skipped handoff within a tick.
   const handoff = await dispatchAcceptanceWithinTimeout(target.application.id, generationId, actor);
-  // Both can have something to say; neither may hide the other. The parts are
-  // joined as sentences, so a preparation note and a refusal do not run on.
+  // Both can have something to say; neither may hide the other. A skipped
+  // handoff is surfaced too: its reason is what tells the operator whether the
+  // rollout is starting, waiting for authorization, paused, or held, instead of
+  // a plain "accepted" that reads the same in every case.
   res.json({
     ok: true,
     materialized: prepared.materialized,
     artifactResolved: prepared.artifact === 'resolved',
     dispatched: handoff.status === 'dispatched',
-    note: joinAcceptNotes([prepared.note, handoff.status === 'blocked' ? handoff.reason : null]),
+    note: joinAcceptNotes([prepared.note, handoff.status === 'dispatched' ? null : handoff.reason]),
   });
 });
 
@@ -1516,17 +1518,18 @@ gitopsApplicationsRouter.post('/:id/rollout/resume', async (req: Request, res: R
   if (!binding) {
     // A resumed rollout with no authorization has nothing to dispatch, and an
     // unfinished rollback would be deployed over if the operator authorized
-    // next. Name it here, because this is the reply that steers them there.
+    // next. Name both, and do not tell an Automatic operator to authorize when
+    // the reconciler will start it on its own.
+    const automatic = app.rollout_authorization_policy === 'automatic';
     const rollbackPending = store.listTargets(app.id).some(
       (target) => target.target_status === 'active' && target.health_stop_reason === 'rollback_pending',
     );
-    res.json({
-      ok: true,
-      dispatched: false,
-      note: rollbackPending
-        ? 'The rollout is resumed, but no live authorization exists and a target has an unfinished rollback; finish the rollback, then authorize the rollout to start it.'
-        : 'The rollout is resumed, but no live authorization exists; authorize the rollout to start it.',
-    });
+    const note = rollbackPending
+      ? 'The rollout is resumed, but a target has an unfinished rollback; finish the rollback and resume again.'
+      : automatic
+        ? 'The rollout is resumed; the automatic policy will start it shortly.'
+        : 'The rollout is resumed, but no live authorization exists; authorize the rollout to start it.';
+    res.json({ ok: true, dispatched: false, note });
     return;
   }
   const genRow = store.getGeneration(binding.acceptedGenerationId);

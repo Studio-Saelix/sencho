@@ -468,7 +468,7 @@ describe('POST /api/gitops/applications/:id/rollout/resume', () => {
       .send({});
     expect(res.status).toBe(200);
     expect(res.body.dispatched).toBe(false);
-    expect(res.body.note).toContain('no live authorization');
+    expect(res.body.note).toContain('the automatic policy will start it shortly');
     expect(GitOpsStore.getInstance().getApplication(seeded.applicationId)!.pause_at).toBeNull();
   });
 

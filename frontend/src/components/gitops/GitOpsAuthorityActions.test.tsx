@@ -164,7 +164,7 @@ describe('GitOpsAuthorityActions', () => {
     await user.click(screen.getByTestId('gitops-action-accept-source'));
 
     // The acceptance stands; the note names what is still missing.
-    await waitFor(() => expect(toast.warning).toHaveBeenCalledWith(note));
+    await waitFor(() => expect(toast.warning).toHaveBeenCalledWith(`Source revision accepted. ${note}`));
     expect(onChanged).toHaveBeenCalled();
   });
 

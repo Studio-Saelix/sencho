@@ -37,7 +37,7 @@ The marker is the trust root. If a directory by the blueprint's name already exi
 
 Statelessness vs statefulness is decided at author time by parsing the compose file. Stateless blueprints (no persistent volumes, or only `tmpfs` mounts) deploy and evict freely. Stateful blueprints (named volumes or bind mounts) get explicit operator-confirmation prompts on the first deploy to a fresh node and on eviction from any node. Blueprints with `external: true` volumes are classified as **unknown** and treated as stateful for safety.
 
-Drift detection runs on every tick for every Active deployment regardless of policy. The policy only governs what Sencho does next: surface the drift silently, notify, or auto-redeploy.
+Drift detection runs on every tick for every Active deployment regardless of policy. The policy only governs what Sencho does next: surface the drift silently, notify, or auto-redeploy. For a Git-managed Blueprint, drift detection compares the running artifacts rather than the Direct manifest cache: its content authority is the accepted generation, so the manifest-cache comparison is skipped for that mode instead of reporting a false commit drift.
 
 ## Key capabilities
 
@@ -316,7 +316,7 @@ Rollout authorization needs resolved executable artifact evidence for the accept
 
 ### Roll back a rollout
 
-Every Git-managed rollout deploy captures the node's previous project as a recovery generation before it applies anything, which is what a later rollback restores from. **Roll back rollout** lists the application's earlier generations, newest first, and asks for the scope: one target, the targets recorded as failed, unreachable, or stale, or every changed target in the rollout. A target already running the selected generation is skipped.
+Every Git-managed rollout deploy on a Local or proxy node captures the node's previous project as a recovery generation before it applies anything, which is what a later rollback restores from. Pilot targets do not capture one yet, so rolling a Pilot back is refused on that target rather than restoring it. **Roll back rollout** lists the application's earlier generations, newest first, and asks for the scope: one target, the targets recorded as failed, unreachable, or stale, or every changed target in the rollout. A target already running the selected generation is skipped.
 
 Each node in the scope must hold a recovery generation that names the selected application generation. A node keeps the generation captured immediately before its latest rollout, so an older selection has no recovery generation to restore from and is reported as a failed target; the rollout then reads as a partially failed rollback rather than a completion.
 
