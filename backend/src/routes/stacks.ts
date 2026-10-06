@@ -29,6 +29,7 @@ import { repoUrlRejectionMessage } from '../services/gitops/repoIdentity';
 import { observeStackRuntimeArtifact } from '../services/gitops/artifactResolve';
 import { loadEffectiveArtifactContext, readNodePlatform } from '../services/gitops/effectiveArtifactContext';
 import { encodeObservedArtifactIdentity } from '../services/gitops/json';
+import { parseRestoreFailureClass } from '../services/gitops/rolloutRecovery';
 import { REF_MAX_LEN } from '../services/git/nativeGitTransport';
 import { validateCaBundlePem } from '../services/git/caBundle';
 import { enforcePolicyPreDeploy } from '../services/PolicyEnforcement';
@@ -2689,6 +2690,14 @@ stacksRouter.post('/:stackName/update', async (req: Request, res: Response) => {
   }
 });
 
+/** The node's own pre/post classification of a restore failure, when the service attached one. */
+function restoreFailureClassOf(error: unknown): { failureClass?: 'pre_mutation' | 'post_mutation' } {
+  const failureClass = parseRestoreFailureClass(
+    (error as { failureClass?: unknown } | null)?.failureClass,
+  );
+  return failureClass ? { failureClass } : {};
+}
+
 stacksRouter.post('/:stackName/rollback', async (req: Request, res: Response) => {
   const stackName = req.params.stackName as string;
   if (!requirePermission(req, res, 'stack:deploy', 'stack', stackName)) return;
@@ -2769,10 +2778,12 @@ stacksRouter.post('/:stackName/rollback', async (req: Request, res: Response) =>
         }
       } catch (compError: unknown) {
         const compCode = (compError as { code?: string }).code;
+        const compFailureClass = restoreFailureClassOf(compError);
         if (compCode === 'ROLLBACK_PROHIBITED') {
           res.status(409).json({
             error: (compError as Error).message || 'Rollback is prohibited for this generation',
             code: 'ROLLBACK_PROHIBITED',
+            ...compFailureClass,
           });
           return;
         }
@@ -2780,6 +2791,7 @@ stacksRouter.post('/:stackName/rollback', async (req: Request, res: Response) =>
           res.status(500).json({
             error: (compError as Error).message || 'Held recovery image is missing.',
             code: 'HELD_IMAGE_MISSING',
+            ...compFailureClass,
           });
           notifyActionFailure('rollback', stackName, compError, req.user?.username ?? 'system');
           return;
@@ -2794,6 +2806,7 @@ stacksRouter.post('/:stackName/rollback', async (req: Request, res: Response) =>
           res.status(500).json({
             error: 'Rollback restore completed but recovery probe failed.',
             code: 'RECOVERY_PROBE_FAILED',
+            ...compFailureClass,
           });
           notifyActionFailure('rollback', stackName, new Error('recovery probe failed'), req.user?.username ?? 'system');
           return;
@@ -2887,7 +2900,11 @@ stacksRouter.post('/:stackName/rollback', async (req: Request, res: Response) =>
     const message = getErrorMessage(error, 'Rollback failed.');
     notifyActionFailure('rollback', stackName, error, req.user?.username ?? 'system');
     if (!res.headersSent) {
-      res.status(500).json({ error: message });
+      // A compensation failure classified by the service rides out even on
+      // this generic path: the hub restoring through this node must get the
+      // node's own pre/post verdict instead of guessing one back from an
+      // error code it has to default to "may have mutated".
+      res.status(500).json({ error: message, ...restoreFailureClassOf(error) });
     }
   } finally {
     releaseStackOpLock(req, stackName);

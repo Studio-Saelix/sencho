@@ -675,6 +675,13 @@ describe('POST /api/gitops/applications/:id/rollout/rollback', () => {
     expect(res.body.ok).toBe(false);
     expect(res.body.results[0].status).toBe('failed');
     expect(projectApplication(seeded.applicationId, false).facets?.rollout.status).toBe('rollback_partial_failed');
+    // A refusal that never reached a mutation is visible on the target, but it
+    // must not park the application in a recovery that can never complete:
+    // only an operator editing rows by hand used to be able to clear it.
+    const application = GitOpsStore.getInstance().getApplication(seeded.applicationId)!;
+    expect(application.recovery_phase).not.toBe('failed');
+    expect(application.failure_stage).not.toBe('recovery');
+    expect(projectApplication(seeded.applicationId, false).facets?.source.status).not.toBe('recovery_failed');
   });
 
   it('restores the matching targets and fails the rest in one scope', async () => {
@@ -697,6 +704,15 @@ describe('POST /api/gitops/applications/:id/rollout/rollback', () => {
     expect(store.getTarget(seeded.applicationId, seeded.nodeIds[0])!.recovery_phase).toBe('complete');
     expect(store.getTarget(seeded.applicationId, seeded.nodeIds[1])!.recovery_phase).toBe('failed');
     expect(projectApplication(seeded.applicationId, false).facets?.rollout.status).toBe('rollback_partial_failed');
+    // Node 1 came back in this rollback; node 2 was refused before it could
+    // mutate. The application keeps the settled receipt and keeps converging
+    // instead of holding on a target that can never restore.
+    const application = store.getApplication(seeded.applicationId)!;
+    expect(application.recovery_phase).toBe('complete');
+    expect(application.failure_stage).toBeNull();
+    const projection = projectApplication(seeded.applicationId, false);
+    expect(projection.facets?.source.status).not.toBe('recovery_failed');
+    expect(projection.facets?.rollout.status).toBe('rollback_partial_failed');
   });
 
   it('reports a partial failure when the recovery point names another generation', async () => {
@@ -736,6 +752,8 @@ describe('POST /api/gitops/applications/:id/rollout/rollback', () => {
       error: 'The restore completed but its result could not be recorded.',
     });
     expect(projectApplication(seeded.applicationId, false).facets?.rollout.status).toBe('rollback_partial_failed');
+    // The restore itself may have landed, so the application hold stays.
+    expect(GitOpsStore.getInstance().getApplication(seeded.applicationId)?.recovery_phase).toBe('failed');
   });
 
   it('refuses a failed-target scope when nothing failed', async () => {

@@ -593,6 +593,41 @@ describe('generation rollback error mapping', () => {
       code: 'HELD_IMAGE_MISSING',
       error: 'Held recovery image is missing',
     });
+    // No classification was attached, so nothing rides the wire the hub could
+    // mistake for proof.
+    expect(res.body.failureClass).toBeUndefined();
+  });
+
+  it('carries the service classification when the restore could prove one', async () => {
+    const res = await withGenerationRollback(async () => {
+      throw Object.assign(new Error('Rollback is prohibited for this generation'), {
+        code: 'ROLLBACK_PROHIBITED',
+        failureClass: 'post_mutation',
+      });
+    });
+    expect(res.status).toBe(409);
+    expect(res.body).toMatchObject({
+      code: 'ROLLBACK_PROHIBITED',
+      // The same code is thrown before and after the file move; the catch that
+      // knows which is the only writer of this field.
+      failureClass: 'post_mutation',
+    });
+  });
+
+  it('carries the classification through the generic error path as well', async () => {
+    const res = await withGenerationRollback(async () => {
+      throw Object.assign(new Error('Recovery generation content is missing'), {
+        code: 'GENERATION_CONTENT_MISSING',
+        failureClass: 'pre_mutation',
+      });
+    });
+    // A code this route has no specific branch for must still not drop the
+    // node's own verdict; the hub would otherwise park the application.
+    expect(res.status).toBe(500);
+    expect(res.body).toMatchObject({
+      error: 'Recovery generation content is missing',
+      failureClass: 'pre_mutation',
+    });
   });
 
   it('returns RECOVERY_PROBE_FAILED when restore completed but the probe failed', async () => {

@@ -53,7 +53,58 @@ export type RolloutRollbackTargetResult = {
 
 export type RestoreTargetOutcome =
   | { ok: true }
-  | { ok: false; code: string; error: string };
+  | {
+      ok: false;
+      code: string;
+      error: string;
+      /**
+       * The restoring node's own classification, when it could prove one. A
+       * thrown compensation error carries it from the restore's catch, which
+       * is the only place that knows whether the files had already moved.
+       */
+      failureClass?: 'pre_mutation' | 'post_mutation';
+    };
+
+/**
+ * Restore refusal codes that prove the restore itself moved nothing: each is
+ * answered before this restore touches the project, so no half-restored state
+ * of its making can exist.
+ *
+ * Every other failure, including a transport error that may have landed after
+ * the restore completed, stays mutable: the application-wide recovery hold is
+ * for exactly the case where the target may have moved.
+ */
+const PRE_MUTATION_REFUSAL_CODES: ReadonlySet<string> = new Set([
+  'NO_RECOVERY_POINT',
+  'RECOVERY_POINT_MISMATCH',
+  'STACK_BUSY',
+  'stack_op_in_progress',
+  'PERMISSION_DENIED',
+]);
+
+/**
+ * Whether a failed restore can have mutated the target it was refused on.
+ *
+ * The node's own `failureClass` wins when it is present: a code such as
+ * `ROLLBACK_PROHIBITED` is thrown both before any file move (eligibility) and
+ * after one (the policy gate), so only the restore's catch knows which
+ * happened.
+ */
+export function restoreFailureMutated(outcome: {
+  code: string;
+  failureClass?: 'pre_mutation' | 'post_mutation';
+}): boolean {
+  if (outcome.failureClass === 'pre_mutation') return false;
+  if (outcome.failureClass === 'post_mutation') return true;
+  return !PRE_MUTATION_REFUSAL_CODES.has(outcome.code);
+}
+
+/** Validate a failure classification that crossed a process boundary. */
+export function parseRestoreFailureClass(
+  value: unknown,
+): 'pre_mutation' | 'post_mutation' | undefined {
+  return value === 'pre_mutation' || value === 'post_mutation' ? value : undefined;
+}
 
 /**
  * The frozen target set the current rollout was authorized against.
@@ -225,6 +276,14 @@ function errorText(error: unknown): string {
   return error instanceof Error && error.message.length > 0 ? error.message : 'The restore did not complete.';
 }
 
+/** The classification a thrown restore error carries, when it carries one. */
+function restoreFailureClassOf(error: unknown): { failureClass?: 'pre_mutation' | 'post_mutation' } {
+  const failureClass = parseRestoreFailureClass(
+    (error as { failureClass?: unknown } | null)?.failureClass,
+  );
+  return failureClass ? { failureClass } : {};
+}
+
 function restoreLocal(args: {
   nodeId: number;
   stackName: string;
@@ -271,7 +330,7 @@ function restoreLocal(args: {
         sanitizeForLog(args.stackName),
         sanitizeForLog(error instanceof Error ? error.message : String(error)),
       );
-        return { ok: false as const, code: errorCode(error), error: errorText(error) };
+        return { ok: false as const, code: errorCode(error), error: errorText(error), ...restoreFailureClassOf(error) };
       }
     })
     .then((result) => {
@@ -320,16 +379,23 @@ async function restoreRemote(args: {
         validateStatus: () => true,
       },
     );
-    const body = res.data as { error?: unknown; code?: unknown; gitopsGenerationId?: unknown } | null;
+    const body = res.data as {
+      error?: unknown;
+      code?: unknown;
+      gitopsGenerationId?: unknown;
+      failureClass?: unknown;
+    } | null;
     if (res.status >= 200 && res.status < 300) {
       // The node must confirm the restored generation. A node that does not
       // know the guard (an older build) would ignore it and answer 200 for
       // whatever its current recovery point is, so an absent or different
-      // echo fails closed rather than claiming the requested restore.
+      // echo fails closed rather than claiming the requested restore. The
+      // node answered 2xx, so it restored something; without the echo the hub
+      // cannot prove what, which is not a pre-mutation refusal.
       if (body?.gitopsGenerationId !== args.generationId) {
         return {
           ok: false,
-          code: 'RECOVERY_POINT_MISMATCH',
+          code: 'RECOVERY_POINT_UNCONFIRMED',
           error: 'The node did not confirm restoring the requested application generation.',
         };
       }
@@ -341,7 +407,13 @@ async function restoreRemote(args: {
     const message = typeof body?.error === 'string' && body.error.length > 0
       ? body.error
       : `The node answered HTTP ${res.status} to the restore request.`;
-    return { ok: false, code, error: message };
+    const failureClass = parseRestoreFailureClass(body?.failureClass);
+    return {
+      ok: false,
+      code,
+      error: message,
+      ...(failureClass ? { failureClass } : {}),
+    };
   } catch (error) {
     console.error(
       '[GitOps recovery] Remote restore request failed for node %s:',

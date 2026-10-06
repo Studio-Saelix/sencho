@@ -1265,8 +1265,16 @@ export class StackUpdateRecoveryService {
     } catch (error) {
       const code = (error as { code?: string }).code;
       // Classified by whether the files had already moved. Only a failure
-      // before that leaves the previous workload provably intact.
-      gitopsRecovery?.failed(filesRestored ? 'post_mutation' : 'pre_mutation');
+      // before that leaves the previous workload provably intact. The same
+      // classification rides the error to the rollback caller (this node's
+      // stack route, or the hub restoring through it): this catch is the only
+      // place that knows, and a code such as ROLLBACK_PROHIBITED is thrown on
+      // both sides of the file move.
+      const failureClass = filesRestored ? 'post_mutation' : 'pre_mutation';
+      gitopsRecovery?.failed(failureClass);
+      if (typeof error === 'object' && error !== null) {
+        Object.assign(error, { failureClass });
+      }
       if (filesRestored && generationContentPath) {
         try {
           await RollbackGenerationStore.reconcileInterruptedRestore(
@@ -1302,7 +1310,7 @@ export class StackUpdateRecoveryService {
       if (isHeldRecoveryImageMissing(error)) {
         throw Object.assign(
           new Error('Held recovery image is missing'),
-          { code: 'HELD_IMAGE_MISSING' },
+          { code: 'HELD_IMAGE_MISSING', failureClass },
         );
       }
       return false;

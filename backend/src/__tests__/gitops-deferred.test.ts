@@ -12,7 +12,7 @@
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { setupTestDb, cleanupTestDb } from './helpers/setupTestDb';
-import { GitOpsStore } from '../services/gitops/store';
+import { GitOpsStore, emptyTargetRow } from '../services/gitops/store';
 import { GitOpsTransitions, type EventEnvelope } from '../services/gitops/transitions';
 import { projectApplication } from '../services/gitops/derive';
 import type { GitOpsApplicationRow, GitOpsGenerationRow } from '../services/gitops/types';
@@ -205,6 +205,115 @@ describe('gitops deferred state', () => {
     // A failed rollback moves no success pointer.
     expect(target.applied_generation_id).toBe(applied);
     expect(target.healthy_generation_id).toBeNull();
+    // A failure that may have mutated the target keeps the application hold:
+    // the source pipeline must not keep converging over a half-restored stack.
+    expect(store.getApplication('app-rb-partial')?.recovery_phase).toBe('failed');
+    expect(store.getApplication('app-rb-partial')?.failure_stage).toBe('recovery');
+  });
+
+  it('releases the application hold when a rollback is refused before it can mutate anything', () => {
+    const store = GitOpsStore.getInstance();
+    const tx = GitOpsTransitions.getInstance();
+    seedApplied('app-rb-refused', 'rb-refused-web');
+
+    tx.rollbackInProgress({
+      applicationId: 'app-rb-refused',
+      nodeId: 1,
+      recoveryRef: 'rb-refused',
+      recoveryGenerationId: 'gen-app-rb-refused',
+      envelope: env('op-rb-refused-start'),
+    });
+    expect(store.getApplication('app-rb-refused')?.recovery_phase).toBe('restoring');
+
+    tx.rollbackPartialFailed({
+      applicationId: 'app-rb-refused',
+      nodeId: 1,
+      recoveryRef: 'rb-refused',
+      failureClass: 'pre_mutation',
+      envelope: env('op-rb-refused-fail'),
+    });
+
+    const target = store.getTarget('app-rb-refused', 1)!;
+    expect(target.recovery_phase).toBe('failed');
+    expect(target.failure_stage).toBe('recovery');
+    expect(target.failure_class).toBe('pre_mutation');
+    // The refusal stays visible on the target, but nothing was restored and
+    // nothing was half-restored, so the application must not park in a
+    // recovery that can never complete.
+    const app = store.getApplication('app-rb-refused')!;
+    expect(app.recovery_phase).toBeNull();
+    expect(app.failure_stage).toBeNull();
+    expect(projectOf('app-rb-refused').facets.rollout.status).toBe('rollback_partial_failed');
+    expect(projectOf('app-rb-refused').facets.source.status).not.toBe('recovery_failed');
+  });
+
+  it('keeps the completion receipt when another target of the same rollback was restored', () => {
+    const store = GitOpsStore.getInstance();
+    const tx = GitOpsTransitions.getInstance();
+    seedApplied('app-rb-mixed', 'rb-mixed-web');
+    store.upsertTarget(emptyTargetRow('app-rb-mixed', 2, 1));
+
+    tx.rollbackInProgress({
+      applicationId: 'app-rb-mixed',
+      nodeId: 1,
+      recoveryRef: 'rb-mixed',
+      recoveryGenerationId: 'gen-app-rb-mixed',
+      envelope: env('op-rb-mixed-t1'),
+    });
+    tx.rollbackCompleted({
+      applicationId: 'app-rb-mixed',
+      nodeId: 1,
+      recoveryRef: 'rb-mixed',
+      recoveryGenerationId: 'gen-app-rb-mixed',
+      capturedArtifactSetId: null,
+      capturedSourceAcceptanceRef: null,
+      envelope: env('op-rb-mixed-t1-done'),
+    });
+    tx.rollbackInProgress({
+      applicationId: 'app-rb-mixed',
+      nodeId: 2,
+      recoveryRef: 'rb-mixed',
+      recoveryGenerationId: 'gen-app-rb-mixed',
+      envelope: env('op-rb-mixed-t2'),
+    });
+    tx.rollbackPartialFailed({
+      applicationId: 'app-rb-mixed',
+      nodeId: 2,
+      recoveryRef: 'rb-mixed',
+      failureClass: 'pre_mutation',
+      envelope: env('op-rb-mixed-t2-fail'),
+    });
+
+    // Node 1 really did come back in this rollback, so the same ref keeps the
+    // settled receipt instead of discarding it with the refusal.
+    expect(store.getApplication('app-rb-mixed')?.recovery_phase).toBe('complete');
+    expect(store.getApplication('app-rb-mixed')?.failure_stage).toBeNull();
+    expect(store.getTarget('app-rb-mixed', 2)?.recovery_phase).toBe('failed');
+    expect(projectOf('app-rb-mixed').facets.rollout.status).toBe('rollback_partial_failed');
+  });
+
+  it('does not release a restoring stamp another rollback owns', () => {
+    const store = GitOpsStore.getInstance();
+    const tx = GitOpsTransitions.getInstance();
+    seedApplied('app-rb-owner2', 'rb-owner2-web');
+
+    tx.rollbackInProgress({
+      applicationId: 'app-rb-owner2',
+      nodeId: 1,
+      recoveryRef: 'rb-owner2',
+      recoveryGenerationId: 'gen-app-rb-owner2',
+      envelope: env('op-rb-owner2-start'),
+    });
+    tx.rollbackPartialFailed({
+      applicationId: 'app-rb-owner2',
+      nodeId: 1,
+      recoveryRef: 'rb-intruder',
+      failureClass: 'pre_mutation',
+      envelope: env('op-rb-intruder-fail'),
+    });
+
+    expect(store.getApplication('app-rb-owner2')?.recovery_phase).toBe('restoring');
+    expect(store.getApplication('app-rb-owner2')?.recovery_ref).toBe('rb-owner2');
   });
 
   it('completes a rollback only against a generation it can prove', () => {

@@ -39,6 +39,7 @@ import {
 import { candidateRowFor, intentRowFor } from '../services/gitops/blueprintProducers';
 import {
   resolveRollbackTargets,
+  restoreFailureMutated,
   restoreTargetToGeneration,
   rollbackCandidatesForApplication,
   rolloutTargetSet,
@@ -1565,6 +1566,15 @@ gitopsApplicationsRouter.post('/:id/rollout/supersede', (req: Request, res: Resp
 });
 
 /**
+ * One target's rollback attempt, carrying whether the failure can have mutated
+ * the target. The route needs that to decide whether the failure may hold the
+ * application; it is not part of the response shape.
+ */
+type RollbackTargetAttempt = RolloutRollbackTargetResult & {
+  mutationPossible: boolean;
+};
+
+/**
  * Restore one target and record what happened, whatever path the restore took.
  *
  * Every exit attempts to record a terminal state for the target: a restore
@@ -1585,7 +1595,7 @@ async function runRollbackTarget(
     userId: number;
   },
   nodeId: number,
-): Promise<RolloutRollbackTargetResult> {
+): Promise<RollbackTargetAttempt> {
   const tx = GitOpsTransitions.getInstance();
   try {
     tx.rollbackInProgress({
@@ -1600,6 +1610,8 @@ async function runRollbackTarget(
       nodeId,
       status: 'failed',
       error: error instanceof Error ? error.message : 'The rollback could not be opened.',
+      // The restore was never requested, so nothing can have been touched.
+      mutationPossible: false,
     };
   }
 
@@ -1638,7 +1650,7 @@ async function runRollbackTarget(
         capturedSourceAcceptanceRef: store.newestSourceAcceptanceId(ctx.app.id, ctx.generationId),
         envelope: ctx.envelope,
       });
-      return { nodeId, status: 'restored' };
+      return { nodeId, status: 'restored', mutationPossible: false };
     } catch (error) {
       console.error(
         '[GitOps authority] Restore succeeded but its completion could not be recorded:',
@@ -1653,12 +1665,18 @@ async function runRollbackTarget(
     sanitizeForLog(nodeId),
     sanitizeForLog(outcome.error),
   );
+  // A refusal the node answered before any file moved is recorded on the
+  // target, but it must not hold the application: there is no half-restored
+  // state to protect and no restore that can ever complete. Everything else,
+  // including a transport failure that may have landed after the restore,
+  // keeps the hold.
+  const mutationPossible = restoreFailureMutated(outcome);
   try {
     tx.rollbackPartialFailed({
       applicationId: ctx.app.id,
       nodeId,
       recoveryRef: ctx.recoveryRef,
-      failureClass: 'partial',
+      failureClass: mutationPossible ? 'partial' : 'pre_mutation',
       envelope: ctx.envelope,
     });
   } catch (error) {
@@ -1667,7 +1685,7 @@ async function runRollbackTarget(
       sanitizeForLog(error instanceof Error ? error.message : String(error)),
     );
   }
-  return { nodeId, status: 'failed', error: outcome.error };
+  return { nodeId, status: 'failed', error: outcome.error, mutationPossible };
 }
 
 /**
@@ -1779,13 +1797,16 @@ gitopsApplicationsRouter.post('/:id/rollout/rollback', async (req: Request, res:
     role: req.user?.role ?? 'viewer',
     userId: req.user?.userId ?? 0,
   };
-  const results: RolloutRollbackTargetResult[] = [];
+  const results: RollbackTargetAttempt[] = [];
   for (const nodeId of resolved.nodeIds) {
     results.push(await runRollbackTarget(ctx, nodeId));
   }
 
   const failedAny = results.some(result => result.status === 'failed');
-  if (failedAny) {
+  // Only a failure that may have moved a target keeps the application hold. A
+  // refusal before any mutation settled per target; re-stamping the
+  // application here would re-park it for a recovery that can never run.
+  if (results.some(result => result.status === 'failed' && result.mutationPossible)) {
     // Lift the application out of `restoring` so the projection reports the
     // partial failure rather than an in-flight rollback that nothing drives.
     try {
@@ -1803,5 +1824,10 @@ gitopsApplicationsRouter.post('/:id/rollout/rollback', async (req: Request, res:
       );
     }
   }
-  res.json({ ok: !failedAny, results });
+  res.json({
+    ok: !failedAny,
+    // The mutation classification decides application state; it is not part of
+    // the per-target result an operator reads.
+    results: results.map(({ nodeId, status, error }) => ({ nodeId, status, error })),
+  });
 });

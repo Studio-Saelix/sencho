@@ -1,6 +1,6 @@
 import { GitOpsStore } from './store';
 import { GitOpsTransitions, type TransitionResult } from './transitions';
-import { restoreTargetToGeneration } from './rolloutRecovery';
+import { restoreFailureMutated, restoreTargetToGeneration } from './rolloutRecovery';
 import { healthHoldReason } from './healthPolicy';
 import { ROLE_PERMISSIONS, type PermissionAction } from '../../middleware/permissions';
 import { sanitizeForLog } from '../../utils/safeLog';
@@ -215,12 +215,15 @@ export async function executeHealthRolloutDecision(args: {
           }
           // Partial failure is reported as partial. Reporting a single target's
           // failed restore as a completed rollback would tell the operator the
-          // fleet is back on the pre-rollout generation when it is not.
+          // fleet is back on the pre-rollout generation when it is not. A
+          // refusal that never reached a mutation is recorded on the target
+          // without holding the application: there is nothing half-restored
+          // and no restore that can ever complete.
           transitions.rollbackPartialFailed({
             applicationId: args.applicationId,
             nodeId: args.nodeId,
             recoveryRef,
-            failureClass: 'partial',
+            failureClass: restoreFailureMutated(outcome) ? 'partial' : 'pre_mutation',
             envelope,
           });
           return { action: 'rollback_partial_failed', reason: outcome.error };
@@ -228,7 +231,11 @@ export async function executeHealthRolloutDecision(args: {
           // The restore or the record of it failed. The target is somewhere
           // between the two generations and only this knows which, so it is
           // recorded as a partial failure, never as a completed rollback, and the
-          // rollout stays held from before the restore went out.
+          // rollout stays held from before the restore went out. Deliberately
+          // fail-closed at `partial` rather than classifying here: a throw can
+          // come from the record call itself, after an outcome this branch no
+          // longer has, and only the classified path above knows what the node
+          // proved.
           try {
             transitions.rollbackPartialFailed({
               applicationId: args.applicationId,

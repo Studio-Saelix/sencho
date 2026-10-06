@@ -1906,6 +1906,28 @@ describe('retry, stop, and rollback', () => {
     expect(outcome.action).toBe('rollback_partial_failed');
   });
 
+  it('a restore refused before it can mutate does not hold the application', async () => {
+    const fixture = await gatedAttempt('rollback');
+    const store = GitOpsStore.getInstance();
+    // The hub recorded a pre-rollout generation, but the node holds no point
+    // for it, so the restore is refused before it can touch anything.
+    markRecoveryPoint(fixture, 'rec-pre-rollout', genId(fixture, 'pre-rollout'));
+    await mockRestore({ ok: false, code: 'NO_RECOVERY_POINT', error: 'This stack has no recovery point to restore.' });
+
+    const outcome = await decide(fixture, 'failed', spyExecutor(), 'rollback');
+
+    // The target keeps the visible failure and the rollout stays held, but the
+    // application is not parked in a recovery that can never complete.
+    expect(outcome.action).toBe('rollback_partial_failed');
+    const target = store.getTarget(fixture.applicationId, fixture.nodeId!)!;
+    expect(target.recovery_phase).toBe('failed');
+    expect(target.failure_class).toBe('pre_mutation');
+    const app = store.getApplication(fixture.applicationId)!;
+    expect(app.recovery_phase).not.toBe('failed');
+    expect(app.failure_stage).not.toBe('recovery');
+    expect(app.pause_at).not.toBeNull();
+  });
+
   it('a health failure never creates source, placement, or artifact authority', async () => {
     const fixture = await gatedAttempt('stop');
     const store = GitOpsStore.getInstance();
