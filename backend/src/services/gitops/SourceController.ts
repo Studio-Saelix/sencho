@@ -552,7 +552,8 @@ export class SourceController {
         if (app.target_mode === 'blueprint') {
             // The one handoff applies the same policy, enabled, pause, and
             // suspension gates every other path uses. A durable refusal is held
-            // by the handoff; a skipped gate needs no log.
+            // by the handoff and logged there; a skipped gate is a deliberate
+            // withholding and needs no log here.
             const handoff = await dispatchPreparedGitManagedGeneration({
                 applicationId: app.id,
                 generationId: acceptGeneration.id,

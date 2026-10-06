@@ -173,10 +173,12 @@ export class BlueprintReconciler {
     private running = false;
     private stopped = false;
     /**
-     * Applications whose preparation retry is running, so an overlapping tick
-     * does not start a second attempt for the same application.
+     * Applications whose content pass is running, mapped to the pass itself so
+     * a test can await it. Production detaches the pass on purpose (a slow
+     * registry or rollout must not hold the tick's running guard); an
+     * overlapping tick skips an application that is still in flight.
      */
-    private readonly gitManagedPreparationInFlight = new Set<string>();
+    private readonly gitManagedPreparationInFlight = new Map<string, Promise<void>>();
     /**
      * An in-memory floor between preparation attempts, for failures that write
      * no evidence row (a missing candidate, an unreadable applied compose). The
@@ -307,14 +309,14 @@ export class BlueprintReconciler {
             const liveAppIds = new Set(liveApps.map((app) => app.id));
             for (const app of liveApps) {
                 if (this.gitManagedPreparationInFlight.has(app.id)) continue;
-                this.gitManagedPreparationInFlight.add(app.id);
-                void this.reconcileGitManagedApplication(app)
+                const pass = this.reconcileGitManagedApplication(app)
                     .catch((err) => {
                         console.error(`[BlueprintReconciler] Git-managed content pass failed for ${app.id}:`, err);
                     })
                     .finally(() => {
                         this.gitManagedPreparationInFlight.delete(app.id);
                     });
+                this.gitManagedPreparationInFlight.set(app.id, pass);
             }
             // Per-application memory for applications that no longer exist would
             // otherwise grow for the process's lifetime.
@@ -515,6 +517,17 @@ export class BlueprintReconciler {
      */
     clearGitManagedHandoffFloorForTests(): void {
         this.gitManagedHandoffFloor.clear();
+    }
+
+    /**
+     * Await every detached content pass started by the last ticks.
+     *
+     * Production detaches them on purpose; a test that needs to observe a
+     * tick's result awaits them here instead of sleeping, and can tick again to
+     * pick up an application the handoff concurrency cap deferred.
+     */
+    async settleGitManagedPassesForTests(): Promise<void> {
+        await Promise.allSettled([...this.gitManagedPreparationInFlight.values()]);
     }
 
     private async executeAuthorizedActions(

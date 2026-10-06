@@ -1068,9 +1068,9 @@ export class GitOpsStore {
   /**
    * The newest rollout authorization opened for one accepted source, if any.
    *
-   * Ordered by `rowid` as the tie-break: two generations opened in the same
-   * millisecond would otherwise have no defined order, and a wrong pick would
-   * silently read the wrong withdrawal marker.
+   * Ordered by `rowid`: monotonic and never reused, because rows are never
+   * deleted. `created_at` alone is not enough, since a clock step backwards can
+   * sort an earlier withdrawn row after a later authorization and hide it.
    */
   latestRolloutAuthorizationForAcceptedGeneration(
     applicationId: string,
@@ -1079,7 +1079,7 @@ export class GitOpsStore {
     return this.db().prepare(
       `SELECT * FROM gitops_rollout_generations
        WHERE application_id = ? AND provenance = 'rollout_authorization' AND accepted_generation_id = ?
-       ORDER BY created_at DESC, rowid DESC LIMIT 1`,
+       ORDER BY rowid DESC LIMIT 1`,
     ).get(applicationId, acceptedGenerationId) as GitOpsRolloutGenerationRow | undefined;
   }
 

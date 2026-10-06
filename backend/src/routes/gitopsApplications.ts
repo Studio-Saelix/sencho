@@ -875,6 +875,18 @@ async function dispatchAcceptanceWithinTimeout(
   });
 }
 
+/** Join the accept route's note fragments as sentences, or null when there are none. */
+function joinAcceptNotes(parts: Array<string | null>): string | null {
+  const sentences = parts
+    .filter((part): part is string => part !== null && part.trim().length > 0)
+    .map((part) => {
+      const trimmed = part.trim();
+      const capitalized = `${trimmed.charAt(0).toUpperCase()}${trimmed.slice(1)}`;
+      return /[.!?]$/.test(capitalized) ? capitalized : `${capitalized}.`;
+    });
+  return sentences.length > 0 ? sentences.join(' ') : null;
+}
+
 /**
  * Record an operator source acceptance for the waiting candidate generation.
  *
@@ -931,18 +943,14 @@ gitopsApplicationsRouter.post('/:id/source/accept', async (req: Request, res: Re
   // and policy routes keep `stack:deploy`, because those are operator
   // decisions, and the reconciler completes a skipped handoff within a tick.
   const handoff = await dispatchAcceptanceWithinTimeout(target.application.id, generationId, actor);
-  // Both can have something to say; neither may hide the other, and the parts
-  // are joined as sentences so the note does not run on. The preparation note
-  // is about the accepted content, the refusal about the rollout.
-  const notes = [prepared.note, handoff.status === 'blocked' ? handoff.reason : null]
-    .filter((part): part is string => part !== null && part.trim().length > 0)
-    .map((part) => part.trim().replace(/\.+$/, ''));
+  // Both can have something to say; neither may hide the other. The parts are
+  // joined as sentences, so a preparation note and a refusal do not run on.
   res.json({
     ok: true,
     materialized: prepared.materialized,
     artifactResolved: prepared.artifact === 'resolved',
     dispatched: handoff.status === 'dispatched',
-    note: notes.length > 0 ? `${notes.join('. ')}.` : null,
+    note: joinAcceptNotes([prepared.note, handoff.status === 'blocked' ? handoff.reason : null]),
   });
 });
 
@@ -1855,9 +1863,10 @@ gitopsApplicationsRouter.post('/:id/rollout/rollback', async (req: Request, res:
   }
 
   // The abandoned rollout must not be dispatchable while its targets are being
-  // restored. Only an authorized rollout has a dispatch to stop; a placement
-  // generation that never authorized cannot be superseded and does not need to
-  // be.
+  // restored. The withdrawal belongs on the latest authorization recorded for
+  // the accepted source, which is not always the pointer's row: a re-approval
+  // after a system supersede leaves the pointer on a placement generation while
+  // an earlier authorization is still what the automatic policy would re-mint.
   const liveRolloutGeneration = app.rollout_generation_id
     ? store.getRolloutGeneration(app.rollout_generation_id)
     : undefined;
@@ -1868,8 +1877,10 @@ gitopsApplicationsRouter.post('/:id/rollout/rollback', async (req: Request, res:
     });
     return;
   }
+  const hasAuthorization = app.accepted_generation_id !== null
+    && !!store.latestRolloutAuthorizationForAcceptedGeneration(app.id, app.accepted_generation_id);
   const envelope = authorityEnvelope(req);
-  if (liveRolloutGeneration?.provenance === 'rollout_authorization') {
+  if (liveRolloutGeneration?.provenance === 'rollout_authorization' || hasAuthorization) {
     try {
       GitOpsTransitions.getInstance().rolloutSuperseded({ applicationId: app.id, envelope });
     } catch (error) {

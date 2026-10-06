@@ -326,9 +326,11 @@ export type GitOpsRolloutGenerationRow = {
    * When the operator withdrew this rollout (Supersede or Rollback).
    *
    * Null on a system supersede (a preflight drift, a placement invalidation, a
-   * re-authorization) and on a generation that predates the column. The
-   * automatic policy refuses to re-mint only when this is set, so a system
-   * supersede still re-drives while an operator's decision sticks.
+   * re-authorization) and on a generation that predates the column, which the
+   * migration backfills as withdrawn. A null here therefore means no operator
+   * withdrawal is recorded. The automatic policy refuses to re-mint only when
+   * this is set, so a system supersede still re-drives while an operator's
+   * decision sticks.
    */
   withdrawn_at: number | null;
   operation_id: string;

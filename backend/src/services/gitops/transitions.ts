@@ -2732,20 +2732,35 @@ export class GitOpsTransitions {
   /**
    * Withdraw a live rollout authorization on the operator's decision.
    *
-   * The generation stays on the application as the record that a rollout was
-   * abandoned, while the authorization itself is cleared: a superseded
-   * generation whose authorization still resolved would let the dispatch
-   * boundary start it again. A later authorization mints a new generation over
-   * the same placement and accepted source, which is the only way forward from
-   * here.
+   * The row withdrawn is the pointer's generation when it is an authorization,
+   * otherwise the latest authorization recorded for the current accepted
+   * source. The second case is real: a system supersede (a preflight drift or a
+   * placement invalidation) can leave the pointer on a placement generation
+   * while an earlier authorization is still the newest one the automatic
+   * policy would re-mint. Marking only the pointer's row would miss it and let
+   * the policy redeploy what the operator rolled back from.
+   *
+   * The generation pointer stays as it is: when it names the abandoned
+   * authorization the projection reports the abandoned rollout, and when it
+   * names a placement generation that is still the current placement state. A
+   * later authorization mints a new generation over the same placement and
+   * accepted source, which is the only way forward from here.
    */
   rolloutSuperseded(args: {
     applicationId: string;
     envelope: EventEnvelope;
   }): TransitionResult {
-    // Read before the transaction only to annotate the history row; the
-    // guards below re-read and remain authoritative if the row moved.
-    const named = this.store().getApplication(args.applicationId)?.rollout_generation_id ?? null;
+    // Read before the transaction only to annotate the history row; the guards
+    // below re-read and remain authoritative if the row moved.
+    const before = this.store().getApplication(args.applicationId);
+    const namedBefore = before?.rollout_generation_id ?? null;
+    const namedRowBefore = namedBefore ? this.store().getRolloutGeneration(namedBefore) : undefined;
+    const latestBefore = before?.accepted_generation_id
+      ? this.store().latestRolloutAuthorizationForAcceptedGeneration(before.id, before.accepted_generation_id)
+      : undefined;
+    const annotation = namedRowBefore?.provenance === 'rollout_authorization'
+      ? namedBefore
+      : latestBefore?.id ?? null;
     return this.mutateApp(
       args.applicationId,
       args.envelope,
@@ -2753,26 +2768,23 @@ export class GitOpsTransitions {
       'superseded',
       (app) => {
         if (app.lifecycle_status !== 'active') throw new GitOpsTransitionError('application is not live');
-        if (!app.rollout_generation_id) {
+        const named = app.rollout_generation_id;
+        const namedRow = named ? this.store().getRolloutGeneration(named) : undefined;
+        const latest = app.accepted_generation_id
+          ? this.store().latestRolloutAuthorizationForAcceptedGeneration(app.id, app.accepted_generation_id)
+          : undefined;
+        const target = namedRow?.provenance === 'rollout_authorization' ? namedRow : latest;
+        if (!target || target.application_id !== app.id) {
           throw new GitOpsTransitionError('there is no live rollout generation to supersede');
-        }
-        const live = this.store().getRolloutGeneration(app.rollout_generation_id);
-        if (!live || live.application_id !== app.id) {
-          throw new GitOpsTransitionError('the live rollout generation could not be read');
-        }
-        if (live.provenance !== 'rollout_authorization') {
-          throw new GitOpsTransitionError('only an authorized rollout can be superseded');
         }
         app.rollout_authorization_ref = null;
         app.preflight_fingerprint = null;
-        // The generation pointer stays: the projection reports the abandoned
-        // rollout rather than pretending the application never had one. The
-        // withdrawal marker is what tells the automatic policy this was an
+        // The withdrawal marker is what tells the automatic policy this was an
         // operator decision, not a system supersede it may re-mint.
-        this.store().markRolloutGenerationSuperseded(app.rollout_generation_id, args.envelope.at);
-        this.store().markRolloutGenerationWithdrawn(app.rollout_generation_id, args.envelope.at);
+        this.store().markRolloutGenerationSuperseded(target.id, args.envelope.at);
+        this.store().markRolloutGenerationWithdrawn(target.id, args.envelope.at);
       },
-      named ? { rolloutGenerationId: named } : {},
+      annotation ? { rolloutGenerationId: annotation } : {},
     );
   }
 

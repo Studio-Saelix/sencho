@@ -26,9 +26,10 @@ export interface GitManagedDispatchOutcome {
  *
  * `skipped` means a gate withheld the handoff (the generation moved on, the
  * source is suspended, the rollout is paused, the policy requires an operator,
- * or the Blueprint is disabled); `blocked` means the dispatch itself was
- * refused and, when the refusal is durable, the rollout was held with the
- * reason. The caller owns logging and the response.
+ * the Blueprint is disabled, or the artifact identity is not resolved);
+ * `blocked` means the handoff was refused and, when the refusal is durable, the
+ * rollout was held with the reason (a dispatch refusal, or an unfinished
+ * rollback). The caller owns logging and the response.
  */
 export async function dispatchPreparedGitManagedGeneration(args: {
   applicationId: string;
@@ -59,11 +60,20 @@ export async function dispatchPreparedGitManagedGeneration(args: {
     (target) => target.target_status === 'active' && target.health_stop_reason === 'rollback_pending',
   );
   if (rollbackPending) {
-    console.warn(
-      '[GitOps] Git-managed handoff withheld for %s: a target has an unfinished rollback',
-      sanitizeForLog(app.id),
-    );
-    return { status: 'skipped', reason: 'a target has an unfinished rollback' };
+    // Held, not skipped: the refusal is durable and operator-visible. A skip
+    // would leave the application reading normally with no reason, the accept
+    // note would not mention it, and the reconciler would warn on every floor
+    // interval. The hold records the reason once and stops the automatic policy
+    // until the rollback is finished. No live binding is required: this state
+    // has already cleared the authorization, and the reason is about the
+    // application rather than about a rollout that exists.
+    const blocked = {
+      status: 'blocked' as const,
+      reason: 'a target has an unfinished rollback; finish it before the rollout continues',
+      holdable: true,
+    };
+    holdBlockedRolloutDispatch(app.id, blocked, { requireLiveBinding: false });
+    return { status: 'blocked', reason: blocked.reason };
   }
   const genRow = store.getGeneration(args.generationId);
   if (!genRow) return { status: 'skipped', reason: 'the accepted generation could not be read' };

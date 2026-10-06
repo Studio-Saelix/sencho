@@ -2928,16 +2928,31 @@ stmt.run('gitops_schema_version', '1');
 
     private migrateGitOpsRolloutWithdrawal(): void {
         const added = this.tryAddColumn('gitops_rollout_generations', 'withdrawn_at', 'INTEGER NULL');
-        if (!added) return;
+        const backfilled = this.getGlobalSettings()['gitops_rollout_withdrawal_backfilled'] === '1';
+        if (!added && backfilled) return;
+        // The ALTER commits on its own, so the backfill is tracked by a settings
+        // flag rather than by the column's presence: a crash between the two
+        // statements, or a downgrade and re-upgrade, resumes the backfill
+        // instead of skipping it. The flag and the backfill commit together, so
+        // a partial state cannot persist.
+        //
         // A generation superseded before this column existed cannot say whether
         // the operator or a system path superseded it. Backfill every
         // superseded authorization as withdrawn, the safe direction: the
         // automatic policy waits for a person once after the upgrade rather
         // than re-minting a rollout the operator may have withdrawn.
-        this.db.prepare(
-            `UPDATE gitops_rollout_generations SET withdrawn_at = superseded_at
-             WHERE superseded_at IS NOT NULL AND provenance = 'rollout_authorization'`,
-        ).run();
+        this.db.transaction(() => {
+            if (!backfilled) {
+                this.db.prepare(
+                    `UPDATE gitops_rollout_generations SET withdrawn_at = superseded_at
+                     WHERE superseded_at IS NOT NULL AND provenance = 'rollout_authorization'`,
+                ).run();
+                this.db.prepare(
+                    "INSERT OR REPLACE INTO global_settings (key, value) VALUES ('gitops_rollout_withdrawal_backfilled', '1')",
+                ).run();
+            }
+        })();
+        this.cachedGlobalSettings = null;
     }
 
     private migrateGitOpsCreateCheckpointSshDeployKey(): void {
