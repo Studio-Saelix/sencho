@@ -416,18 +416,44 @@ describe('runtime repair reads the target\'s acknowledged generation', () => {
     expect(deploySpy).toHaveBeenCalledTimes(1);
   });
 
-  it('proceeds when a deploy failure replaced a refused recovery', async () => {
-    // A later deploy failure takes the failure stage over and clears the stale
-    // recovery phase, so the target no longer claims a recovery hold even
-    // though its class is not `pre_mutation`.
+  it('holds while a retry is in flight over a refused target', async () => {
+    // A retry over a refused target sets `restoring` and leaves the old
+    // pre_mutation claim on the row. Repair must not read that claim and race
+    // the restore that is moving files.
     const { bp, node } = seedBlueprint();
     const fixture = await seedGitManagedMidRollout(bp, node);
     const store = GitOpsStore.getInstance();
     const target = store.getTarget(fixture.appId, node.id)!;
     store.upsertTarget({
       ...target,
-      recovery_phase: null,
-      recovery_ref: null,
+      recovery_phase: 'restoring',
+      failure_stage: 'recovery',
+      failure_class: 'pre_mutation',
+    });
+    const deploySpy = vi
+      .spyOn(BlueprintService.getInstance(), 'deployAuthorizedMaterialization')
+      .mockResolvedValue({ status: 'active' });
+
+    const outcome = await BlueprintService.getInstance().enforceDigestRepair(bp, node);
+
+    expect(outcome.status).toBe('repair_held');
+    expect(outcome.holdReason).toBe('recovery_bound');
+    expect(deploySpy).not.toHaveBeenCalled();
+  });
+
+  it('proceeds when a deploy failure replaced a refused recovery', async () => {
+    // A later deploy failure takes the failure stage over. The row may still
+    // carry the old `failed` phase (a writer that did not clear it), and the
+    // target must still not claim a recovery hold: the stage names the
+    // standing failure.
+    const { bp, node } = seedBlueprint();
+    const fixture = await seedGitManagedMidRollout(bp, node);
+    const store = GitOpsStore.getInstance();
+    const target = store.getTarget(fixture.appId, node.id)!;
+    store.upsertTarget({
+      ...target,
+      recovery_phase: 'failed',
+      recovery_ref: 'rb-old',
       failure_stage: 'blueprint_deploy',
       failure_class: 'deploy_failed',
     });

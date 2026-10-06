@@ -1946,10 +1946,11 @@ describe('retry, stop, and rollback', () => {
     expect(outcome.action).toBe('rollback_partial_failed');
     expect(outcome.reason).toBe('rollback_unrecorded');
     const app = store.getApplication(fixture.applicationId)!;
-    expect(app.recovery_phase).not.toBe('failed');
+    expect(app.recovery_phase).toBeNull();
     const target = store.getTarget(fixture.applicationId, fixture.nodeId!)!;
     expect(target.recovery_phase).toBe('failed');
     expect(target.failure_class).toBe('pre_mutation');
+    expect(target.active_operation_stage).toBeNull();
   });
 
   it('keeps an earlier mutated hold when a health rollback is refused elsewhere', async () => {

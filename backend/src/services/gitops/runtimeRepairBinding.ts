@@ -19,7 +19,7 @@ import type {
   GitOpsApplicationRow,
   GitOpsTargetCurrentRow,
 } from './types';
-import { targetClaimsRecoveryFailure, targetRecoveryFailureMoved } from './recoveryClaim';
+import { targetRecoveryFailureMoved } from './recoveryClaim';
 
 /** Why a repair was not attempted. Each arm is a state, not an error. */
 export type RuntimeRepairHoldReason =
@@ -72,13 +72,14 @@ export type RuntimeRepairHoldReason =
  * this module stays below the projection.
  */
 function recoveryOwnsTarget(target: GitOpsTargetCurrentRow): boolean {
-  if (targetClaimsRecoveryFailure(target)) {
-    return targetRecoveryFailureMoved(target);
-  }
+  // A restore that is still moving owns the target before any question about
+  // a recorded claim: a retry over a refused target sets `restoring` while the
+  // old claim is still on the row, and repair must not race the restore.
   const phase = target.recovery_phase;
-  return phase === 'capturing'
-    || phase === 'restoring'
-    || phase === 'compensating';
+  if (phase === 'capturing' || phase === 'restoring' || phase === 'compensating') {
+    return true;
+  }
+  return targetRecoveryFailureMoved(target);
 }
 
 export type RuntimeRepairBinding =

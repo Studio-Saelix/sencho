@@ -186,7 +186,8 @@ export async function executeHealthRolloutDecision(args: {
         // failure is recorded: an error thrown between them used to leave the
         // target stuck in `restoring` with nothing saying so, and the rollout
         // unheld, so the fleet carried on as if the policy had not stopped it.
-        let preMutationRefusal = false;
+        let recordAttempted = false;
+        let recordFailureClass: 'pre_mutation' | 'partial' = 'partial';
         try {
           const outcome = await restoreTargetToGeneration({
             app: application,
@@ -220,24 +221,25 @@ export async function executeHealthRolloutDecision(args: {
           // refusal that never reached a mutation is recorded on the target
           // without holding the application: there is nothing half-restored
           // and no restore that can ever complete.
-          preMutationRefusal = !restoreFailureMutated(outcome);
+          recordFailureClass = restoreFailureMutated(outcome) ? 'partial' : 'pre_mutation';
+          recordAttempted = true;
           transitions.rollbackPartialFailed({
             applicationId: args.applicationId,
             nodeId: args.nodeId,
             recoveryRef,
-            failureClass: preMutationRefusal ? 'pre_mutation' : 'partial',
+            failureClass: recordFailureClass,
             envelope,
           });
           return { action: 'rollback_partial_failed', reason: outcome.error };
         } catch (error) {
-          if (preMutationRefusal) {
-            // The refusal itself was proven; only its record failed. Settle it
+          if (recordAttempted) {
+            // The failure itself was proven; only its record failed. Settle it
             // the same way the manual route does instead of falling back to a
-            // hold for a restore that never ran.
+            // hold for a restore whose outcome is already known.
             try {
               transitions.rollbackRefusalSettled({
                 applicationId: args.applicationId,
-                nodeIds: [args.nodeId],
+                targets: [{ nodeId: args.nodeId, failureClass: recordFailureClass }],
                 recoveryRef,
                 envelope,
               });
