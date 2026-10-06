@@ -1042,3 +1042,115 @@ describe('POST /api/gitops/applications/:id/rollout/authorize', () => {
     expect(res.status).toBe(403);
   });
 });
+
+describe('POST /api/gitops/applications/:id/rollout/rollback', () => {
+  /** A synthetic live authorization for the application's accepted source. */
+  function insertAuthorization(applicationId: string, acceptedGenerationId: string, nodeIds: number[]): string {
+    const store = GitOpsStore.getInstance();
+    const app = store.getApplication(applicationId)!;
+    const id = `rgen-${randomUUID().slice(0, 8)}`;
+    store.insertRolloutGeneration({
+      id,
+      application_id: applicationId,
+      intent_revision_id: app.intent_revision_id!,
+      rollout_candidate_id: app.rollout_candidate_id!,
+      accepted_generation_id: acceptedGenerationId,
+      artifact_set_id: app.artifact_set_id,
+      placement_approval_ref: app.placement_approval_ref,
+      source_acceptance_ref: app.source_acceptance_ref,
+      rollout_authorization_ref: `auth-${randomUUID().slice(0, 8)}`,
+      required_targets_json: encodeGitOpsRequiredTargetsJson(nodeIds),
+      preflight_fingerprint: null,
+      preflight_evidence_json: null,
+      rollout_strategy_json: '{}',
+      policy_snapshot_json: null,
+      provenance: 'rollout_authorization',
+      supersedes_generation_id: null,
+      superseded_at: null,
+      withdrawn_at: null,
+      operation_id: `op-${randomUUID().slice(0, 8)}`,
+      actor: 'tester',
+      trigger: 'manual',
+      created_at: 1,
+    });
+    return id;
+  }
+
+  it('withdraws the latest authorization when the pointer is a placement generation', async () => {
+    const seeded = seedGitManagedBlueprint({ sourceAccepted: true });
+    const store = GitOpsStore.getInstance();
+    const application = store.getApplication(seeded.applicationId)!;
+    const authorizationId = insertAuthorization(seeded.applicationId, application.accepted_generation_id!, seeded.nodeIds);
+    DatabaseService.getInstance().getDb().prepare(
+      'UPDATE gitops_applications SET rollout_generation_id = ?, rollout_authorization_ref = ? WHERE id = ?',
+    ).run(authorizationId, `auth-${randomUUID().slice(0, 8)}`, seeded.applicationId);
+
+    // A system supersede moves the pointer off the authorization, and a
+    // re-approval leaves it on a placement generation.
+    GitOpsTransitions.getInstance().placementInvalidated({
+      applicationId: seeded.applicationId,
+      envelope: { operationId: randomUUID(), actor: 'system:reconciler', trigger: 'poll', at: Date.now() },
+    });
+    GitOpsTransitions.getInstance().placementApproved({
+      applicationId: seeded.applicationId,
+      approvalId: `place-${randomUUID().slice(0, 8)}`,
+      intentRevisionId: application.intent_revision_id!,
+      blastJson: encodeGitOpsApprovedTargetEffectJson(
+        seeded.nodeIds.map((nodeId) => ({ nodeId, outcome: 'place' as const })),
+      ),
+      requiredNodeIds: seeded.nodeIds,
+      fingerprint: null,
+      actor: 'tester',
+      envelope: { operationId: randomUUID(), actor: 'tester', trigger: 'manual', at: Date.now() },
+      rolloutGenerationId: `rgen-${randomUUID().slice(0, 8)}`,
+      candidateId: application.rollout_candidate_id!,
+      authority: 'operator',
+      policyProvenanceJson: null,
+      provenance: 'placement_approval',
+    });
+    expect(store.getRolloutGeneration(store.getApplication(seeded.applicationId)!.rollout_generation_id!)!.provenance)
+      .toBe('placement_approval');
+
+    const res = await request(app)
+      .post(`/api/gitops/applications/bp:${seeded.blueprintId}/rollout/rollback`)
+      .set('Cookie', adminCookie)
+      .send({ generationId: seeded.generationId, scope: { kind: 'all_changed' } });
+
+    expect(res.status).toBe(200);
+    // The withdrawal lands on the authorization the automatic policy would
+    // re-mint, not on the placement pointer.
+    const latest = store.latestRolloutAuthorizationForAcceptedGeneration(
+      seeded.applicationId,
+      application.accepted_generation_id!,
+    )!;
+    expect(latest.id).toBe(authorizationId);
+    expect(latest.withdrawn_at).not.toBeNull();
+  });
+
+  it('reaches the restore for a fenced target after the pointer detached', async () => {
+    const seeded = seedGitManagedBlueprint({ sourceAccepted: true });
+    const store = GitOpsStore.getInstance();
+    const application = store.getApplication(seeded.applicationId)!;
+    const authorizationId = insertAuthorization(seeded.applicationId, application.accepted_generation_id!, seeded.nodeIds);
+    store.upsertTarget({
+      ...store.getTarget(seeded.applicationId, seeded.nodeIds[0])!,
+      health_stop_reason: 'rollback_pending',
+      rollout_generation_id: authorizationId,
+    });
+    DatabaseService.getInstance().getDb().prepare(
+      'UPDATE gitops_applications SET rollout_generation_id = NULL, rollout_authorization_ref = NULL WHERE id = ?',
+    ).run(seeded.applicationId);
+
+    const res = await request(app)
+      .post(`/api/gitops/applications/bp:${seeded.blueprintId}/rollout/rollback`)
+      .set('Cookie', adminCookie)
+      .send({ generationId: seeded.generationId, scope: { kind: 'all_changed' } });
+
+    // The fence names the generation whose targets moved, so the route resolves
+    // a target set and reaches the restore instead of ROLLBACK_UNAVAILABLE.
+    expect(res.status).toBe(200);
+    expect(res.body.code).toBeUndefined();
+    expect(Array.isArray(res.body.results)).toBe(true);
+    expect(res.body.results).toHaveLength(1);
+  });
+});

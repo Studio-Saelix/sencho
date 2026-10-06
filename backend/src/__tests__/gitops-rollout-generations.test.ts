@@ -57,6 +57,28 @@ describe('gitops rollout generations', () => {
     expect(store.getRolloutGeneration('rg-2')?.superseded_at).toBe(100);
   });
 
+  it('picks the newest authorization by insertion order, not by a skewed clock', () => {
+    const store = GitOpsStore.getInstance();
+    // The second row is inserted later but carries the earlier timestamp. A
+    // clock step backwards must not hide it: it is the row whose withdrawal
+    // marker decides whether the automatic policy may re-mint.
+    store.insertRolloutGeneration({
+      ...generation('rg-clock-old', 'app-rg', 'intent-rg', 'cand-rg', 'rollout_authorization'),
+      accepted_generation_id: 'gen-clock',
+      created_at: 2_000,
+    });
+    store.insertRolloutGeneration({
+      ...generation('rg-clock-new', 'app-rg', 'intent-rg', 'cand-rg', 'rollout_authorization'),
+      accepted_generation_id: 'gen-clock',
+      created_at: 1_000,
+      withdrawn_at: 1_500,
+    });
+
+    const latest = store.latestRolloutAuthorizationForAcceptedGeneration('app-rg', 'gen-clock');
+    expect(latest?.id).toBe('rg-clock-new');
+    expect(latest?.withdrawn_at).toBe(1_500);
+  });
+
   it('round-trips a placement_approval generation with a valid preflight fingerprint', () => {
     const store = GitOpsStore.getInstance();
     const fingerprint = 'ab'.repeat(32);

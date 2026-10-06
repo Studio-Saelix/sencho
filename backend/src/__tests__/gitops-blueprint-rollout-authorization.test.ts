@@ -840,14 +840,9 @@ describe('application-driven preparation retry', () => {
     expect(DatabaseService.getInstance().listEnabledBlueprints()).toHaveLength(0);
     resolveNow();
     deploySpy.mockClear();
-    const reconciler = (await import('../services/BlueprintReconciler')).BlueprintReconciler;
-    await reconciler.getInstance().tick();
-
     // Content is not execution: the generation is prepared so it is ready when
     // the Blueprint is enabled again, but nothing deploys while it is disabled.
-    await vi.waitFor(() => {
-      expect(store.getApplication(fixture.applicationId)?.artifact_set_id).toBe(`resolved-${nextGenId}`);
-    });
+    await tickUntil(() => store.getApplication(fixture.applicationId)?.artifact_set_id === `resolved-${nextGenId}`);
     expect(deploySpy.mock.calls.filter((call) => call[0].blueprint.id === fixture.blueprintId)).toHaveLength(0);
     for (const nodeId of fixture.nodeIds) {
       expect(store.getTarget(fixture.applicationId, nodeId)?.applied_generation_id).toBe(fixture.generationId);
@@ -890,15 +885,12 @@ describe('application-driven preparation retry', () => {
       .mockResolvedValue(undefined);
     const dueSpy = vi.spyOn(BlueprintService.getInstance(), 'gitManagedPreparationRetryDue');
 
-    const reconciler = (await import('../services/BlueprintReconciler')).BlueprintReconciler;
-    await reconciler.getInstance().tick();
-
     // `unsupported_registry` is a property of the reference, not of the
     // registry's mood: the gate refuses before any probe, so no evidence row is
     // appended and no registry traffic is spent. The call-through spy is the
     // positive control: the detached pass has evaluated the application, so a
     // not-called resolver is the gate's decision rather than a race.
-    await vi.waitFor(() => expect(dueSpy).toHaveBeenCalled());
+    await tickUntil(() => dueSpy.mock.calls.some((call) => call[0].id === fixture.applicationId));
     expect(resolveSpy).not.toHaveBeenCalled();
   });
 
@@ -926,6 +918,7 @@ describe('application-driven preparation retry', () => {
     await vi.waitFor(() => {
       expect(GitOpsStore.getInstance().getApplication(fixture.applicationId)!.pause_at).not.toBeNull();
     });
+    await reconciler.getInstance().settleGitManagedPassesForTests();
     dispatchSpy.mockRestore();
   });
 
@@ -960,13 +953,8 @@ describe('application-driven preparation retry', () => {
     });
     expect(store.getApplication(fixture.applicationId)?.artifact_set_id).toBe(`resolved-${nextGenId}`);
 
-    const reconciler = (await import('../services/BlueprintReconciler')).BlueprintReconciler;
-    await reconciler.getInstance().tick();
-
-    await vi.waitFor(() => {
-      expect(deploySpy.mock.calls.filter((call) => call[0].blueprint.id === fixture.blueprintId))
-        .toHaveLength(fixture.nodeIds.length);
-    });
+    await tickUntil(() => deploySpy.mock.calls
+      .filter((call) => call[0].blueprint.id === fixture.blueprintId).length === fixture.nodeIds.length);
     for (const nodeId of fixture.nodeIds) {
       expect(store.getTarget(fixture.applicationId, nodeId)?.applied_generation_id).toBe(nextGenId);
     }
@@ -989,23 +977,15 @@ describe('application-driven preparation retry', () => {
     const { nextGenId, resolveNow } = await acceptSecondCommitWithFailedPreparation(fixture);
     DatabaseService.getInstance().updateBlueprint(fixture.blueprintId, { enabled: false });
     resolveNow();
-    const reconciler = (await import('../services/BlueprintReconciler')).BlueprintReconciler;
-    await reconciler.getInstance().tick();
-    await vi.waitFor(() => {
-      expect(store.getApplication(fixture.applicationId)?.artifact_set_id).toBe(`resolved-${nextGenId}`);
-    });
+    await tickUntil(() => store.getApplication(fixture.applicationId)?.artifact_set_id === `resolved-${nextGenId}`);
     // Content is not execution: prepared while disabled, nothing deploys.
     expect(deploySpy.mock.calls.filter((call) => call[0].blueprint.id === fixture.blueprintId)).toHaveLength(0);
 
     DatabaseService.getInstance().updateBlueprint(fixture.blueprintId, { enabled: true });
-    await reconciler.getInstance().tick();
-
     // Enabling it again is the missing handoff: the pass dispatches without a
     // person clicking Authorize.
-    await vi.waitFor(() => {
-      expect(deploySpy.mock.calls.filter((call) => call[0].blueprint.id === fixture.blueprintId))
-        .toHaveLength(fixture.nodeIds.length);
-    });
+    await tickUntil(() => deploySpy.mock.calls
+      .filter((call) => call[0].blueprint.id === fixture.blueprintId).length === fixture.nodeIds.length);
   });
 
   it('re-drives a transiently refused dispatch on the next tick', async () => {
@@ -1014,20 +994,19 @@ describe('application-driven preparation retry', () => {
     const dispatchSpy = vi.spyOn(GitSourceService.getInstance(), 'dispatchAcceptedGeneration')
       .mockResolvedValueOnce({ status: 'blocked', reason: 'Deploy to node 1 is already in progress.', holdable: false })
       .mockResolvedValue({ status: 'dispatched' });
-    const reconciler = (await import('../services/BlueprintReconciler')).BlueprintReconciler;
+    const dispatchCalls = (): number => dispatchSpy.mock.calls
+      .filter((call) => call[0].applicationId === fixture.applicationId).length;
 
-    await reconciler.getInstance().tick();
-    await vi.waitFor(() => expect(dispatchSpy).toHaveBeenCalledTimes(1));
+    await tickUntil(() => dispatchCalls() === 1);
     // A transient refusal is not a hold: the rollout must not read as paused.
     expect(GitOpsStore.getInstance().getApplication(fixture.applicationId)!.pause_at).toBeNull();
 
     // The holder finishes; a later pass re-drives instead of leaving the
     // rollout queued until a restart. The production backoff is cleared so the
     // test observes the next attempt without waiting out the interval.
-    await new Promise((resolve) => setTimeout(resolve, 10));
+    const reconciler = (await import('../services/BlueprintReconciler')).BlueprintReconciler;
     reconciler.getInstance().clearGitManagedHandoffFloorForTests();
-    await reconciler.getInstance().tick();
-    await vi.waitFor(() => expect(dispatchSpy).toHaveBeenCalledTimes(2));
+    await tickUntil(() => dispatchCalls() === 2);
     dispatchSpy.mockRestore();
   });
 
@@ -1040,7 +1019,6 @@ describe('application-driven preparation retry', () => {
     const freezeSpy = vi.spyOn(await import('../services/gitops/gitManagedMaterialization'), 'materializeAndFreezeGitManagedArtifactSet')
       .mockResolvedValue({ status: 'none', reason: 'applied compose unreadable' });
     const dueSpy = vi.spyOn(BlueprintService.getInstance(), 'gitManagedPreparationRetryDue');
-    const reconciler = (await import('../services/BlueprintReconciler')).BlueprintReconciler;
     // Counts are per application: one tick covers every live Git-managed
     // application, including the ones earlier tests left behind.
     const attempts = (): number => freezeSpy.mock.calls
@@ -1048,17 +1026,10 @@ describe('application-driven preparation retry', () => {
     const dueChecks = (): number => dueSpy.mock.calls
       .filter((call) => call[0].id === fixture.applicationId).length;
 
-    await reconciler.getInstance().tick();
-    await vi.waitFor(() => expect(attempts()).toBe(1));
-    // Let the detached pass release the in-flight entry; a tick while it is
-    // still running would skip this application and the floor assertion would
-    // never see the second due check.
-    await new Promise((resolve) => setTimeout(resolve, 10));
-
-    await reconciler.getInstance().tick();
+    await tickUntil(() => attempts() === 1);
     // The call-through spy is the positive control: the second pass evaluated
     // the application, so a freeze that was not attempted is the floor.
-    await vi.waitFor(() => expect(dueChecks()).toBe(2));
+    await tickUntil(() => dueChecks() === 2);
     expect(attempts()).toBe(1);
     freezeSpy.mockRestore();
   });
@@ -1073,15 +1044,10 @@ describe('application-driven preparation retry', () => {
     });
     const dispatchSpy = vi.spyOn(GitSourceService.getInstance(), 'dispatchAcceptedGeneration');
     const warrantedSpy = vi.spyOn(await import('../services/gitops/handoff'), 'gitManagedDispatchWarranted');
-    const reconciler = (await import('../services/BlueprintReconciler')).BlueprintReconciler;
-
-    await reconciler.getInstance().tick();
 
     // The predicate is the positive control: the detached pass reached the
     // decision, and an in-flight deploy is why it said no.
-    await vi.waitFor(() => {
-      expect(warrantedSpy.mock.calls.some((call) => call[0].id === fixture.applicationId)).toBe(true);
-    });
+    await tickUntil(() => warrantedSpy.mock.calls.some((call) => call[0].id === fixture.applicationId));
     expect(dispatchSpy).not.toHaveBeenCalled();
     dispatchSpy.mockRestore();
     warrantedSpy.mockRestore();
@@ -1098,16 +1064,11 @@ describe('application-driven preparation retry', () => {
     expect(store.getApplication(fixture.applicationId)!.rollout_authorization_ref).toBeNull();
     const dispatchSpy = vi.spyOn(GitSourceService.getInstance(), 'dispatchAcceptedGeneration');
     const warrantedSpy = vi.spyOn(await import('../services/gitops/handoff'), 'gitManagedDispatchWarranted');
-    const reconciler = (await import('../services/BlueprintReconciler')).BlueprintReconciler;
-
-    await reconciler.getInstance().tick();
 
     // The withdrawn generation carries the operator's withdrawal marker, so the
     // predicate refuses and the automatic policy cannot mint a replacement
     // until a new commit arrives.
-    await vi.waitFor(() => {
-      expect(warrantedSpy.mock.calls.some((call) => call[0].id === fixture.applicationId)).toBe(true);
-    });
+    await tickUntil(() => warrantedSpy.mock.calls.some((call) => call[0].id === fixture.applicationId));
     expect(dispatchSpy).not.toHaveBeenCalled();
     dispatchSpy.mockRestore();
     warrantedSpy.mockRestore();
@@ -1147,11 +1108,7 @@ describe('application-driven preparation retry', () => {
 
     const dispatchSpy = vi.spyOn(GitSourceService.getInstance(), 'dispatchAcceptedGeneration');
     const warrantedSpy = vi.spyOn(await import('../services/gitops/handoff'), 'gitManagedDispatchWarranted');
-    const reconciler = (await import('../services/BlueprintReconciler')).BlueprintReconciler;
-    await reconciler.getInstance().tick();
-    await vi.waitFor(() => {
-      expect(warrantedSpy.mock.calls.some((call) => call[0].id === fixture.applicationId)).toBe(true);
-    });
+    await tickUntil(() => warrantedSpy.mock.calls.some((call) => call[0].id === fixture.applicationId));
     const decision = warrantedSpy.mock.results.find(
       (_result, index) => warrantedSpy.mock.calls[index]?.[0].id === fixture.applicationId,
     );
@@ -1226,11 +1183,8 @@ describe('application-driven preparation retry', () => {
 
     const handoffSpy = vi.spyOn(await import('../services/gitops/gitManagedHandoff'), 'dispatchPreparedGitManagedGeneration')
       .mockResolvedValue({ status: 'dispatched', reason: null });
-    const reconciler = (await import('../services/BlueprintReconciler')).BlueprintReconciler;
-    await reconciler.getInstance().tick();
-    await vi.waitFor(() => {
-      expect(handoffSpy.mock.calls.filter((call) => call[0].applicationId === fixture.applicationId)).toHaveLength(1);
-    });
+    await tickUntil(() => handoffSpy.mock.calls
+      .filter((call) => call[0].applicationId === fixture.applicationId).length === 1);
     handoffSpy.mockRestore();
   });
 
@@ -1246,14 +1200,10 @@ describe('application-driven preparation retry', () => {
 
     const handoffSpy = vi.spyOn(await import('../services/gitops/gitManagedHandoff'), 'dispatchPreparedGitManagedGeneration')
       .mockResolvedValue({ status: 'dispatched', reason: null });
-    const reconciler = (await import('../services/BlueprintReconciler')).BlueprintReconciler;
-    await reconciler.getInstance().tick();
-
     // A system supersede carries no withdrawal marker, so the automatic policy
     // still re-mints when the registry is healthy again.
-    await vi.waitFor(() => {
-      expect(handoffSpy.mock.calls.filter((call) => call[0].applicationId === fixture.applicationId)).toHaveLength(1);
-    });
+    await tickUntil(() => handoffSpy.mock.calls
+      .filter((call) => call[0].applicationId === fixture.applicationId).length === 1);
     handoffSpy.mockRestore();
   });
 
@@ -1287,14 +1237,10 @@ describe('application-driven preparation retry', () => {
 
     const handoffSpy = vi.spyOn(await import('../services/gitops/gitManagedHandoff'), 'dispatchPreparedGitManagedGeneration')
       .mockResolvedValue({ status: 'dispatched', reason: null });
-    const reconciler = (await import('../services/BlueprintReconciler')).BlueprintReconciler;
-    await reconciler.getInstance().tick();
-
     // The re-approval moved the pointer onto a generation with no withdrawal
     // marker, so the automatic policy completes the rollout without a person.
-    await vi.waitFor(() => {
-      expect(handoffSpy.mock.calls.filter((call) => call[0].applicationId === fixture.applicationId)).toHaveLength(1);
-    });
+    await tickUntil(() => handoffSpy.mock.calls
+      .filter((call) => call[0].applicationId === fixture.applicationId).length === 1);
     handoffSpy.mockRestore();
   });
 
@@ -1321,11 +1267,7 @@ describe('application-driven preparation retry', () => {
     const dispatchSpy = vi.spyOn(GitSourceService.getInstance(), 'dispatchAcceptedGeneration');
     const warrantedSpy = vi.spyOn(await import('../services/gitops/handoff'), 'gitManagedDispatchWarranted');
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
-    const reconciler = (await import('../services/BlueprintReconciler')).BlueprintReconciler;
-    await reconciler.getInstance().tick();
-    await vi.waitFor(() => {
-      expect(warrantedSpy.mock.calls.some((call) => call[0].id === fixture.applicationId)).toBe(true);
-    });
+    await tickUntil(() => warrantedSpy.mock.calls.some((call) => call[0].id === fixture.applicationId));
     // The fence is scoped to the superseded generation, so the shared handoff
     // gate is what refuses the mint; the predicate itself is satisfied.
     const decision = warrantedSpy.mock.results.find(
@@ -1410,16 +1352,11 @@ describe('application-driven preparation retry', () => {
     });
     const dispatchSpy = vi.spyOn(GitSourceService.getInstance(), 'dispatchAcceptedGeneration');
     const warrantedSpy = vi.spyOn(await import('../services/gitops/handoff'), 'gitManagedDispatchWarranted');
-    const reconciler = (await import('../services/BlueprintReconciler')).BlueprintReconciler;
-
-    await reconciler.getInstance().tick();
 
     // The paused target is a recorded decision the queue skips, so the
     // predicate is the positive control and the full authorization path is not
     // re-run on every tick.
-    await vi.waitFor(() => {
-      expect(warrantedSpy.mock.calls.some((call) => call[0].id === fixture.applicationId)).toBe(true);
-    });
+    await tickUntil(() => warrantedSpy.mock.calls.some((call) => call[0].id === fixture.applicationId));
     const fixtureDecision = warrantedSpy.mock.results.find(
       (_result, index) => warrantedSpy.mock.calls[index]?.[0].id === fixture.applicationId,
     );
@@ -1448,19 +1385,16 @@ describe('application-driven preparation retry', () => {
     const handoffSpy = vi.spyOn(await import('../services/gitops/gitManagedHandoff'), 'dispatchPreparedGitManagedGeneration')
       .mockResolvedValue({ status: 'blocked', reason: 'the registry preflight is blocked' });
     const warrantedSpy = vi.spyOn(await import('../services/gitops/handoff'), 'gitManagedDispatchWarranted');
-    const reconciler = (await import('../services/BlueprintReconciler')).BlueprintReconciler;
     const warrantedChecks = (): number => warrantedSpy.mock.calls
       .filter((call) => call[0].id === fixture.applicationId).length;
+    const handoffCalls = (): number => handoffSpy.mock.calls
+      .filter((call) => call[0].applicationId === fixture.applicationId).length;
 
-    await reconciler.getInstance().tick();
-    await vi.waitFor(() => expect(handoffSpy).toHaveBeenCalledTimes(1));
-    await new Promise((resolve) => setTimeout(resolve, 10));
-
-    await reconciler.getInstance().tick();
+    await tickUntil(() => handoffCalls() === 1);
     // The predicate ran again (positive control); the floor is what stopped the
     // handoff, so a steady blocked state is not re-evaluated every tick.
-    await vi.waitFor(() => expect(warrantedChecks()).toBe(2));
-    expect(handoffSpy).toHaveBeenCalledTimes(1);
+    await tickUntil(() => warrantedChecks() === 2);
+    expect(handoffCalls()).toBe(1);
     handoffSpy.mockRestore();
     warrantedSpy.mockRestore();
   });

@@ -69,7 +69,7 @@ export async function dispatchPreparedGitManagedGeneration(args: {
     // application rather than about a rollout that exists.
     const blocked = {
       status: 'blocked' as const,
-      reason: 'a target has an unfinished rollback; finish it before the rollout continues',
+      reason: 'a target has an unfinished rollback; finish it, then resume the rollout',
       holdable: true,
     };
     holdBlockedRolloutDispatch(app.id, blocked, { requireLiveBinding: false });

@@ -1514,10 +1514,18 @@ gitopsApplicationsRouter.post('/:id/rollout/resume', async (req: Request, res: R
   const app = store.getApplication(target.application.id) ?? target.application;
   const binding = store.currentAuthorizationBinding(app);
   if (!binding) {
+    // A resumed rollout with no authorization has nothing to dispatch, and an
+    // unfinished rollback would be deployed over if the operator authorized
+    // next. Name it here, because this is the reply that steers them there.
+    const rollbackPending = store.listTargets(app.id).some(
+      (target) => target.target_status === 'active' && target.health_stop_reason === 'rollback_pending',
+    );
     res.json({
       ok: true,
       dispatched: false,
-      note: 'The rollout is resumed, but no live authorization exists; authorize the rollout to start it.',
+      note: rollbackPending
+        ? 'The rollout is resumed, but no live authorization exists and a target has an unfinished rollback; finish the rollback, then authorize the rollout to start it.'
+        : 'The rollout is resumed, but no live authorization exists; authorize the rollout to start it.',
     });
     return;
   }
