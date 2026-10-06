@@ -1,14 +1,14 @@
 /**
  * Gate coverage for the mesh router.
  *
- * Every /api/mesh route is tier-gated (requirePaid). Node enable/disable and
- * override regeneration are permission-gated. Stack membership remains Admin-only
- * because a membership change redeploys every affected mesh stack. The read routes
- * (status, aliases, activity, diagnostics) stay reachable for any paid-tier
- * user regardless of role, which is what lets a non-admin see a read-only
+ * Mesh is not tier-gated. Node enable/disable and override regeneration are
+ * permission-gated. Stack membership remains Admin-only because a membership
+ * change redeploys every affected mesh stack. The read routes (status,
+ * aliases, activity, diagnostics) need only the read permission (node:read /
+ * stack:read), not Admin, which is what lets a non-admin see a read-only
  * Routing tab. The node-to-node routes that central calls over the proxy on the
- * operator's behalf (local-override PUT/DELETE, alias test) are paid-gated
- * but intentionally not admin-gated. These tests lock that split so the backend
+ * operator's behalf (local-override PUT/DELETE, alias test) are intentionally
+ * not admin-gated. These tests lock that split so the backend
  * can never silently diverge from the matching frontend render gate (a button
  * that 403s, or a feature an owner cannot see).
  */
@@ -47,9 +47,8 @@ beforeAll(async () => {
 });
 
 beforeEach(() => {
-    // Default every test to a fully entitled paid instance; tier-rejection
-    // tests override this locally.
-    setTier('paid');
+    // Community by default: Mesh must work without a paid license.
+    setTier('community');
 });
 
 afterAll(() => {
@@ -57,27 +56,53 @@ afterAll(() => {
     cleanupTestDb(tmpDir);
 });
 
-describe('mesh tier gate (requirePaid)', () => {
-    it('rejects Community tier with PAID_REQUIRED', async () => {
-        setTier('community');
+describe('mesh is not tier-gated', () => {
+    it('serves aliases to a Community admin', async () => {
         const res = await request(app)
             .get('/api/mesh/aliases')
             .set('Authorization', `Bearer ${userToken(TEST_USERNAME)}`);
-        expect(res.status).toBe(403);
-        expect(res.body.code).toBe('PAID_REQUIRED');
+        expect(res.status).toBe(200);
     });
 
-    it('rejects Community tier on a mutation before the role gate runs', async () => {
-        setTier('community');
+    // Every route except the SSE activity stream, which never ends a response.
+    // Handlers may still 4xx/5xx for other reasons in the test environment;
+    // only a tier rejection is asserted absent.
+    const everyRoute: { method: 'get' | 'post' | 'put' | 'delete'; path: () => string }[] = [
+        { method: 'get', path: () => '/api/mesh/status' },
+        { method: 'post', path: () => '/api/mesh/regen-overrides' },
+        { method: 'post', path: () => `/api/mesh/nodes/${defaultNodeId}/enable` },
+        { method: 'post', path: () => `/api/mesh/nodes/${defaultNodeId}/disable` },
+        { method: 'get', path: () => '/api/mesh/local-services/demo' },
+        { method: 'get', path: () => '/api/mesh/local-stacks' },
+        { method: 'put', path: () => '/api/mesh/local-override/demo' },
+        { method: 'delete', path: () => '/api/mesh/local-override/demo' },
+        { method: 'get', path: () => `/api/mesh/nodes/${defaultNodeId}/stacks` },
+        { method: 'post', path: () => `/api/mesh/nodes/${defaultNodeId}/stacks/demo/opt-in` },
+        { method: 'post', path: () => `/api/mesh/nodes/${defaultNodeId}/stacks/demo/opt-out` },
+        { method: 'get', path: () => '/api/mesh/aliases' },
+        { method: 'get', path: () => '/api/mesh/aliases/demo/diagnostic' },
+        { method: 'post', path: () => '/api/mesh/aliases/demo/test' },
+        { method: 'get', path: () => `/api/mesh/nodes/${defaultNodeId}/diagnostic` },
+        { method: 'get', path: () => '/api/mesh/activity' },
+    ];
+    for (const route of everyRoute) {
+        it(`${route.method.toUpperCase()} ${route.path()} is not tier-rejected for a Community admin`, async () => {
+            const res = await request(app)[route.method](route.path())
+                .set('Authorization', `Bearer ${userToken(TEST_USERNAME)}`);
+            expect(res.body.code).not.toBe('PAID_REQUIRED');
+        });
+    }
+
+    it('serves aliases identically on a paid instance', async () => {
+        setTier('paid');
         const res = await request(app)
-            .post('/api/mesh/regen-overrides')
+            .get('/api/mesh/aliases')
             .set('Authorization', `Bearer ${userToken(TEST_USERNAME)}`);
-        expect(res.status).toBe(403);
-        expect(res.body.code).toBe('PAID_REQUIRED');
+        expect(res.status).toBe(200);
     });
 });
 
-describe('mesh read routes are visible to a non-admin paid user', () => {
+describe('mesh read routes are visible to a non-admin user', () => {
     it('returns aliases to a viewer', async () => {
         const res = await request(app)
             .get('/api/mesh/aliases')
@@ -115,7 +140,7 @@ describe('mesh mutation authorization', () => {
     ];
 
     for (const route of permissionRoutes) {
-        it(`${route.name} rejects a paid user without the required operational permission`, async () => {
+        it(`${route.name} rejects a user without the required operational permission`, async () => {
             const res = await request(app)
                 .post(route.path())
                 .set('Authorization', `Bearer ${userToken('mesh-viewer')}`);
@@ -134,7 +159,7 @@ describe('mesh mutation authorization', () => {
         });
     }
 
-    it('lets a paid admin pass both gates on regen-overrides', async () => {
+    it('lets a Community admin through on regen-overrides', async () => {
         const res = await request(app)
             .post('/api/mesh/regen-overrides')
             .set('Authorization', `Bearer ${userToken(TEST_USERNAME)}`);
@@ -142,9 +167,8 @@ describe('mesh mutation authorization', () => {
         expect(res.body).toHaveProperty('regenerated');
     });
 
-    it('lets a paid admin past both gates on a node mutation (not gate-rejected)', async () => {
-        // Locks the guard order (tier before role) for a mutation other than
-        // regen-overrides: an admin must never be rejected by either gate. The
+    it('lets a Community admin past the gates on a node mutation (not gate-rejected)', async () => {
+        // An admin on a Community instance must never be rejected by a gate. The
         // handler may still 4xx/5xx for other reasons in the test environment;
         // only the gate codes are asserted absent.
         const res = await request(app)

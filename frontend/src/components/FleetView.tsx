@@ -20,11 +20,9 @@ import { useTopologyPreferences } from '@/hooks/useTopologyPreferences';
 import { Button } from '@/components/ui/button';
 import { Tabs, TabsContent, TabsList, TabsTrigger, TabsHighlight, TabsHighlightItem } from '@/components/ui/tabs';
 import { springs } from '@/lib/motion';
-import { useLicense } from '@/context/LicenseContext';
 import { useAuth } from '@/context/AuthContext';
 import { useNodes } from '@/context/NodeContext';
 import { useExperimental } from '@/hooks/useExperimental';
-import { PaidGate } from './PaidGate';
 import FleetSnapshots from './FleetSnapshots';
 import { FleetReadiness } from './fleet/FleetReadiness';
 import { useFleetReadiness } from './fleet/readiness/useFleetReadiness';
@@ -75,15 +73,14 @@ export function FleetView({
     fleetActiveTab: controlledTab,
     onFleetActiveTabChange,
 }: FleetViewProps) {
-    const { isPaid, licenseStatus } = useLicense();
     const { isAdmin, can } = useAuth();
     const canManageFleet = can('node:manage');
     const canExportDossier = can('node:read') && can('stack:read');
     const { hasCapability, nodes: registryNodes } = useNodes();
     const { experimental, experimentalReady } = useExperimental();
     const containerLabelsEnabled = hasCapability('container-label-inventory');
-    // Visual fail-closed while /meta loads; paid/admin gates still apply when on.
-    const canDiscoverRouting = experimentalReady && experimental && isPaid;
+    // Visual fail-closed while /meta loads; permission gates still apply when on.
+    const canDiscoverRouting = experimentalReady && experimental;
 
     const { prefs, updatePrefs } = useFleetPreferences();
     const updateStatus = useFleetUpdateStatus();
@@ -132,22 +129,13 @@ export function FleetView({
         if (controlledTab === undefined) setInternalTab(tab);
     };
 
-    // Fall back Routing deep links when experimental/license gates resolve false.
-    // Wait for license during cold load so a paid deep link is not rewritten to
-    // Overview while isPaid is still the cold-load false.
+    // Fall back Routing deep links when the experimental gate resolves false.
     useEffect(() => {
         if (!experimentalReady) return;
-        if (activeTab === 'routing') {
-            if (!experimental) {
-                setActiveTab('overview');
-                return;
-            }
-            if (licenseStatus !== 'ready') return;
-            if (!isPaid) setActiveTab('overview');
-        }
+        if (activeTab === 'routing' && !experimental) setActiveTab('overview');
     // setActiveTab closes over onFleetActiveTabChange; listing deps explicitly.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [experimentalReady, experimental, licenseStatus, isPaid, activeTab]);
+    }, [experimentalReady, experimental, activeTab]);
 
     useEffect(() => {
         if (fleetUpdatesIntent) {
@@ -366,12 +354,10 @@ export function FleetView({
                     </TabsContent>
                 {canDiscoverRouting && (
                     <TabsContent value="routing">
-                        <PaidGate>
-                            <RoutingTab
-                                canManageNode={(nodeId) => can('node:manage', 'node', String(nodeId))}
-                                canManageMembership={isAdmin}
-                            />
-                        </PaidGate>
+                        <RoutingTab
+                            canManageNode={(nodeId) => can('node:manage', 'node', String(nodeId))}
+                            canManageMembership={isAdmin}
+                        />
                     </TabsContent>
                 )}
                 <TabsContent value="federation">

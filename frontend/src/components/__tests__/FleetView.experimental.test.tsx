@@ -7,8 +7,9 @@ vi.mock('@/hooks/useExperimental', () => ({
   useExperimental: () => useExperimentalMock(),
 }));
 
+// Community license: Routing must not depend on a paid tier.
 vi.mock('@/context/LicenseContext', () => ({
-  useLicense: () => ({ isPaid: true, licenseStatus: 'ready' as const }),
+  useLicense: () => ({ isPaid: false, isAdmiral: false, licenseStatus: 'ready' as const }),
 }));
 const useAuthMock = vi.fn(() => ({ isAdmin: true as boolean, can: () => true as boolean }));
 vi.mock('@/context/AuthContext', () => ({
@@ -99,7 +100,6 @@ vi.mock('../fleet/FleetActions/FleetActionsTab', () => ({ FleetActionsTab: () =>
 vi.mock('../fleet/secrets/SecretsTab', () => ({ SecretsTab: () => <div data-testid="secrets-tab" /> }));
 vi.mock('../fleet/DependencyMapTab', () => ({ DependencyMapTab: () => null }));
 vi.mock('../fleet/ContainerLabelsTab', () => ({ ContainerLabelsTab: () => null }));
-vi.mock('../PaidGate', () => ({ PaidGate: ({ children }: { children: React.ReactNode }) => <>{children}</> }));
 
 describe('FleetView tab discovery and deep-link fallback', () => {
   beforeEach(() => {
@@ -195,7 +195,7 @@ describe('FleetView tab discovery and deep-link fallback', () => {
     useAuthMock.mockReturnValue({ isAdmin: false, can: () => false });
     render(<FleetView onNavigateToNode={vi.fn()} onOpenNodeNetworking={vi.fn()} />);
     expect(screen.queryByRole('tab', { name: /secrets/i })).toBeNull();
-    // Routing still visible (gated on experimental + paid, not admin)
+    // Routing still visible (gated on experimental only, not tier or admin)
     expect(screen.getByRole('tab', { name: /routing/i })).toBeTruthy();
     // Unrelated tabs still visible
     expect(screen.getByRole('tab', { name: /blueprints/i })).toBeTruthy();

@@ -46,15 +46,13 @@ describe('WebSocket upgrade dispatch order', () => {
     const token = jwt.sign({ username: TEST_USERNAME }, TEST_JWT_SECRET, { expiresIn: '1m' });
     sessionCookie = `sencho_token=${token}`;
 
-    // Existing /api/mesh/proxy-tunnel scope tests assume the receiver
-    // license clears the paid check. Set the license to active (paid) so
-    // the credential-only assertions below still hold; the dedicated
-    // license-gating describe block flips and restores per-test.
+    // Default to an active license; the Mesh Community describe block
+    // flips to community per test to prove the tunnel ignores the tier.
     DatabaseService.getInstance().setSystemState('license_status', 'active');
   });
 
   afterAll(async () => {
-    // Clear the paid state beforeAll set so this file does not leak
+    // Clear the license state beforeAll set so this file does not leak
     // license context into other tests sharing the same test DB.
     const { DatabaseService } = await import('../services/DatabaseService');
     DatabaseService.getInstance().setSystemState('license_status', 'community');
@@ -234,43 +232,57 @@ describe('WebSocket upgrade dispatch order', () => {
     });
   });
 
-  describe('/api/mesh/proxy-tunnel paid entitlement gating', () => {
-    // Paid entitlement on the WS data plane is decided against the
-    // *central's* asserted tier, matching the HTTP mesh routes
-    // (requirePaid in routes/mesh.ts reads req.proxyTier from forwarded
-    // headers off the node_proxy credential). The WS dispatcher trusts
-    // x-sencho-tier only when the upgrade carries a node_proxy JWT; when no
-    // header is present, or when the credential is a full-admin api_token
-    // (no central is asserting tier), it falls back to the receiver's own
-    // license. These tests pin both branches:
-    // (a) the trusted-header path accepts a paid central even on a
-    //     Community receiver, and rejects a Community central on a
-    //     paid receiver;
-    // (b) the local-fallback path keeps the receiver-license check intact
-    //     for full-admin api_token upgrades and for header-less node_proxy
-    //     upgrades.
+  describe('/api/mesh/proxy-tunnel is not tier-gated', () => {
+    // Mesh is a Community capability. The upgrade still requires a
+    // machine-to-machine credential (covered above), but neither the
+    // receiver's license nor a forwarded x-sencho-tier header decides access.
 
     async function setLicense(status: string): Promise<void> {
       const { DatabaseService } = await import('../services/DatabaseService');
       DatabaseService.getInstance().setSystemState('license_status', status);
     }
 
+    async function expectOpen(ws: WebSocket): Promise<void> {
+      const outcome = await waitForOutcome(ws);
+      expect(outcome.kind).toBe('open');
+      try { ws.terminate(); } catch { /* ignore */ }
+    }
+
     afterEach(async () => {
-      // Restore the paid state beforeAll established so subsequent
-      // tests in this file (and the proxy-tunnel scope block) keep passing.
+      // Restore the license state beforeAll established so later tests in
+      // this file run against it.
       await setLicense('active');
     });
 
-    it('rejects a node_proxy Bearer with HTTP 403 when no tier headers and the receiver license is community', async () => {
+    it('still rejects a session cookie with HTTP 403 on a Community receiver', async () => {
       await setLicense('community');
-      const nodeProxyToken = jwt.sign({ scope: 'node_proxy' }, TEST_JWT_SECRET, { expiresIn: '1m' });
-      const ws = connect('/api/mesh/proxy-tunnel', { bearer: nodeProxyToken });
-      const outcome = await waitForOutcome(ws);
+      const outcome = await waitForOutcome(connect('/api/mesh/proxy-tunnel', { cookie: sessionCookie }));
       expect(outcome.kind).toBe('unexpected');
       if (outcome.kind === 'unexpected') expect(outcome.status).toBe(403);
     });
 
-    it('rejects a full-admin api_token with HTTP 403 when the receiver license is community (forwarded headers ignored on api_token path)', async () => {
+    it('still rejects a deploy-only api_token with HTTP 403 on a Community receiver', async () => {
+      await setLicense('community');
+      const { DatabaseService } = await import('../services/DatabaseService');
+      const adminId = DatabaseService.getInstance().getUserByUsername(TEST_USERNAME)!.id;
+      const rawToken = createTestApiToken({
+        db: DatabaseService,
+        scope: 'deploy-only',
+        userId: adminId,
+        name: `mesh-community-deploy-only-${Date.now()}`,
+      });
+      const outcome = await waitForOutcome(connect('/api/mesh/proxy-tunnel', { bearer: rawToken }));
+      expect(outcome.kind).toBe('unexpected');
+      if (outcome.kind === 'unexpected') expect(outcome.status).toBe(403);
+    });
+
+    it('accepts a node_proxy Bearer with no tier header on a Community receiver', async () => {
+      await setLicense('community');
+      const nodeProxyToken = jwt.sign({ scope: 'node_proxy' }, TEST_JWT_SECRET, { expiresIn: '1m' });
+      await expectOpen(connect('/api/mesh/proxy-tunnel', { bearer: nodeProxyToken }));
+    });
+
+    it('accepts a full-admin api_token on a Community receiver', async () => {
       await setLicense('community');
       const { DatabaseService } = await import('../services/DatabaseService');
       const adminId = DatabaseService.getInstance().getUserByUsername(TEST_USERNAME)!.id;
@@ -278,41 +290,17 @@ describe('WebSocket upgrade dispatch order', () => {
         db: DatabaseService,
         scope: 'full-admin',
         userId: adminId,
-        name: `mesh-license-gate-${Date.now()}`,
+        name: `mesh-community-${Date.now()}`,
       });
-      // Header is set but must be ignored: the full-admin api_token is a
-      // local-entitlement credential, not a node_proxy forwarder.
-      const ws = connect('/api/mesh/proxy-tunnel', {
-        bearer: rawToken,
-        extraHeaders: { 'x-sencho-tier': 'paid' },
-      });
-      const outcome = await waitForOutcome(ws);
-      expect(outcome.kind).toBe('unexpected');
-      if (outcome.kind === 'unexpected') expect(outcome.status).toBe(403);
+      await expectOpen(connect('/api/mesh/proxy-tunnel', { bearer: rawToken }));
     });
 
-    it('accepts a node_proxy Bearer asserting paid via forwarded headers even when the receiver license is community', async () => {
-      await setLicense('community');
+    it('accepts a node_proxy Bearer whose central forwards a Community tier', async () => {
       const nodeProxyToken = jwt.sign({ scope: 'node_proxy' }, TEST_JWT_SECRET, { expiresIn: '1m' });
-      const ws = connect('/api/mesh/proxy-tunnel', {
-        bearer: nodeProxyToken,
-        extraHeaders: { 'x-sencho-tier': 'paid' },
-      });
-      const outcome = await waitForOutcome(ws);
-      expect(outcome.kind).toBe('open');
-      try { ws.terminate(); } catch { /* ignore */ }
-    });
-
-    it('rejects a node_proxy Bearer asserting community via forwarded headers even when the receiver license is paid', async () => {
-      // Receiver state is already paid (set by beforeAll / afterEach).
-      const nodeProxyToken = jwt.sign({ scope: 'node_proxy' }, TEST_JWT_SECRET, { expiresIn: '1m' });
-      const ws = connect('/api/mesh/proxy-tunnel', {
+      await expectOpen(connect('/api/mesh/proxy-tunnel', {
         bearer: nodeProxyToken,
         extraHeaders: { 'x-sencho-tier': 'community' },
-      });
-      const outcome = await waitForOutcome(ws);
-      expect(outcome.kind).toBe('unexpected');
-      if (outcome.kind === 'unexpected') expect(outcome.status).toBe(403);
+      }));
     });
   });
 
