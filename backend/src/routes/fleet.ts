@@ -384,13 +384,43 @@ function offlineRemoteOverview(node: Node, status: 'online' | 'offline'): FleetN
 // GET /api/fleet/overview (and the Fleet, Heartbeat, and Mobile loading states).
 const FLEET_OVERVIEW_PROBE_TIMEOUT_MS = 3000;
 
+// Per-remote budget for the Fleet fan-outs that fetch a node's own data (the
+// dependency map and the networking summary). A healthy node answers well
+// inside it, but the remote builds a full container, network and volume
+// snapshot, so it is looser than the 3s overview probe. A Pilot whose tunnel is
+// half-open (agent frozen, tunnel not yet reaped, up to ~90s) or a dead proxy
+// host must still degrade inside this window instead of holding the Fleet tab.
+const FLEET_NODE_READ_TIMEOUT_MS = 8000;
+
+/**
+ * The reason a per-node Fleet read failed, as shown beside the node. A budget
+ * overrun says so (a Retry may succeed) instead of surfacing the runtime's
+ * "operation was aborted due to timeout".
+ */
+function describeNodeReadError(error: unknown): string {
+  if (error instanceof Error && (error.name === 'TimeoutError' || error.name === 'AbortError')) {
+    return `Timed out after ${FLEET_NODE_READ_TIMEOUT_MS / 1000}s`;
+  }
+  return getErrorMessage(error, 'Failed to reach node');
+}
+
+// A Pilot with no tunnel still reads as online for this long after its tunnel
+// closed, so a brief reconnect does not flap the Fleet card. The agent's first
+// reconnect attempts land inside it (backoff 1s, 2s, 4s, 8s).
+const PILOT_RECONNECT_GRACE_MS = 30_000;
+
 async function fetchRemoteNodeOverview(node: Node, db: DatabaseService): Promise<FleetNodeOverview> {
   const target = NodeRegistry.getInstance().getProxyTarget(node.id);
   if (!target) {
-    // Soft-online keeps the Fleet card from flapping during a brief pilot
-    // tunnel reconnect: a recent pilot_last_seen still counts as reachable.
+    // `pilot_last_seen` is the last recorded moment the tunnel was up (stamped
+    // on connect and on close). A Pilot gone longer than the grace window is
+    // offline, not soft-online. After a hub restart the stamp predates the new
+    // process, so Pilots read offline until their agents reconnect.
+    const sinceSeen = node.pilot_last_seen ? Date.now() - node.pilot_last_seen : null;
     const status: 'online' | 'offline' =
-      node.mode === 'pilot_agent' && node.pilot_last_seen ? 'online' : 'offline';
+      node.mode === 'pilot_agent' && sinceSeen !== null
+        && sinceSeen >= 0 && sinceSeen <= PILOT_RECONNECT_GRACE_MS
+        ? 'online' : 'offline';
     return offlineRemoteOverview(node, status);
   }
 
@@ -781,7 +811,7 @@ fleetRouter.get('/dependency-map', authMiddleware, async (req: Request, res: Res
           `${target.apiUrl.replace(/\/$/, '')}/api/dependency-map/node-graph`,
           {
             headers: { ...(target.apiToken ? { Authorization: `Bearer ${target.apiToken}` } : {}) },
-            signal: AbortSignal.timeout(15000),
+            signal: AbortSignal.timeout(FLEET_NODE_READ_TIMEOUT_MS),
           },
           target.trustedLoopback,
         );
@@ -789,7 +819,15 @@ fleetRouter.get('/dependency-map', authMiddleware, async (req: Request, res: Res
           const errBody = await resp.json().catch(() => null) as { error?: string } | null;
           return { nodeId: node.id, nodeName: node.name, status: 'error', graph: null, error: errBody?.error ?? `Remote returned ${resp.status}` };
         }
-        const graph = await resp.json().catch(() => null);
+        let graph: unknown;
+        try {
+          graph = await resp.json();
+        } catch (readError) {
+          // A budget overrun mid-body is a timeout, not a malformed payload.
+          console.error(`[Fleet] Dependency map: node ${sanitizeForLog(node.name)} body read failed:`, errorMessageForLog(readError));
+          const reason = readError instanceof SyntaxError ? 'Remote returned invalid JSON' : describeNodeReadError(readError);
+          return { nodeId: node.id, nodeName: node.name, status: 'error', graph: null, error: reason };
+        }
         // Shape-guard a reachable-but-malformed payload (proxy HTML, version
         // drift) so one bad node degrades to a nodeError instead of crashing
         // mergeFleetGraph and 500-ing the whole fleet map.
@@ -804,7 +842,7 @@ fleetRouter.get('/dependency-map', authMiddleware, async (req: Request, res: Res
     const perNode: FleetNodeGraphResult[] = results.map((result, i) => {
       if (result.status === 'fulfilled') return result.value;
       console.error(`[Fleet] Dependency map fetch failed for node ${nodes[i].name}:`, result.reason);
-      return { nodeId: nodes[i].id, nodeName: nodes[i].name, status: 'error', graph: null, error: getErrorMessage(result.reason, 'Failed to reach node') };
+      return { nodeId: nodes[i].id, nodeName: nodes[i].name, status: 'error', graph: null, error: describeNodeReadError(result.reason) };
     });
 
     res.json(mergeFleetGraph(perNode));
@@ -1021,13 +1059,20 @@ fleetRouter.get('/networking-summary', authMiddleware, async (req: Request, res:
         }
         const resp = await safeRemoteFetch(
           `${target.apiUrl.replace(/\/$/, '')}/api/networking/summary`,
-          { headers: { ...(target.apiToken ? { Authorization: `Bearer ${target.apiToken}` } : {}) }, signal: AbortSignal.timeout(15000) },
+          { headers: { ...(target.apiToken ? { Authorization: `Bearer ${target.apiToken}` } : {}) }, signal: AbortSignal.timeout(FLEET_NODE_READ_TIMEOUT_MS) },
           target.trustedLoopback,
         );
         if (!resp.ok) {
           return { nodeId: node.id, nodeName: node.name, status: 'error', summary: null, error: `Remote returned ${resp.status}` };
         }
-        const summary = await resp.json().catch(() => null);
+        let summary: unknown;
+        try {
+          summary = await resp.json();
+        } catch (readError) {
+          console.error(`[Fleet] Networking summary: node ${sanitizeForLog(node.name)} body read failed:`, errorMessageForLog(readError));
+          const reason = readError instanceof SyntaxError ? 'Remote returned invalid JSON' : describeNodeReadError(readError);
+          return { nodeId: node.id, nodeName: node.name, status: 'error', summary: null, error: reason };
+        }
         if (!isNodeNetworkingSummary(summary)) {
           console.error(`[Fleet] Networking summary: node ${sanitizeForLog(node.name)} returned an unexpected payload (status ${resp.status})`);
           return { nodeId: node.id, nodeName: node.name, status: 'error', summary: null, error: 'Remote returned an unexpected summary payload' };
@@ -1039,7 +1084,7 @@ fleetRouter.get('/networking-summary', authMiddleware, async (req: Request, res:
     const perNode: FleetNetworkingSummaryNode[] = results.map((result, i) => {
       if (result.status === 'fulfilled') return result.value;
       console.error(`[Fleet] Networking summary fetch failed for node ${nodes[i].name}:`, result.reason);
-      return { nodeId: nodes[i].id, nodeName: nodes[i].name, status: 'error', summary: null, error: getErrorMessage(result.reason, 'Failed to reach node') };
+      return { nodeId: nodes[i].id, nodeName: nodes[i].name, status: 'error', summary: null, error: describeNodeReadError(result.reason) };
     });
 
     res.json({ nodes: perNode });

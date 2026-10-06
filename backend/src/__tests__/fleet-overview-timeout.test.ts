@@ -11,6 +11,7 @@ import request from 'supertest';
 import jwt from 'jsonwebtoken';
 import { setupTestDb, cleanupTestDb, TEST_USERNAME, TEST_JWT_SECRET } from './helpers/setupTestDb';
 import type { ProxyTarget } from '../services/NodeRegistry';
+import DockerController from '../services/DockerController';
 
 let tmpDir: string;
 let app: import('express').Express;
@@ -221,9 +222,39 @@ describe('GET /api/fleet/overview remote probe budget', () => {
     expect(row!.systemStats).toBeNull();
     expect(row!.stacks).toBeNull();
     expect(row!.pilot_last_seen).toBeTypeOf('number');
+    // Tunnel closed moments ago: still inside the reconnect grace window.
     expect(row!.status).toBe('online');
     expect(fetchSpy).not.toHaveBeenCalled();
     expect(elapsedMs).toBeLessThan(FAST_PATH_CEILING_MS);
+  });
+
+  it.each([
+    [29_000, 'online'],
+    [31_000, 'offline'],
+  ])('reports a Pilot whose tunnel closed %ims ago as %s', async (agoMs, expected) => {
+    const nodeId = addPilotNode('boundary-pilot');
+    DatabaseService.getInstance().updateNode(nodeId, { pilot_last_seen: Date.now() - agoMs });
+    mockTargets({ [nodeId]: null });
+
+    const { body } = await getOverview();
+    expect(body.find(n => n.id === nodeId)?.status).toBe(expected);
+  });
+
+  it('reports a Pilot gone longer than the reconnect grace window as offline', async () => {
+    const nodeId = addPilotNode('gone-pilot');
+    DatabaseService.getInstance().updateNode(nodeId, { pilot_last_seen: Date.now() - 5 * 60_000 });
+    mockTargets({ [nodeId]: null });
+    const fetchSpy = vi.spyOn(globalThis, 'fetch');
+
+    const { status, body } = await getOverview();
+    expect(status).toBe(200);
+    const row = body.find(n => n.id === nodeId);
+    expect(row).toBeDefined();
+    expect(row!.status).toBe('offline');
+    expect(row!.stats).toBeNull();
+    // The last time the tunnel was up is still reported for the card.
+    expect(row!.pilot_last_seen).toBeTypeOf('number');
+    expect(fetchSpy).not.toHaveBeenCalled();
   });
 
   it('returns a mixed fleet without waiting on the hung remote', async () => {
@@ -298,4 +329,64 @@ describe('GET /api/fleet/overview remote probe budget', () => {
     expect(row!.last_successful_contact).toBe(PRIOR_CONTACT);
     expect(elapsedMs).toBeLessThan(FAST_PATH_CEILING_MS);
   });
+});
+
+describe('node-data fan-outs share the per-remote read budget', () => {
+  // Above the 8s read budget, well under the old 15s ceiling.
+  const READ_BUDGET_FLOOR_MS = 7_000;
+  const READ_BUDGET_CEILING_MS = 12_000;
+
+  function stubLocalDocker(): void {
+    vi.spyOn(DockerController, 'getInstance').mockReturnValue({
+      getDependencySnapshot: vi.fn().mockResolvedValue({ containers: [], networks: [], volumes: [] }),
+    } as unknown as DockerController);
+  }
+
+  it('degrades a half-open remote to a nodeError on the dependency map within the budget', async () => {
+    stubLocalDocker();
+    const nodeId = addProxyNode('hung-map', PROXY_BASE);
+    const healthyId = addProxyNode('healthy-map', HEALTHY_BASE);
+    mockTargets({
+      [nodeId]: { apiUrl: PROXY_BASE, apiToken: 'test-token', trustedLoopback: false },
+      [healthyId]: { apiUrl: HEALTHY_BASE, apiToken: 'test-token', trustedLoopback: false },
+    });
+    mockFetch((url, init) => {
+      if (url.startsWith(`${HEALTHY_BASE}/api/dependency-map/node-graph`)) {
+        return jsonResponse({ nodes: [{ id: 'host', kind: 'host', label: 'healthy-map', stack: null, state: null, flags: [] }], edges: [], flags: [], parseErrors: [] });
+      }
+      return hungUntilAbort(init);
+    });
+
+    const started = Date.now();
+    const res = await request(app).get('/api/fleet/dependency-map').set('Authorization', authHeader);
+    const elapsedMs = Date.now() - started;
+
+    expect(res.status).toBe(200);
+    const errors = res.body.nodeErrors as { nodeId: number; error: string }[];
+    const hungError = errors.find(e => e.nodeId === nodeId);
+    expect(hungError?.error).toBe('Timed out after 8s');
+    // The healthy neighbour is not held back by the hung one.
+    expect(errors.map(e => e.nodeId)).not.toContain(healthyId);
+    expect((res.body.nodes as { nodeId: number }[]).some(n => n.nodeId === healthyId)).toBe(true);
+    expect(elapsedMs).toBeGreaterThan(READ_BUDGET_FLOOR_MS);
+    expect(elapsedMs).toBeLessThan(READ_BUDGET_CEILING_MS);
+  }, 20_000);
+
+  it('degrades a half-open remote to an error row on the networking summary within the budget', async () => {
+    stubLocalDocker();
+    const nodeId = addProxyNode('hung-networking', PROXY_BASE);
+    mockTargets({ [nodeId]: { apiUrl: PROXY_BASE, apiToken: 'test-token', trustedLoopback: false } });
+    mockFetch((_url, init) => hungUntilAbort(init));
+
+    const started = Date.now();
+    const res = await request(app).get('/api/fleet/networking-summary').set('Authorization', authHeader);
+    const elapsedMs = Date.now() - started;
+
+    expect(res.status).toBe(200);
+    const row = (res.body.nodes as { nodeId: number; status: string; error?: string }[]).find(n => n.nodeId === nodeId);
+    expect(row?.status).toBe('error');
+    expect(row?.error).toBe('Timed out after 8s');
+    expect(elapsedMs).toBeGreaterThan(READ_BUDGET_FLOOR_MS);
+    expect(elapsedMs).toBeLessThan(READ_BUDGET_CEILING_MS);
+  }, 20_000);
 });

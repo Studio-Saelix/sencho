@@ -1,6 +1,7 @@
 import { Server, Search, RotateCcw } from 'lucide-react';
 import { Skeleton } from '@/components/ui/skeleton';
 import { Button } from '@/components/ui/button';
+import { useVisualBusy } from '@/hooks/useVisualBusy';
 import { FleetTopology } from '../fleet/FleetTopology';
 import { NodeCard } from './NodeCard';
 import { OverviewToolbar } from './OverviewToolbar';
@@ -85,9 +86,11 @@ export function OverviewTab({
     onCheckUpdates,
     checkingUpdates,
 }: OverviewTabProps) {
+    // A fast answer never flashes the skeleton; the pane just holds still.
+    const { showBusy } = useVisualBusy(loading);
     return (
         <>
-            {loading && (
+            {loading && showBusy && (
                 <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
                     {Array.from({ length: 3 }).map((_, i) => (
                         <div key={i} className="rounded-xl border bg-card p-4 space-y-3">

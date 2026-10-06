@@ -34,6 +34,7 @@ import { DeploymentsTab } from './blueprints/DeploymentsTab';
 import { FleetActionsTab } from './fleet/FleetActions/FleetActionsTab';
 import { SecretsTab } from './fleet/secrets/SecretsTab';
 import { DependencyMapTab } from './fleet/DependencyMapTab';
+import { useFleetMap } from './fleet/useFleetMap';
 import { ContainerLabelsTab } from './fleet/ContainerLabelsTab';
 import { useNodeActions } from './nodes/useNodeActions';
 import type { FleetTab, SecurityTab } from '@/lib/events';
@@ -115,6 +116,8 @@ export function FleetView({
 
     const [internalTab, setInternalTab] = useState<FleetTab>('overview');
     const activeTab = controlledTab ?? internalTab;
+    // Owned here so returning to Map shows the last result while it revalidates.
+    const fleetMap = useFleetMap(activeTab === 'dependencies');
 
     // Coming back to Readiness re-checks a failed or stale result. A ref keeps
     // the live state out of the dependency array so only a tab change fires it.
@@ -354,7 +357,7 @@ export function FleetView({
                     />
                 </TabsContent>
                 <TabsContent value="dependencies">
-                    <DependencyMapTab />
+                    <DependencyMapTab map={fleetMap} />
                 </TabsContent>
                 {containerLabelsEnabled && (
                     <TabsContent value="container-labels">

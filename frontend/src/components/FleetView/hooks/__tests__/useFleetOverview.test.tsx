@@ -111,6 +111,87 @@ describe('useFleetOverview', () => {
     expect(result.current.loading).toBe(false);
   });
 
+  it('does not clear loading from an aborted call that a newer call replaced', async () => {
+    const { result } = setup();
+    let release: (r: Response) => void = () => {};
+    apiFetchMock.mockImplementationOnce((_path: string, init?: { signal?: AbortSignal }) => new Promise((_res, rej) => {
+      init?.signal?.addEventListener('abort', () => rej(new DOMException('aborted', 'AbortError')));
+    }));
+    apiFetchMock.mockImplementationOnce(() => new Promise<Response>((res) => { release = res; }));
+    let first: Promise<void> = Promise.resolve();
+    let second: Promise<void> = Promise.resolve();
+    act(() => { first = result.current.fetchOverview(); });
+    act(() => { second = result.current.fetchOverview(); });
+    await act(async () => { await first; });
+    // The aborted first call must not have flipped loading off: no empty-fleet flash.
+    expect(result.current.loading).toBe(true);
+    await act(async () => { release(okJson(NODES)); await second; });
+    expect(result.current.loading).toBe(false);
+    expect(result.current.nodes).toHaveLength(3);
+  });
+
+  it('retries the GitOps attention request after it was aborted', async () => {
+    const { result } = setup();
+    let gitopsCalls = 0;
+    apiFetchMock.mockImplementation((path: string) => {
+      if (path === '/fleet/overview') return Promise.resolve(okJson(NODES));
+      if (path.startsWith('/gitops/applications')) {
+        gitopsCalls += 1;
+        if (gitopsCalls === 1) return Promise.reject(new DOMException('aborted', 'AbortError'));
+        return Promise.resolve(okJson({ summary: { attentionByNode: { '2': 3 } }, coverage: [{ nodeId: 2, state: 'ok' }] }));
+      }
+      return Promise.resolve(okJson({ nodes: [] }));
+    });
+    await act(async () => { await result.current.fetchOverview(); });
+    await act(async () => { await result.current.fetchOverview(); });
+    expect(gitopsCalls).toBe(2);
+    expect(result.current.gitopsAttentionByNode.get(2)).toBe(3);
+  });
+
+  it('does not request GitOps attention again after it loaded', async () => {
+    const { result } = setup();
+    await act(async () => { await result.current.fetchOverview(); });
+    await act(async () => { await result.current.fetchOverview(); });
+    const gitopsCalls = apiFetchMock.mock.calls.filter(([path]) => String(path).startsWith('/gitops/applications'));
+    expect(gitopsCalls).toHaveLength(1);
+  });
+
+  it('lets an in-flight networking summary finish when the next overview starts', async () => {
+    const { result } = setup();
+    const signals: AbortSignal[] = [];
+    let releaseSummary: (r: Response) => void = () => {};
+    apiFetchMock.mockImplementation((path: string, init?: { signal?: AbortSignal }) => {
+      if (path === '/fleet/overview') return Promise.resolve(okJson(NODES));
+      if (path === '/fleet/networking-summary') {
+        if (init?.signal) signals.push(init.signal);
+        return new Promise<Response>((res) => { releaseSummary = res; });
+      }
+      return Promise.resolve(okJson({}));
+    });
+    await act(async () => { await result.current.fetchOverview(); });
+    await act(async () => { await result.current.fetchOverview(); });
+    // One request, never aborted by the second overview, and not restarted.
+    expect(signals).toHaveLength(1);
+    expect(signals[0].aborted).toBe(false);
+    await act(async () => {
+      releaseSummary(okJson({ nodes: [{ nodeId: 1, summary: { exposed: { count: 1, stacks: ['web'] }, unknownExposure: { count: 0, stacks: [] }, networkDrift: { count: 0, stacks: [] } } }] }));
+    });
+    await waitFor(() => expect(result.current.networkingByNode.get(1)?.exposed).toBe(true));
+  });
+
+  it('aborts every in-flight request on unmount', async () => {
+    const { result, unmount } = setup();
+    const signals: AbortSignal[] = [];
+    apiFetchMock.mockImplementation((_path: string, init?: { signal?: AbortSignal }) => {
+      if (init?.signal) signals.push(init.signal);
+      return new Promise<Response>(() => {});
+    });
+    act(() => { void result.current.fetchOverview(); });
+    unmount();
+    expect(signals.length).toBeGreaterThan(0);
+    expect(signals.every(sig => sig.aborted)).toBe(true);
+  });
+
   it('clearFilters resets prefs and label filters', async () => {
     const { result, updatePrefs } = setup({ filterStatus: 'online' });
     await act(async () => { await result.current.fetchOverview(); });
