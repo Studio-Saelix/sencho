@@ -1582,8 +1582,10 @@ type RollbackTargetAttempt = RolloutRollbackTargetResult & {
  * Every exit attempts to record a terminal state for the target: a restore
  * that cannot be opened, cannot be requested, or cannot have its result
  * recorded is reported as a failed target rather than a clean restore. If the
- * terminal write itself fails it is logged; the boot-time reclassification
- * settles a row left in `restoring`.
+ * terminal write itself fails it is logged and the route settles the
+ * application through `rollbackRefusalSettled`, which retries the target
+ * record; the open's active-operation marker makes any target that retry
+ * misses recoverable at boot.
  */
 async function runRollbackTarget(
   ctx: {

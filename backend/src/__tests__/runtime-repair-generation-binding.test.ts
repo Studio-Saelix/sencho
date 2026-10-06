@@ -416,6 +416,31 @@ describe('runtime repair reads the target\'s acknowledged generation', () => {
     expect(deploySpy).toHaveBeenCalledTimes(1);
   });
 
+  it('proceeds when a deploy failure replaced a refused recovery', async () => {
+    // A later deploy failure takes the failure stage over and clears the stale
+    // recovery phase, so the target no longer claims a recovery hold even
+    // though its class is not `pre_mutation`.
+    const { bp, node } = seedBlueprint();
+    const fixture = await seedGitManagedMidRollout(bp, node);
+    const store = GitOpsStore.getInstance();
+    const target = store.getTarget(fixture.appId, node.id)!;
+    store.upsertTarget({
+      ...target,
+      recovery_phase: null,
+      recovery_ref: null,
+      failure_stage: 'blueprint_deploy',
+      failure_class: 'deploy_failed',
+    });
+    const deploySpy = vi
+      .spyOn(BlueprintService.getInstance(), 'deployAuthorizedMaterialization')
+      .mockResolvedValue({ status: 'active' });
+
+    const outcome = await BlueprintService.getInstance().enforceDigestRepair(bp, node);
+
+    expect(outcome.status).toBe('active');
+    expect(deploySpy).toHaveBeenCalledTimes(1);
+  });
+
   it('holds while a recovery is still moving on the target', async () => {
     const { bp, node } = seedBlueprint();
     const fixture = await seedGitManagedMidRollout(bp, node);

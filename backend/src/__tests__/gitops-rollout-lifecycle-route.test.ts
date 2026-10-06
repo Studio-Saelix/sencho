@@ -762,8 +762,9 @@ describe('POST /api/gitops/applications/:id/rollout/rollback', () => {
     const seeded = seedGitManagedBlueprint();
     await authorizeRollout(seeded);
     const { GitOpsTransitions } = await import('../services/gitops/transitions');
+    // Fail once, as a transient write error would; the settle retries it.
     vi.spyOn(GitOpsTransitions.getInstance(), 'rollbackPartialFailed')
-      .mockImplementation(() => {
+      .mockImplementationOnce(() => {
         throw new Error('db write failed');
       });
 
@@ -772,13 +773,18 @@ describe('POST /api/gitops/applications/:id/rollout/rollback', () => {
       .set('Cookie', adminCookie)
       .send({ generationId: seeded.generationId, scope: { kind: 'all_changed' } });
 
-    // The refusal never reached the target row, so its own settle never ran.
-    // Nothing else lifts the stamp the open wrote, so the route must.
+    // The refusal never reached the target row on the first attempt, so its
+    // own settle never ran. The route settles it and the retry writes the
+    // target, so neither the application nor the target stays restoring.
     expect(res.status).toBe(200);
     expect(res.body.results[0].status).toBe('failed');
     const application = GitOpsStore.getInstance().getApplication(seeded.applicationId)!;
     expect(application.recovery_phase).not.toBe('restoring');
     expect(application.recovery_phase).not.toBe('failed');
+    const target = GitOpsStore.getInstance().getTarget(seeded.applicationId, seeded.nodeIds[0])!;
+    expect(target.recovery_phase).toBe('failed');
+    expect(target.failure_class).toBe('pre_mutation');
+    expect(target.active_operation_stage).toBeNull();
   });
 
   it('settles the application when a restore reports no completion before moving anything', async () => {

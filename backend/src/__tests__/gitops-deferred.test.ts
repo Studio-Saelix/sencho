@@ -389,8 +389,8 @@ describe('gitops deferred state', () => {
     seedApplied('app-rb-moving', 'rb-moving-web');
     store.upsertTarget(emptyTargetRow('app-rb-moving', 2, 1));
 
-    // Target 1 is still restoring; target 2's refusal under the application's
-    // own ref must not clear the stamp while that restore runs.
+    // Target 1 is still restoring; target 2's refusal must not clear the
+    // stamp while that restore runs.
     tx.rollbackInProgress({
       applicationId: 'app-rb-moving',
       nodeId: 1,
@@ -415,6 +415,102 @@ describe('gitops deferred state', () => {
 
     expect(store.getApplication('app-rb-moving')?.recovery_phase).toBe('restoring');
     expect(store.getApplication('app-rb-moving')?.recovery_ref).toBe('rb-moving-b');
+
+    // When the other restore is refused too, the application settles from the
+    // targets even though neither refusal owns the current ref any more.
+    tx.rollbackPartialFailed({
+      applicationId: 'app-rb-moving',
+      nodeId: 1,
+      recoveryRef: 'rb-moving-a',
+      failureClass: 'pre_mutation',
+      envelope: env('op-rb-moving-a-fail'),
+    });
+
+    const app = store.getApplication('app-rb-moving')!;
+    expect(app.recovery_phase).toBeNull();
+    expect(app.failure_stage).toBeNull();
+    expect(store.getTarget('app-rb-moving', 1)?.failure_class).toBe('pre_mutation');
+    expect(store.getTarget('app-rb-moving', 2)?.failure_class).toBe('pre_mutation');
+  });
+
+  it('makes a crashed rollback open recoverable at boot', () => {
+    const store = GitOpsStore.getInstance();
+    const tx = GitOpsTransitions.getInstance();
+    seedApplied('app-rb-crash', 'rb-crash-web');
+
+    tx.rollbackInProgress({
+      applicationId: 'app-rb-crash',
+      nodeId: 1,
+      recoveryRef: 'rb-crash',
+      recoveryGenerationId: 'gen-app-rb-crash',
+      envelope: env('op-rb-crash'),
+    });
+    // The open marks the target so the boot sweep selects the application at
+    // all: without a marker the app is never visited and stays restoring.
+    expect(store.getTarget('app-rb-crash', 1)?.active_operation_stage).toBe('recovery_started');
+
+    tx.interruptActiveOperations('app-rb-crash', env('op-rb-crash-boot'));
+
+    const target = store.getTarget('app-rb-crash', 1)!;
+    expect(target.active_operation_stage).toBeNull();
+    expect(target.recovery_phase).toBe('failed');
+    expect(target.failure_stage).toBe('recovery');
+    expect(target.failure_class).toBe('interrupted');
+    expect(store.getApplication('app-rb-crash')?.recovery_phase).toBe('failed');
+  });
+
+  it('does not let a deploy failure on a refused target re-park the application', () => {
+    const store = GitOpsStore.getInstance();
+    const tx = GitOpsTransitions.getInstance();
+    seedApplied('app-rb-deployfail', 'rb-deployfail-web');
+    store.upsertTarget(emptyTargetRow('app-rb-deployfail', 2, 1));
+
+    // Target 1 was refused and holds nothing.
+    tx.rollbackInProgress({
+      applicationId: 'app-rb-deployfail',
+      nodeId: 1,
+      recoveryRef: 'rb-deployfail-a',
+      recoveryGenerationId: 'gen-app-rb-deployfail',
+      envelope: env('op-rb-deployfail-a'),
+    });
+    tx.rollbackPartialFailed({
+      applicationId: 'app-rb-deployfail',
+      nodeId: 1,
+      recoveryRef: 'rb-deployfail-a',
+      failureClass: 'pre_mutation',
+      envelope: env('op-rb-deployfail-a-fail'),
+    });
+
+    // A later Blueprint deploy to that target fails. It replaces the recovery
+    // failure; the class it writes is not a recovery class.
+    tx.blueprintDeployFailed({
+      applicationId: 'app-rb-deployfail',
+      nodeId: 1,
+      failureClass: 'deploy_failed',
+      envelope: env('op-rb-deployfail-deploy'),
+    });
+    expect(store.getTarget('app-rb-deployfail', 1)?.recovery_phase).toBeNull();
+    expect(store.getTarget('app-rb-deployfail', 1)?.failure_stage).toBe('blueprint_deploy');
+
+    // A refusal on target 2 must not read target 1 as a recovery hold.
+    tx.rollbackInProgress({
+      applicationId: 'app-rb-deployfail',
+      nodeId: 2,
+      recoveryRef: 'rb-deployfail-b',
+      recoveryGenerationId: 'gen-app-rb-deployfail',
+      envelope: env('op-rb-deployfail-b'),
+    });
+    tx.rollbackPartialFailed({
+      applicationId: 'app-rb-deployfail',
+      nodeId: 2,
+      recoveryRef: 'rb-deployfail-b',
+      failureClass: 'pre_mutation',
+      envelope: env('op-rb-deployfail-b-fail'),
+    });
+
+    const app = store.getApplication('app-rb-deployfail')!;
+    expect(app.recovery_phase).toBeNull();
+    expect(app.failure_stage).toBeNull();
   });
 
   it('does not let a retry refusal downgrade a target that already failed after mutation', () => {
@@ -479,7 +575,8 @@ describe('gitops deferred state', () => {
     expect(store.getApplication('app-rb-missed')?.recovery_phase).toBe('restoring');
 
     // The route calls this when `rollbackPartialFailed` threw and its own
-    // in-transaction settle never ran.
+    // in-transaction settle never ran. The retry gives the target a terminal
+    // state as well, so it does not stay restoring for ever.
     tx.rollbackRefusalSettled({
       applicationId: 'app-rb-missed',
       nodeIds: [1],
@@ -487,6 +584,10 @@ describe('gitops deferred state', () => {
       envelope: env('op-rb-missed-settle'),
     });
 
+    const target = store.getTarget('app-rb-missed', 1)!;
+    expect(target.recovery_phase).toBe('failed');
+    expect(target.failure_class).toBe('pre_mutation');
+    expect(target.active_operation_stage).toBeNull();
     expect(store.getApplication('app-rb-missed')?.recovery_phase).toBeNull();
     expect(store.getApplication('app-rb-missed')?.failure_stage).toBeNull();
   });
@@ -524,6 +625,12 @@ describe('gitops deferred state', () => {
 
     expect(store.getApplication('app-rb-missed2')?.recovery_phase).toBeNull();
     expect(store.getApplication('app-rb-missed2')?.failure_stage).toBeNull();
+    for (const nodeId of [1, 2]) {
+      const target = store.getTarget('app-rb-missed2', nodeId)!;
+      expect(target.recovery_phase).toBe('failed');
+      expect(target.failure_class).toBe('pre_mutation');
+      expect(target.active_operation_stage).toBeNull();
+    }
   });
 
   it('lets a fresh mutated failure replace an earlier one on a retry', () => {

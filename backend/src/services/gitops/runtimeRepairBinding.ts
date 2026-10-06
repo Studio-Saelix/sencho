@@ -19,6 +19,7 @@ import type {
   GitOpsApplicationRow,
   GitOpsTargetCurrentRow,
 } from './types';
+import { targetClaimsRecoveryFailure, targetRecoveryFailureMoved } from './recoveryClaim';
 
 /** Why a repair was not attempted. Each arm is a state, not an error. */
 export type RuntimeRepairHoldReason =
@@ -59,20 +60,25 @@ export type RuntimeRepairHoldReason =
  * hold (`appDeployWithheld` in `derive.ts` reads the application column, not
  * the target's), and this binding reads the target's own row, so it repairs a
  * refused target even while the application holds for a different target's
- * failure. A class that may have moved the target still owns the mutation here.
+ * failure.
+ *
+ * The recovery claim comes from `targetRecoveryFailureMoved` (`recoveryClaim.ts`):
+ * a row whose failure stage has moved on no longer claims a recovery, and a
+ * `pre_mutation` refusal moved nothing, so it does not own the mutation either.
+ * The same predicate decides the application hold and the acknowledgement
+ * clearing, so the three surfaces cannot drift.
  *
  * Mirrors the recovery checks in `derive.ts`; kept local rather than imported so
  * this module stays below the projection.
  */
 function recoveryOwnsTarget(target: GitOpsTargetCurrentRow): boolean {
-  if (target.recovery_phase === 'failed' && target.failure_class === 'pre_mutation') {
-    return false;
+  if (targetClaimsRecoveryFailure(target)) {
+    return targetRecoveryFailureMoved(target);
   }
   const phase = target.recovery_phase;
   return phase === 'capturing'
     || phase === 'restoring'
-    || phase === 'compensating'
-    || phase === 'failed';
+    || phase === 'compensating';
 }
 
 export type RuntimeRepairBinding =

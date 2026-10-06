@@ -1928,6 +1928,30 @@ describe('retry, stop, and rollback', () => {
     expect(app.pause_at).not.toBeNull();
   });
 
+  it('settles a health rollback whose refused-target record fails once', async () => {
+    const fixture = await gatedAttempt('rollback');
+    const store = GitOpsStore.getInstance();
+    markRecoveryPoint(fixture, 'rec-pre-rollout', genId(fixture, 'pre-rollout'));
+    await mockRestore({ ok: false, code: 'NO_RECOVERY_POINT', error: 'This stack has no recovery point to restore.' });
+    const { GitOpsTransitions } = await import('../services/gitops/transitions');
+    vi.spyOn(GitOpsTransitions.getInstance(), 'rollbackPartialFailed')
+      .mockImplementationOnce(() => {
+        throw new Error('db write failed');
+      });
+
+    const outcome = await decide(fixture, 'failed', spyExecutor(), 'rollback');
+
+    // The refusal was proven; only its record failed. The executor settles it
+    // like the manual route instead of holding for a restore that never ran.
+    expect(outcome.action).toBe('rollback_partial_failed');
+    expect(outcome.reason).toBe('rollback_unrecorded');
+    const app = store.getApplication(fixture.applicationId)!;
+    expect(app.recovery_phase).not.toBe('failed');
+    const target = store.getTarget(fixture.applicationId, fixture.nodeId!)!;
+    expect(target.recovery_phase).toBe('failed');
+    expect(target.failure_class).toBe('pre_mutation');
+  });
+
   it('keeps an earlier mutated hold when a health rollback is refused elsewhere', async () => {
     const fixture = await gatedAttempt('rollback');
     const store = GitOpsStore.getInstance();

@@ -186,6 +186,7 @@ export async function executeHealthRolloutDecision(args: {
         // failure is recorded: an error thrown between them used to leave the
         // target stuck in `restoring` with nothing saying so, and the rollout
         // unheld, so the fleet carried on as if the policy had not stopped it.
+        let preMutationRefusal = false;
         try {
           const outcome = await restoreTargetToGeneration({
             app: application,
@@ -219,15 +220,40 @@ export async function executeHealthRolloutDecision(args: {
           // refusal that never reached a mutation is recorded on the target
           // without holding the application: there is nothing half-restored
           // and no restore that can ever complete.
+          preMutationRefusal = !restoreFailureMutated(outcome);
           transitions.rollbackPartialFailed({
             applicationId: args.applicationId,
             nodeId: args.nodeId,
             recoveryRef,
-            failureClass: restoreFailureMutated(outcome) ? 'partial' : 'pre_mutation',
+            failureClass: preMutationRefusal ? 'pre_mutation' : 'partial',
             envelope,
           });
           return { action: 'rollback_partial_failed', reason: outcome.error };
         } catch (error) {
+          if (preMutationRefusal) {
+            // The refusal itself was proven; only its record failed. Settle it
+            // the same way the manual route does instead of falling back to a
+            // hold for a restore that never ran.
+            try {
+              transitions.rollbackRefusalSettled({
+                applicationId: args.applicationId,
+                nodeIds: [args.nodeId],
+                recoveryRef,
+                envelope,
+              });
+            } catch (settleError) {
+              console.error(
+                '[GitOps] Could not settle a refused health rollback for %s: %s',
+                sanitizeForLog(args.applicationId),
+                sanitizeForLog(settleError instanceof Error ? settleError.message : String(settleError)),
+              );
+            }
+            return {
+              action: 'rollback_partial_failed',
+              reason: 'rollback_unrecorded',
+              detail: error instanceof Error ? error.message : String(error),
+            };
+          }
           // The restore or the record of it failed. The target is somewhere
           // between the two generations and only this knows which, so it is
           // recorded as a partial failure, never as a completed rollback, and the
