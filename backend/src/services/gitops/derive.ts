@@ -17,6 +17,7 @@ import { authorityPolicyReads } from './authorityPolicyProjection';
 import { comparableObservationMatches } from './artifactIdentity';
 import { canonicalizeAuthoredInvocation, compareInvocations } from './invocationIdentity';
 import { runningGenerationForTarget } from './recoveryCapture';
+import { recoveryFailureClaimClass } from './recoveryClaim';
 import {
   DEFAULT_HEALTH_ROLLOUT_POLICY,
   decodeFrozenRolloutStrategy,
@@ -2170,8 +2171,11 @@ function deriveRuntime(
       status: 'recovery_failed',
       recoveryRef: target.recovery_ref,
       recoveryGenerationId: target.recovery_generation_id,
-      failureClass: target.failure_class ?? 'unknown',
-      failureAt: target.failure_at ?? 0,
+      // The claim's own class and time, not the shared slot: a later deploy or
+      // withdraw failure may have taken that slot over, and reporting its class
+      // or timestamp here would describe a failure this facet is not about.
+      failureClass: recoveryFailureClaimClass(target) ?? 'unknown',
+      failureAt: (target.failure_stage === 'recovery' ? target.failure_at : null) ?? 0,
     };
   }
   // Ahead of the interruption branch, exactly as the Direct deploy was: a start

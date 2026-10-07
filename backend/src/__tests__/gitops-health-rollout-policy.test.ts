@@ -1577,15 +1577,21 @@ describe('retry, stop, and rollback', () => {
     );
     markRecoveryPoint(rolled, 'rec-pre-rollout', 'gen-before-rollout');
     await dispatch(rolled);
+    // The same recovery ref the executor opened with: a terminal for an attempt
+    // a newer rollback superseded is ignored, and this completion has to be
+    // recognised as the live one.
+    const rolledRef = rolledStore.getTarget(rolled.applicationId, rolled.nodeId!)!.recovery_ref!;
     GitOpsTransitions.getInstance().rollbackCompleted({
       applicationId: rolled.applicationId,
       nodeId: rolled.nodeId!,
-      recoveryRef: 'health-rollout-rollback-test',
+      recoveryRef: rolledRef,
       recoveryGenerationId: 'gen-before-rollout',
       capturedArtifactSetId: null,
       capturedSourceAcceptanceRef: null,
       envelope: { operationId: 'rb-1', actor: 'tester', trigger: 'manual', at: Date.now() },
     });
+    // The completion releases the marker its own open wrote.
+    expect(rolledStore.getTarget(rolled.applicationId, rolled.nodeId!)!.active_operation_stage).toBeNull();
     // The executor holds the rollout after a completed rollback, so there is
     // something for the operator to resume from.
     GitOpsTransitions.getInstance().rolloutPaused(rolled.applicationId, null, 'held', {
@@ -1951,6 +1957,51 @@ describe('retry, stop, and rollback', () => {
     expect(target.recovery_phase).toBe('failed');
     expect(target.failure_class).toBe('pre_mutation');
     expect(target.active_operation_stage).toBeNull();
+  });
+
+  it('reports a health restore a newer rollback replaced instead of a completion', async () => {
+    const fixture = await gatedAttempt('rollback');
+    markRecoveryPoint(fixture, 'rec-pre-rollout', genId(fixture, 'pre-rollout'));
+    await mockRestore();
+    const { GitOpsTransitions } = await import('../services/gitops/transitions');
+    vi.spyOn(GitOpsTransitions.getInstance(), 'rollbackCompleted').mockReturnValue({
+      historyIds: [], replayed: true, skipped: true,
+    });
+
+    const outcome = await decide(fixture, 'failed', spyExecutor(), 'rollback');
+
+    // The completion wrote nothing because a newer rollback owns the target;
+    // reporting a completed rollback would name a restore this attempt no
+    // longer holds.
+    expect(outcome.action).toBe('rollback_partial_failed');
+    expect(outcome.reason).toBe('rollback_superseded');
+  });
+
+  it('settles a health rollback whose possibly-moved record fails once', async () => {
+    const fixture = await gatedAttempt('rollback');
+    const store = GitOpsStore.getInstance();
+    markRecoveryPoint(fixture, 'rec-pre-rollout', genId(fixture, 'pre-rollout'));
+    // A failure that may have moved the target: the class is partial, so the
+    // settle must retry it as partial rather than as a refusal, and the hold
+    // must survive the retry.
+    await mockRestore({ ok: false, code: 'RESTORE_FAILED', error: 'The restore did not complete.' });
+    const { GitOpsTransitions } = await import('../services/gitops/transitions');
+    vi.spyOn(GitOpsTransitions.getInstance(), 'rollbackPartialFailed')
+      .mockImplementationOnce(() => {
+        throw new Error('db write failed');
+      });
+
+    const outcome = await decide(fixture, 'failed', spyExecutor(), 'rollback');
+
+    expect(outcome.action).toBe('rollback_partial_failed');
+    expect(outcome.reason).toBe('rollback_unrecorded');
+    const target = store.getTarget(fixture.applicationId, fixture.nodeId!)!;
+    expect(target.recovery_phase).toBe('failed');
+    expect(target.recovery_failure_class).toBe('partial');
+    const app = store.getApplication(fixture.applicationId)!;
+    expect(app.recovery_phase).toBe('failed');
+    expect(app.failure_stage).toBe('recovery');
+    expect(app.failure_class).toBe('partial');
   });
 
   it('keeps an earlier mutated hold when a health rollback is refused elsewhere', async () => {

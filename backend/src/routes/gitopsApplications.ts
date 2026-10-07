@@ -1647,7 +1647,7 @@ async function runRollbackTarget(
   if (outcome.ok) {
     const store = GitOpsStore.getInstance();
     try {
-      tx.rollbackCompleted({
+      const completed = tx.rollbackCompleted({
         applicationId: ctx.app.id,
         nodeId,
         recoveryRef: ctx.recoveryRef,
@@ -1659,6 +1659,20 @@ async function runRollbackTarget(
         capturedSourceAcceptanceRef: store.newestSourceAcceptanceId(ctx.app.id, ctx.generationId),
         envelope: ctx.envelope,
       });
+      if (completed.skipped) {
+        // A newer rollback re-opened the target while this restore ran, so the
+        // completion wrote nothing. Reporting it as restored would tell the
+        // operator a target was put back that the newer attempt now owns, and
+        // the restore may still have moved it.
+        return {
+          nodeId,
+          status: 'failed',
+          error: 'A newer rollback replaced this restore.',
+          mutationPossible: true,
+          failureClass: 'partial',
+          settleMissed: false,
+        };
+      }
       return { nodeId, status: 'restored', mutationPossible: false, failureClass: 'pre_mutation', settleMissed: false };
     } catch (error) {
       console.error(

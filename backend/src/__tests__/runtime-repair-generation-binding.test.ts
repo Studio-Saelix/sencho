@@ -13,6 +13,7 @@ import { setupTestDb, cleanupTestDb } from './helpers/setupTestDb';
 import { directApplicationFixture } from './helpers/gitopsFixtures';
 import { newGitOpsId } from '../services/gitops/directApplication';
 import { emptyTargetRow, GitOpsStore } from '../services/gitops/store';
+import { GitOpsTransitions } from '../services/gitops/transitions';
 import {
   encodeArtifactEvidenceJson,
   encodeGitOpsRequiredTargetsJson,
@@ -380,7 +381,67 @@ describe('runtime repair reads the target\'s acknowledged generation', () => {
     const fixture = await seedGitManagedMidRollout(bp, node);
     const store = GitOpsStore.getInstance();
     const target = store.getTarget(fixture.appId, node.id)!;
-    store.upsertTarget({ ...target, recovery_phase: 'failed' });
+    store.upsertTarget({
+      ...target,
+      recovery_phase: 'failed',
+      recovery_ref: 'rb-held',
+      recovery_failure_class: 'partial',
+    });
+    const deploySpy = vi
+      .spyOn(BlueprintService.getInstance(), 'deployAuthorizedMaterialization')
+      .mockResolvedValue({ status: 'active' });
+
+    const outcome = await BlueprintService.getInstance().enforceDigestRepair(bp, node);
+
+    expect(outcome.status).toBe('repair_held');
+    expect(outcome.holdReason).toBe('recovery_bound');
+    expect(deploySpy).not.toHaveBeenCalled();
+  });
+
+  it('holds after a deploy failure lands beside a restore that is still moving', async () => {
+    // Built through the real transitions rather than by writing the row: a
+    // refusal, a retry that opens over it, then a deploy failure that must not
+    // clear the restore that is running or release the hold.
+    const { bp, node } = seedBlueprint();
+    const fixture = await seedGitManagedMidRollout(bp, node);
+    const store = GitOpsStore.getInstance();
+    const tx = GitOpsTransitions.getInstance();
+    const target = store.getTarget(fixture.appId, node.id)!;
+    const envelope = (operationId: string) => ({
+      operationId, actor: 'tester', trigger: 'manual', at: Date.now(),
+    });
+
+    tx.rollbackInProgress({
+      applicationId: fixture.appId,
+      nodeId: node.id,
+      recoveryRef: 'rb-real-a',
+      recoveryGenerationId: target.recovery_generation_id ?? fixture.old.generationId,
+      envelope: envelope('op-real-a'),
+    });
+    tx.rollbackPartialFailed({
+      applicationId: fixture.appId,
+      nodeId: node.id,
+      recoveryRef: 'rb-real-a',
+      failureClass: 'pre_mutation',
+      envelope: envelope('op-real-a-terminal'),
+    });
+    tx.rollbackInProgress({
+      applicationId: fixture.appId,
+      nodeId: node.id,
+      recoveryRef: 'rb-real-b',
+      recoveryGenerationId: target.recovery_generation_id ?? fixture.old.generationId,
+      envelope: envelope('op-real-b'),
+    });
+    tx.blueprintDeployFailed({
+      applicationId: fixture.appId,
+      nodeId: node.id,
+      failureClass: 'deploy_failed',
+      envelope: envelope('op-real-deploy-fail'),
+    });
+    const live = store.getTarget(fixture.appId, node.id)!;
+    expect(live.recovery_phase).toBe('restoring');
+    expect(live.recovery_ref).toBe('rb-real-b');
+
     const deploySpy = vi
       .spyOn(BlueprintService.getInstance(), 'deployAuthorizedMaterialization')
       .mockResolvedValue({ status: 'active' });
@@ -442,10 +503,33 @@ describe('runtime repair reads the target\'s acknowledged generation', () => {
   });
 
   it('proceeds when a deploy failure replaced a refused recovery', async () => {
-    // A later deploy failure takes the failure stage over. The row may still
-    // carry the old `failed` phase (a writer that did not clear it), and the
-    // target must still not claim a recovery hold: the stage names the
-    // standing failure.
+    // A refusal that moved nothing is retired by the later failure, so the row
+    // a real writer produces carries no recovery phase at all.
+    const { bp, node } = seedBlueprint();
+    const fixture = await seedGitManagedMidRollout(bp, node);
+    const store = GitOpsStore.getInstance();
+    const target = store.getTarget(fixture.appId, node.id)!;
+    store.upsertTarget({
+      ...target,
+      recovery_phase: null,
+      recovery_ref: null,
+      failure_stage: 'blueprint_deploy',
+      failure_class: 'deploy_failed',
+    });
+    const deploySpy = vi
+      .spyOn(BlueprintService.getInstance(), 'deployAuthorizedMaterialization')
+      .mockResolvedValue({ status: 'active' });
+
+    const outcome = await BlueprintService.getInstance().enforceDigestRepair(bp, node);
+
+    expect(outcome.status).toBe('active');
+    expect(deploySpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('holds on a legacy failed recovery that carries no class', async () => {
+    // A row written before the claim had its own column, whose shared slot a
+    // later failure already took over: there is no proof the restore moved
+    // nothing, so it is read as moved rather than released.
     const { bp, node } = seedBlueprint();
     const fixture = await seedGitManagedMidRollout(bp, node);
     const store = GitOpsStore.getInstance();
@@ -453,9 +537,36 @@ describe('runtime repair reads the target\'s acknowledged generation', () => {
     store.upsertTarget({
       ...target,
       recovery_phase: 'failed',
-      recovery_ref: 'rb-old',
+      recovery_ref: 'rb-legacy',
+      recovery_failure_class: null,
       failure_stage: 'blueprint_deploy',
       failure_class: 'deploy_failed',
+    });
+    const deploySpy = vi
+      .spyOn(BlueprintService.getInstance(), 'deployAuthorizedMaterialization')
+      .mockResolvedValue({ status: 'active' });
+
+    const outcome = await BlueprintService.getInstance().enforceDigestRepair(bp, node);
+
+    expect(outcome.status).toBe('repair_held');
+    expect(outcome.holdReason).toBe('recovery_bound');
+    expect(deploySpy).not.toHaveBeenCalled();
+  });
+
+  it('proceeds on a legacy refused recovery whose class is still in the shared slot', async () => {
+    // The other legacy shape: the stage never moved, so the shared class is
+    // still the claim's own class and reads as the refusal it is.
+    const { bp, node } = seedBlueprint();
+    const fixture = await seedGitManagedMidRollout(bp, node);
+    const store = GitOpsStore.getInstance();
+    const target = store.getTarget(fixture.appId, node.id)!;
+    store.upsertTarget({
+      ...target,
+      recovery_phase: 'failed',
+      recovery_ref: 'rb-legacy-pre',
+      recovery_failure_class: null,
+      failure_stage: 'recovery',
+      failure_class: 'pre_mutation',
     });
     const deploySpy = vi
       .spyOn(BlueprintService.getInstance(), 'deployAuthorizedMaterialization')

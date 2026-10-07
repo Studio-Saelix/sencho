@@ -397,6 +397,15 @@ export type GitOpsTargetCurrentRow = {
   recovery_ref: string | null;
   recovery_generation_id: string | null;
   recovery_phase: RecoveryPhase | null;
+  /**
+   * The class of the recovery failure this row still claims.
+   *
+   * Separate from `failure_class` because that column is shared with deploy and
+   * withdraw failures. A claim that may have moved the target has to keep its
+   * class when a later failure writes the shared slot, or it would read back as
+   * a refusal that moved nothing. See `recoveryClaim.ts`.
+   */
+  recovery_failure_class: string | null;
   interruption_stage: TargetActiveStage | null;
   interruption_at: number | null;
   interruption_operation_id: string | null;

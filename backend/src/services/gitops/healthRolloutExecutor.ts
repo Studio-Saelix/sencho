@@ -204,7 +204,7 @@ export async function executeHealthRolloutDecision(args: {
             scopedActions: SYSTEM_STACK_ACTIONS,
           });
           if (outcome.ok) {
-            transitions.rollbackCompleted({
+            const completed = transitions.rollbackCompleted({
               applicationId: args.applicationId,
               nodeId: args.nodeId,
               recoveryRef,
@@ -213,6 +213,13 @@ export async function executeHealthRolloutDecision(args: {
               capturedSourceAcceptanceRef,
               envelope,
             });
+            if (completed.skipped) {
+              // A newer rollback re-opened the target while this restore ran.
+              // The completion wrote nothing, and the newer attempt reports its
+              // own outcome; the rollout stays held here rather than reporting
+              // a restore this target no longer owns.
+              return { action: 'rollback_partial_failed', reason: 'rollback_superseded' };
+            }
             return { action: 'rollback', reason: decision.reason };
           }
           // Partial failure is reported as partial. Reporting a single target's

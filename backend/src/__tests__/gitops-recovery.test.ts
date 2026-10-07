@@ -293,6 +293,85 @@ describe('gitops recovery', () => {
     expect(codes()).toContain('artifact_expectation_unresolved');
   });
 
+  it('retires a moved recovery claim when a direct deploy binds a generation', () => {
+    const store = GitOpsStore.getInstance();
+    const tx = GitOpsTransitions.getInstance();
+    seedTwoGenerations('app-rec-bind', 'rec-bind-web');
+    const genA = 'gen-a-app-rec-bind';
+
+    tx.recoveryStarted({
+      applicationId: 'app-rec-bind',
+      nodeId: 1,
+      recoveryRef: 'rec-bind',
+      recoveryGenerationId: genA,
+      envelope: env('op-rec-bind-start'),
+    });
+    tx.recoveryFailed({
+      applicationId: 'app-rec-bind',
+      nodeId: 1,
+      recoveryRef: 'rec-bind',
+      failureClass: 'post_mutation',
+      envelope: env('op-rec-bind-fail'),
+    });
+    const failed = store.getTarget('app-rec-bind', 1)!;
+    expect(failed.recovery_phase).toBe('failed');
+    expect(failed.recovery_failure_class).toBe('post_mutation');
+    expect(store.getApplication('app-rec-bind')!.recovery_phase).toBe('failed');
+
+    // A manual deploy that Compose binds is success evidence: the workload is a
+    // generation applied after the failed restore, so the claim and the
+    // application hold are retired.
+    const applied = failed.applied_generation_id!;
+    const deployOperation = env('op-rec-bind-deploy');
+    tx.deployStarted('app-rec-bind', 1, applied, deployOperation);
+    tx.deployBound('app-rec-bind', 1, applied, deployOperation);
+
+    const bound = store.getTarget('app-rec-bind', 1)!;
+    expect(bound.recovery_phase).toBeNull();
+    expect(bound.recovery_failure_class).toBeNull();
+    expect(bound.failure_stage).toBeNull();
+    expect(store.getApplication('app-rec-bind')!.recovery_phase).toBeNull();
+  });
+
+  it('retires a boot-reclassified recovery interruption when the restore succeeds', () => {
+    const store = GitOpsStore.getInstance();
+    const tx = GitOpsTransitions.getInstance();
+    seedTwoGenerations('app-rec-boot', 'rec-boot-web');
+    const genA = 'gen-a-app-rec-boot';
+
+    tx.recoveryStarted({
+      applicationId: 'app-rec-boot',
+      nodeId: 1,
+      recoveryRef: 'rec-boot',
+      recoveryGenerationId: genA,
+      envelope: env('op-rec-boot-start'),
+    });
+    // The process dies mid-restore; boot reclassifies it as an interruption.
+    tx.interruptActiveOperations('app-rec-boot', env('op-rec-boot-interrupt'));
+    const interrupted = store.getTarget('app-rec-boot', 1)!;
+    expect(interrupted.interruption_stage).toBe('recovery_started');
+    expect(interrupted.recovery_failure_class).toBe('interrupted');
+
+    // The restore reports success afterwards. The interruption describes the
+    // attempt it just finished, so it is retired with it.
+    tx.recoverySucceeded({
+      applicationId: 'app-rec-boot',
+      nodeId: 1,
+      recoveryRef: 'rec-boot',
+      recoveryGenerationId: genA,
+      proven: true,
+      gitopsBinding: 'bound',
+      capturedArtifactSetId: 'art-a-app-rec-boot',
+      capturedSourceAcceptanceRef: 'acc-a-app-rec-boot',
+      envelope: env('op-rec-boot-success'),
+    });
+
+    const done = store.getTarget('app-rec-boot', 1)!;
+    expect(done.recovery_phase).toBe('complete');
+    expect(done.interruption_stage).toBeNull();
+    expect(done.recovery_failure_class).toBeNull();
+  });
+
   it('opens and closes a recovery from the restore path itself', async () => {
     const { StackUpdateRecoveryService } = await import('../services/StackUpdateRecoveryService');
     const store = GitOpsStore.getInstance();

@@ -62,23 +62,14 @@ export type RuntimeRepairHoldReason =
  * refused target even while the application holds for a different target's
  * failure.
  *
- * The recovery claim comes from `targetRecoveryFailureMoved` (`recoveryClaim.ts`):
- * a row whose failure stage has moved on no longer claims a recovery, and a
- * `pre_mutation` refusal moved nothing, so it does not own the mutation either.
- * The same predicate decides the application hold and the acknowledgement
- * clearing, so the three surfaces cannot drift.
- *
- * Mirrors the recovery checks in `derive.ts`; kept local rather than imported so
- * this module stays below the projection.
+ * The recovery claim comes from `targetRecoveryFailureMoved` (`recoveryClaim.ts`),
+ * which reads the claim's own class rather than the shared failure slot: a later
+ * deploy or withdraw failure can no longer make a moved claim read as a refusal,
+ * and a restore still in flight owns the target before any recorded claim is
+ * considered. The same predicate decides the application hold and the
+ * acknowledgement clearing, so the three surfaces cannot drift.
  */
 function recoveryOwnsTarget(target: GitOpsTargetCurrentRow): boolean {
-  // A restore that is still moving owns the target before any question about
-  // a recorded claim: a retry over a refused target sets `restoring` while the
-  // old claim is still on the row, and repair must not race the restore.
-  const phase = target.recovery_phase;
-  if (phase === 'capturing' || phase === 'restoring' || phase === 'compensating') {
-    return true;
-  }
   return targetRecoveryFailureMoved(target);
 }
 
