@@ -3188,7 +3188,11 @@ class DockerController {
       const dockerExec = await container.exec({
         AttachStdin: true, AttachStdout: true, AttachStderr: true, Tty: true, Cmd: [shellType],
       });
-      const stream = await dockerExec.start({ hijack: true, stdin: true });
+      // Docker picks the hijacked stream's framing from the start request's
+      // Tty, not the exec-create Tty. Omitting it here makes every chunk
+      // arrive with an 8-byte multiplex header (01 00 00 00 <len>) before
+      // its payload.
+      const stream = await dockerExec.start({ hijack: true, stdin: true, Tty: true });
 
       if (isDebugEnabled()) console.debug('[Exec:diag] Creating exec', { containerId, shell: shellType });
       if (isDebugEnabled()) console.log('[Exec] Shell session started', { containerId, shell: shellType });

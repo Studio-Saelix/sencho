@@ -259,6 +259,16 @@ describe('DockerController.execContainer - shell fallback', () => {
 // ── execContainer: stream piping ───────────────────────────────────────
 
 describe('DockerController.execContainer - stream handling', () => {
+  it('starts the interactive exec with Tty: true so the daemon does not multiplex the stream', async () => {
+    // Docker picks stream framing from the start request's Tty, not the
+    // exec-create Tty. Omitting it here makes every output chunk arrive with
+    // an 8-byte multiplex frame header (01 00 00 00 <len>) prepended.
+    const ws = createMockWs();
+    await DockerController.getInstance(1).execContainer('abc123', ws);
+
+    expect(mockExecInstance.start).toHaveBeenCalledWith({ hijack: true, stdin: true, Tty: true });
+  });
+
   it('forwards container output to WebSocket', async () => {
     const ws = createMockWs();
     const dc = DockerController.getInstance(1);
