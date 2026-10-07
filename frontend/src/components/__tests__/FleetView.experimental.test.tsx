@@ -15,7 +15,7 @@ vi.mock('@/context/AuthContext', () => ({
   useAuth: () => useAuthMock(),
 }));
 vi.mock('@/context/NodeContext', () => ({
-  useNodes: () => ({ hasCapability: () => false }),
+  useNodes: () => ({ hasCapability: () => false, nodes: [] }),
 }));
 
 vi.mock('../FleetView/hooks/useFleetPreferences', () => ({

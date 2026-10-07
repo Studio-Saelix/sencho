@@ -187,9 +187,9 @@ function MapSkeleton() {
 }
 
 export function DependencyMapTab({ map }: { map: FleetMapState }) {
-  const { data, loading, error, refresh: fetchMap } = map;
+  const { data, loading, progress, refresh, retryFailed } = map;
   // A fast answer never flashes the skeleton; the pane just holds still.
-  const { showBusy } = useVisualBusy(loading && !data);
+  const { showBusy } = useVisualBusy(!data);
   // The Refresh icon spins only for a request that outlasts the busy delay, so
   // a quiet revalidation on tab reopen never flashes it.
   const { showBusy: refreshBusy } = useVisualBusy(loading);
@@ -370,20 +370,12 @@ export function DependencyMapTab({ map }: { map: FleetMapState }) {
       .filter(matchesFilters);
   }, [data, passNode, matchesFilters]);
 
-  if (loading && !data) {
+  if (!data) {
     return showBusy ? <MapSkeleton /> : <div className="min-h-[600px]" />;
   }
-  if (error && !data) {
-    return (
-      <div className="rounded-lg border border-card-border bg-card p-10 text-center">
-        <p className="text-sm text-muted-foreground mb-3">{error}</p>
-        <Button variant="outline" size="sm" onClick={fetchMap} className="gap-2">
-          <RefreshCw className="w-4 h-4" />Retry
-        </Button>
-      </div>
-    );
-  }
-  if (!data) return null;
+  let emptyGraphMessage = 'No stacks to map on this fleet.';
+  if (searchActive || flagActive) emptyGraphMessage = 'No elements match the current filters.';
+  else if (data.nodes.length === 0 && data.nodeErrors.length > 0) emptyGraphMessage = 'Nothing to map yet: no node could be read.';
 
   return (
     <div className="space-y-3">
@@ -460,24 +452,24 @@ export function DependencyMapTab({ map }: { map: FleetMapState }) {
             renderOption={renderNodeOption}
           />
         )}
-        {error && (
-          <span role="status" className="ml-auto font-mono text-[11px] text-warning">
-            Refresh failed. Showing the previous result.
+        {progress && (
+          <span role="status" className="ml-auto font-mono text-[11px] text-stat-subtitle">
+            {progress.done} of {progress.total} nodes
           </span>
         )}
-        <Button variant="outline" size="sm" onClick={fetchMap} disabled={loading} className={cn('gap-2', !error && 'ml-auto')}>
+        <Button variant="outline" size="sm" onClick={refresh} disabled={loading} className={cn('gap-2', !progress && 'ml-auto')}>
           <RefreshCw className={cn('w-4 h-4', refreshBusy && 'animate-spin')} />Refresh
         </Button>
       </div>
 
       {/* Unreachable-node banner */}
       {data.nodeErrors.length > 0 && (
-        <div className="flex items-start gap-2 rounded-md border border-warning/40 bg-warning/10 px-3 py-2 text-sm text-warning">
+        <div role="status" className="flex items-start gap-2 rounded-md border border-warning/40 bg-warning/10 px-3 py-2 text-sm text-warning">
           <TriangleAlert className="h-4 w-4 shrink-0 mt-0.5" strokeWidth={2} />
           <span className="flex-1">
-            {data.nodeErrors.length === 1 ? '1 node could not be reached' : `${data.nodeErrors.length} nodes could not be reached`}: {data.nodeErrors.map((e) => `${e.nodeName} (${e.error})`).join(', ')}. The rest of the fleet is shown below.
+            {data.nodeErrors.length === 1 ? '1 node could not be reached' : `${data.nodeErrors.length} nodes could not be reached`}: {data.nodeErrors.map((e) => `${e.nodeName} (${e.error})`).join(', ')}. {data.nodes.length > 0 ? 'The rest of the fleet is shown below.' : 'No node could be read, so there is nothing to draw.'}
           </span>
-          <Button variant="ghost" size="sm" className="-my-1 shrink-0 text-warning" onClick={fetchMap} disabled={loading}>
+          <Button variant="ghost" size="sm" className="-my-1 shrink-0 text-warning" onClick={retryFailed} disabled={loading}>
             Retry
           </Button>
         </div>
@@ -503,7 +495,7 @@ export function DependencyMapTab({ map }: { map: FleetMapState }) {
           </div>
         ) : flowNodes.length === 0 ? (
           <div className="rounded-lg border border-card-border border-t-card-border-top bg-card shadow-card-bevel p-10 text-center text-sm text-muted-foreground">
-            {searchActive || flagActive ? 'No elements match the current filters.' : 'No stacks to map on this fleet.'}
+            {emptyGraphMessage}
           </div>
         ) : (
           <div className="rounded-lg border border-card-border border-t-card-border-top bg-card shadow-card-bevel overflow-hidden">

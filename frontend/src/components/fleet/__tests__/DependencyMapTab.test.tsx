@@ -21,7 +21,7 @@ import type { FleetMapState } from '../useFleetMap';
 const EMPTY = { nodes: [], edges: [], flags: [], nodeErrors: [], parseErrors: [] };
 
 function state(overrides: Partial<FleetMapState> = {}): FleetMapState {
-  return { data: EMPTY, loading: false, error: null, refresh: vi.fn(), ...overrides };
+  return { data: EMPTY, loading: false, progress: null, refresh: vi.fn(), retryFailed: vi.fn(), ...overrides };
 }
 
 afterEach(() => vi.useRealTimers());
@@ -46,21 +46,15 @@ describe('DependencyMapTab', () => {
     expect(screen.getByRole('button', { name: /Refresh/ })).toBeDisabled();
   });
 
-  it('shows the error with a Retry that refreshes when there is no map yet', () => {
-    const refresh = vi.fn();
-    render(<DependencyMapTab map={state({ data: null, error: 'Request failed (502)', refresh })} />);
-    expect(screen.getByText('Request failed (502)')).toBeInTheDocument();
-    fireEvent.click(screen.getByRole('button', { name: /Retry/ }));
-    expect(refresh).toHaveBeenCalledTimes(1);
-  });
-
-  it('names each unreachable node with its reason and offers Retry in the banner', () => {
+  it('names each unreachable node with its reason and retries only the failed nodes from the banner', () => {
+    const retryFailed = vi.fn();
     const refresh = vi.fn();
     const data = { ...EMPTY, nodeErrors: [{ nodeId: 12, nodeName: 'edge-02', error: 'Timed out after 8s' }] };
-    render(<DependencyMapTab map={state({ data, refresh })} />);
+    render(<DependencyMapTab map={state({ data, retryFailed, refresh })} />);
     expect(screen.getByText(/edge-02 \(Timed out after 8s\)/)).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
-    expect(refresh).toHaveBeenCalledTimes(1);
+    expect(retryFailed).toHaveBeenCalledTimes(1);
+    expect(refresh).not.toHaveBeenCalled();
   });
 
   it('disables the banner Retry while a refresh is in flight', () => {
@@ -69,8 +63,35 @@ describe('DependencyMapTab', () => {
     expect(screen.getByRole('button', { name: 'Retry' })).toBeDisabled();
   });
 
-  it('says so when a refresh failed and the previous result is still shown', () => {
-    render(<DependencyMapTab map={state({ error: 'network down' })} />);
-    expect(screen.getByText('Refresh failed. Showing the previous result.')).toBeInTheDocument();
+  it('does not call a fleet where no node could be read empty, and does not claim the rest is shown', () => {
+    const data = { ...EMPTY, nodeErrors: [{ nodeId: 1, nodeName: 'Local', error: 'Request failed (403)' }] };
+    render(<DependencyMapTab map={state({ data })} />);
+    expect(screen.getByText('Nothing to map yet: no node could be read.')).toBeInTheDocument();
+    expect(screen.getByText(/No node could be read, so there is nothing to draw/)).toBeInTheDocument();
+    expect(screen.queryByText(/No stacks to map/)).not.toBeInTheDocument();
+  });
+
+  it('announces the unreachable-node banner as a status', () => {
+    const data = { ...EMPTY, nodeErrors: [{ nodeId: 12, nodeName: 'edge-02', error: 'Timed out after 8s' }] };
+    render(<DependencyMapTab map={state({ data })} />);
+    expect(screen.getByRole('status')).toHaveTextContent('edge-02');
+  });
+
+  it('shows how many nodes have answered while the rest are pending, with the map already drawn', () => {
+    render(<DependencyMapTab map={state({ loading: true, progress: { done: 2, total: 3 } })} />);
+    expect(screen.getByText('2 of 3 nodes')).toBeInTheDocument();
+    expect(screen.queryByLabelText('Loading dependency map')).not.toBeInTheDocument();
+  });
+
+  it('shows no progress once every node has answered', () => {
+    render(<DependencyMapTab map={state()} />);
+    expect(screen.queryByText(/of \d+ nodes/)).not.toBeInTheDocument();
+  });
+
+  it('refreshes every node from the toolbar button', () => {
+    const refresh = vi.fn();
+    render(<DependencyMapTab map={state({ refresh })} />);
+    fireEvent.click(screen.getByRole('button', { name: /Refresh/ }));
+    expect(refresh).toHaveBeenCalledTimes(1);
   });
 });

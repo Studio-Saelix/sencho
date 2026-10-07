@@ -264,7 +264,7 @@ A summary strip above the map counts four kinds of issue, and the affected eleme
 
 ### When a node can't be reached
 
-The map is fleet-wide: the control instance gathers each node's view and merges them. If a node is offline or unreachable, a banner names it and the rest of the fleet still draws, so one dark node never blanks the whole map.
+The map is fleet-wide: the control instance gathers each node's view and merges them. Nodes are read a few at a time and each one is drawn as soon as it answers, with `n of N nodes` beside **Refresh** while the rest are pending, so a slow node never holds back the others. If a node is offline or unreachable, a banner names it with the reason (for example `Timed out after 8s` or `Pilot tunnel is disconnected`) and the rest of the fleet still draws. **Retry** in the banner reloads only the nodes that failed. Reopening the tab shows the last map at once and refreshes it in the background once it is a minute old.
 
 ## Node Updates
 

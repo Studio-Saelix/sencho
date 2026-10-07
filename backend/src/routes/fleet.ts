@@ -784,7 +784,54 @@ fleetRouter.get('/readiness', authMiddleware, async (req: Request, res: Response
 });
 
 /**
- * Fleet-wide dependency map. Auth-only (read-only visibility, Community). Fans
+ * One node's dependency graph as a merge-ready result. The hub builds its own
+ * in-process; a remote is read through its auth-only per-node route within the
+ * per-remote budget. Every failure degrades to an error result for that node.
+ */
+async function readNodeGraph(node: Node): Promise<FleetNodeGraphResult> {
+  if (node.type === 'local') {
+    const graph = await buildLocalGraph(node.id, node.name);
+    return { nodeId: node.id, nodeName: node.name, status: 'ok', graph, error: null };
+  }
+
+  const target = NodeRegistry.getInstance().getProxyTarget(node.id);
+  if (!target) {
+    return { nodeId: node.id, nodeName: node.name, status: 'error', graph: null, error: formatNoTargetError(node) };
+  }
+
+  const resp = await safeRemoteFetch(
+    `${target.apiUrl.replace(/\/$/, '')}/api/dependency-map/node-graph`,
+    {
+      headers: { ...(target.apiToken ? { Authorization: `Bearer ${target.apiToken}` } : {}) },
+      signal: AbortSignal.timeout(FLEET_NODE_READ_TIMEOUT_MS),
+    },
+    target.trustedLoopback,
+  );
+  if (!resp.ok) {
+    const errBody = await resp.json().catch(() => null) as { error?: string } | null;
+    return { nodeId: node.id, nodeName: node.name, status: 'error', graph: null, error: errBody?.error ?? `Remote returned ${resp.status}` };
+  }
+  let graph: unknown;
+  try {
+    graph = await resp.json();
+  } catch (readError) {
+    // A budget overrun mid-body is a timeout, not a malformed payload.
+    console.error(`[Fleet] Dependency map: node ${sanitizeForLog(node.name)} body read failed:`, errorMessageForLog(readError));
+    const reason = readError instanceof SyntaxError ? 'Remote returned invalid JSON' : describeNodeReadError(readError);
+    return { nodeId: node.id, nodeName: node.name, status: 'error', graph: null, error: reason };
+  }
+  // Shape-guard a reachable-but-malformed payload (proxy HTML, version
+  // drift) so one bad node degrades to a nodeError instead of crashing
+  // mergeFleetGraph and 500-ing the whole fleet map.
+  if (!isLocalDependencyGraph(graph)) {
+    console.error(`[Fleet] Dependency map: node ${sanitizeForLog(node.name)} returned a payload that failed shape validation (status ${resp.status})`);
+    return { nodeId: node.id, nodeName: node.name, status: 'error', graph: null, error: 'Remote returned an unexpected dependency-graph payload' };
+  }
+  return { nodeId: node.id, nodeName: node.name, status: 'ok', graph, error: null };
+}
+
+/**
+ * Fleet-wide dependency map, or one node's slice of it with `?nodeId=`. Auth-only (read-only visibility, Community). Fans
  * out to every node, building each node's local graph in-process for the hub
  * and via its auth-only per-node route for remotes, then merges with per-node
  * attribution. Unreachable nodes degrade to nodeErrors so the rest still draws.
@@ -792,52 +839,25 @@ fleetRouter.get('/readiness', authMiddleware, async (req: Request, res: Response
 fleetRouter.get('/dependency-map', authMiddleware, async (req: Request, res: Response): Promise<void> => {
   if (!requirePermission(req, res, 'node:read')) return;
   try {
-    const db = DatabaseService.getInstance();
-    const nodes = db.getNodes();
+    let nodes = DatabaseService.getInstance().getNodes();
 
-    const results = await Promise.allSettled(
-      nodes.map(async (node: Node): Promise<FleetNodeGraphResult> => {
-        if (node.type === 'local') {
-          const graph = await buildLocalGraph(node.id, node.name);
-          return { nodeId: node.id, nodeName: node.name, status: 'ok', graph, error: null };
-        }
+    // `nodeId` narrows the answer to one node (same response shape), so a caller
+    // can draw each node as it answers instead of waiting on the slowest one.
+    const nodeIdParam = req.query.nodeId;
+    if (nodeIdParam !== undefined) {
+      if (typeof nodeIdParam !== 'string' || !/^[1-9]\d*$/.test(nodeIdParam)) {
+        res.status(400).json({ error: 'nodeId must be a positive node id' });
+        return;
+      }
+      const only = nodes.find(n => n.id === Number(nodeIdParam));
+      if (!only) {
+        res.status(404).json({ error: 'Node not found' });
+        return;
+      }
+      nodes = [only];
+    }
 
-        const target = NodeRegistry.getInstance().getProxyTarget(node.id);
-        if (!target) {
-          return { nodeId: node.id, nodeName: node.name, status: 'error', graph: null, error: formatNoTargetError(node) };
-        }
-
-        const resp = await safeRemoteFetch(
-          `${target.apiUrl.replace(/\/$/, '')}/api/dependency-map/node-graph`,
-          {
-            headers: { ...(target.apiToken ? { Authorization: `Bearer ${target.apiToken}` } : {}) },
-            signal: AbortSignal.timeout(FLEET_NODE_READ_TIMEOUT_MS),
-          },
-          target.trustedLoopback,
-        );
-        if (!resp.ok) {
-          const errBody = await resp.json().catch(() => null) as { error?: string } | null;
-          return { nodeId: node.id, nodeName: node.name, status: 'error', graph: null, error: errBody?.error ?? `Remote returned ${resp.status}` };
-        }
-        let graph: unknown;
-        try {
-          graph = await resp.json();
-        } catch (readError) {
-          // A budget overrun mid-body is a timeout, not a malformed payload.
-          console.error(`[Fleet] Dependency map: node ${sanitizeForLog(node.name)} body read failed:`, errorMessageForLog(readError));
-          const reason = readError instanceof SyntaxError ? 'Remote returned invalid JSON' : describeNodeReadError(readError);
-          return { nodeId: node.id, nodeName: node.name, status: 'error', graph: null, error: reason };
-        }
-        // Shape-guard a reachable-but-malformed payload (proxy HTML, version
-        // drift) so one bad node degrades to a nodeError instead of crashing
-        // mergeFleetGraph and 500-ing the whole fleet map.
-        if (!isLocalDependencyGraph(graph)) {
-          console.error(`[Fleet] Dependency map: node ${sanitizeForLog(node.name)} returned a payload that failed shape validation (status ${resp.status})`);
-          return { nodeId: node.id, nodeName: node.name, status: 'error', graph: null, error: 'Remote returned an unexpected dependency-graph payload' };
-        }
-        return { nodeId: node.id, nodeName: node.name, status: 'ok', graph, error: null };
-      }),
-    );
+    const results = await Promise.allSettled(nodes.map(readNodeGraph));
 
     const perNode: FleetNodeGraphResult[] = results.map((result, i) => {
       if (result.status === 'fulfilled') return result.value;

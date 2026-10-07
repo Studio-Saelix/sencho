@@ -389,4 +389,64 @@ describe('node-data fan-outs share the per-remote read budget', () => {
     expect(elapsedMs).toBeGreaterThan(READ_BUDGET_FLOOR_MS);
     expect(elapsedMs).toBeLessThan(READ_BUDGET_CEILING_MS);
   }, 20_000);
+
+  describe('GET /api/fleet/dependency-map?nodeId=', () => {
+    const graph = { nodes: [{ id: 'host', kind: 'host', label: 'x', stack: null, state: null, flags: [] }], edges: [], flags: [], parseErrors: [] };
+
+    async function getMap(query: string) {
+      return request(app).get(`/api/fleet/dependency-map${query}`).set('Authorization', authHeader);
+    }
+
+    it('answers for one node without waiting on a hung neighbour', async () => {
+      stubLocalDocker();
+      const hungId = addProxyNode('hung-neighbour', PROXY_BASE);
+      const healthyId = addProxyNode('healthy-slice', HEALTHY_BASE);
+      mockTargets({
+        [hungId]: { apiUrl: PROXY_BASE, apiToken: 'test-token', trustedLoopback: false },
+        [healthyId]: { apiUrl: HEALTHY_BASE, apiToken: 'test-token', trustedLoopback: false },
+      });
+      const fetchSpy = mockFetch((url, init) => (url.startsWith(HEALTHY_BASE) ? jsonResponse(graph) : hungUntilAbort(init)));
+
+      const started = Date.now();
+      const res = await getMap(`?nodeId=${healthyId}`);
+      expect(res.status).toBe(200);
+      expect(Date.now() - started).toBeLessThan(FAST_PATH_CEILING_MS);
+      expect((res.body.nodes as { nodeId: number }[]).every(n => n.nodeId === healthyId)).toBe(true);
+      expect(res.body.nodes).toHaveLength(1);
+      expect(res.body.nodeErrors).toEqual([]);
+      // Only the asked-for node was read.
+      const requested = fetchSpy.mock.calls.map((call: unknown[]) => String(call[0]));
+      expect(requested.length).toBeGreaterThan(0);
+      expect(requested.every((u: string) => u.startsWith(HEALTHY_BASE))).toBe(true);
+    });
+
+    it('reports a failing node as that node\'s error, not a failed request', async () => {
+      stubLocalDocker();
+      const goneId = addPilotNode('gone-slice');
+      mockTargets({ [goneId]: null });
+      const res = await getMap(`?nodeId=${goneId}`);
+      expect(res.status).toBe(200);
+      expect(res.body.nodes).toEqual([]);
+      expect((res.body.nodeErrors as { nodeId: number }[]).map(e => e.nodeId)).toEqual([goneId]);
+    });
+
+    it.each(['abc', '0', '-3', '1.5', ''])('rejects a malformed nodeId (%s)', async (bad) => {
+      const res = await getMap(`?nodeId=${encodeURIComponent(bad)}`);
+      expect(res.status).toBe(400);
+    });
+
+    it('answers 404 for a node that does not exist', async () => {
+      const res = await getMap('?nodeId=99999');
+      expect(res.status).toBe(404);
+    });
+
+    it('still returns the whole fleet without the filter', async () => {
+      stubLocalDocker();
+      const addedId = addPilotNode('unfiltered-gone');
+      mockTargets({ [addedId]: null });
+      const res = await getMap('');
+      expect(res.status).toBe(200);
+      expect((res.body.nodeErrors as { nodeId: number }[]).map(e => e.nodeId)).toContain(addedId);
+    });
+  });
 });

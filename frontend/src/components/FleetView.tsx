@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useMemo, useRef } from 'react';
 import {
     RefreshCw, Camera, FileDown,
     Network, Activity,
@@ -117,7 +117,8 @@ export function FleetView({
     const [internalTab, setInternalTab] = useState<FleetTab>('overview');
     const activeTab = controlledTab ?? internalTab;
     // Owned here so returning to Map shows the last result while it revalidates.
-    const fleetMap = useFleetMap(activeTab === 'dependencies');
+    const mapNodes = useMemo(() => registryNodes.map(n => ({ id: n.id, name: n.name })), [registryNodes]);
+    const fleetMap = useFleetMap(activeTab === 'dependencies', mapNodes);
 
     // Coming back to Readiness re-checks a failed or stale result. A ref keeps
     // the live state out of the dependency array so only a tab change fires it.
