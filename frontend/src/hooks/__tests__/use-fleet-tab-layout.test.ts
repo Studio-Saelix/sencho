@@ -8,6 +8,11 @@ import { SENCHO_SETTINGS_CHANGED } from '@/lib/events';
 import { subscribeToPreferenceWrites } from '@/lib/preferences/preferenceEvents';
 import { PREFERENCE_CACHE_KEYS } from '@/lib/preferences/preferencesDocuments';
 
+/** A storage event as another tab would raise it, without the two-argument StorageEvent constructor. */
+function storageEvent(key: string | null, newValue: string | null): Event {
+    return Object.assign(new Event('storage'), { key, newValue });
+}
+
 describe('useFleetTabLayout', () => {
     beforeEach(() => localStorage.clear());
     afterEach(() => localStorage.clear());
@@ -61,11 +66,11 @@ describe('useFleetTabLayout', () => {
 
     it('follows another tab through the storage event, and ignores unrelated keys', () => {
         const { result } = renderHook(() => useFleetTabLayout());
-        act(() => { window.dispatchEvent(new StorageEvent('storage', { key: FLEET_TAB_LAYOUT_KEY, newValue: 'compact' })); });
+        act(() => { window.dispatchEvent(storageEvent(FLEET_TAB_LAYOUT_KEY, 'compact')); });
         expect(result.current[0]).toBe('compact');
-        act(() => { window.dispatchEvent(new StorageEvent('storage', { key: 'other', newValue: 'flat' })); });
+        act(() => { window.dispatchEvent(storageEvent('other', 'flat')); });
         expect(result.current[0]).toBe('compact');
-        act(() => { window.dispatchEvent(new StorageEvent('storage', { key: FLEET_TAB_LAYOUT_KEY, newValue: null })); });
+        act(() => { window.dispatchEvent(storageEvent(FLEET_TAB_LAYOUT_KEY, null)); });
         expect(result.current[0]).toBe('flat');
     });
 
