@@ -113,8 +113,9 @@ export function parseRestoreFailureClass(
  * The live authorization binding is authoritative while it resolves. A
  * superseded generation whose pointer is still on the application keeps
  * naming the set the operator reviewed, so a rollback can act on the targets
- * that actually moved. An invalidation clears the pointer, and then there is
- * no set to recover.
+ * that actually moved. An invalidation clears the pointer; an active rollback
+ * fence still names the generation on its target row, so the set stays
+ * recoverable until the rollback finishes.
  */
 export function rolloutTargetSet(app: GitOpsApplicationRow): {
   nodeIds: number[];
@@ -125,8 +126,20 @@ export function rolloutTargetSet(app: GitOpsApplicationRow): {
   if (binding) {
     return { nodeIds: [...binding.requiredNodeIds], acceptedGenerationId: binding.acceptedGenerationId };
   }
-  if (!app.rollout_generation_id) return null;
-  const generation = store.getRolloutGeneration(app.rollout_generation_id);
+  // The pointer is the normal fallback. Without one, an unfinished rollback is
+  // the exception: the target row still names the generation whose targets
+  // moved, and the rollback route needs a target set to finish rather than a
+  // permanent ROLLBACK_UNAVAILABLE.
+  const fenced = app.rollout_generation_id === null
+    ? store.listTargets(app.id).find(
+        (target) => target.target_status === 'active'
+          && target.health_stop_reason === 'rollback_pending'
+          && target.rollout_generation_id !== null,
+      )
+    : undefined;
+  const generationId = app.rollout_generation_id ?? fenced?.rollout_generation_id ?? null;
+  if (!generationId) return null;
+  const generation = store.getRolloutGeneration(generationId);
   if (!generation) return null;
   try {
     return {

@@ -5146,6 +5146,7 @@ describe('GitSourceService.apply', () => {
             expect(result).toEqual({
                 status: 'blocked',
                 reason: 'Placement approval is required before rollout authorization.',
+                holdable: false,
             });
             expect(GitOpsStore.getInstance().getApplication(app.id)?.accepted_generation_id).toBe(generationId);
         });
@@ -5165,6 +5166,7 @@ describe('GitSourceService.apply', () => {
                 expect(result).toEqual({
                     status: 'blocked',
                     reason: expect.stringMatching(/disagrees with the accepted generation/i),
+                    holdable: false,
                 });
                 expect(promoteSpy).not.toHaveBeenCalled();
                 expect(liveApp('dispatch-contract-drift')!.accepted_generation_id).toBe(generationId);
@@ -5209,6 +5211,7 @@ describe('GitSourceService.apply', () => {
                 expect(result).toEqual({
                     status: 'blocked',
                     reason: expect.stringMatching(/no longer matches the accepted generation/i),
+                    holdable: false,
                 });
                 expect(promoteSpy).not.toHaveBeenCalled();
                 expect(deploySpy).not.toHaveBeenCalled();
@@ -5238,6 +5241,7 @@ describe('GitSourceService.apply', () => {
                 expect(result).toEqual({
                     status: 'blocked',
                     reason: expect.stringMatching(/no longer staged/i),
+                    holdable: false,
                 });
                 expect(promoteSpy).not.toHaveBeenCalled();
                 expect(liveApp('dispatch-candidate-gone')!.accepted_generation_id).toBe(generationId);
@@ -5263,6 +5267,7 @@ describe('GitSourceService.apply', () => {
                 expect(result).toEqual({
                     status: 'blocked',
                     reason: 'Another operation (deploy) is already in progress for dispatch-contention.',
+                    holdable: false,
                 });
                 // The refused dispatch reserved nothing, so it leaves no
                 // unsettled attempt for startup recovery to chase.
@@ -5365,6 +5370,7 @@ describe('GitSourceService.apply', () => {
                 expect(result).toEqual({
                     status: 'blocked',
                     reason: expect.stringMatching(/deploy intent could not be recorded/i),
+                    holdable: false,
                 });
                 // The promotion and the bind did happen; the attempt settles
                 // post-commit (the files are real) without claiming a deploy
@@ -5462,6 +5468,7 @@ describe('GitSourceService.apply', () => {
                 expect(result).toEqual({
                     status: 'blocked',
                     reason: expect.stringMatching(/deploy intent could not be recorded/i),
+                    holdable: false,
                 });
                 const started = historyOperationIds(applicationId, 'source_reconcile_started');
                 const dispatchOp = started[started.length - 1]!;
@@ -5538,6 +5545,7 @@ describe('GitSourceService.apply', () => {
                 expect(result).toEqual({
                     status: 'blocked',
                     reason: expect.stringMatching(/deploy intent could not be recorded and read back[\s\S]*simulated read-back store failure/i),
+                    holdable: false,
                 });
                 const started = historyOperationIds(applicationId, 'source_reconcile_started');
                 const dispatchOp = started[started.length - 1]!;
@@ -5756,6 +5764,7 @@ describe('GitSourceService.apply', () => {
                 expect(result).toEqual({
                     status: 'blocked',
                     reason: expect.stringMatching(/deploy intent could not be recorded/i),
+                    holdable: false,
                 });
                 const started = historyOperationIds(applicationId, 'source_reconcile_started');
                 const dispatchOp = started[started.length - 1]!;
@@ -5861,6 +5870,7 @@ describe('GitSourceService.apply', () => {
                 expect(result).toEqual({
                     status: 'blocked',
                     reason: expect.stringMatching(/the deploy failed: Policy "block-high-dispatch" blocked deploy/i),
+                    holdable: false,
                 });
                 expect(promoteSpy).toHaveBeenCalledTimes(1);
                 const started = historyOperationIds(applicationId, 'source_reconcile_started');
@@ -6052,6 +6062,7 @@ describe('GitSourceService.apply', () => {
                 expect(result).toEqual({
                     status: 'blocked',
                     reason: expect.stringMatching(/the deploy failed: Failed to hand off recovery generation/i),
+                    holdable: false,
                 });
                 expect(promoteSpy).toHaveBeenCalledTimes(1);
                 const started = historyOperationIds(applicationId, 'source_reconcile_started');
@@ -6449,6 +6460,7 @@ describe('GitSourceService.apply', () => {
                 expect(result).toEqual({
                     status: 'blocked',
                     reason: expect.stringContaining('try again'),
+                    holdable: false,
                 });
                 const settled = settledAttemptsForApplication(applicationId);
                 expect(JSON.parse(settled[settled.length - 1]!.after_json!)).toMatchObject({
@@ -6484,6 +6496,7 @@ describe('GitSourceService.apply', () => {
                 expect(result).toEqual({
                     status: 'blocked',
                     reason: expect.stringMatching(/deploy failed/i),
+                    holdable: false,
                 });
                 // The promotion committed, so the target binding happened even
                 // though the deploy did not.
@@ -6641,7 +6654,7 @@ describe('GitSourceService.apply', () => {
 
             const result = await svc.dispatchAcceptedGeneration(generation, directContext, manualDispatch);
 
-            expect(result).toEqual({ status: 'blocked', reason: expect.stringMatching(reason) });
+            expect(result).toEqual({ status: 'blocked', reason: expect.stringMatching(reason), holdable: false });
             const settled = settledAttemptsForApplication(applicationId);
             expect(settled).toHaveLength(settledBefore + 1);
             expect(JSON.parse(settled[settled.length - 1]!.after_json!)).toMatchObject({
@@ -6739,6 +6752,7 @@ describe('GitSourceService.apply', () => {
                 expect(result).toEqual({
                     status: 'blocked',
                     reason: "fatal: cannot reach 'https://***:***@github.com/example/repo.git/'",
+                    holdable: false,
                 });
                 const settled = settledAttemptsForApplication(applicationId);
                 const row = JSON.parse(settled[settled.length - 1]!.after_json!);
@@ -6790,6 +6804,7 @@ describe('GitSourceService.apply', () => {
                 expect(result).toEqual({
                     status: 'blocked',
                     reason: expect.stringContaining('GitOps tracking is unavailable'),
+                    holdable: false,
                 });
                 expect(historyOperationIds(applicationId, 'source_reconcile_started')).toHaveLength(startedBefore);
                 const logged = errorSpy.mock.calls.map((args) => args.map(String).join('\n')).join('\n');
@@ -6828,6 +6843,7 @@ describe('GitSourceService.apply', () => {
                 expect(result).toEqual({
                     status: 'blocked',
                     reason: expect.stringMatching(/push rejected/s),
+                    holdable: false,
                 });
                 const logged = errorSpy.mock.calls.map((args) => args.map(String).join('\n')).join('\n');
                 expect(logged).toContain('promotion failed for dispatch-promote-log-scrub');
@@ -6864,6 +6880,7 @@ describe('GitSourceService.apply', () => {
                 expect(result).toEqual({
                     status: 'blocked',
                     reason: expect.stringMatching(/did not complete cleanly.*may already be updated/s),
+                    holdable: false,
                 });
                 const settled = settledAttemptsForApplication(applicationId);
                 expect(JSON.parse(settled[settled.length - 1]!.after_json!)).toMatchObject({
@@ -6898,6 +6915,7 @@ describe('GitSourceService.apply', () => {
                 expect(result).toEqual({
                     status: 'blocked',
                     reason: expect.stringContaining('GitOps tracking is unavailable'),
+                    holdable: false,
                 });
                 expect(promoteSpy).not.toHaveBeenCalled();
                 // Nothing was reserved, so nothing may be settled: an
@@ -6935,6 +6953,7 @@ describe('GitSourceService.apply', () => {
                 expect(result).toEqual({
                     status: 'blocked',
                     reason: expect.stringMatching(/transient read failure/),
+                    holdable: false,
                 });
                 // The dispatch catch is the only handler for this throw: the
                 // settled row keeps the scrubbed reason, the stack lives here.
@@ -6976,6 +6995,7 @@ describe('GitSourceService.apply', () => {
                     reason: expect.stringMatching(
                         /did not complete cleanly.*may already be updated/s,
                     ),
+                    holdable: false,
                 });
                 const settled = settledAttemptsForApplication(applicationId);
                 expect(JSON.parse(settled[settled.length - 1]!.after_json!)).toMatchObject({
@@ -7013,6 +7033,7 @@ describe('GitSourceService.apply', () => {
                     reason: expect.stringMatching(
                         /did not complete cleanly.*simulated restore failure.*may already be updated/s,
                     ),
+                    holdable: false,
                 });
                 const settled = settledAttemptsForApplication(applicationId);
                 expect(JSON.parse(settled[settled.length - 1]!.after_json!)).toMatchObject({
@@ -7051,6 +7072,7 @@ describe('GitSourceService.apply', () => {
                 expect(result).toEqual({
                     status: 'blocked',
                     reason: expect.stringContaining('simulated promote failure'),
+                    holdable: false,
                 });
                 const settled = settledAttemptsForApplication(applicationId);
                 expect(settled).toHaveLength(settledBefore + 1);
@@ -7110,6 +7132,7 @@ describe('GitSourceService.apply', () => {
                 expect(result).toEqual({
                     status: 'blocked',
                     reason: expect.stringMatching(/could not be bound/i),
+                    holdable: false,
                 });
                 const settled = settledAttemptsForApplication(applicationId);
                 expect(JSON.parse(settled[settled.length - 1]!.after_json!)).toMatchObject({
@@ -7152,6 +7175,7 @@ describe('GitSourceService.apply', () => {
                 expect(result).toEqual({
                     status: 'blocked',
                     reason: expect.stringMatching(/already recorded/i),
+                    holdable: false,
                 });
                 // Nothing was reserved, so nothing may be settled: the
                 // colliding attempt belongs to its own owner (or startup
@@ -7197,6 +7221,7 @@ describe('GitSourceService.apply', () => {
                 expect(result).toEqual({
                     status: 'blocked',
                     reason: expect.stringMatching(/records no change-plan evidence/i),
+                    holdable: false,
                 });
                 expect(promoteSpy).not.toHaveBeenCalled();
                 expect(deploySpy).not.toHaveBeenCalled();
@@ -7224,6 +7249,7 @@ describe('GitSourceService.apply', () => {
             expect(result).toEqual({
                 status: 'blocked',
                 reason: expect.stringMatching(/application could not be read/i),
+                holdable: false,
             });
         });
 
@@ -7357,6 +7383,7 @@ describe('GitSourceService.apply', () => {
                 expect(result).toEqual({
                     status: 'blocked',
                     reason: expect.stringMatching(/could not be bound/i),
+                    holdable: false,
                 });
                 expect(activitySpy.mock.calls.map((args) => args[1])).toContainEqual(
                     expect.objectContaining({

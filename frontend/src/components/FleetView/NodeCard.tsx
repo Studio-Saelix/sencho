@@ -7,7 +7,6 @@ import {
 import { Button } from '@/components/ui/button';
 import { Badge, badgeVariants } from '@/components/ui/badge';
 import { Skeleton } from '@/components/ui/skeleton';
-import { ConfirmModal } from '@/components/ui/modal';
 import {
     DropdownMenu,
     DropdownMenuContent,
@@ -24,7 +23,7 @@ import { toast } from '@/components/ui/toast-store';
 import { formatVersion } from '@/lib/version';
 import { useAuth } from '@/context/AuthContext';
 import { useNodes, type Node } from '@/context/NodeContext';
-import { cordonNode, uncordonNode } from '@/lib/nodesApi';
+import { NodeCordonModal } from './NodeCordonModal';
 import { UpdateStatusBadge } from './UpdateStatusBadge';
 import { PinnedUpdateBadge } from './PinnedUpdateBadge';
 import { StackSection } from './NodeCardStackList';
@@ -74,8 +73,6 @@ export function NodeCard({ node, onNavigate, gitopsAttention, labelMap, updateSt
     const [stacks, setStacks] = useState<string[] | null>(node.stacks);
     const [loadingStacks, setLoadingStacks] = useState(false);
     const [cordonModalOpen, setCordonModalOpen] = useState(false);
-    const [cordonReason, setCordonReason] = useState('');
-    const [cordonSubmitting, setCordonSubmitting] = useState(false);
 
     const { isAdmin, can } = useAuth();
     const { nodes: registryNodes } = useNodes();
@@ -107,31 +104,6 @@ export function NodeCard({ node, onNavigate, gitopsAttention, labelMap, updateSt
     const memUsed = getNodeMemUsed(node);
     const memTotal = getNodeMemTotal(node);
     const diskPercent = getNodeDisk(node);
-
-    const openCordonModal = () => {
-        setCordonReason('');
-        setCordonModalOpen(true);
-    };
-
-    const handleCordonConfirm = async () => {
-        setCordonSubmitting(true);
-        try {
-            if (node.cordoned) {
-                await uncordonNode(node.id);
-                toast.success(`Uncordoned ${node.name}`);
-            } else {
-                await cordonNode(node.id, cordonReason.trim() || null);
-                toast.success(`Cordoned ${node.name}`);
-            }
-            setCordonModalOpen(false);
-            onCordonChange?.();
-        } catch (error) {
-            const message = error instanceof Error ? error.message : 'Failed to update cordon state';
-            toast.error(message);
-        } finally {
-            setCordonSubmitting(false);
-        }
-    };
 
     const handleExpand = async () => {
         const next = !expanded;
@@ -211,7 +183,7 @@ export function NodeCard({ node, onNavigate, gitopsAttention, labelMap, updateSt
                                 </DropdownMenuItem>
                             )}
                             {canCordon && (
-                                <DropdownMenuItem onSelect={openCordonModal}>
+                                <DropdownMenuItem onSelect={() => setCordonModalOpen(true)}>
                                     <Ban className="w-3.5 h-3.5 mr-2" />
                                     {node.cordoned ? 'Uncordon node' : 'Cordon node'}
                                 </DropdownMenuItem>
@@ -397,38 +369,12 @@ export function NodeCard({ node, onNavigate, gitopsAttention, labelMap, updateSt
                 )}
             </div>
 
-            <ConfirmModal
+            <NodeCordonModal
+                node={node}
                 open={cordonModalOpen}
-                onOpenChange={(open) => {
-                    if (!cordonSubmitting) setCordonModalOpen(open);
-                }}
-                kicker="Federation"
-                title={node.cordoned ? `Uncordon ${node.name}` : `Cordon ${node.name}`}
-                description={node.cordoned
-                    ? 'Re-enable this node for new blueprint placements. Existing deployments are unchanged.'
-                    : 'Mark this node as unschedulable. New blueprint deployments will skip it. Existing deployments remain in place.'}
-                confirmLabel={node.cordoned ? 'Uncordon node' : 'Cordon node'}
-                confirming={cordonSubmitting}
-                onConfirm={handleCordonConfirm}
-            >
-                {!node.cordoned && (
-                    <div className="space-y-1.5">
-                        <label htmlFor={`cordon-reason-${node.id}`} className="text-xs font-medium text-muted-foreground">
-                            Reason (optional)
-                        </label>
-                        <input
-                            id={`cordon-reason-${node.id}`}
-                            type="text"
-                            maxLength={256}
-                            value={cordonReason}
-                            onChange={(e) => setCordonReason(e.target.value)}
-                            placeholder="e.g. draining for maintenance"
-                            className="w-full h-8 px-2 text-sm rounded-md border border-input bg-background"
-                            disabled={cordonSubmitting}
-                        />
-                    </div>
-                )}
-            </ConfirmModal>
+                onOpenChange={setCordonModalOpen}
+                onChanged={onCordonChange}
+            />
 
             {/* Expandable Stack List with Container Drill-Down */}
             {isOnline && (

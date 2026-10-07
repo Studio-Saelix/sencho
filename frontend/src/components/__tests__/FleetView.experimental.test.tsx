@@ -15,7 +15,7 @@ vi.mock('@/context/AuthContext', () => ({
   useAuth: () => useAuthMock(),
 }));
 vi.mock('@/context/NodeContext', () => ({
-  useNodes: () => ({ hasCapability: () => false }),
+  useNodes: () => ({ hasCapability: () => false, nodes: [] }),
 }));
 
 vi.mock('../FleetView/hooks/useFleetPreferences', () => ({
@@ -61,9 +61,7 @@ vi.mock('../FleetView/hooks/useFleetOverview', () => ({
       onlineCount: 0,
       criticalCount: 0,
       avgCpuNum: 0,
-      worstCpu: 0,
       totalMemUsed: 0,
-      totalMemTotal: 0,
       totalContainers: 0,
       totalContainersAll: 0,
     },

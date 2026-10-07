@@ -102,6 +102,41 @@ describe('useFleetOverview', () => {
     expect(result.current.processedNodes.map(n => n.name)).toEqual(['Bravo', 'Alpha', 'Charlie']);
   });
 
+  it('sorts offline first, then critical, then the rest by name in attention order', async () => {
+    const { result } = setup({ sortBy: 'attention' });
+    await act(async () => { await result.current.fetchOverview(); });
+    // Charlie is offline, Bravo is critical (95% CPU), Alpha is fine.
+    expect(result.current.processedNodes.map(n => n.name)).toEqual(['Charlie', 'Bravo', 'Alpha']);
+  });
+
+  it('breaks attention ties by name and flips that with the direction', async () => {
+    const two = [
+      { ...NODES[0] },
+      { ...NODES[1], id: 4, name: 'Delta', systemStats: sys('10.0') },
+      { ...NODES[1], id: 5, name: 'Echo', systemStats: sys('10.0') },
+    ];
+    apiFetchMock.mockImplementation((path: string) => Promise.resolve(okJson(path === '/fleet/overview' ? two : {})));
+    const asc = setup({ sortBy: 'attention', sortDir: 'asc' });
+    await act(async () => { await asc.result.current.fetchOverview(); });
+    // Same rank for Delta and Echo, so the name decides; Local stays pinned first in the grid list.
+    expect(asc.result.current.processedNodes.map(n => n.name)).toEqual(['Alpha', 'Delta', 'Echo']);
+    const desc = setup({ sortBy: 'attention', sortDir: 'desc' });
+    await act(async () => { await desc.result.current.fetchOverview(); });
+    expect(desc.result.current.processedNodes.map(n => n.name)).toEqual(['Echo', 'Delta', 'Alpha']);
+  });
+
+  it('keeps the Local node first in the grid list whatever the attention order', async () => {
+    const { result } = setup({ sortBy: 'attention' });
+    await act(async () => { await result.current.fetchOverview(); });
+    expect(result.current.allNodes.map(n => n.name)).toEqual(['Alpha', 'Charlie', 'Bravo']);
+  });
+
+  it('reverses attention order when the direction is descending', async () => {
+    const { result } = setup({ sortBy: 'attention', sortDir: 'desc' });
+    await act(async () => { await result.current.fetchOverview(); });
+    expect(result.current.processedNodes.map(n => n.name)).toEqual(['Alpha', 'Bravo', 'Charlie']);
+  });
+
   it('ignores an aborted fetch without surfacing an error', async () => {
     const { result } = setup();
     apiFetchMock.mockImplementationOnce(() => Promise.reject(new DOMException('aborted', 'AbortError')));
@@ -109,6 +144,87 @@ describe('useFleetOverview', () => {
     // No throw; nodes stay empty, loading cleared.
     expect(result.current.nodes).toHaveLength(0);
     expect(result.current.loading).toBe(false);
+  });
+
+  it('does not clear loading from an aborted call that a newer call replaced', async () => {
+    const { result } = setup();
+    let release: (r: Response) => void = () => {};
+    apiFetchMock.mockImplementationOnce((_path: string, init?: { signal?: AbortSignal }) => new Promise((_res, rej) => {
+      init?.signal?.addEventListener('abort', () => rej(new DOMException('aborted', 'AbortError')));
+    }));
+    apiFetchMock.mockImplementationOnce(() => new Promise<Response>((res) => { release = res; }));
+    let first: Promise<void> = Promise.resolve();
+    let second: Promise<void> = Promise.resolve();
+    act(() => { first = result.current.fetchOverview(); });
+    act(() => { second = result.current.fetchOverview(); });
+    await act(async () => { await first; });
+    // The aborted first call must not have flipped loading off: no empty-fleet flash.
+    expect(result.current.loading).toBe(true);
+    await act(async () => { release(okJson(NODES)); await second; });
+    expect(result.current.loading).toBe(false);
+    expect(result.current.nodes).toHaveLength(3);
+  });
+
+  it('retries the GitOps attention request after it was aborted', async () => {
+    const { result } = setup();
+    let gitopsCalls = 0;
+    apiFetchMock.mockImplementation((path: string) => {
+      if (path === '/fleet/overview') return Promise.resolve(okJson(NODES));
+      if (path.startsWith('/gitops/applications')) {
+        gitopsCalls += 1;
+        if (gitopsCalls === 1) return Promise.reject(new DOMException('aborted', 'AbortError'));
+        return Promise.resolve(okJson({ summary: { attentionByNode: { '2': 3 } }, coverage: [{ nodeId: 2, state: 'ok' }] }));
+      }
+      return Promise.resolve(okJson({ nodes: [] }));
+    });
+    await act(async () => { await result.current.fetchOverview(); });
+    await act(async () => { await result.current.fetchOverview(); });
+    expect(gitopsCalls).toBe(2);
+    expect(result.current.gitopsAttentionByNode.get(2)).toBe(3);
+  });
+
+  it('does not request GitOps attention again after it loaded', async () => {
+    const { result } = setup();
+    await act(async () => { await result.current.fetchOverview(); });
+    await act(async () => { await result.current.fetchOverview(); });
+    const gitopsCalls = apiFetchMock.mock.calls.filter(([path]) => String(path).startsWith('/gitops/applications'));
+    expect(gitopsCalls).toHaveLength(1);
+  });
+
+  it('lets an in-flight networking summary finish when the next overview starts', async () => {
+    const { result } = setup();
+    const signals: AbortSignal[] = [];
+    let releaseSummary: (r: Response) => void = () => {};
+    apiFetchMock.mockImplementation((path: string, init?: { signal?: AbortSignal }) => {
+      if (path === '/fleet/overview') return Promise.resolve(okJson(NODES));
+      if (path === '/fleet/networking-summary') {
+        if (init?.signal) signals.push(init.signal);
+        return new Promise<Response>((res) => { releaseSummary = res; });
+      }
+      return Promise.resolve(okJson({}));
+    });
+    await act(async () => { await result.current.fetchOverview(); });
+    await act(async () => { await result.current.fetchOverview(); });
+    // One request, never aborted by the second overview, and not restarted.
+    expect(signals).toHaveLength(1);
+    expect(signals[0].aborted).toBe(false);
+    await act(async () => {
+      releaseSummary(okJson({ nodes: [{ nodeId: 1, summary: { exposed: { count: 1, stacks: ['web'] }, unknownExposure: { count: 0, stacks: [] }, networkDrift: { count: 0, stacks: [] } } }] }));
+    });
+    await waitFor(() => expect(result.current.networkingByNode.get(1)?.exposed).toBe(true));
+  });
+
+  it('aborts every in-flight request on unmount', async () => {
+    const { result, unmount } = setup();
+    const signals: AbortSignal[] = [];
+    apiFetchMock.mockImplementation((_path: string, init?: { signal?: AbortSignal }) => {
+      if (init?.signal) signals.push(init.signal);
+      return new Promise<Response>(() => {});
+    });
+    act(() => { void result.current.fetchOverview(); });
+    unmount();
+    expect(signals.length).toBeGreaterThan(0);
+    expect(signals.every(sig => sig.aborted)).toBe(true);
   });
 
   it('clearFilters resets prefs and label filters', async () => {

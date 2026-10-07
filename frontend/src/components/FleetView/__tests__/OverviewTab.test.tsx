@@ -1,5 +1,5 @@
-import { describe, it, expect, vi } from 'vitest';
-import { render, screen } from '@testing-library/react';
+import { describe, it, expect, vi, afterEach } from 'vitest';
+import { act, render, screen } from '@testing-library/react';
 
 // Stub the heavy children so this test exercises OverviewTab's own
 // branch-selection logic, not NodeCard/FleetTopology internals.
@@ -7,6 +7,7 @@ vi.mock('../NodeCard', () => ({ NodeCard: ({ node }: { node: { name: string } })
 vi.mock('../../fleet/FleetTopology', () => ({ FleetTopology: () => <div data-testid="topology" /> }));
 
 import { OverviewTab } from '../OverviewTab';
+import { DURATION_BASE_MS } from '@/hooks/useVisualBusy';
 import type { FleetNode, FleetPreferences } from '../types';
 
 const PREFS: FleetPreferences = { sortBy: 'name', sortDir: 'asc', filterStatus: 'all', filterType: 'all', filterCritical: false, filterNetworking: 'all' };
@@ -46,7 +47,34 @@ function props(overrides: Partial<React.ComponentProps<typeof OverviewTab>> = {}
   };
 }
 
+afterEach(() => vi.useRealTimers());
+
 describe('OverviewTab', () => {
+  describe('loading state', () => {
+    const loadingProps = () => props({ loading: true, nodes: [], processedNodes: [], allNodes: [] });
+    const skeleton = (c: HTMLElement) => c.querySelector('.animate-pulse');
+
+    it('holds still until the busy delay passes, then shows the skeleton', () => {
+      vi.useFakeTimers();
+      const { container } = render(<OverviewTab {...loadingProps()} />);
+      act(() => { vi.advanceTimersByTime(DURATION_BASE_MS - 20); });
+      expect(skeleton(container)).toBeNull();
+      expect(screen.queryByText('No nodes configured')).not.toBeInTheDocument();
+      act(() => { vi.advanceTimersByTime(40); });
+      expect(skeleton(container)).not.toBeNull();
+    });
+
+    it('never shows the skeleton when loading ends inside the delay', () => {
+      vi.useFakeTimers();
+      const { container, rerender } = render(<OverviewTab {...loadingProps()} />);
+      act(() => { vi.advanceTimersByTime(DURATION_BASE_MS - 20); });
+      rerender(<OverviewTab {...props()} />);
+      act(() => { vi.advanceTimersByTime(DURATION_BASE_MS * 2); });
+      expect(skeleton(container)).toBeNull();
+      expect(screen.getByTestId('node-card')).toBeInTheDocument();
+    });
+  });
+
   it('renders node cards when nodes are present', () => {
     render(<OverviewTab {...props()} />);
     expect(screen.getByTestId('node-card')).toHaveTextContent('Alpha');

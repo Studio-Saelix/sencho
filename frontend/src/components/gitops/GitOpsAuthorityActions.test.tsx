@@ -127,7 +127,7 @@ describe('GitOpsAuthorityActions', () => {
   it('accepts the reviewed source generation as the next step', async () => {
     const user = userEvent.setup();
     const onChanged = vi.fn();
-    vi.mocked(acceptGitOpsSource).mockResolvedValue(undefined);
+    vi.mocked(acceptGitOpsSource).mockResolvedValue({ ok: true, materialized: true, artifactResolved: true, dispatched: false, note: null });
     renderActions(sourcePending(), () => true, onChanged);
 
     const button = screen.getByTestId('gitops-action-accept-source');
@@ -146,6 +146,26 @@ describe('GitOpsAuthorityActions', () => {
     await user.click(screen.getByTestId('gitops-action-accept-source'));
     await waitFor(() => expect(toast.error).toHaveBeenCalledWith('candidate is blocked'));
     expect(onChanged).not.toHaveBeenCalled();
+  });
+
+  it('warns with the note when acceptance leaves the artifact identity unresolved', async () => {
+    const user = userEvent.setup();
+    const onChanged = vi.fn();
+    const note = 'the artifact identity could not be resolved yet; the next reconcile retries it';
+    vi.mocked(acceptGitOpsSource).mockResolvedValue({
+      ok: true,
+      materialized: true,
+      artifactResolved: false,
+      dispatched: false,
+      note,
+    });
+    renderActions(sourcePending(), () => true, onChanged);
+
+    await user.click(screen.getByTestId('gitops-action-accept-source'));
+
+    // The acceptance stands; the note names what is still missing.
+    await waitFor(() => expect(toast.warning).toHaveBeenCalledWith(`Source revision accepted. ${note}`));
+    expect(onChanged).toHaveBeenCalled();
   });
 
   it('opens the reviewed plan for placement approval', async () => {
@@ -243,7 +263,7 @@ describe('GitOpsAuthorityActions', () => {
 
   it('offers source acceptance for a newer candidate after an earlier acceptance', async () => {
     const user = userEvent.setup();
-    vi.mocked(acceptGitOpsSource).mockResolvedValue(undefined);
+    vi.mocked(acceptGitOpsSource).mockResolvedValue({ ok: true, materialized: true, artifactResolved: true, dispatched: false, note: null });
     renderActions(blueprintRevision({
       approvals: { ...noApprovals, sourceAcceptanceRef: 'src-old', placementApprovalRef: 'place-old' },
       facets: facets({

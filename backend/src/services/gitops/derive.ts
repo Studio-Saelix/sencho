@@ -624,6 +624,13 @@ function collectManagedProjectDrift(
   app: GitOpsApplicationRow,
   rawTargets: GitOpsTargetCurrentRow[],
 ): GitOpsDriftItem[] {
+  // The manifest cache this compares against is written by the Direct
+  // promotion, and a Git-managed Blueprint deliberately never promotes through
+  // that path: its content authority is the accepted generation and its
+  // materialization lives in the hub's generations directory. Comparing the
+  // cache here would report the previous generation's commit as drift the
+  // moment the new one converges, with no writer that could ever clear it.
+  if (app.target_mode === 'blueprint') return [];
   if (!app.accepted_generation_id) return [];
   if (app.active_operation_stage !== null || app.interruption_stage !== null) return [];
   if (recoveryInProgress(app.recovery_phase)) return [];

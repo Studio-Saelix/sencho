@@ -779,6 +779,12 @@ export class GitOpsTransitions {
       const targets = this.acceptanceTargets(app, args);
       this.invalidateAuthorizationOnSourceChange(app, args.envelope, extras);
       this.applySourceAcceptanceMutation(app, args);
+      // Shared with `sourceAccepted` so both acceptance entry points leave the
+      // candidate naming the generation they just accepted. In production
+      // `applied` is Direct-only, where this is a no-op; keeping the call here
+      // means a future blueprint caller cannot reintroduce the stranded-binding
+      // state this pair exists to prevent.
+      this.rebindRolloutCandidateOnAcceptance(app, args.generationId);
       for (const target of targets) {
         if (app.target_mode === 'direct') {
           this.applyTargetAcceptanceMutation(target, args);
@@ -810,6 +816,9 @@ export class GitOpsTransitions {
       this.requireAcceptableCandidate(app, args);
       this.invalidateAuthorizationOnSourceChange(app, args.envelope, extras);
       this.applySourceAcceptanceMutation(app, args);
+      // Blueprint-only in effect: a Direct application has no rollout
+      // candidate, so the helper returns without touching anything.
+      this.rebindRolloutCandidateOnAcceptance(app, args.generationId);
     }, {
       generationId: args.generationId,
       artifactSetId: args.artifactSetId,
@@ -1380,7 +1389,13 @@ export class GitOpsTransitions {
             && app.pause_at === null
           ) {
             try {
-              this.rolloutPaused(args.applicationId, null, healthHoldReason(decision.reason), args.envelope);
+              this.rolloutPaused(
+                args.applicationId,
+                null,
+                healthHoldReason(decision.reason),
+                args.envelope,
+                'health',
+              );
             } catch (error) {
               if (!(error instanceof GitOpsTransitionError)) throw error;
               console.warn(
@@ -2030,17 +2045,20 @@ export class GitOpsTransitions {
     nodeId: number | null,
     reason: string,
     envelope: EventEnvelope,
+    origin: 'operator' | 'system' | 'health' = 'operator',
   ): TransitionResult {
     if (nodeId === null) {
       return this.mutateApp(applicationId, envelope, 'rollout_paused', 'committed', (app) => {
         if (app.lifecycle_status !== 'active') throw new GitOpsTransitionError('application is not live');
         app.pause_at = envelope.at;
         app.pause_reason = reason;
+        app.pause_origin = origin;
       }, {
         // The reason is operator-authored evidence for the hold. The compact
         // app snapshot omits it, so it is merged into the delta explicitly and
-        // the notification carries it.
-        historyAfter: { pauseReason: reason },
+        // the notification carries it. The origin travels with it so a reader
+        // can tell a hold a source change may clear from one only a person can.
+        historyAfter: { pauseReason: reason, pauseOrigin: origin },
       });
     }
     return this.mutateTarget(applicationId, nodeId, envelope, 'rollout_paused', null, (target) => {
@@ -2058,6 +2076,7 @@ export class GitOpsTransitions {
         if (!app.pause_at) throw new GitOpsTransitionError('application is not paused');
         app.pause_at = null;
         app.pause_reason = null;
+        app.pause_origin = 'operator';
         // A resume answers a *hold*: the operator has seen it and wants the
         // rollout to carry on, so the target the hold was about is deployed again
         // and the policy decides afresh. `health_attempts` is deliberately kept, so
@@ -2484,6 +2503,7 @@ export class GitOpsTransitions {
           provenance: args.provenance ?? 'legacy_inline',
           supersedes_generation_id: previousGenerationId,
           superseded_at: null,
+          withdrawn_at: null,
           operation_id: args.envelope.operationId,
           actor: args.actor,
           trigger: args.envelope.trigger,
@@ -2699,6 +2719,7 @@ export class GitOpsTransitions {
           provenance: 'rollout_authorization',
           supersedes_generation_id: previousGenerationId,
           superseded_at: null,
+          withdrawn_at: null,
           operation_id: args.envelope.operationId,
           actor: args.actor,
           trigger: args.envelope.trigger,
@@ -2736,20 +2757,35 @@ export class GitOpsTransitions {
   /**
    * Withdraw a live rollout authorization on the operator's decision.
    *
-   * The generation stays on the application as the record that a rollout was
-   * abandoned, while the authorization itself is cleared: a superseded
-   * generation whose authorization still resolved would let the dispatch
-   * boundary start it again. A later authorization mints a new generation over
-   * the same placement and accepted source, which is the only way forward from
-   * here.
+   * The row withdrawn is the pointer's generation when it is an authorization,
+   * otherwise the latest authorization recorded for the current accepted
+   * source. The second case is real: a system supersede (a preflight drift or a
+   * placement invalidation) can leave the pointer on a placement generation
+   * while an earlier authorization is still the newest one the automatic
+   * policy would re-mint. Marking only the pointer's row would miss it and let
+   * the policy redeploy what the operator rolled back from.
+   *
+   * The generation pointer stays as it is: when it names the abandoned
+   * authorization the projection reports the abandoned rollout, and when it
+   * names a placement generation that is still the current placement state. A
+   * later authorization mints a new generation over the same placement and
+   * accepted source, which is the only way forward from here.
    */
   rolloutSuperseded(args: {
     applicationId: string;
     envelope: EventEnvelope;
   }): TransitionResult {
-    // Read before the transaction only to annotate the history row; the
-    // guards below re-read and remain authoritative if the row moved.
-    const named = this.store().getApplication(args.applicationId)?.rollout_generation_id ?? null;
+    // Read before the transaction only to annotate the history row; the guards
+    // below re-read and remain authoritative if the row moved.
+    const before = this.store().getApplication(args.applicationId);
+    const namedBefore = before?.rollout_generation_id ?? null;
+    const namedRowBefore = namedBefore ? this.store().getRolloutGeneration(namedBefore) : undefined;
+    const latestBefore = before?.accepted_generation_id
+      ? this.store().latestRolloutAuthorizationForAcceptedGeneration(before.id, before.accepted_generation_id)
+      : undefined;
+    const annotation = namedRowBefore?.provenance === 'rollout_authorization'
+      ? namedBefore
+      : latestBefore?.id ?? null;
     return this.mutateApp(
       args.applicationId,
       args.envelope,
@@ -2757,23 +2793,23 @@ export class GitOpsTransitions {
       'superseded',
       (app) => {
         if (app.lifecycle_status !== 'active') throw new GitOpsTransitionError('application is not live');
-        if (!app.rollout_generation_id) {
+        const named = app.rollout_generation_id;
+        const namedRow = named ? this.store().getRolloutGeneration(named) : undefined;
+        const latest = app.accepted_generation_id
+          ? this.store().latestRolloutAuthorizationForAcceptedGeneration(app.id, app.accepted_generation_id)
+          : undefined;
+        const target = namedRow?.provenance === 'rollout_authorization' ? namedRow : latest;
+        if (!target || target.application_id !== app.id) {
           throw new GitOpsTransitionError('there is no live rollout generation to supersede');
-        }
-        const live = this.store().getRolloutGeneration(app.rollout_generation_id);
-        if (!live || live.application_id !== app.id) {
-          throw new GitOpsTransitionError('the live rollout generation could not be read');
-        }
-        if (live.provenance !== 'rollout_authorization') {
-          throw new GitOpsTransitionError('only an authorized rollout can be superseded');
         }
         app.rollout_authorization_ref = null;
         app.preflight_fingerprint = null;
-        // The generation pointer stays: the projection reports the abandoned
-        // rollout rather than pretending the application never had one.
-        this.store().markRolloutGenerationSuperseded(app.rollout_generation_id, args.envelope.at);
+        // The withdrawal marker is what tells the automatic policy this was an
+        // operator decision, not a system supersede it may re-mint.
+        this.store().markRolloutGenerationSuperseded(target.id, args.envelope.at);
+        this.store().markRolloutGenerationWithdrawn(target.id, args.envelope.at);
       },
-      named ? { rolloutGenerationId: named } : {},
+      annotation ? { rolloutGenerationId: annotation } : {},
     );
   }
 
@@ -4352,6 +4388,14 @@ export class GitOpsTransitions {
   /** The mode-neutral application-row mutation `applied` and `sourceAccepted` share. */
   private applySourceAcceptanceMutation(app: GitOpsApplicationRow, args: AppliedArgs): void {
     this.insertAcceptanceRecords(app, args);
+    // A new acceptance replaces the content the previous refusal described, so
+    // that reason goes with it. The freeze that follows records its own refusal
+    // if this generation has one.
+    app.evidence_limitations_json = encodeGitOpsEvidenceLimitations(
+      decodeGitOpsEvidenceLimitations(app.evidence_limitations_json),
+      'git_managed_artifact_unmodellable',
+      null,
+    );
     app.accepted_generation_id = args.generationId;
     app.artifact_set_id = args.artifactSetId;
     app.latest_artifact_set_id = args.artifactSetId;
@@ -4366,6 +4410,34 @@ export class GitOpsTransitions {
     this.clearActive(app);
     this.clearAppFailure(app, ['apply', 'fetch', 'validation']);
     this.clearInterruption(app, 'apply_started');
+  }
+
+  /**
+   * Move the current rollout candidate onto the generation an acceptance just
+   * bound.
+   *
+   * The first authorization stamps the candidate with the generation and
+   * artifact it authorized (`bindRolloutCandidateSource`). A later source
+   * acceptance clears that authorization but keeps placement, so the candidate
+   * must name the new generation or `authorizationIngredients` refuses. The
+   * artifact binding is cleared rather than pointed at the acceptance's seed
+   * set: the freeze that follows advances the application's set to the resolved
+   * one, and a candidate pinned to the seed would then disagree with the
+   * application for ever. Authorization re-stamps both from the resolved set,
+   * the same way it does for a candidate opened before its first acceptance.
+   * Only a candidate that describes the current intent is moved; a candidate
+   * minted for an older intent belongs to a placement that was already
+   * invalidated and will be replaced by the next intent revision.
+   */
+  private rebindRolloutCandidateOnAcceptance(
+    app: GitOpsApplicationRow,
+    acceptedGenerationId: string,
+  ): void {
+    if (app.target_mode !== 'blueprint' || !app.rollout_candidate_id) return;
+    const candidate = this.store().getRolloutCandidate(app.rollout_candidate_id);
+    if (!candidate || candidate.application_id !== app.id) return;
+    if (candidate.intent_revision_id !== app.intent_revision_id) return;
+    this.store().rebindRolloutCandidateSource(app.id, candidate.id, acceptedGenerationId);
   }
 
   /** The Direct-only target-row mutation `applied` and `targetApplied` share. */
@@ -4500,13 +4572,51 @@ export class GitOpsTransitions {
     envelope: EventEnvelope,
     extras: { historyIds: string[] },
   ): void {
+    // A system hold belongs to the rollout this acceptance supersedes, and its
+    // reason describes that rollout. The clear runs for every target mode even
+    // though only Blueprint applications reach the hold helper today: the hold
+    // is about the superseded rollout rather than the content model, and a
+    // target-mode check here would be a second place to keep in step. An
+    // operator pause and a health-policy hold are deliberate stops and survive;
+    // only the operator's own resume clears those.
+    //
+    // An unfinished roll back is the exception: lifting the hold here would let
+    // the next dispatch deploy over a target whose rollback never finished. The
+    // dispatch queue does not skip a fence written by an older rollout
+    // generation, so the clear stays conservative and blocks while any live
+    // target still carries the fence. A retired row does not count: its
+    // rollback can never be finished, and blocking on it would wedge the
+    // application for ever. Finishing or undoing the rollback, then resuming
+    // and authorizing, is what moves the rollout on.
+    const rollbackPending = app.target_mode === 'blueprint'
+      && this.store().listTargets(app.id).some(
+        (target) => target.target_status === 'active' && target.health_stop_reason === 'rollback_pending',
+      );
+    if (app.pause_at !== null && app.pause_origin === 'system' && !rollbackPending) {
+      const before = { pauseAt: app.pause_at, pauseReason: app.pause_reason, pauseOrigin: app.pause_origin };
+      app.pause_at = null;
+      app.pause_reason = null;
+      app.pause_origin = 'operator';
+      const cleared = this.history(app, envelope, {
+        stage: 'rollout_unpaused',
+        outcome: 'committed',
+        before,
+        after: { pauseAt: null, pauseReason: null, pauseOrigin: 'operator' },
+      });
+      if (cleared) extras.historyIds.push(cleared);
+    }
     if (app.target_mode !== 'blueprint') return;
-    if (!app.rollout_authorization_ref && !app.preflight_fingerprint) return;
     app.rollout_authorization_ref = null;
     app.preflight_fingerprint = null;
     if (!app.rollout_generation_id) return;
     const live = this.store().getRolloutGeneration(app.rollout_generation_id);
     if (!live || live.provenance !== 'rollout_authorization') return;
+    // A generation the operator already superseded keeps its pointer until this
+    // acceptance detaches it. Leaving it would make the next dispatch read the
+    // frozen strategy as moved on and refuse, which is how an earlier rollback
+    // or supersede disabled the automatic handoff for every later commit. The
+    // helper records the event only once, so an acceptance does not append a
+    // duplicate.
     this.recordRolloutGenerationSuperseded(app, app.rollout_generation_id, null, envelope, extras);
     app.rollout_generation_id = null;
   }
@@ -4590,6 +4700,34 @@ export class GitOpsTransitions {
   }
 
   /**
+   * Record or clear why a Git-managed generation's artifact identity cannot be
+   * modelled from its authored content.
+   *
+   * The freeze refuses compose shapes whose authored text can diverge from the
+   * rendered model, and a refusal is permanent for that generation. Persisting
+   * it is what keeps the cause visible: without it the refusal reaches only the
+   * accept response and the server log, and the surface shows the generic
+   * unresolved-artifact refusal instead.
+   */
+  setGitManagedArtifactLimitation(args: {
+    applicationId: string;
+    detail: string | null;
+    at?: number;
+  }): void {
+    this.raw().transaction(() => {
+      const app = this.store().getApplication(args.applicationId);
+      if (!app) throw new GitOpsTransitionError('application not found');
+      app.evidence_limitations_json = encodeGitOpsEvidenceLimitations(
+        decodeGitOpsEvidenceLimitations(app.evidence_limitations_json),
+        'git_managed_artifact_unmodellable',
+        args.detail === null ? null : { code: 'git_managed_artifact_unmodellable', detail: args.detail },
+      );
+      app.updated_at = args.at ?? Date.now();
+      this.writeApplication(app);
+    })();
+  }
+
+  /**
    * Clear a live rollout authorization when preflight evidence drifted or
    * blocked. Leaves placement approval intact. Appends history only when a
    * live rollout_authorization generation is superseded.
@@ -4647,6 +4785,11 @@ export class GitOpsTransitions {
     envelope: EventEnvelope,
     extras: { historyIds: string[] },
   ): void {
+    // Idempotent per generation: a row that is already marked must not append a
+    // second history row and notification, whichever caller reaches it again
+    // (a repeat drift invalidation, a re-approval, a re-authorization).
+    const existing = this.store().getRolloutGeneration(previousGenerationId);
+    if (!existing || existing.superseded_at !== null) return;
     this.store().markRolloutGenerationSuperseded(previousGenerationId, envelope.at);
     const superseded = this.history(app, envelope, {
       stage: 'rollout_generation_superseded',
@@ -5083,7 +5226,7 @@ export class GitOpsTransitions {
         legacy_combined_approval_ref=?, preflight_fingerprint=?, latest_preflight_evidence_json=?,
         latest_operation_id=?, active_operation_id=?,
         active_operation_stage=?, active_operation_at=?, active_generation_id=?,
-        pause_at=?, pause_reason=?, source_suspended_reason=?,
+        pause_at=?, pause_reason=?, pause_origin=?, source_suspended_reason=?,
         source_policy=?, placement_policy=?, rollout_authorization_policy=?,
         placement_policy_refusal_reason=?, placement_policy_refused_at=?,
         poll_interval_secs=?, next_poll_at=?, attempt_seq=?, partial_json=?,
@@ -5103,7 +5246,7 @@ export class GitOpsTransitions {
       app.legacy_combined_approval_ref, app.preflight_fingerprint, app.latest_preflight_evidence_json,
       app.latest_operation_id, app.active_operation_id,
       app.active_operation_stage, app.active_operation_at, app.active_generation_id,
-      app.pause_at, app.pause_reason, app.source_suspended_reason,
+      app.pause_at, app.pause_reason, app.pause_origin, app.source_suspended_reason,
       app.source_policy, app.placement_policy, app.rollout_authorization_policy,
       app.placement_policy_refusal_reason, app.placement_policy_refused_at,
       app.poll_interval_secs, app.next_poll_at, app.attempt_seq, app.partial_json,

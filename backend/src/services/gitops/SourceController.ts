@@ -3,7 +3,9 @@ import { GitOpsStore } from './store';
 import { GitOpsTransitions } from './transitions';
 import { GitSourceService } from '../GitSourceService';
 import { buildAcceptedGeneration } from './handoff';
+import { dispatchPreparedGitManagedGeneration } from './gitManagedHandoff';
 import { checkStatefulWithdrawal, holdForStatefulReview, readStagedGeneration } from './statefulGuard';
+import { prepareAcceptedGitManagedGeneration } from './gitManagedMaterialization';
 import { DatabaseService } from '../DatabaseService';
 import type { GitOpsApplicationRow, GitOpsGenerationRow } from './types';
 import { classifyFailure, nextRetryAt, isGitSourceErrorCode, effectivePollIntervalSecs } from './backoff';
@@ -528,13 +530,50 @@ export class SourceController {
             this.warnSkipped(app.id, 'automatic acceptance failed', e);
             return;
         }
-        // The acceptance cleared the candidate pointer; hand the accepted
-        // generation to the shared dispatch boundary, which revalidates the
-        // live target under the stack lock and promotes the generation's own
-        // staged candidate (the deploy choice is read from the source row
-        // there, under the lock). A reserved dispatch never throws: refusals
-        // come back as blocked outcomes. The try/catch stays for the
-        // pre-reservation entry guards (store reads on a failing database).
+        // A Git-managed Blueprint needs its accepted generation materialized and
+        // its artifact set resolved before the dispatch boundary can authorize
+        // the rollout: the dispatch reads the applied materialization and the
+        // preflight refuses an unresolved artifact set. Both steps are
+        // idempotent and the reconciler retries them, so a failure here is
+        // reported and the dispatch below still runs (and refuses truthfully).
+        if (app.target_mode === 'blueprint') {
+            const prepared = await prepareAcceptedGitManagedGeneration({
+                applicationId: app.id,
+                generationId: acceptGeneration.id,
+                actor: 'system:source-controller',
+                trigger,
+            });
+            if (prepared.note) {
+                console.warn(
+                    `[SourceController] Git-managed preparation incomplete for ${sanitizeForLog(app.id)}: ${sanitizeForLog(prepared.note)}`,
+                );
+            }
+        }
+        if (app.target_mode === 'blueprint') {
+            // The one handoff applies the same policy, enabled, pause, and
+            // suspension gates every other path uses. A durable refusal is held
+            // by the handoff and logged there; a skipped gate is a deliberate
+            // withholding and needs no log here.
+            const handoff = await dispatchPreparedGitManagedGeneration({
+                applicationId: app.id,
+                generationId: acceptGeneration.id,
+                actor: 'system:source-controller',
+                trigger,
+            });
+            if (handoff.status === 'blocked') {
+                // The acceptance stands while the apply is refused, so the row
+                // alone cannot explain why nothing moved: log the reason.
+                console.warn(
+                    `[SourceController] automatic dispatch blocked for ${sanitizeForLog(app.id)}: ${sanitizeForLog(handoff.reason ?? 'unknown')}`,
+                );
+            }
+            return;
+        }
+        // Direct: the shared dispatch boundary promotes the generation through
+        // completeGitApply, under the stack lock. A reserved dispatch never
+        // throws: refusals come back as blocked outcomes. The try/catch stays
+        // for the pre-reservation entry guards (store reads on a failing
+        // database).
         try {
             const dispatch = await GitSourceService.getInstance().dispatchAcceptedGeneration(
                 buildAcceptedGeneration(acceptGeneration),
@@ -542,8 +581,8 @@ export class SourceController {
                 { trigger, actor: 'system:source-controller' },
             );
             if (dispatch.status === 'blocked') {
-                // The acceptance stands while the apply is refused, so the
-                // row alone cannot explain why nothing moved: log the reason.
+                // The acceptance stands while the apply is refused, so the row
+                // alone cannot explain why nothing moved: log the reason.
                 console.warn(
                     `[SourceController] automatic dispatch blocked for ${sanitizeForLog(app.id)}: ${sanitizeForLog(dispatch.reason)}`,
                 );

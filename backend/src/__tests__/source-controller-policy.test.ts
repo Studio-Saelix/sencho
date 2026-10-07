@@ -286,7 +286,7 @@ describe('SourceController automatic acceptance', () => {
         // rows alone cannot explain why nothing moved: the blocked arm must
         // log the reason the boundary returned.
         const dispatch = vi.spyOn(GitSourceService.getInstance(), 'dispatchAcceptedGeneration')
-            .mockResolvedValue({ status: 'blocked', reason: 'The live target no longer matches the accepted generation.' });
+            .mockResolvedValue({ status: 'blocked', reason: 'The live target no longer matches the accepted generation.', holdable: false });
         const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
 
         controller.start();

@@ -30,10 +30,19 @@ import {
 } from './gitops/json';
 import { GitOpsStore, placementEffectCompatible } from './gitops/store';
 import { isGitManagedBlueprint } from './gitops/gitManaged';
+import { materializeAndFreezeGitManagedArtifactSet } from './gitops/gitManagedMaterialization';
+import { dispatchPreparedGitManagedGeneration } from './gitops/gitManagedHandoff';
+import { gitManagedDispatchWarranted } from './gitops/handoff';
 import type { GitOpsApplicationRow } from './gitops/types';
 
 const RECONCILER_INTERVAL_MS = 60_000;
 const RECONCILER_INITIAL_DELAY_MS = 5_000;
+/**
+ * Concurrent automatic handoffs. Each one runs a registry preflight, which is
+ * network-bound; the startup backfill caps its own at three for the same reason.
+ * Applications over the cap keep their state and are picked up by a later tick.
+ */
+const GIT_MANAGED_HANDOFF_CONCURRENCY = 3;
 
 export type ConfirmedActionOutcomeStatus = 'ok' | 'failed' | 'name_conflict' | 'pending' | 'skipped';
 
@@ -163,6 +172,38 @@ export class BlueprintReconciler {
     private initialTimer: ReturnType<typeof setTimeout> | null = null;
     private running = false;
     private stopped = false;
+    /**
+     * Applications whose content pass is running, mapped to the pass itself so
+     * a test can await it. Production detaches the pass on purpose (a slow
+     * registry or rollout must not hold the tick's running guard); an
+     * overlapping tick skips an application that is still in flight.
+     */
+    private readonly gitManagedPreparationInFlight = new Map<string, Promise<void>>();
+    /**
+     * An in-memory floor between preparation attempts, for failures that write
+     * no evidence row (a missing candidate, an unreadable applied compose). The
+     * durable gate cannot see those, so without this they would be retried every
+     * 60-second tick; this bounds them to the artifact retry interval. Not
+     * durable by design: a restart is allowed one immediate attempt.
+     */
+    private readonly gitManagedPreparationFloor = new Map<string, { generationId: string; at: number }>();
+    /**
+     * An in-memory floor between automatic handoff attempts, so a steady no-op
+     * state (a persistent non-holdable refusal, a blocked registry preflight)
+     * does not run the full authorization path on every 60-second tick. Dated
+     * from the last attempt; not durable by design, so a restart is allowed one
+     * immediate attempt.
+     */
+    private readonly gitManagedHandoffFloor = new Map<string, { generationId: string; at: number }>();
+    /** Automatic handoffs running right now, bounded by the concurrency cap. */
+    private gitManagedHandoffInFlight = 0;
+    /**
+     * A generation whose preparation was refused by the authored-text parser.
+     * The refusal is a statement about the content, so it is remembered per
+     * generation and never retried; the reason itself is persisted as an
+     * evidence limitation by the freeze.
+     */
+    private readonly refusedGitManagedPreparations = new Map<string, string>();
 
     static getInstance(): BlueprintReconciler {
         if (!BlueprintReconciler.instance) {
@@ -258,6 +299,36 @@ export class BlueprintReconciler {
         try {
             const db = DatabaseService.getInstance();
             const blueprints = db.listEnabledBlueprints();
+            // The content pass runs first, before the enabled check and without
+            // being awaited: preparation belongs to the accepted generation, and
+            // a fleet whose only Git-managed Blueprint is disabled still has one
+            // waiting. Detaching it keeps a slow registry or a sequential
+            // rollout from holding the tick's `running` guard, which would stop
+            // drift observation and Enforce for every Blueprint.
+            const liveApps = GitOpsStore.getInstance().listLiveGitManagedApplications();
+            const liveAppIds = new Set(liveApps.map((app) => app.id));
+            for (const app of liveApps) {
+                if (this.gitManagedPreparationInFlight.has(app.id)) continue;
+                const pass = this.reconcileGitManagedApplication(app)
+                    .catch((err) => {
+                        console.error(`[BlueprintReconciler] Git-managed content pass failed for ${app.id}:`, err);
+                    })
+                    .finally(() => {
+                        this.gitManagedPreparationInFlight.delete(app.id);
+                    });
+                this.gitManagedPreparationInFlight.set(app.id, pass);
+            }
+            // Per-application memory for applications that no longer exist would
+            // otherwise grow for the process's lifetime.
+            for (const id of this.gitManagedPreparationFloor.keys()) {
+                if (!liveAppIds.has(id)) this.gitManagedPreparationFloor.delete(id);
+            }
+            for (const id of this.gitManagedHandoffFloor.keys()) {
+                if (!liveAppIds.has(id)) this.gitManagedHandoffFloor.delete(id);
+            }
+            for (const id of this.refusedGitManagedPreparations.keys()) {
+                if (!liveAppIds.has(id)) this.refusedGitManagedPreparations.delete(id);
+            }
             if (blueprints.length === 0) return;
             const nodes = db.getNodes();
             console.info('[BlueprintReconciler] tick start blueprints=%s nodes=%s', blueprints.length, nodes.length);
@@ -279,6 +350,8 @@ export class BlueprintReconciler {
         if (isGitManagedBlueprint(blueprint)) {
             // Skip place/withdraw/content apply; still observe runtime identity
             // and run Observe/Suggest/Enforce against the authorized generation.
+            // The content retry runs once per tick for every live Git-managed
+            // application, ahead of this loop.
             await this.reconcileGitManagedDriftObservation(blueprint, allNodes);
             return;
         }
@@ -323,6 +396,138 @@ export class BlueprintReconciler {
 
         const byId = new Map(allNodes.map(n => [n.id, n]));
         await this.executeAuthorizedActions(blueprint, byId, authorized);
+    }
+
+    /**
+     * Drive the content pass for one live Git-managed application.
+     *
+     * Two arms, both idempotent and both ending at the one handoff:
+     *
+     * - Preparation, for a generation whose artifact identity did not resolve.
+     *   A registry outage, or a crash between the acceptance commit and the
+     *   materialize call, would otherwise strand that generation: re-accepting
+     *   is refused (it is already accepted), and the per-target artifact retry
+     *   only looks at the generation a target has acknowledged, which is still
+     *   the previous one until a new rollout reaches it.
+     * - Handoff, for a resolved generation the automatic policy has not finished
+     *   dispatching. Without it a skipped handoff (a slow accept, a re-enabled
+     *   Blueprint) and a transiently refused one (lock contention, a store
+     *   refusal) wait for a person, which is the stall this pass exists to
+     *   close. The warranted predicate keeps it from re-driving a settled or
+     *   progressing rollout.
+     *
+     * A preparation refusal (a compose shape the authored-text parser cannot
+     * model) is remembered per generation: it is a statement about the content
+     * and no number of retries changes it. The reason is persisted as an
+     * evidence limitation by the freeze, so the surface names the cause.
+     */
+    private async reconcileGitManagedApplication(app: GitOpsApplicationRow): Promise<void> {
+        if (app.target_mode !== 'blueprint' || !app.accepted_generation_id) return;
+        // Suspension freezes automation for this source, exactly as it does for
+        // the SourceController's own acceptance and for GitSourceService.retry.
+        // Preparing and dispatching around it would bypass that hold.
+        if (app.suspended_at) return;
+        const generationId = app.accepted_generation_id;
+        await this.retryGitManagedPreparation(app, generationId);
+        await this.redriveGitManagedHandoff(app.id, generationId);
+    }
+
+    private async retryGitManagedPreparation(app: GitOpsApplicationRow, generationId: string): Promise<void> {
+        if (this.refusedGitManagedPreparations.get(app.id) === generationId) return;
+        // The same durable gate the per-target retry uses: a set whose recorded
+        // evidence says every service failed permanently is not retried, and the
+        // interval is dated from the latest recorded row, so a restart does not
+        // bypass it.
+        if (!BlueprintService.getInstance().gitManagedPreparationRetryDue(app)) return;
+        // Failures that write no evidence row are invisible to the durable gate,
+        // so the in-memory floor bounds them to the same interval. A restart is
+        // allowed one immediate attempt, which is the correct trade: a process
+        // that just started has no in-memory history to trust.
+        const intervalMs = DatabaseService.getInstance().getGitOpsArtifactRetryIntervalMins() * 60_000;
+        const last = this.gitManagedPreparationFloor.get(app.id);
+        if (last && last.generationId === generationId && Date.now() - last.at < intervalMs) return;
+        this.gitManagedPreparationFloor.set(app.id, { generationId, at: Date.now() });
+
+        const outcome = await materializeAndFreezeGitManagedArtifactSet({
+            applicationId: app.id,
+            generationId,
+            actor: 'system:blueprint-reconciler',
+            trigger: 'git_managed_preparation_retried',
+        });
+        if (outcome.status === 'refused') {
+            this.refusedGitManagedPreparations.set(app.id, generationId);
+        }
+    }
+
+    private async redriveGitManagedHandoff(applicationId: string, generationId: string): Promise<void> {
+        const store = GitOpsStore.getInstance();
+        const fresh = store.getApplication(applicationId);
+        if (!fresh || fresh.target_mode !== 'blueprint') return;
+        if (fresh.suspended_at || fresh.pause_at) return;
+        if (fresh.accepted_generation_id !== generationId) return;
+        if (fresh.rollout_authorization_policy !== 'automatic') return;
+        if (!gitManagedDispatchWarranted(fresh)) return;
+        // A steady no-op state (a persistent refusal, a blocked registry
+        // preflight) must not run the full authorization path, including its
+        // network preflight, on every 60-second tick. The floor is dated from
+        // the last attempt and is not durable by design: a restart is allowed
+        // one immediate attempt.
+        const intervalMs = DatabaseService.getInstance().getGitOpsArtifactRetryIntervalMins() * 60_000;
+        const last = this.gitManagedHandoffFloor.get(fresh.id);
+        if (last && last.generationId === generationId && Date.now() - last.at < intervalMs) return;
+        if (this.gitManagedHandoffInFlight >= GIT_MANAGED_HANDOFF_CONCURRENCY) return;
+        this.gitManagedHandoffFloor.set(fresh.id, { generationId, at: Date.now() });
+        this.gitManagedHandoffInFlight += 1;
+        try {
+            const handoff = await dispatchPreparedGitManagedGeneration({
+                applicationId: fresh.id,
+                generationId,
+                actor: 'system:blueprint-reconciler',
+                trigger: 'retry',
+            });
+            if (handoff.status === 'blocked') {
+                // A durable refusal placed a hold, which is the operator-visible
+                // record; a transient one (lock contention, a store refusal) is
+                // expected to clear on a later pass, so it is diagnostic rather
+                // than a warning on every tick.
+                const held = (store.getApplication(fresh.id)?.pause_at ?? null) !== null;
+                if (held) {
+                    console.warn(
+                        '[BlueprintReconciler] Git-managed dispatch blocked for %s: %s',
+                        sanitizeForLog(fresh.id),
+                        sanitizeForLog(handoff.reason ?? 'unknown'),
+                    );
+                } else {
+                    diagnosticLog('Git-managed redrive refused without a hold', {
+                        applicationId: fresh.id,
+                        reason: handoff.reason,
+                    });
+                }
+            }
+        } finally {
+            this.gitManagedHandoffInFlight -= 1;
+        }
+    }
+
+    /**
+     * Clear the in-memory handoff floor for every application.
+     *
+     * The floor is a production backoff; a test that needs to observe the next
+     * attempt without waiting out the interval clears it instead of sleeping.
+     */
+    clearGitManagedHandoffFloorForTests(): void {
+        this.gitManagedHandoffFloor.clear();
+    }
+
+    /**
+     * Await every detached content pass started by the last ticks.
+     *
+     * Production detaches them on purpose; a test that needs to observe a
+     * tick's result awaits them here instead of sleeping, and can tick again to
+     * pick up an application the handoff concurrency cap deferred.
+     */
+    async settleGitManagedPassesForTests(): Promise<void> {
+        await Promise.allSettled([...this.gitManagedPreparationInFlight.values()]);
     }
 
     private async executeAuthorizedActions(

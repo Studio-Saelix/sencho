@@ -17,9 +17,10 @@ import {
   RefreshCw, Search, Server, Layers, Box, Network, Database, Plug,
   ChevronRight, ChevronDown, TriangleAlert, Share2,
 } from 'lucide-react';
-import { apiFetch } from '@/lib/api';
-import { toast } from '@/components/ui/toast-store';
 import { cn } from '@/lib/utils';
+import { useVisualBusy } from '@/hooks/useVisualBusy';
+import { Skeleton } from '@/components/ui/skeleton';
+import type { FleetMapState } from './useFleetMap';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { SegmentedControl } from '@/components/ui/segmented-control';
@@ -170,10 +171,28 @@ function buildAdjacency(map: FleetDependencyMap): Adjacency {
 
 type ViewMode = 'graph' | 'list';
 
-export function DependencyMapTab() {
-  const [data, setData] = useState<FleetDependencyMap | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+/** Toolbar and graph pane, sized like the loaded layout so nothing shifts when data lands. */
+function MapSkeleton() {
+  return (
+    <div className="space-y-3" aria-busy="true" aria-label="Loading dependency map">
+      <div className="flex items-center gap-2">
+        <Skeleton className="h-9 w-9" />
+        <Skeleton className="h-9 w-28" />
+        <Skeleton className="h-6 w-24" />
+        <Skeleton className="h-6 w-24" />
+      </div>
+      <Skeleton className="h-[560px] w-full rounded-lg" />
+    </div>
+  );
+}
+
+export function DependencyMapTab({ map }: { map: FleetMapState }) {
+  const { data, loading, progress, refresh, retryFailed } = map;
+  // A fast answer never flashes the skeleton; the pane just holds still.
+  const { showBusy } = useVisualBusy(!data);
+  // The Refresh icon spins only for a request that outlasts the busy delay, so
+  // a quiet revalidation on tab reopen never flashes it.
+  const { showBusy: refreshBusy } = useVisualBusy(loading);
   const [view, setView] = useState<ViewMode>('graph');
   const [search, setSearch] = useState('');
   const [nodeFilter, setNodeFilter] = useState<Set<number>>(new Set());
@@ -190,24 +209,6 @@ export function DependencyMapTab() {
   useEffect(() => {
     if (searchExpanded) searchInputRef.current?.focus();
   }, [searchExpanded]);
-
-  const fetchMap = useCallback(async () => {
-    setLoading(true);
-    setError(null);
-    try {
-      const res = await apiFetch('/fleet/dependency-map', { localOnly: true });
-      if (!res.ok) throw new Error(`Request failed (${res.status})`);
-      setData(await res.json() as FleetDependencyMap);
-    } catch (err) {
-      const message = err instanceof Error ? err.message : 'Failed to load dependency map';
-      setError(message);
-      toast.error(`Failed to load dependency map: ${message}`);
-    } finally {
-      setLoading(false);
-    }
-  }, []);
-
-  useEffect(() => { void fetchMap(); }, [fetchMap]);
 
   const adjacency = useMemo(() => (data ? buildAdjacency(data) : null), [data]);
 
@@ -369,20 +370,12 @@ export function DependencyMapTab() {
       .filter(matchesFilters);
   }, [data, passNode, matchesFilters]);
 
-  if (loading && !data) {
-    return <div className="rounded-lg border border-card-border bg-card p-10 text-center text-sm text-muted-foreground">Loading dependency map…</div>;
+  if (!data) {
+    return showBusy ? <MapSkeleton /> : <div className="min-h-[600px]" />;
   }
-  if (error && !data) {
-    return (
-      <div className="rounded-lg border border-card-border bg-card p-10 text-center">
-        <p className="text-sm text-muted-foreground mb-3">{error}</p>
-        <Button variant="outline" size="sm" onClick={() => void fetchMap()} className="gap-2">
-          <RefreshCw className="w-4 h-4" />Retry
-        </Button>
-      </div>
-    );
-  }
-  if (!data) return null;
+  let emptyGraphMessage = 'No stacks to map on this fleet.';
+  if (searchActive || flagActive) emptyGraphMessage = 'No elements match the current filters.';
+  else if (data.nodes.length === 0 && data.nodeErrors.length > 0) emptyGraphMessage = 'Nothing to map yet: no node could be read.';
 
   return (
     <div className="space-y-3">
@@ -459,18 +452,26 @@ export function DependencyMapTab() {
             renderOption={renderNodeOption}
           />
         )}
-        <Button variant="outline" size="sm" onClick={() => void fetchMap()} disabled={loading} className="gap-2 ml-auto">
-          <RefreshCw className={cn('w-4 h-4', loading && 'animate-spin')} />Refresh
+        {progress && (
+          <span role="status" className="ml-auto font-mono text-[11px] text-stat-subtitle">
+            {progress.done} of {progress.total} nodes
+          </span>
+        )}
+        <Button variant="outline" size="sm" onClick={refresh} disabled={loading} className={cn('gap-2', !progress && 'ml-auto')}>
+          <RefreshCw className={cn('w-4 h-4', refreshBusy && 'animate-spin')} />Refresh
         </Button>
       </div>
 
       {/* Unreachable-node banner */}
       {data.nodeErrors.length > 0 && (
-        <div className="flex items-start gap-2 rounded-md border border-warning/40 bg-warning/10 px-3 py-2 text-sm text-warning">
+        <div role="status" className="flex items-start gap-2 rounded-md border border-warning/40 bg-warning/10 px-3 py-2 text-sm text-warning">
           <TriangleAlert className="h-4 w-4 shrink-0 mt-0.5" strokeWidth={2} />
-          <span>
-            {data.nodeErrors.length === 1 ? '1 node could not be reached' : `${data.nodeErrors.length} nodes could not be reached`}: {data.nodeErrors.map((e) => e.nodeName).join(', ')}. The rest of the fleet is shown below.
+          <span className="flex-1">
+            {data.nodeErrors.length === 1 ? '1 node could not be reached' : `${data.nodeErrors.length} nodes could not be reached`}: {data.nodeErrors.map((e) => `${e.nodeName} (${e.error})`).join(', ')}. {data.nodes.length > 0 ? 'The rest of the fleet is shown below.' : 'No node could be read, so there is nothing to draw.'}
           </span>
+          <Button variant="ghost" size="sm" className="-my-1 shrink-0 text-warning" onClick={retryFailed} disabled={loading}>
+            Retry
+          </Button>
         </div>
       )}
 
@@ -494,7 +495,7 @@ export function DependencyMapTab() {
           </div>
         ) : flowNodes.length === 0 ? (
           <div className="rounded-lg border border-card-border border-t-card-border-top bg-card shadow-card-bevel p-10 text-center text-sm text-muted-foreground">
-            {searchActive || flagActive ? 'No elements match the current filters.' : 'No stacks to map on this fleet.'}
+            {emptyGraphMessage}
           </div>
         ) : (
           <div className="rounded-lg border border-card-border border-t-card-border-top bg-card shadow-card-bevel overflow-hidden">

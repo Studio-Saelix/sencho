@@ -198,6 +198,7 @@ function seedRolloutGeneration(args: {
     provenance: 'rollout_authorization',
     supersedes_generation_id: null,
     superseded_at: args.superseded ? Date.now() : null,
+    withdrawn_at: null,
     operation_id: `op-${rolloutGenerationId}`,
     actor: null,
     trigger: 'test',

@@ -124,6 +124,7 @@ const APPLICATION_INSERT_COLUMNS = [
   'active_generation_id',
   'pause_at',
   'pause_reason',
+  'pause_origin',
   'source_suspended_reason',
   'source_policy',
   'placement_policy',
@@ -219,6 +220,22 @@ export class GitOpsStore {
          AND target_mode IN ('inline_blueprint','blueprint')
          AND lifecycle_status IN ('active','creating')`,
     ).get(blueprintId) as GitOpsApplicationRow | undefined;
+  }
+
+  /**
+   * Every live Git-managed Blueprint application, enabled or not.
+   *
+   * The reconciler's content pass uses this rather than the enabled-Blueprint
+   * list: preparation is a property of the accepted generation, and a
+   * Blueprint the operator disabled still has one waiting to be materialized
+   * and resolved.
+   */
+  listLiveGitManagedApplications(): GitOpsApplicationRow[] {
+    return this.db().prepare(
+      `SELECT * FROM gitops_applications
+       WHERE target_mode = 'blueprint' AND lifecycle_status = 'active'
+       ORDER BY created_at ASC`,
+    ).all() as GitOpsApplicationRow[];
   }
 
   /**
@@ -916,7 +933,8 @@ export class GitOpsStore {
       row.intent_revision_id, row.rollout_candidate_id, row.rollout_generation_id, row.source_acceptance_ref,
       row.placement_approval_ref, row.rollout_authorization_ref, row.legacy_combined_approval_ref,
       row.preflight_fingerprint, row.latest_preflight_evidence_json, row.latest_operation_id, row.active_operation_id, row.active_operation_stage,
-      row.active_operation_at, row.active_generation_id, row.pause_at, row.pause_reason, row.source_suspended_reason,
+      row.active_operation_at, row.active_generation_id, row.pause_at, row.pause_reason, row.pause_origin,
+      row.source_suspended_reason,
       row.source_policy, row.placement_policy, row.rollout_authorization_policy,
       row.placement_policy_refusal_reason, row.placement_policy_refused_at,
       row.poll_interval_secs, row.next_poll_at, row.attempt_seq, row.partial_json,
@@ -1023,15 +1041,15 @@ export class GitOpsStore {
         artifact_set_id, placement_approval_ref, source_acceptance_ref, rollout_authorization_ref,
         required_targets_json, preflight_fingerprint, preflight_evidence_json, rollout_strategy_json,
         policy_snapshot_json,
-        provenance, supersedes_generation_id, superseded_at, operation_id, actor, trigger, created_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        provenance, supersedes_generation_id, superseded_at, withdrawn_at, operation_id, actor, trigger, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     ).run(
       row.id, row.application_id, row.intent_revision_id, row.rollout_candidate_id,
       row.accepted_generation_id, row.artifact_set_id, row.placement_approval_ref,
       row.source_acceptance_ref, row.rollout_authorization_ref, row.required_targets_json,
       row.preflight_fingerprint, row.preflight_evidence_json, row.rollout_strategy_json,
       row.policy_snapshot_json,
-      row.provenance, row.supersedes_generation_id, row.superseded_at, row.operation_id,
+      row.provenance, row.supersedes_generation_id, row.superseded_at, row.withdrawn_at, row.operation_id,
       row.actor, row.trigger, row.created_at,
     );
   }
@@ -1040,6 +1058,38 @@ export class GitOpsStore {
     this.db().prepare(
       'UPDATE gitops_rollout_generations SET superseded_at = ? WHERE id = ? AND superseded_at IS NULL',
     ).run(supersededAt, id);
+  }
+
+  /**
+   * Record that the operator withdrew this rollout.
+   *
+   * Separate from `superseded_at` on purpose: system supersedes (a preflight
+   * drift, a placement invalidation, a re-authorization) must stay
+   * distinguishable from the operator's Supersede and Rollback, because only
+   * the latter blocks the automatic policy from minting a replacement.
+   */
+  markRolloutGenerationWithdrawn(id: string, withdrawnAt: number): void {
+    this.db().prepare(
+      'UPDATE gitops_rollout_generations SET withdrawn_at = ? WHERE id = ? AND withdrawn_at IS NULL',
+    ).run(withdrawnAt, id);
+  }
+
+  /**
+   * The newest rollout authorization opened for one accepted source, if any.
+   *
+   * Ordered by `rowid`: monotonic and never reused, because rows are never
+   * deleted. `created_at` alone is not enough, since a clock step backwards can
+   * sort an earlier withdrawn row after a later authorization and hide it.
+   */
+  latestRolloutAuthorizationForAcceptedGeneration(
+    applicationId: string,
+    acceptedGenerationId: string,
+  ): GitOpsRolloutGenerationRow | undefined {
+    return this.db().prepare(
+      `SELECT * FROM gitops_rollout_generations
+       WHERE application_id = ? AND provenance = 'rollout_authorization' AND accepted_generation_id = ?
+       ORDER BY rowid DESC LIMIT 1`,
+    ).get(applicationId, acceptedGenerationId) as GitOpsRolloutGenerationRow | undefined;
   }
 
   upsertTarget(row: GitOpsTargetCurrentRow): void {
@@ -1298,6 +1348,36 @@ export class GitOpsStore {
        SET accepted_generation_id = ?, artifact_set_id = ?
        WHERE id = ?`,
     ).run(acceptedGenerationId, artifactSetId, candidateId);
+  }
+
+  /**
+   * Move a candidate's generation binding to the generation an acceptance just
+   * recorded, clearing its artifact binding.
+   *
+   * Distinct from `bindRolloutCandidateSource`, which is the first binding and
+   * refuses to overwrite a different one. This is the source-change path: the
+   * acceptance cleared the rollout authorization in the same transaction, so
+   * the candidate's previous binding describes content nothing may execute any
+   * more, and leaving it would make `authorizationIngredients` refuse the new
+   * generation for ever. The artifact binding is cleared rather than pointed at
+   * the acceptance's seed set, because the freeze that follows advances the
+   * application's set to the resolved one and authorization re-stamps both from
+   * that resolved set.
+   */
+  rebindRolloutCandidateSource(applicationId: string, candidateId: string, acceptedGenerationId: string): void {
+    const candidate = this.getRolloutCandidate(candidateId);
+    if (!candidate) throw new Error('rollout candidate not found');
+    if (candidate.application_id !== applicationId) {
+      throw new Error('rollout candidate belongs to another application');
+    }
+    if (candidate.accepted_generation_id === acceptedGenerationId && candidate.artifact_set_id === null) {
+      return;
+    }
+    this.db().prepare(
+      `UPDATE gitops_rollout_candidates
+       SET accepted_generation_id = ?, artifact_set_id = NULL
+       WHERE id = ?`,
+    ).run(acceptedGenerationId, candidateId);
   }
 
   /**

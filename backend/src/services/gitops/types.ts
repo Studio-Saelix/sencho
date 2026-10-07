@@ -115,6 +115,13 @@ export type GitOpsApplicationRow = {
   active_generation_id: string | null;
   pause_at: number | null;
   pause_reason: string | null;
+  /**
+   * Who placed the pause. A system hold (a refused dispatch) belongs to the
+   * rollout it was holding, so a source acceptance that supersedes that rollout
+   * clears it; an operator pause and a health-policy hold survive until a
+   * person resumes.
+   */
+  pause_origin: 'operator' | 'system' | 'health';
   /** sourceSuspended/sourceUnsuspended's own reason field; independent of pause_reason. */
   source_suspended_reason: string | null;
   /** Controller-owned. See gitops/SourceController.ts. */
@@ -315,6 +322,17 @@ export type GitOpsRolloutGenerationRow = {
   provenance: GitOpsRolloutGenerationProvenance;
   supersedes_generation_id: string | null;
   superseded_at: number | null;
+  /**
+   * When the operator withdrew this rollout (Supersede or Rollback).
+   *
+   * Null on a system supersede (a preflight drift, a placement invalidation, a
+   * re-authorization) and on a generation that predates the column, which the
+   * migration backfills as withdrawn. A null here therefore means no operator
+   * withdrawal is recorded. The automatic policy refuses to re-mint only when
+   * this is set, so a system supersede still re-drives while an operator's
+   * decision sticks.
+   */
+  withdrawn_at: number | null;
   operation_id: string;
   actor: string | null;
   trigger: string;

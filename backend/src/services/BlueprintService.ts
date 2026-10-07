@@ -50,7 +50,10 @@ import {
     observeStackRuntimeArtifact,
     resolvePlatformLabelForNode,
 } from './gitops/artifactResolve';
-import { stackManagedRoot } from './gitops/directApplication';
+import {
+    materializeAndFreezeGitManagedArtifactSet,
+    readAppliedComposeContent,
+} from './gitops/gitManagedMaterialization';
 import {
     buildDigestPinsFromArtifactSet,
     DigestPinsMismatchError,
@@ -76,7 +79,6 @@ import { envelopeFor, recordableApplication } from './gitops/blueprintProducers'
 import type {
     GitOpsApplicationRow,
     GitOpsArtifactSetRow,
-    GitOpsGenerationRow,
 } from './gitops/types';
 
 /** On-disk compose name for Blueprint applies. Must match createStack scaffold and Sencho discovery priority. */
@@ -345,7 +347,7 @@ export class BlueprintService {
                 return { status: 'failed', error: 'acknowledged generation missing for authorized reapply' };
             }
             try {
-                composeContent = await this.readGitManagedAppliedCompose(app, generation);
+                composeContent = await readAppliedComposeContent(app, generation);
             } catch (err) {
                 return { status: 'failed', error: BlueprintService.formatError(err) };
             }
@@ -358,29 +360,6 @@ export class BlueprintService {
             auditPath: `/api/blueprints/${blueprint.id}/enforce-reapply`,
             digestPins,
         });
-    }
-
-    private async readGitManagedAppliedCompose(
-        app: GitOpsApplicationRow,
-        generation: GitOpsGenerationRow,
-    ): Promise<string> {
-        const stackName = app.configured_source_stack_name;
-        if (!stackName) {
-            throw new Error('bound application has no retained source stack identity');
-        }
-        if (!generation.applied_dir || generation.applied_dir.trim() === '') {
-            throw new Error('accepted generation has no applied materialization directory');
-        }
-        const managedRoot = stackManagedRoot(stackName);
-        const appliedAbs = path.resolve(managedRoot, generation.applied_dir);
-        if (!appliedAbs.startsWith(managedRoot + path.sep)) {
-            throw new Error('applied materialization path escapes the managed root');
-        }
-        const composePath = path.resolve(appliedAbs, 'compose.yaml');
-        if (!composePath.startsWith(appliedAbs + path.sep)) {
-            throw new Error('compose path escapes the applied materialization directory');
-        }
-        return fsPromises.readFile(composePath, 'utf8');
     }
 
     /**
@@ -1198,6 +1177,35 @@ export class BlueprintService {
     }
 
     /**
+     * Whether a Git-managed application's accepted generation still needs a
+     * preparation retry.
+     *
+     * Same durable gate as the per-target artifact retry: a set whose recorded
+     * evidence says every service failed permanently is not retried, because
+     * each attempt appends an evidence row to a table nothing prunes. The clock
+     * is the latest recorded evidence row, not an in-memory timestamp, so a
+     * restart does not bypass the interval.
+     */
+    gitManagedPreparationRetryDue(app: GitOpsApplicationRow): boolean {
+        if (app.target_mode !== 'blueprint' || !app.accepted_generation_id) return false;
+        const store = GitOpsStore.getInstance();
+        const expected = app.artifact_set_id ? store.getArtifactSet(app.artifact_set_id) : undefined;
+        if (expected && (expected.qualification === 'exact' || expected.qualification === 'qualified')) {
+            return false;
+        }
+        const latest = app.latest_artifact_set_id
+            ? store.getArtifactSet(app.latest_artifact_set_id)
+            : expected;
+        if (latest) {
+            if (!RETRYABLE_ARTIFACT_QUALIFICATIONS.has(latest.qualification)) return false;
+            if (!this.artifactRetryCanSucceed(latest)) return false;
+            const intervalMs = DatabaseService.getInstance().getGitOpsArtifactRetryIntervalMins() * 60_000;
+            if (Date.now() - latest.created_at < intervalMs) return false;
+        }
+        return true;
+    }
+
+    /**
      * Re-resolve a freeze whose registry resolve could not complete.
      *
      * Answers whether a *new* expectation was produced, so the caller can hold
@@ -1282,12 +1290,25 @@ export class BlueprintService {
             // so hold this tick's comparison" from "tried, and there was nothing
             // to resolve". The producer reports it from the target's pointer,
             // because it is the pointer the next tick compares against and the one
-            // Enforce would pin to.
-            const outcome = await retryInlineArtifactFreeze({
-                blueprintId: blueprint.id,
-                nodeId: node.id,
-                generationId: binding.acceptedGenerationId,
-            });
+            // Enforce would pin to. A Git-managed Blueprint resolves from the
+            // accepted generation's own materialization through the same
+            // approved-content parser the Inline retry uses; its accepted
+            // generation is the binding's, and the application-level set it
+            // advances is what rollout authorization reads.
+            const liveApp = store.getLiveBlueprintApplication(blueprint.id);
+            const outcome = liveApp?.target_mode === 'blueprint'
+                ? (await materializeAndFreezeGitManagedArtifactSet({
+                    applicationId,
+                    generationId: binding.acceptedGenerationId,
+                    actor: null,
+                    trigger: 'git_managed_artifact_freeze_retried',
+                    nodeId: node.id,
+                })).status
+                : await retryInlineArtifactFreeze({
+                    blueprintId: blueprint.id,
+                    nodeId: node.id,
+                    generationId: binding.acceptedGenerationId,
+                });
             if (outcome === 'refused') {
                 this.refusedFreezeRetries.set(
                     `${applicationId}:${node.id}`,

@@ -98,7 +98,19 @@ export const GITOPS_LIMITATION_COPY: Readonly<Record<string, string | undefined>
     'The stored approval does not cover what this Blueprint currently asks for, so it needs approving again before it can roll out.',
   git_managed_rollout_not_enabled:
     'This Blueprint\'s content is Git-managed, so it cannot deploy from the stored snapshot.',
+  git_managed_artifact_unmodellable:
+    'The accepted compose cannot be resolved to an image identity, so this generation cannot be authorized. The cause names the construct to change; push a new commit whose compose the resolver can read.',
 };
+
+/**
+ * Codes whose write-time evidence is operator-meaningful on its own.
+ *
+ * Most recorded details are log-shaped ("repo identity json is invalid") and the
+ * copy above deliberately replaces them. The unmodellable-compose refusal is the
+ * exception: its detail names the exact construct that has to change, so the
+ * caveat carries it.
+ */
+const EVIDENCE_BEARING_CODES: ReadonlySet<string> = new Set(['git_managed_artifact_unmodellable']);
 
 /**
  * Operator wording for one limitation, or a safe fallback.
@@ -111,7 +123,18 @@ export function limitationCaveat(limitation: GitOpsLimitation): string {
   const known = Object.hasOwn(GITOPS_LIMITATION_COPY, limitation.code)
     ? GITOPS_LIMITATION_COPY[limitation.code]
     : undefined;
-  return known ?? `Part of this state could not be proven (${limitation.code}).`;
+  const base = known ?? `Part of this state could not be proven (${limitation.code}).`;
+  if (EVIDENCE_BEARING_CODES.has(limitation.code)
+    && typeof limitation.evidence === 'string'
+    && limitation.evidence.length > 0) {
+    // The stored detail is unbounded and comes from a remote node's parser, so
+    // it is capped before it reaches the sentence.
+    const cause = limitation.evidence.length > 300
+      ? `${limitation.evidence.slice(0, 300)}...`
+      : limitation.evidence;
+    return `${base} Cause: ${cause}.`;
+  }
+  return base;
 }
 
 /**

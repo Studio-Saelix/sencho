@@ -690,6 +690,25 @@ describe('user-preferences validation', () => {
     expect((await put({ ...APPEARANCE_DOC, anatomyWidth: '640' })).status).toBe(400);
   });
 
+  it('accepts every fleet tab layout and rejects an unknown one', async () => {
+    const put = (doc: Record<string, unknown>) => request(app).put('/api/user-preferences/appearance')
+      .set('Cookie', viewer.cookie).set(HEADER, String(viewer.userId))
+      .send({ absent: true, ...doc });
+
+    // Each write starts from an absent row, so the absent precondition holds.
+    for (const layout of ['compact', 'flat']) {
+      clearAppearanceRow();
+      expect((await put({ ...APPEARANCE_DOC, fleetTabLayout: layout })).status).toBe(200);
+      const all = await request(app).get('/api/user-preferences')
+        .set('Cookie', viewer.cookie).set(HEADER, String(viewer.userId));
+      expect(((all.body.preferences.appearance?.data ?? {}) as Record<string, unknown>).fleetTabLayout).toBe(layout);
+    }
+    expect((await put({ ...APPEARANCE_DOC, fleetTabLayout: 'tabs' })).status).toBe(400);
+    // The retired grouped layout is no longer a value.
+    expect((await put({ ...APPEARANCE_DOC, fleetTabLayout: 'grouped' })).status).toBe(400);
+    expect((await put({ ...APPEARANCE_DOC, fleetTabLayout: 3 })).status).toBe(400);
+  });
+
   /** Remove the viewer's appearance row outright. A route-level DELETE only
    *  tombstones the row (it still exists), and a tombstone fails an
    *  absent-precondition PUT, so the tests that need a truly absent row go to
@@ -712,6 +731,7 @@ describe('user-preferences validation', () => {
     expect(put.body.data.sidebarWidth).toBe(256);
     expect(put.body.data.anatomyMode).toBe('fixed');
     expect(put.body.data.anatomyWidth).toBe(640);
+    expect(put.body.data.fleetTabLayout).toBe('flat');
   });
 
   it('normalizes a legacy document on migrate and a repair PUT keeps the defaults', async () => {

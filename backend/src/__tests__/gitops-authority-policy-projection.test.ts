@@ -133,6 +133,7 @@ function seedGeneration(app: GitOpsApplicationRow, policySnapshotJson: string | 
     policy_snapshot_json: policySnapshotJson,
     supersedes_generation_id: null,
     superseded_at: null,
+    withdrawn_at: null,
     operation_id: 'op-1',
     actor: 'tester',
     trigger: 'test',

@@ -12,7 +12,7 @@ describe('useFleetPreferences', () => {
   it('starts from defaults when nothing is stored', () => {
     const { result } = renderHook(() => useFleetPreferences());
     expect(result.current.prefs).toEqual({
-      sortBy: 'name', sortDir: 'asc', filterStatus: 'all', filterType: 'all', filterCritical: false, filterNetworking: 'all',
+      sortBy: 'attention', sortDir: 'asc', filterStatus: 'all', filterType: 'all', filterCritical: false, filterNetworking: 'all',
     });
   });
 
@@ -32,11 +32,17 @@ describe('useFleetPreferences', () => {
     const { result } = renderHook(() => useFleetPreferences());
     expect(result.current.prefs.filterStatus).toBe('online');
     // Unspecified fields fall back to defaults.
-    expect(result.current.prefs.sortBy).toBe('name');
+    expect(result.current.prefs.sortBy).toBe('attention');
   });
 
   it('falls back to defaults when stored JSON is corrupt', () => {
     localStorage.setItem(PREFS_KEY, '{ not json');
+    const { result } = renderHook(() => useFleetPreferences());
+    expect(result.current.prefs.sortBy).toBe('attention');
+  });
+
+  it('keeps a sort the operator already chose', () => {
+    localStorage.setItem(PREFS_KEY, JSON.stringify({ sortBy: 'name' }));
     const { result } = renderHook(() => useFleetPreferences());
     expect(result.current.prefs.sortBy).toBe('name');
   });

@@ -945,6 +945,7 @@ function app(
     active_generation_id: null,
     pause_at: null,
     pause_reason: null,
+    pause_origin: 'operator',
     source_suspended_reason: null,
     next_poll_at: null,
     attempt_seq: 0,

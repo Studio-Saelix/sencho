@@ -88,6 +88,12 @@ export default function GitOpsAuthorityActions({
   // Each of these acts on a Git source generation, which an Inline Blueprint
   // does not have, and the routes behind them refuse anything but a Git-managed
   // application. Offering one would be a button whose every press is a 409.
+  //
+  // Accepting the source is a `stack:create` write. Under the Automatic rollout
+  // authorization policy the system starts the rollout from the accepted
+  // generation, the same as the automatic source acceptance path, so the
+  // acceptance is the whole operator act and the create grant is the whole
+  // requirement.
   const canAcceptSource = projection.targetMode === 'blueprint'
     && candidateGenerationId !== null
     && allowed('stack:create');
@@ -118,8 +124,16 @@ export default function GitOpsAuthorityActions({
     if (!candidateGenerationId) return;
     setPending('source');
     try {
-      await acceptGitOpsSource(applicationId, candidateGenerationId);
-      toast.success('Source revision accepted');
+      const result = await acceptGitOpsSource(applicationId, candidateGenerationId);
+      if (result.note) {
+        // The acceptance stands; the note says whether the rollout is starting,
+        // waiting for an operator, paused, or held.
+        toast.warning(`Source revision accepted. ${result.note}`);
+      } else if (result.dispatched) {
+        toast.success('Source revision accepted and the rollout started');
+      } else {
+        toast.success('Source revision accepted');
+      }
       onChanged();
     } catch (error) {
       toast.error(errorMessage(error, 'Failed to accept the source revision'));

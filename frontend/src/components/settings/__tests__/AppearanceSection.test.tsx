@@ -5,6 +5,7 @@ import { useTheme } from '@/hooks/use-theme';
 import { SETTINGS_ITEMS } from '../registry';
 import { SIDEBAR_WIDTH, SIDEBAR_MODE_KEY, SIDEBAR_WIDTH_KEY } from '@/hooks/use-sidebar-layout';
 import { ANATOMY_WIDTH, ANATOMY_MODE_KEY, ANATOMY_WIDTH_KEY } from '@/hooks/use-anatomy-layout';
+import { FLEET_TAB_LAYOUT_KEY } from '@/hooks/use-fleet-tab-layout';
 import { subscribeToPreferenceWrites } from '@/lib/preferences/preferenceEvents';
 import { SENCHO_SETTINGS_CHANGED } from '@/lib/events';
 
@@ -443,5 +444,33 @@ describe('AppearanceSection Anatomy layout', () => {
         expect(localStorage.getItem(SIDEBAR_WIDTH_KEY)).toBe('400');
         expect(sliderRoot(container)?.getAttribute('data-disabled')).not.toBeNull();
         expect(sliderThumb(container)?.getAttribute('aria-valuenow')).toBe(String(ANATOMY_WIDTH.default));
+    });
+});
+
+describe('AppearanceSection Fleet tab layout', () => {
+    beforeEach(() => {
+        localStorage.clear();
+        resetTheme();
+    });
+
+    it('defaults to Flat and stores a different choice, attributing the write to its own field', () => {
+        const writes: unknown[] = [];
+        const unsubscribe = subscribeToPreferenceWrites((domain, fields) => writes.push([domain, fields]));
+        render(<AppearanceSection onResetAppearance={() => {}} onResetNavigation={() => {}} />);
+        const group = screen.getByRole('radiogroup', { name: 'Fleet tab layout' });
+        expect(within(group).getByRole('radio', { name: 'Flat' }).getAttribute('aria-checked')).toBe('true');
+
+        fireEvent.click(within(group).getByRole('radio', { name: 'Compact' }));
+        unsubscribe();
+
+        expect(within(group).getByRole('radio', { name: 'Compact' }).getAttribute('aria-checked')).toBe('true');
+        expect(localStorage.getItem(FLEET_TAB_LAYOUT_KEY)).toBe('compact');
+        expect(writes).toEqual([['appearance', ['fleetTabLayout']]]);
+    });
+
+    it('offers the two layouts', () => {
+        render(<AppearanceSection onResetAppearance={() => {}} onResetNavigation={() => {}} />);
+        const group = screen.getByRole('radiogroup', { name: 'Fleet tab layout' });
+        expect(within(group).getAllByRole('radio').map(r => r.textContent)).toEqual(['Flat', 'Compact']);
     });
 });

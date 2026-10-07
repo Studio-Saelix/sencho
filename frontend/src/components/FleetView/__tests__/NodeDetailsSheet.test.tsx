@@ -3,7 +3,11 @@ import { render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 
 const useNodesMock = vi.fn();
+const cordonNode = vi.fn();
+const uncordonNode = vi.fn();
 vi.mock('@/context/NodeContext', () => ({ useNodes: () => useNodesMock() }));
+vi.mock('@/lib/nodesApi', () => ({ cordonNode: (...a: unknown[]) => cordonNode(...a), uncordonNode: (...a: unknown[]) => uncordonNode(...a) }));
+vi.mock('@/components/ui/toast-store', () => ({ toast: { success: vi.fn(), error: vi.fn() } }));
 
 // NodeLabelPicker is a fully self-fetching reused unit (its own tests cover its
 // behavior); shallow-mock it here so this file stays focused on the sheet.
@@ -77,7 +81,7 @@ function baseProps(overrides: Partial<React.ComponentProps<typeof NodeDetailsShe
 }
 
 beforeEach(() => {
-  useNodesMock.mockReturnValue({ nodeMeta: new Map(), refreshNodeMeta: vi.fn() });
+  useNodesMock.mockReturnValue({ nodes: [], nodeMeta: new Map(), refreshNodeMeta: vi.fn() });
 });
 afterEach(() => vi.clearAllMocks());
 
@@ -132,11 +136,12 @@ describe('NodeDetailsSheet', () => {
   });
 
   it('shows a skeleton for capabilities until nodeMeta resolves, then renders the count', () => {
-    useNodesMock.mockReturnValue({ nodeMeta: new Map(), refreshNodeMeta: vi.fn() });
+    useNodesMock.mockReturnValue({ nodes: [], nodeMeta: new Map(), refreshNodeMeta: vi.fn() });
     const { rerender } = render(<NodeDetailsSheet {...baseProps()} />);
     expect(screen.queryByText(/capabilities advertised/)).not.toBeInTheDocument();
 
     useNodesMock.mockReturnValue({
+      nodes: [],
       nodeMeta: new Map([[2, { version: '1.2.0', capabilities: ['fleet', 'self-update'], fetchedAt: Date.now() }]]),
       refreshNodeMeta: vi.fn(),
     });
@@ -186,5 +191,79 @@ describe('NodeDetailsSheet', () => {
   it('still renders Up to date when updateStatus confirms no update is available', () => {
     render(<NodeDetailsSheet {...baseProps({ updateStatus: { ...UPDATE_STATUS, updateAvailable: false } })} />);
     expect(screen.getByText('Up to date')).toBeInTheDocument();
+  });
+
+  describe('toolbar actions', () => {
+    const ONLINE_NODES = [{ id: 1, type: 'local' }, { id: 2, type: 'remote' }];
+
+    function manage(overrides: Partial<React.ComponentProps<typeof NodeDetailsSheet>> = {}) {
+      useNodesMock.mockReturnValue({ nodes: ONLINE_NODES, nodeMeta: new Map(), refreshNodeMeta: vi.fn() });
+      return baseProps({ canManageNode: true, onCordonChange: vi.fn(), onDelete: vi.fn(), ...overrides });
+    }
+
+    it('offers Edit node, Cordon node and Delete node to a node manager', () => {
+      render(<NodeDetailsSheet {...manage()} />);
+      expect(screen.getByRole('button', { name: 'Edit node' })).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: 'Cordon node' })).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: 'Delete node' })).toBeInTheDocument();
+    });
+
+    it('offers none of them to someone who cannot manage the node', () => {
+      render(<NodeDetailsSheet {...manage({ canManageNode: false })} />);
+      expect(screen.queryByRole('button', { name: 'Edit node' })).not.toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: 'Cordon node' })).not.toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: 'Delete node' })).not.toBeInTheDocument();
+    });
+
+    it('reads Uncordon node for a cordoned node', () => {
+      render(<NodeDetailsSheet {...manage({ node: fleetNode({ cordoned: true, cordoned_reason: 'patching' }) })} />);
+      expect(screen.getByRole('button', { name: 'Uncordon node' })).toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: 'Cordon node' })).not.toBeInTheDocument();
+    });
+
+    it('cordons through the shared confirmation, then refreshes the fleet', async () => {
+      cordonNode.mockResolvedValue({});
+      const props = manage();
+      render(<NodeDetailsSheet {...props} />);
+      await userEvent.click(screen.getByRole('button', { name: 'Cordon node' }));
+      await userEvent.type(await screen.findByLabelText(/Reason/), 'draining');
+      await userEvent.click(within(await screen.findByRole('alertdialog')).getByRole('button', { name: 'Cordon node' }));
+      await vi.waitFor(() => expect(props.onCordonChange).toHaveBeenCalledTimes(1));
+      expect(cordonNode).toHaveBeenCalledWith(2, 'draining');
+    });
+
+    it('does not offer Cordon where the sheet has no refresh to run afterwards (the phone page)', () => {
+      render(<NodeDetailsSheet {...manage({ onCordonChange: undefined, onDelete: undefined })} />);
+      expect(screen.queryByRole('button', { name: 'Cordon node' })).not.toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: 'Delete node' })).not.toBeInTheDocument();
+    });
+
+    it('hands the registry node to the delete flow', async () => {
+      const props = manage();
+      render(<NodeDetailsSheet {...props} />);
+      await userEvent.click(screen.getByRole('button', { name: 'Delete node' }));
+      expect(props.onDelete).toHaveBeenCalledWith(expect.objectContaining({ id: 2 }));
+    });
+
+    it('never offers Delete for the default node or the last local node', () => {
+      render(<NodeDetailsSheet {...manage({ registryNode: registryNode({ is_default: true }) })} />);
+      expect(screen.queryByRole('button', { name: 'Delete node' })).not.toBeInTheDocument();
+    });
+
+    it('never offers Delete for the last local node', () => {
+      useNodesMock.mockReturnValue({ nodes: [{ id: 1, type: 'local' }], nodeMeta: new Map(), refreshNodeMeta: vi.fn() });
+      render(<NodeDetailsSheet {...baseProps({
+        canManageNode: true, onDelete: vi.fn(), onCordonChange: vi.fn(),
+        node: fleetNode({ id: 1, type: 'local' }),
+        registryNode: registryNode({ id: 1, type: 'local', is_default: false }),
+      })} />);
+      expect(screen.queryByRole('button', { name: 'Delete node' })).not.toBeInTheDocument();
+    });
+
+    it('keeps View networking next to the Cordon action when the node has a networking signal', () => {
+      render(<NodeDetailsSheet {...manage({ networkingSignal: { exposed: false, unknown: false, drift: true } })} />);
+      expect(screen.getByRole('button', { name: 'View networking' })).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: 'Cordon node' })).toBeInTheDocument();
+    });
   });
 });

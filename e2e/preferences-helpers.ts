@@ -19,7 +19,7 @@ export const APPEARANCE_DOC = {
   borderBoost: 0, glow: 0.16, contrast: 0, typeScale: 1,
   reducedEffects: true, reducedMotion: true, readability: false,
   sidebarMode: 'fixed', sidebarWidth: 256,
-  anatomyMode: 'fixed', anatomyWidth: 640,
+  anatomyMode: 'fixed', anatomyWidth: 640, fleetTabLayout: 'flat',
 };
 
 /** The four-field navigation document. */

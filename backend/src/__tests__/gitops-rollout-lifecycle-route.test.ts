@@ -437,8 +437,27 @@ describe('POST /api/gitops/applications/:id/rollout/resume', () => {
     expect(GitOpsStore.getInstance().getApplication(seeded.applicationId)!.pause_at).toBeNull();
   });
 
-  it('reports that nothing started when no authorization is live', async () => {
+  it('re-holds the rollout when the resumed dispatch is still refused', async () => {
     const seeded = seedGitManagedBlueprint();
+    await authorizeRollout(seeded);
+    const transitions = (await import('../services/gitops/transitions')).GitOpsTransitions.getInstance();
+    transitions.rolloutPaused(seeded.applicationId, null, 'hold', {
+      operationId: randomUUID(), actor: 'tester', trigger: 'test', at: Date.now(),
+    });
+    vi.spyOn((await import('../services/GitSourceService')).GitSourceService.getInstance(), 'dispatchAcceptedGeneration')
+      .mockResolvedValue({ status: 'blocked', reason: 'Deploy to node 2 failed: registry unreachable.', holdable: true });
+    const res = await request(app)
+      .post(`/api/gitops/applications/bp:${seeded.blueprintId}/rollout/resume`)
+      .set('Cookie', adminCookie)
+      .send({});
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({ ok: true, dispatched: false });
+    const held = GitOpsStore.getInstance().getApplication(seeded.applicationId)!;
+    expect(held.pause_at).not.toBeNull();
+    expect(held.pause_reason).toBe('Deploy to node 2 failed: registry unreachable.');
+  });
+
+  it('reports that nothing started when no authorization is live', async () => {    const seeded = seedGitManagedBlueprint();
     const transitions = (await import('../services/gitops/transitions')).GitOpsTransitions.getInstance();
     transitions.rolloutPaused(seeded.applicationId, null, 'hold', {
       operationId: randomUUID(), actor: 'tester', trigger: 'test', at: Date.now(),
@@ -449,7 +468,7 @@ describe('POST /api/gitops/applications/:id/rollout/resume', () => {
       .send({});
     expect(res.status).toBe(200);
     expect(res.body.dispatched).toBe(false);
-    expect(res.body.note).toContain('no live authorization');
+    expect(res.body.note).toContain('the automatic policy will start it shortly');
     expect(GitOpsStore.getInstance().getApplication(seeded.applicationId)!.pause_at).toBeNull();
   });
 

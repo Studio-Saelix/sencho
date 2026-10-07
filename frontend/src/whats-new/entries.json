@@ -58,7 +58,7 @@
   {
     "id": "git-managed-blueprints",
     "title": "Git-managed Blueprint content",
-    "blurb": "Move a live Git source onto a Blueprint so that Blueprint's compose comes from Git instead of the editor. Git-managed Blueprints bind and show a blocked rollout state; they do not deploy from the stored snapshot. Detach restores Inline editing.",
+    "blurb": "Move a live Git source onto a Blueprint so that Blueprint's compose comes from Git instead of the editor. Accept a generation, approve the placement, and authorize the rollout to deploy it; a later commit runs the chain again, automatically when the source policy applies without an operator. Detach restores Inline editing.",
     "docUrl": "https://docs.sencho.io/features/blueprint-model"
   },
   {
