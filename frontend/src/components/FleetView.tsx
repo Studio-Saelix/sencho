@@ -1,11 +1,10 @@
 import { useState, useEffect, useMemo, useRef } from 'react';
-import {
-    RefreshCw, Camera, FileDown,
-    Network, Activity,
-    Send, KeyRound, ArrowLeftRight, Wrench, Workflow, Tag,
-} from 'lucide-react';
+import { RefreshCw, FileDown } from 'lucide-react';
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
 import { FleetMasthead } from './fleet/FleetMasthead';
+import { FleetTabStrip } from './fleet/FleetTabStrip';
+import { buildFleetTabs } from './fleet/fleetTabs';
+import { useFleetTabLayout } from '@/hooks/use-fleet-tab-layout';
 import { ReconnectingOverlay } from './FleetView/ReconnectingOverlay';
 import { NodeUpdatesSheet } from './FleetView/NodeUpdatesSheet';
 import { NodeDetailsSheet } from './FleetView/NodeDetailsSheet';
@@ -18,8 +17,7 @@ import { useFleetOverview } from './FleetView/hooks/useFleetOverview';
 import { useFleetDossierExport } from './FleetView/hooks/useFleetDossierExport';
 import { useTopologyPreferences } from '@/hooks/useTopologyPreferences';
 import { Button } from '@/components/ui/button';
-import { Tabs, TabsContent, TabsList, TabsTrigger, TabsHighlight, TabsHighlightItem } from '@/components/ui/tabs';
-import { springs } from '@/lib/motion';
+import { Tabs, TabsContent } from '@/components/ui/tabs';
 import { useLicense } from '@/context/LicenseContext';
 import { useAuth } from '@/context/AuthContext';
 import { useNodes } from '@/context/NodeContext';
@@ -85,6 +83,11 @@ export function FleetView({
     const containerLabelsEnabled = hasCapability('container-label-inventory');
     // Visual fail-closed while /meta loads; paid/admin gates still apply when on.
     const canDiscoverRouting = experimentalReady && experimental && isPaid;
+    const [tabLayout] = useFleetTabLayout();
+    const fleetTabs = useMemo(
+        () => buildFleetTabs({ isAdmin, containerLabels: containerLabelsEnabled, routing: canDiscoverRouting }),
+        [isAdmin, containerLabelsEnabled, canDiscoverRouting],
+    );
 
     const { prefs, updatePrefs } = useFleetPreferences();
     const updateStatus = useFleetUpdateStatus();
@@ -195,67 +198,7 @@ export function FleetView({
                 <div className="flex items-center justify-between gap-3 mb-4 flex-wrap rounded-lg border border-card-border bg-card/40 px-2.5 py-1.5">
                     {/* Flatten the list's own pill band so the tabs sit directly in
                         the single full-width band, not a nested second band. */}
-                    <TabsList className="border-transparent bg-transparent max-md:w-full max-md:overflow-x-auto max-md:[scrollbar-width:none]">
-                        <TabsHighlight className="rounded-md bg-brand/20" transition={springs.snappy}>
-                            <TabsHighlightItem value="overview">
-                                <TabsTrigger value="overview">Overview</TabsTrigger>
-                            </TabsHighlightItem>
-                            {isAdmin && (
-                                <TabsHighlightItem value="snapshots">
-                                    <TabsTrigger value="snapshots">
-                                        <Camera className="w-4 h-4 mr-1.5" />Snapshots
-                                    </TabsTrigger>
-                                </TabsHighlightItem>
-                            )}
-                            <TabsHighlightItem value="readiness">
-                                <TabsTrigger value="readiness">
-                                    <Activity className="w-4 h-4 mr-1.5" />Readiness
-                                </TabsTrigger>
-                            </TabsHighlightItem>
-                            <TabsHighlightItem value="dependencies">
-                                <TabsTrigger value="dependencies">
-                                    <Workflow className="w-4 h-4 mr-1.5" />Map
-                                </TabsTrigger>
-                            </TabsHighlightItem>
-                            {containerLabelsEnabled && (
-                                <TabsHighlightItem value="container-labels">
-                                    <TabsTrigger value="container-labels">
-                                        <Tag className="w-4 h-4 mr-1.5" />Docker Labels
-                                    </TabsTrigger>
-                                </TabsHighlightItem>
-                            )}
-                            <span aria-hidden className="self-center mx-1 h-4 w-px bg-border" />
-                            <TabsHighlightItem value="deployments">
-                                    <TabsTrigger value="deployments">
-                                        <Send className="w-4 h-4 mr-1.5" />Blueprints
-                                    </TabsTrigger>
-                                </TabsHighlightItem>
-                            {canDiscoverRouting && (
-                                <TabsHighlightItem value="routing">
-                                    <TabsTrigger value="routing">
-                                        <ArrowLeftRight className="w-4 h-4 mr-1.5" />Routing
-                                    </TabsTrigger>
-                                </TabsHighlightItem>
-                            )}
-                            <TabsHighlightItem value="federation">
-                                    <TabsTrigger value="federation">
-                                        <Network className="w-4 h-4 mr-1.5" />Federation
-                                    </TabsTrigger>
-                                </TabsHighlightItem>
-                            <TabsHighlightItem value="actions">
-                                <TabsTrigger value="actions">
-                                    <Wrench className="w-4 h-4 mr-1.5" />Actions
-                                </TabsTrigger>
-                            </TabsHighlightItem>
-                            {isAdmin && (
-                                <TabsHighlightItem value="secrets">
-                                    <TabsTrigger value="secrets">
-                                        <KeyRound className="w-4 h-4 mr-1.5" />Secrets
-                                    </TabsTrigger>
-                                </TabsHighlightItem>
-                            )}
-                        </TabsHighlight>
-                    </TabsList>
+                    <FleetTabStrip layout={tabLayout} tabs={fleetTabs} active={activeTab} onChange={setActiveTab} />
                     <div className="flex items-center gap-2 shrink-0">
                         <TooltipProvider>
                             <Tooltip>

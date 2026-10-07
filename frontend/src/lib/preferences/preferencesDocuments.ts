@@ -40,6 +40,10 @@ import {
   isAnatomyMode, sanitizeAnatomyWidth,
   type AnatomyMode,
 } from '@/hooks/use-anatomy-layout';
+import {
+  currentFleetTabLayout, applyFleetTabLayoutValue, isFleetTabLayout, DEFAULT_FLEET_TAB_LAYOUT, FLEET_TAB_LAYOUT_KEY,
+  type FleetTabLayout,
+} from '@/hooks/use-fleet-tab-layout';
 import { recommendedQuickLinkIds } from '@/lib/navigation/appNavRegistry';
 
 export interface AppearanceDocument {
@@ -63,11 +67,12 @@ export interface AppearanceDocument {
   sidebarWidth: number;
   anatomyMode: AnatomyMode;
   anatomyWidth: number;
+  fleetTabLayout: FleetTabLayout;
 }
 
 /** What the raw theme cache key holds: everything except density, log-chip,
  *  sidebar-layout, and Anatomy-layout fields stored under their own keys. */
-export type ThemeCacheDocument = Omit<AppearanceDocument, 'density' | 'logChipColorMode' | 'sidebarMode' | 'sidebarWidth' | 'anatomyMode' | 'anatomyWidth'>;
+export type ThemeCacheDocument = Omit<AppearanceDocument, 'density' | 'logChipColorMode' | 'sidebarMode' | 'sidebarWidth' | 'anatomyMode' | 'anatomyWidth' | 'fleetTabLayout'>;
 
 /** Navigation document with unset provenance for the pin list. `unset` means
  *  the hook has never persisted a list (never-seeded or eligibility still
@@ -112,6 +117,7 @@ export function buildAppearanceDocument(): AppearanceDocument {
     sidebarWidth: currentSidebarWidth(),
     anatomyMode: currentAnatomyMode(),
     anatomyWidth: currentAnatomyWidth(),
+    fleetTabLayout: currentFleetTabLayout(),
   };
 }
 
@@ -174,6 +180,7 @@ export function hydrateAppearanceDocument(raw: unknown): void {
   applySidebarWidthValue(sanitizeSidebarWidth(p.sidebarWidth));
   applyAnatomyModeValue(isAnatomyMode(p.anatomyMode) ? p.anatomyMode : 'fixed');
   applyAnatomyWidthValue(sanitizeAnatomyWidth(p.anatomyWidth));
+  applyFleetTabLayoutValue(isFleetTabLayout(p.fleetTabLayout) ? p.fleetTabLayout : DEFAULT_FLEET_TAB_LAYOUT);
 }
 
 /** The documented calm-default appearance document, used for tombstone
@@ -202,6 +209,7 @@ export function defaultAppearanceDocument(): AppearanceDocument {
     sidebarWidth: SIDEBAR_WIDTH_DEFAULT,
     anatomyMode: 'fixed',
     anatomyWidth: ANATOMY_WIDTH_DEFAULT,
+    fleetTabLayout: DEFAULT_FLEET_TAB_LAYOUT,
   };
 }
 
@@ -257,6 +265,7 @@ export const PREFERENCE_CACHE_KEYS = [
   SIDEBAR_WIDTH_KEY,
   ANATOMY_MODE_KEY,
   ANATOMY_WIDTH_KEY,
+  FLEET_TAB_LAYOUT_KEY,
   TOP_NAV_MODE_KEY,
   TOP_NAV_QUICK_LINKS_KEY,
   TOP_NAV_LABELS_KEY,
@@ -294,6 +303,7 @@ export function writePreferenceCacheFromDocuments(): void {
       sidebarWidth: undefined,
       anatomyMode: undefined,
       anatomyWidth: undefined,
+      fleetTabLayout: undefined,
     }));
   } catch {
     // ignore; private mode / quota

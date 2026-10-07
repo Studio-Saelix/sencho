@@ -13,6 +13,7 @@ import { useLogChipColorMode, type LogChipColorMode } from '@/hooks/use-log-chip
 import { useTopNavLabels } from '@/hooks/use-top-nav-labels';
 import { useTopNavAlign, type TopNavAlign } from '@/hooks/use-top-nav-align';
 import { useTopNavMode, type TopNavMode } from '@/hooks/use-top-nav-mode';
+import { useFleetTabLayout, type FleetTabLayout } from '@/hooks/use-fleet-tab-layout';
 import { useTopNavQuickLinks, MAX_QUICK_LINKS } from '@/hooks/use-top-nav-quick-links';
 import { getAppNavItem } from '@/lib/navigation/appNavRegistry';
 import type { NavDestination } from '@/lib/navigation/appNavRegistry';
@@ -40,6 +41,12 @@ const DENSITY_DESCRIPTIONS: Record<Density, string> = {
     comfortable: 'Default spacing. Roomy rows for review and orientation.',
     compact: 'Tighter rows and tiles. Fits more on screen for dense dashboards.',
 };
+
+const FLEET_TAB_LAYOUT_OPTIONS: { value: FleetTabLayout; label: string }[] = [
+    { value: 'grouped', label: 'Grouped' },
+    { value: 'flat', label: 'Flat' },
+    { value: 'compact', label: 'Compact' },
+];
 
 const TOP_NAV_ALIGN_OPTIONS: { value: TopNavAlign; label: string }[] = [
     { value: 'left', label: 'Left' },
@@ -193,6 +200,7 @@ export function AppearanceSection({
     const [topNavLabels, setTopNavLabels] = useTopNavLabels();
     const [topNavAlign, setTopNavAlign] = useTopNavAlign();
     const [topNavMode, setTopNavMode] = useTopNavMode();
+    const [fleetTabLayout, setFleetTabLayout] = useFleetTabLayout();
     const {
         persistedIds: quickLinkIds,
         canReset,
@@ -693,6 +701,20 @@ export function AppearanceSection({
                         </div>
                     </SettingsField>
                 )}
+            </SettingsSection>
+
+            <SettingsSection title="Fleet" kicker="your account">
+                <SettingsField
+                    label="Fleet tab layout"
+                    helper="Grouped sets the tabs under Observe and Operate on one strip and is the default. Flat is the single row of every tab. Compact keeps five tabs and moves the rest under More."
+                >
+                    <SegmentedControl
+                        value={fleetTabLayout}
+                        options={FLEET_TAB_LAYOUT_OPTIONS}
+                        onChange={setFleetTabLayout}
+                        ariaLabel="Fleet tab layout"
+                    />
+                </SettingsField>
             </SettingsSection>
 
             <p className="font-mono text-[10px] leading-3 uppercase tracking-[0.18em] text-stat-subtitle/70">

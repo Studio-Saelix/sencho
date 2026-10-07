@@ -125,6 +125,7 @@ describe('useUserPreferencesSync: identity guards', () => {
       theme: 'oled',
       accent: 'violet',
       density: 'compact',
+      fleetTabLayout: 'compact',
     });
     localStorage.setItem(PREFERENCES_OWNER_KEY, JSON.stringify({ userId: 7, schema: 1 }));
 
@@ -151,7 +152,7 @@ describe('useUserPreferencesSync: identity guards', () => {
     );
     await vi.waitFor(() => expect(migrateCall).toBeDefined());
     const body = JSON.parse(((migrateCall?.[1] as RequestInit).body) as string);
-    expect(body).toMatchObject({ theme: 'dim', accent: 'cyan', density: 'comfortable' });
+    expect(body).toMatchObject({ theme: 'dim', accent: 'cyan', density: 'comfortable', fleetTabLayout: 'grouped' });
   });
 
   it('a failed write of the old account cannot be retried after the identity transition', async () => {
