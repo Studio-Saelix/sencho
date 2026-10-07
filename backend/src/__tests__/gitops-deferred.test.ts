@@ -465,6 +465,46 @@ describe('gitops deferred state', () => {
     expect(app.failure_class).toBe('partial');
   });
 
+  it('makes a crashed rollback open recoverable at boot', () => {
+    const store = GitOpsStore.getInstance();
+    const tx = GitOpsTransitions.getInstance();
+    seedApplied('app-rb-crash', 'rb-crash-web');
+
+    tx.rollbackInProgress({
+      applicationId: 'app-rb-crash',
+      nodeId: 1,
+      recoveryRef: 'rb-crash',
+      recoveryGenerationId: 'gen-app-rb-crash',
+      envelope: env('op-rb-crash'),
+    });
+    // The open marks the target so the startup selection reads the application
+    // as holding an open operation at all.
+    expect(store.getTarget('app-rb-crash', 1)?.active_operation_stage).toBe('recovery_started');
+    expect(store.listApplicationsWithOpenOperations().some((row) => row.id === 'app-rb-crash'))
+      .toBe(true);
+
+    reclassifyInterruptedOperations();
+
+    const target = store.getTarget('app-rb-crash', 1)!;
+    expect(target.active_operation_stage).toBeNull();
+    expect(target.recovery_phase).toBe('failed');
+    expect(target.failure_stage).toBe('recovery');
+    expect(target.failure_class).toBe('interrupted');
+    expect(target.interruption_stage).toBe('recovery_started');
+    expect(store.getApplication('app-rb-crash')?.recovery_phase).toBe('failed');
+
+    // A later terminal rollback retires the interruption instead of leaving the
+    // target held as interrupted for ever.
+    tx.rollbackPartialFailed({
+      applicationId: 'app-rb-crash',
+      nodeId: 1,
+      recoveryRef: 'rb-crash',
+      failureClass: 'pre_mutation',
+      envelope: env('op-rb-crash-terminal'),
+    });
+    expect(store.getTarget('app-rb-crash', 1)?.interruption_stage).toBeNull();
+  });
+
   it('keeps a proven moved class when boot reclassifies a retry', () => {
     const store = GitOpsStore.getInstance();
     const tx = GitOpsTransitions.getInstance();
