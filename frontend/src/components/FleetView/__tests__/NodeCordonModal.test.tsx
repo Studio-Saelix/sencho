@@ -79,4 +79,26 @@ describe('NodeCordonModal', () => {
     expect(spy).toHaveBeenCalled();
     spy.mockRestore();
   });
+
+  it('opens empty again after a cancel, so a half-typed reason is not carried over', async () => {
+    const onOpenChange = vi.fn();
+    const { rerender } = render(<NodeCordonModal node={{ id: 2, name: 'Edge', cordoned: false }} open onOpenChange={onOpenChange} />);
+    await userEvent.type(screen.getByLabelText(/Reason/), 'half typed');
+    await userEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+    expect(onOpenChange).toHaveBeenCalledWith(false);
+    rerender(<NodeCordonModal node={{ id: 2, name: 'Edge', cordoned: false }} open={false} onOpenChange={onOpenChange} />);
+    rerender(<NodeCordonModal node={{ id: 2, name: 'Edge', cordoned: false }} open onOpenChange={onOpenChange} />);
+    expect(screen.getByLabelText(/Reason/)).toHaveValue('');
+  });
+
+  it('cannot be dismissed while the request is in flight', async () => {
+    let release: (v: unknown) => void = () => {};
+    cordonNode.mockImplementation(() => new Promise((res) => { release = res; }));
+    const props = renderModal();
+    await userEvent.click(screen.getByRole('button', { name: 'Cordon node' }));
+    await userEvent.keyboard('{Escape}');
+    expect(props.onOpenChange).not.toHaveBeenCalled();
+    release({});
+    await vi.waitFor(() => expect(props.onChanged).toHaveBeenCalledTimes(1));
+  });
 });

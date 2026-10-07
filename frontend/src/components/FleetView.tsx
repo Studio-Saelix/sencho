@@ -320,9 +320,6 @@ export function FleetView({
                         updateStatusMap={overview.updateStatusMap}
                         onNavigateToNode={onNavigateToNode}
                         gitopsAttentionByNode={overview.gitopsAttentionByNode}
-                        networkingByNode={overview.networkingByNode}
-                        onOpenNetworking={onOpenNodeNetworking}
-                        onTested={() => { void overview.fetchOverview(true); }}
                         onUpdate={updateStatus.triggerNodeUpdate}
                         updatingNodeId={updateStatus.updatingNodeId}
                         onRetryUpdate={updateStatus.retryNodeUpdate}
@@ -425,18 +422,11 @@ export function FleetView({
                 registryNode={detailsNodeId !== null ? (registryNodes.find(n => n.id === detailsNodeId) ?? null) : null}
                 updateStatus={detailsNodeId !== null ? overview.updateStatusMap.get(detailsNodeId) : undefined}
                 networkingSignal={detailsNodeId !== null ? overview.networkingByNode.get(detailsNodeId) : undefined}
-                gitopsAttention={detailsNodeId !== null ? overview.gitopsAttentionByNode.get(detailsNodeId) : undefined}
-                handlers={{
-                    onUpdate: updateStatus.triggerNodeUpdate,
-                    updatingNodeId: updateStatus.updatingNodeId,
-                    onRetryUpdate: updateStatus.retryNodeUpdate,
-                    onDismissUpdate: updateStatus.dismissNodeUpdate,
-                    onOpenNetworking: onOpenNodeNetworking,
-                    onTested: () => { void overview.fetchOverview(true); },
-                    onCordonChange: () => { void overview.fetchOverview(true); },
-                    onEdit: openEdit,
-                    onDelete: openDelete,
-                }}
+                canManageNode={detailsNodeId !== null && can('node:manage', 'node', String(detailsNodeId))}
+                onOpenNetworking={onOpenNodeNetworking}
+                onEdit={openEdit}
+                onDelete={openDelete}
+                onCordonChange={() => { void overview.fetchOverview(true); }}
             />
 
             <LocalUpdateConfirmDialog

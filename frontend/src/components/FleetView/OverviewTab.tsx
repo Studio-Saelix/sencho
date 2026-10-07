@@ -7,7 +7,6 @@ import { OverviewToolbar } from './OverviewToolbar';
 import type { FleetTopologyNode, LayoutMode, SavedPositions } from '@/lib/fleet-topology-layout';
 import type { Label as StackLabel } from '../label-types';
 import type { Node } from '@/context/NodeContext';
-import type { NetworkingSignal } from './nodeStatus';
 import type { FleetNode, NodeUpdateStatus, ViewMode, FleetPreferences, FleetPaletteEntry } from './types';
 import type { MuteRuleDraft } from '@/lib/muteRules';
 
@@ -31,9 +30,6 @@ interface OverviewTabProps {
     updateStatusMap: Map<number, NodeUpdateStatus>;
     onNavigateToNode: (nodeId: number, stackName: string) => void;
     gitopsAttentionByNode: Map<number, number>;
-    networkingByNode: Map<number, NetworkingSignal>;
-    onOpenNetworking?: (nodeId: number) => void;
-    onTested?: () => void;
     onUpdate?: (nodeId: number) => void;
     updatingNodeId: number | null;
     onRetryUpdate?: (nodeId: number) => void;
@@ -72,9 +68,6 @@ export function OverviewTab({
     updateStatusMap,
     onNavigateToNode,
     gitopsAttentionByNode,
-    networkingByNode,
-    onOpenNetworking,
-    onTested,
     onUpdate,
     updatingNodeId,
     onRetryUpdate,
@@ -155,9 +148,6 @@ export function OverviewTab({
                                     node={node}
                                     onNavigate={onNavigateToNode}
                                     gitopsAttention={gitopsAttentionByNode.get(node.id)}
-                                    networkingSignal={networkingByNode.get(node.id)}
-                                    onOpenNetworking={onOpenNetworking}
-                                    onTested={onTested}
                                     labelMap={fleetStackLabelMap[node.id] ?? {}}
                                     updateStatus={updateStatusMap.get(node.id)}
                                     onUpdate={onUpdate}

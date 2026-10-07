@@ -36,7 +36,6 @@ function props(overrides: Partial<React.ComponentProps<typeof OverviewTab>> = {}
     updateStatusMap: new Map(),
     onNavigateToNode: vi.fn(),
     gitopsAttentionByNode: new Map(),
-    networkingByNode: new Map(),
     onOpenNodeDetails: vi.fn(),
     updatingNodeId: null,
     topologyMode: 'hub' as const,

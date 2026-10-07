@@ -311,7 +311,7 @@ function NodeDetail({
         onOpenChange={setDetailsOpen}
         node={node}
         registryNode={registryNode}
-        handlers={{ onCordonChange, onTested: onCordonChange }}
+        canManageNode={canCordon}
       />
     </div>
   );
