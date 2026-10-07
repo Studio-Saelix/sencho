@@ -32,8 +32,10 @@ function docker(args: string[]): string {
 }
 
 const hasDocker = dockerAvailable();
-const MARKER = '__SENCHO_EXEC_FRAME_CHECK__';
-const CONTAINER_NAME = 'sencho-exec-tty-stream-test';
+const TYPED_COMMAND = 'echo __SENCHO_FRAME_$((6*7))';
+/** Only the evaluated arithmetic can produce this, not the PTY echo of the typed command. */
+const EVALUATED_OUTPUT = '__SENCHO_FRAME_42\r\n';
+const CONTAINER_NAME = `sencho-exec-tty-stream-test-${process.pid}`;
 
 /** Docker's multiplex header: stream type (1=stdout, 2=stderr) + 3 zeros + length. */
 const FRAME_HEADER = /[\u0001\u0002]\u0000\u0000\u0000/;
@@ -93,22 +95,24 @@ describe.skipIf(!hasDocker)('interactive exec stream is not multiplex-framed', (
     const sent: string[] = [];
     const ws = createMockWs(sent);
 
-    const { default: DockerController } = await import('../../services/DockerController');
-    await DockerController.getInstance(nodeId).execContainer(containerId, ws);
+    try {
+      const { default: DockerController } = await import('../../services/DockerController');
+      await DockerController.getInstance(nodeId).execContainer(containerId, ws);
 
-    (ws as unknown as EventEmitter).emit(
-      'message',
-      Buffer.from(JSON.stringify({ type: 'input', data: `echo ${MARKER}\n` })),
-    );
+      (ws as unknown as EventEmitter).emit(
+        'message',
+        Buffer.from(JSON.stringify({ type: 'input', data: `${TYPED_COMMAND}\n` })),
+      );
 
-    await waitFor(() => sent.join('').includes(`${MARKER}\r\n`));
-    // Let the prompt and the output line settle before scanning the stream.
-    await new Promise((resolve) => setTimeout(resolve, 200));
+      // The PTY echoes the typed command, so wait for the evaluated output,
+      // which only the shell itself can produce.
+      await waitFor(() => sent.join('').includes(EVALUATED_OUTPUT));
 
-    const output = sent.join('');
-    expect(output).toContain(`${MARKER}\r\n`);
-    expect(output).not.toMatch(FRAME_HEADER);
-
-    (ws as unknown as EventEmitter).emit('close');
+      const output = sent.join('');
+      expect(output).toContain(EVALUATED_OUTPUT);
+      expect(output).not.toMatch(FRAME_HEADER);
+    } finally {
+      (ws as unknown as EventEmitter).emit('close');
+    }
   }, 60_000);
 });
