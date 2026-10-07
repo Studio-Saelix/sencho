@@ -27,6 +27,22 @@ const SUCCESS_SHAPED_OUTCOMES: ReadonlySet<ReconcileOutcome> = new Set<Reconcile
 ]);
 
 /**
+ * Whether the row is waiting on a recovery: a restore in flight, or a hold
+ * that success evidence retires.
+ *
+ * Both clear without an operator touching the source, so the poll cadence has
+ * to outlive them. A settled `complete` receipt has nothing outstanding, and
+ * an interrupted fetch or apply (`source_unknown`) waits on the operator
+ * rather than on recovery, so neither is a recovery wait.
+ */
+function recoveryWaitHolds(app: GitOpsApplicationRow): boolean {
+    return app.recovery_phase === 'restoring'
+        || app.recovery_phase === 'compensating'
+        || app.recovery_phase === 'failed'
+        || app.failure_stage === 'recovery';
+}
+
+/**
  * Background driver for unattended GitOps reconciliation: polls sources on
  * their configured interval and re-evaluates applications whose retry_at
  * has arrived, driving each through GitSourceService.reconcile().
@@ -376,6 +392,15 @@ export class SourceController {
             // (requireAcceptableCandidate guards against an outcome that
             // misreports the row's state).
             await this.maybeAcceptAutomaticCandidate(fresh, stackName, trigger);
+        } else if (result.outcome === 'recovery_required' && recoveryWaitHolds(fresh)) {
+            // A recovery wait is not terminal: the hold clears through success
+            // evidence (an acknowledgement or a bind) that never touches the
+            // source. The fetch that just ran consumed the poll cursor, so
+            // without re-arming here the source would drop out of the cadence
+            // and stay idle after the recovery settles. Automatic acceptance
+            // stays gated on success-shaped outcomes, so the hold still
+            // withholds progression.
+            this.maybeScheduleNextPoll(fresh);
         }
     }
 
@@ -405,11 +430,12 @@ export class SourceController {
     }
 
     /**
-     * Re-arm the poll cursor after a successful evaluation, so the source
-     * sleeps on its configured cadence instead of being re-polled every tick.
-     * Manual sources and polling-disabled configurations never re-arm, so
-     * after the fetch consumed the old cursor the row drops out of the due
-     * set until a config change (or a manual pull) arms it again.
+     * Re-arm the poll cursor after an evaluation that leaves the source
+     * eligible, so the source sleeps on its configured cadence instead of
+     * being re-polled every tick. Manual sources and polling-disabled
+     * configurations never re-arm, so after the fetch consumed the old cursor
+     * the row drops out of the due set until a config change (or a manual
+     * pull) arms it again.
      */
     private maybeScheduleNextPoll(app: GitOpsApplicationRow): void {
         if (app.source_policy === 'manual') return;
