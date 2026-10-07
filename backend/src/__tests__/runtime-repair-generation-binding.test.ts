@@ -425,19 +425,41 @@ describe('runtime repair reads the target\'s acknowledged generation', () => {
   });
 
   it('proceeds when a deploy failure replaced a refused recovery', async () => {
-    // A refusal that moved nothing is retired by the later failure, so the row
-    // a real writer produces carries no recovery phase at all.
+    // Driven through the real writers: a refused rollback, then a deploy
+    // failure that retires the refusal and leaves the deploy failure standing.
     const { bp, node } = seedBlueprint();
     const fixture = await seedGitManagedMidRollout(bp, node);
     const store = GitOpsStore.getInstance();
-    const target = store.getTarget(fixture.appId, node.id)!;
-    store.upsertTarget({
-      ...target,
-      recovery_phase: null,
-      recovery_ref: null,
-      failure_stage: 'blueprint_deploy',
-      failure_class: 'deploy_failed',
+    const tx = GitOpsTransitions.getInstance();
+    const envelope = (operationId: string) => ({
+      operationId, actor: 'tester', trigger: 'manual', at: Date.now(),
     });
+    const target = store.getTarget(fixture.appId, node.id)!;
+    tx.rollbackInProgress({
+      applicationId: fixture.appId,
+      nodeId: node.id,
+      recoveryRef: 'rb-replaced',
+      recoveryGenerationId: target.recovery_generation_id ?? fixture.old.generationId,
+      envelope: envelope('op-replaced-open'),
+    });
+    tx.rollbackPartialFailed({
+      applicationId: fixture.appId,
+      nodeId: node.id,
+      recoveryRef: 'rb-replaced',
+      failureClass: 'pre_mutation',
+      envelope: envelope('op-replaced-fail'),
+    });
+    tx.blueprintDeployFailed({
+      applicationId: fixture.appId,
+      nodeId: node.id,
+      failureClass: 'deploy_failed',
+      envelope: envelope('op-replaced-deploy'),
+    });
+    const replaced = store.getTarget(fixture.appId, node.id)!;
+    expect(replaced.recovery_phase).toBeNull();
+    expect(replaced.recovery_failure_class).toBeNull();
+    expect(replaced.failure_stage).toBe('blueprint_deploy');
+
     const deploySpy = vi
       .spyOn(BlueprintService.getInstance(), 'deployAuthorizedMaterialization')
       .mockResolvedValue({ status: 'active' });

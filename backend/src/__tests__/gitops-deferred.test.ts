@@ -548,11 +548,66 @@ describe('gitops deferred state', () => {
     expect(store.getTarget('app-rb-crash', 1)?.interruption_stage).toBeNull();
   });
 
+  it('clears the application interruption after a crashed rollback is reclassified', () => {
+    const store = GitOpsStore.getInstance();
+    const tx = GitOpsTransitions.getInstance();
+    seedApplied('app-rb-app-int', 'rb-app-int-web');
+
+    tx.rollbackInProgress({
+      applicationId: 'app-rb-app-int',
+      nodeId: 1,
+      recoveryRef: 'rb-app-int-a',
+      recoveryGenerationId: 'gen-app-rb-app-int',
+      envelope: env('op-rb-app-int-a'),
+    });
+    reclassifyInterruptedOperations();
+
+    // The application records the interrupted recovery, but no operation
+    // stage: an application interruption stage is never cleared by a recovery
+    // terminal, and the drift collectors treat a set one as a standing
+    // suppression.
+    const interrupted = store.getApplication('app-rb-app-int')!;
+    expect(interrupted.recovery_phase).toBe('failed');
+    expect(interrupted.failure_class).toBe('interrupted');
+    expect(interrupted.interruption_stage).toBeNull();
+
+    // A fresh rollback completes and the application stays clear.
+    tx.rollbackInProgress({
+      applicationId: 'app-rb-app-int',
+      nodeId: 1,
+      recoveryRef: 'rb-app-int-b',
+      recoveryGenerationId: 'gen-app-rb-app-int',
+      envelope: env('op-rb-app-int-b'),
+    });
+    tx.rollbackCompleted({
+      applicationId: 'app-rb-app-int',
+      nodeId: 1,
+      recoveryRef: 'rb-app-int-b',
+      recoveryGenerationId: 'gen-app-rb-app-int',
+      capturedArtifactSetId: null,
+      capturedSourceAcceptanceRef: null,
+      envelope: env('op-rb-app-int-b-terminal'),
+    });
+
+    const done = store.getApplication('app-rb-app-int')!;
+    expect(done.recovery_phase).toBe('complete');
+    expect(done.interruption_stage).toBeNull();
+  });
+
   it('reclassifies an in-flight restore that carries no marker', () => {
     const store = GitOpsStore.getInstance();
+    const tx = GitOpsTransitions.getInstance();
     seedApplied('app-rb-no-marker', 'rb-no-marker-web');
-    // A build before the marker existed left the target restoring with no
-    // active operation. Boot has to select it anyway.
+    // The crash left both levels in flight: the application under its own
+    // alias, and the target with no active operation, as a build before the
+    // marker wrote. Boot has to select it anyway.
+    tx.rollbackInProgress({
+      applicationId: 'app-rb-no-marker',
+      nodeId: null,
+      recoveryRef: 'rb-no-marker',
+      recoveryGenerationId: null,
+      envelope: env('op-rb-no-marker-app'),
+    });
     const target = store.getTarget('app-rb-no-marker', 1)!;
     store.upsertTarget({
       ...target,
@@ -570,6 +625,12 @@ describe('gitops deferred state', () => {
     expect(after.recovery_phase).toBe('failed');
     expect(after.recovery_failure_class).toBe('interrupted');
     expect(after.interruption_stage).toBe('recovery_started');
+    // The application records the interrupted recovery without an operation
+    // stage, which is the condition the drift collectors read.
+    const app = store.getApplication('app-rb-no-marker')!;
+    expect(app.recovery_phase).toBe('failed');
+    expect(app.failure_class).toBe('interrupted');
+    expect(app.interruption_stage).toBeNull();
   });
 
   it('keeps a proven moved class when boot reclassifies a retry', () => {

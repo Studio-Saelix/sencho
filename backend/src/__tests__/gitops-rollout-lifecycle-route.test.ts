@@ -772,8 +772,10 @@ describe('POST /api/gitops/applications/:id/rollout/rollback', () => {
       recoveryGenerationId: seeded.generationId,
       envelope: { operationId: 'op-route-live', actor: 'tester', trigger: 'manual', at: Date.now() },
     });
-    const rolloutGenerationId = GitOpsStore.getInstance()
-      .getApplication(seeded.applicationId)?.rollout_generation_id;
+    const store = GitOpsStore.getInstance();
+    const before = store.getApplication(seeded.applicationId)!;
+    expect(before.rollout_authorization_ref).not.toBeNull();
+    expect(before.rollout_generation_id).not.toBeNull();
 
     const res = await request(app)
       .post(`/api/gitops/applications/bp:${seeded.blueprintId}/rollout/rollback`)
@@ -784,14 +786,20 @@ describe('POST /api/gitops/applications/:id/rollout/rollback', () => {
     // starts, so it cannot race the one that is still moving files.
     expect(res.status).toBe(409);
     expect(res.body.code).toBe('ROLLBACK_IN_PROGRESS');
-    // The first target was never opened, and the live rollout was not withdrawn.
-    const untouched = GitOpsStore.getInstance().getTarget(seeded.applicationId, seeded.nodeIds[0])!;
+    // The first target was never opened.
+    const untouched = store.getTarget(seeded.applicationId, seeded.nodeIds[0])!;
     expect(untouched.recovery_phase).toBeNull();
     expect(untouched.active_operation_stage).toBeNull();
     expect(untouched.recovery_ref).toBeNull();
-    expect(GitOpsStore.getInstance().getApplication(seeded.applicationId)?.rollout_generation_id)
-      .toBe(rolloutGenerationId);
-    expect(GitOpsStore.getInstance().getTarget(seeded.applicationId, seeded.nodeIds[1])?.recovery_ref)
+    // And the live rollout was not withdrawn: superseding clears the
+    // authorization ref and stamps the generation, while the generation
+    // pointer itself is left in place either way.
+    const after = store.getApplication(seeded.applicationId)!;
+    expect(after.rollout_generation_id).toBe(before.rollout_generation_id);
+    expect(after.rollout_authorization_ref).toBe(before.rollout_authorization_ref);
+    const rolloutGeneration = store.getRolloutGeneration(before.rollout_generation_id!)!;
+    expect(rolloutGeneration.superseded_at).toBeNull();
+    expect(store.getTarget(seeded.applicationId, seeded.nodeIds[1])?.recovery_ref)
       .toBe('rb-route-live');
   });
 

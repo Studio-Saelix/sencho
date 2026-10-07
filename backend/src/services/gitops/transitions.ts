@@ -4193,10 +4193,13 @@ export class GitOpsTransitions {
         app.failure_at = envelope.at;
       }
       if (app.active_operation_stage || interruptedRecovery) {
-        // A marker-less in-flight recovery still names what was interrupted;
-        // without the stage the interruption would read as an unknown operation.
-        app.interruption_stage = app.active_operation_stage
-          ?? (interruptedRecovery ? 'recovery_started' : null);
+        // The application row never carries the restore's marker (rollback and
+        // recovery opens write only the target's), so an in-flight recovery
+        // leaves no application operation stage here. The phase above is what
+        // reports the interruption; inventing a stage would set a value no
+        // recovery terminal clears, and the drift collectors read a set
+        // application stage as a standing suppression.
+        app.interruption_stage = app.active_operation_stage;
         app.interruption_at = envelope.at;
         app.interruption_operation_id = app.active_operation_id;
         app.interruption_generation_id = app.active_generation_id;
