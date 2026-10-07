@@ -43,7 +43,6 @@ const DENSITY_DESCRIPTIONS: Record<Density, string> = {
 };
 
 const FLEET_TAB_LAYOUT_OPTIONS: { value: FleetTabLayout; label: string }[] = [
-    { value: 'grouped', label: 'Grouped' },
     { value: 'flat', label: 'Flat' },
     { value: 'compact', label: 'Compact' },
 ];
@@ -706,7 +705,7 @@ export function AppearanceSection({
             <SettingsSection title="Fleet" kicker="your account">
                 <SettingsField
                     label="Fleet tab layout"
-                    helper="Grouped sets the tabs under Observe and Operate on one strip and is the default. Flat is the single row of every tab. Compact keeps five tabs and moves the rest under More."
+                    helper="Flat is the default: every tab on one row, with the monitoring tabs and the tabs that change the fleet set apart by a separator. Compact keeps five tabs and moves the rest under More."
                 >
                     <SegmentedControl
                         value={fleetTabLayout}

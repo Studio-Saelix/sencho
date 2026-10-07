@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useRef, type ReactNode } from 'react';
+import { useEffect, useRef, type ReactNode } from 'react';
 import { Check, ChevronDown } from 'lucide-react';
 import { TabsList, TabsTrigger, TabsHighlight, TabsHighlightItem } from '@/components/ui/tabs';
 import { ScrollableTabRow } from '@/components/ui/ScrollableTabRow';
@@ -7,7 +7,7 @@ import { springs } from '@/lib/motion';
 import { cn } from '@/lib/utils';
 import type { FleetTab } from '@/lib/events';
 import type { FleetTabLayout } from '@/hooks/use-fleet-tab-layout';
-import { COMPACT_PRIMARY_TABS, flatOrder, type FleetTabItem } from './fleetTabs';
+import { COMPACT_PRIMARY_TABS, type FleetTabItem } from './fleetTabs';
 
 interface FleetTabStripProps {
   layout: FleetTabLayout;
@@ -16,9 +16,7 @@ interface FleetTabStripProps {
   onChange: (tab: FleetTab) => void;
 }
 
-const GROUP_LABEL = 'font-mono text-[9px] uppercase tracking-[0.22em] text-stat-subtitle/70 select-none';
 const LIST_CLASS = 'border-transparent bg-transparent';
-const SEPARATOR = <span aria-hidden className="self-center mx-1 h-4 w-px bg-border" />;
 
 function TabItem({ tab }: { tab: FleetTabItem }) {
   const Icon = tab.icon;
@@ -40,28 +38,11 @@ function Highlight({ children }: { children: ReactNode }) {
 }
 
 /**
- * The Fleet tab strip in one of three layouts. Every layout drives the same
+ * The Fleet tab strip in one of two layouts. Every layout drives the same
  * Radix tabs value, so deep links, URL sync and the tab content are identical;
  * only how the triggers are arranged differs.
  */
 export function FleetTabStrip({ layout, tabs, active, onChange }: FleetTabStripProps) {
-  if (layout === 'flat') {
-    const ordered = flatOrder(tabs);
-    const firstOperate = ordered.findIndex(t => t.group === 'operate' && t.value !== 'snapshots');
-    return (
-      <TabsList className={cn(LIST_CLASS, 'max-md:w-full max-md:overflow-x-auto max-md:[scrollbar-width:none]')}>
-        <Highlight>
-          {ordered.map((tab, i) => (
-            <Fragment key={tab.value}>
-              {i === firstOperate && SEPARATOR}
-              <TabItem tab={tab} />
-            </Fragment>
-          ))}
-        </Highlight>
-      </TabsList>
-    );
-  }
-
   if (layout === 'compact') {
     const visible = tabs.filter(t => COMPACT_PRIMARY_TABS.includes(t.value));
     const more = tabs.filter(t => !COMPACT_PRIMARY_TABS.includes(t.value));
@@ -110,11 +91,16 @@ export function FleetTabStrip({ layout, tabs, active, onChange }: FleetTabStripP
     );
   }
 
-  return <GroupedStrip tabs={tabs} active={active} />;
+  return <FlatStrip tabs={tabs} active={active} />;
 }
 
-/** Grouped layout. The active tab is kept in view, since a deep link can land on one the row has scrolled past. */
-function GroupedStrip({ tabs, active }: { tabs: readonly FleetTabItem[]; active: FleetTab }) {
+/**
+ * Flat layout: every tab on one row, the monitoring tabs, a vertical separator,
+ * then the tabs that change the fleet. The row scrolls sideways when the window
+ * is too narrow, and the active tab is kept in view, since a deep link can land
+ * on one the row has scrolled past.
+ */
+function FlatStrip({ tabs, active }: { tabs: readonly FleetTabItem[]; active: FleetTab }) {
   const ref = useRef<HTMLDivElement>(null);
   useEffect(() => {
     ref.current?.querySelector<HTMLElement>('[role="tab"][data-state="active"]')
@@ -127,12 +113,10 @@ function GroupedStrip({ tabs, active }: { tabs: readonly FleetTabItem[]; active:
       <ScrollableTabRow surface="card">
         <TabsList className={cn(LIST_CLASS, 'w-max items-center')}>
           <Highlight>
-            <span aria-hidden className={cn(GROUP_LABEL, 'mr-1.5 ml-1')}>Observe</span>
             {observe.map(tab => <TabItem key={tab.value} tab={tab} />)}
             {operate.length > 0 && (
               <>
                 <span aria-hidden className="self-center mx-2 h-4 w-px bg-border" />
-                <span aria-hidden className={cn(GROUP_LABEL, 'mr-1.5')}>Operate</span>
                 {operate.map(tab => <TabItem key={tab.value} tab={tab} />)}
               </>
             )}

@@ -21,39 +21,23 @@ function renderStrip(layout: FleetTabLayout, active: FleetTab = 'overview', tabs
 
 const tabNames = () => screen.getAllByRole('tab').map(t => t.textContent);
 
-describe('FleetTabStrip grouped', () => {
-  it('names the two groups and lists every tab in group order', () => {
-    renderStrip('grouped');
-    expect(screen.getByText('Observe')).toBeInTheDocument();
-    expect(screen.getByText('Operate')).toBeInTheDocument();
+describe('FleetTabStrip flat', () => {
+  it('is one row of every tab with no group labels, the monitoring tabs first', () => {
+    renderStrip('flat');
+    expect(screen.queryByText('Observe')).not.toBeInTheDocument();
+    expect(screen.queryByText('Operate')).not.toBeInTheDocument();
     expect(tabNames()).toEqual(['Overview', 'Readiness', 'Map', 'Docker Labels', 'Snapshots', 'Blueprints', 'Federation', 'Actions', 'Secrets']);
   });
 
-  it('switches tabs with one click, including an Operate tab', async () => {
-    const onChange = renderStrip('grouped');
+  it('switches tabs with one click, including a tab after the separator', async () => {
+    const onChange = renderStrip('flat');
     await userEvent.click(screen.getByRole('tab', { name: 'Federation' }));
     expect(onChange).toHaveBeenCalledWith('federation');
   });
 
-  it('drops the Operate label when no Operate tab is available', () => {
-    renderStrip('grouped', 'overview', ADMIN.filter(t => t.group === 'observe'));
-    expect(screen.getByText('Observe')).toBeInTheDocument();
-    expect(screen.queryByText('Operate')).not.toBeInTheDocument();
-  });
-});
-
-describe('FleetTabStrip flat', () => {
-  it('is the single row of every tab with no group labels, in the original order', () => {
-    renderStrip('flat');
-    expect(screen.queryByText('Observe')).not.toBeInTheDocument();
-    expect(screen.queryByText('Operate')).not.toBeInTheDocument();
-    expect(tabNames()).toEqual(['Overview', 'Snapshots', 'Readiness', 'Map', 'Docker Labels', 'Blueprints', 'Federation', 'Actions', 'Secrets']);
-  });
-
-  it('switches tabs', async () => {
-    const onChange = renderStrip('flat');
-    await userEvent.click(screen.getByRole('tab', { name: 'Readiness' }));
-    expect(onChange).toHaveBeenCalledWith('readiness');
+  it('draws no separator when only the monitoring tabs are available', () => {
+    renderStrip('flat', 'overview', ADMIN.filter(t => t.group === 'observe'));
+    expect(document.querySelectorAll('span.w-px')).toHaveLength(0);
   });
 });
 
@@ -84,8 +68,8 @@ describe('FleetTabStrip compact', () => {
 });
 
 describe('FleetTabStrip keyboard', () => {
-  it('moves through the grouped tabs with the arrow keys, across the Observe and Operate groups', async () => {
-    renderStrip('grouped');
+  it('moves through the tabs with the arrow keys, across the separator', async () => {
+    renderStrip('flat');
     screen.getByRole('tab', { name: 'Overview' }).focus();
     await userEvent.keyboard('{ArrowRight}');
     expect(screen.getByRole('tab', { name: 'Readiness' })).toHaveFocus();
@@ -98,13 +82,6 @@ describe('FleetTabStrip keyboard', () => {
     expect(screen.getByRole('tab', { name: 'Overview' })).toHaveFocus();
   });
 
-  it('keeps the flat separator out of the focus order', async () => {
-    renderStrip('flat');
-    screen.getByRole('tab', { name: 'Docker Labels' }).focus();
-    await userEvent.keyboard('{ArrowRight}');
-    expect(screen.getByRole('tab', { name: 'Blueprints' })).toHaveFocus();
-  });
-
   it('keeps the compact More button out of the tab list, and still has a tab stop when the active tab is hidden', () => {
     renderStrip('compact', 'secrets');
     const stops = screen.getAllByRole('tab').filter(t => t.getAttribute('tabindex') === '0');
@@ -113,20 +90,21 @@ describe('FleetTabStrip keyboard', () => {
   });
 });
 
-describe('FleetTabStrip flat separator', () => {
+describe('FleetTabStrip separator', () => {
   const separators = () => document.querySelectorAll('span.w-px');
 
-  it('puts one separator between the monitoring tabs and the fleet-wide tabs', () => {
+  it('puts one separator between the last monitoring tab and the first fleet-changing tab', () => {
     renderStrip('flat');
     expect(separators()).toHaveLength(1);
-    expect(separators()[0].nextElementSibling).toHaveTextContent('Blueprints');
+    expect(separators()[0].previousElementSibling).toHaveTextContent('Docker Labels');
+    expect(separators()[0].nextElementSibling).toHaveTextContent('Snapshots');
   });
 
-  it('still lands before the first fleet-wide tab when the admin and label tabs are absent', () => {
+  it('still lands between the groups when the admin and label tabs are absent', () => {
     renderStrip('flat', 'overview', buildFleetTabs({ isAdmin: false, containerLabels: false, routing: false }));
     expect(separators()).toHaveLength(1);
-    expect(separators()[0].nextElementSibling).toHaveTextContent('Blueprints');
     expect(separators()[0].previousElementSibling).toHaveTextContent('Map');
+    expect(separators()[0].nextElementSibling).toHaveTextContent('Blueprints');
   });
 });
 
@@ -137,7 +115,7 @@ describe('FleetTabStrip layout changes', () => {
     const onChange = vi.fn();
     const { rerender } = render(
       <Tabs value="federation" onValueChange={onChange}>
-        <FleetTabStrip layout="grouped" tabs={ADMIN} active="federation" onChange={onChange} />
+        <FleetTabStrip layout="flat" tabs={ADMIN} active="federation" onChange={onChange} />
       </Tabs>,
     );
     expect(screen.getByRole('tab', { name: 'Federation' })).toHaveAttribute('aria-selected', 'true');
@@ -155,19 +133,19 @@ describe('FleetTabStrip layout changes', () => {
     expect(screen.getByRole('tab', { name: 'Federation' })).toHaveAttribute('aria-selected', 'true');
   });
 
-  it('scrolls the active grouped tab into view when it changes', () => {
+  it('scrolls the active tab into view when it changes', () => {
     const scrollIntoView = vi.fn();
     Element.prototype.scrollIntoView = scrollIntoView;
     const onChange = vi.fn();
     const { rerender } = render(
       <Tabs value="overview" onValueChange={onChange}>
-        <FleetTabStrip layout="grouped" tabs={ADMIN} active="overview" onChange={onChange} />
+        <FleetTabStrip layout="flat" tabs={ADMIN} active="overview" onChange={onChange} />
       </Tabs>,
     );
     scrollIntoView.mockClear();
     rerender(
       <Tabs value="secrets" onValueChange={onChange}>
-        <FleetTabStrip layout="grouped" tabs={ADMIN} active="secrets" onChange={onChange} />
+        <FleetTabStrip layout="flat" tabs={ADMIN} active="secrets" onChange={onChange} />
       </Tabs>,
     );
     expect(scrollIntoView).toHaveBeenCalledWith({ inline: 'nearest', block: 'nearest' });

@@ -696,7 +696,7 @@ describe('user-preferences validation', () => {
       .send({ absent: true, ...doc });
 
     // Each write starts from an absent row, so the absent precondition holds.
-    for (const layout of ['compact', 'flat', 'grouped']) {
+    for (const layout of ['compact', 'flat']) {
       clearAppearanceRow();
       expect((await put({ ...APPEARANCE_DOC, fleetTabLayout: layout })).status).toBe(200);
       const all = await request(app).get('/api/user-preferences')
@@ -704,6 +704,8 @@ describe('user-preferences validation', () => {
       expect(((all.body.preferences.appearance?.data ?? {}) as Record<string, unknown>).fleetTabLayout).toBe(layout);
     }
     expect((await put({ ...APPEARANCE_DOC, fleetTabLayout: 'tabs' })).status).toBe(400);
+    // The retired grouped layout is no longer a value.
+    expect((await put({ ...APPEARANCE_DOC, fleetTabLayout: 'grouped' })).status).toBe(400);
     expect((await put({ ...APPEARANCE_DOC, fleetTabLayout: 3 })).status).toBe(400);
   });
 
@@ -729,7 +731,7 @@ describe('user-preferences validation', () => {
     expect(put.body.data.sidebarWidth).toBe(256);
     expect(put.body.data.anatomyMode).toBe('fixed');
     expect(put.body.data.anatomyWidth).toBe(640);
-    expect(put.body.data.fleetTabLayout).toBe('grouped');
+    expect(put.body.data.fleetTabLayout).toBe('flat');
   });
 
   it('normalizes a legacy document on migrate and a repair PUT keeps the defaults', async () => {

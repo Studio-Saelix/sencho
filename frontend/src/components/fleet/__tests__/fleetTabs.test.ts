@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { buildFleetTabs, flatOrder, COMPACT_PRIMARY_TABS } from '../fleetTabs';
+import { buildFleetTabs, COMPACT_PRIMARY_TABS } from '../fleetTabs';
 
 const ALL = { isAdmin: true, containerLabels: true, routing: true };
 
@@ -18,13 +18,6 @@ describe('buildFleetTabs', () => {
   it('keeps the existing tab values and labels so deep links and the docs still match', () => {
     const labels = Object.fromEntries(buildFleetTabs(ALL).map(t => [t.value, t.label]));
     expect(labels).toMatchObject({ overview: 'Overview', deployments: 'Blueprints', dependencies: 'Map', 'container-labels': 'Docker Labels' });
-  });
-
-  it('orders the flat layout the way the strip read before the groups', () => {
-    expect(flatOrder(buildFleetTabs(ALL)).map(t => t.value)).toEqual([
-      'overview', 'snapshots', 'readiness', 'dependencies', 'container-labels',
-      'deployments', 'routing', 'federation', 'actions', 'secrets',
-    ]);
   });
 
   it('keeps five tabs on the compact strip, all of them always available', () => {

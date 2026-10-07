@@ -19,15 +19,10 @@ interface FleetTabAvailability {
 /** Tabs that stay on the strip in the compact layout; the rest sit under More. */
 export const COMPACT_PRIMARY_TABS: readonly FleetTab[] = ['overview', 'readiness', 'dependencies', 'deployments', 'actions'];
 
-/** The flat layout's one separator sits between the last Observe tab and the first Operate tab. */
-const FLAT_ORDER: readonly FleetTab[] = [
-  'overview', 'snapshots', 'readiness', 'dependencies', 'container-labels',
-  'deployments', 'routing', 'federation', 'actions', 'secrets',
-];
-
 /**
- * The tabs this session can see, grouped by the kind of work. Observe reads the
- * fleet; Operate changes it or holds its fleet-wide controls.
+ * The tabs this session can see, in two groups by the kind of work. Observe reads the
+ * fleet; Operate changes it or holds its fleet-wide controls. The strip sets
+ * them apart with a separator.
  */
 export function buildFleetTabs({ isAdmin, containerLabels, routing }: FleetTabAvailability): FleetTabItem[] {
   const all: (FleetTabItem & { show: boolean })[] = [
@@ -43,9 +38,4 @@ export function buildFleetTabs({ isAdmin, containerLabels, routing }: FleetTabAv
     { value: 'secrets', label: 'Secrets', icon: KeyRound, group: 'operate', show: isAdmin },
   ];
   return all.filter(t => t.show).map(t => ({ value: t.value, label: t.label, icon: t.icon, group: t.group }));
-}
-
-/** The tabs in the flat layout's order (the strip before the groups existed). */
-export function flatOrder(tabs: readonly FleetTabItem[]): FleetTabItem[] {
-  return FLAT_ORDER.flatMap(value => tabs.filter(t => t.value === value));
 }

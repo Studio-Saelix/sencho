@@ -152,7 +152,7 @@ describe('useUserPreferencesSync: identity guards', () => {
     );
     await vi.waitFor(() => expect(migrateCall).toBeDefined());
     const body = JSON.parse(((migrateCall?.[1] as RequestInit).body) as string);
-    expect(body).toMatchObject({ theme: 'dim', accent: 'cyan', density: 'comfortable', fleetTabLayout: 'grouped' });
+    expect(body).toMatchObject({ theme: 'dim', accent: 'cyan', density: 'comfortable', fleetTabLayout: 'flat' });
   });
 
   it('a failed write of the old account cannot be retried after the identity transition', async () => {

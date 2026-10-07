@@ -12,21 +12,22 @@ describe('useFleetTabLayout', () => {
     beforeEach(() => localStorage.clear());
     afterEach(() => localStorage.clear());
 
-    it('defaults to grouped when nothing is stored', () => {
+    it('defaults to flat when nothing is stored', () => {
         const { result } = renderHook(() => useFleetTabLayout());
-        expect(result.current[0]).toBe('grouped');
-        expect(DEFAULT_FLEET_TAB_LAYOUT).toBe('grouped');
+        expect(result.current[0]).toBe('flat');
+        expect(DEFAULT_FLEET_TAB_LAYOUT).toBe('flat');
     });
 
-    it.each(['grouped', 'flat', 'compact'] as const)('reads a stored %s layout', (layout) => {
+    it.each(['flat', 'compact'] as const)('reads a stored %s layout', (layout) => {
         localStorage.setItem(FLEET_TAB_LAYOUT_KEY, layout);
         expect(renderHook(() => useFleetTabLayout()).result.current[0]).toBe(layout);
     });
 
-    it('falls back to grouped on an unrecognised stored value', () => {
+    it('falls back to flat on an unrecognised stored value, including the retired grouped layout', () => {
         localStorage.setItem(FLEET_TAB_LAYOUT_KEY, 'tabs');
-        expect(renderHook(() => useFleetTabLayout()).result.current[0]).toBe('grouped');
+        expect(renderHook(() => useFleetTabLayout()).result.current[0]).toBe('flat');
         expect(isFleetTabLayout('tabs')).toBe(false);
+        expect(isFleetTabLayout('grouped')).toBe(false);
     });
 
     it('the setter stores the value, updates state, and attributes the write to its field', () => {
@@ -44,10 +45,10 @@ describe('useFleetTabLayout', () => {
         const listener = vi.fn();
         const unsubscribe = subscribeToPreferenceWrites(listener);
         const { result } = renderHook(() => useFleetTabLayout());
-        act(() => applyFleetTabLayoutValue('flat'));
+        act(() => applyFleetTabLayoutValue('compact'));
         unsubscribe();
-        expect(result.current[0]).toBe('flat');
-        expect(currentFleetTabLayout()).toBe('flat');
+        expect(result.current[0]).toBe('compact');
+        expect(currentFleetTabLayout()).toBe('compact');
         expect(listener).not.toHaveBeenCalled();
     });
 
@@ -60,12 +61,12 @@ describe('useFleetTabLayout', () => {
 
     it('follows another tab through the storage event, and ignores unrelated keys', () => {
         const { result } = renderHook(() => useFleetTabLayout());
-        act(() => { window.dispatchEvent(new StorageEvent('storage', { key: FLEET_TAB_LAYOUT_KEY, newValue: 'flat' })); });
-        expect(result.current[0]).toBe('flat');
-        act(() => { window.dispatchEvent(new StorageEvent('storage', { key: 'other', newValue: 'compact' })); });
-        expect(result.current[0]).toBe('flat');
+        act(() => { window.dispatchEvent(new StorageEvent('storage', { key: FLEET_TAB_LAYOUT_KEY, newValue: 'compact' })); });
+        expect(result.current[0]).toBe('compact');
+        act(() => { window.dispatchEvent(new StorageEvent('storage', { key: 'other', newValue: 'flat' })); });
+        expect(result.current[0]).toBe('compact');
         act(() => { window.dispatchEvent(new StorageEvent('storage', { key: FLEET_TAB_LAYOUT_KEY, newValue: null })); });
-        expect(result.current[0]).toBe('grouped');
+        expect(result.current[0]).toBe('flat');
     });
 
     it('is cleared with the rest of the preference cache when another account claims the browser', () => {
@@ -74,7 +75,7 @@ describe('useFleetTabLayout', () => {
 
     it('survives localStorage being unavailable', () => {
         const spy = vi.spyOn(Storage.prototype, 'getItem').mockImplementation(() => { throw new Error('blocked'); });
-        expect(renderHook(() => useFleetTabLayout()).result.current[0]).toBe('grouped');
+        expect(renderHook(() => useFleetTabLayout()).result.current[0]).toBe('flat');
         spy.mockRestore();
     });
 });

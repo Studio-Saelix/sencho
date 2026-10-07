@@ -2,14 +2,14 @@ import { useCallback, useEffect, useState } from 'react';
 import { SENCHO_SETTINGS_CHANGED } from '@/lib/events';
 import { notifyPreferenceWrite } from '@/lib/preferences/preferenceEvents';
 
-/** How the Fleet tab strip is laid out. `grouped` is the default. */
-export type FleetTabLayout = 'grouped' | 'flat' | 'compact';
+/** How the Fleet tab strip is laid out. `flat` (every tab on one row) is the default. */
+export type FleetTabLayout = 'flat' | 'compact';
 
 export const FLEET_TAB_LAYOUT_KEY = 'sencho.fleet.tab-layout';
-export const DEFAULT_FLEET_TAB_LAYOUT: FleetTabLayout = 'grouped';
+export const DEFAULT_FLEET_TAB_LAYOUT: FleetTabLayout = 'flat';
 
 export function isFleetTabLayout(value: unknown): value is FleetTabLayout {
-    return value === 'grouped' || value === 'flat' || value === 'compact';
+    return value === 'flat' || value === 'compact';
 }
 
 /** Read the current layout without subscribing (sync layer use). */

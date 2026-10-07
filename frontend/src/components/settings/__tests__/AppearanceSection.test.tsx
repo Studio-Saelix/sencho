@@ -453,12 +453,12 @@ describe('AppearanceSection Fleet tab layout', () => {
         resetTheme();
     });
 
-    it('defaults to Grouped and stores a different choice, attributing the write to its own field', () => {
+    it('defaults to Flat and stores a different choice, attributing the write to its own field', () => {
         const writes: unknown[] = [];
         const unsubscribe = subscribeToPreferenceWrites((domain, fields) => writes.push([domain, fields]));
         render(<AppearanceSection onResetAppearance={() => {}} onResetNavigation={() => {}} />);
         const group = screen.getByRole('radiogroup', { name: 'Fleet tab layout' });
-        expect(within(group).getByRole('radio', { name: 'Grouped' }).getAttribute('aria-checked')).toBe('true');
+        expect(within(group).getByRole('radio', { name: 'Flat' }).getAttribute('aria-checked')).toBe('true');
 
         fireEvent.click(within(group).getByRole('radio', { name: 'Compact' }));
         unsubscribe();
@@ -468,9 +468,9 @@ describe('AppearanceSection Fleet tab layout', () => {
         expect(writes).toEqual([['appearance', ['fleetTabLayout']]]);
     });
 
-    it('offers the three layouts', () => {
+    it('offers the two layouts', () => {
         render(<AppearanceSection onResetAppearance={() => {}} onResetNavigation={() => {}} />);
         const group = screen.getByRole('radiogroup', { name: 'Fleet tab layout' });
-        expect(within(group).getAllByRole('radio').map(r => r.textContent)).toEqual(['Grouped', 'Flat', 'Compact']);
+        expect(within(group).getAllByRole('radio').map(r => r.textContent)).toEqual(['Flat', 'Compact']);
     });
 });
