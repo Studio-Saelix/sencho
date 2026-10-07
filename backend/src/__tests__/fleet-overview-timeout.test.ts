@@ -105,6 +105,15 @@ function mockTargets(targets: Record<number, ProxyTarget | null>): void {
   });
 }
 
+/** The origin of a request URL, or null when it is not a URL. Compared whole, never by prefix. */
+function originOf(url: string): string | null {
+  try {
+    return new URL(url).origin;
+  } catch {
+    return null;
+  }
+}
+
 function jsonResponse(body: unknown): Response {
   return new Response(JSON.stringify(body), {
     status: 200,
@@ -405,7 +414,7 @@ describe('node-data fan-outs share the per-remote read budget', () => {
         [hungId]: { apiUrl: PROXY_BASE, apiToken: 'test-token', trustedLoopback: false },
         [healthyId]: { apiUrl: HEALTHY_BASE, apiToken: 'test-token', trustedLoopback: false },
       });
-      const fetchSpy = mockFetch((url, init) => (url.startsWith(HEALTHY_BASE) ? jsonResponse(graph) : hungUntilAbort(init)));
+      const fetchSpy = mockFetch((url, init) => (originOf(url) === HEALTHY_BASE ? jsonResponse(graph) : hungUntilAbort(init)));
 
       const started = Date.now();
       const res = await getMap(`?nodeId=${healthyId}`);
@@ -417,7 +426,7 @@ describe('node-data fan-outs share the per-remote read budget', () => {
       // Only the asked-for node was read.
       const requested = fetchSpy.mock.calls.map((call: unknown[]) => String(call[0]));
       expect(requested.length).toBeGreaterThan(0);
-      expect(requested.every((u: string) => u.startsWith(HEALTHY_BASE))).toBe(true);
+      expect(requested.every((u: string) => originOf(u) === HEALTHY_BASE)).toBe(true);
     });
 
     it('reports a failing node as that node\'s error, not a failed request', async () => {
