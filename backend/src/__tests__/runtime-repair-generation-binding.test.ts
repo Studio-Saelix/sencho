@@ -398,6 +398,56 @@ describe('runtime repair reads the target\'s acknowledged generation', () => {
     expect(deploySpy).not.toHaveBeenCalled();
   });
 
+  it('holds while a retry is in flight over a refused target', async () => {
+    // A retry over a refused target sets `restoring` and leaves the old
+    // pre_mutation claim on the row. Repair must not read that claim and race
+    // the restore that is moving files.
+    const { bp, node } = seedBlueprint();
+    const fixture = await seedGitManagedMidRollout(bp, node);
+    const store = GitOpsStore.getInstance();
+    const target = store.getTarget(fixture.appId, node.id)!;
+    store.upsertTarget({
+      ...target,
+      recovery_phase: 'restoring',
+      failure_stage: 'recovery',
+      failure_class: 'pre_mutation',
+      recovery_failure_class: 'pre_mutation',
+    });
+    const deploySpy = vi
+      .spyOn(BlueprintService.getInstance(), 'deployAuthorizedMaterialization')
+      .mockResolvedValue({ status: 'active' });
+
+    const outcome = await BlueprintService.getInstance().enforceDigestRepair(bp, node);
+
+    expect(outcome.status).toBe('repair_held');
+    expect(outcome.holdReason).toBe('recovery_bound');
+    expect(deploySpy).not.toHaveBeenCalled();
+  });
+
+  it('proceeds when a deploy failure replaced a refused recovery', async () => {
+    // A refusal that moved nothing is retired by the later failure, so the row
+    // a real writer produces carries no recovery phase at all.
+    const { bp, node } = seedBlueprint();
+    const fixture = await seedGitManagedMidRollout(bp, node);
+    const store = GitOpsStore.getInstance();
+    const target = store.getTarget(fixture.appId, node.id)!;
+    store.upsertTarget({
+      ...target,
+      recovery_phase: null,
+      recovery_ref: null,
+      failure_stage: 'blueprint_deploy',
+      failure_class: 'deploy_failed',
+    });
+    const deploySpy = vi
+      .spyOn(BlueprintService.getInstance(), 'deployAuthorizedMaterialization')
+      .mockResolvedValue({ status: 'active' });
+
+    const outcome = await BlueprintService.getInstance().enforceDigestRepair(bp, node);
+
+    expect(outcome.status).toBe('active');
+    expect(deploySpy).toHaveBeenCalledTimes(1);
+  });
+
   it('holds after a deploy failure lands beside a restore that is still moving', async () => {
     // Built through the real transitions rather than by writing the row: a
     // refusal, a retry that opens over it, then a deploy failure that must not

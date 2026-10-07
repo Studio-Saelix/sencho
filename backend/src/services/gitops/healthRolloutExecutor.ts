@@ -125,7 +125,14 @@ export async function executeHealthRolloutDecision(args: {
         if (targetRestoreInFlight(target)) {
           // A rollback already owns this target's restore. Opening a second one
           // would race it while it is still writing files; that operation's own
-          // terminal settles the application, so nothing is held here.
+          // terminal settles the application, so nothing is held here. Logged
+          // because the decision is otherwise invisible: the verdict is
+          // consumed and the queue moves on with nothing said.
+          console.error(
+            '[GitOps] Skipping the health rollback for %s on node %s: a rollback is already in progress.',
+            sanitizeForLog(args.applicationId),
+            sanitizeForLog(String(args.nodeId)),
+          );
           return { action: 'none', reason: 'rollback_in_progress' };
         }
         // The target's own captured pre-rollout generation, never the LKG. The
@@ -173,29 +180,34 @@ export async function executeHealthRolloutDecision(args: {
             detail: error instanceof Error ? error.message : String(error),
           };
         }
-        // Held BEFORE the restore goes out, not after it finishes. A restore is
-        // external and slow, and until it returns the rollout is still authorized:
-        // an operator dispatch, or an auto-accept that mints a fresh generation,
-        // could deploy the next target, or this one, while the restore is in
-        // flight. The fence is the target's; this is what stops the queue.
-        holdRollout(args.applicationId, decision, envelope);
-
-        // What the restored generation was actually captured with, read off that
-        // generation rather than passed as null. A restore that clears the source
-        // acceptance it was bound to would push source-acceptance state, which a
-        // health outcome has no authority to do.
-        const capturedArtifactSetId = store.newestArtifactSetIdForGeneration(restoreGenerationId);
-        const capturedSourceAcceptanceRef = store.newestSourceAcceptanceId(
-          args.applicationId, restoreGenerationId,
-        );
-
-        // The restore and the record of it are one unit. Either both happen or the
-        // failure is recorded: an error thrown between them used to leave the
-        // target stuck in `restoring` with nothing saying so, and the rollout
-        // unheld, so the fleet carried on as if the policy had not stopped it.
+        // The restore and the record of it are one unit, and everything after
+        // the open lives inside this try. Either the restore happens and is
+        // recorded, or a terminal failure is recorded: an error thrown between
+        // the open and the record used to leave the target stuck in `restoring`
+        // with nothing saying so, and with rollbacks now serialized per target
+        // that state is permanent in-process, because every later rollback is
+        // refused until it is cleared. That includes the hold and the two reads
+        // below, which ran outside this block before.
         let recordAttempted = false;
         let recordFailureClass: 'pre_mutation' | 'partial' = 'partial';
         try {
+          // Held BEFORE the restore goes out, not after it finishes. A restore
+          // is external and slow, and until it returns the rollout is still
+          // authorized: an operator dispatch, or an auto-accept that mints a
+          // fresh generation, could deploy the next target, or this one, while
+          // the restore is in flight. The fence is the target's; this is what
+          // stops the queue.
+          holdRollout(args.applicationId, decision, envelope);
+
+          // What the restored generation was actually captured with, read off
+          // that generation rather than passed as null. A restore that clears
+          // the source acceptance it was bound to would push source-acceptance
+          // state, which a health outcome has no authority to do.
+          const capturedArtifactSetId = store.newestArtifactSetIdForGeneration(restoreGenerationId);
+          const capturedSourceAcceptanceRef = store.newestSourceAcceptanceId(
+            args.applicationId, restoreGenerationId,
+          );
+
           const outcome = await restoreTargetToGeneration({
             app: application,
             stackName,

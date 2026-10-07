@@ -1957,6 +1957,63 @@ describe('retry, stop, and rollback', () => {
     expect(restore).not.toHaveBeenCalled();
   });
 
+  it('records a terminal when the hold itself throws after the open', async () => {
+    const fixture = await gatedAttempt('rollback');
+    const store = GitOpsStore.getInstance();
+    markRecoveryPoint(fixture, 'rec-pre-rollout', genId(fixture, 'pre-rollout'));
+    const { GitOpsTransitions } = await import('../services/gitops/transitions');
+    // The open succeeds, then the hold throws before the restore goes out.
+    vi.spyOn(GitOpsTransitions.getInstance(), 'rolloutPaused').mockImplementationOnce(() => {
+      throw new Error('db write failed');
+    });
+    const restore = await mockRestore();
+
+    const outcome = await decide(fixture, 'failed', spyExecutor(), 'rollback');
+
+    // The target must not be left restoring: with rollbacks serialized per
+    // target, that state would refuse every later rollback in-process.
+    expect(outcome.action).toBe('rollback_partial_failed');
+    expect(restore).not.toHaveBeenCalled();
+    const target = store.getTarget(fixture.applicationId, fixture.nodeId!)!;
+    expect(target.recovery_phase).toBe('failed');
+    expect(target.active_operation_stage).toBeNull();
+    expect(store.getApplication(fixture.applicationId)?.recovery_phase).toBe('failed');
+
+    // A later manual rollback is accepted rather than refused.
+    expect(() => GitOpsTransitions.getInstance().rollbackInProgress({
+      applicationId: fixture.applicationId,
+      nodeId: fixture.nodeId!,
+      recoveryRef: 'rb-after-hold-throw',
+      recoveryGenerationId: genId(fixture, 'pre-rollout'),
+      envelope: { operationId: 'op-after-hold-throw', actor: 'tester', trigger: 'manual', at: Date.now() },
+    })).not.toThrow();
+  });
+
+  it('settles a health rollback whose refused-target record fails once', async () => {
+    const fixture = await gatedAttempt('rollback');
+    const store = GitOpsStore.getInstance();
+    markRecoveryPoint(fixture, 'rec-pre-rollout', genId(fixture, 'pre-rollout'));
+    await mockRestore({ ok: false, code: 'NO_RECOVERY_POINT', error: 'This stack has no recovery point to restore.' });
+    const { GitOpsTransitions } = await import('../services/gitops/transitions');
+    vi.spyOn(GitOpsTransitions.getInstance(), 'rollbackPartialFailed')
+      .mockImplementationOnce(() => {
+        throw new Error('db write failed');
+      });
+
+    const outcome = await decide(fixture, 'failed', spyExecutor(), 'rollback');
+
+    // The refusal was proven; only its record failed. The executor settles it
+    // like the manual route instead of holding for a restore that never ran.
+    expect(outcome.action).toBe('rollback_partial_failed');
+    expect(outcome.reason).toBe('rollback_unrecorded');
+    const app = store.getApplication(fixture.applicationId)!;
+    expect(app.recovery_phase).toBeNull();
+    const target = store.getTarget(fixture.applicationId, fixture.nodeId!)!;
+    expect(target.recovery_phase).toBe('failed');
+    expect(target.failure_class).toBe('pre_mutation');
+    expect(target.active_operation_stage).toBeNull();
+  });
+
   it('settles a health rollback whose possibly-moved record fails once', async () => {
     const fixture = await gatedAttempt('rollback');
     const store = GitOpsStore.getInstance();

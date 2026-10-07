@@ -3411,12 +3411,12 @@ export class GitOpsTransitions {
    * update recovery even when it restores the same kind of state.
    *
    * The active-operation marker is what makes a crashed open recoverable: boot
-   * selects applications by an active stage, then `interruptActiveOperations`
-   * reclassifies any target still claiming `restoring`. Without it a crashed
-   * open would leave the target and the application in `restoring` for ever.
-   * It is only written when the target has no operation of its own, so a
-   * rollback that overlaps an in-flight deploy does not steal that deploy's
-   * acknowledgement identity.
+   * selects applications by an active stage or by an in-flight recovery phase,
+   * then `interruptActiveOperations` reclassifies any target still claiming
+   * `restoring`. Without either a crashed open would leave the target and the
+   * application in `restoring` for ever. It is only written when the target has
+   * no operation of its own, so a rollback that overlaps an in-flight deploy
+   * does not steal that deploy's acknowledgement identity.
    */
   rollbackInProgress(args: {
     applicationId: string;
@@ -4193,7 +4193,10 @@ export class GitOpsTransitions {
         app.failure_at = envelope.at;
       }
       if (app.active_operation_stage || interruptedRecovery) {
-        app.interruption_stage = app.active_operation_stage;
+        // A marker-less in-flight recovery still names what was interrupted;
+        // without the stage the interruption would read as an unknown operation.
+        app.interruption_stage = app.active_operation_stage
+          ?? (interruptedRecovery ? 'recovery_started' : null);
         app.interruption_at = envelope.at;
         app.interruption_operation_id = app.active_operation_id;
         app.interruption_generation_id = app.active_generation_id;
@@ -4212,9 +4215,10 @@ export class GitOpsTransitions {
         const targetRecoveryInterrupted = targetRestoreInFlight(target);
         if (!target.active_operation_stage && !targetRecoveryInterrupted) continue;
         if (targetRecoveryInterrupted) {
-          // Read the claim before the shared slot is overwritten: a legacy row
-          // whose class still lives there must be classified from its own
-          // value, not from the `interrupted` this branch is about to write.
+          // Read the claim's own class and time before this branch rewrites
+          // them: a restore that was superseded by a newer attempt may already
+          // carry a class that proves movement, and that proof outranks this
+          // attempt's unknown outcome.
           const priorClaim = recoveryFailureClaimClass(target);
           target.recovery_phase = 'failed';
           target.failure_stage = 'recovery';
@@ -4233,7 +4237,9 @@ export class GitOpsTransitions {
             target.recovery_failure_at = envelope.at;
           }
         }
-        target.interruption_stage = target.active_operation_stage;
+        // A marker-less in-flight restore still names what was interrupted.
+        target.interruption_stage = target.active_operation_stage
+          ?? (targetRecoveryInterrupted ? 'recovery_started' : null);
         target.interruption_at = envelope.at;
         target.interruption_operation_id = target.active_operation_id;
         target.interruption_generation_id = target.active_generation_id;

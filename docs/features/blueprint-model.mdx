@@ -37,7 +37,7 @@ The marker is the trust root. If a directory by the blueprint's name already exi
 
 Statelessness vs statefulness is decided at author time by parsing the compose file. Stateless blueprints (no persistent volumes, or only `tmpfs` mounts) deploy and evict freely. Stateful blueprints (named volumes or bind mounts) get explicit operator-confirmation prompts on the first deploy to a fresh node and on eviction from any node. Blueprints with `external: true` volumes are classified as **unknown** and treated as stateful for safety.
 
-Drift detection runs on every tick for every Active deployment regardless of policy. The policy only governs what Sencho does next: surface the drift silently, notify, or auto-redeploy.
+Drift detection runs on every tick for every Active deployment regardless of policy. The policy only governs what Sencho does next: surface the drift silently, notify, or auto-redeploy. For a Git-managed Blueprint, drift detection compares the running artifacts rather than the Direct manifest cache: its content authority is the accepted generation, so the manifest-cache comparison is skipped for that mode instead of reporting a false commit drift.
 
 ## Key capabilities
 
@@ -260,6 +260,18 @@ A Git-managed Blueprint takes each authority step as its own action. The GitOps 
 - **Review and approve placement** opens the rollout preview, the same reviewed plan the Inline flow shows: every node to place or remove, with its reachability. Confirming records the placement approval and freezes that blast for the current intent, so a later edit or roster change requires a fresh review. The button appears once source is accepted and the current candidate has no placement approval.
 - **Authorize rollout** evaluates registry preflight, records the rollout authorization, and starts the sequential rollout across the approved targets. It appears while the rollout is not authorized or while the recorded authorization was granted against earlier inputs. Authorization needs resolved executable artifact evidence for the accepted generation, which the artifact card reports: while that evidence is unresolved or unavailable, the authorization is refused with the artifact identity as the reason, and a blocked registry preflight refuses it with the registry reason. When a target cannot start, the authorization is recorded and the surface reports what stopped the rollout.
 
+### What a new commit does
+
+A Git-managed Blueprint keeps tracking its source. When the source fetches a newer commit, that commit becomes a new candidate generation and the authority chain runs again for it:
+
+- **Accept source** takes the new generation. Accepting it materializes the generation and attempts to resolve its executable artifact identity; if resolution cannot complete, the reconciler retries it before the next authorization. Under **Authorizes without an operator** the system starts the rollout from the accepted generation, so accepting is the whole operator step.
+- **Placement stays approved.** A content change does not move the target set, so the recorded placement approval still applies. A selector or roster change is what requires a fresh review.
+- **Authorize rollout** records the authorization for the new generation and starts the sequential rollout across the approved targets. Under **Authorizes without an operator** the system attempts authorization after acceptance and keeps trying: the reconciler retries a preparation whose artifact identity is not ready, and re-drives a handoff that was skipped (a slow preparation, a disabled Blueprint) or transiently refused. An authorization the operator withdrew waits for a person to authorize again. A blocked registry preflight is shown on the rollout and is re-checked when authorization runs again.
+
+An authorized dispatch that is refused for a durable reason is held with the reason instead of leaving the rollout reading as queued; **Resume rollout** answers it, and a resume whose dispatch is refused again records the new reason. A refusal that says another operation is already advancing, or that a pause is already on record, is not held, and the reconciler re-drives the handoff on a later pass, so the rollout does not wait for a restart. A health-gated rollout holds transient refusals too, because its dispatch is the only thing that brings the next target; that is a dispatch hold, so a new commit clears it. A health-policy hold (a stop, pause, or rollback the policy decided) is not cleared by a new commit; like an operator pause, it waits for you. An unfinished rollback also stops a new automatic rollout, and holds it with that reason: finish the rollback, then resume.
+
+A generation whose approved compose the artifact resolver cannot model is refused rather than resolved from a guess. That covers an interpolated image reference, `profiles`, `extends`, `include`, and YAML merge keys. The reason is recorded on the Blueprint and shown with its evidence, and that generation waits for a later commit whose compose the resolver can read.
+
 ### Who decides each step
 
 Each of the three steps answers the same question at a different point, so each has its own setting. They are independent: one does not imply or satisfy another, and changing one leaves the other two alone.
@@ -296,7 +308,7 @@ The **Apply now** flow stays Inline-only. For a Git-managed Blueprint the rollou
 A live rollout also offers lifecycle controls on the same GitOps section, on the **Rollout controls** row:
 
 - **Pause rollout** stops the rollout from advancing and asks for a reason. Nodes keep running what they already deployed, and a paused rollout never reads as converged.
-- **Resume rollout** clears the pause and continues the sequential rollout when it is still authorized. If the authorization is no longer live, the surface says so instead of starting anything.
+- **Resume rollout** clears the pause and continues the sequential rollout when it is still authorized. If the authorization is no longer live, the surface says so instead of starting anything. If the dispatch is refused again, the rollout is held again with the new reason rather than left queued without one.
 - **Replan placement** re-derives the Blueprint's target nodes and opens a fresh placement review, which withdraws the existing placement approval and rollout authorization. It appears in the overflow menu and refuses when the current placement already matches the Blueprint, so a review that is still accurate is not invalidated for nothing.
 - **Supersede rollout** withdraws the rollout authorization and marks that rollout generation superseded. Nodes that already received it keep running it; the rollout reads as superseded until you authorize a new one.
 
@@ -306,7 +318,7 @@ Rollout authorization needs resolved executable artifact evidence for the accept
 
 Every Git-managed rollout deploy captures the node's previous project as a recovery generation before it applies anything, which is what a later rollback restores from. **Roll back rollout** lists the application's earlier generations, newest first, and asks for the scope: one target, the targets recorded as failed, unreachable, or stale, or every changed target in the rollout. A target already running the selected generation is skipped.
 
-Each node in the scope must hold a recovery generation that names the selected application generation. A node keeps the generation captured immediately before its latest rollout, so an older selection has no recovery generation to restore from and is reported as a failed target; the rollout then reads as a partially failed rollback rather than a completion. A target refused before the restore changes anything stays failed on its own row, but it does not hold the application: the source keeps converging, and the next successful deploy to that target retires the stale failure. Only a rollback that may have changed a target holds automated work.
+Each node in the scope must hold a recovery generation that names the selected application generation. A node keeps the generation captured immediately before its latest rollout, so an older selection has no recovery generation to restore from and is reported as a failed target; the rollout then reads as a partially failed rollback rather than a completion. A target refused before the restore changes anything stays failed on its own row, but it does not hold the application: the source keeps converging, and the next successful deploy to that target retires the stale failure. Only a rollback that may have changed a target holds automated work. A target can have one rollback at a time: while its restore is running, another rollback request is refused until it finishes.
 
 Rollback restores the authored project. It does not restore application data, and a locally built image is rebuilt from its authored inputs unless the node's recovery generation still holds the previous image. The per-target result states what actually happened.
 

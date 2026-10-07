@@ -390,6 +390,49 @@ describe('gitops deferred state', () => {
     expect(store.getTarget('app-rb-beside', 1)?.active_operation_stage).toBeNull();
   });
 
+  it('never rewrites a restoring row when a bind lands beside it', () => {
+    const store = GitOpsStore.getInstance();
+    const tx = GitOpsTransitions.getInstance();
+    seedApplied('app-rb-bind-beside', 'rb-bind-beside-web');
+
+    tx.rollbackInProgress({
+      applicationId: 'app-rb-bind-beside',
+      nodeId: 1,
+      recoveryRef: 'rb-bind-beside-a',
+      recoveryGenerationId: 'gen-app-rb-bind-beside',
+      envelope: env('op-rb-bind-beside-a'),
+    });
+    tx.rollbackPartialFailed({
+      applicationId: 'app-rb-bind-beside',
+      nodeId: 1,
+      recoveryRef: 'rb-bind-beside-a',
+      failureClass: 'pre_mutation',
+      envelope: env('op-rb-bind-beside-a-terminal'),
+    });
+    const applied = store.getTarget('app-rb-bind-beside', 1)!.applied_generation_id!;
+    const deployOperation = env('op-rb-bind-beside-deploy');
+    tx.deployStarted('app-rb-bind-beside', 1, applied, deployOperation);
+    // A retry opens a restore beside the deploy.
+    tx.rollbackInProgress({
+      applicationId: 'app-rb-bind-beside',
+      nodeId: 1,
+      recoveryRef: 'rb-bind-beside-b',
+      recoveryGenerationId: 'gen-app-rb-bind-beside',
+      envelope: env('op-rb-bind-beside-b'),
+    });
+
+    // The bind is success evidence for the deploy, but the restore beside it is
+    // still moving, so its phase, ref and claim are untouched, and the marker
+    // goes back to the restore.
+    tx.deployBound('app-rb-bind-beside', 1, applied, deployOperation);
+    const target = store.getTarget('app-rb-bind-beside', 1)!;
+    expect(target.recovery_phase).toBe('restoring');
+    expect(target.recovery_ref).toBe('rb-bind-beside-b');
+    expect(target.recovery_failure_class).toBe('pre_mutation');
+    expect(target.active_operation_stage).toBe('recovery_started');
+    expect(store.getApplication('app-rb-bind-beside')?.recovery_phase).toBe('restoring');
+  });
+
   it('keeps a restore marker through a tombstone so boot can reclassify it', () => {
     const store = GitOpsStore.getInstance();
     const tx = GitOpsTransitions.getInstance();
@@ -505,6 +548,30 @@ describe('gitops deferred state', () => {
     expect(store.getTarget('app-rb-crash', 1)?.interruption_stage).toBeNull();
   });
 
+  it('reclassifies an in-flight restore that carries no marker', () => {
+    const store = GitOpsStore.getInstance();
+    seedApplied('app-rb-no-marker', 'rb-no-marker-web');
+    // A build before the marker existed left the target restoring with no
+    // active operation. Boot has to select it anyway.
+    const target = store.getTarget('app-rb-no-marker', 1)!;
+    store.upsertTarget({
+      ...target,
+      recovery_phase: 'restoring',
+      recovery_ref: 'rb-no-marker',
+      active_operation_stage: null,
+    });
+
+    expect(store.listApplicationsWithOpenOperations().some((row) => row.id === 'app-rb-no-marker'))
+      .toBe(true);
+
+    reclassifyInterruptedOperations();
+
+    const after = store.getTarget('app-rb-no-marker', 1)!;
+    expect(after.recovery_phase).toBe('failed');
+    expect(after.recovery_failure_class).toBe('interrupted');
+    expect(after.interruption_stage).toBe('recovery_started');
+  });
+
   it('keeps a proven moved class when boot reclassifies a retry', () => {
     const store = GitOpsStore.getInstance();
     const tx = GitOpsTransitions.getInstance();
@@ -541,6 +608,61 @@ describe('gitops deferred state', () => {
     expect(target.recovery_phase).toBe('failed');
     expect(target.recovery_failure_class).toBe('partial');
     expect(target.interruption_stage).toBe('recovery_started');
+  });
+
+  it('keeps an earlier mutated hold when a later target is refused', () => {
+    const store = GitOpsStore.getInstance();
+    const tx = GitOpsTransitions.getInstance();
+    seedApplied('app-rb-earlier', 'rb-earlier-web');
+    store.upsertTarget(emptyTargetRow('app-rb-earlier', 2, 1));
+
+    // Target 1 failed after a possible mutation and holds the application.
+    tx.rollbackInProgress({
+      applicationId: 'app-rb-earlier',
+      nodeId: 1,
+      recoveryRef: 'rb-earlier-a',
+      recoveryGenerationId: 'gen-app-rb-earlier',
+      envelope: env('op-rb-earlier-a'),
+    });
+    tx.rollbackPartialFailed({
+      applicationId: 'app-rb-earlier',
+      nodeId: 1,
+      recoveryRef: 'rb-earlier-a',
+      failureClass: 'partial',
+      envelope: env('op-rb-earlier-a-fail'),
+    });
+    const mutated = store.getTarget('app-rb-earlier', 1)!;
+    expect(store.getApplication('app-rb-earlier')?.recovery_phase).toBe('failed');
+
+    // A later rollback opens target 2 under its own ref and is refused.
+    tx.rollbackInProgress({
+      applicationId: 'app-rb-earlier',
+      nodeId: 2,
+      recoveryRef: 'rb-earlier-b',
+      recoveryGenerationId: 'gen-app-rb-earlier',
+      envelope: env('op-rb-earlier-b'),
+    });
+    tx.rollbackPartialFailed({
+      applicationId: 'app-rb-earlier',
+      nodeId: 2,
+      recoveryRef: 'rb-earlier-b',
+      failureClass: 'pre_mutation',
+      envelope: env('op-rb-earlier-b-fail'),
+    });
+
+    // The refusal released nothing: target 1's failure may have moved it, so
+    // the hold survives with that failure's own class and reference.
+    const app = store.getApplication('app-rb-earlier')!;
+    expect(app.recovery_phase).toBe('failed');
+    expect(app.failure_stage).toBe('recovery');
+    expect(app.failure_class).toBe('partial');
+    expect(app.recovery_ref).toBe('rb-earlier-a');
+    const after = store.getTarget('app-rb-earlier', 1)!;
+    expect(after.recovery_phase).toBe(mutated.recovery_phase);
+    expect(after.failure_class).toBe('partial');
+    expect(after.failure_at).toBe(mutated.failure_at);
+    // The refused target keeps its own visible marker.
+    expect(store.getTarget('app-rb-earlier', 2)?.failure_class).toBe('pre_mutation');
   });
 
   it('leaves a moving sibling stamp alone when another target fails', () => {

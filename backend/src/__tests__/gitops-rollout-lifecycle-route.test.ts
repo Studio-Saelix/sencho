@@ -760,16 +760,20 @@ describe('POST /api/gitops/applications/:id/rollout/rollback', () => {
 
 
   it('refuses a rollback while a selected target is already restoring', async () => {
-    const seeded = seedGitManagedBlueprint();
+    const seeded = seedGitManagedBlueprint({ nodeCount: 2 });
     await authorizeRollout(seeded);
     const { GitOpsTransitions } = await import('../services/gitops/transitions');
+    // The restoring target is the *later* one, so the refusal has to happen
+    // before the loop touches the first target at all.
     GitOpsTransitions.getInstance().rollbackInProgress({
       applicationId: seeded.applicationId,
-      nodeId: seeded.nodeIds[0],
+      nodeId: seeded.nodeIds[1],
       recoveryRef: 'rb-route-live',
       recoveryGenerationId: seeded.generationId,
       envelope: { operationId: 'op-route-live', actor: 'tester', trigger: 'manual', at: Date.now() },
     });
+    const rolloutGenerationId = GitOpsStore.getInstance()
+      .getApplication(seeded.applicationId)?.rollout_generation_id;
 
     const res = await request(app)
       .post(`/api/gitops/applications/bp:${seeded.blueprintId}/rollout/rollback`)
@@ -780,8 +784,44 @@ describe('POST /api/gitops/applications/:id/rollout/rollback', () => {
     // starts, so it cannot race the one that is still moving files.
     expect(res.status).toBe(409);
     expect(res.body.code).toBe('ROLLBACK_IN_PROGRESS');
-    expect(GitOpsStore.getInstance().getTarget(seeded.applicationId, seeded.nodeIds[0])?.recovery_ref)
+    // The first target was never opened, and the live rollout was not withdrawn.
+    const untouched = GitOpsStore.getInstance().getTarget(seeded.applicationId, seeded.nodeIds[0])!;
+    expect(untouched.recovery_phase).toBeNull();
+    expect(untouched.active_operation_stage).toBeNull();
+    expect(untouched.recovery_ref).toBeNull();
+    expect(GitOpsStore.getInstance().getApplication(seeded.applicationId)?.rollout_generation_id)
+      .toBe(rolloutGenerationId);
+    expect(GitOpsStore.getInstance().getTarget(seeded.applicationId, seeded.nodeIds[1])?.recovery_ref)
       .toBe('rb-route-live');
+  });
+
+  it('settles the application when a refused target record cannot be written', async () => {
+    const seeded = seedGitManagedBlueprint();
+    await authorizeRollout(seeded);
+    const { GitOpsTransitions } = await import('../services/gitops/transitions');
+    // Fail once, as a transient write error would; the settle retries it.
+    vi.spyOn(GitOpsTransitions.getInstance(), 'rollbackPartialFailed')
+      .mockImplementationOnce(() => {
+        throw new Error('db write failed');
+      });
+
+    const res = await request(app)
+      .post(`/api/gitops/applications/bp:${seeded.blueprintId}/rollout/rollback`)
+      .set('Cookie', adminCookie)
+      .send({ generationId: seeded.generationId, scope: { kind: 'all_changed' } });
+
+    // The refusal never reached the target row on the first attempt, so its
+    // own settle never ran. The route settles it and the retry writes the
+    // target, so neither the application nor the target stays restoring.
+    expect(res.status).toBe(200);
+    expect(res.body.results[0].status).toBe('failed');
+    const application = GitOpsStore.getInstance().getApplication(seeded.applicationId)!;
+    expect(application.recovery_phase).not.toBe('restoring');
+    expect(application.recovery_phase).not.toBe('failed');
+    const target = GitOpsStore.getInstance().getTarget(seeded.applicationId, seeded.nodeIds[0])!;
+    expect(target.recovery_phase).toBe('failed');
+    expect(target.failure_class).toBe('pre_mutation');
+    expect(target.active_operation_stage).toBeNull();
   });
 
   it('settles a possibly-moved target whose record cannot be written', async () => {

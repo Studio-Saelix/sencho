@@ -579,14 +579,23 @@ export class GitOpsStore {
    * while it does.
    */
   listApplicationsWithOpenOperations(): GitOpsApplicationRow[] {
+    // In-flight recovery phases count as open work on their own, not only when
+    // a marker accompanies them. A build before this one wrote no marker for a
+    // restore, so a row it left `restoring` would otherwise never be selected,
+    // and boot could never reclassify it into a state an operator can clear.
     return this.db().prepare(
       `SELECT a.* FROM gitops_applications a
        WHERE a.lifecycle_status IN ('active','creating')
          AND (
            a.active_operation_stage IS NOT NULL
+           OR a.recovery_phase IN ('capturing','restoring','compensating')
            OR EXISTS (
              SELECT 1 FROM gitops_target_current t
-             WHERE t.application_id = a.id AND t.active_operation_stage IS NOT NULL
+             WHERE t.application_id = a.id
+               AND (
+                 t.active_operation_stage IS NOT NULL
+                 OR t.recovery_phase IN ('capturing','restoring','compensating')
+               )
            )
          )
        ORDER BY a.created_at ASC`,
