@@ -2,6 +2,7 @@ import { GitOpsStore } from './store';
 import { GitOpsTransitions, type TransitionResult } from './transitions';
 import { restoreFailureMutated, restoreTargetToGeneration } from './rolloutRecovery';
 import { healthHoldReason } from './healthPolicy';
+import { targetRestoreInFlight } from './recoveryClaim';
 import { ROLE_PERMISSIONS, type PermissionAction } from '../../middleware/permissions';
 import { sanitizeForLog } from '../../utils/safeLog';
 
@@ -121,6 +122,12 @@ export async function executeHealthRolloutDecision(args: {
         if (!application || !target) {
           return { action: 'rollback', reason: 'target_not_found' };
         }
+        if (targetRestoreInFlight(target)) {
+          // A rollback already owns this target's restore. Opening a second one
+          // would race it while it is still writing files; that operation's own
+          // terminal settles the application, so nothing is held here.
+          return { action: 'none', reason: 'rollback_in_progress' };
+        }
         // The target's own captured pre-rollout generation, never the LKG. The
         // LKG is the newest generation that ever passed, which is a different
         // question from "what this node was running before this rollout", and
@@ -204,7 +211,7 @@ export async function executeHealthRolloutDecision(args: {
             scopedActions: SYSTEM_STACK_ACTIONS,
           });
           if (outcome.ok) {
-            const completed = transitions.rollbackCompleted({
+            transitions.rollbackCompleted({
               applicationId: args.applicationId,
               nodeId: args.nodeId,
               recoveryRef,
@@ -213,13 +220,6 @@ export async function executeHealthRolloutDecision(args: {
               capturedSourceAcceptanceRef,
               envelope,
             });
-            if (completed.skipped) {
-              // A newer rollback re-opened the target while this restore ran.
-              // The completion wrote nothing, and the newer attempt reports its
-              // own outcome; the rollout stays held here rather than reporting
-              // a restore this target no longer owns.
-              return { action: 'rollback_partial_failed', reason: 'rollback_superseded' };
-            }
             return { action: 'rollback', reason: decision.reason };
           }
           // Partial failure is reported as partial. Reporting a single target's

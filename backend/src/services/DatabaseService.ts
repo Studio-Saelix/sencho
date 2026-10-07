@@ -2166,11 +2166,11 @@ export class DatabaseService {
         addColIfMissing('gitops_applications', 'placement_policy',
             "TEXT NOT NULL DEFAULT 'operator' CHECK (placement_policy IN ('operator','bounded_auto'))");
         // The recovery failure a target row still claims, kept beside the shared
-        // failure columns. No backfill: a row whose claim class is still the
-        // shared one keeps resolving through it, and a row whose shared slot was
-        // taken over by a later failure carries no proof of what that failure
-        // was, so the honest state is no claim rather than an invented one.
+        // failure columns. No backfill: a row whose shared slot a later failure
+        // had already taken over carries no proof of what the claim was, and
+        // inventing one would be worse than the absence.
         maybeAddCol('gitops_target_current', 'recovery_failure_class', 'TEXT NULL');
+        maybeAddCol('gitops_target_current', 'recovery_failure_at', 'INTEGER NULL');
         // Called on every boot, not only the one that created the column: a
         // process that died between the ALTER and the backfill would otherwise
         // skip it for ever, because every later boot sees a duplicate column.

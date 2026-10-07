@@ -51,6 +51,7 @@ import type { PlacementPolicy, RolloutAuthorizationPolicy } from './policyCompos
 import {
   recoveryClaimMoved,
   recoveryClaimRetirable,
+  recoveryFailureClaimAt,
   recoveryFailureClaimClass,
   targetRecoveryFailureMoved,
   targetRestoreInFlight,
@@ -158,12 +159,6 @@ export type TransitionResult = {
    * follow-up of its own.
    */
   healthUnattributable?: boolean;
-  /**
-   * A transition recognised a write that must not happen and recorded nothing:
-   * no row change, no history row, no notification. Present only for that case,
-   * so a caller can tell it from a replayed write.
-   */
-  skipped?: boolean;
 };
 
 /**
@@ -1582,6 +1577,9 @@ export class GitOpsTransitions {
       target.lkg_artifact_set_id = null;
       target.lkg_unavailable_at = null;
       target.lkg_unavailable_reason = null;
+      // A restore that is still moving keeps its marker through the retirement,
+      // so boot can still select and reclassify it after a crash.
+      this.markInFlightRestore(target, envelope.at);
       // A retired target stops answering for the hold it may have claimed; if it
       // was the last claimant, the hold goes with it rather than stranding.
       this.clearApplicationRecoveryWhenNoTargetFails(applicationId, nodeId, envelope);
@@ -2818,19 +2816,8 @@ export class GitOpsTransitions {
           activeStage: target.active_operation_stage,
           targetStatus: target.target_status,
         };
-        target.target_status = 'active';
-        // A tombstone's recovery residue survives the revival. A start is not
-        // evidence the half-restored files are consistent; the acknowledgement
-        // for this placement is, and that retires the claim. Holding until then
-        // is the honest state: the deployment applied on top of whatever the
-        // abandoned restore left behind.
-        if (before.targetStatus !== 'active' && recoveryClaimMoved(target)) {
-          // The revived row answers for the hold again, so the application hold
-          // comes back with it. Without this the target would report a failed
-          // recovery that the application does not.
-          this.withApplication(args.applicationId, args.envelope, (app) => {
-            this.applyRefusedRollbackSettle(app, args.envelope.at, [target]);
-          });
+        if (before.targetStatus !== 'active') {
+          this.reviveTarget(target, args.applicationId, args.envelope);
         }
         // A newer deploy supersedes an older one, which is how a redeploy of a
         // stuck request takes over. Anything else in flight is a different
@@ -2913,11 +2900,18 @@ export class GitOpsTransitions {
     // materialization is what is actually running.
     if (app.intent_revision_id !== intentRevisionId) return false;
     if ((app.rollout_candidate_id ?? null) !== (rolloutCandidateId ?? null)) return false;
+    // The deploy's own marker is gone by the time a duplicate ack arrives, but a
+    // restore opened beside the deploy leaves a `recovery_started` marker in its
+    // place. That marker is another operation's, not evidence this apply is
+    // still pending, so the shortcut still applies; matching the deploy request
+    // instead would throw and make the adapter abandon its health run.
+    const deployStillMarked = target.active_operation_stage !== null
+      && target.active_operation_stage !== 'recovery_started';
     return app.accepted_generation_id !== null
       && target.applied_generation_id === app.accepted_generation_id
       && target.rollout_authorization_ref === app.rollout_authorization_ref
       && target.rollout_generation_id === app.rollout_generation_id
-      && target.active_operation_stage === null;
+      && !deployStillMarked;
   }
 
   /**
@@ -2989,6 +2983,9 @@ export class GitOpsTransitions {
         // candidate while the application carries none.
         if (app.intent_revision_id !== args.intentRevisionId) {
           target.legacy_applied_revision = args.legacyAppliedRevision;
+          // The deploy's marker is released with the deploy, and a restore that
+          // is still moving takes it back so a crash remains boot-recoverable.
+          this.markInFlightRestore(target, args.envelope.at);
           return { before, after: { supersededAck: true } };
         }
         target.intent_revision_id = args.intentRevisionId;
@@ -3266,6 +3263,9 @@ export class GitOpsTransitions {
         target.failure_stage = null;
         target.failure_class = null;
         target.failure_at = null;
+        // A restore that is still moving keeps its marker through the tombstone,
+        // so boot can still select and reclassify it after a crash.
+        this.markInFlightRestore(target, args.envelope.at);
         // The recovery claim stays as residue, so a later revival still knows a
         // restore on this target was never resolved; the tombstoned row stops
         // counting as a claimant, and if it was the last one the hold goes with
@@ -3350,7 +3350,7 @@ export class GitOpsTransitions {
           if (args.stage !== 'blueprint_state_review') {
             throw new GitOpsTransitionError('cannot observe a tombstoned target');
           }
-          target.target_status = 'active';
+          this.reviveTarget(target, args.applicationId, args.envelope);
           // The severance abandoned whatever this target had in flight, and an
           // interruption outranks the observation below, so a surviving one
           // would report the abandoned operation instead of the hold that
@@ -3442,14 +3442,23 @@ export class GitOpsTransitions {
         if (target.target_status !== 'active') {
           throw new GitOpsTransitionError('cannot roll back a tombstoned target');
         }
+        // One rollback per target, enforced here rather than only in the
+        // callers: a second restore opened over a moving one would take its
+        // recovery slot while the first is still writing files, which is how a
+        // hold gets released and a successful restore gets dropped. This
+        // transaction is the serialization point; the route and the health
+        // executor check first so the operator gets a clean answer.
+        if (targetRestoreInFlight(target)) {
+          throw new GitOpsTransitionError('a rollback is already in progress on this target');
+        }
         const before = { recoveryPhase: target.recovery_phase };
         target.recovery_phase = 'restoring';
         target.recovery_ref = args.recoveryRef;
         target.recovery_generation_id = args.recoveryGenerationId;
-        // A newer rollback takes the marker over from an older one; the newest
-        // open owns the target. Any other active stage belongs to a different
-        // operation and is left alone.
-        if (target.active_operation_stage === null || target.active_operation_stage === 'recovery_started') {
+        // A rollback can open beside a deploy that is already in flight (that
+        // deploy may be what is being recovered from), but never over another
+        // restore, so the marker is only written when nothing owns it.
+        if (target.active_operation_stage === null) {
           target.active_operation_id = args.envelope.operationId;
           target.active_operation_stage = 'recovery_started';
           target.active_operation_at = args.envelope.at;
@@ -3498,75 +3507,56 @@ export class GitOpsTransitions {
       failure_stage: string | null;
       failure_class: string | null;
       failure_at: number | null;
+      recovery_failure_class: string | null;
+      recovery_failure_at: number | null;
     }): void => {
       row.recovery_phase = 'failed';
       row.recovery_ref = args.recoveryRef;
       row.failure_stage = 'recovery';
       row.failure_class = args.failureClass;
       row.failure_at = args.envelope.at;
+      row.recovery_failure_class = args.failureClass;
+      row.recovery_failure_at = args.envelope.at;
     };
 
     if (args.nodeId === null) {
+      // The application-only alias is a derivation too, not a direct stamp: it
+      // runs after the per-target terminals, so the live rows already carry the
+      // failure this alias is about, and a restore still moving on a target
+      // outside the operation's scope keeps the stamp it owns.
       return this.mutateApp(args.applicationId, args.envelope, 'rollback_partial_failed', 'failed', (app) => {
-        applyFailure(app);
+        this.deriveApplicationRecovery(app, args.envelope.at, []);
       });
     }
     const refusedBeforeMutation = args.failureClass === 'pre_mutation';
-    const targetResult = this.mutateTarget(
+    let failedTarget: GitOpsTargetCurrentRow | undefined;
+    const result = this.mutateTarget(
       args.applicationId,
       args.nodeId,
       args.envelope,
       'rollback_partial_failed',
       null,
       (target) => {
+        failedTarget = target;
         const before = {
           recoveryPhase: target.recovery_phase,
           failureStage: target.failure_stage,
           recoveryFailureClass: target.recovery_failure_class,
         };
-        // A newer rollback re-opened this target, so the recovery slot, its ref
-        // and its marker now describe an operation that is still running.
-        const superseded = target.recovery_ref !== null
-          && target.recovery_ref !== args.recoveryRef;
-        // Only a refusal is superseded silently. A refusal proves this restore
-        // moved nothing, so it says nothing about a row a newer attempt has
-        // since opened and there is nothing to contribute to it: no record, no
-        // history row, no application stamp.
-        if (superseded && refusedBeforeMutation) {
-          return { before, after: {}, skip: true };
-        }
-        if (superseded) {
-          // A failure that may have moved the target is never dropped. The
-          // restore was superseded, but the files it left behind are the same
-          // files the newer attempt is running against, so the fact is recorded
-          // on the claim, which is where a moved failure is kept, and the
-          // application is stamped below. The newer attempt owns the recovery
-          // slot, its ref, its marker and its interruption, so none of those are
-          // touched: they describe an operation that is still running. A claim
-          // that already moved is the stronger fact and keeps its class.
-          if (!recoveryClaimMoved(target)) {
-            target.recovery_failure_class = args.failureClass;
-          }
-          return {
-            before,
-            after: { recoveryFailureClass: target.recovery_failure_class },
-          };
-        }
-        // A refusal that defers to an earlier moved claim keeps that claim's
-        // class and timestamp: a restore that never ran must not erase a failure
-        // that may have moved this target. The in-flight phase is not such a
-        // claim; it is this attempt's own open.
+        // A refusal that defers to an earlier moved claim leaves the shared
+        // failure slot alone: that slot may now describe a later deploy or
+        // withdraw failure, and overwriting it would erase a record this
+        // refusal says nothing about. The claim keeps its own class and time in
+        // its own columns, and only the phase moves. The in-flight phase is not
+        // such a claim; it is this attempt's own open.
         const priorMoved = refusedBeforeMutation && recoveryClaimMoved(target);
         if (priorMoved) {
           target.recovery_phase = 'failed';
-          target.failure_stage = 'recovery';
         } else {
           applyFailure(target);
-          target.recovery_failure_class = args.failureClass;
         }
         // The rollback is over on this target; release the marker its own open
-        // wrote. The ref guard above already proved this target belongs to this
-        // operation, so a marker here is this operation's, never another's.
+        // wrote. Serialization means no other restore can own it.
         if (target.active_operation_stage === 'recovery_started') {
           this.clearTargetActive(target);
         }
@@ -3583,25 +3573,21 @@ export class GitOpsTransitions {
       },
       'failed',
     );
-    if (targetResult.skipped) {
-      // A true no-op: nothing landed, so there is nothing for the application
-      // to stamp and no history row to raise a notification from.
-      return targetResult;
-    }
     if (refusedBeforeMutation) {
-      return targetResult;
+      return result;
     }
-    // Application-wide too, not only on the target. `rollbackInProgress` opened
-    // the application into `restoring`, so recording the failure on the target
-    // alone would leave the application claiming a recovery is still running that
-    // has already failed, which is what reporting a partial rollback truthfully
-    // has to mean for the rollout as a whole. A superseded attempt stamps it too:
-    // the restore that failed may have moved the target the newer attempt is
-    // running against.
-    this.withApplication(args.applicationId, args.envelope, (app) => {
-      applyFailure(app);
-    });
-    return targetResult;
+    // Application-wide too, not only on the target. Derived from the live
+    // targets rather than stamped directly: a restore still moving on a sibling
+    // target owns the application stamp, and a scope that did not include that
+    // target must not flip it to this failure's ref. When no sibling is moving,
+    // the derivation lands exactly the hold this failure claims.
+    const failedRow = failedTarget;
+    if (failedRow) {
+      this.withApplication(args.applicationId, args.envelope, (app) => {
+        this.deriveApplicationRecovery(app, args.envelope.at, [failedRow]);
+      });
+    }
+    return result;
   }
 
   /**
@@ -3638,51 +3624,50 @@ export class GitOpsTransitions {
         );
       }
     }
-    // Settle from what the retries actually landed. A row a newer rollback has
-    // re-opened is not this operation's to settle, and rewriting it from the
-    // intended shape would replace a live `restoring` row and release the hold
-    // mid-restore. Read after the retries so the rows carry their terminal
-    // state; a row the retry could not record is settled from its intended
-    // state instead, so one failed write does not strand the stamp.
+    // Settle from what the retries actually landed. Read after the retries so
+    // the rows carry their terminal state; a row the retry could not record is
+    // settled from its intended state instead, so one failed write does not
+    // strand the stamp. A refusal that deferred to an earlier moved claim leaves
+    // the shared slot alone, exactly as the write itself does.
     const intended: GitOpsTargetCurrentRow[] = [];
     for (const { nodeId, failureClass } of args.targets) {
       const row = this.store().getTarget(args.applicationId, nodeId);
       if (!row) continue;
-      if (row.recovery_ref !== null && row.recovery_ref !== args.recoveryRef) continue;
       const keepPrior = failureClass === 'pre_mutation' && recoveryClaimMoved(row);
-      intended.push({
+      intended.push(keepPrior ? { ...row, recovery_phase: 'failed' } : {
         ...row,
         recovery_phase: 'failed',
         recovery_ref: args.recoveryRef,
         failure_stage: 'recovery',
-        failure_class: keepPrior ? row.failure_class : failureClass,
-        recovery_failure_class: keepPrior ? row.recovery_failure_class : failureClass,
-        failure_at: keepPrior ? row.failure_at : args.envelope.at,
+        failure_class: failureClass,
+        recovery_failure_class: failureClass,
+        recovery_failure_at: args.envelope.at,
+        failure_at: args.envelope.at,
       });
     }
     return this.mutateApp(args.applicationId, args.envelope, 'rollback_refusal_settled', 'committed', (app) => {
-      this.applyRefusedRollbackSettle(app, args.envelope.at, intended);
+      this.deriveApplicationRecovery(app, args.envelope.at, intended);
     });
   }
 
   /**
-   * Release the application-level `restoring` stamp a refused rollback opened.
+   * Derive the application-level recovery stamp from the live targets.
    *
-   * The application's recovery phase is derived from the live targets rather
-   * than from one operation's ref, so overlapping rollbacks cannot pin it: a
-   * refusal for the operation whose ref was overwritten still settles. A
+   * One derivation for every writer that can settle, open or release the stamp:
+   * a refusal settling, a completion succeeding, and a revived placement. A
    * restore still moving on any target owns the application, a target whose
    * recovery failure may have moved it still owns the hold, and a target that
-   * already completed a recovery keeps the settled receipt.
+   * already completed a recovery keeps the settled receipt. Deriving from the
+   * targets rather than from one operation's ref is what stops a sibling's
+   * success from releasing a hold another target still answers for.
    *
-   * The hold check reads the claim's own class, not the shared failure slot:
-   * the class column is shared with deploy and withdraw failures, and a moved
-   * claim keeps its class beside them.
+   * The hold check reads the claim's own class and time, not the shared failure
+   * slot: those columns are shared with deploy and withdraw failures, and a
+   * moved claim keeps its own record beside them.
    *
-   * `refused` carries the refusing targets' rows as the refusals intend them.
-   * When the write happens in the same transaction, the database still holds
-   * the pre-write rows, so the intent has to be passed in; the route's settle
-   * passes the retried or best available rows instead.
+   * `overrides` carries the rows a caller has mutated in memory and not yet
+   * flushed. When a write happens in the same transaction, the database still
+   * holds the pre-write rows, so the caller's own target has to be passed in.
    */
   private settleRefusedRollback(
     applicationId: string,
@@ -3690,19 +3675,19 @@ export class GitOpsTransitions {
     envelope: EventEnvelope,
   ): void {
     this.withApplication(applicationId, envelope, (app) => {
-      this.applyRefusedRollbackSettle(app, envelope.at, [current]);
+      this.deriveApplicationRecovery(app, envelope.at, [current]);
     });
   }
 
-  private applyRefusedRollbackSettle(
+  private deriveApplicationRecovery(
     app: GitOpsApplicationRow,
     at: number,
-    refused: GitOpsTargetCurrentRow[],
+    overrides: GitOpsTargetCurrentRow[],
   ): void {
-    const refusedIds = new Set(refused.map((row) => row.node_id));
+    const overrideIds = new Set(overrides.map((row) => row.node_id));
     const others = this.store().listTargets(app.id).filter((row) =>
-      row.target_status !== 'tombstoned' && !refusedIds.has(row.node_id));
-    const live = [...others, ...refused.filter((row) => row.target_status !== 'tombstoned')];
+      row.target_status !== 'tombstoned' && !overrideIds.has(row.node_id));
+    const live = [...others, ...overrides.filter((row) => row.target_status !== 'tombstoned')];
     if (live.some((row) => targetRestoreInFlight(row))) {
       // A restore is still moving on some target; whichever operation opened
       // it settles the application. Leave the stamp it carries.
@@ -3713,12 +3698,12 @@ export class GitOpsTransitions {
       app.recovery_phase = 'failed';
       app.recovery_ref = surviving.recovery_ref ?? app.recovery_ref;
       app.failure_stage = 'recovery';
-      // The claim's own class, not the shared slot: a later deploy or withdraw
+      // The claim's own record, not the shared slot: a later deploy or withdraw
       // failure may be sitting there, and it is not what this hold is about. The
-      // timestamp follows the same rule, so a hold is not reported as having
-      // started when the unrelated failure arrived.
+      // time follows the same rule, so a hold is not reported as having started
+      // when the unrelated failure arrived.
       app.failure_class = recoveryFailureClaimClass(surviving) ?? 'partial';
-      app.failure_at = (surviving.failure_stage === 'recovery' ? surviving.failure_at : null) ?? at;
+      app.failure_at = recoveryFailureClaimAt(surviving) ?? at;
       return;
     }
     if (live.some((row) => row.recovery_phase === 'complete')) {
@@ -3755,14 +3740,6 @@ export class GitOpsTransitions {
       'rollback_completed',
       args.recoveryGenerationId,
       (target) => {
-        // A newer rollback re-opened this target, so its recovery slot describes
-        // an operation that is still running. This completion is about a restore
-        // that the newer attempt replaced: it must not write `complete`, clear
-        // the newer attempt's marker, or overwrite its ref. The newer attempt
-        // reports its own outcome.
-        if (target.recovery_ref !== null && target.recovery_ref !== args.recoveryRef) {
-          return { before: {}, after: {}, skip: true };
-        }
         const restored = target.recovery_generation_id;
         if (!restored) {
           throw new GitOpsTransitionError('rollback_completed requires a bound recovery generation');
@@ -3782,14 +3759,17 @@ export class GitOpsTransitions {
         target.recovery_phase = 'complete';
         target.recovery_ref = args.recoveryRef;
         target.recovery_failure_class = null;
+        target.recovery_failure_at = null;
         if (target.failure_stage === 'recovery') {
           target.failure_stage = null;
           target.failure_class = null;
           target.failure_at = null;
         }
+        // The application stamp is derived from every live target, not set to
+        // complete outright: a sibling whose recovery may have moved still owns
+        // the hold, and this target's success must not release it.
         this.withApplication(args.applicationId, args.envelope, (app) => {
-          app.recovery_phase = 'complete';
-          this.clearAppFailure(app, ['recovery']);
+          this.deriveApplicationRecovery(app, args.envelope.at, [target]);
         });
 
         target.desired_generation_id = restored;
@@ -3854,6 +3834,13 @@ export class GitOpsTransitions {
       (target) => {
         if (target.target_status !== 'active') {
           throw new GitOpsTransitionError('cannot recover a tombstoned target');
+        }
+        // One restore per target, the same rule `rollbackInProgress` enforces:
+        // the rollout and Direct recovery paths write the same recovery slot,
+        // and a second restore opening over a moving one would take the slot
+        // while the first is still writing files.
+        if (targetRestoreInFlight(target)) {
+          throw new GitOpsTransitionError('a recovery is already in progress on this target');
         }
         const before = { recoveryPhase: target.recovery_phase };
         target.recovery_phase = 'restoring';
@@ -3925,14 +3912,16 @@ export class GitOpsTransitions {
         this.clearTargetInterruption(target, 'recovery_started');
         target.recovery_phase = 'complete';
         target.recovery_failure_class = null;
+        target.recovery_failure_at = null;
         if (target.failure_stage === 'recovery') {
           target.failure_stage = null;
           target.failure_class = null;
           target.failure_at = null;
         }
+        // Derived from every live target: a sibling that may have moved still
+        // owns the hold, and this success must not release it.
         this.withApplication(args.applicationId, args.envelope, (app) => {
-          app.recovery_phase = 'complete';
-          this.clearAppFailure(app, ['recovery']);
+          this.deriveApplicationRecovery(app, args.envelope.at, [target]);
         });
 
         const generationId = args.recoveryGenerationId;
@@ -4009,6 +3998,7 @@ export class GitOpsTransitions {
         target.failure_class = args.failureClass;
         target.failure_at = args.envelope.at;
         target.recovery_failure_class = args.failureClass;
+        target.recovery_failure_at = args.envelope.at;
         this.withApplication(args.applicationId, args.envelope, (app) => {
           app.recovery_phase = 'failed';
           app.recovery_ref = args.recoveryRef;
@@ -4232,10 +4222,16 @@ export class GitOpsTransitions {
           target.failure_at = envelope.at;
           // A restore that was superseded by a newer attempt may already carry
           // a class that proves movement. That proof outranks this attempt's
-          // unknown outcome, so it is kept rather than overwritten.
-          target.recovery_failure_class = priorClaim !== null && priorClaim !== 'pre_mutation'
-            ? priorClaim
-            : 'interrupted';
+          // unknown outcome, so it and its time are kept rather than
+          // overwritten.
+          const priorClaimAt = recoveryFailureClaimAt(target);
+          if (priorClaim !== null && priorClaim !== 'pre_mutation') {
+            target.recovery_failure_class = priorClaim;
+            target.recovery_failure_at = priorClaimAt ?? envelope.at;
+          } else {
+            target.recovery_failure_class = 'interrupted';
+            target.recovery_failure_at = envelope.at;
+          }
         }
         target.interruption_stage = target.active_operation_stage;
         target.interruption_at = envelope.at;
@@ -4743,7 +4739,7 @@ export class GitOpsTransitions {
     mutate: (
       target: GitOpsTargetCurrentRow,
       app: GitOpsApplicationRow,
-    ) => { before: Record<string, unknown>; after: Record<string, unknown>; skip?: boolean },
+    ) => { before: Record<string, unknown>; after: Record<string, unknown> },
     outcome: HistoryOutcome = 'committed',
     // A transition that only records evidence can ask to leave a standing
     // decision alone. The projection reads `latest_stage` and maps observation
@@ -4759,11 +4755,6 @@ export class GitOpsTransitions {
       const target = this.store().getTarget(applicationId, nodeId);
       if (!target) throw new GitOpsTransitionError('target not found');
       const snapshots = mutate(target, app);
-      if (snapshots.skip) {
-        // A true no-op: the transition recognised work it must not record, so
-        // nothing is written and no history row raises a notification from it.
-        return { historyIds: [], replayed: true, skipped: true };
-      }
       // Stamped for every target mutation, not just the observations that are
       // projected from it. That is what makes an observation stop being the
       // latest thing that happened: a deploy, withdraw or tombstone after it
@@ -4884,6 +4875,31 @@ export class GitOpsTransitions {
   }
 
   /**
+   * Bring a tombstoned placement back into the fleet.
+   *
+   * A revival is a placement, not evidence the abandoned restore resolved, so a
+   * claim that may have moved the target survives it and the application hold is
+   * re-derived from that claim: without this the target would report a failed
+   * recovery the application does not, and the repair gate would be the only
+   * thing still answering for it. A claim that moved nothing is retired here,
+   * because it holds nothing and would otherwise mask the placement's own status
+   * through the redeploy. Both revival paths share this, so they cannot drift.
+   */
+  private reviveTarget(
+    target: GitOpsTargetCurrentRow,
+    applicationId: string,
+    envelope: EventEnvelope,
+  ): void {
+    target.target_status = 'active';
+    this.retireNonMovingRecoveryClaim(target, applicationId, envelope);
+    if (recoveryClaimMoved(target)) {
+      this.withApplication(applicationId, envelope, (app) => {
+        this.deriveApplicationRecovery(app, envelope.at, [target]);
+      });
+    }
+  }
+
+  /**
    * Hand the active-operation marker back to a restore that is still moving.
    *
    * A deploy, withdrawal or acknowledgement clears the marker of the operation
@@ -4988,6 +5004,7 @@ export class GitOpsTransitions {
     target.recovery_phase = null;
     target.recovery_ref = null;
     target.recovery_failure_class = null;
+    target.recovery_failure_at = null;
     if (target.failure_stage === 'recovery') {
       target.failure_stage = null;
       target.failure_class = null;

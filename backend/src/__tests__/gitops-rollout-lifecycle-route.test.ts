@@ -758,45 +758,17 @@ describe('POST /api/gitops/applications/:id/rollout/rollback', () => {
     expect(GitOpsStore.getInstance().getApplication(seeded.applicationId)?.recovery_phase).toBe('failed');
   });
 
-  it('settles the application when a refused target record cannot be written', async () => {
+
+  it('refuses a rollback while a selected target is already restoring', async () => {
     const seeded = seedGitManagedBlueprint();
     await authorizeRollout(seeded);
     const { GitOpsTransitions } = await import('../services/gitops/transitions');
-    // Fail once, as a transient write error would; the settle retries it.
-    vi.spyOn(GitOpsTransitions.getInstance(), 'rollbackPartialFailed')
-      .mockImplementationOnce(() => {
-        throw new Error('db write failed');
-      });
-
-    const res = await request(app)
-      .post(`/api/gitops/applications/bp:${seeded.blueprintId}/rollout/rollback`)
-      .set('Cookie', adminCookie)
-      .send({ generationId: seeded.generationId, scope: { kind: 'all_changed' } });
-
-    // The refusal never reached the target row on the first attempt, so its
-    // own settle never ran. The route settles it and the retry writes the
-    // target, so neither the application nor the target stays restoring.
-    expect(res.status).toBe(200);
-    expect(res.body.results[0].status).toBe('failed');
-    const application = GitOpsStore.getInstance().getApplication(seeded.applicationId)!;
-    expect(application.recovery_phase).not.toBe('restoring');
-    expect(application.recovery_phase).not.toBe('failed');
-    const target = GitOpsStore.getInstance().getTarget(seeded.applicationId, seeded.nodeIds[0])!;
-    expect(target.recovery_phase).toBe('failed');
-    expect(target.failure_class).toBe('pre_mutation');
-    expect(target.active_operation_stage).toBeNull();
-  });
-
-  it('reports a restore a newer rollback replaced instead of a success', async () => {
-    const seeded = seedGitManagedBlueprint();
-    await authorizeRollout(seeded);
-    const recovery = await import('../services/gitops/rolloutRecovery');
-    vi.spyOn(recovery, 'restoreTargetToGeneration').mockResolvedValue({ ok: true });
-    const { GitOpsTransitions } = await import('../services/gitops/transitions');
-    // The completion is a no-op: a newer rollback re-opened the target while
-    // this restore ran.
-    vi.spyOn(GitOpsTransitions.getInstance(), 'rollbackCompleted').mockReturnValue({
-      historyIds: [], replayed: true, skipped: true,
+    GitOpsTransitions.getInstance().rollbackInProgress({
+      applicationId: seeded.applicationId,
+      nodeId: seeded.nodeIds[0],
+      recoveryRef: 'rb-route-live',
+      recoveryGenerationId: seeded.generationId,
+      envelope: { operationId: 'op-route-live', actor: 'tester', trigger: 'manual', at: Date.now() },
     });
 
     const res = await request(app)
@@ -804,12 +776,12 @@ describe('POST /api/gitops/applications/:id/rollout/rollback', () => {
       .set('Cookie', adminCookie)
       .send({ generationId: seeded.generationId, scope: { kind: 'all_changed' } });
 
-    expect(res.status).toBe(200);
-    expect(res.body.ok).toBe(false);
-    expect(res.body.results[0].status).toBe('failed');
-    expect(res.body.results[0].error).toBe('A newer rollback replaced this restore.');
-    // The restore may have moved the target, so the application hold stays.
-    expect(GitOpsStore.getInstance().getApplication(seeded.applicationId)?.recovery_phase).toBe('failed');
+    // One rollback per target: the second request is refused before any restore
+    // starts, so it cannot race the one that is still moving files.
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe('ROLLBACK_IN_PROGRESS');
+    expect(GitOpsStore.getInstance().getTarget(seeded.applicationId, seeded.nodeIds[0])?.recovery_ref)
+      .toBe('rb-route-live');
   });
 
   it('settles a possibly-moved target whose record cannot be written', async () => {

@@ -49,6 +49,7 @@ import {
 } from '../services/gitops/rolloutRecovery';
 import { placementEffectCompatible } from '../services/gitops/store';
 import { GitOpsTransitions, GitOpsTransitionError } from '../services/gitops/transitions';
+import { targetRestoreInFlight } from '../services/gitops/recoveryClaim';
 import { newGitOpsId } from '../services/gitops/directApplication';
 import { HEALTH_ROLLOUT_POLICIES, isHealthRolloutPolicy } from '../services/gitops/healthPolicy';
 import {
@@ -1647,7 +1648,7 @@ async function runRollbackTarget(
   if (outcome.ok) {
     const store = GitOpsStore.getInstance();
     try {
-      const completed = tx.rollbackCompleted({
+      tx.rollbackCompleted({
         applicationId: ctx.app.id,
         nodeId,
         recoveryRef: ctx.recoveryRef,
@@ -1659,20 +1660,6 @@ async function runRollbackTarget(
         capturedSourceAcceptanceRef: store.newestSourceAcceptanceId(ctx.app.id, ctx.generationId),
         envelope: ctx.envelope,
       });
-      if (completed.skipped) {
-        // A newer rollback re-opened the target while this restore ran, so the
-        // completion wrote nothing. Reporting it as restored would tell the
-        // operator a target was put back that the newer attempt now owns, and
-        // the restore may still have moved it.
-        return {
-          nodeId,
-          status: 'failed',
-          error: 'A newer rollback replaced this restore.',
-          mutationPossible: true,
-          failureClass: 'partial',
-          settleMissed: false,
-        };
-      }
       return { nodeId, status: 'restored', mutationPossible: false, failureClass: 'pre_mutation', settleMissed: false };
     } catch (error) {
       console.error(
@@ -1783,6 +1770,21 @@ gitopsApplicationsRouter.post('/:id/rollout/rollback', async (req: Request, res:
   // leave a partial recovery nobody asked for.
   for (const nodeId of resolved.nodeIds) {
     if (!requireDeployOnTarget(req, res, stackName, nodeId)) return;
+  }
+  // One rollback per target. A target whose restore is still moving cannot be
+  // rolled back again: a second restore would take over its recovery slot while
+  // the first is still writing files, which is how a hold gets released and a
+  // successful restore gets dropped. The transition enforces the same rule;
+  // refusing here is what gives the operator a clean answer.
+  for (const nodeId of resolved.nodeIds) {
+    const target = store.getTarget(app.id, nodeId);
+    if (target && targetRestoreInFlight(target)) {
+      res.status(409).json({
+        error: 'A rollback is already in progress on one or more of the selected targets.',
+        code: 'ROLLBACK_IN_PROGRESS',
+      });
+      return;
+    }
   }
 
   // The abandoned rollout must not be dispatchable while its targets are being

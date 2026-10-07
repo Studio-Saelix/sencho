@@ -11,7 +11,7 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { setupTestDb, cleanupTestDb } from './helpers/setupTestDb';
 import { DatabaseService } from '../services/DatabaseService';
-import { GitOpsStore } from '../services/gitops/store';
+import { emptyTargetRow, GitOpsStore } from '../services/gitops/store';
 import { GitOpsTransitions, type EventEnvelope } from '../services/gitops/transitions';
 import { projectApplication } from '../services/gitops/derive';
 import type { GitOpsApplicationRow, GitOpsGenerationRow } from '../services/gitops/types';
@@ -331,6 +331,87 @@ describe('gitops recovery', () => {
     expect(bound.recovery_failure_class).toBeNull();
     expect(bound.failure_stage).toBeNull();
     expect(store.getApplication('app-rec-bind')!.recovery_phase).toBeNull();
+  });
+
+  it('refuses a second recovery while the target is already restoring', () => {
+    const store = GitOpsStore.getInstance();
+    const tx = GitOpsTransitions.getInstance();
+    seedTwoGenerations('app-rec-serialized', 'rec-serialized-web');
+    const genA = 'gen-a-app-rec-serialized';
+
+    tx.recoveryStarted({
+      applicationId: 'app-rec-serialized',
+      nodeId: 1,
+      recoveryRef: 'rec-serialized-a',
+      recoveryGenerationId: genA,
+      envelope: env('op-rec-serialized-a'),
+    });
+
+    // One restore per target across both recovery paths: the rollout rollback
+    // and the Direct recovery write the same slot.
+    expect(() => tx.recoveryStarted({
+      applicationId: 'app-rec-serialized',
+      nodeId: 1,
+      recoveryRef: 'rec-serialized-b',
+      recoveryGenerationId: genA,
+      envelope: env('op-rec-serialized-b'),
+    })).toThrow(/already in progress/);
+
+    const target = store.getTarget('app-rec-serialized', 1)!;
+    expect(target.recovery_phase).toBe('restoring');
+    expect(target.recovery_ref).toBe('rec-serialized-a');
+  });
+
+  it('does not let a recovery success lift a hold another target owns', () => {
+    const store = GitOpsStore.getInstance();
+    const tx = GitOpsTransitions.getInstance();
+    seedTwoGenerations('app-rec-sib', 'rec-sib-web');
+    store.upsertTarget(emptyTargetRow('app-rec-sib', 2, 1));
+    const genA = 'gen-a-app-rec-sib';
+
+    // Target 1 fails after a possible mutation and owns the application hold.
+    tx.recoveryStarted({
+      applicationId: 'app-rec-sib',
+      nodeId: 1,
+      recoveryRef: 'rec-sib-a',
+      recoveryGenerationId: genA,
+      envelope: env('op-rec-sib-a'),
+    });
+    tx.recoveryFailed({
+      applicationId: 'app-rec-sib',
+      nodeId: 1,
+      recoveryRef: 'rec-sib-a',
+      failureClass: 'post_mutation',
+      envelope: env('op-rec-sib-a-fail'),
+    });
+
+    // Target 2 restores successfully. The application stamp is derived from
+    // every live target, so the sibling's hold survives.
+    tx.recoveryStarted({
+      applicationId: 'app-rec-sib',
+      nodeId: 2,
+      recoveryRef: 'rec-sib-b',
+      recoveryGenerationId: genA,
+      envelope: env('op-rec-sib-b'),
+    });
+    tx.recoverySucceeded({
+      applicationId: 'app-rec-sib',
+      nodeId: 2,
+      recoveryRef: 'rec-sib-b',
+      recoveryGenerationId: genA,
+      proven: true,
+      gitopsBinding: 'bound',
+      capturedArtifactSetId: 'art-a-app-rec-sib',
+      capturedSourceAcceptanceRef: 'acc-a-app-rec-sib',
+      envelope: env('op-rec-sib-b-ok'),
+    });
+
+    expect(store.getTarget('app-rec-sib', 2)?.recovery_phase).toBe('complete');
+    const app = store.getApplication('app-rec-sib')!;
+    expect(app.recovery_phase).toBe('failed');
+    expect(app.failure_stage).toBe('recovery');
+    expect(app.recovery_ref).toBe('rec-sib-a');
+    expect(app.failure_class).toBe('post_mutation');
   });
 
   it('retires a boot-reclassified recovery interruption when the restore succeeds', () => {

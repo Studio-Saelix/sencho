@@ -1048,10 +1048,10 @@ export class GitOpsStore {
         connectivity, latest_stage, active_operation_id, active_operation_stage, active_operation_at,
         active_generation_id, active_intent_revision_id, active_rollout_candidate_id,
         failure_stage, failure_class, failure_at, recovery_ref, recovery_generation_id,
-        recovery_phase, recovery_failure_class, interruption_stage, interruption_at, interruption_operation_id,
+        recovery_phase, recovery_failure_class, recovery_failure_at, interruption_stage, interruption_at, interruption_operation_id,
         interruption_generation_id, interruption_intent_revision_id, interruption_rollout_candidate_id,
         pause_at, pause_reason, retry_at, suspended_at, partial_json, evidence_limitations_json, updated_at
-      ) VALUES (${Array(58).fill('?').join(', ')})
+      ) VALUES (${Array(59).fill('?').join(', ')})
       ON CONFLICT(application_id, node_id) DO UPDATE SET
         target_status=excluded.target_status,
         desired_generation_id=excluded.desired_generation_id,
@@ -1096,6 +1096,7 @@ export class GitOpsStore {
         recovery_generation_id=excluded.recovery_generation_id,
         recovery_phase=excluded.recovery_phase,
         recovery_failure_class=excluded.recovery_failure_class,
+        recovery_failure_at=excluded.recovery_failure_at,
         interruption_stage=excluded.interruption_stage,
         interruption_at=excluded.interruption_at,
         interruption_operation_id=excluded.interruption_operation_id,
@@ -1122,7 +1123,7 @@ export class GitOpsStore {
       row.connectivity, row.latest_stage, row.active_operation_id, row.active_operation_stage, row.active_operation_at,
       row.active_generation_id, row.active_intent_revision_id, row.active_rollout_candidate_id,
       row.failure_stage, row.failure_class, row.failure_at, row.recovery_ref, row.recovery_generation_id,
-      row.recovery_phase, row.recovery_failure_class, row.interruption_stage, row.interruption_at, row.interruption_operation_id,
+      row.recovery_phase, row.recovery_failure_class, row.recovery_failure_at, row.interruption_stage, row.interruption_at, row.interruption_operation_id,
       row.interruption_generation_id, row.interruption_intent_revision_id, row.interruption_rollout_candidate_id,
       row.pause_at, row.pause_reason, row.retry_at, row.suspended_at, row.partial_json,
       row.evidence_limitations_json, row.updated_at,
@@ -1502,6 +1503,7 @@ export function emptyTargetRow(
     recovery_generation_id: null,
     recovery_phase: null,
     recovery_failure_class: null,
+    recovery_failure_at: null,
     interruption_stage: null,
     interruption_at: null,
     interruption_operation_id: null,

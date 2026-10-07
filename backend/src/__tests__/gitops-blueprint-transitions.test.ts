@@ -415,42 +415,38 @@ describe('gitops blueprint transitions', () => {
     const store = GitOpsStore.getInstance();
     const tx = GitOpsTransitions.getInstance();
     seedInline('app-ack-self-moving', 340, 1);
+    store.upsertTarget(emptyTargetRow('app-ack-self-moving', 2, 1));
     tx.intentRevised({ applicationId: 'app-ack-self-moving', intent: intent('int-self-moving', 'app-ack-self-moving', 340), envelope: env('op-int-self-moving') });
 
-    tx.rollbackInProgress({
-      applicationId: 'app-ack-self-moving', nodeId: 1, recoveryRef: 'rb-self-a',
-      recoveryGenerationId: null, envelope: env('op-self-a'),
-    });
+    // Node 2 fails after a possible mutation and owns the application hold.
     tx.rollbackPartialFailed({
-      applicationId: 'app-ack-self-moving', nodeId: 1, recoveryRef: 'rb-self-a',
-      failureClass: 'partial', envelope: env('op-self-a-terminal'),
+      applicationId: 'app-ack-self-moving', nodeId: 2, recoveryRef: 'rb-self-other',
+      failureClass: 'partial', envelope: env('op-self-other'),
     });
+    expect(store.getApplication('app-ack-self-moving')?.recovery_phase).toBe('failed');
+
+    // Node 1 is deployed, then a restore opens beside the deploy. The restore
+    // owns the application stamp while it moves.
     tx.blueprintDeployStarted({
       applicationId: 'app-ack-self-moving', nodeId: 1, intentRevisionId: 'int-self-moving',
       rolloutCandidateId: null, envelope: env('op-self-deploy'),
     });
-    // A retry opens a restore beside the deploy, and a later application-wide
-    // failure stamps the application while that restore is still running.
     tx.rollbackInProgress({
-      applicationId: 'app-ack-self-moving', nodeId: 1, recoveryRef: 'rb-self-b',
-      recoveryGenerationId: null, envelope: env('op-self-b'),
+      applicationId: 'app-ack-self-moving', nodeId: 1, recoveryRef: 'rb-self-a',
+      recoveryGenerationId: null, envelope: env('op-self-a'),
     });
-    tx.rollbackPartialFailed({
-      applicationId: 'app-ack-self-moving', nodeId: null, recoveryRef: 'rb-self-b',
-      failureClass: 'partial', envelope: env('op-self-app-fail'),
-    });
-    expect(store.getApplication('app-ack-self-moving')?.recovery_phase).toBe('failed');
 
     // The acknowledgement retires the deploy's own claim, but the restore on
-    // the same row is still moving, so the hold must stay.
+    // the same row is still moving and node 2 still holds a moved claim, so the
+    // application stamp and node 2's hold must both stay.
     tx.blueprintAckRecorded({
       applicationId: 'app-ack-self-moving', nodeId: 1, intentRevisionId: 'int-self-moving',
       rolloutCandidateId: null, legacyAppliedRevision: null, envelope: env('op-self-ack'),
     });
 
     expect(store.getTarget('app-ack-self-moving', 1)?.recovery_phase).toBe('restoring');
-    expect(store.getApplication('app-ack-self-moving')?.recovery_phase).toBe('failed');
-    expect(store.getApplication('app-ack-self-moving')?.failure_stage).toBe('recovery');
+    expect(store.getTarget('app-ack-self-moving', 2)?.recovery_phase).toBe('failed');
+    expect(store.getApplication('app-ack-self-moving')?.recovery_phase).toBe('restoring');
   });
 
   it('never rewrites a restoring row when an acknowledgement lands beside it', () => {
@@ -536,6 +532,79 @@ describe('gitops blueprint transitions', () => {
     });
     expect(store.getTarget('app-revive-residue', 1)?.recovery_phase).toBeNull();
     expect(store.getTarget('app-revive-residue', 1)?.recovery_failure_class).toBeNull();
+  });
+
+  it('re-derives the application hold when a state-review observation revives a residue', () => {
+    const store = GitOpsStore.getInstance();
+    const tx = GitOpsTransitions.getInstance();
+    seedInline('app-obs-revive', 341, 1);
+    tx.intentRevised({ applicationId: 'app-obs-revive', intent: intent('int-obs-revive', 'app-obs-revive', 341), envelope: env('op-int-obs-revive') });
+
+    tx.rollbackInProgress({
+      applicationId: 'app-obs-revive', nodeId: 1, recoveryRef: 'rb-obs-revive',
+      recoveryGenerationId: null, envelope: env('op-obs-revive-open'),
+    });
+    tx.rollbackPartialFailed({
+      applicationId: 'app-obs-revive', nodeId: 1, recoveryRef: 'rb-obs-revive',
+      failureClass: 'partial', envelope: env('op-obs-revive-fail'),
+    });
+    tx.blueprintWithdrawStarted({
+      applicationId: 'app-obs-revive', nodeId: 1, intentRevisionId: 'int-obs-revive',
+      envelope: env('op-obs-revive-wd-start'),
+    });
+    tx.blueprintWithdrawn({
+      applicationId: 'app-obs-revive', nodeId: 1, intentRevisionId: 'int-obs-revive',
+      envelope: env('op-obs-revive-wd-done'),
+    });
+    expect(store.getApplication('app-obs-revive')?.recovery_phase).toBeNull();
+
+    // The state-review observation revives the placement. Both revival paths
+    // share one helper, so the hold comes back here exactly as it does for a
+    // deploy start.
+    tx.blueprintObservation({
+      applicationId: 'app-obs-revive', nodeId: 1, stage: 'blueprint_state_review',
+      envelope: env('op-obs-revive-revive'),
+    });
+
+    expect(store.getTarget('app-obs-revive', 1)?.target_status).toBe('active');
+    expect(store.getTarget('app-obs-revive', 1)?.recovery_failure_class).toBe('partial');
+    expect(store.getApplication('app-obs-revive')?.recovery_phase).toBe('failed');
+    expect(store.getApplication('app-obs-revive')?.failure_stage).toBe('recovery');
+  });
+
+  it('retires a non-moving residue on revival instead of masking the placement', () => {
+    const store = GitOpsStore.getInstance();
+    const tx = GitOpsTransitions.getInstance();
+    seedInline('app-obs-pre', 342, 1);
+    tx.intentRevised({ applicationId: 'app-obs-pre', intent: intent('int-obs-pre', 'app-obs-pre', 342), envelope: env('op-int-obs-pre') });
+
+    tx.rollbackInProgress({
+      applicationId: 'app-obs-pre', nodeId: 1, recoveryRef: 'rb-obs-pre',
+      recoveryGenerationId: null, envelope: env('op-obs-pre-open'),
+    });
+    tx.rollbackPartialFailed({
+      applicationId: 'app-obs-pre', nodeId: 1, recoveryRef: 'rb-obs-pre',
+      failureClass: 'pre_mutation', envelope: env('op-obs-pre-fail'),
+    });
+    tx.blueprintWithdrawStarted({
+      applicationId: 'app-obs-pre', nodeId: 1, intentRevisionId: 'int-obs-pre',
+      envelope: env('op-obs-pre-wd-start'),
+    });
+    tx.blueprintWithdrawn({
+      applicationId: 'app-obs-pre', nodeId: 1, intentRevisionId: 'int-obs-pre',
+      envelope: env('op-obs-pre-wd-done'),
+    });
+
+    tx.blueprintObservation({
+      applicationId: 'app-obs-pre', nodeId: 1, stage: 'blueprint_state_review',
+      envelope: env('op-obs-pre-revive'),
+    });
+
+    // A refusal that moved nothing holds nothing and would otherwise mask the
+    // placement's own status through the redeploy, so it is retired.
+    expect(store.getTarget('app-obs-pre', 1)?.recovery_phase).toBeNull();
+    expect(store.getTarget('app-obs-pre', 1)?.recovery_failure_class).toBeNull();
+    expect(store.getApplication('app-obs-pre')?.recovery_phase).toBeNull();
   });
 
   it('does not retire a recovery failure on an acknowledgement for a superseded intent', () => {

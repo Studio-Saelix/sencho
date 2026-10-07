@@ -3,17 +3,16 @@ import type { GitOpsTargetCurrentRow } from './types';
 /** The columns any recovery-claim decision is allowed to read. */
 type RecoveryClaimRow = Pick<
   GitOpsTargetCurrentRow,
-  'recovery_phase' | 'recovery_failure_class' | 'failure_stage' | 'failure_class'
+  'recovery_phase' | 'recovery_failure_class' | 'recovery_failure_at'
 >;
 
 /**
  * Whether a restore is still moving on this row.
  *
- * An in-flight restore owns the row's recovery slot. It is not a claim about the
- * target's consistency, so nothing retires it, and no hold on automated work is
- * released while it runs: a retry opens `restoring` over the row a refusal left
- * behind, and a deploy or acknowledgement that lands in that window must not read
- * the older claim as the whole story.
+ * An in-flight restore owns the row's recovery slot. Nothing retires it and no
+ * hold on automated work is released while it runs. Rollbacks are serialized
+ * per target (`rollbackInProgress` refuses one that is already moving), so this
+ * is what stops a second restore from taking the slot over mid-write.
  */
 export function targetRestoreInFlight(target: Pick<GitOpsTargetCurrentRow, 'recovery_phase'>): boolean {
   return target.recovery_phase === 'capturing'
@@ -25,25 +24,19 @@ export function targetRestoreInFlight(target: Pick<GitOpsTargetCurrentRow, 'reco
  * The class of the recovery failure this row still claims, or null when it
  * claims none.
  *
- * Read from the claim's own column, because a failure that arrived afterwards
- * takes the shared `failure_class` slot and would otherwise make a moved claim
- * read as a refusal that moved nothing. Rows written before the column existed
- * are resolved from the shared slot, which is still the claim's own class while
- * the failure stage is `recovery`.
+ * The claim has its own column because `failure_class` is shared with deploy and
+ * withdraw failures: a failure that arrives afterwards records itself in that
+ * shared slot, and reading it here would make a moved claim look like a refusal
+ * that moved nothing. Every writer that records a recovery failure sets this
+ * alongside the phase.
  */
 export function recoveryFailureClaimClass(target: RecoveryClaimRow): string | null {
-  if (target.recovery_failure_class !== null) return target.recovery_failure_class;
-  if (target.recovery_phase === 'failed') {
-    // A row written before the claim had its own column kept the class in the
-    // shared slot while its stage was still `recovery`. Any other failed phase
-    // with no class is unprovable, and an unprovable claim is read as one that
-    // may have moved the target rather than released, so an upgraded install
-    // never drops a hold it cannot rule out.
-    return target.failure_stage === 'recovery' && target.failure_class !== null
-      ? target.failure_class
-      : 'unknown';
-  }
-  return null;
+  return target.recovery_failure_class;
+}
+
+/** When the claimed recovery failure happened, or null when it claims none. */
+export function recoveryFailureClaimAt(target: RecoveryClaimRow): number | null {
+  return target.recovery_failure_at;
 }
 
 /**
