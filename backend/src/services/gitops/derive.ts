@@ -1769,6 +1769,28 @@ function connectivityFromObservation(
   }
 }
 
+/**
+ * The connectivity the target projection reports, for the placement decision.
+ *
+ * The projection and the placement policy ask one question of one row ("did the
+ * node holding this target answer?"), and the answer comes from the recorded
+ * observation. The stored `connectivity` column cannot answer it: it is seeded
+ * to null and no producer ever wrote it, so a caller reading the column treats
+ * every node as unknown while the projection reports the truth. Handing out the
+ * projection's own answer keeps the two callers from growing a second
+ * definition of reachability that only one of them can be wrong about.
+ */
+export function targetConnectivity(
+  target: GitOpsTargetCurrentRow,
+  limitations: GitOpsLimitation[] = [],
+): GitOpsTargetProjection['connectivity'] {
+  return connectivityFromObservation(
+    target,
+    decodeObservedSafe(target.observed_artifact_identity_json, limitations),
+    limitations,
+  );
+}
+
 function deriveTarget(
   app: GitOpsApplicationRow,
   acceptedIntent: GitOpsIntentRevisionRow | undefined,

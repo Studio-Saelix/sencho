@@ -28,12 +28,12 @@ import {
     decodeGitOpsApprovedTargetEffectJson,
     decodeGitOpsRequiredTargetsJson,
 } from './gitops/json';
-import { GitOpsStore, placementEffectCompatible } from './gitops/store';
+import { GitOpsStore } from './gitops/store';
 import { isGitManagedBlueprint } from './gitops/gitManaged';
 import { materializeAndFreezeGitManagedArtifactSet } from './gitops/gitManagedMaterialization';
 import { dispatchPreparedGitManagedGeneration } from './gitops/gitManagedHandoff';
 import { gitManagedDispatchWarranted } from './gitops/handoff';
-import type { GitOpsApplicationRow } from './gitops/types';
+import type { GitOpsApplicationRow, GitOpsApprovalRow } from './gitops/types';
 
 const RECONCILER_INTERVAL_MS = 60_000;
 const RECONCILER_INITIAL_DELAY_MS = 5_000;
@@ -45,6 +45,25 @@ const RECONCILER_INITIAL_DELAY_MS = 5_000;
 const GIT_MANAGED_HANDOFF_CONCURRENCY = 3;
 
 export type ConfirmedActionOutcomeStatus = 'ok' | 'failed' | 'name_conflict' | 'pending' | 'skipped';
+
+/**
+ * An operator's blast after the live placement's frozen target set narrows it,
+ * or null when there is no placement authority to narrow by (no live
+ * application, or no placement approval on it), in which case the blast is its
+ * own authorization.
+ *
+ * `resolvable: false` means the placement approval the pointer names cannot be
+ * resolved at all, which authorizes nothing: the executor refuses its gate in
+ * that state rather than running part of a plan it cannot check.
+ */
+export type ScopedLegacyBlast =
+    | { resolvable: false }
+    | {
+        resolvable: true;
+        entries: ApprovedNodeOutcome[];
+        required: ReadonlySet<number>;
+        effectByNode: ReadonlyMap<number, 'place' | 'remove'>;
+    };
 
 export interface ConfirmedActionOutcome {
     nodeId: number;
@@ -359,28 +378,41 @@ export class BlueprintReconciler {
         if (!preview) return;
 
         const parsed = parseApprovedBlastJson(blueprint.approved_blast_json);
-        if (
-            blueprint.approval_status !== 'approved'
-            || !parsed.ok
-            || blueprint.approved_intent_fingerprint !== intentFingerprint(blueprint)
-        ) {
+        const legacyApprovalEffective = blueprint.approval_status === 'approved'
+            && parsed.ok
+            && blueprint.approved_intent_fingerprint === intentFingerprint(blueprint);
+
+        // The policy path is preferred when it covers the whole plan. Its
+        // approval is bound to the current intent, while the combined
+        // approval's fingerprint does not cover the node set a label or cordon
+        // change moved, so preferring the combined one would ignore the
+        // approval the roster change produced. The combined approval is not
+        // cleared to get there: when the policy path cannot run (a manual
+        // rollout, a retained node an operator has to settle, an uncovered
+        // action), the operator's own approval still drives the checks,
+        // repairs, and retries it authorized rather than suspending the tick.
+        let authorized: ConfirmableActionRef[];
+        const policyAuthorized = this.policyPlacementAuthorizedActions(blueprint, preview.executorActions);
+        if (policyAuthorized) {
+            authorized = policyAuthorized;
+        } else if (legacyApprovalEffective) {
+            const gitopsGate = this.authorizeAgainstGitOpsPlacement(blueprint, parsed.entries, preview.executorActions);
+            if (!gitopsGate.ok) {
+                // Clear so the tick does not keep retrying a refused live placement.
+                diagnosticLog('reconcile skipped: GitOps placement gate refused; clearing stale approval', {
+                    blueprintId: blueprint.id,
+                });
+                DatabaseService.getInstance().clearBlueprintApproval(blueprint.id);
+                return;
+            }
+            authorized = gitopsGate.authorized;
+        } else {
             diagnosticLog('reconcile skipped: no valid approval', {
                 blueprintId: blueprint.id,
                 effectiveApproval: preview.effectiveApproval,
             });
             return;
         }
-
-        const gitopsGate = this.authorizeAgainstGitOpsPlacement(blueprint, parsed.entries, preview.executorActions);
-        if (!gitopsGate.ok) {
-            // Clear so the tick does not keep retrying a refused live placement.
-            diagnosticLog('reconcile skipped: GitOps placement gate refused; clearing stale approval', {
-                blueprintId: blueprint.id,
-            });
-            DatabaseService.getInstance().clearBlueprintApproval(blueprint.id);
-            return;
-        }
-        const authorized = gitopsGate.authorized;
         if (authorized.length === 0) {
             diagnosticLog('reconcile skipped: no authorized executor actions', { blueprintId: blueprint.id });
             return;
@@ -755,45 +787,30 @@ export class BlueprintReconciler {
     }
 
     /**
-     * After legacy blueprints.approval_* passes, also require a live GitOps
-     * placement_approval when one exists.
+     * A live application's frozen placement authority, resolved and decoded.
      *
-     * Dual-write period: a live app with no placement_approval_ref still
-     * executes under legacy columns alone. Once placement is set, resolve must
-     * succeed and the frozen required set must not be widened by the current
-     * blast; otherwise refuse closed.
+     * Shared by the legacy gate, which narrows an operator's confirmed plan to
+     * it, and the policy path, which executes a plan the policy already
+     * approved, so the two cannot read the same approval two ways.
      */
-    private authorizeAgainstGitOpsPlacement(
-        blueprint: Blueprint,
-        blastEntries: ApprovedNodeOutcome[],
-        executorActions: ConfirmableActionRef[],
-    ): { ok: true; authorized: ConfirmableActionRef[] } | { ok: false } {
-        const store = GitOpsStore.getInstance();
-        const app = store.getLiveBlueprintApplication(blueprint.id);
-        if (!app || !app.placement_approval_ref) {
-            return {
-                ok: true,
-                authorized: filterAuthorizedExecutorActions(blastEntries, executorActions),
-            };
-        }
-        if (!app.intent_revision_id) return { ok: false };
+    private decodedPlacementAuthority(app: GitOpsApplicationRow): {
+        authority: GitOpsApprovalRow['authority'];
+        requiredNodeIds: number[];
+        required: ReadonlySet<number>;
+        effectByNode: ReadonlyMap<number, 'place' | 'remove'>;
+    } | null {
+        if (!app.placement_approval_ref || !app.intent_revision_id) return null;
 
         const frozenRequired = this.frozenRequiredNodeIds(app);
-        if (!frozenRequired) return { ok: false };
+        if (!frozenRequired) return null;
 
-        const placement = store.resolveApprovalRef(app.placement_approval_ref, {
+        const placement = GitOpsStore.getInstance().resolveApprovalRef(app.placement_approval_ref, {
             kind: 'placement_approval',
             applicationId: app.id,
             intentRevisionId: app.intent_revision_id,
             requiredNodeIds: frozenRequired,
         });
-        if (!placement?.blast_json) return { ok: false };
-
-        // Refuse when the legacy blast would place outside the frozen set
-        // (widen) or remove a still-required node.
-        if (!placementEffectCompatible(blastEntries, frozenRequired)) {
-            return { ok: false };
-        }
+        if (!placement?.blast_json) return null;
 
         let placementEffect: ApprovedNodeOutcome[];
         try {
@@ -803,14 +820,201 @@ export class BlueprintReconciler {
                 `[BlueprintReconciler] placement blast decode failed for ${placement.id}:`,
                 error instanceof Error ? error.message : String(error),
             );
-            return { ok: false };
+            return null;
         }
 
-        const required = new Set(frozenRequired);
-        const effectByNode = new Map(placementEffect.map((e) => [e.nodeId, e.outcome]));
-        const authorized = filterAuthorizedExecutorActions(blastEntries, executorActions)
-            .filter((ref) => this.actionInsideFrozenAuthorization(ref, required, effectByNode));
+        return {
+            authority: placement.authority,
+            requiredNodeIds: frozenRequired,
+            required: new Set(frozenRequired),
+            effectByNode: new Map(placementEffect.map((e) => [e.nodeId, e.outcome])),
+        };
+    }
+
+    /**
+     * The operator's blast narrowed to the live placement's frozen required
+     * set, or null when there is no placement authority to narrow by.
+     *
+     * A node-driven roster change (a label or cordon move) mints a new placement
+     * approval while the operator's combined approval, whose fingerprint does
+     * not cover the node set that change moved, is still effective: its blast
+     * then names nodes the placement no longer requires. Refusing the whole
+     * approval there would stop every action on a running Blueprint, the drift
+     * checks it authorizes included, on a routine label change. So an entry
+     * that contradicts the frozen set is dropped: never honored, which leaves
+     * the nodes the placement still covers authorized and the nodes it dropped
+     * waiting for the operator. An approval that cannot be resolved covers
+     * nothing here, matching the executor, which refuses the gate rather than
+     * running part of it.
+     *
+     * The executor and the composed evaluator both read this, so a plan action
+     * the narrowing drops is unauthorized in both: no surface reports an
+     * approval the tick will not honor, and none withholds one it will.
+     */
+    public scopeLegacyBlast(
+        blueprint: Blueprint,
+        blastEntries: ApprovedNodeOutcome[],
+    ): ScopedLegacyBlast | null {
+        const app = GitOpsStore.getInstance().getLiveBlueprintApplication(blueprint.id);
+        if (!app || !app.placement_approval_ref) return null;
+        const authority = this.decodedPlacementAuthority(app);
+        if (!authority) return { resolvable: false };
+        return {
+            resolvable: true,
+            entries: blastEntries.filter((entry) => (
+                entry.outcome === 'place'
+                    ? authority.required.has(entry.nodeId)
+                    : !authority.required.has(entry.nodeId)
+            )),
+            required: authority.required,
+            effectByNode: authority.effectByNode,
+        };
+    }
+
+    /**
+     * After legacy blueprints.approval_* passes, also require a live GitOps
+     * placement_approval when one exists.
+     *
+     * Dual-write period: a live app with no placement_approval_ref still
+     * executes under legacy columns alone. Once placement is set, resolve must
+     * succeed, and the operator's blast is narrowed to the frozen required set
+     * (see scopeLegacyBlast) rather than invalidated whole.
+     */
+    private authorizeAgainstGitOpsPlacement(
+        blueprint: Blueprint,
+        blastEntries: ApprovedNodeOutcome[],
+        executorActions: ConfirmableActionRef[],
+    ): { ok: true; authorized: ConfirmableActionRef[] } | { ok: false } {
+        const scope = this.scopeLegacyBlast(blueprint, blastEntries);
+        if (!scope) {
+            // No live placement authority, which is the dual-write period: the
+            // operator's blast authorizes itself.
+            return {
+                ok: true,
+                authorized: filterAuthorizedExecutorActions(blastEntries, executorActions),
+            };
+        }
+        // An approval that cannot be resolved checks no plan at all.
+        if (!scope.resolvable) return { ok: false };
+
+        // Narrow the operator's blast to the frozen required set: an entry that
+        // would place a node the placement dropped, or withdraw one it still
+        // requires, is never honored. The per-action filter then enforces the
+        // same rule a second time, so this narrows and never grants.
+        const authorized = filterAuthorizedExecutorActions(scope.entries, executorActions)
+            .filter((ref) => this.actionInsideFrozenAuthorization(ref, scope.required, scope.effectByNode));
         return { ok: true, authorized };
+    }
+
+    /**
+     * The actions a current policy placement approval authorizes without an
+     * operator, or null when it does not cover the whole plan.
+     *
+     * A node-driven roster change leaves the combined approval's fingerprint
+     * untouched, so the reconciler tries this path first and falls back to the
+     * combined approval only when the policy cannot run the whole plan. The
+     * policy approval is bound to the current intent, which is what makes a
+     * policy decision reach execution after a label or cordon move.
+     *
+     * Seven conditions keep it inside the authority model. The application must
+     * be inline, which is where a combined approval is the executor. The
+     * placement policy must still be the one that could have written this
+     * approval: taking it back to operator approval is an operator saying no
+     * further unattended placement, so a standing policy approval stops the
+     * moment the policy goes. The approval must be a policy's, not an
+     * operator's, because this path runs where no operator decided. The rollout
+     * authorization policy must be automatic, because executing the plan is a
+     * rollout and a manual policy reserves it for the operator; the same
+     * condition gates the Git-managed automatic dispatch. At least one node must
+     * be retained, the anchor that proves an operator has already placed
+     * content the plan builds on; a first placement has none and waits for
+     * Apply. Every retained node must already run the current revision, so a
+     * compose edit the policy never saw cannot ride out with a roster change.
+     * And the approval must cover every action in the plan, so an uncovered
+     * plan is refused whole rather than partly executed.
+     */
+    public policyPlacementAuthorizedActions(
+        blueprint: Blueprint,
+        executorActions: ConfirmableActionRef[],
+    ): ConfirmableActionRef[] | null {
+        const app = GitOpsStore.getInstance().getLiveBlueprintApplication(blueprint.id);
+        if (!app || app.target_mode !== 'inline_blueprint') return null;
+        if (app.placement_policy !== 'bounded_auto') return null;
+        if (app.rollout_authorization_policy !== 'automatic') return null;
+        const authority = this.decodedPlacementAuthority(app);
+        if (!authority || authority.authority !== 'configured_policy') return null;
+        const authorized = executorActions.filter((ref) =>
+            this.actionPlacementAuthorized(ref, authority.required, authority.effectByNode));
+        if (authorized.length !== executorActions.length) return null;
+        const retained = authority.requiredNodeIds.filter((nodeId) => !authority.effectByNode.has(nodeId));
+        // The anchor. A plan that retains nothing is a first placement: no
+        // deployed revision and no operator-confirmed blast exists to compare
+        // the content against, so the policy would be approving compose no
+        // person ever confirmed and the revision guard below would pass on an
+        // empty set. A first placement still waits for Apply.
+        if (retained.length === 0) return null;
+        // A retained node in flight emits an informational row, so it drops out
+        // of the plan and cannot fail the coverage count above. Reading the
+        // deployment rows directly closes that: the policy must not place an
+        // added node under a compose edit the policy never saw just because the
+        // retained node that would have exposed it was mid-deploy.
+        if (!this.retainedNodesAtCurrentRevision(blueprint, retained)) return null;
+        return authorized;
+    }
+
+    /**
+     * Whether every node the placement retains already runs the current
+     * revision.
+     *
+     * The placement approval is a decision about the node set, so a retained
+     * node's content is only ever within it when that content is what the
+     * fleet already runs. A retained deployment at an older revision means the
+     * compose changed with (or after) the roster edit, and rolling anything out
+     * under this approval would leave the fleet mixed until an operator
+     * applies. Fail closed to the operator, independent of what this tick's
+     * projection happened to emit for the node.
+     */
+    private retainedNodesAtCurrentRevision(blueprint: Blueprint, retainedNodeIds: readonly number[]): boolean {
+        const db = DatabaseService.getInstance();
+        return retainedNodeIds.every((nodeId) => {
+            const deployment = db.getDeployment(blueprint.id, nodeId);
+            return deployment != null && deployment.applied_revision === blueprint.revision;
+        });
+    }
+
+    /**
+     * One executor action under a policy placement approval.
+     *
+     * The approval authorizes the node set it decided: every action on a node it
+     * adds or removes, including the content that placing a node necessarily
+     * deploys, because the policy read that content to judge the workload
+     * stateless. A node the approval retains is different. The policy saw the
+     * node set, not a compose edit, so it may keep that node observed but must
+     * not roll anything onto it: a retained `create` or `update` means the
+     * compose changed, and so does a `check_enforce`, whose repair redeploys
+     * the compose. Both are still the operator's to authorize, and drift mode is
+     * deliberately not an operational field, so a switch to Enforce does not
+     * clear this approval; that is why the repair waits for Apply instead.
+     */
+    private actionPlacementAuthorized(
+        ref: ConfirmableActionRef,
+        required: ReadonlySet<number>,
+        effectByNode: ReadonlyMap<number, 'place' | 'remove'>,
+    ): boolean {
+        const needed = outcomeForConfirmableAction(ref.action);
+        if (!needed) return false;
+        // The placement blast records only the change, additions and removals,
+        // so a retained node has no entry here and falls through to the
+        // observation-only allowance below. Observation only: a retained node is
+        // never repaired from here, because a placement policy decided the node
+        // set and not the content, and drift mode is deliberately not an
+        // operational field, so a switch to Enforce would otherwise let a user
+        // who cannot approve a placement start rolling out compose this
+        // approval never covered. Repair waits for Apply.
+        if (effectByNode.get(ref.nodeId) === needed) return true;
+        return needed === 'place'
+            && required.has(ref.nodeId)
+            && ref.action === 'check_observe';
     }
 
     private frozenRequiredNodeIds(app: GitOpsApplicationRow): number[] | null {

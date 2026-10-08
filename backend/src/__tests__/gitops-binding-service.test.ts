@@ -1,9 +1,14 @@
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { setupTestDb, cleanupTestDb } from './helpers/setupTestDb';
 import { DatabaseService, type Blueprint } from '../services/DatabaseService';
+import { BlueprintReconciler } from '../services/BlueprintReconciler';
+import { BlueprintService } from '../services/BlueprintService';
 import { GitOpsStore } from '../services/gitops/store';
 import { GitOpsTransitions } from '../services/gitops/transitions';
 import { commitBlueprintCreate, commitBlueprintUpdate } from '../services/gitops/blueprintProducers';
+import { encodeGitOpsApprovedTargetEffectJson } from '../services/gitops/json';
+import { configuredSnapshotFor, encodePolicySnapshot } from '../services/gitops/policyComposition';
+import { newGitOpsId } from '../services/gitops/directApplication';
 import {
   GitManagedContentError,
   GitOpsBindingService,
@@ -172,6 +177,81 @@ describe('GitOps binding service', () => {
       application_id: null,
     });
     expect(GitOpsStore.getInstance().getApplication(applicationId)?.target_mode).toBe('inline_blueprint');
+  });
+
+  it('does not carry a Git-era policy approval into the Inline Blueprint it detaches to', async () => {
+    // The Git-managed case: bounded placement approved an added node, and the
+    // startup migration had set automatic rollout authorization for every active
+    // Git-managed application, so no operator chose either for Inline. Detach
+    // changes who decides, so nothing of that may survive it.
+    const store = GitOpsStore.getInstance();
+    const blueprint = commitBlueprintCreate({
+      name: 'bp-detach-authority',
+      description: null,
+      compose_content: 'services:\n  web:\n    image: nginx:1.27\n',
+      selector: { type: 'nodes', ids: [1, 2] },
+      drift_mode: 'suggest',
+      classification: 'stateless',
+      classification_reasons: [],
+      enabled: true,
+      created_by: 'tester',
+    }, () => [1, 2]);
+    const applicationId = seedDirect('detach-authority-web');
+    GitOpsBindingService.getInstance().convertInlineToGit({
+      blueprintId: blueprint.id,
+      applicationId,
+      actor: 'tester',
+    });
+    const app = store.getApplication(applicationId)!;
+    DatabaseService.getInstance().getDb().prepare(
+      `UPDATE gitops_applications
+          SET placement_policy = 'bounded_auto', rollout_authorization_policy = 'automatic'
+        WHERE id = ?`,
+    ).run(applicationId);
+    // Read back after the policy write: a policy-authorized approval has to
+    // carry the snapshot of the policies that decided it.
+    const configuredApp = store.getApplication(applicationId)!;
+
+    // Node 1 runs the placed revision and node 2 is waiting to be placed, which
+    // is exactly what the retained-node anchor requires before the policy's
+    // approval may execute on its own.
+    DatabaseService.getInstance().upsertDeployment({
+      blueprint_id: blueprint.id,
+      node_id: 1,
+      status: 'active',
+      applied_revision: blueprint.revision,
+      last_deployed_at: Date.now(),
+    });
+    GitOpsTransitions.getInstance().placementApproved({
+      applicationId,
+      approvalId: newGitOpsId(),
+      intentRevisionId: app.intent_revision_id!,
+      blastJson: encodeGitOpsApprovedTargetEffectJson([{ nodeId: 2, outcome: 'place' }]),
+      requiredNodeIds: [1, 2],
+      fingerprint: null,
+      actor: 'tester',
+      envelope: { operationId: newGitOpsId(), actor: 'tester', trigger: 'test', at: Date.now() },
+      rolloutGenerationId: newGitOpsId(),
+      candidateId: app.rollout_candidate_id!,
+      authority: 'configured_policy',
+      policyProvenanceJson: encodePolicySnapshot(configuredSnapshotFor(configuredApp)),
+    });
+    expect(store.getApplication(applicationId)!.placement_approval_ref).not.toBeNull();
+
+    GitOpsBindingService.getInstance().detachToInline({ blueprintId: blueprint.id, actor: 'tester' });
+
+    const demoted = store.getApplication(applicationId)!;
+    expect(demoted.target_mode).toBe('inline_blueprint');
+    expect(demoted.placement_approval_ref).toBeNull();
+    expect(demoted.rollout_authorization_policy).toBe('manual');
+
+    // Nothing deploys from the Git-era authority. The next unattended step is an
+    // operator's: set the Inline rollout authorization policy, then let the
+    // placement policy decide the next change.
+    const deploySpy = vi.spyOn(BlueprintService.getInstance(), 'deployToNode')
+      .mockResolvedValue({ status: 'active' });
+    await BlueprintReconciler.getInstance().reconcileOne(blueprint.id);
+    expect(deploySpy).not.toHaveBeenCalled();
   });
 
   it('describes Git-managed content without the retained source stack identity', () => {

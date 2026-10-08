@@ -43,15 +43,18 @@ function isBlueprintPreview(value: unknown): value is BlueprintPreview {
 }
 
 /**
- * The legacy combined approval stays separate from the decomposed authority
- * chips. It is only called combined rather than legacy when the Blueprint has
- * no live application, where it is the whole approval mechanism rather than the
- * pre-decomposition surface of one.
+ * The authority that made the plan effective, named as such. The legacy
+ * combined approval stays separate from the decomposed authority chips; it is
+ * only called combined rather than legacy when the Blueprint has no live
+ * application, where it is the whole approval mechanism. A plan covered by a
+ * configured policy's placement approval is approved, but calling that a
+ * combined approval would be false.
  */
 function approvalLabel(preview: BlueprintPreview): string {
     const value = preview.effectiveApproval === 'reapproval_required'
         ? 'reapproval required'
         : preview.effectiveApproval;
+    if (preview.approvalAuthority === 'configured_policy') return `placement policy: ${value}`;
     const hasLiveApplication = preview.gitops != null && preview.gitops.targetMode !== 'not_applicable';
     return hasLiveApplication ? `legacy combined: ${value}` : value;
 }

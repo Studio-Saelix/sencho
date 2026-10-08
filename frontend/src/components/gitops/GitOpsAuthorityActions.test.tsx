@@ -11,7 +11,12 @@ import type { PermissionAction } from '@/context/AuthContext';
 
 vi.mock('@/lib/gitopsAuthorityApi', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@/lib/gitopsAuthorityApi')>();
-  return { ...actual, acceptGitOpsSource: vi.fn(), authorizeGitOpsRollout: vi.fn() };
+  return {
+    ...actual,
+    acceptGitOpsSource: vi.fn(),
+    authorizeGitOpsRollout: vi.fn(),
+    setGitOpsRolloutAuthorizationPolicy: vi.fn(),
+  };
 });
 
 vi.mock('@/components/blueprints/RolloutPreviewDialog', () => ({
@@ -24,7 +29,7 @@ vi.mock('@/components/ui/toast-store', () => ({
   toast: { error: vi.fn(), success: vi.fn(), warning: vi.fn(), info: vi.fn(), loading: vi.fn(), dismiss: vi.fn() },
 }));
 
-import { acceptGitOpsSource, authorizeGitOpsRollout } from '@/lib/gitopsAuthorityApi';
+import { acceptGitOpsSource, authorizeGitOpsRollout, setGitOpsRolloutAuthorizationPolicy } from '@/lib/gitopsAuthorityApi';
 import { toast } from '@/components/ui/toast-store';
 import GitOpsAuthorityActions from './GitOpsAuthorityActions';
 
@@ -98,6 +103,29 @@ function withPlacementPolicy(projection: GitOpsRevisionLive): GitOpsRevisionLive
       },
     ],
   };
+}
+
+/** An application whose rollout authorization policy is configured and read. */
+function withRolloutPolicy(projection: GitOpsRevisionLive): GitOpsRevisionLive {
+  return {
+    ...projection,
+    authorityPolicies: [
+      {
+        domain: 'rollout_authorization',
+        configured: 'manual',
+        effectiveFrozen: null,
+        decision: 'awaiting_operator',
+        reason: null,
+        decidedBy: null,
+        decidedAt: null,
+      },
+    ],
+  };
+}
+
+/** A Blueprint demoted to Inline, which is still placed but has no Git lifecycle. */
+function asInline(projection: GitOpsRevisionLive): GitOpsRevisionLive {
+  return { ...projection, targetMode: 'inline_blueprint' };
 }
 
 function renderActions(
@@ -240,6 +268,36 @@ describe('GitOpsAuthorityActions', () => {
     const asInline: GitOpsRevisionLive = { ...demoted, targetMode: 'inline_blueprint' };
     renderActions(asInline);
     expect(screen.getByTestId('gitops-action-placement-policy')).toBeInTheDocument();
+  });
+
+  it('offers the rollout authorization policy to an Inline Blueprint and writes it', async () => {
+    // The mode where no rollout controls row exists. An Inline Blueprint acts
+    // on a policy placement approval only while this policy is automatic, so
+    // without this control the operator could configure bounded automatic
+    // placement and never let it act.
+    const user = userEvent.setup();
+    const onChanged = vi.fn();
+    vi.mocked(setGitOpsRolloutAuthorizationPolicy).mockResolvedValue(undefined);
+    renderActions(asInline(withRolloutPolicy(sourcePending())), () => true, onChanged);
+
+    await user.click(screen.getByTestId('gitops-action-rollout-policy'));
+    await user.click(screen.getByRole('radio', { name: 'Automatic' }));
+    await user.click(screen.getByTestId('gitops-policy-confirm'));
+
+    await waitFor(() => expect(setGitOpsRolloutAuthorizationPolicy).toHaveBeenCalledWith('bp:5', 'automatic'));
+    expect(onChanged).toHaveBeenCalled();
+  });
+
+  it('does not put the inline rollout control on a Git-managed application', () => {
+    // A Git-managed application keeps the control in its rollout overflow; a
+    // second affordance in the authority row would be the same write twice.
+    renderActions(withRolloutPolicy(blueprintRevision()));
+    expect(screen.queryByTestId('gitops-action-rollout-policy')).toBeNull();
+  });
+
+  it('withholds the inline rollout policy from a session that may not deploy', () => {
+    renderActions(asInline(withRolloutPolicy(sourcePending())), action => action !== 'stack:deploy');
+    expect(screen.queryByTestId('gitops-action-rollout-policy')).toBeNull();
   });
 
   it('offers no Git lifecycle action to a demoted Blueprint', () => {

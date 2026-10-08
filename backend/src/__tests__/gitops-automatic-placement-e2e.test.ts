@@ -126,8 +126,19 @@ function generation(id: string, applicationId: string, candidateDir: string, app
   };
 }
 
+/**
+ * A monotonic blueprint id for seeded applications.
+ *
+ * The id was derived from the random application id's digits, which collided
+ * with a row seeded earlier in the file often enough to trip the unique active
+ * blueprint index, reddening the suite about once in a full run. Rows are only
+ * ever inserted through this helper, so a counter cannot collide.
+ */
+let nextApplicationBlueprintId = 7000;
+
 function application(overrides: Partial<GitOpsApplicationRow>): GitOpsApplicationRow {
   const id = overrides.id ?? `app-${randomUUID().slice(0, 8)}`;
+  nextApplicationBlueprintId += 1;
   return {
     id,
     lifecycle_key: `blueprint:${id}`,
@@ -135,7 +146,7 @@ function application(overrides: Partial<GitOpsApplicationRow>): GitOpsApplicatio
     target_mode: 'blueprint',
     stack_name: null,
     configured_source_stack_name: `src-${id}`,
-    blueprint_id: Number(id.replace(/\D/g, '').slice(0, 6)) + 7000,
+    blueprint_id: overrides.blueprint_id ?? nextApplicationBlueprintId,
     configured_repo_url: `https://example.invalid/${id}.git`,
     repo_identity_json: '{"host":"example.invalid","pathname":"/x.git"}',
     configured_ref: 'main',
@@ -463,11 +474,13 @@ describe('a bounded_auto application reaches an approval', () => {
 
     // The withdrawn node must read as reachable: a removal is judged by the
     // observation of the workload that ran there, and a node with no observation
-    // is unknown, which is its own refusal.
+    // is unknown, which is its own refusal. The stored connectivity column is
+    // seeded to null and no producer writes it, so the fixture records the same
+    // evidence a deploy leaves behind.
     store.upsertTarget({
       ...emptyTargetRow(app.id, withdrawn, 1),
       target_status: 'active',
-      connectivity: 'reachable',
+      observed_artifact_identity_json: JSON.stringify({ kind: 'exact', identity: 'sha256:served', observedAt: 1 }),
     });
     // Neither node is cordoned, and the Blueprint itself now asks for one of them.
     const previous = store.getIntentRevision(store.getApplication(app.id)!.intent_revision_id!)!;
@@ -497,6 +510,91 @@ describe('a bounded_auto application reaches an approval', () => {
     const outcome = applyAutomaticPlacement(app.id, { operationId: 'op-wd-3', actor: null, trigger: 'test', at: 3 });
     expect(outcome).toEqual({ status: 'auto_approved', reason: 'stateless_removal' });
     expect(store.hasPlacementApprovalFor(app.id, 'intent-wd', 'cand-wd')).toBe(true);
+  });
+
+  it.each([
+    ['nothing observed', undefined, 'unknown_connectivity', 'none', 'online'],
+    ['an unreadable observation', '{not json', 'malformed_evidence', 'corrupt', 'online'],
+    ['an offline node', JSON.stringify({ kind: 'exact', identity: 'sha256:served', observedAt: 1 }), 'stale_node', 'offline', 'offline'],
+    ['no registry row', JSON.stringify({ kind: 'exact', identity: 'sha256:served', observedAt: 1 }), 'unknown_connectivity', 'unregistered', 'missing'],
+  ] as const)('refuses a withdrawal that left %s', (_label, observation, reason, suffix, registry) => {
+    // The other direction of the same reader. An observation that is absent
+    // proves nothing about the node, and one that cannot be decoded is a data
+    // fault. Both refuse, and the reasons stay apart so neither sends the
+    // operator to check the wrong thing. A node the registry does not have as
+    // online refuses first: a withdrawal must not be approved against a node
+    // the same evidence cannot reach for an addition. A node the registry does
+    // not have at all refuses the same way, and is pinned apart from the
+    // unreadable-observation case so a guard that blamed a data fault for a node
+    // it simply cannot see would fail here.
+    const kept = addNode(`n-${randomUUID().slice(0, 6)}`);
+    const withdrawn = addNode(`n-${randomUUID().slice(0, 6)}`);
+    if (registry === 'offline') {
+      DatabaseService.getInstance().getDb()
+        .prepare('UPDATE nodes SET status = ? WHERE id = ?')
+        .run('offline', withdrawn);
+    }
+    const app = seed({ nodeIds: [kept, withdrawn], compose: 'services:\n  web:\n    image: nginx:1.25\n' });
+    const store = GitOpsStore.getInstance();
+
+    GitOpsTransitions.getInstance().placementApproved({
+      applicationId: app.id,
+      approvalId: `place-both-unobserved-${suffix}`,
+      intentRevisionId: store.getApplication(app.id)!.intent_revision_id!,
+      blastJson: encodeGitOpsApprovedTargetEffectJson([
+        { nodeId: kept, outcome: 'place' as const },
+        { nodeId: withdrawn, outcome: 'place' as const },
+      ]),
+      requiredNodeIds: [kept, withdrawn],
+      fingerprint: null,
+      actor: 'tester',
+      envelope: { operationId: `op-unobserved-base-${suffix}`, actor: 'tester', trigger: 'test', at: 1 },
+      rolloutGenerationId: `rgen-unobserved-${suffix}`,
+      candidateId: store.getApplication(app.id)!.rollout_candidate_id!,
+      authority: 'operator',
+      policyProvenanceJson: null,
+    });
+    // A target row exists and is active. What it left behind is the only thing
+    // that can prove the node answered.
+    store.upsertTarget({
+      ...emptyTargetRow(app.id, withdrawn, 1),
+      target_status: 'active',
+      ...(observation === undefined ? {} : { observed_artifact_identity_json: observation }),
+    });
+
+    const previous = store.getIntentRevision(store.getApplication(app.id)!.intent_revision_id!)!;
+    GitOpsTransitions.getInstance().intentRevised({
+      applicationId: app.id,
+      intent: { ...previous, id: `intent-unobserved-${suffix}`, operation_id: `op-unobserved-2-${suffix}` },
+      envelope: { operationId: `op-unobserved-2-${suffix}`, actor: 'tester', trigger: 'test', at: 2 },
+    });
+    GitOpsTransitions.getInstance().rolloutCandidateOpened({
+      applicationId: app.id,
+      candidate: {
+        id: `cand-unobserved-${suffix}`,
+        application_id: app.id,
+        intent_revision_id: `intent-unobserved-${suffix}`,
+        required_targets_json: encodeGitOpsRequiredTargetsJson([kept]),
+        compose_content_sha256: 'a'.repeat(64),
+        accepted_generation_id: null,
+        artifact_set_id: null,
+        authoritative: 1,
+        provenance: 'roster_change',
+        created_at: 2,
+        operation_id: `op-unobserved-2-${suffix}`,
+      } as never,
+      envelope: { operationId: `op-unobserved-2-${suffix}`, actor: 'tester', trigger: 'test', at: 2 },
+    });
+
+    // The registry row is gone while its target row survives: what the registry
+    // can say about the node is nothing, so the refusal is unknown reachability
+    // rather than a fault in the evidence a deploy left behind.
+    if (registry === 'missing') {
+      DatabaseService.getInstance().getDb().prepare('DELETE FROM nodes WHERE id = ?').run(withdrawn);
+    }
+
+    const outcome = applyAutomaticPlacement(app.id, { operationId: `op-unobserved-3-${suffix}`, actor: null, trigger: 'test', at: 3 });
+    expect(outcome).toEqual({ status: 'operator_review', reason });
   });
 
   it('does not read a migrated application as a first placement', () => {
@@ -534,7 +632,11 @@ describe('a bounded_auto application reaches an approval', () => {
       created_at: 1,
     } as never);
     for (const nodeId of [kept, alsoKept, withdrawn]) {
-      store.upsertTarget({ ...emptyTargetRow(app.id, nodeId, 1), target_status: 'active', connectivity: 'reachable' });
+      store.upsertTarget({
+        ...emptyTargetRow(app.id, nodeId, 1),
+        target_status: 'active',
+        observed_artifact_identity_json: JSON.stringify({ kind: 'exact', identity: 'sha256:served', observedAt: 1 }),
+      });
     }
 
     const previous = store.getIntentRevision(store.getApplication(app.id)!.intent_revision_id!)!;

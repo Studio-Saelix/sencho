@@ -446,6 +446,31 @@ export class GitOpsTransitions {
       },
       matchesDestination: (app) => app.target_mode === 'inline_blueprint',
       assertReady: () => undefined,
+      // Demotion changes who decides, so it takes the Git-era authority with it.
+      // The placement approval was written about Git-managed placement and its
+      // frozen required set describes Git content, and the rollout
+      // authorization policy it could run under was very often not an operator's
+      // choice for Inline at all: the startup migration backfilled automatic on
+      // every active Git-managed row. Carrying either across would hand the next
+      // Inline tick an unattended authority nobody granted for Inline
+      // placement, on nodes whose deployments are stamped with the revision
+      // they had while Git content was running. Both go back to the operator
+      // with the mode; an operator who wants unattended placement sets the
+      // rollout authorization policy again from the Inline authority row.
+      onRetarget: (app) => {
+        if (app.placement_approval_ref === null
+          && app.rollout_authorization_policy === 'manual') {
+          return {};
+        }
+        app.placement_approval_ref = null;
+        app.rollout_authorization_ref = null;
+        app.rollout_authorization_policy = 'manual';
+        return {
+          placementApprovalRef: null,
+          rolloutAuthorizationRef: null,
+          rolloutAuthorizationPolicy: 'manual',
+        };
+      },
     });
   }
 
@@ -462,6 +487,13 @@ export class GitOpsTransitions {
     };
     matchesDestination: (app: GitOpsApplicationRow) => boolean;
     assertReady: (app: GitOpsApplicationRow) => void;
+    /**
+     * Extra row edits applied in the same transaction once the retarget has
+     * landed, on the reloaded row. The returned delta is recorded in the
+     * retarget's history row beside the mode change, so an edit this makes is
+     * as auditable as the retarget it rides on.
+     */
+    onRetarget?: (app: GitOpsApplicationRow) => Record<string, unknown>;
   }): TransitionResult {
     return this.raw().transaction(() => {
       const app = this.store().getApplication(args.applicationId);
@@ -495,11 +527,13 @@ export class GitOpsTransitions {
       }
       const updated = this.store().getApplication(app.id);
       if (!updated) throw new GitOpsTransitionError('application not found');
+      const extra = args.onRetarget ? args.onRetarget(updated) : {};
+      if (args.onRetarget) this.writeApplication(updated);
       const historyId = this.history(updated, args.envelope, {
         stage: 'application_retargeted',
         outcome: 'committed',
         before: { targetMode: args.expectedMode },
-        after: { targetMode: next.targetMode },
+        after: { targetMode: next.targetMode, ...extra },
       });
       return { historyIds: historyId ? [historyId] : [], replayed: !historyId };
     })();

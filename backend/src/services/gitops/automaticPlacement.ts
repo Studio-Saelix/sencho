@@ -27,6 +27,7 @@ import { BlueprintAnalyzer } from '../BlueprintAnalyzer';
 import { sanitizeForLog } from '../../utils/safeLog';
 import { GitOpsStore } from './store';
 import { hasTargetOperationInFlight } from './handoff';
+import { targetConnectivity } from './derive';
 import { GitOpsTransitions, type EventEnvelope } from './transitions';
 import { newGitOpsId } from './directApplication';
 import {
@@ -43,7 +44,7 @@ import {
 } from './placementPolicy';
 import { configuredSnapshotFor, encodePolicySnapshot } from './policyComposition';
 import { readAppliedGenerationContents } from './statefulGuard';
-import type { GitOpsApplicationRow } from './types';
+import type { GitOpsApplicationRow, GitOpsLimitation } from './types';
 
 export type AutomaticPlacementOutcome =
   | { status: 'auto_approved'; reason: 'stateless_addition' | 'stateless_removal' }
@@ -195,21 +196,40 @@ function worstAddedNodeState(nodeIds: readonly number[]): AffectedNodeState {
 /**
  * The worst state across the nodes a removal touches.
  *
- * Here the target row is the right evidence, because the workload being left
- * behind ran on that node, so a real observation of it exists. `stale` is treated
- * as unreachable: it is a recorded state meaning the last observation expired, and
- * a decision about withdrawing from a node must not treat expired evidence as a
- * reachable one.
+ * Two pieces of evidence, both required. The node registry says whether the
+ * node is answering right now, the same gate an addition passes, so a
+ * withdrawal is never approved against a node that is offline. The target's
+ * observation says the workload Sencho is about to leave behind actually ran
+ * there; the stored `connectivity` column cannot answer that, because it is
+ * seeded to null and no producer ever wrote it, so every removal used to
+ * resolve to unknown and the policy could never approve one.
+ *
+ * An observation that cannot be decoded is recorded as a limitation, so the
+ * refusal names malformed evidence rather than sending the operator to check a
+ * node that answered. The observation never ages out on its own: no
+ * connectivity value is derived from elapsed time, so a `stale` reading can
+ * only arrive from a stored negative claim that no current producer writes.
  */
-function worstRemovedNodeState(store: GitOpsStore, appId: string, nodeIds: readonly number[]): AffectedNodeState {
+function worstRemovedNodeState(
+  store: GitOpsStore,
+  appId: string,
+  nodeIds: readonly number[],
+  limitations: GitOpsLimitation[],
+): AffectedNodeState {
   if (nodeIds.length === 0) return 'reachable';
+  const db = DatabaseService.getInstance().getDb();
   let worst: AffectedNodeState = 'reachable';
   for (const nodeId of nodeIds) {
+    const node = db.prepare('SELECT status FROM nodes WHERE id = ?').get(nodeId) as
+      | { status: string }
+      | undefined;
+    if (!node) return 'unknown';
+    if (node.status !== 'online') return 'unreachable';
     const target = store.getTarget(appId, nodeId);
     if (!target) return 'unknown';
-    const connectivity = target.connectivity;
+    const connectivity = targetConnectivity(target, limitations);
     if (connectivity === 'unreachable' || connectivity === 'stale') return 'unreachable';
-    if (connectivity === 'unknown' || connectivity === null) worst = 'unknown';
+    if (connectivity === 'unknown') worst = 'unknown';
   }
   return worst;
 }
@@ -317,6 +337,11 @@ export function applyAutomaticPlacement(
   const additions = candidateNodeIds.filter((nodeId) => !inBaseline.has(nodeId));
   const removals = baselineNodeIds.filter((nodeId) => !inCandidate.has(nodeId));
 
+  // A removal's evidence is an observation, and one that cannot be decoded is a
+  // data fault, not a node that never answered. Collecting the limitations lets
+  // the decision report the truthful reason.
+  const removalEvidenceLimitations: GitOpsLimitation[] = [];
+
   const input: BoundedAutoInput = {
     policy: app.placement_policy,
     approvedNodeIds: baselineNodeIds,
@@ -343,7 +368,7 @@ export function applyAutomaticPlacement(
     // observation of the workload that ran there.
     affectedNodeState: worseState(
       worstAddedNodeState(additions),
-      worstRemovedNodeState(store, app.id, removals),
+      worstRemovedNodeState(store, app.id, removals, removalEvidenceLimitations),
     ),
     // Both machines, not one. The application pointer covers a fetch or apply;
     // a target carries the stage for a deploy or a withdrawal, which is what a
@@ -353,7 +378,10 @@ export function applyAutomaticPlacement(
     conflictingOperation: app.active_operation_stage !== null
       || hasTargetOperationInFlight(store, app.id),
     evidenceReadable: baseline.ok,
-    evidenceWellFormed,
+    // Unusable removal evidence (a corrupt observation, an illegal stored value)
+    // is malformed, which the union reports differently from a node that did not
+    // answer.
+    evidenceWellFormed: evidenceWellFormed && removalEvidenceLimitations.length === 0,
   };
 
   const decision = decideBoundedAutoPlacement(input);
@@ -404,6 +432,9 @@ export function applyAutomaticPlacement(
       strategyJson: intent.rollout_strategy_json,
       provenance: 'placement_approval',
     });
+    // The reconciler tries this approval first when it covers the whole plan,
+    // and falls back to the combined approval otherwise, so an operator's
+    // approval stays in place for the ticks this one cannot run.
     return { status: 'auto_approved', reason: decision.reason };
   } catch (error) {
     // A refusal here is the safe direction: the candidate stands unapproved and

@@ -148,6 +148,11 @@ export interface BlueprintPreview {
     stackName: string;
     approvalStatus: 'pending' | 'approved';
     effectiveApproval: EffectiveApproval;
+    /**
+     * Which authority makes `effectiveApproval` approved, or null when nothing
+     * does. Absent on payloads from an older backend, which is the same as null.
+     */
+    approvalAuthority?: 'legacy_combined' | 'configured_policy' | null;
     planFingerprint: string;
     generatedAt: number;
     summary: { safe: number; warning: number; blocker: number; total: number };
