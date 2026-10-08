@@ -1,4 +1,5 @@
 import {
+  canonicalRepoKey,
   parseHttpsRepoUrl,
   parseLegacyRepoUrl,
   serializeRepoIdentity,
@@ -135,6 +136,65 @@ export function refsMatchConfigured(configuredRef: string, eventRef: string | nu
   const normConfigured = configuredRef.replace(/^refs\/(heads|tags)\//, '');
   const normEvent = eventRef.replace(/^refs\/(heads|tags)\//, '');
   return normConfigured === normEvent || eventRef === configuredRef;
+}
+
+/**
+ * Whether a delivery names the repository its endpoint's source is configured for.
+ *
+ * This is the repository counterpart to `refsMatchConfigured`, and it has to be
+ * looser than the configured string for the same reason that one is: the operator
+ * writes one spelling and the provider sends another. A stored `https` clone URL
+ * with a `.git` suffix against a provider `html_url` without one is not an edge
+ * case, it is what every push to a source configured that way looks like, and
+ * reading it as a different repository silently dropped the delivery while the
+ * source kept polling as if no webhook existed. Transport differs for the same
+ * reason: a source with a deploy key is configured with an ssh URL, and the
+ * provider only ever sends an `https` one.
+ *
+ * The comparison is the canonical repository key, so those spellings collapse
+ * instead of being normalized at each site. The pathname is case-folded before
+ * the key is built, which `canonicalRepoKey` deliberately does not do, and the
+ * fold has to happen before the `.git` suffix is stripped rather than after the
+ * key is finished, or `repo.GIT` would fold to `repo.git` and match neither
+ * `repo` nor `repo.git`.
+ *
+ * The fold stays local because the two consumers carry opposite risks. Folding
+ * in the Blueprint claim guard would add refusals: it would merge two paths that
+ * a case-sensitive host can hold as genuinely different repositories, so the
+ * second claim would be rejected. Here, an endpoint already binds exactly one
+ * source and the delivery has passed signature verification for that endpoint's
+ * secret, so the check reads a signed statement about the endpoint's own
+ * repository rather than looking a repository up.
+ *
+ * Folding path case is a deliberate trade. Providers send the case they have
+ * stored, and nothing requires the operator to have configured that same case,
+ * so exact path case would reinstate the silent drop this function exists to
+ * fix. On a self-hosted forge that treats paths case-sensitively and happens to
+ * host two repositories differing only in path case, a delivery for one is
+ * accepted on the other's endpoint, and the consequence is bounded: the pull
+ * that follows uses the configured source URL, never the delivered one, so it
+ * costs a reconciliation of the configured repository, not content from the
+ * other one. The key also drops the port, so two repositories on different
+ * ports of one host with the same path merge the same way, under the same
+ * bound.
+ *
+ * An identity that names no repository on either side is a refusal, never a match:
+ * an unparseable URL must not read as "same repository".
+ */
+export function deliveryRepoMatchesConfigured(
+  delivered: RepoIdentity,
+  configured: RepoIdentity,
+): boolean {
+  const deliveredKey = canonicalRepoKey({
+    host: delivered.host,
+    pathname: delivered.pathname.toLowerCase(),
+  });
+  const configuredKey = canonicalRepoKey({
+    host: configured.host,
+    pathname: configured.pathname.toLowerCase(),
+  });
+  if (deliveredKey === null || configuredKey === null) return false;
+  return deliveredKey === configuredKey;
 }
 
 export function isPingEvent(eventType: string): boolean {
