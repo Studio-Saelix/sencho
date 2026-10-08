@@ -10907,6 +10907,44 @@ describe('GitSourceService classified plan fingerprint', () => {
         }
     });
 
+    it('keys the pull activity to its attempt so the settled notification cannot repeat it', async () => {
+        const sha = 'ee11ff22aa33bb44cc55dd66ee77ff8800aabbcc';
+        mockSuccessfulClone({ compose: 'services:\n  web:\n    image: nginx\n', sha });
+        const svc = GitSourceService.getInstance();
+        const validateSpy = vi.spyOn(svc, 'validateCompose').mockResolvedValue({ ok: true });
+        const { FileSystemService } = await import('../services/FileSystemService');
+        await FileSystemService.getInstance().createStack('notif-dedupe');
+        await svc.upsert({
+            stackName: 'notif-dedupe',
+            repoUrl: 'https://github.com/example/repo.git',
+            branch: 'main',
+            composePaths: ['compose.yaml'],
+            contextDir: null,
+            syncEnv: false,
+            envPath: null,
+            authType: 'none',
+            autoApplyOnWebhook: false,
+            autoDeployOnApply: false,
+        });
+        const activitySpy = vi.spyOn(DatabaseService.getInstance(), 'addNotificationHistory');
+        try {
+            await svc.pull('notif-dedupe', { actor: 'alice' });
+            const ready = activitySpy.mock.calls
+                .map((call) => call[1])
+                .find((note) => note.category === 'git_pull_ready');
+            const app = GitOpsStore.getInstance().getLiveDirectApplication('notif-dedupe')!;
+            expect(ready?.gitops_operation_id).toBeTruthy();
+            // The literal shape is pinned here so the candidate key cannot
+            // drift into a per-attempt key unnoticed: a staged candidate under
+            // review must not re-notify on every poll.
+            expect(ready?.dedupe_key).toBe(`gitops:candidate:${app.id}:${sha}:ready`);
+        } finally {
+            activitySpy.mockRestore();
+            validateSpy.mockRestore();
+            await cleanupStackDir('notif-dedupe');
+        }
+    });
+
     it('lets a reviewed apply record invocation drift and refuses unattended apply', async () => {
         const sha = 'aa11bb22cc33dd44ee55ff6677889900aabbccdd';
         mockSuccessfulClone({ compose: 'services:\n  web:\n    image: nginx\n', sha });

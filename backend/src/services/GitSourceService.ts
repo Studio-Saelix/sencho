@@ -49,6 +49,7 @@ import {
 } from './gitops/triggers';
 import { classifyFailure, effectivePollIntervalSecs } from './gitops/backoff';
 import { checkStatefulWithdrawal, holdForStatefulReview } from './gitops/statefulGuard';
+import { gitOpsAttemptNotificationKey, settledNotificationFamily, type SettledNotificationFamily } from './gitops/notifications';
 import { BlueprintTargetAdapter, buildAcceptedGeneration, type AcceptedGeneration, type DispatchContext, type DispatchResult } from './gitops/handoff';
 import {
     GitOpsTransitions,
@@ -2352,7 +2353,14 @@ export class GitSourceService {
                 return await this.pullLocked(stackName, actor, operationId);
             } catch (e) {
                 console.error(`[GitSource] fetch failed for ${sanitizeForLog(stackName)}:`, e instanceof Error ? e.message : String(e));
-                this.recordGitActivity(stackName, 'git_pull_failed', `Git pull failed for ${stackName}`, actor, 'error');
+                this.recordGitActivity(
+                    stackName,
+                    'git_pull_failed',
+                    `Git pull failed for ${stackName}`,
+                    actor,
+                    'error',
+                    operationId ? { operationId, family: 'failed' } : undefined,
+                );
                 throw e;
             }
         });
@@ -2727,6 +2735,7 @@ export class GitSourceService {
                     `Git plan blocked for ${stackName} (${shortSha}, op ${GitSourceService.shortOperationId(gitopsOperationId)}, plan ${fpPrefix})`,
                     actor,
                     'warning',
+                    { operationId: gitopsOperationId, family: 'blocked' },
                 );
             } else {
                 this.recordGitActivity(
@@ -2734,6 +2743,14 @@ export class GitSourceService {
                     'git_pull_ready',
                     `Git pull ready for ${stackName} (${shortSha}, op ${GitSourceService.shortOperationId(gitopsOperationId)}, plan ${fpPrefix})`,
                     actor,
+                    undefined,
+                    {
+                        operationId: gitopsOperationId,
+                        family: 'ready',
+                        candidate: gitopsApp
+                            ? { applicationId: gitopsApp.id, commitSha: fetched.commitSha }
+                            : undefined,
+                    },
                 );
             }
         }
@@ -3195,6 +3212,7 @@ export class GitSourceService {
             `Dispatch settlement failed for ${stackName}: ${result.reason}`,
             actor,
             'error',
+            { operationId: envelope.operationId, family: settledNotificationFamily(result.outcome) },
         );
     }
 
@@ -5710,6 +5728,7 @@ export class GitSourceService {
                     `Git apply rolled back for ${stackName} (${commitSha.slice(0, 7)}, op ${GitSourceService.shortOperationId(applyOperationId)}, plan ${plan.fingerprint.slice(0, 12)})`,
                     actor,
                     'warning',
+                    { operationId: applyOperationId, family: 'blocked' },
                 );
             } else {
                 db.setGitSourceLastPlan(stackName, plan.fingerprint, 'failed');
@@ -5719,6 +5738,7 @@ export class GitSourceService {
                     `Git apply failed for ${stackName} (${commitSha.slice(0, 7)}, op ${GitSourceService.shortOperationId(applyOperationId)}, plan ${plan.fingerprint.slice(0, 12)})`,
                     actor,
                     'error',
+                    { operationId: applyOperationId, family: 'failed' },
                 );
             }
             throw new GitSourceError('GIT_ERROR', scrubCredentials(redacted));
@@ -6236,6 +6256,7 @@ export class GitSourceService {
                         blockedPlanActivity,
                         actor,
                         'warning',
+                        { operationId: applyOperationId, family: 'blocked' },
                     );
                 }
                 throw new GitSourceError(
@@ -6253,6 +6274,7 @@ export class GitSourceService {
                     blockedPlanActivity,
                     actor,
                     'warning',
+                    { operationId: applyOperationId, family: 'blocked' },
                 );
                 throw new GitSourceError(
                     'PLAN_BLOCKED',
@@ -7656,6 +7678,12 @@ export class GitSourceService {
         message: string,
         actor: string,
         level: 'info' | 'warning' | 'error' = 'info',
+        attempt?: {
+            operationId: string;
+            family: SettledNotificationFamily;
+            /** A staged candidate this event announces, when it announces one. */
+            candidate?: { applicationId: string; commitSha: string };
+        },
     ): void {
         try {
             DatabaseService.getInstance().addNotificationHistory(
@@ -7667,6 +7695,20 @@ export class GitSourceService {
                     timestamp: Date.now(),
                     stack_name: stackName,
                     actor_username: actor,
+                    // An event that belongs to a tracked attempt carries the
+                    // attempt's dedupe key and operation id, so the settled
+                    // notification for the same attempt and family collides
+                    // with it instead of repeating it in the bell.
+                    ...(attempt
+                        ? {
+                            gitops_operation_id: attempt.operationId,
+                            dedupe_key: gitOpsAttemptNotificationKey(
+                                attempt.operationId,
+                                attempt.family,
+                                attempt.candidate,
+                            ),
+                        }
+                        : {}),
                 },
             );
         } catch (error) {

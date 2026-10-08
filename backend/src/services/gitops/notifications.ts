@@ -23,6 +23,7 @@
 import type { GitOpsHistoryStage } from './history';
 import type { GitOpsTargetMode } from './types';
 import type { NotificationCategory } from '../NotificationService';
+import { settledOutcomeCarriesNews } from './outcomes';
 
 /**
  * Every stage that produces a notification-history entry.
@@ -97,11 +98,16 @@ export function gitOpsOutboxPlan(
   after: Record<string, unknown>,
 ): GitOpsOutboxPlan | null {
   if (stage === 'source_reconcile_settled') {
-    // An attempt that settled without proving anything does not notify. The
-    // portfolio reports the same application as in progress or unknown, and a
-    // bell entry for it would be a surface reporting on evidence it does not
-    // have. What is unproven is the portfolio's to show, not the bell's.
-    if (after.outcome === 'unknown') return null;
+    // A settled attempt that carries no news does not notify. The portfolio
+    // reports the same application as in progress, staged, suspended,
+    // superseded, or waiting on an armed retry, and a bell entry per poll would
+    // be a surface reporting the state it is already showing. What has not
+    // changed is the portfolio's to report; the bell reports the changes. A
+    // malformed outcome reads as unknown here, the same value the outbox insert
+    // writes, so a damaged row is suppressed rather than inserted and silently
+    // dropped at drain time.
+    const outcome = typeof after.outcome === 'string' ? after.outcome : 'unknown';
+    if (!settledOutcomeCarriesNews(outcome)) return null;
     return { kind: 'settled' };
   }
   if (!isNotifiableGitOpsStage(stage)) return null;
@@ -111,6 +117,72 @@ export function gitOpsOutboxPlan(
   // Blueprint decision.
   if (stage === 'source_accepted' && targetMode === 'direct') return null;
   return { kind: 'event', stage };
+}
+
+/**
+ * The event family a settled attempt's notification belongs to.
+ *
+ * One bell entry per attempt and family, whichever writer reaches the bell
+ * first: the staging result and the settle that confirms it are one event. The
+ * family is also what the bell renders, so the category, the level, and the
+ * dedupe key cannot disagree about one outcome.
+ *
+ * A scheduled retry is deliberately not a family of its own: it is a steady
+ * state the no-news rule suppresses, and the failure it follows announced
+ * itself when it happened.
+ */
+export type SettledNotificationFamily = 'ready' | 'blocked' | 'failed';
+
+export const SETTLED_FAMILY_NOTIFICATION: Record<
+  SettledNotificationFamily,
+  { category: NotificationCategory; level: 'info' | 'warning' | 'error' }
+> = {
+  ready: { category: 'git_pull_ready', level: 'info' },
+  blocked: { category: 'git_plan_blocked', level: 'warning' },
+  failed: { category: 'git_pull_failed', level: 'error' },
+};
+
+export function settledNotificationFamily(outcome: string): SettledNotificationFamily {
+  if (outcome === 'blocked') return 'blocked';
+  if (
+    outcome === 'failed_previous_intact'
+    || outcome === 'recovery_required'
+    || outcome === 'unknown'
+  ) {
+    return 'failed';
+  }
+  return 'ready';
+}
+
+/**
+ * The candidate one ready event announces, when it announces one.
+ */
+export type GitOpsCandidateIdentity = { applicationId: string; commitSha: string };
+
+/**
+ * The dedupe key one attempt owns per family.
+ *
+ * The fetch path announces a result when it stages or fails, and the settled
+ * attempt announces the same result after the transition commits. Both write
+ * this key, so the second is a no-op and the operator reads one entry for one
+ * event instead of two. Stable per attempt, so a replay after a crash between
+ * insert and mark-drained collides with the first write too.
+ *
+ * A ready event that names a staged candidate is keyed to the candidate
+ * instead. A candidate awaiting review settles the same outcome on every poll,
+ * and a per-attempt key would notify once per interval; the candidate key makes
+ * the poll that staged it the one that announces it, and a new commit the thing
+ * that announces again.
+ */
+export function gitOpsAttemptNotificationKey(
+  operationId: string,
+  family: SettledNotificationFamily,
+  candidate?: GitOpsCandidateIdentity,
+): string {
+  if (candidate && family === 'ready') {
+    return `gitops:candidate:${candidate.applicationId}:${candidate.commitSha}:ready`;
+  }
+  return `gitops:attempt:${operationId}:${family}`;
 }
 
 /**

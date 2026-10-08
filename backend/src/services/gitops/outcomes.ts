@@ -114,6 +114,31 @@ export function isReconcileOutcome(value: unknown): value is ReconcileOutcome {
   return typeof value === 'string' && RECONCILE_OUTCOMES.has(value);
 }
 
+/**
+ * Whether a settled outcome is an event the bell should report.
+ *
+ * These outcomes are steady states rather than transitions: the source is idle,
+ * a staged candidate is still staged, the source is suspended, a candidate was
+ * superseded before acceptance, or a transient failure has a retry armed. A
+ * poll re-settles into one of them on every interval, so a notification per
+ * settle would fill the bell with the same sentence without anything having
+ * happened. The portfolio reports the state; the bell reports when it changes.
+ * A failure that schedules a retry already announced itself as a failure, and
+ * the retry announces itself when it runs.
+ */
+const NO_NEWS_SETTLED_OUTCOMES: ReadonlySet<string> = new Set([
+  'unknown',
+  'no_source_change',
+  'candidate_already_fetched',
+  'suspended',
+  'superseded',
+  'retry_scheduled',
+]);
+
+export function settledOutcomeCarriesNews(outcome: string): boolean {
+  return !NO_NEWS_SETTLED_OUTCOMES.has(outcome);
+}
+
 export function isNextAction(value: unknown): value is NextAction {
   return typeof value === 'string' && NEXT_ACTIONS.has(value);
 }
