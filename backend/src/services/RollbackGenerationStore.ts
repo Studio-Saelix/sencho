@@ -678,6 +678,12 @@ export class RollbackGenerationStore {
           '[RollbackGenerationStore] Failed to revert interrupted restore:',
           (revertErr as Error).message,
         );
+        // The live files may now be a mix of the generation and the
+        // pre-restore snapshot. Carry that fact with the original failure so
+        // the caller cannot classify it as a refusal that moved nothing.
+        if (typeof e === 'object' && e !== null) {
+          Object.assign(e, { restoreRevertFailed: true });
+        }
       }
       throw e;
     }

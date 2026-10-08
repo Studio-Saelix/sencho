@@ -115,3 +115,16 @@ describe('Invalid stack names are rejected with 400 before the existence check',
     expect(mockDeployStack).not.toHaveBeenCalled();
   });
 });
+
+describe('POST /api/stacks/:stackName/rollback on a nonexistent stack', () => {
+  it('returns 404 with the STACK_NOT_FOUND code the hub classifies', async () => {
+    const res = await request(app)
+      .post('/api/stacks/does-not-exist-f7/rollback')
+      .set('Cookie', authCookie);
+
+    // The code is what lets a hub restoring through this node read the refusal
+    // as one that moved nothing instead of an anonymous failure it must hold.
+    expect(res.status).toBe(404);
+    expect(res.body).toEqual({ error: 'Stack not found', code: 'STACK_NOT_FOUND' });
+  });
+});

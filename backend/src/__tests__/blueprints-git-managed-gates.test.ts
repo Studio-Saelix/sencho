@@ -254,12 +254,58 @@ describe('Git-managed Blueprint fail-closed gates', () => {
           },
         });
       expect(res.status).toBe(200);
-      const options = applySpy.mock.calls[0][5] as { captureRecovery?: boolean };
+      const options = applySpy.mock.calls[0][5] as { allowGitManaged?: boolean; captureRecovery?: boolean };
+      expect(options.allowGitManaged).toBe(false);
       expect(options.captureRecovery).toBe(false);
     } finally {
       applySpy.mockRestore();
     }
   });
+
+  it.each(['node_proxy', 'pilot_tunnel'] as const)(
+    'honors captureRecovery and git-managed content on apply-local for %s machine auth',
+    async (scope) => {
+      const { blueprint, applicationId } = converted();
+      const applySpy = vi.spyOn(BlueprintService.prototype, 'applyLocalUnderLock').mockResolvedValue({ ran: true });
+      try {
+        const token = jwt.sign({ scope }, TEST_JWT_SECRET, { expiresIn: '1m' });
+        const res = await request(app)
+          .post('/api/blueprints/apply-local')
+          .set('Authorization', `Bearer ${token}`)
+          .send({
+            stackName: blueprint.name,
+            composeContent: 'services:\n  fromgen:\n    image: alpine:3.20\n',
+            markerContent: JSON.stringify({
+              blueprintId: blueprint.id,
+              revision: blueprint.revision,
+              lastApplied: Date.now(),
+              applicationId,
+            }),
+            allowGitManagedContent: true,
+            captureRecovery: true,
+            recoveryBinding: {
+              generationId: 'gen-1',
+              artifactSetId: 'art-1',
+              sourceAcceptanceRef: 'acc-1',
+            },
+          });
+        expect(res.status).toBe(200);
+        const options = applySpy.mock.calls[0][5] as {
+          allowGitManaged?: boolean;
+          captureRecovery?: boolean;
+          recoveryBinding?: { gitops_generation_id?: string };
+        };
+        // A pilot-tunnel hop is the same hub-to-leaf machine hop as a
+        // node_proxy one: dropping either flag silently meant a Pilot target
+        // deployed without the recovery point a rollback later needs.
+        expect(options.allowGitManaged).toBe(true);
+        expect(options.captureRecovery).toBe(true);
+        expect(options.recoveryBinding?.gitops_generation_id).toBe('gen-1');
+      } finally {
+        applySpy.mockRestore();
+      }
+    },
+  );
 
   it('honors allowGitManagedContent on apply-local for node_proxy', async () => {
     const { blueprint, applicationId } = converted();

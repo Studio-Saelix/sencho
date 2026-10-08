@@ -571,11 +571,13 @@ describe('generation rollback error mapping', () => {
     };
   }
 
-  async function withGenerationRollback(compensate: () => Promise<boolean>) {
+  async function withGenerationRollback(
+    compensate: () => Promise<import('../services/StackUpdateRecoveryService').CompensationOutcome>,
+  ) {
     const { StackUpdateRecoveryService } = await import('../services/StackUpdateRecoveryService');
     const svc = StackUpdateRecoveryService.getInstance();
     const getSpy = vi.spyOn(svc, 'getCurrent').mockReturnValue(stubCurrentGeneration('gen-1'));
-    const compensateSpy = vi.spyOn(svc, 'compensateWithCandidate').mockImplementation(compensate);
+    const compensateSpy = vi.spyOn(svc, 'compensateWithCandidateOutcome').mockImplementation(compensate);
     try {
       return await request(app).post('/api/stacks/myapp/rollback').set('Cookie', authCookie);
     } finally {
@@ -593,6 +595,41 @@ describe('generation rollback error mapping', () => {
       code: 'HELD_IMAGE_MISSING',
       error: 'Held recovery image is missing',
     });
+    // No classification was attached, so nothing rides the wire the hub could
+    // mistake for proof.
+    expect(res.body.failureClass).toBeUndefined();
+  });
+
+  it('carries the service classification when the restore could prove one', async () => {
+    const res = await withGenerationRollback(async () => {
+      throw Object.assign(new Error('Rollback is prohibited for this generation'), {
+        code: 'ROLLBACK_PROHIBITED',
+        failureClass: 'post_mutation',
+      });
+    });
+    expect(res.status).toBe(409);
+    expect(res.body).toMatchObject({
+      code: 'ROLLBACK_PROHIBITED',
+      // The same code is thrown before and after the file move; the catch that
+      // knows which is the only writer of this field.
+      failureClass: 'post_mutation',
+    });
+  });
+
+  it('carries the classification through the generic error path as well', async () => {
+    const res = await withGenerationRollback(async () => {
+      throw Object.assign(new Error('Recovery generation content is missing'), {
+        code: 'GENERATION_CONTENT_MISSING',
+        failureClass: 'pre_mutation',
+      });
+    });
+    // A code this route has no specific branch for must still not drop the
+    // node's own verdict; the hub would otherwise park the application.
+    expect(res.status).toBe(500);
+    expect(res.body).toMatchObject({
+      error: 'Recovery generation content is missing',
+      failureClass: 'pre_mutation',
+    });
   });
 
   it('returns RECOVERY_PROBE_FAILED when restore completed but the probe failed', async () => {
@@ -607,9 +644,14 @@ describe('generation rollback error mapping', () => {
   });
 
   it('returns a generic restore failure when compensation returns false', async () => {
-    const res = await withGenerationRollback(async () => false);
+    const res = await withGenerationRollback(async () => ({ rolledBack: false, failureClass: 'pre_mutation' }));
     expect(res.status).toBe(500);
-    expect(res.body).toMatchObject({ error: 'Rollback restore did not complete.' });
+    expect(res.body).toMatchObject({
+      error: 'Rollback restore did not complete.',
+      // A false now carries the service's classification; without it the hub
+      // would have to treat the failure as one that may have moved the stack.
+      failureClass: 'pre_mutation',
+    });
     expect(res.body.code).toBeUndefined();
   });
 
@@ -617,7 +659,7 @@ describe('generation rollback error mapping', () => {
     const { StackUpdateRecoveryService } = await import('../services/StackUpdateRecoveryService');
     const svc = StackUpdateRecoveryService.getInstance();
     const getSpy = vi.spyOn(svc, 'getCurrent').mockReturnValue(stubCurrentGeneration('gen-1', 'gen-app-1'));
-    const compensateSpy = vi.spyOn(svc, 'compensateWithCandidate').mockResolvedValue(true);
+    const compensateSpy = vi.spyOn(svc, 'compensateWithCandidateOutcome').mockResolvedValue({ rolledBack: true });
     try {
       const res = await request(app)
         .post('/api/stacks/myapp/rollback')
@@ -635,7 +677,7 @@ describe('generation rollback error mapping', () => {
     const { StackUpdateRecoveryService } = await import('../services/StackUpdateRecoveryService');
     const svc = StackUpdateRecoveryService.getInstance();
     const getSpy = vi.spyOn(svc, 'getCurrent').mockReturnValue(undefined);
-    const compensateSpy = vi.spyOn(svc, 'compensateWithCandidate').mockResolvedValue(true);
+    const compensateSpy = vi.spyOn(svc, 'compensateWithCandidateOutcome').mockResolvedValue({ rolledBack: true });
     try {
       const res = await request(app)
         .post('/api/stacks/myapp/rollback')
@@ -654,7 +696,7 @@ describe('generation rollback error mapping', () => {
     const { StackUpdateRecoveryService } = await import('../services/StackUpdateRecoveryService');
     const svc = StackUpdateRecoveryService.getInstance();
     const getSpy = vi.spyOn(svc, 'getCurrent').mockReturnValue(stubCurrentGeneration('gen-1', 'gen-app-1'));
-    const compensateSpy = vi.spyOn(svc, 'compensateWithCandidate').mockResolvedValue(true);
+    const compensateSpy = vi.spyOn(svc, 'compensateWithCandidateOutcome').mockResolvedValue({ rolledBack: true });
     try {
       const res = await request(app)
         .post('/api/stacks/myapp/rollback')

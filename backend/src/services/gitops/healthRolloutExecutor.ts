@@ -1,7 +1,8 @@
 import { GitOpsStore } from './store';
 import { GitOpsTransitions, type TransitionResult } from './transitions';
-import { restoreTargetToGeneration } from './rolloutRecovery';
+import { restoreFailureMutated, restoreTargetToGeneration } from './rolloutRecovery';
 import { healthHoldReason } from './healthPolicy';
+import { targetRestoreInFlight } from './recoveryClaim';
 import { ROLE_PERMISSIONS, type PermissionAction } from '../../middleware/permissions';
 import { sanitizeForLog } from '../../utils/safeLog';
 
@@ -121,6 +122,19 @@ export async function executeHealthRolloutDecision(args: {
         if (!application || !target) {
           return { action: 'rollback', reason: 'target_not_found' };
         }
+        if (targetRestoreInFlight(target)) {
+          // A rollback already owns this target's restore. Opening a second one
+          // would race it while it is still writing files; that operation's own
+          // terminal settles the application, so nothing is held here. Logged
+          // because the decision is otherwise invisible: the verdict is
+          // consumed and the queue moves on with nothing said.
+          console.error(
+            '[GitOps] Skipping the health rollback for %s on node %s: a rollback is already in progress.',
+            sanitizeForLog(args.applicationId),
+            sanitizeForLog(String(args.nodeId)),
+          );
+          return { action: 'none', reason: 'rollback_in_progress' };
+        }
         // The target's own captured pre-rollout generation, never the LKG. The
         // LKG is the newest generation that ever passed, which is a different
         // question from "what this node was running before this rollout", and
@@ -166,27 +180,34 @@ export async function executeHealthRolloutDecision(args: {
             detail: error instanceof Error ? error.message : String(error),
           };
         }
-        // Held BEFORE the restore goes out, not after it finishes. A restore is
-        // external and slow, and until it returns the rollout is still authorized:
-        // an operator dispatch, or an auto-accept that mints a fresh generation,
-        // could deploy the next target, or this one, while the restore is in
-        // flight. The fence is the target's; this is what stops the queue.
-        holdRollout(args.applicationId, decision, envelope);
-
-        // What the restored generation was actually captured with, read off that
-        // generation rather than passed as null. A restore that clears the source
-        // acceptance it was bound to would push source-acceptance state, which a
-        // health outcome has no authority to do.
-        const capturedArtifactSetId = store.newestArtifactSetIdForGeneration(restoreGenerationId);
-        const capturedSourceAcceptanceRef = store.newestSourceAcceptanceId(
-          args.applicationId, restoreGenerationId,
-        );
-
-        // The restore and the record of it are one unit. Either both happen or the
-        // failure is recorded: an error thrown between them used to leave the
-        // target stuck in `restoring` with nothing saying so, and the rollout
-        // unheld, so the fleet carried on as if the policy had not stopped it.
+        // The restore and the record of it are one unit, and everything after
+        // the open lives inside this try. Either the restore happens and is
+        // recorded, or a terminal failure is recorded: an error thrown between
+        // the open and the record used to leave the target stuck in `restoring`
+        // with nothing saying so, and with rollbacks now serialized per target
+        // that state is permanent in-process, because every later rollback is
+        // refused until it is cleared. That includes the hold and the two reads
+        // below, which ran outside this block before.
+        let recordAttempted = false;
+        let recordFailureClass: 'pre_mutation' | 'partial' = 'partial';
         try {
+          // Held BEFORE the restore goes out, not after it finishes. A restore
+          // is external and slow, and until it returns the rollout is still
+          // authorized: an operator dispatch, or an auto-accept that mints a
+          // fresh generation, could deploy the next target, or this one, while
+          // the restore is in flight. The fence is the target's; this is what
+          // stops the queue.
+          holdRollout(args.applicationId, decision, envelope);
+
+          // What the restored generation was actually captured with, read off
+          // that generation rather than passed as null. A restore that clears
+          // the source acceptance it was bound to would push source-acceptance
+          // state, which a health outcome has no authority to do.
+          const capturedArtifactSetId = store.newestArtifactSetIdForGeneration(restoreGenerationId);
+          const capturedSourceAcceptanceRef = store.newestSourceAcceptanceId(
+            args.applicationId, restoreGenerationId,
+          );
+
           const outcome = await restoreTargetToGeneration({
             app: application,
             stackName,
@@ -215,20 +236,53 @@ export async function executeHealthRolloutDecision(args: {
           }
           // Partial failure is reported as partial. Reporting a single target's
           // failed restore as a completed rollback would tell the operator the
-          // fleet is back on the pre-rollout generation when it is not.
+          // fleet is back on the pre-rollout generation when it is not. A
+          // refusal that never reached a mutation is recorded on the target
+          // without holding the application: there is nothing half-restored
+          // and no restore that can ever complete.
+          recordFailureClass = restoreFailureMutated(outcome) ? 'partial' : 'pre_mutation';
+          recordAttempted = true;
           transitions.rollbackPartialFailed({
             applicationId: args.applicationId,
             nodeId: args.nodeId,
             recoveryRef,
-            failureClass: 'partial',
+            failureClass: recordFailureClass,
             envelope,
           });
           return { action: 'rollback_partial_failed', reason: outcome.error };
         } catch (error) {
+          if (recordAttempted) {
+            // The failure itself was proven; only its record failed. Settle it
+            // the same way the manual route does instead of falling back to a
+            // hold for a restore whose outcome is already known.
+            try {
+              transitions.rollbackRefusalSettled({
+                applicationId: args.applicationId,
+                targets: [{ nodeId: args.nodeId, failureClass: recordFailureClass }],
+                recoveryRef,
+                envelope,
+              });
+            } catch (settleError) {
+              console.error(
+                '[GitOps] Could not settle a refused health rollback for %s: %s',
+                sanitizeForLog(args.applicationId),
+                sanitizeForLog(settleError instanceof Error ? settleError.message : String(settleError)),
+              );
+            }
+            return {
+              action: 'rollback_partial_failed',
+              reason: 'rollback_unrecorded',
+              detail: error instanceof Error ? error.message : String(error),
+            };
+          }
           // The restore or the record of it failed. The target is somewhere
           // between the two generations and only this knows which, so it is
           // recorded as a partial failure, never as a completed rollback, and the
-          // rollout stays held from before the restore went out.
+          // rollout stays held from before the restore went out. Deliberately
+          // fail-closed at `partial` rather than classifying here: a throw can
+          // come from the record call itself, after an outcome this branch no
+          // longer has, and only the classified path above knows what the node
+          // proved.
           try {
             transitions.rollbackPartialFailed({
               applicationId: args.applicationId,

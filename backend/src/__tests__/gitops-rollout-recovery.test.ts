@@ -12,6 +12,7 @@ import { directApplicationFixture } from './helpers/gitopsFixtures';
 import { emptyTargetRow, GitOpsStore } from '../services/gitops/store';
 import { encodeGitOpsRequiredTargetsJson } from '../services/gitops/json';
 import {
+  restoreFailureMutated,
   resolveRollbackTargets,
   restoreTargetToGeneration,
   rollbackCandidatesForApplication,
@@ -313,7 +314,7 @@ describe('restoreTargetToGeneration on a remote node', () => {
     });
   });
 
-  it('fails a 2xx that does not echo the requested generation', async () => {
+  it('fails a 2xx that does not echo the requested generation, without calling it a refusal', async () => {
     const nodeId = insertNode('remote', 'https://remote.example.com:1852');
     const app = remoteApp(nodeId);
     const postSpy = vi.spyOn(axios, 'post').mockResolvedValue({
@@ -331,7 +332,11 @@ describe('restoreTargetToGeneration on a remote node', () => {
       scopedActions: ['stack:deploy'],
     });
     expect(first.ok).toBe(false);
-    if (!first.ok) expect(first.code).toBe('RECOVERY_POINT_MISMATCH');
+    // The node answered 2xx, so it restored something; without the echo the
+    // hub cannot prove it was the requested generation, and this must not be
+    // treated as a refusal that moved nothing.
+    if (!first.ok) expect(first.code).toBe('RECOVERY_POINT_UNCONFIRMED');
+    if (!first.ok) expect(restoreFailureMutated(first)).toBe(true);
 
     postSpy.mockResolvedValue({ status: 200, data: { gitopsGenerationId: 'gen-someone-else' } });
     const second = await restoreTargetToGeneration({
@@ -344,7 +349,36 @@ describe('restoreTargetToGeneration on a remote node', () => {
       scopedActions: ['stack:deploy'],
     });
     expect(second.ok).toBe(false);
-    if (!second.ok) expect(second.code).toBe('RECOVERY_POINT_MISMATCH');
+    if (!second.ok) expect(second.code).toBe('RECOVERY_POINT_UNCONFIRMED');
+  });
+
+  it('carries the restoring node classification of a refusal', async () => {
+    const nodeId = insertNode('remote', 'https://remote.example.com:1852');
+    const app = remoteApp(nodeId);
+    vi.spyOn(axios, 'post').mockResolvedValue({
+      status: 409,
+      data: {
+        error: 'Rollback is prohibited for this generation',
+        code: 'ROLLBACK_PROHIBITED',
+        failureClass: 'post_mutation',
+      },
+    });
+
+    const outcome = await restoreTargetToGeneration({
+      app,
+      stackName: 'bp-stack',
+      nodeId,
+      generationId: 'gen-restore',
+      actor: null,
+      role: 'admin',
+      scopedActions: ['stack:deploy'],
+    });
+
+    expect(outcome.ok).toBe(false);
+    // The node knows whether its files had moved; the hub must not guess the
+    // class back from a code that is thrown on both sides of the move.
+    if (!outcome.ok) expect(outcome.failureClass).toBe('post_mutation');
+    if (!outcome.ok) expect(restoreFailureMutated(outcome)).toBe(true);
   });
 
   it('maps a bare 403 to PERMISSION_DENIED', async () => {
@@ -399,6 +433,44 @@ describe('restoreTargetToGeneration on a remote node', () => {
       scopedActions: ['stack:deploy'],
     });
 
-    expect(outcome).toEqual({ ok: false, code: 'NODE_UNREACHABLE', error: 'The owning node is unreachable.' });
+    // No request left the hub, so this restore moved nothing: the caller can
+    // settle instead of holding for a restore that never ran.
+    expect(outcome).toEqual({
+      ok: false,
+      code: 'RESTORE_NOT_SENT',
+      error: 'The owning node is unreachable.',
+      failureClass: 'pre_mutation',
+    });
+  });
+});
+
+describe('restoreFailureMutated', () => {
+  it.each([
+    ['NO_RECOVERY_POINT', undefined, false],
+    ['RECOVERY_POINT_MISMATCH', undefined, false],
+    ['STACK_NOT_FOUND', undefined, false],
+    ['self_stack_protected', undefined, false],
+    ['PERMISSION_DENIED', undefined, false],
+    // A busy stack means another operation is moving it right now, so the
+    // refusal cannot prove the target is unchanged.
+    ['STACK_BUSY', undefined, true],
+    ['stack_op_in_progress', undefined, true],
+    // The node answered 2xx without an echo: it restored something unproven.
+    ['RECOVERY_POINT_UNCONFIRMED', undefined, true],
+    // Thrown on both sides of the file move, so the code alone cannot decide.
+    ['ROLLBACK_PROHIBITED', undefined, true],
+    ['GENERATION_CONTENT_MISSING', undefined, true],
+    ['ROLLBACK_FAILED', undefined, true],
+    ['ANY_NEW_CODE', undefined, true],
+    // The restoring node's own classification wins when it crossed the wire.
+    ['ROLLBACK_PROHIBITED', 'pre_mutation', false],
+    ['GENERATION_CONTENT_MISSING', 'pre_mutation', false],
+    ['RECOVERY_PROBE_FAILED', 'post_mutation', true],
+    ['NO_RECOVERY_POINT', 'post_mutation', true],
+  ] as const)('code %s with class %s can have mutated: %s', (code, failureClass, expected) => {
+    expect(restoreFailureMutated({
+      code,
+      ...(failureClass ? { failureClass } : {}),
+    })).toBe(expected);
   });
 });

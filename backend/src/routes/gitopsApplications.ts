@@ -39,6 +39,7 @@ import {
 import { candidateRowFor, intentRowFor } from '../services/gitops/blueprintProducers';
 import {
   resolveRollbackTargets,
+  restoreFailureMutated,
   restoreTargetToGeneration,
   rollbackCandidatesForApplication,
   rolloutTargetSet,
@@ -53,6 +54,7 @@ import {
   GIT_MANAGED_ARTIFACT_UNRESOLVED_REASON,
 } from '../services/gitops/gitManagedHandoff';
 import { GitOpsTransitions, GitOpsTransitionError } from '../services/gitops/transitions';
+import { targetRestoreInFlight } from '../services/gitops/recoveryClaim';
 import { newGitOpsId } from '../services/gitops/directApplication';
 import { HEALTH_ROLLOUT_POLICIES, isHealthRolloutPolicy } from '../services/gitops/healthPolicy';
 import {
@@ -1709,13 +1711,28 @@ gitopsApplicationsRouter.post('/:id/rollout/supersede', (req: Request, res: Resp
 });
 
 /**
+ * One target's rollback attempt, carrying whether the failure can have mutated
+ * the target and whether its refusal record (and the settle it performs) did
+ * not land. The route needs both to decide application state; neither is part
+ * of the response shape.
+ */
+type RollbackTargetAttempt = RolloutRollbackTargetResult & {
+  mutationPossible: boolean;
+  /** The class this attempt tried to record; used to retry a failed record. */
+  failureClass: 'pre_mutation' | 'partial';
+  settleMissed: boolean;
+};
+
+/**
  * Restore one target and record what happened, whatever path the restore took.
  *
  * Every exit attempts to record a terminal state for the target: a restore
  * that cannot be opened, cannot be requested, or cannot have its result
  * recorded is reported as a failed target rather than a clean restore. If the
- * terminal write itself fails it is logged; the boot-time reclassification
- * settles a row left in `restoring`.
+ * terminal write itself fails it is logged and the route settles the
+ * application through `rollbackRefusalSettled`, which retries the target
+ * record; the open's active-operation marker makes any target that retry
+ * misses recoverable at boot.
  */
 async function runRollbackTarget(
   ctx: {
@@ -1729,7 +1746,7 @@ async function runRollbackTarget(
     userId: number;
   },
   nodeId: number,
-): Promise<RolloutRollbackTargetResult> {
+): Promise<RollbackTargetAttempt> {
   const tx = GitOpsTransitions.getInstance();
   try {
     tx.rollbackInProgress({
@@ -1744,6 +1761,11 @@ async function runRollbackTarget(
       nodeId,
       status: 'failed',
       error: error instanceof Error ? error.message : 'The rollback could not be opened.',
+      // The restore was never requested, so nothing can have been touched.
+      mutationPossible: false,
+      failureClass: 'pre_mutation',
+      // The open is transactional: no restoring stamp was written.
+      settleMissed: false,
     };
   }
 
@@ -1782,7 +1804,7 @@ async function runRollbackTarget(
         capturedSourceAcceptanceRef: store.newestSourceAcceptanceId(ctx.app.id, ctx.generationId),
         envelope: ctx.envelope,
       });
-      return { nodeId, status: 'restored' };
+      return { nodeId, status: 'restored', mutationPossible: false, failureClass: 'pre_mutation', settleMissed: false };
     } catch (error) {
       console.error(
         '[GitOps authority] Restore succeeded but its completion could not be recorded:',
@@ -1797,21 +1819,33 @@ async function runRollbackTarget(
     sanitizeForLog(nodeId),
     sanitizeForLog(outcome.error),
   );
+  // A refusal the node answered before any file moved is recorded on the
+  // target, but it must not hold the application: there is no half-restored
+  // state to protect and no restore that can ever complete. Everything else,
+  // including a transport failure that may have landed after the restore,
+  // keeps the hold.
+  const mutationPossible = restoreFailureMutated(outcome);
+  const failureClass = mutationPossible ? 'partial' as const : 'pre_mutation' as const;
+  let settleMissed = false;
   try {
     tx.rollbackPartialFailed({
       applicationId: ctx.app.id,
       nodeId,
       recoveryRef: ctx.recoveryRef,
-      failureClass: 'partial',
+      failureClass,
       envelope: ctx.envelope,
     });
   } catch (error) {
+    // The failure's own settle travels with this write, for either class. If
+    // it did not land, the route retries it once at the end rather than
+    // leaving the marker and the stamp behind.
+    settleMissed = true;
     console.error(
       '[GitOps authority] Could not record the failed rollback target:',
       sanitizeForLog(error instanceof Error ? error.message : String(error)),
     );
   }
-  return { nodeId, status: 'failed', error: outcome.error };
+  return { nodeId, status: 'failed', error: outcome.error, mutationPossible, failureClass, settleMissed };
 }
 
 /**
@@ -1881,6 +1915,21 @@ gitopsApplicationsRouter.post('/:id/rollout/rollback', async (req: Request, res:
   for (const nodeId of resolved.nodeIds) {
     if (!requireDeployOnTarget(req, res, stackName, nodeId)) return;
   }
+  // One rollback per target. A target whose restore is still moving cannot be
+  // rolled back again: a second restore would take over its recovery slot while
+  // the first is still writing files, which is how a hold gets released and a
+  // successful restore gets dropped. The transition enforces the same rule;
+  // refusing here is what gives the operator a clean answer.
+  for (const nodeId of resolved.nodeIds) {
+    const target = store.getTarget(app.id, nodeId);
+    if (target && targetRestoreInFlight(target)) {
+      res.status(409).json({
+        error: 'A rollback is already in progress on one or more of the selected targets.',
+        code: 'ROLLBACK_IN_PROGRESS',
+      });
+      return;
+    }
+  }
 
   // The abandoned rollout must not be dispatchable while its targets are being
   // restored. The withdrawal belongs on the latest authorization recorded for
@@ -1926,13 +1975,16 @@ gitopsApplicationsRouter.post('/:id/rollout/rollback', async (req: Request, res:
     role: req.user?.role ?? 'viewer',
     userId: req.user?.userId ?? 0,
   };
-  const results: RolloutRollbackTargetResult[] = [];
+  const results: RollbackTargetAttempt[] = [];
   for (const nodeId of resolved.nodeIds) {
     results.push(await runRollbackTarget(ctx, nodeId));
   }
 
   const failedAny = results.some(result => result.status === 'failed');
-  if (failedAny) {
+  // Only a failure that may have moved a target keeps the application hold. A
+  // refusal before any mutation settled per target; re-stamping the
+  // application here would re-park it for a recovery that can never run.
+  if (results.some(result => result.status === 'failed' && result.mutationPossible)) {
     // Lift the application out of `restoring` so the projection reports the
     // partial failure rather than an in-flight rollback that nothing drives.
     try {
@@ -1950,5 +2002,33 @@ gitopsApplicationsRouter.post('/:id/rollout/rollback', async (req: Request, res:
       );
     }
   }
-  res.json({ ok: !failedAny, results });
+  // A failure whose own record did not land left the restoring stamp that
+  // nothing else lifts in-process, and for a possibly-moved target also left
+  // the active marker blocking the next deploy. The route retries both here;
+  // the marker would let boot reclassify it, but the operator should not have
+  // to wait for a restart.
+  const missedSettleTargets = results
+    .filter(result => result.status === 'failed' && result.settleMissed)
+    .map(result => ({ nodeId: result.nodeId, failureClass: result.failureClass }));
+  if (missedSettleTargets.length > 0) {
+    try {
+      GitOpsTransitions.getInstance().rollbackRefusalSettled({
+        applicationId: app.id,
+        targets: missedSettleTargets,
+        recoveryRef: ctx.recoveryRef,
+        envelope,
+      });
+    } catch (error) {
+      console.error(
+        '[GitOps authority] Could not settle a rollback refusal whose record failed:',
+        sanitizeForLog(error instanceof Error ? error.message : String(error)),
+      );
+    }
+  }
+  res.json({
+    ok: !failedAny,
+    // The mutation classification decides application state; it is not part of
+    // the per-target result an operator reads.
+    results: results.map(({ nodeId, status, error }) => ({ nodeId, status, error })),
+  });
 });

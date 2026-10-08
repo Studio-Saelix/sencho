@@ -81,6 +81,7 @@ export type GitOpsHistoryStage =
   | 'rollback_completed'
   | 'rollback_in_progress'
   | 'rollback_partial_failed'
+  | 'rollback_refusal_settled'
   | 'rollout_authorized'
   | 'rollout_candidate_opened'
   | 'rollout_generation_opened'

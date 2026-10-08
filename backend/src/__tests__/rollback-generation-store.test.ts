@@ -660,6 +660,49 @@ describe('RollbackGenerationStore', () => {
     expect(await fsPromises.readFile(path.join(stackDir, 'extra.yml'), 'utf8')).toBe('EXTRA\n');
   });
 
+  it('marks a failed mid-write restore whose own revert did not land', async () => {
+    const stackName = 'revertfailed';
+    const stackDir = path.join(composeDir, stackName);
+    await fsPromises.mkdir(stackDir, { recursive: true });
+    await fsPromises.writeFile(path.join(stackDir, 'compose.yaml'), 'OLD\n', 'utf8');
+
+    const generationId = randomUUID();
+    await RollbackGenerationStore.captureGeneration({
+      nodeId: NODE,
+      stackName,
+      generationId,
+      inventory: inventoryFor(stackName, [
+        { relativePath: 'compose.yaml', absolutePath: path.join(stackDir, 'compose.yaml') },
+      ]),
+    });
+
+    await fsPromises.writeFile(path.join(stackDir, 'compose.yaml'), 'NEW\n', 'utf8');
+
+    const { FileSystemService } = await import('../services/FileSystemService');
+    const originalWrite = FileSystemService.prototype.writeStackFile;
+    vi.spyOn(FileSystemService.prototype, 'writeStackFile').mockImplementation(async function (
+      this: InstanceType<typeof FileSystemService>,
+      stack,
+      rel,
+      content,
+    ) {
+      if (rel === 'compose.yaml') throw new Error('injected write failure');
+      return originalWrite.call(this, stack, rel, content);
+    });
+    vi.spyOn(
+      RollbackGenerationStore as unknown as {
+        revertFromPreRestoreSnapshot: (...args: unknown[]) => Promise<void>;
+      },
+      'revertFromPreRestoreSnapshot',
+    ).mockRejectedValue(new Error('injected revert failure'));
+
+    // The live files may now be a mix of the generation and the pre-restore
+    // state, so the failure carries that fact for the caller's classification.
+    await expect(
+      RollbackGenerationStore.restoreGeneration(NODE, stackName, generationId, ['compose.yaml']),
+    ).rejects.toMatchObject({ restoreRevertFailed: true });
+  });
+
   it('encrypts sensitive pre-restore snapshots and restores them from ciphertext', async () => {
     const stackName = 'presensitive';
     const stackDir = path.join(composeDir, stackName);

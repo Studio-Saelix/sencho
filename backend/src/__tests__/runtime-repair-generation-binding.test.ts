@@ -13,6 +13,7 @@ import { setupTestDb, cleanupTestDb } from './helpers/setupTestDb';
 import { directApplicationFixture } from './helpers/gitopsFixtures';
 import { newGitOpsId } from '../services/gitops/directApplication';
 import { emptyTargetRow, GitOpsStore } from '../services/gitops/store';
+import { GitOpsTransitions } from '../services/gitops/transitions';
 import {
   encodeArtifactEvidenceJson,
   encodeGitOpsRequiredTargetsJson,
@@ -381,7 +382,12 @@ describe('runtime repair reads the target\'s acknowledged generation', () => {
     const fixture = await seedGitManagedMidRollout(bp, node);
     const store = GitOpsStore.getInstance();
     const target = store.getTarget(fixture.appId, node.id)!;
-    store.upsertTarget({ ...target, recovery_phase: 'failed' });
+    store.upsertTarget({
+      ...target,
+      recovery_phase: 'failed',
+      recovery_ref: 'rb-held',
+      recovery_failure_class: 'partial',
+    });
     const deploySpy = vi
       .spyOn(BlueprintService.getInstance(), 'deployAuthorizedMaterialization')
       .mockResolvedValue({ status: 'active' });
@@ -392,6 +398,158 @@ describe('runtime repair reads the target\'s acknowledged generation', () => {
     expect(outcome.holdReason).toBe('recovery_bound');
     expect(deploySpy).not.toHaveBeenCalled();
   });
+
+  it('holds while a retry is in flight over a refused target', async () => {
+    // A retry over a refused target sets `restoring` and leaves the old
+    // pre_mutation claim on the row. Repair must not read that claim and race
+    // the restore that is moving files.
+    const { bp, node } = seedBlueprint();
+    const fixture = await seedGitManagedMidRollout(bp, node);
+    const store = GitOpsStore.getInstance();
+    const target = store.getTarget(fixture.appId, node.id)!;
+    store.upsertTarget({
+      ...target,
+      recovery_phase: 'restoring',
+      failure_stage: 'recovery',
+      failure_class: 'pre_mutation',
+      recovery_failure_class: 'pre_mutation',
+    });
+    const deploySpy = vi
+      .spyOn(BlueprintService.getInstance(), 'deployAuthorizedMaterialization')
+      .mockResolvedValue({ status: 'active' });
+
+    const outcome = await BlueprintService.getInstance().enforceDigestRepair(bp, node);
+
+    expect(outcome.status).toBe('repair_held');
+    expect(outcome.holdReason).toBe('recovery_bound');
+    expect(deploySpy).not.toHaveBeenCalled();
+  });
+
+  it('proceeds when a deploy failure replaced a refused recovery', async () => {
+    // Driven through the real writers: a refused rollback, then a deploy
+    // failure that retires the refusal and leaves the deploy failure standing.
+    const { bp, node } = seedBlueprint();
+    const fixture = await seedGitManagedMidRollout(bp, node);
+    const store = GitOpsStore.getInstance();
+    const tx = GitOpsTransitions.getInstance();
+    const envelope = (operationId: string) => ({
+      operationId, actor: 'tester', trigger: 'manual', at: Date.now(),
+    });
+    const target = store.getTarget(fixture.appId, node.id)!;
+    tx.rollbackInProgress({
+      applicationId: fixture.appId,
+      nodeId: node.id,
+      recoveryRef: 'rb-replaced',
+      recoveryGenerationId: target.recovery_generation_id ?? fixture.old.generationId,
+      envelope: envelope('op-replaced-open'),
+    });
+    tx.rollbackPartialFailed({
+      applicationId: fixture.appId,
+      nodeId: node.id,
+      recoveryRef: 'rb-replaced',
+      failureClass: 'pre_mutation',
+      envelope: envelope('op-replaced-fail'),
+    });
+    tx.blueprintDeployFailed({
+      applicationId: fixture.appId,
+      nodeId: node.id,
+      failureClass: 'deploy_failed',
+      envelope: envelope('op-replaced-deploy'),
+    });
+    const replaced = store.getTarget(fixture.appId, node.id)!;
+    expect(replaced.recovery_phase).toBeNull();
+    expect(replaced.recovery_failure_class).toBeNull();
+    expect(replaced.failure_stage).toBe('blueprint_deploy');
+
+    const deploySpy = vi
+      .spyOn(BlueprintService.getInstance(), 'deployAuthorizedMaterialization')
+      .mockResolvedValue({ status: 'active' });
+
+    const outcome = await BlueprintService.getInstance().enforceDigestRepair(bp, node);
+
+    expect(outcome.status).toBe('active');
+    expect(deploySpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('holds after a deploy failure lands beside a restore that is still moving', async () => {
+    // Built through the real transitions rather than by writing the row: a
+    // refusal, a retry that opens over it, then a deploy failure that must not
+    // clear the restore that is running or release the hold.
+    const { bp, node } = seedBlueprint();
+    const fixture = await seedGitManagedMidRollout(bp, node);
+    const store = GitOpsStore.getInstance();
+    const tx = GitOpsTransitions.getInstance();
+    const target = store.getTarget(fixture.appId, node.id)!;
+    const envelope = (operationId: string) => ({
+      operationId, actor: 'tester', trigger: 'manual', at: Date.now(),
+    });
+
+    tx.rollbackInProgress({
+      applicationId: fixture.appId,
+      nodeId: node.id,
+      recoveryRef: 'rb-real-a',
+      recoveryGenerationId: target.recovery_generation_id ?? fixture.old.generationId,
+      envelope: envelope('op-real-a'),
+    });
+    tx.rollbackPartialFailed({
+      applicationId: fixture.appId,
+      nodeId: node.id,
+      recoveryRef: 'rb-real-a',
+      failureClass: 'pre_mutation',
+      envelope: envelope('op-real-a-terminal'),
+    });
+    tx.rollbackInProgress({
+      applicationId: fixture.appId,
+      nodeId: node.id,
+      recoveryRef: 'rb-real-b',
+      recoveryGenerationId: target.recovery_generation_id ?? fixture.old.generationId,
+      envelope: envelope('op-real-b'),
+    });
+    tx.blueprintDeployFailed({
+      applicationId: fixture.appId,
+      nodeId: node.id,
+      failureClass: 'deploy_failed',
+      envelope: envelope('op-real-deploy-fail'),
+    });
+    const live = store.getTarget(fixture.appId, node.id)!;
+    expect(live.recovery_phase).toBe('restoring');
+    expect(live.recovery_ref).toBe('rb-real-b');
+
+    const deploySpy = vi
+      .spyOn(BlueprintService.getInstance(), 'deployAuthorizedMaterialization')
+      .mockResolvedValue({ status: 'active' });
+
+    const outcome = await BlueprintService.getInstance().enforceDigestRepair(bp, node);
+
+    expect(outcome.status).toBe('repair_held');
+    expect(outcome.holdReason).toBe('recovery_bound');
+    expect(deploySpy).not.toHaveBeenCalled();
+  });
+
+  it('proceeds while a recovery failed before it could move anything', async () => {
+    // A refused rollback records `failed` on the target so the refusal stays
+    // visible, but it moved nothing by construction and deliberately sets no
+    // application hold. Auto-repair follows the same distinction.
+    const { bp, node } = seedBlueprint();
+    const fixture = await seedGitManagedMidRollout(bp, node);
+    const store = GitOpsStore.getInstance();
+    const target = store.getTarget(fixture.appId, node.id)!;
+    store.upsertTarget({
+      ...target,
+      recovery_phase: 'failed',
+      failure_class: 'pre_mutation',
+      failure_stage: 'recovery',
+    });
+    const deploySpy = vi
+      .spyOn(BlueprintService.getInstance(), 'deployAuthorizedMaterialization')
+      .mockResolvedValue({ status: 'active' });
+
+    const outcome = await BlueprintService.getInstance().enforceDigestRepair(bp, node);
+
+    expect(outcome.status).toBe('active');
+    expect(deploySpy).toHaveBeenCalledTimes(1);
+  });
+
 
   it('holds while a recovery is still moving on the target', async () => {
     const { bp, node } = seedBlueprint();

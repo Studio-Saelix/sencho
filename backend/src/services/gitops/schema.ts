@@ -521,6 +521,17 @@ CREATE TABLE IF NOT EXISTS gitops_target_current (
       'capturing','restoring','compensating','complete','failed'
     )
   ),
+  -- The class and time of the recovery failure this row still claims.
+  --
+  -- failure_class is shared with deploy and withdraw failures, so a claim that
+  -- may have moved the target would lose its class and its timestamp the moment
+  -- a later failure wrote the shared slot, and the claim would read as a refusal
+  -- that moved nothing. These columns keep the claim's own record, so a failure
+  -- can record itself beside it without retiring it, and only success evidence
+  -- (an acknowledgement or a bind) or a claim that moved nothing is allowed to
+  -- drop it.
+  recovery_failure_class TEXT NULL,
+  recovery_failure_at INTEGER NULL,
   interruption_stage TEXT NULL CHECK (
     interruption_stage IS NULL OR interruption_stage IN (
       'deploy_started','blueprint_deploy_started','blueprint_withdraw_started','recovery_started'

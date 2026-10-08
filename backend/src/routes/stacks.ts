@@ -29,6 +29,7 @@ import { repoUrlRejectionMessage } from '../services/gitops/repoIdentity';
 import { observeStackRuntimeArtifact } from '../services/gitops/artifactResolve';
 import { loadEffectiveArtifactContext, readNodePlatform } from '../services/gitops/effectiveArtifactContext';
 import { encodeObservedArtifactIdentity } from '../services/gitops/json';
+import { parseRestoreFailureClass } from '../services/gitops/rolloutRecovery';
 import { REF_MAX_LEN } from '../services/git/nativeGitTransport';
 import { validateCaBundlePem } from '../services/git/caBundle';
 import { enforcePolicyPreDeploy } from '../services/PolicyEnforcement';
@@ -222,20 +223,28 @@ function parseIfMatchMtime(raw: string | undefined): number | null {
   return Number.isFinite(value) ? value : null;
 }
 
-async function requireStackExists(nodeId: number, stackName: string, res: Response): Promise<boolean> {
+async function requireStackExists(
+  nodeId: number,
+  stackName: string,
+  res: Response,
+  notFoundCode?: string,
+): Promise<boolean> {
   if (!isValidStackName(stackName)) {
     res.status(400).json({ error: 'Invalid stack name' });
     return false;
   }
+  const notFound = () => {
+    res.status(404).json({ error: 'Stack not found', ...(notFoundCode ? { code: notFoundCode } : {}) });
+  };
   const fsSvc = FileSystemService.getInstance(nodeId);
   const stackDir = path.join(fsSvc.getBaseDir(), stackName);
   try {
     if (!(await fsSvc.hasComposeFile(stackDir))) {
-      res.status(404).json({ error: 'Stack not found' });
+      notFound();
       return false;
     }
   } catch {
-    res.status(404).json({ error: 'Stack not found' });
+    notFound();
     return false;
   }
   return true;
@@ -2689,10 +2698,20 @@ stacksRouter.post('/:stackName/update', async (req: Request, res: Response) => {
   }
 });
 
+/** The node's own pre/post classification of a restore failure, when the service attached one. */
+function restoreFailureClassOf(error: unknown): { failureClass?: 'pre_mutation' | 'post_mutation' } {
+  const failureClass = parseRestoreFailureClass(
+    (error as { failureClass?: unknown } | null)?.failureClass,
+  );
+  return failureClass ? { failureClass } : {};
+}
+
 stacksRouter.post('/:stackName/rollback', async (req: Request, res: Response) => {
   const stackName = req.params.stackName as string;
   if (!requirePermission(req, res, 'stack:deploy', 'stack', stackName)) return;
-  if (!(await requireStackExists(req.nodeId, stackName, res))) return;
+  // Coded so a rollback caller can tell "the stack is gone, nothing to
+  // restore" from an anonymous failure it has to fail closed on.
+  if (!(await requireStackExists(req.nodeId, stackName, res, 'STACK_NOT_FOUND'))) return;
   if (await refuseIfSelfStack(req, res, stackName)) return;
   // Rollback restores files and re-deploys, so it must hold the same per-stack
   // lock deploy/update use. Without it a rollback racing an in-flight deploy
@@ -2734,7 +2753,7 @@ stacksRouter.post('/:stackName/rollback', async (req: Request, res: Response) =>
     if (currentGen) {
       dlog(`[Stacks] Rollback initiated via recovery generation: ${sanitizeForLog(stackName)}`);
       try {
-        const rolledBack = await recoverySvc.compensateWithCandidate(
+        const compensation = await recoverySvc.compensateWithCandidateOutcome(
           currentGen.id,
           // Ends the gates the restore is about to invalidate, and returns the
           // Compose result rather than swallowing it, so a proven restore can
@@ -2762,17 +2781,24 @@ stacksRouter.post('/:stackName/rollback', async (req: Request, res: Response) =>
           },
           buildPolicyGateOptions(req, { actor: req.user?.username ?? 'system' }),
         );
-        if (!rolledBack) {
-          res.status(500).json({ error: 'Rollback restore did not complete.' });
+        if (!compensation.rolledBack) {
+          res.status(500).json({
+            error: 'Rollback restore did not complete.',
+            // The service classified how far the restore got; the hub
+            // restoring through this node needs it and cannot guess it.
+            failureClass: compensation.failureClass,
+          });
           notifyActionFailure('rollback', stackName, new Error('rollback restore did not complete'), req.user?.username ?? 'system');
           return;
         }
       } catch (compError: unknown) {
         const compCode = (compError as { code?: string }).code;
+        const compFailureClass = restoreFailureClassOf(compError);
         if (compCode === 'ROLLBACK_PROHIBITED') {
           res.status(409).json({
             error: (compError as Error).message || 'Rollback is prohibited for this generation',
             code: 'ROLLBACK_PROHIBITED',
+            ...compFailureClass,
           });
           return;
         }
@@ -2780,6 +2806,7 @@ stacksRouter.post('/:stackName/rollback', async (req: Request, res: Response) =>
           res.status(500).json({
             error: (compError as Error).message || 'Held recovery image is missing.',
             code: 'HELD_IMAGE_MISSING',
+            ...compFailureClass,
           });
           notifyActionFailure('rollback', stackName, compError, req.user?.username ?? 'system');
           return;
@@ -2794,6 +2821,7 @@ stacksRouter.post('/:stackName/rollback', async (req: Request, res: Response) =>
           res.status(500).json({
             error: 'Rollback restore completed but recovery probe failed.',
             code: 'RECOVERY_PROBE_FAILED',
+            ...compFailureClass,
           });
           notifyActionFailure('rollback', stackName, new Error('recovery probe failed'), req.user?.username ?? 'system');
           return;
@@ -2887,7 +2915,11 @@ stacksRouter.post('/:stackName/rollback', async (req: Request, res: Response) =>
     const message = getErrorMessage(error, 'Rollback failed.');
     notifyActionFailure('rollback', stackName, error, req.user?.username ?? 'system');
     if (!res.headersSent) {
-      res.status(500).json({ error: message });
+      // A compensation failure classified by the service rides out even on
+      // this generic path: the hub restoring through this node must get the
+      // node's own pre/post verdict instead of guessing one back from an
+      // error code it has to default to "may have mutated".
+      res.status(500).json({ error: message, ...restoreFailureClassOf(error) });
     }
   } finally {
     releaseStackOpLock(req, stackName);
