@@ -9,9 +9,10 @@ on:
 #   contents: write       - commit signatures to the signatures branch
 #   pull-requests: write  - comment on the PR with the CLA prompt
 #   statuses: write       - set the commit status (success / pending)
-# actions: write is intentionally NOT granted; this workflow does not manage
-# other workflow runs.
+#   actions: write        - re-run the PR's failed check after a contributor
+#                           signs, so the check turns green without another push
 permissions:
+  actions: write
   contents: write
   pull-requests: write
   statuses: write
