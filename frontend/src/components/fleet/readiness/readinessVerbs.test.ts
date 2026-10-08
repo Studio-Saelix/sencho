@@ -26,7 +26,7 @@ describe('resolveVerb', () => {
     ['probe_timeout', 'Test connection', 1],
     ['contact_stale', 'Test connection', 1],
     ['workloads_exited', 'Start stack', 1],
-    ['workloads_partial', 'Start stopped services', 1],
+    ['workloads_partial', 'Start stack', 1],
     ['workloads_unknown', 'Check again', 1],
     ['status_evidence_degraded', 'Check again', 1],
     ['status_evidence_stale', 'Check again', 1],

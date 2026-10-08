@@ -168,8 +168,7 @@ export function useReadinessVerbs({ recheck, openFinding, canRun, nodeName }: Us
   const run = useCallback((verb: ReadinessVerb, finding: ReadinessFinding): void => {
     switch (verb.id) {
       case 'test-connection': void testConnection(finding); return;
-      case 'start-stack':
-      case 'start-services': void runStackVerb(finding, 'start'); return;
+      case 'start-stack': void runStackVerb(finding, 'start'); return;
       case 'capture-recovery': void runStackVerb(finding, 'backup'); return;
       case 'check-again': recheck(); return;
       case 'take-snapshot': void takeSnapshot(finding); return;
