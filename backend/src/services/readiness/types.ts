@@ -3,6 +3,7 @@ import type { BulkStackInfo } from '../DockerController';
 import type { SecurityPostureState } from '../securityPosture';
 import type { Node, NodeMode } from '../DatabaseService';
 import type { PreviewContactSource, PreviewReachabilityNote } from '../blueprintPreviewProjection';
+import type { FindingDismissal } from '../findingDismissals/types';
 
 /** The six readiness domains, in the order the matrix renders its columns. */
 export const READINESS_DOMAINS = [
@@ -198,7 +199,23 @@ export interface ReadinessFinding {
    */
   detail: string | null;
   target: ReadinessTarget;
+  /**
+   * Hash of the structured facts behind this finding (code, severity, verdict,
+   * and the domain's own basis such as running/total containers). Never the free
+   * text in `detail`, whose wording can move without the finding changing. A
+   * dismissal held "until it changes" lifts when this differs.
+   */
+  fingerprint: string;
+  /**
+   * Whether this finding may be dismissed, decided where the code is known so the
+   * client never keeps its own list. `none`: it restates another surface's verdict
+   * and is resolved there. `timed`: unknown, partial, or unavailable evidence may be
+   * dismissed until it changes or for a set time, never permanently. `any`: every mode.
+   */
+  dismissPolicy: DismissPolicy;
 }
+
+export type DismissPolicy = 'none' | 'timed' | 'any';
 
 /**
  * Fields every domain cell carries, whatever its state.
@@ -399,6 +416,12 @@ export interface FleetReadinessResponse {
   /** Worst severity first, then by `id`. Deterministic order. */
   findings: ReadinessFinding[];
   nodes: FleetReadinessNode[];
+  /**
+   * The team's readiness dismissals for the nodes in this response. Findings and
+   * counts above are never filtered by them: the client decides which findings
+   * a dismissal still covers, so verdicts and tallies stay the evidence's own.
+   */
+  dismissals: FindingDismissal[];
 }
 
 /**
@@ -418,6 +441,13 @@ export interface NodeWorkloadProblem {
    */
   stack: string;
   status: Exclude<BulkStackInfo['status'], 'running'>;
+  /**
+   * Running and total container counts, when the read had them. A peer on an
+   * older build omits both, and the finding's fingerprint then rests on the
+   * status alone.
+   */
+  running?: number;
+  total?: number;
 }
 
 /**

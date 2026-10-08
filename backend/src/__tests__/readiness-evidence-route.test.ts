@@ -224,8 +224,9 @@ describe('GET /api/readiness/evidence', () => {
     const res = await request(app).get('/api/readiness/evidence').set('Cookie', authCookie);
 
     // Half a stack up is not a running stack, and it is not an unknown one
-    // either: the reason code has to be able to say which.
-    expect(res.body.workloads.problems).toEqual([{ stack: 'web', status: 'partial' }]);
+    // either: the reason code has to be able to say which. The container tally
+    // rides along so a second service going down changes the finding's fingerprint.
+    expect(res.body.workloads.problems).toEqual([{ stack: 'web', status: 'partial', running: 1, total: 2 }]);
     expect(res.body.workloads.counts).toEqual({ partial: 1 });
   });
 

@@ -26,6 +26,7 @@ import { gitopsApplicationsRouter } from './routes/gitopsApplications';
 import { usersRouter } from './routes/users';
 import { gitSourcesRouter, stackGitSourceRouter } from './routes/gitSources';
 import { fleetRouter } from './routes/fleet';
+import { findingDismissalsRouter } from './routes/findingDismissals';
 import { fleetActionsRouter } from './routes/fleetActions';
 import { readinessRouter } from './routes/readiness';
 import { cloudBackupRouter } from './routes/cloudBackup';
@@ -131,6 +132,8 @@ app.use('/api/stacks', stackLabelsRouter);
 app.use('/api/secrets', secretsRouter);
 app.use('/api/api-tokens', apiTokensRouter);
 app.use('/api/audit-log', auditLogRouter);
+// Mounted ahead of the fleet router so its exact paths are not swallowed.
+app.use('/api/fleet/dismissals', findingDismissalsRouter);
 app.use('/api/fleet', fleetRouter);
 app.use('/api/fleet-actions', fleetActionsRouter);
 // Node-local readiness slices. Deliberately outside the `/api/fleet/` prefix:

@@ -1,4 +1,4 @@
-import { useCallback, useRef, useState } from 'react';
+import { useCallback, useMemo, useRef, useState } from 'react';
 import { RefreshCw, ServerOff } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Skeleton } from '@/components/ui/skeleton';
@@ -17,6 +17,9 @@ import { ReadinessNodeMatrix } from './readiness/ReadinessNodeMatrix';
 import { ReadinessFindingsTable } from './readiness/ReadinessFindingsTable';
 import { ALL, EMPTY_FINDINGS_FILTER, type FindingsFilter } from './readiness/findingsFilter';
 import { useNow } from './readiness/useNow';
+import { useFindingDismissal } from '@/hooks/useFindingDismissal';
+import { READINESS_SEVERITY_SCALE, partitionFindings } from '@/lib/findingDismissals';
+import type { FindingDismissal } from '@/types/findingDismissal';
 
 function navigate(detail: SenchoNavigateDetail): void {
   window.dispatchEvent(new CustomEvent<SenchoNavigateDetail>(SENCHO_NAVIGATE_EVENT, { detail }));
@@ -63,6 +66,8 @@ interface FleetReadinessProps {
   onOpenSettingsSection?: (section: SectionId) => void;
   /** Snapshots is an admin-only tab, so its shortcut follows the same gate. */
   isAdmin: boolean;
+  /** Whether this account may dismiss the finding, from the shell that owns the auth context. */
+  canDismiss: (finding: ReadinessFinding) => boolean;
 }
 
 /**
@@ -79,8 +84,9 @@ export function FleetReadiness({
   onOpenNodeSecurity,
   onOpenSettingsSection,
   isAdmin,
+  canDismiss,
 }: FleetReadinessProps) {
-  const { data, error, checking, retry } = readiness;
+  const { data, error, checking, retry, patchDismissals } = readiness;
   // A fast answer never flashes the skeleton; the pane just holds its height.
   const { showBusy } = useVisualBusy(!data && error === null);
   const [filter, setFilter] = useState<FindingsFilter>(EMPTY_FINDINGS_FILTER);
@@ -127,6 +133,25 @@ export function FleetReadiness({
   // node), has no findings of its own, so it narrows to the node instead of
   // landing on an empty list.
   const findings = data?.findings;
+  const upsertDismissal = useCallback((dismissal: FindingDismissal) => {
+    patchDismissals(current => [...current.filter(item => item.id !== dismissal.id && item.findingKey !== dismissal.findingKey), dismissal]);
+  }, [patchDismissals]);
+  const removeDismissal = useCallback((id: number) => {
+    patchDismissals(current => current.filter(item => item.id !== id));
+  }, [patchDismissals]);
+  const { dismiss, restore, isPending } = useFindingDismissal({
+    surface: 'readiness',
+    onUpsert: upsertDismissal,
+    onRemove: removeDismissal,
+    onGone: retry,
+  });
+
+  // The matrix keeps the whole list: a dismissal moves a finding out of the
+  // attention list, it never changes what a cell says.
+  const partition = useMemo(
+    () => partitionFindings(data?.findings ?? [], data?.dismissals ?? [], now, READINESS_SEVERITY_SCALE),
+    [data?.findings, data?.dismissals, now],
+  );
   const focusCell = useCallback((nodeId: number, domain: ReadinessDomainKey) => {
     const hasOwn = findings?.some(finding => finding.nodeId === nodeId && finding.domain === domain) ?? false;
     setFilter({ ...EMPTY_FINDINGS_FILTER, nodeId, domain: hasOwn ? domain : ALL });
@@ -182,10 +207,17 @@ export function FleetReadiness({
         </FleetEmptyState>
       ) : (
         <>
-          <ReadinessSummaryStrip data={data} checking={checking} />
+          <ReadinessSummaryStrip data={data} checking={checking} dismissedCount={partition.dismissed.length} />
           <div ref={findingsRef} className="scroll-mt-4">
             <ReadinessFindingsTable
-              findings={data.findings}
+              findings={partition.active}
+              dismissed={partition.dismissed}
+              onRestore={dismissal => { void restore(dismissal.id); }}
+              isRestoring={dismissal => isPending(dismissal.id)}
+              now={now}
+              canDismiss={canDismiss}
+              onDismiss={(finding, mode, days) => { void dismiss(finding, mode, days); }}
+              isDismissing={finding => isPending(finding.id)}
               domains={data.domains}
               nodes={data.nodes}
               filter={filter}
