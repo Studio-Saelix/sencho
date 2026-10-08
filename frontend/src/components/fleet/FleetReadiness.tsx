@@ -79,9 +79,10 @@ interface FleetReadinessProps {
  * update, recover, or rely on it.
  *
  * Every state, reason code, and finding is decided on the hub; this surface
- * renders the payload. A finding carries the verb that resolves it where it is
- * listed, or routes to the surface that owns its remediation when the work lives
- * elsewhere. Nothing here recomputes a verdict.
+ * renders the payload. A finding is resolved by a verb run where it is listed
+ * (chosen from the finding's structured facts), or routes to the surface that
+ * owns its remediation when the work lives elsewhere. Nothing here recomputes a
+ * verdict.
  */
 export function FleetReadiness({
   readiness,

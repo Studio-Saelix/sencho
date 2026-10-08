@@ -192,7 +192,8 @@ interface PostStackUpdateParams {
 /**
  * The one request that updates a stack, and the one classification of how it
  * ended. The editor, the Auto-updates view and the Fleet readiness verb all
- * call this; each decides only how to present the outcome.
+ * call this (the last two through `useStackUpdate`); each decides only how to
+ * present the outcome.
  */
 export async function postStackUpdate({
   nodeId,

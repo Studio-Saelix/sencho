@@ -1041,6 +1041,24 @@ describe('GET /api/fleet/readiness aggregation', () => {
     expect(noUpdate.update.fingerprint).not.toBe(first.update.fingerprint);
   });
 
+  it('ignores reason facts of the wrong type from a peer', async () => {
+    const nodeId = addOnlineProxyNode('reason-facts-bad-types');
+    mockFetch(nodeReadHandler(evidenceBody(), {
+      ...summaryBody([]),
+      stacks: [{
+        stack: 'web',
+        update: { verdict: 'blocked', topReason: 'x', topReasonId: 42, hasUpdate: 'yes', computedAt: Date.now() },
+        rollback: null,
+        unavailableReason: null,
+      }],
+    }));
+
+    const { body } = await getReadiness({ domains: 'updates', nodeIds: String(nodeId) });
+    const finding = body.findings.find((entry) => entry.id === `updates:${nodeId}:web:update_blocked`)!;
+    expect(finding).not.toHaveProperty('topReasonId');
+    expect(finding).not.toHaveProperty('hasUpdate');
+  });
+
   it('leaves both fields off a finding from a peer that predates them', async () => {
     const nodeId = addOnlineProxyNode('reason-facts-old-peer');
     mockFetch(nodeReadHandler(evidenceBody(), summaryBody([row('web', { update: 'blocked', topReason: 'x' })])));

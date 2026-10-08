@@ -985,4 +985,82 @@ describe('FleetReadiness resolving verbs', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Re-anchor' }));
     await waitFor(() => expect(resetFleetSyncAnchor).toHaveBeenCalledWith(2));
   });
+
+  it('reports a failed connection test by its own reason, not as an unreachable node', async () => {
+    showFindings([finding({
+      id: 'connectivity:2:node_unreachable',
+      domain: 'connectivity',
+      code: 'node_unreachable',
+      severity: 'unavailable',
+    })]);
+    const error = vi.spyOn(toast, 'error');
+    renderReadiness();
+    vi.mocked(apiFetch).mockImplementation(async (url: string) => (
+      url === '/nodes/2/test'
+        ? ({ ok: false, status: 403, json: async () => ({ error: 'Forbidden' }) } as Response)
+        : okResponse(response({ nodes: [node({ id: 2, name: 'Edge' })] }))
+    ));
+
+    fireEvent.click(await screen.findByRole('button', { name: /^Test connection/ }));
+
+    await waitFor(() => expect(error).toHaveBeenCalledWith('Forbidden'));
+  });
+
+  it('keeps the scanner confirm open and does not recheck when the install fails', async () => {
+    showFindings([finding({
+      id: 'security:2:scanner_unavailable',
+      domain: 'security',
+      code: 'scanner_unavailable',
+      severity: 'unknown',
+    })]);
+    vi.mocked(fetchForNode).mockResolvedValue({ ok: false, status: 500, json: async () => ({ error: 'download failed' }) } as Response);
+    const error = vi.spyOn(toast, 'error');
+    renderReadiness();
+
+    fireEvent.click(await screen.findByRole('button', { name: /^Install scanner/ }));
+    const before = readinessReads();
+    fireEvent.click(await screen.findByRole('button', { name: 'Install' }));
+
+    await waitFor(() => expect(error).toHaveBeenCalledWith('download failed'));
+    expect(screen.getByRole('button', { name: 'Install' })).toBeInTheDocument();
+    expect(readinessReads()).toBe(before);
+  });
+
+  it('still lets a node be re-anchored when its current anchor cannot be read, and says so', async () => {
+    showFindings([finding({
+      id: 'control:2:control_paused',
+      domain: 'control',
+      code: 'control_paused',
+      severity: 'attention',
+    })]);
+    vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    vi.mocked(fetchFleetSyncStatuses).mockRejectedValue(new Error('down'));
+    vi.mocked(resetFleetSyncAnchor).mockResolvedValue(undefined);
+    renderReadiness();
+
+    fireEvent.click(await screen.findByRole('button', { name: /^Re-anchor to this hub/ }));
+    expect(await screen.findByText(/which hub could not be read/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Re-anchor' }));
+    await waitFor(() => expect(resetFleetSyncAnchor).toHaveBeenCalledWith(2));
+  });
+
+  it('warns when a node scan finishes with failures instead of calling it clean', async () => {
+    showFindings([finding({
+      id: 'security:2:scans_stale',
+      domain: 'security',
+      code: 'scans_stale',
+      severity: 'degraded',
+    })]);
+    vi.mocked(fetchForNode).mockResolvedValue({
+      ok: true,
+      json: async () => ({ images: { failed: 2 }, stacks: { failed: 1 } }),
+    } as Response);
+    const warning = vi.spyOn(toast, 'warning');
+    renderReadiness();
+
+    fireEvent.click(await screen.findByRole('button', { name: /^Scan node/ }));
+
+    await waitFor(() => expect(warning).toHaveBeenCalledWith('Scan of "Edge" finished with 3 failures.'));
+    expect(fetchForNode).toHaveBeenCalledWith('/security/scan-node', 2, expect.objectContaining({ method: 'POST' }));
+  });
 });

@@ -9,11 +9,10 @@ interface StackUpdateRequest {
   stackName: string;
 }
 
-export interface StackUpdateResult {
-  ok: boolean;
-  /** Why a digest rebuild is still detected after Compose, when the backend says so. */
-  recheckWarning?: string;
-}
+export type StackUpdateResult =
+  /** `recheckWarning` is why a digest rebuild is still detected after Compose, when the backend says so. */
+  | { ok: true; recheckWarning?: string }
+  | { ok: false };
 
 /**
  * Update a stack on a given node from anywhere that is not the editor: the
@@ -38,15 +37,27 @@ export function useStackUpdate() {
     try {
       const result = await runWithLog({ stackName, action: 'update', nodeId }, async (started, deploySessionId) => {
         await started;
-        const outcome = await postStackUpdate({ nodeId, stackName, deploySessionId });
+        let outcome: Awaited<ReturnType<typeof postStackUpdate>>;
+        try {
+          outcome = await postStackUpdate({ nodeId, stackName, deploySessionId });
+        } catch (error) {
+          // The request never got an answer (dropped connection, aborted). The
+          // deploy panel records the failure, but it can be hidden, so say it here.
+          console.error('Stack update request failed:', error);
+          const message = error instanceof Error ? error.message : 'Update failed';
+          toast.error(message);
+          return { ok: false as const, errorMessage: message };
+        }
         switch (outcome.kind) {
           case 'ok':
             recheckWarning = outcome.recheckWarning;
+            // A recheck warning replaces the success line: it says the update ran
+            // and what is still detected, so the two are not stacked.
+            if (outcome.recheckWarning) toast.info(outcome.recheckWarning);
             // With a health gate observing, finishing is not the final verdict, so
             // success is not claimed twice.
-            if (outcome.healthGateId) toast.info(`${stackName} updated. Verifying health...`);
+            else if (outcome.healthGateId) toast.info(`${stackName} updated. Verifying health...`);
             else toast.success(`${stackName} updated successfully`);
-            if (outcome.recheckWarning) toast.info(outcome.recheckWarning);
             return { ok: true as const, healthGateId: outcome.healthGateId };
           case 'self-stack': {
             const message = `${stackName} is the running Sencho instance, so it is protected here.`;
@@ -61,12 +72,21 @@ export function useStackUpdate() {
             toast.error(message, { action: openEditor });
             return { ok: false as const, errorMessage: message };
           }
-          case 'failed':
-            toast.error(outcome.error.message);
-            return { ok: false as const, errorMessage: outcome.error.message };
+          case 'failed': {
+            // The classification names the cause and the next step; a rollback means
+            // the stack is back on its old version.
+            const { failure, rolledBack } = outcome.error;
+            const message = [
+              outcome.error.message,
+              rolledBack ? 'The stack was rolled back to its previous version.' : null,
+              failure ? `${failure.label}. ${failure.suggestion}` : null,
+            ].filter(Boolean).join(' ');
+            toast.error(message);
+            return { ok: false as const, errorMessage: message };
+          }
         }
       });
-      return { ok: result.ok, recheckWarning };
+      return result.ok ? { ok: true, recheckWarning } : { ok: false };
     } catch (error) {
       console.error('Stack update failed:', error);
       toast.error(error instanceof Error ? error.message : 'Update failed');
