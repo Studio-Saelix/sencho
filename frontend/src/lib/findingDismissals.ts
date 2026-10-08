@@ -26,6 +26,12 @@ export const READINESS_SEVERITY_SCALE: SeverityScale = {
   unverified: ['unavailable', 'unknown'],
 };
 
+/** Networking severities, most severe first. `info` is the floor, so nothing there is "unverified". */
+export const NETWORKING_SEVERITY_SCALE: SeverityScale = {
+  order: ['critical', 'high', 'medium', 'info'],
+  unverified: [],
+};
+
 function becameWorse(stored: string, current: string, scale: SeverityScale): boolean {
   if (stored === current) return false;
   const storedRank = scale.order.indexOf(stored);
