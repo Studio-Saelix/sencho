@@ -147,6 +147,14 @@ export interface ReadinessFinding {
   verdict: FindingVerdict | null;
   /** Pass-through of the canonical explanation, redacted by the producer. */
   detail: string | null;
+  /**
+   * The update signal or rollback item behind `detail`, for update and recovery
+   * findings. Absent from a hub or peer that predates it: a verb that needs it
+   * is then withheld.
+   */
+  topReasonId?: string | null;
+  /** Whether a newer image is known for the stack. Absent from a peer that predates it. */
+  hasUpdate?: boolean;
   target: ReadinessTarget;
   /** Hash of the structured facts behind the finding; a dismissal held until it changes lifts when it moves. */
   fingerprint: string;

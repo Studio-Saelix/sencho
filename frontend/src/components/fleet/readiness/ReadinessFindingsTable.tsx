@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState } from 'react';
 import { ArrowRight, ChevronLeft, ChevronRight, Search } from 'lucide-react';
 import { Button } from '@/components/ui/button';
+import { BusyButton } from '@/components/ui/busy-button';
+import type { FindingVerbControl } from './useReadinessVerbs';
 import { Combobox } from '@/components/ui/combobox';
 import { Input } from '@/components/ui/input';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
@@ -146,6 +148,8 @@ interface ReadinessFindingsTableProps {
   /** Drill-down label, or null when the current user cannot reach that surface. */
   actionFor: (target: ReadinessTarget) => string | null;
   onOpen: (finding: ReadinessFinding) => void;
+  /** The verb that resolves a finding in place, or null to keep its named navigation. */
+  verbFor: (finding: ReadinessFinding) => FindingVerbControl | null;
   /** Whether this account may dismiss the finding; Dismiss is omitted rather than left to 403. */
   canDismiss: (finding: ReadinessFinding) => boolean;
   onDismiss: (finding: ReadinessFinding, mode: DismissalMode, days?: number) => void;
@@ -169,6 +173,7 @@ export function ReadinessFindingsTable({
   onFilterChange,
   actionFor,
   onOpen,
+  verbFor,
   canDismiss,
   onDismiss,
   isDismissing,
@@ -232,6 +237,7 @@ export function ReadinessFindingsTable({
                 nodeName={nodeNames.get(finding.nodeId) ?? `node ${finding.nodeId}`}
                 action={actionFor(finding.target)}
                 onOpen={onOpen}
+                verb={verbFor(finding)}
                 canDismiss={canDismiss(finding)}
                 dismissing={isDismissing(finding)}
                 onDismiss={onDismiss}
@@ -279,12 +285,13 @@ interface FindingRowProps {
   nodeName: string;
   action: string | null;
   onOpen: (finding: ReadinessFinding) => void;
+  verb: FindingVerbControl | null;
   canDismiss: boolean;
   dismissing: boolean;
   onDismiss: (finding: ReadinessFinding, mode: DismissalMode, days?: number) => void;
 }
 
-function FindingRow({ finding, nodeName, action, onOpen, canDismiss, dismissing, onDismiss }: FindingRowProps) {
+function FindingRow({ finding, nodeName, action, onOpen, verb, canDismiss, dismissing, onDismiss }: FindingRowProps) {
   const state = stateMeta(finding.severity);
   // A finding that restates a canonical verdict shows that verdict; any other shows its state.
   const chip = verdictChip(finding.verdict) ?? { label: state.label, tone: TONE_CHIP[state.tone] };
@@ -340,7 +347,18 @@ function FindingRow({ finding, nodeName, action, onOpen, canDismiss, dismissing,
           subject={codeCopy(finding.code)}
           onDismiss={(mode, days) => onDismiss(finding, mode, days)}
         >
-          {action && (
+          {verb ? (
+            <BusyButton
+              variant="ghost"
+              size="sm"
+              className="h-auto min-h-7 max-w-[8rem] whitespace-normal px-2 py-1 text-right text-xs leading-tight text-brand hover:text-brand"
+              pending={verb.busy}
+              aria-label={`${verb.label}: ${codeCopy(finding.code)}`}
+              onClick={verb.run}
+            >
+              {verb.label}
+            </BusyButton>
+          ) : action && (
             <Button
               variant="ghost"
               size="sm"

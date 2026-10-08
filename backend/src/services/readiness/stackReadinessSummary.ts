@@ -94,13 +94,13 @@ const ROLLBACK_RANK: Record<RollbackReadinessItem['state'], number> = {
  * A detail that redacts to nothing is indistinguishable from a signal that
  * carried no detail, which is why both return null rather than an empty string.
  */
-function strongestUpdateReason(signals: ReadinessSignal[]): string | null {
+function strongestUpdateSignal(signals: ReadinessSignal[]): ReadinessSignal | null {
   let best: ReadinessSignal | null = null;
   for (const signal of signals) {
     if (!signal.affectsVerdict || signal.status === 'ok') continue;
     if (best === null || SIGNAL_RANK[signal.status] > SIGNAL_RANK[best.status]) best = signal;
   }
-  return best ? redactSensitiveText(best.detail) || null : null;
+  return best;
 }
 
 /**
@@ -116,13 +116,18 @@ function strongestUpdateReason(signals: ReadinessSignal[]): string | null {
  * a gate invented here would be a second opinion about a verdict that already
  * has one owner.
  */
-function strongestRollbackReason(items: RollbackReadinessItem[]): string | null {
+function strongestRollbackItem(items: RollbackReadinessItem[]): RollbackReadinessItem | null {
   let best: RollbackReadinessItem | null = null;
   for (const item of items) {
     if (!ROLLBACK_GATING_IDS.has(item.id) || item.state === 'ready') continue;
     if (best === null || ROLLBACK_RANK[item.state] > ROLLBACK_RANK[best.state]) best = item;
   }
-  return best ? redactSensitiveText(best.detail) || null : null;
+  return best;
+}
+
+/** A detail that redacts to nothing is reported as no detail, not as an empty string. */
+function redactedDetail(detail: string | undefined): string | null {
+  return detail === undefined ? null : redactSensitiveText(detail) || null;
 }
 
 function unavailableRow(stack: string, reason: ReadinessReasonCode): StackReadinessRow {
@@ -196,17 +201,22 @@ async function computeStackReadinessSummary(nodeId: number): Promise<StackReadin
         remaining,
         `readiness summary for ${stack}`,
       );
+      const topSignal = update.status === 'fulfilled' ? strongestUpdateSignal(update.value.signals) : null;
       const updateRow = update.status === 'fulfilled'
         ? {
             verdict: update.value.verdict,
-            topReason: strongestUpdateReason(update.value.signals),
+            topReason: redactedDetail(topSignal?.detail),
+            topReasonId: topSignal?.id ?? null,
+            hasUpdate: updateDetail[stack]?.hasUpdate === true,
             computedAt: update.value.computedAt,
           }
         : null;
+      const topItem = rollback.status === 'fulfilled' ? strongestRollbackItem(rollback.value.items) : null;
       const rollbackRow = rollback.status === 'fulfilled'
         ? {
             overall: rollback.value.overall,
-            topReason: strongestRollbackReason(rollback.value.items),
+            topReason: redactedDetail(topItem?.detail),
+            topReasonId: topItem?.id ?? null,
             computedAt: rollback.value.computedAt,
           }
         : null;

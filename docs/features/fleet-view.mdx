@@ -189,7 +189,7 @@ A subtle `Auto-refreshing every 30 seconds` line at the bottom of the page confi
 
 ## The Readiness tab
 
-The **Readiness** tab answers one question across the whole estate: what needs attention before you operate, update, recover, or rely on this fleet? It reports conditions, not configuration. A setting you deliberately left off is not a finding here, and nothing on this tab changes your stacks.
+The **Readiness** tab answers one question across the whole estate: what needs attention before you operate, update, recover, or rely on this fleet? It reports conditions, not configuration. A setting you deliberately left off is not a finding here. Most findings carry a button that fixes them on the spot, and nothing runs until you press it.
 
 Nothing is scored. Every state comes from evidence the hub or the node actually gathered, so a check that could not run reads as `not checked` or `unverified` and never as healthy.
 
@@ -205,7 +205,21 @@ The order is deliberate and worst-first: a known problem outranks a condition th
 
 ### Findings
 
-**Findings** is the worklist, worst first. Each row names the condition in a sentence, says in one line what to do about it, carries the explanation the owning check gave (for example, why an update needs review), and names the node, stack, and domain it concerns. The action button opens the surface where you act on it: the stack, the node's details, the node's Security view, Auto-updates, Fleet Snapshots, or Settings > Nodes. A finding that restates a stack's update or rollback verdict repeats that verdict in the same words the stack's own readiness check uses, so `rollback not ready` means the same thing in both places.
+**Findings** is the worklist, worst first. Each row names the condition in a sentence, says in one line what to do about it, carries the explanation the owning check gave (for example, why an update needs review), and names the node, stack, and domain it concerns. The button on a row does the fix where you are, or, when the work belongs on another page, opens that page: the stack, the node's details, the node's Security view, Auto-updates, Fleet Snapshots, or Settings > Nodes. A finding that restates a stack's update or rollback verdict repeats that verdict in the same words the stack's own readiness check uses, so `rollback not ready` means the same thing in both places.
+
+| Finding | Button | What it does |
+|---------|--------|--------------|
+| Node did not answer, slow to answer, or out of contact | **Test connection** | Tests the connection from the hub and re-checks. |
+| Stack is stopped, or some services are stopped | **Start stack**, **Start stopped services** | Starts the stack's existing containers. If its containers were removed there is nothing to start, and the message offers **Open stack** instead, because bringing it back is a deploy. |
+| A check that could not read its evidence | **Check again** | Runs the readiness check again. |
+| An update is available and needs a look | **Review update** | Opens the update review. **Update** there applies it, the same way the stack's own update button does. A stack with nothing to update, or one whose update is blocked, gets **Open stack** instead, so the block is fixed at its cause. |
+| Rollback is not ready because no compose file is captured | **Capture recovery point** | Captures one now, so the stack can be rolled back. |
+| A fleet snapshot missed a node | **Take fleet snapshot** | Takes a new snapshot. |
+| A node has never been scanned, or its scans are old | **Scan node** | Scans the node's images and stacks for vulnerabilities, secrets, and misconfigurations. A scan takes a few minutes and runs while you keep working. |
+| The security scanner is missing | **Install scanner** | Asks you to confirm, then installs it on that node. |
+| Policy sync is paused because the node follows another hub | **Re-anchor to this hub** | Asks you to confirm, naming the hub the node follows now, then makes this hub the one that pushes policy to it. |
+
+A button only appears when your account may do what it does. Everything else keeps the page button.
 
 Use the filters above the table to narrow the list:
 

@@ -17,6 +17,8 @@ import { ReadinessNodeMatrix } from './readiness/ReadinessNodeMatrix';
 import { ReadinessFindingsTable } from './readiness/ReadinessFindingsTable';
 import { ALL, EMPTY_FINDINGS_FILTER, type FindingsFilter } from './readiness/findingsFilter';
 import { useNow } from './readiness/useNow';
+import { useReadinessVerbs } from './readiness/useReadinessVerbs';
+import type { ReadinessVerb } from './readiness/readinessVerbs';
 import { useFindingDismissal } from '@/hooks/useFindingDismissal';
 import { READINESS_SEVERITY_SCALE, partitionFindings } from '@/lib/findingDismissals';
 import type { FindingDismissal } from '@/types/findingDismissal';
@@ -68,6 +70,8 @@ interface FleetReadinessProps {
   isAdmin: boolean;
   /** Whether this account may dismiss the finding, from the shell that owns the auth context. */
   canDismiss: (finding: ReadinessFinding) => boolean;
+  /** Whether this account may run the verb on the finding; a verb it may not run is not offered. */
+  canRun: (verb: ReadinessVerb, finding: ReadinessFinding) => boolean;
 }
 
 /**
@@ -75,8 +79,9 @@ interface FleetReadinessProps {
  * update, recover, or rely on it.
  *
  * Every state, reason code, and finding is decided on the hub; this surface
- * renders the payload and routes each finding to the surface that already owns
- * its remediation. Nothing here recomputes a verdict.
+ * renders the payload. A finding carries the verb that resolves it where it is
+ * listed, or routes to the surface that owns its remediation when the work lives
+ * elsewhere. Nothing here recomputes a verdict.
  */
 export function FleetReadiness({
   readiness,
@@ -85,6 +90,7 @@ export function FleetReadiness({
   onOpenSettingsSection,
   isAdmin,
   canDismiss,
+  canRun,
 }: FleetReadinessProps) {
   const { data, error, checking, retry, patchDismissals } = readiness;
   // A fast answer never flashes the skeleton; the pane just holds its height.
@@ -119,6 +125,10 @@ export function FleetReadiness({
         onOpenSettingsSection?.('nodes');
     }
   }, [onOpenNodeDetails, onOpenNodeSecurity, onOpenSettingsSection]);
+
+  const nodeNames = useMemo(() => new Map((data?.nodes ?? []).map(node => [node.id, node.name])), [data?.nodes]);
+  const nodeName = useCallback((nodeId: number) => nodeNames.get(nodeId) ?? `node ${nodeId}`, [nodeNames]);
+  const { verbFor, overlays } = useReadinessVerbs({ recheck: retry, openFinding, canRun, nodeName });
 
   // A finding is always listed; only the shortcut is withheld when the current
   // user cannot reach the surface it points at, so no row offers a dead button.
@@ -224,6 +234,7 @@ export function FleetReadiness({
               onFilterChange={setFilter}
               actionFor={actionFor}
               onOpen={openFinding}
+              verbFor={verbFor}
             />
           </div>
           <ReadinessNodeMatrix
@@ -236,6 +247,7 @@ export function FleetReadiness({
           />
         </>
       )}
+      {overlays}
     </div>
   );
 }

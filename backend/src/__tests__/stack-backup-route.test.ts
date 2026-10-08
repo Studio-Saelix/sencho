@@ -88,6 +88,19 @@ describe('POST /api/stacks/:stackName/backup', () => {
     expect(mockBackupStackFiles).not.toHaveBeenCalled();
   });
 
+  it('drops the cached readiness rollup so a captured recovery point clears its finding', async () => {
+    const { CacheService } = await import('../services/CacheService');
+    const invalidate = vi.spyOn(CacheService.getInstance(), 'invalidate');
+    try {
+      const res = await request(app).post('/api/stacks/web/backup').set('Cookie', adminCookie);
+      expect(res.status).toBe(200);
+      const keys = invalidate.mock.calls.map(([key]) => key);
+      expect(keys.some((key) => String(key).startsWith('stack-readiness-summary:'))).toBe(true);
+    } finally {
+      invalidate.mockRestore();
+    }
+  });
+
   it('returns 401 without an auth cookie', async () => {
     const res = await request(app).post('/api/stacks/web/backup');
     expect(res.status).toBe(401);
