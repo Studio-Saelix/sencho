@@ -34,6 +34,7 @@ export function MobileStackDetail(props: EditorViewProps) {
         content,
         envContent,
         envExists,
+        envInventoryFailed,
         envFiles,
         selectedEnvFile,
         isFileLoading,
@@ -115,6 +116,7 @@ export function MobileStackDetail(props: EditorViewProps) {
                     activeTab={activeTab}
                     setActiveTab={setActiveTab}
                     envExists={envExists}
+                    envInventoryFailed={envInventoryFailed}
                     envFiles={envFiles}
                     selectedEnvFile={selectedEnvFile}
                     changeEnvFile={changeEnvFile}

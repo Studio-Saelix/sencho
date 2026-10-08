@@ -1,7 +1,7 @@
 import path from 'path';
 import os from 'os';
 import crypto from 'crypto';
-import { promises as fsPromises, createReadStream, createWriteStream } from 'fs';
+import { promises as fsPromises, constants as fsConstants, createReadStream, createWriteStream } from 'fs';
 import type { Dirent } from 'fs';
 import { Readable } from 'stream';
 import { pipeline } from 'stream/promises';
@@ -483,6 +483,106 @@ export class FileSystemService {
     await fsPromises.writeFile(safePath, content, 'utf-8');
     const newStat = await fsPromises.stat(safePath);
     return { ok: true, mtimeMs: newStat.mtimeMs };
+  }
+
+  /**
+   * Exclusive create for the editor's first save on a stack with no env file.
+   * Fails when the target already exists so a stale client can never overwrite
+   * a file it has not read; the caller turns that into the same 412 conflict
+   * the optimistic-concurrency path uses. The path is resolved and contained
+   * like writeFileIfUnchanged.
+   */
+  async createFileExclusive(
+    untrustedTargetPath: string,
+    content: string,
+  ): Promise<
+    | { ok: true; mtimeMs: number }
+    | { ok: false; currentMtimeMs: number; currentContent: string }
+  > {
+    const baseResolved = path.resolve(this.baseDir);
+    const safePath = path.resolve(baseResolved, untrustedTargetPath);
+    if (!safePath.startsWith(baseResolved + path.sep)) {
+      throw Object.assign(new Error('Path escapes compose directory'), { code: 'INVALID_PATH' });
+    }
+    await this.assertRealWithinBase(safePath);
+
+    let fh: import('fs/promises').FileHandle | null = null;
+    try {
+      // O_EXCL makes creation atomic; O_NOFOLLOW keeps a symlink planted after
+      // the containment check from ever being followed. On Linux a symlink at
+      // the target surfaces as EEXIST and goes through the conflict read below.
+      // A missing parent (the stack directory was deleted after the caller's
+      // existence check) surfaces as ENOENT and is left to the route, which
+      // reports the vanished stack instead of recreating the directory.
+      fh = await fsPromises.open(
+        safePath,
+        fsConstants.O_CREAT | fsConstants.O_EXCL | fsConstants.O_WRONLY | fsConstants.O_NOFOLLOW,
+      );
+      await fh.writeFile(content, 'utf-8');
+      await fh.close();
+      fh = null;
+      const newStat = await fsPromises.stat(safePath);
+      return { ok: true, mtimeMs: newStat.mtimeMs };
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'EEXIST') {
+        // The path exists. A symlink can be planted at the target between the
+        // pre-open containment check and the failed exclusive open, so repeat
+        // the check and read through a handle that never follows a link: the
+        // conflict payload must not become a way to read outside the compose
+        // root. A vanished or linked target is refused as an invalid path;
+        // EISDIR propagates and the route answers 409.
+        await this.assertRealWithinBase(safePath);
+        let reader: import('fs/promises').FileHandle | null = null;
+        try {
+          reader = await fsPromises.open(safePath, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
+          const stat = await reader.stat();
+          const currentContent = await reader.readFile('utf-8');
+          return { ok: false, currentMtimeMs: stat.mtimeMs, currentContent };
+        } catch (readErr) {
+          const code = (readErr as NodeJS.ErrnoException).code;
+          if (code === 'ELOOP') {
+            throw Object.assign(new Error('Env target is a symlink; refusing to follow it'), { code: 'INVALID_PATH' });
+          }
+          if (code === 'ENOENT') {
+            throw Object.assign(new Error('Env target vanished during the conflict read'), { code: 'INVALID_PATH' });
+          }
+          throw readErr;
+        } finally {
+          if (reader) await reader.close();
+        }
+      }
+      if ((err as NodeJS.ErrnoException).code === 'ELOOP') {
+        throw Object.assign(new Error('Env target is a symlink; refusing to follow it'), { code: 'INVALID_PATH' });
+      }
+      // The exclusive open may have created the file before the write failed
+      // (ENOSPC, EIO): remove the leftover so a retry can create again and
+      // Compose never reads a partial env file the operator never wrote. The
+      // path must still name the same file this call created (same inode and
+      // size), so a replacement by another actor is never deleted; the window
+      // between that check and the unlink is accepted (a stack-dir writer can
+      // already do worse, and leaving the file is the safe failure). Best
+      // effort, preserving the original error.
+      if (fh) {
+        let createdIno: number | null = null;
+        let createdSize = -1;
+        try {
+          const created = await fh.stat();
+          createdIno = created.ino;
+          createdSize = created.size;
+        } catch { /* ignore: still close below */ }
+        await fh.close().catch(() => {});
+        fh = null;
+        try {
+          const current = await fsPromises.lstat(safePath);
+          if (createdIno !== null && current.ino === createdIno && current.size === createdSize) {
+            await fsPromises.unlink(safePath);
+          }
+        } catch { /* best effort */ }
+      }
+      throw err;
+    } finally {
+      if (fh) await fh.close().catch(() => {});
+    }
   }
 
   async statMtime(untrustedTargetPath: string): Promise<number | null> {

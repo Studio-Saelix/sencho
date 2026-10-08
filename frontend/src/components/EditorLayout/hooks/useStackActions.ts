@@ -11,6 +11,7 @@ import {
   type SpanHandle,
 } from '@/lib/hydrationTiming';
 import { toast } from '@/components/ui/toast-store';
+import { ENV_READ_FAILED_NOTICE } from '../envNotice';
 import { buildServiceUrl, openServiceUrl } from '@/lib/serviceUrl';
 import { requestServiceUpdate as postServiceUpdate, requestServiceRestore as postServiceRestore } from '@/lib/serviceUpdate';
 import type { EffectiveServiceModelResult } from '@/types/effectiveServices';
@@ -673,6 +674,7 @@ export function useStackActions(options: UseStackActionsOptions) {
     editorState.setEnvFiles([]);
     editorState.setSelectedEnvFile('');
     editorState.setEnvExists(false);
+    editorState.setEnvInventoryFailed(false);
     editorState.setContainers([]);
     editorState.setContainersLoadStatus('idle');
     editorState.setContainersLoadError(null);
@@ -959,19 +961,32 @@ export function useStackActions(options: UseStackActionsOptions) {
     editorState.setOriginalEnvContent('');
     editorState.setEnvExists(false);
     editorState.setEnvEtag(null);
+    // Cleared with the rest; loadEnvState sets it again when the inventory
+    // request itself failed rather than returned an empty list.
+    editorState.setEnvInventoryFailed(false);
   };
 
-  const loadEnvState = async (filename: string, signal?: AbortSignal, opNodeId?: number | null): Promise<string[]> => {
+  // ok=false means the env state is not trustworthy (inventory or content
+  // could not be read, or the request was aborted); files carries the resolved
+  // list when only the content fetch failed, so callers can tell that case
+  // apart from a genuinely empty stack.
+  const loadEnvState = async (
+    filename: string,
+    signal?: AbortSignal,
+    opNodeId?: number | null,
+  ): Promise<{ files: string[]; ok: boolean }> => {
     try {
       const envsRes = await apiFetch(`/stacks/${filename}/envs`, { signal, nodeId: opNodeId });
-      if (signal?.aborted) return [];
+      if (signal?.aborted) return { files: [], ok: false };
       if (!envsRes.ok) {
         clearEnvState();
-        return [];
+        editorState.setEnvInventoryFailed(true);
+        return { files: [], ok: false };
       }
       const { envFiles } = await envsRes.json();
-      if (signal?.aborted) return [];
-      if (envFiles && envFiles.length > 0) {
+      if (signal?.aborted) return { files: [], ok: false };
+      if (Array.isArray(envFiles) && envFiles.length > 0) {
+        editorState.setEnvInventoryFailed(false);
         editorState.setEnvFiles(envFiles);
         const firstFile = envFiles[0];
         editorState.setSelectedEnvFile(firstFile);
@@ -980,25 +995,29 @@ export function useStackActions(options: UseStackActionsOptions) {
           `/stacks/${filename}/env?file=${encodeURIComponent(firstFile)}`,
           { signal, nodeId: opNodeId },
         );
-        if (signal?.aborted) return envFiles;
+        if (signal?.aborted) return { files: envFiles, ok: false };
         if (envContentRes.ok) {
           const envText = await envContentRes.text();
           editorState.setEnvContent(envText || '');
           editorState.setOriginalEnvContent(envText || '');
           editorState.setEnvEtag(envContentRes.headers.get('etag'));
-        } else {
-          editorState.setEnvContent('');
-          editorState.setOriginalEnvContent('');
-          editorState.setEnvEtag(null);
+          return { files: envFiles, ok: true };
         }
-        return envFiles;
+        // The file exists but its content could not be read. Presenting an
+        // empty buffer would assert something untrue, and the next save would
+        // be unguarded, so mark the env state unreadable: the editor shows the
+        // failure notice and refuses to save or create over it.
+        clearEnvState();
+        editorState.setEnvInventoryFailed(true);
+        return { files: envFiles, ok: false };
       }
       clearEnvState();
-      return [];
+      return { files: [], ok: true };
     } catch (err) {
-      if (isAbortError(err)) return [];
+      if (isAbortError(err)) return { files: [], ok: false };
       clearEnvState();
-      return [];
+      editorState.setEnvInventoryFailed(true);
+      return { files: [], ok: false };
     }
   };
 
@@ -1115,7 +1134,7 @@ export function useStackActions(options: UseStackActionsOptions) {
       endSpan(dispatchSpan);
       detailVisiblePendingRef.current = { attemptId, token: filename, proxied };
       setDetailVisibleEpoch((n) => n + 1);
-      const envFiles = await loadEnvState(filename, signal, opNodeId);
+      const envLoad = await loadEnvState(filename, signal, opNodeId);
       const containersResult = await loadContainerState(filename, signal, attemptId, opNodeId);
       if (!signal.aborted) {
         if (containersResult.ok) {
@@ -1145,7 +1164,7 @@ export function useStackActions(options: UseStackActionsOptions) {
       if (!signal.aborted) {
         detailHydratedPendingRef.current = { attemptId, token: filename, proxied };
       }
-      return { ok: true, envFiles };
+      return { ok: true, envFiles: envLoad.files };
     } catch (error) {
       if (headersSpan !== null) endSpan(headersSpan, { outcome: 'error' });
       if (bodySpan !== null) endSpan(bodySpan, { outcome: 'error' });
@@ -1156,9 +1175,10 @@ export function useStackActions(options: UseStackActionsOptions) {
       editorState.setContent('');
       editorState.setOriginalContent('');
       editorState.setComposeEtag(null);
-      editorState.setEnvContent('');
-      editorState.setOriginalEnvContent('');
-      editorState.setEnvEtag(null);
+      // The failed stack was never loaded, so its env state is unknown, not
+      // absent. Clear it or the previous stack's "no env file" would authorize
+      // a create against this one.
+      clearEnvState();
       editorState.setContainers([]);
       editorState.setContainersLoadStatus('idle');
       editorState.setContainersLoadError(null);
@@ -1229,24 +1249,61 @@ export function useStackActions(options: UseStackActionsOptions) {
     }
   };
 
-  const saveFile = async (options?: { force?: boolean }): Promise<boolean> => {
+  const saveFile = async (options?: { force?: boolean; envPath?: string; create?: boolean }): Promise<boolean> => {
     if (editorState.activeTab === 'files') return false;
     if (!stackListState.selectedFile) return false;
     const force = options?.force === true;
+    const pinnedEnvPath = options?.envPath;
     const isCompose = editorState.activeTab === 'compose';
     const currentContent = isCompose
       ? editorState.content || ''
       : editorState.envContent || '';
+    // The env tab opens before an env file exists. Its first save asks the
+    // backend to create the file Compose reads and returns the resolved path,
+    // which becomes the selected file so later saves target it directly. A
+    // confirmed overwrite after a create conflict retries with force=1 and
+    // pins the exact file the conflict named, so a config change between the
+    // two requests cannot move the write to another file. The retry passes
+    // create explicitly so the mode cannot depend on state-update ordering.
+    const creatingEnv = !isCompose && (options?.create ?? !editorState.envExists);
+    // A failed inventory load is an unknown state, not an absent file: never
+    // offer or perform a create over it.
+    if (creatingEnv && editorState.envInventoryFailed) {
+      toast.error(ENV_READ_FAILED_NOTICE);
+      return false;
+    }
+    // Save & Deploy / Save & Pull on an untouched, still-empty env tab have
+    // nothing to write. Skipping the create lets the deploy proceed and avoids
+    // planting an empty env file the operator never edited.
+    if (creatingEnv && (editorState.envContent || '') === '' && (editorState.originalEnvContent || '') === '') {
+      toast.info('Nothing to save: the environment file is still empty.');
+      return true;
+    }
     const endpoint = isCompose
       ? `/stacks/${stackListState.selectedFile}`
-      : `/stacks/${stackListState.selectedFile}/env?file=${encodeURIComponent(editorState.selectedEnvFile)}`;
+      : creatingEnv
+        ? `/stacks/${stackListState.selectedFile}/env?create=1${force ? '&force=1' : ''}${pinnedEnvPath ? `&file=${encodeURIComponent(pinnedEnvPath)}` : ''}`
+        : `/stacks/${stackListState.selectedFile}/env?file=${encodeURIComponent(editorState.selectedEnvFile)}`;
     const etag = isCompose ? editorState.composeEtag : editorState.envEtag;
     const headers: Record<string, string> = {};
-    if (!force && etag) headers['If-Match'] = etag;
+    if (creatingEnv && !force) {
+      // The create branch of this build ignores the precondition (creation is
+      // exclusive either way), but a node that predates create-on-save treats
+      // it as a normal conditional write: an existing file answers 412 with
+      // its content instead of being overwritten, and a missing file keeps
+      // that node's handled 404.
+      headers['If-Match'] = 'W/"0"';
+    } else if (!force && etag) {
+      headers['If-Match'] = etag;
+    }
     // Pin the PUT to the node this tab captured at the start of the operation.
     // A forced retry re-enters this same closure and reads the same already
     // captured `activeNode` binding, so both PUTs carry one target.
     const opNodeId = activeNode?.id ?? null;
+    // The load that produced the current editor state, captured before the PUT:
+    // a stack switch during the request aborts it, so post-save recovery can
+    // tell that the editor moved on and must not repaint.
+    const opLoadSignal = loadFileAbortRef.current?.signal;
     try {
       const response = await apiFetch(endpoint, {
         method: 'PUT',
@@ -1258,19 +1315,87 @@ export function useStackActions(options: UseStackActionsOptions) {
         const payload = await response.json().catch(() => null);
         const currentRemoteContent =
           payload && typeof payload.currentContent === 'string' ? payload.currentContent : '';
+        const conflictPath =
+          payload && typeof payload.envPath === 'string' ? payload.envPath : '';
+        // The response belongs to a stack the editor has left: a new load
+        // aborted this one's signal and owns the state now. Do not paint the
+        // old stack's file into it, and do not prompt for a conflict the
+        // operator is no longer looking at.
+        if (opLoadSignal?.aborted) return false;
+        // A create conflict means the file appeared after the tab loaded. Adopt
+        // it and its ETag so the notice clears, later saves target the real
+        // file, and a forced retry that fails cannot fall back to an unguarded
+        // write on the next manual save.
+        if (creatingEnv && conflictPath) {
+          editorState.setEnvExists(true);
+          editorState.setSelectedEnvFile(conflictPath);
+          editorState.setEnvFiles([conflictPath]);
+          editorState.setEnvEtag(response.headers.get('etag'));
+        }
         const fileName = isCompose
           ? 'compose.yaml'
-          : (editorState.selectedEnvFile || '.env').split('/').pop() ?? '.env';
+          : (conflictPath || editorState.selectedEnvFile || '.env').split('/').pop() ?? '.env';
         const confirmed = window.confirm(
-          `${fileName} was changed by another tab or process. Overwrite their changes with yours? Click Cancel to discard your local edits and reload the latest version.`,
+          creatingEnv
+            ? `${fileName} already exists for this stack and you have not loaded its contents. Overwriting replaces it with your edits. Click Cancel to reload the existing file instead.`
+            : `${fileName} was changed by another tab or process. Overwrite their changes with yours? Click Cancel to discard your local edits and reload the latest version.`,
         );
         if (confirmed) {
-          return await saveFile({ force: true });
+          return await saveFile({ force: true, envPath: conflictPath || undefined, create: creatingEnv });
         }
         if (isCompose) {
           editorState.setContent(currentRemoteContent);
           editorState.setOriginalContent(currentRemoteContent);
           editorState.setComposeEtag(response.headers.get('etag'));
+        } else if (creatingEnv && !conflictPath) {
+          // A node that predates the envPath field named the conflict but not
+          // the file, and such a node's route resolves the default env source,
+          // so the retry cannot pin a path. Keep the 412 content visible, then
+          // refresh the inventory so the tab stops offering to create one. The
+          // refresh runs under the signal captured before the PUT; if a stack
+          // switch aborts it, the new load owns the state and nothing more is
+          // painted.
+          editorState.setEnvContent(currentRemoteContent);
+          editorState.setOriginalEnvContent(currentRemoteContent);
+          editorState.setEnvEtag(response.headers.get('etag'));
+          const refreshed = await loadEnvState(stackListState.selectedFile, opLoadSignal, opNodeId);
+          if (opLoadSignal?.aborted) return false;
+          if (!refreshed.ok) {
+            // The refresh did not complete (or loaded no content). The buffer
+            // still holds the conflicted file's content; the unknown-state
+            // guard refuses the next save, so report the failure instead of
+            // claiming a reload.
+            editorState.setEnvContent(currentRemoteContent);
+            editorState.setOriginalEnvContent(currentRemoteContent);
+            editorState.setEnvEtag(response.headers.get('etag'));
+            toast.error('Could not reload the environment files. Reload the editor before saving.');
+            return false;
+          }
+        } else if (creatingEnv && conflictPath) {
+          // The conflict named a file the editor had not loaded. Re-read the
+          // env state instead of trusting the payload: the file can be removed
+          // while the dialog is open, and adopting a path that no longer
+          // exists would fail the allowed-file check on every later save. A
+          // successful refresh adopts what is on disk now, or returns the
+          // editor to create mode when nothing is left.
+          const refreshed = await loadEnvState(stackListState.selectedFile, opLoadSignal, opNodeId);
+          if (opLoadSignal?.aborted) return false;
+          if (!refreshed.ok) {
+            // Keep the conflicted content visible under its ETag; the
+            // unknown-state guard refuses the next save instead of writing
+            // over something unread.
+            editorState.setEnvContent(currentRemoteContent);
+            editorState.setOriginalEnvContent(currentRemoteContent);
+            editorState.setEnvEtag(response.headers.get('etag'));
+            toast.error('Could not reload the environment files. Reload the editor before saving.');
+            return false;
+          }
+          if (refreshed.files.length === 0) {
+            // The file vanished while the dialog was open; the refresh left
+            // the editor in create mode, so the next save creates it.
+            toast.info('The environment file no longer exists. Saving will create it.');
+            return false;
+          }
         } else {
           editorState.setEnvContent(currentRemoteContent);
           editorState.setOriginalEnvContent(currentRemoteContent);
@@ -1280,8 +1405,23 @@ export function useStackActions(options: UseStackActionsOptions) {
         return false;
       }
       if (!response.ok) {
-        throw new Error(`HTTP ${response.status}: ${await response.text()}`);
+        // Surface the server's error text, not the raw JSON envelope: a failed
+        // save (404 vanished stack, 409 unusable path, 413 too large) is shown
+        // to the operator in a toast.
+        const bodyText = await response.text().catch(() => '');
+        let serverError = '';
+        try {
+          const parsed = JSON.parse(bodyText) as { error?: unknown } | null;
+          if (parsed && typeof parsed.error === 'string') serverError = parsed.error;
+        } catch {
+          // Non-JSON body (e.g. a proxy error page): fall back to the status.
+        }
+        throw new Error(serverError || `HTTP ${response.status}`);
       }
+      // If the editor moved to another stack while the PUT was in flight, the
+      // new load owns the state: the write succeeded, but none of this
+      // response's file state may be painted into the editor.
+      if (opLoadSignal?.aborted) return true;
       const newEtag = response.headers.get('etag');
       if (isCompose) {
         editorState.setOriginalContent(editorState.content);
@@ -1289,6 +1429,30 @@ export function useStackActions(options: UseStackActionsOptions) {
       } else {
         editorState.setOriginalEnvContent(editorState.envContent);
         if (newEtag) editorState.setEnvEtag(newEtag);
+        if (creatingEnv) {
+          // Create path: adopt the resolved path the backend returns so the
+          // next save targets the real file instead of failing the allowed-file
+          // check. Present for both a fresh create and the forced overwrite.
+          const payload = (await response.json().catch(() => null)) as
+            { envPath?: unknown } | null;
+          const createdPath =
+            payload && typeof payload.envPath === 'string' ? payload.envPath : '';
+          if (createdPath) {
+            editorState.setEnvExists(true);
+            editorState.setSelectedEnvFile(createdPath);
+            editorState.setEnvFiles([createdPath]);
+          } else {
+            // A node that predates the envPath response accepted the write but
+            // cannot name the path. Refresh the inventory so the editor leaves
+            // create mode and later saves are normal conditional writes instead
+            // of prompting for an overwrite on every save.
+            const refreshed = await loadEnvState(stackListState.selectedFile, opLoadSignal, opNodeId);
+            if (opLoadSignal?.aborted) return true;
+            if (!refreshed.ok) {
+              toast.error('Saved, but the environment files could not be reloaded. Reload the editor before the next save.');
+            }
+          }
+        }
       }
       toast.success('File saved successfully!');
       return true;

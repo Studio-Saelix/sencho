@@ -142,6 +142,7 @@ export default function EditorLayout() {
     content, setContent,
     envContent, setEnvContent,
     envExists,
+    envInventoryFailed,
     envFiles,
     selectedEnvFile,
     containers,
@@ -821,6 +822,7 @@ export default function EditorLayout() {
       content={content}
       envContent={envContent}
       envExists={envExists}
+      envInventoryFailed={envInventoryFailed}
       envFiles={envFiles}
       selectedEnvFile={selectedEnvFile}
       isFileLoading={isFileLoading}

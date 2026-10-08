@@ -30,7 +30,7 @@ This tutorial covers one guardrail: **Block deploy on missing required env vars*
           - "5432:5432"
     ```
 
-    The `${DB_PASSWORD:?message}` syntax tells Compose the variable is required: it refuses to render the stack at all if `DB_PASSWORD` has no value, anywhere in the file. The **.env** tab stays disabled until a project environment file exists, so switch to the **Files** tab, select **New file**, and create one named `.env`. Open it and add `DB_PASSWORD=devpassword123` before your first deploy. Setting it now gets you a clean first deploy; the next steps remove it on purpose to see the guardrail react.
+    The `${DB_PASSWORD:?message}` syntax tells Compose the variable is required: it refuses to render the stack at all if `DB_PASSWORD` has no value, anywhere in the file. Open the **.env** tab. The stack has no env file yet, so the editor explains that saving creates the environment file; add `DB_PASSWORD=devpassword123` and save. Setting it now gets you a clean first deploy; the next steps remove it on purpose to see the guardrail react.
 
     <Frame>
       <img src="/images/tutorials/configure-environment-guardrails/compose-required-password.png" alt="Compose editor for inventory-db showing a single db service: image postgres:16, restart always, environment with POSTGRES_PASSWORD set to the interpolation ${DB_PASSWORD:?Set DB_PASSWORD in .env before deploying}, POSTGRES_DB inventory, and port 5432 published." />

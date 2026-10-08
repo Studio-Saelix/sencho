@@ -129,7 +129,7 @@ The editor card has three tabs:
 | Tab | Purpose |
 |-----|---------|
 | `compose.yaml` | YAML editor with syntax highlighting. Always available. |
-| `.env` | Environment file editor with syntax highlighting. Disabled when the stack has no env file. |
+| `.env` | Environment file editor with syntax highlighting. When the stack has no env file yet, the first save creates the file Compose will read: a configured project env file, or the default `.env`. |
 | **Files** | Browseable directory tree for the stack folder. See the dedicated [Stack File Explorer](/features/stack-file-explorer) page for permissions, upload caps, and protected-file behavior. A full-screen toggle appears next to **Close editor** while this tab is active, collapsing the left column so the file tree and editor use the full width. |
 
 Above the editor area, the toolbar carries:
@@ -140,7 +140,7 @@ Above the editor area, the toolbar carries:
 
 When you switch to the `.env` tab and the stack defines more than one env file, a dropdown appears next to the tab strip so you can pick which file to edit. The dropdown locks while you have unsaved edits so switching files cannot drop them. Sencho discovers env files from the `env_file:` entries in `compose.yaml`; if none are declared, it falls back to a `.env` in the stack directory.
 
-The `.env` editor renders a teal banner above the textarea reminding you that variables defined there are available for substitution in `compose.yaml` (`${VAR}`), and that passing them into containers requires an `env_file:` entry on the service.
+The `.env` editor renders a teal banner above the textarea reminding you that variables defined there are available for substitution in `compose.yaml` (`${VAR}`), and that passing them into containers requires an `env_file:` entry on the service. When the stack has no env file yet, the same banner adds that saving creates the environment file in the stack directory. Creation never overwrites: if the file appears between opening the tab and saving, Sencho asks before replacing it, and declining reloads the file that is on disk.
 
 ### Save options
 
@@ -182,10 +182,10 @@ If there are no unsaved changes the modal is skipped and the save proceeds direc
 On a narrow screen the stack opens as a full-screen detail with **Health**, **Logs**, and **Compose** segments instead of the two-column cockpit. The **Compose** segment shows the read-only Anatomy summary; tap **Edit compose** to open a full-screen editor for small, safe changes.
 
 <Frame>
-  <img src="/images/editor/editor-mobile.png" alt="Mobile compose editor with a Cancel button, the compose.yaml label, a monospace text field showing the compose file, a small-edits note, and Save and Save and Deploy buttons" />
+  <img src="/images/editor/editor-mobile.png" alt="Mobile compose editor with a Cancel button, the compose/.env toggle with compose selected, a monospace text field showing the compose file, a small-edits note, and Save and Save and Deploy buttons" />
 </Frame>
 
-The mobile editor is a lightweight monospace text field rather than Monaco. Tap **compose** or **.env** at the top to choose the file. The **.env** toggle appears only when the stack has an env file, and the file picker is locked while you have unsaved edits so switching files cannot drop them. The footer carries the same **Save** and **Save & Deploy** (or **Save & Reapply** when eligible) actions, and a chevron attached to the primary action holds **Save & Pull Images** so the action row never crowds the primary label. Every protection is shared with desktop: the diff preview, save-conflict handling, and the unsaved-changes prompt all behave the same way. **Cancel** leaves the editor and asks before discarding unsaved edits.
+The mobile editor is a lightweight monospace text field rather than Monaco. Tap **compose** or **.env** at the top to choose the file. The file picker is locked while you have unsaved edits so switching files cannot drop them. When the stack has no env file yet, the `.env` view explains that saving creates the environment file. The footer carries the same **Save** and **Save & Deploy** (or **Save & Reapply** when eligible) actions, and a chevron attached to the primary action holds **Save & Pull Images** so the action row never crowds the primary label. Every protection is shared with desktop: the diff preview, save-conflict handling, and the unsaved-changes prompt all behave the same way. **Cancel** leaves the editor and asks before discarding unsaved edits.
 
 A note at the bottom of the editor is a reminder that mobile editing is meant for small corrections such as bumping an image tag or fixing a value. For large compose rewrites, open the stack on a desktop. Editing requires the `stack:edit` permission.
 
@@ -236,9 +236,6 @@ Sencho tries `/bin/bash` first and transparently falls back to `/bin/sh` if bash
   </Accordion>
   <Accordion title="Save & Deploy is disabled">
     A deploy is already running for this stack. Watch the action bar for the spinning state to clear, then save again.
-  </Accordion>
-  <Accordion title="The .env tab is greyed out">
-    The stack has no env file to edit. Add an `env_file:` entry to a service in `compose.yaml` and save, or create a `.env` file in the stack directory through the **Files** tab.
   </Accordion>
   <Accordion title='Log viewer shows "Request forbidden by administrative rules"'>
     The container list can still load while log viewing fails. The **View logs** stream can show `[Sencho] Error fetching logs:` followed by an HTTP 403 and `Request forbidden by administrative rules`. A Docker socket proxy is blocking `/containers/{id}/logs`. On `linuxserver/socket-proxy`, set `ALLOW_LOGS=1` in addition to `CONTAINERS=1`. Tecnativa-style profiles include logs under `CONTAINERS`. See [Self-Hosting: Docker socket proxy](/operations/self-hosting#linuxserver-socket-proxy-extras).

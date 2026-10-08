@@ -55,7 +55,7 @@ Sencho encodes env file selection in the `?env=` query on the Env tab only:
 - **Non-default files use basenames only:** `?env=.env.prod`, never a server filesystem path.
 - **Legacy bookmarks:** older links that used an absolute path in `?env=` still open the matching file by basename. Sencho normalizes the URL to basename form when the address bar updates.
 - **Unknown basenames:** if `?env=` does not match any file on the stack, Sencho opens the default env file.
-- **No env files:** a stack with no env file at all has no Env tab. Opening `/env` on it stays on the compose editor instead.
+- **No env files:** a stack with no env file at all opens the Env tab with an empty editor; saving creates the environment file Compose reads.
 
 Compose and Files routes never carry `?env=`.
 

@@ -189,7 +189,7 @@ describe('useUrlSync', () => {
     expect(setActiveView).not.toHaveBeenCalledWith('dashboard');
   });
 
-  it('settles env tab route when stack has no env files', async () => {
+  it('opens the env tab for a route to a stack that has no env files yet', async () => {
     const loadFileForRoute = vi.fn().mockResolvedValue({ ok: true, envFiles: [] });
     const applyEditorRouteState = vi.fn();
 
@@ -214,7 +214,9 @@ describe('useUrlSync', () => {
     });
 
     expect(loadFileForRoute).toHaveBeenCalledWith('radarr');
-    expect(applyEditorRouteState).toHaveBeenCalledWith('compose');
+    // The env tab is usable without an env file (its first save creates one),
+    // so an /env deep link must land there instead of bouncing to compose.
+    expect(applyEditorRouteState).toHaveBeenCalledWith('env');
   });
 
   it('restores non-default env selection after stack load populates file list', async () => {
