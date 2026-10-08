@@ -241,6 +241,47 @@ describe('prune_on_update (auto-prune after updates)', () => {
   });
 });
 
+describe('gitops_history_retention_days (GitOps history and outbox retention)', () => {
+  it('defaults to 30 days in a freshly seeded database', () => {
+    expect(DatabaseService.getInstance().getGlobalSettings().gitops_history_retention_days).toBe('30');
+  });
+
+  it('is exposed through the settings GET projection', async () => {
+    const res = await request(app).get('/api/settings').set('Cookie', adminCookie);
+    expect(res.status).toBe(200);
+    expect(res.body.gitops_history_retention_days).toBeDefined();
+  });
+
+  it('accepts a well-formed write and persists it', async () => {
+    const res = await request(app)
+      .post('/api/settings')
+      .set('Cookie', adminCookie)
+      .send({ key: 'gitops_history_retention_days', value: '90' });
+    expect(res.status).toBe(200);
+    expect(DatabaseService.getInstance().getGlobalSettings().gitops_history_retention_days).toBe('90');
+    DatabaseService.getInstance().updateGlobalSetting('gitops_history_retention_days', '30');
+  });
+
+  it('rejects an out-of-range value (400) and does not write it', async () => {
+    const res = await request(app)
+      .post('/api/settings')
+      .set('Cookie', adminCookie)
+      .send({ key: 'gitops_history_retention_days', value: '366' });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('Validation failed');
+    expect(DatabaseService.getInstance().getGlobalSettings().gitops_history_retention_days).not.toBe('366');
+  });
+
+  it('rejects a non-numeric value (400) and does not write it', async () => {
+    const res = await request(app)
+      .post('/api/settings')
+      .set('Cookie', adminCookie)
+      .send({ key: 'gitops_history_retention_days', value: 'banana' });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('Validation failed');
+  });
+});
+
 describe('recovery_retention_days (superseded rollback generation retention)', () => {
   it('defaults to 7 days in a freshly seeded database', () => {
     expect(DatabaseService.getInstance().getGlobalSettings().recovery_retention_days).toBe('7');

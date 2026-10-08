@@ -20,10 +20,11 @@ interface GitOpsSectionProps {
     onDirtyChange?: (dirty: boolean) => void;
 }
 
-type GitOpsFields = Pick<PatchableSettings, 'gitops_artifact_retry_interval_mins'>;
+type GitOpsFields = Pick<PatchableSettings, 'gitops_artifact_retry_interval_mins' | 'gitops_history_retention_days'>;
 
 const DEFAULT_FIELDS: GitOpsFields = {
     gitops_artifact_retry_interval_mins: DEFAULT_SETTINGS.gitops_artifact_retry_interval_mins,
+    gitops_history_retention_days: DEFAULT_SETTINGS.gitops_history_retention_days,
 };
 
 function RetrySkeleton() {
@@ -37,29 +38,32 @@ function RetrySkeleton() {
 /**
  * How this instance behaves on its own schedule.
  *
- * The two controls here answer different questions and neither implies the
- * other. Git polling is about fetching new intent on a cadence the operator
- * opts into, and it is off by default because an unattended fetch writes to a
- * repository. The artifact retry interval is about how fast Sencho proves what
- * is already running, and it is on by default because leaving it unset would
- * hold a target's approved image identity unresolved until something unrelated
- * happened to redeploy it.
+ * The controls here answer different questions and none implies another. Git
+ * polling is about fetching new intent on a cadence the operator opts into, and
+ * it is off by default because an unattended fetch writes to a repository. The
+ * artifact retry interval is about how fast Sencho proves what is already
+ * running, and it is on by default because leaving it unset would hold a
+ * target's approved image identity unresolved until something unrelated
+ * happened to redeploy it. The history window is about how long the record of
+ * all of it is kept, and it is on by default because the tables it prunes are
+ * insert-only.
  *
- * They share a section because both configure background work and an operator
- * adjusting one usually wants to see the other. They are saved differently on
- * purpose: the poll interval has to reschedule live fetchers, so it owns an
- * endpoint and is node-scoped, while the retry interval is a value read at the
- * moment a check needs it, so it rides the shared settings and is read from this
- * instance rather than from the selected node.
+ * They share a section because all three configure background work and an
+ * operator adjusting one usually wants to see the others. They are saved
+ * differently on purpose: the poll interval has to reschedule live fetchers, so
+ * it owns an endpoint and is node-scoped, while the retry interval and the
+ * history window are values read at the moment they are needed, so they ride
+ * the shared settings and are read from this instance rather than from the
+ * selected node.
  */
 export function GitOpsSection({ onDirtyChange }: GitOpsSectionProps) {
     const { can } = useAuth();
-    // The two controls gate differently, because their permissions differ, and
-    // only the retry interval is wrapped in a disabled fieldset. The poll
-    // interval is node-scoped and the backend requires node:manage against the
-    // active node, which `GitPollingControl` checks for itself; the retry
-    // interval is instance-scoped and requires system:settings, since one value
-    // governs every node this instance manages.
+    // The three controls gate differently, because their permissions differ,
+    // and only the retry interval and history window are wrapped in a disabled
+    // fieldset. The poll interval is node-scoped and the backend requires
+    // node:manage against the active node, which `GitPollingControl` checks for
+    // itself; the other two are instance-scoped and require system:settings,
+    // since one value governs every node this instance manages.
     const canEditRetry = can('system:settings');
     const readOnly = !canEditRetry;
     const { settings, setSettings, dirtyCount, hasChanges, reset, markSaved } = useSettingsDirty<GitOpsFields>({ ...DEFAULT_FIELDS });
@@ -108,6 +112,10 @@ export function GitOpsSection({ onDirtyChange }: GitOpsSectionProps) {
                         typeof body.gitops_artifact_retry_interval_mins === 'string'
                             ? body.gitops_artifact_retry_interval_mins
                             : DEFAULT_SETTINGS.gitops_artifact_retry_interval_mins,
+                    gitops_history_retention_days:
+                        typeof body.gitops_history_retention_days === 'string'
+                            ? body.gitops_history_retention_days
+                            : DEFAULT_SETTINGS.gitops_history_retention_days,
                 });
                 setPhase('ready');
             } catch {
@@ -166,6 +174,24 @@ export function GitOpsSection({ onDirtyChange }: GitOpsSectionProps) {
                                 suffix="min"
                                 min={1}
                                 max={1440}
+                            />
+                        </SettingsField>
+                    </SettingsSection>
+
+                    <SettingsSection title="History" kicker="this Sencho">
+                        <p className="pb-2 text-sm leading-relaxed text-stat-subtitle">
+                            How long the record behind the GitOps timeline is kept.
+                        </p>
+                        <SettingsField
+                            label="Keep GitOps history for"
+                            helper="Days of GitOps history and its notification fanout to keep before the cleanup pass prunes them. The newest rows are always kept, and pruning an old row never changes what the fleet is running. Lower it to keep a busy Sencho's database small, raise it to keep a longer record. Default 30 days."
+                        >
+                            <NumberChip
+                                value={settings.gitops_history_retention_days || '30'}
+                                onChange={(v) => setSettings(prev => ({ ...prev, gitops_history_retention_days: v }))}
+                                suffix="days"
+                                min={1}
+                                max={365}
                             />
                         </SettingsField>
                     </SettingsSection>

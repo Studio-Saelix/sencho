@@ -855,6 +855,17 @@ export class MonitorService {
         } catch (e) {
             console.error('MonitorService: failed to cleanup old data', e);
         }
+
+        // Its own try/catch, not the block above: an unrelated cleanup failing
+        // must not disable the only bound on the insert-only GitOps history and
+        // outbox tables.
+        try {
+            const gitopsHistoryRetentionDays = db.getGitOpsHistoryRetentionDays();
+            const gitopsHistoryPruned = db.cleanupOldGitOpsHistory(gitopsHistoryRetentionDays);
+            if (isDebugEnabled()) console.log(`[Monitor:diag] Cleanup: gitops history ${gitopsHistoryRetentionDays}d (history=${gitopsHistoryPruned.history} outbox=${gitopsHistoryPruned.outbox})`);
+        } catch (e) {
+            console.error('MonitorService: failed to cleanup GitOps history', e);
+        }
     }
 
     /**
