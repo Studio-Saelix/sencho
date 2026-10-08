@@ -129,7 +129,7 @@ describe('bounds and degradation', () => {
     const summary = await buildStackReadinessSummary(NODE);
 
     expect(summary.stacks).toEqual([
-      { stack: 'app', update: { verdict: 'ready', topReason: null, computedAt: 1 }, rollback: { overall: 'ready', topReason: null, computedAt: 1 }, unavailableReason: null },
+      { stack: 'app', update: { verdict: 'ready', topReason: null, topReasonId: null, hasUpdate: false, computedAt: 1 }, rollback: { overall: 'ready', topReason: null, topReasonId: null, computedAt: 1 }, unavailableReason: null },
     ]);
     expect(summary.truncated).toBe(false);
   });
@@ -383,6 +383,35 @@ describe('reason selection', () => {
     // the reason has to follow the same order or it explains the verdict with
     // the input that did not decide it.
     expect(summary.stacks[0].update?.topReason).toBe('Docker probe did not answer');
+  });
+
+  it('names the signal and whether an update is known beside the quoted reason', async () => {
+    computeUpdate.mockResolvedValue(updateReport('app', 'blocked', [
+      signal('preflight', 'blocked', 'Compose Doctor found an unresolvable reference'),
+    ]));
+    updateDetail.mockReturnValue({ app: { hasUpdate: true, checkStatus: 'ok', lastError: null, checkedAt: 1 } });
+
+    const summary = await buildStackReadinessSummary(NODE);
+
+    expect(summary.stacks[0].update).toMatchObject({ topReasonId: 'preflight', hasUpdate: true });
+  });
+
+  it('reports no update and no signal id when nothing moved the verdict', async () => {
+    const summary = await buildStackReadinessSummary(NODE);
+
+    expect(summary.stacks[0].update).toMatchObject({ topReasonId: null, hasUpdate: false });
+    expect(summary.stacks[0].rollback).toMatchObject({ topReasonId: null });
+  });
+
+  it('names the rollback item behind the quoted rollback reason', async () => {
+    computeRollback.mockResolvedValue(rollbackReport('app', [
+      ...gatingReady(),
+      item('compose_source', 'blocked', 'No compose file is captured'),
+    ]));
+
+    const summary = await buildStackReadinessSummary(NODE);
+
+    expect(summary.stacks[0].rollback).toMatchObject({ topReasonId: 'compose_source' });
   });
 
   it('quotes a blocked signal over an attention one on the update side', async () => {

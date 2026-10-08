@@ -18,9 +18,22 @@ import type {
 
 vi.mock('@/lib/api', () => ({
   apiFetch: vi.fn(),
+  fetchForNode: vi.fn(),
+  withDeploySession: (_id: string, options: object = {}) => options,
+}));
+vi.mock('@/context/DeployFeedbackContext', () => ({
+  useDeployFeedback: () => ({
+    runWithLog: async (_params: unknown, run: (started: Promise<void>, sessionId: string) => Promise<unknown>) =>
+      run(Promise.resolve(), 'test-session'),
+  }),
+}));
+vi.mock('@/lib/fleetSyncApi', () => ({
+  fetchFleetSyncStatuses: vi.fn(),
+  resetFleetSyncAnchor: vi.fn(),
 }));
 
-import { apiFetch } from '@/lib/api';
+import { apiFetch, fetchForNode } from '@/lib/api';
+import { fetchFleetSyncStatuses, resetFleetSyncAnchor } from '@/lib/fleetSyncApi';
 import { useFleetReadiness } from '../readiness/useFleetReadiness';
 
 function healthyCell(counts: Record<string, number> = {}): NodeDomainCell {
@@ -106,14 +119,15 @@ function findingRows(): HTMLElement[] {
   return within(section).getAllByRole('row').slice(1);
 }
 
-type HarnessProps = Omit<Parameters<typeof FleetReadiness>[0], 'readiness' | 'canDismiss'> & {
+type HarnessProps = Omit<Parameters<typeof FleetReadiness>[0], 'readiness' | 'canDismiss' | 'canRun'> & {
   refreshKey: number;
   canDismiss?: Parameters<typeof FleetReadiness>[0]['canDismiss'];
+  canRun?: Parameters<typeof FleetReadiness>[0]['canRun'];
 };
 
 /** Stands in for the Fleet shell, which owns the readiness check and hands it to the tab. */
-function Harness({ refreshKey, canDismiss = () => true, ...props }: HarnessProps) {
-  return <FleetReadiness readiness={useFleetReadiness(refreshKey)} canDismiss={canDismiss} {...props} />;
+function Harness({ refreshKey, canDismiss = () => true, canRun = () => true, ...props }: HarnessProps) {
+  return <FleetReadiness readiness={useFleetReadiness(refreshKey)} canDismiss={canDismiss} canRun={canRun} {...props} />;
 }
 
 function renderReadiness(props: Partial<HarnessProps> = {}) {
@@ -342,19 +356,20 @@ describe('FleetReadiness', () => {
   it('opens Security on the node the finding is about', async () => {
     mockResponse(response({
       findings: [finding({
-        id: 'security:2:scanner_unavailable',
+        id: 'security:2:posture_action_needed',
         domain: 'security',
-        code: 'scanner_unavailable',
-        severity: 'unknown',
+        code: 'posture_action_needed',
+        severity: 'attention',
+        dismissPolicy: 'none',
         target: { surface: 'security', tab: 'scanner' },
       })],
-      nodes: [node({ id: 2, name: 'Edge', cells: { security: problemCell('scanner_unavailable', 'unknown') } })],
+      nodes: [node({ id: 2, name: 'Edge', cells: { security: problemCell('posture_action_needed', 'attention') } })],
     }));
     const onOpenNodeSecurity = vi.fn();
     renderReadiness({ onOpenNodeSecurity });
 
-    await screen.findByText('Security scanner is unavailable');
-    fireEvent.click(within(findingRows()[0]).getByRole('button', { name: /^Security/ }));
+    await screen.findAllByText('Security needs action');
+    fireEvent.click(within(findingRows()[0]).getByRole('button', { name: /^Open Security/ }));
     expect(onOpenNodeSecurity).toHaveBeenCalledWith(2, 'scanner');
   });
 
@@ -764,5 +779,210 @@ describe('FleetReadiness dismissals', () => {
     await waitFor(() => expect(info).toHaveBeenCalledWith('Dismissed. Refreshing the list.'));
     expect(error).not.toHaveBeenCalled();
     await waitFor(() => expect(vi.mocked(apiFetch).mock.calls.filter(([url]) => url === '/fleet/readiness').length).toBeGreaterThan(1));
+  });
+});
+
+
+describe('FleetReadiness resolving verbs', () => {
+  const verbFinding = (over: Partial<ReadinessFinding> & { id: string; code: ReadinessReasonCode }) => finding({
+    domain: 'workloads',
+    nodeId: 2,
+    stack: 'web',
+    target: { surface: 'stack', nodeId: 2, stackName: 'web' },
+    ...over,
+  });
+
+  function showFindings(findings: ReadinessFinding[]) {
+    mockResponse(response({ findings, nodes: [node({ id: 2, name: 'Edge' })] }));
+  }
+
+  const readinessReads = () => vi.mocked(apiFetch).mock.calls.filter(([url]) => url === '/fleet/readiness').length;
+
+  beforeEach(() => {
+    vi.mocked(apiFetch).mockReset();
+    vi.mocked(fetchForNode).mockReset();
+    vi.mocked(fetchFleetSyncStatuses).mockReset();
+    vi.mocked(resetFleetSyncAnchor).mockReset();
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('starts the stack on its own node in one click, then re-reads the check', async () => {
+    showFindings([verbFinding({ id: 'workloads:2:web:workloads_exited', code: 'workloads_exited' })]);
+    vi.mocked(fetchForNode).mockResolvedValue({ ok: true, json: async () => ({ success: true }) } as Response);
+    const success = vi.spyOn(toast, 'success');
+    renderReadiness();
+
+    const button = await screen.findByRole('button', { name: /^Start stack/ });
+    const before = readinessReads();
+    fireEvent.click(button);
+
+    await waitFor(() => expect(fetchForNode).toHaveBeenCalledWith('/stacks/web/start', 2, { method: 'POST' }));
+    await waitFor(() => expect(success).toHaveBeenCalledWith('Started web'));
+    await waitFor(() => expect(readinessReads()).toBeGreaterThan(before));
+  });
+
+  it('offers to open the stack when its containers are gone', async () => {
+    showFindings([verbFinding({ id: 'workloads:2:web:workloads_exited', code: 'workloads_exited' })]);
+    vi.mocked(fetchForNode).mockResolvedValue({
+      ok: false,
+      status: 404,
+      json: async () => ({ error: 'No containers found for this stack.' }),
+    } as Response);
+    const error = vi.spyOn(toast, 'error');
+    renderReadiness();
+
+    fireEvent.click(await screen.findByRole('button', { name: /^Start stack/ }));
+
+    await waitFor(() => expect(error).toHaveBeenCalledWith(
+      'web has no containers to start.',
+      expect.objectContaining({ action: expect.objectContaining({ label: 'Open stack' }) }),
+    ));
+  });
+
+  it('keeps the named navigation when the account cannot run the verb', async () => {
+    showFindings([verbFinding({ id: 'workloads:2:web:workloads_exited', code: 'workloads_exited' })]);
+    renderReadiness({ canRun: () => false });
+
+    expect(await screen.findByRole('button', { name: /^Open stack/ })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /^Start stack/ })).toBeNull();
+  });
+
+  it('tests the connection against the hub-held node record', async () => {
+    showFindings([finding({
+      id: 'connectivity:2:node_unreachable',
+      domain: 'connectivity',
+      code: 'node_unreachable',
+      severity: 'unavailable',
+    })]);
+    renderReadiness();
+    vi.mocked(apiFetch).mockImplementation(async (url: string) => (
+      url === '/nodes/2/test'
+        ? ({ ok: true, json: async () => ({ success: true }) } as Response)
+        : okResponse(response({ nodes: [node({ id: 2, name: 'Edge' })] }))
+    ));
+
+    fireEvent.click(await screen.findByRole('button', { name: /^Test connection/ }));
+
+    await waitFor(() => expect(apiFetch).toHaveBeenCalledWith('/nodes/2/test', { method: 'POST', localOnly: true }));
+  });
+
+  it('checks again by re-reading the readiness check', async () => {
+    showFindings([finding({ id: 'workloads:2:workloads_unknown', domain: 'workloads', code: 'workloads_unknown', severity: 'unknown' })]);
+    renderReadiness();
+
+    const button = await screen.findByRole('button', { name: /^Check again/ });
+    const before = readinessReads();
+    fireEvent.click(button);
+
+    await waitFor(() => expect(readinessReads()).toBeGreaterThan(before));
+  });
+
+  it('offers the update review only when an update is known and the verdict is not blocked', async () => {
+    showFindings([
+      verbFinding({
+        id: 'updates:2:web:update_review_required',
+        domain: 'updates',
+        code: 'update_review_required',
+        hasUpdate: true,
+        topReasonId: 'preflight',
+        verdict: { kind: 'update', value: 'review_required' },
+      }),
+      verbFinding({
+        id: 'updates:2:api:update_review_required',
+        domain: 'updates',
+        stack: 'api',
+        code: 'update_review_required',
+        hasUpdate: false,
+        verdict: { kind: 'update', value: 'review_required' },
+        target: { surface: 'stack', nodeId: 2, stackName: 'api' },
+      }),
+      verbFinding({
+        id: 'updates:2:db:update_blocked',
+        domain: 'updates',
+        stack: 'db',
+        code: 'update_blocked',
+        hasUpdate: true,
+        verdict: { kind: 'update', value: 'blocked' },
+        target: { surface: 'stack', nodeId: 2, stackName: 'db' },
+      }),
+    ]);
+    renderReadiness();
+
+    expect(await screen.findAllByRole('button', { name: /^Review update/ })).toHaveLength(1);
+    expect(screen.getAllByRole('button', { name: /^Open stack/ })).toHaveLength(2);
+  });
+
+  it('captures a recovery point only when the compose source is what is missing', async () => {
+    showFindings([
+      verbFinding({
+        id: 'recovery:2:web:rollback_not_ready',
+        domain: 'recovery',
+        code: 'rollback_not_ready',
+        topReasonId: 'compose_source',
+        verdict: { kind: 'rollback', value: 'not_ready' },
+      }),
+      verbFinding({
+        id: 'recovery:2:api:rollback_not_ready',
+        domain: 'recovery',
+        stack: 'api',
+        code: 'rollback_not_ready',
+        topReasonId: 'volume_data',
+        verdict: { kind: 'rollback', value: 'not_ready' },
+        target: { surface: 'stack', nodeId: 2, stackName: 'api' },
+      }),
+    ]);
+    renderReadiness();
+
+    expect(await screen.findAllByRole('button', { name: /^Capture recovery point/ })).toHaveLength(1);
+    expect(screen.getAllByRole('button', { name: /^Open stack/ })).toHaveLength(1);
+  });
+
+  it('installs the scanner only after a confirmation', async () => {
+    showFindings([finding({
+      id: 'security:2:scanner_unavailable',
+      domain: 'security',
+      code: 'scanner_unavailable',
+      severity: 'unknown',
+      target: { surface: 'security', tab: 'scanner' },
+    })]);
+    vi.mocked(fetchForNode).mockResolvedValue({ ok: true, json: async () => ({}) } as Response);
+    renderReadiness();
+
+    fireEvent.click(await screen.findByRole('button', { name: /^Install scanner/ }));
+    expect(fetchForNode).not.toHaveBeenCalled();
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Install' }));
+    await waitFor(() => expect(fetchForNode).toHaveBeenCalledWith('/security/trivy-install', 2, { method: 'POST' }));
+  });
+
+  it('names the hub a node is anchored to before re-anchoring it', async () => {
+    showFindings([finding({
+      id: 'control:2:control_paused',
+      domain: 'control',
+      code: 'control_paused',
+      severity: 'attention',
+    })]);
+    vi.mocked(fetchFleetSyncStatuses).mockResolvedValue([{
+      node_id: 2,
+      resource: 'policy',
+      last_success_at: null,
+      last_failure_at: null,
+      last_error: null,
+      sticky_error_code: 'CONTROL_IDENTITY_MISMATCH',
+      sticky_error_expected: 'abcdef0123456789',
+      sticky_error_got: null,
+    }]);
+    vi.mocked(resetFleetSyncAnchor).mockResolvedValue(undefined);
+    renderReadiness();
+
+    fireEvent.click(await screen.findByRole('button', { name: /^Re-anchor to this hub/ }));
+    expect(await screen.findByText(/abcdef012345/)).toBeInTheDocument();
+    expect(resetFleetSyncAnchor).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Re-anchor' }));
+    await waitFor(() => expect(resetFleetSyncAnchor).toHaveBeenCalledWith(2));
   });
 });

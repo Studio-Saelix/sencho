@@ -2968,6 +2968,9 @@ stacksRouter.post('/:stackName/backup', async (req: Request, res: Response) => {
       stackName,
       createdBy: req.user?.username ?? null,
     });
+    // A fresh recovery point changes the rollback verdict the readiness
+    // rollup caches, so drop it or the finding this clears keeps showing.
+    invalidateNodeCaches(req.nodeId);
     dlog(`[Stacks] Backup completed: ${sanitizeForLog(stackName)}`);
     res.json({ success: true });
   } catch (error: unknown) {

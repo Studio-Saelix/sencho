@@ -260,16 +260,33 @@ function contactSecondsOf(nodeId: number): number | null {
 /** One stack's tier-two row. Both verdict slots default to `ready`. */
 function row(
   stack: string,
-  over: { update?: ReadinessVerdict | null; rollback?: RollbackOverall | null; topReason?: string | null } = {},
+  over: {
+    update?: ReadinessVerdict | null;
+    rollback?: RollbackOverall | null;
+    topReason?: string | null;
+    topReasonId?: string | null;
+    hasUpdate?: boolean;
+  } = {},
 ): StackReadinessRow {
   const computedAt = Date.now();
   const topReason = over.topReason ?? null;
+  // Only a peer that predates the fields omits them, so the helper omits them
+  // unless a test sets them.
+  const facts = {
+    ...(over.topReasonId !== undefined ? { topReasonId: over.topReasonId } : {}),
+  };
   const updateWord = over.update === undefined ? 'ready' : over.update;
   const rollbackWord = over.rollback === undefined ? 'ready' : over.rollback;
   return {
     stack,
-    update: updateWord === null ? null : { verdict: updateWord, topReason, computedAt },
-    rollback: rollbackWord === null ? null : { overall: rollbackWord, topReason, computedAt },
+    update: updateWord === null ? null : {
+      verdict: updateWord,
+      topReason,
+      ...facts,
+      ...(over.hasUpdate !== undefined ? { hasUpdate: over.hasUpdate } : {}),
+      computedAt,
+    },
+    rollback: rollbackWord === null ? null : { overall: rollbackWord, topReason, ...facts, computedAt },
     unavailableReason: null,
   };
 }
@@ -997,6 +1014,41 @@ describe('GET /api/fleet/readiness aggregation', () => {
     // No verdict tag, because a word this build cannot name is not a verdict it
     // can hand the frontend to render.
     expect(body.findings[0]).toMatchObject({ severity: 'unknown', stack: 'web', verdict: null });
+  });
+
+  it('carries the structured reason onto update and recovery findings and moves the fingerprint with it', async () => {
+    const nodeId = addOnlineProxyNode('reason-facts');
+    const read = async (facts: { topReasonId?: string | null; hasUpdate?: boolean }) => {
+      mockFetch(nodeReadHandler(evidenceBody(), summaryBody([
+        row('web', { update: 'blocked', rollback: 'not_ready', topReason: 'same words', ...facts }),
+      ])));
+      const { body } = await getReadiness({ domains: 'updates,recovery', nodeIds: String(nodeId) });
+      return {
+        update: body.findings.find((finding) => finding.id === `updates:${nodeId}:web:update_blocked`)!,
+        rollback: body.findings.find((finding) => finding.id === `recovery:${nodeId}:web:rollback_not_ready`)!,
+      };
+    };
+
+    const first = await read({ topReasonId: 'preflight', hasUpdate: true });
+    expect(first.update).toMatchObject({ topReasonId: 'preflight', hasUpdate: true });
+    expect(first.rollback).toMatchObject({ topReasonId: 'preflight' });
+    expect(first.rollback).not.toHaveProperty('hasUpdate');
+
+    const moved = await read({ topReasonId: 'disk', hasUpdate: true });
+    expect(moved.update.fingerprint).not.toBe(first.update.fingerprint);
+
+    const noUpdate = await read({ topReasonId: 'preflight', hasUpdate: false });
+    expect(noUpdate.update.fingerprint).not.toBe(first.update.fingerprint);
+  });
+
+  it('leaves both fields off a finding from a peer that predates them', async () => {
+    const nodeId = addOnlineProxyNode('reason-facts-old-peer');
+    mockFetch(nodeReadHandler(evidenceBody(), summaryBody([row('web', { update: 'blocked', topReason: 'x' })])));
+
+    const { body } = await getReadiness({ domains: 'updates', nodeIds: String(nodeId) });
+    const finding = body.findings.find((entry) => entry.id === `updates:${nodeId}:web:update_blocked`)!;
+    expect(finding).not.toHaveProperty('topReasonId');
+    expect(finding).not.toHaveProperty('hasUpdate');
   });
 
   it('surfaces a rollback that is not ready, or only partly ready', async () => {

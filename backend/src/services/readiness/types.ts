@@ -198,6 +198,13 @@ export interface ReadinessFinding {
    * node, and again before the aggregate leaves the hub.
    */
   detail: string | null;
+  /**
+   * The signal or rollback item behind `detail` for update and recovery
+   * findings; absent for every other finding and for a peer that predates it.
+   */
+  topReasonId?: string | null;
+  /** Whether a newer image is known; set on update findings from a current peer only. */
+  hasUpdate?: boolean;
   target: ReadinessTarget;
   /**
    * Hash of the structured facts behind this finding (code, severity, verdict,
@@ -313,6 +320,14 @@ export interface StackUpdateReadinessRow {
    * materialized input path.
    */
   topReason: string | null;
+  /**
+   * The id of the signal behind `topReason`, so a client can choose a verb
+   * without parsing text. Absent from a peer that predates it, which a client
+   * treats as "no verb beyond opening the stack".
+   */
+  topReasonId?: string | null;
+  /** Whether a newer image is known for this stack. Absent from an older peer. */
+  hasUpdate?: boolean;
   computedAt: number;
 }
 
@@ -320,6 +335,8 @@ export interface StackRollbackReadinessRow {
   overall: RollbackOverall;
   /** Redacted the same way `StackUpdateReadinessRow.topReason` is. */
   topReason: string | null;
+  /** The rollback item id behind `topReason`; absent from an older peer. */
+  topReasonId?: string | null;
   computedAt: number;
 }
 

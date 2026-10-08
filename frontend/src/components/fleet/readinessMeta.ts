@@ -274,7 +274,7 @@ export const TARGET_ACTION: Record<ReadinessTarget['surface'], string> = {
   stack: 'Open stack',
   'auto-updates': 'Auto-updates',
   'fleet-snapshots': 'Snapshots',
-  security: 'Security',
-  'node-details': 'Node details',
-  'settings-nodes': 'Settings',
+  security: 'Open Security',
+  'node-details': 'Open node details',
+  'settings-nodes': 'Open node settings',
 };
