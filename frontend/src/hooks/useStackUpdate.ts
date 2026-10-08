@@ -2,7 +2,7 @@ import { useCallback } from 'react';
 import { toast } from '@/components/ui/toast-store';
 import { useDeployFeedback } from '@/context/DeployFeedbackContext';
 import { SENCHO_OPEN_STACK_EVENT, type SenchoOpenStackDetail } from '@/lib/events';
-import { postStackUpdate } from '@/lib/stackUpdate';
+import { postStackUpdate, type StackUpdateOutcome } from '@/lib/stackUpdate';
 
 interface StackUpdateRequest {
   nodeId: number;
@@ -37,7 +37,7 @@ export function useStackUpdate() {
     try {
       const result = await runWithLog({ stackName, action: 'update', nodeId }, async (started, deploySessionId) => {
         await started;
-        let outcome: Awaited<ReturnType<typeof postStackUpdate>>;
+        let outcome: StackUpdateOutcome;
         try {
           outcome = await postStackUpdate({ nodeId, stackName, deploySessionId });
         } catch (error) {

@@ -236,6 +236,15 @@ export function useReadinessVerbs({ recheck, openFinding, canRun, nodeName }: Us
     }
   }, [confirming, nodeName, recheck]);
 
+  let confirmDescription: string | undefined;
+  if (confirming?.verb === 'reanchor') {
+    const anchorNote = confirming.anchor ? ` (${confirming.anchor})` : '';
+    const unreadableNote = confirming.unreadable ? ' (which hub could not be read)' : '';
+    confirmDescription = `"${nodeName(confirming.finding.nodeId)}" is anchored to a different hub${anchorNote}${unreadableNote}. Re-anchoring makes this hub the one that pushes policy to it.`;
+  } else if (confirming?.verb === 'install-scanner') {
+    confirmDescription = `Downloads the vulnerability scanner onto "${nodeName(confirming.finding.nodeId)}" so it can scan images and stacks.`;
+  }
+
   const reviewingStack = reviewing?.stack ?? null;
   const overlays: ReactNode = (
     <>
@@ -261,9 +270,7 @@ export function useReadinessVerbs({ recheck, openFinding, canRun, nodeName }: Us
         onOpenChange={open => { if (!open) setConfirming(null); }}
         kicker={confirming?.verb === 'reanchor' ? 'fleet · policy sync' : 'security · scanner'}
         title={confirming?.verb === 'reanchor' ? 'Re-anchor to this hub?' : 'Install the scanner?'}
-        description={confirming === null ? undefined : confirming.verb === 'reanchor'
-          ? `"${nodeName(confirming.finding.nodeId)}" is anchored to a different hub${confirming.anchor ? ` (${confirming.anchor})` : ''}${confirming.unreadable ? ' (which hub could not be read)' : ''}. Re-anchoring makes this hub the one that pushes policy to it.`
-          : `Downloads the vulnerability scanner onto "${nodeName(confirming.finding.nodeId)}" so it can scan images and stacks.`}
+        description={confirmDescription}
         confirmLabel={confirming?.verb === 'reanchor' ? 'Re-anchor' : 'Install'}
         confirming={confirmBusy}
         confirmDisabled={confirming?.verb === 'reanchor' && confirming.anchor === undefined}
