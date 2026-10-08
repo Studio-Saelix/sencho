@@ -1262,16 +1262,18 @@ function updatesConcerns(node: Node, summary: NodeStackReadinessSummary, notDepl
  * falls back to opening the stack rather than guessing.
  */
 function reasonFacts(
-  topReasonId: string | null | undefined,
-  hasUpdate?: boolean,
+  topReasonId: unknown,
+  hasUpdate?: unknown,
 ): Pick<DomainConcern, 'topReasonId' | 'hasUpdate' | 'basis'> {
+  // A peer's payload is not trusted to be typed: a value of the wrong type is
+  // treated as absent rather than copied into the response and the fingerprint.
+  const id = typeof topReasonId === 'string' || topReasonId === null ? topReasonId : undefined;
+  const known = typeof hasUpdate === 'boolean' ? hasUpdate : undefined;
   const facts: Pick<DomainConcern, 'topReasonId' | 'hasUpdate' | 'basis'> = {
-    basis: topReasonId === undefined && hasUpdate === undefined
-      ? ''
-      : JSON.stringify([topReasonId ?? null, hasUpdate ?? null]),
+    basis: id === undefined && known === undefined ? '' : JSON.stringify([id ?? null, known ?? null]),
   };
-  if (topReasonId !== undefined) facts.topReasonId = topReasonId;
-  if (hasUpdate !== undefined) facts.hasUpdate = hasUpdate;
+  if (id !== undefined) facts.topReasonId = id;
+  if (known !== undefined) facts.hasUpdate = known;
   return facts;
 }
 

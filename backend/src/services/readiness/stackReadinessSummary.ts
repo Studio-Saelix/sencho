@@ -90,9 +90,7 @@ const ROLLBACK_RANK: Record<RollbackReadinessItem['state'], number> = {
  * considered: an informational signal did not produce the verdict, so quoting
  * it here would explain something the verdict does not rest on. Ties go to the
  * first signal in canonical order, so the answer is stable across passes.
- *
- * A detail that redacts to nothing is indistinguishable from a signal that
- * carried no detail, which is why both return null rather than an empty string.
+ * Null when no signal moved the verdict.
  */
 function strongestUpdateSignal(signals: ReadinessSignal[]): ReadinessSignal | null {
   let best: ReadinessSignal | null = null;

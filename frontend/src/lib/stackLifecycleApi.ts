@@ -9,8 +9,9 @@ export type StackLifecycleResult =
 async function post(nodeId: number, stackName: string, action: 'start' | 'backup'): Promise<StackLifecycleResult> {
   const res = await fetchForNode(`/stacks/${encodeURIComponent(stackName)}/${action}`, nodeId, { method: 'POST' });
   if (res.ok) return { ok: true };
-  const body = (await res.json().catch(() => ({}))) as { error?: unknown };
-  const message = typeof body.error === 'string' && body.error !== '' ? body.error : `${action} failed (HTTP ${res.status})`;
+  const body: unknown = await res.json().catch(() => null);
+  const error = typeof body === 'object' && body !== null && 'error' in body ? body.error : undefined;
+  const message = typeof error === 'string' && error !== '' ? error : `${action} failed (HTTP ${res.status})`;
   // A 404 for a missing stack reads "Stack not found"; this one means the stack
   // exists but has no containers to start.
   if (action === 'start' && res.status === 404 && message.startsWith('No containers found')) return { ok: false, reason: 'no-containers', message };

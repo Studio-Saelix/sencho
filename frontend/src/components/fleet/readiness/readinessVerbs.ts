@@ -32,7 +32,7 @@ const NONE: VerbRequirement = { kind: 'none' };
 const ADMIN: VerbRequirement = { kind: 'admin' };
 const deploy: VerbRequirement = { kind: 'permission', action: 'stack:deploy', scope: 'stack' };
 const manageNode: VerbRequirement = { kind: 'permission', action: 'node:manage', scope: 'node' };
-// `scan-node` and `reset-anchor` check the global role, not a grant scoped to one node.
+// `scan-node` checks node:manage as a global role, not a grant scoped to one node.
 const manageNodeGlobally: VerbRequirement = { kind: 'permission', action: 'node:manage', scope: 'global' };
 
 const VERBS: Record<ReadinessVerbId, ReadinessVerb> = {

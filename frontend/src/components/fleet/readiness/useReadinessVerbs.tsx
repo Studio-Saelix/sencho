@@ -19,7 +19,7 @@ export interface FindingVerbControl {
 interface UseReadinessVerbsOptions {
   /** Re-reads the hub's check, so a resolved finding leaves the list. */
   recheck: () => void;
-  /** The finding's named navigation, offered when a verb cannot run. */
+  /** Opens the finding's own surface; the follow-up action when a verb finds nothing to run. */
   openFinding: (finding: ReadinessFinding) => void;
   /** Whether this account may run the verb; a verb it may not run is not offered. */
   canRun: (verb: ReadinessVerb, finding: ReadinessFinding) => boolean;
@@ -28,13 +28,23 @@ interface UseReadinessVerbsOptions {
 
 type Confirming =
   | { verb: 'install-scanner'; finding: ReadinessFinding }
-  | { verb: 'reanchor'; finding: ReadinessFinding; anchor: string | null | undefined };
+  /** `anchor`: undefined while it is being read, null when the node records none, else its short fingerprint. */
+  | { verb: 'reanchor'; finding: ReadinessFinding; anchor: string | null | undefined; unreadable: boolean };
 
 async function serverMessage(res: Response, fallback: string): Promise<string> {
   const body: unknown = await res.json().catch(() => null);
   return typeof body === 'object' && body !== null && 'error' in body && typeof body.error === 'string' && body.error !== ''
     ? body.error
     : fallback;
+}
+
+/** Images and stacks a node scan could not scan, from its reply. */
+function scanFailureCount(result: unknown): number {
+  if (typeof result !== 'object' || result === null) return 0;
+  const failed = (part: unknown): number => (
+    typeof part === 'object' && part !== null && 'failed' in part && typeof part.failed === 'number' ? part.failed : 0
+  );
+  return failed('images' in result ? result.images : null) + failed('stacks' in result ? result.stacks : null);
 }
 
 /** The first characters of a control fingerprint: enough to tell two hubs apart on a confirm. */
@@ -45,8 +55,9 @@ function shortAnchor(fingerprint: string | null): string | null {
 /**
  * Runs the verbs that resolve a readiness finding where it is listed.
  *
- * Every verb is addressed to the finding's own node, never the node the
- * operator happens to have selected. Anything consequential (an update, an
+ * Node-scoped verbs (start, backup, scan, install, update) are addressed to the
+ * finding's own node, never the node the operator happens to have selected;
+ * fleet-wide ones run on the hub. Anything consequential (an update, an
  * install, a re-anchor) goes through an overlay first, so a safe action is one
  * click and a consequential one is two.
  */
@@ -72,7 +83,12 @@ export function useReadinessVerbs({ recheck, openFinding, canRun, nodeName }: Us
 
   const runStackVerb = useCallback((finding: ReadinessFinding, verb: 'start' | 'backup') => track(finding, async () => {
     const stack = finding.stack;
-    if (stack === null) return;
+    if (stack === null) {
+      // resolveVerb only offers a stack verb on a finding that names a stack.
+      console.error('Readiness stack verb on a finding with no stack:', finding.id);
+      openFinding(finding);
+      return;
+    }
     try {
       const result = verb === 'start' ? await startStack(finding.nodeId, stack) : await backupStack(finding.nodeId, stack);
       if (result.ok) {
@@ -99,8 +115,10 @@ export function useReadinessVerbs({ recheck, openFinding, canRun, nodeName }: Us
       const res = await apiFetch(`/nodes/${finding.nodeId}/test`, { method: 'POST', localOnly: true });
       const body: unknown = await res.json().catch(() => null);
       const outcome = typeof body === 'object' && body !== null ? body as { success?: unknown; error?: unknown } : {};
+      const reason = typeof outcome.error === 'string' && outcome.error !== '' ? outcome.error : null;
       if (res.ok && outcome.success === true) toast.success(`Connected to "${name}"`);
-      else toast.error(typeof outcome.error === 'string' ? outcome.error : `Could not reach "${name}"`);
+      else if (!res.ok) toast.error(reason ?? `Connection test failed (HTTP ${res.status})`);
+      else toast.error(reason ?? `Could not reach "${name}"`);
       recheck();
     } catch (error) {
       console.error('Readiness connection test failed:', error);
@@ -132,7 +150,11 @@ export function useReadinessVerbs({ recheck, openFinding, canRun, nodeName }: Us
         body: JSON.stringify({ vulns: true, secrets: true, misconfig: true }),
       });
       if (res.ok) {
-        toast.success(`Scan of "${name}" finished`);
+        // A 200 can still carry per-image or per-stack failures; a partial scan must not read as clean.
+        const result: unknown = await res.json().catch(() => null);
+        const failed = scanFailureCount(result);
+        if (failed > 0) toast.warning(`Scan of "${name}" finished with ${failed} failure${failed === 1 ? '' : 's'}.`);
+        else toast.success(`Scan of "${name}" finished`);
         recheck();
       } else {
         toast.error(await serverMessage(res, `Scan of "${name}" failed`));
@@ -155,19 +177,28 @@ export function useReadinessVerbs({ recheck, openFinding, canRun, nodeName }: Us
       case 'review-update': setReviewing(finding); return;
       case 'install-scanner': setConfirming({ verb: 'install-scanner', finding }); return;
       case 'reanchor':
-        setConfirming({ verb: 'reanchor', finding, anchor: undefined });
+        setConfirming({ verb: 'reanchor', finding, anchor: undefined, unreadable: false });
         fetchFleetSyncStatuses()
           .then(statuses => {
-            const expected = statuses.find(status => status.node_id === finding.nodeId)?.sticky_error_expected ?? null;
+            // A node has one row per synced resource; the paused one is the row that names the anchor.
+            const expected = statuses.find(status => status.node_id === finding.nodeId && status.sticky_error_expected !== null)
+              ?.sticky_error_expected ?? null;
             setConfirming(current => (current?.verb === 'reanchor' && current.finding.id === finding.id
               ? { ...current, anchor: shortAnchor(expected) }
               : current));
           })
           .catch((error: unknown) => {
-            // The confirm still works without the name; it just cannot show the anchor.
+            // The confirm still works without the name, and says it could not be read.
             console.error('Could not read the current anchor:', error);
-            setConfirming(current => (current?.verb === 'reanchor' ? { ...current, anchor: null } : current));
+            setConfirming(current => (current?.verb === 'reanchor' && current.finding.id === finding.id
+              ? { ...current, anchor: null, unreadable: true }
+              : current));
           });
+        return;
+      default: {
+        const unhandled: never = verb.id;
+        console.error('Readiness verb has no runner:', unhandled);
+      }
     }
   }, [recheck, runStackVerb, scanNode, takeSnapshot, testConnection]);
 
@@ -218,8 +249,9 @@ export function useReadinessVerbs({ recheck, openFinding, canRun, nodeName }: Us
             const target = reviewing;
             setReviewing(null);
             void track(target, async () => {
-              const result = await updateStack({ nodeId: target.nodeId, stackName: reviewingStack });
-              if (result.ok) recheck();
+              await updateStack({ nodeId: target.nodeId, stackName: reviewingStack });
+              // A refused or failed update can still have changed what the check sees.
+              recheck();
             });
           }}
         />
@@ -230,7 +262,7 @@ export function useReadinessVerbs({ recheck, openFinding, canRun, nodeName }: Us
         kicker={confirming?.verb === 'reanchor' ? 'fleet · policy sync' : 'security · scanner'}
         title={confirming?.verb === 'reanchor' ? 'Re-anchor to this hub?' : 'Install the scanner?'}
         description={confirming === null ? undefined : confirming.verb === 'reanchor'
-          ? `"${nodeName(confirming.finding.nodeId)}" is anchored to a different hub${confirming.anchor ? ` (${confirming.anchor})` : ''}. Re-anchoring makes this hub the one that pushes policy to it.`
+          ? `"${nodeName(confirming.finding.nodeId)}" is anchored to a different hub${confirming.anchor ? ` (${confirming.anchor})` : ''}${confirming.unreadable ? ' (which hub could not be read)' : ''}. Re-anchoring makes this hub the one that pushes policy to it.`
           : `Downloads the vulnerability scanner onto "${nodeName(confirming.finding.nodeId)}" so it can scan images and stacks.`}
         confirmLabel={confirming?.verb === 'reanchor' ? 'Re-anchor' : 'Install'}
         confirming={confirmBusy}

@@ -1498,8 +1498,8 @@ function AutoUpdateReadinessContent({ headerActions }: AutoUpdateReadinessProps)
     setCardField(matchCard, { applying: true, verificationNote: null });
     const loadingId = toast.loading(`Applying update to ${stack}...`);
     try {
-      // The shared update executor tells the operator how it ended (success,
-      // policy block, busy, failure); this view only reconciles its card.
+      // The shared update executor tells the operator how it ended; this view
+      // only reconciles its card.
       const update = await updateStack({ nodeId, stackName: stack });
       if (!update.ok) {
         setCardField(matchCard, { applying: false });
