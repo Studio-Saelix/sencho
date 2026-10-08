@@ -6,7 +6,7 @@ on:
     types: [opened,closed,synchronize]
 
 # Minimum scopes contributor-assistant/github-action needs to operate:
-#   contents: write       - commit signatures to signatures/version1/cla.json
+#   contents: write       - commit signatures to the signatures branch
 #   pull-requests: write  - comment on the PR with the CLA prompt
 #   statuses: write       - set the commit status (success / pending)
 # actions: write is intentionally NOT granted; this workflow does not manage
@@ -39,9 +39,16 @@ jobs:
         with:
           path-to-signatures: 'signatures/version1/cla.json'
           path-to-document: 'https://github.com/studio-saelix/sencho/blob/main/CLA.md'
-          branch: 'main'
+          # The action commits signatures with the built-in GITHUB_TOKEN, which
+          # cannot bypass the main ruleset's "Changes must be made through a pull
+          # request" rule. The action requires a branch it can commit to directly,
+          # so signatures live on this dedicated branch instead of main. The
+          # branch is guarded against deletion and force-pushes, but not against
+          # direct commits.
+          branch: 'cla-signatures'
           allowlist: 'AnsoCode,dependabot[bot],greenkeeper[bot],github-actions[bot],release-please[bot],sencho-quartermaster[bot]'
           # Default true locks merged PR conversations, which blocks
           # release-please from commenting "included in vX.Y.Z" on the
-          # release PR. Signatures live in signatures/version1/cla.json.
+          # release PR. Signatures live in signatures/version1/cla.json on the
+          # cla-signatures branch.
           lock-pullrequest-aftermerge: false
