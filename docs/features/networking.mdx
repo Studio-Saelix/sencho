@@ -13,7 +13,7 @@ Networking follows whichever node is selected in the top bar. Remote nodes load 
 
 The overview masthead summarizes the node at a glance and derives its posture from findings: action needed, review, contained, partial networking data, or runtime unavailable. Stat cards break down network counts by ownership (Sencho-managed, external dependency, system) alongside exposed stacks, unknown exposure, missing externals, and name collisions; each links to the relevant inventory or findings view.
 
-The **operator attention** list ranks the top findings needing review, with a one-click primary action per row and a link to the full Findings tab. Three Compose-first sections round out the page: external network dependencies, networks shared across stacks, and services publishing without a classified exposure intent. The activity band below shows recent node-wide stack work, linked back to the owning stack.
+The **operator attention** list ranks the top findings needing review. Each row shows the same actions as the Findings tab and the list links to it. Three Compose-first sections round out the page: external network dependencies, networks shared across stacks, and services publishing without a classified exposure intent. The activity band below shows recent node-wide stack work, linked back to the owning stack.
 
 Use **Refresh** to re-fetch live Docker state and Compose facts in one pass.
 
@@ -42,9 +42,20 @@ Admins can open **Create network** from the page header. The dialog matches the 
 
 The **Findings** tab lists Compose-first networking issues Sencho derives from the effective model plus one live Docker snapshot per refresh, grouped into **Needs action**, **Review recommended**, and **Informational**. Examples include missing external networks, duplicate network names across stacks, host-network exposure mismatches, and stacks whose model could not be rendered. Missing external findings only offer create actions when the declaration is a safe default bridge network.
 
-Findings also fold in the networking-relevant results from your last Compose Doctor run on each stack. A finding both engines detect shows **Live · also found by Doctor**; a finding only Doctor caught (Doctor checks a few things the live engine does not, such as host port conflicts) shows **Last Doctor run** with the timestamp of that run. Doctor's contribution is always the cached result of the last run on that stack, not a fresh check, so run Doctor again on a stack if you want its findings current. An active acknowledgement on a Doctor finding excludes it here too.
+Findings also fold in the networking-relevant results from your last Compose Doctor run on each stack. A finding both engines detect shows **Live · also found by Doctor**; a finding only Doctor caught (Doctor checks a few things the live engine does not, such as host port conflicts) shows **Last Doctor run** with the timestamp of that run. Doctor's contribution is always the cached result of the last run on that stack, not a fresh check, so run Doctor again on a stack if you want its findings current. A Doctor finding you have acknowledged moves to the dismissed list below instead of the active list.
 
-Each finding includes a severity, evidence, and the actions that are appropriate for the current operator. Depending on permissions and the finding, this can open the affected stack, its Networking, Doctor, Dossier, or Drift tab, filter topology, inspect a network, create a missing network, copy a safe Compose snippet, or refresh the data.
+Each finding includes a severity, what it means, what to do about it, and the actions that are appropriate for the current operator. The main action sits on the row and runs where you are:
+
+- **Set exposure intent** opens a small picker over the row. Choose an intent and it is saved; the finding is re-checked straight away.
+- **Create network** opens the create dialog with the missing network's name filled in. **Copy Docker command** and **Copy Compose snippet** are in the row's **⋯** menu.
+- **Open stack editor**, **View network topology**, and **Inspect network** go to the place where that finding is fixed or explained.
+- **Acknowledge in Doctor** is offered on findings only Compose Doctor reported. It asks first, because an acknowledgement is recorded in Doctor and also changes that stack's update readiness; it holds until the stack's Compose file changes.
+
+### Dismissing findings
+
+**Dismiss** sets a finding aside for the whole team until it changes: the next time its severity rises, its fingerprint (the ports, stacks, or networks it covers) changes, or it covers more than it did, it returns on its own. The arrow next to **Dismiss** offers 7 days or permanently. A finding about runtime data Sencho could not read can only be dismissed for a set number of days.
+
+Dismissed findings stay counted: the masthead and the posture word still include them. They appear under a quiet **N dismissed** row with who dismissed them, when, and for how long, and **Restore** brings one back. A toast right after dismissing offers **Undo**.
 
 ## Resources and cleanup
 
