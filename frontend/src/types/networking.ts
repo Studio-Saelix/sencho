@@ -1,3 +1,9 @@
+import type { DismissPolicy } from '@/types/findingDismissal';
+
+/** How an operator classifies what a service publishes. Mirrors the backend `ExposureIntent`. */
+export type ExposureIntent = 'internal' | 'same-node' | 'lan' | 'reverse-proxy' | 'public' | 'temporary' | 'unknown';
+export const EXPOSURE_INTENTS: readonly ExposureIntent[] = ['internal', 'same-node', 'lan', 'reverse-proxy', 'public', 'temporary', 'unknown'];
+
 export type NetworkingOwnership = 'system' | 'sencho-managed' | 'compose-managed' | 'unmanaged';
 export type NetworkingFindingSeverity = 'critical' | 'high' | 'medium' | 'info';
 
@@ -96,6 +102,8 @@ export interface DoctorFindingMetadata {
   sourcePath?: string;
   remediation?: string;
   severity: NetworkingFindingSeverity;
+  /** Set when an active Doctor acknowledgement covers this occurrence. */
+  acknowledgement?: { id: number; reason?: string };
 }
 
 export interface NetworkingFinding {
@@ -111,6 +119,12 @@ export interface NetworkingFinding {
   recommendedActions: NetworkingRecommendedAction[];
   sources: NetworkingFindingSource[];
   doctorFindings: DoctorFindingMetadata[];
+  /** Structured state a dismissal is judged against. `none` (or absent, from an older node) means it cannot be dismissed here. */
+  fingerprint: string;
+  count: number;
+  dismissPolicy: DismissPolicy;
+  /** A Doctor-only card whose every occurrence is acknowledged in Doctor. Listed as dismissed, left out of counts. */
+  acknowledged?: boolean;
 }
 
 export interface NodeNetworkingOverview {
@@ -150,7 +164,7 @@ export interface NetworkingTopologyContainer {
   service: string | null;
   composeAliases: string[];
   publishedPorts: NetworkFactPort[];
-  exposureIntent: 'internal' | 'same-node' | 'lan' | 'reverse-proxy' | 'public' | 'temporary' | 'unknown' | null;
+  exposureIntent: ExposureIntent | null;
   findingIds: string[];
   driftFlags: string[];
   hostMode: boolean;

@@ -62,6 +62,11 @@ function stackActions(stack: string): NetworkingRecommendedAction[] {
   return [{ kind: 'open-stack-networking', label: 'Open stack networking', stack }];
 }
 
+/** Drift is fixed in the Compose file, so its first verb opens the editor. */
+function editorAction(stack: string): NetworkingRecommendedAction {
+  return { kind: 'open-stack-editor', label: 'Open stack editor', stack };
+}
+
 function effectiveIntent(service: string, stackIntent: ExposureIntent | null, byService: Record<string, ExposureIntent>): ExposureIntent | null {
   return byService[service] ?? stackIntent ?? null;
 }
@@ -229,7 +234,7 @@ function addComposeDriftFindings(
         'Declared network missing',
         `Stack "${facts.stack}" declares network "${network.name}" but it does not exist in the runtime.`,
         { stack: facts.stack, network: network.name },
-        [...stackActions(facts.stack), { kind: 'copy-docker-command', label: 'Copy Docker command', commandKind: 'network-create', networkName: network.name }],
+        [editorAction(facts.stack), { kind: 'copy-docker-command', label: 'Copy Docker command', commandKind: 'network-create', networkName: network.name }],
       ));
     }
     if (!network.external && network.createdByStack && facts.drift.declaredButUnused.includes(network.key)) {
@@ -239,7 +244,7 @@ function addComposeDriftFindings(
         'Declared network unused',
         `Stack "${facts.stack}" declares network "${network.name}" but no running service is attached.`,
         { stack: facts.stack, network: network.name },
-        stackActions(facts.stack),
+        [editorAction(facts.stack)],
       ));
     }
   }
@@ -250,7 +255,7 @@ function addComposeDriftFindings(
       'Undeclared network attachment',
       `Container "${attachment.container}" (${attachment.service ?? 'unknown service'}) is attached to undeclared network "${attachment.network}".`,
       { stack: facts.stack, network: attachment.network, service: attachment.service ?? undefined },
-      [...stackActions(facts.stack), ...(networkIds.has(attachment.network) ? [{ kind: 'inspect-network', label: 'Inspect network', networkId: networkIds.get(attachment.network)! } satisfies NetworkingRecommendedAction] : [])],
+      [editorAction(facts.stack), ...(networkIds.has(attachment.network) ? [{ kind: 'inspect-network', label: 'Inspect network', networkId: networkIds.get(attachment.network)! } satisfies NetworkingRecommendedAction] : [])],
       { subject: attachment.container },
     ));
   }
@@ -261,7 +266,7 @@ function addComposeDriftFindings(
       'Foreign network attachment',
       `Container "${attachment.container}" in stack "${facts.stack}" is attached to network "${attachment.network}" owned elsewhere.`,
       { stack: facts.stack, network: attachment.network },
-      [...stackActions(facts.stack), ...(networkIds.has(attachment.network) ? [{ kind: 'inspect-network', label: 'Inspect network', networkId: networkIds.get(attachment.network)! } satisfies NetworkingRecommendedAction] : [])],
+      [...(networkIds.has(attachment.network) ? [{ kind: 'inspect-network', label: 'Inspect network', networkId: networkIds.get(attachment.network)! } satisfies NetworkingRecommendedAction] : []), ...stackActions(facts.stack)],
       { subject: attachment.container },
     ));
   }
