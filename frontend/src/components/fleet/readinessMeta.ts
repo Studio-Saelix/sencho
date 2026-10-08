@@ -228,7 +228,7 @@ const CODE_REMEDIATION: Record<ReadinessReasonCode, string> = {
   probe_timeout: 'The node is slow or overloaded. Test the connection again shortly.',
 
   workloads_exited: 'Start the stack, or open it to read why it stopped.',
-  workloads_partial: 'Start the stopped services, or open the stack to see which ones failed.',
+  workloads_partial: 'Start the stack, or open it to see which services failed.',
   workloads_unknown: 'Update this node to a version that matches this hub.',
   status_evidence_degraded: 'Check again. If it persists, open node details to see what the Docker listing is missing.',
   status_evidence_stale: 'Check again to refresh the stack state.',

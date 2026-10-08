@@ -210,7 +210,7 @@ The order is deliberate and worst-first: a known problem outranks a condition th
 | Finding | Button | What it does |
 |---------|--------|--------------|
 | Node did not answer, slow to answer, or out of contact | **Test connection** | Tests the connection from the hub and re-checks. |
-| Stack is stopped, or some services are stopped | **Start stack**, **Start stopped services** | Starts the stack's existing containers. If its containers were removed there is nothing to start, and the message offers **Open stack** instead, because bringing it back is a deploy. |
+| Stack is stopped, or some services are stopped | **Start stack** | Starts the stack's existing containers, including any that finished on purpose. If its containers were removed there is nothing to start, and the message offers **Open stack** instead, because bringing it back is a deploy. |
 | A check that could not read its evidence | **Check again** | Runs the readiness check again. |
 | An update is available and needs a look | **Review update** | Opens the update review. **Update** there applies it, the same way the stack's own update button does. A stack with nothing to update, or one whose update is blocked, gets **Open stack** instead, so the block is fixed at its cause. |
 | Rollback is not ready because no compose file is captured | **Capture recovery point** | Captures one now, so the stack can be rolled back. |

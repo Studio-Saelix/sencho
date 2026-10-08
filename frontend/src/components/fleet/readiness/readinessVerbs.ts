@@ -5,7 +5,6 @@ import type { ReadinessFinding } from '@/types/readiness';
 export type ReadinessVerbId =
   | 'test-connection'
   | 'start-stack'
-  | 'start-services'
   | 'check-again'
   | 'review-update'
   | 'capture-recovery'
@@ -38,7 +37,6 @@ const manageNodeGlobally: VerbRequirement = { kind: 'permission', action: 'node:
 const VERBS: Record<ReadinessVerbId, ReadinessVerb> = {
   'test-connection': { id: 'test-connection', label: 'Test connection', clicks: 1, requires: manageNode },
   'start-stack': { id: 'start-stack', label: 'Start stack', clicks: 1, requires: deploy },
-  'start-services': { id: 'start-services', label: 'Start stopped services', clicks: 1, requires: deploy },
   'check-again': { id: 'check-again', label: 'Check again', clicks: 1, requires: NONE },
   'review-update': { id: 'review-update', label: 'Review update', clicks: 2, requires: deploy },
   'capture-recovery': { id: 'capture-recovery', label: 'Capture recovery point', clicks: 1, requires: deploy },
@@ -69,9 +67,9 @@ function verbIdFor(finding: ReadinessFinding): ReadinessVerbId | null {
     case 'contact_stale':
       return 'test-connection';
     case 'workloads_exited':
-      return finding.stack === null ? null : 'start-stack';
     case 'workloads_partial':
-      return finding.stack === null ? null : 'start-services';
+      // The route starts every container of the stack, so the label names the stack.
+      return finding.stack === null ? null : 'start-stack';
     case 'workloads_unknown':
     case 'stacks_unknown':
     case 'summary_stale':
