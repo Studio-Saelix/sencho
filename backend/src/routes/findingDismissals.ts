@@ -8,6 +8,12 @@ import {
 } from '../services/findingDismissals/types';
 import { buildFleetReadiness } from '../services/readiness/readinessAggregator';
 import { parseReadinessKey } from '../services/readiness/readinessDismissals';
+import {
+  isNetworkingSeverity,
+  networkingDismissPolicy,
+  parseNetworkingKey,
+  type ParsedNetworkingKey,
+} from '../services/network/networkingDismissals';
 import { authMiddleware } from '../middleware/auth';
 import { requireAdmin, requireUserSession } from '../middleware/tierGates';
 import { requirePermission } from '../middleware/permissions';
@@ -18,6 +24,39 @@ export const findingDismissalsRouter = Router();
 
 const MAX_DAYS = 365;
 const DAY_MS = 86_400_000;
+const MAX_FINGERPRINT_LENGTH = 64;
+const MAX_TARGET_COUNT = 100_000;
+
+type DismissalBody = Record<string, unknown>;
+
+interface ParsedDismissalRequest {
+  mode: DismissalMode;
+  expiresAt: number | null;
+}
+
+/** The mode and expiry a request asks for, or null after answering 400. */
+function readDismissalMode(record: DismissalBody, res: Response): ParsedDismissalRequest | null {
+  const mode = record.mode;
+  if (typeof mode !== 'string' || !(DISMISSAL_MODES as readonly string[]).includes(mode)) {
+    res.status(400).json({ error: `mode must be one of: ${DISMISSAL_MODES.join(', ')}` });
+    return null;
+  }
+  if (mode !== 'days') return { mode: mode as DismissalMode, expiresAt: null };
+  const days = record.days ?? 7;
+  if (typeof days !== 'number' || !Number.isInteger(days) || days < 1 || days > MAX_DAYS) {
+    res.status(400).json({ error: `days must be a whole number from 1 to ${MAX_DAYS}` });
+    return null;
+  }
+  return { mode: 'days', expiresAt: Date.now() + days * DAY_MS };
+}
+
+/** Authorizes the scope a networking finding key names, from the key alone. */
+function authorizeNetworkingKey(req: Request, res: Response, key: ParsedNetworkingKey): boolean {
+  if (key.stack !== '') {
+    return requirePermission(req, res, 'stack:deploy', 'stack', key.stack, key.nodeId);
+  }
+  return requirePermission(req, res, 'node:manage', 'node', String(key.nodeId));
+}
 
 /** Authorizes the scope a readiness finding id names, from the id alone. */
 function authorizeReadinessKey(req: Request, res: Response, key: NonNullable<ReturnType<typeof parseReadinessKey>>): boolean {
@@ -27,6 +66,22 @@ function authorizeReadinessKey(req: Request, res: Response, key: NonNullable<Ret
     return requirePermission(req, res, 'stack:deploy', 'stack', key.stack, key.nodeId);
   }
   return requirePermission(req, res, 'node:manage', 'node', String(key.nodeId));
+}
+
+/**
+ * Whether the caller may restore a row, from its stored key. Null when the key
+ * cannot be read for its surface (nothing was answered); false when a 403 was sent.
+ */
+function authorizeRestore(req: Request, res: Response, surface: string, findingKey: string): boolean | null {
+  if (surface === 'readiness') {
+    const key = parseReadinessKey(findingKey);
+    return key === null ? null : authorizeReadinessKey(req, res, key);
+  }
+  if (surface === 'networking') {
+    const key = parseNetworkingKey(findingKey);
+    return key === null ? null : authorizeNetworkingKey(req, res, key);
+  }
+  return null;
 }
 
 /**
@@ -56,20 +111,9 @@ findingDismissalsRouter.post('/readiness', authMiddleware, async (req: Request, 
     res.status(400).json({ error: 'fingerprint and count must say which state of the finding was seen' });
     return;
   }
-  const mode = record.mode;
-  if (typeof mode !== 'string' || !(DISMISSAL_MODES as readonly string[]).includes(mode)) {
-    res.status(400).json({ error: `mode must be one of: ${DISMISSAL_MODES.join(', ')}` });
-    return;
-  }
-  let expiresAt: number | null = null;
-  if (mode === 'days') {
-    const days = record.days ?? 7;
-    if (typeof days !== 'number' || !Number.isInteger(days) || days < 1 || days > MAX_DAYS) {
-      res.status(400).json({ error: `days must be a whole number from 1 to ${MAX_DAYS}` });
-      return;
-    }
-    expiresAt = Date.now() + days * DAY_MS;
-  }
+  const requested = readDismissalMode(record, res);
+  if (requested === null) return;
+  const { mode, expiresAt } = requested;
   if (!authorizeReadinessKey(req, res, key)) return;
   if (!DatabaseService.getInstance().getNodes().some((node) => node.id === key.nodeId)) {
     res.status(404).json({ error: 'Node not found' });
@@ -116,7 +160,7 @@ findingDismissalsRouter.post('/readiness', authMiddleware, async (req: Request, 
         severity: finding.severity,
         count: finding.count,
       },
-      { mode: mode as DismissalMode, expiresAt, createdBy: auditActorUsername(req), now: Date.now() },
+      { mode, expiresAt, createdBy: auditActorUsername(req), now: Date.now() },
     );
     res.status(result.kept ? 200 : 201).json({ dismissal: toFindingDismissal(result.row), kept: result.kept });
   } catch (error) {
@@ -124,6 +168,96 @@ findingDismissalsRouter.post('/readiness', authMiddleware, async (req: Request, 
     res.status(500).json({ error: 'Failed to dismiss the finding' });
   } finally {
     res.off('close', onClose);
+  }
+});
+
+/**
+ * The team's networking dismissals for one node. Rows whose time is up are
+ * removed here; whether a row still covers its finding is decided by the
+ * client against the finding it is looking at, because the hub does not hold
+ * a remote node's networking evidence.
+ */
+findingDismissalsRouter.get('/networking', authMiddleware, (req: Request, res: Response): void => {
+  const nodeId = Number(req.query.nodeId);
+  if (!Number.isInteger(nodeId) || nodeId < 1) {
+    res.status(400).json({ error: 'nodeId must be a node id' });
+    return;
+  }
+  if (!requirePermission(req, res, 'node:read', 'node', String(nodeId))) return;
+  try {
+    const store = FindingDismissalStore.getInstance();
+    const now = Date.now();
+    const rows = store.list('networking').filter((row) => row.node_id === nodeId);
+    const lapsed = rows.filter((row) => row.mode === 'days' && row.expires_at !== null && row.expires_at <= now);
+    if (lapsed.length > 0) store.deleteMany(lapsed.map((row) => row.id));
+    const lapsedIds = new Set(lapsed.map((row) => row.id));
+    res.json({ dismissals: rows.filter((row) => !lapsedIds.has(row.id)).map(toFindingDismissal) });
+  } catch (error) {
+    console.error('[Fleet] Networking dismissals read error:', errorMessageForLog(error));
+    res.status(500).json({ error: 'Failed to read dismissed findings' });
+  }
+});
+
+/**
+ * Dismiss one networking finding for the team.
+ *
+ * The key alone names the scope (node, stack, finding kind) and what the kind
+ * allows; none of that is read from the request body. The hub does not hold a
+ * remote node's networking evidence, so the fingerprint, severity, and count
+ * are the state the operator saw, checked for shape. They only decide when the
+ * dismissal lifts for the finding it is stored against, so a wrong value
+ * affects nothing beyond what the caller was already allowed to set aside.
+ */
+findingDismissalsRouter.post('/networking', authMiddleware, (req: Request, res: Response): void => {
+  if (!requireUserSession(req, res)) return;
+  const body: unknown = req.body;
+  const record: DismissalBody = typeof body === 'object' && body !== null ? body as DismissalBody : {};
+  const findingId = typeof record.findingId === 'string' ? record.findingId : '';
+  const key = parseNetworkingKey(findingId);
+  if (key === null) {
+    res.status(400).json({ error: 'findingId is not a networking finding id' });
+    return;
+  }
+  const { fingerprint, count, severity } = record;
+  if (typeof fingerprint !== 'string' || fingerprint === '' || fingerprint.length > MAX_FINGERPRINT_LENGTH
+    || typeof count !== 'number' || !Number.isInteger(count) || count < 1 || count > MAX_TARGET_COUNT
+    || !isNetworkingSeverity(severity)) {
+    res.status(400).json({ error: 'fingerprint, count, and severity must say which state of the finding was seen' });
+    return;
+  }
+  const requested = readDismissalMode(record, res);
+  if (requested === null) return;
+  const policy = networkingDismissPolicy(key.kind);
+  if (policy === 'none') {
+    res.status(400).json({ error: 'This finding is acknowledged in Compose Doctor and cannot be dismissed here.' });
+    return;
+  }
+  if (policy === 'timed' && requested.mode !== 'days') {
+    res.status(400).json({ error: 'A finding about evidence that could not be read can only be dismissed for a set number of days.' });
+    return;
+  }
+  if (!authorizeNetworkingKey(req, res, key)) return;
+  if (!DatabaseService.getInstance().getNodes().some((node) => node.id === key.nodeId)) {
+    res.status(404).json({ error: 'Node not found' });
+    return;
+  }
+  try {
+    const result = FindingDismissalStore.getInstance().dismiss(
+      {
+        nodeId: key.nodeId,
+        surface: 'networking',
+        findingKey: findingId,
+        stackName: key.stack === '' ? null : key.stack,
+        fingerprint,
+        severity,
+        count,
+      },
+      { mode: requested.mode, expiresAt: requested.expiresAt, createdBy: auditActorUsername(req), now: Date.now() },
+    );
+    res.status(result.kept ? 200 : 201).json({ dismissal: toFindingDismissal(result.row), kept: result.kept });
+  } catch (error) {
+    console.error('[Fleet] Networking dismissal error:', errorMessageForLog(error));
+    res.status(500).json({ error: 'Failed to dismiss the finding' });
   }
 });
 
@@ -142,12 +276,12 @@ findingDismissalsRouter.delete('/:id', authMiddleware, (req: Request, res: Respo
       res.status(404).json({ error: 'Dismissal not found' });
       return;
     }
-    const key = row.surface === 'readiness' ? parseReadinessKey(row.finding_key) : null;
-    if (key === null) {
+    const authorized = authorizeRestore(req, res, row.surface, row.finding_key);
+    if (authorized === null) {
       res.status(400).json({ error: 'Dismissal has an unreadable scope' });
       return;
     }
-    if (!authorizeReadinessKey(req, res, key)) return;
+    if (!authorized) return;
     store.delete(id);
     res.status(204).end();
   } catch (error) {

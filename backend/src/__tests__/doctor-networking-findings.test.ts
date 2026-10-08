@@ -52,6 +52,9 @@ function liveHostFinding(stack: string, service: string): NetworkingFinding {
     recommendedActions: [{ kind: 'open-stack-networking', label: 'Open stack networking', stack }],
     sources: ['live'],
     doctorFindings: [],
+    fingerprint: 'fp',
+    count: 1,
+    dismissPolicy: 'any',
   };
 }
 
@@ -165,21 +168,59 @@ describe('applyDoctorNetworkingFindings', () => {
     expect(new Set(result.map((f) => f.id)).size).toBe(2);
   });
 
-  it('excludes acknowledged findings', () => {
-    vi.spyOn(ComposeDoctorService, 'getInstance').mockReturnValue({
-      getLatest: vi.fn().mockReturnValue(stubReport({
-        stack: 'stack1',
-        findings: [{
-          ruleId: 'sensitive-service-broad-exposure', severity: 'high', title: 't', message: 'm',
-          service: 'db', acknowledged: true,
-        }],
-      })),
-    } as unknown as ComposeDoctorService);
+  describe('acknowledged findings', () => {
+    const dbFacts = () => stubFacts({ services: [{ name: 'db', networks: [], publishedPorts: [], extraHosts: [] }] });
+    const reportWith = (findings: PreflightReport['findings']) => {
+      vi.spyOn(ComposeDoctorService, 'getInstance').mockReturnValue({
+        getLatest: vi.fn().mockReturnValue(stubReport({ stack: 'stack1', findings })),
+      } as unknown as ComposeDoctorService);
+    };
+    const run = (live: NetworkingFinding[] = []) =>
+      applyDoctorNetworkingFindings(live, { nodeId: 1, stackNames: ['stack1'], stackFacts: [dbFacts()], snapshot: null });
 
-    const result = applyDoctorNetworkingFindings([], {
-      nodeId: 1, stackNames: ['stack1'], stackFacts: [stubFacts()], snapshot: null,
+    it('keeps an acknowledged Doctor-only finding, marked acknowledged, so it can be listed as dismissed', () => {
+      reportWith([{
+        ruleId: 'sensitive-service-broad-exposure', severity: 'high', title: 't', message: 'm',
+        service: 'db', acknowledged: true, acknowledgementId: 7, acknowledgementReason: 'fronted by a proxy',
+      }]);
+      const [card] = run();
+      expect(card.acknowledged).toBe(true);
+      expect(card.sources).toEqual(['doctor']);
+      expect(card.dismissPolicy).toBe('none');
+      expect(card.doctorFindings[0].acknowledgement).toEqual({ id: 7, reason: 'fronted by a proxy' });
     });
-    expect(result).toHaveLength(0);
+
+    it('stays an active card while any occurrence is still open, and follows the open one', () => {
+      reportWith([
+        { ruleId: 'sensitive-service-broad-exposure', severity: 'blocker', title: 'old', message: 'm', service: 'db', acknowledged: true, acknowledgementId: 7 },
+        { ruleId: 'sensitive-service-broad-exposure', severity: 'warning', title: 'open', message: 'm', service: 'db' },
+      ]);
+      const [card] = run();
+      expect(card.acknowledged).toBeUndefined();
+      expect(card.title).toBe('open');
+      expect(card.severity).toBe('medium');
+    });
+
+    it('does not decorate a live card with an acknowledged occurrence', () => {
+      reportWith([{
+        ruleId: 'network-mode-host', severity: 'high', title: 't', message: 'm', service: 'web',
+        sourcePath: 'services.web.network_mode', acknowledged: true, acknowledgementId: 3,
+      }]);
+      const result = applyDoctorNetworkingFindings([liveHostFinding('stack1', 'web')], {
+        nodeId: 1, stackNames: ['stack1'], stackFacts: [stubFacts()], snapshot: null,
+      });
+      expect(result).toHaveLength(1);
+      expect(result[0].doctorFindings).toEqual([]);
+    });
+
+    it('gives the card the same id whether or not it is acknowledged', () => {
+      reportWith([{ ruleId: 'sensitive-service-broad-exposure', severity: 'high', title: 't', message: 'm', service: 'db' }]);
+      const open = run()[0];
+      reportWith([{ ruleId: 'sensitive-service-broad-exposure', severity: 'high', title: 't', message: 'reworded', service: 'db', acknowledged: true, acknowledgementId: 1 }]);
+      const acked = run()[0];
+      expect(acked.id).toBe(open.id);
+      expect(acked.id).toBe('sensitive-service-broad-exposure|stack1|db||sensitive-service-broad-exposure');
+    });
   });
 
   it('discards a stale finding when the referenced service no longer exists', () => {

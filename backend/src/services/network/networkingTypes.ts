@@ -3,6 +3,7 @@
  * raw Docker label values or inspect secrets; label keys only on detail views.
  */
 import type { StackNetworkFacts } from './types';
+import type { DismissPolicy } from '../readiness/types';
 
 export const NETWORKING_SCHEMA_VERSION = 3;
 export type NetworkingOwnership = 'system' | 'sencho-managed' | 'compose-managed' | 'unmanaged';
@@ -86,6 +87,8 @@ export interface DoctorFindingMetadata {
   /** Doctor's own severity translation, kept even when the merged card's canonical
    *  severity (live) differs, so provenance is never lost. */
   severity: NetworkingFindingSeverity;
+  /** Set when an active Doctor acknowledgement covers this occurrence. */
+  acknowledgement?: { id: number; reason?: string };
 }
 
 export type NetworkingRecommendedAction =
@@ -105,6 +108,7 @@ export type NetworkingRecommendedAction =
   | { kind: 'refresh'; label: string };
 
 export interface NetworkingFinding {
+  /** Structural key `kind|stack|service|network|subject` (see networkingDismissals.ts); stable across message edits. */
   id: string;
   kind: NetworkingFindingKind;
   severity: NetworkingFindingSeverity;
@@ -121,6 +125,14 @@ export interface NetworkingFinding {
   /** Every retained Doctor occurrence that structurally matches this card (one-to-many:
    *  e.g. two broad-bind ports on one service both attach here). Empty for live-only findings. */
   doctorFindings: DoctorFindingMetadata[];
+  /** Hash of severity and the structured targets, never message text; a dismissal "until it changes" lifts when it moves. */
+  fingerprint: string;
+  /** How many structured targets the finding covers; a dismissal lifts when it grows. At least 1. */
+  count: number;
+  /** What a team may do with this finding: `timed` when the evidence could not be read, `none` when Doctor owns it. */
+  dismissPolicy: DismissPolicy;
+  /** A Doctor-only card whose every occurrence is acknowledged in Doctor. Listed as dismissed, left out of counts. */
+  acknowledged?: boolean;
 }
 
 export interface NodeNetworkingOverview {
