@@ -96,6 +96,7 @@ export const AUDIT_ROUTE_SUMMARIES: Record<string, string> = {
 
   // Fleet
   'POST /fleet/dismissals/readiness': 'Dismissed a readiness finding',
+  'POST /fleet/dismissals/networking': 'Dismissed a networking finding',
   'DELETE /fleet/dismissals': 'Restored a dismissed finding',
   'POST /fleet/snapshots': 'Created fleet backup',
   'DELETE /fleet/snapshots': 'Deleted fleet backup',

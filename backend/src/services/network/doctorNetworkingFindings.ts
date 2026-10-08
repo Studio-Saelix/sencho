@@ -9,7 +9,6 @@
  * they are retained as cached rather than silently dropped or fabricated as
  * live.
  */
-import { createHash } from 'crypto';
 import { ComposeDoctorService } from '../ComposeDoctorService';
 import type { PreflightFinding } from '../preflight/types';
 import type { DependencySnapshot } from '../DockerController';
@@ -17,6 +16,7 @@ import type { StackNetworkFacts } from './types';
 import { getErrorMessage } from '../../utils/errors';
 import { sanitizeForLog } from '../../utils/safeLog';
 import { NETWORKING_SEVERITY_RANK } from './networkingSeverity';
+import { dismissFields } from './networkingDismissals';
 import type {
   DoctorFindingMetadata,
   NetworkingFinding,
@@ -74,11 +74,11 @@ function liveDedupeKey(
   stack: string,
   f: PreflightFinding,
   facts: StackNetworkFacts | undefined,
-): { key: string; mergeKind: NetworkingFindingKind } | null {
+): { key: string; mergeKind: NetworkingFindingKind; network?: string } | null {
   switch (kind) {
     case 'external-network-missing': {
       const network = resolveNetworkName(f.sourcePath, facts);
-      return network ? { key: `${kind}\0${stack}\0${network}`, mergeKind: kind } : null;
+      return network ? { key: `${kind}\0${stack}\0${network}`, mergeKind: kind, network } : null;
     }
     case 'network-mode-host':
     case 'exposure-all-interfaces':
@@ -88,7 +88,7 @@ function liveDedupeKey(
     case 'new-network': {
       const network = resolveNetworkName(f.sourcePath, facts);
       // Reconciles against the live "declared network missing at runtime" finding.
-      return network ? { key: `network-missing\0${stack}\0${network}`, mergeKind: 'network-missing' } : null;
+      return network ? { key: `network-missing\0${stack}\0${network}`, mergeKind: 'network-missing', network } : null;
     }
     default:
       return null;
@@ -105,6 +105,9 @@ function toMetadata(ruleId: string, ranAt: number | null, f: PreflightFinding): 
     sourcePath: f.sourcePath,
     remediation: f.remediation,
     severity: DOCTOR_SEVERITY_MAP[f.severity] ?? 'info',
+    ...(f.acknowledged === true && typeof f.acknowledgementId === 'number'
+      ? { acknowledgement: { id: f.acknowledgementId, ...(f.acknowledgementReason ? { reason: f.acknowledgementReason } : {}) } }
+      : {}),
   };
 }
 
@@ -193,7 +196,6 @@ export function applyDoctorNetworkingFindings(
   // into ONE card carrying every matched occurrence; distinct
   // services/networks/stacks always get distinct cards.
   const doctorOnlyGroups = new Map<string, { kind: NetworkingFindingKind; stack: string; service?: string; network?: string; entries: DoctorFindingMetadata[] }>();
-  let ordinal = 0;
 
   for (const stack of stackNames) {
     let report;
@@ -208,7 +210,6 @@ export function applyDoctorNetworkingFindings(
     const facts = factsByStack.get(stack);
 
     for (const f of report.findings) {
-      if (f.acknowledged === true) continue;
       const kind = DOCTOR_NETWORKING_RULE_KIND[f.ruleId];
       if (!kind) continue;
       if (!isStillPlausible(kind, f, facts, snapshot)) continue;
@@ -218,6 +219,7 @@ export function applyDoctorNetworkingFindings(
 
       if (dedupe) {
         const liveMatch = liveByKey.get(dedupe.key);
+        if (liveMatch && f.acknowledged === true) continue;
         if (liveMatch) {
           if (!liveMatch.sources.includes('doctor')) liveMatch.sources.push('doctor');
           liveMatch.doctorFindings.push(metadata);
@@ -238,8 +240,8 @@ export function applyDoctorNetworkingFindings(
         ? dedupe.key
         : f.service
           ? `${kind}\0${stack}\0${f.service}`
-          : `${kind}\0${stack}\0ordinal-${ordinal++}`;
-      const group = doctorOnlyGroups.get(groupKey) ?? { kind, stack, service: f.service, entries: [] };
+          : `${kind}\0${stack}\0src-${f.sourcePath ?? ''}`;
+      const group = doctorOnlyGroups.get(groupKey) ?? { kind, stack, service: f.service, network: dedupe?.network, entries: [] };
       group.entries.push(metadata);
       doctorOnlyGroups.set(groupKey, group);
     }
@@ -247,19 +249,34 @@ export function applyDoctorNetworkingFindings(
 
   const doctorOnlyFindings: NetworkingFinding[] = [];
   for (const group of doctorOnlyGroups.values()) {
-    const worstSeverity = group.entries.reduce<NetworkingFindingSeverity>(
+    // An acknowledged occurrence no longer drives the card: severity and wording follow the
+    // occurrences still open, and the card is listed as dismissed once none are.
+    const open = group.entries.filter((entry) => entry.acknowledgement === undefined);
+    const acknowledged = open.length === 0;
+    const driving = acknowledged ? group.entries : open;
+    const worstSeverity = driving.reduce<NetworkingFindingSeverity>(
       (worst, entry) => (NETWORKING_SEVERITY_RANK[entry.severity] > NETWORKING_SEVERITY_RANK[worst] ? entry.severity : worst),
       'info',
     );
-    const idPayload = [group.kind, group.stack, group.service ?? '', group.entries.map((e) => e.ruleId).join(',')].join('\0');
+    // The card is keyed by the rules and source paths it holds, so it is the same card
+    // when an occurrence is acknowledged or cleared. Doctor owns it: no silent dismissal.
+    const targets = group.entries.map((entry) => `${entry.ruleId}@${entry.sourcePath ?? ''}`);
+    const subject = [...new Set(group.entries.map((entry) => entry.ruleId))].sort().join(',');
     doctorOnlyFindings.push({
-      id: createHash('sha256').update(idPayload).digest('hex').slice(0, 16),
+      ...dismissFields(
+        { kind: group.kind, stack: group.stack, service: group.service ?? '', network: group.network ?? '', subject },
+        worstSeverity,
+        targets,
+      ),
+      dismissPolicy: 'none',
+      ...(acknowledged ? { acknowledged: true } : {}),
       kind: group.kind,
       severity: worstSeverity,
-      title: group.entries[0].title,
-      message: group.entries[0].message,
+      title: driving[0].title,
+      message: driving[0].message,
       stack: group.stack,
       service: group.service,
+      ...(group.network ? { network: group.network } : {}),
       evidence: [
         { label: 'Stack', value: group.stack },
         ...(group.service ? [{ label: 'Service', value: group.service }] : []),

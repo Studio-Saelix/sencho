@@ -31,7 +31,7 @@ export function stacksDeclaringNetwork(
 export function indexFindingIdsByNetwork(findings: NetworkingFinding[]): Map<string, string[]> {
   const byNetwork = new Map<string, string[]>();
   for (const finding of findings) {
-    if (!finding.network) continue;
+    if (!finding.network || finding.acknowledged) continue;
     const list = byNetwork.get(finding.network) ?? [];
     list.push(finding.id);
     byNetwork.set(finding.network, list);

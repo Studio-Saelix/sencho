@@ -2,14 +2,28 @@
  * Node-scoped networking findings derived from effective-model stack facts,
  * exposure intents, and the shared dependency snapshot.
  */
-import { createHash } from 'crypto';
 import type { DependencySnapshot } from '../DockerController';
-import type { ExposureIntent, StackNetworkFacts } from './types';
+import type { ExposureIntent, NetworkFactPort, StackNetworkFacts } from './types';
 import { isHostNetwork } from './normalize';
 import { getExposureContext, type ExposureContext } from './exposureContext';
+import { dismissFields } from './networkingDismissals';
 import type { NetworkingFinding, NetworkingFindingKind, NetworkingNetworkBase, NetworkingRecommendedAction } from './networkingTypes';
 
 type FindingExtra = Pick<NetworkingFinding, 'stack' | 'network' | 'service'>;
+
+/** What tells two findings with the same kind and target apart, and what a dismissal is judged against. */
+interface FindingFacts {
+  /** Separates findings that share kind, stack, service and network (a duplicated name, a container). */
+  subject?: string;
+  /** Structured targets the fingerprint hashes. Never message text. */
+  targets?: readonly string[];
+  /** How many targets the finding covers when that differs from `targets.length`. */
+  count?: number;
+}
+
+function portTargets(ports: readonly NetworkFactPort[]): string[] {
+  return ports.map(port => `${port.hostIp}:${port.startPort}-${port.endPort}/${port.protocol}`);
+}
 
 function finding(
   kind: NetworkingFindingKind,
@@ -18,10 +32,16 @@ function finding(
   message: string,
   extra: FindingExtra = {},
   recommendedActions: NetworkingRecommendedAction[] = [],
+  facts: FindingFacts = {},
 ): NetworkingFinding {
-  const idPayload = [kind, message, extra.stack ?? '', extra.network ?? '', extra.service ?? ''].join('\0');
+  const dismiss = dismissFields(
+    { kind, stack: extra.stack ?? '', service: extra.service ?? '', network: extra.network ?? '', subject: facts.subject ?? '' },
+    severity,
+    facts.targets ?? [],
+  );
   return {
-    id: createHash('sha256').update(idPayload).digest('hex').slice(0, 16),
+    ...dismiss,
+    ...(facts.count === undefined ? {} : { count: Math.max(1, facts.count) }),
     kind,
     severity,
     title,
@@ -85,6 +105,7 @@ function addExposureFindings(
         `Service "${service.name}" in stack "${facts.stack}" uses network_mode: host.`,
         { stack: facts.stack, service: service.name },
         [intentAction, ...stackActions(facts.stack)],
+        { targets: [`intent:${intent ?? 'unset'}`], count: 1 },
       ));
       continue;
     }
@@ -100,6 +121,7 @@ function addExposureFindings(
           `Service "${service.name}" in stack "${facts.stack}" publishes ports on all interfaces.`,
           { stack: facts.stack, service: service.name },
           [intentAction],
+          { targets: portTargets(service.publishedPorts.filter(port => port.allInterfaces)) },
         ));
       }
       continue;
@@ -112,6 +134,7 @@ function addExposureFindings(
         `Stack "${facts.stack}" publishes ports from "${service.name}" without a classified exposure intent.`,
         { stack: facts.stack, service: service.name },
         [intentAction],
+        { targets: portTargets(service.publishedPorts) },
       ));
     }
     if ((intent === 'internal' || intent === 'same-node') && service.publishedPorts.some(port => !port.loopbackOnly)) {
@@ -122,6 +145,7 @@ function addExposureFindings(
         `Service "${service.name}" is classified ${intent} but publishes ports to the host.`,
         { stack: facts.stack, service: service.name },
         [intentAction],
+        { targets: [`intent:${intent}`, ...portTargets(service.publishedPorts.filter(port => !port.loopbackOnly))] },
       ));
     } else if (intent === 'temporary' && broad) {
       out.push(finding(
@@ -131,6 +155,7 @@ function addExposureFindings(
         `Service "${service.name}" is marked temporary and publishes on all interfaces.`,
         { stack: facts.stack, service: service.name },
         [intentAction],
+        { targets: ['intent:temporary', ...portTargets(service.publishedPorts.filter(port => port.allInterfaces))] },
       ));
     } else if (broad && intent !== 'public' && intent !== 'reverse-proxy') {
       out.push(finding(
@@ -140,6 +165,7 @@ function addExposureFindings(
         `Service "${service.name}" in stack "${facts.stack}" publishes ports on all interfaces.`,
         { stack: facts.stack, service: service.name },
         [intentAction],
+        { targets: portTargets(service.publishedPorts.filter(port => port.allInterfaces)) },
       ));
     }
   }
@@ -183,6 +209,7 @@ function addCrossStackDnsFindings(out: NetworkingFinding[], stackFacts: StackNet
         `Name "${name}" resolves to multiple services on shared network "${networkName}".`,
         { network: networkName },
         [{ kind: 'filter-topology', label: 'View network topology', networkName }],
+        { subject: name, targets: [...distinct] },
       ));
     }
   }
@@ -224,6 +251,7 @@ function addComposeDriftFindings(
       `Container "${attachment.container}" (${attachment.service ?? 'unknown service'}) is attached to undeclared network "${attachment.network}".`,
       { stack: facts.stack, network: attachment.network, service: attachment.service ?? undefined },
       [...stackActions(facts.stack), ...(networkIds.has(attachment.network) ? [{ kind: 'inspect-network', label: 'Inspect network', networkId: networkIds.get(attachment.network)! } satisfies NetworkingRecommendedAction] : [])],
+      { subject: attachment.container },
     ));
   }
   for (const attachment of facts.drift.foreignNetworkAttachments) {
@@ -234,6 +262,7 @@ function addComposeDriftFindings(
       `Container "${attachment.container}" in stack "${facts.stack}" is attached to network "${attachment.network}" owned elsewhere.`,
       { stack: facts.stack, network: attachment.network },
       [...stackActions(facts.stack), ...(networkIds.has(attachment.network) ? [{ kind: 'inspect-network', label: 'Inspect network', networkId: networkIds.get(attachment.network)! } satisfies NetworkingRecommendedAction] : [])],
+      { subject: attachment.container },
     ));
   }
 }
@@ -261,6 +290,7 @@ function addSharedNetworkFindings(
       `Network "${networkName}" connects containers from ${stacks.size} stacks: ${[...stacks].sort().join(', ')}.`,
       { network: networkName },
       [{ kind: 'filter-topology', label: 'View network topology', networkName }],
+      { targets: [...stacks] },
     ));
   }
 
@@ -291,6 +321,7 @@ function addSharedNetworkFindings(
       `Multiple stacks resolve to the same network name "${networkName}": ${uniqueStacks.join(', ')}.`,
       { network: networkName },
       [{ kind: 'filter-topology', label: 'View network topology', networkName }],
+      { targets: uniqueStacks },
     ));
   }
 }
@@ -356,6 +387,7 @@ export function buildNodeNetworkingFindings(
         `Stack "${facts.stack}" requires the external network "${missing.name}" (Compose keys: ${missing.keys.join(', ')}), which is not present on this node.${reasonSuffix}`,
         { stack: facts.stack, network: missing.name },
         actions,
+        { targets: [...missing.keys.map(key => `key:${key}`), `safe:${missing.safe}`] },
       ));
     }
   }
@@ -379,6 +411,7 @@ export function buildNodeNetworkingFindings(
         `Network "${network.name}" uses ${network.enableIPv6 ? 'IPv6 or ' : ''}${network.driver} networking.`,
         { network: network.name },
         [{ kind: 'inspect-network', label: 'Inspect network', networkId: network.id }],
+        { targets: [`driver:${network.driver}`, `ipv6:${network.enableIPv6 === true}`] },
       ));
     }
   }
