@@ -14,6 +14,13 @@ import {
   parseNetworkingKey,
   type ParsedNetworkingKey,
 } from '../services/network/networkingDismissals';
+import {
+  isPostureSeverity,
+  parseSecurityKey,
+  postureDismissPolicy,
+  postureKeySeverity,
+  type ParsedSecurityKey,
+} from '../services/securityPostureDismissals';
 import { authMiddleware } from '../middleware/auth';
 import { requireAdmin, requireUserSession } from '../middleware/tierGates';
 import { requirePermission } from '../middleware/permissions';
@@ -58,6 +65,11 @@ function authorizeNetworkingKey(req: Request, res: Response, key: ParsedNetworki
   return requirePermission(req, res, 'node:manage', 'node', String(key.nodeId));
 }
 
+/** Authorizes the scope a security reason key names: the reason is about the whole node. */
+function authorizeSecurityKey(req: Request, res: Response, key: ParsedSecurityKey): boolean {
+  return requirePermission(req, res, 'node:manage', 'node', String(key.nodeId));
+}
+
 /** Authorizes the scope a readiness finding id names, from the id alone. */
 function authorizeReadinessKey(req: Request, res: Response, key: NonNullable<ReturnType<typeof parseReadinessKey>>): boolean {
   // Control findings are withheld from non-admins, so they cannot be named by one.
@@ -80,6 +92,10 @@ function authorizeRestore(req: Request, res: Response, surface: string, findingK
   if (surface === 'networking') {
     const key = parseNetworkingKey(findingKey);
     return key === null ? null : authorizeNetworkingKey(req, res, key);
+  }
+  if (surface === 'security') {
+    const key = parseSecurityKey(findingKey);
+    return key === null ? null : authorizeSecurityKey(req, res, key);
   }
   return null;
 }
@@ -257,6 +273,97 @@ findingDismissalsRouter.post('/networking', authMiddleware, (req: Request, res: 
     res.status(result.kept ? 200 : 201).json({ dismissal: toFindingDismissal(result.row), kept: result.kept });
   } catch (error) {
     console.error('[Fleet] Networking dismissal error:', errorMessageForLog(error));
+    res.status(500).json({ error: 'Failed to dismiss the finding' });
+  }
+});
+
+/**
+ * The team's security dismissals for one node. Lapsed timed rows are removed
+ * here; whether a row still covers its reason is decided by the client against
+ * the reason it is looking at, because the hub does not hold a remote node's
+ * posture evidence.
+ */
+findingDismissalsRouter.get('/security', authMiddleware, (req: Request, res: Response): void => {
+  const nodeId = Number(req.query.nodeId);
+  if (!Number.isInteger(nodeId) || nodeId < 1) {
+    res.status(400).json({ error: 'nodeId must be a node id' });
+    return;
+  }
+  if (!requirePermission(req, res, 'node:read', 'node', String(nodeId))) return;
+  try {
+    const store = FindingDismissalStore.getInstance();
+    const now = Date.now();
+    const rows = store.list('security').filter((row) => row.node_id === nodeId);
+    const isLapsed = (row: (typeof rows)[number]): boolean => row.mode === 'days' && row.expires_at !== null && row.expires_at <= now;
+    const lapsed = rows.filter(isLapsed);
+    if (lapsed.length > 0) store.deleteMany(lapsed.map((row) => row.id));
+    res.json({ dismissals: rows.filter((row) => !isLapsed(row)).map(toFindingDismissal) });
+  } catch (error) {
+    console.error('[Fleet] Security dismissals read error:', errorMessageForLog(error));
+    res.status(500).json({ error: 'Failed to read dismissed findings' });
+  }
+});
+
+/**
+ * Dismiss one security posture reason for the team.
+ *
+ * The key alone names the scope (node, reason kind and variant) and what the
+ * reason allows; none of that is read from the request body. Blockers are never
+ * dismissed here: a red masthead always lists them. The hub does not hold a
+ * remote node's posture evidence, so the fingerprint, severity, and count are
+ * the state the operator saw, checked for shape and for consistency with the
+ * severity the key carries. They only decide when the dismissal lifts for the
+ * reason it is stored against.
+ */
+findingDismissalsRouter.post('/security', authMiddleware, (req: Request, res: Response): void => {
+  if (!requireUserSession(req, res)) return;
+  const body: unknown = req.body;
+  const record: DismissalBody = typeof body === 'object' && body !== null ? body as DismissalBody : {};
+  const findingId = typeof record.findingId === 'string' ? record.findingId : '';
+  const key = parseSecurityKey(findingId);
+  if (key === null) {
+    res.status(400).json({ error: 'findingId is not a security finding id' });
+    return;
+  }
+  const { fingerprint, count, severity } = record;
+  if (typeof fingerprint !== 'string' || fingerprint === '' || fingerprint.length > MAX_FINGERPRINT_LENGTH
+    || typeof count !== 'number' || !Number.isInteger(count) || count < 1 || count > MAX_TARGET_COUNT
+    || !isPostureSeverity(severity) || severity !== postureKeySeverity(key.reasonKey)) {
+    res.status(400).json({ error: 'fingerprint, count, and severity must say which state of the finding was seen' });
+    return;
+  }
+  const requested = readDismissalMode(record, res);
+  if (requested === null) return;
+  const policy = postureDismissPolicy(key.reasonKey);
+  if (policy === 'none') {
+    res.status(400).json({ error: 'This finding keeps the posture at Action needed and is resolved from its own action, so it cannot be dismissed.' });
+    return;
+  }
+  if (policy === 'timed' && requested.mode !== 'days') {
+    res.status(400).json({ error: 'A finding about evidence that is missing or out of date can only be dismissed for a set number of days.' });
+    return;
+  }
+  if (!authorizeSecurityKey(req, res, key)) return;
+  if (!DatabaseService.getInstance().getNodes().some((node) => node.id === key.nodeId)) {
+    res.status(404).json({ error: 'Node not found' });
+    return;
+  }
+  try {
+    const result = FindingDismissalStore.getInstance().dismiss(
+      {
+        nodeId: key.nodeId,
+        surface: 'security',
+        findingKey: findingId,
+        stackName: null,
+        fingerprint,
+        severity,
+        count,
+      },
+      { mode: requested.mode, expiresAt: requested.expiresAt, createdBy: auditActorUsername(req), now: Date.now() },
+    );
+    res.status(result.kept ? 200 : 201).json({ dismissal: toFindingDismissal(result.row), kept: result.kept });
+  } catch (error) {
+    console.error('[Fleet] Security dismissal error:', errorMessageForLog(error));
     res.status(500).json({ error: 'Failed to dismiss the finding' });
   }
 });

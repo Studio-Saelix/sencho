@@ -9,7 +9,7 @@
  */
 
 /** The surfaces that keep dismissals in this store. Validated in code, not by a CHECK, so adding one needs no table rebuild. */
-export const DISMISSAL_SURFACES = ['readiness', 'networking'] as const;
+export const DISMISSAL_SURFACES = ['readiness', 'networking', 'security'] as const;
 export type DismissalSurface = (typeof DISMISSAL_SURFACES)[number];
 
 /**
