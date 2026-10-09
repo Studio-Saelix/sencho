@@ -108,6 +108,10 @@ export function RolloutPreviewDialog({
     const blocked = (preview?.summary.blocker ?? 0) > 0;
     const canConfirm = !!preview && !loading && !submitting && !blocked;
     const gitManaged = isGitManagedPreview(preview);
+    // The plan is already effective under a configured policy's own approval, so
+    // the reconciler runs it without this dialog. What the confirm adds is the
+    // operator taking the decision over, which is what the sentence says.
+    const policyApproved = preview != null && preview.approvalAuthority === 'configured_policy';
 
     async function refreshPreview(): Promise<void> {
         try {
@@ -200,7 +204,13 @@ export function RolloutPreviewDialog({
                         <p className="text-xs text-stat-subtitle">
                             {gitManaged
                                 ? 'This approval covers the reviewed place and remove outcomes for this Blueprint. Rollout authorization is a separate step.'
-                                : 'Enabled blueprints still need this confirmation before the reconciler mutates the fleet.'}
+                                : policyApproved
+                                    // The old sentence here claimed the fleet cannot change without this
+                                    // confirmation, which a policy approval had already made false: it
+                                    // authorizes the reconciler on its own. What confirming adds is that
+                                    // the decision becomes yours, so that is what this says.
+                                    ? 'The placement policy already approves this plan. Confirming records your own approval for the same outcomes, which takes the decision over from the policy.'
+                                    : 'Enabled blueprints still need this confirmation before the reconciler mutates the fleet.'}
                         </p>
                         <div className="flex flex-wrap gap-3 text-xs font-mono uppercase tracking-[0.15em]">
                             <span className="text-stat-value">Safe {preview.summary.safe}</span>

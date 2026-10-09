@@ -2251,11 +2251,32 @@ export class GitOpsTransitions {
       if (args.intent.application_id !== args.applicationId) {
         throw new GitOpsTransitionError('intent belongs to another application');
       }
+      // Read before the pointer moves: the freeze is keyed on the compose, and
+      // only the intent this one replaces can say what that compose was.
+      const previousIntentId = app.intent_revision_id;
+      const previousIntent = previousIntentId === null
+        ? null
+        : this.store().getIntentRevision(previousIntentId) ?? null;
       this.store().insertIntentRevision(args.intent);
       app.intent_revision_id = args.intent.id;
-      // Inline freeze is per intent revision. A new intent must drop the prior
-      // freeze so the next successful deploy binds digests for this compose.
-      if (app.target_mode === 'inline_blueprint') {
+      // Inline freeze is per compose content. A compose edit must drop the prior
+      // freeze so the next successful deploy binds this compose's digests.
+      //
+      // A roster change mints an intent without touching the compose, and the
+      // freeze was cleared for it anyway. That dropped the desired generation on
+      // every placed target and left the applied one where it was, so the next
+      // freeze pointed every retained target at a generation id for content it
+      // was already running: the reconciler repairs a retained node only when the
+      // compose changed, so nothing ever re-acknowledged it and the projection
+      // reported a permanent "running a different generation" divergence that no
+      // Apply could clear. Content is the identity the freeze exists for, so a
+      // change that leaves the content alone keeps it.
+      //
+      // An unreadable prior intent falls to clearing: the freeze is an
+      // executable identity, and re-resolving it is the safe direction.
+      const composeChanged = previousIntent === null
+        || previousIntent.compose_content_sha256 !== args.intent.compose_content_sha256;
+      if (app.target_mode === 'inline_blueprint' && composeChanged) {
         this.clearInlineFreezePointers(app);
       }
       this.invalidatePlacementOnMaterialChange(app, args.envelope, extras);
@@ -4618,8 +4639,13 @@ export class GitOpsTransitions {
 
   /**
    * Drop Inline freeze pointers so the next successful deploy can mint a new
-   * generation and expected set for the current intent. Does not delete the
+   * generation and expected set for the current compose. Does not delete the
    * prior generation/artifact rows (history stays).
+   *
+   * Only for a compose change. `intentRevised` decides, and the reason is that
+   * the generation names executable content: dropping it for a roster change
+   * would re-point placed targets at a fresh id for the content they are
+   * already running.
    */
   private clearInlineFreezePointers(app: GitOpsApplicationRow): void {
     app.accepted_generation_id = null;

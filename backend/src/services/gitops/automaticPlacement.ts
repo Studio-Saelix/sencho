@@ -63,6 +63,10 @@ export type AutomaticPlacementOutcome =
  * every application looked un-approved, and every multi-node candidate was
  * refused as a first placement. The approval row survives the pointer and is
  * still the authority record of the last set an operator accepted.
+ *
+ * A decision, not a report of what is running: the reconciler may not have
+ * executed the last approval yet, which is a separate question this leaves to
+ * `nodesHoldingPlacement`.
  */
 function approvedBaseline(
     store: GitOpsStore,
@@ -100,6 +104,37 @@ function approvedBaseline(
   } catch {
     return { ok: false };
   }
+}
+
+/**
+ * The nodes that already hold a placement for this application.
+ *
+ * The question the executor asks is "will the plan create here?", so this is the
+ * complement of that and nothing broader. An Inline Blueprint's own deployment
+ * rows answer it: the plan emits a `create` for a node with no row, or one the
+ * model has withdrawn, and an `update` or a drift check for every other row it
+ * finds. Reading "active" alone would have called a drifted or failed placement a
+ * fresh one, and naming a fresh place in the blast is what would let this
+ * approval authorize the redeploy the placement never covered.
+ *
+ * A Git-managed application runs no deployment rows and is placed once a target
+ * acknowledged an apply. A target that has acknowledged nothing does not count
+ * either way: the reconciler creates one to record an observation, which is a
+ * report about a node rather than a placement.
+ */
+function nodesHoldingPlacement(store: GitOpsStore, app: GitOpsApplicationRow): number[] {
+  const holding = new Set<number>();
+  for (const row of store.listTargets(app.id)) {
+    if (row.target_status === 'active' && row.applied_generation_id !== null) {
+      holding.add(row.node_id);
+    }
+  }
+  if (app.blueprint_id !== null) {
+    for (const row of DatabaseService.getInstance().listDeployments(app.blueprint_id)) {
+      if (row.status !== 'withdrawn') holding.add(row.node_id);
+    }
+  }
+  return [...holding];
 }
 
 /**
@@ -362,12 +397,27 @@ export function applyAutomaticPlacement(
   const baseline = approvedBaseline(store, app);
   const baselineNodeIds = baseline.ok ? baseline.nodeIds : [];
 
-  // The change itself, computed once so every evidence signal reads the same
-  // two sets rather than each re-deriving them.
-  const inBaseline = new Set(baselineNodeIds);
+  // Two deltas, because a decision and the executor read two different baselines.
+  //
+  // The decision reads the approved set: what has already been decided, so the
+  // change being decided is the one no decision has covered yet. What this
+  // approval places is read from what the fleet holds, so it names every node the
+  // candidate wants that no node carries.
+  //
+  // They are the same set in the ordinary case, once the last approval has run.
+  // They differ in the window where it has not: the reconciler executes one
+  // approval and refuses a plan it does not cover whole, so an approval written
+  // from the approved set alone covered only its own delta while the plan still
+  // wanted the earlier one, and neither change could run. A second roster change
+  // inside one tick is the reachable form of that window.
+  //
+  // Removals stay on the approved set. A withdrawal is judged by the observation
+  // of the workload that ran there, which exists only for a node the fleet has,
+  // and the node the approval dropped is the node that has to be reached.
   const inCandidate = new Set(candidateNodeIds);
-  const additions = candidateNodeIds.filter((nodeId) => !inBaseline.has(nodeId));
   const removals = baselineNodeIds.filter((nodeId) => !inCandidate.has(nodeId));
+  const holding = new Set(nodesHoldingPlacement(store, app));
+  const toPlace = candidateNodeIds.filter((nodeId) => !holding.has(nodeId));
 
   // A removal's evidence is an observation, and one that cannot be decoded is a
   // data fault, not a node that never answered. Collecting the limitations lets
@@ -389,15 +439,23 @@ export function applyAutomaticPlacement(
     // so only a node being added to can override one. Reading a literal false
     // here would let an automatic approval place a workload onto a cordoned node
     // while the decision carried a refusal nobody could ever reach.
-    cordonOverride: hasCordonOverride(additions),
+    //
+    // Read over the nodes this approval places rather than the nodes this decision
+    // is about, because the blast names the former and nothing it places may be
+    // authorized on evidence nobody read. A node an earlier decision placed and
+    // the fleet has not landed yet is one this approval places, so its cordon is
+    // a cordon this approval would override and the refusal has to be reachable.
+    cordonOverride: hasCordonOverride(toPlace),
     // A cordon on the node being withdrawn makes the withdrawal the cordon's doing,
     // not the policy's judgement about the workload.
     cordonDrivenRemoval: removals.length === 1 && hasCordonOverride(removals),
     // Each side judged by the evidence that actually exists for it: a node being
     // added is known from the registry, a node being left is known from the
-    // observation of the workload that ran there.
+    // observation of the workload that ran there. The added side reads the nodes
+    // this approval places, so nothing it places is authorized on evidence that
+    // was never read.
     affectedNodeState: worseState(
-      worstAddedNodeState(additions),
+      worstAddedNodeState(toPlace),
       worstRemovedNodeState(store, app.id, removals, removalEvidenceLimitations),
     ),
     // Both machines, not one. The application pointer covers a fetch or apply;
@@ -432,9 +490,17 @@ export function applyAutomaticPlacement(
   }
 
   try {
-    // A single stateless change approves exactly the target set the candidate
-    // asked for, so the effect is derived here from that same set rather than
-    // from anything a client supplied.
+    // The approval names the work: every node the candidate wants that no node
+    // carries, and every node the approved set dropped that the candidate no
+    // longer wants.
+    //
+    // Equal to the decision's own effect whenever the last approval has run, so
+    // the ordinary single change is unchanged. It is a superset in the window
+    // where it has not: an earlier decision's placement is carried forward rather
+    // than dropped, because dropping it left the plan needing work no standing
+    // approval could authorize and the tick waiting for an operator with no reason
+    // on the row. Carrying it costs nothing nobody has already decided, and this
+    // approval read the evidence for every node it names.
     //
     // Encoded through the shared encoder rather than assembled by hand. A
     // hand-built object was rejected by the transition's own decode, and because
@@ -442,8 +508,8 @@ export function applyAutomaticPlacement(
     // with no approval ever landing, which is how a feature can look wired up
     // while doing nothing.
     const effect = [
-      ...decision.effect.additions.map((nodeId) => ({ nodeId, outcome: 'place' as const })),
-      ...decision.effect.removals.map((nodeId) => ({ nodeId, outcome: 'remove' as const })),
+      ...toPlace.map((nodeId) => ({ nodeId, outcome: 'place' as const })),
+      ...removals.map((nodeId) => ({ nodeId, outcome: 'remove' as const })),
     ];
     const blastJson = encodeGitOpsApprovedTargetEffectJson(effect);
     GitOpsTransitions.getInstance().placementApproved({

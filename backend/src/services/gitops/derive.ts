@@ -2104,7 +2104,21 @@ function blueprintAckStatus(
     || (app.rollout_candidate_id !== null
       && target.rollout_candidate_id !== null
       && target.rollout_candidate_id !== app.rollout_candidate_id);
-  if (identityStale) return 'stale_acknowledgement';
+  // A newer intent and a newer candidate are what an identity test is for, but a
+  // roster change mints both while changing no compose, and a node the change
+  // retains is never re-deployed for it: the reconciler repairs a retained node
+  // only when the revision moved, and a placement decision covers the node set
+  // rather than the content. So the id this target acknowledged is behind for a
+  // change that left what it runs alone, and reporting that as a fault put a
+  // permanently unsatisfiable attention on the happy path of unattended
+  // placement.
+  //
+  // The compose is the test, not the id, and only for a node the application
+  // still wants. Both revisions have to be readable and the current candidate has
+  // to require this node: an intent row that cannot be resolved proves nothing
+  // about the content, and a node the candidate dropped is not a superseded
+  // acknowledgement but a withdrawal the plan is asking for.
+  if (identityStale && !acknowledgesSameCompose(app, target)) return 'stale_acknowledgement';
   // The outcome is only unconfirmed while something is going to confirm it.
   // A Blueprint whose drift policy never observes and whose health contract is
   // off has no confirmation coming, so claiming the outcome is unknown would
@@ -2123,6 +2137,47 @@ function blueprintAckStatus(
     return null;
   }
   return 'acknowledged_completion_unknown';
+}
+
+/**
+ * Whether the compose this target acknowledged is the compose the application
+ * wants now, for a node the application still wants.
+ *
+ * Both intent revisions must resolve and their compose digests must match, and
+ * the current candidate must still require this node. A target whose
+ * acknowledgement names the same revision the application is on is not the case
+ * this answers, so it reads the rows only when an id actually moved, which is the
+ * superseded case and not the converged one.
+ *
+ * The node-set leg is what keeps this from covering a withdrawal. A node the
+ * application has since dropped is running something nothing asks for, and the
+ * plan already says so with a withdrawal to approve; reading it as a superseded
+ * acknowledgement as well would put two pending signals on one roster removal,
+ * one of them with no operator action behind it.
+ */
+function acknowledgesSameCompose(
+  app: GitOpsApplicationRow,
+  target: GitOpsTargetCurrentRow,
+): boolean {
+  if (app.intent_revision_id === null || target.intent_revision_id === null) return false;
+  if (app.intent_revision_id === target.intent_revision_id) return false;
+  const store = GitOpsStore.getInstance();
+  const wanted = store.getIntentRevision(app.intent_revision_id);
+  const acknowledged = store.getIntentRevision(target.intent_revision_id);
+  if (!wanted || !acknowledged) return false;
+  if (wanted.compose_content_sha256 !== acknowledged.compose_content_sha256) return false;
+  const candidate = app.rollout_candidate_id
+    ? store.getRolloutCandidate(app.rollout_candidate_id)
+    : undefined;
+  if (!candidate || candidate.application_id !== app.id) return false;
+  // A candidate from an older intent describes a node set the application has
+  // left, so it cannot answer what it wants now.
+  if (candidate.intent_revision_id !== app.intent_revision_id) return false;
+  try {
+    return decodeGitOpsRequiredTargetsJson(candidate.required_targets_json).nodeIds.includes(target.node_id);
+  } catch {
+    return false;
+  }
 }
 
 /**

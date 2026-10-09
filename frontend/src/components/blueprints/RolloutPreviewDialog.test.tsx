@@ -255,6 +255,10 @@ describe('RolloutPreviewDialog', () => {
 
         await waitFor(() => expect(screen.getByText(/placement policy: approved/i)).toBeInTheDocument());
         expect(screen.queryByText(/legacy combined/i)).toBeNull();
+        // The dialog used to claim the fleet cannot change until it is confirmed,
+        // which is false the moment a policy has approved the plan on its own.
+        expect(screen.queryByText(/need this confirmation before the reconciler mutates/i)).toBeNull();
+        expect(screen.getByText(/placement policy already approves this plan/i)).toBeInTheDocument();
     });
 
     it('states why an Enforce plan the policy approved is waiting', async () => {

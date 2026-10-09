@@ -1119,6 +1119,90 @@ describe('policy placement authority on an automatic rollout', () => {
         expect(deployedIds).not.toContain(nodeA.id);
     });
 
+    it('carries an unlanded placement forward so two roster changes in one tick both run', async () => {
+        // The reconciler executes one approval and refuses a plan it does not
+        // cover whole. An approval written from the approved set alone covers only
+        // its own delta, so a second roster change arriving before the first one
+        // landed produced an approval the plan could not run, and both additions
+        // waited for an operator with no refusal recorded to explain the wait.
+        const nodeA = seedNode();
+        const nodeB = seedNode();
+        const nodeC = seedNode();
+        const blueprintId = await seedPolicyPlacedInline({
+            rollout: 'automatic',
+            initialNodeIds: [nodeA.id],
+            addedNodeIds: [nodeB.id],
+        });
+
+        // The second roster change, before the reconciler has placed the first.
+        const { commitBlueprintUpdate } = await import('../services/gitops/blueprintProducers');
+        const desiredIdsFor = (current: import('../services/DatabaseService').Blueprint) => BlueprintReconciler.getInstance()
+            .listDesiredNodes(current, DatabaseService.getInstance().getNodes())
+            .map(n => n.id);
+        commitBlueprintUpdate(
+            blueprintId,
+            { selector: { type: 'nodes' as const, ids: [nodeA.id, nodeB.id, nodeC.id] } },
+            'admin',
+            desiredIdsFor,
+        );
+
+        const checkSpy = vi.spyOn(BlueprintService.getInstance(), 'checkForDrift').mockResolvedValue({ kind: 'matched' });
+        const deploySpy = vi.spyOn(BlueprintService.getInstance(), 'deployToNode').mockResolvedValue({ status: 'active' });
+        await BlueprintReconciler.getInstance().reconcileOne(blueprintId);
+
+        const deployedIds = deploySpy.mock.calls.map(c => (c[1] as { id: number }).id);
+        expect(deployedIds).toContain(nodeB.id);
+        expect(deployedIds).toContain(nodeC.id);
+        expect(deployedIds).not.toContain(nodeA.id);
+        expect(checkSpy.mock.calls.map(c => (c[1] as { id: number }).id)).toContain(nodeA.id);
+    });
+
+    it('names only the nodes the fleet does not hold, so a drifted placement is never redeployed under the approval', async () => {
+        // The blast is what the executor's coverage check reads, and a `place`
+        // entry covers an `update` on that node too. Reading "not active" as "not
+        // placed" would have named the drifted node, and the approval would then
+        // authorize the redeploy of compose it never covered, which is the one
+        // thing a placement decision may not roll out.
+        const nodeA = seedNode();
+        const nodeB = seedNode();
+        const nodeC = seedNode();
+        const blueprintId = await seedPolicyPlacedInline({
+            rollout: 'automatic',
+            initialNodeIds: [nodeA.id],
+            addedNodeIds: [nodeB.id],
+        });
+
+        // The retained node's placement ran and drifted. It still holds the
+        // workload, so it is not a fresh place.
+        DatabaseService.getInstance().getDb().prepare(
+            `UPDATE blueprint_deployments SET status = 'drifted' WHERE blueprint_id = ? AND node_id = ?`,
+        ).run(blueprintId, nodeA.id);
+
+        const { commitBlueprintUpdate } = await import('../services/gitops/blueprintProducers');
+        const desiredIdsFor = (current: import('../services/DatabaseService').Blueprint) => BlueprintReconciler.getInstance()
+            .listDesiredNodes(current, DatabaseService.getInstance().getNodes())
+            .map(n => n.id);
+        commitBlueprintUpdate(
+            blueprintId,
+            { selector: { type: 'nodes' as const, ids: [nodeA.id, nodeB.id, nodeC.id] } },
+            'admin',
+            desiredIdsFor,
+        );
+
+        const { GitOpsStore } = await import('../services/gitops/store');
+        const { decodeGitOpsApprovedTargetEffectJson } = await import('../services/gitops/json');
+        const live = GitOpsStore.getInstance().getLiveBlueprintApplication(blueprintId)!;
+        const blast = decodeGitOpsApprovedTargetEffectJson(
+            GitOpsStore.getInstance().getApproval(live.placement_approval_ref!)!.blast_json!,
+        );
+        expect(blast.map(entry => entry.nodeId)).not.toContain(nodeA.id);
+        // The earlier decision's placement is still unlanded, so it is carried.
+        expect(blast).toEqual([
+            { nodeId: nodeB.id, outcome: 'place' },
+            { nodeId: nodeC.id, outcome: 'place' },
+        ]);
+    });
+
     it('leaves a combined compose and roster edit to the operator', async () => {
         const nodeA = seedNode();
         const nodeB = seedNode();

@@ -299,6 +299,58 @@ describe('the Blueprint acknowledgement statuses reach the projection', () => {
       expect(projection.drift.find((item) => item.class === 'runtime')?.action).toBe('none');
     });
 
+    it('is not reported when a roster change left the target on the same compose, in either Blueprint mode', () => {
+      // The case the identity test has to forgive. A roster change mints a new
+      // intent and a new candidate over the same compose and never re-deploys a
+      // node the change retains, so the acknowledged ids stay behind for ever and
+      // the status would never clear. Both Blueprint modes reach it, and neither
+      // has a deploy-bound writer that could produce a later acknowledgement.
+      const store = GitOpsStore.getInstance();
+      const { applicationId } = ackedBlueprint('rosterchange', {
+        application: { rollout_candidate_id: 'rc-rosterchange' },
+        target: { intent_revision_id: 'ir-rosterchange-old' },
+      });
+      // The revision this target acknowledged, same compose digest, smaller
+      // roster. Only the intent the application left is on the row already.
+      store.insertIntentRevision({
+        id: 'ir-rosterchange-old',
+        application_id: applicationId,
+        blueprint_id: store.getApplication(applicationId)!.blueprint_id!,
+        compose_content_sha256: 'c'.repeat(64),
+        blueprint_revision: 1,
+        deploy_stack_name: `${applicationId}-stack`,
+        selector_json: '{"nodeIds":[1]}',
+        pinned_node_id: null,
+        cordon_implications_json: '[]',
+        rollout_strategy_json: '{}',
+        runtime_drift_policy: 'observe',
+        stateful_policy_json: null,
+        health_failure_rollback_policy_json: null,
+        operation_id: 'op-ir-rosterchange-old',
+        actor: 'tester',
+        created_at: 1,
+      });
+      store.insertRolloutCandidate({
+        id: 'rc-rosterchange',
+        application_id: applicationId,
+        intent_revision_id: 'ir-rosterchange',
+        compose_content_sha256: 'c'.repeat(64),
+        accepted_generation_id: null,
+        artifact_set_id: null,
+        // The retained node is still required, and it is running the compose.
+        required_targets_json: '{"nodeIds":[1]}',
+        authoritative: 1,
+        provenance: 'roster_change',
+        operation_id: 'op-rc-rosterchange',
+        created_at: 1,
+      });
+
+      const projection = project(applicationId);
+      if (projection.targetMode === 'not_applicable') throw new Error('expected application');
+      expect(projection.targets[0]?.runtime.status).not.toBe('stale_acknowledgement');
+      expect(attentionReasons(projection)).not.toContain('rollout_stale_acknowledgement');
+    });
+
     it('is not reported for a Direct target, which has a deploy-bound writer', () => {
       const store = GitOpsStore.getInstance();
       const applicationId = 'app-ack-direct';
