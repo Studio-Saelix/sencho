@@ -293,6 +293,33 @@ function approvalFailureReason(message: string): PlacementPolicyReason {
 }
 
 /**
+ * Whether this candidate's placement moved because a pin moved.
+ *
+ * A pin still on the current intent is one direction. A clear is the other:
+ * the current intent names no pin, so the standing approval has to be read.
+ * An approval recorded on this intent already accepted the clear. An approval
+ * recorded on an older unpinned intent does not, when a pin was written after
+ * it and never confirmed. A missing approval intent fails closed.
+ */
+function pinDrivenPlacement(
+  store: GitOpsStore,
+  applicationId: string,
+  intent: { id: string; pinned_node_id: number | null },
+): boolean {
+  if (intent.pinned_node_id !== null) return true;
+  const approval = store.latestPlacementApproval(applicationId);
+  if (!approval?.intent_revision_id) {
+    const previous = store.previousIntentRevision(applicationId, intent.id);
+    return (previous?.pinned_node_id ?? null) !== null;
+  }
+  if (approval.intent_revision_id === intent.id) return false;
+  const approvedIntent = store.getIntentRevision(approval.intent_revision_id);
+  if (!approvedIntent || approvedIntent.application_id !== applicationId) return true;
+  if (approvedIntent.pinned_node_id !== null) return true;
+  return store.hasPinnedIntentAfter(applicationId, approvedIntent.id, intent.id);
+}
+
+/**
  * Decide, and apply an approval when the decision allows one.
  *
  * Safe to call on every placement event. It refuses without writing whenever the
@@ -350,11 +377,9 @@ export function applyAutomaticPlacement(
     statelessness: deriveStatelessness(app, app.blueprint_id
       ? (DatabaseService.getInstance().getBlueprint(app.blueprint_id) ?? undefined)
       : undefined),
-    // A pin is an operator's choice of where a workload may run, so placement
-    // that moved because a pin moved is never automatic. Read from the intent
-    // rather than from the column name: `pinnedOverridesCordon` records that the
-    // Blueprint is pinned, not that a node is cordoned.
-    pinDriven: intent.pinned_node_id !== null,
+    // A set or a clear. The helper reads the standing approval, because a
+    // clear leaves the current intent with no pin.
+    pinDriven: pinDrivenPlacement(store, app.id, intent),
     // A cordon is an operator saying a node is not available for new placements,
     // so only a node being added to can override one. Reading a literal false
     // here would let an automatic approval place a workload onto a cordoned node

@@ -1135,10 +1135,11 @@ blueprintsRouter.put('/:id/pin', async (req: Request, res: Response): Promise<vo
         // the state this request committed rather than whatever the background
         // pass has reached by the time it is serialized.
         const gitopsRevision = projectCommittedRevision(id, 'blueprint pin');
-        // A pin that moved clears approval, so reconcileOne cannot mutate until
-        // Confirm Apply. Re-pinning the node already pinned changes nothing and
-        // leaves approval intact. Called either way so the resulting state is
-        // evaluated immediately instead of waiting for the next tick.
+        // A pin that moved, including clearing one, waits for Confirm Apply, so
+        // reconcileOne cannot place the freed node on its own. Re-pinning the
+        // node already pinned changes nothing and leaves approval intact.
+        // Called either way so the resulting state is evaluated immediately
+        // instead of waiting for the next tick.
         if (updated.enabled) {
             BlueprintReconciler.getInstance().reconcileOne(id).catch(err => {
                 console.warn('[Blueprints] post-pin reconcileOne failed:', err);

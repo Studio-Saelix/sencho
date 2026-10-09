@@ -360,6 +360,158 @@ describe('reconcileOne approval gate (real path)', () => {
         expect(deploySpy).not.toHaveBeenCalled();
         expect(withdrawSpy).not.toHaveBeenCalled();
     });
+
+    it('clearing a pin does not deploy the freed node under both automatic policies', async () => {
+        const nodeA = seedNode();
+        const nodeB = seedNode();
+        const { commitBlueprintCreate, commitBlueprintPin } = await import('../services/gitops/blueprintProducers');
+        const { GitOpsStore } = await import('../services/gitops/store');
+        const { GitOpsTransitions } = await import('../services/gitops/transitions');
+        const { encodeGitOpsApprovedTargetEffectJson } = await import('../services/gitops/json');
+        const { newGitOpsId } = await import('../services/gitops/directApplication');
+        const desiredIdsFor = (blueprint: import('../services/DatabaseService').Blueprint): number[] =>
+            BlueprintReconciler.getInstance()
+                .listDesiredNodes(blueprint, DatabaseService.getInstance().getNodes())
+                .map((node) => node.id);
+
+        counter += 1;
+        const bp = commitBlueprintCreate({
+            name: `bp-gate-unpin-${counter}`,
+            description: null,
+            compose_content: 'services:\n  app:\n    image: nginx\n',
+            selector: { type: 'nodes', ids: [nodeA.id, nodeB.id] },
+            drift_mode: 'observe',
+            classification: 'stateless',
+            classification_reasons: [],
+            enabled: true,
+            created_by: 'admin',
+        }, desiredIdsFor);
+
+        const store = GitOpsStore.getInstance();
+        const created = store.getLiveBlueprintApplication(bp.id)!;
+        DatabaseService.getInstance().getDb().prepare(
+            `UPDATE gitops_applications
+                SET placement_policy = 'bounded_auto', rollout_authorization_policy = 'automatic'
+              WHERE id = ?`,
+        ).run(created.id);
+
+        // Approved while pinned to A, with A already running this revision, so
+        // the only thing that can refuse placing B is the pin change itself.
+        commitBlueprintPin(bp.id, nodeA.id, 'admin', desiredIdsFor);
+        const pinned = store.getLiveBlueprintApplication(bp.id)!;
+        const pinnedBlueprint = DatabaseService.getInstance().getBlueprint(bp.id)!;
+        GitOpsTransitions.getInstance().placementApproved({
+            applicationId: pinned.id,
+            approvalId: newGitOpsId(),
+            intentRevisionId: pinned.intent_revision_id!,
+            blastJson: encodeGitOpsApprovedTargetEffectJson([{ nodeId: nodeA.id, outcome: 'place' }]),
+            requiredNodeIds: [nodeA.id],
+            fingerprint: null,
+            actor: 'admin',
+            envelope: { operationId: newGitOpsId(), actor: 'admin', trigger: 'test', at: Date.now() },
+            rolloutGenerationId: newGitOpsId(),
+            candidateId: pinned.rollout_candidate_id!,
+            authority: 'operator',
+            policyProvenanceJson: null,
+        });
+        DatabaseService.getInstance().getDb().prepare(
+            `INSERT INTO blueprint_deployments (blueprint_id, node_id, status, applied_revision, last_deployed_at)
+             VALUES (?, ?, 'active', ?, ?)`,
+        ).run(bp.id, nodeA.id, pinnedBlueprint.revision, Date.now());
+
+        const deploySpy = vi.spyOn(BlueprintService.getInstance(), 'deployToNode').mockResolvedValue({ status: 'active' });
+        const withdrawSpy = vi.spyOn(BlueprintService.getInstance(), 'withdrawFromNode').mockResolvedValue({ status: 'withdrawn' });
+        const unpinRes = await request(app)
+            .put(`/api/blueprints/${bp.id}/pin`)
+            .set('Cookie', adminCookie)
+            .send({ nodeId: null });
+        expect(unpinRes.status).toBe(200);
+        expect(unpinRes.body.approval_status).toBe('pending');
+
+        await BlueprintReconciler.getInstance().reconcileOne(bp.id);
+        expect(deploySpy).not.toHaveBeenCalled();
+        expect(withdrawSpy).not.toHaveBeenCalled();
+
+        const preview = await request(app).get(`/api/blueprints/${bp.id}/preview`).set('Cookie', adminCookie);
+        expect(preview.status).toBe(200);
+        expect(preview.body.effectiveApproval).toBe('pending');
+        expect(preview.body.approvalAuthority).toBeNull();
+    });
+
+    it('clearing a pin does not deploy when the last approval predates the pin', async () => {
+        const nodeA = seedNode();
+        const nodeB = seedNode();
+        const { commitBlueprintCreate, commitBlueprintPin } = await import('../services/gitops/blueprintProducers');
+        const { GitOpsStore } = await import('../services/gitops/store');
+        const { GitOpsTransitions } = await import('../services/gitops/transitions');
+        const { encodeGitOpsApprovedTargetEffectJson } = await import('../services/gitops/json');
+        const { newGitOpsId } = await import('../services/gitops/directApplication');
+        const desiredIdsFor = (blueprint: import('../services/DatabaseService').Blueprint): number[] =>
+            BlueprintReconciler.getInstance()
+                .listDesiredNodes(blueprint, DatabaseService.getInstance().getNodes())
+                .map((node) => node.id);
+
+        counter += 1;
+        const bp = commitBlueprintCreate({
+            name: `bp-gate-unpin-stale-${counter}`,
+            description: null,
+            compose_content: 'services:\n  app:\n    image: nginx\n',
+            selector: { type: 'nodes', ids: [nodeA.id, nodeB.id] },
+            drift_mode: 'observe',
+            classification: 'stateless',
+            classification_reasons: [],
+            enabled: true,
+            created_by: 'admin',
+        }, desiredIdsFor);
+
+        const store = GitOpsStore.getInstance();
+        const created = store.getLiveBlueprintApplication(bp.id)!;
+        // Confirmed while unpinned, and only for A. The selector already names
+        // B, so clearing a later pin is a single addition unless the pin itself
+        // keeps it operator-only.
+        GitOpsTransitions.getInstance().placementApproved({
+            applicationId: created.id,
+            approvalId: newGitOpsId(),
+            intentRevisionId: created.intent_revision_id!,
+            blastJson: encodeGitOpsApprovedTargetEffectJson([{ nodeId: nodeA.id, outcome: 'place' }]),
+            requiredNodeIds: [nodeA.id],
+            fingerprint: null,
+            actor: 'admin',
+            envelope: { operationId: newGitOpsId(), actor: 'admin', trigger: 'test', at: Date.now() },
+            rolloutGenerationId: newGitOpsId(),
+            candidateId: created.rollout_candidate_id!,
+            authority: 'operator',
+            policyProvenanceJson: null,
+        });
+        DatabaseService.getInstance().getDb().prepare(
+            `UPDATE gitops_applications
+                SET placement_policy = 'bounded_auto', rollout_authorization_policy = 'automatic'
+              WHERE id = ?`,
+        ).run(created.id);
+        DatabaseService.getInstance().getDb().prepare(
+            `INSERT INTO blueprint_deployments (blueprint_id, node_id, status, applied_revision, last_deployed_at)
+             VALUES (?, ?, 'active', ?, ?)`,
+        ).run(bp.id, nodeA.id, bp.revision, Date.now());
+
+        commitBlueprintPin(bp.id, nodeA.id, 'admin', desiredIdsFor);
+
+        const deploySpy = vi.spyOn(BlueprintService.getInstance(), 'deployToNode').mockResolvedValue({ status: 'active' });
+        const withdrawSpy = vi.spyOn(BlueprintService.getInstance(), 'withdrawFromNode').mockResolvedValue({ status: 'withdrawn' });
+        const unpinRes = await request(app)
+            .put(`/api/blueprints/${bp.id}/pin`)
+            .set('Cookie', adminCookie)
+            .send({ nodeId: null });
+        expect(unpinRes.status).toBe(200);
+
+        await BlueprintReconciler.getInstance().reconcileOne(bp.id);
+        expect(deploySpy).not.toHaveBeenCalled();
+        expect(withdrawSpy).not.toHaveBeenCalled();
+
+        const preview = await request(app).get(`/api/blueprints/${bp.id}/preview`).set('Cookie', adminCookie);
+        expect(preview.status).toBe(200);
+        expect(preview.body.effectiveApproval).toBe('pending');
+        expect(preview.body.approvalAuthority).toBeNull();
+    });
 });
 
 describe('reconcileConfirmedPlan fingerprint gate', () => {
