@@ -625,23 +625,24 @@ export function composeEffectiveApproval(
 /**
  * The Enforce hold, or null when Enforce is not what is keeping this plan waiting.
  *
- * Rewriting each repair as an observation asks the question the policy can
- * answer: would this plan run if the retained nodes were only being checked?
- * A yes means the placement approval covers the plan and Enforce is the only
- * reason it is waiting. Any other refusal (a compose edit, a first placement,
- * a manual rollout) is a different wait, and this reason would misname it.
+ * The same method that refuses execution answers the question, with the hold
+ * turned off: would this plan run if the retained nodes were only being
+ * checked? A yes means the placement approval covers the plan and Enforce is
+ * the only reason it is waiting, including when a retained node is mid-deploy
+ * and its repair has dropped out of the plan. Any other refusal (a compose
+ * edit, a first placement, a manual rollout) is a different wait, and this
+ * reason would misname it.
  */
 function enforcePlacementHoldReason(
     blueprint: Blueprint,
     executorActions: ConfirmableActionRef[],
 ): string | null {
     if (blueprint.drift_mode !== 'enforce') return null;
-    if (!executorActions.some((ref) => ref.action === 'check_enforce')) return null;
     const asObservation = executorActions.map((ref) => (
         ref.action === 'check_enforce' ? { nodeId: ref.nodeId, action: 'check_observe' as const } : ref
     ));
     const wouldRun = BlueprintReconciler.getInstance()
-        .policyPlacementAuthorizedActions(blueprint, asObservation);
+        .policyPlacementAuthorizedActions(blueprint, asObservation, { enforceHold: false });
     return wouldRun ? ENFORCE_APPROVAL_HOLD_REASON : null;
 }
 

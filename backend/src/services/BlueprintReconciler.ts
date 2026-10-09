@@ -916,7 +916,7 @@ export class BlueprintReconciler {
      * policy approval is bound to the current intent, which is what makes a
      * policy decision reach execution after a label or cordon move.
      *
-     * Seven conditions keep it inside the authority model. The application must
+     * Eight conditions keep it inside the authority model. The application must
      * be inline, which is where a combined approval is the executor. The
      * placement policy must still be the one that could have written this
      * approval: taking it back to operator approval is an operator saying no
@@ -930,12 +930,19 @@ export class BlueprintReconciler {
      * content the plan builds on; a first placement has none and waits for
      * Apply. Every retained node must already run the current revision, so a
      * compose edit the policy never saw cannot ride out with a roster change.
-     * And the approval must cover every action in the plan, so an uncovered
-     * plan is refused whole rather than partly executed.
+     * The approval must cover every action in the plan, so an uncovered plan
+     * is refused whole rather than partly executed. And the drift mode must
+     * not be Enforce: a policy approval survives that switch, and a retained
+     * node that is mid-deploy drops its repair out of the plan, so without
+     * this check the added node would place on its own.
+     *
+     * `enforceHold` is false only for the preview's question: would this plan
+     * run if Enforce were not holding it? Execution always leaves the hold on.
      */
     public policyPlacementAuthorizedActions(
         blueprint: Blueprint,
         executorActions: ConfirmableActionRef[],
+        options?: { enforceHold?: boolean },
     ): ConfirmableActionRef[] | null {
         const app = GitOpsStore.getInstance().getLiveBlueprintApplication(blueprint.id);
         if (!app || app.target_mode !== 'inline_blueprint') return null;
@@ -955,10 +962,14 @@ export class BlueprintReconciler {
         if (retained.length === 0) return null;
         // A retained node in flight emits an informational row, so it drops out
         // of the plan and cannot fail the coverage count above. Reading the
-        // deployment rows directly closes that: the policy must not place an
-        // added node under a compose edit the policy never saw just because the
-        // retained node that would have exposed it was mid-deploy.
+        // deployment rows directly closes the compose case: the policy must not
+        // place an added node under a compose edit the policy never saw just
+        // because the retained node that would have exposed it was mid-deploy.
         if (!this.retainedNodesAtCurrentRevision(blueprint, retained)) return null;
+        // Enforce is the other in-flight case. The revision still matches, and
+        // the repair is not in the plan, so the checks above would place the
+        // added node. The mode itself holds the plan until Apply.
+        if (options?.enforceHold !== false && blueprint.drift_mode === 'enforce') return null;
         return authorized;
     }
 

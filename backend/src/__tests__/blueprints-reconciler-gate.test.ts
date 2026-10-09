@@ -1362,6 +1362,102 @@ describe('policy placement authority on an automatic rollout', () => {
         );
     });
 
+    it('does not place an added node under Enforce while a retained node is in flight', async () => {
+        // A correcting or deploying row is informational, so the repair drops
+        // out of the plan and the revision still matches. Enforce has to hold
+        // the added node's place anyway, and the preview has to say why.
+        const { commitBlueprintUpdate } = await import('../services/gitops/blueprintProducers');
+        const desiredIdsFor = (bp: import('../services/DatabaseService').Blueprint): number[] =>
+            BlueprintReconciler.getInstance()
+                .listDesiredNodes(bp, DatabaseService.getInstance().getNodes())
+                .map((n) => n.id);
+        for (const status of ['correcting', 'deploying'] as const) {
+            const nodeA = seedNode();
+            const nodeB = seedNode();
+            const blueprintId = await seedPolicyPlacedInline({
+                rollout: 'automatic',
+                initialNodeIds: [nodeA.id],
+                addedNodeIds: [nodeB.id],
+            });
+            DatabaseService.getInstance().getDb().prepare(
+                `UPDATE blueprint_deployments SET status = ? WHERE blueprint_id = ? AND node_id = ?`,
+            ).run(status, blueprintId, nodeA.id);
+            commitBlueprintUpdate(blueprintId, { drift_mode: 'enforce' }, 'admin', desiredIdsFor);
+
+            const deploySpy = vi.spyOn(BlueprintService.getInstance(), 'deployToNode')
+                .mockResolvedValue({ status: 'active' });
+            try {
+                await BlueprintReconciler.getInstance().reconcileOne(blueprintId);
+                expect(deploySpy).not.toHaveBeenCalled();
+
+                const preview = await request(app).get(`/api/blueprints/${blueprintId}/preview`).set('Cookie', adminCookie);
+                expect(preview.body.effectiveApproval).toBe('pending');
+                expect(preview.body.approvalHoldReason).toBe(
+                    'Enforce waits for Apply. Automatic placement acts in Observe or Suggest. In Enforce, a place, a withdrawal, or a repair under a policy approval stays pending until you confirm it.',
+                );
+            } finally {
+                deploySpy.mockRestore();
+            }
+        }
+    });
+
+    it('does not blame Enforce when rollout authorization is manual', async () => {
+        const nodeA = seedNode();
+        const nodeB = seedNode();
+        const blueprintId = await seedPolicyPlacedInline({
+            rollout: 'manual',
+            initialNodeIds: [nodeA.id],
+            addedNodeIds: [nodeB.id],
+        });
+        const { commitBlueprintUpdate } = await import('../services/gitops/blueprintProducers');
+        const desiredIdsFor = (bp: import('../services/DatabaseService').Blueprint): number[] =>
+            BlueprintReconciler.getInstance()
+                .listDesiredNodes(bp, DatabaseService.getInstance().getNodes())
+                .map((n) => n.id);
+        commitBlueprintUpdate(blueprintId, { drift_mode: 'enforce' }, 'admin', desiredIdsFor);
+
+        const deploySpy = vi.spyOn(BlueprintService.getInstance(), 'deployToNode')
+            .mockResolvedValue({ status: 'active' });
+        try {
+            await BlueprintReconciler.getInstance().reconcileOne(blueprintId);
+            expect(deploySpy).not.toHaveBeenCalled();
+            const preview = await request(app).get(`/api/blueprints/${blueprintId}/preview`).set('Cookie', adminCookie);
+            expect(preview.body.effectiveApproval).toBe('pending');
+            expect(preview.body.approvalHoldReason).toBeNull();
+        } finally {
+            deploySpy.mockRestore();
+        }
+    });
+
+    it('does not blame Enforce for a compose edit', async () => {
+        const nodeA = seedNode();
+        const nodeB = seedNode();
+        const blueprintId = await seedPolicyPlacedInline({
+            rollout: 'automatic',
+            initialNodeIds: [nodeA.id],
+            addedNodeIds: [nodeB.id],
+            alsoChangeCompose: true,
+        });
+        const { commitBlueprintUpdate } = await import('../services/gitops/blueprintProducers');
+        const desiredIdsFor = (bp: import('../services/DatabaseService').Blueprint): number[] =>
+            BlueprintReconciler.getInstance()
+                .listDesiredNodes(bp, DatabaseService.getInstance().getNodes())
+                .map((n) => n.id);
+        commitBlueprintUpdate(blueprintId, { drift_mode: 'enforce' }, 'admin', desiredIdsFor);
+
+        const deploySpy = vi.spyOn(BlueprintService.getInstance(), 'deployToNode')
+            .mockResolvedValue({ status: 'active' });
+        try {
+            await BlueprintReconciler.getInstance().reconcileOne(blueprintId);
+            expect(deploySpy).not.toHaveBeenCalled();
+            const preview = await request(app).get(`/api/blueprints/${blueprintId}/preview`).set('Cookie', adminCookie);
+            expect(preview.body.effectiveApproval).toBe('pending');
+            expect(preview.body.approvalHoldReason).toBeNull();
+        } finally {
+            deploySpy.mockRestore();
+        }
+    });
+
     it('executes nothing on a compose-only edit', async () => {
         // A compose edit bumps the revision, so the retained node is no longer
         // at the revision the policy saw. The policy must not roll that content

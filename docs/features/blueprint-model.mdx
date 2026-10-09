@@ -154,7 +154,7 @@ Holding only ever applies to **Enforce**, because it is a decision about auto-re
 
 The reason on a held row is the reason the repair was declined, not the drift itself, so the Drift panel is where you read what is actually running. A row held under Enforce also keeps reading **Repair held** if you switch to Observe or Suggest while the drift cannot be classified, until the cause clears.
 
-Changing the drift mode clears the confirmation you recorded. It leaves a policy placement grant already on record in place. On an Inline Blueprint the new mode waits for Apply, unless that grant is already recorded and rollout authorization is automatic: then Observe or Suggest keeps reconciling under it, and Enforce holds a policy-only plan until you confirm it. The mode change leaves the placement the fleet already acknowledged, so once you confirm, Enforce acts on that generation.
+Changing the drift mode clears the confirmation you recorded. It leaves a policy placement grant already on record in place. On an Inline Blueprint the new mode waits for Apply, unless that grant is already recorded and rollout authorization is automatic: then Observe or Suggest keeps reconciling under it, and Enforce holds a policy-only plan until you confirm it. On an Inline Blueprint, once you confirm, Enforce acts on the generation the fleet already acknowledged. A Git-managed Blueprint has no confirm step for that content: when a repair is due, Enforce restores the generation that target already acknowledged.
 
 A repair is held when:
 
@@ -246,7 +246,7 @@ Raw `POST /api/blueprints/:id/apply` clients must send `{ planFingerprint, gitop
 
 ### Edit
 
-Click **Edit** on the detail sheet. On an Inline Blueprint, editing the compose bumps the revision. Stateless blueprints redeploy on the next reconciliation tick. Stateful and state-unknown blueprints re-enter **Awaiting confirmation** on every targeted node so the operator can decide whether the new revision is safe for each node's local data, whether or not the change actually touches a volume. On a Git-managed Blueprint the compose editor is read-only; selector, drift policy, and enabled still save.
+Click **Edit** on the detail sheet. On an Inline Blueprint, editing the compose bumps the revision and clears the approval you confirmed, so the reconciler waits for Apply before it places, withdraws, or repairs anything. Stateful and state-unknown blueprints also re-enter **Awaiting confirmation** on every targeted node so you can decide whether the new revision is safe for each node's local data, whether or not the change actually touches a volume. On a Git-managed Blueprint the compose editor is read-only; selector, drift policy, and enabled still save.
 
 ### Convert to Git-managed content
 
