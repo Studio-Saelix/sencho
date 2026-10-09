@@ -138,6 +138,13 @@ export interface BlueprintPreviewResult {
      * approval would be false.
      */
     approvalAuthority: ApprovalAuthority | null;
+    /**
+     * Why a policy-approved plan is still waiting, or null when nothing is
+     * holding it. Set only when the composed approval is pending, so the tick
+     * will not run any of the plan. A plan the combined approval still covers
+     * in part stays reapproval required and does not carry this sentence.
+     */
+    approvalHoldReason: string | null;
     planFingerprint: string;
     generatedAt: number;
     summary: { safe: number; warning: number; blocker: number; total: number };
@@ -551,6 +558,17 @@ function asApprovedBlueprint(blueprint: Blueprint): Blueprint & BlueprintApprova
 }
 
 /**
+ * Why an Enforce plan a policy already approved is still waiting for Apply.
+ *
+ * The placement policy covers the node set, and Enforce then asks every
+ * retained node for a repair. That repair is not part of the placement
+ * decision, so the policy path declines the whole plan. The sentence is the
+ * one the rollout preview and the operator docs both show.
+ */
+export const ENFORCE_APPROVAL_HOLD_REASON =
+    'Enforce waits for Apply. Automatic placement acts in Observe or Suggest. In Enforce, a place, a withdrawal, or a repair under a policy approval stays pending until you confirm it.';
+
+/**
  * The composed authority a preview, a list row, and the reconciler all read.
  *
  * The policy path is tried first, mirroring the reconciler: its approval is
@@ -573,19 +591,58 @@ export function composeEffectiveApproval(
     effectiveApproval: EffectiveApproval;
     unauthorizedActions: ConfirmableActionRef[];
     approvalAuthority: ApprovalAuthority | null;
+    approvalHoldReason: string | null;
 } {
     if (executorActions.length > 0) {
         const policyAuthorized = BlueprintReconciler.getInstance()
             .policyPlacementAuthorizedActions(blueprint, executorActions);
         if (policyAuthorized) {
-            return { effectiveApproval: 'approved', unauthorizedActions: [], approvalAuthority: 'configured_policy' };
+            return {
+                effectiveApproval: 'approved',
+                unauthorizedActions: [],
+                approvalAuthority: 'configured_policy',
+                approvalHoldReason: null,
+            };
         }
     }
     const evaluated = evaluateEffectiveApproval(scopedApprovedBlueprint(blueprint), executorActions);
     if (evaluated.effectiveApproval === 'approved') {
-        return { ...evaluated, approvalAuthority: 'legacy_combined' };
+        return { ...evaluated, approvalAuthority: 'legacy_combined', approvalHoldReason: null };
     }
-    return { ...evaluated, approvalAuthority: null };
+    // reapproval_required means the combined approval still runs the subset it
+    // covers, including an Enforce repair. The hold sentence is only for a
+    // plan the tick will not touch.
+    if (evaluated.effectiveApproval !== 'pending') {
+        return { ...evaluated, approvalAuthority: null, approvalHoldReason: null };
+    }
+    return {
+        ...evaluated,
+        approvalAuthority: null,
+        approvalHoldReason: enforcePlacementHoldReason(blueprint, executorActions),
+    };
+}
+
+/**
+ * The Enforce hold, or null when Enforce is not what is keeping this plan waiting.
+ *
+ * Rewriting each repair as an observation asks the question the policy can
+ * answer: would this plan run if the retained nodes were only being checked?
+ * A yes means the placement approval covers the plan and Enforce is the only
+ * reason it is waiting. Any other refusal (a compose edit, a first placement,
+ * a manual rollout) is a different wait, and this reason would misname it.
+ */
+function enforcePlacementHoldReason(
+    blueprint: Blueprint,
+    executorActions: ConfirmableActionRef[],
+): string | null {
+    if (blueprint.drift_mode !== 'enforce') return null;
+    if (!executorActions.some((ref) => ref.action === 'check_enforce')) return null;
+    const asObservation = executorActions.map((ref) => (
+        ref.action === 'check_enforce' ? { nodeId: ref.nodeId, action: 'check_observe' as const } : ref
+    ));
+    const wouldRun = BlueprintReconciler.getInstance()
+        .policyPlacementAuthorizedActions(blueprint, asObservation);
+    return wouldRun ? ENFORCE_APPROVAL_HOLD_REASON : null;
 }
 
 /**
@@ -678,7 +735,7 @@ export async function buildBlueprintPreview(blueprintId: number): Promise<Bluepr
     // policy placement approval first, the legacy combined approval as the
     // fallback. Without the composition the editor would say pending while the
     // tick deployed anyway.
-    const { effectiveApproval, unauthorizedActions, approvalAuthority } =
+    const { effectiveApproval, unauthorizedActions, approvalAuthority, approvalHoldReason } =
         composeEffectiveApproval(blueprint, executorActions);
 
     const { requirements, compat, reqWarnings } = extractRequirements(blueprint.compose_content);
@@ -744,6 +801,7 @@ export async function buildBlueprintPreview(blueprintId: number): Promise<Bluepr
         approvalStatus: approvedBp.approval_status,
         effectiveApproval,
         approvalAuthority,
+        approvalHoldReason,
         planFingerprint: intentFingerprint(blueprint),
         generatedAt: Date.now(),
         summary,

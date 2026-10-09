@@ -257,6 +257,29 @@ describe('RolloutPreviewDialog', () => {
         expect(screen.queryByText(/legacy combined/i)).toBeNull();
     });
 
+    it('states why an Enforce plan the policy approved is waiting', async () => {
+        vi.mocked(previewBlueprint).mockResolvedValue(previewFixture({
+            ...confirmablePreview(),
+            effectiveApproval: 'pending',
+            approvalHoldReason: 'Enforce waits for Apply. Automatic placement acts in Observe or Suggest. In Enforce, a place, a withdrawal, or a repair under a policy approval stays pending until you confirm it.',
+        }));
+
+        render(
+            <RolloutPreviewDialog
+                blueprintId={1}
+                blueprintName="web"
+                open
+                onOpenChange={() => {}}
+                onApplied={() => {}}
+            />,
+        );
+
+        await waitFor(() => expect(screen.getByText(
+            'Enforce waits for Apply. Automatic placement acts in Observe or Suggest. In Enforce, a place, a withdrawal, or a repair under a policy approval stays pending until you confirm it.',
+        )).toBeInTheDocument());
+        expect(screen.queryByText(/legacy combined/i)).toBeNull();
+    });
+
     it('closes instead of arming a stale preview when the 409 refresh fails', async () => {
         const user = userEvent.setup();
         const onOpenChange = vi.fn();

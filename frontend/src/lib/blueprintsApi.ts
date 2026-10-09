@@ -153,6 +153,12 @@ export interface BlueprintPreview {
      * does. Absent on payloads from an older backend, which is the same as null.
      */
     approvalAuthority?: 'legacy_combined' | 'configured_policy' | null;
+    /**
+     * Why a policy-approved plan is still waiting, or null when nothing is
+     * holding it. Absent on payloads from an older backend, which shows no
+     * reason line.
+     */
+    approvalHoldReason?: string | null;
     planFingerprint: string;
     generatedAt: number;
     summary: { safe: number; warning: number; blocker: number; total: number };

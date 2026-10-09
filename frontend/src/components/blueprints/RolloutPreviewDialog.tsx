@@ -55,6 +55,9 @@ function approvalLabel(preview: BlueprintPreview): string {
         ? 'reapproval required'
         : preview.effectiveApproval;
     if (preview.approvalAuthority === 'configured_policy') return `placement policy: ${value}`;
+    // A hold names why the plan is waiting. Calling that wait a legacy combined
+    // approval would point at an authority that is not the one holding it.
+    if (preview.approvalHoldReason) return value;
     const hasLiveApplication = preview.gitops != null && preview.gitops.targetMode !== 'not_applicable';
     return hasLiveApplication ? `legacy combined: ${value}` : value;
 }
@@ -205,6 +208,9 @@ export function RolloutPreviewDialog({
                             <span className="text-destructive">Blockers {preview.summary.blocker}</span>
                             <span className="text-stat-subtitle">{approvalLabel(preview)}</span>
                         </div>
+                        {preview.approvalHoldReason ? (
+                            <p className="text-xs text-warning">{preview.approvalHoldReason}</p>
+                        ) : null}
                         <p className="text-xs text-stat-subtitle">{preview.healthNote}</p>
                         <GitOpsEvidenceSection preview={preview} />
                         {preview.gitopsFingerprint && (

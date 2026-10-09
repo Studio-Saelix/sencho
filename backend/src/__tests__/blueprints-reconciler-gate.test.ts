@@ -909,6 +909,7 @@ describe('policy placement authority on an automatic rollout', () => {
         // The authority has to be named, because the plan is approved by the
         // policy's decomposed placement approval and not by the combined one.
         expect(preview.body.approvalAuthority).toBe('configured_policy');
+        expect(preview.body.approvalHoldReason).toBeNull();
 
         const detail = await request(app).get(`/api/blueprints/${blueprintId}`).set('Cookie', adminCookie);
         expect(detail.status).toBe(200);
@@ -1204,6 +1205,97 @@ describe('policy placement authority on an automatic rollout', () => {
 
         const preview = await request(app).get(`/api/blueprints/${blueprintId}/preview`).set('Cookie', adminCookie);
         expect(preview.body.effectiveApproval).toBe('pending');
+        expect(preview.body.approvalHoldReason).toBe(
+            'Enforce waits for Apply. Automatic placement acts in Observe or Suggest. In Enforce, a place, a withdrawal, or a repair under a policy approval stays pending until you confirm it.',
+        );
+    });
+
+    it('executes nothing on a compose-only edit', async () => {
+        // A compose edit bumps the revision, so the retained node is no longer
+        // at the revision the policy saw. The policy must not roll that content
+        // out, and the preview must not blame Enforce for a wait that is not one.
+        const nodeA = seedNode();
+        const blueprintId = await seedPolicyPlacedInline({
+            rollout: 'automatic',
+            initialNodeIds: [nodeA.id],
+            addedNodeIds: [],
+            alsoChangeCompose: true,
+        });
+
+        const deploySpy = vi.spyOn(BlueprintService.getInstance(), 'deployToNode').mockResolvedValue({ status: 'active' });
+        const withdrawSpy = vi.spyOn(BlueprintService.getInstance(), 'withdrawFromNode').mockResolvedValue({ status: 'withdrawn' });
+        await BlueprintReconciler.getInstance().reconcileOne(blueprintId);
+
+        expect(deploySpy).not.toHaveBeenCalled();
+        expect(withdrawSpy).not.toHaveBeenCalled();
+
+        const preview = await request(app).get(`/api/blueprints/${blueprintId}/preview`).set('Cookie', adminCookie);
+        expect(preview.body.effectiveApproval).toBe('pending');
+        expect(preview.body.approvalHoldReason).toBeNull();
+    });
+
+    it('executes nothing on a drift-mode edit', async () => {
+        // The selector edit already earned a policy approval. Switching to
+        // Enforce does not mint a new intent, so that approval survives, and
+        // it still must not place or repair: Enforce is not an operational
+        // field, and the preview has to say why the plan is waiting.
+        const nodeA = seedNode();
+        const nodeB = seedNode();
+        const blueprintId = await seedPolicyPlacedInline({
+            rollout: 'automatic',
+            initialNodeIds: [nodeA.id],
+            addedNodeIds: [nodeB.id],
+        });
+        const { commitBlueprintUpdate } = await import('../services/gitops/blueprintProducers');
+        const desiredIdsFor = (bp: import('../services/DatabaseService').Blueprint): number[] =>
+            BlueprintReconciler.getInstance()
+                .listDesiredNodes(bp, DatabaseService.getInstance().getNodes())
+                .map((n) => n.id);
+        commitBlueprintUpdate(blueprintId, { drift_mode: 'enforce' }, 'admin', desiredIdsFor);
+
+        const deploySpy = vi.spyOn(BlueprintService.getInstance(), 'deployToNode').mockResolvedValue({ status: 'active' });
+        const withdrawSpy = vi.spyOn(BlueprintService.getInstance(), 'withdrawFromNode').mockResolvedValue({ status: 'withdrawn' });
+        await BlueprintReconciler.getInstance().reconcileOne(blueprintId);
+
+        expect(deploySpy).not.toHaveBeenCalled();
+        expect(withdrawSpy).not.toHaveBeenCalled();
+
+        const preview = await request(app).get(`/api/blueprints/${blueprintId}/preview`).set('Cookie', adminCookie);
+        expect(preview.body.effectiveApproval).toBe('pending');
+        expect(preview.body.approvalHoldReason).toBe(
+            'Enforce waits for Apply. Automatic placement acts in Observe or Suggest. In Enforce, a place, a withdrawal, or a repair under a policy approval stays pending until you confirm it.',
+        );
+    });
+
+    it('does not call a partly covered Enforce plan a policy hold', async () => {
+        // The combined approval still runs the retained node's repair. The
+        // added node waits for a fresh confirmation. That is reapproval
+        // required, and the Enforce sentence would hide the authority that is
+        // actually repairing.
+        const nodeA = seedNode();
+        const nodeB = seedNode();
+        const blueprintId = await seedPolicyPlacedInline({
+            rollout: 'automatic',
+            initialNodeIds: [nodeA.id],
+            addedNodeIds: [nodeB.id],
+        });
+        const { commitBlueprintUpdate } = await import('../services/gitops/blueprintProducers');
+        const desiredIdsFor = (bp: import('../services/DatabaseService').Blueprint): number[] =>
+            BlueprintReconciler.getInstance()
+                .listDesiredNodes(bp, DatabaseService.getInstance().getNodes())
+                .map((n) => n.id);
+        commitBlueprintUpdate(blueprintId, { drift_mode: 'enforce' }, 'admin', desiredIdsFor);
+
+        const bp = DatabaseService.getInstance().getBlueprint(blueprintId)!;
+        DatabaseService.getInstance().setBlueprintApproval(blueprintId, {
+            intentFingerprint: intentFingerprint(bp),
+            blastJson: serializeApprovedBlast([{ nodeId: nodeA.id, outcome: 'place' as const }]),
+            approvedBy: 'admin',
+        });
+
+        const preview = await request(app).get(`/api/blueprints/${blueprintId}/preview`).set('Cookie', adminCookie);
+        expect(preview.body.effectiveApproval).toBe('reapproval_required');
+        expect(preview.body.approvalHoldReason).toBeNull();
     });
 
     /**
