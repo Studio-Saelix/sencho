@@ -148,6 +148,7 @@ describe('NetworkingFindingsList', () => {
     const doctorOnly = finding({
       id: 'doctor', kind: 'sensitive-service-broad-exposure', title: 'Broadly exposed', stack: 'web', sources: ['doctor'],
       dismissPolicy: 'none',
+      doctorFindings: [{ ruleId: 'r', ranAt: new Date().toISOString(), title: 't', message: 'm', severity: 'high', service: 'db' }],
       recommendedActions: [{ kind: 'open-stack-doctor', label: 'Open Doctor', stack: 'web' }],
     });
     render(<NetworkingFindingsList findings={[doctorOnly]} loading={false} controls={controls({ onAcknowledge })} />);

@@ -168,6 +168,21 @@ describe('applyDoctorNetworkingFindings', () => {
     expect(new Set(result.map((f) => f.id)).size).toBe(2);
   });
 
+  it('keeps two service-less port conflicts as two cards with different ids', () => {
+    vi.spyOn(ComposeDoctorService, 'getInstance').mockReturnValue({
+      getLatest: vi.fn().mockReturnValue(stubReport({
+        stack: 'stack1',
+        findings: [
+          { ruleId: 'port-conflict-internal', severity: 'warning', title: 'Port conflict', message: '8080 conflicts' },
+          { ruleId: 'port-conflict-internal', severity: 'warning', title: 'Port conflict', message: '9090 conflicts' },
+        ],
+      })),
+    } as unknown as ComposeDoctorService);
+    const result = applyDoctorNetworkingFindings([], { nodeId: 1, stackNames: ['stack1'], stackFacts: [stubFacts()], snapshot: null });
+    expect(result).toHaveLength(2);
+    expect(new Set(result.map((f) => f.id)).size).toBe(2);
+  });
+
   describe('acknowledged findings', () => {
     const dbFacts = () => stubFacts({ services: [{ name: 'db', networks: [], publishedPorts: [], extraHosts: [] }] });
     const reportWith = (findings: PreflightReport['findings']) => {

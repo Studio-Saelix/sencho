@@ -195,7 +195,8 @@ export function applyDoctorNetworkingFindings(
   // Doctor-only groups: same (mergeKind, stack, service-or-network) collapse
   // into ONE card carrying every matched occurrence; distinct
   // services/networks/stacks always get distinct cards.
-  const doctorOnlyGroups = new Map<string, { kind: NetworkingFindingKind; stack: string; service?: string; network?: string; entries: DoctorFindingMetadata[] }>();
+  const doctorOnlyGroups = new Map<string, { kind: NetworkingFindingKind; stack: string; service?: string; network?: string; ordinal: number; entries: DoctorFindingMetadata[] }>();
+  let ordinal = 0;
 
   for (const stack of stackNames) {
     let report;
@@ -240,8 +241,11 @@ export function applyDoctorNetworkingFindings(
         ? dedupe.key
         : f.service
           ? `${kind}\0${stack}\0${f.service}`
-          : `${kind}\0${stack}\0src-${f.sourcePath ?? ''}`;
-      const group = doctorOnlyGroups.get(groupKey) ?? { kind, stack, service: f.service, network: dedupe?.network, entries: [] };
+          : f.sourcePath
+            ? `${kind}\0${stack}\0src-${f.sourcePath}`
+            // Nothing structural tells these apart (e.g. port conflicts), so each stays its own card.
+            : `${kind}\0${stack}\0ordinal-${ordinal++}`;
+      const group = doctorOnlyGroups.get(groupKey) ?? { kind, stack, service: f.service, network: dedupe?.network, ordinal: ordinal - 1, entries: [] };
       group.entries.push(metadata);
       doctorOnlyGroups.set(groupKey, group);
     }
@@ -258,10 +262,14 @@ export function applyDoctorNetworkingFindings(
       (worst, entry) => (NETWORKING_SEVERITY_RANK[entry.severity] > NETWORKING_SEVERITY_RANK[worst] ? entry.severity : worst),
       'info',
     );
-    // The card is keyed by the rules and source paths it holds, so it is the same card
-    // when an occurrence is acknowledged or cleared. Doctor owns it: no silent dismissal.
+    // The id comes from the rule ids the card holds; the fingerprint also covers their source
+    // paths, so the card is the same card when an occurrence is acknowledged or cleared.
+    // Doctor owns it: no silent dismissal.
     const targets = group.entries.map((entry) => `${entry.ruleId}@${entry.sourcePath ?? ''}`);
-    const subject = [...new Set(group.entries.map((entry) => entry.ruleId))].sort().join(',');
+    const rules = [...new Set(group.entries.map((entry) => entry.ruleId))].sort().join(',');
+    // A card with no service, network or source path is told apart by its position in the report.
+    const unkeyed = group.service === undefined && group.network === undefined && group.entries.every((entry) => !entry.sourcePath);
+    const subject = unkeyed ? `${rules}#${group.ordinal}` : rules;
     doctorOnlyFindings.push({
       ...dismissFields(
         { kind: group.kind, stack: group.stack, service: group.service ?? '', network: group.network ?? '', subject },

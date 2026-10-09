@@ -297,6 +297,7 @@ export function NetworkingView({ headerActions }: NetworkingViewProps) {
   const clearAcknowledgement = useCallback(async (finding: NetworkingFinding) => {
     if (finding.stack === undefined) return;
     setClearingAck(current => new Set(current).add(finding.id));
+    let cleared = 0;
     try {
       for (const entry of finding.doctorFindings) {
         if (entry.acknowledgement === undefined) continue;
@@ -306,12 +307,12 @@ export function NetworkingView({ headerActions }: NetworkingViewProps) {
         });
         if (!res.ok && res.status !== 404) {
           console.error('[Networking] clearing an acknowledgement was refused:', res.status);
-          toast.error('Failed to clear the acknowledgement.');
+          toast.error(cleared > 0 ? `Cleared ${cleared}, then the next one failed.` : 'Failed to clear the acknowledgement.');
           return;
         }
+        cleared += 1;
       }
       toast.success('Restored. It is back in the list.');
-      reload();
     } catch (error) {
       console.error('[Networking] clearing an acknowledgement failed:', error);
       toast.error('Failed to clear the acknowledgement.');
@@ -321,6 +322,8 @@ export function NetworkingView({ headerActions }: NetworkingViewProps) {
         next.delete(finding.id);
         return next;
       });
+      // A partial clear still changed the server, so the list is re-read either way.
+      if (cleared > 0) reload();
     }
   }, [nodeId, reload]);
 
@@ -347,8 +350,8 @@ export function NetworkingView({ headerActions }: NetworkingViewProps) {
     );
   }
 
-  // A dismissal moves a finding out of the attention list; the posture word and
-  // the masthead keep counting every finding.
+  // A dismissal moves a finding out of the attention list; the posture word and the
+  // masthead still count it. Only findings acknowledged in Doctor are left out.
   const counted = countedFindings(findings);
   const posture = getNetworkingPosture(counted, runtimeAvailable, isLegacy);
   const mobileTone = MOBILE_MASTHEAD_TONE[POSTURE_TONE[posture.tone]];

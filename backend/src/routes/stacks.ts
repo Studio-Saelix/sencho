@@ -1843,6 +1843,8 @@ stacksRouter.put('/:stackName/exposure', async (req: Request, res: Response) => 
     } else {
       DatabaseService.getInstance().setStackExposureIntent(req.nodeId, stackName, service, intent, req.user?.username ?? null);
     }
+    // Networking findings depend on intent; drop its memo so the finding is re-checked at once.
+    invalidateNodeNetworkingAggregate(req.nodeId);
     res.json(exposurePayload(req.nodeId, stackName));
   } catch (error) {
     console.error('[Stacks] Failed to save exposure intent for %s:', sanitizeForLog(stackName),

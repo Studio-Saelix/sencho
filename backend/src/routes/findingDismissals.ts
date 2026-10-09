@@ -188,10 +188,10 @@ findingDismissalsRouter.get('/networking', authMiddleware, (req: Request, res: R
     const store = FindingDismissalStore.getInstance();
     const now = Date.now();
     const rows = store.list('networking').filter((row) => row.node_id === nodeId);
-    const lapsed = rows.filter((row) => row.mode === 'days' && row.expires_at !== null && row.expires_at <= now);
+    const isLapsed = (row: (typeof rows)[number]): boolean => row.mode === 'days' && row.expires_at !== null && row.expires_at <= now;
+    const lapsed = rows.filter(isLapsed);
     if (lapsed.length > 0) store.deleteMany(lapsed.map((row) => row.id));
-    const lapsedIds = new Set(lapsed.map((row) => row.id));
-    res.json({ dismissals: rows.filter((row) => !lapsedIds.has(row.id)).map(toFindingDismissal) });
+    res.json({ dismissals: rows.filter((row) => !isLapsed(row)).map(toFindingDismissal) });
   } catch (error) {
     console.error('[Fleet] Networking dismissals read error:', errorMessageForLog(error));
     res.status(500).json({ error: 'Failed to read dismissed findings' });
@@ -278,6 +278,7 @@ findingDismissalsRouter.delete('/:id', authMiddleware, (req: Request, res: Respo
     }
     const authorized = authorizeRestore(req, res, row.surface, row.finding_key);
     if (authorized === null) {
+      console.error('[Fleet] Dismissal has an unreadable scope:', row.id, row.surface);
       res.status(400).json({ error: 'Dismissal has an unreadable scope' });
       return;
     }

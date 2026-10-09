@@ -99,7 +99,7 @@ export default function StackNetworkingPanel({ stackName, canEdit, doctorEnabled
         // The exposure overlay is secondary: a bad exposure body must not tear
         // down a working facts view, so its parse is tolerated on its own.
         if (exposureRes.ok) {
-          try { setIntents(asIntents(await exposureRes.json())); } catch { /* keep intents unset */ }
+          try { setIntents(asIntents(await exposureRes.json()) ?? []); } catch { /* keep intents unset */ }
         }
       } catch {
         if (!cancelled) {

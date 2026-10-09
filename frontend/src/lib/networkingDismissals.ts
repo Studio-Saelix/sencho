@@ -21,9 +21,9 @@ export interface NetworkingPartition {
 /**
  * Splits a node's findings into the ones to show and the ones set aside.
  *
- * Pure, and nothing is dropped: the caller keeps counting every finding for the
- * posture word and the masthead. A finding from a node that sends no
- * fingerprint carries `dismissPolicy: 'none'` and so is always active.
+ * Pure, and nothing is dropped from the result; the caller counts through
+ * `countedFindings`, which leaves out only Doctor-acknowledged findings. A finding
+ * from a node that sends no `dismissPolicy` is given `none` and so is always active.
  */
 export function partitionNetworkingFindings(
   findings: readonly NetworkingFinding[],
@@ -31,9 +31,7 @@ export function partitionNetworkingFindings(
   nodeId: number,
   now: number,
 ): NetworkingPartition {
-  const keyed = findings
-    .filter(finding => finding.acknowledged !== true)
-    .map(finding => ({ ...finding, id: networkingDismissalKey(nodeId, finding.id), original: finding }));
+  const keyed = countedFindings(findings).map(finding => ({ ...finding, id: networkingDismissalKey(nodeId, finding.id), original: finding }));
   const { active, dismissed } = partitionFindings(keyed, dismissals, now, NETWORKING_SEVERITY_SCALE);
   return {
     active: active.map(item => item.original),

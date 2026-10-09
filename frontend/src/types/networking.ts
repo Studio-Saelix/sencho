@@ -1,8 +1,8 @@
 import type { DismissPolicy } from '@/types/findingDismissal';
 
 /** How an operator classifies what a service publishes. Mirrors the backend `ExposureIntent`. */
-export type ExposureIntent = 'internal' | 'same-node' | 'lan' | 'reverse-proxy' | 'public' | 'temporary' | 'unknown';
-export const EXPOSURE_INTENTS: readonly ExposureIntent[] = ['internal', 'same-node', 'lan', 'reverse-proxy', 'public', 'temporary', 'unknown'];
+export const EXPOSURE_INTENTS = ['internal', 'same-node', 'lan', 'reverse-proxy', 'public', 'temporary', 'unknown'] as const;
+export type ExposureIntent = (typeof EXPOSURE_INTENTS)[number];
 
 export type NetworkingOwnership = 'system' | 'sencho-managed' | 'compose-managed' | 'unmanaged';
 export type NetworkingFindingSeverity = 'critical' | 'high' | 'medium' | 'info';

@@ -37,7 +37,10 @@ describe('resolveNetworkingVerbs', () => {
   });
 
   it('acknowledges a Doctor-only card in Doctor, in two clicks, only for someone who can edit the stack', () => {
-    const doctorOnly = finding([{ kind: 'open-stack-doctor', label: 'Open Doctor', stack: 'web' }], { sources: ['doctor'], dismissPolicy: 'none' });
+    const doctorOnly = finding([{ kind: 'open-stack-doctor', label: 'Open Doctor', stack: 'web' }], {
+      sources: ['doctor'], dismissPolicy: 'none',
+      doctorFindings: [{ ruleId: 'r', ranAt: 'now', title: 't', message: 'm', severity: 'high', service: 'db' }],
+    });
     expect(resolveNetworkingVerbs(doctorOnly, ADMIN).primary).toEqual({ label: 'Acknowledge in Doctor', clicks: 2, action: { kind: 'acknowledge-in-doctor' } });
     expect(resolveNetworkingVerbs(doctorOnly, VIEWER).primary).toBeNull();
   });
@@ -49,5 +52,13 @@ describe('resolveNetworkingVerbs', () => {
     );
     expect(primary).toMatchObject({ label: 'Open stack editor' });
     expect(more.map(verb => verb.label)).toEqual(['Open Doctor']);
+  });
+
+  it('leaves a Doctor-only card whose rule covers the whole stack to Doctor itself', () => {
+    const stackWide = finding([{ kind: 'open-stack-doctor', label: 'Open Doctor', stack: 'web' }], {
+      sources: ['doctor'], dismissPolicy: 'none',
+      doctorFindings: [{ ruleId: 'r', ranAt: 'now', title: 't', message: 'm', severity: 'high' }],
+    });
+    expect(resolveNetworkingVerbs(stackWide, ADMIN).primary?.action.kind).not.toBe('acknowledge-in-doctor');
   });
 });
