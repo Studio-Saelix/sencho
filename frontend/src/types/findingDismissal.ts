@@ -9,7 +9,7 @@ export type DismissalMode = 'until_change' | 'days' | 'forever';
 export type DismissPolicy = 'none' | 'timed' | 'any';
 
 /** The surfaces that keep dismissals. Mirrors the backend `DismissalSurface`. */
-export type DismissalSurface = 'readiness' | 'networking';
+export type DismissalSurface = 'readiness' | 'networking' | 'security';
 
 /** One team dismissal as the server publishes it. */
 export interface FindingDismissal {
