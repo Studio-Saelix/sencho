@@ -32,6 +32,13 @@ import {
   partialTargetsIntentionalWithUnavailable,
 } from './securityExposureTargets';
 import type { ExposureIntent } from './network/types';
+import type { DismissPolicy } from './readiness/types';
+import {
+  postureDismissPolicy,
+  postureFingerprint,
+  postureReasonKey,
+  type PostureReasonKey,
+} from './securityPostureDismissals';
 
 /** EPSS score at or above this is treated as an elevated exploitation
  *  likelihood, matching the frontend threshold in SecurityCharts.tsx. */
@@ -124,6 +131,12 @@ export interface PostureReason {
   driverCount?: number;
   /** True when driverCount exceeds the attached drivers array length. */
   driversTruncated?: boolean;
+  /** Stable identity on one node (`kind:variant`). Older remotes omit it. */
+  key?: PostureReasonKey;
+  /** Hash of the reason's structured targets and drivers, never its text. Older remotes omit it. */
+  fingerprint?: string;
+  /** What a team may do with this reason. Older remotes omit it, which means no Dismiss. */
+  dismissPolicy?: DismissPolicy;
 }
 
 export interface PostureAction {
@@ -206,6 +219,8 @@ export interface SecurityPostureFacts {
   needsReview: number;
   /** Raw image_refs for Images-bound reasons (optional; omit when unknown). */
   fixableWithImageUpdateTargets?: string[];
+  /** Per stack/service rows behind the confirmed updates; preferred over the image-only list. */
+  fixableWithImageUpdateServiceTargets?: PostureTarget[];
   fixableWaitingUpstreamTargets?: string[];
   fixableUpdateUnknownTargets?: string[];
   knownExploitedTargets?: string[];
@@ -364,7 +379,17 @@ export function derivePostureReasons(f: SecurityPostureFacts): {
   ): void => {
     const { reason, truncated } = attachCappedTargets(base, capped);
     if (truncated) targetsTruncated = true;
-    reasons.push(reason);
+    const key = postureReasonKey(reason.kind, reason.severity);
+    reasons.push({
+      ...reason,
+      key,
+      fingerprint: postureFingerprint({
+        severity: reason.severity,
+        targets: reason.targets,
+        targetsTruncated: truncated,
+      }),
+      dismissPolicy: postureDismissPolicy(key),
+    });
     if (!primaryAction && reason.severity === 'blocker') {
       primaryAction = actionFrom(reason);
     }
@@ -377,7 +402,7 @@ export function derivePostureReasons(f: SecurityPostureFacts): {
   // Blockers. Each of these can keep the masthead red.
 
   if (f.fixableWithImageUpdate > 0) {
-    push(withDrivers({
+    pushCapped(withDrivers({
       kind: 'fixable_cve',
       count: f.fixableWithImageUpdate,
       severity: 'blocker',
@@ -385,7 +410,10 @@ export function derivePostureReasons(f: SecurityPostureFacts): {
       description: 'Critical or High findings have a newer image available to review. This does not prove the candidate removes the findings.',
       targetTab: 'images',
       actionLabel: 'Review update',
-    }, f.fixableWithImageUpdateDrivers, f.fixableWithImageUpdateDriverCount, f.fixableWithImageUpdateDriversTruncated), f.fixableWithImageUpdateTargets);
+    }, f.fixableWithImageUpdateDrivers, f.fixableWithImageUpdateDriverCount, f.fixableWithImageUpdateDriversTruncated),
+    f.fixableWithImageUpdateServiceTargets?.length
+      ? capPostureTargetRows(f.fixableWithImageUpdateServiceTargets)
+      : capPostureTargets(f.fixableWithImageUpdateTargets));
   }
 
   if (f.knownExploited > 0) {
