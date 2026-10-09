@@ -16,6 +16,7 @@ import {
 import { scopedProviderDeliveryId, deliveryIdFromHeaders, boundDeliveryId } from './deliveryIds';
 import { GitProviderWebhookStore } from './store';
 import {
+  deliveryRepoMatchesConfigured,
   isActionablePullRequestAction,
   isPingEvent,
   isPullRequestLikeEvent,
@@ -209,8 +210,7 @@ export class ProviderWebhookService {
 
     const configuredIdentity = this.configuredRepoIdentity(endpoint.stack_name);
     if (!parsed.repoIdentity || !configuredIdentity
-      || parsed.repoIdentity.host !== configuredIdentity.host
-      || parsed.repoIdentity.pathname !== configuredIdentity.pathname) {
+      || !deliveryRepoMatchesConfigured(parsed.repoIdentity, configuredIdentity)) {
       store.upsertDelivery({ endpointId: endpoint.id, deliveryId, state: 'ignored_by_policy', outcomeClass: 'source_mismatch' });
       store.pruneDeliveries(endpoint.id);
       return { httpStatus: 202, state: 'ignored_by_policy', message: 'Repository identity does not match the configured source.' };
