@@ -49,13 +49,13 @@ Each finding includes a severity, what it means, what to do about it, and the ac
 - **Set exposure intent** opens a small picker over the row. Choose an intent and it is saved; the finding is re-checked straight away.
 - **Create network** opens the create dialog with the missing network's name filled in. **Copy Docker command** and **Copy Compose snippet** are in the row's **⋯** menu.
 - **Open stack editor**, **View network topology**, and **Inspect network** go to the place where that finding is fixed or explained.
-- **Acknowledge in Doctor** is offered on findings only Compose Doctor reported. It asks first, because an acknowledgement is recorded in Doctor and also changes that stack's update readiness; it holds until the stack's Compose file changes.
+- **Acknowledge in Doctor** is offered on findings only Compose Doctor reported. It asks first, because an acknowledgement is recorded in Doctor and also changes that stack's update readiness; it holds until the stack's Compose file changes. Findings whose Doctor rule covers the whole stack are acknowledged in Doctor itself.
 
 ### Dismissing findings
 
-**Dismiss** sets a finding aside for the whole team until it changes: the next time its severity rises, its fingerprint (the ports, stacks, or networks it covers) changes, or it covers more than it did, it returns on its own. The arrow next to **Dismiss** offers 7 days or permanently. A finding about runtime data Sencho could not read can only be dismissed for a set number of days.
+**Dismiss** sets a finding aside for the whole team until it changes: the next time its severity rises, its fingerprint (the ports, stacks, or networks it covers) changes, or it covers more than it did, it returns on its own. If it later comes back in exactly the state you dismissed, it stays dismissed until the hold ends or you restore it. The arrow next to **Dismiss** offers 7 days or permanently. A finding about runtime data Sencho could not read can only be dismissed for a set number of days.
 
-Dismissed findings stay counted: the masthead and the posture word still include them. They appear under a quiet **N dismissed** row with who dismissed them, when, and for how long, and **Restore** brings one back. A toast right after dismissing offers **Undo**.
+Dismissed findings stay counted: the masthead and the posture word still include them. (A Doctor finding you acknowledged is the exception: Doctor already excludes it.) They appear under a quiet **N dismissed** row with who dismissed them, when, and for how long, and **Restore** brings one back. A toast right after dismissing offers **Undo**.
 
 ## Resources and cleanup
 

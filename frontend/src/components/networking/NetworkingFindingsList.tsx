@@ -22,7 +22,7 @@ const GROUP_CLASS: Record<NetworkingFindingGroup, string> = {
 export interface NetworkingDismissedList {
   items: DismissedNetworkingFinding[];
   now: number;
-  /** Omitted for an item the account may not restore. */
+  /** False for an item the account may not restore; its Restore action is then not offered. */
   canRestore: (item: DismissedNetworkingFinding) => boolean;
   onRestore: (item: DismissedNetworkingFinding) => void;
   isRestoring: (item: DismissedNetworkingFinding) => boolean;

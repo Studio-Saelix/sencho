@@ -78,6 +78,10 @@ describe('networking finding key', () => {
     expect(parseNetworkingKey(networkingDismissalKey(1, id))?.stack).toBe('a_b');
   });
 
+  it('refuses a key too long to be a real finding', () => {
+    expect(parseNetworkingKey(networkingDismissalKey(1, `network-missing|${'a'.repeat(700)}|||`))).toBeNull();
+  });
+
   it.each([
     '', 'readiness:1:x', 'networking:0:network-missing|a|||', 'networking:x:network-missing|a|||',
     'networking:1:bogus-kind|a|||', 'networking:1:network-missing|a||', 'networking:1:network-missing|a||||',

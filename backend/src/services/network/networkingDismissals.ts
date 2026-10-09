@@ -17,6 +17,8 @@ export interface NetworkingKeyParts {
 }
 
 const PART_SEPARATOR = '|';
+/** Bounds what a caller can store: five Compose-sized names and a node id. */
+const MAX_KEY_LENGTH = 640;
 
 /** `|` and control characters cannot appear in a part, so the key splits unambiguously. */
 function cleanPart(value: string): string {
@@ -55,8 +57,9 @@ export interface ParsedNetworkingKey extends NetworkingKeyParts {
   nodeId: number;
 }
 
-/** Reads a store key back into scope. Null for anything that is not a well-formed networking key. */
+/** Reads a store key back into scope. Null for anything that is not a well-formed networking key, or is too long to be one. */
 export function parseNetworkingKey(key: string): ParsedNetworkingKey | null {
+  if (key.length > MAX_KEY_LENGTH) return null;
   const match = /^networking:([1-9]\d{0,9}):(.+)$/.exec(key);
   if (match === null) return null;
   const parts = match[2].split(PART_SEPARATOR);

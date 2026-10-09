@@ -49,7 +49,8 @@ export function AcknowledgeInDoctorDialog({ finding, nodeId, onClose, onDone }: 
         });
         if (!res.ok) {
           console.error('[Networking] acknowledgement refused:', res.status);
-          toast.error(await serverMessage(res));
+          const message = await serverMessage(res);
+          toast.error(written > 0 ? `Acknowledged ${written} of ${unacknowledged.length}. ${message}` : message);
           return;
         }
         written += 1;
