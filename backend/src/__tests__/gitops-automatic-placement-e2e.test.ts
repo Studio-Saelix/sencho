@@ -299,6 +299,37 @@ function seed(opts: {
   return app;
 }
 
+/**
+ * The pre-decomposition approval marker, which names no target set and no intent.
+ *
+ * Two things about it matter to the decision: it proves the placement was
+ * approved once, so a multi-node change is not read as a first placement, and
+ * it gives `pinDrivenPlacement` no intent to anchor on.
+ */
+function insertLegacyCombinedApproval(store: GitOpsStore, applicationId: string, id: string): void {
+  store.insertApproval({
+    id,
+    kind: 'legacy_combined',
+    authority: 'legacy_combined',
+    authoritative: 0,
+    application_id: applicationId,
+    generation_id: null,
+    intent_revision_id: null,
+    artifact_set_id: null,
+    rollout_candidate_id: null,
+    rollout_generation_id: null,
+    source_acceptance_ref: null,
+    placement_approval_ref: null,
+    required_targets_json: null,
+    preflight_fingerprint: null,
+    fingerprint: null,
+    blast_json: null,
+    policy_provenance_json: null,
+    actor: null,
+    created_at: 1,
+  } as never);
+}
+
 beforeAll(async () => {
   tmpDir = await setupTestDb();
   GitOpsStore.resetForTests();
@@ -610,27 +641,7 @@ describe('a bounded_auto application reaches an approval', () => {
     const store = GitOpsStore.getInstance();
 
     // The carried-forward row, with no placement_approval beside it.
-    store.insertApproval({
-      id: 'legacy-combined',
-      kind: 'legacy_combined',
-      authority: 'legacy_combined',
-      authoritative: 0,
-      application_id: app.id,
-      generation_id: null,
-      intent_revision_id: null,
-      artifact_set_id: null,
-      rollout_candidate_id: null,
-      rollout_generation_id: null,
-      source_acceptance_ref: null,
-      placement_approval_ref: null,
-      required_targets_json: null,
-      preflight_fingerprint: null,
-      fingerprint: null,
-      blast_json: null,
-      policy_provenance_json: null,
-      actor: null,
-      created_at: 1,
-    } as never);
+    insertLegacyCombinedApproval(store, app.id, 'legacy-combined');
     for (const nodeId of [kept, alsoKept, withdrawn]) {
       store.upsertTarget({
         ...emptyTargetRow(app.id, nodeId, 1),
@@ -667,6 +678,83 @@ describe('a bounded_auto application reaches an approval', () => {
     // as a first placement.
     const outcome = applyAutomaticPlacement(app.id, { operationId: 'op-narrow-2', actor: null, trigger: 'test', at: 3 });
     expect(outcome).toEqual({ status: 'auto_approved', reason: 'stateless_removal' });
+  });
+
+  it('runs the automatic path again once an operator confirms a cleared pin', () => {
+    // The widening in the pin chain is a wait, not a lockout. An application
+    // with no decomposed approval has no record of any confirmation, so an
+    // unconfirmed pin keeps every later change with the operator; Confirm Apply
+    // mints the approval the decision anchors on from, and the next change is
+    // judged against that instead of against the whole history.
+    const kept = addNode(`n-${randomUUID().slice(0, 6)}`);
+    const freed = addNode(`n-${randomUUID().slice(0, 6)}`);
+    const later = addNode(`n-${randomUUID().slice(0, 6)}`);
+    const app = seed({ nodeIds: [kept], compose: 'services:\n  web:\n    image: nginx:1.25\n' });
+    const store = GitOpsStore.getInstance();
+    // A is live, so the baseline the decision reads is {A} and every change
+    // below is a single stateless addition rather than a first placement.
+    store.upsertTarget({
+      ...emptyTargetRow(app.id, kept, 1),
+      target_status: 'active',
+      observed_artifact_identity_json: JSON.stringify({ kind: 'exact', identity: 'sha256:served', observedAt: 1 }),
+    });
+    insertLegacyCombinedApproval(store, app.id, `legacy-combined-${app.id}`);
+
+    const revise = (id: string, pinnedNodeId: number | null, nodeIds: number[], at: number) => {
+      const previous = store.getIntentRevision(store.getApplication(app.id)!.intent_revision_id!)!;
+      GitOpsTransitions.getInstance().intentRevised({
+        applicationId: app.id,
+        intent: { ...previous, id, pinned_node_id: pinnedNodeId, operation_id: `op-${id}` },
+        envelope: { operationId: `op-${id}`, actor: 'tester', trigger: 'test', at },
+      });
+      GitOpsTransitions.getInstance().rolloutCandidateOpened({
+        applicationId: app.id,
+        candidate: {
+          id: `cand-${id}`,
+          application_id: app.id,
+          intent_revision_id: id,
+          required_targets_json: encodeGitOpsRequiredTargetsJson(nodeIds),
+          compose_content_sha256: 'a'.repeat(64),
+          accepted_generation_id: null,
+          artifact_set_id: null,
+          authoritative: 1,
+          provenance: 'roster_change',
+          created_at: at,
+          operation_id: `op-${id}`,
+        } as never,
+        envelope: { operationId: `op-${id}`, actor: 'tester', trigger: 'test', at },
+      });
+    };
+
+    // The pin and then the clear: the clear is an unconfirmed pin change, so it
+    // waits, even though the node set it freed is one stateless addition.
+    revise('intent-pin', kept, [kept], 2);
+    revise('intent-clear', null, [kept, freed], 3);
+    expect(applyAutomaticPlacement(app.id, { operationId: 'op-clear', actor: null, trigger: 'test', at: 4 }))
+      .toEqual({ status: 'operator_review', reason: 'pin_driven_placement' });
+
+    // Confirm Apply for the placement the operator is being shown.
+    GitOpsTransitions.getInstance().placementApproved({
+      applicationId: app.id,
+      approvalId: 'operator-confirms-clear',
+      intentRevisionId: 'intent-clear',
+      blastJson: encodeGitOpsApprovedTargetEffectJson([
+        { nodeId: kept, outcome: 'place' as const },
+        { nodeId: freed, outcome: 'place' as const },
+      ]),
+      requiredNodeIds: [kept, freed],
+      fingerprint: null,
+      actor: 'tester',
+      envelope: { operationId: 'op-confirm', actor: 'tester', trigger: 'test', at: 5 },
+      rolloutGenerationId: 'gen-confirm',
+      candidateId: 'cand-intent-clear',
+      authority: 'operator',
+      policyProvenanceJson: null,
+    });
+
+    revise('intent-later', null, [kept, freed, later], 6);
+    expect(applyAutomaticPlacement(app.id, { operationId: 'op-later', actor: null, trigger: 'test', at: 7 }))
+      .toEqual({ status: 'auto_approved', reason: 'stateless_addition' });
   });
 
   it('reads an application with no approval at all as never having been placed', () => {

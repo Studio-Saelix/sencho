@@ -299,7 +299,13 @@ function approvalFailureReason(message: string): PlacementPolicyReason {
  * the current intent names no pin, so the standing approval has to be read.
  * An approval recorded on this intent already accepted the clear. An approval
  * recorded on an older unpinned intent does not, when a pin was written after
- * it and never confirmed. A missing approval intent fails closed.
+ * it and never confirmed.
+ *
+ * With no decomposed approval to read, the whole intent history counts, because
+ * nothing in it records a confirmation. Reading only the intent before this one
+ * is what let a set, a clear, and one later edit place the freed node without
+ * Apply: the intent before this one was the clear, so the pin that moved the
+ * work two intents back was not in view.
  */
 function pinDrivenPlacement(
   store: GitOpsStore,
@@ -309,8 +315,7 @@ function pinDrivenPlacement(
   if (intent.pinned_node_id !== null) return true;
   const approval = store.latestPlacementApproval(applicationId);
   if (!approval?.intent_revision_id) {
-    const previous = store.previousIntentRevision(applicationId, intent.id);
-    return (previous?.pinned_node_id ?? null) !== null;
+    return store.hasPinnedIntentExcept(applicationId, intent.id);
   }
   if (approval.intent_revision_id === intent.id) return false;
   const approvedIntent = store.getIntentRevision(approval.intent_revision_id);

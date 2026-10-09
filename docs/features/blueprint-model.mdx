@@ -293,15 +293,18 @@ The source policy is set on the Git source, in its apply behavior. The placement
 - a change that both adds and removes nodes, or that moves more than one node either way
 - a workload that carries data, or whose contents Sencho could not establish, which is treated as data
 - a first placement that spans more than one node
-- a node that is cordoned, gone, or was last seen unreachable
+- a node that is cordoned, is not answering, or was last seen unreachable
+- a node that has not reported, or is not a node this Sencho knows about
 - a change that would leave the application with nothing running it
 - an operation already in flight, for the application or for a node in the plan
+
+A withdrawal is judged from what the node itself reported. It has to be answering now, and it has to have reported the workload that ran there; a node that has never reported keeps running where it is, and the withdrawal falls back to you.
 
 Cordoning is a statement about where work may not go, not a decision to take work away, so a node you cordon is never withdrawn automatically. The withdrawal it would have caused falls back to you with that stated, and the workload keeps running where it is. Uncordon the node, or approve the move yourself.
 
 Under **Evidence**, each decision carries its own policy line, saying who is configured to decide that stage and what the policy actually did. When the policy declined, the line also says when it recorded that reason. A reason is recorded the moment the policy runs, and Sencho re-decides only when something changes, so a reason recorded because an operation was in flight is still what is recorded after that operation finishes. Showing when it was recorded keeps it a fact about the moment the policy looked, rather than a claim about now.
 
-When a rollout is already in flight the line also says which value it was decided under, because every rollout freezes the policy it executes: changing a setting changes what the next decision may do and leaves work already approved exactly where it is.
+When a rollout is already in flight the line also says which value it was decided under, because every rollout freezes the policy it executes: changing a setting changes what the next decision may do and leaves work already approved exactly where it is. Setting a policy back after taking it away is the one exception: an approval that policy made is withdrawn with it, so the change it already decided waits for you again.
 
 A disabled Blueprint withholds placement approval and rollout authorization until you enable it again, the same way **Apply now** waits for an Inline Blueprint to be enabled. Accepting source stays available while a Blueprint is disabled, because reviewing content changes nothing on the fleet.
 

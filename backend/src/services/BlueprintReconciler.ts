@@ -921,15 +921,18 @@ export class BlueprintReconciler {
      * placement policy must still be the one that could have written this
      * approval: taking it back to operator approval is an operator saying no
      * further unattended placement, so a standing policy approval stops the
-     * moment the policy goes. The approval must be a policy's, not an
-     * operator's, because this path runs where no operator decided. The rollout
-     * authorization policy must be automatic, because executing the plan is a
-     * rollout and a manual policy reserves it for the operator; the same
-     * condition gates the Git-managed automatic dispatch. At least one node must
-     * be retained, the anchor that proves an operator has already placed
-     * content the plan builds on; a first placement has none and waits for
-     * Apply. Every retained node must already run the current revision, so a
-     * compose edit the policy never saw cannot ride out with a roster change.
+     * moment the policy goes, and arming it again withdraws the approval the
+     * policy wrote (`placementPolicyChanged` and
+     * `rolloutAuthorizationPolicyChanged`), so it does not come back with the
+     * setting. The approval must be a policy's, not an operator's, because this
+     * path runs where no operator decided. The rollout authorization policy must
+     * be automatic, because executing the plan is a rollout and a manual policy
+     * reserves it for the operator; the same condition gates the Git-managed
+     * automatic dispatch. At least one node must be retained, the anchor that
+     * proves an operator has already placed content the plan builds on; a first
+     * placement has none and waits for Apply. Every retained node must already
+     * run the current revision, so a compose edit the policy never saw cannot
+     * ride out with a roster change.
      * The approval must cover every action in the plan, so an uncovered plan
      * is refused whole rather than partly executed. And the drift mode must
      * not be Enforce: a policy approval survives that switch, and a retained

@@ -1716,11 +1716,19 @@ export class GitOpsTransitions {
    * Change the placement policy. Configuration, not work.
    *
    * Mints no intent revision and no rollout candidate, and clears no source
-   * acceptance, placement approval, or rollout authorization. The edit decides
-   * what a *future* placement decision may do; the approvals already standing
-   * were made under the snapshot that authorized them and keep running under
-   * it. That is the same rule the health policy write follows, and it is why a
-   * policy change never appears as drift.
+   * acceptance and no operator approval. The edit decides what a *future*
+   * placement decision may do; an operator's approval stands, because an
+   * operator is not the policy. That is the same rule the health policy write
+   * follows, and it is why a policy change never appears as drift.
+   *
+   * Arming the policy again is the one exception, and it withdraws what the
+   * policy itself decided while it was last armed, with the rollout
+   * authorization that stood on it. Execution stops the moment the policy goes,
+   * but the approvals stayed on the row, so setting the policy back handed the
+   * next tick a decision made days earlier, on evidence nobody has read since.
+   * Re-arming says what a *future* change may do unattended; the change that
+   * was already decided waits for the operator, and the generation it opened
+   * waits with it, so the rollout pauses rather than being cancelled under them.
    *
    * Refuses while an operation is in flight, because the operation is reading
    * the policy this edit would change underneath it.
@@ -1743,22 +1751,51 @@ export class GitOpsTransitions {
         if (app.placement_policy === args.placementPolicy) {
           throw new GitOpsTransitionError('the placement policy is already set to that value');
         }
-        const before = { placementPolicy: app.placement_policy };
         app.placement_policy = args.placementPolicy;
         // A reason recorded under the old policy explains a decision that policy
         // made, and this one is no longer configured. Left in place it would be
         // read as the current reason for whatever review is open next.
         app.placement_policy_refusal_reason = null;
         app.placement_policy_refused_at = null;
-        return { before, after: { placementPolicy: args.placementPolicy } };
+        // The snapshot the single writer takes records both the policy value and
+        // the pointers it moved, so the withdrawal needs no payload of its own.
+        if (args.placementPolicy === 'bounded_auto') this.withdrawPolicyAuthority(app);
       },
     );
+  }
+
+  /**
+   * Withdraw the authority a policy wrote, leaving an operator's alone.
+   *
+   * The pointers are what name the authority, so clearing them is what makes it
+   * unusable: the reconciler's policy path and the preview's authority label
+   * both resolve through the placement pointer, and a rollout authorization is
+   * only live while the placement it names is. The authority recorded on the row
+   * decides this rather than the pointer being non-null, because an operator's
+   * approval is the operator's own decision and survives every policy edit.
+   *
+   * An unreadable approval row is left in place on purpose. A missing row is
+   * damage, and the gate that resolves it refuses the whole plan rather than
+   * falling back to the operator's own approval, which is the direction damage
+   * should fail.
+   */
+  private withdrawPolicyAuthority(app: GitOpsApplicationRow): void {
+    if (app.placement_approval_ref === null) return;
+    if (this.store().getApproval(app.placement_approval_ref)?.authority !== 'configured_policy') return;
+    app.placement_approval_ref = null;
+    app.rollout_authorization_ref = null;
   }
 
   /**
    * Change the rollout authorization policy. Configuration, not work, on the
    * same terms as `placementPolicyChanged`: nothing already authorized is
    * withdrawn, and no intent, candidate, or generation is minted or cleared.
+   *
+   * Arming it again is the exception, and it withdraws what stood on the
+   * automatic authority rather than only pausing it. Executing a placement is a
+   * rollout, so both settings gate one unattended authority; an operator's
+   * approval is untouched, and the generation stays so a fresh approval and
+   * authorization re-drive it.
    */
   rolloutAuthorizationPolicyChanged(args: {
     applicationId: string;
@@ -1780,9 +1817,9 @@ export class GitOpsTransitions {
         if (app.rollout_authorization_policy === args.policy) {
           throw new GitOpsTransitionError('the rollout authorization policy is already set to that value');
         }
-        const before = { rolloutAuthorizationPolicy: app.rollout_authorization_policy };
         app.rollout_authorization_policy = args.policy;
-        return { before, after: { rolloutAuthorizationPolicy: args.policy } };
+        // Same terms as `placementPolicyChanged`, and recorded the same way.
+        if (args.policy === 'automatic') this.withdrawPolicyAuthority(app);
       },
     );
   }
@@ -5303,6 +5340,12 @@ function snapshotApp(app: GitOpsApplicationRow): Record<string, unknown> {
     artifactSetId: app.artifact_set_id,
     latestArtifactSetId: app.latest_artifact_set_id,
     sourceAcceptanceRef: app.source_acceptance_ref,
+    // The two pointers an authority change moves. Arming a policy again
+    // withdraws what that policy decided, and a row that recorded the policy
+    // changing without recording the authority it took with it could not tell
+    // that apart from a policy edit that left the approval alone.
+    placementApprovalRef: app.placement_approval_ref,
+    rolloutAuthorizationRef: app.rollout_authorization_ref,
     activeOperationStage: app.active_operation_stage,
     failureStage: app.failure_stage,
     // The three authority policies, and the recorded bounded-auto refusal.

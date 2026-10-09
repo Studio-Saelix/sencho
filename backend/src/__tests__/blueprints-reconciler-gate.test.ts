@@ -512,6 +512,103 @@ describe('reconcileOne approval gate (real path)', () => {
         expect(preview.body.effectiveApproval).toBe('pending');
         expect(preview.body.approvalAuthority).toBeNull();
     });
+
+    it('does not place a freed node after an unconfirmed pin when only a combined approval stands', async () => {
+        // The chain the one-intent lookback lost. The only approval is the
+        // pre-decomposition marker, which names no intent revision, so there is
+        // no anchor to cut the pin search at and the whole history counts. Set,
+        // cleared, then one more edit that keeps the same two nodes: the intent
+        // before this one is the clear, so reading one intent back reports "no
+        // pin moved" and the policy approves an addition nothing confirmed.
+        const nodeA = seedNode();
+        const nodeB = seedNode();
+        const { commitBlueprintCreate, commitBlueprintPin, commitBlueprintUpdate } = await import('../services/gitops/blueprintProducers');
+        const { GitOpsStore, emptyTargetRow } = await import('../services/gitops/store');
+        const { GitOpsTransitions } = await import('../services/gitops/transitions');
+        const { newGitOpsId } = await import('../services/gitops/directApplication');
+        const desiredIdsFor = (blueprint: import('../services/DatabaseService').Blueprint): number[] =>
+            BlueprintReconciler.getInstance()
+                .listDesiredNodes(blueprint, DatabaseService.getInstance().getNodes())
+                .map((node) => node.id);
+
+        counter += 1;
+        const bp = commitBlueprintCreate({
+            name: `bp-gate-unpin-chain-${counter}`,
+            description: null,
+            compose_content: 'services:\n  app:\n    image: nginx\n',
+            selector: { type: 'nodes', ids: [nodeA.id] },
+            drift_mode: 'observe',
+            classification: 'stateless',
+            classification_reasons: [],
+            enabled: true,
+            created_by: 'admin',
+        }, desiredIdsFor);
+
+        const store = GitOpsStore.getInstance();
+        const created = store.getLiveBlueprintApplication(bp.id)!;
+        DatabaseService.getInstance().getDb().prepare(
+            `UPDATE gitops_applications
+                SET placement_policy = 'bounded_auto', rollout_authorization_policy = 'automatic'
+              WHERE id = ?`,
+        ).run(created.id);
+
+        // The only authority this application has ever had, and it names no
+        // intent. A is live, so the baseline the decision reads is {A} and the
+        // plan is a single stateless addition of B.
+        GitOpsTransitions.getInstance().legacyCombinedAppended({
+            applicationId: created.id,
+            approvalId: newGitOpsId(),
+            envelope: { operationId: newGitOpsId(), actor: 'admin', trigger: 'test', at: Date.now() },
+        });
+        store.upsertTarget({
+            ...emptyTargetRow(created.id, nodeA.id, Date.now()),
+            target_status: 'active',
+            observed_artifact_identity_json: JSON.stringify({ kind: 'exact', identity: 'sha256:served', observedAt: 1 }),
+        });
+        DatabaseService.getInstance().getDb().prepare(
+            `INSERT INTO blueprint_deployments (blueprint_id, node_id, status, applied_revision, last_deployed_at)
+             VALUES (?, ?, 'active', ?, ?)`,
+        ).run(bp.id, nodeA.id, bp.revision, Date.now());
+
+        // The pin and then the clear: both are placement changes the operator
+        // has not confirmed, so both wait.
+        commitBlueprintPin(bp.id, nodeA.id, 'admin', desiredIdsFor);
+        await request(app)
+            .put(`/api/blueprints/${bp.id}/pin`)
+            .set('Cookie', adminCookie)
+            .send({ nodeId: null })
+            .expect(200);
+
+        // One more edit that keeps the same node set, so the plan is still the
+        // unconfirmed addition of B. Labels on both nodes resolve to A and B.
+        expect(NodeLabelService.getInstance().addLabel(nodeA.id, 'web').ok).toBe(true);
+        expect(NodeLabelService.getInstance().addLabel(nodeB.id, 'web').ok).toBe(true);
+        commitBlueprintUpdate(
+            bp.id,
+            { selector: { type: 'labels', any: ['web'], all: [] } },
+            'admin',
+            desiredIdsFor,
+        );
+
+        const afterEdit = store.getLiveBlueprintApplication(bp.id)!;
+        expect(store.getApplication(created.id)?.placement_policy_refusal_reason).toBe('pin_driven_placement');
+        // The decision is the guard: no approval exists for this intent and
+        // candidate, so there is nothing for the tick to execute.
+        expect(store.hasPlacementApprovalFor(
+            created.id,
+            afterEdit.intent_revision_id!,
+            afterEdit.rollout_candidate_id!,
+        )).toBe(false);
+
+        const deploySpy = vi.spyOn(BlueprintService.getInstance(), 'deployToNode').mockResolvedValue({ status: 'active' });
+        await BlueprintReconciler.getInstance().reconcileOne(bp.id);
+        expect(deploySpy).not.toHaveBeenCalled();
+
+        const preview = await request(app).get(`/api/blueprints/${bp.id}/preview`).set('Cookie', adminCookie);
+        expect(preview.status).toBe(200);
+        expect(preview.body.effectiveApproval).toBe('pending');
+        expect(preview.body.approvalAuthority).toBeNull();
+    });
 });
 
 describe('reconcileConfirmedPlan fingerprint gate', () => {
@@ -1157,14 +1254,33 @@ describe('policy placement authority on an automatic rollout', () => {
         expect(preview.body.effectiveApproval).not.toBe('approved');
     });
 
-    it('waits for the operator when the rollout policy is manual', async () => {
+    it('does not revive a policy approval when the placement policy is armed again', async () => {
         const nodeA = seedNode();
         const nodeB = seedNode();
         const blueprintId = await seedPolicyPlacedInline({
-            rollout: 'manual',
+            rollout: 'automatic',
             initialNodeIds: [nodeA.id],
             addedNodeIds: [nodeB.id],
         });
+
+        const { GitOpsStore } = await import('../services/gitops/store');
+        const store = GitOpsStore.getInstance();
+        expect(store.getLiveBlueprintApplication(blueprintId)!.placement_approval_ref).not.toBeNull();
+
+        for (const policy of ['operator', 'bounded_auto']) {
+            const armed = await request(app)
+                .post(`/api/gitops/applications/bp:${blueprintId}/placement-policy`)
+                .set('Cookie', adminCookie)
+                .send({ policy });
+            expect(armed.status).toBe(200);
+        }
+
+        // Armed again, and the decision the policy made while it was armed the
+        // first time is gone: setting it back says what a future change may do
+        // unattended, not that the change it already decided may now run.
+        const live = store.getLiveBlueprintApplication(blueprintId)!;
+        expect(live.placement_policy).toBe('bounded_auto');
+        expect(live.placement_approval_ref).toBeNull();
 
         const deploySpy = vi.spyOn(BlueprintService.getInstance(), 'deployToNode').mockResolvedValue({ status: 'active' });
         await BlueprintReconciler.getInstance().reconcileOne(blueprintId);
@@ -1172,6 +1288,7 @@ describe('policy placement authority on an automatic rollout', () => {
 
         const preview = await request(app).get(`/api/blueprints/${blueprintId}/preview`).set('Cookie', adminCookie);
         expect(preview.body.effectiveApproval).toBe('pending');
+        expect(preview.body.approvalAuthority).toBeNull();
     });
 
     it('does not execute a placement approval an operator made', async () => {
