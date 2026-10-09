@@ -1,20 +1,17 @@
-import { useState } from 'react';
-import { useNodes } from '@/context/NodeContext';
-import { REMOTE_IMAGE_INSPECT_V1_CAPABILITY } from '@/lib/capabilities';
 import { ShieldOff } from 'lucide-react';
 import { Skeleton } from '@/components/ui/skeleton';
 import { SignalRail, type SignalTile } from '@/components/ui/SignalRail';
 import { cn } from '@/lib/utils';
 import { formatTimeAgo } from '@/lib/relativeTime';
 import { useIsMobile } from '@/hooks/use-is-mobile';
-import { toast } from '@/components/ui/toast-store';
+import { DismissedSection } from '@/components/ui/dismissed-section';
 import { SecuritySevStrip, SecurityTotalsGrid, SecurityFooterBand } from './SecurityMobile';
 import type { SecurityOverview, SecurityRiskTrendPoint, ExploitIntelFinding, PostureReason } from '@/types/security';
 import type { SecurityTab } from '@/lib/events';
 import type { ImageFilterValue } from '@/lib/severityStyles';
-import { reasonImageFilter, defaultReasonActionLabel } from './postureNavigation';
-import { triggerNodeImageUpdateCheck } from './imageUpdateRecheck';
-import { targetingFromTargets, type ImagesTargetingInput } from './imagesTargeting';
+import type { ImagesTargetingInput } from './imagesTargeting';
+import { SecurityReasonActions } from './SecurityReasonActions';
+import type { SecurityReasons } from './useSecurityReasons';
 import {
   RiskTrendChart,
   ActionPostureChart,
@@ -46,8 +43,8 @@ interface OverviewTabProps {
   canScan: boolean;
   /** Refresh the overview after a node-wide scan completes. */
   onScanComplete: () => void;
-  /** Whether the operator may trigger node-scoped image-update refresh. */
-  canManageNode?: boolean;
+  /** Verbs, dismissals, and the single handler that runs them for the review queue. */
+  reasons: SecurityReasons;
 }
 
 const STATUS_ROW_TONE: Record<'value' | 'warn' | 'subtitle', string> = {
@@ -87,36 +84,7 @@ const SEVERITY_LABEL: Record<PostureReason['severity'], string> = {
   info: 'text-stat-subtitle',
 };
 
-function reasonNavLabel(r: PostureReason): string {
-  return `${r.actionLabel ?? defaultReasonActionLabel(r.targetTab)} →`;
-}
-
-function navigateReason(onNavigate: NavigateFn, reason: PostureReason): void {
-  const targeting = targetingFromTargets(
-    reason.kind,
-    reason.label,
-    reason.targets,
-    reason.drivers,
-    { driverCount: reason.driverCount, driversTruncated: reason.driversTruncated },
-  );
-  // Prefer precise targets; severity filter is only the older-node fallback.
-  const filter = targeting ? undefined : reasonImageFilter(reason.kind);
-  onNavigate(reason.targetTab, filter, targeting);
-}
-
-function ReasonRow({
-  reason,
-  onNavigate,
-  showCheckAgain = false,
-  checkAgainBusy = false,
-  onCheckAgain,
-}: {
-  reason: PostureReason;
-  onNavigate: NavigateFn;
-  showCheckAgain?: boolean;
-  checkAgainBusy?: boolean;
-  onCheckAgain?: () => void;
-}) {
+function ReasonRow({ reason, reasons }: { reason: PostureReason; reasons: SecurityReasons }) {
   return (
     <div className="flex items-start gap-3">
       <span className={cn('mt-1.5 h-2 w-2 shrink-0 rounded-full', SEVERITY_DOT[reason.severity])} aria-hidden />
@@ -124,24 +92,8 @@ function ReasonRow({
         <div className="flex items-center gap-2 flex-wrap">
           <span className={cn('font-mono text-sm', SEVERITY_LABEL[reason.severity])}>{reason.label}</span>
           <span className="font-mono tabular-nums text-xs text-stat-subtitle">{reason.count}</span>
-          <div className="ml-auto flex items-center gap-3">
-            {showCheckAgain && onCheckAgain ? (
-              <button
-                type="button"
-                disabled={checkAgainBusy}
-                onClick={onCheckAgain}
-                className="text-xs font-medium text-brand hover:underline whitespace-nowrap disabled:opacity-50"
-              >
-                {checkAgainBusy ? 'Starting…' : 'Check again'}
-              </button>
-            ) : null}
-            <button
-              type="button"
-              onClick={() => navigateReason(onNavigate, reason)}
-              className="text-xs font-medium text-brand hover:underline whitespace-nowrap"
-            >
-              {reasonNavLabel(reason)}
-            </button>
+          <div className="ml-auto flex items-center gap-1 max-md:w-full max-md:justify-end">
+            <SecurityReasonActions reason={reason} verb={reasons.verbFor(reason)} controls={reasons.controls} />
           </div>
         </div>
         <p className="text-xs text-stat-subtitle mt-0.5">{reason.description}</p>
@@ -151,69 +103,46 @@ function ReasonRow({
 }
 
 function ReviewQueueCard({
+  allReasons,
   reasons,
-  onNavigate,
-  canManageNode,
-  updateChecksDisabled,
   posture,
 }: {
-  reasons: PostureReason[];
-  onNavigate: NavigateFn;
-  canManageNode: boolean;
-  updateChecksDisabled: boolean;
+  allReasons: PostureReason[];
+  reasons: SecurityReasons;
   posture?: SecurityOverview['posture'];
 }) {
-  const [checkAgainBusy, setCheckAgainBusy] = useState(false);
-  // The target-local scanner backs Security rechecks, so inspect-v1 remotes
-  // address it directly; hub overlay evidence is not a recheck target.
-  const { activeNode, activeNodeMeta } = useNodes();
-  const targetScannerRefresh = activeNode?.type === 'remote'
-    && (activeNodeMeta?.capabilities.includes(REMOTE_IMAGE_INSPECT_V1_CAPABILITY) ?? false);
-  const blockers = reasons.filter((r) => r.severity === 'blocker');
-  const nonBlockers = reasons.filter((r) => r.severity !== 'blocker');
-  const hasBlockers = blockers.length > 0;
+  // The title follows the posture word, so it reads every reason; the list shows the active ones.
+  const hasBlockers = allReasons.some((r) => r.severity === 'blocker');
+  const blockers = reasons.active.filter((r) => r.severity === 'blocker');
+  const nonBlockers = reasons.active.filter((r) => r.severity !== 'blocker');
   const title = hasBlockers
     ? 'Why Action needed'
     : posture === 'Monitoring'
       ? 'Why Monitoring'
       : 'Review queue';
 
-  const handleCheckAgain = async () => {
-    if (checkAgainBusy) return;
-    setCheckAgainBusy(true);
-    try {
-      await triggerNodeImageUpdateCheck(targetScannerRefresh);
-    } catch (err) {
-      toast.error((err as Error)?.message || 'Failed to start image update check');
-    } finally {
-      setCheckAgainBusy(false);
-    }
-  };
-
-  const showCheckAgainFor = (r: PostureReason): boolean =>
-    r.kind === 'update_check_uncertain' && canManageNode && !updateChecksDisabled;
-
   return (
     <div className="rounded-lg border border-card-border border-t-card-border-top bg-card shadow-card-bevel p-4">
       <h3 className="font-mono text-[10px] uppercase tracking-[0.22em] text-stat-subtitle mb-3">{title}</h3>
       <div className="space-y-3">
         {blockers.map((r, i) => (
-          <ReasonRow key={`${r.kind}-${i}`} reason={r} onNavigate={onNavigate} />
+          <ReasonRow key={`${r.kind}-${i}`} reason={r} reasons={reasons} />
         ))}
         {nonBlockers.length > 0 && hasBlockers && (
           <div className="border-t border-hairline pt-3 mt-1" />
         )}
         {nonBlockers.map((r, i) => (
-          <ReasonRow
-            key={`${r.kind}-${i}`}
-            reason={r}
-            onNavigate={onNavigate}
-            showCheckAgain={showCheckAgainFor(r)}
-            checkAgainBusy={checkAgainBusy}
-            onCheckAgain={handleCheckAgain}
-          />
+          <ReasonRow key={`${r.kind}-${r.key ?? i}`} reason={r} reasons={reasons} />
         ))}
+        {reasons.active.length === 0 && reasons.dismissedItems.length > 0 && (
+          <p className="text-sm text-muted-foreground">Nothing needs attention right now.</p>
+        )}
       </div>
+      {reasons.dismissedItems.length > 0 && (
+        <div className="mt-3">
+          <DismissedSection items={reasons.dismissedItems} forceOpen={reasons.active.length === 0} />
+        </div>
+      )}
     </div>
   );
 }
@@ -228,7 +157,7 @@ export function OverviewTab({
   onInspect,
   canScan,
   onScanComplete,
-  canManageNode = false,
+  reasons,
 }: OverviewTabProps) {
   const isMobile = useIsMobile();
 
@@ -317,13 +246,7 @@ export function OverviewTab({
       {/* Review queue: surfaces the "why" behind the posture -- blocker reasons
           with CTAs, plus review/info items even when the masthead is not red. */}
       {overview.posture && overview.posture !== 'Unknown' && overview.postureReasons && overview.postureReasons.length > 0 && (
-        <ReviewQueueCard
-          reasons={overview.postureReasons}
-          onNavigate={onNavigate}
-          canManageNode={canManageNode}
-          updateChecksDisabled={overview.updateChecksDisabled === true}
-          posture={overview.posture}
-        />
+        <ReviewQueueCard allReasons={overview.postureReasons} reasons={reasons} posture={overview.posture} />
       )}
 
       {/* Charts lead the dashboard: the trend gives severity context, the rest
