@@ -49,6 +49,7 @@ import {
 } from './gitops/triggers';
 import { classifyFailure, effectivePollIntervalSecs } from './gitops/backoff';
 import { checkStatefulWithdrawal, holdForStatefulReview } from './gitops/statefulGuard';
+import { gitOpsAttemptNotificationKey, gitOpsCandidateState, type GitOpsCandidateIdentity } from './gitops/notifications';
 import { BlueprintTargetAdapter, buildAcceptedGeneration, type AcceptedGeneration, type DispatchContext, type DispatchResult } from './gitops/handoff';
 import {
     GitOpsTransitions,
@@ -690,6 +691,18 @@ const SUBMODULE_WARNING =
 
 const REF_DELETED_MESSAGE =
     'The configured branch, tag, or commit no longer points at the same revision as before. It may have been deleted, force-pushed, or moved to a different commit (for example a retagged release).';
+
+/**
+ * The staged candidate this application's live row names, or null when it has
+ * none. Shared with the settled outbox so a live write and the settle that
+ * confirms it cannot disagree about which candidate they are announcing.
+ */
+function candidateIdentityFromApplication(app: GitOpsApplicationRow): GitOpsCandidateIdentity | null {
+    const state = gitOpsCandidateState(app);
+    return app.candidate_generation_id && state
+        ? { applicationId: app.id, generationId: app.candidate_generation_id, state }
+        : null;
+}
 
 function priorFetchIdentity(app: GitOpsApplicationRow | null | undefined): FetchParams['priorIdentity'] {
     if (!app?.fetched_commit_sha) return undefined;
@@ -2352,7 +2365,14 @@ export class GitSourceService {
                 return await this.pullLocked(stackName, actor, operationId);
             } catch (e) {
                 console.error(`[GitSource] fetch failed for ${sanitizeForLog(stackName)}:`, e instanceof Error ? e.message : String(e));
-                this.recordGitActivity(stackName, 'git_pull_failed', `Git pull failed for ${stackName}`, actor, 'error');
+                this.recordGitActivity(
+                    stackName,
+                    'git_pull_failed',
+                    `Git pull failed for ${stackName}`,
+                    actor,
+                    'error',
+                    operationId ? { operationId } : undefined,
+                );
                 throw e;
             }
         });
@@ -2592,6 +2612,7 @@ export class GitSourceService {
 
         // Record what this fetch resolved before the pending blob is written,
         // so the durable pointers and the operational pending store agree.
+        let stagingRecorded = true;
         if (gitopsApp) {
             const outcomeRecorded = this.recordGitOps(stackName, 'fetch outcome', () => {
                 const tx = GitOpsTransitions.getInstance();
@@ -2686,6 +2707,7 @@ export class GitSourceService {
             // The pull itself succeeded; the files and the pending blob are
             // real. Closing the operation is what stops the source reporting a
             // fetch in flight for ever and locking out every later pull.
+            stagingRecorded = outcomeRecorded;
             if (!outcomeRecorded) gitops.abandon();
         }
 
@@ -2720,20 +2742,42 @@ export class GitSourceService {
             this.upsertGitPlanDrift(stackName, plan);
             const shortSha = fetched.commitSha.slice(0, 7);
             const fpPrefix = plan.fingerprint.slice(0, 12);
-            if (plan.blocked) {
-                this.recordGitActivity(
-                    stackName,
-                    'git_plan_blocked',
-                    `Git plan blocked for ${stackName} (${shortSha}, op ${GitSourceService.shortOperationId(gitopsOperationId)}, plan ${fpPrefix})`,
-                    actor,
-                    'warning',
-                );
+            // Nothing is announced here when the attempt has no staged result to
+            // announce, because the settle that records it is the single entry
+            // and this write would take its key. That is the case when the
+            // staged project does not validate (no candidate was staged), and
+            // when the staging transition was rejected: the abandon above
+            // stamped the attempt failed, so announcing "ready" here would both
+            // misreport the attempt and suppress the failure the settle is
+            // about to write.
+            if (!validation.ok || !stagingRecorded) {
+                console.log(`[GitSource] Pull of ${sanitizeForLog(stackName)} at ${shortSha} announced no candidate: ${!stagingRecorded ? 'the staging transition was rejected' : validation.error ?? 'the project does not validate'}`);
             } else {
+                // Read after the staging transition committed, so this is the
+                // generation this fetch actually staged and the state it was
+                // staged in: that pair is what identifies the candidate to the
+                // bell. Looked up by application id, not by stack name:
+                // gitopsApp may be a converted Blueprint source rather than a
+                // Direct row, and reading it back the way it was found keeps the
+                // live write on the same candidate key the settle derives.
+                //
+                // A blocked candidate is keyed the same way a reviewable one is.
+                // It settles `blocked` on every poll for as long as the local
+                // conflict stands, so on the attempt key it announced once per
+                // poll, which is the repeat this key exists to stop.
+                const staged = gitopsApp
+                    ? GitOpsStore.getInstance().getApplication(gitopsApp.id) ?? null
+                    : null;
+                const candidate = staged
+                    ? candidateIdentityFromApplication(staged)
+                    : null;
                 this.recordGitActivity(
                     stackName,
-                    'git_pull_ready',
-                    `Git pull ready for ${stackName} (${shortSha}, op ${GitSourceService.shortOperationId(gitopsOperationId)}, plan ${fpPrefix})`,
+                    plan.blocked ? 'git_plan_blocked' : 'git_pull_ready',
+                    `Git ${plan.blocked ? 'plan blocked' : 'pull ready'} for ${stackName} (${shortSha}, op ${GitSourceService.shortOperationId(gitopsOperationId)}, plan ${fpPrefix})`,
                     actor,
+                    plan.blocked ? 'warning' : undefined,
+                    { operationId: gitopsOperationId, candidate },
                 );
             }
         }
@@ -3195,6 +3239,7 @@ export class GitSourceService {
             `Dispatch settlement failed for ${stackName}: ${result.reason}`,
             actor,
             'error',
+            { operationId: envelope.operationId },
         );
     }
 
@@ -5710,6 +5755,7 @@ export class GitSourceService {
                     `Git apply rolled back for ${stackName} (${commitSha.slice(0, 7)}, op ${GitSourceService.shortOperationId(applyOperationId)}, plan ${plan.fingerprint.slice(0, 12)})`,
                     actor,
                     'warning',
+                    { operationId: applyOperationId },
                 );
             } else {
                 db.setGitSourceLastPlan(stackName, plan.fingerprint, 'failed');
@@ -5719,6 +5765,7 @@ export class GitSourceService {
                     `Git apply failed for ${stackName} (${commitSha.slice(0, 7)}, op ${GitSourceService.shortOperationId(applyOperationId)}, plan ${plan.fingerprint.slice(0, 12)})`,
                     actor,
                     'error',
+                    { operationId: applyOperationId },
                 );
             }
             throw new GitSourceError('GIT_ERROR', scrubCredentials(redacted));
@@ -6236,6 +6283,7 @@ export class GitSourceService {
                         blockedPlanActivity,
                         actor,
                         'warning',
+                        { operationId: applyOperationId },
                     );
                 }
                 throw new GitSourceError(
@@ -6253,6 +6301,7 @@ export class GitSourceService {
                     blockedPlanActivity,
                     actor,
                     'warning',
+                    { operationId: applyOperationId },
                 );
                 throw new GitSourceError(
                     'PLAN_BLOCKED',
@@ -7656,6 +7705,11 @@ export class GitSourceService {
         message: string,
         actor: string,
         level: 'info' | 'warning' | 'error' = 'info',
+        attempt?: {
+            operationId: string;
+            /** A staged candidate this event announces, when it announces one. */
+            candidate?: GitOpsCandidateIdentity | null;
+        },
     ): void {
         try {
             DatabaseService.getInstance().addNotificationHistory(
@@ -7667,6 +7721,19 @@ export class GitSourceService {
                     timestamp: Date.now(),
                     stack_name: stackName,
                     actor_username: actor,
+                    // An event that belongs to a tracked attempt carries the
+                    // attempt's dedupe key and operation id, so the settled
+                    // notification for the same attempt collides with it
+                    // instead of repeating it in the bell.
+                    ...(attempt
+                        ? {
+                            gitops_operation_id: attempt.operationId,
+                            dedupe_key: gitOpsAttemptNotificationKey(
+                                attempt.operationId,
+                                attempt.candidate ?? undefined,
+                            ),
+                        }
+                        : {}),
                 },
             );
         } catch (error) {
