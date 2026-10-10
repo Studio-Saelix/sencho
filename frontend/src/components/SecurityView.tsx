@@ -74,6 +74,8 @@ export function SecurityView({ activeTab, onTabChange, headerActions }: Security
   const isRemote = activeNode?.type === 'remote';
 
   const [overview, setOverview] = useState<SecurityOverview | null>(null);
+  // The node the overview was read for. Verbs and dismissals act on a node, so they never see another node's overview.
+  const [overviewNodeId, setOverviewNodeId] = useState<number | undefined>(undefined);
   // 'unsupported' = the node has no overview endpoint (e.g. an older remote, 404);
   // 'failed' = a genuine error (5xx, network, malformed body) that must not read as benign.
   const [overviewLoadError, setOverviewLoadError] = useState<'unsupported' | 'failed' | null>(null);
@@ -155,9 +157,10 @@ export function SecurityView({ activeTab, onTabChange, headerActions }: Security
     setInspectScanId(scanId);
   }, []);
 
+  const nodeOverview = overviewNodeId === activeNode?.id ? overview : null;
   const reloadOverview = useCallback(() => setReloadToken((t) => t + 1), []);
   const reasons = useSecurityReasons({
-    overview,
+    overview: nodeOverview,
     summaries,
     isReplica,
     onNavigate: handleNavigate,
@@ -183,6 +186,7 @@ export function SecurityView({ activeTab, onTabChange, headerActions }: Security
   // remote node that lacks the endpoint).
   useEffect(() => {
     let cancelled = false;
+    const fetchedNodeId = activeNode?.id;
     (async () => {
       setSummariesLoading(true);
       setOverviewLoadError(null);
@@ -211,7 +215,10 @@ export function SecurityView({ activeTab, onTabChange, headerActions }: Security
         ]);
         if (cancelled) return;
         if (overviewRes.ok) {
-          setOverview(await overviewRes.json());
+          const body = await overviewRes.json();
+          if (cancelled) return;
+          setOverview(body);
+          setOverviewNodeId(fetchedNodeId);
         } else {
           setOverview(null);
           setOverviewLoadError(overviewRes.status === 404 ? 'unsupported' : 'failed');
@@ -348,7 +355,7 @@ export function SecurityView({ activeTab, onTabChange, headerActions }: Security
     <>
         <TabsContent value="overview">
           <OverviewTab
-            overview={overview}
+            overview={nodeOverview}
             loadError={overviewLoadError}
             trend={trend}
             exploitIntel={exploitIntel}
@@ -479,8 +486,8 @@ export function SecurityView({ activeTab, onTabChange, headerActions }: Security
   }
 
   // The masthead offers the verb of the blocker its primary action came from, so it acts like the queue row.
-  const mastheadReason = overview?.posture === 'Action needed' && overview.primaryAction
-    ? overview.postureReasons?.find((r) => r.kind === overview.primaryAction?.kind && r.severity === 'blocker') ?? null
+  const mastheadReason = nodeOverview?.posture === 'Action needed' && nodeOverview.primaryAction
+    ? nodeOverview.postureReasons?.find((r) => r.kind === nodeOverview.primaryAction?.kind && r.severity === 'blocker') ?? null
     : null;
 
   return (

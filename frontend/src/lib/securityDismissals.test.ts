@@ -54,6 +54,22 @@ describe('partitionPostureReasons', () => {
   });
 });
 
+describe('a remote that sends part of the facts', () => {
+  it('lists a reason with a key but no policy, and one with an unrecognised key, as active and not dismissable', () => {
+    const noPolicy = reason({ dismissPolicy: undefined });
+    expect(partitionPostureReasons([noPolicy], [dismissal()], 1, NOW).active).toHaveLength(1);
+    expect(isReasonDismissable(noPolicy)).toBe(false);
+    const unknown = reason({ key: 'future_kind:all', dismissPolicy: 'any' });
+    expect(partitionPostureReasons([unknown], [dismissal()], 1, NOW).active).toHaveLength(1);
+  });
+});
+
+describe('securityDismissalKey', () => {
+  it('matches the key the hub stores', () => {
+    expect(securityDismissalKey(3, 'public_exposure:conflict')).toBe('security:3:public_exposure:conflict');
+  });
+});
+
 describe('isReasonDismissable', () => {
   it('needs the remote facts, a non-blocker, and a policy that allows it', () => {
     expect(isReasonDismissable(reason())).toBe(true);

@@ -27,6 +27,7 @@ export function useNodeScan(onComplete?: () => void) {
     setRunning(true);
     const opNodeId = activeNode?.id ?? null;
     const nodeLabel = activeNode?.name ?? 'this node';
+    let ok = false;
     try {
       await runWithLog(
         { stackName: nodeLabel, action: 'scan', nodeId: opNodeId },
@@ -46,12 +47,20 @@ export function useNodeScan(onComplete?: () => void) {
           // A 200 can still carry per-image/stack failures (the batch is
           // failure-tolerant); surface them so a partial scan does not read as clean.
           const result = await res.json().catch(() => null);
-          const failed = (result?.images?.failed ?? 0) + (result?.stacks?.failed ?? 0);
-          if (failed > 0) toast.warning(`Scan completed with ${failed} failure${failed === 1 ? '' : 's'}.`);
+          if (result === null) {
+            toast.warning('The scan finished, but its result could not be read.');
+          } else {
+            const failed = (result?.images?.failed ?? 0) + (result?.stacks?.failed ?? 0);
+            if (failed > 0) toast.warning(`Scan completed with ${failed} failure${failed === 1 ? '' : 's'}.`);
+          }
+          ok = true;
           return { ok: true };
         },
       );
-      onComplete?.();
+      if (ok) onComplete?.();
+    } catch (error) {
+      console.error('[Security] node scan failed:', error);
+      toast.error('The node scan could not be started.');
     } finally {
       setRunning(false);
     }
