@@ -17,7 +17,7 @@ import { randomUUID } from 'crypto';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { setupTestDb, cleanupTestDb } from './helpers/setupTestDb';
 import { directApplicationFixture } from './helpers/gitopsFixtures';
-import { DatabaseService } from '../services/DatabaseService';
+import { DatabaseService, GITOPS_PRUNE_CHUNK_ROWS } from '../services/DatabaseService';
 import { insertHistory, latestTransitionByApplication } from '../services/gitops/history';
 import { GitOpsStore } from '../services/gitops/store';
 import { GitOpsTransitions } from '../services/gitops/transitions';
@@ -90,6 +90,51 @@ function remainingIdsFor(db: import('better-sqlite3').Database, applicationId: s
     db.prepare('SELECT id FROM gitops_history WHERE application_id = ? ORDER BY created_at DESC, id DESC')
       .all(applicationId) as { id: string }[]
   ).map((row) => row.id);
+}
+
+/**
+ * One started or settled row with a caller-chosen id, so a test can force the
+ * UUID order independently of insertion order. The application row is created
+ * the same way `writeRow` does. Call started first when the settlement must
+ * have the higher rowid.
+ */
+function insertStageRow(
+  id: string,
+  operationId: string,
+  at: number,
+  applicationId: string,
+  stage: 'source_reconcile_started' | 'source_reconcile_settled',
+): void {
+  const application = directApplicationFixture(applicationId, `stack-${applicationId}`);
+  const database = DatabaseService.getInstance().getDb();
+  const existing = database.prepare('SELECT 1 FROM gitops_applications WHERE id = ?').get(applicationId);
+  if (!existing) GitOpsStore.getInstance().insertApplication(application);
+  database.prepare(
+    `INSERT INTO gitops_history (id, created_at, application_id, target_mode, lifecycle_key,
+     node_id, dedupe_target, operation_id, stage, outcome, trigger, before_json, after_json)
+     VALUES (?, ?, ?, 'direct', ?, 3, 'app', ?, ?, 'committed', 'poll', '{}', '{}')`,
+  ).run(id, at, applicationId, application.lifecycle_key, operationId, stage);
+}
+
+/** Run the prune until a pass deletes nothing, so a later test's counts are its own rows. */
+function sweepUntilQuiet(): void {
+  const db = DatabaseService.getInstance();
+  for (let pass = 0; pass < 20; pass++) {
+    const result = db.cleanupOldGitOpsHistory(30);
+    if (result.history === 0 && result.outbox === 0) return;
+  }
+  throw new Error('retention prune did not finish');
+}
+
+/** Remaining counts are computed only while developer mode is on. */
+function pruneWithCounts(days: number): ReturnType<DatabaseService['cleanupOldGitOpsHistory']> {
+  const db = DatabaseService.getInstance();
+  db.updateGlobalSetting('developer_mode', '1');
+  try {
+    return db.cleanupOldGitOpsHistory(days);
+  } finally {
+    db.updateGlobalSetting('developer_mode', '0');
+  }
 }
 
 describe('GitOps history retention', () => {
@@ -252,7 +297,7 @@ describe('GitOps history retention', () => {
     // asserts, and thousands of them would slow the suite without testing more.
     const app = 'app-retention-chunk';
     const backlogAt = Date.now() - 400 * DAY_MS;
-    const backlogRows = 6000;
+    const backlogRows = GITOPS_PRUNE_CHUNK_ROWS * 2 + 1000;
     const windowCutoff = Date.now() - 30 * DAY_MS;
     const insert = db.prepare(
       `INSERT INTO gitops_history (id, created_at, application_id, target_mode, lifecycle_key,
@@ -274,18 +319,26 @@ describe('GitOps history retention', () => {
     writeRow('op-retention-chunk-newest', Date.now() - 1 * DAY_MS, { applicationId: app });
     expect(backlogStanding()).toBe(backlogRows);
 
-    const first = DatabaseService.getInstance().cleanupOldGitOpsHistory(30);
-    // One pass, one bounded chunk: the whole backlog is not deleted in a single
-    // transaction, and what is left is reported so the janitor's log can say
-    // whether it is still catching up.
-    expect(first.history).toBeGreaterThan(0);
-    expect(first.historyRemaining).toBe(backlogRows - first.history);
+    // Developer mode is off, so this pass still deletes one chunk and reports
+    // no remainder, even though rows are left. The exact remainder is what the
+    // next pass reports once the diagnostic counts are on.
+    const blind = DatabaseService.getInstance().cleanupOldGitOpsHistory(30);
+    expect(blind.history).toBe(GITOPS_PRUNE_CHUNK_ROWS);
+    expect(blind.historyRemaining).toBe(0);
+    expect(blind.outboxRemaining).toBe(0);
+    expect(backlogStanding()).toBe(backlogRows - GITOPS_PRUNE_CHUNK_ROWS);
+
+    const first = pruneWithCounts(30);
+    // One pass deletes exactly one chunk. An unbounded delete, or a cap raised
+    // past the backlog, deletes a different number.
+    expect(first.history).toBe(GITOPS_PRUNE_CHUNK_ROWS);
+    expect(first.historyRemaining).toBe(backlogRows - 2 * GITOPS_PRUNE_CHUNK_ROWS);
     expect(backlogStanding()).toBe(first.historyRemaining);
     expect(first.outboxRemaining).toBe(0);
 
     // Later passes finish the backlog, and a pass with nothing to do is a no-op.
     while (DatabaseService.getInstance().cleanupOldGitOpsHistory(30).history > 0) {
-      // Clear the backlog one bounded pass at a time, as the janitor does.
+      // Clear the backlog one bounded pass at a time, as the monitor pass does.
     }
     expect(backlogStanding()).toBe(0);
     expect(DatabaseService.getInstance().cleanupOldGitOpsHistory(30).history).toBe(0);
@@ -308,5 +361,89 @@ describe('GitOps history retention', () => {
     expect(result.historyRemaining).toBe(0);
     expect(remainingIdsFor(db, app)).toEqual([]);
     expect(latestTransitionByApplication(db, [app]).has(app)).toBe(false);
+  });
+
+  it('keeps the settled row when it ties the started row and the started id sorts later', () => {
+    const db = DatabaseService.getInstance().getDb();
+    const store = GitOpsStore.getInstance();
+    // Both rows of one attempt share envelope.at. The started id sorts after
+    // the settled id, which is the UUID order that used to treat started as
+    // newer. Started is inserted first, so its rowid is lower.
+    const app = 'app-retention-tie';
+    const operationId = 'op-retention-tie';
+    const at = Date.now() - 60 * DAY_MS;
+    insertStageRow('z-tie-started', operationId, at, app, 'source_reconcile_started');
+    insertStageRow('a-tie-settled', operationId, at, app, 'source_reconcile_settled');
+
+    DatabaseService.getInstance().cleanupOldGitOpsHistory(30);
+
+    expect(
+      db.prepare('SELECT id FROM gitops_history WHERE id = ?').get('a-tie-settled'),
+    ).toEqual({ id: 'a-tie-settled' });
+    expect(store.listUnsettledReconcileAttempts().some((row) => row.operation_id === operationId)).toBe(false);
+  });
+
+  it('does not drop a settled row when a chunk boundary falls inside its attempt', () => {
+    const db = DatabaseService.getInstance().getDb();
+    const store = GitOpsStore.getInstance();
+    sweepUntilQuiet();
+    // 4999 older rows, then a tied pair. Ordered by created_at then rowid, the
+    // chunk of 5000 takes the older rows and the started row (inserted first)
+    // and leaves the settlement. Ordered by id, the settled id sorts first and
+    // would be the row the chunk deletes.
+    const app = 'app-retention-chunk-tie';
+    const operationId = 'op-retention-chunk-tie';
+    const now = Date.now();
+    writeRow('op-retention-chunk-tie-newest', now - 1 * DAY_MS, { applicationId: app });
+    const fillerAt = now - 400 * DAY_MS;
+    const pairAt = now - 60 * DAY_MS;
+    const insert = db.prepare(
+      `INSERT INTO gitops_history (id, created_at, application_id, target_mode, lifecycle_key,
+       node_id, dedupe_target, operation_id, stage, outcome, trigger, before_json, after_json)
+       VALUES (?, ?, ?, 'direct', ?, 3, ?, ?, 'runtime_artifact_observed', 'committed', 'poll', '{}', '{}')`,
+    );
+    const fillers = GITOPS_PRUNE_CHUNK_ROWS - 1;
+    db.transaction(() => {
+      for (let i = 0; i < fillers; i++) {
+        insert.run(randomUUID(), fillerAt, app, `direct:stack-${app}`, `filler-${i}`, `op-chunk-tie-filler-${i}`);
+      }
+    })();
+    insertStageRow('z-chunk-tie-started', operationId, pairAt, app, 'source_reconcile_started');
+    insertStageRow('a-chunk-tie-settled', operationId, pairAt, app, 'source_reconcile_settled');
+
+    const first = DatabaseService.getInstance().cleanupOldGitOpsHistory(30);
+
+    expect(first.history).toBe(GITOPS_PRUNE_CHUNK_ROWS);
+    expect(
+      db.prepare('SELECT id FROM gitops_history WHERE id = ?').get('a-chunk-tie-settled'),
+    ).toEqual({ id: 'a-chunk-tie-settled' });
+    expect(store.listUnsettledReconcileAttempts().some((row) => row.operation_id === operationId)).toBe(false);
+    sweepUntilQuiet();
+  });
+
+  it('bounds an outbox pass to one chunk', () => {
+    const db = DatabaseService.getInstance().getDb();
+    sweepUntilQuiet();
+    const backlogAt = Date.now() - 400 * DAY_MS;
+    const backlogRows = GITOPS_PRUNE_CHUNK_ROWS + 1000;
+    const insert = db.prepare(
+      `INSERT INTO gitops_settled_outbox
+       (settled_history_id, payload_json, payload_version, created_at, updated_at, drained_at)
+       VALUES (?, '{}', 1, ?, ?, ?)`,
+    );
+    db.transaction(() => {
+      for (let i = 0; i < backlogRows; i++) {
+        insert.run(`outbox-chunk-${i}`, backlogAt, backlogAt, backlogAt);
+      }
+    })();
+
+    const first = pruneWithCounts(30);
+
+    expect(first.outbox).toBe(GITOPS_PRUNE_CHUNK_ROWS);
+    expect(first.outboxRemaining).toBe(backlogRows - GITOPS_PRUNE_CHUNK_ROWS);
+    sweepUntilQuiet();
+    expect(
+      db.prepare("SELECT COUNT(*) AS n FROM gitops_settled_outbox WHERE settled_history_id LIKE 'outbox-chunk-%'").get(),
+    ).toEqual({ n: 0 });
   });
 });

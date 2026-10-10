@@ -101,14 +101,14 @@ const MAX_GITOPS_HISTORY_RETENTION_DAYS = 365;
 // undecodable payload, or a fanout that keeps failing), and it is dropped so it
 // cannot accumulate for ever.
 const UNDRAINED_OUTBOX_GRACE_DAYS = 7;
-// History rows deleted per prune pass. A first prune on a long-lived install has
-// months of backlog to clear and SQLite has one writer, so an unbounded
-// transaction would block every other write on the instance for its duration;
-// the janitor runs every 15 minutes and clears the rest on later passes.
-const GITOPS_PRUNE_CHUNK_ROWS = 5000;
+// History and outbox rows deleted per prune pass. A first prune on a long-lived
+// install has months of backlog to clear and SQLite has one writer, so an
+// unbounded transaction would block every other write on the instance for its
+// duration. The pass runs at the end of each monitor evaluation (every 30
+// seconds), not on the 15-minute janitor, and clears the rest on later passes.
+export const GITOPS_PRUNE_CHUNK_ROWS = 5000;
 // What a prune may delete, in one place so the delete statement and the
-// remaining-count that logs how much backlog a pass left behind can never
-// disagree.
+// remaining-count, when developer mode runs it, can never disagree.
 //
 // A row older than the window is pruned unless it is the newest row of a live
 // application: only a live application has a "last activity" fact to preserve.
@@ -118,9 +118,16 @@ const GITOPS_PRUNE_CHUNK_ROWS = 5000;
 // applications. Deleting an idle application's last row would silently empty its
 // activity column with no change on the application itself, since polling off, a
 // suspended source, a detached node and an idle Blueprint are indistinguishable
-// from "no activity" once the rows are gone. Ties on created_at are broken by id,
-// so the row kept is the same one on every run and does not depend on insertion
-// order.
+// from "no activity" once the rows are gone.
+//
+// Ties on created_at are broken by rowid, SQLite's insertion-order key. The id
+// column is a random UUID and does not sort by recency (`latestSettledAttempt`
+// already orders by rowid for that reason). One attempt's started and settled
+// rows share the same envelope timestamp, so a UUID tie-break can keep the
+// started row and delete the settled one. Startup recovery then treats that
+// attempt as open and re-settles it. rowid keeps the later insert, which is
+// the settlement. The chunk delete orders the same way, so a pass that stops
+// between the two rows leaves the settlement in place.
 //
 // Scoped to live applications rather than to every application_id, because the
 // tombstone is the only thing that outlives a stack: `gitops_applications` keeps a
@@ -150,7 +157,7 @@ const GITOPS_HISTORY_PRUNEABLE = `created_at < ?
       SELECT 1 FROM gitops_history newer
       WHERE newer.application_id = gitops_history.application_id
         AND (newer.created_at > gitops_history.created_at
-             OR (newer.created_at = gitops_history.created_at AND newer.id > gitops_history.id))
+             OR (newer.created_at = gitops_history.created_at AND newer.rowid > gitops_history.rowid))
     )
   )`;
 
@@ -5656,11 +5663,11 @@ stmt.run('gitops_schema_version', '1');
      * Drop one bounded chunk of GitOps history and its consumed outbox rows
      * older than the window.
      *
-     * What a prune may delete, and why each application's newest row is exempt
+     * What a prune may delete, and why each live application's newest row is exempt
      * from it, is documented on `GITOPS_HISTORY_PRUNEABLE`.
-     * `historyRemaining` and `outboxRemaining` report the backlog left for the
-     * next pass, so the janitor's log says whether a pass cleared the last rows
-     * or is still catching up.
+     * `historyRemaining` and `outboxRemaining` are exact only while developer mode
+     * is on. The diagnostic log is the only reader, and the counts walk the
+     * backlog, so they are skipped otherwise and reported as 0.
      *
      * A drained outbox row is pruned with the history it announced. An undrained
      * row is a notification the fanout has not written yet, or a payload a later
@@ -5683,14 +5690,15 @@ stmt.run('gitops_schema_version', '1');
             `DELETE FROM gitops_history
              WHERE id IN (
                  SELECT id FROM gitops_history WHERE ${GITOPS_HISTORY_PRUNEABLE}
-                 ORDER BY created_at ASC, id ASC
+                 ORDER BY created_at ASC, rowid ASC
                  LIMIT ?
              )`,
         );
-        // Two statements rather than one OR: the OR cannot use the partial
-        // undrained index, so the drained branch paid for it by scanning. Both
-        // are bounded by the same row cap, so a first prune with months of
-        // outbox backlog clears it over the same later passes rather than
+        // Two statements rather than one OR, so each branch keeps its own row
+        // cap. One statement with both predicates and one LIMIT would still use
+        // the two partial indexes, and it would cap the combined delete. Both
+        // branches are bounded by the same row cap, so a first prune with
+        // months of outbox backlog clears it over later passes rather than
         // holding the writer for all of it.
         const deleteDrained = this.db.prepare(
             `DELETE FROM gitops_settled_outbox
@@ -5708,15 +5716,6 @@ stmt.run('gitops_schema_version', '1');
                  LIMIT ?
              )`,
         );
-        const countHistoryCandidates = this.db.prepare(
-            `SELECT COUNT(*) AS n FROM gitops_history WHERE ${GITOPS_HISTORY_PRUNEABLE}`,
-        );
-        const countOutboxCandidates = this.db.prepare(
-            `SELECT COUNT(*) AS n FROM gitops_settled_outbox
-             WHERE (drained_at IS NOT NULL AND created_at < ?)
-                OR (drained_at IS NULL AND created_at < ?)`,
-        );
-
         // Counted before the delete, so the warning reports the rows this pass is
         // about to drop rather than the rows a previous pass already took.
         const poison = this.db.prepare(
@@ -5734,10 +5733,21 @@ stmt.run('gitops_schema_version', '1');
                 outbox: Number(deletedDrained.changes ?? 0) + Number(deletedUndrained.changes ?? 0),
             };
         })();
-        // Counted after the delete, so a long backlog reports what the next pass
-        // still has to clear rather than what this one was about to look at.
-        const remainingHistory = (countHistoryCandidates.get(cutoff) as { n: number }).n;
-        const remainingOutbox = (countOutboxCandidates.get(cutoff, undrainedCutoff) as { n: number }).n;
+        // Counted after the delete, and only for the diagnostic log. The history
+        // count walks whatever backlog is still left, and the monitor tick runs
+        // this every 30 seconds.
+        let historyRemaining = 0;
+        let outboxRemaining = 0;
+        if (this.getGlobalSettings().developer_mode === '1') {
+            historyRemaining = (this.db.prepare(
+                `SELECT COUNT(*) AS n FROM gitops_history WHERE ${GITOPS_HISTORY_PRUNEABLE}`,
+            ).get(cutoff) as { n: number }).n;
+            outboxRemaining = (this.db.prepare(
+                `SELECT COUNT(*) AS n FROM gitops_settled_outbox
+                 WHERE (drained_at IS NOT NULL AND created_at < ?)
+                    OR (drained_at IS NULL AND created_at < ?)`,
+            ).get(cutoff, undrainedCutoff) as { n: number }).n;
+        }
 
         if (poison.n > 0) {
             console.warn(
@@ -5745,7 +5755,7 @@ stmt.run('gitops_schema_version', '1');
             );
         }
 
-        return { ...pruned, historyRemaining: remainingHistory, outboxRemaining: remainingOutbox };
+        return { ...pruned, historyRemaining, outboxRemaining };
     }
 
     // --- Nodes ---

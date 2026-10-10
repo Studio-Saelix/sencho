@@ -184,7 +184,7 @@ export function GitOpsSection({ onDirtyChange }: GitOpsSectionProps) {
                         </p>
                         <SettingsField
                             label="Keep GitOps history for"
-                            helper="Days of GitOps history and its notification fanout to keep before the cleanup pass prunes them. The newest row for each application is always kept, so the activity timestamps in the GitOps portfolio stay readable however short the window is; pruning an old row never changes what the fleet is running. Lower it to keep a busy Sencho's database small, raise it to keep a longer record. Default 30 days."
+                            helper="Days of GitOps history and its notification fanout to keep before the cleanup pass prunes them. The newest row for each live application is kept, so the activity timestamps in the GitOps portfolio stay readable however short the window is. History views show the entries inside the window, and that kept row when it is older. Pruning an old row never changes what the fleet is running. Lower it to keep a busy Sencho's database small, raise it to keep a longer record. Default 30 days."
                         >
                             <NumberChip
                                 value={settings.gitops_history_retention_days || '30'}

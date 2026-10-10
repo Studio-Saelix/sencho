@@ -106,6 +106,8 @@ describe('GitOpsSection', () => {
         await waitFor(() => expect(chipShowing('17')).toBeInTheDocument());
         // The history window reads the same payload and renders its own stored value.
         expect(screen.getByText('Keep GitOps history for')).toBeInTheDocument();
+        expect(screen.getByText(/newest row for each live application/)).toBeInTheDocument();
+        expect(screen.getByText(/entries inside the window/)).toBeInTheDocument();
         await waitFor(() => expect(chipShowing('45')).toBeInTheDocument());
     });
 
