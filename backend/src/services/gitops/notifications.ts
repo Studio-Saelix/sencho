@@ -120,12 +120,14 @@ export function gitOpsOutboxPlan(
 }
 
 /**
- * The event family a settled attempt's notification belongs to.
+ * How a settled attempt's notification is rendered in the bell.
  *
- * One bell entry per attempt and family, whichever writer reaches the bell
- * first: the staging result and the settle that confirms it are one event. The
- * family is also what the bell renders, so the category, the level, and the
- * dedupe key cannot disagree about one outcome.
+ * This is presentation only. It deliberately does not reach the dedupe key:
+ * one attempt settles into exactly one outcome, so keying per outcome family
+ * would let two writers that classify the same event differently (a live
+ * apply-failure write against the settle that confirms it) produce two entries
+ * for one attempt. The key is per attempt, where there is nothing to disagree
+ * about.
  *
  * A scheduled retry is deliberately not a family of its own: it is a steady
  * state the no-news rule suppresses, and the failure it follows announced
@@ -156,11 +158,16 @@ export function settledNotificationFamily(outcome: string): SettledNotificationF
 
 /**
  * The candidate one ready event announces, when it announces one.
+ *
+ * Identified by the candidate generation rather than the commit, so a commit
+ * that is legitimately staged again later (after an apply, or after the
+ * candidate was discarded and re-staged) is a new candidate and announces
+ * again, while a poll that settles the same waiting candidate stays silent.
  */
-export type GitOpsCandidateIdentity = { applicationId: string; commitSha: string };
+export type GitOpsCandidateIdentity = { applicationId: string; generationId: string };
 
 /**
- * The dedupe key one attempt owns per family.
+ * The dedupe key one attempt owns.
  *
  * The fetch path announces a result when it stages or fails, and the settled
  * attempt announces the same result after the transition commits. Both write
@@ -168,21 +175,26 @@ export type GitOpsCandidateIdentity = { applicationId: string; commitSha: string
  * event instead of two. Stable per attempt, so a replay after a crash between
  * insert and mark-drained collides with the first write too.
  *
+ * Per attempt, not per attempt and outcome: one attempt produces one outcome,
+ * so a per-outcome key would let the two writers collide only when they happen
+ * to classify the event identically, which is exactly the property that must
+ * not be assumed (a live apply-failure write and the settle that confirms it
+ * classify the same failure differently by construction).
+ *
  * A ready event that names a staged candidate is keyed to the candidate
  * instead. A candidate awaiting review settles the same outcome on every poll,
  * and a per-attempt key would notify once per interval; the candidate key makes
- * the poll that staged it the one that announces it, and a new commit the thing
- * that announces again.
+ * the poll that staged it the one that announces it, and a newly staged
+ * candidate the thing that announces again.
  */
 export function gitOpsAttemptNotificationKey(
   operationId: string,
-  family: SettledNotificationFamily,
   candidate?: GitOpsCandidateIdentity,
 ): string {
-  if (candidate && family === 'ready') {
-    return `gitops:candidate:${candidate.applicationId}:${candidate.commitSha}:ready`;
+  if (candidate) {
+    return `gitops:candidate:${candidate.applicationId}:${candidate.generationId}:ready`;
   }
-  return `gitops:attempt:${operationId}:${family}`;
+  return `gitops:attempt:${operationId}`;
 }
 
 /**

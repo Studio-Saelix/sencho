@@ -264,7 +264,7 @@ export function insertHistory(db: Database.Database, row: HistoryInsert): string
       trigger: row.trigger,
       actor: row.actor,
       at: row.at,
-      commitSha: row.commitSha ?? row.application.desired_commit_sha ?? null,
+      candidateGenerationId: row.generationId ?? row.application.candidate_generation_id ?? null,
     });
   } else if (outboxPlan?.kind === 'event') {
     insertGitOpsEventOutbox(db, {

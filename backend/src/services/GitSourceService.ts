@@ -49,7 +49,7 @@ import {
 } from './gitops/triggers';
 import { classifyFailure, effectivePollIntervalSecs } from './gitops/backoff';
 import { checkStatefulWithdrawal, holdForStatefulReview } from './gitops/statefulGuard';
-import { gitOpsAttemptNotificationKey, settledNotificationFamily, type SettledNotificationFamily } from './gitops/notifications';
+import { gitOpsAttemptNotificationKey } from './gitops/notifications';
 import { BlueprintTargetAdapter, buildAcceptedGeneration, type AcceptedGeneration, type DispatchContext, type DispatchResult } from './gitops/handoff';
 import {
     GitOpsTransitions,
@@ -2359,7 +2359,7 @@ export class GitSourceService {
                     `Git pull failed for ${stackName}`,
                     actor,
                     'error',
-                    operationId ? { operationId, family: 'failed' } : undefined,
+                    operationId ? { operationId } : undefined,
                 );
                 throw e;
             }
@@ -2728,29 +2728,45 @@ export class GitSourceService {
             this.upsertGitPlanDrift(stackName, plan);
             const shortSha = fetched.commitSha.slice(0, 7);
             const fpPrefix = plan.fingerprint.slice(0, 12);
-            if (plan.blocked) {
+            // A fetch whose staged project does not validate staged no
+            // candidate, so there is nothing here to announce: the attempt
+            // settles as failed_previous_intact and that settle is the one
+            // entry. Announcing anyway would both double the entries for one
+            // attempt and, because the candidate key identifies the staged
+            // candidate, consume the key a real candidate for that commit needs
+            // once the operator fixes the cause and pulls the same commit again.
+            if (!validation.ok) {
+                console.log(`[GitSource] Pull of ${sanitizeForLog(stackName)} at ${shortSha} staged no candidate: ${validation.error ?? 'the project does not validate'}`);
+            } else if (plan.blocked) {
                 this.recordGitActivity(
                     stackName,
                     'git_plan_blocked',
                     `Git plan blocked for ${stackName} (${shortSha}, op ${GitSourceService.shortOperationId(gitopsOperationId)}, plan ${fpPrefix})`,
                     actor,
                     'warning',
-                    { operationId: gitopsOperationId, family: 'blocked' },
+                    { operationId: gitopsOperationId },
                 );
             } else {
+                // Read after the staging transition committed, so this is the
+                // generation this fetch actually staged: that generation is what
+                // identifies the candidate to the bell. Looked up by
+                // application id, not by stack name: gitopsApp may be a
+                // converted Blueprint source rather than a Direct row, and
+                // reading it back the way it was found keeps the live write on
+                // the same candidate key the settle derives.
+                const staged = gitopsApp
+                    ? GitOpsStore.getInstance().getApplication(gitopsApp.id) ?? null
+                    : null;
+                const candidate = staged?.candidate_generation_id
+                    ? { applicationId: staged.id, generationId: staged.candidate_generation_id }
+                    : undefined;
                 this.recordGitActivity(
                     stackName,
                     'git_pull_ready',
                     `Git pull ready for ${stackName} (${shortSha}, op ${GitSourceService.shortOperationId(gitopsOperationId)}, plan ${fpPrefix})`,
                     actor,
                     undefined,
-                    {
-                        operationId: gitopsOperationId,
-                        family: 'ready',
-                        candidate: gitopsApp
-                            ? { applicationId: gitopsApp.id, commitSha: fetched.commitSha }
-                            : undefined,
-                    },
+                    { operationId: gitopsOperationId, candidate },
                 );
             }
         }
@@ -3212,7 +3228,7 @@ export class GitSourceService {
             `Dispatch settlement failed for ${stackName}: ${result.reason}`,
             actor,
             'error',
-            { operationId: envelope.operationId, family: settledNotificationFamily(result.outcome) },
+            { operationId: envelope.operationId },
         );
     }
 
@@ -5728,7 +5744,7 @@ export class GitSourceService {
                     `Git apply rolled back for ${stackName} (${commitSha.slice(0, 7)}, op ${GitSourceService.shortOperationId(applyOperationId)}, plan ${plan.fingerprint.slice(0, 12)})`,
                     actor,
                     'warning',
-                    { operationId: applyOperationId, family: 'blocked' },
+                    { operationId: applyOperationId },
                 );
             } else {
                 db.setGitSourceLastPlan(stackName, plan.fingerprint, 'failed');
@@ -5738,7 +5754,7 @@ export class GitSourceService {
                     `Git apply failed for ${stackName} (${commitSha.slice(0, 7)}, op ${GitSourceService.shortOperationId(applyOperationId)}, plan ${plan.fingerprint.slice(0, 12)})`,
                     actor,
                     'error',
-                    { operationId: applyOperationId, family: 'failed' },
+                    { operationId: applyOperationId },
                 );
             }
             throw new GitSourceError('GIT_ERROR', scrubCredentials(redacted));
@@ -6256,7 +6272,7 @@ export class GitSourceService {
                         blockedPlanActivity,
                         actor,
                         'warning',
-                        { operationId: applyOperationId, family: 'blocked' },
+                        { operationId: applyOperationId },
                     );
                 }
                 throw new GitSourceError(
@@ -6274,7 +6290,7 @@ export class GitSourceService {
                     blockedPlanActivity,
                     actor,
                     'warning',
-                    { operationId: applyOperationId, family: 'blocked' },
+                    { operationId: applyOperationId },
                 );
                 throw new GitSourceError(
                     'PLAN_BLOCKED',
@@ -7680,9 +7696,8 @@ export class GitSourceService {
         level: 'info' | 'warning' | 'error' = 'info',
         attempt?: {
             operationId: string;
-            family: SettledNotificationFamily;
             /** A staged candidate this event announces, when it announces one. */
-            candidate?: { applicationId: string; commitSha: string };
+            candidate?: { applicationId: string; generationId: string };
         },
     ): void {
         try {
@@ -7697,14 +7712,13 @@ export class GitSourceService {
                     actor_username: actor,
                     // An event that belongs to a tracked attempt carries the
                     // attempt's dedupe key and operation id, so the settled
-                    // notification for the same attempt and family collides
-                    // with it instead of repeating it in the bell.
+                    // notification for the same attempt collides with it
+                    // instead of repeating it in the bell.
                     ...(attempt
                         ? {
                             gitops_operation_id: attempt.operationId,
                             dedupe_key: gitOpsAttemptNotificationKey(
                                 attempt.operationId,
-                                attempt.family,
                                 attempt.candidate,
                             ),
                         }

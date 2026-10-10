@@ -17,13 +17,15 @@ export type SettledAttemptPayloadV1 = {
   actor: string | null;
   at: number;
   /**
-   * The commit this attempt settled on, when one is established. Present so a
-   * staged candidate's review notification is keyed to the candidate rather
-   * than the poll that noticed it, which is what stops a candidate awaiting
-   * review from notifying on every interval. Absent on rows written before the
-   * field existed.
+   * The staged candidate this attempt settled on, when one was staged. Present
+   * so a candidate's review notification is keyed to the candidate itself
+   * rather than to the poll that noticed it, which is what stops a candidate
+   * awaiting review from notifying on every interval. The candidate generation,
+   * not the commit, because the same commit staged again is a new candidate.
+   * Null when the attempt staged nothing, and absent on rows written before
+   * the field existed.
    */
-  commitSha: string | null;
+  candidateGenerationId: string | null;
 };
 
 export type SettledAttemptPayload = SettledAttemptPayloadV1;
@@ -84,8 +86,10 @@ export function decodeSettledAttemptPayload(raw: string, version: number): Settl
     return { ok: false, limitation: 'settled_attempt_payload_invalid' };
   }
   // Absent on rows written before the field existed, and null is what those
-  // rows mean: no commit was established for the notification to key on.
-  if (decoded.commitSha !== undefined && decoded.commitSha !== null && typeof decoded.commitSha !== 'string') {
+  // rows mean: no candidate was staged for the notification to key on.
+  if (decoded.candidateGenerationId !== undefined
+    && decoded.candidateGenerationId !== null
+    && typeof decoded.candidateGenerationId !== 'string') {
     return { ok: false, limitation: 'settled_attempt_payload_invalid' };
   }
   return {
@@ -103,7 +107,7 @@ export function decodeSettledAttemptPayload(raw: string, version: number): Settl
       trigger: decoded.trigger,
       actor: decoded.actor,
       at: decoded.at,
-      commitSha: typeof decoded.commitSha === 'string' ? decoded.commitSha : null,
+      candidateGenerationId: typeof decoded.candidateGenerationId === 'string' ? decoded.candidateGenerationId : null,
     },
   };
 }

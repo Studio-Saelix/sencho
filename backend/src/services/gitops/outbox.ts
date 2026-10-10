@@ -170,9 +170,13 @@ function fanoutSettledNotification(payload: SettledAttemptPayload): void {
       gitops_operation_id: payload.operationId,
       dedupe_key: gitOpsAttemptNotificationKey(
         payload.operationId,
-        family,
-        payload.commitSha
-          ? { applicationId: payload.applicationId, commitSha: payload.commitSha }
+        // Only a ready outcome announces a staged candidate. A blocked or
+        // failed outcome can also carry a candidate generation (a blocked
+        // candidate is still the live candidate), and keying that to the
+        // candidate would put it on a different key from the live write for
+        // the same attempt, which is the double entry this key exists to stop.
+        family === 'ready' && payload.candidateGenerationId
+          ? { applicationId: payload.applicationId, generationId: payload.candidateGenerationId }
           : undefined,
       ),
     },
