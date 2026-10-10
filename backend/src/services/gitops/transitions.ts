@@ -457,18 +457,44 @@ export class GitOpsTransitions {
       // they had while Git content was running. Both go back to the operator
       // with the mode; an operator who wants unattended placement sets the
       // rollout authorization policy again from the Inline authority row.
+      //
+      // The preflight evidence goes with them, for its own reason: this row
+      // never runs Git-managed content again. `inline_blueprint` is a terminal
+      // mode. The only transition into it is this demotion, nothing accepts it
+      // as an entry mode, and `loadConvertBinding` refuses anything that is not
+      // `direct`, so the row a Detach produced is never converted back; binding
+      // a fresh Git source to the same Blueprint tombstones it first.
+      // `recordPreflightEvaluation` is the evidence column's only writer and the
+      // `ensureRolloutAuthorization` path that calls it evaluates registry
+      // readiness for a Git-managed rollout this row can never run, so nothing
+      // will ever refresh it. Left in place it is a permanent stale claim: the
+      // row answers "the last registry preflight for this application evaluated
+      // this" with a fingerprint naming an authorization it no longer has, and
+      // no mode change, apply, or invalidation cleared it, which is why it
+      // outlived everything it was evaluated for until now.
+      // Every column the clear writes is in the early-return condition, so the
+      // no-op is exact: a row carrying only a dangling `rollout_authorization_ref`
+      // would otherwise be reported as having nothing to clear and left with a
+      // ref nothing resolves, with no history row admitting it.
       onRetarget: (app) => {
         if (app.placement_approval_ref === null
-          && app.rollout_authorization_policy === 'manual') {
+          && app.rollout_authorization_ref === null
+          && app.rollout_authorization_policy === 'manual'
+          && app.latest_preflight_evidence_json === null
+          && app.preflight_fingerprint === null) {
           return {};
         }
         app.placement_approval_ref = null;
         app.rollout_authorization_ref = null;
         app.rollout_authorization_policy = 'manual';
+        app.latest_preflight_evidence_json = null;
+        app.preflight_fingerprint = null;
         return {
           placementApprovalRef: null,
           rolloutAuthorizationRef: null,
           rolloutAuthorizationPolicy: 'manual',
+          latestPreflightEvidenceJson: null,
+          preflightFingerprint: null,
         };
       },
     });

@@ -302,6 +302,90 @@ describe('gitops binding transitions', () => {
     expect(demoted.configured_repo_url).toBeNull();
     expect(demoted.blueprint_id).toBe(blueprintId);
   });
+
+  it('takes the Git-era rollout authorization evidence off the row on demotion', () => {
+    const store = GitOpsStore.getInstance();
+    const tx = GitOpsTransitions.getInstance();
+    const blueprintId = createBlueprint('bind-demote-evidence');
+    tx.activateDirect({
+      application: app('app-demote-evidence', 'demote-evidence-web'),
+      nodeId: 1,
+      envelope: env('op-activate-demote-evidence'),
+    });
+    tx.convertDirectToBlueprint({
+      applicationId: 'app-demote-evidence',
+      blueprintId,
+      envelope: env('op-demote-evidence-convert'),
+    });
+    // The shape a live Git-managed application carries: a placement approval,
+    // an authorization policy other than manual, and the preflight evidence a
+    // recorded evaluation left behind with its live fingerprint.
+    const sqlite = DatabaseService.getInstance().getDb();
+    sqlite.prepare(
+      `UPDATE gitops_applications
+       SET placement_approval_ref = ?, rollout_authorization_ref = ?, rollout_authorization_policy = 'automatic',
+           latest_preflight_evidence_json = '{}', preflight_fingerprint = ?
+       WHERE id = ?`,
+    ).run('place-demote', 'auth-demote', 'f'.repeat(64), 'app-demote-evidence');
+
+    tx.blueprintModeDemoted({
+      applicationId: 'app-demote-evidence',
+      envelope: env('op-demote-evidence'),
+    });
+
+    const demoted = store.getApplication('app-demote-evidence')!;
+    // The evidence outlived nothing else on the row: without the clear it
+    // describes a Git-managed authorization this mode can no longer be granted,
+    // and the first placement an operator grants afterwards would be projected
+    // against it.
+    expect(demoted.placement_approval_ref).toBeNull();
+    expect(demoted.rollout_authorization_ref).toBeNull();
+    expect(demoted.rollout_authorization_policy).toBe('manual');
+    expect(demoted.latest_preflight_evidence_json).toBeNull();
+    expect(demoted.preflight_fingerprint).toBeNull();
+
+    const history = sqlite.prepare(
+      "SELECT after_json FROM gitops_history WHERE application_id = ? AND operation_id = ? AND stage = 'application_retargeted'",
+    ).get('app-demote-evidence', 'op-demote-evidence') as { after_json: string };
+    // The clear is auditable in the same row as the mode change it rides on,
+    // so a reader can tell an evidence drop from a row that never had one.
+    expect(JSON.parse(history.after_json)).toMatchObject({
+      targetMode: 'inline_blueprint',
+      latestPreflightEvidenceJson: null,
+      preflightFingerprint: null,
+    });
+  });
+
+  it('leaves a demoted row with no evidence untouched', () => {
+    const store = GitOpsStore.getInstance();
+    const tx = GitOpsTransitions.getInstance();
+    const blueprintId = createBlueprint('bind-demote-noop');
+    tx.activateDirect({
+      application: app('app-demote-noop', 'demote-noop-web'),
+      nodeId: 1,
+      envelope: env('op-activate-demote-noop'),
+    });
+    tx.convertDirectToBlueprint({
+      applicationId: 'app-demote-noop',
+      blueprintId,
+      envelope: env('op-demote-noop-convert'),
+    });
+    const before = store.getApplication('app-demote-noop')!;
+
+    tx.blueprintModeDemoted({ applicationId: 'app-demote-noop', envelope: env('op-demote-noop') });
+
+    const demoted = store.getApplication('app-demote-noop')!;
+    expect(demoted.latest_preflight_evidence_json).toBeNull();
+    expect(demoted.preflight_fingerprint).toBeNull();
+    expect(demoted.placement_approval_ref).toBe(before.placement_approval_ref);
+    expect(demoted.rollout_authorization_policy).toBe(before.rollout_authorization_policy);
+    const rows = DatabaseService.getInstance().getDb().prepare(
+      "SELECT after_json FROM gitops_history WHERE application_id = ? AND operation_id = ? AND stage = 'application_retargeted'",
+    ).all('app-demote-noop', 'op-demote-noop') as Array<{ after_json: string }>;
+    // Nothing was cleared, so the retarget row names only the mode change.
+    expect(rows).toHaveLength(1);
+    expect(JSON.parse(rows[0]!.after_json)).toEqual({ targetMode: 'inline_blueprint' });
+  });
 });
 
 function createBlueprint(name: string): number {

@@ -2043,6 +2043,117 @@ describe('derive facets for authorization and convergence', () => {
   });
 });
 
+describe('a detached Blueprint has no rollout authorization to wait for', () => {
+  /**
+   * Re-mint a placement approval the way an Inline Apply writes one.
+   *
+   * The detached row keeps the intent, candidate, generation and artifact set
+   * it carried while it was Git-managed, so the approval this writes resolves
+   * against them exactly as an Apply's does.
+   */
+  function reMintPlacement(fixture: {
+    applicationId: string;
+    nodeIds: number[];
+  }, app: GitOpsApplicationRow): void {
+    const store = GitOpsStore.getInstance();
+    const candidate = store.getRolloutCandidate(app.rollout_candidate_id!)!;
+    GitOpsTransitions.getInstance().placementApproved({
+      applicationId: fixture.applicationId,
+      approvalId: randomUUID(),
+      intentRevisionId: app.intent_revision_id!,
+      blastJson: encodeGitOpsApprovedTargetEffectJson(
+        fixture.nodeIds.map((nodeId) => ({ nodeId, outcome: 'place' as const })),
+      ),
+      requiredNodeIds: fixture.nodeIds,
+      fingerprint: null,
+      actor: 'tester',
+      envelope: { operationId: randomUUID(), actor: 'tester', trigger: 'manual', at: Date.now() },
+      rolloutGenerationId: randomUUID(),
+      candidateId: candidate.id,
+      authority: 'operator',
+      policyProvenanceJson: null,
+      provenance: 'placement_approval',
+    });
+  }
+
+  it('projects blueprint_bound, not an outstanding authorization, after a detach and a placement re-mint', () => {
+    clearGitOpsState();
+    const fixture = seedAuthorizedReadyApp();
+    authorize(fixture.applicationId);
+    const store = GitOpsStore.getInstance();
+    // Stored evidence the authorization above recorded, still on the row until
+    // the demotion clears it.
+    expect(store.getApplication(fixture.applicationId)!.latest_preflight_evidence_json).toBeTruthy();
+
+    GitOpsTransitions.getInstance().blueprintModeDemoted({
+      applicationId: fixture.applicationId,
+      envelope: { operationId: randomUUID(), actor: 'tester', trigger: 'manual', at: Date.now() },
+    });
+    const demoted = store.getApplication(fixture.applicationId)!;
+    expect(demoted.target_mode).toBe('inline_blueprint');
+
+    reMintPlacement(fixture, demoted);
+
+    const projection = deriveGitOpsRevision({
+      application: store.getApplication(fixture.applicationId)!,
+      targets: store.listTargets(fixture.applicationId),
+      healthDisabled: false,
+    }, null);
+    // The dead end this guards: the placement facet reported an authorization
+    // the Inline surface has no route or affordance to grant, because the
+    // Git-era evidence outlived the authorization it was evaluated for.
+    expect(projection.facets?.placement.status).toBe('blueprint_bound');
+  });
+
+  it('reads blueprint_bound for a row the old demotion left holding Git-era evidence', () => {
+    clearGitOpsState();
+    const fixture = seedAuthorizedReadyApp();
+    authorize(fixture.applicationId);
+    const store = GitOpsStore.getInstance();
+    // A row that was detached while the earlier code was live.
+    // `commitTargetBinding` short-circuits a row that already matches the
+    // destination and returns before `onRetarget` runs, so replaying the
+    // demotion never reaches the clear, and no backfill removes the evidence
+    // it left behind. This is the population the dead end was found on, so the
+    // guard in derive, not the clear, is what protects them.
+    store.getApplication(fixture.applicationId);
+    DatabaseService.getInstance().getDb().prepare(
+      `UPDATE gitops_applications SET target_mode = 'inline_blueprint', stack_name = NULL,
+         configured_source_stack_name = NULL, configured_repo_url = NULL
+       WHERE id = ?`,
+    ).run(fixture.applicationId);
+    const stuck = store.getApplication(fixture.applicationId)!;
+    expect(stuck.target_mode).toBe('inline_blueprint');
+    // Both of these are what the old demotion left in place: the evidence, and
+    // the authorization pointer it was evaluated for, since the earlier code
+    // cleared neither. The guard has to answer correctly from this row.
+    expect(stuck.latest_preflight_evidence_json).toBeTruthy();
+    expect(stuck.preflight_fingerprint).toBeTruthy();
+
+    // The placement an operator grants next, the way an Apply writes it.
+    reMintPlacement(fixture, stuck);
+
+    const projection = deriveGitOpsRevision({
+      application: store.getApplication(fixture.applicationId)!,
+      targets: store.listTargets(fixture.applicationId),
+      healthDisabled: false,
+    }, null);
+    expect(projection.facets?.placement.status).toBe('blueprint_bound');
+  });
+
+  it('still projects an outstanding authorization for a Git-managed application', () => {
+    clearGitOpsState();
+    const fixture = seedAuthorizedReadyApp();
+    recordNonBlockingPreflight(fixture.applicationId);
+    const projection = deriveGitOpsRevision({
+      application: GitOpsStore.getInstance().getApplication(fixture.applicationId)!,
+      targets: GitOpsStore.getInstance().listTargets(fixture.applicationId),
+      healthDisabled: false,
+    }, null);
+    expect(projection.facets?.placement.status).toBe('rollout_authorization_pending');
+  });
+});
+
 describe('a rollout authorization records the policy that decided it', () => {
   it('records the configured snapshot on a policy-authorized mint', async () => {
     // The record this exists for. The projection can still answer "what
