@@ -2600,6 +2600,7 @@ export class GitSourceService {
 
         // Record what this fetch resolved before the pending blob is written,
         // so the durable pointers and the operational pending store agree.
+        let stagingRecorded = true;
         if (gitopsApp) {
             const outcomeRecorded = this.recordGitOps(stackName, 'fetch outcome', () => {
                 const tx = GitOpsTransitions.getInstance();
@@ -2694,6 +2695,7 @@ export class GitSourceService {
             // The pull itself succeeded; the files and the pending blob are
             // real. Closing the operation is what stops the source reporting a
             // fetch in flight for ever and locking out every later pull.
+            stagingRecorded = outcomeRecorded;
             if (!outcomeRecorded) gitops.abandon();
         }
 
@@ -2728,15 +2730,16 @@ export class GitSourceService {
             this.upsertGitPlanDrift(stackName, plan);
             const shortSha = fetched.commitSha.slice(0, 7);
             const fpPrefix = plan.fingerprint.slice(0, 12);
-            // A fetch whose staged project does not validate staged no
-            // candidate, so there is nothing here to announce: the attempt
-            // settles as failed_previous_intact and that settle is the one
-            // entry. Announcing anyway would both double the entries for one
-            // attempt and, because the candidate key identifies the staged
-            // candidate, consume the key a real candidate for that commit needs
-            // once the operator fixes the cause and pulls the same commit again.
-            if (!validation.ok) {
-                console.log(`[GitSource] Pull of ${sanitizeForLog(stackName)} at ${shortSha} staged no candidate: ${validation.error ?? 'the project does not validate'}`);
+            // Nothing is announced here when the attempt has no staged result to
+            // announce, because the settle that records it is the single entry
+            // and this write would take its key. That is the case when the
+            // staged project does not validate (no candidate was staged), and
+            // when the staging transition was rejected: the abandon above
+            // stamped the attempt failed, so announcing "ready" here would both
+            // misreport the attempt and suppress the failure the settle is
+            // about to write.
+            if (!validation.ok || !stagingRecorded) {
+                console.log(`[GitSource] Pull of ${sanitizeForLog(stackName)} at ${shortSha} announced no candidate: ${!stagingRecorded ? 'the staging transition was rejected' : validation.error ?? 'the project does not validate'}`);
             } else if (plan.blocked) {
                 this.recordGitActivity(
                     stackName,

@@ -11072,6 +11072,111 @@ describe('GitSourceService classified plan fingerprint', () => {
         }
     });
 
+    it('announces the failure, not ready, when the staging transition is rejected', async () => {
+        // The fetch succeeded but its result could not be recorded. The attempt
+        // is abandoned as failed, so the live write must not announce a staged
+        // candidate it never staged: that write would also take the attempt key
+        // and suppress the failure the settle is about to write.
+        const sha = 'ff88ff88ff88ff88ff88ff88ff88ff88ff88ff88';
+        mockSuccessfulClone({ compose: 'services:\n  web:\n    image: nginx\n', sha });
+        const svc = GitSourceService.getInstance();
+        const validateSpy = vi.spyOn(svc, 'validateCompose').mockResolvedValue({ ok: true });
+        const { FileSystemService } = await import('../services/FileSystemService');
+        await FileSystemService.getInstance().createStack('notif-rejected');
+        await svc.upsert({
+            stackName: 'notif-rejected',
+            repoUrl: 'https://github.com/example/notif-rejected.git',
+            branch: 'main',
+            composePaths: ['compose.yaml'],
+            contextDir: null,
+            syncEnv: false,
+            envPath: null,
+            authType: 'none',
+            autoApplyOnWebhook: false,
+            autoDeployOnApply: false,
+        });
+        const stagingSpy = vi.spyOn(GitOpsTransitions.prototype, 'candidateReady')
+            .mockImplementation(() => { throw new Error('store rejected the staged generation'); });
+        try {
+            await svc.pull('notif-rejected', { actor: 'alice' });
+            await drainSettledOutbox();
+
+            const app = GitOpsStore.getInstance().getLiveDirectApplication('notif-rejected')!;
+            const rows = bellRowsFor(app.id);
+            expect(bellRowsPerAttempt(app.id)).toEqual([]);
+            expect(rows).toHaveLength(1);
+            expect(rows[0]!.category).toBe('git_pull_failed');
+        } finally {
+            stagingSpy.mockRestore();
+            validateSpy.mockRestore();
+            await cleanupStackDir('notif-rejected');
+        }
+    });
+
+    it('keeps a waiting candidate announced once across polls, and once more after its entry is cleared', async () => {
+        // The candidate key is enforced by the unique index against rows that
+        // still exist, so a repeat poll adds nothing while the entry is in the
+        // bell and announces the candidate once more once it is not. Marking
+        // the bell read is not the same as clearing it and frees nothing.
+        const sha = 'ee77ee77ee77ee77ee77ee77ee77ee77ee77ee77';
+        mockSuccessfulClone({ compose: 'services:\n  web:\n    image: nginx\n', sha });
+        const svc = GitSourceService.getInstance();
+        const validateSpy = vi.spyOn(svc, 'validateCompose').mockResolvedValue({ ok: true });
+        const { FileSystemService } = await import('../services/FileSystemService');
+        await FileSystemService.getInstance().createStack('notif-repeatpoll');
+        await svc.upsert({
+            stackName: 'notif-repeatpoll',
+            repoUrl: 'https://github.com/example/notif-repeatpoll.git',
+            branch: 'main',
+            composePaths: ['compose.yaml'],
+            contextDir: null,
+            syncEnv: false,
+            envPath: null,
+            authType: 'none',
+            autoApplyOnWebhook: false,
+            autoDeployOnApply: false,
+        });
+        const poll = async (appId: string): Promise<void> => {
+            await svc.reconcile({
+                intent: 'fetch',
+                applicationId: appId,
+                stackName: 'notif-repeatpoll',
+                trigger: 'poll',
+                actor: 'system:source-controller',
+            });
+            await drainSettledOutbox();
+        };
+        const readyRows = (appId: string) =>
+            bellRowsFor(appId).filter((row) => row.category === 'git_pull_ready');
+        try {
+            await svc.pull('notif-repeatpoll', { actor: 'alice' });
+            await drainSettledOutbox();
+            const app = GitOpsStore.getInstance().getLiveDirectApplication('notif-repeatpoll')!;
+
+            // Later polls of the same waiting candidate, through the path the
+            // controller uses, add nothing.
+            await poll(app.id);
+            await poll(app.id);
+            expect(readyRows(app.id)).toHaveLength(1);
+            expect(bellRowsPerAttempt(app.id)).toEqual([]);
+
+            // Reading the bell does not free the key.
+            DatabaseService.getInstance().markAllNotificationsRead(DatabaseService.getInstance().getDefaultNode()!.id!);
+            await poll(app.id);
+            expect(readyRows(app.id)).toHaveLength(1);
+
+            // Clearing it does, and the next poll announces the candidate once
+            // more. Pinned here rather than engineered around.
+            DatabaseService.getInstance().deleteAllNotifications(DatabaseService.getInstance().getDefaultNode()!.id!);
+            await poll(app.id);
+            expect(readyRows(app.id)).toHaveLength(1);
+            expect(bellRowsPerAttempt(app.id)).toEqual([]);
+        } finally {
+            validateSpy.mockRestore();
+            await cleanupStackDir('notif-repeatpoll');
+        }
+    });
+
     it('announces a commit staged again after a different commit', async () => {
         // The apply-then-return case: the candidate key identifies the
         // candidate generation, so a genuinely new candidate for a commit seen
