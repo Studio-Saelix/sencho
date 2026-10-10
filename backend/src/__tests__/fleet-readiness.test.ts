@@ -1963,3 +1963,130 @@ describe('GET /api/fleet/readiness input validation', () => {
     expect(res.body.nodes.some((node: FleetReadinessNode) => node.type === 'local')).toBe(true);
   });
 });
+
+describe('GET /api/fleet/readiness dismissals', () => {
+  const partial = (running: number, total: number) => ({
+    generatedAt: Date.now(),
+    counts: { partial: 1 },
+    degraded: false,
+    stale: false,
+    problems: [{ stack: 'web', status: 'partial', running, total }],
+  });
+
+  async function fingerprintOf(nodeId: number, workloads: unknown, code: string): Promise<string> {
+    mockFetch(nodeReadHandler(evidenceBody({ workloads }), summaryBody([])));
+    const { body } = await getReadiness({ domains: 'workloads', nodeIds: String(nodeId) });
+    return body.findings.find((finding) => finding.code === code)!.fingerprint;
+  }
+
+  async function store() {
+    const { FindingDismissalStore } = await import('../services/findingDismissals/FindingDismissalStore');
+    return FindingDismissalStore.getInstance();
+  }
+
+  function dismiss(nodeId: number, findingKey: string, fingerprint: string, severity = 'degraded') {
+    return store().then((s) => s.dismiss(
+      { nodeId, surface: 'readiness', findingKey, stackName: 'web', fingerprint, severity, count: 1 },
+      { mode: 'until_change', expiresAt: null, createdBy: 'alice', now: 1 },
+    ).row);
+  }
+
+  it('moves the fingerprint when a second service goes down, and holds it still otherwise', async () => {
+    const nodeId = addOnlineProxyNode('fingerprint-proxy');
+    const oneOfTwo = await fingerprintOf(nodeId, partial(1, 2), 'workloads_partial');
+    expect(await fingerprintOf(nodeId, partial(1, 2), 'workloads_partial')).toBe(oneOfTwo);
+    expect(await fingerprintOf(nodeId, partial(1, 3), 'workloads_partial')).not.toBe(oneOfTwo);
+    expect(await fingerprintOf(nodeId, partial(0, 2), 'workloads_partial')).not.toBe(oneOfTwo);
+  });
+
+  it('still fingerprints a stack reported by a node that sends no container tally', async () => {
+    const nodeId = addOnlineProxyNode('older-peer-proxy');
+    const without = {
+      generatedAt: Date.now(), counts: { partial: 1 }, degraded: false, stale: false,
+      problems: [{ stack: 'web', status: 'partial' }],
+    };
+    expect(await fingerprintOf(nodeId, without, 'workloads_partial')).toMatch(/^[0-9a-f]{64}$/);
+  });
+
+  it('publishes each finding with its dismissal policy', async () => {
+    const nodeId = addOnlineProxyNode('policy-proxy');
+    mockFetch(nodeReadHandler(evidenceBody({
+      workloads: {
+        generatedAt: Date.now(), counts: { running: 1 }, degraded: false, stale: false,
+        problems: [{ stack: 'a', status: 'exited' }, { stack: 'c', status: 'surprise' }],
+      },
+    }), summaryBody([])));
+    const { body } = await getReadiness({ domains: 'workloads', nodeIds: String(nodeId) });
+    const policy = (code: string) => body.findings.find((finding) => finding.code === code)?.dismissPolicy;
+    expect(policy('workloads_exited')).toBe('any');
+    expect(policy('workloads_unknown')).toBe('timed');
+    expect(body.dismissals).toEqual([]);
+  });
+
+  it('publishes a dismissal that still covers its finding, and retires one whose finding a live read shows gone', async () => {
+    const nodeId = addOnlineProxyNode('retire-proxy');
+    const key = `workloads:${nodeId}:web:workloads_partial`;
+    const fingerprint = await fingerprintOf(nodeId, partial(1, 2), 'workloads_partial');
+    await dismiss(nodeId, key, fingerprint);
+
+    mockFetch(nodeReadHandler(evidenceBody({ workloads: partial(1, 2) }), summaryBody([])));
+    const covered = await getReadiness({ domains: 'workloads', nodeIds: String(nodeId) });
+    expect(covered.body.dismissals.map((d) => d.findingKey)).toEqual([key]);
+    // The finding itself is never filtered by the dismissal.
+    expect(covered.body.findings.some((finding) => finding.id === key)).toBe(true);
+
+    mockFetch(nodeReadHandler(evidenceBody(), summaryBody([])));
+    const healthy = await getReadiness({ domains: 'workloads', nodeIds: String(nodeId) });
+    expect(healthy.body.findings.some((finding) => finding.id === key)).toBe(false);
+    expect(healthy.body.dismissals).toEqual([]);
+    expect((await store()).list('readiness')).toHaveLength(0);
+  });
+
+  it('retires a dismissal once the finding changed, so a revert cannot hide it again', async () => {
+    const nodeId = addOnlineProxyNode('revert-proxy');
+    const key = `workloads:${nodeId}:web:workloads_partial`;
+    await dismiss(nodeId, key, await fingerprintOf(nodeId, partial(1, 2), 'workloads_partial'));
+
+    mockFetch(nodeReadHandler(evidenceBody({ workloads: partial(1, 3) }), summaryBody([])));
+    expect((await getReadiness({ domains: 'workloads', nodeIds: String(nodeId) })).body.dismissals).toEqual([]);
+    mockFetch(nodeReadHandler(evidenceBody({ workloads: partial(1, 2) }), summaryBody([])));
+    const back = await getReadiness({ domains: 'workloads', nodeIds: String(nodeId) });
+    expect(back.body.dismissals).toEqual([]);
+    expect(back.body.findings.some((finding) => finding.id === key)).toBe(true);
+  });
+
+  it('keeps a dismissal while the node cannot be reached', async () => {
+    const nodeId = addOnlineProxyNode('outage-proxy');
+    const key = `workloads:${nodeId}:web:workloads_partial`;
+    await dismiss(nodeId, key, await fingerprintOf(nodeId, partial(1, 2), 'workloads_partial'));
+
+    mockFetch(() => Promise.reject(new Error('connect ECONNREFUSED')));
+    const down = await getReadiness({ domains: 'connectivity,workloads', nodeIds: String(nodeId) });
+    expect(down.body.findings.some((finding) => finding.code === 'node_unreachable')).toBe(true);
+    expect((await store()).list('readiness').map((row) => row.finding_key)).toEqual([key]);
+  });
+
+  it('leaves another node\'s dismissals alone when the request names one node', async () => {
+    const first = addOnlineProxyNode('scope-one');
+    const second = addProxyNode('scope-two', HEALTHY_BASE);
+    const key = `workloads:${second}:web:workloads_partial`;
+    await dismiss(second, key, 'fp');
+
+    mockFetch(nodeReadHandler(evidenceBody(), summaryBody([])));
+    const { body } = await getReadiness({ domains: 'workloads', nodeIds: String(first) });
+    expect(body.dismissals).toEqual([]);
+    expect((await store()).list('readiness').map((row) => row.finding_key)).toEqual([key]);
+  });
+
+  it('degrades to no dismissals, not no board, when the dismissals cannot be read', async () => {
+    const nodeId = addOnlineProxyNode('db-failure-proxy');
+    mockFetch(nodeReadHandler(evidenceBody({ workloads: partial(1, 2) }), summaryBody([])));
+    vi.spyOn((await store()), 'list').mockImplementation(() => { throw new Error('SQLITE_BUSY'); });
+    const logs = captureConsole();
+    const { status, body } = await getReadiness({ domains: 'workloads', nodeIds: String(nodeId) });
+    expect(status).toBe(200);
+    expect(body.dismissals).toEqual([]);
+    expect(body.findings.some((finding) => finding.code === 'workloads_partial')).toBe(true);
+    expect(logs.errors).toContain('[Readiness] Could not read dismissals:');
+  });
+});

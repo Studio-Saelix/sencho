@@ -1876,6 +1876,27 @@ export class DatabaseService {
       CREATE INDEX IF NOT EXISTS idx_preflight_ack_stack
         ON preflight_acknowledgements(node_id, stack_name);
 
+      -- Hub-held team dismissals of attention findings (FindingDismissalStore).
+      -- surface and mode are validated in code so a new surface needs no rebuild.
+      CREATE TABLE IF NOT EXISTS finding_dismissals (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        node_id INTEGER NOT NULL,
+        surface TEXT NOT NULL,
+        finding_key TEXT NOT NULL,
+        stack_name TEXT,
+        fingerprint TEXT NOT NULL,
+        severity TEXT NOT NULL,
+        count_at INTEGER NOT NULL,
+        mode TEXT NOT NULL,
+        expires_at INTEGER,
+        created_by TEXT NOT NULL,
+        created_at INTEGER NOT NULL
+      );
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_finding_dismissals_key
+        ON finding_dismissals(node_id, surface, finding_key);
+      CREATE INDEX IF NOT EXISTS idx_finding_dismissals_surface
+        ON finding_dismissals(surface, node_id);
+
       CREATE TABLE IF NOT EXISTS stack_exposure (
         node_id INTEGER NOT NULL DEFAULT 0,
         stack_name TEXT NOT NULL,
@@ -5721,6 +5742,7 @@ stmt.run('gitops_schema_version', '1');
             this.db.prepare('DELETE FROM preflight_findings WHERE run_id IN (SELECT id FROM preflight_runs WHERE node_id = ?)').run(id);
             this.db.prepare('DELETE FROM preflight_runs WHERE node_id = ?').run(id);
             this.db.prepare('DELETE FROM preflight_acknowledgements WHERE node_id = ?').run(id);
+            this.db.prepare('DELETE FROM finding_dismissals WHERE node_id = ?').run(id);
             this.db.prepare('DELETE FROM stack_exposure WHERE node_id = ?').run(id);
             this.db.prepare('DELETE FROM health_gate_runs WHERE node_id = ?').run(id);
             this.db.prepare('DELETE FROM stack_update_recovery_generations WHERE node_id = ?').run(id);
