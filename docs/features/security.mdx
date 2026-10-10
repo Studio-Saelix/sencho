@@ -138,6 +138,8 @@ the secret findings for a scan.
 
 ## Policies
 
+Scan policies decide what a deploy gate blocks on. A separate set of **Evidence availability** settings on the same tab decides what the gate may do when it has no finding to evaluate, because a missing scanner is not the same thing as a clean scan. See [Deploy Enforcement](/features/deploy-enforcement#evidence-availability) for the full behavior and the shipped defaults.
+
 <Frame>
   <img src="/images/security/add-policy.png" alt="New policy dialog with a Name field, an optional glob-style Stack pattern field, Block conditions toggles for Severity threshold, Known-exploited (KEV), and Package fix available (Critical/High), a Block on deploy toggle, and an Enabled toggle." />
 </Frame>

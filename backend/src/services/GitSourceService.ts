@@ -137,6 +137,52 @@ function storedCandidateContentSha256(raw: string | null): string | null {
     return decoded.candidateContentSha256;
 }
 
+/**
+ * The decision half of a stored security-policy evidence column, for the reuse
+ * comparison.
+ *
+ * Compared as a projection rather than as raw text, so the comparison is about
+ * the decision rather than its encoding. The applications are part of it, which
+ * is the point: an acceptance on unproven evidence and a clean one share a
+ * status and a policy id, so a verdict-only comparison would reuse the
+ * generation recorded for one of them when the other is re-polled, leaving the
+ * attribution column describing a decision this poll did not reach.
+ *
+ * The application list is sorted before it is compared, because the order the
+ * evaluator happens to produce is not part of the decision. Two polls that reach
+ * the same set of rules in a different order describe the same outcome, and
+ * treating them as different would mint a replacement generation for it.
+ *
+ * Both evidence fields are normalized for a column written before they existed,
+ * so the first poll after an upgrade reuses its generation rather than minting a
+ * replacement for every existing source on an unchanged verdict. An absent list
+ * normalizes to empty and an absent outcome to `allow`, which is what
+ * `mostRestrictiveOutcome` returns for no applications at all, so a legacy clean
+ * acceptance and a freshly recorded one compare equal. That cannot hide a change:
+ * any outcome other than `allow`, or any rule that acted, differs from both
+ * defaults and replaces the row. An unparseable or absent column yields null,
+ * which never matches, so auto-accept re-evaluates and writes a fresh row instead
+ * of reusing an unreadable one.
+ */
+function securityPolicyDecision(raw: string | null): string | null {
+    if (!raw) return null;
+    let decoded: unknown;
+    try {
+        decoded = decodeGitOpsJson(raw);
+    } catch {
+        return null;
+    }
+    if (!isRecord(decoded)) return null;
+    const applications = Array.isArray(decoded.evidenceApplications) ? decoded.evidenceApplications : [];
+    const ordered = [...applications].sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)));
+    return JSON.stringify({
+        status: decoded.status ?? null,
+        policyId: decoded.policyId ?? null,
+        evidenceOutcome: decoded.evidenceOutcome ?? 'allow',
+        evidenceApplications: ordered,
+    });
+}
+
 function candidateContentSha256FromDisk(
     stackName: string,
     candidateRelPath: string,
@@ -4813,10 +4859,24 @@ export class GitSourceService {
         const securityEvidenceJson = encodeGitOpsJson({
             status: evaluation.status,
             policyId: evaluation.policy?.id ?? null,
+            // The rules that decided it, not just the verdict. A candidate held
+            // under the shipped defaults is recorded as `unavailable` either way,
+            // but an operator who sets the candidate rule to allow would
+            // otherwise leave a persisted row that reads exactly like a clean
+            // acceptance. Nothing downstream reads these applications, so this
+            // column is the only place an unattended acceptance on unproven
+            // evidence stays attributable.
+            //
+            // The applications rather than the whole decision, deliberately: the
+            // records carry scan timestamps, and a re-run that rescans the same
+            // candidate would then produce different JSON, append a generation
+            // for an unchanged verdict, and defeat the reuse comparison below.
+            evidenceOutcome: evaluation.evidence?.outcome ?? null,
+            evidenceApplications: evaluation.evidence?.applications ?? null,
         });
         if (
             generation.source_policy_evidence_json === sourceEvidenceJson
-            && generation.security_policy_evidence_json === securityEvidenceJson
+            && securityPolicyDecision(generation.security_policy_evidence_json) === securityPolicyDecision(securityEvidenceJson)
         ) {
             return { status: 'reuse', generation };
         }

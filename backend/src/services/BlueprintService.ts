@@ -1463,7 +1463,7 @@ export class BlueprintService {
             auditPath: `/api/blueprints/${blueprint.id}/apply`,
         }, undefined, true);
         if (!gate.ok) {
-            throw new Error(describePolicyBlock(gate.policy, gate.violations));
+            throw new Error(describePolicyBlock(gate.policy, gate.violations, 'deploy', gate.evidence));
         }
 
         const outcome = await this.applyLocalUnderLock(

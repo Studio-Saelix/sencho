@@ -19,6 +19,18 @@ import {
 } from '../utils/suppression-filter';
 import { applyMisconfigAcknowledgements } from '../utils/misconfig-ack-filter';
 import { buildSecurityOverview } from '../services/securityOverview';
+import {
+  DEFAULT_SECURITY_EVIDENCE_POLICY,
+  SECURITY_EVIDENCE_SETTING_KEYS,
+  resolveSecurityEvidencePolicy,
+  serializeSecurityEvidencePolicy,
+} from '../services/securityEvidencePolicy';
+const EVIDENCE_OUTCOMES: readonly string[] = ['allow', 'warn', 'block'];
+/** The typed twin of `EVIDENCE_OUTCOMES`, for anything that needs the union. */
+const VALID_EVIDENCE_OUTCOMES: ReadonlySet<string> = new Set(EVIDENCE_OUTCOMES);
+/** The outcome fields, keyed by the settings row each one is stored in. */
+const OUTCOME_FIELDS = ['scannerUnavailable', 'scanFailure', 'candidateUnproven'] as const;
+const EVIDENCE_POLICY_BODY_KEYS: ReadonlySet<string> = new Set<string>([...OUTCOME_FIELDS]);
 import { generateSarif } from '../services/SarifExporter';
 import { generateOpenVex } from '../services/OpenVexExporter';
 import { buildExposedImageMap, type StackExposure } from '../services/preflight/exposure';
@@ -303,6 +315,104 @@ securityRouter.put('/deploy-block-honor-suppressions', authMiddleware, (req: Req
   } catch (err) {
     const msg = getErrorMessage(err, 'Failed to update setting');
     console.error('[Security] Deploy-block honor-suppressions toggle failed:', msg);
+    res.status(500).json({ error: msg });
+  }
+});
+
+// Evidence-availability policy: what the pre-deploy gate may do when it cannot
+// prove a target is safe. Admin-only because every field can weaken a deploy
+// block, matching the honor-suppressions toggle above and its stated reason
+// ("this toggle weakens a deploy block, so intent must be unambiguous"). The
+// response always carries the resolved values plus `isDefault`, so the UI can
+// state the active behaviour instead of leaving it to be inferred.
+securityRouter.get('/evidence-policy', authMiddleware, (req: Request, res: Response): void => {
+  if (!requirePermission(req, res, 'stack:read')) return;
+  try {
+    res.json({
+      policy: serializeSecurityEvidencePolicy(
+        resolveSecurityEvidencePolicy(DatabaseService.getInstance().getGlobalSettings()),
+      ),
+      defaults: serializeSecurityEvidencePolicy(DEFAULT_SECURITY_EVIDENCE_POLICY),
+      outcomes: ['allow', 'warn', 'block'],
+    });
+  } catch (err) {
+    const msg = getErrorMessage(err, 'Failed to read the evidence policy');
+    console.error('[Security] Evidence policy read failed:', msg);
+    res.status(500).json({ error: msg });
+  }
+});
+
+securityRouter.put('/evidence-policy', authMiddleware, (req: Request, res: Response): void => {
+  if (!requireAdmin(req, res)) return;
+  // Deliberately NOT blocked on a replica. The gate runs on the node that
+  // deploys, and this configures that node's own behavior, exactly like the
+  // honour-suppressions toggle beside it, which a replica can also set. Blocking
+  // the write here would leave the panel rendered but every save refused.
+  // Organization-wide mandatory policy is a separate, paid capability, not this.
+  const body = req.body ?? {};
+  const unknown = Object.keys(body).filter((k) => !EVIDENCE_POLICY_BODY_KEYS.has(k));
+  if (unknown.length > 0) {
+    res.status(400).json({ error: `Unknown field(s): ${unknown.join(', ')}` });
+    return;
+  }
+  // Validate everything before writing anything: a partial apply would leave the
+  // gate reading a policy the operator never asked for.
+  const next: Record<string, string> = {};
+  for (const field of OUTCOME_FIELDS) {
+    const value = body[field];
+    if (value === undefined) continue;
+    if (typeof value !== 'string' || !VALID_EVIDENCE_OUTCOMES.has(value)) {
+      res.status(400).json({ error: `${field} must be one of: ${EVIDENCE_OUTCOMES.join(', ')}` });
+      return;
+    }
+    next[SECURITY_EVIDENCE_SETTING_KEYS[field]] = value;
+  }
+  try {
+    const db = DatabaseService.getInstance();
+    const before = resolveSecurityEvidencePolicy(db.getGlobalSettings());
+    // Named by the field an operator sees, not by the settings row it is stored
+    // in, so the audit reads as a record of the control that moved.
+    const changed: string[] = [];
+    const fromTo: string[] = [];
+    for (const field of OUTCOME_FIELDS) {
+      const written = next[SECURITY_EVIDENCE_SETTING_KEYS[field]];
+      // A field written to the value it already holds did not move, so it is not
+      // in `changed`. Re-saving the screen unchanged is the common case, and
+      // logging it would put phantom entries like `scanFailure:block->block` in
+      // the one record an incident review reads for what loosened and when.
+      if (written !== undefined && written !== before[field]) {
+        changed.push(field);
+        fromTo.push(`${field}:${before[field]}->${written}`);
+      }
+    }
+    if (changed.length === 0) {
+      // Nothing moved, so nothing is written and nothing is audited. The response
+      // is the resolved policy, which is what the caller asked to see.
+      res.json({ policy: serializeSecurityEvidencePolicy(before) });
+      return;
+    }
+    // One transaction, so a multi-field save is all-or-nothing.
+    db.updateGlobalSettings(next);
+    db.insertAuditLog({
+      timestamp: Date.now(),
+      username: req.user?.username ?? 'unknown',
+      method: req.method,
+      path: req.originalUrl || req.url,
+      status_code: 200,
+      node_id: typeof req.nodeId === 'number' ? req.nodeId : null,
+      ip_address: req.ip ?? '',
+      // The previous value and the new one, per field. These settings decide
+      // whether a deploy is refused, so "who loosened it, when, and from what to
+      // what" has to be answerable from the audit log alone; a bare list of
+      // field names would not answer the last part.
+      summary: `policy.evidence_availability changed=[${changed.join(',')}] transitions=[${fromTo.join(',')}]`,
+    });
+    res.json({
+      policy: serializeSecurityEvidencePolicy(resolveSecurityEvidencePolicy(db.getGlobalSettings())),
+    });
+  } catch (err) {
+    const msg = getErrorMessage(err, 'Failed to update the evidence policy');
+    console.error('[Security] Evidence policy update failed:', msg);
     res.status(500).json({ error: msg });
   }
 });
