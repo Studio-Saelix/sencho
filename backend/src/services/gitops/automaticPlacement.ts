@@ -319,6 +319,14 @@ function recordRefusal(applicationId: string, reason: PlacementPolicyReason, at:
 }
 
 function approvalFailureReason(message: string): PlacementPolicyReason {
+  // A blast effect that did not decode is a data fault, and so are the existing
+  // data faults below. Matching the blast messages by name rather than letting
+  // them fall through to the default: an out-of-canonical-order blast used to be
+  // recorded as `conflicting_operation`, which sent the operator looking for an
+  // in-flight operation that was never there.
+  if (/blast_json/.test(message)) {
+    return 'malformed_evidence';
+  }
   if (/is not current|could not be read|not found|does not match/.test(message)) {
     return 'malformed_evidence';
   }
@@ -507,10 +515,17 @@ export function applyAutomaticPlacement(
     // that refusal is the safe direction it surfaced only as an operator review
     // with no approval ever landing, which is how a feature can look wired up
     // while doing nothing.
+    //
+    // Sorted by node id because that is the order the decoder requires, and
+    // places-then-removals is not it: a roster move that adds a higher node id
+    // while dropping a lower one put the removal after the placement, the write
+    // was refused as out of canonical order, and nothing executed. The array
+    // order carries no meaning of its own; both readers key off the node id
+    // (the reconciler's effect is a map, and the transition re-encodes it).
     const effect = [
       ...toPlace.map((nodeId) => ({ nodeId, outcome: 'place' as const })),
       ...removals.map((nodeId) => ({ nodeId, outcome: 'remove' as const })),
-    ];
+    ].sort((a, b) => a.nodeId - b.nodeId);
     const blastJson = encodeGitOpsApprovedTargetEffectJson(effect);
     GitOpsTransitions.getInstance().placementApproved({
       applicationId: app.id,

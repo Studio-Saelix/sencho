@@ -465,6 +465,25 @@ function projectActions(
         }
     }
 
+    // A severed target the selector wants again used to vanish here: the node was
+    // online and labelled and produced no row at all, so the plan read as nothing
+    // to do with nothing to say about why. The tombstone still holds, because
+    // only an explicit deploy re-opens a severed placement and that revival is
+    // recorded by the transition itself. So the row is informational, names what
+    // the operator has to do, and gives automatic placement no new authority.
+    //
+    // It yields to the status-precedence pass above, which pushes without a `seen`
+    // guard: an in-flight or guard row is the specific, actionable truth about
+    // that node right now, and a second explanation for the same node only asks
+    // the operator to reconcile two rows pointing in different directions.
+    for (const nodeId of decision.severedNodeIds) {
+        if (!desiredIds.has(nodeId)) continue;
+        if (out.some((row) => row.node.id === nodeId)) continue;
+        const node = byId.get(nodeId);
+        if (!node) continue;
+        push(node, 'skip_withdrawn', 'warning', 'Withdrawn earlier; deploy again to restore');
+    }
+
     for (const node of decision.deploy) {
         if (seen.has(node.id)) continue;
         const dep = depByNode.get(node.id);
@@ -727,7 +746,7 @@ export async function buildBlueprintPreview(blueprintId: number): Promise<Bluepr
         action: c.action,
     });
     const confirmable = changes
-        .filter(c => c.action !== 'skip_cordoned' && c.action !== 'blocked_name_conflict')
+        .filter(c => c.action !== 'skip_cordoned' && c.action !== 'skip_withdrawn' && c.action !== 'blocked_name_conflict')
         .map(toActionRef);
     const executorActions = changes.filter(c => isExecutorAction(c.action)).map(toActionRef);
 

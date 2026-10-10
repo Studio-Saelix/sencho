@@ -543,6 +543,114 @@ describe('a bounded_auto application reaches an approval', () => {
     expect(store.hasPlacementApprovalFor(app.id, 'intent-wd', 'cand-wd')).toBe(true);
   });
 
+  it('carries an earlier unlanded placement forward when a lower node id is withdrawn', () => {
+    // The finding this pins. The reconciler executes one approval per tick, so
+    // an addition that has been approved but not yet landed is carried into the
+    // next approval's blast. That blast is written places-then-removals, while
+    // the approval's own decode requires the node ids to be strictly
+    // increasing. Adding a higher id while withdrawing a lower one left the
+    // write refused as "blast_json must be strictly increasing by nodeId",
+    // which `approvalFailureReason` recorded as `conflicting_operation`: the
+    // operator was told an operation was in flight when none was, the plan read
+    // `reapproval_required`, and nothing executed.
+    const leave = addNode(`n-${randomUUID().slice(0, 6)}`);
+    const keep = addNode(`n-${randomUUID().slice(0, 6)}`);
+    const added = addNode(`n-${randomUUID().slice(0, 6)}`);
+    const app = seed({ nodeIds: [leave, keep], compose: 'services:\n  web:\n    image: nginx:1.25\n' });
+    const store = GitOpsStore.getInstance();
+
+    // An operator's baseline over both nodes, so there is something to withdraw
+    // from and something the added node joins.
+    GitOpsTransitions.getInstance().placementApproved({
+      applicationId: app.id,
+      approvalId: 'place-both-n1',
+      intentRevisionId: store.getApplication(app.id)!.intent_revision_id!,
+      blastJson: encodeGitOpsApprovedTargetEffectJson([
+        { nodeId: leave, outcome: 'place' as const },
+        { nodeId: keep, outcome: 'place' as const },
+      ]),
+      requiredNodeIds: [leave, keep],
+      fingerprint: null,
+      actor: 'tester',
+      envelope: { operationId: 'op-n1-base', actor: 'tester', trigger: 'test', at: 1 },
+      rolloutGenerationId: 'rgen-n1',
+      candidateId: store.getApplication(app.id)!.rollout_candidate_id!,
+      authority: 'operator',
+      policyProvenanceJson: null,
+    });
+
+    // The withdrawn node must read as reachable: a removal is judged by the
+    // observation of the workload that ran there, and a node with none is
+    // unknown, which is its own refusal.
+    store.upsertTarget({
+      ...emptyTargetRow(app.id, leave, 1),
+      observed_artifact_identity_json: JSON.stringify({ kind: 'exact', identity: 'sha256:served', observedAt: 1 }),
+    });
+
+    // First the addition. The approval it writes is never executed here, which
+    // is the window: the fleet has not landed it, so the next approval carries
+    // it forward and the blast names a placed node alongside the withdrawal.
+    const first = store.getIntentRevision(store.getApplication(app.id)!.intent_revision_id!)!;
+    GitOpsTransitions.getInstance().intentRevised({
+      applicationId: app.id,
+      intent: { ...first, id: 'intent-n1-add', operation_id: 'op-n1-add' },
+      envelope: { operationId: 'op-n1-add', actor: 'tester', trigger: 'test', at: 2 },
+    });
+    GitOpsTransitions.getInstance().rolloutCandidateOpened({
+      applicationId: app.id,
+      candidate: {
+        id: 'cand-n1-add',
+        application_id: app.id,
+        intent_revision_id: 'intent-n1-add',
+        required_targets_json: encodeGitOpsRequiredTargetsJson([leave, keep, added]),
+        compose_content_sha256: 'a'.repeat(64),
+        accepted_generation_id: null,
+        artifact_set_id: null,
+        authoritative: 1,
+        provenance: 'roster_change',
+        created_at: 2,
+        operation_id: 'op-n1-add',
+      } as never,
+      envelope: { operationId: 'op-n1-add', actor: 'tester', trigger: 'test', at: 2 },
+    });
+    expect(
+      applyAutomaticPlacement(app.id, { operationId: 'op-n1-add-2', actor: null, trigger: 'test', at: 3 }),
+    ).toEqual({ status: 'auto_approved', reason: 'stateless_addition' });
+
+    // Then the withdrawal of the lower node id, with the added node still
+    // unlanded. Both are in the blast, and it has to be canonical.
+    const second = store.getIntentRevision(store.getApplication(app.id)!.intent_revision_id!)!;
+    GitOpsTransitions.getInstance().intentRevised({
+      applicationId: app.id,
+      intent: { ...second, id: 'intent-n1-remove', operation_id: 'op-n1-remove' },
+      envelope: { operationId: 'op-n1-remove', actor: 'tester', trigger: 'test', at: 4 },
+    });
+    GitOpsTransitions.getInstance().rolloutCandidateOpened({
+      applicationId: app.id,
+      candidate: {
+        id: 'cand-n1-remove',
+        application_id: app.id,
+        intent_revision_id: 'intent-n1-remove',
+        required_targets_json: encodeGitOpsRequiredTargetsJson([keep, added]),
+        compose_content_sha256: 'a'.repeat(64),
+        accepted_generation_id: null,
+        artifact_set_id: null,
+        authoritative: 1,
+        provenance: 'roster_change',
+        created_at: 4,
+        operation_id: 'op-n1-remove',
+      } as never,
+      envelope: { operationId: 'op-n1-remove', actor: 'tester', trigger: 'test', at: 4 },
+    });
+
+    const outcome = applyAutomaticPlacement(app.id, { operationId: 'op-n1-remove-2', actor: null, trigger: 'test', at: 5 });
+    expect(outcome).toEqual({ status: 'auto_approved', reason: 'stateless_removal' });
+    expect(store.hasPlacementApprovalFor(app.id, 'intent-n1-remove', 'cand-n1-remove')).toBe(true);
+    // Nothing was declining anything, so nothing was recorded as a refusal. A
+    // refusal row here is the lie the finding is about.
+    expect(store.getApplication(app.id)!.placement_policy_refusal_reason).toBeNull();
+  });
+
   it.each([
     ['nothing observed', undefined, 'unknown_connectivity', 'none', 'online'],
     ['an unreadable observation', '{not json', 'malformed_evidence', 'corrupt', 'online'],
