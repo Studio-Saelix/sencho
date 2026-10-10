@@ -141,10 +141,19 @@ export function secretFreeRepoUrlFromStorable(parsed: ParseStorableRepoUrlResult
  * short of guessing: a `.git` suffix is stripped once, from the last path
  * segment only, so `/org.git/repo` and `repo.git.git` stay distinct
  * repositories; the port is dropped rather than compared, because a forge
- * serving HTTPS on 443 and SSH on 2222 is one repository reached two ways; the
- * path is never case-folded because Git hosts treat it case-sensitively; and
- * `..` is refused rather than resolved, since a caller asking about a traversal
- * has a bug, not a repository.
+ * serving HTTPS on 443 and SSH on 2222 is one repository reached two ways;
+ * the path is never case-folded here, because only the host knows whether case
+ * is meaningful (a self-hosted forge that treats paths case-sensitively can
+ * hold two repositories differing only in case) and this key stops short of
+ * guessing; and `..` is refused rather than resolved, since a caller asking
+ * about a traversal has a bug, not a repository.
+ *
+ * Folding the path in the exclusivity guard would add refusals: on a host
+ * where the two spellings are two repositories, the second claim would be
+ * rejected. The one deliberate exception is the provider webhook delivery
+ * check, which folds path case locally: an endpoint binds exactly one source
+ * and the check reads a signed delivery rather than looking a repository up
+ * (see `providerWebhooks/normalize.ts`).
  *
  * `null` means the URL names no repository the guard can reason about. A
  * caller that is deciding exclusivity must read that as a refusal, never as

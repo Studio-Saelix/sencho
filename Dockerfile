@@ -90,7 +90,7 @@ RUN if [ "$TARGETARCH" = "$BUILDARCH" ]; then \
         npm ci --omit=dev; \
     fi
 
-# Stage 4a: Build Docker CLI from source against Go 1.26.3
+# Stage 4a: Build Docker CLI from source against Go 1.27.2
 #
 # CLI v29.4.1 ships otel/sdk v1.43.0, resolving CVE-2026-39883 (BSD kenv) and
 # CVE-2026-39882 (OTLP response OOM). Building against grpc v1.83.2 below
@@ -98,20 +98,22 @@ RUN if [ "$TARGETARCH" = "$BUILDARCH" ]; then \
 # CVE-2026-41178 (baggage header parsing dropped its raw-length cap, allowing
 # resource exhaustion via an oversized header, present through v1.43.0). It
 # also carries the CVE-2025-15558 fix (Windows plugin search path LPE, fixed
-# since v29.2.0). Building from source with Go 1.26.3 additionally eliminates
+# since v29.2.0). Building from source with Go 1.27.2 additionally eliminates
 # Go stdlib CVEs present in the upstream static binary.
 #
 # Runs on the BUILD platform; GOARCH cross-compiles the static binary for
 # TARGET. The fetch pulls only the v29.4.1 commit, minimising transfer size.
 # docker/cli uses CalVer and ships vendor.mod instead of go.mod to avoid
 # SemVer compliance requirements. We copy vendor.mod -> go.mod, drop the
-# committed vendor tree, bump golang.org/x/net to v0.58.0, golang.org/x/text
-# to v0.41.0, google.golang.org/grpc to v1.83.2, and
+# committed vendor tree, bump golang.org/x/net to v0.60.0, golang.org/x/text
+# to v0.42.0, google.golang.org/grpc to v1.83.2, and
 # github.com/moby/go-archive to v0.3.0, and build with -mod=mod so the patched
 # modules are resolved from the module proxy. x/net v0.53.0 is flagged for six
 # HIGH advisories (CVE-2026-25680, -25681, -27136, -39821, -42502, -42506;
 # x/net/html parsing and x/net/idna). x/net v0.55.0 is flagged for
-# CVE-2026-46600 (dnsmessage denial of service). x/text v0.37.0 is flagged for
+# CVE-2026-46600 (dnsmessage denial of service), and v0.58.0 for
+# CVE-2026-78669 (HTTP/2 SETTINGS-flood denial of service), fixed in v0.60.0,
+# whose minimum golang.org/x/text is v0.42.0. x/text v0.37.0 is flagged for
 # CVE-2026-56852 (norm.Iter infinite loop on crafted input). grpc v1.80.0 is
 # flagged for GHSA-hrxh-6v49-42gf (xDS RBAC / HTTP/2), and grpc v1.82.1 for
 # CVE-2026-84304 (unauthenticated peer OOM via fragmented HTTP/2 DATA frames
@@ -122,8 +124,11 @@ RUN if [ "$TARGETARCH" = "$BUILDARCH" ]; then \
 # vendor.mod manifest). This stage now fetches modules at build time rather
 # than building fully offline.
 # Base image pinned by digest so the Go toolchain that compiles the static
-# Docker CLI binary cannot change without an explicit Dependabot bump.
-FROM --platform=$BUILDPLATFORM golang:1.27-alpine@sha256:8a5910f31396cd4d89662f56c68b3ae31d374308270a1c3bd96672ee5ed43414 AS cli-builder
+# Docker CLI binary cannot change without an explicit Dependabot bump. The
+# 1.27.2 toolchain carries the stdlib fixes for CVE-2026-78667 (net/http
+# Range-header denial of service) and CVE-2026-97031 (crypto/tls ECH denial
+# of service).
+FROM --platform=$BUILDPLATFORM golang:1.27.2-alpine@sha256:85dc1069ac644ea3c527b177303a406eb3358192816cd7f9e5848eb658851673 AS cli-builder
 
 ARG TARGETARCH
 
@@ -144,19 +149,19 @@ RUN mkdir -p /build
 
 RUN cp vendor.mod go.mod && cp vendor.sum go.sum && \
     rm -rf vendor && \
-    go get golang.org/x/net@v0.58.0 \
-           golang.org/x/text@v0.41.0 \
+    go get golang.org/x/net@v0.60.0 \
+           golang.org/x/text@v0.42.0 \
            google.golang.org/grpc@v1.83.2 \
            github.com/moby/go-archive@v0.3.0 && \
     CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH} go build \
       -mod=mod \
       -ldflags "-extldflags=-static \
         -X github.com/docker/cli/cli/version.Version=29.4.1 \
-        -X github.com/docker/cli/cli/version.GitCommit=source-go1.26.3" \
+        -X github.com/docker/cli/cli/version.GitCommit=source-go1.27.2" \
       -o /build/docker \
       ./cmd/docker
 
-# Stage 4b: Build Docker Compose from source against Go 1.26.3
+# Stage 4b: Build Docker Compose from source against Go 1.27.2
 #
 # Compose v5.1.3 moved github.com/docker/docker from a direct require to an
 # indirect dep (the direct surface is now moby/moby/api + moby/moby/client),
@@ -193,15 +198,20 @@ RUN cp vendor.mod go.mod && cp vendor.sum go.sum && \
 # The same go get also bumps google.golang.org/grpc from v1.80.0 to v1.83.2 to
 # clear GHSA-hrxh-6v49-42gf (xDS RBAC fail-open and HTTP/2 transport issues)
 # and CVE-2026-84304 (unauthenticated peer OOM via fragmented HTTP/2 DATA
-# frames buffered per-message), golang.org/x/text from v0.38.0 to v0.41.0 to
+# frames buffered per-message), golang.org/x/text from v0.38.0 to v0.42.0 to
 # clear CVE-2026-56852 (norm.Iter infinite loop on crafted input) and satisfy
-# x/crypto's minimum, golang.org/x/net from v0.55.0 to v0.58.0 to clear
-# CVE-2026-46600 (dnsmessage denial of service) and satisfy grpc v1.83.2's
-# minimum version, and golang.org/x/crypto from v0.53.0 to v0.55.0 to clear
-# CVE-2026-56854 (SSH host-key verification bypass).
+# x/net v0.60.0's minimum, golang.org/x/net from v0.55.0 to v0.60.0 to clear
+# CVE-2026-46600 (dnsmessage denial of service) and CVE-2026-78669 (HTTP/2
+# SETTINGS-flood denial of service) while satisfying grpc v1.83.2's minimum
+# version, and golang.org/x/crypto from v0.53.0 to v0.57.0 to clear
+# CVE-2026-56854 (SSH host-key verification bypass) and satisfy x/net
+# v0.60.0's minimum.
 # Base image pinned by digest (same image as cli-builder above) so both
-# source builds share an identical, immutable Go toolchain.
-FROM --platform=$BUILDPLATFORM golang:1.27-alpine@sha256:8a5910f31396cd4d89662f56c68b3ae31d374308270a1c3bd96672ee5ed43414 AS compose-builder
+# source builds share an identical, immutable Go toolchain. The 1.27.2
+# toolchain carries the stdlib fixes for CVE-2026-78667 (net/http
+# Range-header denial of service) and CVE-2026-97031 (crypto/tls ECH denial
+# of service).
+FROM --platform=$BUILDPLATFORM golang:1.27.2-alpine@sha256:85dc1069ac644ea3c527b177303a406eb3358192816cd7f9e5848eb658851673 AS compose-builder
 
 ARG TARGETARCH
 
@@ -225,11 +235,12 @@ RUN mkdir -p /build
 # grpc v1.83.2's minimum below), bump containerd/v2 from v2.2.3 → v2.2.5 to
 # clear CVE-2026-46680 plus the CVE-2026-53488 / 53489 / 53492 cluster, bump
 # google.golang.org/grpc to v1.83.2 to clear GHSA-hrxh-6v49-42gf,
-# CVE-2026-84304, and CVE-2026-84445, bump golang.org/x/net to v0.58.0 to clear
-# CVE-2026-46600,
-# and bump golang.org/x/crypto to v0.55.0 to clear CVE-2026-56854. The
-# containerd bump is patch-level; the otel, grpc, x/net, and x/crypto bumps
-# are minor security releases. None introduce breaking API changes.
+# CVE-2026-84304, and CVE-2026-84445, bump golang.org/x/net to v0.60.0 (which
+# also requires golang.org/x/text v0.42.0) to clear CVE-2026-46600 and
+# CVE-2026-78669, and bump golang.org/x/crypto to v0.57.0 to clear
+# CVE-2026-56854 and satisfy x/net v0.60.0's minimum. The containerd bump is
+# patch-level; the otel, grpc, x/net, and x/crypto bumps are minor security
+# releases. None introduce breaking API changes.
 RUN --mount=type=cache,id=go-mod,sharing=locked,target=/go/pkg/mod \
     go get go.opentelemetry.io/otel@v1.44.0 \
            go.opentelemetry.io/otel/sdk@v1.44.0 \
@@ -243,9 +254,9 @@ RUN --mount=type=cache,id=go-mod,sharing=locked,target=/go/pkg/mod \
            go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetrichttp@v1.44.0 \
            github.com/containerd/containerd/v2@v2.2.5 \
            google.golang.org/grpc@v1.83.2 \
-           golang.org/x/text@v0.41.0 \
-           golang.org/x/net@v0.58.0 \
-           golang.org/x/crypto@v0.55.0 \
+           golang.org/x/text@v0.42.0 \
+           golang.org/x/net@v0.60.0 \
+           golang.org/x/crypto@v0.57.0 \
            github.com/moby/go-archive@v0.3.0 && \
     go mod tidy
 
@@ -310,7 +321,7 @@ RUN echo "apk cache bust: ${APK_CACHE_BUST}" && \
     mkdir -p /usr/local/lib/docker/cli-plugins
 
 # Copy the source-built Docker CLI and Compose plugin from their builder stages.
-# These binaries were compiled with Go 1.26.3, resolving all Go stdlib CVEs that
+# These binaries were compiled with Go 1.27.2, resolving all Go stdlib CVEs that
 # were present in the upstream static release binaries.
 COPY --from=cli-builder /build/docker /usr/local/bin/docker
 COPY --from=compose-builder /build/docker-compose /usr/local/lib/docker/cli-plugins/docker-compose

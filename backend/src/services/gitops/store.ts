@@ -474,6 +474,46 @@ export class GitOpsStore {
     return this.db().prepare('SELECT * FROM gitops_intent_revisions WHERE id = ?').get(id) as GitOpsIntentRevisionRow | undefined;
   }
 
+  /**
+   * Whether a pin was recorded on an intent newer than `afterIntentId`.
+   *
+   * `rowid` is the insert order, so a later pin still counts when it shares
+   * `created_at` with the intent the approval names. The current intent is
+   * excluded: the caller already knows it names no pin.
+   */
+  hasPinnedIntentAfter(applicationId: string, afterIntentId: string, excludingIntentId: string): boolean {
+    const row = this.db().prepare(
+      `SELECT 1 AS found FROM gitops_intent_revisions
+       WHERE application_id = ?
+         AND pinned_node_id IS NOT NULL
+         AND id != ?
+         AND rowid > (SELECT rowid FROM gitops_intent_revisions WHERE id = ?)
+       LIMIT 1`,
+    ).get(applicationId, excludingIntentId, afterIntentId) as { found: number } | undefined;
+    return row !== undefined;
+  }
+
+  /**
+   * Whether any intent other than the current one records a pin.
+   *
+   * The whole history, for an application with no decomposed placement approval
+   * to measure from: such an approval names no intent, so there is nothing to
+   * cut the search at, and a pin written two or more intents back and never
+   * confirmed is still a pin nobody answered for. Reading one intent back
+   * instead let a clear hide behind the next edit, which then placed the freed
+   * node without Apply.
+   */
+  hasPinnedIntentExcept(applicationId: string, excludingIntentId: string): boolean {
+    const row = this.db().prepare(
+      `SELECT 1 AS found FROM gitops_intent_revisions
+       WHERE application_id = ?
+         AND pinned_node_id IS NOT NULL
+         AND id != ?
+       LIMIT 1`,
+    ).get(applicationId, excludingIntentId) as { found: number } | undefined;
+    return row !== undefined;
+  }
+
   getRolloutCandidate(id: string): GitOpsRolloutCandidateRow | undefined {
     return this.db().prepare('SELECT * FROM gitops_rollout_candidates WHERE id = ?').get(id) as GitOpsRolloutCandidateRow | undefined;
   }
