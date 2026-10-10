@@ -7,6 +7,8 @@
  * here would be surface with nothing on the other end.
  */
 
+import type { DismissPolicy, FindingDismissal } from './findingDismissal';
+
 /**
  * The canonical update-guard verdicts, which readiness restates rather than
  * recomputes (`services/updateGuard/types.ts` on the node, served per stack by
@@ -145,7 +147,19 @@ export interface ReadinessFinding {
   verdict: FindingVerdict | null;
   /** Pass-through of the canonical explanation, redacted by the producer. */
   detail: string | null;
+  /**
+   * The update signal or rollback item behind `detail`, for update and recovery
+   * findings. Absent from a hub or peer that predates it: a verb that needs it
+   * is then withheld.
+   */
+  topReasonId?: string | null;
+  /** Whether a newer image is known for the stack. Absent from a peer that predates it. */
+  hasUpdate?: boolean;
   target: ReadinessTarget;
+  /** Hash of the structured facts behind the finding; a dismissal held until it changes lifts when it moves. */
+  fingerprint: string;
+  /** Which dismissal modes this finding allows. */
+  dismissPolicy: DismissPolicy;
 }
 
 /** Fields every domain cell carries, whatever its state. */
@@ -232,4 +246,6 @@ export interface FleetReadinessResponse {
   /** Worst severity first, then by `id`. Deterministic order. */
   findings: ReadinessFinding[];
   nodes: FleetReadinessNode[];
+  /** The team's dismissals for the nodes in this response. `findings` and the counts are never filtered by them. */
+  dismissals: FindingDismissal[];
 }

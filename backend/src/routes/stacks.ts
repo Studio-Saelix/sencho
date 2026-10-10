@@ -70,6 +70,7 @@ import { buildPolicyGateOptions, runPolicyGate, triggerPostDeployScan, describeP
 import { parseComposePreview, type ComposePreview } from '../helpers/composePreview';
 import { filterContainersByComposeService } from '../helpers/composeServiceMatch';
 import { invalidateNodeCaches } from '../helpers/cacheInvalidation';
+import { invalidateNodeNetworkingAggregate } from '../services/network/networkingAggregateCache';
 import { auditActorUsername } from '../helpers/auditActor';
 import { invalidateFleetUpdateCache } from '../helpers/fleetUpdateCache';
 import {
@@ -1733,6 +1734,8 @@ stacksRouter.post('/:stackName/preflight/acknowledgements', async (req: Request,
       created_by: req.user?.username ?? 'unknown',
       created_at: Date.now(),
     });
+    // Networking lists Doctor findings under "dismissed" once acknowledged; drop its memo so that shows now.
+    invalidateNodeNetworkingAggregate(req.nodeId);
     res.status(201).json(ack);
   } catch (error) {
     console.error('[Stacks] Failed to create preflight acknowledgement for %s:', sanitizeForLog(stackName),
@@ -1757,6 +1760,7 @@ stacksRouter.delete('/:stackName/preflight/acknowledgements/:id', async (req: Re
   }
   try {
     DatabaseService.getInstance().deletePreflightAcknowledgement(id);
+    invalidateNodeNetworkingAggregate(req.nodeId);
     res.status(204).end();
   } catch (error) {
     console.error('[Stacks] Failed to delete preflight acknowledgement for %s:', sanitizeForLog(stackName),
@@ -1924,6 +1928,8 @@ stacksRouter.put('/:stackName/exposure', async (req: Request, res: Response) => 
     } else {
       DatabaseService.getInstance().setStackExposureIntent(req.nodeId, stackName, service, intent, req.user?.username ?? null);
     }
+    // Networking findings depend on intent; drop its memo so the finding is re-checked at once.
+    invalidateNodeNetworkingAggregate(req.nodeId);
     res.json(exposurePayload(req.nodeId, stackName));
   } catch (error) {
     console.error('[Stacks] Failed to save exposure intent for %s:', sanitizeForLog(stackName),
@@ -3053,6 +3059,9 @@ stacksRouter.post('/:stackName/backup', async (req: Request, res: Response) => {
       stackName,
       createdBy: req.user?.username ?? null,
     });
+    // A fresh recovery point changes the rollback verdict the readiness
+    // rollup caches, so drop it or the finding this clears keeps showing.
+    invalidateNodeCaches(req.nodeId);
     dlog(`[Stacks] Backup completed: ${sanitizeForLog(stackName)}`);
     res.json({ success: true });
   } catch (error: unknown) {

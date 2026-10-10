@@ -34,6 +34,7 @@ import type { ScheduledTask } from '@/types/scheduling';
 import { SERVICE_SCOPED_UPDATE_CAPABILITY } from '@/lib/capabilities';
 import { requestServiceUpdate } from '@/lib/serviceUpdate';
 import { useDeployFeedback } from '@/context/DeployFeedbackContext';
+import { useStackUpdate } from '@/hooks/useStackUpdate';
 
 type SemverBump = 'none' | 'patch' | 'minor' | 'major' | 'unknown';
 
@@ -1092,6 +1093,7 @@ interface AutoUpdateReadinessProps {
 function AutoUpdateReadinessContent({ headerActions }: AutoUpdateReadinessProps) {
   const isMobile = useIsMobile();
   const { runWithLog } = useDeployFeedback();
+  const updateStack = useStackUpdate();
   const { can } = useAuth();
   const canRefreshFleet = can('node:manage');
   const { nodes, nodeMeta, refreshNodeMeta } = useNodes();
@@ -1496,19 +1498,14 @@ function AutoUpdateReadinessContent({ headerActions }: AutoUpdateReadinessProps)
     setCardField(matchCard, { applying: true, verificationNote: null });
     const loadingId = toast.loading(`Applying update to ${stack}...`);
     try {
-      const res = await fetchForNode(
-        `/stacks/${encodeURIComponent(stack)}/update`,
-        nodeId,
-        { method: 'POST' },
-      );
-      if (!res.ok) {
-        const data = await res.json().catch(() => ({ error: 'Update failed' }));
-        throw new Error(data.error ?? 'Update failed');
+      // The shared update executor tells the operator how it ended; this view
+      // only reconciles its card.
+      const update = await updateStack({ nodeId, stackName: stack });
+      if (!update.ok) {
+        setCardField(matchCard, { applying: false });
+        return;
       }
-      const body = await res.json().catch(() => ({})) as { recheckWarning?: unknown };
-      const recheckWarning = typeof body.recheckWarning === 'string' ? body.recheckWarning : undefined;
-      if (recheckWarning) toast.info(recheckWarning);
-      else toast.success(`${stack} updated successfully`);
+      const recheckWarning = update.recheckWarning;
 
       // Authoritative live preview decides card removal. When it disagrees with
       // a backend recheckWarning (preview cleared, persisted check uncertain),
@@ -1553,13 +1550,10 @@ function AutoUpdateReadinessContent({ headerActions }: AutoUpdateReadinessProps)
         console.error('[AutoUpdate] post-Apply preview reconciliation failed', previewErr);
         retainPreviewFailed();
       }
-    } catch (err) {
-      toast.error((err as Error)?.message || 'Update failed');
-      setCardField(matchCard, { applying: false });
     } finally {
       toast.dismiss(loadingId);
     }
-  }, []);
+  }, [updateStack]);
 
   const flatCards = useMemo(() => groups.flatMap(g => g.cards), [groups]);
   const { total, ready } = useMemo(() => {

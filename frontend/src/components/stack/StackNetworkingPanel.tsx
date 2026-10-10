@@ -6,11 +6,12 @@ import { toast } from '@/components/ui/toast-store';
 import { useNodes } from '@/context/NodeContext';
 import { CreateNetworkDialog } from '@/components/resources/CreateNetworkDialog';
 import { SENCHO_NAVIGATE_EVENT, type SenchoNavigateDetail } from '@/components/NodeManager';
+import { ExposureIntentPicker } from '@/components/networking/ExposureIntentPicker';
+import { asIntents, saveExposureIntent, type IntentEntry } from '@/hooks/useExposureIntent';
+import type { ExposureIntent } from '@/types/networking';
 
 // Mirrors the backend networking payload shapes (the frontend never imports
-// backend). IntentEntry intentionally keeps only the fields this panel reads.
-type ExposureIntent = 'internal' | 'same-node' | 'lan' | 'reverse-proxy' | 'public' | 'temporary' | 'unknown';
-const INTENTS: readonly ExposureIntent[] = ['internal', 'same-node', 'lan', 'reverse-proxy', 'public', 'temporary', 'unknown'];
+// backend).
 
 interface NetworkFactNetwork { key: string; name: string; external: boolean; internal: boolean; createdByStack: boolean }
 interface NetworkFactPort { hostIp: string; startPort: number; endPort: number; protocol: string; allInterfaces: boolean; loopbackOnly: boolean }
@@ -43,7 +44,6 @@ interface StackNetworkFacts {
     unsupportedFeatures: string[];
   }>;
 }
-interface IntentEntry { service: string; intent: ExposureIntent }
 
 const LABEL_CLASS = 'font-mono text-[10px] uppercase tracking-[0.18em] text-stat-subtitle';
 const ACTION_CLASS = 'inline-flex items-center gap-1 font-mono text-[10px] uppercase tracking-wide text-stat-subtitle hover:text-brand transition-colors disabled:opacity-40';
@@ -52,12 +52,6 @@ const CARD_CLASS = 'rounded-lg border px-3 py-2.5';
 function portLabel(p: NetworkFactPort): string {
   const range = p.startPort === p.endPort ? `${p.startPort}` : `${p.startPort}-${p.endPort}`;
   return `${range}/${p.protocol}`;
-}
-
-/** Defensively read the intents array from an exposure response body. */
-function asIntents(body: unknown): IntentEntry[] {
-  const list = (body as { intents?: unknown })?.intents;
-  return Array.isArray(list) ? (list as IntentEntry[]) : [];
 }
 
 /** A small chip that states the binding scope of a published port. */
@@ -69,42 +63,6 @@ function BindingBadge({ port }: { port: NetworkFactPort }) {
     return <span className="rounded border border-success/30 bg-success/[0.06] px-1 py-0.5 font-mono text-[10px] text-success">loopback</span>;
   }
   return <span className="rounded border border-muted bg-card/40 px-1 py-0.5 font-mono text-[10px] text-stat-subtitle">{port.hostIp}</span>;
-}
-
-/**
- * Exposure-intent picker: a row of pills plus a clear option. `value` null means
- * the scope is cleared. The clear option reads "unset" on the stack row and
- * "inherit" on a per-service row, where the service then falls back to the stack
- * intent. Disabled and read-only when the user cannot edit the stack.
- */
-function IntentControl({ value, inherited, canEdit, onChange }: {
-  value: ExposureIntent | null;
-  inherited?: ExposureIntent | null;
-  canEdit: boolean;
-  onChange: (intent: ExposureIntent | null) => void;
-}) {
-  const pill = (active: boolean) => cn(
-    'rounded px-1.5 py-0.5 font-mono text-[10px] uppercase tracking-wide border transition-colors',
-    active ? 'border-brand/50 bg-brand/15 text-brand' : 'border-muted bg-card/40 text-stat-subtitle',
-    canEdit ? 'hover:border-brand/40' : 'cursor-default opacity-90',
-  );
-  const clearLabel = inherited !== undefined ? 'inherit' : 'unset';
-  const cleared = value === null;
-  return (
-    <div className="flex flex-wrap items-center gap-1">
-      {INTENTS.map(opt => (
-        <button key={opt} type="button" disabled={!canEdit} className={pill(value === opt)} onClick={() => canEdit && onChange(opt)}>
-          {opt}
-        </button>
-      ))}
-      <button type="button" disabled={!canEdit} className={pill(cleared)} onClick={() => canEdit && onChange(null)}>
-        {clearLabel}
-      </button>
-      {cleared && inherited && (
-        <span className="font-mono text-[10px] text-stat-subtitle">→ {inherited}</span>
-      )}
-    </div>
-  );
 }
 
 export default function StackNetworkingPanel({ stackName, canEdit, doctorEnabled }: {
@@ -141,7 +99,7 @@ export default function StackNetworkingPanel({ stackName, canEdit, doctorEnabled
         // The exposure overlay is secondary: a bad exposure body must not tear
         // down a working facts view, so its parse is tolerated on its own.
         if (exposureRes.ok) {
-          try { setIntents(asIntents(await exposureRes.json())); } catch { /* keep intents unset */ }
+          try { setIntents(asIntents(await exposureRes.json()) ?? []); } catch { /* keep intents unset */ }
         }
       } catch {
         if (!cancelled) {
@@ -160,19 +118,8 @@ export default function StackNetworkingPanel({ stackName, canEdit, doctorEnabled
   const intentFor = (service: string): ExposureIntent | null => intents.find(i => i.service === service)?.intent ?? null;
 
   const saveIntent = useCallback(async (service: string, intent: ExposureIntent | null) => {
-    try {
-      const res = await apiFetch(`/stacks/${stackName}/exposure`, {
-        method: 'PUT',
-        body: JSON.stringify({ service, intent }),
-      });
-      if (!res.ok) {
-        toast.error('Failed to save the exposure intent.');
-        return;
-      }
-      setIntents(asIntents(await res.json()));
-    } catch {
-      toast.error('Failed to save the exposure intent.');
-    }
+    const next = await saveExposureIntent(stackName, service, intent);
+    if (next !== null) setIntents(next);
   }, [stackName]);
 
   if (loadError) {
@@ -231,12 +178,12 @@ export default function StackNetworkingPanel({ stackName, canEdit, doctorEnabled
         <div className={cn(CARD_CLASS, 'border-muted bg-card/40 flex flex-col gap-2')}>
           <div className="flex flex-col gap-1">
             <span className="font-mono text-[11px] text-foreground/80">stack</span>
-            <IntentControl value={stackIntent} canEdit={canEdit} onChange={intent => saveIntent('', intent)} />
+            <ExposureIntentPicker value={stackIntent} canEdit={canEdit} onChange={intent => saveIntent('', intent)} />
           </div>
           {facts.services.map(svc => (
             <div key={svc.name} className="flex flex-col gap-1 border-t border-muted pt-2">
               <span className="font-mono text-[11px] text-foreground/80">{svc.name}</span>
-              <IntentControl value={intentFor(svc.name)} inherited={stackIntent} canEdit={canEdit} onChange={intent => saveIntent(svc.name, intent)} />
+              <ExposureIntentPicker value={intentFor(svc.name)} inherited={stackIntent} canEdit={canEdit} onChange={intent => saveIntent(svc.name, intent)} />
             </div>
           ))}
         </div>

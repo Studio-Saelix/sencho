@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import {
   LayoutDashboard, Network, GitBranch, AlertTriangle, RefreshCw, Plus, Unplug,
 } from 'lucide-react';
@@ -21,14 +21,19 @@ import { CreateNetworkDialog } from '@/components/resources/CreateNetworkDialog'
 import { ConfirmModal } from '@/components/ui/modal';
 import { NetworkDetailDrawer } from './NetworkDetailDrawer';
 import { NetworkInventoryTable } from './NetworkInventoryTable';
-import { NetworkingFindingsList } from './NetworkingFindingsList';
+import { NetworkingDismissedSection, NetworkingFindingsList, type NetworkingDismissedList } from './NetworkingFindingsList';
+import { NetworkingFindingActions, type NetworkingFindingControls } from './NetworkingFindingActions';
+import { NetworkingFindingText } from './NetworkingFindingText';
+import { AcknowledgeInDoctorDialog } from './AcknowledgeInDoctorDialog';
 import { NetworkingTopologyPanel } from './NetworkingTopologyPanel';
 import { SENCHO_OPEN_STACK_EVENT, type SenchoOpenStackDetail } from '@/lib/events';
 import {
   adaptNetworkingOverview, buildExternalNetworkSnippet, canUseNetworkName, getNetworkingPosture,
-  isNetworkingActionVisible,
 } from '@/lib/networking';
 import { rankFindings, SEVERITY_TEXT_CLASS } from '@/lib/networkingSeverity';
+import { countedFindings, networkingDismissalKey, partitionNetworkingFindings, type DismissedNetworkingFinding } from '@/lib/networkingDismissals';
+import { useNetworkingDismissals } from '@/hooks/useNetworkingDismissals';
+import type { DismissalMode } from '@/types/findingDismissal';
 import { isNetworkDriftFindingKind } from '@/types/networking';
 import type {
   NetworkingFinding, NetworkingOverviewEnvelope, NetworkingRecommendedAction,
@@ -104,6 +109,11 @@ export function NetworkingView({ headerActions }: NetworkingViewProps) {
   const [runtimeAvailable, setRuntimeAvailable] = useState(true);
   const [isLegacy, setIsLegacy] = useState(false);
   const [reloadKey, setReloadKey] = useState(0);
+  const [now, setNow] = useState(() => Date.now());
+  const [acknowledging, setAcknowledging] = useState<NetworkingFinding | null>(null);
+  const [clearingAck, setClearingAck] = useState<ReadonlySet<string>>(() => new Set());
+  const reload = useCallback(() => setReloadKey(value => value + 1), []);
+  const { dismissals, dismiss, restore, isPending } = useNetworkingDismissals(nodeId, reloadKey, reload);
   const [showCreateNetwork, setShowCreateNetwork] = useState(false);
   const [initialNetworkName, setInitialNetworkName] = useState<string | undefined>();
   const [selectedNetworkId, setSelectedNetworkId] = useState<string | null>(null);
@@ -171,6 +181,7 @@ export function NetworkingView({ headerActions }: NetworkingViewProps) {
         setNetworks(adapted.networks);
         setFindings(adapted.findings);
         setRecentActivity(adapted.recentActivity);
+        setNow(Date.now());
       } catch (error) {
         if (!stale && !(error instanceof DOMException && error.name === 'AbortError')) {
           console.error('[Networking] Failed to load overview:', error);
@@ -250,6 +261,85 @@ export function NetworkingView({ headerActions }: NetworkingViewProps) {
     }
   }, [isAdmin, openStack]);
 
+  const partition = useMemo(
+    () => (nodeId === undefined ? { active: findings, dismissed: [] } : partitionNetworkingFindings(findings, dismissals, nodeId, now)),
+    [findings, dismissals, nodeId, now],
+  );
+
+  const canDismiss = useCallback((finding: NetworkingFinding): boolean => {
+    if (nodeId === undefined) return false;
+    return finding.stack !== undefined
+      ? can('stack:deploy', 'stack', finding.stack, nodeId)
+      : can('node:manage', 'node', String(nodeId));
+  }, [can, nodeId]);
+
+  const findingControls = useMemo<NetworkingFindingControls>(() => ({
+    nodeId,
+    isAdmin,
+    canEditStack: (stack: string) => can('stack:edit', 'stack', stack, nodeId),
+    onAction: dispatchAction,
+    onAcknowledge: setAcknowledging,
+    onResolved: reload,
+    canDismiss,
+    isDismissing: (finding: NetworkingFinding) => nodeId !== undefined && isPending(networkingDismissalKey(nodeId, finding.id)),
+    onDismiss: (finding: NetworkingFinding, mode: DismissalMode, days?: number) => {
+      if (nodeId === undefined) return;
+      void dismiss({
+        id: networkingDismissalKey(nodeId, finding.id),
+        fingerprint: finding.fingerprint,
+        count: finding.count,
+        severity: finding.severity,
+      }, mode, days);
+    },
+  }), [nodeId, isAdmin, can, dispatchAction, reload, canDismiss, isPending, dismiss]);
+
+  // A Doctor acknowledgement is cleared in Doctor's own store, one occurrence at a time.
+  const clearAcknowledgement = useCallback(async (finding: NetworkingFinding) => {
+    if (finding.stack === undefined) return;
+    setClearingAck(current => new Set(current).add(finding.id));
+    let cleared = 0;
+    try {
+      for (const entry of finding.doctorFindings) {
+        if (entry.acknowledgement === undefined) continue;
+        const res = await apiFetch(`/stacks/${encodeURIComponent(finding.stack)}/preflight/acknowledgements/${entry.acknowledgement.id}`, {
+          method: 'DELETE',
+          nodeId,
+        });
+        if (!res.ok && res.status !== 404) {
+          console.error('[Networking] clearing an acknowledgement was refused:', res.status);
+          toast.error(cleared > 0 ? `Cleared ${cleared}, then the next one failed.` : 'Failed to clear the acknowledgement.');
+          return;
+        }
+        cleared += 1;
+      }
+      toast.success('Restored. It is back in the list.');
+    } catch (error) {
+      console.error('[Networking] clearing an acknowledgement failed:', error);
+      toast.error('Failed to clear the acknowledgement.');
+    } finally {
+      setClearingAck(current => {
+        const next = new Set(current);
+        next.delete(finding.id);
+        return next;
+      });
+      // A partial clear still changed the server, so the list is re-read either way.
+      if (cleared > 0) reload();
+    }
+  }, [nodeId, reload]);
+
+  const dismissedList = useMemo<NetworkingDismissedList>(() => ({
+    items: partition.dismissed,
+    now,
+    canRestore: (item: DismissedNetworkingFinding) => (item.dismissal === null
+      ? item.finding.stack !== undefined && can('stack:edit', 'stack', item.finding.stack, nodeId)
+      : canDismiss(item.finding)),
+    onRestore: (item: DismissedNetworkingFinding) => {
+      if (item.dismissal === null) void clearAcknowledgement(item.finding);
+      else void restore(item.dismissal.id);
+    },
+    isRestoring: (item: DismissedNetworkingFinding) => (item.dismissal === null ? clearingAck.has(item.finding.id) : isPending(item.dismissal.id)),
+  }), [partition.dismissed, now, can, nodeId, canDismiss, clearAcknowledgement, restore, isPending, clearingAck]);
+
   if (unsupported) {
     return (
       <LockCard
@@ -260,11 +350,14 @@ export function NetworkingView({ headerActions }: NetworkingViewProps) {
     );
   }
 
-  const posture = getNetworkingPosture(findings, runtimeAvailable, isLegacy);
+  // A dismissal moves a finding out of the attention list; the posture word and the
+  // masthead still count it. Only findings acknowledged in Doctor are left out.
+  const counted = countedFindings(findings);
+  const posture = getNetworkingPosture(counted, runtimeAvailable, isLegacy);
   const mobileTone = MOBILE_MASTHEAD_TONE[POSTURE_TONE[posture.tone]];
-  const needsActionCount = findings.filter((f) => f.severity === 'critical' || f.severity === 'high').length;
-  const reviewCount = findings.filter((f) => f.severity === 'medium').length;
-  const driftCount = findings.filter((f) => isNetworkDriftFindingKind(f.kind)).length;
+  const needsActionCount = counted.filter((f) => f.severity === 'critical' || f.severity === 'high').length;
+  const reviewCount = counted.filter((f) => f.severity === 'medium').length;
+  const driftCount = counted.filter((f) => isNetworkDriftFindingKind(f.kind)).length;
 
   const mastheadMetadata: MastheadMetadataItem[] | undefined = overview ? [
     { label: 'NEEDS ACTION', value: String(needsActionCount), tone: needsActionCount > 0 ? 'error' : 'value' },
@@ -297,7 +390,7 @@ export function NetworkingView({ headerActions }: NetworkingViewProps) {
   const externalDependencies = networks.filter((n) => n.isExternalDependency);
   const sharedNetworks = networks.filter((n) => n.sharedStackCount >= 2);
   const unclassifiedExposureNetworks = networks.filter((n) => (n.exposureSummary?.unclassifiedStackCount ?? 0) > 0);
-  const topFindings = rankFindings(findings).slice(0, 5);
+  const topFindings = rankFindings(partition.active).slice(0, 5);
 
   const overviewCards = overview ? (
     <div className="space-y-4">
@@ -338,7 +431,7 @@ export function NetworkingView({ headerActions }: NetworkingViewProps) {
         <CardContent className="p-4">
           <div className="mb-2 flex items-center justify-between">
             <p className="font-mono text-[10px] uppercase tracking-[0.18em] text-stat-subtitle">Operator attention</p>
-            {findings.length > 5 && (
+            {partition.active.length > 5 && (
               <button type="button" className="text-xs text-brand hover:underline" onClick={() => setTab('findings')}>
                 View all findings
               </button>
@@ -347,7 +440,9 @@ export function NetworkingView({ headerActions }: NetworkingViewProps) {
           {isLegacy ? (
             <p className="text-sm text-stat-value">This node provides a partial networking response. Update it to review enriched findings.</p>
           ) : topFindings.length === 0 ? (
-            <p className="text-sm text-stat-value">No networking issues detected.</p>
+            <p className="text-sm text-stat-value">
+              {partition.dismissed.length > 0 ? 'Nothing needs attention right now.' : 'No networking issues detected.'}
+            </p>
           ) : (
             <Table>
               <TableHeader>
@@ -355,35 +450,31 @@ export function NetworkingView({ headerActions }: NetworkingViewProps) {
                   <TableHead className="w-20">Severity</TableHead>
                   <TableHead>Finding</TableHead>
                   <TableHead>Stack</TableHead>
-                  <TableHead className="w-44">Action</TableHead>
+                  <TableHead className="w-64 text-right">Action</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {topFindings.map((finding) => {
-                  const primary = finding.recommendedActions.find((action) =>
-                    isNetworkingActionVisible(action, isAdmin, (stack) => can('stack:edit', 'stack', stack, nodeId)),
-                  );
-                  return (
-                    <TableRow key={finding.id}>
-                      <TableCell className="w-20">
-                        <span className={`font-mono text-[10px] uppercase tracking-wide ${SEVERITY_TEXT_CLASS[finding.severity]}`}>
-                          {finding.severity}
-                        </span>
-                      </TableCell>
-                      <TableCell className="text-sm text-stat-value">{finding.title}</TableCell>
-                      <TableCell className="font-mono text-xs text-stat-subtitle">{finding.stack ?? finding.network ?? ''}</TableCell>
-                      <TableCell className="w-44">
-                        {primary && (
-                          <Button variant="ghost" size="sm" className="h-7 px-2 text-xs" onClick={() => void dispatchAction(primary)}>
-                            {primary.label}
-                          </Button>
-                        )}
-                      </TableCell>
-                    </TableRow>
-                  );
-                })}
+                {topFindings.map((finding) => (
+                  <TableRow key={finding.id}>
+                    <TableCell className="w-20">
+                      <span className={`font-mono text-[10px] uppercase tracking-wide ${SEVERITY_TEXT_CLASS[finding.severity]}`}>
+                        {finding.severity}
+                      </span>
+                    </TableCell>
+                    <TableCell><NetworkingFindingText finding={finding} showMessage={false} /></TableCell>
+                    <TableCell className="font-mono text-xs text-stat-subtitle">{finding.stack ?? finding.network ?? ''}</TableCell>
+                    <TableCell className="w-64 text-right">
+                      <NetworkingFindingActions finding={finding} controls={findingControls} />
+                    </TableCell>
+                  </TableRow>
+                ))}
               </TableBody>
             </Table>
+          )}
+          {!isLegacy && partition.dismissed.length > 0 && (
+            <div className="mt-3">
+              <NetworkingDismissedSection dismissed={dismissedList} />
+            </div>
           )}
         </CardContent>
       </Card>
@@ -567,7 +658,13 @@ export function NetworkingView({ headerActions }: NetworkingViewProps) {
         </TabsContent>
 
         <TabsContent value="findings" className="mt-4">
-          <NetworkingFindingsList findings={findings} loading={loading} canEdit={can} isAdmin={isAdmin} onAction={dispatchAction} disabled={isLegacy} nodeId={nodeId} />
+          <NetworkingFindingsList
+            findings={partition.active}
+            dismissed={dismissedList}
+            loading={loading}
+            controls={findingControls}
+            disabled={isLegacy}
+          />
         </TabsContent>
       </Tabs>
 
@@ -594,6 +691,13 @@ export function NetworkingView({ headerActions }: NetworkingViewProps) {
           setInitialNetworkName(undefined);
           setReloadKey(k => k + 1);
         }}
+      />
+
+      <AcknowledgeInDoctorDialog
+        finding={acknowledging}
+        nodeId={nodeId}
+        onClose={() => setAcknowledging(null)}
+        onDone={reload}
       />
 
       <NetworkDetailDrawer
