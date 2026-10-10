@@ -11,7 +11,7 @@ import { useNodeScan } from '@/hooks/useNodeScan';
 import { partitionPostureReasons, securityDismissalKey } from '@/lib/securityDismissals';
 import type { SecurityTab } from '@/lib/events';
 import type { ImageFilterValue } from '@/lib/severityStyles';
-import type { PostureReason, ScanDetailTab, ScanSummary, SecurityOverview } from '@/types/security';
+import type { PostureReason, SecurityOverview } from '@/types/security';
 import { defaultReasonActionLabel, reasonImageFilter } from './postureNavigation';
 import { targetingFromTargets, type ImagesTargetingInput } from './imagesTargeting';
 import { triggerNodeImageUpdateCheck } from './imageUpdateRecheck';
@@ -22,24 +22,10 @@ type NavigateFn = (tab: SecurityTab, filter?: ImageFilterValue, targeting?: Imag
 
 interface UseSecurityReasonsOptions {
   overview: SecurityOverview | null;
-  summaries: Record<string, ScanSummary>;
   isReplica: boolean;
   onNavigate: NavigateFn;
-  onInspect: (scanId: number, initialTab?: ScanDetailTab) => void;
   /** Re-read the overview. */
   reload: () => void;
-}
-
-const SCAN_TAB_COUNT = { secrets: 'secret_count', misconfigs: 'misconfig_count' } as const;
-
-/** The scan with the most findings of this kind, so the verb opens where the work is. */
-function firstScanWith(summaries: Record<string, ScanSummary>, tab: 'secrets' | 'misconfigs'): ScanSummary | null {
-  const field = SCAN_TAB_COUNT[tab];
-  let best: ScanSummary | null = null;
-  for (const summary of Object.values(summaries)) {
-    if (summary[field] > 0 && (best === null || summary[field] > best[field])) best = summary;
-  }
-  return best;
 }
 
 export function reasonNavLabel(reason: PostureReason): string {
@@ -52,7 +38,7 @@ export function reasonNavLabel(reason: PostureReason): string {
  * posture word is never derived from the partition: a dismissal only moves a
  * reason from the queue to the dismissed list.
  */
-export function useSecurityReasons({ overview, summaries, isReplica, onNavigate, onInspect, reload }: UseSecurityReasonsOptions) {
+export function useSecurityReasons({ overview, isReplica, onNavigate, reload }: UseSecurityReasonsOptions) {
   const { can } = useAuth();
   const { activeNode, activeNodeMeta } = useNodes();
   const nodeId = activeNode?.id;
@@ -68,18 +54,19 @@ export function useSecurityReasons({ overview, summaries, isReplica, onNavigate,
     setReloadKey(value => value + 1);
     reload();
   }, [reload]);
-  const { dismissals, dismiss, restore, isPending } = useNodeDismissals('security', nodeId, reloadKey, refresh);
+  const canReadNode = nodeId !== undefined && can('node:read', 'node', String(nodeId));
+  const { dismissals, dismiss, restore, isPending } = useNodeDismissals('security', nodeId, reloadKey, refresh, canReadNode);
 
   const canManageNode = nodeId !== undefined && can('node:manage', 'node', String(nodeId));
   const verbContext: ReasonVerbContext = useMemo(() => ({
     canManageNode,
+    canScanNode: can('node:manage'),
     canDeployStack: stack => nodeId !== undefined && can('stack:deploy', 'stack', stack, nodeId),
     canEditStack: stack => nodeId !== undefined && can('stack:edit', 'stack', stack, nodeId),
     scannerAvailable: overview?.scanner.available === true,
     updateChecksDisabled: overview?.updateChecksDisabled === true,
     isReplica,
-    hasScanWith: tab => firstScanWith(summaries, tab) !== null,
-  }), [can, canManageNode, nodeId, overview, isReplica, summaries]);
+  }), [can, canManageNode, nodeId, overview, isReplica]);
 
   const verbFor = useCallback(
     (reason: PostureReason): ReasonVerb | null => resolveReasonVerb(reason, verbContext, reasonNavLabel(reason)),
@@ -103,12 +90,6 @@ export function useSecurityReasons({ overview, summaries, isReplica, onNavigate,
       case 'navigate':
         navigate(reason);
         return;
-      case 'open-scan': {
-        const summary = firstScanWith(summaries, verb.tab);
-        if (summary === null) navigate(reason);
-        else onInspect(summary.scan_id, verb.tab);
-        return;
-      }
       case 'check-again':
         if (checkAgainBusy) return;
         setCheckAgainBusy(true);
@@ -127,7 +108,7 @@ export function useSecurityReasons({ overview, summaries, isReplica, onNavigate,
       default:
         return;
     }
-  }, [navigate, summaries, onInspect, checkAgainBusy, targetScannerRefresh, refresh, scanRunning, scan]);
+  }, [navigate, checkAgainBusy, targetScannerRefresh, refresh, scanRunning, scan]);
 
   const partition = useMemo(
     () => (nodeId === undefined
@@ -142,6 +123,7 @@ export function useSecurityReasons({ overview, summaries, isReplica, onNavigate,
   const controls: SecurityReasonControls = {
     nodeId,
     run,
+    navLabel: reasonNavLabel,
     busy: verb => (verb.kind === 'check-again' ? checkAgainBusy : verb.kind === 'rescan-node' ? scanRunning : false),
     onResolved: refresh,
     canDismiss: canManageNode,

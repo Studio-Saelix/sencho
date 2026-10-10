@@ -32,7 +32,7 @@ export const findingDismissalsRouter = Router();
 const MAX_DAYS = 365;
 const DAY_MS = 86_400_000;
 const MAX_FINGERPRINT_LENGTH = 64;
-const MAX_TARGET_COUNT = 100_000;
+const MAX_TARGET_COUNT = 10_000_000;
 
 type DismissalBody = Record<string, unknown>;
 

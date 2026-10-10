@@ -39,7 +39,7 @@ const REASON_DISMISS_POLICY: Record<PostureReasonKey, DismissPolicy> = {
   'waiting_upstream:all': 'any',
   'update_check_uncertain:all': 'timed',
   'stale_scan:all': 'timed',
-  'failed_scan:all': 'any',
+  'failed_scan:all': 'timed',
 };
 
 export const POSTURE_REASON_KEYS = Object.keys(REASON_DISMISS_POLICY) as PostureReasonKey[];

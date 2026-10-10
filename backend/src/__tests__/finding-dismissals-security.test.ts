@@ -96,6 +96,7 @@ describe('security policy', () => {
   it('allows only a timed dismissal of missing or old evidence', () => {
     expect(postureDismissPolicy('update_check_uncertain:all')).toBe('timed');
     expect(postureDismissPolicy('stale_scan:all')).toBe('timed');
+    expect(postureDismissPolicy('failed_scan:all')).toBe('timed');
     expect(postureDismissPolicy('needs_review:all')).toBe('any');
   });
 });
@@ -212,13 +213,13 @@ describe('POST /api/fleet/dismissals/security', () => {
       const res = await post({ findingId: keyFor(key), mode: 'days', days: 7, severity: sev });
       expect(res.status).toBe(postureDismissPolicy(key) === 'none' ? 400 : 201);
     }
-    expect((await post({ findingId: keyFor('failed_scan:all'), mode: 'forever', severity: 'info' })).status).toBe(201);
+    expect((await post({ findingId: keyFor('failed_scan:all'), mode: 'forever', severity: 'info' })).status).toBe(400);
     expect((await post({ findingId: keyFor('public_exposure:unclassified'), mode: 'forever', severity: 'review' })).status).toBe(201);
   });
 
   it('bounds the count and the days', async () => {
     const findingId = keyFor('needs_review:all');
-    expect((await post({ findingId, mode: 'until_change', count: 100001 })).status).toBe(400);
+    expect((await post({ findingId, mode: 'until_change', count: 10_000_001 })).status).toBe(400);
     expect((await post({ findingId, mode: 'until_change', count: 1.5 })).status).toBe(400);
     expect((await post({ findingId, mode: 'days', days: 366 })).status).toBe(400);
   });

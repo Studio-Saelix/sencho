@@ -15,6 +15,8 @@ export function useNodeDismissals(
   nodeId: number | undefined,
   reloadKey: number,
   onGone: () => void,
+  /** False for an account the read route would refuse; nothing is read and every finding stays listed. */
+  enabled = true,
 ) {
   const [loaded, setLoaded] = useState<{ nodeId: number; list: FindingDismissal[] } | null>(null);
   // A list read for another node is never shown; a failed re-read keeps this node's last list.
@@ -24,7 +26,7 @@ export function useNodeDismissals(
   }, [nodeId]);
 
   useEffect(() => {
-    if (nodeId === undefined) return;
+    if (nodeId === undefined || !enabled) return;
     const controller = new AbortController();
     const load = async () => {
       try {
@@ -50,7 +52,7 @@ export function useNodeDismissals(
     };
     void load();
     return () => controller.abort();
-  }, [surface, nodeId, reloadKey]);
+  }, [surface, nodeId, reloadKey, enabled]);
 
   const upsert = useCallback((dismissal: FindingDismissal) => {
     setDismissals(current => [...current.filter(item => item.id !== dismissal.id && item.findingKey !== dismissal.findingKey), dismissal]);
