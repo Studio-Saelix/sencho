@@ -30,6 +30,11 @@ export const SETTING_WRITE_PERMISSIONS: Record<string, PermissionAction> = {
   // manages, so one value governs the fleet. The sibling node-scoped keys keep
   // `node:manage` because each governs the node it is stored against.
   gitops_artifact_retry_interval_mins: 'system:settings',
+  // `system:settings` for the same reason as the retry interval above: the
+  // history being pruned is the one this instance holds, and the monitor that
+  // prunes it runs here. A value written to a remote node's own database would
+  // govern that node's history, not this instance's.
+  gitops_history_retention_days: 'system:settings',
   env_block_deploy_on_missing_required: 'node:manage',
   auto_create_missing_external_networks: 'node:manage',
   notification_dispatch_retries: 'node:manage',
@@ -120,6 +125,7 @@ const SettingsPatchSchema = z.object({
   health_gate_enabled: z.enum(['0', '1']),
   health_gate_window_seconds: z.coerce.number().int().min(15).max(600).transform(String),
   gitops_artifact_retry_interval_mins: z.coerce.number().int().min(1).max(1440).transform(String),
+  gitops_history_retention_days: z.coerce.number().int().min(1).max(365).transform(String),
   env_block_deploy_on_missing_required: z.enum(['0', '1']),
   auto_create_missing_external_networks: z.enum(['0', '1']),
   image_update_sidebar_indicators: z.enum(['0', '1']),

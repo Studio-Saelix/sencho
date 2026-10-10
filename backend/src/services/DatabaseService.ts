@@ -89,6 +89,18 @@ const DEFAULT_RECOVERY_MAX_GENERATIONS = 0;
 // value from parking a target unverified for longer than a day.
 const DEFAULT_ARTIFACT_RETRY_INTERVAL_MINS = 5;
 const MAX_ARTIFACT_RETRY_INTERVAL_MINS = 1440;
+// Bounds of gitops_history_retention_days. The window is what keeps the
+// insert-only history and outbox tables from growing for the life of an
+// installation; the ceiling keeps a stored value from retaining rows longer
+// than a year.
+const DEFAULT_GITOPS_HISTORY_RETENTION_DAYS = 30;
+const MAX_GITOPS_HISTORY_RETENTION_DAYS = 365;
+// How long past the history window an undrained outbox row is kept. The boot
+// repair drains those rows from their payload alone, so age is not proof they
+// are done; a row still undrained this long after the window is poison (an
+// undecodable payload, or a fanout that keeps failing), and it is dropped so it
+// cannot accumulate for ever.
+const UNDRAINED_OUTBOX_GRACE_DAYS = 7;
 
 function isStackServiceStatus(value: unknown): value is StackServiceStatus {
     if (!value || typeof value !== 'object') return false;
@@ -2348,6 +2360,11 @@ stmt.run('gitops_schema_version', '1');
         // reachable floor. Kept off the generic read path on purpose: it is only
         // consulted for a target whose approved identity is still unresolved.
         stmt.run('gitops_artifact_retry_interval_mins', '5');
+        // Days of GitOps history and settled-outbox rows kept before the
+        // monitor's cleanup pass prunes them. Both tables are insert-only and
+        // the reconcile tick appends to them continuously, so the window is the
+        // only bound on their size; it defaults on rather than off.
+        stmt.run('gitops_history_retention_days', '30');
         // SSO role sync defaults off: admin-set roles persist across SSO sign-ins;
         // operators who want IdP group membership to drive roles opt in via Settings > SSO.
         stmt.run('sso_role_sync', '0');
@@ -5049,6 +5066,28 @@ stmt.run('gitops_schema_version', '1');
         }
     }
 
+    /**
+     * Days of GitOps history to keep.
+     *
+     * History is insert-only and the reconcile tick appends to it continuously,
+     * so this is the only bound on the table's size. There is no off value:
+     * turning retention off would leave the history and its outbox growing for
+     * the life of the installation, which is the accumulation this setting
+     * exists to stop. A failed read falls back to the default rather than to a
+     * value that keeps everything.
+     */
+    public getGitOpsHistoryRetentionDays(): number {
+        try {
+            const raw = parseInt(this.getGlobalSettings()['gitops_history_retention_days'] ?? '', 10);
+            return Number.isFinite(raw) && raw > 0
+                ? Math.min(raw, MAX_GITOPS_HISTORY_RETENTION_DAYS)
+                : DEFAULT_GITOPS_HISTORY_RETENTION_DAYS;
+        } catch (e) {
+            console.warn('[DatabaseService] gitops_history_retention_days read failed; using default:', (e as Error).message);
+            return DEFAULT_GITOPS_HISTORY_RETENTION_DAYS;
+        }
+    }
+
     /** Total generations retained per stack, current included (0 = unlimited). */
     public getRecoveryMaxGenerations(): number {
         try {
@@ -5559,6 +5598,53 @@ stmt.run('gitops_schema_version', '1');
             perStack: stackOverflow.length,
             perNode: unattachedOverflow.length,
         };
+    }
+
+    /**
+     * Drop GitOps history and its consumed outbox rows older than the window.
+     *
+     * The newest rows are always kept. No projection reads history for current
+     * state, so pruning an old row cannot change what an application shows or
+     * what the fleet is doing; crash recovery does read recent attempt rows,
+     * and the one-day floor is far longer than any attempt stays in flight.
+     * Recovery evidence older than the window is destroyed by design.
+     *
+     * A drained outbox row is pruned with the history it announced. An undrained
+     * row is a notification the fanout has not written yet, or a payload a later
+     * decoder is meant to repair, so it gets a grace period past the window: the
+     * boot repair drains it from the payload alone. A row still undrained after
+     * the grace is poison, counted and logged before it is dropped, because
+     * keeping it for ever is the unbounded growth the window exists to stop. The
+     * deletes share one transaction so a crash cannot leave half a prune behind.
+     */
+    public cleanupOldGitOpsHistory(
+        daysToKeep = DEFAULT_GITOPS_HISTORY_RETENTION_DAYS,
+    ): { history: number; outbox: number } {
+        const days = Number.isFinite(daysToKeep) && daysToKeep > 0
+            ? Math.min(Math.floor(daysToKeep), MAX_GITOPS_HISTORY_RETENTION_DAYS)
+            : DEFAULT_GITOPS_HISTORY_RETENTION_DAYS;
+        const cutoff = Date.now() - (days * 24 * 60 * 60 * 1000);
+        const undrainedCutoff = cutoff - (UNDRAINED_OUTBOX_GRACE_DAYS * 24 * 60 * 60 * 1000);
+        return this.db.transaction(() => {
+            const history = this.db.prepare('DELETE FROM gitops_history WHERE created_at < ?').run(cutoff);
+            const poison = this.db.prepare(
+                'SELECT COUNT(*) AS n FROM gitops_settled_outbox WHERE drained_at IS NULL AND created_at < ?',
+            ).get(undrainedCutoff) as { n: number };
+            if (poison.n > 0) {
+                console.warn(
+                    `[DatabaseService] dropping ${poison.n} undrained GitOps outbox row(s) older than ${days + UNDRAINED_OUTBOX_GRACE_DAYS} days`,
+                );
+            }
+            const outbox = this.db.prepare(
+                `DELETE FROM gitops_settled_outbox
+                 WHERE (drained_at IS NOT NULL AND created_at < ?)
+                    OR (drained_at IS NULL AND created_at < ?)`,
+            ).run(cutoff, undrainedCutoff);
+            return {
+                history: Number(history.changes ?? 0),
+                outbox: Number(outbox.changes ?? 0),
+            };
+        })();
     }
 
     // --- Nodes ---
