@@ -52,20 +52,24 @@ export function postureDismissPolicy(key: PostureReasonKey): DismissPolicy {
   return REASON_DISMISS_POLICY[key];
 }
 
-/** The severity a reason key carries, in the Security vocabulary. */
+const KEY_SEVERITY: Record<PostureReasonKey, PostureReasonSeverity> = {
+  'fixable_cve:all': 'blocker',
+  'known_exploited:all': 'blocker',
+  'elevated_exploit_risk:all': 'blocker',
+  'secret:all': 'blocker',
+  'dangerous_compose:all': 'blocker',
+  'public_exposure:conflict': 'blocker',
+  'public_exposure:unclassified': 'review',
+  'needs_review:all': 'review',
+  'waiting_upstream:all': 'review',
+  'update_check_uncertain:all': 'review',
+  'stale_scan:all': 'info',
+  'failed_scan:all': 'info',
+};
+
+/** The severity a reason key carries, in the Security vocabulary. One exhaustive record, like the policy. */
 export function postureKeySeverity(key: PostureReasonKey): PostureReasonSeverity {
-  switch (key) {
-    case 'stale_scan:all':
-    case 'failed_scan:all':
-      return 'info';
-    case 'needs_review:all':
-    case 'waiting_upstream:all':
-    case 'update_check_uncertain:all':
-    case 'public_exposure:unclassified':
-      return 'review';
-    default:
-      return 'blocker';
-  }
+  return KEY_SEVERITY[key];
 }
 
 /** Most severe first. The client uses the same order to decide whether a reason got worse. */

@@ -111,6 +111,16 @@ describe('posture fingerprint', () => {
     expect(postureFingerprint({ severity: 'info', targets: [t('a'), t('b')] })).not.toBe(a);
   });
 
+  it('moves on severity, intent facts and a boundary shift, and ignores drivers and count', () => {
+    const base = postureFingerprint({ severity: 'review', targets: [t('a', 'web')] });
+    expect(postureFingerprint({ severity: 'info', targets: [t('a', 'web')] })).not.toBe(base);
+    expect(postureFingerprint({ severity: 'review', targets: [{ imageRef: 'a', stackName: 'web', intentStatus: 'unset' }] })).not.toBe(base);
+    expect(postureFingerprint({ severity: 'review', targets: [{ imageRef: 'a', stackName: 'web', intentConflict: true }] })).not.toBe(base);
+    expect(postureFingerprint({ severity: 'review', targets: [t('a|b', 'c')] }))
+      .not.toBe(postureFingerprint({ severity: 'review', targets: [t('a', 'b|c')] }));
+    expect(postureFingerprint({ severity: 'review' })).toMatch(/^[0-9a-f]{16}$/);
+  });
+
   it('moves when the target list was capped', () => {
     expect(postureFingerprint({ severity: 'review', targets: [t('a')], targetsTruncated: true }))
       .not.toBe(postureFingerprint({ severity: 'review', targets: [t('a')] }));
@@ -196,6 +206,23 @@ describe('POST /api/fleet/dismissals/security', () => {
     expect(FindingDismissalStore.getInstance().list('security')).toHaveLength(0);
   });
 
+  it('accepts every dismissable reason and none of the blockers', async () => {
+    for (const key of POSTURE_REASON_KEYS) {
+      const sev = postureKeySeverity(key);
+      const res = await post({ findingId: keyFor(key), mode: 'days', days: 7, severity: sev });
+      expect(res.status).toBe(postureDismissPolicy(key) === 'none' ? 400 : 201);
+    }
+    expect((await post({ findingId: keyFor('failed_scan:all'), mode: 'forever', severity: 'info' })).status).toBe(201);
+    expect((await post({ findingId: keyFor('public_exposure:unclassified'), mode: 'forever', severity: 'review' })).status).toBe(201);
+  });
+
+  it('bounds the count and the days', async () => {
+    const findingId = keyFor('needs_review:all');
+    expect((await post({ findingId, mode: 'until_change', count: 100001 })).status).toBe(400);
+    expect((await post({ findingId, mode: 'until_change', count: 1.5 })).status).toBe(400);
+    expect((await post({ findingId, mode: 'days', days: 366 })).status).toBe(400);
+  });
+
   it('refuses a node that does not exist', async () => {
     expect((await post({ findingId: keyFor('needs_review:all', 9999), mode: 'until_change' })).status).toBe(404);
   });
@@ -220,6 +247,11 @@ describe('GET /api/fleet/dismissals/security', () => {
       { nodeId: localNodeId, surface: 'security', findingKey, stackName: null, fingerprint: 'fp', severity: 'review', count: 1 },
       { mode, expiresAt, createdBy: 'alice', now: 1 },
     ).row;
+
+  it('refuses someone with no access to the node', async () => {
+    const res = await request(app).get(`/api/fleet/dismissals/security?nodeId=${localNodeId}`);
+    expect(res.status).toBe(401);
+  });
 
   it('lists the node dismissals and drops a timed one whose time is up', async () => {
     const live = keyFor('needs_review:all');
@@ -246,6 +278,15 @@ describe('DELETE /api/fleet/dismissals/:id for a security row', () => {
     const row = seed();
     expect((await request(app).delete(`/api/fleet/dismissals/${row.id}`).set('Authorization', adminAuth)).status).toBe(204);
     expect(FindingDismissalStore.getInstance().get(row.id)).toBeNull();
+  });
+
+  it('answers 400 for a stored row whose key no longer reads, and leaves it', async () => {
+    const row = FindingDismissalStore.getInstance().dismiss(
+      { nodeId: localNodeId, surface: 'security', findingKey: 'security:1:bogus:all', stackName: null, fingerprint: 'fp', severity: 'review', count: 1 },
+      { mode: 'until_change', expiresAt: null, createdBy: 'alice', now: 1 },
+    ).row;
+    expect((await request(app).delete(`/api/fleet/dismissals/${row.id}`).set('Authorization', adminAuth)).status).toBe(400);
+    expect(FindingDismissalStore.getInstance().get(row.id)).not.toBeNull();
   });
 
   it('refuses someone who could not have dismissed it', async () => {

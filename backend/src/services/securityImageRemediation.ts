@@ -193,7 +193,11 @@ export function classifyImageRemediation(input: ClassifyImageRemediationInput): 
       case 'update_available':
         fixableWithImageUpdate += finding.count;
         pushUnique(imageRefsUpdateAvailable, finding.image_ref);
-        updateServiceTargets.push(...confirmedUpdateServices(finding.image_ref, matches, freshnessWindowMs, now));
+        for (const target of confirmedUpdateServices(finding.image_ref, matches, freshnessWindowMs, now)) {
+          if (!updateServiceTargets.some((t) => t.imageRef === target.imageRef && t.stackName === target.stackName && t.serviceName === target.serviceName)) {
+            updateServiceTargets.push(target);
+          }
+        }
         break;
       case 'waiting_upstream':
         fixableWaitingUpstream += finding.count;

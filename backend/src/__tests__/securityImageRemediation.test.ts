@@ -71,6 +71,17 @@ describe('classifyImageRemediation', () => {
     });
   });
 
+  it('lists a service once when several findings share its image', () => {
+    const facts = classifyImageRemediation({
+      findings: [{ image_ref: 'nginx:1.25', count: 1 }, { image_ref: 'nginx:1.25', count: 2 }],
+      details: { web: detail([service({ service: 'app', image: 'nginx:1.25', hasUpdate: true, checkStatus: 'ok' })]) },
+      checksEnabled: true,
+      freshnessWindowMs: FRESH_WINDOW,
+      now: NOW,
+    });
+    expect(facts.updateServiceTargets).toHaveLength(1);
+  });
+
   it('names only the services whose own fresh check found an update', () => {
     const facts = classifyImageRemediation({
       findings: [{ image_ref: 'nginx:1.25', count: 1 }],
