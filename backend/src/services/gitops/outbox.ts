@@ -170,13 +170,34 @@ function fanoutSettledNotification(payload: SettledAttemptPayload): void {
       gitops_operation_id: payload.operationId,
       dedupe_key: gitOpsAttemptNotificationKey(
         payload.operationId,
-        // Only a ready outcome announces a staged candidate. A blocked or
-        // failed outcome can also carry a candidate generation (a blocked
-        // candidate is still the live candidate), and keying that to the
-        // candidate would put it on a different key from the live write for
-        // the same attempt, which is the double entry this key exists to stop.
-        family === 'ready' && payload.candidateGenerationId
-          ? { applicationId: payload.applicationId, generationId: payload.candidateGenerationId }
+        // A candidate awaiting review or blocked by a local conflict is a
+        // standing state: it settles the same way on every poll, so it is keyed
+        // to the candidate and announces once. Every other outcome is about the
+        // attempt that ran, and stays on the attempt key, or the operator's
+        // problem would be swallowed by the candidate's own first entry.
+        //
+        // The family and the candidate's state have to agree for the key to be
+        // the candidate's. They disagree on purpose in one direction: a
+        // dispatch refused while a reviewable candidate is live settles
+        // `blocked` while the candidate is still `awaiting_review`, and that
+        // refusal is about the attempt.
+        //
+        // The one case where the live write and this settle can land on
+        // different candidate keys is a hold recorded between them: the live
+        // write reads the candidate as `awaiting_review`, and a hold the
+        // controller records before the attempt settles makes this row
+        // `held`. Both facts are true and each is worth one entry, so that
+        // window costs the operator an extra informative row rather than a
+        // repeat, and the next poll settles under the held key and stops.
+        payload.candidateGenerationId && payload.candidateState !== null
+          && (family === 'ready'
+            ? payload.candidateState === 'awaiting_review' || payload.candidateState === 'held'
+            : payload.candidateState === 'blocked')
+          ? {
+              applicationId: payload.applicationId,
+              generationId: payload.candidateGenerationId,
+              state: payload.candidateState,
+            }
           : undefined,
       ),
     },

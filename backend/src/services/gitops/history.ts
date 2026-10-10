@@ -4,7 +4,7 @@ import { decodeGitOpsJson, encodeGitOpsJson, isRecord, GitOpsJsonError } from '.
 import { enqueueHistoryPublication } from './publish';
 import { insertSettledOutbox, insertGitOpsEventOutbox } from './outbox';
 import { GITOPS_EVENT_PAYLOAD_VERSION, SETTLED_ATTEMPT_PAYLOAD_VERSION } from './attemptPayload';
-import { gitOpsOutboxPlan, gitOpsPauseReason } from './notifications';
+import { gitOpsCandidateState, gitOpsOutboxPlan, gitOpsPauseReason } from './notifications';
 import { sanitizeForLog } from '../../utils/safeLog';
 import type {
   GitOpsApplicationRow,
@@ -265,6 +265,7 @@ export function insertHistory(db: Database.Database, row: HistoryInsert): string
       actor: row.actor,
       at: row.at,
       candidateGenerationId: row.generationId ?? row.application.candidate_generation_id ?? null,
+      candidateState: gitOpsCandidateState(row.application),
     });
   } else if (outboxPlan?.kind === 'event') {
     insertGitOpsEventOutbox(db, {

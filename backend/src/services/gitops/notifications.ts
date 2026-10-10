@@ -157,14 +157,30 @@ export function settledNotificationFamily(outcome: string): SettledNotificationF
 }
 
 /**
- * The candidate one ready event announces, when it announces one.
+ * The state a staged candidate is waiting in, which is part of its identity.
+ *
+ * `awaiting_review` and `blocked` are standing states: the candidate keeps
+ * settling into them on every poll, so each announces once and then stays
+ * silent. `held` is a change rather than a state to sit in (a safety refusal
+ * turned an automatic candidate into one needing review), and it gets its own
+ * candidate key so the operator sees it instead of it colliding with the entry
+ * the candidate wrote when it was staged.
+ */
+export type GitOpsCandidateState = 'awaiting_review' | 'blocked' | 'held';
+
+/**
+ * The staged candidate an event announces, when it announces one.
  *
  * Identified by the candidate generation rather than the commit, so a commit
  * that is legitimately staged again later (after an apply, or after the
  * candidate was discarded and re-staged) is a new candidate and announces
  * again, while a poll that settles the same waiting candidate stays silent.
  */
-export type GitOpsCandidateIdentity = { applicationId: string; generationId: string };
+export type GitOpsCandidateIdentity = {
+  applicationId: string;
+  generationId: string;
+  state: GitOpsCandidateState;
+};
 
 /**
  * The dedupe key one attempt owns.
@@ -181,20 +197,43 @@ export type GitOpsCandidateIdentity = { applicationId: string; generationId: str
  * not be assumed (a live apply-failure write and the settle that confirms it
  * classify the same failure differently by construction).
  *
- * A ready event that names a staged candidate is keyed to the candidate
- * instead. A candidate awaiting review settles the same outcome on every poll,
- * and a per-attempt key would notify once per interval; the candidate key makes
- * the poll that staged it the one that announces it, and a newly staged
- * candidate the thing that announces again.
+ * An event that is about a staged candidate is keyed to the candidate instead.
+ * A candidate settles the same outcome on every poll, whether it is waiting on
+ * review or blocked by a local conflict, and a per-attempt key would notify once
+ * per interval for as long as it waits. The candidate key makes the poll that
+ * staged it the one that announces it, a newly staged candidate the thing that
+ * announces again, and a review that turns into a hold the thing that announces
+ * the hold.
  */
 export function gitOpsAttemptNotificationKey(
   operationId: string,
   candidate?: GitOpsCandidateIdentity,
 ): string {
   if (candidate) {
-    return `gitops:candidate:${candidate.applicationId}:${candidate.generationId}:ready`;
+    return `gitops:candidate:${candidate.applicationId}:${candidate.generationId}:${candidate.state}`;
   }
   return `gitops:attempt:${operationId}`;
+}
+
+/**
+ * The state a live candidate row is waiting in, or null when there is none.
+ *
+ * Read from the application row rather than re-derived from the settled
+ * outcome, because the two disagree on purpose: a candidate blocked by a local
+ * conflict settles `blocked`, while a held candidate settles `pending_review`
+ * even though the hold is what the operator needs to see.
+ */
+export function gitOpsCandidateState(
+  application: {
+    candidate_generation_id: string | null;
+    candidate_plan_blocked: number | null;
+    review_block_reason: string | null;
+  },
+): GitOpsCandidateState | null {
+  if (!application.candidate_generation_id) return null;
+  if (application.candidate_plan_blocked === 1) return 'blocked';
+  if (application.review_block_reason !== null) return 'held';
+  return 'awaiting_review';
 }
 
 /**

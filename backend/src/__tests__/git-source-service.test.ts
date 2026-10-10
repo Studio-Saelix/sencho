@@ -10912,6 +10912,29 @@ describe('GitSourceService classified plan fingerprint', () => {
      * counted per attempt rather than by recomputing a dedupe key, so the
      * property under test is the one the operator sees: one attempt, one entry.
      */
+    /**
+     * Bell rows this stack produced, found by stack name as well as by attempt
+     * id. Both matter: a write that lost its attempt metadata lands with a null
+     * `gitops_operation_id`, and a helper that only matched attempt ids would
+     * not see it at all, which is how a double entry could return unnoticed.
+     */
+    function bellRowsForStack(stackName: string): { category: string; dedupe_key: string | null; gitops_operation_id: string | null }[] {
+        return DatabaseService.getInstance().getDb()
+            .prepare(
+                `SELECT category, dedupe_key, gitops_operation_id FROM notification_history
+                 WHERE stack_name = ?
+                    OR gitops_operation_id IN (
+                      SELECT DISTINCT operation_id FROM gitops_history
+                      WHERE application_id IN (
+                        SELECT id FROM gitops_applications
+                        WHERE stack_name = ? OR configured_source_stack_name = ?
+                      )
+                   )
+                 ORDER BY id`,
+            )
+            .all(stackName, stackName, stackName) as never;
+    }
+
     function bellRowsFor(applicationId: string): { category: string; dedupe_key: string | null; gitops_operation_id: string | null }[] {
         return DatabaseService.getInstance().getDb()
             .prepare(
@@ -10922,6 +10945,24 @@ describe('GitSourceService classified plan fingerprint', () => {
                  ORDER BY id`,
             )
             .all(applicationId) as never;
+    }
+
+    /**
+     * Git source rows for this stack that carry no attempt id, among the
+     * categories that belong to an attempt and must therefore be keyed.
+     * Stack-level markers like `git_create` are legitimately keyless and are
+     * not in scope here.
+     */
+    function unkeyedBellRows(stackName: string): { category: string }[] {
+        return DatabaseService.getInstance().getDb()
+            .prepare(
+                `SELECT category FROM notification_history
+                 WHERE stack_name = ? AND gitops_operation_id IS NULL
+                   AND category IN ('git_pull_ready','git_plan_blocked','git_pull_failed',
+                                    'git_apply','git_apply_failed','git_apply_rolled_back')
+                 ORDER BY id`,
+            )
+            .all(stackName) as never;
     }
 
     /** Rows per attempt id, the shape a double entry shows up in. */
@@ -10972,7 +11013,7 @@ describe('GitSourceService classified plan fingerprint', () => {
             expect(rows[0]!.category).toBe('git_pull_ready');
             // The candidate key, pinned as a literal shape: a staged candidate
             // under review must not re-notify on every poll.
-            expect(rows[0]!.dedupe_key).toBe(`gitops:candidate:${app.id}:${app.candidate_generation_id}:ready`);
+            expect(rows[0]!.dedupe_key).toBe(`gitops:candidate:${app.id}:${app.candidate_generation_id}:awaiting_review`);
         } finally {
             validateSpy.mockRestore();
             await cleanupStackDir('notif-ready');
@@ -11069,6 +11110,221 @@ describe('GitSourceService classified plan fingerprint', () => {
             }
         } finally {
             await cleanupStackDir('notif-refixed');
+        }
+    });
+
+    it('writes one bell entry for an apply that failed before mutating anything', async () => {
+        // The other promote-failure live write: a failure before the first
+        // mutation writes `git_apply_failed`, and its `applyFailed` settle
+        // carries `failed_previous_intact`. Different classifications of one
+        // event, collapsed by both carrying the attempt key.
+        const sha = '44bb44bb44bb44bb44bb44bb44bb44bb44bb44bb';
+        mockSuccessfulClone({ compose: 'services:\n  web:\n    image: nginx\n', sha });
+        const svc = GitSourceService.getInstance();
+        const validateSpy = vi.spyOn(svc, 'validateCompose').mockResolvedValue({ ok: true });
+        const { FileSystemService } = await import('../services/FileSystemService');
+        const { GitProjectManifestService, PromoteGenerationError } = await import('../services/GitProjectManifestService');
+        await FileSystemService.getInstance().createStack('notif-premut');
+        await svc.upsert({
+            stackName: 'notif-premut',
+            repoUrl: 'https://github.com/example/notif-premut.git',
+            branch: 'main',
+            composePaths: ['compose.yaml'],
+            contextDir: null,
+            syncEnv: false,
+            envPath: null,
+            authType: 'none',
+            autoApplyOnWebhook: false,
+            autoDeployOnApply: false,
+        });
+        try {
+            const pull = await svc.pull('notif-premut', { actor: 'alice' });
+            const promoteSpy = vi.spyOn(GitProjectManifestService.getInstance(), 'promoteGeneration')
+                .mockRejectedValue(new PromoteGenerationError('pre_mutation', new Error('refused early')));
+            await expect(
+                svc.apply('notif-premut', sha, { planFingerprint: pull.planFingerprint! }),
+            ).rejects.toBeTruthy();
+            promoteSpy.mockRestore();
+            await drainSettledOutbox();
+
+            const app = GitOpsStore.getInstance().getLiveDirectApplication('notif-premut')!;
+            expect(bellRowsPerAttempt(app.id)).toEqual([]);
+            const applyRows = bellRowsForStack('notif-premut')
+                .filter((row) => row.category !== 'git_pull_ready');
+            expect(applyRows).toHaveLength(1);
+            expect(unkeyedBellRows('notif-premut')).toEqual([]);
+        } finally {
+            validateSpy.mockRestore();
+            await cleanupStackDir('notif-premut');
+        }
+    });
+
+    it('writes one bell entry for an apply refused on a plan that blocked after the pull', async () => {
+        // The apply-side blocked write, reached when the plan turns blocked
+        // between the pull that staged the candidate and the apply that
+        // recomputes it. Its settle is `failed_previous_intact` (the applyFailed
+        // transition ran), so the two only collapse because both carry the
+        // attempt: dropping the attempt metadata would leave two entries, which
+        // is what counting by stack name is here to catch.
+        const sha = '33aa33aa33aa33aa33aa33aa33aa33aa33aa33aa';
+        const stackName = 'notif-apply-blocked';
+        mockSuccessfulClone({ compose: 'services:\n  web:\n    image: nginx\n', sha });
+        const svc = GitSourceService.getInstance();
+        const validateSpy = vi.spyOn(svc, 'validateCompose').mockResolvedValue({ ok: true });
+        const { FileSystemService } = await import('../services/FileSystemService');
+        await svc.upsert({
+            stackName,
+            repoUrl: 'https://github.com/example/notif-apply-blocked.git',
+            branch: 'main',
+            composePaths: ['compose.yaml'],
+            contextDir: null,
+            syncEnv: false,
+            envPath: null,
+            authType: 'none',
+            autoApplyOnWebhook: false,
+            autoDeployOnApply: false,
+        });
+        await FileSystemService.getInstance().createStack(stackName);
+        try {
+            const pull = await svc.pull(stackName, { actor: 'alice' });
+            expect(pull.plan?.blocked).toBe(false);
+
+            // The conflict appears between pull and apply.
+            const planSpy = vi.spyOn(svc, 'computeChangePlan').mockResolvedValue({
+                blocked: true,
+                fingerprint: pull.planFingerprint,
+                operations: [{ op: 'local-modified', pathKey: 'compose.yaml', role: 'managed', sensitivity: 'low', provenance: null }],
+                summary: { added: 0, removed: 0, modified: 1 },
+                reviewedLive: [],
+                schemaVersion: 4,
+                invocationBlocked: false,
+                rationale: [],
+            } as never);
+            await expect(
+                svc.apply(stackName, sha, { planFingerprint: pull.planFingerprint! }),
+            ).rejects.toMatchObject({ code: 'PLAN_BLOCKED' });
+            planSpy.mockRestore();
+            await drainSettledOutbox();
+
+            const app = GitOpsStore.getInstance().getLiveDirectApplication(stackName)!;
+            expect(bellRowsPerAttempt(app.id)).toEqual([]);
+            const blocked = bellRowsForStack(stackName)
+                .filter((row) => row.category === 'git_plan_blocked');
+            expect(blocked).toHaveLength(1);
+            expect(unkeyedBellRows(stackName)).toEqual([]);
+        } finally {
+            validateSpy.mockRestore();
+            await cleanupStackDir(stackName);
+        }
+    });
+
+    it('writes one bell entry for a fetch that threw', async () => {
+        // The other live failure write: a fetch that throws writes
+        // `git_pull_failed` under the attempt key, and the settle that confirms
+        // it writes the same key. Counted by stack name as well as by attempt
+        // id, so a write that lost its attempt metadata would still show up as
+        // a second row rather than being invisible to this assertion.
+        const sha = '1188118811881188118811881188118811881188';
+        mockSuccessfulClone({ compose: 'services:\n  web:\n    image: nginx\n', sha });
+        const svc = GitSourceService.getInstance();
+        const validateSpy = vi.spyOn(svc, 'validateCompose').mockResolvedValue({ ok: true });
+        const { FileSystemService } = await import('../services/FileSystemService');
+        await FileSystemService.getInstance().createStack('notif-thrown');
+        await svc.upsert({
+            stackName: 'notif-thrown',
+            repoUrl: 'https://github.com/example/notif-thrown.git',
+            branch: 'main',
+            composePaths: ['compose.yaml'],
+            contextDir: null,
+            syncEnv: false,
+            envPath: null,
+            authType: 'none',
+            autoApplyOnWebhook: false,
+            autoDeployOnApply: false,
+        });
+        // After the upsert, which itself resolves the ref.
+        mockGitClone.mockRejectedValue(gitFailure('fatal: could not read from remote', false));
+        try {
+            await expect(svc.pull('notif-thrown', { actor: 'alice' })).rejects.toBeTruthy();
+            await drainSettledOutbox();
+
+            const app = GitOpsStore.getInstance().getLiveDirectApplication('notif-thrown')!;
+            expect(bellRowsPerAttempt(app.id)).toEqual([]);
+            const rows = bellRowsForStack('notif-thrown');
+            expect(rows).toHaveLength(1);
+            expect(rows[0]!.category).toBe('git_pull_failed');
+            // A keyless write would be a second entry the operator cannot
+            // attribute to an attempt, so assert there is none.
+            expect(unkeyedBellRows('notif-thrown')).toEqual([]);
+        } finally {
+            validateSpy.mockRestore();
+            await cleanupStackDir('notif-thrown');
+        }
+    });
+
+    it('writes one bell entry for a plan-blocked candidate across polls', async () => {
+        // A candidate blocked by a local conflict settles `blocked` on every
+        // poll for as long as the conflict stands. On the attempt key that
+        // announced once per interval, which is the repeat this key exists to
+        // stop, so it is keyed to the candidate like a reviewable one.
+        const sha = '2299229922992299229922992299229922992299';
+        mockSuccessfulClone({ compose: 'services:\n  web:\n    image: nginx\n', sha });
+        const svc = GitSourceService.getInstance();
+        const validateSpy = vi.spyOn(svc, 'validateCompose').mockResolvedValue({ ok: true });
+        const { FileSystemService } = await import('../services/FileSystemService');
+        await FileSystemService.getInstance().createStack('notif-blocked');
+        await svc.upsert({
+            stackName: 'notif-blocked',
+            repoUrl: 'https://github.com/example/notif-blocked.git',
+            branch: 'main',
+            composePaths: ['compose.yaml'],
+            contextDir: null,
+            syncEnv: false,
+            envPath: null,
+            authType: 'none',
+            autoApplyOnWebhook: false,
+            autoDeployOnApply: false,
+        });
+        const poll = async (appId: string): Promise<void> => {
+            await svc.reconcile({
+                intent: 'fetch',
+                applicationId: appId,
+                stackName: 'notif-blocked',
+                trigger: 'poll',
+                actor: 'system:source-controller',
+            });
+            await drainSettledOutbox();
+        };
+        try {
+            // Block the plan the way a local conflict does: the pull stages the
+            // candidate as blocked and returns a blocked plan.
+            const planSpy = vi.spyOn(svc, 'computeChangePlan').mockResolvedValue({
+                blocked: true,
+                fingerprint: 'b'.repeat(64),
+                operations: [],
+                summary: { added: 0, removed: 0, modified: 0 },
+                reviewedLive: [],
+                schemaVersion: 4,
+                invocationBlocked: false,
+                rationale: [],
+            } as never);
+            await svc.pull('notif-blocked', { actor: 'alice' });
+            planSpy.mockRestore();
+            await drainSettledOutbox();
+
+            const app = GitOpsStore.getInstance().getLiveDirectApplication('notif-blocked')!;
+            expect(app.candidate_plan_blocked).toBe(1);
+            const blockedRows = () =>
+                bellRowsForStack('notif-blocked').filter((row) => row.category === 'git_plan_blocked');
+            expect(blockedRows()).toHaveLength(1);
+
+            await poll(app.id);
+            await poll(app.id);
+            expect(blockedRows()).toHaveLength(1);
+            expect(bellRowsPerAttempt(app.id)).toEqual([]);
+        } finally {
+            validateSpy.mockRestore();
+            await cleanupStackDir('notif-blocked');
         }
     });
 
@@ -11260,8 +11516,12 @@ describe('GitSourceService classified plan fingerprint', () => {
 
             const app = GitOpsStore.getInstance().getLiveDirectApplication('notif-rollback')!;
             expect(bellRowsPerAttempt(app.id)).toEqual([]);
-            const applyRows = bellRowsFor(app.id).filter((row) => row.category !== 'git_pull_ready');
+            // By stack name, not only by attempt id: the live write dropping its
+            // attempt metadata would land a keyless row this has to see too.
+            const applyRows = bellRowsForStack('notif-rollback')
+                .filter((row) => row.category !== 'git_pull_ready');
             expect(applyRows).toHaveLength(1);
+            expect(unkeyedBellRows('notif-rollback')).toEqual([]);
         } finally {
             validateSpy.mockRestore();
             await cleanupStackDir('notif-rollback');
@@ -11361,6 +11621,13 @@ describe('GitSourceService classified plan fingerprint', () => {
                 code: 'PLAN_BLOCKED',
                 message: expect.stringMatching(/invocation/i),
             });
+            // The unattended refusal writes one blocked entry and its settle
+            // finds the attempt key taken. Counted by stack name so a live write
+            // that lost its attempt metadata would show up as a second row.
+            await drainSettledOutbox();
+            const driftApp = GitOpsStore.getInstance().getLiveDirectApplication('inv-drift')!;
+            expect(bellRowsPerAttempt(driftApp.id)).toEqual([]);
+            expect(unkeyedBellRows('inv-drift')).toEqual([]);
             expect((await fsSvc.readStackFile('inv-drift', '.env')).content).toBe('FOO=1\n');
             expect(DatabaseService.getInstance().getGitSource('inv-drift')?.pending_commit_sha).toBe(sha);
 

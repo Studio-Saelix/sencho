@@ -97,10 +97,15 @@ const writeSettledFor = (
   applicationId: string,
   operationId: string,
   outcome: string,
-  candidateGenerationId: string,
+  candidateGenerationId: string | null,
+  candidate: Partial<Pick<GitOpsApplicationRow, 'candidate_plan_blocked' | 'review_block_reason'>> = {},
 ): string => {
   const id = insertHistory(testDb(), {
-    application: directApplicationFixture(applicationId, `stack-${applicationId}`),
+    application: {
+      ...directApplicationFixture(applicationId, `stack-${applicationId}`),
+      candidate_generation_id: candidateGenerationId,
+      ...candidate,
+    },
     nodeId: 3,
     dedupeTarget: 'app',
     operationId,
@@ -368,6 +373,7 @@ describe('gitops transition announcements', () => {
       actor: 'system:source-controller',
       at: 4242,
       candidateGenerationId: null,
+      candidateState: null,
     }), historyId);
     drainGitOpsOutboxRow(db(), historyId);
     const note = db().prepare(
@@ -857,6 +863,74 @@ describe('GitOps notifications agree with the canonical posture', () => {
     expect(notes.n).toBe(2);
   });
 
+  it('notifies a plan-blocked candidate once, and again when it is staged afresh', async () => {
+    // The same per-poll case for a candidate a local conflict blocks: it
+    // settles `blocked` on every interval, so on the attempt key it announced
+    // once per poll for as long as the conflict stood.
+    const applicationId = 'app-poll-blocked';
+    const generationA = 'gen-blocked-a';
+    const blocked = { candidate_plan_blocked: 1 } as const;
+    writeSettledFor(applicationId, 'op-block-1', 'blocked', generationA, blocked);
+    await settle();
+    writeSettledFor(applicationId, 'op-block-2', 'blocked', generationA, blocked);
+    await settle();
+    let notes = db().prepare(
+      'SELECT COUNT(*) AS n FROM notification_history WHERE gitops_operation_id IN (?, ?)',
+    ).get('op-block-1', 'op-block-2') as { n: number };
+    expect(notes.n).toBe(1);
+
+    writeSettledFor(applicationId, 'op-block-3', 'blocked', 'gen-blocked-b', blocked);
+    await settle();
+    notes = db().prepare(
+      'SELECT COUNT(*) AS n FROM notification_history WHERE gitops_operation_id IN (?, ?, ?)',
+    ).get('op-block-1', 'op-block-2', 'op-block-3') as { n: number };
+    expect(notes.n).toBe(2);
+  });
+
+  it('announces a stateful hold on a candidate that already announced ready', async () => {
+    // An automatic source stages a candidate and announces it, then a safety
+    // hold turns that same candidate into one needing review. The settle for the
+    // hold is `pending_review` like the one before it, so without the hold as
+    // part of the candidate's identity it would collide with the ready entry and
+    // the operator would never learn the candidate stopped being automatic.
+    const applicationId = 'app-hold-candidate';
+    const generation = 'gen-held';
+    writeSettledFor(applicationId, 'op-hold-1', 'pending_review', generation);
+    await settle();
+    writeSettledFor(applicationId, 'op-hold-2', 'pending_review', generation, {
+      review_block_reason: 'stateful_withdrawal',
+    });
+    await settle();
+    const notes = db().prepare(
+      'SELECT COUNT(*) AS n FROM notification_history WHERE gitops_operation_id IN (?, ?)',
+    ).get('op-hold-1', 'op-hold-2') as { n: number };
+    expect(notes.n).toBe(2);
+
+    // And it announces once, not on every later poll of the held candidate.
+    writeSettledFor(applicationId, 'op-hold-3', 'pending_review', generation, {
+      review_block_reason: 'stateful_withdrawal',
+    });
+    await settle();
+    const afterRepeat = db().prepare(
+      'SELECT COUNT(*) AS n FROM notification_history WHERE gitops_operation_id IN (?, ?, ?)',
+    ).get('op-hold-1', 'op-hold-2', 'op-hold-3') as { n: number };
+    expect(afterRepeat.n).toBe(2);
+  });
+
+  it('keeps a blocked attempt on its own key when a reviewable candidate is live', async () => {
+    // A dispatch refused while a candidate is waiting on review settles
+    // `blocked` too, but it is a refusal about that run, not a statement about
+    // the candidate. Keyed to the candidate it would be swallowed by the
+    // candidate's own first entry.
+    const applicationId = 'app-refusal-with-candidate';
+    writeSettledFor(applicationId, 'op-refusal-1', 'blocked', 'gen-reviewable');
+    await settle();
+    const onAttemptKey = db().prepare(
+      'SELECT COUNT(*) AS n FROM notification_history WHERE dedupe_key = ?',
+    ).get(gitOpsAttemptNotificationKey('op-refusal-1')) as { n: number };
+    expect(onAttemptKey.n).toBe(1);
+  });
+
   it('writes one bell entry per attempt when a live write and its settle both announce', async () => {
     // The live apply-failure write and the settle that confirms it classify the
     // same failure differently by construction (a rolled-back apply writes
@@ -914,6 +988,7 @@ describe('GitOps notifications agree with the canonical posture', () => {
         actor: 'system:source-controller',
         at: 4242,
         candidateGenerationId: null,
+        candidateState: null,
       }), SETTLED_ATTEMPT_PAYLOAD_VERSION);
 
       resetGitOpsPublicationsForTests();
@@ -1060,6 +1135,7 @@ describe('GitOps notifications agree with the canonical posture', () => {
         actor: 'operator-1',
         at: 4242,
         candidateGenerationId: null,
+        candidateState: null,
       }), SETTLED_ATTEMPT_PAYLOAD_VERSION);
     }
 

@@ -49,7 +49,7 @@ import {
 } from './gitops/triggers';
 import { classifyFailure, effectivePollIntervalSecs } from './gitops/backoff';
 import { checkStatefulWithdrawal, holdForStatefulReview } from './gitops/statefulGuard';
-import { gitOpsAttemptNotificationKey } from './gitops/notifications';
+import { gitOpsAttemptNotificationKey, gitOpsCandidateState, type GitOpsCandidateIdentity } from './gitops/notifications';
 import { BlueprintTargetAdapter, buildAcceptedGeneration, type AcceptedGeneration, type DispatchContext, type DispatchResult } from './gitops/handoff';
 import {
     GitOpsTransitions,
@@ -691,6 +691,18 @@ const SUBMODULE_WARNING =
 
 const REF_DELETED_MESSAGE =
     'The configured branch, tag, or commit no longer points at the same revision as before. It may have been deleted, force-pushed, or moved to a different commit (for example a retagged release).';
+
+/**
+ * The staged candidate this application's live row names, or null when it has
+ * none. Shared with the settled outbox so a live write and the settle that
+ * confirms it cannot disagree about which candidate they are announcing.
+ */
+function candidateIdentityFromApplication(app: GitOpsApplicationRow): GitOpsCandidateIdentity | null {
+    const state = gitOpsCandidateState(app);
+    return app.candidate_generation_id && state
+        ? { applicationId: app.id, generationId: app.candidate_generation_id, state }
+        : null;
+}
 
 function priorFetchIdentity(app: GitOpsApplicationRow | null | undefined): FetchParams['priorIdentity'] {
     if (!app?.fetched_commit_sha) return undefined;
@@ -2740,35 +2752,31 @@ export class GitSourceService {
             // about to write.
             if (!validation.ok || !stagingRecorded) {
                 console.log(`[GitSource] Pull of ${sanitizeForLog(stackName)} at ${shortSha} announced no candidate: ${!stagingRecorded ? 'the staging transition was rejected' : validation.error ?? 'the project does not validate'}`);
-            } else if (plan.blocked) {
-                this.recordGitActivity(
-                    stackName,
-                    'git_plan_blocked',
-                    `Git plan blocked for ${stackName} (${shortSha}, op ${GitSourceService.shortOperationId(gitopsOperationId)}, plan ${fpPrefix})`,
-                    actor,
-                    'warning',
-                    { operationId: gitopsOperationId },
-                );
             } else {
                 // Read after the staging transition committed, so this is the
-                // generation this fetch actually staged: that generation is what
-                // identifies the candidate to the bell. Looked up by
-                // application id, not by stack name: gitopsApp may be a
-                // converted Blueprint source rather than a Direct row, and
-                // reading it back the way it was found keeps the live write on
-                // the same candidate key the settle derives.
+                // generation this fetch actually staged and the state it was
+                // staged in: that pair is what identifies the candidate to the
+                // bell. Looked up by application id, not by stack name:
+                // gitopsApp may be a converted Blueprint source rather than a
+                // Direct row, and reading it back the way it was found keeps the
+                // live write on the same candidate key the settle derives.
+                //
+                // A blocked candidate is keyed the same way a reviewable one is.
+                // It settles `blocked` on every poll for as long as the local
+                // conflict stands, so on the attempt key it announced once per
+                // poll, which is the repeat this key exists to stop.
                 const staged = gitopsApp
                     ? GitOpsStore.getInstance().getApplication(gitopsApp.id) ?? null
                     : null;
-                const candidate = staged?.candidate_generation_id
-                    ? { applicationId: staged.id, generationId: staged.candidate_generation_id }
-                    : undefined;
+                const candidate = staged
+                    ? candidateIdentityFromApplication(staged)
+                    : null;
                 this.recordGitActivity(
                     stackName,
-                    'git_pull_ready',
-                    `Git pull ready for ${stackName} (${shortSha}, op ${GitSourceService.shortOperationId(gitopsOperationId)}, plan ${fpPrefix})`,
+                    plan.blocked ? 'git_plan_blocked' : 'git_pull_ready',
+                    `Git ${plan.blocked ? 'plan blocked' : 'pull ready'} for ${stackName} (${shortSha}, op ${GitSourceService.shortOperationId(gitopsOperationId)}, plan ${fpPrefix})`,
                     actor,
-                    undefined,
+                    plan.blocked ? 'warning' : undefined,
                     { operationId: gitopsOperationId, candidate },
                 );
             }
@@ -7700,7 +7708,7 @@ export class GitSourceService {
         attempt?: {
             operationId: string;
             /** A staged candidate this event announces, when it announces one. */
-            candidate?: { applicationId: string; generationId: string };
+            candidate?: GitOpsCandidateIdentity | null;
         },
     ): void {
         try {
@@ -7722,7 +7730,7 @@ export class GitSourceService {
                             gitops_operation_id: attempt.operationId,
                             dedupe_key: gitOpsAttemptNotificationKey(
                                 attempt.operationId,
-                                attempt.candidate,
+                                attempt.candidate ?? undefined,
                             ),
                         }
                         : {}),
