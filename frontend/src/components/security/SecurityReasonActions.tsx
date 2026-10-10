@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { MoreHorizontal } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import {
   DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger,
@@ -20,6 +21,8 @@ export interface SecurityReasonControls {
   nodeId: number | undefined;
   /** The one handler for a verb that runs in place or navigates; the page owns busy state. */
   run: (reason: PostureReason, verb: ReasonVerb) => void | Promise<void>;
+  /** The label of the reason's own navigation. */
+  navLabel: (reason: PostureReason) => string;
   busy: (verb: ReasonVerb) => boolean;
   /** A verb changed what the overview says, so the page should re-read it. */
   onResolved: () => void;
@@ -158,7 +161,25 @@ export function SecurityReasonActions({ reason, verb, controls }: {
     </Button>
   );
 
-  if (!isReasonDismissable(reason)) return <div className="flex items-center gap-1">{body}</div>;
+  // A verb that runs in place replaces the row's shortcut, so the shortcut moves into an overflow menu.
+  const withShortcut = verb !== null && verb.kind !== 'navigate' ? (
+    <>
+      {body}
+      <DropdownMenu>
+        <DropdownMenuTrigger asChild>
+          <Button variant="ghost" size="icon" className="h-7 w-7 max-md:min-h-11 max-md:min-w-11" aria-label={`More actions: ${reason.label}`}>
+            <MoreHorizontal className="h-4 w-4" strokeWidth={1.5} />
+          </Button>
+        </DropdownMenuTrigger>
+        <DropdownMenuContent align="end">
+          <DropdownMenuItem onSelect={() => void controls.run(reason, { kind: 'navigate', label: controls.navLabel(reason), clicks: 1 })}>
+            {controls.navLabel(reason)}
+          </DropdownMenuItem>
+        </DropdownMenuContent>
+      </DropdownMenu>
+    </>
+  ) : body;
+  if (!isReasonDismissable(reason)) return <div className="flex items-center gap-1">{withShortcut}</div>;
   return (
     <FindingRowActions
       dismissPolicy={reason.dismissPolicy ?? 'none'}
@@ -167,7 +188,7 @@ export function SecurityReasonActions({ reason, verb, controls }: {
       subject={reason.label}
       onDismiss={(mode, days) => controls.onDismiss(reason, mode, days)}
     >
-      {body}
+      {withShortcut}
     </FindingRowActions>
   );
 }

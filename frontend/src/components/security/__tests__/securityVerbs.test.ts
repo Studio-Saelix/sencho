@@ -8,12 +8,12 @@ function reason(partial: Partial<PostureReason> & Pick<PostureReason, 'kind'>): 
 
 const ctx = (overrides: Partial<ReasonVerbContext> = {}): ReasonVerbContext => ({
   canManageNode: true,
+  canScanNode: true,
   canDeployStack: () => true,
   canEditStack: () => true,
   scannerAvailable: true,
   updateChecksDisabled: false,
   isReplica: false,
-  hasScanWith: () => true,
   ...overrides,
 });
 
@@ -64,17 +64,17 @@ describe('resolveReasonVerb', () => {
     expect(resolve(r, ctx({ updateChecksDisabled: true }))).toMatchObject({ kind: 'navigate' });
   });
 
-  it('rescans only with node management and a ready scanner', () => {
+  it('rescans only with the global node scan permission and a ready scanner', () => {
     const r = reason({ kind: 'stale_scan', severity: 'info' });
     expect(resolve(r)).toMatchObject({ kind: 'rescan-node' });
     expect(resolve(r, ctx({ scannerAvailable: false }))).toMatchObject({ kind: 'navigate' });
-    expect(resolve(r, ctx({ canManageNode: false }))).toMatchObject({ kind: 'navigate' });
+    // A node-scoped grant passes the update recheck but not the node scan, which takes no resource.
+    expect(resolve(r, ctx({ canScanNode: false, canManageNode: true }))).toMatchObject({ kind: 'navigate' });
   });
 
-  it('opens the scan on the matching tab when one has findings', () => {
-    expect(resolve(reason({ kind: 'secret', severity: 'blocker' }))).toEqual({ kind: 'open-scan', label: 'Open scan', clicks: 1, tab: 'secrets' });
-    expect(resolve(reason({ kind: 'dangerous_compose', severity: 'blocker' }))).toMatchObject({ tab: 'misconfigs' });
-    expect(resolve(reason({ kind: 'secret', severity: 'blocker' }), ctx({ hasScanWith: () => false }))).toMatchObject({ kind: 'navigate' });
+  it('keeps the tab shortcut for secrets and Compose risks, which list every item there', () => {
+    expect(resolve(reason({ kind: 'secret', severity: 'blocker' }))).toMatchObject({ kind: 'navigate' });
+    expect(resolve(reason({ kind: 'dangerous_compose', severity: 'blocker' }))).toMatchObject({ kind: 'navigate' });
   });
 
   it('offers triage in the same page, but not on a replica', () => {

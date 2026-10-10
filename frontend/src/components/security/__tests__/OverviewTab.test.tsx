@@ -100,7 +100,7 @@ function Harness({ data, onNavigate, onInspect, reload }: {
   onInspect: OverviewProps['onInspect'];
   reload: () => void;
 }) {
-  const reasons = useSecurityReasons({ overview: data, summaries: {}, isReplica: false, onNavigate, onInspect, reload });
+  const reasons = useSecurityReasons({ overview: data, isReplica: false, onNavigate, reload });
   return (
     <OverviewTab
       overview={data}

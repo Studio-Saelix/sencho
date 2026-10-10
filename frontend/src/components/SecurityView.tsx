@@ -161,10 +161,8 @@ export function SecurityView({ activeTab, onTabChange, headerActions }: Security
   const reloadOverview = useCallback(() => setReloadToken((t) => t + 1), []);
   const reasons = useSecurityReasons({
     overview: nodeOverview,
-    summaries,
     isReplica,
     onNavigate: handleNavigate,
-    onInspect,
     reload: reloadOverview,
   });
 

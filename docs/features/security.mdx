@@ -77,22 +77,22 @@ Each row's button does the work where you see it:
 - **Set exposure intent** (exposed images) classifies each affected service from a popover.
 - **Check again** (update availability unknown) re-runs the image update check and refreshes the
   card.
-- **Rescan node** (stale scans) runs the node scan with live progress.
-- **Open scan** (secrets, Compose risks) opens the scan report on the Secrets or Compose risks tab;
-  Compose risks are acknowledged there, rule by rule.
-- **Triage** (findings awaiting triage) and **Open History** (failed scans) switch to that tab.
+- **Rescan node** (stale scans) runs the node scan with live progress, when you can scan the node.
+- **Triage** (findings awaiting triage) and **Open History** (failed scans) switch to that tab, as do
+  the rows for secrets and Compose risks, which list every item there.
   Triage is not offered on a replica node, which takes triage decisions from its control instance.
 
 A button only appears when your role can run it; otherwise the row keeps its shortcut to the
-relevant tab.
+relevant tab. When a button runs in place, the shortcut to the tab moves into the row's **⋯** menu.
 
 ### Dismissing review items
 
 On rows that are review or informational, **Dismiss** sets the item aside for the whole team until it
 changes: it returns on its own when the images or stacks it covers change, or when it covers more
-than before. The arrow next to **Dismiss** offers 7 days or permanently. Update availability unknown
-and stale scans can only be dismissed for a set number of days, because the evidence behind them is
-missing or old. Items that keep the posture at Action needed cannot be dismissed; they go away when
+than before. If it comes back in exactly the state you dismissed, it stays dismissed until the hold
+ends or you restore it. The arrow next to **Dismiss** offers 7 days or permanently. Update
+availability unknown, stale scans, and failed scans can only be dismissed for a set number of days,
+because the evidence behind them is missing or old. Items that keep the posture at Action needed cannot be dismissed; they go away when
 you resolve them.
 
 Dismissed items stay counted: the masthead and the posture word still include them. They appear under
