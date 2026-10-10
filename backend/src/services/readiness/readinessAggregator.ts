@@ -9,11 +9,14 @@ import { SYNC_ERROR_CODES } from '../fleetSyncConstants';
 import { isFleetSyncTarget } from '../FleetSyncService';
 import { contactInfo, type PreviewReachabilityNote } from '../blueprintPreviewProjection';
 import { safeRemoteFetch } from '../../utils/outboundTarget';
+import { sha256Hex } from '../../utils/hashing';
 import { mapWithConcurrency } from '../../utils/mapWithConcurrency';
 import { withTimeout, TimeoutError } from '../../utils/withTimeout';
 import { errorMessageForLog, redactSensitiveText, sanitizeForLog } from '../../utils/safeLog';
 import type { SecurityPostureState } from '../securityPosture';
 import type { ReadinessVerdict, RollbackOverall } from '../updateGuard/types';
+import { attachReadinessDismissals, dismissPolicyFor } from './readinessDismissals';
+import type { FindingDismissal } from '../findingDismissals/types';
 import { buildNodeReadinessEvidence } from './readinessEvidence';
 import { buildStackReadinessSummary } from './stackReadinessSummary';
 import {
@@ -313,6 +316,15 @@ interface DomainConcern {
   /** The stack the row is about, or null for a node-level concern. */
   stack: string | null;
   verdict: FindingVerdict | null;
+  /**
+   * Structured facts the finding rests on beyond its code and verdict (for a
+   * workload, the status and running/total containers). Feeds the fingerprint, so
+   * it must not carry free text whose wording can move on its own.
+   */
+  basis: string;
+  /** Carried onto the finding for update and recovery rows; see `ReadinessFinding`. */
+  topReasonId?: string | null;
+  hasUpdate?: boolean;
   target: ReadinessTarget;
 }
 
@@ -339,7 +351,7 @@ interface DomainResult {
 function concern(
   spec: ConcernSpec,
   target: ReadinessTarget,
-  overrides: Partial<Pick<DomainConcern, 'detail' | 'count' | 'stack' | 'verdict'>> = {},
+  overrides: Partial<Pick<DomainConcern, 'detail' | 'count' | 'stack' | 'verdict' | 'basis' | 'topReasonId' | 'hasUpdate'>> = {},
 ): DomainConcern {
   return {
     state: spec.state,
@@ -348,6 +360,7 @@ function concern(
     count: 1,
     stack: null,
     verdict: null,
+    basis: '',
     target,
     ...overrides,
   };
@@ -373,6 +386,11 @@ export interface FleetReadinessRequest {
   includeControl: boolean;
   /** Aborted when the client goes away, so in-flight reads stop with it. */
   signal: AbortSignal;
+  /**
+   * False skips reading and retiring dismissals, for a caller that wants the
+   * evidence alone (the dismiss route re-reads one finding and needs no list).
+   */
+  withDismissals?: boolean;
 }
 
 function stateRank(state: DomainState): number {
@@ -548,7 +566,11 @@ function findingsFor(
       count: concern.count,
       verdict: concern.verdict,
       detail: concern.detail === null ? null : redactSensitiveText(concern.detail) || null,
+      ...(concern.topReasonId !== undefined ? { topReasonId: concern.topReasonId } : {}),
+      ...(concern.hasUpdate !== undefined ? { hasUpdate: concern.hasUpdate } : {}),
       target: concern.target,
+      fingerprint: sha256Hex(JSON.stringify([code, concern.state, concern.verdict, concern.basis])),
+      dismissPolicy: dismissPolicyFor({ code, severity: concern.state }),
     };
   });
 }
@@ -1028,6 +1050,11 @@ function connectivityResult(input: ConnectivityInput): { result: DomainResult; r
   };
 }
 
+/** A workload problem's status and container tally, so a second service going down changes the fingerprint. */
+function workloadBasis(problem: NodeWorkloadProblem): string {
+  return `${problem.status}:${problem.running ?? '?'}/${problem.total ?? '?'}`;
+}
+
 function workloadsConcerns(node: Node, evidence: NodeWorkloadEvidence): DomainConcern[] {
   const concerns: DomainConcern[] = [];
   const nodeTarget: ReadinessTarget = { surface: 'node-details', nodeId: node.id };
@@ -1050,7 +1077,9 @@ function workloadsConcerns(node: Node, evidence: NodeWorkloadEvidence): DomainCo
       continue;
     }
     const spec = WORKLOAD_STATUS_CONCERNS[problem.status];
-    if (spec !== null) concerns.push(concern(spec, stackTarget, { stack: problem.stack }));
+    if (spec !== null) {
+      concerns.push(concern(spec, stackTarget, { stack: problem.stack, basis: workloadBasis(problem) }));
+    }
   }
   return concerns;
 }
@@ -1217,12 +1246,35 @@ function updatesConcerns(node: Node, summary: NodeStackReadinessSummary, notDepl
       detail: reasonText(row.update.topReason),
       stack: row.stack,
       verdict: { kind: 'update', value: row.update.verdict },
+      ...reasonFacts(row.update.topReasonId, row.update.hasUpdate),
     }));
   }
   if (summary.truncated) {
     concerns.push(concern({ state: 'unknown', code: 'summary_truncated' }, target));
   }
   return concerns;
+}
+
+/**
+ * The structured reason facts a stack row carries, with the basis they add to
+ * the fingerprint. A peer that predates the fields sends neither, and then the
+ * finding carries neither and its fingerprint is what it was before: a verb
+ * falls back to opening the stack rather than guessing.
+ */
+function reasonFacts(
+  topReasonId: unknown,
+  hasUpdate?: unknown,
+): Pick<DomainConcern, 'topReasonId' | 'hasUpdate' | 'basis'> {
+  // A peer's payload is not trusted to be typed: a value of the wrong type is
+  // treated as absent rather than copied into the response and the fingerprint.
+  const id = typeof topReasonId === 'string' || topReasonId === null ? topReasonId : undefined;
+  const known = typeof hasUpdate === 'boolean' ? hasUpdate : undefined;
+  const facts: Pick<DomainConcern, 'topReasonId' | 'hasUpdate' | 'basis'> = {
+    basis: id === undefined && known === undefined ? '' : JSON.stringify([id ?? null, known ?? null]),
+  };
+  if (id !== undefined) facts.topReasonId = id;
+  if (known !== undefined) facts.hasUpdate = known;
+  return facts;
 }
 
 function recoveryConcerns(
@@ -1256,6 +1308,7 @@ function recoveryConcerns(
       detail: reasonText(row.rollback.topReason),
       stack: row.stack,
       verdict: { kind: 'rollback', value: row.rollback.overall },
+      ...reasonFacts(row.rollback.topReasonId),
     }));
   }
   if (summary.truncated) {
@@ -1604,6 +1657,7 @@ function emptySeverityCounts(): Record<ReadinessFinding['severity'], number> {
  * structure ever holds it for a caller who may not see it.
  */
 export async function buildFleetReadiness(request: FleetReadinessRequest): Promise<FleetReadinessResponse> {
+  const startedAt = Date.now();
   const db = DatabaseService.getInstance();
   const all = db.getNodes();
   const nodeIds = request.nodeIds;
@@ -1673,7 +1727,27 @@ export async function buildFleetReadiness(request: FleetReadinessRequest): Promi
     summary: { nodes: summaryNodes, findings: summaryFindings },
     findings: sortFindings(findings),
     nodes,
+    dismissals: request.withDismissals === false ? [] : publishDismissals(rowNodes, findings, domains, startedAt),
   };
+}
+
+/**
+ * The team's dismissals for this response. They are decoration on the evidence,
+ * so a failure to read or retire them costs the dismissals and never the board:
+ * findings stay listed, which is the safe direction to fail.
+ */
+function publishDismissals(
+  nodes: ReadonlyArray<Omit<FleetReadinessNode, 'state'>>,
+  findings: readonly ReadinessFinding[],
+  domains: readonly ReadinessDomainKey[],
+  startedAt: number,
+): FindingDismissal[] {
+  try {
+    return attachReadinessDismissals({ nodes, findings, domains, now: Date.now(), startedAt });
+  } catch (error) {
+    console.error('[Readiness] Could not read dismissals:', errorMessageForLog(error));
+    return [];
+  }
 }
 
 /**

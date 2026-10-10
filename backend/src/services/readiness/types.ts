@@ -3,6 +3,7 @@ import type { BulkStackInfo } from '../DockerController';
 import type { SecurityPostureState } from '../securityPosture';
 import type { Node, NodeMode } from '../DatabaseService';
 import type { PreviewContactSource, PreviewReachabilityNote } from '../blueprintPreviewProjection';
+import type { FindingDismissal } from '../findingDismissals/types';
 
 /** The six readiness domains, in the order the matrix renders its columns. */
 export const READINESS_DOMAINS = [
@@ -197,8 +198,31 @@ export interface ReadinessFinding {
    * node, and again before the aggregate leaves the hub.
    */
   detail: string | null;
+  /**
+   * The signal or rollback item behind `detail` for update and recovery
+   * findings; absent for every other finding and for a peer that predates it.
+   */
+  topReasonId?: string | null;
+  /** Whether a newer image is known; set on update findings from a current peer only. */
+  hasUpdate?: boolean;
   target: ReadinessTarget;
+  /**
+   * Hash of the structured facts behind this finding (code, severity, verdict,
+   * and the domain's own basis such as running/total containers). Never the free
+   * text in `detail`, whose wording can move without the finding changing. A
+   * dismissal held "until it changes" lifts when this differs.
+   */
+  fingerprint: string;
+  /**
+   * Whether this finding may be dismissed, decided where the code is known so the
+   * client never keeps its own list. `none`: it restates another surface's verdict
+   * and is resolved there. `timed`: unknown, partial, or unavailable evidence may be
+   * dismissed until it changes or for a set time, never permanently. `any`: every mode.
+   */
+  dismissPolicy: DismissPolicy;
 }
+
+export type DismissPolicy = 'none' | 'timed' | 'any';
 
 /**
  * Fields every domain cell carries, whatever its state.
@@ -296,6 +320,14 @@ export interface StackUpdateReadinessRow {
    * materialized input path.
    */
   topReason: string | null;
+  /**
+   * The id of the signal behind `topReason`, so a client can choose a verb
+   * without parsing text. Absent from a peer that predates it, which a client
+   * treats as "no verb beyond opening the stack".
+   */
+  topReasonId?: string | null;
+  /** Whether a newer image is known for this stack. Absent from an older peer. */
+  hasUpdate?: boolean;
   computedAt: number;
 }
 
@@ -303,6 +335,8 @@ export interface StackRollbackReadinessRow {
   overall: RollbackOverall;
   /** Redacted the same way `StackUpdateReadinessRow.topReason` is. */
   topReason: string | null;
+  /** The rollback item id behind `topReason`; absent from an older peer. */
+  topReasonId?: string | null;
   computedAt: number;
 }
 
@@ -399,6 +433,12 @@ export interface FleetReadinessResponse {
   /** Worst severity first, then by `id`. Deterministic order. */
   findings: ReadinessFinding[];
   nodes: FleetReadinessNode[];
+  /**
+   * The team's readiness dismissals for the nodes in this response. Findings and
+   * counts above are never filtered by them: the client decides which findings
+   * a dismissal still covers, so verdicts and tallies stay the evidence's own.
+   */
+  dismissals: FindingDismissal[];
 }
 
 /**
@@ -418,6 +458,13 @@ export interface NodeWorkloadProblem {
    */
   stack: string;
   status: Exclude<BulkStackInfo['status'], 'running'>;
+  /**
+   * Running and total container counts, when the read had them. A peer on an
+   * older build omits both, and the finding's fingerprint then rests on the
+   * status alone.
+   */
+  running?: number;
+  total?: number;
 }
 
 /**
