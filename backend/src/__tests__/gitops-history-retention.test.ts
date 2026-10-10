@@ -153,7 +153,6 @@ describe('GitOps history retention', () => {
   });
 
   it('still returns an unsettled attempt from inside the window after a prune', () => {
-    const db = DatabaseService.getInstance().getDb();
     const store = GitOpsStore.getInstance();
     // The recovery claim in the PR body: a reservation with no settlement inside
     // the window is still recoverable after a prune.
@@ -170,7 +169,6 @@ describe('GitOps history retention', () => {
   });
 
   it('keeps the newest row of a quiet application recoverable even outside the window', () => {
-    const db = DatabaseService.getInstance().getDb();
     const store = GitOpsStore.getInstance();
     // A process that crashed and was not restarted for longer than the window:
     // its reservation is the application's newest row, so the exemption keeps it
