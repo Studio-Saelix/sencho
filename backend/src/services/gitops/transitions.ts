@@ -446,6 +446,31 @@ export class GitOpsTransitions {
       },
       matchesDestination: (app) => app.target_mode === 'inline_blueprint',
       assertReady: () => undefined,
+      // Demotion changes who decides, so it takes the Git-era authority with it.
+      // The placement approval was written about Git-managed placement and its
+      // frozen required set describes Git content, and the rollout
+      // authorization policy it could run under was very often not an operator's
+      // choice for Inline at all: the startup migration backfilled automatic on
+      // every active Git-managed row. Carrying either across would hand the next
+      // Inline tick an unattended authority nobody granted for Inline
+      // placement, on nodes whose deployments are stamped with the revision
+      // they had while Git content was running. Both go back to the operator
+      // with the mode; an operator who wants unattended placement sets the
+      // rollout authorization policy again from the Inline authority row.
+      onRetarget: (app) => {
+        if (app.placement_approval_ref === null
+          && app.rollout_authorization_policy === 'manual') {
+          return {};
+        }
+        app.placement_approval_ref = null;
+        app.rollout_authorization_ref = null;
+        app.rollout_authorization_policy = 'manual';
+        return {
+          placementApprovalRef: null,
+          rolloutAuthorizationRef: null,
+          rolloutAuthorizationPolicy: 'manual',
+        };
+      },
     });
   }
 
@@ -462,6 +487,13 @@ export class GitOpsTransitions {
     };
     matchesDestination: (app: GitOpsApplicationRow) => boolean;
     assertReady: (app: GitOpsApplicationRow) => void;
+    /**
+     * Extra row edits applied in the same transaction once the retarget has
+     * landed, on the reloaded row. The returned delta is recorded in the
+     * retarget's history row beside the mode change, so an edit this makes is
+     * as auditable as the retarget it rides on.
+     */
+    onRetarget?: (app: GitOpsApplicationRow) => Record<string, unknown>;
   }): TransitionResult {
     return this.raw().transaction(() => {
       const app = this.store().getApplication(args.applicationId);
@@ -495,11 +527,13 @@ export class GitOpsTransitions {
       }
       const updated = this.store().getApplication(app.id);
       if (!updated) throw new GitOpsTransitionError('application not found');
+      const extra = args.onRetarget ? args.onRetarget(updated) : {};
+      if (args.onRetarget) this.writeApplication(updated);
       const historyId = this.history(updated, args.envelope, {
         stage: 'application_retargeted',
         outcome: 'committed',
         before: { targetMode: args.expectedMode },
-        after: { targetMode: next.targetMode },
+        after: { targetMode: next.targetMode, ...extra },
       });
       return { historyIds: historyId ? [historyId] : [], replayed: !historyId };
     })();
@@ -1682,11 +1716,19 @@ export class GitOpsTransitions {
    * Change the placement policy. Configuration, not work.
    *
    * Mints no intent revision and no rollout candidate, and clears no source
-   * acceptance, placement approval, or rollout authorization. The edit decides
-   * what a *future* placement decision may do; the approvals already standing
-   * were made under the snapshot that authorized them and keep running under
-   * it. That is the same rule the health policy write follows, and it is why a
-   * policy change never appears as drift.
+   * acceptance and no operator approval. The edit decides what a *future*
+   * placement decision may do; an operator's approval stands, because an
+   * operator is not the policy. That is the same rule the health policy write
+   * follows, and it is why a policy change never appears as drift.
+   *
+   * Arming the policy again is the one exception, and it withdraws what the
+   * policy itself decided while it was last armed, with the rollout
+   * authorization that stood on it. Execution stops the moment the policy goes,
+   * but the approvals stayed on the row, so setting the policy back handed the
+   * next tick a decision made days earlier, on evidence nobody has read since.
+   * Re-arming says what a *future* change may do unattended; the change that
+   * was already decided waits for the operator, and the generation it opened
+   * waits with it, so the rollout pauses rather than being cancelled under them.
    *
    * Refuses while an operation is in flight, because the operation is reading
    * the policy this edit would change underneath it.
@@ -1709,22 +1751,51 @@ export class GitOpsTransitions {
         if (app.placement_policy === args.placementPolicy) {
           throw new GitOpsTransitionError('the placement policy is already set to that value');
         }
-        const before = { placementPolicy: app.placement_policy };
         app.placement_policy = args.placementPolicy;
         // A reason recorded under the old policy explains a decision that policy
         // made, and this one is no longer configured. Left in place it would be
         // read as the current reason for whatever review is open next.
         app.placement_policy_refusal_reason = null;
         app.placement_policy_refused_at = null;
-        return { before, after: { placementPolicy: args.placementPolicy } };
+        // The snapshot the single writer takes records both the policy value and
+        // the pointers it moved, so the withdrawal needs no payload of its own.
+        if (args.placementPolicy === 'bounded_auto') this.withdrawPolicyAuthority(app);
       },
     );
+  }
+
+  /**
+   * Withdraw the authority a policy wrote, leaving an operator's alone.
+   *
+   * The pointers are what name the authority, so clearing them is what makes it
+   * unusable: the reconciler's policy path and the preview's authority label
+   * both resolve through the placement pointer, and a rollout authorization is
+   * only live while the placement it names is. The authority recorded on the row
+   * decides this rather than the pointer being non-null, because an operator's
+   * approval is the operator's own decision and survives every policy edit.
+   *
+   * An unreadable approval row is left in place on purpose. A missing row is
+   * damage, and the gate that resolves it refuses the whole plan rather than
+   * falling back to the operator's own approval, which is the direction damage
+   * should fail.
+   */
+  private withdrawPolicyAuthority(app: GitOpsApplicationRow): void {
+    if (app.placement_approval_ref === null) return;
+    if (this.store().getApproval(app.placement_approval_ref)?.authority !== 'configured_policy') return;
+    app.placement_approval_ref = null;
+    app.rollout_authorization_ref = null;
   }
 
   /**
    * Change the rollout authorization policy. Configuration, not work, on the
    * same terms as `placementPolicyChanged`: nothing already authorized is
    * withdrawn, and no intent, candidate, or generation is minted or cleared.
+   *
+   * Arming it again is the exception, and it withdraws what stood on the
+   * automatic authority rather than only pausing it. Executing a placement is a
+   * rollout, so both settings gate one unattended authority; an operator's
+   * approval is untouched, and the generation stays so a fresh approval and
+   * authorization re-drive it.
    */
   rolloutAuthorizationPolicyChanged(args: {
     applicationId: string;
@@ -1746,9 +1817,9 @@ export class GitOpsTransitions {
         if (app.rollout_authorization_policy === args.policy) {
           throw new GitOpsTransitionError('the rollout authorization policy is already set to that value');
         }
-        const before = { rolloutAuthorizationPolicy: app.rollout_authorization_policy };
         app.rollout_authorization_policy = args.policy;
-        return { before, after: { rolloutAuthorizationPolicy: args.policy } };
+        // Same terms as `placementPolicyChanged`, and recorded the same way.
+        if (args.policy === 'automatic') this.withdrawPolicyAuthority(app);
       },
     );
   }
@@ -2180,11 +2251,32 @@ export class GitOpsTransitions {
       if (args.intent.application_id !== args.applicationId) {
         throw new GitOpsTransitionError('intent belongs to another application');
       }
+      // Read before the pointer moves: the freeze is keyed on the compose, and
+      // only the intent this one replaces can say what that compose was.
+      const previousIntentId = app.intent_revision_id;
+      const previousIntent = previousIntentId === null
+        ? null
+        : this.store().getIntentRevision(previousIntentId) ?? null;
       this.store().insertIntentRevision(args.intent);
       app.intent_revision_id = args.intent.id;
-      // Inline freeze is per intent revision. A new intent must drop the prior
-      // freeze so the next successful deploy binds digests for this compose.
-      if (app.target_mode === 'inline_blueprint') {
+      // Inline freeze is per compose content. A compose edit must drop the prior
+      // freeze so the next successful deploy binds this compose's digests.
+      //
+      // A roster change mints an intent without touching the compose, and the
+      // freeze was cleared for it anyway. That dropped the desired generation on
+      // every placed target and left the applied one where it was, so the next
+      // freeze pointed every retained target at a generation id for content it
+      // was already running: the reconciler repairs a retained node only when the
+      // compose changed, so nothing ever re-acknowledged it and the projection
+      // reported a permanent "running a different generation" divergence that no
+      // Apply could clear. Content is the identity the freeze exists for, so a
+      // change that leaves the content alone keeps it.
+      //
+      // An unreadable prior intent falls to clearing: the freeze is an
+      // executable identity, and re-resolving it is the safe direction.
+      const composeChanged = previousIntent === null
+        || previousIntent.compose_content_sha256 !== args.intent.compose_content_sha256;
+      if (app.target_mode === 'inline_blueprint' && composeChanged) {
         this.clearInlineFreezePointers(app);
       }
       this.invalidatePlacementOnMaterialChange(app, args.envelope, extras);
@@ -4547,8 +4639,13 @@ export class GitOpsTransitions {
 
   /**
    * Drop Inline freeze pointers so the next successful deploy can mint a new
-   * generation and expected set for the current intent. Does not delete the
+   * generation and expected set for the current compose. Does not delete the
    * prior generation/artifact rows (history stays).
+   *
+   * Only for a compose change. `intentRevised` decides, and the reason is that
+   * the generation names executable content: dropping it for a roster change
+   * would re-point placed targets at a fresh id for the content they are
+   * already running.
    */
   private clearInlineFreezePointers(app: GitOpsApplicationRow): void {
     app.accepted_generation_id = null;
@@ -5269,6 +5366,12 @@ function snapshotApp(app: GitOpsApplicationRow): Record<string, unknown> {
     artifactSetId: app.artifact_set_id,
     latestArtifactSetId: app.latest_artifact_set_id,
     sourceAcceptanceRef: app.source_acceptance_ref,
+    // The two pointers an authority change moves. Arming a policy again
+    // withdraws what that policy decided, and a row that recorded the policy
+    // changing without recording the authority it took with it could not tell
+    // that apart from a policy edit that left the approval alone.
+    placementApprovalRef: app.placement_approval_ref,
+    rolloutAuthorizationRef: app.rollout_authorization_ref,
     activeOperationStage: app.active_operation_stage,
     failureStage: app.failure_stage,
     // The three authority policies, and the recorded bounded-auto refusal.

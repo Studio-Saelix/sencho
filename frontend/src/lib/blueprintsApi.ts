@@ -125,6 +125,7 @@ export type PreviewAction =
     | 'in_flight_correct'
     | 'in_flight_withdraw'
     | 'skip_cordoned'
+    | 'skip_withdrawn'
     | 'blocked_name_conflict';
 
 export interface BlueprintPreviewWarning {
@@ -148,6 +149,17 @@ export interface BlueprintPreview {
     stackName: string;
     approvalStatus: 'pending' | 'approved';
     effectiveApproval: EffectiveApproval;
+    /**
+     * Which authority makes `effectiveApproval` approved, or null when nothing
+     * does. Absent on payloads from an older backend, which is the same as null.
+     */
+    approvalAuthority?: 'legacy_combined' | 'configured_policy' | null;
+    /**
+     * Why a policy-approved plan is still waiting, or null when nothing is
+     * holding it. Absent on payloads from an older backend, which shows no
+     * reason line.
+     */
+    approvalHoldReason?: string | null;
     planFingerprint: string;
     generatedAt: number;
     summary: { safe: number; warning: number; blocker: number; total: number };

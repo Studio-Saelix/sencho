@@ -84,9 +84,16 @@ export type PlacementPolicyReason =
    * is yours.
    */
   | 'cordon_driven_removal'
-  /** An affected node is gone, or was last seen unreachable. */
+  /**
+   * An affected node is not answering in the node registry, or was last seen
+   * unreachable. A node the registry no longer has at all is the next reason,
+   * not this one.
+   */
   | 'stale_node'
-  /** An affected node answered but could not be read. */
+  /**
+   * An affected node has not reported at all, or is not a node the registry
+   * holds. Nothing was observed about it, so nothing claims it is unreachable.
+   */
   | 'unknown_connectivity'
   /** Evidence the decision needed could not be read at all. */
   | 'missing_evidence'

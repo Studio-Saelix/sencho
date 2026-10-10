@@ -236,6 +236,54 @@ describe('RolloutPreviewDialog', () => {
         await waitFor(() => expect(screen.getByText(/legacy combined: pending/i)).toBeInTheDocument());
     });
 
+    it('names the policy placement, not the combined approval, when the policy approved the plan', async () => {
+        vi.mocked(previewBlueprint).mockResolvedValue(previewFixture({
+            ...confirmablePreview(),
+            effectiveApproval: 'approved',
+            approvalAuthority: 'configured_policy',
+        }));
+
+        render(
+            <RolloutPreviewDialog
+                blueprintId={1}
+                blueprintName="web"
+                open
+                onOpenChange={() => {}}
+                onApplied={() => {}}
+            />,
+        );
+
+        await waitFor(() => expect(screen.getByText(/placement policy: approved/i)).toBeInTheDocument());
+        expect(screen.queryByText(/legacy combined/i)).toBeNull();
+        // The dialog used to claim the fleet cannot change until it is confirmed,
+        // which is false the moment a policy has approved the plan on its own.
+        expect(screen.queryByText(/need this confirmation before the reconciler mutates/i)).toBeNull();
+        expect(screen.getByText(/placement policy already approves this plan/i)).toBeInTheDocument();
+    });
+
+    it('states why an Enforce plan the policy approved is waiting', async () => {
+        vi.mocked(previewBlueprint).mockResolvedValue(previewFixture({
+            ...confirmablePreview(),
+            effectiveApproval: 'pending',
+            approvalHoldReason: 'Enforce waits for Apply. Automatic placement acts in Observe or Suggest. In Enforce, a place, a withdrawal, or a repair under a policy approval stays pending until you confirm it.',
+        }));
+
+        render(
+            <RolloutPreviewDialog
+                blueprintId={1}
+                blueprintName="web"
+                open
+                onOpenChange={() => {}}
+                onApplied={() => {}}
+            />,
+        );
+
+        await waitFor(() => expect(screen.getByText(
+            'Enforce waits for Apply. Automatic placement acts in Observe or Suggest. In Enforce, a place, a withdrawal, or a repair under a policy approval stays pending until you confirm it.',
+        )).toBeInTheDocument());
+        expect(screen.queryByText(/legacy combined/i)).toBeNull();
+    });
+
     it('closes instead of arming a stale preview when the 409 refresh fails', async () => {
         const user = userEvent.setup();
         const onOpenChange = vi.fn();

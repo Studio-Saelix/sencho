@@ -334,8 +334,11 @@ export function commitBlueprintUpdate(
 /**
  * Record a pin change.
  *
- * Pinning moves where a Blueprint is allowed to run, so it revises placement
- * the same way a selector edit does. Re-pinning to the node already pinned
+ * Setting or clearing a pin moves where a Blueprint is allowed to run, so it
+ * revises placement the same way a selector edit does. The evaluation that
+ * follows marks either direction pin-driven, so bounded auto does not approve
+ * it. Confirm Apply is what places the freed node. An operator placement
+ * policy never reaches that mark. Re-pinning to the node already pinned
  * changes nothing and writes nothing.
  */
 export function commitBlueprintPin(

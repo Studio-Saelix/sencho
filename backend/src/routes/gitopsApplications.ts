@@ -1312,10 +1312,12 @@ function requirePolicyTargetAuthority(
  * application-wide grant is the part it cannot, and a policy governs every
  * target of the application including the ones that do not exist yet.
  *
- * A global `stack:create` is deliberately not also required. The create
- * authority belongs to the placement approval this policy authorizes, which
- * already demands it, not to the configuration of whether that approval may be
- * automatic.
+ * A global `stack:create` is deliberately not also required. An operator who
+ * approves a placement holds it, and where the policy executes an approval on
+ * its own (an Inline Blueprint with automatic rollout authorization) the policy
+ * acts as the delegate of the operator who configured it. The Git-managed
+ * automatic rollout places accepted content the same way, which is why this
+ * gate matches that one rather than the Inline Apply gate.
  */
 gitopsApplicationsRouter.post('/:id/placement-policy', async (req: Request, res: Response): Promise<void> => {
   const target = resolvePolicyTarget(req, res);

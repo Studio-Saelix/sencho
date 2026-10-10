@@ -635,4 +635,98 @@ describe('preview projection status precedence', () => {
         expect(row?.action).toBe('clear_stale_guard');
         expect(preview.body.executorActions).toContainEqual({ nodeId: node.id, action: 'clear_stale_guard' });
     });
+
+    it('emits skip_withdrawn for a severed target the selector wants again', async () => {
+        // The finding this pins. A withdrawal tombstones the placement's target,
+        // and a tombstoned node is invisible to every automatic action, which is
+        // deliberate: only an explicit deploy re-opens it. Re-adding the label
+        // used to leave the node selected, online, and absent from the preview
+        // entirely, so the plan read as nothing to do with no way to find out
+        // why. The row says what the operator has to do, and stays
+        // informational so automatic placement still never revives it.
+        const node = seedNode();
+        counter += 1;
+        const created = await request(app)
+            .post('/api/blueprints')
+            .set('Cookie', adminCookie)
+            .send({
+                name: `bp-severed-${counter}`,
+                compose_content: 'services:\n  app:\n    image: nginx:1.27\n',
+                selector: { type: 'nodes', ids: [node.id] },
+                drift_mode: 'observe',
+            });
+        expect(created.status).toBe(201);
+
+        const { GitOpsStore, emptyTargetRow } = await import('../services/gitops/store');
+        const store = GitOpsStore.getInstance();
+        // The Blueprint create already opens a placement for it, so the tombstone
+        // goes on the application that exists rather than a second one.
+        const placement = store.getLiveBlueprintApplication(created.body.id);
+        if (!placement) throw new Error('expected a placement for the new Blueprint');
+        store.upsertTarget({
+            ...emptyTargetRow(placement.id, node.id, 1),
+            target_status: 'tombstoned',
+        });
+
+        const preview = await request(app)
+            .get(`/api/blueprints/${created.body.id}/preview`)
+            .set('Cookie', adminCookie);
+        expect(preview.status).toBe(200);
+        const row = preview.body.changes.find((c: { nodeId: number }) => c.nodeId === node.id);
+        expect(row?.action).toBe('skip_withdrawn');
+        expect(row?.kind).toBe('informational');
+        expect(row?.detail).toMatch(/deploy/i);
+        // Informational, so it takes no side in the plan and never authorizes a
+        // mutate on its own.
+        expect(preview.body.executorActions).not.toContainEqual({ nodeId: node.id, action: 'skip_withdrawn' });
+        expect(preview.body.confirmableActions).not.toContainEqual({ nodeId: node.id, action: 'skip_withdrawn' });
+    });
+
+    it('does not report the same node twice when a severed target also has an in-flight row', async () => {
+        // The row this fix adds is informational, and the status-precedence pass
+        // that follows pushes its own row with no `seen` guard. A node that is
+        // severed, desired, and carrying a `withdrawing` deployment row would
+        // therefore be reported twice: once by this fix and once by the
+        // precedence pass. The precedence row is the specific, actionable truth
+        // about what is happening right now, so it wins and this row stands
+        // down rather than piling a second explanation onto the same node.
+        const node = seedNode();
+        counter += 1;
+        const created = await request(app)
+            .post('/api/blueprints')
+            .set('Cookie', adminCookie)
+            .send({
+                name: `bp-severed-inflight-${counter}`,
+                compose_content: 'services:\n  app:\n    image: nginx:1.27\n',
+                selector: { type: 'nodes', ids: [node.id] },
+                drift_mode: 'observe',
+            });
+        expect(created.status).toBe(201);
+
+        const { GitOpsStore, emptyTargetRow } = await import('../services/gitops/store');
+        const store = GitOpsStore.getInstance();
+        const placement = store.getLiveBlueprintApplication(created.body.id);
+        if (!placement) throw new Error('expected a placement for the new Blueprint');
+        store.upsertTarget({
+            ...emptyTargetRow(placement.id, node.id, 1),
+            target_status: 'tombstoned',
+        });
+        DatabaseService.getInstance().upsertDeployment({
+            blueprint_id: created.body.id,
+            node_id: node.id,
+            status: 'withdrawing',
+            applied_revision: 1,
+        });
+
+        const preview = await request(app)
+            .get(`/api/blueprints/${created.body.id}/preview`)
+            .set('Cookie', adminCookie);
+        expect(preview.status).toBe(200);
+        const rows = preview.body.changes.filter((c: { nodeId: number }) => c.nodeId === node.id);
+        expect(rows).toHaveLength(1);
+        // The in-flight withdrawal is what the operator has to know about now;
+        // the "deploy again to restore" note would only add a second, competing
+        // instruction for the same node.
+        expect(rows[0]?.action).toBe('in_flight_withdraw');
+    });
 });
