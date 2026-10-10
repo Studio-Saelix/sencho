@@ -67,7 +67,34 @@ describe('classifyImageRemediation', () => {
       imageRefsUpdateAvailable: ['nginx:1.25'],
       imageRefsWaitingUpstream: [],
       imageRefsUpdateUnknown: [],
+      updateServiceTargets: [{ imageRef: 'nginx:1.25', stackName: 'web', serviceName: 'app' }],
     });
+  });
+
+  it('lists a service once when several findings share its image', () => {
+    const facts = classifyImageRemediation({
+      findings: [{ image_ref: 'nginx:1.25', count: 1 }, { image_ref: 'nginx:1.25', count: 2 }],
+      details: { web: detail([service({ service: 'app', image: 'nginx:1.25', hasUpdate: true, checkStatus: 'ok' })]) },
+      checksEnabled: true,
+      freshnessWindowMs: FRESH_WINDOW,
+      now: NOW,
+    });
+    expect(facts.updateServiceTargets).toHaveLength(1);
+  });
+
+  it('names only the services whose own fresh check found an update', () => {
+    const facts = classifyImageRemediation({
+      findings: [{ image_ref: 'nginx:1.25', count: 1 }],
+      details: {
+        web: detail([service({ service: 'app', image: 'nginx:1.25', hasUpdate: true, checkStatus: 'ok' })]),
+        blog: detail([service({ service: 'proxy', image: 'nginx:1.25', hasUpdate: false, checkStatus: 'ok' })]),
+        old: detail([service({ service: 'edge', image: 'nginx:1.25', hasUpdate: true, checkStatus: 'ok' })], { checkedAt: NOW - 10 * HOUR }),
+      },
+      checksEnabled: true,
+      freshnessWindowMs: FRESH_WINDOW,
+      now: NOW,
+    });
+    expect(facts.updateServiceTargets).toEqual([{ imageRef: 'nginx:1.25', stackName: 'web', serviceName: 'app' }]);
   });
 
   it('treats sticky partial hasUpdate as uncertain, never update_available', () => {
@@ -168,6 +195,7 @@ describe('classifyImageRemediation', () => {
       imageRefsUpdateAvailable: [],
       imageRefsWaitingUpstream: [],
       imageRefsUpdateUnknown: ['nginx:1.25'],
+      updateServiceTargets: [],
     });
   });
 

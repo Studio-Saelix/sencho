@@ -1,4 +1,4 @@
-import { useCallback, useRef, useState } from 'react';
+import { useCallback, useMemo, useRef, useState } from 'react';
 import { RefreshCw, ServerOff } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Skeleton } from '@/components/ui/skeleton';
@@ -17,6 +17,11 @@ import { ReadinessNodeMatrix } from './readiness/ReadinessNodeMatrix';
 import { ReadinessFindingsTable } from './readiness/ReadinessFindingsTable';
 import { ALL, EMPTY_FINDINGS_FILTER, type FindingsFilter } from './readiness/findingsFilter';
 import { useNow } from './readiness/useNow';
+import { useReadinessVerbs } from './readiness/useReadinessVerbs';
+import type { ReadinessVerb } from './readiness/readinessVerbs';
+import { useFindingDismissal } from '@/hooks/useFindingDismissal';
+import { READINESS_SEVERITY_SCALE, partitionFindings } from '@/lib/findingDismissals';
+import type { FindingDismissal } from '@/types/findingDismissal';
 
 function navigate(detail: SenchoNavigateDetail): void {
   window.dispatchEvent(new CustomEvent<SenchoNavigateDetail>(SENCHO_NAVIGATE_EVENT, { detail }));
@@ -63,6 +68,10 @@ interface FleetReadinessProps {
   onOpenSettingsSection?: (section: SectionId) => void;
   /** Snapshots is an admin-only tab, so its shortcut follows the same gate. */
   isAdmin: boolean;
+  /** Whether this account may dismiss the finding, from the shell that owns the auth context. */
+  canDismiss: (finding: ReadinessFinding) => boolean;
+  /** Whether this account may run the verb on the finding; a verb it may not run is not offered. */
+  canRun: (verb: ReadinessVerb, finding: ReadinessFinding) => boolean;
 }
 
 /**
@@ -70,8 +79,10 @@ interface FleetReadinessProps {
  * update, recover, or rely on it.
  *
  * Every state, reason code, and finding is decided on the hub; this surface
- * renders the payload and routes each finding to the surface that already owns
- * its remediation. Nothing here recomputes a verdict.
+ * renders the payload. A finding is resolved by a verb run where it is listed
+ * (chosen from the finding's structured facts), or routes to the surface that
+ * owns its remediation when the work lives elsewhere. Nothing here recomputes a
+ * verdict.
  */
 export function FleetReadiness({
   readiness,
@@ -79,8 +90,10 @@ export function FleetReadiness({
   onOpenNodeSecurity,
   onOpenSettingsSection,
   isAdmin,
+  canDismiss,
+  canRun,
 }: FleetReadinessProps) {
-  const { data, error, checking, retry } = readiness;
+  const { data, error, checking, retry, patchDismissals } = readiness;
   // A fast answer never flashes the skeleton; the pane just holds its height.
   const { showBusy } = useVisualBusy(!data && error === null);
   const [filter, setFilter] = useState<FindingsFilter>(EMPTY_FINDINGS_FILTER);
@@ -114,6 +127,10 @@ export function FleetReadiness({
     }
   }, [onOpenNodeDetails, onOpenNodeSecurity, onOpenSettingsSection]);
 
+  const nodeNames = useMemo(() => new Map((data?.nodes ?? []).map(node => [node.id, node.name])), [data?.nodes]);
+  const nodeName = useCallback((nodeId: number) => nodeNames.get(nodeId) ?? `node ${nodeId}`, [nodeNames]);
+  const { verbFor, overlays } = useReadinessVerbs({ recheck: retry, openFinding, canRun, nodeName });
+
   // A finding is always listed; only the shortcut is withheld when the current
   // user cannot reach the surface it points at, so no row offers a dead button.
   const actionFor = useCallback((target: ReadinessTarget): string | null => {
@@ -127,6 +144,25 @@ export function FleetReadiness({
   // node), has no findings of its own, so it narrows to the node instead of
   // landing on an empty list.
   const findings = data?.findings;
+  const upsertDismissal = useCallback((dismissal: FindingDismissal) => {
+    patchDismissals(current => [...current.filter(item => item.id !== dismissal.id && item.findingKey !== dismissal.findingKey), dismissal]);
+  }, [patchDismissals]);
+  const removeDismissal = useCallback((id: number) => {
+    patchDismissals(current => current.filter(item => item.id !== id));
+  }, [patchDismissals]);
+  const { dismiss, restore, isPending } = useFindingDismissal({
+    surface: 'readiness',
+    onUpsert: upsertDismissal,
+    onRemove: removeDismissal,
+    onGone: retry,
+  });
+
+  // The matrix keeps the whole list: a dismissal moves a finding out of the
+  // attention list, it never changes what a cell says.
+  const partition = useMemo(
+    () => partitionFindings(data?.findings ?? [], data?.dismissals ?? [], now, READINESS_SEVERITY_SCALE),
+    [data?.findings, data?.dismissals, now],
+  );
   const focusCell = useCallback((nodeId: number, domain: ReadinessDomainKey) => {
     const hasOwn = findings?.some(finding => finding.nodeId === nodeId && finding.domain === domain) ?? false;
     setFilter({ ...EMPTY_FINDINGS_FILTER, nodeId, domain: hasOwn ? domain : ALL });
@@ -182,16 +218,24 @@ export function FleetReadiness({
         </FleetEmptyState>
       ) : (
         <>
-          <ReadinessSummaryStrip data={data} checking={checking} />
+          <ReadinessSummaryStrip data={data} checking={checking} dismissedCount={partition.dismissed.length} />
           <div ref={findingsRef} className="scroll-mt-4">
             <ReadinessFindingsTable
-              findings={data.findings}
+              findings={partition.active}
+              dismissed={partition.dismissed}
+              onRestore={dismissal => { void restore(dismissal.id); }}
+              isRestoring={dismissal => isPending(dismissal.id)}
+              now={now}
+              canDismiss={canDismiss}
+              onDismiss={(finding, mode, days) => { void dismiss(finding, mode, days); }}
+              isDismissing={finding => isPending(finding.id)}
               domains={data.domains}
               nodes={data.nodes}
               filter={filter}
               onFilterChange={setFilter}
               actionFor={actionFor}
               onOpen={openFinding}
+              verbFor={verbFor}
             />
           </div>
           <ReadinessNodeMatrix
@@ -204,6 +248,7 @@ export function FleetReadiness({
           />
         </>
       )}
+      {overlays}
     </div>
   );
 }

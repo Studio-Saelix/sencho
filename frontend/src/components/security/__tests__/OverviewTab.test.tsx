@@ -3,7 +3,7 @@
  * non-blocker View findings, Check again gating, and node-scoped refresh.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, waitFor } from '@testing-library/react';
+import { cleanup, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import type { SecurityOverview, PostureReason } from '@/types/security';
 
@@ -17,6 +17,20 @@ vi.mock('@/context/NodeContext', () => ({
   useNodes: () => ({
     activeNode: nodeState.activeNode,
     activeNodeMeta: nodeState.activeNodeMeta,
+  }),
+}));
+const authState: { can: (action: string, type?: string, id?: string, nodeId?: number) => boolean } = { can: () => false };
+vi.mock('@/context/AuthContext', () => ({ useAuth: () => ({ can: authState.can }) }));
+vi.mock('@/context/DeployFeedbackContext', () => ({ useDeployFeedback: () => ({ runWithLog: vi.fn() }) }));
+const dismissalState: { dismissals: unknown[]; dismiss: ReturnType<typeof vi.fn>; restore: ReturnType<typeof vi.fn> } = {
+  dismissals: [], dismiss: vi.fn(), restore: vi.fn(),
+};
+vi.mock('@/hooks/useNodeDismissals', () => ({
+  useNodeDismissals: () => ({
+    dismissals: dismissalState.dismissals,
+    dismiss: dismissalState.dismiss,
+    restore: dismissalState.restore,
+    isPending: () => false,
   }),
 }));
 vi.mock('@/lib/api', () => ({ apiFetch: vi.fn() }));
@@ -41,6 +55,7 @@ import { apiFetch } from '@/lib/api';
 import { REMOTE_IMAGE_INSPECT_V1_CAPABILITY } from '@/lib/capabilities';
 import { toast } from '@/components/ui/toast-store';
 import { OverviewTab } from '../OverviewTab';
+import { useSecurityReasons } from '../useSecurityReasons';
 import type { ComponentProps } from 'react';
 
 const mockedFetch = apiFetch as unknown as ReturnType<typeof vi.fn>;
@@ -77,6 +92,31 @@ function overview(reasons: PostureReason[], extra: Partial<SecurityOverview> = {
   };
 }
 
+type OverviewProps = ComponentProps<typeof OverviewTab>;
+
+function Harness({ data, onNavigate, onInspect, reload }: {
+  data: SecurityOverview;
+  onNavigate: OverviewNavigate;
+  onInspect: OverviewProps['onInspect'];
+  reload: () => void;
+}) {
+  const reasons = useSecurityReasons({ overview: data, isReplica: false, onNavigate, reload });
+  return (
+    <OverviewTab
+      overview={data}
+      loadError={null}
+      trend={[]}
+      exploitIntel={[]}
+      exploitTruncated={false}
+      onNavigate={onNavigate}
+      onInspect={onInspect}
+      canScan={false}
+      onScanComplete={vi.fn()}
+      reasons={reasons}
+    />
+  );
+}
+
 function renderOverview(
   reasons: PostureReason[],
   opts: {
@@ -86,21 +126,17 @@ function renderOverview(
   } = {},
 ) {
   const onNavigate: OverviewNavigate = opts.onNavigate ?? vi.fn();
+  const reload = vi.fn();
+  authState.can = (action) => (action === 'node:manage' ? (opts.canManageNode ?? false) : false);
   render(
-    <OverviewTab
-      overview={overview(reasons, { updateChecksDisabled: opts.updateChecksDisabled })}
-      loadError={null}
-      trend={[]}
-      exploitIntel={[]}
-      exploitTruncated={false}
+    <Harness
+      data={overview(reasons, { updateChecksDisabled: opts.updateChecksDisabled })}
       onNavigate={onNavigate}
       onInspect={vi.fn()}
-      canScan={false}
-      onScanComplete={vi.fn()}
-      canManageNode={opts.canManageNode ?? false}
+      reload={reload}
     />,
   );
-  return { onNavigate };
+  return { onNavigate, reload };
 }
 
 describe('OverviewTab remediation affordances', () => {
@@ -108,6 +144,7 @@ describe('OverviewTab remediation affordances', () => {
     vi.clearAllMocks();
     nodeState.activeNode = { id: 1, type: 'local' };
     nodeState.activeNodeMeta = null;
+    dismissalState.dismissals = [];
   });
 
   it('titles the review queue Why Monitoring when posture is Monitoring without blockers', () => {
@@ -292,6 +329,60 @@ describe('OverviewTab remediation affordances', () => {
     await user.click(screen.getByRole('button', { name: /check again/i }));
     await waitFor(() => {
       expect(toast.warning).toHaveBeenCalledWith(expect.stringMatching(/rate limited/i));
+    });
+  });
+
+  describe('refetch and dismissals', () => {
+    const dismissable = (partial: Partial<PostureReason> = {}) => reason({
+      kind: 'needs_review', label: 'Findings needing review', severity: 'review', targetTab: 'suppressions', actionLabel: undefined,
+      key: 'needs_review:all', fingerprint: 'fp-1', dismissPolicy: 'any', ...partial,
+    });
+
+    it('refetches the overview after Check again', async () => {
+      const user = userEvent.setup();
+      mockedFetch.mockResolvedValue({ ok: true, status: 200, json: async () => ({ message: 'started' }) });
+      const { reload } = renderOverview(
+        [reason({ kind: 'update_check_uncertain', label: 'Update availability unknown' })],
+        { canManageNode: true },
+      );
+      await user.click(screen.getByRole('button', { name: /check again/i }));
+      await waitFor(() => expect(reload).toHaveBeenCalled());
+    });
+
+    it('dismisses a review reason in one click, sending what the operator saw', async () => {
+      const user = userEvent.setup();
+      renderOverview([dismissable()], { canManageNode: true });
+      await user.click(screen.getByRole('button', { name: /^dismiss: findings needing review/i }));
+      expect(dismissalState.dismiss).toHaveBeenCalledWith(
+        { id: 'security:1:needs_review:all', fingerprint: 'fp-1', count: 2, severity: 'review' },
+        'until_change',
+        undefined,
+      );
+    });
+
+    it('offers no Dismiss on a blocker, to an account that cannot manage the node, or for an older remote', () => {
+      renderOverview([
+        reason({ kind: 'secret', label: 'Detected secrets', severity: 'blocker', key: 'secret:all', fingerprint: 'f', dismissPolicy: 'none' }),
+        dismissable({ kind: 'failed_scan', label: 'Failed scans', key: undefined, fingerprint: undefined, dismissPolicy: undefined }),
+      ], { canManageNode: true });
+      expect(screen.queryByRole('button', { name: /^dismiss:/i })).toBeNull();
+      cleanup();
+      renderOverview([dismissable()], { canManageNode: false });
+      expect(screen.queryByRole('button', { name: /^dismiss:/i })).toBeNull();
+    });
+
+    it('moves a covered reason to the dismissed list and still counts it in the title', async () => {
+      const user = userEvent.setup();
+      dismissalState.dismissals = [{
+        id: 7, nodeId: 1, surface: 'security', findingKey: 'security:1:needs_review:all', fingerprint: 'fp-1',
+        severity: 'review', count: 2, mode: 'until_change', expiresAt: null, createdBy: 'alice', createdAt: Date.now(),
+      }];
+      renderOverview([dismissable()], { canManageNode: true });
+      expect(screen.getByRole('heading', { name: /why monitoring/i })).toBeInTheDocument();
+      expect(screen.getByText(/1 dismissed/i)).toBeInTheDocument();
+      expect(screen.getByText(/dismissed by alice/i)).toBeInTheDocument();
+      await user.click(screen.getByRole('button', { name: /restore/i }));
+      expect(dismissalState.restore).toHaveBeenCalledWith(7);
     });
   });
 });

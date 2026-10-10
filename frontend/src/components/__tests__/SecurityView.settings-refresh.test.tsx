@@ -20,6 +20,10 @@ vi.mock('@/context/NodeContext', () => ({
 vi.mock('@/hooks/useImageScan', () => ({
   useImageScan: () => ({ scanningRef: null, scanImage: vi.fn() }),
 }));
+vi.mock('@/context/DeployFeedbackContext', () => ({ useDeployFeedback: () => ({ runWithLog: vi.fn() }) }));
+vi.mock('@/hooks/useNodeDismissals', () => ({
+  useNodeDismissals: () => ({ dismissals: [], dismiss: vi.fn(), restore: vi.fn(), isPending: () => false }),
+}));
 vi.mock('@/hooks/use-is-mobile', () => ({ useIsMobile: () => false }));
 vi.mock('@/components/security/OverviewTab', () => ({
   OverviewTab: ({ overview }: { overview: { updateChecksDisabled?: boolean } | null }) => {

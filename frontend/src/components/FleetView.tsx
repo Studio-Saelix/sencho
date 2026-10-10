@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo, useRef } from 'react';
+import { useState, useEffect, useMemo, useRef, useCallback } from 'react';
 import { RefreshCw, FileDown } from 'lucide-react';
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
 import { FleetMasthead } from './fleet/FleetMasthead';
@@ -26,6 +26,9 @@ import { PaidGate } from './PaidGate';
 import FleetSnapshots from './FleetSnapshots';
 import { FleetReadiness } from './fleet/FleetReadiness';
 import { useFleetReadiness } from './fleet/readiness/useFleetReadiness';
+import { canDismissFinding } from './fleet/readiness/canDismissFinding';
+import { canRunVerb, type ReadinessVerb } from './fleet/readiness/readinessVerbs';
+import type { ReadinessFinding } from '@/types/readiness';
 import { RoutingTab } from './fleet/RoutingTab';
 import { FederationTab } from './fleet/FederationTab';
 import { DeploymentsTab } from './blueprints/DeploymentsTab';
@@ -77,6 +80,14 @@ export function FleetView({
     const { isPaid, licenseStatus } = useLicense();
     const { isAdmin, can } = useAuth();
     const canManageFleet = can('node:manage');
+    const canDismissReadinessFinding = useCallback(
+        (finding: Pick<ReadinessFinding, 'domain' | 'stack' | 'nodeId'>) => canDismissFinding(can, isAdmin, finding),
+        [can, isAdmin],
+    );
+    const canRunReadinessVerb = useCallback(
+        (verb: ReadinessVerb, finding: ReadinessFinding) => canRunVerb(can, isAdmin, verb, finding),
+        [can, isAdmin],
+    );
     const canExportDossier = can('node:read') && can('stack:read');
     const { hasCapability, nodes: registryNodes } = useNodes();
     const { experimental, experimentalReady } = useExperimental();
@@ -296,6 +307,8 @@ export function FleetView({
                         onOpenNodeSecurity={onOpenNodeSecurity}
                         onOpenSettingsSection={onOpenSettingsSection}
                         isAdmin={isAdmin}
+                        canDismiss={canDismissReadinessFinding}
+                        canRun={canRunReadinessVerb}
                     />
                 </TabsContent>
                 <TabsContent value="dependencies">
