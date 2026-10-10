@@ -27,7 +27,6 @@ export function useNodeScan(onComplete?: () => void) {
     setRunning(true);
     const opNodeId = activeNode?.id ?? null;
     const nodeLabel = activeNode?.name ?? 'this node';
-    let ok = false;
     try {
       await runWithLog(
         { stackName: nodeLabel, action: 'scan', nodeId: opNodeId },
@@ -53,11 +52,10 @@ export function useNodeScan(onComplete?: () => void) {
             const failed = (result?.images?.failed ?? 0) + (result?.stacks?.failed ?? 0);
             if (failed > 0) toast.warning(`Scan completed with ${failed} failure${failed === 1 ? '' : 's'}.`);
           }
-          ok = true;
           return { ok: true };
         },
       );
-      if (ok) onComplete?.();
+      onComplete?.();
     } catch (error) {
       console.error('[Security] node scan failed:', error);
       toast.error('The node scan could not be started.');
