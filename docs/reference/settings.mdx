@@ -426,7 +426,7 @@ How long the record behind the GitOps timeline is kept.
 |---------|---------|-----|-------------|
 | **Keep GitOps history for** | 30 days | 365 | How long to keep the record behind the GitOps timeline before older entries are pruned. Lower it to stop a busy Sencho's history from growing, raise it to keep a longer record. The newest entry for each live application is always kept, so its activity stays readable. A webhook redelivered after the record of its first delivery is pruned can run again; a delivery to a provider endpoint keeps its own record and is unaffected. Bell entries for those changes follow the **Notification log** window in [Data Retention](#data-retention) instead. |
 
-The window belongs to the Sencho instance, not to a node: each instance prunes the history it holds. Pruning deletes entries older than the window; it does not shrink the database file.
+The window belongs to the Sencho instance, not to a node: each instance prunes the history it holds, so the window set here governs this instance and a remote instance's window is set on that instance. Pruning deletes entries older than the window; it does not shrink the database file.
 
 The [GitOps portfolio](/features/gitops-portfolio) page explains what a cleanup pass keeps.
 
