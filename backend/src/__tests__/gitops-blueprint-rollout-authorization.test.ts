@@ -2116,7 +2116,6 @@ describe('a detached Blueprint has no rollout authorization to wait for', () => 
     // demotion never reaches the clear, and no backfill removes the evidence
     // it left behind. This is the population the dead end was found on, so the
     // guard in derive, not the clear, is what protects them.
-    store.getApplication(fixture.applicationId);
     DatabaseService.getInstance().getDb().prepare(
       `UPDATE gitops_applications SET target_mode = 'inline_blueprint', stack_name = NULL,
          configured_source_stack_name = NULL, configured_repo_url = NULL
@@ -2139,6 +2138,31 @@ describe('a detached Blueprint has no rollout authorization to wait for', () => 
       healthDisabled: false,
     }, null);
     expect(projection.facets?.placement.status).toBe('blueprint_bound');
+  });
+
+  it('cannot have preflight evidence written back onto it', () => {
+    clearGitOpsState();
+    const fixture = seedAuthorizedReadyApp();
+    authorize(fixture.applicationId);
+    const store = GitOpsStore.getInstance();
+    GitOpsTransitions.getInstance().blueprintModeDemoted({
+      applicationId: fixture.applicationId,
+      envelope: { operationId: randomUUID(), actor: 'tester', trigger: 'manual', at: Date.now() },
+    });
+    const demoted = store.getApplication(fixture.applicationId)!;
+    expect(demoted.target_mode).toBe('inline_blueprint');
+    expect(demoted.latest_preflight_evidence_json).toBeNull();
+
+    // The race this closes: an authorization already past its preflight await
+    // writes the evaluation it just completed onto a row a Detach demoted in
+    // the meantime. Nothing reads the column for an inline row, so the write
+    // would only contradict the mode the row now runs.
+    GitOpsTransitions.getInstance().recordPreflightEvaluation({
+      applicationId: fixture.applicationId,
+      evidenceJson: encodePreflightEvidenceJson(nonBlockingPreflightForApp(fixture.applicationId)),
+    });
+
+    expect(store.getApplication(fixture.applicationId)!.latest_preflight_evidence_json).toBeNull();
   });
 
   it('still projects an outstanding authorization for a Git-managed application', () => {

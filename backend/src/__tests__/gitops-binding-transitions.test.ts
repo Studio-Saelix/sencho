@@ -356,6 +356,51 @@ describe('gitops binding transitions', () => {
     });
   });
 
+  it('clears evidence that an invalidated placement left behind', () => {
+    const store = GitOpsStore.getInstance();
+    const tx = GitOpsTransitions.getInstance();
+    const blueprintId = createBlueprint('bind-demote-invalidated');
+    tx.activateDirect({
+      application: app('app-demote-invalidated', 'demote-invalidated-web'),
+      nodeId: 1,
+      envelope: env('op-activate-demote-invalidated'),
+    });
+    tx.convertDirectToBlueprint({
+      applicationId: 'app-demote-invalidated',
+      blueprintId,
+      envelope: env('op-demote-invalidated-convert'),
+    });
+    // The one reachable shape where the no-op conditions can disagree with
+    // what the clear would write. `invalidatePlacementOnMaterialChange` nulls
+    // the placement ref, the authorization ref and the fingerprint but leaves
+    // the evidence column, so on a manual-policy row every gate except the
+    // evidence one reads clean. A no-op condition that omitted the evidence
+    // would return early here and strand it.
+    const sqlite = DatabaseService.getInstance().getDb();
+    sqlite.prepare(
+      `UPDATE gitops_applications
+       SET placement_approval_ref = NULL, rollout_authorization_ref = NULL,
+           preflight_fingerprint = NULL, rollout_authorization_policy = 'manual',
+           latest_preflight_evidence_json = '{}'
+       WHERE id = ?`,
+    ).run('app-demote-invalidated');
+
+    tx.blueprintModeDemoted({
+      applicationId: 'app-demote-invalidated',
+      envelope: env('op-demote-invalidated'),
+    });
+
+    const demoted = store.getApplication('app-demote-invalidated')!;
+    expect(demoted.latest_preflight_evidence_json).toBeNull();
+    const history = sqlite.prepare(
+      "SELECT after_json FROM gitops_history WHERE application_id = ? AND operation_id = ? AND stage = 'application_retargeted'",
+    ).get('app-demote-invalidated', 'op-demote-invalidated') as { after_json: string };
+    expect(JSON.parse(history.after_json)).toMatchObject({
+      targetMode: 'inline_blueprint',
+      latestPreflightEvidenceJson: null,
+    });
+  });
+
   it('leaves a demoted row with no evidence untouched', () => {
     const store = GitOpsStore.getInstance();
     const tx = GitOpsTransitions.getInstance();
