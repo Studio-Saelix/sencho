@@ -576,8 +576,11 @@ How long Sencho keeps historical data on this node before pruning it.
 | **Scan history per digest** | 50 scans | 1,000 | How many vulnerability scans to keep per image digest (or per image reference when no digest is stored). Older scans beyond the cap are pruned. |
 | **Remove scans for deleted images and stacks** | On | - | When on, scan results are deleted once their image is gone from this node or their stack is deleted, so the Security Overview stays tied to what still exists. Turn it off to keep scan history for removed images and stacks. |
 | **Audit log** | 90 days | 365 | How long to keep audit trail entries. Requires Admiral. |
+| **GitOps history** | 30 days | 365 | How long to keep the GitOps activity record behind each application's timeline, and the notifications it fans out. The newest entry for each live application is always kept, so its activity stays readable. A window under about 3 days can let a Git host retry a webhook Sencho already handled. Lower it to keep a busy instance's database small, raise it for a longer record. |
 
 Removing scans for deleted artifacts runs in the background a few minutes after an image or stack disappears, and immediately when you delete a stack. An image that is still present on the node keeps its scan results, even when no stack uses it.
+
+The GitOps history window is set per Sencho instance: each instance prunes the history and notifications it holds. The control itself is **Keep GitOps history for** under **Settings → GitOps**, and the [GitOps portfolio](/features/gitops-portfolio) page explains what a cleanup pass keeps.
 
 Click **Save settings** to apply.
 
