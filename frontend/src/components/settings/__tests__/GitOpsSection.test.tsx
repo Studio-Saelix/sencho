@@ -113,6 +113,9 @@ describe('GitOpsSection', () => {
         // below is on text the helper alone carries.
         expect(screen.getByText(/before older entries are pruned/)).toBeInTheDocument();
         expect(screen.getByText(/follow the Notification log window/)).toBeInTheDocument();
+        // The 3-day figure had no basis in the code; the helper now names the
+        // real condition and scopes it to the direct webhook path.
+        expect(screen.getByText(/provider endpoint keeps its own record/)).toBeInTheDocument();
         expect(screen.getByText('days')).toBeInTheDocument();
         await waitFor(() => expect(chipShowing('45')).toBeInTheDocument());
     });

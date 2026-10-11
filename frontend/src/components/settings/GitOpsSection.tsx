@@ -184,7 +184,7 @@ export function GitOpsSection({ onDirtyChange }: GitOpsSectionProps) {
                         </p>
                         <SettingsField
                             label="Keep GitOps history for"
-                            helper="How long to keep the record behind the GitOps timeline before older entries are pruned. Lower it to stop a busy Sencho's history from growing, raise it to keep a longer record. The newest entry for each live application is always kept, so its activity stays readable, and a window under about 3 days can let a Git host retry a webhook Sencho already handled. Bell entries for those changes follow the Notification log window instead. Default 30 days."
+                            helper="How long to keep the record behind the GitOps timeline before older entries are pruned. Lower it to stop a busy Sencho's history from growing, raise it to keep a longer record. The newest entry for each live application is always kept, so its activity stays readable. A webhook redelivered after the record of its first delivery is pruned can run again; a delivery to a provider endpoint keeps its own record and is unaffected. Bell entries for those changes follow the Notification log window instead. Default 30 days."
                         >
                             <NumberChip
                                 value={settings.gitops_history_retention_days || '30'}
