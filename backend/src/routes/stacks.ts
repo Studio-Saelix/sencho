@@ -36,6 +36,14 @@ import { enforcePolicyPreDeploy } from '../services/PolicyEnforcement';
 import { getRegistryDeliveryContext, getRegistryDeliveryLockContext } from '../helpers/registryDeliveryContext';
 import { buildStackDriftReport, type DriftFindingKind, type StackDriftReport } from '../services/DriftDetectionService';
 import { DriftLedgerService, type DriftTemporal } from '../services/DriftLedgerService';
+import {
+  driftDismissPolicy,
+  driftFindingFacts,
+  parseDriftKey,
+  type DriftDismissal,
+  type DriftFindingFacts,
+} from '../services/driftDismissals';
+import { readDismissalMode } from '../helpers/dismissalMode';
 import { ComposeDoctorService } from '../services/ComposeDoctorService';
 import { RULE_IDS, isPreflightNoteFinding } from '../services/preflight/rules';
 import { parseServiceImages, isPreflightAckActive } from '../utils/preflight-ack-filter';
@@ -1499,7 +1507,10 @@ async function buildDriftPayload(
   nodeId: number,
   stackName: string,
   reconcile: boolean,
-): Promise<StackDriftReport & {
+): Promise<Omit<StackDriftReport, 'findings'> & {
+  findings: Array<StackDriftReport['findings'][number] & DriftFindingFacts>;
+  /** Team dismissals on this stack's open findings; the client decides which still cover a finding. */
+  dismissals: DriftDismissal[];
   temporal: DriftTemporal;
   ledger: DriftLedgerEntry[];
   lastCheckedAt: number | null;
@@ -1546,7 +1557,16 @@ async function buildDriftPayload(
   // less state than exists. Mutation routes take the opposite side, because
   // there the write has already committed and a decoration must not be able to
   // report it as failed.
-  return { ...report, temporal, ledger, lastCheckedAt, gitopsRevision: projectManagedStackRevision(stackName, nodeId) };
+  return {
+    ...report,
+    // Facts only: the verdict and the count above still read every finding.
+    findings: report.findings.map(f => ({ ...f, ...driftFindingFacts(f) })),
+    dismissals: DriftLedgerService.getInstance().getOpenDismissals(nodeId, stackName),
+    temporal,
+    ledger,
+    lastCheckedAt,
+    gitopsRevision: projectManagedStackRevision(stackName, nodeId),
+  };
 }
 
 stacksRouter.get('/:stackName/drift', async (req: Request, res: Response) => {
@@ -1575,6 +1595,82 @@ stacksRouter.post('/:stackName/drift/recheck', async (req: Request, res: Respons
     console.error('[Stacks] Failed to re-check drift for %s:', sanitizeForLog(stackName),
       sanitizeForLog(inspect(error, { depth: 4 })));
     res.status(500).json({ error: 'Failed to re-check drift' });
+  }
+});
+
+/**
+ * Dismiss one drift finding for the team, until it changes (or for a set time,
+ * or permanently). The finding id names the kind and service; the policy for
+ * that kind and the fingerprint come from a fresh read of this stack, never from
+ * the request, which only says which state of the finding the operator saw.
+ * Stack-scoped deploy authority, the same as the actions drift offers next to it.
+ */
+stacksRouter.post('/:stackName/drift/dismissals', async (req: Request, res: Response) => {
+  const stackName = req.params.stackName as string;
+  if (!requirePermission(req, res, 'stack:deploy', 'stack', stackName)) return;
+  const body: unknown = req.body;
+  const record: Record<string, unknown> = typeof body === 'object' && body !== null ? body as Record<string, unknown> : {};
+  const key = parseDriftKey(typeof record.findingId === 'string' ? record.findingId : '');
+  if (key === null) {
+    res.status(400).json({ error: 'findingId is not a drift finding id' });
+    return;
+  }
+  const { fingerprint, count } = record;
+  if (typeof fingerprint !== 'string' || fingerprint === '' || fingerprint.length > 64
+    || typeof count !== 'number' || !Number.isInteger(count) || count < 1) {
+    res.status(400).json({ error: 'fingerprint and count must say which state of the finding was seen' });
+    return;
+  }
+  const requested = readDismissalMode(record, res);
+  if (requested === null) return;
+  if (driftDismissPolicy(key.kind) === 'none') {
+    res.status(400).json({ error: 'This finding is resolved from its Git source and cannot be dismissed here.' });
+    return;
+  }
+  if (!(await requireStackExists(req.nodeId, stackName, res))) return;
+  try {
+    const report = await buildStackDriftReport(req.nodeId, stackName);
+    const outcome = DriftLedgerService.getInstance().dismissFinding(
+      req.nodeId, stackName, report, key, { fingerprint, count },
+      { mode: requested.mode, expiresAt: requested.expiresAt, createdBy: auditActorUsername(req), now: Date.now() },
+    );
+    if (!outcome.ok) {
+      const refusal = {
+        FINDING_GONE: { status: 409, error: 'That finding is no longer present.' },
+        FINDING_CHANGED: { status: 409, error: 'That finding changed. Review it again.' },
+        EVIDENCE_UNAVAILABLE: { status: 503, error: 'Drift could not be assessed right now, so nothing was dismissed.' },
+      }[outcome.code];
+      res.status(refusal.status).json({ error: refusal.error, code: outcome.code });
+      return;
+    }
+    res.status(outcome.kept ? 200 : 201).json({ dismissal: outcome.dismissal, kept: outcome.kept });
+  } catch (error) {
+    console.error('[Stacks] Failed to dismiss drift finding for %s:', sanitizeForLog(stackName),
+      sanitizeForLog(inspect(error, { depth: 4 })));
+    res.status(500).json({ error: 'Failed to dismiss the finding' });
+  }
+});
+
+/** Restore a dismissed drift finding. The same stack-scoped deploy authority that dismissing it took. */
+stacksRouter.delete('/:stackName/drift/dismissals/:id', async (req: Request, res: Response) => {
+  const stackName = req.params.stackName as string;
+  if (!requirePermission(req, res, 'stack:deploy', 'stack', stackName)) return;
+  const id = Number(req.params.id);
+  if (!Number.isInteger(id) || id < 1) {
+    res.status(400).json({ error: 'Invalid dismissal id' });
+    return;
+  }
+  if (!(await requireStackExists(req.nodeId, stackName, res))) return;
+  try {
+    if (!DriftLedgerService.getInstance().restoreDismissal(req.nodeId, stackName, id)) {
+      res.status(404).json({ error: 'Dismissal not found' });
+      return;
+    }
+    res.status(204).end();
+  } catch (error) {
+    console.error('[Stacks] Failed to restore drift finding for %s:', sanitizeForLog(stackName),
+      sanitizeForLog(inspect(error, { depth: 4 })));
+    res.status(500).json({ error: 'Failed to restore the finding' });
   }
 });
 

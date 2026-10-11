@@ -31,7 +31,7 @@ export interface DismissalWriteResult {
  * already expired holds nothing. Expiry dates are not compared, so a later
  * "7 days" replaces an earlier "30 days".
  */
-function holdRank(mode: DismissalMode, expiresAt: number | null, now: number): number {
+export function holdRank(mode: DismissalMode, expiresAt: number | null, now: number): number {
   if (mode === 'forever') return 3;
   if (mode === 'days') return expiresAt !== null && expiresAt > now ? 2 : 0;
   return 1;

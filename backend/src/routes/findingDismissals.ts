@@ -1,11 +1,8 @@
 import { Router, type Request, type Response } from 'express';
 import { DatabaseService } from '../services/DatabaseService';
 import { FindingDismissalStore } from '../services/findingDismissals/FindingDismissalStore';
-import {
-  DISMISSAL_MODES,
-  toFindingDismissal,
-  type DismissalMode,
-} from '../services/findingDismissals/types';
+import { toFindingDismissal } from '../services/findingDismissals/types';
+import { readDismissalMode } from '../helpers/dismissalMode';
 import { buildFleetReadiness } from '../services/readiness/readinessAggregator';
 import { parseReadinessKey } from '../services/readiness/readinessDismissals';
 import {
@@ -29,33 +26,10 @@ import { errorMessageForLog } from '../utils/safeLog';
 
 export const findingDismissalsRouter = Router();
 
-const MAX_DAYS = 365;
-const DAY_MS = 86_400_000;
 const MAX_FINGERPRINT_LENGTH = 64;
 const MAX_TARGET_COUNT = 10_000_000;
 
 type DismissalBody = Record<string, unknown>;
-
-interface ParsedDismissalRequest {
-  mode: DismissalMode;
-  expiresAt: number | null;
-}
-
-/** The mode and expiry a request asks for, or null after answering 400. */
-function readDismissalMode(record: DismissalBody, res: Response): ParsedDismissalRequest | null {
-  const mode = record.mode;
-  if (typeof mode !== 'string' || !(DISMISSAL_MODES as readonly string[]).includes(mode)) {
-    res.status(400).json({ error: `mode must be one of: ${DISMISSAL_MODES.join(', ')}` });
-    return null;
-  }
-  if (mode !== 'days') return { mode: mode as DismissalMode, expiresAt: null };
-  const days = record.days ?? 7;
-  if (typeof days !== 'number' || !Number.isInteger(days) || days < 1 || days > MAX_DAYS) {
-    res.status(400).json({ error: `days must be a whole number from 1 to ${MAX_DAYS}` });
-    return null;
-  }
-  return { mode: 'days', expiresAt: Date.now() + days * DAY_MS };
-}
 
 /** Authorizes the scope a networking finding key names, from the key alone. */
 function authorizeNetworkingKey(req: Request, res: Response, key: ParsedNetworkingKey): boolean {
