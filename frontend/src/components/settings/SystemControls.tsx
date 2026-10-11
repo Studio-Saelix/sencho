@@ -38,6 +38,13 @@ export function NumberChip({ value, onChange, suffix, min, max, step = 1, warnOv
         const parsed = Number(trimmed);
         if (trimmed !== '' && Number.isFinite(parsed)) {
             let next = parsed;
+            // Snap to the control's own step before clamping. A chip with the
+            // default step of 1 writes an integer, which is what the settings
+            // route validates for every integer key; without this a typed "1.5"
+            // is clamped but not rounded, saved as a fraction, and rejected by
+            // the route with a bare validation error. A chip that asks for a
+            // fractional step (docker janitor, 0.5 GiB) keeps it.
+            next = Math.round(next / step) * step;
             if (typeof min === 'number') next = Math.max(min, next);
             if (typeof max === 'number') next = Math.min(max, next);
             onChange(String(next));
