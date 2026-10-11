@@ -1489,6 +1489,29 @@ function derivePlacementAuthority(
     return { status: 'placement_review_pending' };
   }
 
+  // Everything below is the Git-managed rollout authorization chain, and an
+  // Inline Blueprint has no such surface to offer: its combined approval is
+  // written by Apply, the decomposed authority routes refuse a target mode that
+  // is not `blueprint`, and the surface hides every action that would grant the
+  // authorization this chain asks for. An application that was Git-managed and
+  // then detached keeps its Git-era intent, candidate, generation and artifact
+  // pointers, so without this guard a post-detach placement re-mint lands on
+  // the branch below that reports an outstanding authorization with a null ref,
+  // and the surface asks a question the surface itself refuses.
+  //
+  // The guard and the demotion clear are complementary, and neither replaces
+  // the other. The clear keeps the stored record honest at the event that made
+  // it describe a mode the row no longer runs. It cannot be what fixes the
+  // symptom on its own: a detached row still resolves its remaining Git-era
+  // pointers, and rows detached before the clear existed are never revisited by
+  // it, which is the population the dead end was reported from. What stops the
+  // chain asking is this guard: an Inline application has no rollout
+  // authorization to be pending, stale, or blocked, and `blueprint_bound` is
+  // what an Inline application with no ingredients already reads as.
+  if (app.target_mode !== 'blueprint') {
+    return { status: 'blueprint_bound', completion: 'unknown' };
+  }
+
   const ingredients = store.authorizationIngredients(app);
   if (!ingredients) {
     return { status: 'blueprint_bound', completion: 'unknown' };

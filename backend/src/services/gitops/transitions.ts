@@ -457,18 +457,47 @@ export class GitOpsTransitions {
       // they had while Git content was running. Both go back to the operator
       // with the mode; an operator who wants unattended placement sets the
       // rollout authorization policy again from the Inline authority row.
+      //
+      // The preflight evidence goes with them, for its own reason: this row
+      // never runs Git-managed content again. `inline_blueprint` is a terminal
+      // mode. The only transition into it is this demotion, nothing accepts it
+      // as an entry mode, and `loadConvertBinding` refuses anything that is not
+      // `direct`, so the row a Detach produced is never converted back; binding
+      // a fresh Git source to the same Blueprint tombstones it first.
+      // `recordPreflightEvaluation` is the evidence column's only writer, and
+      // neither of its callers can reach this row again: the Direct apply path
+      // resolves its application through `getLiveDirectApplication`, and the
+      // Git-managed authorization path is refused for a mode that is not
+      // `blueprint` before it evaluates. The transition also skips an
+      // `inline_blueprint` row outright, so nothing will ever refresh or
+      // contradict what is stored. Left in place it is a permanent stale claim:
+      // the row answers "the last registry preflight for this application
+      // evaluated this" with a fingerprint naming an authorization it no longer
+      // has, and no mode change, apply, or invalidation cleared it, which is why
+      // it outlived everything it was evaluated for until now.
+      // Every column the clear writes is in the early-return condition, so the
+      // no-op is exact: a row carrying only a dangling `rollout_authorization_ref`
+      // would otherwise be reported as having nothing to clear and left with a
+      // ref nothing resolves, with no history row admitting it.
       onRetarget: (app) => {
         if (app.placement_approval_ref === null
-          && app.rollout_authorization_policy === 'manual') {
+          && app.rollout_authorization_ref === null
+          && app.rollout_authorization_policy === 'manual'
+          && app.latest_preflight_evidence_json === null
+          && app.preflight_fingerprint === null) {
           return {};
         }
         app.placement_approval_ref = null;
         app.rollout_authorization_ref = null;
         app.rollout_authorization_policy = 'manual';
+        app.latest_preflight_evidence_json = null;
+        app.preflight_fingerprint = null;
         return {
           placementApprovalRef: null,
           rolloutAuthorizationRef: null,
           rolloutAuthorizationPolicy: 'manual',
+          latestPreflightEvidenceJson: null,
+          preflightFingerprint: null,
         };
       },
     });
@@ -4722,6 +4751,20 @@ export class GitOpsTransitions {
    * Persist the latest redacted preflight evaluation on the application row.
    * Writes no history (reconcile-time evaluations must not spam the operator
    * list). Call before any mint or invalidate decision.
+   *
+   * An Inline Blueprint is skipped rather than written, because no caller can
+   * reach it there legitimately. The Direct apply path resolves its application
+   * through `getLiveDirectApplication` and the Git-managed authorization path
+   * is refused for a non-`blueprint` mode before it evaluates, so the one way
+   * an inline row arrives is a Detach landing inside that path's preflight
+   * await. The write would then describe an application this mode can never
+   * authorize, and nothing reads it: derive answers from the mode. The mint
+   * that follows is refused by `rolloutAuthorized`, so skipping the write
+   * leaves correct state behind.
+   *
+   * Skipped rather than refused: an exception here would turn a benign race
+   * into a failed authorize request, and the refusal is already reported by
+   * the mint that the caller reaches next.
    */
   recordPreflightEvaluation(args: {
     applicationId: string;
@@ -4731,6 +4774,7 @@ export class GitOpsTransitions {
     this.raw().transaction(() => {
       const app = this.store().getApplication(args.applicationId);
       if (!app) throw new GitOpsTransitionError('application not found');
+      if (app.target_mode === 'inline_blueprint') return;
       app.latest_preflight_evidence_json = args.evidenceJson;
       app.updated_at = args.at ?? Date.now();
       this.writeApplication(app);
