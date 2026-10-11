@@ -1,9 +1,10 @@
 import { Button } from '@/components/ui/button';
 import { SegmentedControl } from '@/components/ui/segmented-control';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
-import { Info, AlertTriangle, AlertOctagon, CheckCircle2, ChevronRight, CloudOff } from 'lucide-react';
+import { Info, AlertTriangle, AlertOctagon, Check, CheckCircle2, ChevronRight, CloudOff } from 'lucide-react';
 import { cn, formatRelativeTime } from '@/lib/utils';
 import { isActionableAlert } from '@/lib/notificationVisibility';
+import { NotificationMuteMenu } from '@/components/mute/NotificationMuteMenu';
 import type { AlertDestination } from '@/lib/alertDestination';
 import { useRecentAlertsScopePreference } from './useRecentAlertsScopePreference';
 import { DashboardPanel, PanelMeta, PanelNotice, PanelSkeleton, RowAction } from './DashboardPanel';
@@ -37,6 +38,10 @@ interface RecentAlertsProps {
    */
   unreportedNodeIds: ReadonlySet<number> | null;
   navigation: AlertNavigation;
+  /** Marks one alert read on the node that owns it. Shown for every unread row. */
+  onMarkRead: (notif: NotificationItem) => void;
+  /** Whether the account may create mute rules. The Mute menu is hidden otherwise. */
+  canMute: boolean;
   className?: string;
   /** Hold the eight-row body height even when empty, so a side-by-side neighbour can match it. */
   reserveHeight?: boolean;
@@ -75,7 +80,7 @@ function formatNodeList(names: string[]): string {
   return `${names.slice(0, 2).join(', ')} and ${names.length - 2} more`;
 }
 
-export function RecentAlerts({ notifications, nodes, activeNodeId, unreportedNodeIds, navigation, className, reserveHeight = false }: RecentAlertsProps) {
+export function RecentAlerts({ notifications, nodes, activeNodeId, unreportedNodeIds, navigation, onMarkRead, canMute, className, reserveHeight = false }: RecentAlertsProps) {
   const [scope, setScope] = useRecentAlertsScopePreference();
 
   // Without a remote node there is no cross-node scope to choose, so the stored
@@ -137,7 +142,7 @@ export function RecentAlerts({ notifications, nodes, activeNodeId, unreportedNod
               <TableHead className={cn(PANEL_TABLE_HEAD, 'w-full')}>Alert</TableHead>
               {nodeScoped ? null : <TableHead className={cn(PANEL_TABLE_HEAD, 'w-px whitespace-nowrap')}>Node</TableHead>}
               <TableHead className={cn(PANEL_TABLE_HEAD, 'w-px whitespace-nowrap text-right')}>When</TableHead>
-              <TableHead className={cn(PANEL_TABLE_HEAD, 'w-px whitespace-nowrap')}><span className="sr-only">Open</span></TableHead>
+              <TableHead className={cn(PANEL_TABLE_HEAD, 'w-px whitespace-nowrap')}><span className="sr-only">Actions</span></TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
@@ -163,7 +168,7 @@ export function RecentAlerts({ notifications, nodes, activeNodeId, unreportedNod
                   // both hold id 7; the key is node-qualified.
                   key={`${n.nodeId ?? 'local'}:${n.id}`}
                   data-testid="recent-alert-row"
-                  className={cn(PANEL_TABLE_ROW, ROW_HEIGHT, ROW_TINT[n.level], destination && PANEL_TABLE_ROW_ACTIONABLE)}
+                  className={cn('group', PANEL_TABLE_ROW, ROW_HEIGHT, ROW_TINT[n.level], destination && PANEL_TABLE_ROW_ACTIONABLE)}
                   onClick={destination ? () => navigation.open(destination) : undefined}
                 >
                   <TableCell className="w-px whitespace-nowrap">
@@ -182,7 +187,26 @@ export function RecentAlerts({ notifications, nodes, activeNodeId, unreportedNod
                     {formatRelativeTime(Math.floor(n.timestamp / 1000))}
                   </TableCell>
                   <TableCell className="w-px whitespace-nowrap">
-                    {destination ? <ChevronRight className="h-3.5 w-3.5 text-stat-icon" strokeWidth={1.5} aria-hidden /> : null}
+                    <div className="flex items-center justify-end gap-0.5">
+                      {/* Hover-revealed like the bell's row actions; always visible without a hover. */}
+                      <div className="flex items-center gap-0.5 opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100 max-md:opacity-100">
+                        {canMute ? <NotificationMuteMenu notif={n} /> : null}
+                        {n.is_read ? null : (
+                          <Button
+                            type="button"
+                            variant="ghost"
+                            size="icon"
+                            className="h-6 w-6"
+                            title="Mark read"
+                            aria-label="Mark read"
+                            onClick={(e) => { e.stopPropagation(); onMarkRead(n); }}
+                          >
+                            <Check className="h-3 w-3" strokeWidth={1.5} />
+                          </Button>
+                        )}
+                      </div>
+                      {destination ? <ChevronRight className="h-3.5 w-3.5 text-stat-icon" strokeWidth={1.5} aria-hidden /> : <span className="h-3.5 w-3.5" aria-hidden />}
+                    </div>
                   </TableCell>
                 </TableRow>
               );

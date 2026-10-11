@@ -395,6 +395,32 @@ export function useNotifications({ nodes, onStateInvalidate, onImageUpdatesChang
     }
   };
 
+  /**
+   * Marks one row read on the node that owns it. Notification ids are per-node,
+   * so the write is addressed by the row's own `nodeId`; the row flips locally
+   * only once that node confirms.
+   */
+  const markRead = async (notif: NotificationItem) => {
+    if (notif.nodeId == null) return;
+    try {
+      const localNode = nodesRef.current.find(n => n.type === 'local');
+      const path = `/notifications/${notif.id}/read`;
+      const res = notif.nodeId === localNode?.id
+        ? await apiFetch(path, { method: 'POST', localOnly: true } as Parameters<typeof apiFetch>[1])
+        : await fetchForNode(path, notif.nodeId, { method: 'POST' });
+      if (!res.ok) {
+        toast.error('Could not mark the notification as read');
+        return;
+      }
+      setNotifications(prev => prev.map(n =>
+        n.id === notif.id && n.nodeId === notif.nodeId ? { ...n, is_read: 1 } : n,
+      ));
+    } catch (e: unknown) {
+      const err = e as { message?: string; error?: string };
+      toast.error(err?.message || err?.error || 'Failed to mark notification as read');
+    }
+  };
+
   const deleteNotification = async (notif: NotificationItem) => {
     try {
       const localNode = nodesRef.current.find(n => n.type === 'local');
@@ -431,6 +457,7 @@ export function useNotifications({ nodes, onStateInvalidate, onImageUpdatesChang
     unreportedNodeIds,
     tickerConnected,
     markAllRead,
+    markRead,
     deleteNotification,
     clearAllNotifications,
     removeNotificationsForStack: purgeStackNotifications,

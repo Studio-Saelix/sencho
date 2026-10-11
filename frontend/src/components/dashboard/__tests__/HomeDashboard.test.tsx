@@ -89,6 +89,7 @@ function renderDashboard(extra: {
     <HomeDashboard
       notifications={extra.notifications ?? []}
       unreportedNodeIds={extra.unreportedNodeIds ?? new Set()}
+      onMarkNotificationRead={vi.fn()}
       navigation={extra.navigation ?? makeNavigation()}
     />,
   );

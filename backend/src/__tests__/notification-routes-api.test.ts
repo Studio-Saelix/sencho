@@ -848,6 +848,126 @@ describe('GET /api/notifications - history', () => {
   });
 });
 
+// --- POST /api/notifications/:id/read ---
+
+describe('POST /api/notifications/:id/read', () => {
+  let localNodeId: number;
+  let otherNodeId: number;
+
+  beforeAll(() => {
+    const db = DatabaseService.getInstance();
+    localNodeId = db.getDefaultNode()!.id;
+    otherNodeId = db.addNode({
+      name: 'mark-read-other',
+      type: 'remote',
+      mode: 'proxy',
+      compose_dir: '/tmp/compose',
+      is_default: false,
+      api_url: 'https://other.example.com:1852',
+      api_token: 'tok',
+    });
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.spyOn(licenseService, 'getTier').mockReturnValue('community');
+  });
+
+  function seed(nodeId: number, message: string): { id: number } {
+    const row = DatabaseService.getInstance().addNotificationHistory(nodeId, {
+      level: 'warning',
+      message,
+      timestamp: Date.now(),
+    });
+    if (row.id === undefined) throw new Error('seeded notification has no id');
+    return { id: row.id };
+  }
+
+  function isRead(nodeId: number, id: number): boolean {
+    const row = DatabaseService.getInstance()
+      .getNotificationHistory(nodeId, 500)
+      .find(n => n.id === id);
+    return row?.is_read === true;
+  }
+
+  it('marks only the addressed row read', async () => {
+    const target = seed(localNodeId, 'mark one: target');
+    const sibling = seed(localNodeId, 'mark one: sibling');
+
+    const res = await request(app).post(`/api/notifications/${target.id}/read`).set('Cookie', authCookie);
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ success: true });
+    expect(isRead(localNodeId, target.id)).toBe(true);
+    expect(isRead(localNodeId, sibling.id)).toBe(false);
+  });
+
+  it('answers 404 for an id that belongs to another node and leaves that row unread', async () => {
+    const foreign = seed(otherNodeId, 'mark one: other node row');
+
+    const res = await request(app).post(`/api/notifications/${foreign.id}/read`).set('Cookie', authCookie);
+
+    expect(res.status).toBe(404);
+    expect(res.body.error).toBe('Notification not found');
+    expect(isRead(otherNodeId, foreign.id)).toBe(false);
+  });
+
+  it('answers 404 for an id that does not exist', async () => {
+    const res = await request(app).post('/api/notifications/999999/read').set('Cookie', authCookie);
+    expect(res.status).toBe(404);
+  });
+
+  it('succeeds again for a row that is already read', async () => {
+    const row = seed(localNodeId, 'mark one: twice');
+    await request(app).post(`/api/notifications/${row.id}/read`).set('Cookie', authCookie);
+
+    const res = await request(app).post(`/api/notifications/${row.id}/read`).set('Cookie', authCookie);
+
+    expect(res.status).toBe(200);
+    expect(isRead(localNodeId, row.id)).toBe(true);
+  });
+
+  it('is refused without a session', async () => {
+    const row = seed(localNodeId, 'mark one: anonymous');
+    const res = await request(app).post(`/api/notifications/${row.id}/read`);
+    expect(res.status).toBe(401);
+    expect(isRead(localNodeId, row.id)).toBe(false);
+  });
+
+  it('lets a viewer mark a row read, as mark-all already does', async () => {
+    const row = seed(localNodeId, 'mark one: viewer');
+    const res = await request(app).post(`/api/notifications/${row.id}/read`).set('Cookie', viewerCookie);
+    expect(res.status).toBe(200);
+    expect(isRead(localNodeId, row.id)).toBe(true);
+  });
+
+  it('rejects a non-numeric id with 400', async () => {
+    const res = await request(app).post('/api/notifications/abc/read').set('Cookie', authCookie);
+    expect(res.status).toBe(400);
+    expect(res.body.error).toContain('Invalid');
+  });
+
+  it('still routes POST /read to mark-all', async () => {
+    const row = seed(localNodeId, 'mark one: mark-all still works');
+    const res = await request(app).post('/api/notifications/read').set('Cookie', authCookie);
+    expect(res.status).toBe(200);
+    expect(isRead(localNodeId, row.id)).toBe(true);
+  });
+
+  it('returns 500 and logs the error when the write throws', async () => {
+    const consoleErrorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    vi.spyOn(DatabaseService.getInstance(), 'markNotificationRead').mockImplementationOnce(() => {
+      throw new Error('database is locked');
+    });
+
+    const res = await request(app).post('/api/notifications/1/read').set('Cookie', authCookie);
+
+    expect(res.status).toBe(500);
+    expect(res.body.error).toBe('Failed to mark notification read');
+    expect(consoleErrorSpy).toHaveBeenCalledWith('Failed to mark notification read:', expect.any(Error));
+  });
+});
+
 describe('notification routes - glob patterns and levels', () => {
   it('POST omits stack_patterns and levels to defaults', async () => {
     const res = await request(app)
