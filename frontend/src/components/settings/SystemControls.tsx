@@ -47,6 +47,7 @@ export function NumberChip({ value, onChange, suffix, min, max, step = 1, warnOv
 
     const numeric = Number(value);
     const warn = typeof warnOver === 'number' && Number.isFinite(numeric) && numeric > warnOver;
+    const shownSuffix = numeric === 1 && suffix.length > 1 && suffix.endsWith('s') ? suffix.slice(0, -1) : suffix;
 
     const chipClass = cn(
         'inline-flex items-baseline gap-1 rounded-md border px-2.5 py-1 font-mono text-sm tabular-nums tracking-tight transition-colors min-w-[78px] justify-end focus-within:ring-2 focus-within:ring-brand/50 focus-within:outline-none',
@@ -74,7 +75,7 @@ export function NumberChip({ value, onChange, suffix, min, max, step = 1, warnOv
                     className="w-12 bg-transparent text-right outline-none [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none"
                     disabled={disabled}
                 />
-                <span className="text-stat-subtitle">{suffix}</span>
+                <span className="text-stat-subtitle">{shownSuffix}</span>
             </span>
         );
     }
@@ -87,7 +88,7 @@ export function NumberChip({ value, onChange, suffix, min, max, step = 1, warnOv
             disabled={disabled}
         >
             <span>{value || '0'}</span>
-            <span className="text-stat-subtitle">{suffix}</span>
+            <span className="text-stat-subtitle">{shownSuffix}</span>
         </button>
     );
 }

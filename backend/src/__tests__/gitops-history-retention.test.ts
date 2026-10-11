@@ -195,9 +195,9 @@ describe('GitOps history retention', () => {
 
   it('keeps an application\'s newest history row even when every row is older than the window', () => {
     const db = DatabaseService.getInstance().getDb();
-    // The scenario the audit named: a quiet application whose only history is
-    // older than the window. Its row must survive, and the "last activity" the
-    // portfolio and the application sheet read must still resolve.
+    // A quiet application whose only history is older than the window. Its row
+    // must survive, and the "last activity" the portfolio and the application
+    // sheet read must still resolve.
     const app = 'app-retention-quiet';
     const onlyRow = writeRow('op-retention-quiet-only', Date.now() - 400 * DAY_MS, { applicationId: app });
 
@@ -262,6 +262,24 @@ describe('GitOps history retention', () => {
     expect(store.listUnsettledReconcileAttempts().some((row) => row.application_id === app)).toBe(true);
   });
 
+  it('drops an unsettled attempt older than the window once a newer row exists', () => {
+    const store = GitOpsStore.getInstance();
+    // An unsettled reservation older than the window, then later history for the
+    // same live application. The reservation is no longer the newest row, so the
+    // window takes it and the next startup has nothing to recover.
+    const app = 'app-retention-unsettled-superseded';
+    writeRow('op-retention-unsettled-superseded-newer', Date.now() - 1 * DAY_MS, { applicationId: app });
+    writeRow('op-retention-unsettled-superseded-started', Date.now() - 60 * DAY_MS, {
+      applicationId: app,
+      stage: 'source_reconcile_started',
+    });
+
+    const result = DatabaseService.getInstance().cleanupOldGitOpsHistory(30);
+
+    expect(result.history).toBe(1);
+    expect(store.listUnsettledReconcileAttempts().some((row) => row.application_id === app)).toBe(false);
+  });
+
   it('keeps an undrained outbox row through the grace period, and prunes it once drained', () => {
     const db = DatabaseService.getInstance().getDb();
     const app = 'app-retention-undrained';
@@ -322,6 +340,7 @@ describe('GitOps history retention', () => {
 
   it('bounds each pass to a chunk of rows, so a backlog cannot hold the writer', () => {
     const db = DatabaseService.getInstance().getDb();
+    sweepUntilQuiet();
     // The unchunked alternative deletes the whole backlog in one transaction,
     // holding SQLite's single writer and blocking every other write on the
     // instance for its duration. Rows are written directly rather than through
@@ -394,6 +413,33 @@ describe('GitOps history retention', () => {
     expect(result.historyRemaining).toBe(0);
     expect(remainingIdsFor(db, app)).toEqual([]);
     expect(latestTransitionByApplication(db, [app]).has(app)).toBe(false);
+  });
+
+  it('keeps the newest row of a creating application when every row is older than the window', () => {
+    const db = DatabaseService.getInstance().getDb();
+    // Rows are written before activation. Dropping them would leave an
+    // application that goes live with no recorded activity.
+    const app = 'app-retention-creating';
+    writeRow('op-retention-creating-older', Date.now() - 60 * DAY_MS, { applicationId: app });
+    const newest = writeRow('op-retention-creating-newest', Date.now() - 40 * DAY_MS, { applicationId: app });
+    db.prepare("UPDATE gitops_applications SET lifecycle_status = 'creating' WHERE id = ?").run(app);
+
+    const result = DatabaseService.getInstance().cleanupOldGitOpsHistory(30);
+
+    expect(result.history).toBe(1);
+    expect(remainingIdsFor(db, app)).toEqual([newest]);
+  });
+
+  it('prunes a detached application\'s whole history, including its newest row', () => {
+    const db = DatabaseService.getInstance().getDb();
+    const app = 'app-retention-detached';
+    writeRow('op-retention-detached-only', Date.now() - 60 * DAY_MS, { applicationId: app });
+    db.prepare("UPDATE gitops_applications SET lifecycle_status = 'detached' WHERE id = ?").run(app);
+
+    const result = DatabaseService.getInstance().cleanupOldGitOpsHistory(30);
+
+    expect(result.history).toBe(1);
+    expect(remainingIdsFor(db, app)).toEqual([]);
   });
 
   it('keeps the settled row when it ties the started row and the started id sorts later', () => {

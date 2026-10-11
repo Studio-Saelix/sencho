@@ -37,7 +37,7 @@ const { mockGetGlobalSettings, mockGetNodes, mockGetStackAlerts, mockAddContaine
   mockCleanupOldAuditLogs: vi.fn(),
   mockCleanupOldDeliveryEvents: vi.fn(),
   mockGetGitOpsHistoryRetentionDays: vi.fn().mockReturnValue(45),
-  mockCleanupOldGitOpsHistory: vi.fn().mockReturnValue({ history: 0, outbox: 0 }),
+  mockCleanupOldGitOpsHistory: vi.fn().mockReturnValue({ history: 0, outbox: 0, historyRemaining: 0, outboxRemaining: 0 }),
   mockUpdateStackAlertLastFired: vi.fn(),
   mockGetStackAlertServiceCooldown: vi.fn().mockReturnValue(null),
   mockHasAnyStackAlertServiceCooldown: vi.fn().mockReturnValue(false),

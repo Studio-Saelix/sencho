@@ -139,11 +139,11 @@ export const GITOPS_PRUNE_CHUNK_ROWS = 5000;
 // are primary-key seeks on their own table, so the predicate costs one seek per
 // candidate row.
 //
-// Recovery is not widened by this. Startup recovery reads unsettled reservations,
-// and `getSettledAttempt` reads a settled row for a specific recent operation
-// (follower settlement, duplicate delivery), both bounded to attempts still in
-// flight rather than to days. The one case this widens is an unsettled attempt
-// that is also its live application's newest row, which is kept rather than lost.
+// An unsettled reservation older than the window is pruned once a newer row
+// exists for that application. Startup recovery then does not see it. The
+// reservation survives past the window only when it is still that application's
+// newest row, which is the quiet-application case. Keeping every unsettled row
+// would retain attempts the store documents as staying unsettled forever.
 const GITOPS_HISTORY_PRUNEABLE = `created_at < ?
   AND (
     -- The application is retired, so no projection reads its history.

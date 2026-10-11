@@ -108,8 +108,21 @@ describe('GitOpsSection', () => {
         expect(screen.getByText('Keep GitOps history for')).toBeInTheDocument();
         expect(screen.getByText(/newest row for each live application/)).toBeInTheDocument();
         expect(screen.getByText(/entries inside the window/)).toBeInTheDocument();
+        expect(screen.getByText(/unfinished attempt is kept past the window only when it is that newest row/)).toBeInTheDocument();
         expect(screen.getByText(/window under about 3 days/)).toBeInTheDocument();
+        expect(screen.getByText('days')).toBeInTheDocument();
         await waitFor(() => expect(chipShowing('45')).toBeInTheDocument());
+    });
+
+    it('reads day when the history window is 1', async () => {
+        mockedFetch.mockImplementation(async (path: string) => (
+            path === '/git-sources/polling'
+                ? { ok: true, json: async () => ({ poll_interval_mins: 0 }) }
+                : { ok: true, json: async () => ({ gitops_artifact_retry_interval_mins: '5', gitops_history_retention_days: '1' }) }
+        ));
+        render(<GitOpsSection />);
+        await waitFor(() => expect(screen.getByText('Keep GitOps history for')).toBeInTheDocument());
+        expect(screen.getByText('day')).toBeInTheDocument();
     });
 
     it('saves a changed interval through the shared node settings, carrying the section values', async () => {
