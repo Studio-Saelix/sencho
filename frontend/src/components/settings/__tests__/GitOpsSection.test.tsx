@@ -107,7 +107,7 @@ describe('GitOpsSection', () => {
         // The history window reads the same payload and renders its own stored value.
         expect(screen.getByText('Keep GitOps history for')).toBeInTheDocument();
         expect(screen.getByText(/newest row for each live application/)).toBeInTheDocument();
-        expect(screen.getByText(/entries inside the window/)).toBeInTheDocument();
+        expect(screen.getByText(/rows inside the window/)).toBeInTheDocument();
         expect(screen.getByText(/unfinished attempt is kept past the window only when it is that newest row/)).toBeInTheDocument();
         expect(screen.getByText(/window under about 3 days/)).toBeInTheDocument();
         expect(screen.getByText('days')).toBeInTheDocument();

@@ -1230,6 +1230,29 @@ describe('MonitorService - cleanup triggers', () => {
       sweep.mockRestore();
     }
   });
+
+  it('skips the GitOps history prune when the retention read throws', async () => {
+    mockGetNodes.mockReturnValue([]);
+    mockGetStackAlerts.mockReturnValue([]);
+    mockGetGlobalSettings.mockReturnValue({});
+    mockGetGitOpsHistoryRetentionDays.mockImplementationOnce(() => {
+      throw new Error('settings unavailable');
+    });
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const svc = MonitorService.getInstance();
+    const sweep = vi.spyOn(svc as unknown as { sweepStaleUpdateTrackers: () => void }, 'sweepStaleUpdateTrackers')
+      .mockImplementation(() => {});
+    try {
+      await (svc as unknown as { evaluate: () => Promise<void> }).evaluate();
+      expect(mockCleanupOldGitOpsHistory).not.toHaveBeenCalled();
+      expect(error.mock.calls.some((call) => String(call[0]).includes('failed to cleanup GitOps history'))).toBe(true);
+      expect(sweep).toHaveBeenCalled();
+      expect((svc as unknown as { isProcessing: boolean }).isProcessing).toBe(false);
+    } finally {
+      sweep.mockRestore();
+      error.mockRestore();
+    }
+  });
 });
 
 // ── isProcessing guard ─────────────────────────────────────────────────

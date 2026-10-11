@@ -135,9 +135,11 @@ export const GITOPS_PRUNE_CHUNK_ROWS = 5000;
 // would retain one history row per stack ever retired and leave exactly the
 // growth this setting exists to stop. 'creating' counts as live because its rows
 // are written before the application is activated, and dropping them would leave
-// an application that goes live with no recorded activity at all. Both subqueries
-// are primary-key seeks on their own table, so the predicate costs one seek per
-// candidate row.
+// an application that goes live with no recorded activity at all. The application
+// lookup is a primary-key seek. The newer-row probe uses
+// idx_gitops_history_app_created: one seek for a later timestamp and one for
+// the same timestamp, with the rowid tie applied on that second seek. A
+// retired application stops after the primary-key seek.
 //
 // An unsettled reservation older than the window is pruned once a newer row
 // exists for that application. Startup recovery then does not see it. The
@@ -5132,19 +5134,18 @@ stmt.run('gitops_schema_version', '1');
      * so this is the only bound on the table's size. There is no off value:
      * turning retention off would leave the history and its outbox growing for
      * the life of the installation, which is the accumulation this setting
-     * exists to stop. A failed read falls back to the default rather than to a
-     * value that keeps everything.
+     * exists to stop. A missing or unusable stored value uses the default. A
+     * failed read throws, so the caller can skip the delete instead of pruning
+     * with a window the operator did not choose.
      */
     public getGitOpsHistoryRetentionDays(): number {
-        try {
-            const raw = parseInt(this.getGlobalSettings()['gitops_history_retention_days'] ?? '', 10);
-            return Number.isFinite(raw) && raw > 0
-                ? Math.min(raw, MAX_GITOPS_HISTORY_RETENTION_DAYS)
-                : DEFAULT_GITOPS_HISTORY_RETENTION_DAYS;
-        } catch (e) {
-            console.warn('[DatabaseService] gitops_history_retention_days read failed; using default:', (e as Error).message);
+        const stored = this.getGlobalSettings()['gitops_history_retention_days'];
+        const raw = parseInt(stored ?? '', 10);
+        if (!Number.isFinite(raw) || raw < 1) {
+            console.warn(`[DatabaseService] invalid gitops_history_retention_days "${String(stored)}"; treating as ${DEFAULT_GITOPS_HISTORY_RETENTION_DAYS}`);
             return DEFAULT_GITOPS_HISTORY_RETENTION_DAYS;
         }
+        return Math.min(raw, MAX_GITOPS_HISTORY_RETENTION_DAYS);
     }
 
     /** Total generations retained per stack, current included (0 = unlimited). */

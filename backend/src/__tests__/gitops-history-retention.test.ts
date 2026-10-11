@@ -14,7 +14,7 @@
  * the prune rather than accidentally testing that exemption.
  */
 import { randomUUID } from 'crypto';
-import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { setupTestDb, cleanupTestDb } from './helpers/setupTestDb';
 import { directApplicationFixture } from './helpers/gitopsFixtures';
 import { DatabaseService, GITOPS_PRUNE_CHUNK_ROWS } from '../services/DatabaseService';
@@ -138,6 +138,12 @@ function pruneWithCounts(days: number): ReturnType<DatabaseService['cleanupOldGi
 }
 
 describe('GitOps history retention', () => {
+  // The delete is global and capped, so a row left by an earlier test can
+  // change the next test's count or steal a chunk. Clear those first.
+  beforeEach(() => {
+    sweepUntilQuiet();
+  });
+
   it('seeds a 30-day default and clamps an out-of-range stored value', () => {
     const db = DatabaseService.getInstance();
     expect(db.getGlobalSettings().gitops_history_retention_days).toBe('30');
@@ -148,32 +154,38 @@ describe('GitOps history retention', () => {
     db.updateGlobalSetting('gitops_history_retention_days', '30');
   });
 
-  it('reads a stored window and falls back to 30 for garbage, zero, negative, a missing row, and a failed read', () => {
+  it('reads a stored window and falls back to 30 for garbage, zero, negative, and a missing row', () => {
     const db = DatabaseService.getInstance();
     db.updateGlobalSetting('gitops_history_retention_days', '45');
     expect(db.getGitOpsHistoryRetentionDays()).toBe(45);
 
-    for (const stored of ['banana', '0', '-3']) {
-      db.updateGlobalSetting('gitops_history_retention_days', stored);
-      expect(db.getGitOpsHistoryRetentionDays(), stored).toBe(30);
-    }
-
-    const developerMode = db.getGlobalSettings().developer_mode;
-    db.getDb().prepare('DELETE FROM global_settings WHERE key = ?').run('gitops_history_retention_days');
-    db.updateGlobalSetting('developer_mode', developerMode);
-    expect(db.getGitOpsHistoryRetentionDays()).toBe(30);
-    db.updateGlobalSetting('gitops_history_retention_days', '30');
-
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      for (const stored of ['banana', '0', '-3']) {
+        db.updateGlobalSetting('gitops_history_retention_days', stored);
+        expect(db.getGitOpsHistoryRetentionDays(), stored).toBe(30);
+      }
+
+      const developerMode = db.getGlobalSettings().developer_mode;
+      db.getDb().prepare('DELETE FROM global_settings WHERE key = ?').run('gitops_history_retention_days');
+      db.updateGlobalSetting('developer_mode', developerMode);
+      expect(db.getGitOpsHistoryRetentionDays()).toBe(30);
+      expect(warn.mock.calls.some((call) => String(call[0]).includes('invalid gitops_history_retention_days'))).toBe(true);
+    } finally {
+      warn.mockRestore();
+      db.updateGlobalSetting('gitops_history_retention_days', '30');
+    }
+  });
+
+  it('throws when the retention setting cannot be read, so the caller can skip the delete', () => {
+    const db = DatabaseService.getInstance();
     const read = vi.spyOn(db, 'getGlobalSettings').mockImplementation(() => {
       throw new Error('settings unavailable');
     });
     try {
-      expect(db.getGitOpsHistoryRetentionDays()).toBe(30);
-      expect(warn.mock.calls.some((call) => String(call[0]).includes('gitops_history_retention_days read failed'))).toBe(true);
+      expect(() => db.getGitOpsHistoryRetentionDays()).toThrow(/settings unavailable/);
     } finally {
       read.mockRestore();
-      warn.mockRestore();
     }
   });
 
@@ -340,7 +352,6 @@ describe('GitOps history retention', () => {
 
   it('bounds each pass to a chunk of rows, so a backlog cannot hold the writer', () => {
     const db = DatabaseService.getInstance().getDb();
-    sweepUntilQuiet();
     // The unchunked alternative deletes the whole backlog in one transaction,
     // holding SQLite's single writer and blocking every other write on the
     // instance for its duration. Rows are written directly rather than through

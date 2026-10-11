@@ -857,10 +857,12 @@ export class MonitorService {
         }
 
         // Separate from the metrics and notification cleanup above, so a failure
-        // there does not skip this prune. A throw in the settings pass skips it
-        // until the next evaluation. A hang in the Docker enumeration above holds
-        // this evaluation, so later ticks do not run the prune until that call
-        // returns.
+        // there does not skip this prune. A throw from the global-settings
+        // evaluation earlier in this cycle does skip it until the next
+        // evaluation, because that cycle never reaches this pass. A hang in the
+        // Docker enumeration above holds this evaluation, so later ticks do not
+        // run the prune until that call returns. A failed read of the window
+        // throws out of the getter, and this catch logs it without deleting.
         try {
             const gitopsHistoryRetentionDays = db.getGitOpsHistoryRetentionDays();
             const gitopsHistoryPruned = db.cleanupOldGitOpsHistory(gitopsHistoryRetentionDays);
