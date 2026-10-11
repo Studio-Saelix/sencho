@@ -34,10 +34,11 @@ export async function classifyImageAge(
   running: readonly string[],
 ): Promise<DriftImageAge> {
   if (running.length === 0) return 'unknown';
-  const [declaredAt, ...runningAt] = await Promise.all([declared, ...running].map((ref) => builtAt(docker, ref)));
-  if (declaredAt === null || runningAt.some((at) => at === null)) return 'unknown';
-  if (runningAt.every((at) => (at as number) > declaredAt)) return 'running-newer';
-  if (runningAt.every((at) => (at as number) < declaredAt)) return 'running-older';
+  const [declaredAt, ...builtTimes] = await Promise.all([declared, ...running].map((ref) => builtAt(docker, ref)));
+  const runningAt = builtTimes.filter((at): at is number => at !== null);
+  if (declaredAt === null || runningAt.length !== builtTimes.length) return 'unknown';
+  if (runningAt.every((at) => at > declaredAt)) return 'running-newer';
+  if (runningAt.every((at) => at < declaredAt)) return 'running-older';
   return 'unknown';
 }
 

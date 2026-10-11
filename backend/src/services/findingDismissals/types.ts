@@ -23,6 +23,15 @@ export type DismissalSurface = (typeof DISMISSAL_SURFACES)[number];
 export const DISMISSAL_MODES = ['until_change', 'days', 'forever'] as const;
 export type DismissalMode = (typeof DISMISSAL_MODES)[number];
 
+export function isDismissalMode(value: unknown): value is DismissalMode {
+    return typeof value === 'string' && (DISMISSAL_MODES as readonly string[]).includes(value);
+}
+
+/** A mode with its expiry: only `days` has one. */
+export type DismissalTiming =
+    | { mode: 'days'; expiresAt: number }
+    | { mode: 'until_change' | 'forever'; expiresAt: null };
+
 export interface FindingDismissalRow {
   id: number;
   node_id: number;

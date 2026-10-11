@@ -1,7 +1,7 @@
 import { useCallback, useState } from 'react';
 import { apiFetch } from '@/lib/api';
 import { toast } from '@/components/ui/toast-store';
-import type { DismissalMode, DismissalSurface, FindingDismissal } from '@/types/findingDismissal';
+import type { DismissalMode, FindingDismissal, HubDismissalSurface } from '@/types/findingDismissal';
 
 /** The server's own `{ error }` sentence when it sent one, else the fallback. */
 async function serverMessage(res: Response, fallback: string): Promise<{ message: string; code: string | null }> {
@@ -44,11 +44,12 @@ export interface DismissalEndpoint {
   remove: (id: number) => string;
 }
 
-interface UseFindingDismissalOptions {
-  /** Which surface's store the dismissal goes to (`/fleet/dismissals/<surface>`). */
-  surface: DismissalSurface;
-  /** Overrides the hub store: the routes are node-scoped, so the request follows the active node. */
-  endpoint?: DismissalEndpoint;
+/** Where the dismissal goes: a hub-owned surface's store, or a node-scoped endpoint. */
+type DismissalTarget =
+  | { surface: HubDismissalSurface; endpoint?: undefined }
+  | { endpoint: DismissalEndpoint; surface?: undefined };
+
+type UseFindingDismissalOptions = DismissalTarget & {
   /** A dismissal was created or already existed; the list updates from it without a refetch. */
   onUpsert: (dismissal: FindingDismissal) => void;
   /**
@@ -60,7 +61,7 @@ interface UseFindingDismissalOptions {
   onRemove: (id: number) => void;
   /** The finding vanished before it could be dismissed, so the list should be re-read. */
   onGone?: () => void;
-}
+};
 
 /**
  * Dismiss and restore findings for the team. One handler for every affordance:
@@ -95,7 +96,14 @@ export function useFindingDismissal({ surface, endpoint, sendSeverity = false, o
           localOnly: endpoint === undefined,
         });
         // A 404 means it is already gone (restored elsewhere, or retired by a later
-        // check): the end state is the one asked for.
+        // check): the end state is the one asked for. A node-scoped route also answers
+        // 404 for a stack or finding that is not there, so that list is re-read
+        // rather than edited on a guess.
+        if (res.status === 404 && endpoint !== undefined && onGone) {
+          toast.info('That dismissal is already gone. Refreshing the list.');
+          onGone();
+          return;
+        }
         if (!res.ok && res.status !== 404) {
           const { message } = await serverMessage(res, 'Could not restore the finding.');
           console.error('[FindingDismissal] restore refused:', res.status);
@@ -109,7 +117,7 @@ export function useFindingDismissal({ surface, endpoint, sendSeverity = false, o
         toast.error('Could not restore the finding.');
       }
     });
-  }, [endpoint, onRemove, track]);
+  }, [endpoint, onRemove, onGone, track]);
 
   const dismiss = useCallback(async (finding: DismissTarget, mode: DismissalMode, days?: number) => {
     await track(finding.id, async () => {

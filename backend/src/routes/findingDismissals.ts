@@ -2,7 +2,7 @@ import { Router, type Request, type Response } from 'express';
 import { DatabaseService } from '../services/DatabaseService';
 import { FindingDismissalStore } from '../services/findingDismissals/FindingDismissalStore';
 import { toFindingDismissal } from '../services/findingDismissals/types';
-import { readDismissalMode } from '../helpers/dismissalMode';
+import { MAX_TARGET_COUNT, readDismissalMode } from '../helpers/dismissalMode';
 import { buildFleetReadiness } from '../services/readiness/readinessAggregator';
 import { parseReadinessKey } from '../services/readiness/readinessDismissals';
 import {
@@ -27,7 +27,6 @@ import { errorMessageForLog } from '../utils/safeLog';
 export const findingDismissalsRouter = Router();
 
 const MAX_FINGERPRINT_LENGTH = 64;
-const MAX_TARGET_COUNT = 10_000_000;
 
 type DismissalBody = Record<string, unknown>;
 

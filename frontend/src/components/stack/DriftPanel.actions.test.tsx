@@ -8,9 +8,15 @@ import { render, screen, fireEvent, waitFor, within } from '@testing-library/rea
 
 vi.mock('@/lib/api', () => ({ apiFetch: vi.fn(), fetchForNode: vi.fn() }));
 vi.mock('@/components/ui/toast-store', () => ({ toast: { success: vi.fn(), error: vi.fn(), info: vi.fn() } }));
-const authBox: { canDeploy: boolean } = { canDeploy: true };
+const authBox: { canDeploy: boolean; canEdit: boolean } = { canDeploy: true, canEdit: true };
 vi.mock('@/context/AuthContext', () => ({
-  useAuth: () => ({ can: (action: string) => action !== 'stack:deploy' || authBox.canDeploy }),
+  useAuth: () => ({
+    can: (action: string) => {
+      if (action === 'stack:deploy') return authBox.canDeploy;
+      if (action === 'stack:edit') return authBox.canEdit;
+      return true;
+    },
+  }),
 }));
 vi.mock('@/context/NodeContext', () => ({
   useNodes: () => ({ activeNode: { id: 1 }, nodes: [{ id: 1, name: 'local' }] }),
@@ -84,6 +90,7 @@ function renderPanel() {
 beforeEach(() => {
   vi.clearAllMocks();
   authBox.canDeploy = true;
+  authBox.canEdit = true;
 });
 
 describe('DriftPanel verbs', () => {
@@ -151,6 +158,109 @@ describe('DriftPanel verbs', () => {
     expect(screen.queryByTestId('drift-verb-start-service')).not.toBeInTheDocument();
     expect(screen.getByTestId('drift-verb-open-editor')).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /^Dismiss/ })).not.toBeInTheDocument();
+  });
+});
+
+describe('DriftPanel verbs without edit authority', () => {
+  it('keeps the deploy verbs but never offers an editor that would do nothing', async () => {
+    authBox.canEdit = false;
+    mockReads(report([finding('ports-mismatch', 'web'), finding('service-undeclared', 'old')]));
+    renderPanel();
+    const rows = await screen.findAllByTestId('drift-finding');
+    expect(within(rows[0]).getByTestId('drift-verb-redeploy')).toBeInTheDocument();
+    expect(screen.queryByTestId('drift-verb-open-editor')).not.toBeInTheDocument();
+    expect(within(rows[1]).queryByRole('button', { name: /Open stack editor/ })).not.toBeInTheDocument();
+  });
+});
+
+describe('DriftPanel when a request fails or the scope changes', () => {
+  it('reports a redeploy that throws, closes the confirm, and still re-checks', async () => {
+    mockReads(report([finding('ports-mismatch', 'web')]));
+    onRedeploy.mockRejectedValueOnce(new Error('boom'));
+    renderPanel();
+    fireEvent.click(await screen.findByTestId('drift-verb-redeploy'));
+    fireEvent.click(await screen.findByRole('button', { name: 'Redeploy' }));
+    await waitFor(() => expect(toast.error).toHaveBeenCalledWith('Could not redeploy the stack.'));
+    await waitFor(() => expect(vi.mocked(apiFetch)).toHaveBeenCalledWith('/stacks/web/drift/recheck', { method: 'POST' }));
+    expect(screen.queryByRole('button', { name: 'Redeploy' })).not.toBeInTheDocument();
+  });
+
+  it('reads the list again when the finding changed under a dismiss, and says so', async () => {
+    const f = finding('ports-mismatch', 'web');
+    mockReads(report([f]));
+    const base = vi.mocked(apiFetch).getMockImplementation()!;
+    vi.mocked(apiFetch).mockImplementation(async (path: string, options?: RequestInit) =>
+      String(path) === '/stacks/web/drift/dismissals' && options?.method === 'POST'
+        ? jsonRes({ error: 'changed', code: 'FINDING_CHANGED' }, false, 409)
+        : base(path, options));
+    renderPanel();
+    fireEvent.click(await screen.findByRole('button', { name: /^Dismiss: web ports/ }));
+    await waitFor(() => expect(toast.info).toHaveBeenCalledWith('That finding just changed, so it was not dismissed.'));
+    await waitFor(() => expect(vi.mocked(apiFetch)).toHaveBeenCalledWith('/stacks/web/drift/recheck', { method: 'POST' }));
+  });
+
+  it('shows the server message and leaves the list alone when Docker cannot be read', async () => {
+    const f = finding('ports-mismatch', 'web');
+    mockReads(report([f]));
+    const base = vi.mocked(apiFetch).getMockImplementation()!;
+    vi.mocked(apiFetch).mockImplementation(async (path: string, options?: RequestInit) =>
+      String(path) === '/stacks/web/drift/dismissals' && options?.method === 'POST'
+        ? jsonRes({ error: 'Docker is unreachable.', code: 'EVIDENCE_UNAVAILABLE' }, false, 503)
+        : base(path, options));
+    renderPanel();
+    fireEvent.click(await screen.findByRole('button', { name: /^Dismiss: web ports/ }));
+    await waitFor(() => expect(toast.error).toHaveBeenCalledWith('Docker is unreachable.'));
+    expect(screen.getByTestId('drift-finding')).toBeInTheDocument();
+    const rechecks = vi.mocked(apiFetch).mock.calls.filter(([path]) => path === '/stacks/web/drift/recheck');
+    expect(rechecks).toHaveLength(0);
+  });
+
+  it('re-reads instead of guessing when a restore finds nothing there', async () => {
+    const f = finding('ports-mismatch', 'web');
+    mockReads(report([f], { dismissals: [dismissal(f)] }), report([f]));
+    const base = vi.mocked(apiFetch).getMockImplementation()!;
+    vi.mocked(apiFetch).mockImplementation(async (path: string, options?: RequestInit) =>
+      String(path) === '/stacks/web/drift/dismissals/7' && options?.method === 'DELETE'
+        ? jsonRes({ error: 'Stack not found' }, false, 404)
+        : base(path, options));
+    renderPanel();
+    fireEvent.click(await screen.findByRole('button', { name: /1 dismissed/ }));
+    fireEvent.click(screen.getByRole('button', { name: 'Restore' }));
+    await waitFor(() => expect(vi.mocked(apiFetch)).toHaveBeenCalledWith('/stacks/web/drift/recheck', { method: 'POST' }));
+    await waitFor(() => expect(screen.getByTestId('drift-finding')).toBeInTheDocument());
+  });
+
+  it('ignores a re-check that finishes after the operator moved to another stack', async () => {
+    const web = finding('ports-mismatch', 'web');
+    const api = finding('service-undeclared', 'api-extra');
+    let finishRecheck: (res: Response) => void = () => undefined;
+    vi.mocked(apiFetch).mockImplementation(async (path: string) => {
+      const url = String(path);
+      if (url.startsWith('/gitops/applications')) return jsonRes({ application: null });
+      if (url === '/stacks/web/drift/recheck') return new Promise<Response>(resolve => { finishRecheck = resolve; });
+      if (url === '/stacks/web/drift') return jsonRes(report([web]));
+      if (url === '/stacks/api/drift') return jsonRes({ ...report([api]), stack: 'api' });
+      return jsonRes({});
+    });
+    const view = render(<DriftPanel stackName="web" onRedeploy={onRedeploy} onEditCompose={onEditCompose} onOpenGitSource={onOpenGitSource} />);
+    await screen.findByTestId('drift-finding');
+    fireEvent.click(screen.getByTestId('drift-recheck-btn'));
+    await waitFor(() => expect(vi.mocked(apiFetch)).toHaveBeenCalledWith('/stacks/web/drift/recheck', { method: 'POST' }));
+
+    view.rerender(<DriftPanel stackName="api" onRedeploy={onRedeploy} onEditCompose={onEditCompose} onOpenGitSource={onOpenGitSource} />);
+    await waitFor(() => expect(screen.getByTestId('drift-finding')).toHaveAttribute('data-kind', 'service-undeclared'));
+    finishRecheck(jsonRes(report([web])));
+    await new Promise(resolve => setTimeout(resolve, 20));
+    expect(screen.getByTestId('drift-finding')).toHaveAttribute('data-kind', 'service-undeclared');
+  });
+
+  it('closes an open redeploy confirm when the stack changes', async () => {
+    mockReads(report([finding('ports-mismatch', 'web')]));
+    const view = renderPanel();
+    fireEvent.click(await screen.findByTestId('drift-verb-redeploy'));
+    await screen.findByRole('button', { name: 'Redeploy' });
+    view.rerender(<DriftPanel stackName="other" onRedeploy={onRedeploy} onEditCompose={onEditCompose} onOpenGitSource={onOpenGitSource} />);
+    await waitFor(() => expect(screen.queryByRole('button', { name: 'Redeploy' })).not.toBeInTheDocument());
   });
 });
 

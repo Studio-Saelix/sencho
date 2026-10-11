@@ -43,7 +43,7 @@ import {
   type DriftDismissal,
   type DriftFindingFacts,
 } from '../services/driftDismissals';
-import { readDismissalMode } from '../helpers/dismissalMode';
+import { MAX_TARGET_COUNT, readDismissalMode } from '../helpers/dismissalMode';
 import { ComposeDoctorService } from '../services/ComposeDoctorService';
 import { RULE_IDS, isPreflightNoteFinding } from '../services/preflight/rules';
 import { parseServiceImages, isPreflightAckActive } from '../utils/preflight-ack-filter';
@@ -1559,7 +1559,7 @@ async function buildDriftPayload(
   // report it as failed.
   return {
     ...report,
-    // Facts only: the verdict and the count above still read every finding.
+    // Facts only: the report's status and finding count still read every finding.
     findings: report.findings.map(f => ({ ...f, ...driftFindingFacts(f) })),
     dismissals: DriftLedgerService.getInstance().getOpenDismissals(nodeId, stackName),
     temporal,
@@ -1600,9 +1600,10 @@ stacksRouter.post('/:stackName/drift/recheck', async (req: Request, res: Respons
 
 /**
  * Dismiss one drift finding for the team, until it changes (or for a set time,
- * or permanently). The finding id names the kind and service; the policy for
- * that kind and the fingerprint come from a fresh read of this stack, never from
- * the request, which only says which state of the finding the operator saw.
+ * or permanently). The finding id names the kind and service; the fingerprint
+ * comes from a fresh read of this stack and the policy from the kind's fixed
+ * table, never from the request, which only says which state of the finding the
+ * operator saw.
  * Stack-scoped deploy authority, the same as the actions drift offers next to it.
  */
 stacksRouter.post('/:stackName/drift/dismissals', async (req: Request, res: Response) => {
@@ -1617,7 +1618,7 @@ stacksRouter.post('/:stackName/drift/dismissals', async (req: Request, res: Resp
   }
   const { fingerprint, count } = record;
   if (typeof fingerprint !== 'string' || fingerprint === '' || fingerprint.length > 64
-    || typeof count !== 'number' || !Number.isInteger(count) || count < 1) {
+    || typeof count !== 'number' || !Number.isInteger(count) || count < 1 || count > MAX_TARGET_COUNT) {
     res.status(400).json({ error: 'fingerprint and count must say which state of the finding was seen' });
     return;
   }
@@ -1632,7 +1633,7 @@ stacksRouter.post('/:stackName/drift/dismissals', async (req: Request, res: Resp
     const report = await buildStackDriftReport(req.nodeId, stackName);
     const outcome = DriftLedgerService.getInstance().dismissFinding(
       req.nodeId, stackName, report, key, { fingerprint, count },
-      { mode: requested.mode, expiresAt: requested.expiresAt, createdBy: auditActorUsername(req), now: Date.now() },
+      { ...requested, createdBy: auditActorUsername(req), now: Date.now() },
     );
     if (!outcome.ok) {
       const refusal = {

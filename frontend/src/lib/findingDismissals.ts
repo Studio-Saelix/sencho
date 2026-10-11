@@ -38,7 +38,7 @@ export const SECURITY_SEVERITY_SCALE: SeverityScale = {
   unverified: [],
 };
 
-/** Drift has one severity, so only the count and the fingerprint can lift a dismissal. */
+/** Drift has one severity, so severity never lifts a dismissal; the count, fingerprint, expiry and policy still can. */
 export const DRIFT_SEVERITY_SCALE: SeverityScale = {
   order: ['warning'],
   unverified: [],

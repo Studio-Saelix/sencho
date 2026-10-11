@@ -1,4 +1,4 @@
-import type { DismissPolicy, FindingDismissal } from '@/types/findingDismissal';
+import type { DismissPolicy } from '@/types/findingDismissal';
 
 // Mirrors the backend drift payload (the frontend never imports backend).
 export type StackDriftStatus = 'in-sync' | 'drifted' | 'missing-runtime' | 'unreachable';
@@ -32,11 +32,12 @@ export type DismissableDriftFinding = StackDriftFinding & {
   fingerprint: string;
   severity: string;
   count: number;
+  dismissPolicy: DismissPolicy;
 };
 
 export function isDismissableDriftFinding(finding: StackDriftFinding): finding is DismissableDriftFinding {
   return finding.id !== undefined && finding.fingerprint !== undefined
-    && finding.severity !== undefined && finding.count !== undefined;
+    && finding.severity !== undefined && finding.count !== undefined && finding.dismissPolicy !== undefined;
 }
 
 export interface DriftTemporal {
@@ -52,5 +53,3 @@ export interface DriftLedgerEntry {
   detectedAt: number;
   resolvedAt: number | null;
 }
-
-export type DriftDismissal = FindingDismissal;

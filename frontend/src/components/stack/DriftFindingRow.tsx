@@ -44,7 +44,7 @@ export function DriftFindingRow({ finding, resolution, controls }: {
 }) {
   const gitPath = finding.kind === 'managed-path-conflict';
   const { primary, secondary } = resolution;
-  const dismissable = isDismissableDriftFinding(finding) && finding.dismissPolicy !== undefined;
+  const dismissable = isDismissableDriftFinding(finding);
 
   const verbs = (
     <>
@@ -84,7 +84,7 @@ export function DriftFindingRow({ finding, resolution, controls }: {
         </div>
         {dismissable ? (
           <FindingRowActions
-            dismissPolicy={finding.dismissPolicy ?? 'none'}
+            dismissPolicy={finding.dismissPolicy}
             canDismiss={controls.canDismiss}
             pending={controls.isDismissing(finding)}
             subject={`${finding.service || DRIFT_FINDING_LABEL[finding.kind]} ${DRIFT_FINDING_LABEL[finding.kind]}`}

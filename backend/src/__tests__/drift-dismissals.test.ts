@@ -99,6 +99,15 @@ describe('drift fingerprint', () => {
     expect(driftFindingFacts({ ...base, service: 'api' }).fingerprint).not.toBe(a);
   });
 
+  it('ignores the derived image age, so a Docker cache change never resurfaces a dismissal', () => {
+    const a = driftFindingFacts(base).fingerprint;
+    // A published finding carries the age beside its structured facts.
+    const aged = { ...base, detail: 'd', imageAge: 'running-newer' as const };
+    expect(driftFindingFacts(aged).fingerprint).toBe(a);
+    const unknownAge = { ...aged, imageAge: 'unknown' as const };
+    expect(driftFindingFacts(unknownAge).fingerprint).toBe(a);
+  });
+
   it('does not let one field spill into the next', () => {
     expect(driftFindingFacts({ ...base, expected: 'a', actual: 'bc' }).fingerprint)
       .not.toBe(driftFindingFacts({ ...base, expected: 'ab', actual: 'c' }).fingerprint);
@@ -335,6 +344,52 @@ describe('POST /api/stacks/:stackName/drift/dismissals', () => {
     expect(second.body).toMatchObject({ kept: true, dismissal: { id: first.body.dismissal.id, mode: 'forever' } });
   });
 
+  it('replaces a weaker or equal dismissal, and a stronger one that no longer covers the finding', async () => {
+    stubRuntime('nginx:1.26');
+    const echoed = await seen();
+    const first = await post({ ...echoed, mode: 'until_change' });
+    // Equal rank does not keep: the second click is a write.
+    expect((await post({ ...echoed, mode: 'until_change' })).body.kept).toBe(false);
+    const upgraded = await post({ ...echoed, mode: 'forever' });
+    expect(upgraded.status).toBe(201);
+    expect(upgraded.body).toMatchObject({ kept: false, dismissal: { id: first.body.dismissal.id, mode: 'forever' } });
+
+    // The running image changes, so the stored fingerprint no longer covers the finding.
+    vi.restoreAllMocks();
+    stubRuntime('nginx:1.28');
+    const changed = await seen();
+    expect(changed.fingerprint).not.toBe(echoed.fingerprint);
+    const again = await post({ ...changed, mode: 'until_change' });
+    expect(again.status).toBe(201);
+    expect(again.body).toMatchObject({ kept: false, dismissal: { mode: 'until_change', fingerprint: changed.fingerprint } });
+  });
+
+  it('publishes a new fingerprint for a changed finding while the dismissal keeps the one it was made against', async () => {
+    stubRuntime('nginx:1.26');
+    const echoed = await seen();
+    await post({ ...echoed, mode: 'until_change' });
+
+    vi.restoreAllMocks();
+    stubRuntime('nginx:1.28');
+    const after = await get();
+    expect(after.body.findings[0].fingerprint).not.toBe(echoed.fingerprint);
+    expect(after.body.dismissals[0].fingerprint).toBe(echoed.fingerprint);
+  });
+
+  it('only touches the dismissed finding: a sibling open row stays open and no check is stamped', async () => {
+    stubRuntime('nginx:1.26');
+    const db = DatabaseService.getInstance();
+    const sibling = db.insertDriftFinding({
+      node_id: nodeId, stack_name: STACK, service: 'api', finding_type: 'ports-mismatch', severity: 'warning',
+      message: 'm', expected_json: null, actual_json: null, detected_at: 1,
+    });
+    const before = db.getStackDossier(nodeId, STACK);
+    const echoed = await seen();
+    expect((await post({ ...echoed, mode: 'until_change' })).status).toBe(201);
+    expect(db.getDriftFinding(sibling)?.resolved_at).toBeNull();
+    expect(db.getStackDossier(nodeId, STACK)).toEqual(before);
+  });
+
   it('accepts a timed dismissal with an expiry, and refuses a malformed one', async () => {
     stubRuntime('nginx:1.26');
     const echoed = await seen();
@@ -365,6 +420,12 @@ describe('POST /api/stacks/:stackName/drift/dismissals', () => {
     const res = await post({ findingId: KEY, fingerprint: 'abc', count: 1, mode: 'until_change' });
     expect(res.status).toBe(503);
     expect(res.body.code).toBe('EVIDENCE_UNAVAILABLE');
+  });
+
+  it('refuses a count beyond the shared bound', async () => {
+    stubRuntime('nginx:1.26');
+    const echoed = await seen();
+    expect((await post({ ...echoed, count: 10_000_001, mode: 'until_change' })).status).toBe(400);
   });
 
   it('answers 400 for a managed-path conflict, an unreadable id, or a missing fingerprint', async () => {

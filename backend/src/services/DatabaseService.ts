@@ -24,6 +24,7 @@ import type { RollbackOperationKind } from '../types/rollbackGeneration';
 import { collectImageIds, parseServicesJsonStrict } from './recoveryServicesJson';
 import { GITOPS_DUE_INDEX_SQL, GITOPS_SCHEMA_SQL } from './gitops/schema';
 import { PLACEMENT_POLICY_REASONS } from './gitops/placementPolicy';
+import type { DismissalMode } from './findingDismissals/types';
 
 export type { SnapshotFileReadResult } from '../helpers/snapshotFileDecrypt';
 export type { RollbackOperationKind } from '../types/rollbackGeneration';
@@ -458,7 +459,7 @@ export interface StackDriftFindingRow {
     actual_json: string | null;
     detected_at: number;
     resolved_at: number | null;
-    /** Set while a team dismissal covers this open finding; all six move together. */
+    /** A team dismissal on this finding, kept after the row closes. All six columns are written and cleared together. */
     dismissed_by: string | null;
     dismissed_at: number | null;
     dismissed_fingerprint: string | null;
@@ -4619,7 +4620,7 @@ stmt.run('gitops_schema_version', '1');
 
     /** Record a dismissal on an open finding. Closed rows are never dismissed. */
     public setDriftFindingDismissal(id: number, d: {
-        by: string; at: number; fingerprint: string; mode: string; expiresAt: number | null; count: number;
+        by: string; at: number; fingerprint: string; mode: DismissalMode; expiresAt: number | null; count: number;
     }): boolean {
         return this.db.prepare(
             `UPDATE stack_drift_findings

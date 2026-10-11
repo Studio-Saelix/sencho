@@ -53,6 +53,13 @@ describe('resolveDriftFinding', () => {
     expect(resolve('service-missing', viewer).secondary).toEqual([]);
   });
 
+  it('drops the editor when the account cannot edit the stack, so no verb is a dead button', () => {
+    const deployer = { ...FULL, hasEditor: false };
+    expect(resolve('ports-mismatch', deployer).primary?.kind).toBe('redeploy');
+    expect(resolve('ports-mismatch', deployer).secondary).toEqual([]);
+    expect(resolve('service-undeclared', deployer).primary).toBeNull();
+  });
+
   it('drops redeploy when the host mounted no deploy handler but keeps start-service', () => {
     const ctx = { ...FULL, hasRedeploy: false };
     expect(resolve('ports-mismatch', ctx).primary?.kind).toBe('open-editor');

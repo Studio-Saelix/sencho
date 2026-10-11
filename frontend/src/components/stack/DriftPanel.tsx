@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Check, TriangleAlert, CircleSlash, WifiOff, RefreshCw,
   FileClock, FileCheck2, FileQuestion, type LucideIcon,
@@ -310,6 +310,11 @@ export default function DriftPanel({ stackName, onRedeploy, onEditCompose, onOpe
   const [busyVerb, setBusyVerb] = useState<string | null>(null);
   const [redeployTarget, setRedeployTarget] = useState<{ finding: StackDriftFinding; verb: Extract<DriftVerb, { kind: 'redeploy' }> } | null>(null);
   const [redeploying, setRedeploying] = useState(false);
+  // The stack and node the panel shows right now. A request that outlives a
+  // switch compares the scope it started in against this, so a late answer never
+  // lands on another stack's report.
+  const scopeKey = `${nodeId ?? 'none'}:${stackName}`;
+  const liveScope = useRef(scopeKey);
 
   // Passive load when the stack OR active node changes (the same stack can exist on
   // two nodes), and on an explicit retry. Read-only: it never writes the ledger, so
@@ -323,8 +328,10 @@ export default function DriftPanel({ stackName, onRedeploy, onEditCompose, onOpe
     // previous node's report, which both probes an identity that cannot exist and
     // shows a state belonging to the node the operator just left. `loading` is set
     // below for the same cycle, so the tab reads as checking rather than as wrong.
+    liveScope.current = `${nodeId ?? 'none'}:${stackName}`;
     setReport(null);
     setReportNodeId(undefined);
+    setRedeployTarget(null);
     const run = async () => {
       setLoading(true);
       setLoadError(false);
@@ -362,7 +369,9 @@ export default function DriftPanel({ stackName, onRedeploy, onEditCompose, onOpe
         toast.error('Failed to re-check drift.');
         return;
       }
-      setReport((await res.json()) as StackDriftReport);
+      const fresh = (await res.json()) as StackDriftReport;
+      if (liveScope.current !== scopeKey) return;
+      setReport(fresh);
       setReportNodeId(nodeId);
       setLoadError(false);
     } catch {
@@ -377,13 +386,18 @@ export default function DriftPanel({ stackName, onRedeploy, onEditCompose, onOpe
     remove: (id: number) => `/stacks/${encodeURIComponent(stackName)}/drift/dismissals/${id}`,
   }), [stackName]);
   const { dismiss, restore, isPending } = useFindingDismissal({
-    surface: 'drift',
     endpoint: dismissalEndpoint,
-    onUpsert: dismissal => setReport(prev => prev && ({
-      ...prev,
-      dismissals: [...(prev.dismissals ?? []).filter(d => d.findingKey !== dismissal.findingKey), dismissal],
-    })),
-    onRemove: id => setReport(prev => prev && ({ ...prev, dismissals: (prev.dismissals ?? []).filter(d => d.id !== id) })),
+    onUpsert: dismissal => {
+      if (liveScope.current !== scopeKey) return;
+      setReport(prev => prev && ({
+        ...prev,
+        dismissals: [...(prev.dismissals ?? []).filter(d => d.findingKey !== dismissal.findingKey), dismissal],
+      }));
+    },
+    onRemove: id => {
+      if (liveScope.current !== scopeKey) return;
+      setReport(prev => prev && ({ ...prev, dismissals: (prev.dismissals ?? []).filter(d => d.id !== id) }));
+    },
     onGone: () => { void recheck(); },
   });
 
@@ -466,7 +480,9 @@ export default function DriftPanel({ stackName, onRedeploy, onEditCompose, onOpe
   const reportIsCurrent = reportNodeId === nodeId;
   // Verbs and Dismiss act on this node's stack, so they wait for a report read from it.
   const canDeploy = reportIsCurrent && can('stack:deploy', 'stack', stackName, nodeId);
-  const verbContext = { canDeploy, hasRedeploy: onRedeploy !== undefined, hasEditor: onEditCompose !== undefined, hasGitSource: onOpenGitSource !== undefined };
+  // Open stack editor is a no-op without edit authority, so the verb needs it too.
+  const canEdit = reportIsCurrent && can('stack:edit', 'stack', stackName, nodeId);
+  const verbContext = { canDeploy, hasRedeploy: onRedeploy !== undefined, hasEditor: canEdit && onEditCompose !== undefined, hasGitSource: onOpenGitSource !== undefined };
   const findings = report?.findings ?? [];
   const { dismissed } = partitionFindings(findings.filter(isDismissableDriftFinding), report?.dismissals ?? [], now, DRIFT_SEVERITY_SCALE);
   const dismissedIds = new Set(dismissed.map(item => item.finding.id));

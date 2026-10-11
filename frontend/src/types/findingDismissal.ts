@@ -8,8 +8,15 @@ export type DismissalMode = 'until_change' | 'days' | 'forever';
  */
 export type DismissPolicy = 'none' | 'timed' | 'any';
 
-/** The surfaces that keep dismissals. Mirrors the backend `DismissalSurface`. */
+/**
+ * The surfaces that keep dismissals. The hub store (the backend `DismissalSurface`)
+ * holds the first three; `drift` dismissals live on the node's stack ledger and
+ * are never sent to `/fleet/dismissals`.
+ */
 export type DismissalSurface = 'readiness' | 'networking' | 'security' | 'drift';
+
+/** The surfaces whose dismissals the hub store keeps. */
+export type HubDismissalSurface = Exclude<DismissalSurface, 'drift'>;
 
 /** One team dismissal as the server publishes it. */
 export interface FindingDismissal {

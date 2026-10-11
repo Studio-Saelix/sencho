@@ -1,6 +1,6 @@
 import { createHash } from 'crypto';
 import type { DismissPolicy } from './readiness/types';
-import type { DismissalMode } from './findingDismissals/types';
+import { isDismissalMode, type DismissalMode } from './findingDismissals/types';
 import type { DriftFindingKind } from './DriftDetectionService';
 import type { StackDriftFindingRow } from './DatabaseService';
 
@@ -110,16 +110,6 @@ export function driftFindingFacts(finding: FactsInput): DriftFindingFacts {
   };
 }
 
-/** The ledger columns a dismissal writes. */
-export interface DriftDismissalColumns {
-  dismissed_by: string;
-  dismissed_at: number;
-  dismissed_fingerprint: string;
-  dismissed_mode: DismissalMode;
-  dismissed_expires_at: number | null;
-  dismissed_count: number;
-}
-
 /** The wire shape the frontend partitions against; the same fields as a hub dismissal. */
 export interface DriftDismissal {
   id: number;
@@ -133,10 +123,6 @@ export interface DriftDismissal {
   expiresAt: number | null;
   createdBy: string;
   createdAt: number;
-}
-
-function isDismissalMode(value: unknown): value is DismissalMode {
-  return value === 'until_change' || value === 'days' || value === 'forever';
 }
 
 /** The dismissal a ledger row carries, or null when it has none (or one this build cannot read). */
