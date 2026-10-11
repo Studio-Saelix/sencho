@@ -35,6 +35,7 @@ const SAFE_SETTING_KEYS = [
     'metrics_retention_hours',
     'log_retention_days',
     'audit_retention_days',
+    'gitops_history_retention_days',
     'mesh_auto_recreate',
     'scan_history_per_image_limit',
     'cloud_backup_provider',

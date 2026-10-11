@@ -67,6 +67,7 @@ const FULL_SETTINGS: Record<string, string> = {
     env_block_deploy_on_missing_required: '0',
     auto_create_missing_external_networks: '0',
     gitops_artifact_retry_interval_mins: '5',
+    gitops_history_retention_days: '30',
 };
 
 function patchedKeys(): string[] {
@@ -129,7 +130,7 @@ describe('split section save payloads', () => {
         ]);
     });
 
-    it('GitOpsSection patches only the artifact retry interval', async () => {
+    it('GitOpsSection patches only the GitOps section keys', async () => {
         // The polling control saves to its own endpoint, and this file's
         // patchedKeys() reads the last PATCH, so the capability is off here to
         // keep that control out of the way and leave one PATCH to inspect.
@@ -140,7 +141,7 @@ describe('split section save payloads', () => {
         fireEvent.blur(screen.getByRole('spinbutton'));
         fireEvent.click(save);
         await waitFor(() => expect(mockedFetch.mock.calls.some(c => c[1]?.method === 'PATCH')).toBe(true));
-        expect(patchedKeys()).toEqual(['gitops_artifact_retry_interval_mins']);
+        expect(patchedKeys()).toEqual(['gitops_artifact_retry_interval_mins', 'gitops_history_retention_days']);
     });
 
     it('DockerStorageSection patches only docker and storage keys', async () => {

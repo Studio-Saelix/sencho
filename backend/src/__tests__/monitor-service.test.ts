@@ -8,7 +8,8 @@ import { installArcstatsFsMock, arcstatsBody, DEFAULT_ARC_PATH, type ArcstatsFsM
 // ── Hoisted mocks ──────────────────────────────────────────────────────
 
 const { mockGetGlobalSettings, mockGetNodes, mockGetStackAlerts, mockAddContainerMetric,
-  mockCleanupOldMetrics, mockCleanupOldNotifications, mockCleanupOldAuditLogs,
+  mockCleanupOldMetrics, mockCleanupOldNotifications, mockCleanupOldAuditLogs, mockCleanupOldDeliveryEvents,
+  mockGetGitOpsHistoryRetentionDays, mockCleanupOldGitOpsHistory,
   mockUpdateStackAlertLastFired, mockGetStackAlertServiceCooldown,
   mockHasAnyStackAlertServiceCooldown, mockUpsertStackAlertServiceCooldown,
   mockGetSystemState, mockSetSystemState,
@@ -34,6 +35,9 @@ const { mockGetGlobalSettings, mockGetNodes, mockGetStackAlerts, mockAddContaine
   mockCleanupOldMetrics: vi.fn(),
   mockCleanupOldNotifications: vi.fn(),
   mockCleanupOldAuditLogs: vi.fn(),
+  mockCleanupOldDeliveryEvents: vi.fn(),
+  mockGetGitOpsHistoryRetentionDays: vi.fn().mockReturnValue(45),
+  mockCleanupOldGitOpsHistory: vi.fn().mockReturnValue({ history: 0, outbox: 0, historyRemaining: null, outboxRemaining: null }),
   mockUpdateStackAlertLastFired: vi.fn(),
   mockGetStackAlertServiceCooldown: vi.fn().mockReturnValue(null),
   mockHasAnyStackAlertServiceCooldown: vi.fn().mockReturnValue(false),
@@ -83,6 +87,9 @@ vi.mock('../services/DatabaseService', () => ({
       cleanupOldMetrics: mockCleanupOldMetrics,
       cleanupOldNotifications: mockCleanupOldNotifications,
       cleanupOldAuditLogs: mockCleanupOldAuditLogs,
+      cleanupOldDeliveryEvents: mockCleanupOldDeliveryEvents,
+      getGitOpsHistoryRetentionDays: mockGetGitOpsHistoryRetentionDays,
+      cleanupOldGitOpsHistory: mockCleanupOldGitOpsHistory,
       updateStackAlertLastFired: mockUpdateStackAlertLastFired,
       getStackAlertServiceCooldown: mockGetStackAlertServiceCooldown,
       hasAnyStackAlertServiceCooldown: mockHasAnyStackAlertServiceCooldown,
@@ -1164,6 +1171,10 @@ describe('MonitorService - cleanup triggers', () => {
     expect(mockCleanupOldMetrics).toHaveBeenCalledWith(48);
     expect(mockCleanupOldNotifications).toHaveBeenCalledWith(7);
     expect(mockCleanupOldAuditLogs).toHaveBeenCalledWith(30);
+    // The history window is read through its own getter, which applies the
+    // default and the ceiling; the cleanup pass receives that value.
+    expect(mockGetGitOpsHistoryRetentionDays).toHaveBeenCalled();
+    expect(mockCleanupOldGitOpsHistory).toHaveBeenCalledWith(45);
   });
 
   it('uses defaults when settings are NaN', async () => {
@@ -1181,6 +1192,66 @@ describe('MonitorService - cleanup triggers', () => {
     expect(mockCleanupOldMetrics).toHaveBeenCalledWith(24);
     expect(mockCleanupOldNotifications).toHaveBeenCalledWith(30);
     expect(mockCleanupOldAuditLogs).toHaveBeenCalledWith(90);
+  });
+
+  it('still prunes GitOps history when an unrelated cleanup step fails', async () => {
+    mockGetNodes.mockReturnValue([]);
+    mockGetStackAlerts.mockReturnValue([]);
+    mockGetGlobalSettings.mockReturnValue({});
+    // The metrics/notifications/audit/scan block is one try/catch. A failure
+    // there must not disable the only bound on the insert-only GitOps tables,
+    // so the history prune has its own.
+    mockCleanupOldMetrics.mockImplementationOnce(() => {
+      throw new Error('metrics cleanup failed');
+    });
+
+    const svc = MonitorService.getInstance();
+    await (svc as any).evaluate();
+
+    expect(mockCleanupOldGitOpsHistory).toHaveBeenCalledWith(45);
+  });
+
+  it('finishes the evaluation when the GitOps history prune throws', async () => {
+    mockGetNodes.mockReturnValue([]);
+    mockGetStackAlerts.mockReturnValue([]);
+    mockGetGlobalSettings.mockReturnValue({});
+    mockCleanupOldGitOpsHistory.mockImplementationOnce(() => {
+      throw new Error('gitops history prune failed');
+    });
+    const svc = MonitorService.getInstance();
+    const sweep = vi.spyOn(svc as unknown as { sweepStaleUpdateTrackers: () => void }, 'sweepStaleUpdateTrackers')
+      .mockImplementation(() => {});
+    try {
+      await (svc as unknown as { evaluate: () => Promise<void> }).evaluate();
+      expect(mockCleanupOldGitOpsHistory).toHaveBeenCalledWith(45);
+      expect(sweep).toHaveBeenCalled();
+      expect((svc as unknown as { isProcessing: boolean }).isProcessing).toBe(false);
+    } finally {
+      sweep.mockRestore();
+    }
+  });
+
+  it('skips the GitOps history prune when the retention read throws', async () => {
+    mockGetNodes.mockReturnValue([]);
+    mockGetStackAlerts.mockReturnValue([]);
+    mockGetGlobalSettings.mockReturnValue({});
+    mockGetGitOpsHistoryRetentionDays.mockImplementationOnce(() => {
+      throw new Error('settings unavailable');
+    });
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const svc = MonitorService.getInstance();
+    const sweep = vi.spyOn(svc as unknown as { sweepStaleUpdateTrackers: () => void }, 'sweepStaleUpdateTrackers')
+      .mockImplementation(() => {});
+    try {
+      await (svc as unknown as { evaluate: () => Promise<void> }).evaluate();
+      expect(mockCleanupOldGitOpsHistory).not.toHaveBeenCalled();
+      expect(error.mock.calls.some((call) => String(call[0]).includes('failed to cleanup GitOps history'))).toBe(true);
+      expect(sweep).toHaveBeenCalled();
+      expect((svc as unknown as { isProcessing: boolean }).isProcessing).toBe(false);
+    } finally {
+      sweep.mockRestore();
+      error.mockRestore();
+    }
   });
 });
 
