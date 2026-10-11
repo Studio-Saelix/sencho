@@ -5683,7 +5683,10 @@ stmt.run('gitops_schema_version', '1');
         daysToKeep = DEFAULT_GITOPS_HISTORY_RETENTION_DAYS,
     ): { history: number; outbox: number; historyRemaining: number | null; outboxRemaining: number | null } {
         const days = Number.isFinite(daysToKeep) && daysToKeep > 0
-            ? Math.min(Math.floor(daysToKeep), MAX_GITOPS_HISTORY_RETENTION_DAYS)
+            // Floor before the guard, not after it: a fraction between 0 and 1
+            // floors to 0, which is not an off value and would delete everything
+            // non-exempt.
+            ? Math.min(Math.max(Math.floor(daysToKeep), 1), MAX_GITOPS_HISTORY_RETENTION_DAYS)
             : DEFAULT_GITOPS_HISTORY_RETENTION_DAYS;
         const cutoff = Date.now() - (days * 24 * 60 * 60 * 1000);
         const undrainedCutoff = cutoff - (UNDRAINED_OUTBOX_GRACE_DAYS * 24 * 60 * 60 * 1000);

@@ -106,10 +106,13 @@ describe('GitOpsSection', () => {
         await waitFor(() => expect(chipShowing('17')).toBeInTheDocument());
         // The history window reads the same payload and renders its own stored value.
         expect(screen.getByText('Keep GitOps history for')).toBeInTheDocument();
-        expect(screen.getByText(/newest row for each live application/)).toBeInTheDocument();
-        expect(screen.getByText(/rows inside the window/)).toBeInTheDocument();
-        expect(screen.getByText(/unfinished attempt is kept past the window only when it is that newest row/)).toBeInTheDocument();
-        expect(screen.getByText(/window under about 3 days/)).toBeInTheDocument();
+        // The helper states what the window governs and where bell entries
+        // actually come from. Asserted on substance, not on whole sentences,
+        // so a copy edit does not need a test change. The History subtitle
+        // and the chip suffix share phrases with the helper, so each match
+        // below is on text the helper alone carries.
+        expect(screen.getByText(/before older entries are pruned/)).toBeInTheDocument();
+        expect(screen.getByText(/follow the Notification log window/)).toBeInTheDocument();
         expect(screen.getByText('days')).toBeInTheDocument();
         await waitFor(() => expect(chipShowing('45')).toBeInTheDocument());
     });

@@ -350,6 +350,23 @@ describe('GitOps history retention', () => {
     expect(remainingIdsFor(db, app)).toEqual([freshId]);
   });
 
+  it('clamps a fraction below one day to a day rather than to nothing', () => {
+    const db = DatabaseService.getInstance().getDb();
+    const now = Date.now();
+    const app = 'app-retention-fraction';
+    const olderId = writeRow('op-retention-fraction-old', now - 12 * 60 * 60 * 1000, { applicationId: app });
+    const freshId = writeRow('op-retention-fraction-fresh', now - 1 * 60 * 1000, { applicationId: app });
+
+    // 0.5 passes a `> 0` guard and floors to 0, which as a cutoff is now and
+    // deletes everything not exempt. One day is the smallest real window, so
+    // the 12-hour-old row survives a clamped pass and would not survive a
+    // floored one. Asserted on this application's rows rather than on the
+    // returned count, which also covers whatever an earlier test left behind.
+    DatabaseService.getInstance().cleanupOldGitOpsHistory(0.5);
+
+    expect(remainingIdsFor(db, app)).toEqual([freshId, olderId]);
+  });
+
   it('bounds each pass to a chunk of rows, so a backlog cannot hold the writer', () => {
     const db = DatabaseService.getInstance().getDb();
     // The unchunked alternative deletes the whole backlog in one transaction,

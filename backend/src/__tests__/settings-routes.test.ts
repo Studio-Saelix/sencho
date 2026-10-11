@@ -257,9 +257,12 @@ describe('gitops_history_retention_days (GitOps history and outbox retention)', 
       .post('/api/settings')
       .set('Cookie', adminCookie)
       .send({ key: 'gitops_history_retention_days', value: '90' });
-    expect(res.status).toBe(200);
-    expect(DatabaseService.getInstance().getGlobalSettings().gitops_history_retention_days).toBe('90');
-    DatabaseService.getInstance().updateGlobalSetting('gitops_history_retention_days', '30');
+    try {
+      expect(res.status).toBe(200);
+      expect(DatabaseService.getInstance().getGlobalSettings().gitops_history_retention_days).toBe('90');
+    } finally {
+      DatabaseService.getInstance().updateGlobalSetting('gitops_history_retention_days', '30');
+    }
   });
 
   it('rejects an out-of-range value (400) and does not write it', async () => {
@@ -283,15 +286,20 @@ describe('gitops_history_retention_days (GitOps history and outbox retention)', 
 
   it('accepts the bounds the settings page saves', async () => {
     // The page PATCHes the stored string. 1 and 365 are the schema edges.
-    for (const value of ['1', '365']) {
-      const res = await request(app)
-        .patch('/api/settings')
-        .set('Cookie', adminCookie)
-        .send({ gitops_history_retention_days: value });
-      expect(res.status, value).toBe(200);
-      expect(DatabaseService.getInstance().getGlobalSettings().gitops_history_retention_days).toBe(value);
+    // Restore in a finally: a failed assertion would otherwise leave the
+    // shared test database on the last value this test wrote.
+    try {
+      for (const value of ['1', '365']) {
+        const res = await request(app)
+          .patch('/api/settings')
+          .set('Cookie', adminCookie)
+          .send({ gitops_history_retention_days: value });
+        expect(res.status, value).toBe(200);
+        expect(DatabaseService.getInstance().getGlobalSettings().gitops_history_retention_days).toBe(value);
+      }
+    } finally {
+      DatabaseService.getInstance().updateGlobalSetting('gitops_history_retention_days', '30');
     }
-    DatabaseService.getInstance().updateGlobalSetting('gitops_history_retention_days', '30');
   });
 
   it('rejects an off value, a value past the ceiling, and a non-numeric value on PATCH', async () => {
