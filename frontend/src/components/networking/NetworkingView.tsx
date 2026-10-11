@@ -450,7 +450,7 @@ export function NetworkingView({ headerActions }: NetworkingViewProps) {
                   <TableHead className="w-20">Severity</TableHead>
                   <TableHead>Finding</TableHead>
                   <TableHead>Stack</TableHead>
-                  <TableHead className="text-right">Action</TableHead>
+                  <TableHead className="w-64 text-right">Action</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
@@ -463,7 +463,7 @@ export function NetworkingView({ headerActions }: NetworkingViewProps) {
                     </TableCell>
                     <TableCell><NetworkingFindingText finding={finding} showMessage={false} /></TableCell>
                     <TableCell className="font-mono text-xs text-stat-subtitle">{finding.stack ?? finding.network ?? ''}</TableCell>
-                    <TableCell className="text-right">
+                    <TableCell className="w-64 text-right">
                       <NetworkingFindingActions finding={finding} controls={findingControls} />
                     </TableCell>
                   </TableRow>

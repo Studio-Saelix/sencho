@@ -1,7 +1,5 @@
 import { useEffect, useState } from 'react';
 import { Button } from '@/components/ui/button';
-import { FINDING_ROW_PRIMARY_CLASS } from '@/components/ui/finding-row-actions';
-import { cn } from '@/lib/utils';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { toast } from '@/components/ui/toast-store';
 import { useExposureIntent } from '@/hooks/useExposureIntent';
@@ -46,7 +44,7 @@ export function SetExposureIntentPopover({ stack, service, nodeId, label, onSave
   return (
     <Popover open={open} onOpenChange={setOpen}>
       <PopoverTrigger asChild>
-        <Button variant="outline" size="sm" className={cn(FINDING_ROW_PRIMARY_CLASS)} data-testid={`finding-verb-${finding.id}`}>
+        <Button variant="ghost" size="sm" className="h-7 px-2 text-xs max-md:min-h-11" data-testid={`finding-verb-${finding.id}`}>
           {label}
         </Button>
       </PopoverTrigger>

@@ -19,7 +19,7 @@ import {
 } from '@/types/readiness';
 import { ALL, EMPTY_FINDINGS_FILTER, VERDICT_OPTIONS, filterFindings, type FindingsFilter } from './findingsFilter';
 import { TONE_CHIP, TONE_DOT, TONE_ROW, codeCopy, codeRemediation, domainMeta, stateMeta } from '../readinessMeta';
-import { FINDING_ROW_PRIMARY_CLASS, FindingRowActions } from '@/components/ui/finding-row-actions';
+import { FindingRowActions } from '@/components/ui/finding-row-actions';
 import { DismissedSection, type DismissedItem } from '@/components/ui/dismissed-section';
 import type { DismissalMode, FindingDismissal } from '@/types/findingDismissal';
 import type { DismissedFinding } from '@/lib/findingDismissals';
@@ -349,9 +349,9 @@ function FindingRow({ finding, nodeName, action, onOpen, verb, canDismiss, dismi
         >
           {verb ? (
             <BusyButton
-              variant="outline"
+              variant="ghost"
               size="sm"
-              className={cn(FINDING_ROW_PRIMARY_CLASS)}
+              className="h-auto min-h-7 max-w-[8rem] whitespace-normal px-2 py-1 text-right text-xs leading-tight text-brand hover:text-brand"
               pending={verb.busy}
               aria-label={`${verb.label}: ${codeCopy(finding.code)}`}
               onClick={verb.run}
@@ -360,13 +360,13 @@ function FindingRow({ finding, nodeName, action, onOpen, verb, canDismiss, dismi
             </BusyButton>
           ) : action && (
             <Button
-              variant="outline"
+              variant="ghost"
               size="sm"
-              className={cn(FINDING_ROW_PRIMARY_CLASS)}
+              className="h-7 whitespace-nowrap px-2 text-xs text-stat-subtitle hover:text-stat-value"
               onClick={() => onOpen(finding)}
             >
               {action}
-              <ArrowRight className="ml-1 h-3.5 w-3.5 shrink-0" strokeWidth={1.5} />
+              <ArrowRight className="ml-1 h-3.5 w-3.5" strokeWidth={1.5} />
             </Button>
           )}
         </FindingRowActions>
