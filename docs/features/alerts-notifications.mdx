@@ -179,7 +179,7 @@ All non-empty matchers must match (AND). Suppressed alerts are still written to 
 
 Rules you create on the control instance replicate to remote nodes so alerts emitted on a remote stack honor the same suppression. Replication is best-effort. Remotes that do not support weekly windows do not receive scheduled replicas as all-day mutes: Sencho skips the push and attempts to remove any prior replica. If a remote is unreachable, cleanup may stay pending until connectivity returns and you re-save or clear the rule. Before downgrading a node past a release that introduced weekly windows, clear every weekly window (or disable those rules) so an older binary does not treat them as always-on.
 
-From the bell, admins can open a row menu and choose **Mute this category**, **Mute notifications like this**, or **Mute this stack** to create a quick rule with default **Both** targeting and no weekly window. The same presets are available from stack menus (sidebar, stack header, activity tab), fleet node cards, and label groups.
+From the bell and from the **Recent alerts** card on Home, admins can open a row menu and choose **Mute this category**, **Mute notifications like this**, or **Mute this stack** to create a quick rule with default **Both** targeting and no weekly window. The same presets are available from stack menus (sidebar, stack header, activity tab), fleet node cards, and label groups.
 
 The masthead carries `SCOPE` (`global`), `RULES` (total), and `ACTIVE` (count).
 
@@ -328,7 +328,7 @@ Each row carries:
 - A **severity icon** in the same hue: `Info`, `AlertTriangle`, or `AlertOctagon`.
 - The **message body**, slightly dimmer once read.
 - A **kicker line** below the message with an optional **node-name pill** (only rendered for multi-node fleets), a `·` separator, and a relative timestamp (`just now`, `Nm ago`, `Nh ago`, `yesterday`, then a short locale date).
-- A **dismiss** target on hover, top-right.
+- **Row actions** at the top right, shown on hover or keyboard focus (always visible on a phone): a **Mute options** menu for admins (the presets above), **Mark read** on unread rows, and **Dismiss**, which deletes the row. **Mark read** and **Mute options** act in place, so the popover stays open and the row does not open its stack. Read state is shared by everyone on the node, the same as **Mark all read**.
 
 There is no level chip in the row; the rail color and icon do that work. Rows whose payload carries a `stack_name` become click targets that jump to the stack and, when a `container_name` is present, surface that container's logs.
 
