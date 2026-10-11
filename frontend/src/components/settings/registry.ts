@@ -140,7 +140,7 @@ export const SETTINGS_ITEMS: readonly SettingsItemMeta[] = [
         id: 'gitops',
         group: 'infrastructure',
         label: 'GitOps',
-        description: 'How this node fetches Git sources, verifies the images a Blueprint target is running, and how long it keeps the GitOps history.',
+        description: 'How Git sources are fetched, how the images a Blueprint target runs are verified, and how long the GitOps history is kept.',
         keywords: ['git', 'gitops', 'source', 'poll', 'polling', 'interval', 'cadence', 'fetch', 'schedule', 'drift', 'verify', 'verification', 'artifact', 'digest', 'image', 'identity', 'registry', 'freeze', 'expected', 'retry', 'blueprint', 'history', 'retention', 'prune', 'cleanup'],
         tier: null,
         scope: 'node',

@@ -866,7 +866,14 @@ export class MonitorService {
         try {
             const gitopsHistoryRetentionDays = db.getGitOpsHistoryRetentionDays();
             const gitopsHistoryPruned = db.cleanupOldGitOpsHistory(gitopsHistoryRetentionDays);
-            if (isDebugEnabled()) console.log(`[Monitor:diag] Cleanup: gitops history ${gitopsHistoryRetentionDays}d (history=${gitopsHistoryPruned.history} outbox=${gitopsHistoryPruned.outbox} left=${gitopsHistoryPruned.historyRemaining}+${gitopsHistoryPruned.outboxRemaining})`);
+            if (isDebugEnabled()) {
+                // Null remainder means the counts were skipped (developer mode
+                // off), which is unknown rather than empty.
+                const remaining = gitopsHistoryPruned.historyRemaining === null
+                    ? 'not measured'
+                    : `${gitopsHistoryPruned.historyRemaining}+${gitopsHistoryPruned.outboxRemaining}`;
+                console.log(`[Monitor:diag] Cleanup: gitops history ${gitopsHistoryRetentionDays}d (history=${gitopsHistoryPruned.history} outbox=${gitopsHistoryPruned.outbox} left=${remaining})`);
+            }
         } catch (e) {
             console.error('MonitorService: failed to cleanup GitOps history', e);
         }

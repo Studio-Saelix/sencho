@@ -5668,7 +5668,8 @@ stmt.run('gitops_schema_version', '1');
      * from it, is documented on `GITOPS_HISTORY_PRUNEABLE`.
      * `historyRemaining` and `outboxRemaining` are exact only while developer mode
      * is on. The diagnostic log is the only reader, and the counts walk the
-     * backlog, so they are skipped otherwise and reported as 0.
+     * backlog, so they are skipped otherwise and reported as `null`: an
+     * unmeasured remainder is unknown, not zero.
      *
      * A drained outbox row is pruned with the history it announced. An undrained
      * row is a notification the fanout has not written yet, or a payload a later
@@ -5680,7 +5681,7 @@ stmt.run('gitops_schema_version', '1');
      */
     public cleanupOldGitOpsHistory(
         daysToKeep = DEFAULT_GITOPS_HISTORY_RETENTION_DAYS,
-    ): { history: number; outbox: number; historyRemaining: number; outboxRemaining: number } {
+    ): { history: number; outbox: number; historyRemaining: number | null; outboxRemaining: number | null } {
         const days = Number.isFinite(daysToKeep) && daysToKeep > 0
             ? Math.min(Math.floor(daysToKeep), MAX_GITOPS_HISTORY_RETENTION_DAYS)
             : DEFAULT_GITOPS_HISTORY_RETENTION_DAYS;
@@ -5731,9 +5732,10 @@ stmt.run('gitops_schema_version', '1');
         })();
         // Counted after the delete, and only for the diagnostic log. The history
         // count walks whatever backlog is still left, and the monitor tick runs
-        // this every 30 seconds.
-        let historyRemaining = 0;
-        let outboxRemaining = 0;
+        // this every 30 seconds. Null rather than 0 when they are skipped, so the
+        // log cannot read "none left" for a table that was never measured.
+        let historyRemaining: number | null = null;
+        let outboxRemaining: number | null = null;
         if (this.getGlobalSettings().developer_mode === '1') {
             historyRemaining = (this.db.prepare(
                 `SELECT COUNT(*) AS n FROM gitops_history WHERE ${GITOPS_HISTORY_PRUNEABLE}`,

@@ -382,12 +382,13 @@ describe('GitOps history retention', () => {
     expect(backlogStanding()).toBe(backlogRows);
 
     // Developer mode is off, so this pass still deletes one chunk and reports
-    // no remainder, even though rows are left. The exact remainder is what the
+    // no remainder at all, even though rows are left. Unknown is not the same
+    // as none left, so the counts are null. The exact remainder is what the
     // next pass reports once the diagnostic counts are on.
     const blind = DatabaseService.getInstance().cleanupOldGitOpsHistory(30);
     expect(blind.history).toBe(GITOPS_PRUNE_CHUNK_ROWS);
-    expect(blind.historyRemaining).toBe(0);
-    expect(blind.outboxRemaining).toBe(0);
+    expect(blind.historyRemaining).toBeNull();
+    expect(blind.outboxRemaining).toBeNull();
     expect(backlogStanding()).toBe(backlogRows - GITOPS_PRUNE_CHUNK_ROWS);
 
     const first = pruneWithCounts(30);
