@@ -105,6 +105,51 @@ describe('FileSystemService.createFileExclusive', () => {
       .rejects.toMatchObject({ code: 'SYMLINK_ESCAPE' });
   });
 
+  it('reads a plain file created between the realpath and lstat probes as inside the base', async () => {
+    // The containment walk probes realpath and then lstat, so a concurrent
+    // create can land in the gap: realpath reports the target missing and the
+    // lstat that follows sees the winner's new plain file. Reading any
+    // successful lstat as a dangling link refused the losing side of two racing
+    // creates as a path escape, and the route turned that into a 409 instead of
+    // the 412 conflict the editor needs in order to show the current content.
+    fs.writeFileSync(targetPath(), 'SECRET=keepme', 'utf-8');
+    const target = targetPath();
+    const realpath = fsPromises.realpath;
+    const realpathSpy = vi.spyOn(fsPromises, 'realpath').mockImplementation(async (p) => {
+      if (p === target) throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+      return realpath(p as string);
+    });
+
+    try {
+      const res = await fsService.createFileExclusive(targetPath(), 'FOO=2');
+
+      expect(res.ok).toBe(false);
+      if (!res.ok) expect(res.currentContent).toBe('SECRET=keepme');
+      expect(fs.readFileSync(targetPath(), 'utf-8')).toBe('SECRET=keepme');
+    } finally {
+      realpathSpy.mockRestore();
+    }
+  });
+
+  it('still refuses a real dangling symlink across that same probe gap', async () => {
+    // The guard the previous test could have weakened: a symlink that genuinely
+    // does not resolve stays refused, because lstat reports it as a link.
+    fs.symlinkSync(path.join(composeDir, STACK_DIR, 'missing.env'), targetPath());
+    const target = targetPath();
+    const realpath = fsPromises.realpath;
+    const realpathSpy = vi.spyOn(fsPromises, 'realpath').mockImplementation(async (p) => {
+      if (p === target) throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+      return realpath(p as string);
+    });
+
+    try {
+      await expect(fsService.createFileExclusive(targetPath(), 'FOO=1'))
+        .rejects.toMatchObject({ code: 'SYMLINK_ESCAPE' });
+    } finally {
+      realpathSpy.mockRestore();
+    }
+  });
+
   it('removes the zero-byte leftover when the write fails after the exclusive open', async () => {
     // Grab the prototype from a real FileHandle: the exported class is not a
     // dependable runtime import across Node/vitest interop.

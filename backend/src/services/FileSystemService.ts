@@ -1127,10 +1127,17 @@ export class FileSystemService {
         // cursor did not resolve. A dangling symlink still lstat's (the link
         // exists); a genuinely absent component does not. Reject the dangling
         // link; walk up past an absent component to the nearest real ancestor.
+        // The lstat must be asked whether it is a link, not merely whether it
+        // succeeds: realpath and lstat are two syscalls, so a concurrent writer
+        // can leave a plain file at cursor in the gap. Reading any successful
+        // lstat as a dangling link then refused a path inside the base, which
+        // turned two racing creates of one env file into a 409 instead of the
+        // 412 the loser is meant to get. Containment is unaffected: a real
+        // symlink is still refused here, and the walk up confirms the nearest
+        // real ancestor is under realBase.
         let danglingLink = false;
         try {
-          await fsPromises.lstat(cursor);
-          danglingLink = true;
+          danglingLink = (await fsPromises.lstat(cursor)).isSymbolicLink();
         } catch (le) {
           if ((le as NodeJS.ErrnoException).code !== 'ENOENT') throw le;
         }
