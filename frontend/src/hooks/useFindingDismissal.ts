@@ -35,9 +35,20 @@ interface DismissTarget {
   severity?: string;
 }
 
+/**
+ * Where a surface that is not hub-owned keeps its dismissals. Drift lives on the
+ * node that owns the stack, so it addresses the active node's stack route.
+ */
+export interface DismissalEndpoint {
+  create: string;
+  remove: (id: number) => string;
+}
+
 interface UseFindingDismissalOptions {
   /** Which surface's store the dismissal goes to (`/fleet/dismissals/<surface>`). */
   surface: DismissalSurface;
+  /** Overrides the hub store: the routes are node-scoped, so the request follows the active node. */
+  endpoint?: DismissalEndpoint;
   /** A dismissal was created or already existed; the list updates from it without a refetch. */
   onUpsert: (dismissal: FindingDismissal) => void;
   /**
@@ -57,9 +68,10 @@ interface UseFindingDismissalOptions {
  * list all run through here, so the request, the toast, and the busy state
  * cannot drift apart.
  *
- * Hub-owned, so every call is addressed to this instance whatever node is active.
+ * Hub-owned by default, so every call is addressed to this instance whatever
+ * node is active; with an `endpoint` it follows the active node instead.
  */
-export function useFindingDismissal({ surface, sendSeverity = false, onUpsert, onRemove, onGone }: UseFindingDismissalOptions) {
+export function useFindingDismissal({ surface, endpoint, sendSeverity = false, onUpsert, onRemove, onGone }: UseFindingDismissalOptions) {
   const [pending, setPending] = useState<ReadonlySet<string | number>>(() => new Set());
 
   const track = useCallback(async (key: string | number, run: () => Promise<void>) => {
@@ -78,7 +90,10 @@ export function useFindingDismissal({ surface, sendSeverity = false, onUpsert, o
   const restore = useCallback(async (id: number, options: { quiet?: boolean } = {}) => {
     await track(id, async () => {
       try {
-        const res = await apiFetch(`/fleet/dismissals/${id}`, { method: 'DELETE', localOnly: true });
+        const res = await apiFetch(endpoint ? endpoint.remove(id) : `/fleet/dismissals/${id}`, {
+          method: 'DELETE',
+          localOnly: endpoint === undefined,
+        });
         // A 404 means it is already gone (restored elsewhere, or retired by a later
         // check): the end state is the one asked for.
         if (!res.ok && res.status !== 404) {
@@ -94,14 +109,14 @@ export function useFindingDismissal({ surface, sendSeverity = false, onUpsert, o
         toast.error('Could not restore the finding.');
       }
     });
-  }, [onRemove, track]);
+  }, [endpoint, onRemove, track]);
 
   const dismiss = useCallback(async (finding: DismissTarget, mode: DismissalMode, days?: number) => {
     await track(finding.id, async () => {
       try {
-        const res = await apiFetch(`/fleet/dismissals/${surface}`, {
+        const res = await apiFetch(endpoint ? endpoint.create : `/fleet/dismissals/${surface}`, {
           method: 'POST',
-          localOnly: true,
+          localOnly: endpoint === undefined,
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             findingId: finding.id,
@@ -149,7 +164,7 @@ export function useFindingDismissal({ surface, sendSeverity = false, onUpsert, o
         toast.error('Could not dismiss the finding.');
       }
     });
-  }, [surface, sendSeverity, onUpsert, onGone, restore, track]);
+  }, [surface, endpoint, sendSeverity, onUpsert, onGone, restore, track]);
 
   const isPending = useCallback((key: string | number) => pending.has(key), [pending]);
   return { dismiss, restore, isPending };

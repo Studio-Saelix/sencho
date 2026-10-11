@@ -42,6 +42,8 @@ interface StackAnatomyPanelProps {
   onEditCompose: () => void;
   onOpenGitSource: () => void;
   onApplyUpdate: () => void;
+  /** Deploys the stack through the editor's own handler; the Drift tab's redeploy verb runs it. */
+  onRedeploy?: () => void | Promise<void>;
   onOpenFiles?: () => void;
   canEdit: boolean;
   applying?: boolean;
@@ -117,6 +119,7 @@ export default function StackAnatomyPanel({
   onEditCompose,
   onOpenGitSource,
   onApplyUpdate,
+  onRedeploy,
   onOpenFiles,
   canEdit,
   applying = false,
@@ -758,7 +761,7 @@ export default function StackAnatomyPanel({
       )}
       </TabsContent>
       <TabsContent value="drift" className="flex flex-col flex-1 min-h-0 mt-0">
-        <DriftPanel stackName={stackName} />
+        <DriftPanel stackName={stackName} onRedeploy={onRedeploy} onEditCompose={onEditCompose} onOpenGitSource={onOpenGitSource} />
       </TabsContent>
       <TabsContent value="dossier" className="flex flex-col flex-1 min-h-0 mt-0">
         <StackDossierPanel stackName={stackName} anatomy={anatomyInput} canEdit={canEdit} />

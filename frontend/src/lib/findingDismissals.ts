@@ -38,6 +38,12 @@ export const SECURITY_SEVERITY_SCALE: SeverityScale = {
   unverified: [],
 };
 
+/** Drift has one severity, so only the count and the fingerprint can lift a dismissal. */
+export const DRIFT_SEVERITY_SCALE: SeverityScale = {
+  order: ['warning'],
+  unverified: [],
+};
+
 function becameWorse(stored: string, current: string, scale: SeverityScale): boolean {
   if (stored === current) return false;
   const storedRank = scale.order.indexOf(stored);
