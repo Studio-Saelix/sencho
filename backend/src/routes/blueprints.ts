@@ -999,6 +999,44 @@ blueprintsRouter.post('/:id/accept/:nodeId', async (req: Request, res: Response)
     }
 });
 
+/**
+ * Check a name-conflict row again. Re-runs the ownership check only: a name
+ * still taken leaves the row as it is, a name that is free releases the row to
+ * `pending` so the next reconcile tick decides what happens. It never deploys,
+ * and a check that cannot tell leaves the row in conflict and answers an error.
+ * Same authority as accepting a deployment on this node.
+ */
+blueprintsRouter.post('/:id/deployments/:nodeId/recheck', async (req: Request, res: Response): Promise<void> => {
+    const id = parseIntParam(req, res, 'id');
+    if (id === null) return;
+    const nodeId = parseIntParam(req, res, 'nodeId');
+    if (nodeId === null) return;
+    try {
+        const db = DatabaseService.getInstance();
+        const blueprint = db.getBlueprint(id);
+        if (!blueprint) { res.status(404).json({ error: 'Blueprint not found' }); return; }
+        if (refuseGitManagedContent(res, blueprint, GIT_MANAGED_INLINE_ERROR)) return;
+        if (!requirePermission(req, res, 'stack:deploy', 'stack', blueprint.name, nodeId)) return;
+        const node = db.getNode(nodeId);
+        const deployment = db.getDeployment(id, nodeId);
+        if (!node || !deployment) { res.status(404).json({ error: 'Deployment not found' }); return; }
+        if (deployment.status !== 'name_conflict') {
+            res.status(409).json({ error: 'This deployment is not in a name conflict.', code: 'not_name_conflict', status: deployment.status });
+            return;
+        }
+        const result = await BlueprintService.getInstance().recheckNameConflict(blueprint, node);
+        res.json({ cleared: result.cleared, status: result.deployment.status });
+    } catch (error) {
+        if (error instanceof BlueprintOwnershipProbeError) {
+            console.error('[Blueprints] Name conflict recheck could not verify ownership:', sanitizeForLog(error.message));
+            res.status(500).json({ error: error.message, code: 'ownership_probe_failed' });
+            return;
+        }
+        console.error('[Blueprints] Recheck error:', sanitizeForLog(getErrorMessage(error, 'recheck failed')));
+        res.status(500).json({ error: getErrorMessage(error, 'Failed to recheck the name conflict') });
+    }
+});
+
 blueprintsRouter.get('/:id/preview', async (req: Request, res: Response): Promise<void> => {
     if (!requirePermission(req, res, 'node:read')) return;
     const id = parseIntParam(req, res, 'id');

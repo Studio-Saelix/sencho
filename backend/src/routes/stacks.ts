@@ -74,7 +74,7 @@ import { isDebugEnabled } from '../utils/debug';
 import { errorMessageForLog, sanitizeForLog } from '../utils/safeLog';
 import { logDebugTiming } from '../utils/requestTiming';
 import { sendGitSourceError } from '../utils/gitSourceHttp';
-import { buildPolicyGateOptions, runPolicyGate, triggerPostDeployScan, describePolicyBlock } from '../helpers/policyGate';
+import { buildPolicyGateOptions, runPolicyGate, triggerPostDeployScan, describePolicyBlock, isPostDeployScanRunning } from '../helpers/policyGate';
 import { parseComposePreview, type ComposePreview } from '../helpers/composePreview';
 import { filterContainersByComposeService } from '../helpers/composeServiceMatch';
 import { invalidateNodeCaches } from '../helpers/cacheInvalidation';
@@ -3215,23 +3215,47 @@ stacksRouter.post('/:stackName/fleet-snapshot-apply', async (req: Request, res: 
 });
 
 /**
- * Returns the latest post-deploy scan attempt for this stack, or null if
- * no scan has been attempted yet. Used by the editor UI to flag stacks
- * whose latest deploy did not trigger a successful scan (Trivy missing,
- * registry rejection, etc).
+ * Returns the latest post-deploy scan attempt for this stack (status is null
+ * if none has been attempted) plus `scanning`, true while a scan for this
+ * stack is running on this node. Used by the editor UI to flag stacks whose
+ * latest deploy did not trigger a successful scan (Trivy missing, registry
+ * rejection, etc) and to follow a rescan to its result.
  */
 stacksRouter.get('/:stackName/scan-status', (req: Request, res: Response): void => {
   const stackName = req.params.stackName as string;
   const row = DatabaseService.getInstance().getStackScanAttempt(req.nodeId, stackName);
+  const scanning = isPostDeployScanRunning(req.nodeId, stackName);
   if (!row) {
-    res.json({ status: null });
+    res.json({ status: null, scanning });
     return;
   }
   res.json({
     status: row.status,
     attemptedAt: row.attempted_at,
     errorMessage: row.error_message,
+    scanning,
   });
+});
+
+/**
+ * Scan this stack's running images again, on the node that owns the stack.
+ * Answers as soon as the scan has started: a scan walks every image and can
+ * outlast a proxy hop, so the caller reads `scanning` and the new attempt from
+ * GET scan-status. A second call while one is running starts nothing.
+ * Same authority as the deploys that start this scan after each deploy.
+ */
+stacksRouter.post('/:stackName/scan-status/rescan', async (req: Request, res: Response) => {
+  const stackName = req.params.stackName as string;
+  if (!requirePermission(req, res, 'stack:deploy', 'stack', stackName)) return;
+  if (!(await requireStackExists(req.nodeId, stackName, res))) return;
+  if (isPostDeployScanRunning(req.nodeId, stackName)) {
+    res.status(202).json({ started: false, scanning: true });
+    return;
+  }
+  triggerPostDeployScan(stackName, req.nodeId).catch(err =>
+    console.error('[Security] Post-deploy scan failed for %s:', sanitizeForLog(stackName), err),
+  );
+  res.status(202).json({ started: true, scanning: true });
 });
 
 // ── File explorer endpoints ──

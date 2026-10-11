@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { GitBranch, Pencil, ExternalLink, Rocket, FolderOpen, X } from 'lucide-react';
+import { GitBranch, Pencil, ExternalLink, Rocket, FolderOpen } from 'lucide-react';
 import { Button } from './ui/button';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from './ui/tabs';
 import { ScrollableTabRow } from './ui/ScrollableTabRow';
@@ -14,8 +14,7 @@ import {
 import { DigestRebuildHint } from '@/components/DigestRebuildHint';
 import { cn } from '@/lib/utils';
 import { type AnatomyMarkdownInput, type PortRow, type VolumeRow } from '@/lib/anatomyMarkdown';
-import { usePreflightDismiss } from '@/hooks/usePreflightDismiss';
-import { useScanBannerDismiss } from '@/hooks/useScanBannerDismiss';
+import { preflightFingerprint, useStackDismiss } from '@/hooks/useStackDismiss';
 import { parseAnatomy, parseEnvKeys, formatGitSource, imageName, primaryPublishedHostPort, type GitSourceInfo } from '@/lib/anatomy';
 import { SOURCE_STATE_LOOKUP } from '@/lib/gitopsState';
 import type { GitOpsSourceStatus } from '@/types/gitops';
@@ -23,6 +22,7 @@ import { buildServiceUrl } from '@/lib/serviceUrl';
 import { StackActivityTimeline } from './stack/StackActivityTimeline';
 import StackDossierPanel from './stack/StackDossierPanel';
 import DriftPanel from './stack/DriftPanel';
+import { ScanStatusBanner } from './stack/ScanStatusBanner';
 import PreflightPanel from './stack/PreflightPanel';
 import StoragePanel from './stack/StoragePanel';
 import EnvironmentPanel from './stack/EnvironmentPanel';
@@ -158,12 +158,8 @@ export default function StackAnatomyPanel({
   const [preflightFindings, setPreflightFindings] = useState<Array<{ ruleId: string; severity: string; service?: string }> | undefined>(undefined);
   // The Doctor tab dot clears when the high-risk banner is dismissed, and returns
   // when the findings change (shared fingerprint with PreflightPanel).
-  const { dismissed: doctorDismissed } = usePreflightDismiss(stackName, activeNode?.id, preflightFindings);
-  const [scanStatus, setScanStatus] = useState<{
-    status: 'ok' | 'partial' | 'failed' | 'skipped' | null;
-    attemptedAt?: number;
-    errorMessage?: string | null;
-  } | null>(null);
+  const preflightFp = useMemo(() => preflightFingerprint(preflightFindings), [preflightFindings]);
+  const { dismissed: doctorDismissed } = useStackDismiss('doctor', stackName, activeNode?.id, preflightFp);
   const [activeTab, setActiveTab] = useState('anatomy');
 
   useEffect(() => {
@@ -174,8 +170,6 @@ export default function StackAnatomyPanel({
     if (requestedTab === 'dossier') setActiveTab('dossier');
     if (requestedTab === 'drift') setActiveTab('drift');
   }, [doctorEnabled, networkingEnabled, requestedTab]);
-  const { dismissed: scanBannerDismissed, dismiss: dismissScanBanner } =
-    useScanBannerDismiss(stackName, activeNode?.id, scanStatus);
 
   // Best-effort badge: read the last stored preflight severity to dot the tab.
   // Skipped when the active node does not advertise the capability.
@@ -321,25 +315,6 @@ export default function StackAnatomyPanel({
     void run();
     return () => { cancelled = true; };
   }, [applying, stackName]);
-
-  useEffect(() => {
-    let cancelled = false;
-    const run = async () => {
-      try {
-        const res = await apiFetch(`/stacks/${stackName}/scan-status`);
-        if (cancelled) return;
-        if (res.ok) {
-          setScanStatus(await res.json());
-        } else {
-          setScanStatus(null);
-        }
-      } catch {
-        if (!cancelled) setScanStatus(null);
-      }
-    };
-    void run();
-    return () => { cancelled = true; };
-  }, [stackName]);
 
   const networkName = anatomy && anatomy.networks.length > 0
     ? anatomy.networks[0]
@@ -710,29 +685,7 @@ export default function StackAnatomyPanel({
             </div>
           </div>
         )}
-        {scanStatus && scanStatus.status && scanStatus.status !== 'ok' && !scanBannerDismissed && (
-          <div
-            className="mx-3 my-2 flex items-start gap-2 rounded-md border border-warning/40 bg-warning/[0.06] px-2 py-1.5 text-xs text-warning"
-            role="status"
-            title={scanStatus.errorMessage ?? undefined}
-          >
-            <span className="font-mono text-[9px] uppercase tracking-wide shrink-0 mt-0.5">scan</span>
-            <span className="flex-1">
-              {scanStatus.status === 'failed' && 'Last post-deploy scan failed.'}
-              {scanStatus.status === 'partial' && 'Last post-deploy scan partially failed.'}
-              {scanStatus.status === 'skipped' && 'Post-deploy scan did not run.'}
-              {scanStatus.errorMessage ? ` ${scanStatus.errorMessage}` : ''}
-            </span>
-            <button
-              type="button"
-              className="shrink-0 ml-2 p-0.5 rounded hover:bg-warning/10 transition-colors"
-              onClick={dismissScanBanner}
-              aria-label="Dismiss"
-            >
-              <X className="h-3.5 w-3.5" strokeWidth={1.5} />
-            </button>
-          </div>
-        )}
+        <ScanStatusBanner key={`${activeNode?.id ?? 'local'}:${stackName}`} stackName={stackName} nodeId={activeNode?.id} />
       </div>
       {anatomy && anatomy.services.length > 0 && (
         <div className="border-t border-muted px-3 py-2 flex items-center justify-between">

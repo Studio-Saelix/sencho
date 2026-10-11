@@ -1,4 +1,4 @@
-import { Lock, AlertTriangle, Pin, ShieldQuestion } from 'lucide-react';
+import { Lock, AlertTriangle, Pin } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import {
@@ -11,6 +11,14 @@ import { useNodes } from '@/context/NodeContext';
 import { formatTimeAgo } from '@/lib/relativeTime';
 import { summarizeFailure, type FailureSummary } from '@/lib/blueprintStatus';
 
+/** What an operator can do about a stack that already owns the Blueprint's name. */
+export interface NameConflictActions {
+    canRecheck: (nodeId: number) => boolean;
+    canOpenStack: (nodeId: number) => boolean;
+    onRecheck: (nodeId: number) => void;
+    onOpenStack: (nodeId: number) => void;
+}
+
 interface BlueprintDeploymentTableProps {
     deployments: BlueprintDeployment[];
     classification: BlueprintClassification;
@@ -22,6 +30,7 @@ interface BlueprintDeploymentTableProps {
     onAcceptStateReview: (nodeId: number) => void;
     onRetry: (nodeId: number) => void;
     pinnedNodeId?: number | null;
+    nameConflict?: NameConflictActions;
 }
 
 function statusDotClass(status: BlueprintDeploymentStatus): string {
@@ -59,7 +68,7 @@ function FailureNote({ failure }: { failure: FailureSummary }) {
 }
 
 export function BlueprintDeploymentTable({
-    deployments, classification, canDeploy, canWithdraw, canRetry, busyNodeId, onWithdraw, onAcceptStateReview, onRetry, pinnedNodeId = null,
+    deployments, classification, canDeploy, canWithdraw, canRetry, busyNodeId, onWithdraw, onAcceptStateReview, onRetry, pinnedNodeId = null, nameConflict,
 }: BlueprintDeploymentTableProps) {
     const { nodes } = useNodes();
     const nodesById = new Map(nodes.map(n => [n.id, n]));
@@ -121,7 +130,11 @@ export function BlueprintDeploymentTable({
                                     {lastSeen ? formatTimeAgo(lastSeen) : '-'}
                                 </TableCell>
                                 <TableCell className="text-xs text-stat-subtitle align-top max-w-[220px]">
-                                    {failure ? (
+                                    {dep.status === 'name_conflict' ? (
+                                        <span className="break-words">
+                                            Rename or remove the existing stack{nameConflict?.canRecheck(dep.node_id) ? ', then check again' : ''}.
+                                        </span>
+                                    ) : failure ? (
                                         <FailureNote failure={failure} />
                                     ) : dep.drift_summary ? (
                                         <span className="break-words font-mono text-[10px] leading-relaxed">{dep.drift_summary}</span>
@@ -143,11 +156,24 @@ export function BlueprintDeploymentTable({
                                                 Confirm deploy
                                             </Button>
                                         )}
-                                        {dep.status === 'name_conflict' && (
-                                            <span className="inline-flex items-center gap-1 text-[10px] uppercase tracking-[0.18em] font-mono text-destructive">
-                                                <ShieldQuestion className="w-3 h-3" strokeWidth={1.5} />
-                                                Resolve manually
-                                            </span>
+                                        {dep.status === 'name_conflict' && nameConflict?.canOpenStack(dep.node_id) && (
+                                            <Button
+                                                size="sm"
+                                                variant="ghost"
+                                                onClick={() => nameConflict.onOpenStack(dep.node_id)}
+                                            >
+                                                Open conflicting stack
+                                            </Button>
+                                        )}
+                                        {dep.status === 'name_conflict' && nameConflict?.canRecheck(dep.node_id) && (
+                                            <Button
+                                                size="sm"
+                                                variant="outline"
+                                                onClick={() => nameConflict.onRecheck(dep.node_id)}
+                                                disabled={busyNodeId === dep.node_id}
+                                            >
+                                                Check again
+                                            </Button>
                                         )}
                                         {dep.status === 'failed' && canRetry && (
                                             <Button

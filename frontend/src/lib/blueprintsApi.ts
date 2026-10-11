@@ -367,6 +367,21 @@ export async function acceptDeployment(
     return expectJson(res, 'Failed to accept deployment');
 }
 
+export interface RecheckResult {
+    /** True when the name is free and the row moved back to pending for the next reconcile. */
+    cleared: boolean;
+    status: BlueprintDeploymentStatus;
+}
+
+/** Re-evaluate a name conflict on one node. Never deploys; a cleared row waits for the next reconcile. */
+export async function recheckNameConflict(blueprintId: number, nodeId: number): Promise<RecheckResult> {
+    const res = await apiFetch(`/blueprints/${blueprintId}/deployments/${nodeId}/recheck`, {
+        method: 'POST',
+        localOnly: true,
+    });
+    return expectJson<RecheckResult>(res, 'Failed to check the name conflict');
+}
+
 export async function previewBlueprint(id: number): Promise<BlueprintPreview> {
     const res = await apiFetch(`/blueprints/${id}/preview`, { localOnly: true });
     return expectJson<BlueprintPreview>(res, 'Failed to preview blueprint');

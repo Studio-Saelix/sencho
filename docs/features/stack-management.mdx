@@ -302,7 +302,7 @@ For actionable registry updates, the detail line also reads `patch · safe to ap
 
 Rebuilds can take longer than a registry pull and depend on the local Dockerfile context, network access, and base-image availability. When a recovery generation captured the prior image ID, supported local-build recovery restores that exact image identity. Without a held prior ID, restore falls back to the authored files alone and does not reconstruct previously built layers.
 
-A separate amber **scan** banner appears here if the most recent post-deploy vulnerability scan failed or was skipped for one or more images; deploys are never blocked by a scan failure. See [Vulnerability Scanning](/features/vulnerability-scanning).
+A separate amber **scan** banner appears here if the most recent post-deploy vulnerability scan failed or was skipped for one or more images; deploys are never blocked by a scan failure. **Rescan** on the banner runs the scan again. See [Vulnerability Scanning](/features/vulnerability-scanning).
 
 ### Activity
 

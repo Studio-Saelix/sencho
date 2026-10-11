@@ -30,6 +30,7 @@ export type BlueprintDeploymentCause =
   | 'deploy_ack'
   | 'deploy_fail'
   | 'name_conflict'
+  | 'name_conflict_cleared'
   | 'withdraw_start'
   | 'withdraw_success'
   | 'withdraw_fail'
@@ -173,6 +174,11 @@ function record(
     });
     return;
   }
+
+  // An operator's recheck found the name free. It deployed nothing and
+  // acknowledged nothing: the row goes back to `pending` so the next reconcile
+  // tick decides, and that deploy records itself.
+  if (cause === 'name_conflict_cleared') return;
 
   const target = store.getTarget(app.id, nodeId);
   if (!target) return;
