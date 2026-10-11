@@ -4,6 +4,7 @@ import {
   DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
 import { FINDING_ROW_PRIMARY_CLASS, FindingRowActions } from '@/components/ui/finding-row-actions';
+import { cn } from '@/lib/utils';
 import type { DismissalMode } from '@/types/findingDismissal';
 import type { NetworkingFinding, NetworkingRecommendedAction } from '@/types/networking';
 import { SetExposureIntentPopover } from './SetExposureIntentPopover';
@@ -89,7 +90,7 @@ export function NetworkingFindingActions({ finding, controls }: NetworkingFindin
         <Button
           variant="outline"
           size="sm"
-          className={FINDING_ROW_PRIMARY_CLASS}
+          className={cn(FINDING_ROW_PRIMARY_CLASS)}
           data-testid={`finding-verb-${finding.id}`}
           onClick={() => run(primary)}
         >

@@ -7,16 +7,17 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
+import { cn } from '@/lib/utils';
 import type { DismissalMode, DismissPolicy } from '@/types/findingDismissal';
 
-/** Class for the resolving verb: nowrap, h-7, and at least 44px tall below md. Callers also set variant="outline". */
+/** Shared chrome for the resolving verb on a finding row (outline, fixed height). */
 export const FINDING_ROW_PRIMARY_CLASS =
   'h-7 whitespace-nowrap px-2 text-xs shadow-none max-md:min-h-11';
 
 interface FindingRowActionsProps {
   /** The finding's resolving verb, if any. It stays first and loudest. */
   children?: ReactNode;
-  /** Optional node rendered after Dismiss. Networking passes the trailing menu of secondary verbs. */
+  /** Rare or secondary verbs (copy, Open Doctor, …). Renders as the trailing ··· menu. */
   overflow?: ReactNode;
   /** What the server allows. `none` renders no Dismiss at all. */
   dismissPolicy: DismissPolicy;
@@ -57,7 +58,9 @@ export function FindingRowActions({
           <Button
             variant="outline"
             size="sm"
-            className="h-7 rounded-r-none px-2 text-xs text-stat-subtitle shadow-none hover:text-stat-value max-md:min-h-11"
+            className={cn(
+              'h-7 rounded-r-none px-2 text-xs text-stat-subtitle shadow-none hover:text-stat-value max-md:min-h-11',
+            )}
             disabled={pending}
             aria-label={label}
             title={timedOnly ? 'This finding is about evidence that could not be read, so it is dismissed for 7 days.' : undefined}
