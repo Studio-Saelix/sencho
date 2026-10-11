@@ -1,11 +1,12 @@
 /**
- * The GitOps section: how often this node fetches Git sources, and how fast it
- * retries proving the images a Blueprint target is running.
+ * The GitOps section: how often this node fetches Git sources, how fast it
+ * retries proving the images a Blueprint target is running, and how long it
+ * keeps the history of all of it.
  *
- * The two controls save through different routes on purpose, so the tests assert
+ * The controls save through different routes on purpose, so the tests assert
  * each one reaches its own: the poll interval owns an endpoint because writing it
- * reschedules live fetchers, and the retry interval rides the shared node
- * settings because it is only read when a check needs it.
+ * reschedules live fetchers, and the retry interval and history window ride the
+ * shared node settings because they are only read when needed.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
@@ -49,7 +50,10 @@ import { apiFetch } from '@/lib/api';
 
 const mockedFetch = apiFetch as unknown as ReturnType<typeof vi.fn>;
 
-const SETTINGS: Record<string, string> = { gitops_artifact_retry_interval_mins: '5' };
+const SETTINGS: Record<string, string> = {
+    gitops_artifact_retry_interval_mins: '5',
+    gitops_history_retention_days: '30',
+};
 
 beforeEach(() => {
     mockedFetch.mockReset();
@@ -94,15 +98,40 @@ describe('GitOpsSection', () => {
         mockedFetch.mockImplementation(async (path: string) => (
             path === '/git-sources/polling'
                 ? { ok: true, json: async () => ({ poll_interval_mins: 0 }) }
-                : { ok: true, json: async () => ({ gitops_artifact_retry_interval_mins: '17' }) }
+                : { ok: true, json: async () => ({ gitops_artifact_retry_interval_mins: '17', gitops_history_retention_days: '45' }) }
         ));
         render(<GitOpsSection />);
         await waitFor(() => expect(screen.getByText('Drift verification')).toBeInTheDocument());
         expect(screen.getByText('Retry an unresolved image identity')).toBeInTheDocument();
         await waitFor(() => expect(chipShowing('17')).toBeInTheDocument());
+        // The history window reads the same payload and renders its own stored value.
+        expect(screen.getByText('Keep GitOps history for')).toBeInTheDocument();
+        // The helper states what the window governs and where bell entries
+        // actually come from. Asserted on substance, not on whole sentences,
+        // so a copy edit does not need a test change. The History subtitle
+        // and the chip suffix share phrases with the helper, so each match
+        // below is on text the helper alone carries.
+        expect(screen.getByText(/before older entries are pruned/)).toBeInTheDocument();
+        expect(screen.getByText(/follow the Notification log window/)).toBeInTheDocument();
+        // The 3-day figure had no basis in the code; the helper now names the
+        // real condition and scopes it to the direct webhook path.
+        expect(screen.getByText(/provider endpoint keeps its own record/)).toBeInTheDocument();
+        expect(screen.getByText('days')).toBeInTheDocument();
+        await waitFor(() => expect(chipShowing('45')).toBeInTheDocument());
     });
 
-    it('saves a changed interval through the shared node settings, carrying only that key', async () => {
+    it('reads day when the history window is 1', async () => {
+        mockedFetch.mockImplementation(async (path: string) => (
+            path === '/git-sources/polling'
+                ? { ok: true, json: async () => ({ poll_interval_mins: 0 }) }
+                : { ok: true, json: async () => ({ gitops_artifact_retry_interval_mins: '5', gitops_history_retention_days: '1' }) }
+        ));
+        render(<GitOpsSection />);
+        await waitFor(() => expect(screen.getByText('Keep GitOps history for')).toBeInTheDocument());
+        expect(screen.getByText('day')).toBeInTheDocument();
+    });
+
+    it('saves a changed interval through the shared node settings, carrying the section values', async () => {
         render(<GitOpsSection />);
         await waitFor(() => expect(chipShowing('5')).toBeInTheDocument());
 
@@ -115,7 +144,24 @@ describe('GitOpsSection', () => {
             );
             expect(call).toBeDefined();
             expect(JSON.parse((call![1] as { body: string }).body))
-                .toEqual({ gitops_artifact_retry_interval_mins: '30' });
+                .toEqual({ gitops_artifact_retry_interval_mins: '30', gitops_history_retention_days: '30' });
+        });
+    });
+
+    it('saves a changed history window through the shared node settings', async () => {
+        render(<GitOpsSection />);
+        await waitFor(() => expect(chipShowing('30')).toBeInTheDocument());
+
+        await editChip('30', '90');
+        fireEvent.click(screen.getByText('Save settings'));
+
+        await waitFor(() => {
+            const call = mockedFetch.mock.calls.find(
+                (c) => c[0] === '/settings' && (c[1] as { method?: string } | undefined)?.method === 'PATCH',
+            );
+            expect(call).toBeDefined();
+            expect(JSON.parse((call![1] as { body: string }).body))
+                .toEqual({ gitops_artifact_retry_interval_mins: '5', gitops_history_retention_days: '90' });
         });
     });
 
@@ -184,8 +230,29 @@ describe('GitOpsSection', () => {
         });
         render(<GitOpsSection />);
         await waitFor(() => expect(screen.getByText('Drift verification')).toBeInTheDocument());
-        expect(document.querySelectorAll('fieldset[disabled]').length).toBeGreaterThan(0);
+        const fieldset = document.querySelector('fieldset[disabled]');
+        expect(fieldset).not.toBeNull();
+        expect(fieldset?.textContent).toContain('Keep GitOps history for');
+        expect(fieldset?.textContent).toContain('Retry an unresolved image identity');
+        expect(fieldset?.textContent).not.toContain('Poll Git sources');
         expect(screen.queryByText('Save settings')).not.toBeInTheDocument();
+    });
+
+    it('shows the load error when settings cannot be read', async () => {
+        mockedFetch.mockImplementation(async () => ({ ok: false, json: async () => ({}) }));
+        render(<GitOpsSection />);
+        expect(await screen.findByText('Could not load settings')).toBeInTheDocument();
+        expect(screen.queryByText('Keep GitOps history for')).not.toBeInTheDocument();
+    });
+
+    it('falls back to 30 days when the history window is missing from the payload', async () => {
+        mockedFetch.mockImplementation(async (path: string) => {
+            if (path === '/git-sources/polling') return { ok: true, json: async () => ({ poll_interval_mins: 0 }) };
+            return { ok: true, json: async () => ({ gitops_artifact_retry_interval_mins: '5' }) };
+        });
+        render(<GitOpsSection />);
+        await waitFor(() => expect(screen.getByText('Keep GitOps history for')).toBeInTheDocument());
+        expect(chipShowing('30')).toBeInTheDocument();
     });
 
     it('leaves the poll control usable for a node admin who cannot edit the retry interval', async () => {

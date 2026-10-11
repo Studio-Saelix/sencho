@@ -42,15 +42,18 @@ function errorMessage(error: unknown, fallback: string): string {
 }
 
 /**
- * The decomposed authority actions for one Git-managed Blueprint application:
- * accept the waiting source revision, approve the reviewed placement, or
- * authorize the rollout.
+ * The decomposed authority actions for one Blueprint application: accept the
+ * waiting source revision, approve the reviewed placement, or authorize the
+ * rollout, alongside the placement and rollout authorization policies that
+ * govern whether a decision may be taken automatically.
  *
  * Each action is offered only while the projection says its authority step is
- * outstanding, so the row is a next-step prompt rather than a permanent
- * toolbar; when nothing is outstanding it renders nothing. Inline and Direct
- * applications render nothing: their authority runs through Apply or through
- * the owning stack, and both are rejected by the routes.
+ * outstanding, so the action buttons are a next-step prompt rather than a
+ * permanent toolbar; when nothing is outstanding it renders nothing. Direct
+ * applications render nothing: their authority runs through the owning stack
+ * and the routes reject them. An Inline Blueprint renders no Git-lifecycle
+ * action, but it does render the two policy controls, because its placement and
+ * rollout decisions are evaluated against them.
  *
  * Placement approval opens the Blueprint's rollout preview, which is the
  * reviewed plan the approval is bound to; the confirm there writes the
@@ -116,7 +119,25 @@ export default function GitOpsAuthorityActions({
   const placementPolicyRead = policyReadFor(live?.authorityPolicies, 'placement');
   const canConfigurePlacement = !!live && allowed('stack:deploy');
 
-  if (!canAcceptSource && !canApprovePlacement && !canAuthorizeRollout && !canConfigurePlacement) {
+  // The rollout authorization policy, for the one mode whose rollout controls
+  // row does not exist. An Inline Blueprint executes a policy-approved plan on
+  // its own only while this policy is automatic, and GitOpsRolloutControls
+  // hosts the control only for Git-managed applications, so without it here an
+  // operator could configure bounded automatic placement and never let it act.
+  // A Git-managed application keeps the control in its rollout overflow.
+  const inlineTarget = projection.targetMode === 'inline_blueprint';
+  const rolloutPolicyRead = inlineTarget
+    ? policyReadFor(live?.authorityPolicies, 'rollout_authorization')
+    : null;
+  const canConfigureRolloutPolicy = rolloutPolicyRead !== null && allowed('stack:deploy');
+
+  if (
+    !canAcceptSource
+    && !canApprovePlacement
+    && !canAuthorizeRollout
+    && !canConfigurePlacement
+    && !canConfigureRolloutPolicy
+  ) {
     return null;
   }
 
@@ -210,28 +231,51 @@ export default function GitOpsAuthorityActions({
             {pending === 'rollout' ? 'Authorizing…' : 'Authorize rollout'}
           </Button>
         )}
-        {placementPolicyRead && canConfigurePlacement && (
-          // Beside the placement approval, because that is the decision this
-          // policy governs. Same gate as the approval it configures, so a
-          // session that cannot deploy is not offered either.
-          <GitOpsPolicyControl
-            applicationId={applicationId}
-            domain="placement"
-            read={placementPolicyRead}
-            onChanged={onChanged}
-            canWrite={canConfigurePlacement}
-            trigger={(open) => (
-              <button
-                type="button"
-                onClick={open}
-                className="ml-auto font-mono text-[10px] uppercase tracking-[0.18em] text-stat-subtitle transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand/50 max-md:min-h-11"
-                data-testid="gitops-action-placement-policy"
-              >
-                Placement policy
-              </button>
-            )}
-          />
-        )}
+        <span className="ml-auto flex flex-wrap items-center gap-2">
+          {placementPolicyRead && canConfigurePlacement && (
+            // Beside the placement approval, because that is the decision this
+            // policy governs. Same gate as the approval it configures, so a
+            // session that cannot deploy is not offered either.
+            <GitOpsPolicyControl
+              applicationId={applicationId}
+              domain="placement"
+              read={placementPolicyRead}
+              onChanged={onChanged}
+              canWrite={canConfigurePlacement}
+              trigger={(open) => (
+                <button
+                  type="button"
+                  onClick={open}
+                  className="font-mono text-[10px] uppercase tracking-[0.18em] text-stat-subtitle transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand/50 max-md:min-h-11"
+                  data-testid="gitops-action-placement-policy"
+                >
+                  Placement policy
+                </button>
+              )}
+            />
+          )}
+          {rolloutPolicyRead && canConfigureRolloutPolicy && (
+            // Beside the placement policy, because together they decide whether
+            // this Inline Blueprint acts on its own.
+            <GitOpsPolicyControl
+              applicationId={applicationId}
+              domain="rollout_authorization"
+              read={rolloutPolicyRead}
+              onChanged={onChanged}
+              canWrite={canConfigureRolloutPolicy}
+              trigger={(open) => (
+                <button
+                  type="button"
+                  onClick={open}
+                  className="font-mono text-[10px] uppercase tracking-[0.18em] text-stat-subtitle transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand/50 max-md:min-h-11"
+                  data-testid="gitops-action-rollout-policy"
+                >
+                  Rollout authorization policy
+                </button>
+              )}
+            />
+          )}
+        </span>
       </div>
 
       {blueprintId !== null && (

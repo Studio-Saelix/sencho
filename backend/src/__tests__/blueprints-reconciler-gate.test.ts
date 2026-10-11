@@ -360,6 +360,255 @@ describe('reconcileOne approval gate (real path)', () => {
         expect(deploySpy).not.toHaveBeenCalled();
         expect(withdrawSpy).not.toHaveBeenCalled();
     });
+
+    it('clearing a pin does not deploy the freed node under both automatic policies', async () => {
+        const nodeA = seedNode();
+        const nodeB = seedNode();
+        const { commitBlueprintCreate, commitBlueprintPin } = await import('../services/gitops/blueprintProducers');
+        const { GitOpsStore } = await import('../services/gitops/store');
+        const { GitOpsTransitions } = await import('../services/gitops/transitions');
+        const { encodeGitOpsApprovedTargetEffectJson } = await import('../services/gitops/json');
+        const { newGitOpsId } = await import('../services/gitops/directApplication');
+        const desiredIdsFor = (blueprint: import('../services/DatabaseService').Blueprint): number[] =>
+            BlueprintReconciler.getInstance()
+                .listDesiredNodes(blueprint, DatabaseService.getInstance().getNodes())
+                .map((node) => node.id);
+
+        counter += 1;
+        const bp = commitBlueprintCreate({
+            name: `bp-gate-unpin-${counter}`,
+            description: null,
+            compose_content: 'services:\n  app:\n    image: nginx\n',
+            selector: { type: 'nodes', ids: [nodeA.id, nodeB.id] },
+            drift_mode: 'observe',
+            classification: 'stateless',
+            classification_reasons: [],
+            enabled: true,
+            created_by: 'admin',
+        }, desiredIdsFor);
+
+        const store = GitOpsStore.getInstance();
+        const created = store.getLiveBlueprintApplication(bp.id)!;
+        DatabaseService.getInstance().getDb().prepare(
+            `UPDATE gitops_applications
+                SET placement_policy = 'bounded_auto', rollout_authorization_policy = 'automatic'
+              WHERE id = ?`,
+        ).run(created.id);
+
+        // Approved while pinned to A, with A already running this revision, so
+        // the only thing that can refuse placing B is the pin change itself.
+        commitBlueprintPin(bp.id, nodeA.id, 'admin', desiredIdsFor);
+        const pinned = store.getLiveBlueprintApplication(bp.id)!;
+        const pinnedBlueprint = DatabaseService.getInstance().getBlueprint(bp.id)!;
+        GitOpsTransitions.getInstance().placementApproved({
+            applicationId: pinned.id,
+            approvalId: newGitOpsId(),
+            intentRevisionId: pinned.intent_revision_id!,
+            blastJson: encodeGitOpsApprovedTargetEffectJson([{ nodeId: nodeA.id, outcome: 'place' }]),
+            requiredNodeIds: [nodeA.id],
+            fingerprint: null,
+            actor: 'admin',
+            envelope: { operationId: newGitOpsId(), actor: 'admin', trigger: 'test', at: Date.now() },
+            rolloutGenerationId: newGitOpsId(),
+            candidateId: pinned.rollout_candidate_id!,
+            authority: 'operator',
+            policyProvenanceJson: null,
+        });
+        DatabaseService.getInstance().getDb().prepare(
+            `INSERT INTO blueprint_deployments (blueprint_id, node_id, status, applied_revision, last_deployed_at)
+             VALUES (?, ?, 'active', ?, ?)`,
+        ).run(bp.id, nodeA.id, pinnedBlueprint.revision, Date.now());
+
+        const deploySpy = vi.spyOn(BlueprintService.getInstance(), 'deployToNode').mockResolvedValue({ status: 'active' });
+        const withdrawSpy = vi.spyOn(BlueprintService.getInstance(), 'withdrawFromNode').mockResolvedValue({ status: 'withdrawn' });
+        const unpinRes = await request(app)
+            .put(`/api/blueprints/${bp.id}/pin`)
+            .set('Cookie', adminCookie)
+            .send({ nodeId: null });
+        expect(unpinRes.status).toBe(200);
+        expect(unpinRes.body.approval_status).toBe('pending');
+
+        await BlueprintReconciler.getInstance().reconcileOne(bp.id);
+        expect(deploySpy).not.toHaveBeenCalled();
+        expect(withdrawSpy).not.toHaveBeenCalled();
+
+        const preview = await request(app).get(`/api/blueprints/${bp.id}/preview`).set('Cookie', adminCookie);
+        expect(preview.status).toBe(200);
+        expect(preview.body.effectiveApproval).toBe('pending');
+        expect(preview.body.approvalAuthority).toBeNull();
+    });
+
+    it('clearing a pin does not deploy when the last approval predates the pin', async () => {
+        const nodeA = seedNode();
+        const nodeB = seedNode();
+        const { commitBlueprintCreate, commitBlueprintPin } = await import('../services/gitops/blueprintProducers');
+        const { GitOpsStore } = await import('../services/gitops/store');
+        const { GitOpsTransitions } = await import('../services/gitops/transitions');
+        const { encodeGitOpsApprovedTargetEffectJson } = await import('../services/gitops/json');
+        const { newGitOpsId } = await import('../services/gitops/directApplication');
+        const desiredIdsFor = (blueprint: import('../services/DatabaseService').Blueprint): number[] =>
+            BlueprintReconciler.getInstance()
+                .listDesiredNodes(blueprint, DatabaseService.getInstance().getNodes())
+                .map((node) => node.id);
+
+        counter += 1;
+        const bp = commitBlueprintCreate({
+            name: `bp-gate-unpin-stale-${counter}`,
+            description: null,
+            compose_content: 'services:\n  app:\n    image: nginx\n',
+            selector: { type: 'nodes', ids: [nodeA.id, nodeB.id] },
+            drift_mode: 'observe',
+            classification: 'stateless',
+            classification_reasons: [],
+            enabled: true,
+            created_by: 'admin',
+        }, desiredIdsFor);
+
+        const store = GitOpsStore.getInstance();
+        const created = store.getLiveBlueprintApplication(bp.id)!;
+        // Confirmed while unpinned, and only for A. The selector already names
+        // B, so clearing a later pin is a single addition unless the pin itself
+        // keeps it operator-only.
+        GitOpsTransitions.getInstance().placementApproved({
+            applicationId: created.id,
+            approvalId: newGitOpsId(),
+            intentRevisionId: created.intent_revision_id!,
+            blastJson: encodeGitOpsApprovedTargetEffectJson([{ nodeId: nodeA.id, outcome: 'place' }]),
+            requiredNodeIds: [nodeA.id],
+            fingerprint: null,
+            actor: 'admin',
+            envelope: { operationId: newGitOpsId(), actor: 'admin', trigger: 'test', at: Date.now() },
+            rolloutGenerationId: newGitOpsId(),
+            candidateId: created.rollout_candidate_id!,
+            authority: 'operator',
+            policyProvenanceJson: null,
+        });
+        DatabaseService.getInstance().getDb().prepare(
+            `UPDATE gitops_applications
+                SET placement_policy = 'bounded_auto', rollout_authorization_policy = 'automatic'
+              WHERE id = ?`,
+        ).run(created.id);
+        DatabaseService.getInstance().getDb().prepare(
+            `INSERT INTO blueprint_deployments (blueprint_id, node_id, status, applied_revision, last_deployed_at)
+             VALUES (?, ?, 'active', ?, ?)`,
+        ).run(bp.id, nodeA.id, bp.revision, Date.now());
+
+        commitBlueprintPin(bp.id, nodeA.id, 'admin', desiredIdsFor);
+
+        const deploySpy = vi.spyOn(BlueprintService.getInstance(), 'deployToNode').mockResolvedValue({ status: 'active' });
+        const withdrawSpy = vi.spyOn(BlueprintService.getInstance(), 'withdrawFromNode').mockResolvedValue({ status: 'withdrawn' });
+        const unpinRes = await request(app)
+            .put(`/api/blueprints/${bp.id}/pin`)
+            .set('Cookie', adminCookie)
+            .send({ nodeId: null });
+        expect(unpinRes.status).toBe(200);
+
+        await BlueprintReconciler.getInstance().reconcileOne(bp.id);
+        expect(deploySpy).not.toHaveBeenCalled();
+        expect(withdrawSpy).not.toHaveBeenCalled();
+
+        const preview = await request(app).get(`/api/blueprints/${bp.id}/preview`).set('Cookie', adminCookie);
+        expect(preview.status).toBe(200);
+        expect(preview.body.effectiveApproval).toBe('pending');
+        expect(preview.body.approvalAuthority).toBeNull();
+    });
+
+    it('does not place a freed node after an unconfirmed pin when only a combined approval stands', async () => {
+        // The chain the one-intent lookback lost. The only approval is the
+        // pre-decomposition marker, which names no intent revision, so there is
+        // no anchor to cut the pin search at and the whole history counts. Set,
+        // cleared, then one more edit that keeps the same two nodes: the intent
+        // before this one is the clear, so reading one intent back reports "no
+        // pin moved" and the policy approves an addition nothing confirmed.
+        const nodeA = seedNode();
+        const nodeB = seedNode();
+        const { commitBlueprintCreate, commitBlueprintPin, commitBlueprintUpdate } = await import('../services/gitops/blueprintProducers');
+        const { GitOpsStore, emptyTargetRow } = await import('../services/gitops/store');
+        const { GitOpsTransitions } = await import('../services/gitops/transitions');
+        const { newGitOpsId } = await import('../services/gitops/directApplication');
+        const desiredIdsFor = (blueprint: import('../services/DatabaseService').Blueprint): number[] =>
+            BlueprintReconciler.getInstance()
+                .listDesiredNodes(blueprint, DatabaseService.getInstance().getNodes())
+                .map((node) => node.id);
+
+        counter += 1;
+        const bp = commitBlueprintCreate({
+            name: `bp-gate-unpin-chain-${counter}`,
+            description: null,
+            compose_content: 'services:\n  app:\n    image: nginx\n',
+            selector: { type: 'nodes', ids: [nodeA.id] },
+            drift_mode: 'observe',
+            classification: 'stateless',
+            classification_reasons: [],
+            enabled: true,
+            created_by: 'admin',
+        }, desiredIdsFor);
+
+        const store = GitOpsStore.getInstance();
+        const created = store.getLiveBlueprintApplication(bp.id)!;
+        DatabaseService.getInstance().getDb().prepare(
+            `UPDATE gitops_applications
+                SET placement_policy = 'bounded_auto', rollout_authorization_policy = 'automatic'
+              WHERE id = ?`,
+        ).run(created.id);
+
+        // The only authority this application has ever had, and it names no
+        // intent. A is live, so the baseline the decision reads is {A} and the
+        // plan is a single stateless addition of B.
+        GitOpsTransitions.getInstance().legacyCombinedAppended({
+            applicationId: created.id,
+            approvalId: newGitOpsId(),
+            envelope: { operationId: newGitOpsId(), actor: 'admin', trigger: 'test', at: Date.now() },
+        });
+        store.upsertTarget({
+            ...emptyTargetRow(created.id, nodeA.id, Date.now()),
+            target_status: 'active',
+            observed_artifact_identity_json: JSON.stringify({ kind: 'exact', identity: 'sha256:served', observedAt: 1 }),
+        });
+        DatabaseService.getInstance().getDb().prepare(
+            `INSERT INTO blueprint_deployments (blueprint_id, node_id, status, applied_revision, last_deployed_at)
+             VALUES (?, ?, 'active', ?, ?)`,
+        ).run(bp.id, nodeA.id, bp.revision, Date.now());
+
+        // The pin and then the clear: both are placement changes the operator
+        // has not confirmed, so both wait.
+        commitBlueprintPin(bp.id, nodeA.id, 'admin', desiredIdsFor);
+        await request(app)
+            .put(`/api/blueprints/${bp.id}/pin`)
+            .set('Cookie', adminCookie)
+            .send({ nodeId: null })
+            .expect(200);
+
+        // One more edit that keeps the same node set, so the plan is still the
+        // unconfirmed addition of B. Labels on both nodes resolve to A and B.
+        expect(NodeLabelService.getInstance().addLabel(nodeA.id, 'web').ok).toBe(true);
+        expect(NodeLabelService.getInstance().addLabel(nodeB.id, 'web').ok).toBe(true);
+        commitBlueprintUpdate(
+            bp.id,
+            { selector: { type: 'labels', any: ['web'], all: [] } },
+            'admin',
+            desiredIdsFor,
+        );
+
+        const afterEdit = store.getLiveBlueprintApplication(bp.id)!;
+        expect(store.getApplication(created.id)?.placement_policy_refusal_reason).toBe('pin_driven_placement');
+        // The decision is the guard: no approval exists for this intent and
+        // candidate, so there is nothing for the tick to execute.
+        expect(store.hasPlacementApprovalFor(
+            created.id,
+            afterEdit.intent_revision_id!,
+            afterEdit.rollout_candidate_id!,
+        )).toBe(false);
+
+        const deploySpy = vi.spyOn(BlueprintService.getInstance(), 'deployToNode').mockResolvedValue({ status: 'active' });
+        await BlueprintReconciler.getInstance().reconcileOne(bp.id);
+        expect(deploySpy).not.toHaveBeenCalled();
+
+        const preview = await request(app).get(`/api/blueprints/${bp.id}/preview`).set('Cookie', adminCookie);
+        expect(preview.status).toBe(200);
+        expect(preview.body.effectiveApproval).toBe('pending');
+        expect(preview.body.approvalAuthority).toBeNull();
+    });
 });
 
 describe('reconcileConfirmedPlan fingerprint gate', () => {
@@ -576,7 +825,11 @@ describe('approval defaults and corrupt-approval fail-closed', () => {
         expect(deploySpy).not.toHaveBeenCalled();
     });
 
-    it('refuses place on a node outside a frozen GitOps placement set', async () => {
+    it('withholds a place outside the frozen GitOps placement set and keeps the nodes it covers', async () => {
+        // The operator's blast names a node the frozen set dropped, which is
+        // what a node-driven roster change leaves behind. That narrows the blast
+        // to the frozen set instead of invalidating the whole approval, so the
+        // node the approval covers still deploys.
         const nodeA = seedNode();
         const nodeB = seedNode();
         const bp = createBp({ nodeIds: [nodeA.id, nodeB.id] });
@@ -589,10 +842,18 @@ describe('approval defaults and corrupt-approval fail-closed', () => {
 
         const deploySpy = vi.spyOn(BlueprintService.getInstance(), 'deployToNode').mockResolvedValue({ status: 'active' });
         await BlueprintReconciler.getInstance().reconcileOne(bp.id);
-        expect(deploySpy).not.toHaveBeenCalled();
+        const deployedIds = deploySpy.mock.calls.map(c => (c[1] as { id: number }).id);
+        expect(deployedIds).toContain(nodeA.id);
+        expect(deployedIds).not.toContain(nodeB.id);
+
+        // The surface reads the narrowed blast too. Reporting approved over a
+        // plan the tick will not run would leave it waiting with nothing on
+        // screen to prompt for Apply.
+        const preview = await request(app).get(`/api/blueprints/${bp.id}/preview`).set('Cookie', adminCookie);
+        expect(preview.body.effectiveApproval).toBe('reapproval_required');
     });
 
-    it('refuses remove of a node still required by a frozen GitOps placement set', async () => {
+    it('withholds a remove the frozen GitOps placement set still requires', async () => {
         const nodeA = seedNode();
         const bp = createBp({ nodeIds: [] });
         DatabaseService.getInstance().upsertDeployment({
@@ -613,9 +874,11 @@ describe('approval defaults and corrupt-approval fail-closed', () => {
         await BlueprintReconciler.getInstance().reconcileOne(bp.id);
         expect(deploySpy).not.toHaveBeenCalled();
         expect(withdrawSpy).not.toHaveBeenCalled();
+        // Nothing was executed, so the approval stands: it is the withdrawn node
+        // the frozen set still requires that waits for the operator.
         const stored = DatabaseService.getInstance().getBlueprint(bp.id)!;
-        expect(stored.approval_status).toBe('pending');
-        expect(stored.approved_intent_fingerprint).toBeNull();
+        expect(stored.approval_status).toBe('approved');
+        expect(stored.approved_intent_fingerprint).not.toBeNull();
     });
 
     it('allows dual-write legacy approval when placement_approval_ref is still null', async () => {
@@ -654,6 +917,1168 @@ describe('approval defaults and corrupt-approval fail-closed', () => {
         const deploySpy = vi.spyOn(BlueprintService.getInstance(), 'deployToNode').mockResolvedValue({ status: 'active' });
         await BlueprintReconciler.getInstance().reconcileOne(bp.id);
         expect(deploySpy).not.toHaveBeenCalled();
+    });
+});
+
+describe('policy placement authority on an automatic rollout', () => {
+    /**
+     * An Inline Blueprint in the state an operator's edit leaves behind: the
+     * legacy combined approval is pending, and the only current authority is the
+     * decomposed placement approval the policy wrote.
+     */
+    async function seedPolicyPlacedInline(opts: {
+        rollout: 'manual' | 'automatic';
+        initialNodeIds: number[];
+        addedNodeIds: number[];
+        alsoChangeCompose?: boolean;
+    }): Promise<number> {
+        const { commitBlueprintCreate, commitBlueprintUpdate } = await import('../services/gitops/blueprintProducers');
+        const { GitOpsStore } = await import('../services/gitops/store');
+        const { GitOpsTransitions } = await import('../services/gitops/transitions');
+        const { encodeGitOpsApprovedTargetEffectJson } = await import('../services/gitops/json');
+        const { newGitOpsId } = await import('../services/gitops/directApplication');
+        const desiredIdsFor = (bp: import('../services/DatabaseService').Blueprint): number[] =>
+            BlueprintReconciler.getInstance()
+                .listDesiredNodes(bp, DatabaseService.getInstance().getNodes())
+                .map((n) => n.id);
+
+        counter += 1;
+        const bp = commitBlueprintCreate({
+            name: `bp-gate-policy-${counter}`,
+            description: null,
+            compose_content: 'services:\n  app:\n    image: nginx\n',
+            selector: { type: 'nodes', ids: opts.initialNodeIds },
+            drift_mode: 'observe',
+            classification: 'stateless',
+            classification_reasons: [],
+            enabled: true,
+            created_by: 'admin',
+        }, desiredIdsFor);
+
+        const app = GitOpsStore.getInstance().getLiveBlueprintApplication(bp.id)!;
+        DatabaseService.getInstance().getDb().prepare(
+            `UPDATE gitops_applications
+                SET placement_policy = 'bounded_auto', rollout_authorization_policy = ?
+              WHERE id = ?`,
+        ).run(opts.rollout, app.id);
+
+        // A prior placement authority over the initial set, so the change is an
+        // ordinary single addition rather than a first placement.
+        GitOpsTransitions.getInstance().placementApproved({
+            applicationId: app.id,
+            approvalId: newGitOpsId(),
+            intentRevisionId: app.intent_revision_id!,
+            blastJson: encodeGitOpsApprovedTargetEffectJson(
+                opts.initialNodeIds.map((nodeId) => ({ nodeId, outcome: 'place' as const })),
+            ),
+            requiredNodeIds: opts.initialNodeIds,
+            fingerprint: null,
+            actor: 'admin',
+            envelope: { operationId: newGitOpsId(), actor: 'admin', trigger: 'test', at: Date.now() },
+            rolloutGenerationId: newGitOpsId(),
+            candidateId: app.rollout_candidate_id!,
+            authority: 'operator',
+            policyProvenanceJson: null,
+        });
+
+        // The initial placement has run, so its nodes are retained deployments
+        // rather than nodes waiting for a first deploy. The change under test is
+        // then an ordinary single addition on top of a running set.
+        for (const nodeId of opts.initialNodeIds) {
+            DatabaseService.getInstance().getDb().prepare(
+                `INSERT INTO blueprint_deployments (blueprint_id, node_id, status, applied_revision, last_deployed_at)
+                 VALUES (?, ?, 'active', ?, ?)`,
+            ).run(bp.id, nodeId, bp.revision, Date.now());
+        }
+
+        // The operational edit the policy answers. The legacy approval clears,
+        // and the policy writes the placement approval the reconciler used to
+        // record and then ignore.
+        const nextSelector = { type: 'nodes' as const, ids: [...opts.initialNodeIds, ...opts.addedNodeIds] };
+        commitBlueprintUpdate(
+            bp.id,
+            opts.alsoChangeCompose
+                ? {
+                    selector: nextSelector,
+                    compose_content: 'services:\n  app:\n    image: nginx:alpine\n',
+                    bumpRevision: true,
+                }
+                : { selector: nextSelector },
+            'admin',
+            desiredIdsFor,
+        );
+        return bp.id;
+    }
+
+    /**
+     * The mirror image of the addition fixture: the operator shrinks the
+     * roster, and the policy writes the placement approval that authorizes
+     * withdrawing the node it left behind. The withdrawn node carries the
+     * observation a deploy leaves, which is the evidence a removal is judged by.
+     */
+    async function seedPolicyRemovalInline(opts: {
+        rollout: 'manual' | 'automatic';
+        keptNodeIds: number[];
+        removedNodeIds: number[];
+    }): Promise<number> {
+        const { commitBlueprintCreate, commitBlueprintUpdate } = await import('../services/gitops/blueprintProducers');
+        const { GitOpsStore, emptyTargetRow } = await import('../services/gitops/store');
+        const { GitOpsTransitions } = await import('../services/gitops/transitions');
+        const { encodeGitOpsApprovedTargetEffectJson } = await import('../services/gitops/json');
+        const { newGitOpsId } = await import('../services/gitops/directApplication');
+        const desiredIdsFor = (bp: import('../services/DatabaseService').Blueprint): number[] =>
+            BlueprintReconciler.getInstance()
+                .listDesiredNodes(bp, DatabaseService.getInstance().getNodes())
+                .map((n) => n.id);
+
+        const allNodeIds = [...opts.keptNodeIds, ...opts.removedNodeIds];
+        counter += 1;
+        const bp = commitBlueprintCreate({
+            name: `bp-gate-policy-removal-${counter}`,
+            description: null,
+            compose_content: 'services:\n  app:\n    image: nginx\n',
+            selector: { type: 'nodes', ids: allNodeIds },
+            drift_mode: 'observe',
+            classification: 'stateless',
+            classification_reasons: [],
+            enabled: true,
+            created_by: 'admin',
+        }, desiredIdsFor);
+
+        const app = GitOpsStore.getInstance().getLiveBlueprintApplication(bp.id)!;
+        DatabaseService.getInstance().getDb().prepare(
+            `UPDATE gitops_applications
+                SET placement_policy = 'bounded_auto', rollout_authorization_policy = ?
+              WHERE id = ?`,
+        ).run(opts.rollout, app.id);
+
+        GitOpsTransitions.getInstance().placementApproved({
+            applicationId: app.id,
+            approvalId: newGitOpsId(),
+            intentRevisionId: app.intent_revision_id!,
+            blastJson: encodeGitOpsApprovedTargetEffectJson(
+                allNodeIds.map((nodeId) => ({ nodeId, outcome: 'place' as const })),
+            ),
+            requiredNodeIds: allNodeIds,
+            fingerprint: null,
+            actor: 'admin',
+            envelope: { operationId: newGitOpsId(), actor: 'admin', trigger: 'test', at: Date.now() },
+            rolloutGenerationId: newGitOpsId(),
+            candidateId: app.rollout_candidate_id!,
+            authority: 'operator',
+            policyProvenanceJson: null,
+        });
+
+        for (const nodeId of allNodeIds) {
+            DatabaseService.getInstance().getDb().prepare(
+                `INSERT INTO blueprint_deployments (blueprint_id, node_id, status, applied_revision, last_deployed_at)
+                 VALUES (?, ?, 'active', ?, ?)`,
+            ).run(bp.id, nodeId, bp.revision, Date.now());
+        }
+        for (const nodeId of opts.removedNodeIds) {
+            GitOpsStore.getInstance().upsertTarget({
+                ...emptyTargetRow(app.id, nodeId, Date.now()),
+                target_status: 'active',
+                observed_artifact_identity_json: JSON.stringify({ kind: 'exact', identity: 'sha256:served', observedAt: 1 }),
+            });
+        }
+
+        commitBlueprintUpdate(
+            bp.id,
+            { selector: { type: 'nodes' as const, ids: opts.keptNodeIds } },
+            'admin',
+            desiredIdsFor,
+        );
+        return bp.id;
+    }
+
+    it('executes the placement a policy approved without a legacy approval', async () => {
+        const nodeA = seedNode();
+        const nodeB = seedNode();
+        const blueprintId = await seedPolicyPlacedInline({
+            rollout: 'automatic',
+            initialNodeIds: [nodeA.id],
+            addedNodeIds: [nodeB.id],
+        });
+
+        const { GitOpsStore } = await import('../services/gitops/store');
+        const live = GitOpsStore.getInstance().getLiveBlueprintApplication(blueprintId)!;
+        expect(live.placement_approval_ref).not.toBeNull();
+        expect(DatabaseService.getInstance().getBlueprint(blueprintId)!.approval_status).toBe('pending');
+
+        const checkSpy = vi.spyOn(BlueprintService.getInstance(), 'checkForDrift').mockResolvedValue({ kind: 'matched' });
+        const deploySpy = vi.spyOn(BlueprintService.getInstance(), 'deployToNode').mockResolvedValue({ status: 'active' });
+        await BlueprintReconciler.getInstance().reconcileOne(blueprintId);
+
+        // The added node is placed. The retained one is only observed, because
+        // the policy decided the node set and never saw the compose.
+        const checkedIds = checkSpy.mock.calls.map(c => (c[1] as { id: number }).id);
+        expect(checkedIds).toContain(nodeA.id);
+        const deployedIds = deploySpy.mock.calls.map(c => (c[1] as { id: number }).id);
+        expect(deployedIds).toContain(nodeB.id);
+        expect(deployedIds).not.toContain(nodeA.id);
+    });
+
+    it('carries an unlanded placement forward so two roster changes in one tick both run', async () => {
+        // The reconciler executes one approval and refuses a plan it does not
+        // cover whole. An approval written from the approved set alone covers only
+        // its own delta, so a second roster change arriving before the first one
+        // landed produced an approval the plan could not run, and both additions
+        // waited for an operator with no refusal recorded to explain the wait.
+        const nodeA = seedNode();
+        const nodeB = seedNode();
+        const nodeC = seedNode();
+        const blueprintId = await seedPolicyPlacedInline({
+            rollout: 'automatic',
+            initialNodeIds: [nodeA.id],
+            addedNodeIds: [nodeB.id],
+        });
+
+        // The second roster change, before the reconciler has placed the first.
+        const { commitBlueprintUpdate } = await import('../services/gitops/blueprintProducers');
+        const desiredIdsFor = (current: import('../services/DatabaseService').Blueprint) => BlueprintReconciler.getInstance()
+            .listDesiredNodes(current, DatabaseService.getInstance().getNodes())
+            .map(n => n.id);
+        commitBlueprintUpdate(
+            blueprintId,
+            { selector: { type: 'nodes' as const, ids: [nodeA.id, nodeB.id, nodeC.id] } },
+            'admin',
+            desiredIdsFor,
+        );
+
+        const checkSpy = vi.spyOn(BlueprintService.getInstance(), 'checkForDrift').mockResolvedValue({ kind: 'matched' });
+        const deploySpy = vi.spyOn(BlueprintService.getInstance(), 'deployToNode').mockResolvedValue({ status: 'active' });
+        await BlueprintReconciler.getInstance().reconcileOne(blueprintId);
+
+        const deployedIds = deploySpy.mock.calls.map(c => (c[1] as { id: number }).id);
+        expect(deployedIds).toContain(nodeB.id);
+        expect(deployedIds).toContain(nodeC.id);
+        expect(deployedIds).not.toContain(nodeA.id);
+        expect(checkSpy.mock.calls.map(c => (c[1] as { id: number }).id)).toContain(nodeA.id);
+    });
+
+    it('names only the nodes the fleet does not hold, so a drifted placement is never redeployed under the approval', async () => {
+        // The blast is what the executor's coverage check reads, and a `place`
+        // entry covers an `update` on that node too. Reading "not active" as "not
+        // placed" would have named the drifted node, and the approval would then
+        // authorize the redeploy of compose it never covered, which is the one
+        // thing a placement decision may not roll out.
+        const nodeA = seedNode();
+        const nodeB = seedNode();
+        const nodeC = seedNode();
+        const blueprintId = await seedPolicyPlacedInline({
+            rollout: 'automatic',
+            initialNodeIds: [nodeA.id],
+            addedNodeIds: [nodeB.id],
+        });
+
+        // The retained node's placement ran and drifted. It still holds the
+        // workload, so it is not a fresh place.
+        DatabaseService.getInstance().getDb().prepare(
+            `UPDATE blueprint_deployments SET status = 'drifted' WHERE blueprint_id = ? AND node_id = ?`,
+        ).run(blueprintId, nodeA.id);
+
+        const { commitBlueprintUpdate } = await import('../services/gitops/blueprintProducers');
+        const desiredIdsFor = (current: import('../services/DatabaseService').Blueprint) => BlueprintReconciler.getInstance()
+            .listDesiredNodes(current, DatabaseService.getInstance().getNodes())
+            .map(n => n.id);
+        commitBlueprintUpdate(
+            blueprintId,
+            { selector: { type: 'nodes' as const, ids: [nodeA.id, nodeB.id, nodeC.id] } },
+            'admin',
+            desiredIdsFor,
+        );
+
+        const { GitOpsStore } = await import('../services/gitops/store');
+        const { decodeGitOpsApprovedTargetEffectJson } = await import('../services/gitops/json');
+        const live = GitOpsStore.getInstance().getLiveBlueprintApplication(blueprintId)!;
+        const blast = decodeGitOpsApprovedTargetEffectJson(
+            GitOpsStore.getInstance().getApproval(live.placement_approval_ref!)!.blast_json!,
+        );
+        expect(blast.map(entry => entry.nodeId)).not.toContain(nodeA.id);
+        // The earlier decision's placement is still unlanded, so it is carried.
+        expect(blast).toEqual([
+            { nodeId: nodeB.id, outcome: 'place' },
+            { nodeId: nodeC.id, outcome: 'place' },
+        ]);
+    });
+
+    it('leaves a combined compose and roster edit to the operator', async () => {
+        const nodeA = seedNode();
+        const nodeB = seedNode();
+        const blueprintId = await seedPolicyPlacedInline({
+            rollout: 'automatic',
+            initialNodeIds: [nodeA.id],
+            addedNodeIds: [nodeB.id],
+            alsoChangeCompose: true,
+        });
+
+        const deploySpy = vi.spyOn(BlueprintService.getInstance(), 'deployToNode').mockResolvedValue({ status: 'active' });
+        const withdrawSpy = vi.spyOn(BlueprintService.getInstance(), 'withdrawFromNode').mockResolvedValue({ status: 'withdrawn' });
+        await BlueprintReconciler.getInstance().reconcileOne(blueprintId);
+
+        // The placement policy saw the roster, not the compose edit, so the
+        // retained node's content update is not its to authorize. The whole plan
+        // waits for the operator rather than partly executing.
+        expect(deploySpy).not.toHaveBeenCalled();
+        expect(withdrawSpy).not.toHaveBeenCalled();
+
+        const preview = await request(app).get(`/api/blueprints/${blueprintId}/preview`).set('Cookie', adminCookie);
+        expect(preview.body.effectiveApproval).toBe('pending');
+    });
+
+    it('reports the composed approval as approved on the preview, the detail and the list', async () => {
+        const nodeA = seedNode();
+        const nodeB = seedNode();
+        const blueprintId = await seedPolicyPlacedInline({
+            rollout: 'automatic',
+            initialNodeIds: [nodeA.id],
+            addedNodeIds: [nodeB.id],
+        });
+
+        const preview = await request(app).get(`/api/blueprints/${blueprintId}/preview`).set('Cookie', adminCookie);
+        expect(preview.status).toBe(200);
+        expect(preview.body.effectiveApproval).toBe('approved');
+        // The authority has to be named, because the plan is approved by the
+        // policy's decomposed placement approval and not by the combined one.
+        expect(preview.body.approvalAuthority).toBe('configured_policy');
+        expect(preview.body.approvalHoldReason).toBeNull();
+
+        const detail = await request(app).get(`/api/blueprints/${blueprintId}`).set('Cookie', adminCookie);
+        expect(detail.status).toBe(200);
+        expect(detail.body.effectiveApproval).toBe('approved');
+
+        const list = await request(app).get('/api/blueprints').set('Cookie', adminCookie);
+        expect(list.status).toBe(200);
+        const row = list.body.find((b: { id: number }) => b.id === blueprintId);
+        expect(row.effectiveApproval).toBe('approved');
+    });
+
+    it('prefers a covering policy approval over a current combined approval the plan has outgrown', async () => {
+        const nodeA = seedNode();
+        const nodeB = seedNode();
+        const blueprintId = await seedPolicyPlacedInline({
+            rollout: 'automatic',
+            initialNodeIds: [nodeA.id],
+            addedNodeIds: [nodeB.id],
+        });
+
+        // A combined approval that names only the retained node. The policy
+        // approval covers the whole plan and is bound to the current intent, so
+        // the tick runs under it and the combined approval is left in place as
+        // the fallback rather than discarded.
+        const bp = DatabaseService.getInstance().getBlueprint(blueprintId)!;
+        DatabaseService.getInstance().setBlueprintApproval(blueprintId, {
+            intentFingerprint: intentFingerprint(bp),
+            blastJson: serializeApprovedBlast([{ nodeId: nodeA.id, outcome: 'place' as const }]),
+            approvedBy: 'admin',
+        });
+
+        const preview = await request(app).get(`/api/blueprints/${blueprintId}/preview`).set('Cookie', adminCookie);
+        expect(preview.body.effectiveApproval).toBe('approved');
+        expect(preview.body.approvalAuthority).toBe('configured_policy');
+
+        const checkSpy = vi.spyOn(BlueprintService.getInstance(), 'checkForDrift').mockResolvedValue({ kind: 'matched' });
+        const deploySpy = vi.spyOn(BlueprintService.getInstance(), 'deployToNode').mockResolvedValue({ status: 'active' });
+        await BlueprintReconciler.getInstance().reconcileOne(blueprintId);
+
+        expect(deploySpy.mock.calls.map(c => (c[1] as { id: number }).id)).toContain(nodeB.id);
+        expect(checkSpy.mock.calls.map(c => (c[1] as { id: number }).id)).toContain(nodeA.id);
+        expect(DatabaseService.getInstance().getBlueprint(blueprintId)!.approval_status).toBe('approved');
+    });
+
+    it('refuses an action whose outcome does not match the approval effect for that node', async () => {
+        const nodeA = seedNode();
+        const nodeB = seedNode();
+        const blueprintId = await seedPolicyPlacedInline({
+            rollout: 'automatic',
+            initialNodeIds: [nodeA.id],
+            addedNodeIds: [nodeB.id],
+        });
+        const bp = DatabaseService.getInstance().getBlueprint(blueprintId)!;
+        const reconciler = BlueprintReconciler.getInstance();
+
+        // The approval places B, so withdrawing B is not its to authorize.
+        expect(reconciler.policyPlacementAuthorizedActions(bp, [{ nodeId: nodeB.id, action: 'remove' }])).toBeNull();
+        // A check on a node the approval does not retain is not its to authorize either.
+        expect(reconciler.policyPlacementAuthorizedActions(bp, [{ nodeId: 987654, action: 'check_observe' }])).toBeNull();
+    });
+
+    it('stops executing a policy approval once the placement policy is revoked', async () => {
+        const nodeA = seedNode();
+        const nodeB = seedNode();
+        const blueprintId = await seedPolicyPlacedInline({
+            rollout: 'automatic',
+            initialNodeIds: [nodeA.id],
+            addedNodeIds: [nodeB.id],
+        });
+
+        // Revoked through the route an operator writes through. Taking the
+        // placement policy back is a statement that no further change is placed
+        // without them, and the approval that policy wrote has to stop with it
+        // rather than wait for someone to flip rollout authorization too.
+        const revoked = await request(app)
+            .post(`/api/gitops/applications/bp:${blueprintId}/placement-policy`)
+            .set('Cookie', adminCookie)
+            .send({ policy: 'operator' });
+        expect(revoked.status).toBe(200);
+
+        const { GitOpsStore } = await import('../services/gitops/store');
+        const live = GitOpsStore.getInstance().getLiveBlueprintApplication(blueprintId)!;
+        expect(live.placement_policy).toBe('operator');
+        // The pointer is left in place: revocation stops execution at the
+        // execution-time check rather than by withdrawing it.
+        expect(live.placement_approval_ref).not.toBeNull();
+
+        const deploySpy = vi.spyOn(BlueprintService.getInstance(), 'deployToNode').mockResolvedValue({ status: 'active' });
+        await BlueprintReconciler.getInstance().reconcileOne(blueprintId);
+        expect(deploySpy).not.toHaveBeenCalled();
+
+        const preview = await request(app).get(`/api/blueprints/${blueprintId}/preview`).set('Cookie', adminCookie);
+        expect(preview.body.effectiveApproval).not.toBe('approved');
+    });
+
+    it('does not revive a policy approval when the placement policy is armed again', async () => {
+        const nodeA = seedNode();
+        const nodeB = seedNode();
+        const blueprintId = await seedPolicyPlacedInline({
+            rollout: 'automatic',
+            initialNodeIds: [nodeA.id],
+            addedNodeIds: [nodeB.id],
+        });
+
+        const { GitOpsStore } = await import('../services/gitops/store');
+        const store = GitOpsStore.getInstance();
+        expect(store.getLiveBlueprintApplication(blueprintId)!.placement_approval_ref).not.toBeNull();
+
+        for (const policy of ['operator', 'bounded_auto']) {
+            const armed = await request(app)
+                .post(`/api/gitops/applications/bp:${blueprintId}/placement-policy`)
+                .set('Cookie', adminCookie)
+                .send({ policy });
+            expect(armed.status).toBe(200);
+        }
+
+        // Armed again, and the decision the policy made while it was armed the
+        // first time is gone: setting it back says what a future change may do
+        // unattended, not that the change it already decided may now run.
+        const live = store.getLiveBlueprintApplication(blueprintId)!;
+        expect(live.placement_policy).toBe('bounded_auto');
+        expect(live.placement_approval_ref).toBeNull();
+
+        const deploySpy = vi.spyOn(BlueprintService.getInstance(), 'deployToNode').mockResolvedValue({ status: 'active' });
+        await BlueprintReconciler.getInstance().reconcileOne(blueprintId);
+        expect(deploySpy).not.toHaveBeenCalled();
+
+        const preview = await request(app).get(`/api/blueprints/${blueprintId}/preview`).set('Cookie', adminCookie);
+        expect(preview.body.effectiveApproval).toBe('pending');
+        expect(preview.body.approvalAuthority).toBeNull();
+    });
+
+    it('does not execute a placement approval an operator made', async () => {
+        // The policy path runs where no operator decided, so only a policy's
+        // own approval may execute under it. An operator's approval is not a
+        // licence to skip the combined Apply it was made through.
+        const nodeA = seedNode();
+        const nodeB = seedNode();
+        const blueprintId = await seedPolicyPlacedInline({
+            rollout: 'automatic',
+            initialNodeIds: [nodeA.id],
+            addedNodeIds: [nodeB.id],
+        });
+
+        const { GitOpsStore } = await import('../services/gitops/store');
+        const live = GitOpsStore.getInstance().getLiveBlueprintApplication(blueprintId)!;
+        expect(live.placement_approval_ref).not.toBeNull();
+        DatabaseService.getInstance().getDb().prepare(
+            `UPDATE gitops_approvals SET authority = 'operator' WHERE id = ?`,
+        ).run(live.placement_approval_ref);
+
+        const deploySpy = vi.spyOn(BlueprintService.getInstance(), 'deployToNode').mockResolvedValue({ status: 'active' });
+        await BlueprintReconciler.getInstance().reconcileOne(blueprintId);
+        expect(deploySpy).not.toHaveBeenCalled();
+
+        const preview = await request(app).get(`/api/blueprints/${blueprintId}/preview`).set('Cookie', adminCookie);
+        expect(preview.body.effectiveApproval).toBe('pending');
+    });
+
+    it('does not execute a policy approval for a non-inline application', async () => {
+        // The combined approval is the executor for an Inline Blueprint. Another
+        // target mode executes through its own authority, not this path.
+        const nodeA = seedNode();
+        const nodeB = seedNode();
+        const blueprintId = await seedPolicyPlacedInline({
+            rollout: 'automatic',
+            initialNodeIds: [nodeA.id],
+            addedNodeIds: [nodeB.id],
+        });
+
+        const { GitOpsStore } = await import('../services/gitops/store');
+        const live = GitOpsStore.getInstance().getLiveBlueprintApplication(blueprintId)!;
+        DatabaseService.getInstance().getDb().prepare(
+            `UPDATE gitops_applications
+                SET target_mode = 'blueprint', configured_repo_url = 'https://example.invalid/x.git'
+              WHERE id = ?`,
+        ).run(live.id);
+
+        const deploySpy = vi.spyOn(BlueprintService.getInstance(), 'deployToNode').mockResolvedValue({ status: 'active' });
+        await BlueprintReconciler.getInstance().reconcileOne(blueprintId);
+        expect(deploySpy).not.toHaveBeenCalled();
+    });
+
+    it('executes a policy-approved removal through the reconciler', async () => {
+        const kept = seedNode();
+        const removed = seedNode();
+        const blueprintId = await seedPolicyRemovalInline({
+            rollout: 'automatic',
+            keptNodeIds: [kept.id],
+            removedNodeIds: [removed.id],
+        });
+
+        const { GitOpsStore } = await import('../services/gitops/store');
+        const live = GitOpsStore.getInstance().getLiveBlueprintApplication(blueprintId)!;
+        expect(live.placement_approval_ref).not.toBeNull();
+
+        const checkSpy = vi.spyOn(BlueprintService.getInstance(), 'checkForDrift').mockResolvedValue({ kind: 'matched' });
+        const deploySpy = vi.spyOn(BlueprintService.getInstance(), 'deployToNode').mockResolvedValue({ status: 'active' });
+        const withdrawSpy = vi.spyOn(BlueprintService.getInstance(), 'withdrawFromNode').mockResolvedValue({ status: 'withdrawn' });
+        await BlueprintReconciler.getInstance().reconcileOne(blueprintId);
+
+        const withdrawnIds = withdrawSpy.mock.calls.map(c => (c[1] as { id: number }).id);
+        expect(withdrawnIds).toContain(removed.id);
+        expect(deploySpy).not.toHaveBeenCalled();
+        const checkedIds = checkSpy.mock.calls.map(c => (c[1] as { id: number }).id);
+        expect(checkedIds).toContain(kept.id);
+    });
+
+    it('does not re-place an added node the fleet already runs', async () => {
+        const nodeA = seedNode();
+        const nodeB = seedNode();
+        const blueprintId = await seedPolicyPlacedInline({
+            rollout: 'automatic',
+            initialNodeIds: [nodeA.id],
+            addedNodeIds: [nodeB.id],
+        });
+
+        const checkSpy = vi.spyOn(BlueprintService.getInstance(), 'checkForDrift').mockResolvedValue({ kind: 'matched' });
+        const deploySpy = vi.spyOn(BlueprintService.getInstance(), 'deployToNode').mockResolvedValue({ status: 'active' });
+        await BlueprintReconciler.getInstance().reconcileOne(blueprintId);
+        expect(deploySpy.mock.calls.map(c => (c[1] as { id: number }).id)).toEqual([nodeB.id]);
+
+        // The placement landed between ticks: the added node now runs the
+        // revision, so the next tick only checks it.
+        const revision = DatabaseService.getInstance().getBlueprint(blueprintId)!.revision;
+        DatabaseService.getInstance().getDb().prepare(
+            `INSERT INTO blueprint_deployments (blueprint_id, node_id, status, applied_revision, last_deployed_at)
+             VALUES (?, ?, 'active', ?, ?)`,
+        ).run(blueprintId, nodeB.id, revision, Date.now());
+
+        checkSpy.mockClear();
+        await BlueprintReconciler.getInstance().reconcileOne(blueprintId);
+
+        expect(deploySpy.mock.calls.length).toBe(1);
+        const checkedIds = checkSpy.mock.calls.map(c => (c[1] as { id: number }).id);
+        expect(checkedIds).toContain(nodeB.id);
+    });
+
+    it('waits when a retained node needs a content update', async () => {
+        // A failed deployment on a retained node is an uncovered update, so the
+        // placement policy must not place the added node around it.
+        const nodeA = seedNode();
+        const nodeB = seedNode();
+        const blueprintId = await seedPolicyPlacedInline({
+            rollout: 'automatic',
+            initialNodeIds: [nodeA.id],
+            addedNodeIds: [nodeB.id],
+        });
+        DatabaseService.getInstance().getDb().prepare(
+            `UPDATE blueprint_deployments SET status = 'failed' WHERE blueprint_id = ? AND node_id = ?`,
+        ).run(blueprintId, nodeA.id);
+
+        const deploySpy = vi.spyOn(BlueprintService.getInstance(), 'deployToNode').mockResolvedValue({ status: 'active' });
+        await BlueprintReconciler.getInstance().reconcileOne(blueprintId);
+        expect(deploySpy).not.toHaveBeenCalled();
+    });
+
+    it('waits when the compose edit lands while a retained node is mid-deploy', async () => {
+        // The retained node emits an informational row while mid-deploy, so it
+        // drops out of the plan and cannot fail the coverage count. The revision
+        // it still runs is what keeps the added node from receiving compose the
+        // policy never saw.
+        const nodeA = seedNode();
+        const nodeB = seedNode();
+        const blueprintId = await seedPolicyPlacedInline({
+            rollout: 'automatic',
+            initialNodeIds: [nodeA.id],
+            addedNodeIds: [nodeB.id],
+            alsoChangeCompose: true,
+        });
+        DatabaseService.getInstance().getDb().prepare(
+            `UPDATE blueprint_deployments SET status = 'deploying' WHERE blueprint_id = ? AND node_id = ?`,
+        ).run(blueprintId, nodeA.id);
+
+        const deploySpy = vi.spyOn(BlueprintService.getInstance(), 'deployToNode').mockResolvedValue({ status: 'active' });
+        await BlueprintReconciler.getInstance().reconcileOne(blueprintId);
+        expect(deploySpy).not.toHaveBeenCalled();
+
+        const preview = await request(app).get(`/api/blueprints/${blueprintId}/preview`).set('Cookie', adminCookie);
+        expect(preview.body.effectiveApproval).toBe('pending');
+    });
+
+    it('waits for Apply before repairing a retained node under Enforce', async () => {
+        // Drift mode is deliberately not an operational field, so the policy's
+        // placement approval survives the switch. What it cannot cover is the
+        // repair it then asks for: a retained node rolling out compose the
+        // approval never confirmed, which is a deployment, not an observation.
+        // Drift mode is part of the intent fingerprint, so the operator's
+        // combined approval is stale too and the whole plan waits for Apply.
+        const nodeA = seedNode();
+        const nodeB = seedNode();
+        const blueprintId = await seedPolicyPlacedInline({
+            rollout: 'automatic',
+            initialNodeIds: [nodeA.id],
+            addedNodeIds: [nodeB.id],
+        });
+        const { commitBlueprintUpdate } = await import('../services/gitops/blueprintProducers');
+        const desiredIdsFor = (bp: import('../services/DatabaseService').Blueprint): number[] =>
+            BlueprintReconciler.getInstance()
+                .listDesiredNodes(bp, DatabaseService.getInstance().getNodes())
+                .map((n) => n.id);
+        commitBlueprintUpdate(blueprintId, { drift_mode: 'enforce' }, 'admin', desiredIdsFor);
+
+        vi.spyOn(BlueprintService.getInstance(), 'checkForDrift').mockImplementation(async (_blueprint, node) =>
+            node.id === nodeA.id
+                ? { kind: 'drifted', reason: 'container config differs', cause: 'container' }
+                : { kind: 'matched' });
+        const deploySpy = vi.spyOn(BlueprintService.getInstance(), 'deployToNode').mockResolvedValue({ status: 'active' });
+        await BlueprintReconciler.getInstance().reconcileOne(blueprintId);
+
+        // Neither the repair nor the added node's placement runs.
+        expect(deploySpy).not.toHaveBeenCalled();
+
+        const preview = await request(app).get(`/api/blueprints/${blueprintId}/preview`).set('Cookie', adminCookie);
+        expect(preview.body.effectiveApproval).toBe('pending');
+        expect(preview.body.approvalHoldReason).toBe(
+            'Enforce waits for Apply. Automatic placement acts in Observe or Suggest. In Enforce, a place, a withdrawal, or a repair under a policy approval stays pending until you confirm it.',
+        );
+    });
+
+    it('does not place an added node under Enforce while a retained node is in flight', async () => {
+        // A correcting or deploying row is informational, so the repair drops
+        // out of the plan and the revision still matches. Enforce has to hold
+        // the added node's place anyway, and the preview has to say why.
+        const { commitBlueprintUpdate } = await import('../services/gitops/blueprintProducers');
+        const desiredIdsFor = (bp: import('../services/DatabaseService').Blueprint): number[] =>
+            BlueprintReconciler.getInstance()
+                .listDesiredNodes(bp, DatabaseService.getInstance().getNodes())
+                .map((n) => n.id);
+        for (const status of ['correcting', 'deploying'] as const) {
+            const nodeA = seedNode();
+            const nodeB = seedNode();
+            const blueprintId = await seedPolicyPlacedInline({
+                rollout: 'automatic',
+                initialNodeIds: [nodeA.id],
+                addedNodeIds: [nodeB.id],
+            });
+            DatabaseService.getInstance().getDb().prepare(
+                `UPDATE blueprint_deployments SET status = ? WHERE blueprint_id = ? AND node_id = ?`,
+            ).run(status, blueprintId, nodeA.id);
+            commitBlueprintUpdate(blueprintId, { drift_mode: 'enforce' }, 'admin', desiredIdsFor);
+
+            const deploySpy = vi.spyOn(BlueprintService.getInstance(), 'deployToNode')
+                .mockResolvedValue({ status: 'active' });
+            try {
+                await BlueprintReconciler.getInstance().reconcileOne(blueprintId);
+                expect(deploySpy).not.toHaveBeenCalled();
+
+                const preview = await request(app).get(`/api/blueprints/${blueprintId}/preview`).set('Cookie', adminCookie);
+                expect(preview.body.effectiveApproval).toBe('pending');
+                expect(preview.body.approvalHoldReason).toBe(
+                    'Enforce waits for Apply. Automatic placement acts in Observe or Suggest. In Enforce, a place, a withdrawal, or a repair under a policy approval stays pending until you confirm it.',
+                );
+            } finally {
+                deploySpy.mockRestore();
+            }
+        }
+    });
+
+    it('does not blame Enforce when rollout authorization is manual', async () => {
+        const nodeA = seedNode();
+        const nodeB = seedNode();
+        const blueprintId = await seedPolicyPlacedInline({
+            rollout: 'manual',
+            initialNodeIds: [nodeA.id],
+            addedNodeIds: [nodeB.id],
+        });
+        const { commitBlueprintUpdate } = await import('../services/gitops/blueprintProducers');
+        const desiredIdsFor = (bp: import('../services/DatabaseService').Blueprint): number[] =>
+            BlueprintReconciler.getInstance()
+                .listDesiredNodes(bp, DatabaseService.getInstance().getNodes())
+                .map((n) => n.id);
+        commitBlueprintUpdate(blueprintId, { drift_mode: 'enforce' }, 'admin', desiredIdsFor);
+
+        const deploySpy = vi.spyOn(BlueprintService.getInstance(), 'deployToNode')
+            .mockResolvedValue({ status: 'active' });
+        try {
+            await BlueprintReconciler.getInstance().reconcileOne(blueprintId);
+            expect(deploySpy).not.toHaveBeenCalled();
+            const preview = await request(app).get(`/api/blueprints/${blueprintId}/preview`).set('Cookie', adminCookie);
+            expect(preview.body.effectiveApproval).toBe('pending');
+            expect(preview.body.approvalHoldReason).toBeNull();
+        } finally {
+            deploySpy.mockRestore();
+        }
+    });
+
+    it('does not blame Enforce for a compose edit', async () => {
+        const nodeA = seedNode();
+        const nodeB = seedNode();
+        const blueprintId = await seedPolicyPlacedInline({
+            rollout: 'automatic',
+            initialNodeIds: [nodeA.id],
+            addedNodeIds: [nodeB.id],
+            alsoChangeCompose: true,
+        });
+        const { commitBlueprintUpdate } = await import('../services/gitops/blueprintProducers');
+        const desiredIdsFor = (bp: import('../services/DatabaseService').Blueprint): number[] =>
+            BlueprintReconciler.getInstance()
+                .listDesiredNodes(bp, DatabaseService.getInstance().getNodes())
+                .map((n) => n.id);
+        commitBlueprintUpdate(blueprintId, { drift_mode: 'enforce' }, 'admin', desiredIdsFor);
+
+        const deploySpy = vi.spyOn(BlueprintService.getInstance(), 'deployToNode')
+            .mockResolvedValue({ status: 'active' });
+        try {
+            await BlueprintReconciler.getInstance().reconcileOne(blueprintId);
+            expect(deploySpy).not.toHaveBeenCalled();
+            const preview = await request(app).get(`/api/blueprints/${blueprintId}/preview`).set('Cookie', adminCookie);
+            expect(preview.body.effectiveApproval).toBe('pending');
+            expect(preview.body.approvalHoldReason).toBeNull();
+        } finally {
+            deploySpy.mockRestore();
+        }
+    });
+
+    it('executes nothing on a compose-only edit', async () => {
+        // A compose edit bumps the revision, so the retained node is no longer
+        // at the revision the policy saw. The policy must not roll that content
+        // out, and the preview must not blame Enforce for a wait that is not one.
+        const nodeA = seedNode();
+        const blueprintId = await seedPolicyPlacedInline({
+            rollout: 'automatic',
+            initialNodeIds: [nodeA.id],
+            addedNodeIds: [],
+            alsoChangeCompose: true,
+        });
+
+        const deploySpy = vi.spyOn(BlueprintService.getInstance(), 'deployToNode').mockResolvedValue({ status: 'active' });
+        const withdrawSpy = vi.spyOn(BlueprintService.getInstance(), 'withdrawFromNode').mockResolvedValue({ status: 'withdrawn' });
+        await BlueprintReconciler.getInstance().reconcileOne(blueprintId);
+
+        expect(deploySpy).not.toHaveBeenCalled();
+        expect(withdrawSpy).not.toHaveBeenCalled();
+
+        const preview = await request(app).get(`/api/blueprints/${blueprintId}/preview`).set('Cookie', adminCookie);
+        expect(preview.body.effectiveApproval).toBe('pending');
+        expect(preview.body.approvalHoldReason).toBeNull();
+    });
+
+    it('executes nothing on a drift-mode edit', async () => {
+        // The selector edit already earned a policy approval. Switching to
+        // Enforce does not mint a new intent, so that approval survives, and
+        // it still must not place or repair: Enforce is not an operational
+        // field, and the preview has to say why the plan is waiting.
+        const nodeA = seedNode();
+        const nodeB = seedNode();
+        const blueprintId = await seedPolicyPlacedInline({
+            rollout: 'automatic',
+            initialNodeIds: [nodeA.id],
+            addedNodeIds: [nodeB.id],
+        });
+        const { commitBlueprintUpdate } = await import('../services/gitops/blueprintProducers');
+        const desiredIdsFor = (bp: import('../services/DatabaseService').Blueprint): number[] =>
+            BlueprintReconciler.getInstance()
+                .listDesiredNodes(bp, DatabaseService.getInstance().getNodes())
+                .map((n) => n.id);
+        commitBlueprintUpdate(blueprintId, { drift_mode: 'enforce' }, 'admin', desiredIdsFor);
+
+        const deploySpy = vi.spyOn(BlueprintService.getInstance(), 'deployToNode').mockResolvedValue({ status: 'active' });
+        const withdrawSpy = vi.spyOn(BlueprintService.getInstance(), 'withdrawFromNode').mockResolvedValue({ status: 'withdrawn' });
+        await BlueprintReconciler.getInstance().reconcileOne(blueprintId);
+
+        expect(deploySpy).not.toHaveBeenCalled();
+        expect(withdrawSpy).not.toHaveBeenCalled();
+
+        const preview = await request(app).get(`/api/blueprints/${blueprintId}/preview`).set('Cookie', adminCookie);
+        expect(preview.body.effectiveApproval).toBe('pending');
+        expect(preview.body.approvalHoldReason).toBe(
+            'Enforce waits for Apply. Automatic placement acts in Observe or Suggest. In Enforce, a place, a withdrawal, or a repair under a policy approval stays pending until you confirm it.',
+        );
+    });
+
+    it('does not call a partly covered Enforce plan a policy hold', async () => {
+        // The combined approval still runs the retained node's repair. The
+        // added node waits for a fresh confirmation. That is reapproval
+        // required, and the Enforce sentence would hide the authority that is
+        // actually repairing.
+        const nodeA = seedNode();
+        const nodeB = seedNode();
+        const blueprintId = await seedPolicyPlacedInline({
+            rollout: 'automatic',
+            initialNodeIds: [nodeA.id],
+            addedNodeIds: [nodeB.id],
+        });
+        const { commitBlueprintUpdate } = await import('../services/gitops/blueprintProducers');
+        const desiredIdsFor = (bp: import('../services/DatabaseService').Blueprint): number[] =>
+            BlueprintReconciler.getInstance()
+                .listDesiredNodes(bp, DatabaseService.getInstance().getNodes())
+                .map((n) => n.id);
+        commitBlueprintUpdate(blueprintId, { drift_mode: 'enforce' }, 'admin', desiredIdsFor);
+
+        const bp = DatabaseService.getInstance().getBlueprint(blueprintId)!;
+        DatabaseService.getInstance().setBlueprintApproval(blueprintId, {
+            intentFingerprint: intentFingerprint(bp),
+            blastJson: serializeApprovedBlast([{ nodeId: nodeA.id, outcome: 'place' as const }]),
+            approvedBy: 'admin',
+        });
+
+        const preview = await request(app).get(`/api/blueprints/${blueprintId}/preview`).set('Cookie', adminCookie);
+        expect(preview.body.effectiveApproval).toBe('reapproval_required');
+        expect(preview.body.approvalHoldReason).toBeNull();
+    });
+
+    /**
+     * An Inline Blueprint an operator placed, whose roster then moves because a
+     * node gains or loses a label. The label route snapshots placement before
+     * and after the write and hands the pair to `recordPlacementShift`, which
+     * mints the new intent and runs the policy; these tests reproduce that pair
+     * directly so the producer, the policy and the reconciler all run.
+     */
+    async function seedAppliedInlineWithLabel(opts: {
+        initialNodes: { id: number }[];
+    }): Promise<{ blueprintId: number }> {
+        const { commitBlueprintCreate } = await import('../services/gitops/blueprintProducers');
+        const { GitOpsStore, emptyTargetRow } = await import('../services/gitops/store');
+        const { GitOpsTransitions } = await import('../services/gitops/transitions');
+        const { encodeGitOpsApprovedTargetEffectJson } = await import('../services/gitops/json');
+        const { newGitOpsId } = await import('../services/gitops/directApplication');
+        const desiredIdsFor = (bp: import('../services/DatabaseService').Blueprint): number[] =>
+            BlueprintReconciler.getInstance()
+                .listDesiredNodes(bp, DatabaseService.getInstance().getNodes())
+                .map((n) => n.id);
+
+        for (const node of opts.initialNodes) {
+            NodeLabelService.getInstance().addLabel(node.id, 'web');
+        }
+        counter += 1;
+        const bp = commitBlueprintCreate({
+            name: `bp-gate-label-${counter}`,
+            description: null,
+            compose_content: 'services:\n  app:\n    image: nginx\n',
+            selector: { type: 'labels', any: ['web'], all: [] },
+            drift_mode: 'observe',
+            classification: 'stateless',
+            classification_reasons: [],
+            enabled: true,
+            created_by: 'admin',
+        }, desiredIdsFor);
+
+        const app = GitOpsStore.getInstance().getLiveBlueprintApplication(bp.id)!;
+        DatabaseService.getInstance().getDb().prepare(
+            `UPDATE gitops_applications SET placement_policy = 'bounded_auto' WHERE id = ?`,
+        ).run(app.id);
+
+        // The operator's Apply leaves both approvals behind: the combined one on
+        // the Blueprint and the decomposed operator placement approval the apply
+        // route writes beside it.
+        DatabaseService.getInstance().setBlueprintApproval(bp.id, {
+            intentFingerprint: intentFingerprint(bp),
+            blastJson: serializeApprovedBlast(
+                opts.initialNodes.map((node) => ({ nodeId: node.id, outcome: 'place' as const })),
+            ),
+            approvedBy: 'admin',
+        });
+        GitOpsTransitions.getInstance().placementApproved({
+            applicationId: app.id,
+            approvalId: newGitOpsId(),
+            intentRevisionId: app.intent_revision_id!,
+            blastJson: encodeGitOpsApprovedTargetEffectJson(
+                opts.initialNodes.map((node) => ({ nodeId: node.id, outcome: 'place' as const })),
+            ),
+            requiredNodeIds: opts.initialNodes.map((node) => node.id),
+            fingerprint: null,
+            actor: 'admin',
+            envelope: { operationId: newGitOpsId(), actor: 'admin', trigger: 'blueprint_apply', at: Date.now() },
+            rolloutGenerationId: newGitOpsId(),
+            candidateId: app.rollout_candidate_id!,
+            authority: 'operator',
+            policyProvenanceJson: null,
+        });
+        for (const node of opts.initialNodes) {
+            DatabaseService.getInstance().getDb().prepare(
+                `INSERT INTO blueprint_deployments (blueprint_id, node_id, status, applied_revision, last_deployed_at)
+                 VALUES (?, ?, 'active', ?, ?)`,
+            ).run(bp.id, node.id, bp.revision, Date.now());
+            // The observation a deploy leaves, which is the evidence a later
+            // removal of this node is judged by.
+            GitOpsStore.getInstance().upsertTarget({
+                ...emptyTargetRow(app.id, node.id, Date.now()),
+                target_status: 'active',
+                observed_artifact_identity_json: JSON.stringify({ kind: 'exact', identity: 'sha256:served', observedAt: 1 }),
+            });
+        }
+        return { blueprintId: bp.id };
+    }
+
+    /** The label route's pair: snapshot, mutate, snapshot, hand to the producer. */
+    async function shiftPlacementByLabel(blueprintId: number, mutate: () => void): Promise<void> {
+        const { recordPlacementShift, snapshotPlacementWith } = await import('../services/gitops/nodePlacementProducers');
+        const bp = DatabaseService.getInstance().getBlueprint(blueprintId)!;
+        const desiredIdsFor = (target: import('../services/DatabaseService').Blueprint): number[] =>
+            BlueprintReconciler.getInstance()
+                .listDesiredNodes(target, DatabaseService.getInstance().getNodes())
+                .map((n) => n.id);
+        const before = snapshotPlacementWith(desiredIdsFor, [bp]);
+        mutate();
+        const after = snapshotPlacementWith(desiredIdsFor, [bp]);
+        recordPlacementShift(before, after, 'admin', 'node_label_add');
+    }
+
+    it('executes a label-driven addition the policy approves while the combined approval stays in place', async () => {
+        const nodeA = seedNode();
+        const nodeB = seedNode();
+        const { blueprintId } = await seedAppliedInlineWithLabel({ initialNodes: [nodeA] });
+
+        // The rollout policy is set through the route the interface writes
+        // through, not by seeding the column, because an Inline Blueprint with
+        // no reachable way to set it is exactly the configuration that made the
+        // policy approval inert.
+        const policy = await request(app)
+            .post(`/api/gitops/applications/bp:${blueprintId}/rollout/authorization-policy`)
+            .set('Cookie', adminCookie)
+            .send({ policy: 'automatic' });
+        expect(policy.status).toBe(200);
+
+        await shiftPlacementByLabel(blueprintId, () => {
+            expect(NodeLabelService.getInstance().addLabel(nodeB.id, 'web').ok).toBe(true);
+        });
+
+        const { GitOpsStore } = await import('../services/gitops/store');
+        const live = GitOpsStore.getInstance().getLiveBlueprintApplication(blueprintId)!;
+        expect(live.placement_approval_ref).not.toBeNull();
+        // The policy path is preferred, not substituted for the operator's
+        // approval: the combined approval survives as the fallback for a tick
+        // the policy cannot cover.
+        expect(DatabaseService.getInstance().getBlueprint(blueprintId)!.approval_status).toBe('approved');
+
+        const checkSpy = vi.spyOn(BlueprintService.getInstance(), 'checkForDrift').mockResolvedValue({ kind: 'matched' });
+        const deploySpy = vi.spyOn(BlueprintService.getInstance(), 'deployToNode').mockResolvedValue({ status: 'active' });
+        await BlueprintReconciler.getInstance().reconcileOne(blueprintId);
+
+        expect(deploySpy.mock.calls.map(c => (c[1] as { id: number }).id)).toContain(nodeB.id);
+        expect(checkSpy.mock.calls.map(c => (c[1] as { id: number }).id)).toContain(nodeA.id);
+
+        const preview = await request(app).get(`/api/blueprints/${blueprintId}/preview`).set('Cookie', adminCookie);
+        expect(preview.body.effectiveApproval).toBe('approved');
+        expect(preview.body.approvalAuthority).toBe('configured_policy');
+    });
+
+    it('keeps checking a retained node when a label-driven addition waits under manual rollout', async () => {
+        // The policy cannot execute the added node under a manual rollout, so
+        // the operator's combined approval stays the executor: the retained node
+        // keeps its drift check (and would keep an Enforce repair) while the
+        // added node waits for Apply. Suspending the whole tick here would stop
+        // drift observation for a running Blueprint on a routine label change.
+        const nodeA = seedNode();
+        const nodeB = seedNode();
+        const { blueprintId } = await seedAppliedInlineWithLabel({ initialNodes: [nodeA] });
+
+        await shiftPlacementByLabel(blueprintId, () => {
+            expect(NodeLabelService.getInstance().addLabel(nodeB.id, 'web').ok).toBe(true);
+        });
+
+        const checkSpy = vi.spyOn(BlueprintService.getInstance(), 'checkForDrift').mockResolvedValue({ kind: 'matched' });
+        const deploySpy = vi.spyOn(BlueprintService.getInstance(), 'deployToNode').mockResolvedValue({ status: 'active' });
+        await BlueprintReconciler.getInstance().reconcileOne(blueprintId);
+        expect(deploySpy).not.toHaveBeenCalled();
+        expect(checkSpy.mock.calls.map(c => (c[1] as { id: number }).id)).toContain(nodeA.id);
+
+        const preview = await request(app).get(`/api/blueprints/${blueprintId}/preview`).set('Cookie', adminCookie);
+        expect(preview.body.effectiveApproval).toBe('reapproval_required');
+    });
+
+    it('keeps checking a retained node when a label-driven removal waits under manual rollout', async () => {
+        // The removal mirror of the addition case. The policy approved the
+        // withdrawal, so the placement pointer moved and the operator's combined
+        // approval now names a node the placement dropped. That narrows the
+        // approval to the nodes the placement still retains instead of
+        // invalidating it: A keeps its drift check and B waits for Apply.
+        const nodeA = seedNode();
+        const nodeB = seedNode();
+        const { blueprintId } = await seedAppliedInlineWithLabel({ initialNodes: [nodeA, nodeB] });
+
+        await shiftPlacementByLabel(blueprintId, () => {
+            expect(NodeLabelService.getInstance().removeLabel(nodeB.id, 'web')).toBe(true);
+        });
+
+        const checkSpy = vi.spyOn(BlueprintService.getInstance(), 'checkForDrift').mockResolvedValue({ kind: 'matched' });
+        const withdrawSpy = vi.spyOn(BlueprintService.getInstance(), 'withdrawFromNode').mockResolvedValue({ status: 'withdrawn' });
+        const deploySpy = vi.spyOn(BlueprintService.getInstance(), 'deployToNode').mockResolvedValue({ status: 'active' });
+        await BlueprintReconciler.getInstance().reconcileOne(blueprintId);
+
+        expect(checkSpy.mock.calls.map(c => (c[1] as { id: number }).id)).toContain(nodeA.id);
+        expect(withdrawSpy).not.toHaveBeenCalled();
+        expect(deploySpy).not.toHaveBeenCalled();
+        // The approval is not discarded. What waits is the node it no longer
+        // covers, which is the difference between a policy declining a change
+        // and a policy retiring the operator's authority.
+        expect(DatabaseService.getInstance().getBlueprint(blueprintId)!.approval_status).toBe('approved');
+
+        const preview = await request(app).get(`/api/blueprints/${blueprintId}/preview`).set('Cookie', adminCookie);
+        expect(preview.body.effectiveApproval).toBe('reapproval_required');
+    });
+
+    it('keeps the operator approval when the policy cannot run a label-driven removal', async () => {
+        // Automatic rollout, but the retained node is in flight on an older
+        // revision, so the policy approval cannot resolve to a full plan and the
+        // operator's approval is the executor again. Nothing runs (the retained
+        // node is mid-deploy and the withdrawal was never in its blast), and the
+        // approval is still standing for the checks it does authorize.
+        const nodeA = seedNode();
+        const nodeB = seedNode();
+        const { blueprintId } = await seedAppliedInlineWithLabel({ initialNodes: [nodeA, nodeB] });
+
+        const policy = await request(app)
+            .post(`/api/gitops/applications/bp:${blueprintId}/rollout/authorization-policy`)
+            .set('Cookie', adminCookie)
+            .send({ policy: 'automatic' });
+        expect(policy.status).toBe(200);
+
+        await shiftPlacementByLabel(blueprintId, () => {
+            expect(NodeLabelService.getInstance().removeLabel(nodeB.id, 'web')).toBe(true);
+        });
+        DatabaseService.getInstance().getDb().prepare(
+            `UPDATE blueprint_deployments
+                SET status = 'deploying', applied_revision = applied_revision - 1
+              WHERE blueprint_id = ? AND node_id = ?`,
+        ).run(blueprintId, nodeA.id);
+
+        const deploySpy = vi.spyOn(BlueprintService.getInstance(), 'deployToNode').mockResolvedValue({ status: 'active' });
+        const withdrawSpy = vi.spyOn(BlueprintService.getInstance(), 'withdrawFromNode').mockResolvedValue({ status: 'withdrawn' });
+        await BlueprintReconciler.getInstance().reconcileOne(blueprintId);
+
+        expect(deploySpy).not.toHaveBeenCalled();
+        expect(withdrawSpy).not.toHaveBeenCalled();
+        expect(DatabaseService.getInstance().getBlueprint(blueprintId)!.approval_status).toBe('approved');
+    });
+
+    it('executes a label-driven removal the policy approves', async () => {
+        const nodeA = seedNode();
+        const nodeB = seedNode();
+        const { blueprintId } = await seedAppliedInlineWithLabel({ initialNodes: [nodeA, nodeB] });
+
+        const policy = await request(app)
+            .post(`/api/gitops/applications/bp:${blueprintId}/rollout/authorization-policy`)
+            .set('Cookie', adminCookie)
+            .send({ policy: 'automatic' });
+        expect(policy.status).toBe(200);
+
+        await shiftPlacementByLabel(blueprintId, () => {
+            expect(NodeLabelService.getInstance().removeLabel(nodeB.id, 'web')).toBe(true);
+        });
+
+        const checkSpy = vi.spyOn(BlueprintService.getInstance(), 'checkForDrift').mockResolvedValue({ kind: 'matched' });
+        const withdrawSpy = vi.spyOn(BlueprintService.getInstance(), 'withdrawFromNode').mockResolvedValue({ status: 'withdrawn' });
+        const deploySpy = vi.spyOn(BlueprintService.getInstance(), 'deployToNode').mockResolvedValue({ status: 'active' });
+        await BlueprintReconciler.getInstance().reconcileOne(blueprintId);
+
+        expect(withdrawSpy.mock.calls.map(c => (c[1] as { id: number }).id)).toContain(nodeB.id);
+        expect(deploySpy).not.toHaveBeenCalled();
+        expect(checkSpy.mock.calls.map(c => (c[1] as { id: number }).id)).toContain(nodeA.id);
+    });
+
+    it('keeps a failed retained retry running while the policy cannot cover the plan', async () => {
+        const nodeA = seedNode();
+        const nodeB = seedNode();
+        const { blueprintId } = await seedAppliedInlineWithLabel({ initialNodes: [nodeA] });
+
+        const policy = await request(app)
+            .post(`/api/gitops/applications/bp:${blueprintId}/rollout/authorization-policy`)
+            .set('Cookie', adminCookie)
+            .send({ policy: 'automatic' });
+        expect(policy.status).toBe(200);
+
+        await shiftPlacementByLabel(blueprintId, () => {
+            expect(NodeLabelService.getInstance().addLabel(nodeB.id, 'web').ok).toBe(true);
+        });
+        // A failed retained deployment is a retry the policy does not authorize,
+        // so the plan falls back to the operator's combined approval: the retry
+        // runs and the added node waits, rather than the tick stopping whole.
+        DatabaseService.getInstance().getDb().prepare(
+            `UPDATE blueprint_deployments SET status = 'failed' WHERE blueprint_id = ? AND node_id = ?`,
+        ).run(blueprintId, nodeA.id);
+
+        const deploySpy = vi.spyOn(BlueprintService.getInstance(), 'deployToNode').mockResolvedValue({ status: 'active' });
+        await BlueprintReconciler.getInstance().reconcileOne(blueprintId);
+
+        const deployedIds = deploySpy.mock.calls.map(c => (c[1] as { id: number }).id);
+        expect(deployedIds).toContain(nodeA.id);
+        expect(deployedIds).not.toContain(nodeB.id);
+
+        const preview = await request(app).get(`/api/blueprints/${blueprintId}/preview`).set('Cookie', adminCookie);
+        expect(preview.body.effectiveApproval).toBe('reapproval_required');
+    });
+
+    it('waits for Apply on a first placement under both automatic policies', async () => {
+        const nodeA = seedNode();
+        const { commitBlueprintCreate } = await import('../services/gitops/blueprintProducers');
+        const desiredIdsFor = (bp: import('../services/DatabaseService').Blueprint): number[] =>
+            BlueprintReconciler.getInstance()
+                .listDesiredNodes(bp, DatabaseService.getInstance().getNodes())
+                .map((n) => n.id);
+        // No operator Apply: the selector matches nothing yet, so no content has
+        // ever been confirmed and no deployment anchors the revision check.
+        counter += 1;
+        const bp = commitBlueprintCreate({
+            name: `bp-gate-first-${counter}`,
+            description: null,
+            compose_content: 'services:\n  app:\n    image: nginx\n',
+            selector: { type: 'labels', any: ['web'], all: [] },
+            drift_mode: 'observe',
+            classification: 'stateless',
+            classification_reasons: [],
+            enabled: true,
+            created_by: 'admin',
+        }, desiredIdsFor);
+
+        const placement = await request(app)
+            .post(`/api/gitops/applications/bp:${bp.id}/placement-policy`)
+            .set('Cookie', adminCookie)
+            .send({ policy: 'bounded_auto' });
+        expect(placement.status).toBe(200);
+        const rollout = await request(app)
+            .post(`/api/gitops/applications/bp:${bp.id}/rollout/authorization-policy`)
+            .set('Cookie', adminCookie)
+            .send({ policy: 'automatic' });
+        expect(rollout.status).toBe(200);
+
+        // The node gaining the label is the first placement the policy sees: a
+        // single stateless addition, so the policy records an approval even
+        // though nothing has ever been placed.
+        await shiftPlacementByLabel(bp.id, () => {
+            expect(NodeLabelService.getInstance().addLabel(nodeA.id, 'web').ok).toBe(true);
+        });
+
+        const deploySpy = vi.spyOn(BlueprintService.getInstance(), 'deployToNode').mockResolvedValue({ status: 'active' });
+        const withdrawSpy = vi.spyOn(BlueprintService.getInstance(), 'withdrawFromNode').mockResolvedValue({ status: 'withdrawn' });
+        await BlueprintReconciler.getInstance().reconcileOne(bp.id);
+        // With nothing already placed, the policy would be approving compose no
+        // operator ever confirmed, so the first placement waits for Apply.
+        expect(deploySpy).not.toHaveBeenCalled();
+        expect(withdrawSpy).not.toHaveBeenCalled();
+
+        const preview = await request(app).get(`/api/blueprints/${bp.id}/preview`).set('Cookie', adminCookie);
+        expect(preview.body.effectiveApproval).toBe('pending');
     });
 });
 

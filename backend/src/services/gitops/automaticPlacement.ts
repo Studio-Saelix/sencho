@@ -27,6 +27,7 @@ import { BlueprintAnalyzer } from '../BlueprintAnalyzer';
 import { sanitizeForLog } from '../../utils/safeLog';
 import { GitOpsStore } from './store';
 import { hasTargetOperationInFlight } from './handoff';
+import { targetConnectivity } from './derive';
 import { GitOpsTransitions, type EventEnvelope } from './transitions';
 import { newGitOpsId } from './directApplication';
 import {
@@ -43,7 +44,7 @@ import {
 } from './placementPolicy';
 import { configuredSnapshotFor, encodePolicySnapshot } from './policyComposition';
 import { readAppliedGenerationContents } from './statefulGuard';
-import type { GitOpsApplicationRow } from './types';
+import type { GitOpsApplicationRow, GitOpsLimitation } from './types';
 
 export type AutomaticPlacementOutcome =
   | { status: 'auto_approved'; reason: 'stateless_addition' | 'stateless_removal' }
@@ -62,6 +63,10 @@ export type AutomaticPlacementOutcome =
  * every application looked un-approved, and every multi-node candidate was
  * refused as a first placement. The approval row survives the pointer and is
  * still the authority record of the last set an operator accepted.
+ *
+ * A decision, not a report of what is running: the reconciler may not have
+ * executed the last approval yet, which is a separate question this leaves to
+ * `nodesHoldingPlacement`.
  */
 function approvedBaseline(
     store: GitOpsStore,
@@ -99,6 +104,37 @@ function approvedBaseline(
   } catch {
     return { ok: false };
   }
+}
+
+/**
+ * The nodes that already hold a placement for this application.
+ *
+ * The question the executor asks is "will the plan create here?", so this is the
+ * complement of that and nothing broader. An Inline Blueprint's own deployment
+ * rows answer it: the plan emits a `create` for a node with no row, or one the
+ * model has withdrawn, and an `update` or a drift check for every other row it
+ * finds. Reading "active" alone would have called a drifted or failed placement a
+ * fresh one, and naming a fresh place in the blast is what would let this
+ * approval authorize the redeploy the placement never covered.
+ *
+ * A Git-managed application runs no deployment rows and is placed once a target
+ * acknowledged an apply. A target that has acknowledged nothing does not count
+ * either way: the reconciler creates one to record an observation, which is a
+ * report about a node rather than a placement.
+ */
+function nodesHoldingPlacement(store: GitOpsStore, app: GitOpsApplicationRow): number[] {
+  const holding = new Set<number>();
+  for (const row of store.listTargets(app.id)) {
+    if (row.target_status === 'active' && row.applied_generation_id !== null) {
+      holding.add(row.node_id);
+    }
+  }
+  if (app.blueprint_id !== null) {
+    for (const row of DatabaseService.getInstance().listDeployments(app.blueprint_id)) {
+      if (row.status !== 'withdrawn') holding.add(row.node_id);
+    }
+  }
+  return [...holding];
 }
 
 /**
@@ -195,21 +231,40 @@ function worstAddedNodeState(nodeIds: readonly number[]): AffectedNodeState {
 /**
  * The worst state across the nodes a removal touches.
  *
- * Here the target row is the right evidence, because the workload being left
- * behind ran on that node, so a real observation of it exists. `stale` is treated
- * as unreachable: it is a recorded state meaning the last observation expired, and
- * a decision about withdrawing from a node must not treat expired evidence as a
- * reachable one.
+ * Two pieces of evidence, both required. The node registry says whether the
+ * node is answering right now, the same gate an addition passes, so a
+ * withdrawal is never approved against a node that is offline. The target's
+ * observation says the workload Sencho is about to leave behind actually ran
+ * there; the stored `connectivity` column cannot answer that, because it is
+ * seeded to null and no producer ever wrote it, so every removal used to
+ * resolve to unknown and the policy could never approve one.
+ *
+ * An observation that cannot be decoded is recorded as a limitation, so the
+ * refusal names malformed evidence rather than sending the operator to check a
+ * node that answered. The observation never ages out on its own: no
+ * connectivity value is derived from elapsed time, so a `stale` reading can
+ * only arrive from a stored negative claim that no current producer writes.
  */
-function worstRemovedNodeState(store: GitOpsStore, appId: string, nodeIds: readonly number[]): AffectedNodeState {
+function worstRemovedNodeState(
+  store: GitOpsStore,
+  appId: string,
+  nodeIds: readonly number[],
+  limitations: GitOpsLimitation[],
+): AffectedNodeState {
   if (nodeIds.length === 0) return 'reachable';
+  const db = DatabaseService.getInstance().getDb();
   let worst: AffectedNodeState = 'reachable';
   for (const nodeId of nodeIds) {
+    const node = db.prepare('SELECT status FROM nodes WHERE id = ?').get(nodeId) as
+      | { status: string }
+      | undefined;
+    if (!node) return 'unknown';
+    if (node.status !== 'online') return 'unreachable';
     const target = store.getTarget(appId, nodeId);
     if (!target) return 'unknown';
-    const connectivity = target.connectivity;
+    const connectivity = targetConnectivity(target, limitations);
     if (connectivity === 'unreachable' || connectivity === 'stale') return 'unreachable';
-    if (connectivity === 'unknown' || connectivity === null) worst = 'unknown';
+    if (connectivity === 'unknown') worst = 'unknown';
   }
   return worst;
 }
@@ -264,12 +319,52 @@ function recordRefusal(applicationId: string, reason: PlacementPolicyReason, at:
 }
 
 function approvalFailureReason(message: string): PlacementPolicyReason {
+  // A blast effect that did not decode is a data fault, and so are the existing
+  // data faults below. Matching the blast messages by name rather than letting
+  // them fall through to the default: an out-of-canonical-order blast used to be
+  // recorded as `conflicting_operation`, which sent the operator looking for an
+  // in-flight operation that was never there.
+  if (/blast_json/.test(message)) {
+    return 'malformed_evidence';
+  }
   if (/is not current|could not be read|not found|does not match/.test(message)) {
     return 'malformed_evidence';
   }
   // An already-recorded approval is the replay guard, and a live operation is
   // the one state reachable from outside the transition's own checks.
   return 'conflicting_operation';
+}
+
+/**
+ * Whether this candidate's placement moved because a pin moved.
+ *
+ * A pin still on the current intent is one direction. A clear is the other:
+ * the current intent names no pin, so the standing approval has to be read.
+ * An approval recorded on this intent already accepted the clear. An approval
+ * recorded on an older unpinned intent does not, when a pin was written after
+ * it and never confirmed.
+ *
+ * With no decomposed approval to read, the whole intent history counts, because
+ * nothing in it records a confirmation. Reading only the intent before this one
+ * is what let a set, a clear, and one later edit place the freed node without
+ * Apply: the intent before this one was the clear, so the pin that moved the
+ * work two intents back was not in view.
+ */
+function pinDrivenPlacement(
+  store: GitOpsStore,
+  applicationId: string,
+  intent: { id: string; pinned_node_id: number | null },
+): boolean {
+  if (intent.pinned_node_id !== null) return true;
+  const approval = store.latestPlacementApproval(applicationId);
+  if (!approval?.intent_revision_id) {
+    return store.hasPinnedIntentExcept(applicationId, intent.id);
+  }
+  if (approval.intent_revision_id === intent.id) return false;
+  const approvedIntent = store.getIntentRevision(approval.intent_revision_id);
+  if (!approvedIntent || approvedIntent.application_id !== applicationId) return true;
+  if (approvedIntent.pinned_node_id !== null) return true;
+  return store.hasPinnedIntentAfter(applicationId, approvedIntent.id, intent.id);
 }
 
 /**
@@ -310,12 +405,32 @@ export function applyAutomaticPlacement(
   const baseline = approvedBaseline(store, app);
   const baselineNodeIds = baseline.ok ? baseline.nodeIds : [];
 
-  // The change itself, computed once so every evidence signal reads the same
-  // two sets rather than each re-deriving them.
-  const inBaseline = new Set(baselineNodeIds);
+  // Two deltas, because a decision and the executor read two different baselines.
+  //
+  // The decision reads the approved set: what has already been decided, so the
+  // change being decided is the one no decision has covered yet. What this
+  // approval places is read from what the fleet holds, so it names every node the
+  // candidate wants that no node carries.
+  //
+  // They are the same set in the ordinary case, once the last approval has run.
+  // They differ in the window where it has not: the reconciler executes one
+  // approval and refuses a plan it does not cover whole, so an approval written
+  // from the approved set alone covered only its own delta while the plan still
+  // wanted the earlier one, and neither change could run. A second roster change
+  // inside one tick is the reachable form of that window.
+  //
+  // Removals stay on the approved set. A withdrawal is judged by the observation
+  // of the workload that ran there, which exists only for a node the fleet has,
+  // and the node the approval dropped is the node that has to be reached.
   const inCandidate = new Set(candidateNodeIds);
-  const additions = candidateNodeIds.filter((nodeId) => !inBaseline.has(nodeId));
   const removals = baselineNodeIds.filter((nodeId) => !inCandidate.has(nodeId));
+  const holding = new Set(nodesHoldingPlacement(store, app));
+  const toPlace = candidateNodeIds.filter((nodeId) => !holding.has(nodeId));
+
+  // A removal's evidence is an observation, and one that cannot be decoded is a
+  // data fault, not a node that never answered. Collecting the limitations lets
+  // the decision report the truthful reason.
+  const removalEvidenceLimitations: GitOpsLimitation[] = [];
 
   const input: BoundedAutoInput = {
     policy: app.placement_policy,
@@ -325,25 +440,31 @@ export function applyAutomaticPlacement(
     statelessness: deriveStatelessness(app, app.blueprint_id
       ? (DatabaseService.getInstance().getBlueprint(app.blueprint_id) ?? undefined)
       : undefined),
-    // A pin is an operator's choice of where a workload may run, so placement
-    // that moved because a pin moved is never automatic. Read from the intent
-    // rather than from the column name: `pinnedOverridesCordon` records that the
-    // Blueprint is pinned, not that a node is cordoned.
-    pinDriven: intent.pinned_node_id !== null,
+    // A set or a clear. The helper reads the standing approval, because a
+    // clear leaves the current intent with no pin.
+    pinDriven: pinDrivenPlacement(store, app.id, intent),
     // A cordon is an operator saying a node is not available for new placements,
     // so only a node being added to can override one. Reading a literal false
     // here would let an automatic approval place a workload onto a cordoned node
     // while the decision carried a refusal nobody could ever reach.
-    cordonOverride: hasCordonOverride(additions),
+    //
+    // Read over the nodes this approval places rather than the nodes this decision
+    // is about, because the blast names the former and nothing it places may be
+    // authorized on evidence nobody read. A node an earlier decision placed and
+    // the fleet has not landed yet is one this approval places, so its cordon is
+    // a cordon this approval would override and the refusal has to be reachable.
+    cordonOverride: hasCordonOverride(toPlace),
     // A cordon on the node being withdrawn makes the withdrawal the cordon's doing,
     // not the policy's judgement about the workload.
     cordonDrivenRemoval: removals.length === 1 && hasCordonOverride(removals),
     // Each side judged by the evidence that actually exists for it: a node being
     // added is known from the registry, a node being left is known from the
-    // observation of the workload that ran there.
+    // observation of the workload that ran there. The added side reads the nodes
+    // this approval places, so nothing it places is authorized on evidence that
+    // was never read.
     affectedNodeState: worseState(
-      worstAddedNodeState(additions),
-      worstRemovedNodeState(store, app.id, removals),
+      worstAddedNodeState(toPlace),
+      worstRemovedNodeState(store, app.id, removals, removalEvidenceLimitations),
     ),
     // Both machines, not one. The application pointer covers a fetch or apply;
     // a target carries the stage for a deploy or a withdrawal, which is what a
@@ -353,7 +474,10 @@ export function applyAutomaticPlacement(
     conflictingOperation: app.active_operation_stage !== null
       || hasTargetOperationInFlight(store, app.id),
     evidenceReadable: baseline.ok,
-    evidenceWellFormed,
+    // Unusable removal evidence (a corrupt observation, an illegal stored value)
+    // is malformed, which the union reports differently from a node that did not
+    // answer.
+    evidenceWellFormed: evidenceWellFormed && removalEvidenceLimitations.length === 0,
   };
 
   const decision = decideBoundedAutoPlacement(input);
@@ -374,19 +498,34 @@ export function applyAutomaticPlacement(
   }
 
   try {
-    // A single stateless change approves exactly the target set the candidate
-    // asked for, so the effect is derived here from that same set rather than
-    // from anything a client supplied.
+    // The approval names the work: every node the candidate wants that no node
+    // carries, and every node the approved set dropped that the candidate no
+    // longer wants.
+    //
+    // Equal to the decision's own effect whenever the last approval has run, so
+    // the ordinary single change is unchanged. It is a superset in the window
+    // where it has not: an earlier decision's placement is carried forward rather
+    // than dropped, because dropping it left the plan needing work no standing
+    // approval could authorize and the tick waiting for an operator with no reason
+    // on the row. Carrying it costs nothing nobody has already decided, and this
+    // approval read the evidence for every node it names.
     //
     // Encoded through the shared encoder rather than assembled by hand. A
     // hand-built object was rejected by the transition's own decode, and because
     // that refusal is the safe direction it surfaced only as an operator review
     // with no approval ever landing, which is how a feature can look wired up
     // while doing nothing.
+    //
+    // Sorted by node id because that is the order the decoder requires, and
+    // places-then-removals is not it: a roster move that adds a higher node id
+    // while dropping a lower one put the removal after the placement, the write
+    // was refused as out of canonical order, and nothing executed. The array
+    // order carries no meaning of its own; both readers key off the node id
+    // (the reconciler's effect is a map, and the transition re-encodes it).
     const effect = [
-      ...decision.effect.additions.map((nodeId) => ({ nodeId, outcome: 'place' as const })),
-      ...decision.effect.removals.map((nodeId) => ({ nodeId, outcome: 'remove' as const })),
-    ];
+      ...toPlace.map((nodeId) => ({ nodeId, outcome: 'place' as const })),
+      ...removals.map((nodeId) => ({ nodeId, outcome: 'remove' as const })),
+    ].sort((a, b) => a.nodeId - b.nodeId);
     const blastJson = encodeGitOpsApprovedTargetEffectJson(effect);
     GitOpsTransitions.getInstance().placementApproved({
       applicationId: app.id,
@@ -404,6 +543,9 @@ export function applyAutomaticPlacement(
       strategyJson: intent.rollout_strategy_json,
       provenance: 'placement_approval',
     });
+    // The reconciler tries this approval first when it covers the whole plan,
+    // and falls back to the combined approval otherwise, so an operator's
+    // approval stays in place for the ticks this one cannot run.
     return { status: 'auto_approved', reason: decision.reason };
   } catch (error) {
     // A refusal here is the safe direction: the candidate stands unapproved and

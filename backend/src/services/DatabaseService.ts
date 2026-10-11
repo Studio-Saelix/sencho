@@ -89,6 +89,79 @@ const DEFAULT_RECOVERY_MAX_GENERATIONS = 0;
 // value from parking a target unverified for longer than a day.
 const DEFAULT_ARTIFACT_RETRY_INTERVAL_MINS = 5;
 const MAX_ARTIFACT_RETRY_INTERVAL_MINS = 1440;
+// Bounds of gitops_history_retention_days. The window is what keeps the
+// insert-only history and outbox tables from growing for the life of an
+// installation; the ceiling keeps a stored value from retaining rows longer
+// than a year.
+const DEFAULT_GITOPS_HISTORY_RETENTION_DAYS = 30;
+const MAX_GITOPS_HISTORY_RETENTION_DAYS = 365;
+// How long past the history window an undrained outbox row is kept. The repair
+// that drains these rows from their payload runs at startup, so a restart
+// inside this grace can still announce them. A process that stays up does not
+// retry them. A row still undrained after the grace is dropped so it cannot
+// accumulate for ever.
+const UNDRAINED_OUTBOX_GRACE_DAYS = 7;
+// History and outbox rows deleted per prune pass. A first prune on a long-lived
+// install has months of backlog to clear and SQLite has one writer, so an
+// unbounded transaction would block every other write on the instance for its
+// duration. The pass runs at the end of each monitor evaluation (every 30
+// seconds), not on the 15-minute janitor, and clears the rest on later passes.
+export const GITOPS_PRUNE_CHUNK_ROWS = 5000;
+// What a prune may delete, in one place so the delete statement and the
+// remaining-count, when developer mode runs it, can never disagree.
+//
+// A row older than the window is pruned unless it is the newest row of a live
+// application: only a live application has a "last activity" fact to preserve.
+//
+// The portfolio's "last activity" fact reads `MAX(created_at)` over history
+// (`latestTransitionByApplication`), and its readers select only active
+// applications. Deleting an idle application's last row would silently empty its
+// activity column with no change on the application itself, since polling off, a
+// suspended source, a detached node and an idle Blueprint are indistinguishable
+// from "no activity" once the rows are gone.
+//
+// Ties on created_at are broken by rowid, SQLite's insertion-order key. The id
+// column is a random UUID and does not sort by recency (`latestSettledAttempt`
+// already orders by rowid for that reason). One attempt's started and settled
+// rows share the same envelope timestamp, so a UUID tie-break can keep the
+// started row and delete the settled one. Startup recovery then treats that
+// attempt as open and re-settles it. rowid keeps the later insert, which is
+// the settlement. The chunk delete orders the same way, so a pass that stops
+// between the two rows leaves the settlement in place.
+//
+// Scoped to live applications rather than to every application_id, because the
+// tombstone is the only thing that outlives a stack: `gitops_applications` keeps a
+// deleted or detached row as a frozen record forever, so an unscoped exemption
+// would retain one history row per stack ever retired and leave exactly the
+// growth this setting exists to stop. 'creating' counts as live because its rows
+// are written before the application is activated, and dropping them would leave
+// an application that goes live with no recorded activity at all. The application
+// lookup is a primary-key seek. The newer-row probe uses
+// idx_gitops_history_app_created: one seek for a later timestamp and one for
+// the same timestamp, with the rowid tie applied on that second seek. A
+// retired application stops after the primary-key seek.
+//
+// An unsettled reservation older than the window is pruned once a newer row
+// exists for that application. Startup recovery then does not see it. The
+// reservation survives past the window only when it is still that application's
+// newest row, which is the quiet-application case. Keeping every unsettled row
+// would retain attempts the store documents as staying unsettled forever.
+const GITOPS_HISTORY_PRUNEABLE = `created_at < ?
+  AND (
+    -- The application is retired, so no projection reads its history.
+    NOT EXISTS (
+      SELECT 1 FROM gitops_applications application
+      WHERE application.id = gitops_history.application_id
+        AND application.lifecycle_status IN ('active','creating')
+    )
+    -- Or this row is not the newest one, for any application.
+    OR EXISTS (
+      SELECT 1 FROM gitops_history newer
+      WHERE newer.application_id = gitops_history.application_id
+        AND (newer.created_at > gitops_history.created_at
+             OR (newer.created_at = gitops_history.created_at AND newer.rowid > gitops_history.rowid))
+    )
+  )`;
 
 function isStackServiceStatus(value: unknown): value is StackServiceStatus {
     if (!value || typeof value !== 'object') return false;
@@ -2369,6 +2442,11 @@ stmt.run('gitops_schema_version', '1');
         // reachable floor. Kept off the generic read path on purpose: it is only
         // consulted for a target whose approved identity is still unresolved.
         stmt.run('gitops_artifact_retry_interval_mins', '5');
+        // Days of GitOps history and settled-outbox rows kept before the
+        // monitor's cleanup pass prunes them. Both tables are insert-only and
+        // the reconcile tick appends to them continuously, so the window is the
+        // only bound on their size; it defaults on rather than off.
+        stmt.run('gitops_history_retention_days', '30');
         // SSO role sync defaults off: admin-set roles persist across SSO sign-ins;
         // operators who want IdP group membership to drive roles opt in via Settings > SSO.
         stmt.run('sso_role_sync', '0');
@@ -5070,6 +5148,27 @@ stmt.run('gitops_schema_version', '1');
         }
     }
 
+    /**
+     * Days of GitOps history to keep.
+     *
+     * History is insert-only and the reconcile tick appends to it continuously,
+     * so this is the only bound on the table's size. There is no off value:
+     * turning retention off would leave the history and its outbox growing for
+     * the life of the installation, which is the accumulation this setting
+     * exists to stop. A missing or unusable stored value uses the default. A
+     * failed read throws, so the caller can skip the delete instead of pruning
+     * with a window the operator did not choose.
+     */
+    public getGitOpsHistoryRetentionDays(): number {
+        const stored = this.getGlobalSettings()['gitops_history_retention_days'];
+        const raw = parseInt(stored ?? '', 10);
+        if (!Number.isFinite(raw) || raw < 1) {
+            console.warn(`[DatabaseService] invalid gitops_history_retention_days "${String(stored)}"; treating as ${DEFAULT_GITOPS_HISTORY_RETENTION_DAYS}`);
+            return DEFAULT_GITOPS_HISTORY_RETENTION_DAYS;
+        }
+        return Math.min(raw, MAX_GITOPS_HISTORY_RETENTION_DAYS);
+    }
+
     /** Total generations retained per stack, current included (0 = unlimited). */
     public getRecoveryMaxGenerations(): number {
         try {
@@ -5579,6 +5678,110 @@ stmt.run('gitops_schema_version', '1');
             ttl: Number(ttlInfo.changes ?? 0),
             perStack: stackOverflow.length,
             perNode: unattachedOverflow.length,
+        };
+    }
+
+    /**
+     * Drop one bounded chunk of GitOps history and its consumed outbox rows
+     * older than the window.
+     *
+     * What a prune may delete, and why each live application's newest row is exempt
+     * from it, is documented on `GITOPS_HISTORY_PRUNEABLE`.
+     * `historyRemaining` and `outboxRemaining` are exact only while developer mode
+     * is on. The diagnostic log is the only reader, and the counts walk the
+     * backlog, so they are skipped otherwise and reported as `null`: an
+     * unmeasured remainder is unknown, not zero.
+     *
+     * A drained outbox row is pruned with the history it announced. An undrained
+     * row is a notification the fanout has not written yet, or a payload a later
+     * decoder is meant to repair, so it gets a grace period past the window. The
+     * repair runs at startup, so the grace only helps an instance that restarts
+     * in time. A row still undrained after the grace is dropped, and the warning
+     * reports how many this pass deleted, because one pass is capped and keeping
+     * the row for ever is the unbounded growth the window exists to stop.
+     */
+    public cleanupOldGitOpsHistory(
+        daysToKeep = DEFAULT_GITOPS_HISTORY_RETENTION_DAYS,
+    ): { history: number; outbox: number; historyRemaining: number | null; outboxRemaining: number | null } {
+        const days = Number.isFinite(daysToKeep) && daysToKeep > 0
+            // Floor before the guard, not after it: a fraction between 0 and 1
+            // floors to 0, which is not an off value and would delete everything
+            // non-exempt.
+            ? Math.min(Math.max(Math.floor(daysToKeep), 1), MAX_GITOPS_HISTORY_RETENTION_DAYS)
+            : DEFAULT_GITOPS_HISTORY_RETENTION_DAYS;
+        const cutoff = Date.now() - (days * 24 * 60 * 60 * 1000);
+        const undrainedCutoff = cutoff - (UNDRAINED_OUTBOX_GRACE_DAYS * 24 * 60 * 60 * 1000);
+
+        const deleteHistoryChunk = this.db.prepare(
+            `DELETE FROM gitops_history
+             WHERE id IN (
+                 SELECT id FROM gitops_history WHERE ${GITOPS_HISTORY_PRUNEABLE}
+                 ORDER BY created_at ASC, rowid ASC
+                 LIMIT ?
+             )`,
+        );
+        // Two statements rather than one OR, so each branch keeps its own row
+        // cap. One statement with both predicates and one LIMIT would still use
+        // the two partial indexes, and it would cap the combined delete. Both
+        // branches are bounded by the same row cap, so a first prune with
+        // months of outbox backlog clears it over later passes rather than
+        // holding the writer for all of it.
+        const deleteDrained = this.db.prepare(
+            `DELETE FROM gitops_settled_outbox
+             WHERE settled_history_id IN (
+                 SELECT settled_history_id FROM gitops_settled_outbox
+                 WHERE drained_at IS NOT NULL AND created_at < ?
+                 LIMIT ?
+             )`,
+        );
+        const deleteUndrained = this.db.prepare(
+            `DELETE FROM gitops_settled_outbox
+             WHERE settled_history_id IN (
+                 SELECT settled_history_id FROM gitops_settled_outbox
+                 WHERE drained_at IS NULL AND created_at < ?
+                 LIMIT ?
+             )`,
+        );
+        // One transaction per pass, so a long backlog is cleared over several
+        // passes rather than holding SQLite's single writer for all of it.
+        const pruned = this.db.transaction(() => {
+            const deletedHistory = deleteHistoryChunk.run(cutoff, GITOPS_PRUNE_CHUNK_ROWS);
+            const deletedDrained = deleteDrained.run(cutoff, GITOPS_PRUNE_CHUNK_ROWS);
+            const deletedUndrained = deleteUndrained.run(undrainedCutoff, GITOPS_PRUNE_CHUNK_ROWS);
+            return {
+                history: Number(deletedHistory.changes ?? 0),
+                outbox: Number(deletedDrained.changes ?? 0) + Number(deletedUndrained.changes ?? 0),
+                undrained: Number(deletedUndrained.changes ?? 0),
+            };
+        })();
+        // Counted after the delete, and only for the diagnostic log. The history
+        // count walks whatever backlog is still left, and the monitor tick runs
+        // this every 30 seconds. Null rather than 0 when they are skipped, so the
+        // log cannot read "none left" for a table that was never measured.
+        let historyRemaining: number | null = null;
+        let outboxRemaining: number | null = null;
+        if (this.getGlobalSettings().developer_mode === '1') {
+            historyRemaining = (this.db.prepare(
+                `SELECT COUNT(*) AS n FROM gitops_history WHERE ${GITOPS_HISTORY_PRUNEABLE}`,
+            ).get(cutoff) as { n: number }).n;
+            outboxRemaining = (this.db.prepare(
+                `SELECT COUNT(*) AS n FROM gitops_settled_outbox
+                 WHERE (drained_at IS NOT NULL AND created_at < ?)
+                    OR (drained_at IS NULL AND created_at < ?)`,
+            ).get(cutoff, undrainedCutoff) as { n: number }).n;
+        }
+
+        if (pruned.undrained > 0) {
+            console.warn(
+                `[DatabaseService] dropping ${pruned.undrained} undrained GitOps outbox row(s) older than ${days + UNDRAINED_OUTBOX_GRACE_DAYS} days`,
+            );
+        }
+
+        return {
+            history: pruned.history,
+            outbox: pruned.outbox,
+            historyRemaining,
+            outboxRemaining,
         };
     }
 

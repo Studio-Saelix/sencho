@@ -23,6 +23,7 @@
 import type { GitOpsHistoryStage } from './history';
 import type { GitOpsTargetMode } from './types';
 import type { NotificationCategory } from '../NotificationService';
+import { settledOutcomeCarriesNews } from './outcomes';
 
 /**
  * Every stage that produces a notification-history entry.
@@ -97,11 +98,16 @@ export function gitOpsOutboxPlan(
   after: Record<string, unknown>,
 ): GitOpsOutboxPlan | null {
   if (stage === 'source_reconcile_settled') {
-    // An attempt that settled without proving anything does not notify. The
-    // portfolio reports the same application as in progress or unknown, and a
-    // bell entry for it would be a surface reporting on evidence it does not
-    // have. What is unproven is the portfolio's to show, not the bell's.
-    if (after.outcome === 'unknown') return null;
+    // A settled attempt that carries no news does not notify. The portfolio
+    // reports the same application as in progress, staged, suspended,
+    // superseded, or waiting on an armed retry, and a bell entry per poll would
+    // be a surface reporting the state it is already showing. What has not
+    // changed is the portfolio's to report; the bell reports the changes. A
+    // malformed outcome reads as unknown here, the same value the outbox insert
+    // writes, so a damaged row is suppressed rather than inserted and silently
+    // dropped at drain time.
+    const outcome = typeof after.outcome === 'string' ? after.outcome : 'unknown';
+    if (!settledOutcomeCarriesNews(outcome)) return null;
     return { kind: 'settled' };
   }
   if (!isNotifiableGitOpsStage(stage)) return null;
@@ -111,6 +117,123 @@ export function gitOpsOutboxPlan(
   // Blueprint decision.
   if (stage === 'source_accepted' && targetMode === 'direct') return null;
   return { kind: 'event', stage };
+}
+
+/**
+ * How a settled attempt's notification is rendered in the bell.
+ *
+ * This is presentation only. It deliberately does not reach the dedupe key:
+ * one attempt settles into exactly one outcome, so keying per outcome family
+ * would let two writers that classify the same event differently (a live
+ * apply-failure write against the settle that confirms it) produce two entries
+ * for one attempt. The key is per attempt, where there is nothing to disagree
+ * about.
+ *
+ * A scheduled retry is deliberately not a family of its own: it is a steady
+ * state the no-news rule suppresses, and the failure it follows announced
+ * itself when it happened.
+ */
+export type SettledNotificationFamily = 'ready' | 'blocked' | 'failed';
+
+export const SETTLED_FAMILY_NOTIFICATION: Record<
+  SettledNotificationFamily,
+  { category: NotificationCategory; level: 'info' | 'warning' | 'error' }
+> = {
+  ready: { category: 'git_pull_ready', level: 'info' },
+  blocked: { category: 'git_plan_blocked', level: 'warning' },
+  failed: { category: 'git_pull_failed', level: 'error' },
+};
+
+export function settledNotificationFamily(outcome: string): SettledNotificationFamily {
+  if (outcome === 'blocked') return 'blocked';
+  if (
+    outcome === 'failed_previous_intact'
+    || outcome === 'recovery_required'
+    || outcome === 'unknown'
+  ) {
+    return 'failed';
+  }
+  return 'ready';
+}
+
+/**
+ * The state a staged candidate is waiting in, which is part of its identity.
+ *
+ * `awaiting_review` and `blocked` are standing states: the candidate keeps
+ * settling into them on every poll, so each announces once and then stays
+ * silent. `held` is a change rather than a state to sit in (a safety refusal
+ * turned an automatic candidate into one needing review), and it gets its own
+ * candidate key so the operator sees it instead of it colliding with the entry
+ * the candidate wrote when it was staged.
+ */
+export type GitOpsCandidateState = 'awaiting_review' | 'blocked' | 'held';
+
+/**
+ * The staged candidate an event announces, when it announces one.
+ *
+ * Identified by the candidate generation rather than the commit, so a commit
+ * that is legitimately staged again later (after an apply, or after the
+ * candidate was discarded and re-staged) is a new candidate and announces
+ * again, while a poll that settles the same waiting candidate stays silent.
+ */
+export type GitOpsCandidateIdentity = {
+  applicationId: string;
+  generationId: string;
+  state: GitOpsCandidateState;
+};
+
+/**
+ * The dedupe key one attempt owns.
+ *
+ * The fetch path announces a result when it stages or fails, and the settled
+ * attempt announces the same result after the transition commits. Both write
+ * this key, so the second is a no-op and the operator reads one entry for one
+ * event instead of two. Stable per attempt, so a replay after a crash between
+ * insert and mark-drained collides with the first write too.
+ *
+ * Per attempt, not per attempt and outcome: one attempt produces one outcome,
+ * so a per-outcome key would let the two writers collide only when they happen
+ * to classify the event identically, which is exactly the property that must
+ * not be assumed (a live apply-failure write and the settle that confirms it
+ * classify the same failure differently by construction).
+ *
+ * An event that is about a staged candidate is keyed to the candidate instead.
+ * A candidate settles the same outcome on every poll, whether it is waiting on
+ * review or blocked by a local conflict, and a per-attempt key would notify once
+ * per interval for as long as it waits. The candidate key makes the poll that
+ * staged it the one that announces it, a newly staged candidate the thing that
+ * announces again, and a review that turns into a hold the thing that announces
+ * the hold.
+ */
+export function gitOpsAttemptNotificationKey(
+  operationId: string,
+  candidate?: GitOpsCandidateIdentity,
+): string {
+  if (candidate) {
+    return `gitops:candidate:${candidate.applicationId}:${candidate.generationId}:${candidate.state}`;
+  }
+  return `gitops:attempt:${operationId}`;
+}
+
+/**
+ * The state a live candidate row is waiting in, or null when there is none.
+ *
+ * Read from the application row rather than re-derived from the settled
+ * outcome, because the two disagree on purpose: a candidate blocked by a local
+ * conflict settles `blocked`, while a held candidate settles `pending_review`
+ * even though the hold is what the operator needs to see.
+ */
+export function gitOpsCandidateState(
+  application: {
+    candidate_generation_id: string | null;
+    candidate_plan_blocked: number | null;
+    review_block_reason: string | null;
+  },
+): GitOpsCandidateState | null {
+  if (!application.candidate_generation_id) return null;
+  if (application.candidate_plan_blocked === 1) return 'blocked';
+  if (application.review_block_reason !== null) return 'held';
+  return 'awaiting_review';
 }
 
 /**

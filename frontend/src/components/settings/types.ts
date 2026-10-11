@@ -24,6 +24,7 @@ export interface PatchableSettings {
     env_block_deploy_on_missing_required?: '0' | '1';
     auto_create_missing_external_networks?: '0' | '1';
     gitops_artifact_retry_interval_mins?: string;
+    gitops_history_retention_days?: string;
     image_update_sidebar_indicators?: '0' | '1';
     notification_dispatch_retries?: string;
     session_sliding_refresh?: '0' | '1';
@@ -55,6 +56,7 @@ export const DEFAULT_SETTINGS: PatchableSettings = {
     env_block_deploy_on_missing_required: '0',
     auto_create_missing_external_networks: '0',
     gitops_artifact_retry_interval_mins: '5',
+    gitops_history_retention_days: '30',
     image_update_sidebar_indicators: '1',
     notification_dispatch_retries: '0',
     session_sliding_refresh: '1',

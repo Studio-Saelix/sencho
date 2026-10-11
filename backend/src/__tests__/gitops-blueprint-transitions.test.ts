@@ -1207,7 +1207,7 @@ describe('gitops blueprint transitions', () => {
     expect(store.getGeneration('gen-freeze-2')).toBeUndefined();
   });
 
-  it('clears Inline freeze pointers on a new intent so the next deploy can re-freeze', () => {
+  it('clears Inline freeze pointers on a compose change so the next deploy can re-freeze', () => {
     const store = GitOpsStore.getInstance();
     const tx = GitOpsTransitions.getInstance();
     seedInline('app-freeze-revise', 322, 1);
@@ -1242,7 +1242,7 @@ describe('gitops blueprint transitions', () => {
 
     tx.intentRevised({
       applicationId: 'app-freeze-revise',
-      intent: intent('int-freeze-r2', 'app-freeze-revise', 322),
+      intent: intent('int-freeze-r2', 'app-freeze-revise', 322, 'd'.repeat(64)),
       envelope: env('op-int-r2'),
     });
     const cleared = store.getApplication('app-freeze-revise')!;
@@ -1259,6 +1259,157 @@ describe('gitops blueprint transitions', () => {
     expect(again.replayed).toBe(false);
     expect(store.getApplication('app-freeze-revise')?.accepted_generation_id).toBe('gen-freeze-r2');
     expect(store.getApplication('app-freeze-revise')?.artifact_set_id).toBe('art-freeze-r2');
+  });
+
+  it('keeps the Inline freeze across a roster change, so a retained target keeps the generation it runs', () => {
+    const store = GitOpsStore.getInstance();
+    const tx = GitOpsTransitions.getInstance();
+    seedInline('app-freeze-roster', 323, 1);
+    tx.intentRevised({
+      applicationId: 'app-freeze-roster',
+      intent: intent('int-roster-r1', 'app-freeze-roster', 323),
+      envelope: env('op-int-roster-1'),
+    });
+    deployAndFreezeInline('app-freeze-roster', 1, 'int-roster-r1', 'gen-roster-1', 'c'.repeat(64));
+    const frozen = store.getTarget('app-freeze-roster', 1)!;
+    expect(frozen.applied_generation_id).toBeNull();
+    expect(frozen.desired_generation_id).toBe('gen-roster-1');
+
+    // A label change: a new intent and candidate over the same compose. Nothing
+    // about the materialization moved, so the expectation must not either.
+    tx.intentRevised({
+      applicationId: 'app-freeze-roster',
+      // Same compose digest, different selector: a roster change, not an edit.
+      intent: { ...intent('int-roster-r2', 'app-freeze-roster', 323), selector_json: '{"labels":{"qa-g":[]}}' },
+      envelope: env('op-int-roster-2'),
+    });
+    const kept = store.getApplication('app-freeze-roster')!;
+    expect(kept.accepted_generation_id).toBe('gen-roster-1');
+    expect(store.getArtifactSet('art-gen-roster-1')?.generation_id).toBe('gen-roster-1');
+    expect(store.getTarget('app-freeze-roster', 1)?.expected_artifact_set_id).toBe('art-gen-roster-1');
+    expect(store.getTarget('app-freeze-roster', 1)?.desired_generation_id).toBe('gen-roster-1');
+
+    // And the deploy the roster change triggers re-resolves that same freeze
+    // instead of minting a second generation for the same compose.
+    const replay = tx.inlineRevisionFrozen({
+      applicationId: 'app-freeze-roster',
+      generation: inlineGeneration('gen-roster-2', 'app-freeze-roster', 'c'.repeat(64)),
+      artifactSetId: 'art-roster-2',
+      envelope: env('op-freeze-roster-2'),
+    });
+    expect(replay.replayed).toBe(true);
+    expect(store.getApplication('app-freeze-roster')?.accepted_generation_id).toBe('gen-roster-1');
+  });
+
+  it('leaves a retained Blueprint target converged after a policy placed a node for a roster change', () => {
+    const store = GitOpsStore.getInstance();
+    const tx = GitOpsTransitions.getInstance();
+    const app = 'app-roster-place';
+    seedInline(app, 324, 1);
+    // One operator Apply across two nodes, the order a real apply runs in. The
+    // second deploy lands after the freeze, so its target carries an applied
+    // generation and the identity test below has something to read.
+    tx.intentRevised({ applicationId: app, intent: intent('int-place-r1', app, 324), envelope: env('op-int-place-1') });
+    deployAndFreezeInline(app, 1, 'int-place-r1', 'gen-place-1', 'c'.repeat(64));
+    deployAndFreezeInline(app, 2, 'int-place-r1', 'gen-place-2', 'c'.repeat(64));
+    const placed = store.getTarget(app, 2)!;
+    expect(placed.applied_generation_id).not.toBeNull();
+    const accepted = store.getApplication(app)!.accepted_generation_id!;
+    expect(placed.applied_generation_id).toBe(accepted);
+
+    // The roster change, then the placement the policy approved for it.
+    tx.intentRevised({ applicationId: app, intent: intent('int-place-r2', app, 324), envelope: env('op-int-place-2') });
+    tx.rolloutCandidateOpened({
+      applicationId: app,
+      // The candidate is what the selector now resolves to: the retained nodes
+      // and the one the policy is about to place.
+      candidate: { ...candidate('cand-place-r2', app, 'int-place-r2'), required_targets_json: '{"nodeIds":[1,2,3]}' },
+      envelope: env('op-cand-place-2'),
+    });
+    store.upsertTarget(emptyTargetRow(app, 3, 1));
+    tx.blueprintDeployStarted({
+      applicationId: app, nodeId: 3, intentRevisionId: 'int-place-r2', rolloutCandidateId: 'cand-place-r2',
+      envelope: env('op-dep-place-3'),
+    });
+    tx.blueprintAckRecorded({
+      applicationId: app, nodeId: 3, intentRevisionId: 'int-place-r2', rolloutCandidateId: 'cand-place-r2',
+      legacyAppliedRevision: 1, envelope: env('op-ack-place-3'),
+    });
+
+    const projection = mustProject(app);
+    expect(attentionReasons(projection)).not.toContain('rollout_stale_acknowledgement');
+    expect(projection.drift).toEqual([]);
+    const retained = projection.targets.find((t) => t.nodeId === 2)!;
+    expect(retained.runtime.status).not.toBe('stale_acknowledgement');
+    expect(retained.appliedGenerationId).toBe(retained.desiredGenerationId);
+  });
+
+  it('still reads a node the candidate dropped as superseded, so a pending withdrawal keeps its signal', () => {
+    // The other half of the roster rule. Same compose, same acknowledgement, but
+    // the candidate no longer requires this node: it is running something nothing
+    // asks for, and the plan is asking for the withdrawal. Reading that as
+    // converged would leave the removal path with no signal at all.
+    const tx = GitOpsTransitions.getInstance();
+    const app = 'app-roster-drop';
+    seedInline(app, 326, 1);
+    tx.intentRevised({ applicationId: app, intent: intent('int-drop-r1', app, 326), envelope: env('op-int-drop-1') });
+    deployAndFreezeInline(app, 1, 'int-drop-r1', 'gen-drop-1', 'c'.repeat(64));
+    deployAndFreezeInline(app, 2, 'int-drop-r1', 'gen-drop-2', 'c'.repeat(64));
+
+    // The roster shrank: node 2 is no longer wanted, and the compose did not move.
+    tx.intentRevised({ applicationId: app, intent: intent('int-drop-r2', app, 326), envelope: env('op-int-drop-2') });
+    tx.rolloutCandidateOpened({
+      applicationId: app,
+      candidate: { ...candidate('cand-drop-r2', app, 'int-drop-r2'), required_targets_json: '{"nodeIds":[1]}' },
+      envelope: env('op-cand-drop-2'),
+    });
+
+    const projection = mustProject(app);
+    const dropped = projection.targets.find((t) => t.nodeId === 2)!;
+    expect(dropped.runtime.status).toBe('stale_acknowledgement');
+    expect(attentionReasons(projection)).toContain('rollout_stale_acknowledgement');
+  });
+
+  it('still reads a retained Blueprint target as stale when the compose it ran has been edited', () => {
+    const store = GitOpsStore.getInstance();
+    const tx = GitOpsTransitions.getInstance();
+    const app = 'app-roster-compose';
+    seedInline(app, 325, 1);
+    tx.intentRevised({ applicationId: app, intent: intent('int-compose-r1', app, 325), envelope: env('op-int-compose-1') });
+    deployAndFreezeInline(app, 1, 'int-compose-r1', 'gen-compose-1', 'c'.repeat(64));
+    deployAndFreezeInline(app, 2, 'int-compose-r1', 'gen-compose-2', 'c'.repeat(64));
+
+    // A compose edit changes the content, so the freeze is dropped and the
+    // retained node really is running something the application has left. The
+    // roster fix must not paper over that.
+    tx.intentRevised({
+      applicationId: app,
+      intent: intent('int-compose-r2', app, 325, 'd'.repeat(64)),
+      envelope: env('op-int-compose-2'),
+    });
+    store.upsertTarget(emptyTargetRow(app, 3, 1));
+    tx.blueprintDeployStarted({
+      applicationId: app, nodeId: 3, intentRevisionId: 'int-compose-r2', rolloutCandidateId: null,
+      envelope: env('op-dep-compose-3'),
+    });
+    tx.blueprintAckRecorded({
+      applicationId: app, nodeId: 3, intentRevisionId: 'int-compose-r2', rolloutCandidateId: null,
+      legacyAppliedRevision: 2, envelope: env('op-ack-compose-3'),
+    });
+    tx.inlineRevisionFrozen({
+      applicationId: app,
+      generation: inlineGeneration('gen-compose-3', app, 'd'.repeat(64)),
+      artifactSetId: 'art-compose-3',
+      envelope: env('op-freeze-compose-3'),
+    });
+
+    const projection = mustProject(app);
+    const retained = projection.targets.find((t) => t.nodeId === 2)!;
+    expect(retained.runtime.status).toBe('stale_acknowledgement');
+    expect(attentionReasons(projection)).toContain('rollout_stale_acknowledgement');
+    expect(projection.drift.map((item) => item.reason)).toContain(
+      'the target is running a different generation than the one it was asked to run',
+    );
   });
 
   it('refuses an Inline freeze whose artifact set does not belong to the generation', () => {
@@ -1350,12 +1501,63 @@ function env(operationId: string): EventEnvelope {
   return { operationId, actor: 'tester', trigger: 'manual', at: Date.now() };
 }
 
-function intent(id: string, applicationId: string, blueprintId: number): GitOpsIntentRevisionRow {
+/**
+ * One real deploy, acknowledgement and Inline freeze, the sequence the
+ * deployment producer runs for a node the Blueprint placed.
+ *
+ * The order matters and is the point of the helper: the acknowledgement reads
+ * the application's accepted generation before the freeze mints one, so the
+ * first node of an Apply acknowledges against a null pointer and the second
+ * against the generation the first one froze. That is the shape a fleet is in
+ * whenever more than one node was ever placed in one pass.
+ */
+function deployAndFreezeInline(
+  applicationId: string,
+  nodeId: number,
+  intentRevisionId: string,
+  generationId: string,
+  composeContentSha256: string,
+  rolloutCandidateId: string | null = null,
+): void {
+  const store = GitOpsStore.getInstance();
+  const tx = GitOpsTransitions.getInstance();
+  if (!store.getTarget(applicationId, nodeId)) {
+    store.upsertTarget(emptyTargetRow(applicationId, nodeId, 1));
+  }
+  tx.blueprintDeployStarted({
+    applicationId,
+    nodeId,
+    intentRevisionId,
+    rolloutCandidateId,
+    envelope: env(`op-dep-${generationId}-${nodeId}`),
+  });
+  tx.blueprintAckRecorded({
+    applicationId,
+    nodeId,
+    intentRevisionId,
+    rolloutCandidateId,
+    legacyAppliedRevision: 1,
+    envelope: env(`op-ack-${generationId}-${nodeId}`),
+  });
+  tx.inlineRevisionFrozen({
+    applicationId,
+    generation: inlineGeneration(generationId, applicationId, composeContentSha256),
+    artifactSetId: `art-${generationId}`,
+    envelope: env(`op-freeze-${generationId}`),
+  });
+}
+
+function intent(
+  id: string,
+  applicationId: string,
+  blueprintId: number,
+  composeContentSha256 = 'c'.repeat(64),
+): GitOpsIntentRevisionRow {
   return {
     id,
     application_id: applicationId,
     blueprint_id: blueprintId,
-    compose_content_sha256: 'c'.repeat(64),
+    compose_content_sha256: composeContentSha256,
     blueprint_revision: 1,
     deploy_stack_name: 'bp-stack',
     selector_json: '{"nodeIds":[1]}',

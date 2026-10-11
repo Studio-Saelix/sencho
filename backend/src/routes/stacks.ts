@@ -59,7 +59,7 @@ import { NotificationService, type NotificationCategory } from '../services/Noti
 import { StackOpLockService, type StackOpAction } from '../services/StackOpLockService';
 import { StackOpMetricsService, type StackOpAction as StackMetricAction } from '../services/StackOpMetricsService';
 import { FileExplorerMetricsService, type FileExplorerOp } from '../services/FileExplorerMetricsService';
-import { isValidGitSourcePath, isValidStackName, isValidServiceName, isValidRelativeStackPath } from '../utils/validation';
+import { isPathWithinBase, isValidGitSourcePath, isValidStackName, isValidServiceName, isValidRelativeStackPath } from '../utils/validation';
 import { normalizeBulkPaths, destWithinAnySource } from '../utils/bulkPaths';
 import { getErrorMessage } from '../utils/errors';
 import { isDebugEnabled } from '../utils/debug';
@@ -250,12 +250,21 @@ async function requireStackExists(
   return true;
 }
 
-// Thin wrapper over the shared env-source resolver. Returns the absolute paths of
-// the env files Compose would consult for this stack: existing declared `env_file:`
-// paths (injection sources) plus the project interpolation source(s). Configured
-// project env files are included as interpolation sources. The multi-file Git case
-// and path validation live in resolveStackEnvSources so every consumer agrees.
-export async function resolveAllEnvFilePaths(nodeId: number, stackName: string): Promise<string[]> {
+export interface StackEnvFileState {
+  /** Present env files the editor can edit: injection sources first, deduped. */
+  existing: string[];
+  /**
+   * The interpolation source Compose reads: the first configured project env
+   * file that resolves inside the stack directory, else the default `.env`.
+   * Present or missing; null only when none qualifies.
+   */
+  createTarget: string | null;
+}
+
+// Shared state for the env routes: the present env files the editor lists, plus
+// the file a first save would create. The multi-file Git case and path
+// validation live in resolveStackEnvSources so every consumer agrees.
+export async function resolveStackEnvFileState(nodeId: number, stackName: string): Promise<StackEnvFileState> {
   const sources = await resolveStackEnvSources(nodeId, stackName);
   const present = sources.envFiles.filter(f => f.existence === 'present' && f.resolvedPath);
   const injection = present.filter(f => f.isInjectionSource).map(f => f.resolvedPath as string);
@@ -268,7 +277,21 @@ export async function resolveAllEnvFilePaths(nodeId: number, stackName: string):
       injection.push(p);
     }
   }
-  return injection;
+  const createTarget = sources.envFiles.find(
+    f =>
+      f.isInterpolationSource
+      && f.existence !== 'unverifiable'
+      && f.resolvedPath
+      && isPathWithinBase(f.resolvedPath, sources.stackDir),
+  )?.resolvedPath ?? null;
+  return { existing: injection, createTarget };
+}
+
+// Thin wrapper for callers that only need the present env file list (GET /envs,
+// SecretsService): existing declared `env_file:` paths (injection sources) plus
+// the present project interpolation source(s), deduped.
+export async function resolveAllEnvFilePaths(nodeId: number, stackName: string): Promise<string[]> {
+  return (await resolveStackEnvFileState(nodeId, stackName)).existing;
 }
 
 // Uploads spool to disk (not memory) so a 25 MB upload is never held in RAM.
@@ -825,27 +848,74 @@ stacksRouter.put('/:stackName/env', async (req: Request, res: Response) => {
     }
 
     const requestedFile = req.query.file as string | undefined;
-    const envPaths = await resolveAllEnvFilePaths(req.nodeId, stackName);
+    const createRequested = req.query.create === '1';
+    const forceRequested = req.query.force === '1';
+    const { existing: envPaths, createTarget } = await resolveStackEnvFileState(req.nodeId, stackName);
 
     let envPath = envPaths[0];
 
     if (requestedFile) {
       if (envPaths.includes(requestedFile)) {
         envPath = requestedFile;
+      } else if (createRequested && requestedFile === createTarget) {
+        // The editor's confirmed create retry pins the file the conflict named.
+        // That file can vanish before the retry (deleted while the dialog was
+        // open); it is still the file the resolver would create, so allow the
+        // retry to recreate it instead of stranding the editor on a 400. Any
+        // other pinned path keeps the scoped rejection.
+        envPath = requestedFile;
       } else {
         return res.status(400).json({ error: 'Requested env file not allowed' });
       }
     }
 
-    // No env file resolved: the stack has no .env yet and the editor only edits
-    // an existing env file. GET treats this same case as an empty 200; PUT cannot,
-    // since there is no resolved path to write. Reply with a clean, handled response
-    // instead of writing to an undefined path, which would otherwise surface as an opaque 500.
+    const fsService = FileSystemService.getInstance(req.nodeId);
+
+    // The editor's first save on a stack with no env file (?create=1).
+    // Creation is exclusive: an existing target is a conflict, never an
+    // overwrite, so a stale editor that still believes no file exists cannot
+    // destroy one. The editor's confirmed overwrite retry adds ?force=1 and
+    // pins the file it confirmed with ?file=<path>, re-validated above. Every
+    // other caller keeps the handled 404 below.
+    if (createRequested) {
+      if (!(await requireStackExists(req.nodeId, stackName, res))) return;
+      const target = envPath ?? createTarget;
+      if (!target) {
+        return res.status(409).json({ error: 'No env file target is available for this stack' });
+      }
+      const result = forceRequested
+        ? await fsService.writeFileIfUnchanged(target, content, null)
+        : await fsService.createFileExclusive(target, content);
+      if (!result.ok) {
+        res.setHeader('ETag', stackFileEtag(result.currentMtimeMs));
+        return res.status(412).json({
+          error: `${stackName}'s env file already exists.`,
+          code: 'stack_file_changed',
+          currentMtimeMs: result.currentMtimeMs,
+          currentContent: result.currentContent,
+          envPath: target,
+        });
+      }
+      invalidateNodeCaches(req.nodeId);
+      StackFileRootsService.invalidate(req.nodeId, stackName);
+      dlog(`[Stacks] Env file saved: ${sanitizeForLog(stackName)}/${sanitizeForLog(path.basename(target))}${forceRequested ? '' : ' (created)'}`);
+      res.setHeader('ETag', stackFileEtag(result.mtimeMs));
+      return res.json({
+        message: 'Env file saved successfully',
+        mtimeMs: result.mtimeMs,
+        // The client selects the resolved path for its next read/save.
+        envPath: target,
+        ...(forceRequested ? {} : { created: true }),
+      });
+    }
+
+    // No env file resolved and no create intent: the stack has no env file
+    // yet. Keep the handled 404 so pushing a secret bundle to a stack with no
+    // env file never creates one as a side effect.
     if (!envPath) {
       return res.status(404).json({ error: 'No env file exists for this stack' });
     }
 
-    const fsService = FileSystemService.getInstance(req.nodeId);
     const expectedMtimeMs = parseIfMatchMtime(req.header('if-match'));
     const result = await fsService.writeFileIfUnchanged(envPath, content, expectedMtimeMs);
     if (!result.ok) {
@@ -864,6 +934,21 @@ stacksRouter.put('/:stackName/env', async (req: Request, res: Response) => {
     res.setHeader('ETag', stackFileEtag(result.mtimeMs));
     res.json({ message: 'Env file saved successfully', mtimeMs: result.mtimeMs });
   } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === 'EISDIR') {
+      return res.status(409).json({ error: `${stackName}'s env file path is a directory` });
+    }
+    if (code === 'INVALID_PATH' || code === 'SYMLINK_ESCAPE') {
+      // The target became unusable between resolution and write (symlink,
+      // moved path). That is a recoverable conflict, not a server fault.
+      return res.status(409).json({ error: `${stackName}'s env file path is not usable` });
+    }
+    if (code === 'ENOENT') {
+      // The stack directory vanished between the existence check and the
+      // write (a concurrent delete). Report the stack as gone; never recreate
+      // it, or the deleted stack would come back hidden with the env content.
+      return res.status(404).json({ error: 'Stack not found' });
+    }
     console.error('[Stacks] Failed to save env file:', error);
     res.status(500).json({ error: 'Failed to save env file' });
   }

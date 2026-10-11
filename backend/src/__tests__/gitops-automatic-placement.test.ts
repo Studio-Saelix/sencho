@@ -13,7 +13,7 @@ import { DatabaseService } from '../services/DatabaseService';
 import { GitOpsStore } from '../services/gitops/store';
 import { GitOpsTransitions, type EventEnvelope } from '../services/gitops/transitions';
 import { applyAutomaticPlacement } from '../services/gitops/automaticPlacement';
-import { encodePolicySnapshot } from '../services/gitops/policyComposition';
+import { encodePolicySnapshot, configuredSnapshotFor } from '../services/gitops/policyComposition';
 import {
   encodeGitOpsApprovedTargetEffectJson,
   encodeGitOpsRequiredTargetsJson,
@@ -141,7 +141,11 @@ function candidate(id: string, applicationId: string, intentId: string, nodeIds:
   };
 }
 
-function seedApproved(app: GitOpsApplicationRow, approvedNodeIds: number[]): void {
+function seedApproved(
+  app: GitOpsApplicationRow,
+  approvedNodeIds: number[],
+  authority: 'operator' | 'configured_policy' = 'operator',
+): void {
   const store = GitOpsStore.getInstance();
   store.insertIntentRevision(intent(app.intent_revision_id as string, app.id));
   store.insertRolloutCandidate(candidate(app.rollout_candidate_id as string, app.id, app.intent_revision_id as string, approvedNodeIds));
@@ -153,12 +157,14 @@ function seedApproved(app: GitOpsApplicationRow, approvedNodeIds: number[]): voi
     blastJson: encodeGitOpsApprovedTargetEffectJson(approvedNodeIds.map((nodeId) => ({ nodeId, outcome: 'place' as const }))),
     requiredNodeIds: approvedNodeIds,
     fingerprint: null,
-    actor: 'tester',
+    actor: authority === 'operator' ? 'tester' : null,
     envelope: envelope('seed'),
     rolloutGenerationId: `${app.id}-gen`,
     candidateId: app.rollout_candidate_id as string,
-    authority: 'operator',
-    policyProvenanceJson: null,
+    authority,
+    policyProvenanceJson: authority === 'configured_policy'
+      ? encodePolicySnapshot(configuredSnapshotFor(app))
+      : null,
   });
 }
 
@@ -561,6 +567,108 @@ describe('a policy edit is configuration, not work', () => {
     expect(after?.rollout_authorization_policy).toBe('manual');
     expect(after?.placement_approval_ref).toBe('9203-placement');
     expect(after?.rollout_generation_id).toBe('9203-gen');
+  });
+
+  it('withdraws what the policy decided when the placement policy is armed again', () => {
+    // Revocation stops execution at the execution-time check and leaves the
+    // approval on the row. Arming the policy again is what must withdraw it,
+    // because otherwise the next tick executes a decision the operator took
+    // back days ago, on evidence it has not read since.
+    const store = GitOpsStore.getInstance();
+    // Minting a rollout authorization for real needs a whole ingredient set,
+    // which is not what is under test. What is under test is the pairing: an
+    // authorization only resolves through the placement it names, so the
+    // withdrawal takes it with it rather than leaving a pointer that reports an
+    // authority nothing can honor.
+    seedApproved(blueprintApp('9210'), [1], 'configured_policy');
+    DatabaseService.getInstance().getDb()
+      .prepare('UPDATE gitops_applications SET rollout_authorization_ref = ? WHERE id = ?')
+      .run('9210-authz', '9210');
+
+    GitOpsTransitions.getInstance().placementPolicyChanged({
+      applicationId: '9210',
+      placementPolicy: 'operator',
+      envelope: envelope('revoke'),
+    });
+    expect(store.getApplication('9210')?.placement_approval_ref).toBe('9210-placement');
+
+    GitOpsTransitions.getInstance().placementPolicyChanged({
+      applicationId: '9210',
+      placementPolicy: 'bounded_auto',
+      envelope: envelope('rearm'),
+    });
+    const after = store.getApplication('9210')!;
+    expect(after.placement_policy).toBe('bounded_auto');
+    expect(after.placement_approval_ref).toBeNull();
+    expect(after.rollout_authorization_ref).toBeNull();
+    // The approval row itself stays: it is the record of what the policy decided
+    // and when. Only the pointers that made it live are gone.
+    expect(store.getApproval('9210-placement')).toBeDefined();
+
+    // And the audit trail says so, or a reader cannot tell this row apart from
+    // a policy edit that left the approval alone.
+    const row = DatabaseService.getInstance().getDb()
+      .prepare(`SELECT before_json, after_json FROM gitops_history
+                 WHERE application_id = '9210' AND stage = 'placement_policy_changed'
+                 ORDER BY rowid DESC LIMIT 1`)
+      .get() as { before_json: string; after_json: string };
+    expect(JSON.parse(row.before_json).placementApprovalRef).toBe('9210-placement');
+    expect(JSON.parse(row.after_json).placementApprovalRef).toBeNull();
+    expect(JSON.parse(row.before_json).rolloutAuthorizationRef).toBe('9210-authz');
+    expect(JSON.parse(row.after_json).rolloutAuthorizationRef).toBeNull();
+  });
+
+  it('withdraws what the policy decided when rollout authorization is armed again', () => {
+    // Executing a placement is a rollout, so both settings gate the one
+    // unattended authority and taking either one back withdraws it.
+    const store = GitOpsStore.getInstance();
+    seedApproved(blueprintApp('9211'), [1], 'configured_policy');
+
+    GitOpsTransitions.getInstance().rolloutAuthorizationPolicyChanged({
+      applicationId: '9211',
+      policy: 'manual',
+      envelope: envelope('manual'),
+    });
+    expect(store.getApplication('9211')?.placement_approval_ref).toBe('9211-placement');
+
+    GitOpsTransitions.getInstance().rolloutAuthorizationPolicyChanged({
+      applicationId: '9211',
+      policy: 'automatic',
+      envelope: envelope('automatic'),
+    });
+    expect(store.getApplication('9211')?.placement_approval_ref).toBeNull();
+  });
+
+  it("leaves an operator's approval standing when either policy is armed again", () => {
+    // An operator is not the policy. Their approval is their own decision and
+    // no policy edit withdraws it, which is the rule the withdrawal above is
+    // scoped by.
+    const store = GitOpsStore.getInstance();
+    seedApproved(blueprintApp('9212'), [1]);
+
+    GitOpsTransitions.getInstance().placementPolicyChanged({
+      applicationId: '9212',
+      placementPolicy: 'operator',
+      envelope: envelope('revoke'),
+    });
+    GitOpsTransitions.getInstance().placementPolicyChanged({
+      applicationId: '9212',
+      placementPolicy: 'bounded_auto',
+      envelope: envelope('rearm'),
+    });
+    expect(store.getApplication('9212')?.placement_approval_ref).toBe('9212-placement');
+
+    GitOpsTransitions.getInstance().rolloutAuthorizationPolicyChanged({
+      applicationId: '9212',
+      policy: 'manual',
+      envelope: envelope('manual'),
+    });
+    GitOpsTransitions.getInstance().rolloutAuthorizationPolicyChanged({
+      applicationId: '9212',
+      policy: 'automatic',
+      envelope: envelope('automatic'),
+    });
+    expect(store.getApplication('9212')?.placement_approval_ref).toBe('9212-placement');
   });
 });
 

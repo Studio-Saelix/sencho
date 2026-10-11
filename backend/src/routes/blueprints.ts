@@ -18,11 +18,10 @@ import {
     summarizeConfirmedOutcomes,
 } from '../services/BlueprintReconciler';
 import { BlueprintAnalyzer } from '../services/BlueprintAnalyzer';
-import { buildBlueprintPreview, evaluateLightweightEffectiveApproval } from '../services/blueprintPreviewProjection';
+import { buildBlueprintPreview, composeEffectiveApproval, evaluateLightweightEffectiveApproval } from '../services/blueprintPreviewProjection';
 import {
     confirmableActionsEqual,
     deriveBlastFromConfirmableActions,
-    evaluateEffectiveApproval,
     intentFingerprint,
     parseConfirmableActionsBody,
     serializeApprovedBlast,
@@ -858,10 +857,11 @@ blueprintsRouter.post('/:id/apply', async (req: Request, res: Response): Promise
             return;
         }
         // Snapshot deploy may finish after a concurrent edit cleared approval.
-        // Report live effectiveApproval; do not hardcode "approved".
+        // Report the live composed approval, the same authority the preview and
+        // the tick read; do not hardcode "approved".
         const live = DatabaseService.getInstance().getBlueprint(id);
         const { effectiveApproval } = live
-            ? evaluateEffectiveApproval(live, preview.executorActions)
+            ? composeEffectiveApproval(live, preview.executorActions)
             : { effectiveApproval: 'pending' as const };
         const outcomeSummary = summarizeConfirmedOutcomes(plan.outcomes);
         const message = effectiveApproval === 'approved'
@@ -1135,10 +1135,11 @@ blueprintsRouter.put('/:id/pin', async (req: Request, res: Response): Promise<vo
         // the state this request committed rather than whatever the background
         // pass has reached by the time it is serialized.
         const gitopsRevision = projectCommittedRevision(id, 'blueprint pin');
-        // A pin that moved clears approval, so reconcileOne cannot mutate until
-        // Confirm Apply. Re-pinning the node already pinned changes nothing and
-        // leaves approval intact. Called either way so the resulting state is
-        // evaluated immediately instead of waiting for the next tick.
+        // A pin that moved, including clearing one, waits for Confirm Apply, so
+        // reconcileOne cannot place the freed node on its own. Re-pinning the
+        // node already pinned changes nothing and leaves approval intact.
+        // Called either way so the resulting state is evaluated immediately
+        // instead of waiting for the next tick.
         if (updated.enabled) {
             BlueprintReconciler.getInstance().reconcileOne(id).catch(err => {
                 console.warn('[Blueprints] post-pin reconcileOne failed:', err);

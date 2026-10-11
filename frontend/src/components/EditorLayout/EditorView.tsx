@@ -43,6 +43,7 @@ import { ScrollArea } from '../ui/scroll-area';
 import { AnatomyResizePane } from '@/components/stack/AnatomyResizePane';
 import { StackIdentityHeader, ContainersHealth, StackLogsSection } from './editor-view-blocks';
 import { MobileStackDetail } from './MobileStackDetail';
+import { ENV_READ_FAILED_NOTICE } from './envNotice';
 import { RecoveryChip } from './RecoveryChip';
 import { StackOperationBanner } from './StackOperationBanner';
 import { retryHandlerFor } from './recovery-retry';
@@ -137,6 +138,8 @@ export interface EditorViewProps {
     content: string;
     envContent: string;
     envExists: boolean;
+    /** The env inventory request failed; unknown is not the same as absent. */
+    envInventoryFailed: boolean;
     envFiles: string[];
     selectedEnvFile: string;
     isFileLoading: boolean;
@@ -260,6 +263,7 @@ export function EditorView(props: EditorViewProps) {
         content,
         envContent,
         envExists,
+        envInventoryFailed,
         envFiles,
         selectedEnvFile,
         isFileLoading,
@@ -612,7 +616,7 @@ export function EditorView(props: EditorViewProps) {
                                                 <TabsTrigger value="compose">compose.yaml</TabsTrigger>
                                             </TabsHighlightItem>
                                             <TabsHighlightItem value="env">
-                                                <TabsTrigger value="env" disabled={!envExists}>.env</TabsTrigger>
+                                                <TabsTrigger value="env">.env</TabsTrigger>
                                             </TabsHighlightItem>
                                             {canRead && (
                                                 <TabsHighlightItem value="files">
@@ -727,10 +731,23 @@ export function EditorView(props: EditorViewProps) {
                             ) : (
                                 <>
                                     {activeTab === 'env' && (
-                                        <div className="bg-brand/8 border-b border-brand/20 px-4 py-2 flex items-center gap-2 text-xs text-brand">
-                                            <span>
-                                                Variables defined in the project environment file are available for substitution in your compose.yaml (e.g., <code className="bg-background px-1 rounded text-[10px]">${'{}'}VAR</code>). To pass them directly into your container, add <code className="bg-background px-1 rounded text-[10px]">env_file: - .env</code> to your service definition.
-                                            </span>
+                                        <div className="bg-brand/8 border-b border-brand/20 px-4 py-2 space-y-1 text-xs text-brand">
+                                            <div className="flex items-center gap-2">
+                                                <span>
+                                                    Variables defined in the project environment file are available for substitution in your compose.yaml (e.g., <code className="bg-background px-1 rounded text-[10px]">${'{}'}VAR</code>). To pass them directly into your container, add <code className="bg-background px-1 rounded text-[10px]">env_file: - .env</code> to your service definition.
+                                                </span>
+                                            </div>
+                                            {!envExists && (
+                                                <div className="flex items-center gap-2">
+                                                    <span>
+                                                        {envInventoryFailed
+                                                            ? ENV_READ_FAILED_NOTICE
+                                                            : canEditCompose
+                                                                ? 'This stack has no environment file yet. One will be created in the stack directory when you save.'
+                                                                : 'This stack has no environment file yet.'}
+                                                    </span>
+                                                </div>
+                                            )}
                                         </div>
                                     )}
                                     <div className="flex-1 min-h-0 overflow-hidden">
@@ -761,7 +778,7 @@ export function EditorView(props: EditorViewProps) {
                                                         fontSize: 14,
                                                         padding: { top: 10 },
                                                         scrollBeyondLastLine: false,
-                                                        readOnly: !canEditCompose,
+                                                        readOnly: !canEditCompose || (activeTab === 'env' && !envExists && envInventoryFailed),
                                                     }}
                                                 />
                                             </Suspense>

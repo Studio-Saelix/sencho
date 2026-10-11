@@ -29,6 +29,12 @@ export function useEditorViewState() {
   const [originalEnvContent, setOriginalEnvContent] = useState<string>('');
   const [envEtag, setEnvEtag] = useState<string | null>(null);
   const [envExists, setEnvExists] = useState<boolean>(false);
+  // True when the env state could not be read: the inventory request failed,
+  // or a listed file's content could not be fetched. Unknown is not the same
+  // as "this stack has no env file": the editor must not offer to create and
+  // must refuse to save in that state, or a transient failure would read as an
+  // absent file.
+  const [envInventoryFailed, setEnvInventoryFailed] = useState<boolean>(false);
   const [envFiles, setEnvFiles] = useState<string[]>([]);
   const [selectedEnvFile, setSelectedEnvFile] = useState<string>('');
   const [containers, setContainers] = useState<ContainerInfo[]>([]);
@@ -70,6 +76,7 @@ export function useEditorViewState() {
     originalEnvContent, setOriginalEnvContent,
     envEtag, setEnvEtag,
     envExists, setEnvExists,
+    envInventoryFailed, setEnvInventoryFailed,
     envFiles, setEnvFiles,
     selectedEnvFile, setSelectedEnvFile,
     containers, setContainers,

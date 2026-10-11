@@ -39,19 +39,35 @@ function githubPushPayload(opts: {
   ref?: string;
   after?: string;
   padding?: string;
+  cloneUrl?: string;
 } = {}): Record<string, unknown> {
   return {
     ref: opts.ref ?? 'refs/heads/main',
     after: opts.after ?? 'a'.repeat(40),
-    repository: { clone_url: 'https://github.com/example/repo.git' },
+    repository: { clone_url: opts.cloneUrl ?? 'https://github.com/example/repo.git' },
     ...(opts.padding ? { padding: opts.padding } : {}),
   };
 }
 
-function seedGitSource(stackName: string): void {
+/**
+ * A delivery carrying the `html_url` a real provider sends, which is the
+ * spelling that never matches a stored `.git` clone URL.
+ */
+function githubPushPayloadWithHtmlUrl(htmlUrl: string): Record<string, unknown> {
+  return {
+    ref: 'refs/heads/main',
+    after: 'a'.repeat(40),
+    repository: {
+      html_url: htmlUrl,
+      clone_url: htmlUrl.endsWith('.git') ? htmlUrl : `${htmlUrl}.git`,
+    },
+  };
+}
+
+function seedGitSource(stackName: string, repoUrl = 'https://github.com/example/repo.git'): void {
   DatabaseService.getInstance().upsertGitSource({
     stack_name: stackName,
-    repo_url: 'https://github.com/example/repo.git',
+    repo_url: repoUrl,
     branch: 'main',
     compose_path: 'compose.yaml',
     compose_paths: ['compose.yaml'],
@@ -458,6 +474,108 @@ describe('git provider hooks audit F3: ingest-level replay', () => {
     expect(deliveries[0]?.state).toBe('queued');
     handleSpy.mockRestore();
   });
+});
+
+describe('git provider hooks repository identity matching', () => {
+  // Each pair names one repository in two spellings: the first is what the
+  // operator configured on the source, the second is what the provider puts in
+  // the delivery. A stored `.git` clone URL against a provider `html_url` is the
+  // shape every real push has, and the ssh forms are how a source with a deploy
+  // key is configured.
+  const oneRepository: [configured: string, delivered: string][] = [
+    ['https://github.com/example/repo.git', 'https://github.com/example/repo'],
+    ['https://github.com/example/repo', 'https://github.com/example/repo.git'],
+    ['https://github.com/example/repo/', 'https://github.com/example/repo.git/'],
+    ['https://GitHub.com/example/repo.git', 'https://github.com/example/repo'],
+    // scp-style URLs preserve host case, unlike the https parser.
+    ['git@GitHub.com:example/repo.git', 'https://github.com/example/repo.git'],
+    ['git@github.com:example/repo.git', 'https://github.com/example/repo'],
+    ['ssh://git@github.com/example/repo.git', 'https://github.com/example/repo'],
+    ['ssh://git@github.com:2222/example/repo.git', 'https://github.com/example/repo'],
+    // A port is not part of the key, so the https spelling merges too.
+    ['https://github.com:8443/example/repo.git', 'https://github.com/example/repo'],
+    // Folding runs before the `.git` suffix is stripped, in both directions.
+    ['https://github.com/example/repo.git', 'https://github.com/example/repo.GIT'],
+    ['https://github.com/example/repo.GIT', 'https://github.com/example/repo.git'],
+    // Path case is folded on purpose here; the comparator's doc comment owns
+    // the trade.
+    ['https://github.com/Example/Repo', 'https://github.com/example/repo'],
+  ];
+
+  it.each(oneRepository)(
+    'queues a delivery for a source configured as %s when the provider names %s',
+    async (configured, delivered) => {
+      const { GitSourceService } = await import('../services/GitSourceService');
+      const stackName = `provider-hook-identity-${crypto.randomUUID().slice(0, 8)}`;
+      seedGitSource(stackName, configured);
+      const { id, secret } = createGithubEndpoint(stackName);
+      const body = JSON.stringify(githubPushPayloadWithHtmlUrl(delivered));
+      const handleSpy = vi.spyOn(GitSourceService.getInstance(), 'handleWebhookPull')
+        .mockResolvedValue({ status: 'success', message: 'Queued for reconciliation.' });
+
+      const res = await postInternalHook(id, body, secret);
+
+      expect(res.status).toBe(202);
+      expect(res.body.state).toBe('queued');
+      expect(handleSpy).toHaveBeenCalledTimes(1);
+      handleSpy.mockRestore();
+    },
+  );
+
+  it('queues a push whose clone_url drops the configured .git suffix', async () => {
+    const { GitSourceService } = await import('../services/GitSourceService');
+    const stackName = `provider-hook-identity-clone-${crypto.randomUUID().slice(0, 8)}`;
+    seedGitSource(stackName, 'https://github.com/example/repo.git');
+    const { id, secret } = createGithubEndpoint(stackName);
+    const body = JSON.stringify(githubPushPayload({ cloneUrl: 'https://github.com/example/repo' }));
+    const handleSpy = vi.spyOn(GitSourceService.getInstance(), 'handleWebhookPull')
+      .mockResolvedValue({ status: 'success', message: 'Queued for reconciliation.' });
+
+    const res = await postInternalHook(id, body, secret);
+
+    expect(res.status).toBe(202);
+    expect(res.body.state).toBe('queued');
+    expect(handleSpy).toHaveBeenCalledTimes(1);
+    handleSpy.mockRestore();
+  });
+
+  const differentRepository: [configured: string, delivered: string][] = [
+    ['https://github.com/example/repo.git', 'https://github.com/example/other.git'],
+    ['https://github.com/example/repo.git', 'https://github.com/example/repo-two'],
+    ['https://github.com/example/repo.git', 'https://gitlab.com/example/repo.git'],
+    ['https://github.com/example/repo.git', 'https://github.com/example/nested/repo'],
+  ];
+
+  it('refuses an identity that names no repository, on one side or both', async () => {
+    const { deliveryRepoMatchesConfigured } = await import('../services/gitops/providerWebhooks/normalize');
+    const repo = { host: 'github.com', pathname: '/example/repo.git' };
+    expect(deliveryRepoMatchesConfigured({ host: 'github.com', pathname: '/example/../repo' }, repo)).toBe(false);
+    expect(deliveryRepoMatchesConfigured(repo, { host: '', pathname: '/example/repo' })).toBe(false);
+    // Both sides unparseable: without the null guard, null would equal null.
+    expect(deliveryRepoMatchesConfigured({ host: 'github.com', pathname: '/' }, { host: 'github.com', pathname: '/' })).toBe(false);
+  });
+
+  it.each(differentRepository)(
+    'refuses a delivery for a source configured as %s when the provider names %s',
+    async (configured, delivered) => {
+      const { GitSourceService } = await import('../services/GitSourceService');
+      const stackName = `provider-hook-identity-other-${crypto.randomUUID().slice(0, 8)}`;
+      seedGitSource(stackName, configured);
+      const { id, secret } = createGithubEndpoint(stackName);
+      const body = JSON.stringify(githubPushPayloadWithHtmlUrl(delivered));
+      const handleSpy = vi.spyOn(GitSourceService.getInstance(), 'handleWebhookPull')
+        .mockResolvedValue({ status: 'success', message: 'Queued for reconciliation.' });
+
+      const res = await postInternalHook(id, body, secret);
+
+      expect(res.status).toBe(202);
+      expect(res.body.state).toBe('ignored_by_policy');
+      const delivery = GitProviderWebhookStore.getInstance().listDeliveries(id)[0];
+      expect(delivery?.outcome_class).toBe('source_mismatch');
+      expect(handleSpy).not.toHaveBeenCalled();
+      handleSpy.mockRestore();
+    },
+  );
 });
 
 describe('git provider hooks audit F4: pull request event action', () => {

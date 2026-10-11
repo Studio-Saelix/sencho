@@ -237,10 +237,22 @@ export class GitOpsBindingService {
     );
   }
 
+  /**
+   * Hand the Blueprint back to Inline editing.
+   *
+   * The revision moves with the origin. A Git-managed deploy stamps the
+   * deployment with the Blueprint revision, and Git content never bumps that
+   * number, so a node that ran an older generation still compares equal to the
+   * restored snapshot. Leaving the number in place lets a later automatic
+   * placement treat that node as current and place the snapshot on a node the
+   * operator has not confirmed. The new revision makes every such stamp stale
+   * until Apply records it.
+   */
   private restoreInline(blueprintId: number): void {
     const db = DatabaseService.getInstance();
     db.updateBlueprintContentOrigin(blueprintId, 'inline', null);
     db.clearBlueprintApproval(blueprintId);
+    db.updateBlueprint(blueprintId, { bumpRevision: true });
   }
 
   private clearGitManagedRolloutEvidence(applicationId: string): void {
@@ -381,6 +393,7 @@ function rollbackLimitationsFor(transition: BindingPreview['transition']): strin
   if (transition === 'detach') {
     return [
       'Detach restores the frozen Inline snapshot; later Git commits are not written back.',
+      'The snapshot is recorded as a new revision, and rollout authorization returns to operator-authorized.',
       'Existing node directories keep their current marker until a later rollout.',
     ];
   }

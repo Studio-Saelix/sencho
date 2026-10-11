@@ -230,7 +230,7 @@ Sencho authenticates every delivery with provider-specific headers, then applies
 | Unknown endpoint, disabled endpoint, or bad signature | **404 Not found** (same response for every rejection so callers cannot probe ids) |
 | Malformed JSON or unsupported payload shape | **400 Bad request** |
 | Body larger than 1 MiB | **413 Payload too large** |
-| Repository in the event does not match the linked source URL | **202 Accepted**, delivery recorded as ignored (`source_mismatch`) |
+| Repository in the event names a different repository than the linked source (`.git` suffix, ssh versus https, port, and letter case differences still match) | **202 Accepted**, delivery recorded as ignored (`source_mismatch`) |
 | Push ref does not match the configured ref | **202 Accepted**, ignored (`ref_policy`) |
 | Pull request event while scope is **Configured ref only** | **202 Accepted**, ignored (`ref_policy`) |
 | Ping or connectivity test from the host | **202 Accepted**, ignored (`ping`) |

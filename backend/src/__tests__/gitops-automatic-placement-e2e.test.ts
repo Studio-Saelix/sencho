@@ -126,8 +126,19 @@ function generation(id: string, applicationId: string, candidateDir: string, app
   };
 }
 
+/**
+ * A monotonic blueprint id for seeded applications.
+ *
+ * The id was derived from the random application id's digits, which collided
+ * with a row seeded earlier in the file often enough to trip the unique active
+ * blueprint index, reddening the suite about once in a full run. Rows are only
+ * ever inserted through this helper, so a counter cannot collide.
+ */
+let nextApplicationBlueprintId = 7000;
+
 function application(overrides: Partial<GitOpsApplicationRow>): GitOpsApplicationRow {
   const id = overrides.id ?? `app-${randomUUID().slice(0, 8)}`;
+  nextApplicationBlueprintId += 1;
   return {
     id,
     lifecycle_key: `blueprint:${id}`,
@@ -135,7 +146,7 @@ function application(overrides: Partial<GitOpsApplicationRow>): GitOpsApplicatio
     target_mode: 'blueprint',
     stack_name: null,
     configured_source_stack_name: `src-${id}`,
-    blueprint_id: Number(id.replace(/\D/g, '').slice(0, 6)) + 7000,
+    blueprint_id: overrides.blueprint_id ?? nextApplicationBlueprintId,
     configured_repo_url: `https://example.invalid/${id}.git`,
     repo_identity_json: '{"host":"example.invalid","pathname":"/x.git"}',
     configured_ref: 'main',
@@ -286,6 +297,37 @@ function seed(opts: {
   store.insertGeneration(generation(generationId, app.id, dirs.candidateDir, dirs.appliedDir));
   void opts.cordoned;
   return app;
+}
+
+/**
+ * The pre-decomposition approval marker, which names no target set and no intent.
+ *
+ * Two things about it matter to the decision: it proves the placement was
+ * approved once, so a multi-node change is not read as a first placement, and
+ * it gives `pinDrivenPlacement` no intent to anchor on.
+ */
+function insertLegacyCombinedApproval(store: GitOpsStore, applicationId: string, id: string): void {
+  store.insertApproval({
+    id,
+    kind: 'legacy_combined',
+    authority: 'legacy_combined',
+    authoritative: 0,
+    application_id: applicationId,
+    generation_id: null,
+    intent_revision_id: null,
+    artifact_set_id: null,
+    rollout_candidate_id: null,
+    rollout_generation_id: null,
+    source_acceptance_ref: null,
+    placement_approval_ref: null,
+    required_targets_json: null,
+    preflight_fingerprint: null,
+    fingerprint: null,
+    blast_json: null,
+    policy_provenance_json: null,
+    actor: null,
+    created_at: 1,
+  } as never);
 }
 
 beforeAll(async () => {
@@ -463,11 +505,13 @@ describe('a bounded_auto application reaches an approval', () => {
 
     // The withdrawn node must read as reachable: a removal is judged by the
     // observation of the workload that ran there, and a node with no observation
-    // is unknown, which is its own refusal.
+    // is unknown, which is its own refusal. The stored connectivity column is
+    // seeded to null and no producer writes it, so the fixture records the same
+    // evidence a deploy leaves behind.
     store.upsertTarget({
       ...emptyTargetRow(app.id, withdrawn, 1),
       target_status: 'active',
-      connectivity: 'reachable',
+      observed_artifact_identity_json: JSON.stringify({ kind: 'exact', identity: 'sha256:served', observedAt: 1 }),
     });
     // Neither node is cordoned, and the Blueprint itself now asks for one of them.
     const previous = store.getIntentRevision(store.getApplication(app.id)!.intent_revision_id!)!;
@@ -499,6 +543,199 @@ describe('a bounded_auto application reaches an approval', () => {
     expect(store.hasPlacementApprovalFor(app.id, 'intent-wd', 'cand-wd')).toBe(true);
   });
 
+  it('carries an earlier unlanded placement forward when a lower node id is withdrawn', () => {
+    // The finding this pins. The reconciler executes one approval per tick, so
+    // an addition that has been approved but not yet landed is carried into the
+    // next approval's blast. That blast is written places-then-removals, while
+    // the approval's own decode requires the node ids to be strictly
+    // increasing. Adding a higher id while withdrawing a lower one left the
+    // write refused as "blast_json must be strictly increasing by nodeId",
+    // which `approvalFailureReason` recorded as `conflicting_operation`: the
+    // operator was told an operation was in flight when none was, the plan read
+    // `reapproval_required`, and nothing executed.
+    const leave = addNode(`n-${randomUUID().slice(0, 6)}`);
+    const keep = addNode(`n-${randomUUID().slice(0, 6)}`);
+    const added = addNode(`n-${randomUUID().slice(0, 6)}`);
+    const app = seed({ nodeIds: [leave, keep], compose: 'services:\n  web:\n    image: nginx:1.25\n' });
+    const store = GitOpsStore.getInstance();
+
+    // An operator's baseline over both nodes, so there is something to withdraw
+    // from and something the added node joins.
+    GitOpsTransitions.getInstance().placementApproved({
+      applicationId: app.id,
+      approvalId: 'place-both-n1',
+      intentRevisionId: store.getApplication(app.id)!.intent_revision_id!,
+      blastJson: encodeGitOpsApprovedTargetEffectJson([
+        { nodeId: leave, outcome: 'place' as const },
+        { nodeId: keep, outcome: 'place' as const },
+      ]),
+      requiredNodeIds: [leave, keep],
+      fingerprint: null,
+      actor: 'tester',
+      envelope: { operationId: 'op-n1-base', actor: 'tester', trigger: 'test', at: 1 },
+      rolloutGenerationId: 'rgen-n1',
+      candidateId: store.getApplication(app.id)!.rollout_candidate_id!,
+      authority: 'operator',
+      policyProvenanceJson: null,
+    });
+
+    // The withdrawn node must read as reachable: a removal is judged by the
+    // observation of the workload that ran there, and a node with none is
+    // unknown, which is its own refusal.
+    store.upsertTarget({
+      ...emptyTargetRow(app.id, leave, 1),
+      observed_artifact_identity_json: JSON.stringify({ kind: 'exact', identity: 'sha256:served', observedAt: 1 }),
+    });
+
+    // First the addition. The approval it writes is never executed here, which
+    // is the window: the fleet has not landed it, so the next approval carries
+    // it forward and the blast names a placed node alongside the withdrawal.
+    const first = store.getIntentRevision(store.getApplication(app.id)!.intent_revision_id!)!;
+    GitOpsTransitions.getInstance().intentRevised({
+      applicationId: app.id,
+      intent: { ...first, id: 'intent-n1-add', operation_id: 'op-n1-add' },
+      envelope: { operationId: 'op-n1-add', actor: 'tester', trigger: 'test', at: 2 },
+    });
+    GitOpsTransitions.getInstance().rolloutCandidateOpened({
+      applicationId: app.id,
+      candidate: {
+        id: 'cand-n1-add',
+        application_id: app.id,
+        intent_revision_id: 'intent-n1-add',
+        required_targets_json: encodeGitOpsRequiredTargetsJson([leave, keep, added]),
+        compose_content_sha256: 'a'.repeat(64),
+        accepted_generation_id: null,
+        artifact_set_id: null,
+        authoritative: 1,
+        provenance: 'roster_change',
+        created_at: 2,
+        operation_id: 'op-n1-add',
+      } as never,
+      envelope: { operationId: 'op-n1-add', actor: 'tester', trigger: 'test', at: 2 },
+    });
+    expect(
+      applyAutomaticPlacement(app.id, { operationId: 'op-n1-add-2', actor: null, trigger: 'test', at: 3 }),
+    ).toEqual({ status: 'auto_approved', reason: 'stateless_addition' });
+
+    // Then the withdrawal of the lower node id, with the added node still
+    // unlanded. Both are in the blast, and it has to be canonical.
+    const second = store.getIntentRevision(store.getApplication(app.id)!.intent_revision_id!)!;
+    GitOpsTransitions.getInstance().intentRevised({
+      applicationId: app.id,
+      intent: { ...second, id: 'intent-n1-remove', operation_id: 'op-n1-remove' },
+      envelope: { operationId: 'op-n1-remove', actor: 'tester', trigger: 'test', at: 4 },
+    });
+    GitOpsTransitions.getInstance().rolloutCandidateOpened({
+      applicationId: app.id,
+      candidate: {
+        id: 'cand-n1-remove',
+        application_id: app.id,
+        intent_revision_id: 'intent-n1-remove',
+        required_targets_json: encodeGitOpsRequiredTargetsJson([keep, added]),
+        compose_content_sha256: 'a'.repeat(64),
+        accepted_generation_id: null,
+        artifact_set_id: null,
+        authoritative: 1,
+        provenance: 'roster_change',
+        created_at: 4,
+        operation_id: 'op-n1-remove',
+      } as never,
+      envelope: { operationId: 'op-n1-remove', actor: 'tester', trigger: 'test', at: 4 },
+    });
+
+    const outcome = applyAutomaticPlacement(app.id, { operationId: 'op-n1-remove-2', actor: null, trigger: 'test', at: 5 });
+    expect(outcome).toEqual({ status: 'auto_approved', reason: 'stateless_removal' });
+    expect(store.hasPlacementApprovalFor(app.id, 'intent-n1-remove', 'cand-n1-remove')).toBe(true);
+    // Nothing was declining anything, so nothing was recorded as a refusal. A
+    // refusal row here is the lie the finding is about.
+    expect(store.getApplication(app.id)!.placement_policy_refusal_reason).toBeNull();
+  });
+
+  it.each([
+    ['nothing observed', undefined, 'unknown_connectivity', 'none', 'online'],
+    ['an unreadable observation', '{not json', 'malformed_evidence', 'corrupt', 'online'],
+    ['an offline node', JSON.stringify({ kind: 'exact', identity: 'sha256:served', observedAt: 1 }), 'stale_node', 'offline', 'offline'],
+    ['no registry row', JSON.stringify({ kind: 'exact', identity: 'sha256:served', observedAt: 1 }), 'unknown_connectivity', 'unregistered', 'missing'],
+  ] as const)('refuses a withdrawal that left %s', (_label, observation, reason, suffix, registry) => {
+    // The other direction of the same reader. An observation that is absent
+    // proves nothing about the node, and one that cannot be decoded is a data
+    // fault. Both refuse, and the reasons stay apart so neither sends the
+    // operator to check the wrong thing. A node the registry does not have as
+    // online refuses first: a withdrawal must not be approved against a node
+    // the same evidence cannot reach for an addition. A node the registry does
+    // not have at all refuses the same way, and is pinned apart from the
+    // unreadable-observation case so a guard that blamed a data fault for a node
+    // it simply cannot see would fail here.
+    const kept = addNode(`n-${randomUUID().slice(0, 6)}`);
+    const withdrawn = addNode(`n-${randomUUID().slice(0, 6)}`);
+    if (registry === 'offline') {
+      DatabaseService.getInstance().getDb()
+        .prepare('UPDATE nodes SET status = ? WHERE id = ?')
+        .run('offline', withdrawn);
+    }
+    const app = seed({ nodeIds: [kept, withdrawn], compose: 'services:\n  web:\n    image: nginx:1.25\n' });
+    const store = GitOpsStore.getInstance();
+
+    GitOpsTransitions.getInstance().placementApproved({
+      applicationId: app.id,
+      approvalId: `place-both-unobserved-${suffix}`,
+      intentRevisionId: store.getApplication(app.id)!.intent_revision_id!,
+      blastJson: encodeGitOpsApprovedTargetEffectJson([
+        { nodeId: kept, outcome: 'place' as const },
+        { nodeId: withdrawn, outcome: 'place' as const },
+      ]),
+      requiredNodeIds: [kept, withdrawn],
+      fingerprint: null,
+      actor: 'tester',
+      envelope: { operationId: `op-unobserved-base-${suffix}`, actor: 'tester', trigger: 'test', at: 1 },
+      rolloutGenerationId: `rgen-unobserved-${suffix}`,
+      candidateId: store.getApplication(app.id)!.rollout_candidate_id!,
+      authority: 'operator',
+      policyProvenanceJson: null,
+    });
+    // A target row exists and is active. What it left behind is the only thing
+    // that can prove the node answered.
+    store.upsertTarget({
+      ...emptyTargetRow(app.id, withdrawn, 1),
+      target_status: 'active',
+      ...(observation === undefined ? {} : { observed_artifact_identity_json: observation }),
+    });
+
+    const previous = store.getIntentRevision(store.getApplication(app.id)!.intent_revision_id!)!;
+    GitOpsTransitions.getInstance().intentRevised({
+      applicationId: app.id,
+      intent: { ...previous, id: `intent-unobserved-${suffix}`, operation_id: `op-unobserved-2-${suffix}` },
+      envelope: { operationId: `op-unobserved-2-${suffix}`, actor: 'tester', trigger: 'test', at: 2 },
+    });
+    GitOpsTransitions.getInstance().rolloutCandidateOpened({
+      applicationId: app.id,
+      candidate: {
+        id: `cand-unobserved-${suffix}`,
+        application_id: app.id,
+        intent_revision_id: `intent-unobserved-${suffix}`,
+        required_targets_json: encodeGitOpsRequiredTargetsJson([kept]),
+        compose_content_sha256: 'a'.repeat(64),
+        accepted_generation_id: null,
+        artifact_set_id: null,
+        authoritative: 1,
+        provenance: 'roster_change',
+        created_at: 2,
+        operation_id: `op-unobserved-2-${suffix}`,
+      } as never,
+      envelope: { operationId: `op-unobserved-2-${suffix}`, actor: 'tester', trigger: 'test', at: 2 },
+    });
+
+    // The registry row is gone while its target row survives: what the registry
+    // can say about the node is nothing, so the refusal is unknown reachability
+    // rather than a fault in the evidence a deploy left behind.
+    if (registry === 'missing') {
+      DatabaseService.getInstance().getDb().prepare('DELETE FROM nodes WHERE id = ?').run(withdrawn);
+    }
+
+    const outcome = applyAutomaticPlacement(app.id, { operationId: `op-unobserved-3-${suffix}`, actor: null, trigger: 'test', at: 3 });
+    expect(outcome).toEqual({ status: 'operator_review', reason });
+  });
+
   it('does not read a migrated application as a first placement', () => {
     // The migration that carries a forward approval records a pre-decomposition
     // row, which names no target set. With no decomposed approval to read, the
@@ -512,29 +749,13 @@ describe('a bounded_auto application reaches an approval', () => {
     const store = GitOpsStore.getInstance();
 
     // The carried-forward row, with no placement_approval beside it.
-    store.insertApproval({
-      id: 'legacy-combined',
-      kind: 'legacy_combined',
-      authority: 'legacy_combined',
-      authoritative: 0,
-      application_id: app.id,
-      generation_id: null,
-      intent_revision_id: null,
-      artifact_set_id: null,
-      rollout_candidate_id: null,
-      rollout_generation_id: null,
-      source_acceptance_ref: null,
-      placement_approval_ref: null,
-      required_targets_json: null,
-      preflight_fingerprint: null,
-      fingerprint: null,
-      blast_json: null,
-      policy_provenance_json: null,
-      actor: null,
-      created_at: 1,
-    } as never);
+    insertLegacyCombinedApproval(store, app.id, 'legacy-combined');
     for (const nodeId of [kept, alsoKept, withdrawn]) {
-      store.upsertTarget({ ...emptyTargetRow(app.id, nodeId, 1), target_status: 'active', connectivity: 'reachable' });
+      store.upsertTarget({
+        ...emptyTargetRow(app.id, nodeId, 1),
+        target_status: 'active',
+        observed_artifact_identity_json: JSON.stringify({ kind: 'exact', identity: 'sha256:served', observedAt: 1 }),
+      });
     }
 
     const previous = store.getIntentRevision(store.getApplication(app.id)!.intent_revision_id!)!;
@@ -565,6 +786,83 @@ describe('a bounded_auto application reaches an approval', () => {
     // as a first placement.
     const outcome = applyAutomaticPlacement(app.id, { operationId: 'op-narrow-2', actor: null, trigger: 'test', at: 3 });
     expect(outcome).toEqual({ status: 'auto_approved', reason: 'stateless_removal' });
+  });
+
+  it('runs the automatic path again once an operator confirms a cleared pin', () => {
+    // The widening in the pin chain is a wait, not a lockout. An application
+    // with no decomposed approval has no record of any confirmation, so an
+    // unconfirmed pin keeps every later change with the operator; Confirm Apply
+    // mints the approval the decision anchors on from, and the next change is
+    // judged against that instead of against the whole history.
+    const kept = addNode(`n-${randomUUID().slice(0, 6)}`);
+    const freed = addNode(`n-${randomUUID().slice(0, 6)}`);
+    const later = addNode(`n-${randomUUID().slice(0, 6)}`);
+    const app = seed({ nodeIds: [kept], compose: 'services:\n  web:\n    image: nginx:1.25\n' });
+    const store = GitOpsStore.getInstance();
+    // A is live, so the baseline the decision reads is {A} and every change
+    // below is a single stateless addition rather than a first placement.
+    store.upsertTarget({
+      ...emptyTargetRow(app.id, kept, 1),
+      target_status: 'active',
+      observed_artifact_identity_json: JSON.stringify({ kind: 'exact', identity: 'sha256:served', observedAt: 1 }),
+    });
+    insertLegacyCombinedApproval(store, app.id, `legacy-combined-${app.id}`);
+
+    const revise = (id: string, pinnedNodeId: number | null, nodeIds: number[], at: number) => {
+      const previous = store.getIntentRevision(store.getApplication(app.id)!.intent_revision_id!)!;
+      GitOpsTransitions.getInstance().intentRevised({
+        applicationId: app.id,
+        intent: { ...previous, id, pinned_node_id: pinnedNodeId, operation_id: `op-${id}` },
+        envelope: { operationId: `op-${id}`, actor: 'tester', trigger: 'test', at },
+      });
+      GitOpsTransitions.getInstance().rolloutCandidateOpened({
+        applicationId: app.id,
+        candidate: {
+          id: `cand-${id}`,
+          application_id: app.id,
+          intent_revision_id: id,
+          required_targets_json: encodeGitOpsRequiredTargetsJson(nodeIds),
+          compose_content_sha256: 'a'.repeat(64),
+          accepted_generation_id: null,
+          artifact_set_id: null,
+          authoritative: 1,
+          provenance: 'roster_change',
+          created_at: at,
+          operation_id: `op-${id}`,
+        } as never,
+        envelope: { operationId: `op-${id}`, actor: 'tester', trigger: 'test', at },
+      });
+    };
+
+    // The pin and then the clear: the clear is an unconfirmed pin change, so it
+    // waits, even though the node set it freed is one stateless addition.
+    revise('intent-pin', kept, [kept], 2);
+    revise('intent-clear', null, [kept, freed], 3);
+    expect(applyAutomaticPlacement(app.id, { operationId: 'op-clear', actor: null, trigger: 'test', at: 4 }))
+      .toEqual({ status: 'operator_review', reason: 'pin_driven_placement' });
+
+    // Confirm Apply for the placement the operator is being shown.
+    GitOpsTransitions.getInstance().placementApproved({
+      applicationId: app.id,
+      approvalId: 'operator-confirms-clear',
+      intentRevisionId: 'intent-clear',
+      blastJson: encodeGitOpsApprovedTargetEffectJson([
+        { nodeId: kept, outcome: 'place' as const },
+        { nodeId: freed, outcome: 'place' as const },
+      ]),
+      requiredNodeIds: [kept, freed],
+      fingerprint: null,
+      actor: 'tester',
+      envelope: { operationId: 'op-confirm', actor: 'tester', trigger: 'test', at: 5 },
+      rolloutGenerationId: 'gen-confirm',
+      candidateId: 'cand-intent-clear',
+      authority: 'operator',
+      policyProvenanceJson: null,
+    });
+
+    revise('intent-later', null, [kept, freed, later], 6);
+    expect(applyAutomaticPlacement(app.id, { operationId: 'op-later', actor: null, trigger: 'test', at: 7 }))
+      .toEqual({ status: 'auto_approved', reason: 'stateless_addition' });
   });
 
   it('reads an application with no approval at all as never having been placed', () => {

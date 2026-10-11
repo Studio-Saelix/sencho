@@ -16,7 +16,7 @@ Open the Settings Hub by clicking the **Profile** icon in the top bar and select
 |-------|----------------|
 | **Personal** | Account, Appearance |
 | **Access** | Admiral Account, Users, SSO, API Tokens |
-| **Infrastructure** | Nodes, Stacks, Fleet, Registries, Recovery Vault, App Store |
+| **Infrastructure** | Nodes, Stacks, GitOps, Fleet, Registries, Recovery Vault, App Store |
 | **Monitoring** | Host Alerts, Container Alerts, Docker & Storage |
 | **Notifications** | Channels, Notification Routing, Mute Rules |
 | **Automation** | Image update checks, Webhooks |
@@ -391,6 +391,49 @@ See [Fleet Snapshots & Backups](/features/fleet-backups) for restore workflows.
 
 ---
 
+## GitOps
+
+How Git sources are fetched, how the images a Blueprint target runs are verified, and how long the GitOps history is kept. The section mixes scopes: **Git sources** follows the active node, while the other two groups belong to the Sencho instance serving it.
+
+### Git sources
+
+**Scope:** Per-node
+
+When on, this node fetches linked Git sources on a schedule. Off means polling is off (interval 0); sources still pull on demand, on webhook, and on retry. Linked sources with no override inherit this interval. Off by default.
+
+| Setting | Default | Max | Description |
+|---------|---------|-----|-------------|
+| **Poll Git sources** | Off | - | Master switch for scheduled fetches on this node. |
+| **Poll interval** | - | 10,080 min (1 week) | Minutes between unattended fetches, shown while polling is on. |
+
+### Drift verification
+
+**Scope:** Per instance
+
+How Sencho proves which images a Blueprint target is actually running.
+
+| Setting | Default | Max | Description |
+|---------|---------|-----|-------------|
+| **Retry an unresolved image identity** | 5 min | 1,440 min | How often a drift check retries resolving the exact image identity a Blueprint target was approved at, when the first attempt could not reach the registry. Lower it for faster recovery once a registry comes back, raise it to keep Sencho off a rate-limited or private registry. Covers the Blueprint targets this Sencho manages, whichever node each one runs on. It has no effect while every target's identity is already resolved. |
+
+### History
+
+**Scope:** Per instance
+
+How long the record behind the GitOps timeline is kept.
+
+| Setting | Default | Max | Description |
+|---------|---------|-----|-------------|
+| **Keep GitOps history for** | 30 days | 365 | How long to keep the record behind the GitOps timeline before older entries are pruned. Lower it to stop a busy Sencho's history from growing, raise it to keep a longer record. The newest entry for each live application is always kept, so its activity stays readable. A webhook redelivered after the record of its first delivery is pruned can run again; a delivery to a provider endpoint keeps its own record and is unaffected. Bell entries for those changes follow the **Notification log** window in [Data Retention](#data-retention) instead. |
+
+The window belongs to the Sencho instance, not to a node: each instance prunes the history it holds, so the window set here governs this instance and a remote instance's window is set on that instance. Pruning deletes entries older than the window; it does not shrink the database file.
+
+The [GitOps portfolio](/features/gitops-portfolio) page explains what a cleanup pass keeps.
+
+Click **Save settings** to apply.
+
+---
+
 ## Nodes
 
 **Scope:** Global
@@ -578,6 +621,8 @@ How long Sencho keeps historical data on this node before pruning it.
 | **Audit log** | 90 days | 365 | How long to keep audit trail entries. Requires Admiral. |
 
 Removing scans for deleted artifacts runs in the background a few minutes after an image or stack disappears, and immediately when you delete a stack. An image that is still present on the node keeps its scan results, even when no stack uses it.
+
+The GitOps history window is a retention window too, but it belongs to this Sencho instance rather than to a node, so it is set under **Settings → GitOps** and is listed on that section's page.
 
 Click **Save settings** to apply.
 

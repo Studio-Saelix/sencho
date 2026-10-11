@@ -152,15 +152,11 @@ async function applyPendingEditorRoute(
   );
   if (!outcome.ready) return false;
   pendingEnvRef.current = null;
-  let effectiveTab: EditorTab = tab;
-  if (outcome.target == null && envFiles.length === 0) {
-    // Empty env inventory: stay on Monaco compose tab rather than detail.
-    effectiveTab = 'compose';
-  } else if (outcome.target && outcome.target !== live.selectedEnvFile) {
+  if (outcome.target && outcome.target !== live.selectedEnvFile) {
     await live.changeEnvFile(outcome.target);
   }
-  live.setActiveTab(effectiveTab);
-  live.applyEditorRouteState(effectiveTab);
+  live.setActiveTab(tab);
+  live.applyEditorRouteState(tab);
   return true;
 }
 

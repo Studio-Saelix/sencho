@@ -645,6 +645,11 @@ CREATE TABLE IF NOT EXISTS gitops_settled_outbox (
 CREATE INDEX IF NOT EXISTS idx_gitops_settled_outbox_undrained
   ON gitops_settled_outbox(created_at)
   WHERE drained_at IS NULL;
+-- Drained rows are the steady-state majority. The prune deletes them by age on
+-- the monitor tick, and the undrained partial index above cannot serve that scan.
+CREATE INDEX IF NOT EXISTS idx_gitops_settled_outbox_drained
+  ON gitops_settled_outbox(created_at)
+  WHERE drained_at IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS git_provider_endpoints (
   id TEXT PRIMARY KEY,
