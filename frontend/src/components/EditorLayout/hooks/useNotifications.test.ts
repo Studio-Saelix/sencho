@@ -364,6 +364,30 @@ describe('useNotifications', () => {
       expect(readFlags(result.current.notifications)).toEqual([`${localNode.id}:7:0`, '2:7:1']);
     });
 
+    it('refetches the feed after a confirmed write so an older response cannot restore the row', async () => {
+      const result = seedRows([{ socket: 0, payload: makeNotif({ id: 11 }) }]);
+      (apiFetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce({ ok: true });
+      const target = result.current.notifications.find((n) => n.id === 11)!;
+      (apiFetch as ReturnType<typeof vi.fn>).mockClear();
+      (apiFetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce({ ok: true });
+
+      await act(async () => { await result.current.markRead(target); });
+
+      await waitFor(() => expect(apiFetch).toHaveBeenCalledWith('/notifications', { localOnly: true }));
+    });
+
+    it('does nothing for a row with no node', async () => {
+      const result = seedRows([{ socket: 0, payload: makeNotif({ id: 12 }) }]);
+      (apiFetch as ReturnType<typeof vi.fn>).mockClear();
+      (fetchForNode as ReturnType<typeof vi.fn>).mockClear();
+
+      await act(async () => { await result.current.markRead({ ...result.current.notifications[0], nodeId: undefined }); });
+
+      expect(apiFetch).not.toHaveBeenCalled();
+      expect(fetchForNode).not.toHaveBeenCalled();
+      expect(toast.error).not.toHaveBeenCalled();
+    });
+
     it('leaves the row unread and tells the operator when the write is refused', async () => {
       const result = seedRows([{ socket: 0, payload: makeNotif({ id: 9 }) }]);
       (apiFetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce({ ok: false, status: 404 });

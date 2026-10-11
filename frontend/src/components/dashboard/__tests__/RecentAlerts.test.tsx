@@ -244,7 +244,7 @@ describe('RecentAlerts row actions', () => {
   });
 
   it('leaves a row without a destination inert and unfocusable', () => {
-    // Read, so the only button a row could carry is a navigation one.
+    // Read, so there is no Mark read button; with no destination there is no navigation button either.
     const { navigation } = renderAlerts({ notifications: [notif({ category: 'monitor_alert', message: 'CPU high', is_read: 1 })] });
     const row = rows()[0];
 

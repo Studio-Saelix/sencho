@@ -38,7 +38,7 @@ interface RecentAlertsProps {
    */
   unreportedNodeIds: ReadonlySet<number> | null;
   navigation: AlertNavigation;
-  /** Marks one alert read on the node that owns it. Shown for every unread row. */
+  /** Marks one alert read on the node that owns it. */
   onMarkRead: (notif: NotificationItem) => void;
   /** Whether the account may create mute rules. The Mute menu is hidden otherwise. */
   canMute: boolean;
@@ -188,7 +188,7 @@ export function RecentAlerts({ notifications, nodes, activeNodeId, unreportedNod
                   </TableCell>
                   <TableCell className="w-px whitespace-nowrap">
                     <div className="flex items-center justify-end gap-0.5">
-                      {/* Hover-revealed like the bell's row actions; always visible without a hover. */}
+                      {/* Hover- or focus-revealed like the bell's row actions; always visible below `md`. */}
                       <div className="flex items-center gap-0.5 opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100 max-md:opacity-100">
                         {canMute ? <NotificationMuteMenu notif={n} /> : null}
                         {n.is_read ? null : (

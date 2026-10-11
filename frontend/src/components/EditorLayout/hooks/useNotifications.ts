@@ -362,7 +362,7 @@ export function useNotifications({ nodes, onStateInvalidate, onImageUpdatesChang
 
       const results = await Promise.allSettled(unreadNodeIds.map(nodeId =>
         nodeId === localNode?.id
-          ? apiFetch('/notifications/read', { method: 'POST', localOnly: true } as Parameters<typeof apiFetch>[1])
+          ? apiFetch('/notifications/read', { method: 'POST', localOnly: true })
           : fetchForNode('/notifications/read', nodeId, { method: 'POST' }),
       ));
 
@@ -406,7 +406,7 @@ export function useNotifications({ nodes, onStateInvalidate, onImageUpdatesChang
       const localNode = nodesRef.current.find(n => n.type === 'local');
       const path = `/notifications/${notif.id}/read`;
       const res = notif.nodeId === localNode?.id
-        ? await apiFetch(path, { method: 'POST', localOnly: true } as Parameters<typeof apiFetch>[1])
+        ? await apiFetch(path, { method: 'POST', localOnly: true })
         : await fetchForNode(path, notif.nodeId, { method: 'POST' });
       if (!res.ok) {
         toast.error('Could not mark the notification as read');
@@ -415,6 +415,8 @@ export function useNotifications({ nodes, onStateInvalidate, onImageUpdatesChang
       setNotifications(prev => prev.map(n =>
         n.id === notif.id && n.nodeId === notif.nodeId ? { ...n, is_read: 1 } : n,
       ));
+      // A feed request that started before the write could land after the flip and restore the stale row.
+      void fetchNotificationsRef.current();
     } catch (e: unknown) {
       const err = e as { message?: string; error?: string };
       toast.error(err?.message || err?.error || 'Failed to mark notification as read');

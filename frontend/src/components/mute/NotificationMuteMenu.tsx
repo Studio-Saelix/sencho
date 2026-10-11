@@ -15,7 +15,7 @@ import type { NotificationItem } from '@/components/dashboard/types';
  * rule is an admin action, so callers render this only for an admin.
  *
  * Clicks are stopped at the trigger and the menu: the menu content is portaled
- * but React still bubbles its events to the row, and a row may navigate on click.
+ * but React still bubbles its events to the row, and Home's Recent alerts rows navigate on click.
  */
 export function NotificationMuteMenu({ notif }: { notif: NotificationItem }) {
     return (
