@@ -351,7 +351,7 @@ function FindingRow({ finding, nodeName, action, onOpen, verb, canDismiss, dismi
             <BusyButton
               variant="outline"
               size="sm"
-              className={cn(FINDING_ROW_PRIMARY_CLASS)}
+              className={FINDING_ROW_PRIMARY_CLASS}
               pending={verb.busy}
               aria-label={`${verb.label}: ${codeCopy(finding.code)}`}
               onClick={verb.run}
@@ -362,7 +362,7 @@ function FindingRow({ finding, nodeName, action, onOpen, verb, canDismiss, dismi
             <Button
               variant="outline"
               size="sm"
-              className={cn(FINDING_ROW_PRIMARY_CLASS)}
+              className={FINDING_ROW_PRIMARY_CLASS}
               onClick={() => onOpen(finding)}
             >
               {action}
