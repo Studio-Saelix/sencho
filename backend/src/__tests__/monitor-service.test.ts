@@ -36,7 +36,7 @@ const { mockGetGlobalSettings, mockGetNodes, mockGetStackAlerts, mockAddContaine
   mockCleanupOldNotifications: vi.fn(),
   mockCleanupOldAuditLogs: vi.fn(),
   mockCleanupOldDeliveryEvents: vi.fn(),
-  mockGetGitOpsHistoryRetentionDays: vi.fn().mockReturnValue(30),
+  mockGetGitOpsHistoryRetentionDays: vi.fn().mockReturnValue(45),
   mockCleanupOldGitOpsHistory: vi.fn().mockReturnValue({ history: 0, outbox: 0 }),
   mockUpdateStackAlertLastFired: vi.fn(),
   mockGetStackAlertServiceCooldown: vi.fn().mockReturnValue(null),
@@ -1174,7 +1174,7 @@ describe('MonitorService - cleanup triggers', () => {
     // The history window is read through its own getter, which applies the
     // default and the ceiling; the cleanup pass receives that value.
     expect(mockGetGitOpsHistoryRetentionDays).toHaveBeenCalled();
-    expect(mockCleanupOldGitOpsHistory).toHaveBeenCalledWith(30);
+    expect(mockCleanupOldGitOpsHistory).toHaveBeenCalledWith(45);
   });
 
   it('uses defaults when settings are NaN', async () => {
@@ -1208,7 +1208,27 @@ describe('MonitorService - cleanup triggers', () => {
     const svc = MonitorService.getInstance();
     await (svc as any).evaluate();
 
-    expect(mockCleanupOldGitOpsHistory).toHaveBeenCalledWith(30);
+    expect(mockCleanupOldGitOpsHistory).toHaveBeenCalledWith(45);
+  });
+
+  it('finishes the evaluation when the GitOps history prune throws', async () => {
+    mockGetNodes.mockReturnValue([]);
+    mockGetStackAlerts.mockReturnValue([]);
+    mockGetGlobalSettings.mockReturnValue({});
+    mockCleanupOldGitOpsHistory.mockImplementationOnce(() => {
+      throw new Error('gitops history prune failed');
+    });
+    const svc = MonitorService.getInstance();
+    const sweep = vi.spyOn(svc as unknown as { sweepStaleUpdateTrackers: () => void }, 'sweepStaleUpdateTrackers')
+      .mockImplementation(() => {});
+    try {
+      await (svc as unknown as { evaluate: () => Promise<void> }).evaluate();
+      expect(mockCleanupOldGitOpsHistory).toHaveBeenCalledWith(45);
+      expect(sweep).toHaveBeenCalled();
+      expect((svc as unknown as { isProcessing: boolean }).isProcessing).toBe(false);
+    } finally {
+      sweep.mockRestore();
+    }
   });
 });
 

@@ -249,7 +249,7 @@ describe('gitops_history_retention_days (GitOps history and outbox retention)', 
   it('is exposed through the settings GET projection', async () => {
     const res = await request(app).get('/api/settings').set('Cookie', adminCookie);
     expect(res.status).toBe(200);
-    expect(res.body.gitops_history_retention_days).toBeDefined();
+    expect(res.body.gitops_history_retention_days).toBe('30');
   });
 
   it('accepts a well-formed write and persists it', async () => {
@@ -279,6 +279,38 @@ describe('gitops_history_retention_days (GitOps history and outbox retention)', 
       .send({ key: 'gitops_history_retention_days', value: 'banana' });
     expect(res.status).toBe(400);
     expect(res.body.error).toBe('Validation failed');
+  });
+
+  it('accepts the bounds the settings page saves', async () => {
+    // The page PATCHes the stored string. 1 and 365 are the schema edges.
+    for (const value of ['1', '365']) {
+      const res = await request(app)
+        .patch('/api/settings')
+        .set('Cookie', adminCookie)
+        .send({ gitops_history_retention_days: value });
+      expect(res.status, value).toBe(200);
+      expect(DatabaseService.getInstance().getGlobalSettings().gitops_history_retention_days).toBe(value);
+    }
+    DatabaseService.getInstance().updateGlobalSetting('gitops_history_retention_days', '30');
+  });
+
+  it('rejects an off value, a value past the ceiling, and a non-numeric value on PATCH', async () => {
+    // 0 is not an off switch. The page save is a PATCH, so a POST-only check
+    // would miss a schema that accepted it there.
+    for (const value of [0, 366, 'banana']) {
+      const res = await request(app)
+        .patch('/api/settings')
+        .set('Cookie', adminCookie)
+        .send({ gitops_history_retention_days: value });
+      expect(res.status, String(value)).toBe(400);
+      expect(res.body.error).toBe('Validation failed');
+    }
+    const postZero = await request(app)
+      .post('/api/settings')
+      .set('Cookie', adminCookie)
+      .send({ key: 'gitops_history_retention_days', value: 0 });
+    expect(postZero.status).toBe(400);
+    expect(DatabaseService.getInstance().getGlobalSettings().gitops_history_retention_days).toBe('30');
   });
 });
 

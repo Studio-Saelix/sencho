@@ -95,11 +95,11 @@ const MAX_ARTIFACT_RETRY_INTERVAL_MINS = 1440;
 // than a year.
 const DEFAULT_GITOPS_HISTORY_RETENTION_DAYS = 30;
 const MAX_GITOPS_HISTORY_RETENTION_DAYS = 365;
-// How long past the history window an undrained outbox row is kept. The boot
-// repair drains those rows from their payload alone, so age is not proof they
-// are done; a row still undrained this long after the window is poison (an
-// undecodable payload, or a fanout that keeps failing), and it is dropped so it
-// cannot accumulate for ever.
+// How long past the history window an undrained outbox row is kept. The repair
+// that drains these rows from their payload runs at startup, so a restart
+// inside this grace can still announce them. A process that stays up does not
+// retry them. A row still undrained after the grace is dropped so it cannot
+// accumulate for ever.
 const UNDRAINED_OUTBOX_GRACE_DAYS = 7;
 // History and outbox rows deleted per prune pass. A first prune on a long-lived
 // install has months of backlog to clear and SQLite has one writer, so an
@@ -5671,11 +5671,11 @@ stmt.run('gitops_schema_version', '1');
      *
      * A drained outbox row is pruned with the history it announced. An undrained
      * row is a notification the fanout has not written yet, or a payload a later
-     * decoder is meant to repair, so it gets a grace period past the window: the
-     * boot repair drains it from the payload alone, with no dependence on the
-     * history row. A row still undrained after the grace is poison, counted and
-     * logged before it is dropped, because keeping it for ever is the unbounded
-     * growth the window exists to stop.
+     * decoder is meant to repair, so it gets a grace period past the window. The
+     * repair runs at startup, so the grace only helps an instance that restarts
+     * in time. A row still undrained after the grace is dropped, and the warning
+     * reports how many this pass deleted, because one pass is capped and keeping
+     * the row for ever is the unbounded growth the window exists to stop.
      */
     public cleanupOldGitOpsHistory(
         daysToKeep = DEFAULT_GITOPS_HISTORY_RETENTION_DAYS,
@@ -5716,12 +5716,6 @@ stmt.run('gitops_schema_version', '1');
                  LIMIT ?
              )`,
         );
-        // Counted before the delete, so the warning reports the rows this pass is
-        // about to drop rather than the rows a previous pass already took.
-        const poison = this.db.prepare(
-            'SELECT COUNT(*) AS n FROM gitops_settled_outbox WHERE drained_at IS NULL AND created_at < ?',
-        ).get(undrainedCutoff) as { n: number };
-
         // One transaction per pass, so a long backlog is cleared over several
         // passes rather than holding SQLite's single writer for all of it.
         const pruned = this.db.transaction(() => {
@@ -5731,6 +5725,7 @@ stmt.run('gitops_schema_version', '1');
             return {
                 history: Number(deletedHistory.changes ?? 0),
                 outbox: Number(deletedDrained.changes ?? 0) + Number(deletedUndrained.changes ?? 0),
+                undrained: Number(deletedUndrained.changes ?? 0),
             };
         })();
         // Counted after the delete, and only for the diagnostic log. The history
@@ -5749,13 +5744,18 @@ stmt.run('gitops_schema_version', '1');
             ).get(cutoff, undrainedCutoff) as { n: number }).n;
         }
 
-        if (poison.n > 0) {
+        if (pruned.undrained > 0) {
             console.warn(
-                `[DatabaseService] dropping ${poison.n} undrained GitOps outbox row(s) older than ${days + UNDRAINED_OUTBOX_GRACE_DAYS} days`,
+                `[DatabaseService] dropping ${pruned.undrained} undrained GitOps outbox row(s) older than ${days + UNDRAINED_OUTBOX_GRACE_DAYS} days`,
             );
         }
 
-        return { ...pruned, historyRemaining, outboxRemaining };
+        return {
+            history: pruned.history,
+            outbox: pruned.outbox,
+            historyRemaining,
+            outboxRemaining,
+        };
     }
 
     // --- Nodes ---

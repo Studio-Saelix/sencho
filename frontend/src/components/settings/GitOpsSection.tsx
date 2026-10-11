@@ -64,8 +64,8 @@ export function GitOpsSection({ onDirtyChange }: GitOpsSectionProps) {
     // node:manage against the active node, which `GitPollingControl` checks for
     // itself; the other two are instance-scoped and require system:settings,
     // since one value governs every node this instance manages.
-    const canEditRetry = can('system:settings');
-    const readOnly = !canEditRetry;
+    const canEditInstanceSettings = can('system:settings');
+    const readOnly = !canEditInstanceSettings;
     const { settings, setSettings, dirtyCount, hasChanges, reset, markSaved } = useSettingsDirty<GitOpsFields>({ ...DEFAULT_FIELDS });
     const [phase, setPhase] = useState<LoadPhase>('loading');
     const [isSaving, setIsSaving] = useState(false);
@@ -184,7 +184,7 @@ export function GitOpsSection({ onDirtyChange }: GitOpsSectionProps) {
                         </p>
                         <SettingsField
                             label="Keep GitOps history for"
-                            helper="Days of GitOps history and its notification fanout to keep before the cleanup pass prunes them. The newest row for each live application is kept, so the activity timestamps in the GitOps portfolio stay readable however short the window is. History views show the entries inside the window, and that kept row when it is older. Pruning an old row never changes what the fleet is running. Lower it to keep a busy Sencho's database small, raise it to keep a longer record. Default 30 days."
+                            helper="Days of GitOps history and its notification fanout to keep before the cleanup pass prunes them. The newest row for each live application is kept, so the activity timestamps in the GitOps portfolio stay readable however short the window is. History views show the entries inside the window, and that kept row when it is older. A window under about 3 days can let a Git host retry the same webhook and start it again, because the record of the first delivery is gone. Pruning an old row never changes what the fleet is running. Lower it to keep a busy Sencho's database small, raise it to keep a longer record. Default 30 days."
                         >
                             <NumberChip
                                 value={settings.gitops_history_retention_days || '30'}

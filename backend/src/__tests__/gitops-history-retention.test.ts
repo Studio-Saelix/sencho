@@ -148,6 +148,35 @@ describe('GitOps history retention', () => {
     db.updateGlobalSetting('gitops_history_retention_days', '30');
   });
 
+  it('reads a stored window and falls back to 30 for garbage, zero, negative, a missing row, and a failed read', () => {
+    const db = DatabaseService.getInstance();
+    db.updateGlobalSetting('gitops_history_retention_days', '45');
+    expect(db.getGitOpsHistoryRetentionDays()).toBe(45);
+
+    for (const stored of ['banana', '0', '-3']) {
+      db.updateGlobalSetting('gitops_history_retention_days', stored);
+      expect(db.getGitOpsHistoryRetentionDays(), stored).toBe(30);
+    }
+
+    const developerMode = db.getGlobalSettings().developer_mode;
+    db.getDb().prepare('DELETE FROM global_settings WHERE key = ?').run('gitops_history_retention_days');
+    db.updateGlobalSetting('developer_mode', developerMode);
+    expect(db.getGitOpsHistoryRetentionDays()).toBe(30);
+    db.updateGlobalSetting('gitops_history_retention_days', '30');
+
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const read = vi.spyOn(db, 'getGlobalSettings').mockImplementation(() => {
+      throw new Error('settings unavailable');
+    });
+    try {
+      expect(db.getGitOpsHistoryRetentionDays()).toBe(30);
+      expect(warn.mock.calls.some((call) => String(call[0]).includes('gitops_history_retention_days read failed'))).toBe(true);
+    } finally {
+      read.mockRestore();
+      warn.mockRestore();
+    }
+  });
+
   it('prunes history and drained outbox rows older than the window and keeps the newest', () => {
     const db = DatabaseService.getInstance().getDb();
     const now = Date.now();
@@ -199,9 +228,12 @@ describe('GitOps history retention', () => {
 
   it('still returns an unsettled attempt from inside the window after a prune', () => {
     const store = GitOpsStore.getInstance();
-    // The recovery claim in the PR body: a reservation with no settlement inside
-    // the window is still recoverable after a prune.
+    // The recovery claim: a reservation with no settlement inside the window is
+    // still recoverable after a prune. A newer row is written first so the
+    // reservation is not also the application's newest row: the newest-row
+    // exemption would keep it even if the window filter were wrong.
     const inside = 'app-retention-recovery';
+    writeRow('op-retention-recovery-inside-newer', Date.now() - 1 * DAY_MS, { applicationId: inside });
     writeRow('op-retention-recovery-inside', Date.now() - 20 * DAY_MS, {
       applicationId: inside,
       stage: 'source_reconcile_started',
@@ -237,9 +269,9 @@ describe('GitOps history retention', () => {
     writeRow('op-retention-undrained-newer', Date.now() - 1 * DAY_MS, { applicationId: app });
     const historyId = writeRow('op-retention-undrained-old', Date.now() - 32 * DAY_MS, { applicationId: app });
 
-    // The history row is pruned by age; the notification the fanout has not
-    // written yet is not, because the boot repair can still drain it from the
-    // payload alone.
+    // The history row is pruned by age. The notification the fanout has not
+    // written yet is kept through the grace. The repair that could still drain
+    // it runs at startup, so the grace only helps an instance that restarts.
     const first = DatabaseService.getInstance().cleanupOldGitOpsHistory(30);
     expect(first.history).toBe(1);
     expect(
@@ -341,8 +373,9 @@ describe('GitOps history retention', () => {
       // Clear the backlog one bounded pass at a time, as the monitor pass does.
     }
     expect(backlogStanding()).toBe(0);
-    expect(DatabaseService.getInstance().cleanupOldGitOpsHistory(30).history).toBe(0);
-    expect(DatabaseService.getInstance().cleanupOldGitOpsHistory(30).historyRemaining).toBe(0);
+    const empty = pruneWithCounts(30);
+    expect(empty.history).toBe(0);
+    expect(empty.historyRemaining).toBe(0);
     expect(remainingIdsFor(db, app)).toHaveLength(1);
   });
 
@@ -355,7 +388,7 @@ describe('GitOps history retention', () => {
     writeRow('op-retention-tombstoned-only', Date.now() - 60 * DAY_MS, { applicationId: app });
     db.prepare("UPDATE gitops_applications SET lifecycle_status = 'deleted' WHERE id = ?").run(app);
 
-    const result = DatabaseService.getInstance().cleanupOldGitOpsHistory(30);
+    const result = pruneWithCounts(30);
 
     expect(result.history).toBe(1);
     expect(result.historyRemaining).toBe(0);
@@ -444,6 +477,40 @@ describe('GitOps history retention', () => {
     sweepUntilQuiet();
     expect(
       db.prepare("SELECT COUNT(*) AS n FROM gitops_settled_outbox WHERE settled_history_id LIKE 'outbox-chunk-%'").get(),
+    ).toEqual({ n: 0 });
+  });
+
+  it('counts an undrained row past the grace that one pass did not delete', () => {
+    const db = DatabaseService.getInstance().getDb();
+    sweepUntilQuiet();
+    // Past the window plus the grace, so the undrained branch is the only one
+    // that can see these rows. One more than a chunk is inserted, so one row
+    // is left after the pass. A remaining count that only sees drained rows
+    // reports 0.
+    const backlogAt = Date.now() - 40 * DAY_MS;
+    const backlogRows = GITOPS_PRUNE_CHUNK_ROWS + 1;
+    const insert = db.prepare(
+      `INSERT INTO gitops_settled_outbox
+       (settled_history_id, payload_json, payload_version, created_at, updated_at, drained_at)
+       VALUES (?, '{}', 1, ?, ?, NULL)`,
+    );
+    db.transaction(() => {
+      for (let i = 0; i < backlogRows; i++) {
+        insert.run(`outbox-undrained-${i}`, backlogAt, backlogAt);
+      }
+    })();
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const first = pruneWithCounts(30);
+      expect(first.outbox).toBe(GITOPS_PRUNE_CHUNK_ROWS);
+      expect(first.outboxRemaining).toBe(1);
+      expect(warn.mock.calls.some((call) => String(call[0]).includes(`dropping ${GITOPS_PRUNE_CHUNK_ROWS} undrained`))).toBe(true);
+    } finally {
+      warn.mockRestore();
+    }
+    sweepUntilQuiet();
+    expect(
+      db.prepare("SELECT COUNT(*) AS n FROM gitops_settled_outbox WHERE settled_history_id LIKE 'outbox-undrained-%'").get(),
     ).toEqual({ n: 0 });
   });
 });

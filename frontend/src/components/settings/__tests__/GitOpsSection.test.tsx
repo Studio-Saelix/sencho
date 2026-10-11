@@ -108,6 +108,7 @@ describe('GitOpsSection', () => {
         expect(screen.getByText('Keep GitOps history for')).toBeInTheDocument();
         expect(screen.getByText(/newest row for each live application/)).toBeInTheDocument();
         expect(screen.getByText(/entries inside the window/)).toBeInTheDocument();
+        expect(screen.getByText(/window under about 3 days/)).toBeInTheDocument();
         await waitFor(() => expect(chipShowing('45')).toBeInTheDocument());
     });
 
@@ -210,8 +211,29 @@ describe('GitOpsSection', () => {
         });
         render(<GitOpsSection />);
         await waitFor(() => expect(screen.getByText('Drift verification')).toBeInTheDocument());
-        expect(document.querySelectorAll('fieldset[disabled]').length).toBeGreaterThan(0);
+        const fieldset = document.querySelector('fieldset[disabled]');
+        expect(fieldset).not.toBeNull();
+        expect(fieldset?.textContent).toContain('Keep GitOps history for');
+        expect(fieldset?.textContent).toContain('Retry an unresolved image identity');
+        expect(fieldset?.textContent).not.toContain('Poll Git sources');
         expect(screen.queryByText('Save settings')).not.toBeInTheDocument();
+    });
+
+    it('shows the load error when settings cannot be read', async () => {
+        mockedFetch.mockImplementation(async () => ({ ok: false, json: async () => ({}) }));
+        render(<GitOpsSection />);
+        expect(await screen.findByText('Could not load settings')).toBeInTheDocument();
+        expect(screen.queryByText('Keep GitOps history for')).not.toBeInTheDocument();
+    });
+
+    it('falls back to 30 days when the history window is missing from the payload', async () => {
+        mockedFetch.mockImplementation(async (path: string) => {
+            if (path === '/git-sources/polling') return { ok: true, json: async () => ({ poll_interval_mins: 0 }) };
+            return { ok: true, json: async () => ({ gitops_artifact_retry_interval_mins: '5' }) };
+        });
+        render(<GitOpsSection />);
+        await waitFor(() => expect(screen.getByText('Keep GitOps history for')).toBeInTheDocument());
+        expect(chipShowing('30')).toBeInTheDocument();
     });
 
     it('leaves the poll control usable for a node admin who cannot edit the retry interval', async () => {
