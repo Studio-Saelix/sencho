@@ -19,6 +19,7 @@ import { parseAnatomy, parseEnvKeys, formatGitSource, imageName, primaryPublishe
 import { SOURCE_STATE_LOOKUP } from '@/lib/gitopsState';
 import type { GitOpsSourceStatus } from '@/types/gitops';
 import { buildServiceUrl } from '@/lib/serviceUrl';
+import { resolvePublishedPortClick, tcpOwners } from '@/lib/serviceUrlResolve';
 import { StackActivityTimeline } from './stack/StackActivityTimeline';
 import StackDossierPanel from './stack/StackDossierPanel';
 import DriftPanel from './stack/DriftPanel';
@@ -49,6 +50,8 @@ interface StackAnatomyPanelProps {
   applying?: boolean;
   notifications?: NotificationItem[];
   requestedTab?: 'networking' | 'doctor' | 'dossier' | 'drift';
+  /** Shared effective-anatomy read. When passed, this panel does not fetch it again. */
+  serviceUrlEntry?: import('@/lib/serviceUrlResolve').ServiceUrlEntry | null;
 }
 
 type SemverBump = 'none' | 'patch' | 'minor' | 'major' | 'unknown';
@@ -125,6 +128,7 @@ export default function StackAnatomyPanel({
   applying = false,
   notifications,
   requestedTab,
+  serviceUrlEntry,
 }: StackAnatomyPanelProps) {
   const anatomy = useMemo(() => parseAnatomy(content), [content]);
   const envKeys = useMemo(() => parseEnvKeys(envContent), [envContent]);
@@ -236,6 +240,7 @@ export default function StackAnatomyPanel({
     // Single-file / non-git stacks keep the root-only parse and skip the fetch.
     // Any tagged result left from a previous stack is ignored downstream by the
     // stack-name guard, so there is no need to clear state synchronously here.
+    if (serviceUrlEntry !== undefined) return;
     if (!(gitSource?.stack === stackName && gitSource.multiFile)) return;
     let cancelled = false;
     const run = async () => {
@@ -263,7 +268,7 @@ export default function StackAnatomyPanel({
     };
     void run();
     return () => { cancelled = true; };
-  }, [stackName, activeNode?.id, gitSource]);
+  }, [stackName, activeNode?.id, gitSource, serviceUrlEntry]);
 
   useEffect(() => {
     let cancelled = false;
@@ -331,6 +336,17 @@ export default function StackAnatomyPanel({
     () => (primaryHostPort !== null ? buildServiceUrl({ node: activeNode, publicPort: primaryHostPort }) : null),
     [primaryHostPort, activeNode],
   );
+  const sharedPortClick = useMemo(() => {
+    if (serviceUrlEntry === undefined || primaryHostPort === null) return null;
+    const owners = tcpOwners(serviceUrlEntry?.ports ?? {}, primaryHostPort);
+    return resolvePublishedPortClick({
+      entry: serviceUrlEntry,
+      serviceName: owners[0],
+      publicPort: primaryHostPort,
+      portLabel: `:${primaryHostPort}`,
+      node: activeNode,
+    });
+  }, [serviceUrlEntry, primaryHostPort, activeNode]);
 
   // Assembled facts for this stack, passed to the Dossier tab for its read-only
   // summary and Markdown export. Null until compose parses.
@@ -342,7 +358,19 @@ export default function StackAnatomyPanel({
     // `anatomy` already carries the same structural fields (plus env-only extras we
     // read separately below), so the raw parse stands in directly when there are no
     // effective facts for this stack.
-    const activeEffective = effectiveAnatomy?.stack === stackName ? effectiveAnatomy : null;
+    const fetched = effectiveAnatomy?.stack === stackName ? effectiveAnatomy : null;
+    const shared = serviceUrlEntry !== undefined && gitSource?.stack === stackName && gitSource.multiFile
+      && serviceUrlEntry?.status === 'ready' && serviceUrlEntry.renderable
+      ? {
+          stack: stackName,
+          services: serviceUrlEntry.services ?? [],
+          ports: (serviceUrlEntry.ports ?? {}) as EffectiveAnatomyFacts['ports'],
+          volumes: serviceUrlEntry.volumes ?? {},
+          restart: serviceUrlEntry.restart ?? null,
+          networks: serviceUrlEntry.networks ?? [],
+        }
+      : null;
+    const activeEffective = serviceUrlEntry !== undefined ? shared : fetched;
     const structural = activeEffective ?? anatomy;
     if (!structural) return null;
     return {
@@ -357,7 +385,7 @@ export default function StackAnatomyPanel({
       networkName: structural.networks.length > 0 ? structural.networks[0] : `${stackName}_default`,
       gitSource: activeGitSource ? formatGitSource(activeGitSource) : null,
     };
-  }, [effectiveAnatomy, anatomy, stackName, firstEnvFile, envVarCount, missingVars, activeGitSource]);
+  }, [effectiveAnatomy, serviceUrlEntry, gitSource, anatomy, stackName, firstEnvFile, envVarCount, missingVars, activeGitSource]);
 
   const bump = updatePreview?.summary.semver_bump ?? 'none';
   const hasUpdate = Boolean(updatePreview?.summary.has_update);
@@ -693,7 +721,25 @@ export default function StackAnatomyPanel({
             {Object.keys(anatomy.ports).length > 0 ? 'exposed' : 'no ports'}
           </span>
           {primaryHostPort !== null && (
-            primaryServiceUrl ? (
+            sharedPortClick ? (
+              sharedPortClick.kind === 'link' ? (
+                <a
+                  href={sharedPortClick.href}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="inline-flex items-center gap-1 whitespace-nowrap font-mono text-[10px] text-stat-subtitle hover:text-foreground"
+                >
+                  <ExternalLink className="h-3 w-3" strokeWidth={1.5} />
+                  {sharedPortClick.hostLabel ? sharedPortClick.portLabel.replace(/^:/, '') : `:${primaryHostPort}`}
+                  {sharedPortClick.hostLabel ? ` · ${sharedPortClick.hostLabel}` : ''}
+                </a>
+              ) : (
+                <span className="inline-flex items-center gap-1 font-mono text-[10px] text-stat-subtitle">
+                  <ExternalLink className="h-3 w-3" strokeWidth={1.5} />
+                  :{primaryHostPort}
+                </span>
+              )
+            ) : primaryServiceUrl ? (
               <a
                 href={primaryServiceUrl}
                 target="_blank"

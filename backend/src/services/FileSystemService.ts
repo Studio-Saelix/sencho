@@ -74,6 +74,11 @@ const BACKUP_MARKER_FILES = new Set(['.timestamp', '.checksums']);
 // order. Used by getStacks / hasComposeFile / firstComposeFilename.
 const IMPORT_COMPOSE_FILENAMES = ['compose.yaml', 'compose.yml', 'docker-compose.yaml', 'docker-compose.yml'] as const;
 const IMPORT_COMPOSE_FILENAME_SET = new Set<string>(IMPORT_COMPOSE_FILENAMES);
+
+/** True when `name` is one of the four compose filenames Sencho resolves, and nothing else. */
+export function isComposeBasename(name: string): boolean {
+  return IMPORT_COMPOSE_FILENAME_SET.has(name);
+}
 // Override filenames docker compose can auto-discover, listed in priority order (first
 // match wins, not paired to the chosen base file's family). We resolve the first that
 // exists, mirroring compose's default override resolution, to re-add it when an explicit
@@ -251,21 +256,33 @@ export class FileSystemService {
     return false;
   }
 
-  private async getComposeFilePath(stackName: string): Promise<string> {
+  /**
+   * The compose file this stack resolves to, or null when none of the four
+   * filenames exists. A symlink that escapes the compose dir, or a dangling
+   * link, is rejected here and is not treated as a missing file.
+   */
+  private async resolveComposeFile(stackName: string): Promise<{ filename: string; absolute: string } | null> {
     const stackDir = this.resolveStackDir(stackName);
     await this.assertRealWithinBase(stackDir);
-    const composeFiles = ['compose.yaml', 'compose.yml', 'docker-compose.yaml', 'docker-compose.yml'];
-    for (const file of composeFiles) {
+    for (const file of IMPORT_COMPOSE_FILENAMES) {
       const filePath = path.join(stackDir, file);
       try {
-        await fsPromises.access(filePath);
-        if (isDebugEnabled()) console.debug('[FileSystemService:debug] Resolved compose file', { stackName, file });
-        return filePath;
-      } catch {
-        // continue
+        await fsPromises.lstat(filePath);
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code === 'ENOENT') continue;
+        throw err;
       }
+      await this.assertRealWithinBase(filePath);
+      if (isDebugEnabled()) console.debug('[FileSystemService:debug] Resolved compose file', { stackName, file });
+      return { filename: file, absolute: filePath };
     }
-    throw new Error(`No compose file found for stack: ${stackName}`);
+    return null;
+  }
+
+  private async getComposeFilePath(stackName: string): Promise<string> {
+    const resolved = await this.resolveComposeFile(stackName);
+    if (!resolved) throw new Error(`No compose file found for stack: ${stackName}`);
+    return resolved.absolute;
   }
 
   async getComposeFilename(stackName: string): Promise<string> {
@@ -357,7 +374,7 @@ export class FileSystemService {
    * and read share a single file descriptor so they observe the same inode
    * state, even if the file is replaced (rename) between the two calls.
    */
-  async getStackContentWithMtime(stackName: string): Promise<{ content: string; mtimeMs: number }> {
+  async getStackContentWithMtime(stackName: string): Promise<{ content: string; mtimeMs: number; filename: string }> {
     const untrustedFilePath = await this.getComposeFilePath(stackName);
     // Canonical js/path-injection barrier: resolve against a known-safe root
     // then check the result is contained in that root. The form mirrors
@@ -371,7 +388,7 @@ export class FileSystemService {
     try {
       const stat = await fh.stat();
       const content = await fh.readFile('utf-8');
-      return { content, mtimeMs: stat.mtimeMs };
+      return { content, mtimeMs: stat.mtimeMs, filename: path.basename(safePath) };
     } finally {
       await fh.close();
     }
@@ -406,12 +423,29 @@ export class FileSystemService {
     stackName: string,
     content: string,
     expectedMtimeMs: number | null,
+    expectedFilename: string | null = null,
   ): Promise<
-    | { ok: true; mtimeMs: number }
-    | { ok: false; currentMtimeMs: number; currentContent: string }
+    | { ok: true; mtimeMs: number; filename: string }
+    | { ok: false; reason: 'mtime' | 'source'; currentMtimeMs: number; currentContent: string; filename: string | null }
   > {
+    const resolved = await this.resolveComposeFile(stackName);
+    if (expectedFilename !== null && (!resolved || resolved.filename !== expectedFilename)) {
+      if (!resolved) {
+        return { ok: false, reason: 'source', currentMtimeMs: 0, currentContent: '', filename: null };
+      }
+      const current = await this.readContainedCompose(resolved.absolute);
+      return {
+        ok: false,
+        reason: 'source',
+        currentMtimeMs: current.mtimeMs,
+        currentContent: current.content,
+        filename: resolved.filename,
+      };
+    }
+
     const stackDir = this.resolveStackDir(stackName);
-    const untrustedFilePath = path.join(stackDir, 'compose.yaml');
+    const untrustedFilePath = resolved ? resolved.absolute : path.join(stackDir, 'compose.yaml');
+    const filename = resolved ? resolved.filename : 'compose.yaml';
     // Canonical js/path-injection barrier: path.resolve(SAFE_ROOT, untrusted)
     // followed by a single startsWith check, both inline with the sink.
     const baseResolved = path.resolve(this.baseDir);
@@ -421,26 +455,62 @@ export class FileSystemService {
     }
     await this.assertRealWithinBase(safePath);
 
-    if (expectedMtimeMs !== null) {
+    if (expectedMtimeMs !== null && resolved) {
       let fh: import('fs/promises').FileHandle | null = null;
       try {
         fh = await fsPromises.open(safePath, 'r');
         const stat = await fh.stat();
         if (Math.floor(stat.mtimeMs) !== Math.floor(expectedMtimeMs)) {
           const currentContent = await fh.readFile('utf-8');
-          return { ok: false, currentMtimeMs: stat.mtimeMs, currentContent };
+          return { ok: false, reason: 'mtime', currentMtimeMs: stat.mtimeMs, currentContent, filename };
         }
       } catch (err) {
         if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
-        // File doesn't exist yet, treat as fresh write.
+        if (expectedFilename !== null) {
+          return { ok: false, reason: 'source', currentMtimeMs: 0, currentContent: '', filename: null };
+        }
       } finally {
         if (fh) await fh.close();
       }
     }
 
+    if (expectedFilename !== null) {
+      const latest = await this.resolveComposeFile(stackName);
+      if (!latest || latest.filename !== expectedFilename) {
+        if (!latest) {
+          return { ok: false, reason: 'source', currentMtimeMs: 0, currentContent: '', filename: null };
+        }
+        const current = await this.readContainedCompose(latest.absolute);
+        return {
+          ok: false,
+          reason: 'source',
+          currentMtimeMs: current.mtimeMs,
+          currentContent: current.content,
+          filename: latest.filename,
+        };
+      }
+    }
+
     await fsPromises.writeFile(safePath, content, 'utf-8');
     const newStat = await fsPromises.stat(safePath);
-    return { ok: true, mtimeMs: newStat.mtimeMs };
+    return { ok: true, mtimeMs: newStat.mtimeMs, filename };
+  }
+
+  private async readContainedCompose(untrustedFilePath: string): Promise<{ content: string; mtimeMs: number }> {
+    const baseResolved = path.resolve(this.baseDir);
+    const safePath = path.resolve(baseResolved, untrustedFilePath);
+    if (!safePath.startsWith(baseResolved + path.sep)) {
+      throw Object.assign(new Error('Path escapes compose directory'), { code: 'INVALID_PATH' });
+    }
+    await this.assertRealWithinBase(safePath);
+    const fh = await fsPromises.open(safePath, 'r');
+    try {
+      const stat = await fh.stat();
+      const content = await fh.readFile('utf-8');
+      return { content, mtimeMs: stat.mtimeMs };
+    } finally {
+      await fh.close();
+    }
   }
 
   /**

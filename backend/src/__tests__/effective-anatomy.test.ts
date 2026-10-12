@@ -12,7 +12,7 @@ import { parseEffectiveAnatomy } from '../services/effectiveAnatomy';
 
 describe('parseEffectiveAnatomy', () => {
   it('returns an empty model for null / non-object input', () => {
-    const empty = { services: [], ports: {}, volumes: {}, restart: null, networks: [] };
+    const empty = { services: [], ports: {}, volumes: {}, restart: null, networks: [], serviceUrls: {} };
     expect(parseEffectiveAnatomy(null)).toEqual(empty);
     expect(parseEffectiveAnatomy('nope')).toEqual(empty);
     expect(parseEffectiveAnatomy(42)).toEqual(empty);
@@ -112,5 +112,22 @@ describe('parseEffectiveAnatomy', () => {
     expect(serialized).not.toContain('leak-me');
     expect(serialized).not.toContain('do-not-leak');
     expect(serialized).not.toContain('secret.example.com');
+  });
+
+  it('returns only a validated sencho.service.url and drops every other label value', () => {
+    const anatomy = parseEffectiveAnatomy({
+      services: {
+        web: {
+          labels: {
+            'sencho.service.url': 'https://app.example.com',
+            'traefik.http.routers.web.rule': 'Host(`secret.example.com`)',
+          },
+        },
+        api: { labels: { 'sencho.service.url': 'https://user:secret@api.example.com' } },
+      },
+    });
+    expect(anatomy.serviceUrls).toEqual({ web: 'https://app.example.com' });
+    expect(JSON.stringify(anatomy)).not.toContain('secret.example.com');
+    expect(JSON.stringify(anatomy)).not.toContain('user:secret');
   });
 });

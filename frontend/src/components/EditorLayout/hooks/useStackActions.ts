@@ -22,7 +22,9 @@ import {
 } from '@/lib/hydrationTiming';
 import { toast } from '@/components/ui/toast-store';
 import { ENV_READ_FAILED_NOTICE } from '../envNotice';
-import { buildServiceUrl, openServiceUrl } from '@/lib/serviceUrl';
+import { openServiceUrl } from '@/lib/serviceUrl';
+import { fetchServiceUrlEntry } from './useServiceUrls';
+import { resolveOpenAppTarget } from '@/lib/serviceUrlResolve';
 import { requestServiceUpdate as postServiceUpdate, requestServiceRestore as postServiceRestore } from '@/lib/serviceUpdate';
 import type { EffectiveServiceModelResult } from '@/types/effectiveServices';
 import { absentFault, pendingSourceStatus, type GitSourcePendingMap } from '@/lib/gitopsState';
@@ -124,6 +126,8 @@ interface UseStackActionsOptions {
   // names. Evaluated against the load target so post-load auto-edit is not
   // gated by a stale previously-selected stack.
   canEditStack: (stackNameOrFilename: string) => boolean;
+  serviceUrlsRef?: { current: import('@/lib/serviceUrlResolve').ServiceUrlEntry | null };
+  onStackFilesChanged?: () => void;
   /** Fail-closed: true only when active node meta explicitly lists stack-down-remove-volumes. */
   canOfferVolumeRemoval?: boolean;
   /**
@@ -332,6 +336,8 @@ export function useStackActions(options: UseStackActionsOptions) {
     hasGuidedExternalNetworkPreflight = false,
     hasServiceScopedUpdate = false,
     canEditStack,
+    serviceUrlsRef,
+    onStackFilesChanged,
     canOfferVolumeRemoval = false,
     onDeletedOpenStack,
     removeNotificationsForStack,
@@ -489,10 +495,33 @@ export function useStackActions(options: UseStackActionsOptions) {
 
   const openStackApp = (file: string) => {
     if (!hydrationReady()) return;
+    const capturedNode = activeNode ?? null;
+    const capturedNodeId = capturedNode?.id ?? null;
     const port = stackListState.stackPorts[file];
-    if (!port) return;
-    const url = buildServiceUrl({ node: activeNode, publicPort: port });
-    if (url) openServiceUrl(url);
+    const cached = serviceUrlsRef?.current ?? null;
+    const open = (target: { url: string } | { error: string } | null) => {
+      if ((activeNode?.id ?? null) !== capturedNodeId) return;
+      if (!target) return;
+      if ('error' in target) {
+        toast.error(target.error);
+        return;
+      }
+      openServiceUrl(target.url);
+    };
+    if (cached && cached.stackName === file && cached.nodeId === capturedNodeId) {
+      if (cached.status === 'loading') {
+        toast.error('Service URL unavailable');
+        return;
+      }
+      open(resolveOpenAppTarget({ entry: cached, publicPort: port, node: capturedNode }));
+      return;
+    }
+    void fetchServiceUrlEntry(capturedNodeId, file).then(next => {
+      open(resolveOpenAppTarget({ entry: next, publicPort: port, node: capturedNode }));
+    }).catch(error => {
+      console.error('Failed to resolve service URL:', error);
+      toast.error('Service URL unavailable');
+    });
   };
 
   const resetEditorState = () => {
@@ -508,6 +537,8 @@ export function useStackActions(options: UseStackActionsOptions) {
     stackListState.setSelectedFile(null);
     editorState.setContent('');
     editorState.setOriginalContent('');
+    editorState.setComposeEtag(null);
+    editorState.setComposeFilename(null);
     editorState.setEnvContent('');
     editorState.setOriginalEnvContent('');
     editorState.setEnvFiles([]);
@@ -970,6 +1001,7 @@ export function useStackActions(options: UseStackActionsOptions) {
       editorState.setContent(text || '');
       editorState.setOriginalContent(text || '');
       editorState.setComposeEtag(res.headers.get('etag'));
+      editorState.setComposeFilename(res.headers.get('x-compose-file'));
       endSpan(dispatchSpan);
       detailVisiblePendingRef.current = { attemptId, token: filename, proxied };
       setDetailVisibleEpoch((n) => n + 1);
@@ -1088,6 +1120,69 @@ export function useStackActions(options: UseStackActionsOptions) {
     }
   };
 
+  const saveComposeContent = async (args: {
+    content: string;
+    stackName: string;
+    nodeId: number | null;
+    etag: string | null;
+    filename: string | null;
+    force?: boolean;
+  }): Promise<
+    | { ok: true; etag: string | null }
+    | { ok: false; conflict: true; code: string; currentContent: string; etag: string | null; filename: string | null }
+    | { ok: false; conflict: false; error: string }
+  > => {
+    const headers: Record<string, string> = {};
+    if (!args.force && args.etag) headers['If-Match'] = args.etag;
+    if (args.filename) headers['X-Compose-File'] = args.filename;
+    const opLoadSignal = loadFileAbortRef.current?.signal;
+    try {
+      const response = await apiFetch(`/stacks/${args.stackName}`, {
+        method: 'PUT',
+        headers,
+        body: JSON.stringify({ content: args.content }),
+        nodeId: args.nodeId,
+      });
+      if (response.status === 412) {
+        const payload = await response.json().catch(() => null) as { currentContent?: unknown; code?: unknown; filename?: unknown } | null;
+        return {
+          ok: false,
+          conflict: true,
+          code: typeof payload?.code === 'string' ? payload.code : 'stack_file_changed',
+          currentContent: typeof payload?.currentContent === 'string' ? payload.currentContent : '',
+          etag: response.headers.get('etag'),
+          filename: response.headers.get('x-compose-file') ?? (typeof payload?.filename === 'string' ? payload.filename : null),
+        };
+      }
+      if (!response.ok) {
+        const bodyText = await response.text().catch(() => '');
+        let serverError = '';
+        try {
+          const parsed = JSON.parse(bodyText) as { error?: unknown } | null;
+          if (parsed && typeof parsed.error === 'string') serverError = parsed.error;
+        } catch {
+          serverError = '';
+        }
+        return { ok: false, conflict: false, error: serverError || `HTTP ${response.status}` };
+      }
+      const stillOwns = !opLoadSignal?.aborted
+        && stackListState.selectedFile === args.stackName
+        && (activeNode?.id ?? null) === args.nodeId;
+      if (stillOwns) {
+        editorState.setOriginalContent(args.content);
+        const newEtag = response.headers.get('etag');
+        if (newEtag) editorState.setComposeEtag(newEtag);
+        const savedName = response.headers.get('x-compose-file');
+        if (savedName) editorState.setComposeFilename(savedName);
+        onStackFilesChanged?.();
+      }
+      return { ok: true, etag: response.headers.get('etag') };
+    } catch (error) {
+      console.error('Failed to save compose file:', error);
+      return { ok: false, conflict: false, error: (error as Error).message };
+    }
+  };
+
   const saveFile = async (options?: { force?: boolean; envPath?: string; create?: boolean }): Promise<boolean> => {
     if (editorState.activeTab === 'files') return false;
     if (!stackListState.selectedFile) return false;
@@ -1135,6 +1230,9 @@ export function useStackActions(options: UseStackActionsOptions) {
     } else if (!force && etag) {
       headers['If-Match'] = etag;
     }
+    if (isCompose && editorState.composeFilename) {
+      headers['X-Compose-File'] = editorState.composeFilename;
+    }
     // Pin the PUT to the node this tab captured at the start of the operation.
     // A forced retry re-enters this same closure and reads the same already
     // captured `activeNode` binding, so both PUTs carry one target.
@@ -1161,6 +1259,18 @@ export function useStackActions(options: UseStackActionsOptions) {
         // old stack's file into it, and do not prompt for a conflict the
         // operator is no longer looking at.
         if (opLoadSignal?.aborted) return false;
+        const conflictCode = payload && typeof payload === 'object' && 'code' in payload
+          ? (payload as { code?: unknown }).code
+          : undefined;
+        if (isCompose && conflictCode === 'compose_source_changed') {
+          editorState.setContent(currentRemoteContent);
+          editorState.setOriginalContent(currentRemoteContent);
+          editorState.setComposeEtag(response.headers.get('etag'));
+          const nextName = response.headers.get('x-compose-file');
+          if (nextName) editorState.setComposeFilename(nextName);
+          toast.error('The compose file that was open is no longer the file on disk. Reloaded the current file.');
+          return false;
+        }
         // A create conflict means the file appeared after the tab loaded. Adopt
         // it and its ETag so the notice clears, later saves target the real
         // file, and a forced retry that fails cannot fall back to an unguarded
@@ -1294,6 +1404,7 @@ export function useStackActions(options: UseStackActionsOptions) {
         }
       }
       toast.success('File saved successfully!');
+      onStackFilesChanged?.();
       return true;
     } catch (error) {
       console.error('Failed to save file:', error);
@@ -2744,6 +2855,7 @@ export function useStackActions(options: UseStackActionsOptions) {
     navigateToNotification,
     changeEnvFile,
     saveFile,
+    saveComposeContent,
     requestSave,
     requestSaveAndDeploy,
     requestSaveAndPullImages,

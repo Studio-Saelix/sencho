@@ -52,6 +52,7 @@ import type { Node } from '@/context/NodeContext';
 import type { useAuth } from '@/context/AuthContext';
 import type { useStackMuteActions } from '@/hooks/useMuteRuleActions';
 import type { EffectiveServiceSpec } from '@/types/effectiveServices';
+import type { ServiceUrlEntry } from '@/lib/serviceUrlResolve';
 import type { GitSourcePendingMap } from '@/lib/gitopsState';
 import type { StackServiceUpdateStatus } from '@/types/imageUpdates';
 
@@ -204,6 +205,9 @@ export interface EditorViewProps {
     serviceUpdateStatuses?: StackServiceUpdateStatus[];
     serviceUpdateInProgress?: { service: string; mode: 'update' | 'rebuild' } | null;
     onRequestServiceUpdate?: (serviceName: string, mode: 'update' | 'rebuild') => void;
+    serviceUrlEntry?: ServiceUrlEntry | null;
+    onEditServiceUrl?: (serviceName: string) => void;
+    onRetryServiceUrls?: () => void;
 
     // UI state setters
     setActiveTab: (tab: 'compose' | 'env' | 'files') => void;
@@ -309,6 +313,9 @@ export function EditorView(props: EditorViewProps) {
         serviceUpdateStatuses = [],
         serviceUpdateInProgress = null,
         onRequestServiceUpdate,
+        serviceUrlEntry = null,
+        onEditServiceUrl,
+        onRetryServiceUrls,
         setActiveTab,
         setLogsMode,
         setEditingCompose,
@@ -468,6 +475,7 @@ export function EditorView(props: EditorViewProps) {
             canEdit={can('stack:edit', 'stack', stackName, activeNode?.id)}
             notifications={notifications}
             requestedTab={props.requestedAnatomyTab}
+            serviceUrlEntry={serviceUrlEntry}
         />
     );
 
@@ -554,6 +562,10 @@ export function EditorView(props: EditorViewProps) {
                                     serviceUpdateStatuses={serviceUpdateStatuses}
                                     serviceUpdateInProgress={serviceUpdateInProgress}
                                     onRequestServiceUpdate={onRequestServiceUpdate}
+                                    serviceUrlEntry={serviceUrlEntry}
+                                    canEditServiceUrl={can('stack:edit', 'stack', stackName, activeNode?.id)}
+                                    onEditServiceUrl={onEditServiceUrl}
+                                    onRetryServiceUrls={onRetryServiceUrls}
                                     containersExpanded={containersExpanded}
                                     onToggleContainersExpand={toggleContainersExpand}
                                     containersLoadStatus={containersLoadStatus}
@@ -582,6 +594,10 @@ export function EditorView(props: EditorViewProps) {
                                 serviceUpdateStatuses={serviceUpdateStatuses}
                                 serviceUpdateInProgress={serviceUpdateInProgress}
                                 onRequestServiceUpdate={onRequestServiceUpdate}
+                                serviceUrlEntry={serviceUrlEntry}
+                                canEditServiceUrl={can('stack:edit', 'stack', stackName, activeNode?.id)}
+                                onEditServiceUrl={onEditServiceUrl}
+                                onRetryServiceUrls={onRetryServiceUrls}
                                 containersLoadStatus={containersLoadStatus}
                                 containersLoadError={containersLoadError}
                                 onRetryContainersLoad={onRetryContainersLoad}

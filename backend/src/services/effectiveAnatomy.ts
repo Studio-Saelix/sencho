@@ -7,11 +7,13 @@
  * facts. Rendering the merged model and extracting the same anatomy shape keeps
  * those signals honest.
  *
- * Reads only structural fields (service keys, ports, volumes, restart, network
- * keys); it never reads `environment`, `command`, `entrypoint`, `labels`,
- * `secrets`, or `configs`, so a secret INJECTED through those fields can never
- * reach this payload. The exception is a secret interpolated INTO a structural
- * field (a bind path, network name, or published port built from a `${VAR}`):
+ * Reads structural fields (service keys, ports, volumes, restart, network keys)
+ * plus one allowlisted label, `sencho.service.url`, and only when that value is
+ * an http(s) URL with no userinfo. It never reads `environment`, `command`,
+ * `entrypoint`, other label values, `secrets`, or `configs`, so a secret
+ * INJECTED through those fields can never reach this payload. The exception is
+ * a secret interpolated INTO a structural field or into the allowlisted label
+ * (a bind path, network name, published port, or URL built from a `${VAR}`):
  * `docker compose config` resolves it before this parse, leaving no provenance
  * to distinguish it, so the resolved value is returned. That value is already
  * readable at the same `stack:read` scope via the stack's files, so this is a
@@ -22,6 +24,7 @@ import { ComposeService } from './ComposeService';
 import { parseMissingRequiredVars } from '../helpers/envVarParse';
 import { getErrorMessage } from '../utils/errors';
 import { redactSensitiveText, sanitizeForLog } from '../utils/safeLog';
+import { serviceUrlFromLabels } from '../helpers/serviceUrlLabel';
 
 const MAX_RENDER_ERROR = 600;
 
@@ -43,6 +46,8 @@ export interface EffectiveAnatomy {
   volumes: Record<string, EffectiveAnatomyVolume[]>;
   restart: string | null;
   networks: string[];
+  /** Validated `sencho.service.url` values, keyed by service. Omitted services have none. */
+  serviceUrls: Record<string, string>;
 }
 
 export interface EffectiveAnatomyResult extends EffectiveAnatomy {
@@ -52,7 +57,7 @@ export interface EffectiveAnatomyResult extends EffectiveAnatomy {
   renderError: string | null;
 }
 
-const EMPTY: EffectiveAnatomy = { services: [], ports: {}, volumes: {}, restart: null, networks: [] };
+const EMPTY: EffectiveAnatomy = { services: [], ports: {}, volumes: {}, restart: null, networks: [], serviceUrls: {} };
 
 function asString(v: unknown): string | undefined {
   if (typeof v === 'string') return v;
@@ -123,6 +128,7 @@ export function parseEffectiveAnatomy(parsed: unknown): EffectiveAnatomy {
   const volumes: Record<string, EffectiveAnatomyVolume[]> = {};
   let restart: string | null = null;
   const networks = new Set<string>();
+  const serviceUrls: Record<string, string> = {};
 
   for (const name of serviceNames) {
     const svc = servicesObj[name];
@@ -139,13 +145,15 @@ export function parseEffectiveAnatomy(parsed: unknown): EffectiveAnatomy {
     if (v.length) volumes[name] = v;
     if (restart === null && typeof o.restart === 'string') restart = o.restart;
     for (const n of networkKeys(o.networks)) networks.add(n);
+    const serviceUrl = serviceUrlFromLabels(o.labels);
+    if (serviceUrl) serviceUrls[name] = serviceUrl;
   }
 
   if (root.networks && typeof root.networks === 'object' && !Array.isArray(root.networks)) {
     for (const n of Object.keys(root.networks as Record<string, unknown>)) networks.add(n);
   }
 
-  return { services: serviceNames, ports, volumes, restart, networks: Array.from(networks) };
+  return { services: serviceNames, ports, volumes, restart, networks: Array.from(networks), serviceUrls };
 }
 
 /**

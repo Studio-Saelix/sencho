@@ -352,6 +352,45 @@ describe.skipIf(isWindows)('FileSystemService symlink-escape: migrate skips an e
   });
 });
 
+describe.skipIf(isWindows)('FileSystemService symlink-escape: alternate compose filename', () => {
+  let tmpBase: string;
+  let composeDir: string;
+  let stackDir: string;
+  let outside: string;
+
+  beforeEach(async () => {
+    tmpBase = await fs.mkdtemp(path.join(os.tmpdir(), 'sencho-symcompose-'));
+    composeDir = path.join(tmpBase, 'compose');
+    stackDir = path.join(composeDir, STACK);
+    outside = path.join(tmpBase, 'outside.yml');
+    await fs.mkdir(stackDir, { recursive: true });
+    await fs.writeFile(outside, 'OUTSIDE=1\n', 'utf-8');
+    mockState.composeDir = composeDir;
+  });
+
+  afterEach(async () => {
+    await fs.rm(tmpBase, { recursive: true, force: true });
+  });
+
+  it('rejects a docker-compose.yml symlink that leaves the compose dir and does not create compose.yaml', async () => {
+    await fs.symlink(outside, path.join(stackDir, 'docker-compose.yml'));
+    const svc = FileSystemService.getInstance();
+    await expect(svc.getStackContentWithMtime(STACK)).rejects.toMatchObject({ code: 'SYMLINK_ESCAPE' });
+    await expect(svc.saveStackContentIfUnchanged(STACK, 'pwned\n', null, 'docker-compose.yml')).rejects.toMatchObject({ code: 'SYMLINK_ESCAPE' });
+    expect(await fs.readFile(outside, 'utf-8')).toBe('OUTSIDE=1\n');
+    await expect(fs.access(path.join(stackDir, 'compose.yaml'))).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
+  it('rejects a dangling docker-compose.yml instead of treating it as a missing compose file', async () => {
+    const link = path.join(stackDir, 'docker-compose.yml');
+    await fs.symlink(path.join(stackDir, 'missing.yml'), link);
+    const svc = FileSystemService.getInstance();
+    await expect(svc.saveStackContentIfUnchanged(STACK, 'fresh\n', null)).rejects.toMatchObject({ code: 'SYMLINK_ESCAPE' });
+    expect((await fs.lstat(link)).isSymbolicLink()).toBe(true);
+    await expect(fs.access(path.join(stackDir, 'compose.yaml'))).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+});
+
 // ── Happy path on every platform: the guard is a no-op on normal directories ──
 describe('FileSystemService symlink-escape: happy path (no symlinks)', () => {
   let composeDir: string;

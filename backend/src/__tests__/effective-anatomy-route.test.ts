@@ -100,6 +100,26 @@ describe('effective-anatomy route', () => {
     expect(body).not.toContain(LABEL_SECRET);
   });
 
+  it('returns a validated service URL and still omits every other label value', async () => {
+    stubRender(JSON.stringify({
+      name: STACK,
+      services: {
+        web: {
+          labels: {
+            'sencho.service.url': 'https://app.example.com',
+            'x.secret': LABEL_SECRET,
+          },
+        },
+      },
+      networks: {},
+      volumes: {},
+    }));
+    const res = await request(app).get(`/api/stacks/${STACK}/effective-anatomy`).set('Authorization', authHeader);
+    expect(res.status).toBe(200);
+    expect(res.body.serviceUrls).toEqual({ web: 'https://app.example.com' });
+    expect(JSON.stringify(res.body)).not.toContain(LABEL_SECRET);
+  });
+
   it('rejects an unauthenticated request', async () => {
     const res = await request(app).get(`/api/stacks/${STACK}/effective-anatomy`);
     expect(res.status).toBe(401);

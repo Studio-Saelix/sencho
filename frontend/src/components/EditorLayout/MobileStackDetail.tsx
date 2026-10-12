@@ -71,6 +71,9 @@ export function MobileStackDetail(props: EditorViewProps) {
         serviceUpdateStatuses,
         serviceUpdateInProgress,
         onRequestServiceUpdate,
+        serviceUrlEntry = null,
+        onEditServiceUrl,
+        onRetryServiceUrls,
         setLogsMode,
         setActiveTab,
         setGitSourceOpen,
@@ -253,6 +256,10 @@ export function MobileStackDetail(props: EditorViewProps) {
                                 serviceUpdateStatuses={serviceUpdateStatuses}
                                 serviceUpdateInProgress={serviceUpdateInProgress}
                                 onRequestServiceUpdate={onRequestServiceUpdate}
+                                serviceUrlEntry={serviceUrlEntry}
+                                canEditServiceUrl={can('stack:edit', 'stack', stackName, activeNode?.id)}
+                                onEditServiceUrl={onEditServiceUrl}
+                                onRetryServiceUrls={onRetryServiceUrls}
                                 containersLoadStatus={props.containersLoadStatus}
                                 containersLoadError={props.containersLoadError}
                                 onRetryContainersLoad={props.onRetryContainersLoad}

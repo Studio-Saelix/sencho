@@ -73,6 +73,8 @@ function makeEditorState(over: Partial<EditorState> = {}): EditorState {
     setIsFileLoading: vi.fn(),
     setGitSourcePendingMap: vi.fn(),
     setComposeEtag: vi.fn(),
+    composeFilename: 'compose.yaml',
+    setComposeFilename: vi.fn(),
     setEnvEtag: vi.fn(),
     effectiveServices: [],
     setEffectiveServices: vi.fn(),
@@ -2674,12 +2676,21 @@ describe('useStackActions.getStackMenuVisibility', () => {
 describe('useStackActions.openStackApp', () => {
   beforeEach(() => {
     vi.mocked(apiFetch).mockReset();
+    vi.mocked(apiFetch).mockResolvedValue(new Response(JSON.stringify({
+      renderable: true,
+      serviceUrls: {},
+      ports: {},
+      services: [],
+      networks: [],
+      volumes: {},
+      restart: null,
+    }), { status: 200, headers: { 'content-type': 'application/json' } }));
   });
 
-  function openAndCaptureHref(over: Parameters<typeof setup>[0]): {
+  async function openAndCaptureHref(over: Parameters<typeof setup>[0]): Promise<{
     href: string | undefined;
     clickCount: number;
-  } {
+  }> {
     let href: string | undefined;
     const click = vi
       .spyOn(HTMLAnchorElement.prototype, 'click')
@@ -2688,28 +2699,28 @@ describe('useStackActions.openStackApp', () => {
       });
     try {
       const { result } = setup(over);
-      result.current.openStackApp('web.yml');
+      await act(async () => { result.current.openStackApp('web.yml'); });
       return { href, clickCount: click.mock.calls.length };
     } finally {
       click.mockRestore();
     }
   }
 
-  it('opens the published port on the browser host for a local node', () => {
-    const { href } = openAndCaptureHref({ stackList: { stackPorts: { 'web.yml': 8989 } } });
+  it('opens the published port on the browser host for a local node', async () => {
+    const { href } = await openAndCaptureHref({ stackList: { stackPorts: { 'web.yml': 8989 } } });
     expect(href).toBe('http://localhost:8989/');
   });
 
-  it('opens on the remote node host derived from its api_url', () => {
-    const { href } = openAndCaptureHref({
+  it('opens on the remote node host derived from its api_url', async () => {
+    const { href } = await openAndCaptureHref({
       stackList: { stackPorts: { 'web.yml': 8989 } },
       activeNode: { id: 2, type: 'remote', api_url: 'http://10.0.0.5:1852' } as Parameters<typeof useStackActions>[0]['activeNode'],
     });
     expect(href).toBe('http://10.0.0.5:8989/');
   });
 
-  it('does nothing for a remote node with no api_url (pilot) and does not throw', () => {
-    const { href, clickCount } = openAndCaptureHref({
+  it('does nothing for a remote node with no api_url (pilot) and does not throw', async () => {
+    const { href, clickCount } = await openAndCaptureHref({
       stackList: { stackPorts: { 'web.yml': 8989 } },
       activeNode: { id: 3, type: 'remote', api_url: '' } as Parameters<typeof useStackActions>[0]['activeNode'],
     });
@@ -2717,13 +2728,13 @@ describe('useStackActions.openStackApp', () => {
     expect(href).toBeUndefined();
   });
 
-  it('appends a known service path via the published port', () => {
-    const { href } = openAndCaptureHref({ stackList: { stackPorts: { 'web.yml': 32400 } } });
+  it('appends a known service path via the published port', async () => {
+    const { href } = await openAndCaptureHref({ stackList: { stackPorts: { 'web.yml': 32400 } } });
     expect(href).toBe('http://localhost:32400/web');
   });
 
-  it('does nothing when the stack has no published port', () => {
-    const { clickCount } = openAndCaptureHref({});
+  it('does nothing when the stack has no published port', async () => {
+    const { clickCount } = await openAndCaptureHref({});
     expect(clickCount).toBe(0);
   });
 });

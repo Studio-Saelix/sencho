@@ -25,6 +25,7 @@ export function useEditorViewState() {
   const [content, setContent] = useState<string>('');
   const [originalContent, setOriginalContent] = useState<string>('');
   const [composeEtag, setComposeEtag] = useState<string | null>(null);
+  const [composeFilename, setComposeFilename] = useState<string | null>(null);
   const [envContent, setEnvContent] = useState<string>('');
   const [originalEnvContent, setOriginalEnvContent] = useState<string>('');
   const [envEtag, setEnvEtag] = useState<string | null>(null);
@@ -72,6 +73,7 @@ export function useEditorViewState() {
     content, setContent,
     originalContent, setOriginalContent,
     composeEtag, setComposeEtag,
+    composeFilename, setComposeFilename,
     envContent, setEnvContent,
     originalEnvContent, setOriginalEnvContent,
     envEtag, setEnvEtag,
