@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { composeServiceNames, patchServiceUrlLabel } from './composeServiceUrl';
+import { composeServiceNames, patchServiceUrlLabel, serviceUrlOwnedBySource } from './composeServiceUrl';
 import { parseServiceUrlResponse, resolveOpenAppTarget, resolvePublishedPortClick, tcpOwners, type ServiceUrlEntry } from './serviceUrlResolve';
 import { buildServiceUrl } from './serviceUrl';
 import { serviceUrlFromLabelValue } from './serviceUrlLabel';
@@ -706,6 +706,77 @@ describe('patchServiceUrlLabel', () => {
     if (!cleared.ok) return;
     const afterClear = parse(cleared.yaml, { merge: true }) as typeof merged;
     expect(afterClear.services.web.labels).toEqual(['keep=yes']);
+  });
+
+  it('clears a list alias without changing other consumers', () => {
+    const source = [
+      'x-url: &url sencho.service.url=https://old.example.com',
+      'services:',
+      '  web:',
+      '    image: nginx',
+      '    labels:',
+      '      - *url',
+      '  api:',
+      '    image: nginx',
+      '    labels:',
+      '      - *url',
+      '',
+    ].join('\n');
+    const cleared = patchServiceUrlLabel(source, 'web', null);
+    expect(cleared.ok).toBe(true);
+    if (!cleared.ok) return;
+    const merged = parse(cleared.yaml, { merge: true }) as {
+      services: { web: { labels?: string[] }; api: { labels: string[] } };
+    };
+    expect(merged.services.web.labels ?? []).toEqual([]);
+    expect(merged.services.api.labels).toEqual(['sencho.service.url=https://old.example.com']);
+
+    const mixed = [
+      'x-url: &url sencho.service.url=https://old.example.com',
+      'services:',
+      '  web:',
+      '    image: nginx',
+      '    labels:',
+      '      - *url',
+      '      - keep=yes',
+      '      - sencho.service.url=https://last.example.com',
+      '  api:',
+      '    image: nginx',
+      '    labels:',
+      '      - *url',
+      '',
+    ].join('\n');
+    const set = patchServiceUrlLabel(mixed, 'web', 'https://new.example.com');
+    expect(set.ok).toBe(true);
+    if (!set.ok) return;
+    const afterSet = parse(set.yaml, { merge: true }) as {
+      services: { web: { labels: string[] }; api: { labels: string[] } };
+    };
+    expect(afterSet.services.web.labels).toEqual([
+      'sencho.service.url=https://new.example.com',
+      'keep=yes',
+    ]);
+    expect(afterSet.services.api.labels).toEqual(['sencho.service.url=https://old.example.com']);
+  });
+
+  it('does not treat an override URL as owned by the open file', () => {
+    const base = [
+      'services:',
+      '  web:',
+      '    image: nginx',
+      '',
+    ].join('\n');
+    expect(serviceUrlOwnedBySource(base, 'web', 'https://old.example.com')).toBe(false);
+    const owning = [
+      'services:',
+      '  web:',
+      '    image: nginx',
+      '    labels:',
+      '      sencho.service.url: https://app.example.com',
+      '',
+    ].join('\n');
+    expect(serviceUrlOwnedBySource(owning, 'web', 'https://app.example.com')).toBe(true);
+    expect(serviceUrlOwnedBySource(owning, 'web', undefined)).toBe(true);
   });
 });
 

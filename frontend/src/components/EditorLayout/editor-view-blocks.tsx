@@ -360,6 +360,7 @@ export interface ContainersHealthProps {
     serviceUrlEntry?: ServiceUrlEntry | null;
     canEditServiceUrl?: boolean;
     sourceServices?: readonly string[] | null;
+    lockedServices?: ReadonlySet<string>;
     onEditServiceUrl?: (serviceName: string) => void;
     onRetryServiceUrls?: () => void;
 }
@@ -391,6 +392,7 @@ export function ContainersHealth({
     serviceUrlEntry = null,
     canEditServiceUrl = false,
     sourceServices,
+    lockedServices,
     onEditServiceUrl,
     onRetryServiceUrls,
 }: ContainersHealthProps) {
@@ -612,6 +614,7 @@ export function ContainersHealth({
                                                             node={activeNode}
                                                             canEdit={canEditServiceUrl}
                                                             sourceServices={sourceServices}
+                                                            lockedServices={lockedServices}
                                                             onEdit={onEditServiceUrl}
                                                             onRetry={onRetryServiceUrls}
                                                         />

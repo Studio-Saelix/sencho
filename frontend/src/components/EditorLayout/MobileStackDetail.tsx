@@ -8,7 +8,7 @@ import { StackIdentityHeader, ContainersHealth, StackLogsSection } from './edito
 import { RecoveryPanel } from './RecoveryPanel';
 import { StackOperationBanner } from './StackOperationBanner';
 import { retryHandlerFor } from './recovery-retry';
-import { composeServiceNames } from '@/lib/composeServiceUrl';
+import { composeServiceNames, serviceUrlOwnedBySource } from '@/lib/composeServiceUrl';
 import type { EditorViewProps } from './EditorView';
 
 const SEGMENTS = [
@@ -99,6 +99,14 @@ export function MobileStackDetail(props: EditorViewProps) {
     const [segment, setSegment] = useState<Segment>('logs');
 
     const sourceServices = useMemo(() => composeServiceNames(content || ''), [content]);
+    const lockedServices = useMemo(() => {
+      const locked = new Set<string>();
+      if (!serviceUrlEntry || serviceUrlEntry.status !== 'ready') return locked;
+      for (const [name, url] of Object.entries(serviceUrlEntry.serviceUrls)) {
+        if (!serviceUrlOwnedBySource(content || '', name, url)) locked.add(name);
+      }
+      return locked;
+    }, [content, serviceUrlEntry]);
     const safeContainers = containers || [];
     const isMultiContainerLayout = safeContainers.length > 1 || effectiveServices.length > 1;
     const isRunning = safeContainers.some(c => c.State === 'running');
@@ -261,6 +269,7 @@ export function MobileStackDetail(props: EditorViewProps) {
                                 serviceUrlEntry={serviceUrlEntry}
                                 canEditServiceUrl={can('stack:edit', 'stack', stackName, activeNode?.id)}
                                 sourceServices={sourceServices}
+                                lockedServices={lockedServices}
                                 onEditServiceUrl={onEditServiceUrl}
                                 onRetryServiceUrls={onRetryServiceUrls}
                                 containersLoadStatus={props.containersLoadStatus}

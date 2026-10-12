@@ -6,6 +6,7 @@ import type { Node } from '@/context/NodeContext';
 import { cn } from '@/lib/utils';
 
 const OTHER_FILE = 'This service is not in the open compose file.';
+const OTHER_LAYER = 'This URL is set in another compose file.';
 
 interface ServicePortLinkProps {
   portLabel: string;
@@ -17,6 +18,8 @@ interface ServicePortLinkProps {
   canEdit: boolean;
   /** Services declared in the open compose buffer. Omit when the buffer is unknown. */
   sourceServices?: readonly string[] | null;
+  /** Services whose effective URL is set by a file other than the open buffer. */
+  lockedServices?: ReadonlySet<string>;
   onEdit?: (serviceName: string) => void;
   onRetry?: () => void;
 }
@@ -30,6 +33,7 @@ export function ServicePortLink({
   node,
   canEdit,
   sourceServices,
+  lockedServices,
   onEdit,
   onRetry,
 }: ServicePortLinkProps) {
@@ -51,7 +55,9 @@ export function ServicePortLink({
 
   const inOpenFile = sourceServices === undefined
     || (sourceServices !== null && !!serviceName && sourceServices.includes(serviceName));
-  const edit = canEdit && serviceName && onEdit && entry?.status === 'ready' && inOpenFile ? (
+  const locked = !!serviceName && !!lockedServices?.has(serviceName);
+  const unavailable = !inOpenFile ? OTHER_FILE : locked ? OTHER_LAYER : null;
+  const edit = canEdit && serviceName && onEdit && entry?.status === 'ready' && !unavailable ? (
     <button
       type="button"
       aria-label={`Set URL for ${serviceName}`}
@@ -60,12 +66,12 @@ export function ServicePortLink({
     >
       <Pencil className="h-3 w-3" strokeWidth={1.5} />
     </button>
-  ) : canEdit && serviceName && entry?.status === 'ready' && !inOpenFile ? (
+  ) : canEdit && serviceName && entry?.status === 'ready' && unavailable ? (
     <button
       type="button"
       disabled
-      title={OTHER_FILE}
-      aria-label={OTHER_FILE}
+      title={unavailable}
+      aria-label={unavailable}
       className="inline-flex h-4 w-4 items-center justify-center rounded text-stat-subtitle opacity-40 max-md:h-11 max-md:w-11 max-md:shrink-0"
     >
       <Pencil className="h-3 w-3" strokeWidth={1.5} />

@@ -52,7 +52,7 @@ import type { Node } from '@/context/NodeContext';
 import type { useAuth } from '@/context/AuthContext';
 import type { useStackMuteActions } from '@/hooks/useMuteRuleActions';
 import type { EffectiveServiceSpec } from '@/types/effectiveServices';
-import { composeServiceNames } from '@/lib/composeServiceUrl';
+import { composeServiceNames, serviceUrlOwnedBySource } from '@/lib/composeServiceUrl';
 import type { ServiceUrlEntry } from '@/lib/serviceUrlResolve';
 import type { GitSourcePendingMap } from '@/lib/gitopsState';
 import type { StackServiceUpdateStatus } from '@/types/imageUpdates';
@@ -335,6 +335,14 @@ export function EditorView(props: EditorViewProps) {
         hasUnsavedChanges,
     } = props;
     const sourceServices = useMemo(() => composeServiceNames(content || ''), [content]);
+    const lockedServices = useMemo(() => {
+      const locked = new Set<string>();
+      if (!serviceUrlEntry || serviceUrlEntry.status !== 'ready') return locked;
+      for (const [name, url] of Object.entries(serviceUrlEntry.serviceUrls)) {
+        if (!serviceUrlOwnedBySource(content || '', name, url)) locked.add(name);
+      }
+      return locked;
+    }, [content, serviceUrlEntry]);
     const monacoEditorRef = useRef<import('monaco-editor').editor.IStandaloneCodeEditor | null>(null);
     const canEditCompose = can('stack:edit', 'stack', stackName, activeNode?.id);
     // Pulling stages images for a deploy, so it takes the edit authority for the
@@ -567,6 +575,7 @@ export function EditorView(props: EditorViewProps) {
                                     serviceUrlEntry={serviceUrlEntry}
                                     canEditServiceUrl={can('stack:edit', 'stack', stackName, activeNode?.id)}
                                     sourceServices={sourceServices}
+                                    lockedServices={lockedServices}
                                     onEditServiceUrl={onEditServiceUrl}
                                     onRetryServiceUrls={onRetryServiceUrls}
                                     containersExpanded={containersExpanded}
@@ -600,6 +609,7 @@ export function EditorView(props: EditorViewProps) {
                                 serviceUrlEntry={serviceUrlEntry}
                                 canEditServiceUrl={can('stack:edit', 'stack', stackName, activeNode?.id)}
                                 sourceServices={sourceServices}
+                                lockedServices={lockedServices}
                                 onEditServiceUrl={onEditServiceUrl}
                                 onRetryServiceUrls={onRetryServiceUrls}
                                 containersLoadStatus={containersLoadStatus}

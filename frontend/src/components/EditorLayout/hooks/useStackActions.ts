@@ -1005,6 +1005,7 @@ export function useStackActions(options: UseStackActionsOptions) {
       editorState.setOriginalContent(text || '');
       editorState.setComposeEtag(res.headers.get('etag'));
       editorState.setComposeFilename(res.headers.get('x-compose-file'));
+      onStackFilesChanged?.();
       endSpan(dispatchSpan);
       detailVisiblePendingRef.current = { attemptId, token: filename, proxied };
       setDetailVisibleEpoch((n) => n + 1);
@@ -1281,6 +1282,7 @@ export function useStackActions(options: UseStackActionsOptions) {
             ?? (typeof payloadName === 'string' ? payloadName : null);
           editorState.setComposeFilename(nextName);
           toast.info('Reloaded the current compose file.');
+          onStackFilesChanged?.();
           return false;
         }
         // A create conflict means the file appeared after the tab loaded. Adopt

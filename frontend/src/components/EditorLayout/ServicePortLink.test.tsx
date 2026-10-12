@@ -47,4 +47,24 @@ describe('ServicePortLink edit affordance', () => {
     );
     expect(screen.getByRole('button', { name: 'Set URL for api' })).toBeTruthy();
   });
+
+  it('does not invite a save when another file sets the URL', () => {
+    const onEdit = vi.fn();
+    render(
+      <ServicePortLink
+        portLabel="8080"
+        publicPort={8080}
+        serviceName="api"
+        entry={entry}
+        node={null}
+        canEdit
+        sourceServices={['api']}
+        lockedServices={new Set(['api'])}
+        onEdit={onEdit}
+      />,
+    );
+    expect(screen.getByLabelText('This URL is set in another compose file.')).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Set URL for api' })).toBeNull();
+    expect(onEdit).not.toHaveBeenCalled();
+  });
 });

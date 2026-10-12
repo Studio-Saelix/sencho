@@ -1,5 +1,5 @@
 import { isAlias, isMap, isPair, isSeq, parse, parseDocument, visit, type YAMLMap } from 'yaml';
-import { SERVICE_URL_LABEL } from './serviceUrlLabel';
+import { SERVICE_URL_LABEL, serviceUrlFromLabelValue } from './serviceUrlLabel';
 
 /** Compose treats `$$` as a literal dollar. A URL typed by the operator is literal. */
 export function escapeComposeLiteral(url: string): string {
@@ -22,6 +22,15 @@ function labelText(item: unknown): string {
     return typeof value === 'string' ? value : '';
   }
   return '';
+}
+
+/** A list entry may be an alias. Matching uses the resolved text and leaves the anchor alone. */
+function resolvedLabelText(doc: unknown, item: unknown): string {
+  if (isAlias(item)) {
+    const resolved = (item as { resolve: (doc: unknown) => unknown }).resolve(doc);
+    return labelText(resolved);
+  }
+  return labelText(item);
 }
 
 function mapHasMerge(map: YAMLMap): boolean {
@@ -202,6 +211,44 @@ export function composeServiceNames(source: string): string[] | null {
   }
 }
 
+/** The URL this buffer itself sets for the service. Null when this file does not set one. */
+export function serviceUrlInSource(source: string, serviceName: string): string | null {
+  try {
+    const merged: unknown = parse(source, { merge: true });
+    if (!merged || typeof merged !== 'object') return null;
+    const services = (merged as { services?: unknown }).services;
+    if (!services || typeof services !== 'object') return null;
+    const service = (services as Record<string, unknown>)[serviceName];
+    if (!service || typeof service !== 'object') return null;
+    const labels = (service as { labels?: unknown }).labels;
+    if (Array.isArray(labels)) {
+      let found: string | null = null;
+      const prefix = `${SERVICE_URL_LABEL}=`;
+      for (const item of labels) {
+        if (typeof item !== 'string' || !item.startsWith(prefix)) continue;
+        const url = serviceUrlFromLabelValue(item.slice(prefix.length));
+        if (url) found = url;
+      }
+      return found;
+    }
+    if (!labels || typeof labels !== 'object') return null;
+    const value = (labels as Record<string, unknown>)[SERVICE_URL_LABEL];
+    return typeof value === 'string' ? serviceUrlFromLabelValue(value) : null;
+  } catch (error) {
+    console.error('Failed to read the service URL label:', error);
+    return null;
+  }
+}
+
+/**
+ * True when saving this buffer can change the effective URL. A URL supplied by
+ * another compose file is not owned here, so an edit of this file would not apply.
+ */
+export function serviceUrlOwnedBySource(source: string, serviceName: string, effectiveUrl: string | undefined): boolean {
+  if (!effectiveUrl) return true;
+  return serviceUrlInSource(source, serviceName) === effectiveUrl;
+}
+
 /** Give every alias of this value its own copy of the current text, then drop the anchor. */
 function detachScalar(doc: unknown, node: unknown): void {
   const anchor = anchorName(node);
@@ -222,7 +269,7 @@ function applyDirect(doc: unknown, labels: unknown, url: string | null): boolean
     }
     if (isSeq(labels)) {
       for (let i = labels.items.length - 1; i >= 0; i -= 1) {
-        if (labelText(labels.items[i]).startsWith(`${SERVICE_URL_LABEL}=`)) {
+        if (resolvedLabelText(doc, labels.items[i]).startsWith(`${SERVICE_URL_LABEL}=`)) {
           detachScalar(doc, labels.items[i]);
           labels.delete(i);
         }
@@ -241,7 +288,7 @@ function applyDirect(doc: unknown, labels: unknown, url: string | null): boolean
     const line = `${SERVICE_URL_LABEL}=${literal}`;
     const matches: number[] = [];
     for (let i = 0; i < labels.items.length; i += 1) {
-      if (labelText(labels.items[i]).startsWith(`${SERVICE_URL_LABEL}=`)) {
+      if (resolvedLabelText(doc, labels.items[i]).startsWith(`${SERVICE_URL_LABEL}=`)) {
         detachScalar(doc, labels.items[i]);
         matches.push(i);
       }

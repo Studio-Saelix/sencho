@@ -29,7 +29,8 @@ import { useContainerStats } from './EditorLayout/hooks/useContainerStats';
 import { useSidebarContextMenu } from './EditorLayout/hooks/useSidebarContextMenu';
 import { useServiceUrls, fetchServiceUrlEntry } from './EditorLayout/hooks/useServiceUrls';
 import { ServiceUrlModal } from './EditorLayout/ServiceUrlModal';
-import { patchServiceUrlLabel } from '@/lib/composeServiceUrl';
+import { patchServiceUrlLabel, serviceUrlOwnedBySource } from '@/lib/composeServiceUrl';
+import { sameServiceUrlTarget, type ServiceUrlDialogTarget } from '@/lib/serviceUrlTarget';
 import { confirmComposeSourceReload } from '@/lib/composeSourceConflict';
 import { useActiveNodeReapplyEligibility } from './EditorLayout/hooks/useActiveNodeReapplyEligibility';
 import { useHomeNavigation } from './EditorLayout/hooks/useHomeNavigation';
@@ -423,10 +424,18 @@ export default function EditorLayout() {
     onStackFilesChangedRef.current = () => { void refreshServiceUrls(); };
   }, [selectedFile, activeNode?.id, can, serviceUrlEntry, refreshServiceUrls]);
 
-  const [serviceUrlTarget, setServiceUrlTarget] = useState<string | null>(null);
+  const [serviceUrlTarget, setServiceUrlTarget] = useState<ServiceUrlDialogTarget | null>(null);
   const [serviceUrlDirty, setServiceUrlDirty] = useState(false);
   const [serviceUrlSaving, setServiceUrlSaving] = useState(false);
   const [serviceUrlVerify, setServiceUrlVerify] = useState<string | null>(null);
+  if (serviceUrlTarget && !sameServiceUrlTarget(serviceUrlTarget, {
+    nodeId: activeNode?.id ?? null,
+    stackName: selectedFile,
+  })) {
+    setServiceUrlTarget(null);
+    setServiceUrlVerify(null);
+  }
+
   const serviceUrlVerifyTarget = useRef<{
     nodeId: number | null;
     stackName: string;
@@ -866,15 +875,29 @@ export default function EditorLayout() {
   }, [refreshServiceUrls]);
 
   const commitServiceUrl = useCallback(async (url: string | null) => {
-    if (!serviceUrlTarget || !selectedFile) return;
-    const stackKey = selectedFile.replace(/\.(ya?ml)$/, '');
-    if (!can('stack:edit', 'stack', stackKey, activeNode?.id)) {
+    const opened = serviceUrlTarget;
+    if (!opened) return;
+    const current = { nodeId: activeNode?.id ?? null, stackName: selectedFile };
+    if (!sameServiceUrlTarget(opened, current)) {
+      setServiceUrlTarget(null);
+      toast.error('This stack is no longer open, so the URL was not saved.');
+      return;
+    }
+    const stackKey = opened.stackName.replace(/\.(ya?ml)$/, '');
+    if (!can('stack:edit', 'stack', stackKey, opened.nodeId)) {
       toast.error('You cannot edit this stack.');
+      return;
+    }
+    const effectiveUrl = serviceUrlEntry?.status === 'ready'
+      ? serviceUrlEntry.serviceUrls[opened.serviceName]
+      : undefined;
+    if (!serviceUrlOwnedBySource(content, opened.serviceName, effectiveUrl)) {
+      toast.error('This URL is set in another compose file.');
       return;
     }
     let patched: ReturnType<typeof patchServiceUrlLabel>;
     try {
-      patched = patchServiceUrlLabel(content, serviceUrlTarget, url);
+      patched = patchServiceUrlLabel(content, opened.serviceName, url);
     } catch (error) {
       console.error('Failed to update the service URL label:', error);
       toast.error('The compose file could not be updated.');
@@ -887,11 +910,11 @@ export default function EditorLayout() {
       return;
     }
     const captured = {
-      stackName: selectedFile,
-      nodeId: activeNode?.id ?? null,
+      stackName: opened.stackName,
+      nodeId: opened.nodeId,
       etag: editorState.composeEtag,
       filename: editorState.composeFilename,
-      service: serviceUrlTarget,
+      service: opened.serviceName,
       url,
       content: patched.yaml,
     };
@@ -926,6 +949,7 @@ export default function EditorLayout() {
               editorState.setComposeFilename(result.filename);
               setServiceUrlTarget(null);
               toast.info('Reloaded the current compose file.');
+              void refreshServiceUrls();
             } else {
               toast.error('The compose file on disk changed, so the URL was not saved. Your edits are still in the editor.');
             }
@@ -959,11 +983,13 @@ export default function EditorLayout() {
     activeNode?.id,
     can,
     content,
+    serviceUrlEntry,
     diffPreviewEnabled,
     editorState.composeEtag,
     editorState.composeFilename,
     editorState.originalContent,
     overlayState,
+    refreshServiceUrls,
     selectedFile,
     serviceUrlTarget,
     setContent,
@@ -1038,9 +1064,14 @@ export default function EditorLayout() {
       }}
       serviceUrlEntry={serviceUrlEntry}
       onEditServiceUrl={(serviceName) => {
+        if (!selectedFile) return;
         setServiceUrlDirty(content !== editorState.originalContent);
         setServiceUrlVerify(null);
-        setServiceUrlTarget(serviceName);
+        setServiceUrlTarget({
+          nodeId: activeNode?.id ?? null,
+          stackName: selectedFile,
+          serviceName,
+        });
       }}
       onRetryServiceUrls={() => { void refreshServiceUrls(); }}
       setActiveTab={setActiveTab}
@@ -1070,11 +1101,11 @@ export default function EditorLayout() {
       stackMuteActions={selectedFile ? stackMuteActions : undefined}
     />
     <ServiceUrlModal
-      key={serviceUrlTarget ?? 'closed'}
+      key={serviceUrlTarget ? `${serviceUrlTarget.nodeId}:${serviceUrlTarget.stackName}:${serviceUrlTarget.serviceName}` : 'closed'}
       open={serviceUrlTarget !== null}
-      serviceName={serviceUrlTarget ?? ''}
+      serviceName={serviceUrlTarget?.serviceName ?? ''}
       initialUrl={serviceUrlTarget && serviceUrlEntry?.status === 'ready'
-        ? (serviceUrlEntry.serviceUrls[serviceUrlTarget] ?? '')
+        ? (serviceUrlEntry.serviceUrls[serviceUrlTarget.serviceName] ?? '')
         : ''}
       dirty={serviceUrlDirty}
       saving={serviceUrlSaving}
