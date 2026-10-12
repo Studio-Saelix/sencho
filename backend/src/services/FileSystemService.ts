@@ -264,8 +264,14 @@ export class FileSystemService {
   private async resolveComposeFile(stackName: string): Promise<{ filename: string; absolute: string } | null> {
     const stackDir = this.resolveStackDir(stackName);
     await this.assertRealWithinBase(stackDir);
+    // Containment sits on the lstat. The stack dir is already checked above,
+    // and static analysis only credits the check that sits at the sink.
+    const baseResolved = path.resolve(this.baseDir);
     for (const file of IMPORT_COMPOSE_FILENAMES) {
-      const filePath = path.join(stackDir, file);
+      const filePath = path.resolve(stackDir, file);
+      if (!filePath.startsWith(baseResolved + path.sep)) {
+        throw Object.assign(new Error('Path escapes compose directory'), { code: 'INVALID_PATH' });
+      }
       try {
         await fsPromises.lstat(filePath);
       } catch (err) {
