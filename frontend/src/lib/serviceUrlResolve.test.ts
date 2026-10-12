@@ -78,6 +78,60 @@ describe('resolvePublishedPortClick', () => {
     expect(click).toMatchObject({ kind: 'link', href: 'http://10.0.0.5:8080' });
   });
 
+  it('does not open another service URL when the live service no longer owns the port', () => {
+    const click = resolvePublishedPortClick({
+      entry: {
+        ...ready,
+        serviceUrls: {
+          web: 'https://web.example.com',
+          api: 'https://api.example.com',
+        },
+        ports: {
+          web: [{ host: '8081', proto: 'tcp' }],
+          api: [{ host: '8080', proto: 'tcp' }],
+        },
+      },
+      serviceName: 'web',
+      publicPort: 8080,
+      portLabel: '8080 → 80/tcp',
+      node: { type: 'local' },
+    });
+    expect(click).toMatchObject({ kind: 'link', href: 'http://localhost:8080' });
+  });
+
+  it('keeps the generated link when the named service has no URL', () => {
+    const click = resolvePublishedPortClick({
+      entry: {
+        ...ready,
+        serviceUrls: { api: 'https://api.example.com' },
+        ports: { web: [{ host: '8080', proto: 'tcp' }] },
+      },
+      serviceName: 'web',
+      publicPort: 8080,
+      portLabel: '8080',
+      node: { type: 'local' },
+    });
+    expect(click).toMatchObject({ kind: 'link', href: 'http://localhost:8080' });
+  });
+
+  it('uses the inferred owner when that service still publishes the port', () => {
+    const click = resolvePublishedPortClick({
+      entry: {
+        ...ready,
+        serviceUrls: {
+          web: 'https://web.example.com',
+          api: 'https://api.example.com',
+        },
+        ports: { api: [{ host: '8080', proto: 'tcp' }] },
+      },
+      serviceName: 'api',
+      publicPort: 8080,
+      portLabel: ':8080',
+      node: { type: 'local' },
+    });
+    expect(click).toMatchObject({ kind: 'link', href: 'https://api.example.com' });
+  });
+
   it('does not open when two services publish the port and one has an override', () => {
     const click = resolvePublishedPortClick({
       entry: {
@@ -207,6 +261,143 @@ describe('patchServiceUrlLabel', () => {
       'sencho.service.url': 'https://app.example.com',
     });
     expect(merged.services.api.labels).toEqual({ 'traefik.enable': 'true' });
+  });
+
+  it('edits the service that owns a shared label anchor without changing consumers', () => {
+    const source = [
+      'services:',
+      '  web:',
+      '    image: nginx',
+      '    labels: &labels',
+      '      keep: "yes"',
+      '  api:',
+      '    image: redis',
+      '    labels: *labels',
+      '',
+    ].join('\n');
+    const added = patchServiceUrlLabel(source, 'web', 'https://new.example.com');
+    expect(added.ok).toBe(true);
+    if (!added.ok) return;
+    const merged = parse(added.yaml, { merge: true }) as {
+      services: { web: { labels: Record<string, string> }; api: { labels: Record<string, string> } };
+    };
+    expect(merged.services.web.labels).toEqual({ keep: 'yes', 'sencho.service.url': 'https://new.example.com' });
+    expect(merged.services.api.labels).toEqual({ keep: 'yes' });
+
+    const cleared = patchServiceUrlLabel(added.yaml, 'web', null);
+    expect(cleared.ok).toBe(true);
+    if (!cleared.ok) return;
+    const afterClear = parse(cleared.yaml, { merge: true }) as typeof merged;
+    expect(afterClear.services.web.labels).toEqual({ keep: 'yes' });
+    expect(afterClear.services.api.labels).toEqual({ keep: 'yes' });
+  });
+
+  it('edits a shared label list from its owner without changing the consumer', () => {
+    const source = [
+      'services:',
+      '  web:',
+      '    labels: &labels',
+      '      - keep=yes',
+      '  api:',
+      '    labels: *labels',
+      '',
+    ].join('\n');
+    const patched = patchServiceUrlLabel(source, 'web', 'https://new.example.com');
+    expect(patched.ok).toBe(true);
+    if (!patched.ok) return;
+    const merged = parse(patched.yaml, { merge: true }) as {
+      services: { web: { labels: string[] }; api: { labels: string[] } };
+    };
+    expect(merged.services.web.labels).toEqual(['keep=yes', 'sencho.service.url=https://new.example.com']);
+    expect(merged.services.api.labels).toEqual(['keep=yes']);
+  });
+
+  it('clears a local override without restoring the merged URL', () => {
+    const source = [
+      'x-labels: &labels',
+      '  keep: "yes"',
+      '  sencho.service.url: https://default.example.com',
+      'services:',
+      '  web:',
+      '    labels:',
+      '      <<: *labels',
+      '      sencho.service.url: https://web.example.com',
+      '  api:',
+      '    labels: *labels',
+      '',
+    ].join('\n');
+    const cleared = patchServiceUrlLabel(source, 'web', null);
+    expect(cleared.ok).toBe(true);
+    if (!cleared.ok) return;
+    const merged = parse(cleared.yaml, { merge: true }) as {
+      services: { web: { labels: Record<string, string> }; api: { labels: Record<string, string> } };
+    };
+    expect(merged.services.web.labels['sencho.service.url']).toBeUndefined();
+    expect(merged.services.web.labels.keep).toBe('yes');
+    expect(merged.services.api.labels['sencho.service.url']).toBe('https://default.example.com');
+    const click = resolvePublishedPortClick({
+      entry: {
+        ...ready,
+        serviceUrls: {},
+        ports: { web: [{ host: '8080', proto: 'tcp' }] },
+      },
+      serviceName: 'web',
+      publicPort: 8080,
+      portLabel: '8080',
+      node: { type: 'local' },
+    });
+    expect(click).toMatchObject({ kind: 'link', href: 'http://localhost:8080' });
+  });
+
+  it('copies a whole-service alias before editing it', () => {
+    const source = [
+      'x-service: &svc',
+      '  image: nginx',
+      '  labels:',
+      '    keep: "yes"',
+      'services:',
+      '  web: *svc',
+      '  api: *svc',
+      '',
+    ].join('\n');
+    const added = patchServiceUrlLabel(source, 'web', 'https://new.example.com');
+    expect(added.ok).toBe(true);
+    if (!added.ok) return;
+    const merged = parse(added.yaml, { merge: true }) as {
+      services: { web: { labels: Record<string, string> }; api: { labels: Record<string, string> } };
+    };
+    expect(merged.services.web.labels['sencho.service.url']).toBe('https://new.example.com');
+    expect(merged.services.api.labels).toEqual({ keep: 'yes' });
+    expect(added.yaml).toContain('x-service: &svc');
+    expect(added.yaml.split('x-service:')[1]?.split('services:')[0]).not.toContain('sencho.service.url');
+
+    const cleared = patchServiceUrlLabel(added.yaml, 'web', null);
+    expect(cleared.ok).toBe(true);
+    if (!cleared.ok) return;
+    const afterClear = parse(cleared.yaml, { merge: true }) as typeof merged;
+    expect(afterClear.services.web.labels['sencho.service.url']).toBeUndefined();
+    expect(afterClear.services.web.labels.keep).toBe('yes');
+    expect(afterClear.services.api.labels).toEqual({ keep: 'yes' });
+  });
+
+  it('copies a service that owns a shared anchor before editing it', () => {
+    const source = [
+      'services:',
+      '  web: &svc',
+      '    image: nginx',
+      '    labels:',
+      '      keep: "yes"',
+      '  api: *svc',
+      '',
+    ].join('\n');
+    const patched = patchServiceUrlLabel(source, 'web', 'https://new.example.com');
+    expect(patched.ok).toBe(true);
+    if (!patched.ok) return;
+    const merged = parse(patched.yaml, { merge: true }) as {
+      services: { web: { labels: Record<string, string> }; api: { labels: Record<string, string> } };
+    };
+    expect(merged.services.web.labels['sencho.service.url']).toBe('https://new.example.com');
+    expect(merged.services.api.labels).toEqual({ keep: 'yes' });
   });
 });
 

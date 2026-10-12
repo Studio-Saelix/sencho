@@ -872,7 +872,14 @@ export default function EditorLayout() {
       toast.error('You cannot edit this stack.');
       return;
     }
-    const patched = patchServiceUrlLabel(content, serviceUrlTarget, url);
+    let patched: ReturnType<typeof patchServiceUrlLabel>;
+    try {
+      patched = patchServiceUrlLabel(content, serviceUrlTarget, url);
+    } catch (error) {
+      console.error('Failed to update the service URL label:', error);
+      toast.error('The compose file could not be updated.');
+      return;
+    }
     if (!patched.ok) {
       toast.error(patched.reason === 'missing-service'
         ? 'That service is defined in another compose file.'

@@ -79,15 +79,14 @@ export function resolvePublishedPortClick(args: {
   }
   const owners = tcpOwners(entry.ports, publicPort);
   const withOverride = owners.filter(name => entry.serviceUrls[name]);
-  if (owners.length === 0) {
-    return generated
-      ? { kind: 'link', href: generated, portLabel, hostLabel: null }
-      : { kind: 'text', portLabel, reason: UNAVAILABLE };
-  }
   if (owners.length > 1 && withOverride.length > 0) {
     return { kind: 'text', portLabel, reason: AMBIGUOUS };
   }
-  const override = owners.length === 1 ? entry.serviceUrls[owners[0]] : undefined;
+  // A named service uses only its own URL, and only when the saved file still
+  // says it is the only owner of this port. A live container can publish a
+  // port that the saved file has since given to another service.
+  const namedIsSoleOwner = owners.length === 1 && owners[0] === serviceName;
+  const override = namedIsSoleOwner ? entry.serviceUrls[serviceName] : undefined;
   if (override) {
     return { kind: 'link', href: override, portLabel, hostLabel: hostLabel(override) };
   }
