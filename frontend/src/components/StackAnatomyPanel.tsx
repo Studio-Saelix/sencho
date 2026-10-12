@@ -341,7 +341,7 @@ export default function StackAnatomyPanel({
     const owners = tcpOwners(serviceUrlEntry?.ports ?? {}, primaryHostPort);
     return resolvePublishedPortClick({
       entry: serviceUrlEntry,
-      serviceName: owners[0],
+      serviceName: owners.length === 1 ? owners[0] : undefined,
       publicPort: primaryHostPort,
       portLabel: `:${primaryHostPort}`,
       node: activeNode,

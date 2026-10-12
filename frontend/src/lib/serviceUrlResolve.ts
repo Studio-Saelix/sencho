@@ -98,24 +98,32 @@ export function resolvePublishedPortClick(args: {
       ? { kind: 'link', href: generated, portLabel, hostLabel: null }
       : { kind: 'text', portLabel, reason: UNAVAILABLE };
   }
-  if (!serviceName) {
+  const owners = tcpOwners(entry.ports, publicPort);
+  const withOverride = owners.filter(name => entry.serviceUrls[name]);
+  // A named service uses only its own URL. The same host port on another bind
+  // address still belongs to this service. A port the saved file gave to a
+  // different service does not, including one Docker assigned later.
+  if (serviceName && owners.includes(serviceName)) {
+    const own = entry.serviceUrls[serviceName];
+    if (own) return { kind: 'link', href: own, portLabel, hostLabel: hostLabel(own) };
     return generated
       ? { kind: 'link', href: generated, portLabel, hostLabel: null }
       : { kind: 'text', portLabel, reason: UNAVAILABLE };
   }
-  const owners = tcpOwners(entry.ports, publicPort);
-  const withOverride = owners.filter(name => entry.serviceUrls[name]);
   if (owners.length > 1 && withOverride.length > 0) {
     return { kind: 'text', portLabel, reason: AMBIGUOUS };
   }
-  // A named service uses only its own URL. A fixed host port must still name
-  // that service as the only owner. A host port Docker assigned later matches
-  // the service's target-only binding instead, and never another service's URL.
-  const namedIsSoleOwner = owners.length === 1 && owners[0] === serviceName;
+  if (!serviceName) {
+    const sole = owners.length === 1 ? entry.serviceUrls[owners[0]] : undefined;
+    if (sole) return { kind: 'link', href: sole, portLabel, hostLabel: hostLabel(sole) };
+    return generated
+      ? { kind: 'link', href: generated, portLabel, hostLabel: null }
+      : { kind: 'text', portLabel, reason: UNAVAILABLE };
+  }
   const dynamicOwner = owners.length === 0
     && privatePort !== undefined
     && dynamicTcpOwners(entry.ports, privatePort).includes(serviceName);
-  const override = namedIsSoleOwner || dynamicOwner ? entry.serviceUrls[serviceName] : undefined;
+  const override = dynamicOwner ? entry.serviceUrls[serviceName] : undefined;
   if (override) {
     return { kind: 'link', href: override, portLabel, hostLabel: hostLabel(override) };
   }
@@ -147,9 +155,13 @@ export function resolveOpenAppTarget(args: {
   const override = owners.length === 1 ? entry.serviceUrls[owners[0]] : undefined;
   if (override) return { url: override };
   if (owners.length === 0) {
-    const dynamicWithUrl = dynamicTcpOwners(entry.ports, undefined).filter(name => entry.serviceUrls[name]);
-    if (dynamicWithUrl.length > 1) return { error: AMBIGUOUS };
-    if (dynamicWithUrl.length === 1) return { url: entry.serviceUrls[dynamicWithUrl[0]] };
+    const dynamic = dynamicTcpOwners(entry.ports, undefined);
+    if (dynamic.length === 1) {
+      const only = entry.serviceUrls[dynamic[0]];
+      if (only) return { url: only };
+    } else if (dynamic.filter(name => entry.serviceUrls[name]).length > 1) {
+      return { error: AMBIGUOUS };
+    }
   }
   const generated = buildServiceUrl({ node, publicPort });
   return generated ? { url: generated } : { error: UNAVAILABLE };

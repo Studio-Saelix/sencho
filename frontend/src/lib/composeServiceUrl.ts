@@ -202,30 +202,56 @@ export function composeServiceNames(source: string): string[] | null {
   }
 }
 
-function applyDirect(labels: unknown, url: string | null): boolean {
+/** Give every alias of this value its own copy of the current text, then drop the anchor. */
+function detachScalar(doc: unknown, node: unknown): void {
+  const anchor = anchorName(node);
+  if (!anchor) return;
+  const original = labelText(node);
+  for (const site of aliasSites(doc, anchor)) {
+    replaceAlias(site.parent, site.node, original);
+  }
+  (node as { anchor?: string | null }).anchor = null;
+}
+
+function applyDirect(doc: unknown, labels: unknown, url: string | null): boolean {
   if (url === null) {
-    if (isMap(labels)) labels.delete(SERVICE_URL_LABEL);
+    if (isMap(labels)) {
+      const pair = labels.items.find(item => labelText(item.key) === SERVICE_URL_LABEL);
+      if (pair) detachScalar(doc, pair.value);
+      labels.delete(SERVICE_URL_LABEL);
+    }
     if (isSeq(labels)) {
       for (let i = labels.items.length - 1; i >= 0; i -= 1) {
-        if (labelText(labels.items[i]).startsWith(`${SERVICE_URL_LABEL}=`)) labels.delete(i);
+        if (labelText(labels.items[i]).startsWith(`${SERVICE_URL_LABEL}=`)) {
+          detachScalar(doc, labels.items[i]);
+          labels.delete(i);
+        }
       }
     }
     return true;
   }
   const literal = escapeComposeLiteral(url);
   if (isMap(labels)) {
+    const pair = labels.items.find(item => labelText(item.key) === SERVICE_URL_LABEL);
+    if (pair) detachScalar(doc, pair.value);
     labels.set(SERVICE_URL_LABEL, literal);
     return true;
   }
   if (isSeq(labels)) {
     const line = `${SERVICE_URL_LABEL}=${literal}`;
+    const matches: number[] = [];
     for (let i = 0; i < labels.items.length; i += 1) {
       if (labelText(labels.items[i]).startsWith(`${SERVICE_URL_LABEL}=`)) {
-        labels.set(i, line);
-        return true;
+        detachScalar(doc, labels.items[i]);
+        matches.push(i);
       }
     }
-    labels.add(line);
+    if (matches.length === 0) {
+      labels.add(line);
+      return true;
+    }
+    labels.set(matches[0], line);
+    for (let i = matches.length - 1; i >= 1; i -= 1) labels.delete(matches[i]);
     return true;
   }
   return false;
@@ -243,7 +269,7 @@ function editLabels(docText: string, doc: unknown, service: YAMLMap, serviceName
       if (next !== null) service.set('labels', next);
       return;
     }
-    if (!applyDirect(edited, url)) throw new Error('Service labels are not a map or list');
+    if (!applyDirect(doc, edited, url)) throw new Error('Service labels are not a map or list');
     detachSharedAnchor(doc, labels as YamlNode);
     service.set('labels', edited);
     return;
@@ -260,7 +286,7 @@ function editLabels(docText: string, doc: unknown, service: YAMLMap, serviceName
     if (url !== null) service.set('labels', { [SERVICE_URL_LABEL]: escapeComposeLiteral(url) });
     return;
   }
-  if (!applyDirect(labels, url)) throw new Error('Service labels are not a map or list');
+  if (!applyDirect(doc, labels, url)) throw new Error('Service labels are not a map or list');
 }
 
 /** Set or remove `sencho.service.url` on one service. Other services keep their labels. */
