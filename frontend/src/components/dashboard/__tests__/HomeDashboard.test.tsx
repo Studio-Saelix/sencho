@@ -38,8 +38,10 @@ vi.mock('../index', () => ({
       <button type="button" onClick={() => onOpenNode(9)}>open-fleet-node</button>
     </div>
   ),
-  RecentAlerts: ({ notifications, nodes, activeNodeId, unreportedNodeIds, className }: {
+  RecentAlerts: ({ notifications, nodes, activeNodeId, unreportedNodeIds, canMute, onMarkRead, className }: {
     notifications: unknown[];
+    canMute: boolean;
+    onMarkRead: (notif: unknown) => void;
     nodes: unknown[];
     activeNodeId: number | null;
     unreportedNodeIds: ReadonlySet<number> | null;
@@ -52,12 +54,15 @@ vi.mock('../index', () => ({
       data-notification-count={String(notifications.length)}
       data-node-count={String(nodes.length)}
       data-unreported={[...(unreportedNodeIds ?? [])].join(',')}
-    />
+      data-can-mute={String(canMute)}
+    >
+      <button type="button" onClick={() => onMarkRead(notifications[0])}>mark-first-read</button>
+    </div>
   ),
   useDashboardData: () => ({}),
 }));
 
-function setup(opts: { remote: boolean; nodeRead: boolean; activeNodeId?: number }) {
+function setup(opts: { remote: boolean; nodeRead: boolean; activeNodeId?: number; isAdmin?: boolean }) {
   const nodes = opts.remote
     ? [{ id: 1, name: 'local', type: 'local' }, { id: 2, name: 'edge', type: 'remote' }]
     : [{ id: 1, name: 'local', type: 'local' }];
@@ -67,6 +72,7 @@ function setup(opts: { remote: boolean; nodeRead: boolean; activeNodeId?: number
   } as unknown as ReturnType<typeof NodeContext.useNodes>);
   vi.mocked(AuthContext.useAuth).mockReturnValue({
     can: (p: string) => opts.nodeRead && p === 'node:read',
+    isAdmin: opts.isAdmin ?? false,
   } as unknown as ReturnType<typeof AuthContext.useAuth>);
 }
 
@@ -84,11 +90,13 @@ function renderDashboard(extra: {
   navigation?: HomeNavigation;
   notifications?: NotificationItem[];
   unreportedNodeIds?: ReadonlySet<number>;
+  onMarkNotificationRead?: (notif: NotificationItem) => void;
 } = {}) {
   return render(
     <HomeDashboard
       notifications={extra.notifications ?? []}
       unreportedNodeIds={extra.unreportedNodeIds ?? new Set()}
+      onMarkNotificationRead={extra.onMarkNotificationRead ?? vi.fn()}
       navigation={extra.navigation ?? makeNavigation()}
     />,
   );
@@ -170,5 +178,21 @@ describe('HomeDashboard alert scope', () => {
     expect(card.getAttribute('data-node-count')).toBe('2');
     // Feed gaps reach the card so a silent node never reads as an all-clear.
     expect(card.getAttribute('data-unreported')).toBe('2');
+  });
+
+  it('hands Recent alerts the row writer and offers Mute only to admins', () => {
+    const onMarkNotificationRead = vi.fn();
+    const row = { id: 3 } as NotificationItem;
+
+    setup({ remote: false, nodeRead: true, isAdmin: false });
+    const viewer = renderDashboard({ notifications: [row], onMarkNotificationRead });
+    expect(screen.getByTestId('recent-alerts')).toHaveAttribute('data-can-mute', 'false');
+    fireEvent.click(screen.getByText('mark-first-read'));
+    expect(onMarkNotificationRead).toHaveBeenCalledWith(row);
+    viewer.unmount();
+
+    setup({ remote: false, nodeRead: true, isAdmin: true });
+    renderDashboard({ notifications: [row] });
+    expect(screen.getByTestId('recent-alerts')).toHaveAttribute('data-can-mute', 'true');
   });
 });

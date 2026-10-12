@@ -110,6 +110,7 @@ export interface ViewRouterProps {
     homeNavigation: HomeNavigation;
     /** Nodes whose latest notification fetch did not land; null before the first fetch settles. */
     unreportedNotificationNodeIds: ReadonlySet<number> | null;
+    onMarkNotificationRead: (notif: NotificationItem) => void;
     fleetNodeIntent: number | null;
     onFleetNodeIntentConsumed: () => void;
     fleetActiveTab?: FleetTab;
@@ -151,6 +152,7 @@ export function ViewRouter({
     onFleetUpdatesIntentConsumed,
     homeNavigation,
     unreportedNotificationNodeIds,
+    onMarkNotificationRead,
     fleetNodeIntent,
     onFleetNodeIntentConsumed,
     fleetActiveTab,
@@ -342,6 +344,7 @@ export function ViewRouter({
         <HomeDashboard
             notifications={notifications}
             unreportedNodeIds={unreportedNotificationNodeIds}
+            onMarkNotificationRead={onMarkNotificationRead}
             navigation={homeNavigation}
             stackUpdates={stackUpdates}
         />

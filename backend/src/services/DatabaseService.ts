@@ -5610,6 +5610,12 @@ stmt.run('gitops_schema_version', '1');
         stmt.run(nodeId);
     }
 
+    /** Marks one row read. Returns false when no row with that id exists on that node. */
+    public markNotificationRead(nodeId: number, id: number): boolean {
+        const result = this.db.prepare('UPDATE notification_history SET is_read = 1 WHERE node_id = ? AND id = ?').run(nodeId, id);
+        return result.changes > 0;
+    }
+
     public deleteNotification(nodeId: number, id: number): void {
         const stmt = this.db.prepare('DELETE FROM notification_history WHERE node_id = ? AND id = ?');
         stmt.run(nodeId, id);

@@ -109,6 +109,8 @@ When more than one node is registered, a **This node | All nodes** control appea
 
 The summary line beside the title reads `<n> alerts · <node>` under **This node**, and `<n> alerts · <m> nodes` under **All nodes**. When a node in scope did not answer the latest fetch (it is offline, or its request failed), a notice names the silent node (in the footer while alerts are listed, in place of the list when there are none), and under **All nodes** the summary switches to `<k>/<m> nodes reporting`. Rows already received from that node stay visible; a silent node is never read as having no alerts. If the card would otherwise be empty, it says the node's alerts may be missing instead of showing the all-clear. Until the first fetch after sign-in settles, the card shows a loading state rather than an all-clear.
 
+Hover a row, or focus it with the keyboard, to reveal its actions at the right edge (they are always visible on a phone-width layout). **Mark read** appears on unread rows and dims the row without opening it; read state is shared with the bell, so its unread count drops too. Admins also get **Mute options**, the same row menu the bell offers. Neither action leaves Home.
+
 Each row shows a severity icon (info, warning, or error, also announced as text to screen readers), the message with the stack and container it concerns underneath, the node under **All nodes**, and a relative time. Rows with a deterministic destination open it:
 
 | Alert | Opens |

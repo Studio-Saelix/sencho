@@ -354,6 +354,7 @@ export default function EditorLayout() {
     unreportedNodeIds,
     tickerConnected,
     markAllRead,
+    markRead,
     deleteNotification,
     clearAllNotifications,
     removeNotificationsForStack,
@@ -1184,6 +1185,7 @@ export default function EditorLayout() {
           notifications={notifications}
           nodes={nodes}
           onMarkAllRead={markAllRead}
+          onMarkRead={markRead}
           onClearAll={clearAllNotifications}
           onDelete={deleteNotification}
           onNavigate={handleNotificationNavigate}
@@ -1263,6 +1265,7 @@ export default function EditorLayout() {
             onFleetUpdatesIntentConsumed={onFleetUpdatesIntentConsumed}
             homeNavigation={homeNavigation}
             unreportedNotificationNodeIds={unreportedNodeIds}
+            onMarkNotificationRead={markRead}
             fleetNodeIntent={fleetNodeIntent}
             onFleetNodeIntentConsumed={onFleetNodeIntentConsumed}
             securityTab={securityTab}
