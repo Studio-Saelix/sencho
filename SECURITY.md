@@ -40,7 +40,7 @@ Quick summary:
 ```bash
 # Verify image signature (cosign keyless, Rekor logged)
 cosign verify saelix/sencho:<tag> \
-  --certificate-identity-regexp "https://github.com/studio-saelix/sencho/.*" \
+  --certificate-identity-regexp "https://github.com/Studio-Saelix/sencho/.*" \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com
 
 # Scan with VEX applied (zero unresolved HIGH/CRITICAL CVEs)

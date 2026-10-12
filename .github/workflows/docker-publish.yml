@@ -24,11 +24,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     # DOCKERHUB_USERNAME and DOCKERHUB_TOKEN live in the `production` environment,
-    # not repo-wide secrets. Any future workflow that tries to push to Docker Hub
-    # without declaring this environment will fail to resolve the credentials,
-    # which is exactly the blast-radius reduction we want. Adding a required
-    # reviewer to the environment in repo settings also turns every release into
-    # a manual-approval gate without any workflow change.
+    # not repo-wide secrets. The environment allows only `v*` tag deployments, so
+    # no other ref can resolve the credentials. Required reviewers are
+    # intentionally unset: merging the Release PR is the only approval step.
     environment: production
     permissions:
       contents: write
@@ -197,7 +195,7 @@ jobs:
         # Signs every tag produced by metadata-action using the ambient GitHub
         # OIDC token. No private keys, no secrets. Users verify with:
         #   cosign verify saelix/sencho:<tag> \
-        #     --certificate-identity-regexp "https://github.com/studio-saelix/sencho/.*" \
+        #     --certificate-identity-regexp "https://github.com/Studio-Saelix/sencho/.*" \
         #     --certificate-oidc-issuer https://token.actions.githubusercontent.com
         # Each ref is pinned to the immutable digest so signatures are bound to
         # the exact manifest, not the mutable tag pointer.

@@ -15,7 +15,7 @@ name: Build and Publish Dev Image
 #           sencho-dev                           ghcr.io/studio-saelix/sencho
 #   tags:   :dev (moving) + :dev-<sha>   tags: latest, X.Y.Z, X.Y
 #   signing / SBOM / VEX / Release: no   signing / SBOM / VEX / Release: yes
-#   approval gate: none                  approval gate: production environment
+#   Docker Hub publish: no               Docker Hub publish: yes (v* tag, prod env)
 #
 # Public release tags (latest, semver, moving-minor), Docker Hub publishing,
 # cosign signatures, SBOM/VEX attestations, and GitHub Releases are RELEASE-ONLY

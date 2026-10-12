@@ -34,7 +34,7 @@ Every **release** tag is signed with cosign keyless signing via GitHub Actions O
 
 ```bash
 cosign verify saelix/sencho:<tag> \
-  --certificate-identity-regexp "https://github.com/studio-saelix/sencho/.*" \
+  --certificate-identity-regexp "https://github.com/Studio-Saelix/sencho/.*" \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com
 ```
 
@@ -51,7 +51,7 @@ BuildKit produces an SLSA v1 provenance attestation during every multi-arch buil
 ```bash
 cosign verify-attestation \
   --type slsaprovenance \
-  --certificate-identity-regexp "https://github.com/studio-saelix/sencho/.*" \
+  --certificate-identity-regexp "https://github.com/Studio-Saelix/sencho/.*" \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
   saelix/sencho:<tag> | jq -r '.payload' | base64 -d | jq
 ```
@@ -61,7 +61,7 @@ cosign verify-attestation \
 ```bash
 cosign verify-attestation \
   --type cyclonedx \
-  --certificate-identity-regexp "https://github.com/studio-saelix/sencho/.*" \
+  --certificate-identity-regexp "https://github.com/Studio-Saelix/sencho/.*" \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
   saelix/sencho:<tag> | jq -r '.payload' | base64 -d | jq
 ```
@@ -73,7 +73,7 @@ Alternatively, download `sbom.cdx.json` directly from the GitHub Release assets 
 ```bash
 cosign verify-attestation \
   --type spdxjson \
-  --certificate-identity-regexp "https://github.com/studio-saelix/sencho/.*" \
+  --certificate-identity-regexp "https://github.com/Studio-Saelix/sencho/.*" \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
   saelix/sencho:<tag> | jq -r '.payload' | base64 -d | jq
 ```
@@ -87,7 +87,7 @@ The OpenVEX document explains Sencho's triage decisions for any CVEs that appear
 ```bash
 cosign verify-attestation \
   --type openvex \
-  --certificate-identity-regexp "https://github.com/studio-saelix/sencho/.*" \
+  --certificate-identity-regexp "https://github.com/Studio-Saelix/sencho/.*" \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
   saelix/sencho:<tag> | jq -r '.payload' | base64 -d | jq
 ```
