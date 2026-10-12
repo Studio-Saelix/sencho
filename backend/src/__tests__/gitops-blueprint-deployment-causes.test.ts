@@ -148,6 +148,28 @@ describe('gitops blueprint deployment causes', () => {
     expect(target.failure_class).toBe('name_conflict');
   });
 
+  it('releases a name conflict to pending without acknowledging or failing anything', () => {
+    const store = GitOpsStore.getInstance();
+    const db = DatabaseService.getInstance();
+    const blueprint = create('dc-conflict-cleared');
+    deploying(blueprint);
+    commitBlueprintDeploymentCause('name_conflict', blueprint.id, NODE, {
+      status: 'name_conflict', last_checked_at: Date.now(), last_error: 'taken',
+    }, 'tester');
+    const appId = store.getLiveBlueprintApplication(blueprint.id)!.id;
+    const before = store.getTarget(appId, NODE)!;
+
+    commitBlueprintDeploymentCause('name_conflict_cleared', blueprint.id, NODE, {
+      status: 'pending', last_checked_at: Date.now(), last_error: null,
+    }, 'tester');
+
+    expect(db.getDeployment(blueprint.id, NODE)?.status).toBe('pending');
+    const after = store.getTarget(appId, NODE)!;
+    expect(after.intent_revision_id).toBe(before.intent_revision_id);
+    expect(after.failure_class).toBe(before.failure_class);
+    expect(after.target_status).toBe(before.target_status);
+  });
+
   it('tombstones the target when the deployment row is removed', () => {
     const store = GitOpsStore.getInstance();
     const blueprint = create('dc-removed');

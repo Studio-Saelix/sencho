@@ -593,6 +593,26 @@ export class BlueprintService {
     }
 
     /**
+     * Re-run the name-conflict check for a deployment parked in `name_conflict`,
+     * and release the row to `pending` only when the check finds the name free.
+     * It never deploys: a `pending` row is picked up by the next reconcile tick,
+     * which applies its own approval and state-review rules.
+     *
+     * A probe that cannot tell throws BlueprintOwnershipProbeError and leaves the
+     * row untouched, because "could not check" is not "clear". A row that moved
+     * while the probe ran (a tick, another operator) is not overwritten.
+     */
+    async recheckNameConflict(blueprint: Blueprint, node: Node): Promise<{ cleared: boolean; deployment: BlueprintDeployment }> {
+        const db = DatabaseService.getInstance();
+        const conflicting = await this.hasNameConflict(blueprint.name, node, blueprint.id);
+        const current = db.getDeployment(blueprint.id, node.id);
+        if (!current) throw new Error(`No deployment for blueprint ${blueprint.id} on node ${node.id}`);
+        if (conflicting || current.status !== 'name_conflict') return { cleared: false, deployment: current };
+        const deployment = this.setStatus(blueprint.id, node.id, 'pending', 'name_conflict_cleared', { last_error: null });
+        return { cleared: true, deployment };
+    }
+
+    /**
      * Read the marker file from a target node, as a discriminated result.
      *
      * The three arms are load-bearing. `missing` is a fact about the node and

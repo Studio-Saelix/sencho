@@ -10,6 +10,7 @@ import { render, screen, waitFor } from '@testing-library/react';
 vi.mock('@/lib/api', () => ({ apiFetch: vi.fn() }));
 vi.mock('./stack/StackActivityTimeline', () => ({ StackActivityTimeline: () => <div /> }));
 vi.mock('@/context/NodeContext', () => ({ useNodes: () => ({ activeNode: { id: 1 }, hasCapability: () => true }) }));
+vi.mock('@/context/AuthContext', () => ({ useAuth: () => ({ can: () => true }) }));
 
 import { apiFetch } from '@/lib/api';
 import StackAnatomyPanel from './StackAnatomyPanel';

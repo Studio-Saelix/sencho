@@ -8,6 +8,7 @@ import { render, screen } from '@testing-library/react';
 vi.mock('@/lib/api', () => ({ apiFetch: vi.fn(async () => ({ ok: false, status: 404, json: async () => null, text: async () => '' }) as unknown as Response) }));
 vi.mock('./stack/StackActivityTimeline', () => ({ StackActivityTimeline: () => <div /> }));
 vi.mock('@/context/NodeContext', () => ({ useNodes: () => ({ activeNode: { id: 1 }, hasCapability: () => false }) }));
+vi.mock('@/context/AuthContext', () => ({ useAuth: () => ({ can: () => true }) }));
 
 const driftProps = vi.fn();
 vi.mock('./stack/DriftPanel', () => ({

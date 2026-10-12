@@ -24,8 +24,10 @@ import {
     deleteBlueprint,
     withdrawDeployment,
     acceptDeployment,
+    recheckNameConflict,
     pinBlueprint,
     describeSelector,
+    DEPLOYMENT_STATUS_LABEL,
 } from '@/lib/blueprintsApi';
 import { BlueprintEditor, type BlueprintSubmitOptions } from './BlueprintEditor';
 import { BlueprintStatus } from './BlueprintStatus';
@@ -38,6 +40,7 @@ import { DetachBlueprintDialog } from './DetachBlueprintDialog';
 import { RetireBlueprintDialog } from './RetireBlueprintDialog';
 import { ContentOriginBadge } from './ContentOriginBadge';
 import { useNodes } from '@/context/NodeContext';
+import { SENCHO_OPEN_STACK_EVENT, type SenchoOpenStackDetail } from '@/lib/events';
 import { formatTimeAgo } from '@/lib/relativeTime';
 import { type NodeLabelMap, describeStagedWrite, writeStagedLabels } from '@/lib/blueprintTargets';
 import type { PermissionAction } from '@/context/AuthContext';
@@ -241,6 +244,38 @@ export function BlueprintDetail({ blueprintId, open, onOpenChange, onChanged, ca
             setBusyNodeId(null);
             setStateReviewTarget(null);
         }
+    }
+
+    async function performRecheck(nodeId: number) {
+        if (!blueprint) return;
+        setBusyNodeId(nodeId);
+        try {
+            const result = await recheckNameConflict(blueprint.id, nodeId);
+            if (result.cleared) {
+                let next = 'It will ask you to review state before it deploys.';
+                if (!blueprint.enabled) next = 'It deploys once the Blueprint is enabled.';
+                else if (blueprint.classification === 'stateless') next = 'It deploys on the next reconcile.';
+                toast.success(`The name is free on ${nodeLabel(nodeId)}. ${next}`);
+            } else if (result.status === 'name_conflict') {
+                toast.info(`A stack named "${blueprint.name}" still exists on ${nodeLabel(nodeId)}.`);
+            } else {
+                toast.info(`The deployment on ${nodeLabel(nodeId)} changed while it was checked. It is now ${DEPLOYMENT_STATUS_LABEL[result.status].toLowerCase()}.`);
+            }
+            await refresh();
+            onChanged();
+        } catch (err) {
+            toast.error(err instanceof Error ? err.message : 'Failed to check the name conflict');
+        } finally {
+            setBusyNodeId(null);
+        }
+    }
+
+    function openConflictingStack(nodeId: number) {
+        if (!blueprint) return;
+        onOpenChange(false);
+        window.dispatchEvent(new CustomEvent<SenchoOpenStackDetail>(SENCHO_OPEN_STACK_EVENT, {
+            detail: { nodeId, stackName: blueprint.name, destination: 'stack' },
+        }));
     }
 
     /**
@@ -479,6 +514,12 @@ export function BlueprintDetail({ blueprintId, open, onOpenChange, onChanged, ca
                                 onAcceptStateReview={openAcceptStateReview}
                                 onRetry={handleRetryRow}
                                 pinnedNodeId={blueprint.pinned_node_id}
+                                nameConflict={{
+                                    canRecheck: canDeployOnNode,
+                                    canOpenStack: (nodeId) => (can ? can('stack:read', 'stack', blueprint.name, nodeId) : true),
+                                    onRecheck: (nodeId) => void performRecheck(nodeId),
+                                    onOpenStack: openConflictingStack,
+                                }}
                             />
                         </SheetSection>
 

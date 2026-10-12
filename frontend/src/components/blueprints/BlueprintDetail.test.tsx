@@ -10,7 +10,7 @@ import type { BlueprintSummary } from '@/lib/blueprintsApi';
 
 vi.mock('@/lib/blueprintsApi', async (importOriginal) => {
     const actual = await importOriginal<typeof import('@/lib/blueprintsApi')>();
-    return { ...actual, getBlueprint: vi.fn(), applyBlueprint: vi.fn(), previewBlueprint: vi.fn(), deleteBlueprint: vi.fn(), pinBlueprint: vi.fn(), updateBlueprint: vi.fn() };
+    return { ...actual, getBlueprint: vi.fn(), applyBlueprint: vi.fn(), previewBlueprint: vi.fn(), deleteBlueprint: vi.fn(), pinBlueprint: vi.fn(), updateBlueprint: vi.fn(), recheckNameConflict: vi.fn() };
 });
 
 vi.mock('@/context/NodeContext', () => ({ useNodes: () => ({ nodes: [] }) }));
@@ -20,7 +20,13 @@ vi.mock('@/components/ui/toast-store', () => ({
 }));
 
 vi.mock('./BlueprintDeploymentTable', () => ({
-    BlueprintDeploymentTable: () => <div data-testid="deployment-table" />,
+    BlueprintDeploymentTable: ({ nameConflict }: { nameConflict?: NameConflictActions }) => (
+        <div data-testid="deployment-table">
+            <button onClick={() => nameConflict?.onRecheck(7)}>recheck-7</button>
+            <button onClick={() => nameConflict?.onOpenStack(7)}>open-7</button>
+            <span data-testid="gates">{`${nameConflict?.canRecheck(7)}|${nameConflict?.canOpenStack(7)}`}</span>
+        </div>
+    ),
 }));
 
 vi.mock('./RolloutPreviewDialog', () => ({
@@ -59,7 +65,9 @@ vi.mock('./RetireBlueprintDialog', () => ({
     ),
 }));
 
-import { deleteBlueprint, getBlueprint, pinBlueprint, updateBlueprint } from '@/lib/blueprintsApi';
+import { deleteBlueprint, getBlueprint, pinBlueprint, recheckNameConflict, updateBlueprint } from '@/lib/blueprintsApi';
+import type { NameConflictActions } from './BlueprintDeploymentTable';
+import { SENCHO_OPEN_STACK_EVENT } from '@/lib/events';
 import { toast } from '@/components/ui/toast-store';
 import { BlueprintDetail } from './BlueprintDetail';
 import { absentRevision, facets, liveRevision, missingApplicationLimitation } from '@/__tests__/gitopsFixtures';
@@ -608,3 +616,105 @@ describe('BlueprintDetail GitOps link', () => {
     });
 });
 
+
+describe('BlueprintDetail name conflict recheck', () => {
+    const onChanged = vi.fn();
+    const onOpenChange = vi.fn();
+    const can = vi.fn((action: string) => action === 'stack:deploy' || action === 'stack:read');
+
+    function detail() {
+        return render(
+            <BlueprintDetail
+                blueprintId={1}
+                open
+                onOpenChange={onOpenChange}
+                onChanged={onChanged}
+                canEdit={false}
+                can={can}
+                nodeLabels={{}}
+            />
+        );
+    }
+
+    beforeEach(() => {
+        onChanged.mockReset();
+        onOpenChange.mockReset();
+        can.mockClear();
+        vi.mocked(recheckNameConflict).mockReset();
+        vi.mocked(toast.success).mockReset();
+        vi.mocked(toast.info).mockReset();
+        vi.mocked(toast.error).mockReset();
+        vi.mocked(getBlueprint).mockResolvedValue(summary());
+    });
+
+    it('scopes both gates to this Blueprint stack name on that node', async () => {
+        detail();
+        await screen.findByTestId('deployment-table');
+        expect(screen.getByTestId('gates')).toHaveTextContent('true|true');
+        expect(can).toHaveBeenCalledWith('stack:deploy', 'stack', 'web-blueprint', 7);
+        expect(can).toHaveBeenCalledWith('stack:read', 'stack', 'web-blueprint', 7);
+    });
+
+    it('announces a freed name, refreshes, and tells a stateless Blueprint it deploys next', async () => {
+        vi.mocked(recheckNameConflict).mockResolvedValue({ cleared: true, status: 'pending' });
+        detail();
+        fireEvent.click(await screen.findByText('recheck-7'));
+        await waitFor(() => expect(toast.success).toHaveBeenCalledWith('The name is free on node 7. It deploys on the next reconcile.'));
+        expect(recheckNameConflict).toHaveBeenCalledWith(1, 7);
+        expect(onChanged).toHaveBeenCalled();
+    });
+
+    it('says a stateful Blueprint will ask for review, and a disabled one waits to be enabled', async () => {
+        const base = summary().blueprint;
+        vi.mocked(recheckNameConflict).mockResolvedValue({ cleared: true, status: 'pending' });
+
+        vi.mocked(getBlueprint).mockResolvedValue(summary({ blueprint: { ...base, classification: 'stateful' } }));
+        const first = detail();
+        fireEvent.click(await screen.findByText('recheck-7'));
+        await waitFor(() => expect(toast.success).toHaveBeenCalledWith(expect.stringContaining('review state')));
+        first.unmount();
+
+        vi.mocked(getBlueprint).mockResolvedValue(summary({ blueprint: { ...base, enabled: false } }));
+        detail();
+        fireEvent.click(await screen.findByText('recheck-7'));
+        await waitFor(() => expect(toast.success).toHaveBeenCalledWith(expect.stringContaining('once the Blueprint is enabled')));
+    });
+
+    it('reports a name that is still taken without claiming anything changed', async () => {
+        vi.mocked(recheckNameConflict).mockResolvedValue({ cleared: false, status: 'name_conflict' });
+        detail();
+        fireEvent.click(await screen.findByText('recheck-7'));
+        await waitFor(() => expect(toast.info).toHaveBeenCalledWith('A stack named "web-blueprint" still exists on node 7.'));
+        expect(toast.success).not.toHaveBeenCalled();
+    });
+
+    it('reports a row that moved while it was checked instead of a still-taken name', async () => {
+        vi.mocked(recheckNameConflict).mockResolvedValue({ cleared: false, status: 'deploying' });
+        detail();
+        fireEvent.click(await screen.findByText('recheck-7'));
+        await waitFor(() => expect(toast.info).toHaveBeenCalledWith(expect.stringContaining('changed while it was checked')));
+        expect(toast.info).not.toHaveBeenCalledWith(expect.stringContaining('still exists'));
+    });
+
+    it('surfaces a failed check as an error', async () => {
+        vi.mocked(recheckNameConflict).mockRejectedValue(new Error('Could not read the node'));
+        detail();
+        fireEvent.click(await screen.findByText('recheck-7'));
+        await waitFor(() => expect(toast.error).toHaveBeenCalledWith('Could not read the node'));
+        expect(onChanged).not.toHaveBeenCalled();
+    });
+
+    it('closes the sheet and asks the shell to open the conflicting stack on that node', async () => {
+        const seen: unknown[] = [];
+        const listener = (e: Event) => seen.push((e as CustomEvent).detail);
+        window.addEventListener(SENCHO_OPEN_STACK_EVENT, listener);
+        try {
+            detail();
+            fireEvent.click(await screen.findByText('open-7'));
+            expect(onOpenChange).toHaveBeenCalledWith(false);
+            expect(seen).toEqual([{ nodeId: 7, stackName: 'web-blueprint', destination: 'stack' }]);
+        } finally {
+            window.removeEventListener(SENCHO_OPEN_STACK_EVENT, listener);
+        }
+    });
+});

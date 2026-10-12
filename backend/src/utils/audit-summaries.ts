@@ -101,6 +101,7 @@ export const AUDIT_ROUTE_SUMMARIES: Record<string, string> = {
   'DELETE /fleet/dismissals': 'Restored a dismissed finding',
   'POST /stacks/*/drift/dismissals': 'Dismissed a drift finding',
   'DELETE /stacks/*/drift/dismissals/*': 'Restored a dismissed drift finding',
+  'POST /stacks/*/scan-status/rescan': 'Started a rescan of a stack',
   'POST /fleet/snapshots': 'Created fleet backup',
   'DELETE /fleet/snapshots': 'Deleted fleet backup',
   'POST /fleet/snapshots/*/restore': 'Restored fleet backup',
@@ -154,6 +155,7 @@ export const AUDIT_ROUTE_SUMMARIES: Record<string, string> = {
 
   // Blueprints (Federation pin)
   'PUT /blueprints/*/pin': 'Updated blueprint pin',
+  'POST /blueprints/*/deployments/*/recheck': 'Rechecked a Blueprint name conflict',
 
   // Git source SOPS identities
   'POST /stacks/*/git-source/sops-identities': 'Generated Git source age identity',

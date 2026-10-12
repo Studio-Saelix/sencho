@@ -201,7 +201,7 @@ Possible status values:
 | **Withdrawing** | A withdraw is in flight. |
 | **Withdrawn** | The deployment was successfully removed; the row is about to be cleared. |
 | **Evict blocked** | A node left the selector while a stateful deployment was active. The reconciler refuses to evict until you choose an explicit mode. |
-| **Name conflict** | A directory by the blueprint's name already exists on the node and does not carry a matching `.blueprint.json` (missing, malformed, or another blueprint ID). The reconciler will not touch it. |
+| **Name conflict** | A directory by the blueprint's name already exists on the node and does not carry a matching `.blueprint.json` (missing, malformed, or another blueprint ID). The reconciler will not touch it. The row offers **Open conflicting stack** and **Check again**. |
 
 <Frame caption="A deployment row in Awaiting confirmation. The Confirm deploy action sits at the right; the notes column explains why the reconciler is waiting on the operator.">
   <img src="/images/blueprint-model/detail-state-review.png" alt="Blueprint detail sheet with a deployment row in Awaiting confirmation state" />
@@ -217,7 +217,7 @@ The common paths through the status enum.
 - **Compose change on a stateful or unknown deployment.** **Active** → **Awaiting confirmation** on every targeted node so the operator can decide whether the new revision is safe for that node's local data. Operator confirms → **Deploying** → **Active**.
 - **Node leaves a stateless selector.** **Active** → **Withdrawing** → **Withdrawn** and the row clears.
 - **Node leaves a stateful selector.** **Active** → **Evict blocked**. Operator chooses **Snapshot, then evict** or **Evict and destroy data** → **Withdrawing** → **Withdrawn**.
-- **Pre-existing stack collision.** New row → **Name conflict**. No further action without operator rename of the user-authored stack or of the blueprint itself.
+- **Pre-existing stack collision.** New row → **Name conflict**. Operator renames or removes the user-authored stack (or renames the blueprint), then clicks **Check again** on the row. If the name is free the row moves to **Pending** and the next reconcile deploys it; **Check again** never deploys by itself.
 - **Deploy or withdraw error.** Any in-flight status → **Failed** with the message in the notes column. The row stays put until the next tick or until the operator clicks **Apply now** to retry.
 
 ## Working with Blueprints
@@ -462,7 +462,7 @@ A future Volume Migration feature will automate this with app-aware backup tooli
 
 <AccordionGroup>
   <Accordion title="A deployment row shows 'Name conflict' and refuses to deploy">
-    A directory by the blueprint's name already exists on that node without a matching `.blueprint.json` marker (missing, malformed, or owned by another blueprint). The most likely cause is a manually created stack with the same name. Resolution: rename either the existing stack or the blueprint, then click **Apply now** on the detail sheet to retry.
+    A directory by the blueprint's name already exists on that node without a matching `.blueprint.json` marker (missing, malformed, or owned by another blueprint). The most likely cause is a manually created stack with the same name. Resolution: use **Open conflicting stack** on the row to look at the existing stack, rename or remove it (or rename the blueprint), then click **Check again**. If the name is free the row moves to **Pending** and the next reconcile deploys it, or asks for state confirmation first on a stateful blueprint. If the stack is still there, the row stays in **Name conflict**. **Check again** only re-evaluates the conflict; it does not deploy.
   </Accordion>
   <Accordion title="A stateful deployment is stuck in 'Awaiting confirmation'">
     The reconciler will not auto-deploy a stateful blueprint to a node it has never run on. Click **Confirm deploy** on the row, then choose **Deploy fresh** in the dialog. Sencho will create empty named volumes and start the stack.

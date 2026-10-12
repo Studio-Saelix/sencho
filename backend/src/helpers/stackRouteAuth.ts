@@ -115,6 +115,7 @@ const EXACT_SUFFIX_RULES: readonly SuffixRule[] = [
   { method: 'POST', suffix: '/rollback', action: 'stack:deploy' },
   { method: 'POST', suffix: '/backup', action: 'stack:deploy' },
   { method: 'POST', suffix: '/drift/dismissals', action: 'stack:deploy' },
+  { method: 'POST', suffix: '/scan-status/rescan', action: 'stack:deploy' },
 
   // Delete
   { method: 'DELETE', suffix: '', action: 'stack:delete' },

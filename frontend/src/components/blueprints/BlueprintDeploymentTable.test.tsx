@@ -4,8 +4,8 @@
  * the table without a label renders as a blank chip, which no type would catch.
  */
 import { describe, expect, it, vi } from 'vitest';
-import { render, screen } from '@testing-library/react';
-import { BlueprintDeploymentTable } from './BlueprintDeploymentTable';
+import { cleanup, fireEvent, render, screen } from '@testing-library/react';
+import { BlueprintDeploymentTable, type NameConflictActions } from './BlueprintDeploymentTable';
 import type { BlueprintDeployment } from '@/lib/blueprintsApi';
 
 vi.mock('@/context/NodeContext', () => ({
@@ -106,5 +106,82 @@ describe('a failed deploy is readable in the deployment table', () => {
   it('says nothing is deployed yet instead of asking for a node ID', () => {
     renderTable([]);
     expect(screen.getByText(/No deployments yet/)).toBeInTheDocument();
+  });
+});
+
+describe('a name conflict names its way out', () => {
+  function renderConflict(overrides: Partial<NameConflictActions> = {}) {
+    const actions: NameConflictActions = {
+      canRecheck: () => true,
+      canOpenStack: () => true,
+      onRecheck: vi.fn(),
+      onOpenStack: vi.fn(),
+      ...overrides,
+    };
+    render(
+      <BlueprintDeploymentTable
+        deployments={[deployment({ status: 'name_conflict', drift_summary: null })]}
+        classification="stateless"
+        canDeploy={() => true}
+        canWithdraw={() => true}
+        canRetry
+        busyNodeId={null}
+        onWithdraw={() => {}}
+        onAcceptStateReview={() => {}}
+        onRetry={() => {}}
+        nameConflict={actions}
+      />,
+    );
+    return actions;
+  }
+
+  it('says what to do and offers both verbs, each for the right node', () => {
+    const actions = renderConflict();
+
+    expect(screen.getByText('Rename or remove the existing stack, then check again.')).toBeDefined();
+    fireEvent.click(screen.getByRole('button', { name: 'Check again' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Open conflicting stack' }));
+    expect(actions.onRecheck).toHaveBeenCalledWith(1);
+    expect(actions.onOpenStack).toHaveBeenCalledWith(1);
+  });
+
+  it('hides Check again when the account cannot deploy there, keeping the stack link', () => {
+    renderConflict({ canRecheck: () => false });
+
+    expect(screen.queryByRole('button', { name: 'Check again' })).toBeNull();
+    expect(screen.getByRole('button', { name: 'Open conflicting stack' })).toBeDefined();
+  });
+
+  it('does not point at Check again when the account cannot use it', () => {
+    renderConflict({ canRecheck: () => false });
+
+    expect(screen.getByText('Rename or remove the existing stack.')).toBeDefined();
+  });
+
+  it('locks Check again while the node is busy', () => {
+    renderConflict();
+    cleanup();
+    render(
+      <BlueprintDeploymentTable
+        deployments={[deployment({ status: 'name_conflict', drift_summary: null })]}
+        classification="stateless"
+        canDeploy={() => true}
+        canWithdraw={() => true}
+        canRetry
+        busyNodeId={1}
+        onWithdraw={() => {}}
+        onAcceptStateReview={() => {}}
+        onRetry={() => {}}
+        nameConflict={{ canRecheck: () => true, canOpenStack: () => true, onRecheck: vi.fn(), onOpenStack: vi.fn() }}
+      />,
+    );
+    expect((screen.getByRole('button', { name: 'Check again' }) as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it('hides the stack link when the account cannot read that stack', () => {
+    renderConflict({ canOpenStack: () => false });
+
+    expect(screen.queryByRole('button', { name: 'Open conflicting stack' })).toBeNull();
+    expect(screen.getByRole('button', { name: 'Check again' })).toBeDefined();
   });
 });
