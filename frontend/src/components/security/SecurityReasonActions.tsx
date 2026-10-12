@@ -1,11 +1,10 @@
 import { useEffect, useState } from 'react';
-import { MoreHorizontal } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import {
   DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
-import { FindingRowActions } from '@/components/ui/finding-row-actions';
+import { FindingRowActions, type FindingRowMoreItem } from '@/components/ui/finding-row-actions';
 import { UpdateReadinessDialog } from '@/components/stack/UpdateReadinessDialog';
 import { ExposureIntentPicker } from '@/components/networking/ExposureIntentPicker';
 import { toast } from '@/components/ui/toast-store';
@@ -136,8 +135,12 @@ function SetExposureIntentVerb({ verb, nodeId, onResolved }: {
 
 /**
  * The action cluster for one posture reason: its resolving verb, then Dismiss
- * where the reason allows it. Shared by the Overview review queue and the
- * masthead, so both run the same verb.
+ * where the reason allows it, then the trailing slot. Shared by the Overview
+ * review queue and the masthead, so both run the same verb.
+ *
+ * A verb that runs in place replaces the row's shortcut, so that shortcut is
+ * the overflow menu. Every row passes `more`, including an empty list, which
+ * keeps a spacer so Dismiss lines up when the row has no shortcut.
  */
 export function SecurityReasonActions({ reason, verb, controls }: {
   reason: PostureReason;
@@ -161,34 +164,22 @@ export function SecurityReasonActions({ reason, verb, controls }: {
     </Button>
   );
 
-  // A verb that runs in place replaces the row's shortcut, so the shortcut moves into an overflow menu.
-  const withShortcut = verb !== null && verb.kind !== 'navigate' ? (
-    <>
-      {body}
-      <DropdownMenu>
-        <DropdownMenuTrigger asChild>
-          <Button variant="ghost" size="icon" className="h-7 w-7 max-md:min-h-11 max-md:min-w-11" aria-label={`More actions: ${reason.label}`}>
-            <MoreHorizontal className="h-4 w-4" strokeWidth={1.5} />
-          </Button>
-        </DropdownMenuTrigger>
-        <DropdownMenuContent align="end">
-          <DropdownMenuItem onSelect={() => void controls.run(reason, { kind: 'navigate', label: controls.navLabel(reason), clicks: 1 })}>
-            {controls.navLabel(reason)}
-          </DropdownMenuItem>
-        </DropdownMenuContent>
-      </DropdownMenu>
-    </>
-  ) : body;
-  if (!isReasonDismissable(reason)) return <div className="flex items-center gap-1">{withShortcut}</div>;
+  const dismissable = isReasonDismissable(reason);
+  const shortcutLabel = controls.navLabel(reason);
+  const more: FindingRowMoreItem[] = verb !== null && verb.kind !== 'navigate'
+    ? [{ label: shortcutLabel, onSelect: () => void controls.run(reason, { kind: 'navigate', label: shortcutLabel, clicks: 1 }) }]
+    : [];
+
   return (
     <FindingRowActions
-      dismissPolicy={reason.dismissPolicy ?? 'none'}
-      canDismiss={controls.canDismiss}
+      more={more}
+      dismissPolicy={dismissable ? (reason.dismissPolicy ?? 'none') : 'none'}
+      canDismiss={dismissable && controls.canDismiss}
       pending={controls.isDismissing(reason)}
       subject={reason.label}
       onDismiss={(mode, days) => controls.onDismiss(reason, mode, days)}
     >
-      {withShortcut}
+      {body}
     </FindingRowActions>
   );
 }

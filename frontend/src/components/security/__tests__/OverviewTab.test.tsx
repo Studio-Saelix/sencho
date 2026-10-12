@@ -3,7 +3,7 @@
  * non-blocker View findings, Check again gating, and node-scoped refresh.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { cleanup, render, screen, waitFor } from '@testing-library/react';
+import { cleanup, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import type { SecurityOverview, PostureReason } from '@/types/security';
 
@@ -347,6 +347,51 @@ describe('OverviewTab remediation affordances', () => {
       );
       await user.click(screen.getByRole('button', { name: /check again/i }));
       await waitFor(() => expect(reload).toHaveBeenCalled());
+    });
+
+    /** Desktop control names in the review queue, in visual order. The phone menu stays in the DOM under jsdom. */
+    function queueControlNames(): string[] {
+      const card = screen.getByRole('heading', { name: /why monitoring/i }).parentElement;
+      if (card === null) throw new Error('review queue card missing');
+      return within(card)
+        .getAllByRole('button')
+        .map(button => button.getAttribute('aria-label') ?? button.textContent ?? '')
+        .filter(name => !name.startsWith('Actions:') && name !== 'Dismiss options');
+    }
+
+    it('orders an in-place verb, then Dismiss, then the overflow menu', () => {
+      renderOverview([
+        reason({
+          kind: 'update_check_uncertain',
+          label: 'Update availability unknown',
+          severity: 'review',
+          key: 'update_check_uncertain:all',
+          fingerprint: 'fp-1',
+          dismissPolicy: 'timed',
+        }),
+      ], { canManageNode: true });
+      expect(queueControlNames()).toEqual([
+        'Check again',
+        'Dismiss: Update availability unknown',
+        'More ways to dismiss',
+        'More actions: Update availability unknown',
+      ]);
+    });
+
+    it('keeps the overflow slot empty on a navigate-only row so Dismiss stays aligned', () => {
+      renderOverview([dismissable()], { canManageNode: true });
+      expect(queueControlNames()).toEqual([
+        'Triage →',
+        'Dismiss: Findings needing review',
+        'More ways to dismiss',
+      ]);
+      expect(screen.queryByRole('button', { name: /more actions/i })).not.toBeInTheDocument();
+      const card = screen.getByRole('heading', { name: /why monitoring/i }).parentElement;
+      if (card === null) throw new Error('review queue card missing');
+      const slot = within(card).getByTestId('finding-row-more-slot');
+      expect(slot.previousElementSibling).toBe(
+        within(card).getByRole('button', { name: 'Dismiss: Findings needing review' }).parentElement,
+      );
     });
 
     it('dismisses a review reason in one click, sending what the operator saw', async () => {
