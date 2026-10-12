@@ -322,6 +322,9 @@ interface DomainConcern {
    * it must not carry free text whose wording can move on its own.
    */
   basis: string;
+  /** Carried onto the finding for update and recovery rows; see `ReadinessFinding`. */
+  topReasonId?: string | null;
+  hasUpdate?: boolean;
   target: ReadinessTarget;
 }
 
@@ -348,7 +351,7 @@ interface DomainResult {
 function concern(
   spec: ConcernSpec,
   target: ReadinessTarget,
-  overrides: Partial<Pick<DomainConcern, 'detail' | 'count' | 'stack' | 'verdict' | 'basis'>> = {},
+  overrides: Partial<Pick<DomainConcern, 'detail' | 'count' | 'stack' | 'verdict' | 'basis' | 'topReasonId' | 'hasUpdate'>> = {},
 ): DomainConcern {
   return {
     state: spec.state,
@@ -563,6 +566,8 @@ function findingsFor(
       count: concern.count,
       verdict: concern.verdict,
       detail: concern.detail === null ? null : redactSensitiveText(concern.detail) || null,
+      ...(concern.topReasonId !== undefined ? { topReasonId: concern.topReasonId } : {}),
+      ...(concern.hasUpdate !== undefined ? { hasUpdate: concern.hasUpdate } : {}),
       target: concern.target,
       fingerprint: sha256Hex(JSON.stringify([code, concern.state, concern.verdict, concern.basis])),
       dismissPolicy: dismissPolicyFor({ code, severity: concern.state }),
@@ -1241,12 +1246,35 @@ function updatesConcerns(node: Node, summary: NodeStackReadinessSummary, notDepl
       detail: reasonText(row.update.topReason),
       stack: row.stack,
       verdict: { kind: 'update', value: row.update.verdict },
+      ...reasonFacts(row.update.topReasonId, row.update.hasUpdate),
     }));
   }
   if (summary.truncated) {
     concerns.push(concern({ state: 'unknown', code: 'summary_truncated' }, target));
   }
   return concerns;
+}
+
+/**
+ * The structured reason facts a stack row carries, with the basis they add to
+ * the fingerprint. A peer that predates the fields sends neither, and then the
+ * finding carries neither and its fingerprint is what it was before: a verb
+ * falls back to opening the stack rather than guessing.
+ */
+function reasonFacts(
+  topReasonId: unknown,
+  hasUpdate?: unknown,
+): Pick<DomainConcern, 'topReasonId' | 'hasUpdate' | 'basis'> {
+  // A peer's payload is not trusted to be typed: a value of the wrong type is
+  // treated as absent rather than copied into the response and the fingerprint.
+  const id = typeof topReasonId === 'string' || topReasonId === null ? topReasonId : undefined;
+  const known = typeof hasUpdate === 'boolean' ? hasUpdate : undefined;
+  const facts: Pick<DomainConcern, 'topReasonId' | 'hasUpdate' | 'basis'> = {
+    basis: id === undefined && known === undefined ? '' : JSON.stringify([id ?? null, known ?? null]),
+  };
+  if (id !== undefined) facts.topReasonId = id;
+  if (known !== undefined) facts.hasUpdate = known;
+  return facts;
 }
 
 function recoveryConcerns(
@@ -1280,6 +1308,7 @@ function recoveryConcerns(
       detail: reasonText(row.rollback.topReason),
       stack: row.stack,
       verdict: { kind: 'rollback', value: row.rollback.overall },
+      ...reasonFacts(row.rollback.topReasonId),
     }));
   }
   if (summary.truncated) {

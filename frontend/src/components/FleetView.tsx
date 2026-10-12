@@ -27,6 +27,7 @@ import FleetSnapshots from './FleetSnapshots';
 import { FleetReadiness } from './fleet/FleetReadiness';
 import { useFleetReadiness } from './fleet/readiness/useFleetReadiness';
 import { canDismissFinding } from './fleet/readiness/canDismissFinding';
+import { canRunVerb, type ReadinessVerb } from './fleet/readiness/readinessVerbs';
 import type { ReadinessFinding } from '@/types/readiness';
 import { RoutingTab } from './fleet/RoutingTab';
 import { FederationTab } from './fleet/FederationTab';
@@ -81,6 +82,10 @@ export function FleetView({
     const canManageFleet = can('node:manage');
     const canDismissReadinessFinding = useCallback(
         (finding: Pick<ReadinessFinding, 'domain' | 'stack' | 'nodeId'>) => canDismissFinding(can, isAdmin, finding),
+        [can, isAdmin],
+    );
+    const canRunReadinessVerb = useCallback(
+        (verb: ReadinessVerb, finding: ReadinessFinding) => canRunVerb(can, isAdmin, verb, finding),
         [can, isAdmin],
     );
     const canExportDossier = can('node:read') && can('stack:read');
@@ -303,6 +308,7 @@ export function FleetView({
                         onOpenSettingsSection={onOpenSettingsSection}
                         isAdmin={isAdmin}
                         canDismiss={canDismissReadinessFinding}
+                        canRun={canRunReadinessVerb}
                     />
                 </TabsContent>
                 <TabsContent value="dependencies">

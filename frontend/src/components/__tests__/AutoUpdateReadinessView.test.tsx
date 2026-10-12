@@ -8,7 +8,11 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { render, screen, act, waitFor, fireEvent } from '@testing-library/react';
 
-vi.mock('@/lib/api', () => ({ apiFetch: vi.fn(), fetchForNode: vi.fn() }));
+vi.mock('@/lib/api', () => ({
+  apiFetch: vi.fn(),
+  fetchForNode: vi.fn(),
+  withDeploySession: (_id: string, options: object = {}) => options,
+}));
 vi.mock('@/lib/serviceUpdate', () => ({
   requestServiceUpdate: vi.fn(),
 }));
@@ -712,8 +716,15 @@ describe('AutoUpdateReadinessView desktop Apply now', () => {
     changelog: 'Fixes.',
   };
 
-  function mockFleetLoad(fleetMap: Record<string, Record<string, boolean>>) {
-    mockedFetch.mockImplementation((url: string) => {
+  // The full-stack update goes through the shared executor, which posts with apiFetch.
+  function mockFleetLoad(
+    fleetMap: Record<string, Record<string, boolean>>,
+    updateBody: Record<string, unknown> = { status: 'Update completed' },
+  ) {
+    mockedFetch.mockImplementation((url: string, init?: { method?: string }) => {
+      if (url.includes('/update') && !url.includes('update-preview') && init?.method === 'POST') {
+        return Promise.resolve({ ok: true, json: async () => updateBody });
+      }
       if (url === '/image-updates/fleet') {
         return Promise.resolve({ ok: true, json: async () => fleetMap });
       }
@@ -752,16 +763,14 @@ describe('AutoUpdateReadinessView desktop Apply now', () => {
     await waitFor(() => {
       expect(screen.queryByRole('button', { name: /Apply now/i })).not.toBeInTheDocument();
     });
-    const postIdx = mockedFetchForNode.mock.calls.findIndex(
+    const post = mockedFetch.mock.calls.find(
       (c) => String(c[0]).includes('/stacks/nextcloud/update') && !String(c[0]).includes('update-preview'),
     );
-    const previewAfter = mockedFetchForNode.mock.calls.findIndex(
-      (c, i) => i > postIdx && String(c[0]).includes('/update-preview'),
-    );
-    expect(postIdx).toBeGreaterThanOrEqual(0);
-    expect(previewAfter).toBeGreaterThan(postIdx);
-    expect(mockedFetchForNode.mock.calls[postIdx][1]).toBe(1);
-    expect(mockedFetchForNode.mock.calls[previewAfter][1]).toBe(1);
+    const previewAfter = mockedFetchForNode.mock.calls.filter((c) => String(c[0]).includes('/update-preview'));
+    expect(post).toBeDefined();
+    expect(post?.[1]).toMatchObject({ method: 'POST', nodeId: 1 });
+    expect(previewAfter.length).toBeGreaterThanOrEqual(2);
+    expect(previewAfter.at(-1)?.[1]).toBe(1);
   });
 
   it('retains the card and warns when the preview still reports an update', async () => {
@@ -834,7 +843,10 @@ describe('AutoUpdateReadinessView desktop Apply now', () => {
   });
 
   it('retains an unknown card when recheckWarning disagrees with a cleared preview', async () => {
-    mockFleetLoad({ '1': { nextcloud: true } });
+    mockFleetLoad({ '1': { nextcloud: true } }, {
+      status: 'Update completed',
+      recheckWarning: 'The update command completed, but Sencho still detects an available image update.',
+    });
     const cleared = {
       ...basePreview,
       images: basePreview.images.map((img) => ({ ...img, has_update: false, digest_update: false })),
@@ -936,13 +948,13 @@ describe('AutoUpdateReadinessView desktop Apply now', () => {
     await waitFor(() => {
       expect(screen.queryByRole('button', { name: /Apply now/i })).not.toBeInTheDocument();
     });
-    const postCall = mockedFetchForNode.mock.calls.find(
+    const postCall = mockedFetch.mock.calls.find(
       (c) => String(c[0]).includes('/stacks/nextcloud/update') && !String(c[0]).includes('update-preview'),
     );
     const postApplyPreview = mockedFetchForNode.mock.calls.filter(
       (c) => String(c[0]).includes('/update-preview') && c[1] === 2,
     );
-    expect(postCall?.[1]).toBe(2);
+    expect(postCall?.[1]).toMatchObject({ nodeId: 2 });
     expect(postApplyPreview.length).toBeGreaterThanOrEqual(2);
     mockNodes.splice(0, mockNodes.length, { id: 1, name: 'Local', type: 'local', status: 'online' });
   });
