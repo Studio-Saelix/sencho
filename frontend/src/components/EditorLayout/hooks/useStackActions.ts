@@ -25,6 +25,7 @@ import { ENV_READ_FAILED_NOTICE } from '../envNotice';
 import { openServiceUrl } from '@/lib/serviceUrl';
 import { fetchServiceUrlEntry } from './useServiceUrls';
 import { resolveOpenAppTarget } from '@/lib/serviceUrlResolve';
+import { confirmComposeSourceReload } from '@/lib/composeSourceConflict';
 import { requestServiceUpdate as postServiceUpdate, requestServiceRestore as postServiceRestore } from '@/lib/serviceUpdate';
 import type { EffectiveServiceModelResult } from '@/types/effectiveServices';
 import { absentFault, pendingSourceStatus, type GitSourcePendingMap } from '@/lib/gitopsState';
@@ -500,7 +501,7 @@ export function useStackActions(options: UseStackActionsOptions) {
     const port = stackListState.stackPorts[file];
     const cached = serviceUrlsRef?.current ?? null;
     const open = (target: { url: string } | { error: string } | null) => {
-      if ((activeNode?.id ?? null) !== capturedNodeId) return;
+      if ((activeNodeIdRef.current ?? null) !== capturedNodeId) return;
       if (!target) return;
       if ('error' in target) {
         toast.error(target.error);
@@ -509,10 +510,6 @@ export function useStackActions(options: UseStackActionsOptions) {
       openServiceUrl(target.url);
     };
     if (cached && cached.stackName === file && cached.nodeId === capturedNodeId) {
-      if (cached.status === 'loading') {
-        toast.error('Service URL unavailable');
-        return;
-      }
       open(resolveOpenAppTarget({ entry: cached, publicPort: port, node: capturedNode }));
       return;
     }
@@ -520,7 +517,13 @@ export function useStackActions(options: UseStackActionsOptions) {
       open(resolveOpenAppTarget({ entry: next, publicPort: port, node: capturedNode }));
     }).catch(error => {
       console.error('Failed to resolve service URL:', error);
-      toast.error('Service URL unavailable');
+      if ((activeNodeIdRef.current ?? null) !== capturedNodeId) return;
+      const target = resolveOpenAppTarget({ entry: null, publicPort: port, node: capturedNode });
+      if (!target) {
+        toast.error('Service URL unavailable');
+        return;
+      }
+      open(target);
     });
   };
 
@@ -1263,12 +1266,21 @@ export function useStackActions(options: UseStackActionsOptions) {
           ? (payload as { code?: unknown }).code
           : undefined;
         if (isCompose && conflictCode === 'compose_source_changed') {
+          const reload = confirmComposeSourceReload(message => window.confirm(message));
+          if (!reload) {
+            toast.error('The compose file on disk changed. Your edits were kept.');
+            return false;
+          }
           editorState.setContent(currentRemoteContent);
           editorState.setOriginalContent(currentRemoteContent);
           editorState.setComposeEtag(response.headers.get('etag'));
-          const nextName = response.headers.get('x-compose-file');
-          if (nextName) editorState.setComposeFilename(nextName);
-          toast.error('The compose file that was open is no longer the file on disk. Reloaded the current file.');
+          const payloadName = payload && typeof payload === 'object' && 'filename' in payload
+            ? (payload as { filename?: unknown }).filename
+            : undefined;
+          const nextName = response.headers.get('x-compose-file')
+            ?? (typeof payloadName === 'string' ? payloadName : null);
+          editorState.setComposeFilename(nextName);
+          toast.info('Reloaded the current compose file.');
           return false;
         }
         // A create conflict means the file appeared after the tab loaded. Adopt

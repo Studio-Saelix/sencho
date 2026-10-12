@@ -64,13 +64,13 @@ export function resolvePublishedPortClick(args: {
 }): PortClick {
   const { entry, serviceName, publicPort, privatePort, portLabel, node } = args;
   const generated = buildServiceUrl({ node, publicPort, privatePort });
-  if (!entry) {
+  // A missing, legacy, or failed URL list has no override to apply, so the
+  // generated host and port stays available. An override is used only after a
+  // ready response names one owner.
+  if (!entry || entry.status !== 'ready' || !entry.renderable) {
     return generated
       ? { kind: 'link', href: generated, portLabel, hostLabel: null }
       : { kind: 'text', portLabel, reason: UNAVAILABLE };
-  }
-  if (entry.status === 'loading' || entry.status === 'unavailable' || entry.status === 'unsupported' || !entry.renderable) {
-    return { kind: 'text', portLabel, reason: UNAVAILABLE };
   }
   if (!serviceName) {
     return generated
@@ -103,7 +103,9 @@ export function resolveOpenAppTarget(args: {
 }): { url: string } | { error: string } | null {
   const { entry, publicPort, node } = args;
   if (!entry || entry.status !== 'ready' || !entry.renderable) {
-    return { error: UNAVAILABLE };
+    if (publicPort === undefined) return null;
+    const generated = buildServiceUrl({ node, publicPort });
+    return generated ? { url: generated } : { error: UNAVAILABLE };
   }
   const urls = Object.values(entry.serviceUrls);
   if (publicPort === undefined) {

@@ -13,6 +13,8 @@ describe('serviceUrlFromLabelValue', () => {
     expect(serviceUrlFromLabelValue('javascript:alert(1)')).toBeNull();
     expect(serviceUrlFromLabelValue('/relative')).toBeNull();
     expect(serviceUrlFromLabelValue('')).toBeNull();
+    expect(serviceUrlFromLabelValue('https:app.example.com')).toBeNull();
+    expect(serviceUrlFromLabelValue('https:/app.example.com')).toBeNull();
   });
 });
 

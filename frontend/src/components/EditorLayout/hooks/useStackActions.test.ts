@@ -231,6 +231,51 @@ describe('useStackActions.saveFile', () => {
     expect(editorState.setOriginalContent).not.toHaveBeenCalled();
   });
 
+  it('keeps a dirty compose draft when the opened file is no longer the source', async () => {
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(false);
+    vi.mocked(apiFetch).mockResolvedValue(new Response(JSON.stringify({
+      code: 'compose_source_changed',
+      currentContent: '',
+      filename: null,
+    }), { status: 412 }));
+    const { result, editorState } = setup({
+      editorState: { content: 'local draft', originalContent: 'old', composeFilename: 'docker-compose.yml' },
+    });
+    try {
+      const ok = await result.current.saveFile();
+      expect(ok).toBe(false);
+      expect(editorState.setContent).not.toHaveBeenCalled();
+      expect(editorState.setOriginalContent).not.toHaveBeenCalled();
+      expect(editorState.setComposeFilename).not.toHaveBeenCalled();
+    } finally {
+      confirm.mockRestore();
+    }
+  });
+
+  it('reloads a changed compose source only after the operator discards the draft', async () => {
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(true);
+    vi.mocked(apiFetch).mockResolvedValue(new Response(JSON.stringify({
+      code: 'compose_source_changed',
+      currentContent: 'remote file',
+      filename: 'compose.yaml',
+    }), {
+      status: 412,
+      headers: { etag: 'W/"9"', 'x-compose-file': 'compose.yaml' },
+    }));
+    const { result, editorState } = setup({
+      editorState: { content: 'local draft', originalContent: 'old', composeFilename: 'docker-compose.yml' },
+    });
+    try {
+      const ok = await result.current.saveFile();
+      expect(ok).toBe(false);
+      expect(editorState.setContent).toHaveBeenCalledWith('remote file');
+      expect(editorState.setOriginalContent).toHaveBeenCalledWith('remote file');
+      expect(editorState.setComposeFilename).toHaveBeenCalledWith('compose.yaml');
+    } finally {
+      confirm.mockRestore();
+    }
+  });
+
   it('returns false when no stack is selected', async () => {
     vi.mocked(apiFetch).mockResolvedValue(new Response(null, { status: 200 }));
     const editorState = makeEditorState();
@@ -2736,6 +2781,47 @@ describe('useStackActions.openStackApp', () => {
   it('does nothing when the stack has no published port', async () => {
     const { clickCount } = await openAndCaptureHref({});
     expect(clickCount).toBe(0);
+  });
+
+  it('does not open after the operator switches node', async () => {
+    let resolveAnatomy: ((response: Response) => void) | null = null;
+    vi.mocked(apiFetch).mockImplementation(() => new Promise(resolve => { resolveAnatomy = resolve; }));
+    const click = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {});
+    try {
+      const { result, rerender, activeNodeHolder } = setup({
+        stackList: { stackPorts: { 'web.yml': 8989 } },
+      });
+      act(() => { result.current.openStackApp('web.yml'); });
+      activeNodeHolder.current = { id: 2, type: 'remote', api_url: 'http://10.0.0.5:1852' } as ActiveNode;
+      rerender();
+      await act(async () => {
+        resolveAnatomy?.(new Response(JSON.stringify({
+          renderable: true,
+          serviceUrls: { web: 'https://app.example.com' },
+          ports: {},
+        }), { status: 200, headers: { 'content-type': 'application/json' } }));
+        await Promise.resolve();
+      });
+      expect(click).not.toHaveBeenCalled();
+    } finally {
+      click.mockRestore();
+    }
+  });
+
+  it('does not report a failed lookup after the operator switches node', async () => {
+    let rejectAnatomy: ((error: Error) => void) | null = null;
+    vi.mocked(apiFetch).mockImplementation(() => new Promise((_resolve, reject) => { rejectAnatomy = reject; }));
+    const { result, rerender, activeNodeHolder } = setup({
+      stackList: { stackPorts: { 'web.yml': 8989 } },
+    });
+    act(() => { result.current.openStackApp('web.yml'); });
+    activeNodeHolder.current = { id: 2, type: 'remote', api_url: 'http://10.0.0.5:1852' } as ActiveNode;
+    rerender();
+    await act(async () => {
+      rejectAnatomy?.(new Error('offline'));
+      await Promise.resolve();
+    });
+    expect(toast.error).not.toHaveBeenCalled();
   });
 });
 

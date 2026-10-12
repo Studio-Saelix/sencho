@@ -30,6 +30,7 @@ import { useSidebarContextMenu } from './EditorLayout/hooks/useSidebarContextMen
 import { useServiceUrls, fetchServiceUrlEntry } from './EditorLayout/hooks/useServiceUrls';
 import { ServiceUrlModal } from './EditorLayout/ServiceUrlModal';
 import { patchServiceUrlLabel } from '@/lib/composeServiceUrl';
+import { confirmComposeSourceReload } from '@/lib/composeSourceConflict';
 import { useActiveNodeReapplyEligibility } from './EditorLayout/hooks/useActiveNodeReapplyEligibility';
 import { useHomeNavigation } from './EditorLayout/hooks/useHomeNavigation';
 import { resolveNodeSettleAction } from './EditorLayout/resolveNodeSettleAction';
@@ -910,12 +911,17 @@ export default function EditorLayout() {
           if (result.conflict && result.code === 'compose_source_changed'
             && selectedFileRef.current === captured.stackName
             && activeNodeIdRef.current === captured.nodeId) {
-            setContent(result.currentContent);
-            editorState.setOriginalContent(result.currentContent);
-            editorState.setComposeEtag(result.etag);
-            if (result.filename) editorState.setComposeFilename(result.filename);
-            setServiceUrlTarget(null);
-            toast.error('The compose file that was open is no longer the file on disk. Reloaded the current file.');
+            const reload = confirmComposeSourceReload(message => window.confirm(message));
+            if (reload) {
+              setContent(result.currentContent);
+              editorState.setOriginalContent(result.currentContent);
+              editorState.setComposeEtag(result.etag);
+              editorState.setComposeFilename(result.filename);
+              setServiceUrlTarget(null);
+              toast.info('Reloaded the current compose file.');
+            } else {
+              toast.error('The compose file on disk changed, so the URL was not saved. Your edits are still in the editor.');
+            }
             return;
           }
           toast.error(result.conflict

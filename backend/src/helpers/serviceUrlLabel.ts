@@ -11,6 +11,7 @@ export function serviceUrlFromLabelValue(raw: string): string | null {
   const value = raw.trim();
   if (!value || value.length > MAX_SERVICE_URL_LENGTH) return null;
   if (value.includes(' ') || value.includes('\n') || value.includes('\r')) return null;
+  if (!/^https?:\/\//i.test(value)) return null;
   let parsed: URL;
   try {
     parsed = new URL(value);

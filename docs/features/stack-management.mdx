@@ -290,7 +290,7 @@ Each row maps one compose concept to the value it resolves to right now:
 - **Network**: Derived network name and driver (default `{stack}_default · bridge`).
 - **Source**: `git · {host}/{repo}#{branch}` when Git Source is configured, else `local`. The whole row is clickable and opens the Git Source dialog. A pulsing dot appears when upstream has moved ahead of the working copy.
 
-A footer under the rows links the first published port. When that service has a `sencho.service.url` label, the link opens that address. Otherwise it opens the generated host and port.
+A footer under the rows links the first published port. When that service has a `sencho.service.url` label, the link opens that address. Otherwise, including when the service URL list cannot be loaded, it opens the generated host and port.
 
 If an image update is available, or the stack declares one or more services with a local `build:` section, an inline banner appears below the rows.
 
@@ -433,7 +433,7 @@ Press `B` again or toggle the bulk mode button to leave bulk mode.
 
 ## Controlling a single service
 
-Inside the stack detail view, container cards expose quick actions (View logs, Inspect image, Monitor, Open bash when available). A published port on the card is a link. It opens the service's `sencho.service.url` when that label is set, and the generated host and port otherwise. Editors see a pencil on that row to set or clear the URL. The address is saved in the compose file and is visible to anyone who can read the stack, so it must not contain a password. On single-service stacks, single-container multi-service rows, and empty declared-service rows, a **Service actions** kebab sits on that row. On multi-replica services the kebab lives on the shared service header only, not on each replica card. Use these actions to act on that service without touching the rest of the stack.
+Inside the stack detail view, container cards expose quick actions (View logs, Inspect image, Monitor, Open bash when available). A published port on the card is a link. It opens the service's `sencho.service.url` when that label is set, and the generated host and port otherwise, including when the service URL list cannot be loaded. Editors see a pencil on that row to set or clear the URL. The address is saved in the compose file and is visible to anyone who can read the stack, so it must not contain a password. On single-service stacks, single-container multi-service rows, and empty declared-service rows, a **Service actions** kebab sits on that row. On multi-replica services the kebab lives on the shared service header only, not on each replica card. Use these actions to act on that service without touching the rest of the stack.
 
 - **Inspect image**: opens the same image detail sheet as [Resources](/features/resources#inspect-image) for that container's image. Used by shows the current stack only from this entry point.
 - **Monitor**: opens the stack **Monitor** sheet with that Compose service preferred in the add forms. Shown only when the container reports a Compose service name.

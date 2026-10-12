@@ -2,6 +2,8 @@ import { describe, expect, it } from 'vitest';
 import { patchServiceUrlLabel } from './composeServiceUrl';
 import { parseServiceUrlResponse, resolveOpenAppTarget, resolvePublishedPortClick, tcpOwners, type ServiceUrlEntry } from './serviceUrlResolve';
 import { buildServiceUrl } from './serviceUrl';
+import { serviceUrlFromLabelValue } from './serviceUrlLabel';
+import { parse } from 'yaml';
 
 const ready: ServiceUrlEntry = {
   status: 'ready',
@@ -45,15 +47,35 @@ describe('resolvePublishedPortClick', () => {
     expect(click).toMatchObject({ kind: 'link', href: 'https://app.example.com', hostLabel: 'app.example.com' });
   });
 
-  it('stays text while the service URL is unavailable', () => {
+  it('keeps the generated link when the URL list is missing, legacy, or failed', () => {
+    const node = { type: 'local' as const };
+    for (const entry of [
+      { ...ready, status: 'unsupported' as const, serviceUrls: {} },
+      { ...ready, status: 'loading' as const, serviceUrls: {}, renderable: false },
+      { ...ready, status: 'unavailable' as const, serviceUrls: {}, renderable: false },
+    ]) {
+      const click = resolvePublishedPortClick({
+        entry,
+        serviceName: 'web',
+        publicPort: 8080,
+        portLabel: '8080 → 80/tcp',
+        node,
+      });
+      expect(click).toMatchObject({ kind: 'link', href: 'http://localhost:8080' });
+    }
+  });
+
+  it('keeps a remote generated link when anatomy has no service URL field', () => {
+    const entry = parseServiceUrlResponse(2, 'web', true, { renderable: true, ports: { web: [{ host: '8080', proto: 'tcp' }] } });
+    expect(entry.status).toBe('unsupported');
     const click = resolvePublishedPortClick({
-      entry: { ...ready, status: 'unsupported', serviceUrls: {} },
+      entry,
       serviceName: 'web',
       publicPort: 8080,
-      portLabel: '8080 → 80/tcp',
-      node: { type: 'local' },
+      portLabel: '8080',
+      node: { type: 'remote', api_url: 'http://10.0.0.5:1852' },
     });
-    expect(click).toMatchObject({ kind: 'text', reason: 'Service URL unavailable' });
+    expect(click).toMatchObject({ kind: 'link', href: 'http://10.0.0.5:8080' });
   });
 
   it('does not open when two services publish the port and one has an override', () => {
@@ -124,5 +146,74 @@ describe('patchServiceUrlLabel', () => {
     expect(patched.ok).toBe(true);
     if (patched.ok) expect(patched.yaml).toContain('sencho.service.url=https://app.example.com');
     expect(patchServiceUrlLabel(source, 'api', 'https://app.example.com')).toEqual({ ok: false, reason: 'missing-service' });
+  });
+
+  it('keeps labels inherited through a merge, and leaves the sibling alone', () => {
+    const source = [
+      'x-common: &common',
+      '  labels:',
+      '    traefik.enable: "true"',
+      '    traefik.http.routers.web.rule: Host(`app.example.com`)',
+      'services:',
+      '  web:',
+      '    <<: *common',
+      '    image: nginx',
+      '  api:',
+      '    <<: *common',
+      '    image: redis',
+      '',
+    ].join('\n');
+    const added = patchServiceUrlLabel(source, 'web', 'https://app.example.com');
+    expect(added.ok).toBe(true);
+    if (!added.ok) return;
+    const merged = parse(added.yaml, { merge: true }) as {
+      services: { web: { labels: Record<string, string> }; api: { labels: Record<string, string> } };
+    };
+    expect(merged.services.web.labels['traefik.enable']).toBe('true');
+    expect(merged.services.web.labels['sencho.service.url']).toBe('https://app.example.com');
+    expect(merged.services.api.labels['sencho.service.url']).toBeUndefined();
+    expect(added.yaml.split('services:')[0]).not.toContain('sencho.service.url');
+
+    const cleared = patchServiceUrlLabel(added.yaml, 'web', null);
+    expect(cleared.ok).toBe(true);
+    if (!cleared.ok) return;
+    const afterClear = parse(cleared.yaml, { merge: true }) as {
+      services: { web: { labels: Record<string, string> }; api: { labels: Record<string, string> } };
+    };
+    expect(afterClear.services.web.labels['traefik.enable']).toBe('true');
+    expect(afterClear.services.web.labels['sencho.service.url']).toBeUndefined();
+    expect(afterClear.services.api.labels['sencho.service.url']).toBeUndefined();
+  });
+
+  it('copies an aliased label map onto the edited service only', () => {
+    const source = [
+      'x-labels: &labels',
+      '  traefik.enable: "true"',
+      'services:',
+      '  web:',
+      '    labels: *labels',
+      '  api:',
+      '    labels: *labels',
+      '',
+    ].join('\n');
+    const patched = patchServiceUrlLabel(source, 'web', 'https://app.example.com');
+    expect(patched.ok).toBe(true);
+    if (!patched.ok) return;
+    const merged = parse(patched.yaml, { merge: true }) as {
+      services: { web: { labels: Record<string, string> }; api: { labels: Record<string, string> } };
+    };
+    expect(merged.services.web.labels).toMatchObject({
+      'traefik.enable': 'true',
+      'sencho.service.url': 'https://app.example.com',
+    });
+    expect(merged.services.api.labels).toEqual({ 'traefik.enable': 'true' });
+  });
+});
+
+describe('serviceUrlFromLabelValue', () => {
+  it('rejects a scheme that is not an absolute http or https authority', () => {
+    expect(serviceUrlFromLabelValue('https:app.example.com')).toBeNull();
+    expect(serviceUrlFromLabelValue('https:/app.example.com')).toBeNull();
+    expect(serviceUrlFromLabelValue('https://app.example.com/path')).toBe('https://app.example.com/path');
   });
 });
