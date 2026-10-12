@@ -1,7 +1,7 @@
 import { useCallback, useState } from 'react';
 import { apiFetch } from '@/lib/api';
 import { toast } from '@/components/ui/toast-store';
-import type { DismissalMode, DismissalSurface, FindingDismissal } from '@/types/findingDismissal';
+import type { DismissalMode, FindingDismissal, HubDismissalSurface } from '@/types/findingDismissal';
 
 /** The server's own `{ error }` sentence when it sent one, else the fallback. */
 async function serverMessage(res: Response, fallback: string): Promise<{ message: string; code: string | null }> {
@@ -35,9 +35,21 @@ interface DismissTarget {
   severity?: string;
 }
 
-interface UseFindingDismissalOptions {
-  /** Which surface's store the dismissal goes to (`/fleet/dismissals/<surface>`). */
-  surface: DismissalSurface;
+/**
+ * Where a surface that is not hub-owned keeps its dismissals. Drift lives on the
+ * node that owns the stack, so it addresses the active node's stack route.
+ */
+export interface DismissalEndpoint {
+  create: string;
+  remove: (id: number) => string;
+}
+
+/** Where the dismissal goes: a hub-owned surface's store, or a node-scoped endpoint. */
+type DismissalTarget =
+  | { surface: HubDismissalSurface; endpoint?: undefined }
+  | { endpoint: DismissalEndpoint; surface?: undefined };
+
+type UseFindingDismissalOptions = DismissalTarget & {
   /** A dismissal was created or already existed; the list updates from it without a refetch. */
   onUpsert: (dismissal: FindingDismissal) => void;
   /**
@@ -49,7 +61,7 @@ interface UseFindingDismissalOptions {
   onRemove: (id: number) => void;
   /** The finding vanished before it could be dismissed, so the list should be re-read. */
   onGone?: () => void;
-}
+};
 
 /**
  * Dismiss and restore findings for the team. One handler for every affordance:
@@ -57,9 +69,10 @@ interface UseFindingDismissalOptions {
  * list all run through here, so the request, the toast, and the busy state
  * cannot drift apart.
  *
- * Hub-owned, so every call is addressed to this instance whatever node is active.
+ * Hub-owned by default, so every call is addressed to this instance whatever
+ * node is active; with an `endpoint` it follows the active node instead.
  */
-export function useFindingDismissal({ surface, sendSeverity = false, onUpsert, onRemove, onGone }: UseFindingDismissalOptions) {
+export function useFindingDismissal({ surface, endpoint, sendSeverity = false, onUpsert, onRemove, onGone }: UseFindingDismissalOptions) {
   const [pending, setPending] = useState<ReadonlySet<string | number>>(() => new Set());
 
   const track = useCallback(async (key: string | number, run: () => Promise<void>) => {
@@ -78,9 +91,19 @@ export function useFindingDismissal({ surface, sendSeverity = false, onUpsert, o
   const restore = useCallback(async (id: number, options: { quiet?: boolean } = {}) => {
     await track(id, async () => {
       try {
-        const res = await apiFetch(`/fleet/dismissals/${id}`, { method: 'DELETE', localOnly: true });
+        const res = await apiFetch(endpoint ? endpoint.remove(id) : `/fleet/dismissals/${id}`, {
+          method: 'DELETE',
+          localOnly: endpoint === undefined,
+        });
         // A 404 means it is already gone (restored elsewhere, or retired by a later
-        // check): the end state is the one asked for.
+        // check): the end state is the one asked for. A node-scoped route also answers
+        // 404 for a stack or finding that is not there, so that list is re-read
+        // rather than edited on a guess.
+        if (res.status === 404 && endpoint !== undefined && onGone) {
+          toast.info('That dismissal is already gone. Refreshing the list.');
+          onGone();
+          return;
+        }
         if (!res.ok && res.status !== 404) {
           const { message } = await serverMessage(res, 'Could not restore the finding.');
           console.error('[FindingDismissal] restore refused:', res.status);
@@ -94,14 +117,14 @@ export function useFindingDismissal({ surface, sendSeverity = false, onUpsert, o
         toast.error('Could not restore the finding.');
       }
     });
-  }, [onRemove, track]);
+  }, [endpoint, onRemove, onGone, track]);
 
   const dismiss = useCallback(async (finding: DismissTarget, mode: DismissalMode, days?: number) => {
     await track(finding.id, async () => {
       try {
-        const res = await apiFetch(`/fleet/dismissals/${surface}`, {
+        const res = await apiFetch(endpoint ? endpoint.create : `/fleet/dismissals/${surface}`, {
           method: 'POST',
-          localOnly: true,
+          localOnly: endpoint === undefined,
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             findingId: finding.id,
@@ -149,7 +172,7 @@ export function useFindingDismissal({ surface, sendSeverity = false, onUpsert, o
         toast.error('Could not dismiss the finding.');
       }
     });
-  }, [surface, sendSeverity, onUpsert, onGone, restore, track]);
+  }, [surface, endpoint, sendSeverity, onUpsert, onGone, restore, track]);
 
   const isPending = useCallback((key: string | number) => pending.has(key), [pending]);
   return { dismiss, restore, isPending };

@@ -24,6 +24,7 @@ import type { RollbackOperationKind } from '../types/rollbackGeneration';
 import { collectImageIds, parseServicesJsonStrict } from './recoveryServicesJson';
 import { GITOPS_DUE_INDEX_SQL, GITOPS_SCHEMA_SQL } from './gitops/schema';
 import { PLACEMENT_POLICY_REASONS } from './gitops/placementPolicy';
+import type { DismissalMode } from './findingDismissals/types';
 
 export type { SnapshotFileReadResult } from '../helpers/snapshotFileDecrypt';
 export type { RollbackOperationKind } from '../types/rollbackGeneration';
@@ -458,6 +459,13 @@ export interface StackDriftFindingRow {
     actual_json: string | null;
     detected_at: number;
     resolved_at: number | null;
+    /** A team dismissal on this finding, kept after the row closes. All six columns are written and cleared together. */
+    dismissed_by: string | null;
+    dismissed_at: number | null;
+    dismissed_fingerprint: string | null;
+    dismissed_mode: string | null;
+    dismissed_expires_at: number | null;
+    dismissed_count: number | null;
 }
 
 export interface StackExposureIntentRow {
@@ -1276,6 +1284,7 @@ export class DatabaseService {
         this.migrateAutoHealNodeId();
         this.migrateFleetSyncStickyError();
         this.migrateStackDossierHashes();
+        this.migrateDriftFindingDismissals();
         this.migrateGitSourceMultiFile();
         this.migrateGitSourceSshDeployKey();
         this.migrateGitSourcePrivateCa();
@@ -2989,6 +2998,15 @@ stmt.run('gitops_schema_version', '1');
         this.tryAddColumn('stack_dossiers', 'last_drift_check_at', 'INTEGER');
     }
 
+    private migrateDriftFindingDismissals(): void {
+        this.tryAddColumn('stack_drift_findings', 'dismissed_by', 'TEXT');
+        this.tryAddColumn('stack_drift_findings', 'dismissed_at', 'INTEGER');
+        this.tryAddColumn('stack_drift_findings', 'dismissed_fingerprint', 'TEXT');
+        this.tryAddColumn('stack_drift_findings', 'dismissed_mode', 'TEXT');
+        this.tryAddColumn('stack_drift_findings', 'dismissed_expires_at', 'INTEGER');
+        this.tryAddColumn('stack_drift_findings', 'dismissed_count', 'INTEGER');
+    }
+
     private migrateGitSourceSshDeployKey(): void {
         this.tryAddColumn('stack_git_sources', 'encrypted_deploy_key', 'TEXT');
         this.tryAddColumn('stack_git_sources', 'ssh_known_hosts_entry', 'TEXT');
@@ -4564,7 +4582,7 @@ stmt.run('gitops_schema_version', '1');
 
     // --- Stack Drift Findings (the persisted drift ledger) ---
 
-    public insertDriftFinding(f: Omit<StackDriftFindingRow, 'id' | 'resolved_at'>): number {
+    public insertDriftFinding(f: Omit<StackDriftFindingRow, 'id' | 'resolved_at' | `dismissed_${string}`>): number {
         const res = this.db.prepare(
             `INSERT INTO stack_drift_findings
                 (node_id, stack_name, service, finding_type, severity, message, expected_json, actual_json, detected_at, resolved_at)
@@ -4586,6 +4604,39 @@ stmt.run('gitops_schema_version', '1');
         return this.db.prepare(
             'SELECT * FROM stack_drift_findings WHERE node_id = ? AND stack_name = ? AND resolved_at IS NULL ORDER BY detected_at ASC, id ASC'
         ).all(nodeId, stackName) as StackDriftFindingRow[];
+    }
+
+    /** One ledger row by id, open or resolved. */
+    public getDriftFinding(id: number): StackDriftFindingRow | undefined {
+        return this.db.prepare('SELECT * FROM stack_drift_findings WHERE id = ?').get(id) as StackDriftFindingRow | undefined;
+    }
+
+    /** The open finding for one service and kind on a stack, if the ledger holds it. */
+    public getOpenDriftFindingByKey(nodeId: number, stackName: string, service: string, findingType: string): StackDriftFindingRow | undefined {
+        return this.db.prepare(
+            'SELECT * FROM stack_drift_findings WHERE node_id = ? AND stack_name = ? AND service = ? AND finding_type = ? AND resolved_at IS NULL ORDER BY id DESC LIMIT 1'
+        ).get(nodeId, stackName, service, findingType) as StackDriftFindingRow | undefined;
+    }
+
+    /** Record a dismissal on an open finding. Closed rows are never dismissed. */
+    public setDriftFindingDismissal(id: number, d: {
+        by: string; at: number; fingerprint: string; mode: DismissalMode; expiresAt: number | null; count: number;
+    }): boolean {
+        return this.db.prepare(
+            `UPDATE stack_drift_findings
+                SET dismissed_by = ?, dismissed_at = ?, dismissed_fingerprint = ?,
+                    dismissed_mode = ?, dismissed_expires_at = ?, dismissed_count = ?
+              WHERE id = ? AND resolved_at IS NULL`
+        ).run(d.by, d.at, d.fingerprint, d.mode, d.expiresAt, d.count, id).changes > 0;
+    }
+
+    public clearDriftFindingDismissal(id: number): boolean {
+        return this.db.prepare(
+            `UPDATE stack_drift_findings
+                SET dismissed_by = NULL, dismissed_at = NULL, dismissed_fingerprint = NULL,
+                    dismissed_mode = NULL, dismissed_expires_at = NULL, dismissed_count = NULL
+              WHERE id = ? AND dismissed_by IS NOT NULL`
+        ).run(id).changes > 0;
     }
 
     /** Recent findings for a stack: open ones first, then resolved, each newest first. */

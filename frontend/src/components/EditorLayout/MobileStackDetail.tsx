@@ -281,6 +281,7 @@ export function MobileStackDetail(props: EditorViewProps) {
                                 onEditCompose={openComposeEditor}
                                 onOpenGitSource={() => setGitSourceOpen(true)}
                                 onApplyUpdate={() => { void updateStack(); }}
+                                onRedeploy={() => deployStack()}
                                 applying={loadingAction === 'update'}
                                 canEdit={canEditStack}
                                 notifications={notifications}

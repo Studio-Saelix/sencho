@@ -7,7 +7,12 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent, waitFor, within } from '@testing-library/react';
 
 vi.mock('@/lib/api', () => ({ apiFetch: vi.fn() }));
-vi.mock('@/components/ui/toast-store', () => ({ toast: { success: vi.fn(), error: vi.fn() } }));
+vi.mock('@/components/ui/toast-store', () => ({ toast: { success: vi.fn(), error: vi.fn(), info: vi.fn() } }));
+/** Whether the account may deploy this stack; a test flips it to see the gated verbs drop. */
+const authBox: { canDeploy: boolean } = { canDeploy: true };
+vi.mock('@/context/AuthContext', () => ({
+  useAuth: () => ({ can: (action: string) => action !== 'stack:deploy' || authBox.canDeploy }),
+}));
 /**
  * The active node is held in a module-level box so a test can switch it and
  * re-render, which is what a node change looks like to this tab.
@@ -88,6 +93,7 @@ function mockFailedDriftRead(options: { portfolio?: { application: unknown; ok?:
 beforeEach(() => {
   vi.clearAllMocks();
   activeNodeBox.id = 1;
+  authBox.canDeploy = true;
 });
 
 describe('DriftPanel', () => {

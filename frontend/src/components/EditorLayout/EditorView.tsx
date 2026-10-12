@@ -168,7 +168,7 @@ export interface EditorViewProps {
     activeNode: Node | null;
 
     // Stack actions
-    deployStack: (e: React.MouseEvent) => Promise<void>;
+    deployStack: (e?: React.MouseEvent) => Promise<void>;
     restartStack: (e: React.MouseEvent) => Promise<void>;
     stopStack: (e: React.MouseEvent) => Promise<void>;
     updateStack: (e?: React.MouseEvent) => Promise<void>;
@@ -463,6 +463,7 @@ export function EditorView(props: EditorViewProps) {
             onOpenFiles={canRead ? () => { setEditingCompose(true); setActiveTab('files'); } : undefined}
             onOpenGitSource={() => setGitSourceOpen(true)}
             onApplyUpdate={() => { void updateStack(); }}
+            onRedeploy={() => deployStack()}
             applying={loadingAction === 'update'}
             canEdit={can('stack:edit', 'stack', stackName, activeNode?.id)}
             notifications={notifications}

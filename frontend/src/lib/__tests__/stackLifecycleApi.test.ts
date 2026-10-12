@@ -3,7 +3,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 vi.mock('@/lib/api', () => ({ fetchForNode: vi.fn() }));
 
 import { fetchForNode } from '@/lib/api';
-import { backupStack, startStack } from '../stackLifecycleApi';
+import { backupStack, startService, startStack } from '../stackLifecycleApi';
 
 const reply = (status: number, body: unknown): Response => ({
   ok: status >= 200 && status < 300,
@@ -27,6 +27,16 @@ describe('stackLifecycleApi', () => {
     expect(await startStack(1, 'web')).toMatchObject({ ok: false, reason: 'no-containers' });
     vi.mocked(fetchForNode).mockResolvedValueOnce(reply(404, { error: 'Stack not found' }));
     expect(await startStack(1, 'web')).toMatchObject({ ok: false, reason: 'failed', message: 'Stack not found' });
+  });
+
+  it('starts one service on the given node and reads a missing service as nothing to start', async () => {
+    vi.mocked(fetchForNode).mockResolvedValueOnce(reply(200, {}));
+    expect(await startService(2, 'my stack', 'db/1')).toEqual({ ok: true });
+    expect(fetchForNode).toHaveBeenCalledWith('/stacks/my%20stack/services/db%2F1/start', 2, { method: 'POST' });
+    vi.mocked(fetchForNode).mockResolvedValueOnce(reply(404, { error: "Service 'db' not found in stack 'web'." }));
+    expect(await startService(1, 'web', 'db')).toMatchObject({ ok: false, reason: 'no-containers' });
+    vi.mocked(fetchForNode).mockResolvedValueOnce(reply(404, { error: 'Stack not found' }));
+    expect(await startService(1, 'web', 'db')).toMatchObject({ ok: false, reason: 'failed' });
   });
 
   it('never reports no-containers for a backup', async () => {
