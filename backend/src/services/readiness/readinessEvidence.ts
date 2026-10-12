@@ -25,7 +25,9 @@ async function computeWorkloadEvidence(nodeId: number): Promise<NodeWorkloadEvid
     const problems: NodeWorkloadProblem[] = [];
     for (const [stack, info] of Object.entries(evidence.data)) {
       counts[info.status] = (counts[info.status] ?? 0) + 1;
-      if (info.status !== 'running') problems.push({ stack, status: info.status });
+      if (info.status !== 'running') {
+        problems.push({ stack, status: info.status, running: info.running, total: info.total });
+      }
     }
     // Compared against the TTL this read is cached under, which makes it the
     // cache's own expiry condition rather than a second guess at one: the read

@@ -16,7 +16,12 @@ import {
   type ReadinessTarget,
 } from '@/types/readiness';
 import { ALL, EMPTY_FINDINGS_FILTER, VERDICT_OPTIONS, filterFindings, type FindingsFilter } from './findingsFilter';
-import { TONE_CHIP, TONE_DOT, TONE_ROW, codeCopy, domainMeta, stateMeta } from '../readinessMeta';
+import { TONE_CHIP, TONE_DOT, TONE_ROW, codeCopy, codeRemediation, domainMeta, stateMeta } from '../readinessMeta';
+import { FindingRowActions } from '@/components/ui/finding-row-actions';
+import { DismissedSection, type DismissedItem } from '@/components/ui/dismissed-section';
+import type { DismissalMode, FindingDismissal } from '@/types/findingDismissal';
+import type { DismissedFinding } from '@/lib/findingDismissals';
+import { describeDismissal } from './describeDismissal';
 
 const HEAD = 'text-[10px] uppercase tracking-[0.18em]';
 const FILTER_CLASS = 'w-[200px] [&>button]:!bg-background';
@@ -141,6 +146,15 @@ interface ReadinessFindingsTableProps {
   /** Drill-down label, or null when the current user cannot reach that surface. */
   actionFor: (target: ReadinessTarget) => string | null;
   onOpen: (finding: ReadinessFinding) => void;
+  /** Whether this account may dismiss the finding; Dismiss is omitted rather than left to 403. */
+  canDismiss: (finding: ReadinessFinding) => boolean;
+  onDismiss: (finding: ReadinessFinding, mode: DismissalMode, days?: number) => void;
+  isDismissing: (finding: ReadinessFinding) => boolean;
+  /** Findings a dismissal still covers, listed under the table with a Restore. They follow the filter. */
+  dismissed: DismissedFinding<ReadinessFinding>[];
+  onRestore: (dismissal: FindingDismissal) => void;
+  isRestoring: (dismissal: FindingDismissal) => boolean;
+  now: number;
 }
 
 /**
@@ -155,6 +169,13 @@ export function ReadinessFindingsTable({
   onFilterChange,
   actionFor,
   onOpen,
+  canDismiss,
+  onDismiss,
+  isDismissing,
+  dismissed,
+  onRestore,
+  isRestoring,
+  now,
 }: ReadinessFindingsTableProps) {
   // The page belongs to the filter it was chosen under, so any filter change,
   // including one made from the matrix, starts again at the first page.
@@ -167,6 +188,19 @@ export function ReadinessFindingsTable({
   const safePage = Math.min(page, totalPages - 1);
   const pageItems = visible.slice(safePage * PAGE_SIZE, (safePage + 1) * PAGE_SIZE);
   const filtered = visible.length !== findings.length;
+  // The dismissed list answers to the same filter, so a node filter does not
+  // list the rest of the fleet's dismissals under one node's findings.
+  const visibleDismissedIds = new Set(filterFindings(dismissed.map(item => item.finding), filter, nodeNames).map(item => item.id));
+  const dismissedItems: DismissedItem[] = dismissed
+    .filter(item => visibleDismissedIds.has(item.finding.id))
+    .map(({ finding, dismissal }) => ({
+      id: dismissal.id,
+      title: `${codeCopy(finding.code)} · ${[nodeNames.get(finding.nodeId) ?? `node ${finding.nodeId}`, finding.stack].filter(Boolean).join(' / ')}`,
+      meta: describeDismissal(dismissal, now),
+      onRestore: canDismiss(finding) ? () => onRestore(dismissal) : undefined,
+      restoring: isRestoring(dismissal),
+    }));
+  const onlyDismissedHere = visible.length === 0 && dismissedItems.length > 0;
 
   return (
     <section aria-label="Readiness findings" className="space-y-2">
@@ -198,13 +232,20 @@ export function ReadinessFindingsTable({
                 nodeName={nodeNames.get(finding.nodeId) ?? `node ${finding.nodeId}`}
                 action={actionFor(finding.target)}
                 onOpen={onOpen}
+                canDismiss={canDismiss(finding)}
+                dismissing={isDismissing(finding)}
+                onDismiss={onDismiss}
               />
             ))}
           </TableBody>
         </Table>
         {pageItems.length === 0 && (
           <div className="py-12 text-center text-sm text-muted-foreground">
-            {findings.length === 0 ? 'Nothing needs attention across this fleet.' : 'No finding matches the current filters.'}
+            {onlyDismissedHere
+              ? 'Everything here is dismissed.'
+              : findings.length > 0 || dismissed.length > 0
+                ? 'No finding matches the current filters.'
+                : 'Nothing needs attention across this fleet.'}
           </div>
         )}
       </div>
@@ -217,6 +258,7 @@ export function ReadinessFindingsTable({
           Clear filters
         </button>
       )}
+      <DismissedSection items={dismissedItems} forceOpen={onlyDismissedHere} />
       {visible.length > PAGE_SIZE && (
         <div className="flex items-center justify-end gap-1">
           <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => setPage(Math.max(0, safePage - 1))} disabled={safePage === 0} aria-label="Previous page">
@@ -237,14 +279,18 @@ interface FindingRowProps {
   nodeName: string;
   action: string | null;
   onOpen: (finding: ReadinessFinding) => void;
+  canDismiss: boolean;
+  dismissing: boolean;
+  onDismiss: (finding: ReadinessFinding, mode: DismissalMode, days?: number) => void;
 }
 
-function FindingRow({ finding, nodeName, action, onOpen }: FindingRowProps) {
+function FindingRow({ finding, nodeName, action, onOpen, canDismiss, dismissing, onDismiss }: FindingRowProps) {
   const state = stateMeta(finding.severity);
   // A finding that restates a canonical verdict shows that verdict; any other shows its state.
   const chip = verdictChip(finding.verdict) ?? { label: state.label, tone: TONE_CHIP[state.tone] };
   const domain = domainMeta(finding.domain);
   const DomainIcon = domain.icon;
+  const remediation = codeRemediation(finding.code);
 
   return (
     <TableRow className={cn('transition-colors hover:bg-muted/30', TONE_ROW[state.tone])}>
@@ -258,6 +304,7 @@ function FindingRow({ finding, nodeName, action, onOpen }: FindingRowProps) {
             {finding.count > 1 && <span className="ml-1.5 font-mono text-[10px] tabular-nums text-stat-subtitle">×{finding.count}</span>}
           </span>
           {finding.detail && <span className="mt-0.5 block text-[11px] leading-snug text-stat-subtitle">{finding.detail}</span>}
+          {remediation && <span className="mt-0.5 block text-[11px] leading-snug text-stat-subtitle">{remediation}</span>}
           {/* The scope columns are hidden on a phone, so the row names it inline. */}
           <span className="mt-0.5 hidden font-mono text-[10px] text-stat-subtitle max-md:block">
             {[nodeName, finding.stack].filter(Boolean).join(' / ')}
@@ -286,17 +333,25 @@ function FindingRow({ finding, nodeName, action, onOpen }: FindingRowProps) {
         </span>
       </TableCell>
       <TableCell className="text-right align-top">
-        {action && (
-          <Button
-            variant="ghost"
-            size="sm"
-            className="h-7 whitespace-nowrap px-2 text-xs text-stat-subtitle hover:text-stat-value"
-            onClick={() => onOpen(finding)}
-          >
-            {action}
-            <ArrowRight className="ml-1 h-3.5 w-3.5" strokeWidth={1.5} />
-          </Button>
-        )}
+        <FindingRowActions
+          dismissPolicy={finding.dismissPolicy ?? 'none'}
+          canDismiss={canDismiss}
+          pending={dismissing}
+          subject={codeCopy(finding.code)}
+          onDismiss={(mode, days) => onDismiss(finding, mode, days)}
+        >
+          {action && (
+            <Button
+              variant="ghost"
+              size="sm"
+              className="h-7 whitespace-nowrap px-2 text-xs text-stat-subtitle hover:text-stat-value"
+              onClick={() => onOpen(finding)}
+            >
+              {action}
+              <ArrowRight className="ml-1 h-3.5 w-3.5" strokeWidth={1.5} />
+            </Button>
+          )}
+        </FindingRowActions>
       </TableCell>
     </TableRow>
   );

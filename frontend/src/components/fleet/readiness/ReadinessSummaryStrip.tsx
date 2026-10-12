@@ -24,14 +24,19 @@ function worstState(counts: Record<DomainState, number>): DomainState {
  * counts by state, and when the check ran. One flat line, not a second
  * masthead; the Fleet masthead above it stays the page's only hero.
  */
-export function ReadinessSummaryStrip({ data, checking }: { data: FleetReadinessResponse; checking: boolean }) {
+export function ReadinessSummaryStrip({ data, checking, dismissedCount = 0 }: {
+  data: FleetReadinessResponse;
+  checking: boolean;
+  /** Findings a team dismissal still covers. They stay out of the finding count and are named beside it. */
+  dismissedCount?: number;
+}) {
   const now = useNow(1000);
   const counts = data.summary.nodes;
   const worst = worstState(counts);
   const tone = stateMeta(worst).tone;
   const total = data.nodes.length;
   const unverified = counts.unknown + counts.unavailable;
-  const findingCount = data.findings.length;
+  const findingCount = data.findings.length - dismissedCount;
 
   const parts = [
     counts.attention > 0 ? `${counts.attention} attention` : null,
@@ -39,6 +44,7 @@ export function ReadinessSummaryStrip({ data, checking }: { data: FleetReadiness
     unverified > 0 ? `${unverified} unverified` : null,
     `${counts.healthy} of ${total} healthy`,
     `${findingCount} ${findingCount === 1 ? 'finding' : 'findings'}`,
+    dismissedCount > 0 ? `${dismissedCount} dismissed` : null,
   ].filter((part): part is string => part !== null);
 
   return (

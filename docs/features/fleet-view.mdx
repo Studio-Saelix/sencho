@@ -205,7 +205,7 @@ The order is deliberate and worst-first: a known problem outranks a condition th
 
 ### Findings
 
-**Findings** is the worklist, worst first. Each row names the condition in a sentence, carries the explanation the owning check gave (for example, why an update needs review), and names the node, stack, and domain it concerns. The action button opens the surface where you act on it: the stack, the node's details, the node's Security view, Auto-updates, Fleet Snapshots, or Settings > Nodes. A finding that restates a stack's update or rollback verdict repeats that verdict in the same words the stack's own readiness check uses, so `rollback not ready` means the same thing in both places.
+**Findings** is the worklist, worst first. Each row names the condition in a sentence, says in one line what to do about it, carries the explanation the owning check gave (for example, why an update needs review), and names the node, stack, and domain it concerns. The action button opens the surface where you act on it: the stack, the node's details, the node's Security view, Auto-updates, Fleet Snapshots, or Settings > Nodes. A finding that restates a stack's update or rollback verdict repeats that verdict in the same words the stack's own readiness check uses, so `rollback not ready` means the same thing in both places.
 
 Use the filters above the table to narrow the list:
 
@@ -214,6 +214,14 @@ Use the filters above the table to narrow the list:
 - **Search** matches the finding text, its explanation, and node and stack names.
 
 When a node cannot be reached, its finding says so once, on Connectivity, instead of repeating the same cause for every domain the hub could not read.
+
+### Dismissing a finding
+
+A finding you have seen and decided to live with does not have to stay in the worklist. **Dismiss** on its row moves it out of the list in one click and shows an **Undo** for a few seconds. By default a dismissal holds until the finding changes: if the stack goes from one service down to two, the condition gets worse, or its underlying facts change, the finding comes back on its own. The chevron beside **Dismiss** offers **Dismiss for 7 days** and **Dismiss permanently**. A permanent dismissal still comes back if the finding gets worse.
+
+A dismissal applies to everyone on this hub, and the audit log records who made it. Dismissed findings are never hidden outright: the summary counts them (`2 dismissed`), and the **dismissed** row under the table lists each one with who dismissed it, when, and for how long. **Restore** puts a finding back in the list. A dismissal clears itself once the condition it covered has gone and a complete check confirms it, so the same problem returning later is shown again.
+
+Some findings cannot be dismissed. A finding that restates the Security posture is resolved on the Security page, so it has no **Dismiss**. A finding about evidence that could not be read, such as a node that did not answer, can be dismissed for a time but not permanently, because a permanent dismissal would hide the absence of evidence. Dismissing changes nothing about the matrix: its cells keep counting every finding, and the fleet's state and the node counts above stay what the evidence says.
 
 ### The readiness matrix
 

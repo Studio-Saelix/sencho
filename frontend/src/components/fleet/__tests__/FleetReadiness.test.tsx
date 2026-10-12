@@ -1,5 +1,8 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { act, fireEvent, render, screen, within } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
+import { toast } from '@/components/ui/toast-store';
+import type { FindingDismissal } from '@/types/findingDismissal';
 import { FleetReadiness } from '../FleetReadiness';
 import { EMPTY_FINDINGS_FILTER, filterFindings } from '../readiness/findingsFilter';
 import { SENCHO_OPEN_STACK_EVENT } from '@/lib/events';
@@ -61,6 +64,8 @@ function finding(over: Partial<ReadinessFinding> & { id: string; code: Readiness
     verdict: null,
     detail: null,
     target: { surface: 'node-details', nodeId: 2 },
+    fingerprint: 'fp',
+    dismissPolicy: 'any',
     ...over,
   };
 }
@@ -76,6 +81,7 @@ function response(over: Partial<FleetReadinessResponse> = {}): FleetReadinessRes
     },
     findings: [],
     nodes: [],
+    dismissals: [],
     ...over,
   };
 }
@@ -100,11 +106,14 @@ function findingRows(): HTMLElement[] {
   return within(section).getAllByRole('row').slice(1);
 }
 
-type HarnessProps = Omit<Parameters<typeof FleetReadiness>[0], 'readiness'> & { refreshKey: number };
+type HarnessProps = Omit<Parameters<typeof FleetReadiness>[0], 'readiness' | 'canDismiss'> & {
+  refreshKey: number;
+  canDismiss?: Parameters<typeof FleetReadiness>[0]['canDismiss'];
+};
 
 /** Stands in for the Fleet shell, which owns the readiness check and hands it to the tab. */
-function Harness({ refreshKey, ...props }: HarnessProps) {
-  return <FleetReadiness readiness={useFleetReadiness(refreshKey)} {...props} />;
+function Harness({ refreshKey, canDismiss = () => true, ...props }: HarnessProps) {
+  return <FleetReadiness readiness={useFleetReadiness(refreshKey)} canDismiss={canDismiss} {...props} />;
 }
 
 function renderReadiness(props: Partial<HarnessProps> = {}) {
@@ -345,7 +354,7 @@ describe('FleetReadiness', () => {
     renderReadiness({ onOpenNodeSecurity });
 
     await screen.findByText('Security scanner is unavailable');
-    fireEvent.click(within(findingRows()[0]).getByRole('button', { name: /Security/ }));
+    fireEvent.click(within(findingRows()[0]).getByRole('button', { name: /^Security/ }));
     expect(onOpenNodeSecurity).toHaveBeenCalledWith(2, 'scanner');
   });
 
@@ -537,5 +546,223 @@ describe('filterFindings', () => {
     expect(ids(filterFindings(findings, { ...EMPTY_FINDINGS_FILTER, severity: 'degraded' }, names))).toEqual(['r1', 'u2']);
     expect(ids(filterFindings(findings, { ...EMPTY_FINDINGS_FILTER, query: 'nas' }, names))).toEqual(['r2', 'c1']);
     expect(ids(filterFindings(findings, { ...EMPTY_FINDINGS_FILTER, query: 'WEB' }, names))).toEqual(['u1']);
+  });
+});
+
+describe('FleetReadiness dismissals', () => {
+  const STOPPED = finding({
+    id: 'workloads:2:api:workloads_exited',
+    domain: 'workloads',
+    code: 'workloads_exited',
+    stack: 'api',
+    target: { surface: 'stack', nodeId: 2, stackName: 'api' },
+    fingerprint: 'fp-api',
+  });
+  const SLOW = finding({ id: 'connectivity:2:probe_timeout', domain: 'connectivity', code: 'probe_timeout', severity: 'unavailable', dismissPolicy: 'timed' });
+
+  function dismissalFor(f: ReadinessFinding, over: Partial<FindingDismissal> = {}): FindingDismissal {
+    return {
+      id: 7, nodeId: f.nodeId, surface: 'readiness', findingKey: f.id, fingerprint: f.fingerprint,
+      severity: f.severity, count: f.count, mode: 'until_change', expiresAt: null,
+      createdBy: 'alice', createdAt: Date.now() - 3_600_000, ...over,
+    };
+  }
+
+  function board(over: Partial<FleetReadinessResponse> = {}) {
+    return response({
+      findings: [STOPPED, SLOW],
+      nodes: [node({ id: 2, name: 'Edge', state: 'attention', cells: { workloads: problemCell('workloads_exited', 'attention') } })],
+      ...over,
+    });
+  }
+
+  /** Answers the readiness read, and any dismissal call with the given reply. */
+  function mockServer(reply: (url: string, init?: RequestInit) => Response, read: FleetReadinessResponse) {
+    vi.mocked(apiFetch).mockImplementation(async (url: string, init?: RequestInit) => (
+      url.startsWith('/fleet/dismissals') ? reply(url, init) : okResponse(read)
+    ));
+  }
+
+  const json = (body: unknown, status = 200) => ({ ok: status < 400, status, json: async () => body }) as Response;
+
+  it('sets a dismissed finding aside, names it, and leaves the matrix untouched', async () => {
+    mockResponse(board({ dismissals: [dismissalFor(STOPPED)] }));
+    renderReadiness();
+
+    await screen.findByText('Node did not answer in time');
+    expect(screen.queryByText('Stack is stopped')).toBeNull();
+    expect(findingRows()).toHaveLength(1);
+    expect(screen.getByText(/1 finding · 1 dismissed/)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /1 dismissed/ })).toBeInTheDocument();
+    // The cell still says what the evidence says: the dismissed stack is still counted.
+    const matrix = await matrixRows();
+    expect(within(matrix[0]).getByText('1 exited')).toBeInTheDocument();
+  });
+
+  it('shows a dismissed finding again as soon as it changes', async () => {
+    mockResponse(board({ dismissals: [dismissalFor(STOPPED, { fingerprint: 'an-older-state' })] }));
+    renderReadiness();
+
+    expect(await screen.findByText('Stack is stopped')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /dismissed/ })).toBeNull();
+  });
+
+  it('shows a dismissed finding again once it gets worse', async () => {
+    mockResponse(board({ dismissals: [dismissalFor(STOPPED, { severity: 'degraded', mode: 'forever' })] }));
+    renderReadiness();
+
+    expect(await screen.findByText('Stack is stopped')).toBeInTheDocument();
+  });
+
+  it('dismisses in one click, moves the row at once, and offers Undo', async () => {
+    const success = vi.spyOn(toast, 'success').mockReturnValue('t');
+    mockServer(() => json({ dismissal: dismissalFor(STOPPED), kept: false }, 201), board());
+    renderReadiness();
+
+    await screen.findByText('Stack is stopped');
+    const row = findingRows().find(candidate => within(candidate).queryByText('Stack is stopped'))!;
+    fireEvent.click(within(row).getByRole('button', { name: 'Dismiss: Stack is stopped' }));
+
+    await waitFor(() => expect(screen.queryByText('Stack is stopped')).toBeNull());
+    const post = vi.mocked(apiFetch).mock.calls.find(([url]) => url === '/fleet/dismissals/readiness')!;
+    expect(post[1]).toMatchObject({ method: 'POST', localOnly: true });
+    expect(JSON.parse(post[1]!.body as string)).toEqual({ findingId: STOPPED.id, fingerprint: 'fp-api', count: 1, mode: 'until_change' });
+    expect(screen.getByRole('button', { name: /1 dismissed/ })).toBeInTheDocument();
+    expect(success).toHaveBeenCalledWith(expect.stringContaining('returns if it changes'), expect.objectContaining({
+      action: expect.objectContaining({ label: 'Undo' }),
+    }));
+  });
+
+  it('puts the finding back when Undo is chosen', async () => {
+    const success = vi.spyOn(toast, 'success').mockReturnValue('t');
+    mockServer((_url, init) => (init?.method === 'DELETE'
+      ? ({ ok: true, status: 204, json: async () => ({}) }) as Response
+      : json({ dismissal: dismissalFor(STOPPED), kept: false }, 201)), board());
+    renderReadiness();
+
+    await screen.findByText('Stack is stopped');
+    fireEvent.click(within(findingRows().find(candidate => within(candidate).queryByText('Stack is stopped'))!).getByRole('button', { name: 'Dismiss: Stack is stopped' }));
+    await waitFor(() => expect(screen.queryByText('Stack is stopped')).toBeNull());
+
+    const undo = (success.mock.calls[0][1] as { action: { onClick: () => void } }).action.onClick;
+    await act(async () => { undo(); });
+
+    expect(await screen.findByText('Stack is stopped')).toBeInTheDocument();
+    expect(vi.mocked(apiFetch)).toHaveBeenCalledWith('/fleet/dismissals/7', { method: 'DELETE', localOnly: true });
+  });
+
+  it('restores from the dismissed list', async () => {
+    mockServer(() => ({ ok: true, status: 204, json: async () => ({}) }) as Response, board({ dismissals: [dismissalFor(STOPPED)] }));
+    renderReadiness();
+
+    fireEvent.click(await screen.findByRole('button', { name: /1 dismissed/ }));
+    expect(await screen.findByText(/dismissed by alice/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Restore' }));
+
+    expect(await screen.findByText('Stack is stopped')).toBeInTheDocument();
+  });
+
+  it('omits Dismiss for an account that cannot dismiss, and for a finding resolved elsewhere', async () => {
+    const posture = finding({ id: 'security:2:posture_action_needed', domain: 'security', code: 'posture_action_needed', dismissPolicy: 'none' });
+    mockResponse(board({ findings: [STOPPED, posture] }));
+    renderReadiness({ canDismiss: candidate => candidate.id !== STOPPED.id });
+
+    await screen.findByText('Security needs action');
+    expect(screen.queryAllByRole('button', { name: /^Dismiss/ })).toHaveLength(0);
+  });
+
+  it('dismisses a finding about missing evidence for a set time only, never until it changes or permanently', async () => {
+    const user = userEvent.setup();
+    mockServer(() => json({ dismissal: dismissalFor(SLOW, { mode: 'days', expiresAt: Date.now() + 7 * 86_400_000 }), kept: false }, 201), board({ findings: [SLOW] }));
+    renderReadiness();
+
+    await screen.findByText('Node did not answer in time');
+    await user.click(screen.getByRole('button', { name: 'More ways to dismiss' }));
+    expect(await screen.findByRole('menuitem', { name: 'Dismiss for 30 days' })).toBeInTheDocument();
+    expect(screen.queryByRole('menuitem', { name: 'Dismiss permanently' })).toBeNull();
+    expect(screen.queryByRole('menuitem', { name: 'Dismiss until it changes' })).toBeNull();
+    await user.keyboard('{Escape}');
+
+    await user.click(screen.getByRole('button', { name: 'Dismiss: Node did not answer in time' }));
+    const post = vi.mocked(apiFetch).mock.calls.find(([url]) => url === '/fleet/dismissals/readiness')!;
+    expect(JSON.parse(post[1]!.body as string)).toEqual({ findingId: SLOW.id, fingerprint: 'fp', count: 1, mode: 'days', days: 7 });
+  });
+
+  it('offers a permanent dismissal for an ordinary finding', async () => {
+    const user = userEvent.setup();
+    mockResponse(board({ findings: [STOPPED] }));
+    renderReadiness();
+
+    await screen.findByText('Stack is stopped');
+    await user.click(screen.getByRole('button', { name: 'More ways to dismiss' }));
+    expect(await screen.findByRole('menuitem', { name: 'Dismiss permanently' })).toBeInTheDocument();
+  });
+
+  it('says so, and re-reads, when the finding was already resolved', async () => {
+    const info = vi.spyOn(toast, 'info').mockReturnValue('t');
+    mockServer(() => json({ error: 'That finding is no longer present.', code: 'FINDING_GONE' }, 409), board());
+    renderReadiness();
+
+    await screen.findByText('Stack is stopped');
+    fireEvent.click(within(findingRows().find(candidate => within(candidate).queryByText('Stack is stopped'))!).getByRole('button', { name: 'Dismiss: Stack is stopped' }));
+
+    await waitFor(() => expect(info).toHaveBeenCalledWith('That finding is already resolved.'));
+    await waitFor(() => expect(vi.mocked(apiFetch).mock.calls.filter(([url]) => url === '/fleet/readiness').length).toBeGreaterThan(1));
+  });
+
+  it('says so, and re-reads, when the finding changed before the dismissal reached the server', async () => {
+    const info = vi.spyOn(toast, 'info').mockReturnValue('t');
+    mockServer(() => json({ error: 'That finding changed. Review it again.', code: 'FINDING_CHANGED' }, 409), board());
+    renderReadiness();
+
+    await screen.findByText('Stack is stopped');
+    fireEvent.click(screen.getByRole('button', { name: 'Dismiss: Stack is stopped' }));
+
+    await waitFor(() => expect(info).toHaveBeenCalledWith('That finding just changed, so it was not dismissed.'));
+    expect(screen.getByText('Stack is stopped')).toBeInTheDocument();
+    await waitFor(() => expect(vi.mocked(apiFetch).mock.calls.filter(([url]) => url === '/fleet/readiness').length).toBeGreaterThan(1));
+  });
+
+  it('keeps the finding listed and reports the failure when dismissing fails', async () => {
+    const error = vi.spyOn(toast, 'error').mockReturnValue('t');
+    mockServer(() => json({ error: 'Permission denied.' }, 403), board());
+    renderReadiness();
+
+    await screen.findByText('Stack is stopped');
+    fireEvent.click(within(findingRows().find(candidate => within(candidate).queryByText('Stack is stopped'))!).getByRole('button', { name: 'Dismiss: Stack is stopped' }));
+
+    await waitFor(() => expect(error).toHaveBeenCalledWith('Permission denied.'));
+    expect(screen.getByText('Stack is stopped')).toBeInTheDocument();
+  });
+
+  it('opens the dismissed list when everything in view is dismissed', async () => {
+    mockResponse(board({ findings: [STOPPED], dismissals: [dismissalFor(STOPPED)] }));
+    renderReadiness();
+
+    expect(await screen.findByText('Everything here is dismissed.')).toBeInTheDocument();
+    // The list opens by itself, because the table above it has nothing to show.
+    expect(screen.getByRole('button', { name: /1 dismissed/ })).toHaveAttribute('aria-expanded', 'true');
+    expect(screen.getByText(/dismissed by alice/)).toBeInTheDocument();
+  });
+
+  it('counts only the findings still in view, never a negative number', async () => {
+    mockResponse(board({ dismissals: [dismissalFor(STOPPED), dismissalFor(SLOW, { id: 8, mode: 'days', expiresAt: Date.now() + 86_400_000 })] }));
+    renderReadiness();
+
+    expect(await screen.findByText(/0 findings · 2 dismissed/)).toBeInTheDocument();
+  });
+
+  it('re-reads the list instead of reporting a failure when the server accepted a dismissal but the reply is unreadable', async () => {
+    const info = vi.spyOn(toast, 'info').mockReturnValue('t');
+    const error = vi.spyOn(toast, 'error').mockReturnValue('t');
+    mockServer(() => ({ ok: true, status: 201, json: async () => ({ unexpected: true }) }) as Response, board());
+    renderReadiness();
+
+    await screen.findByText('Stack is stopped');
+    fireEvent.click(screen.getByRole('button', { name: 'Dismiss: Stack is stopped' }));
+
+    await waitFor(() => expect(info).toHaveBeenCalledWith('Dismissed. Refreshing the list.'));
+    expect(error).not.toHaveBeenCalled();
+    await waitFor(() => expect(vi.mocked(apiFetch).mock.calls.filter(([url]) => url === '/fleet/readiness').length).toBeGreaterThan(1));
   });
 });
