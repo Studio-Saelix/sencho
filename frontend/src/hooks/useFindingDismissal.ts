@@ -31,6 +31,8 @@ interface DismissTarget {
   id: string;
   fingerprint: string;
   count: number;
+  /** Sent only when the surface asks for it (`sendSeverity`). */
+  severity?: string;
 }
 
 interface UseFindingDismissalOptions {
@@ -38,6 +40,11 @@ interface UseFindingDismissalOptions {
   surface: DismissalSurface;
   /** A dismissal was created or already existed; the list updates from it without a refetch. */
   onUpsert: (dismissal: FindingDismissal) => void;
+  /**
+   * Send the severity the operator saw. For surfaces whose hub cannot read the
+   * finding itself (Networking); a surface whose hub evaluates it reads its own.
+   */
+  sendSeverity?: boolean;
   /** A dismissal was removed. */
   onRemove: (id: number) => void;
   /** The finding vanished before it could be dismissed, so the list should be re-read. */
@@ -52,7 +59,7 @@ interface UseFindingDismissalOptions {
  *
  * Hub-owned, so every call is addressed to this instance whatever node is active.
  */
-export function useFindingDismissal({ surface, onUpsert, onRemove, onGone }: UseFindingDismissalOptions) {
+export function useFindingDismissal({ surface, sendSeverity = false, onUpsert, onRemove, onGone }: UseFindingDismissalOptions) {
   const [pending, setPending] = useState<ReadonlySet<string | number>>(() => new Set());
 
   const track = useCallback(async (key: string | number, run: () => Promise<void>) => {
@@ -100,6 +107,7 @@ export function useFindingDismissal({ surface, onUpsert, onRemove, onGone }: Use
             findingId: finding.id,
             fingerprint: finding.fingerprint,
             count: finding.count,
+            ...(sendSeverity && finding.severity !== undefined ? { severity: finding.severity } : {}),
             mode,
             ...(days === undefined ? {} : { days }),
           }),
@@ -141,7 +149,7 @@ export function useFindingDismissal({ surface, onUpsert, onRemove, onGone }: Use
         toast.error('Could not dismiss the finding.');
       }
     });
-  }, [surface, onUpsert, onGone, restore, track]);
+  }, [surface, sendSeverity, onUpsert, onGone, restore, track]);
 
   const isPending = useCallback((key: string | number) => pending.has(key), [pending]);
   return { dismiss, restore, isPending };
