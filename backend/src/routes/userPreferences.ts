@@ -43,7 +43,7 @@ const QUICK_LINK_IDS = [
   'global-observability', 'auto-updates', 'scheduled-ops', 'host-console', 'audit-log',
 ] as const;
 
-// Headroom over the frontend's MAX_QUICK_LINKS (8) so a frontend cap increase
+// Headroom over the frontend's MAX_QUICK_LINKS (10) so a frontend cap increase
 // never turns a previously saved document into a 400 on write. Duplicates are
 // rejected here; the frontend sanitize dedupes.
 const QUICK_LINKS_MAX = 16;
