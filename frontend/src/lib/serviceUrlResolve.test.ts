@@ -65,6 +65,28 @@ describe('resolvePublishedPortClick', () => {
     }
   });
 
+  it('keeps a plain label when a remote node has no host and no override', () => {
+    const click = resolvePublishedPortClick({
+      entry: { ...ready, serviceUrls: {} },
+      serviceName: 'web',
+      publicPort: 8080,
+      portLabel: '8080',
+      node: { type: 'remote', api_url: '' },
+    });
+    expect(click).toEqual({ kind: 'text', portLabel: '8080', reason: '' });
+  });
+
+  it('keeps the last ready override while the list is refreshing', () => {
+    const click = resolvePublishedPortClick({
+      entry: { ...ready, status: 'loading' },
+      serviceName: 'web',
+      publicPort: 8080,
+      portLabel: '8080',
+      node: { type: 'local' },
+    });
+    expect(click).toMatchObject({ kind: 'link', href: 'https://app.example.com' });
+  });
+
   it('keeps a remote generated link when anatomy has no service URL field', () => {
     const entry = parseServiceUrlResponse(2, 'web', true, { renderable: true, ports: { web: [{ host: '8080', proto: 'tcp' }] } });
     expect(entry.status).toBe('unsupported');
@@ -300,6 +322,19 @@ describe('parseServiceUrlResponse', () => {
     });
     expect(entry.status).toBe('ready');
     expect(entry.serviceUrls).toEqual({ api: 'https://api.example.com' });
+  });
+
+  it('keeps dossier facts when an older node omits service URLs', () => {
+    const entry = parseServiceUrlResponse(2, 'web', true, {
+      renderable: true,
+      services: ['web', 'api'],
+      ports: { web: [{ host: '8080', proto: 'tcp' }] },
+      networks: ['proxy'],
+    });
+    expect(entry.status).toBe('unsupported');
+    expect(entry.services).toEqual(['web', 'api']);
+    expect(entry.ports.web).toEqual([{ host: '8080', proto: 'tcp' }]);
+    expect(entry.networks).toEqual(['proxy']);
   });
 });
 
@@ -759,6 +794,125 @@ describe('patchServiceUrlLabel', () => {
     expect(afterSet.services.api.labels).toEqual(['sencho.service.url=https://old.example.com']);
   });
 
+  it('keeps keys inherited by a flow label map', () => {
+    const source = [
+      'x-labels: &labels',
+      '  keep: "yes"',
+      '  extra: "hold"',
+      'services:',
+      '  web:',
+      '    image: nginx',
+      '    labels: { <<: *labels, other: "x" }',
+      '',
+    ].join('\n');
+    const patched = patchServiceUrlLabel(source, 'web', 'https://app.example.com');
+    expect(patched.ok).toBe(true);
+    if (!patched.ok) return;
+    const merged = parse(patched.yaml, { merge: true }) as {
+      services: { web: { labels: Record<string, string> } };
+    };
+    expect(merged.services.web.labels.keep).toBe('yes');
+    expect(merged.services.web.labels.extra).toBe('hold');
+    expect(merged.services.web.labels.other).toBe('x');
+    expect(merged.services.web.labels['sencho.service.url']).toBe('https://app.example.com');
+  });
+
+  it('adds a label inside a flow-style service', () => {
+    const source = 'services:\n  web: { image: nginx }\n  api:\n    image: redis\n';
+    const patched = patchServiceUrlLabel(source, 'web', 'https://app.example.com');
+    expect(patched.ok).toBe(true);
+    if (!patched.ok) return;
+    const merged = parse(patched.yaml, { merge: true }) as {
+      services: { web: { image: string; labels: Record<string, string> }; api: { image: string } };
+    };
+    expect(merged.services.web.image).toBe('nginx');
+    expect(merged.services.web.labels['sencho.service.url']).toBe('https://app.example.com');
+    expect(merged.services.api.image).toBe('redis');
+    expect(patched.yaml).not.toMatch(/^labels:/m);
+  });
+
+  it('clears a URL inherited only through a service merge', () => {
+    const source = [
+      'x-common: &common',
+      '  labels:',
+      '    keep: "yes"',
+      '    sencho.service.url: https://default.example.com',
+      'services:',
+      '  web:',
+      '    <<: *common',
+      '    image: nginx',
+      '  api:',
+      '    <<: *common',
+      '    image: redis',
+      '',
+    ].join('\n');
+    const cleared = patchServiceUrlLabel(source, 'web', null);
+    expect(cleared.ok).toBe(true);
+    if (!cleared.ok) return;
+    const merged = parse(cleared.yaml, { merge: true }) as {
+      services: { web: { labels: Record<string, string> }; api: { labels: Record<string, string> } };
+    };
+    expect(merged.services.web.labels['sencho.service.url']).toBeUndefined();
+    expect(merged.services.web.labels.keep).toBe('yes');
+    expect(merged.services.api.labels['sencho.service.url']).toBe('https://default.example.com');
+  });
+
+  it('keeps an octal mode when a whole-service alias is copied', () => {
+    const source = [
+      'x-service: &svc',
+      '  image: nginx',
+      '  secrets:',
+      '    - source: db',
+      '      mode: 0440',
+      'services:',
+      '  web: *svc',
+      '  api: *svc',
+      '',
+    ].join('\n');
+    const patched = patchServiceUrlLabel(source, 'web', 'https://app.example.com');
+    expect(patched.ok).toBe(true);
+    if (!patched.ok) return;
+    expect(patched.yaml).toContain('mode: 0440');
+    expect(patched.yaml.split('services:')[0]).toContain('mode: 0440');
+    const web = patched.yaml.split('web:')[1]?.split('api:')[0] ?? '';
+    expect(web).toContain('mode: 0440');
+    expect(web).toContain('https://app.example.com');
+    expect(patched.yaml.split('api:')[1] ?? '').not.toContain('https://app.example.com');
+  });
+
+  it('leaves every byte outside the edited label unchanged', () => {
+    const comment = '# keep this comment exactly, including the long sentence that would otherwise be folded by a yaml emitter once it passes eighty columns and then some more words';
+    const source = [
+      comment,
+      'services:',
+      '    web:',
+      '        image: nginx',
+      '        environment:',
+      '            UMASK: 022',
+      '            DIR_MODE: 0775',
+      '            NOTE: "this scalar is deliberately long enough that a document emitter would fold it onto the next line if the whole file were rewritten"',
+      '        labels:',
+      '            traefik.enable: "true"',
+      '        tmpfs:',
+      '            - /run:mode=01777',
+      'secrets:',
+      '    db:',
+      '        file: ./db',
+      '        mode: 0440',
+      'configs:',
+      '    app:',
+      '        file: ./app',
+      '        mode: 0644',
+      '',
+    ].join('\r\n');
+    const patched = patchServiceUrlLabel(source, 'web', 'https://app.example.com');
+    expect(patched.ok).toBe(true);
+    if (!patched.ok) return;
+    const inserted = '            sencho.service.url: "https://app.example.com"\r\n';
+    expect(patched.yaml.includes(inserted)).toBe(true);
+    expect(patched.yaml.replace(inserted, '')).toBe(source);
+  });
+
   it('does not treat an override URL as owned by the open file', () => {
     const base = [
       'services:',
@@ -777,6 +931,14 @@ describe('patchServiceUrlLabel', () => {
     ].join('\n');
     expect(serviceUrlOwnedBySource(owning, 'web', 'https://app.example.com')).toBe(true);
     expect(serviceUrlOwnedBySource(owning, 'web', undefined)).toBe(true);
+    const interpolated = [
+      'services:',
+      '  web:',
+      '    labels:',
+      '      sencho.service.url: https://${APP_HOST}',
+      '',
+    ].join('\n');
+    expect(serviceUrlOwnedBySource(interpolated, 'web', 'https://app.example.com')).toBe(true);
   });
 });
 

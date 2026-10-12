@@ -1,4 +1,4 @@
-import { isAlias, isMap, isPair, isSeq, parse, parseDocument, visit, type YAMLMap } from 'yaml';
+import { Document, isAlias, isMap, isSeq, parse, parseDocument, visit, type YAMLMap } from 'yaml';
 import { SERVICE_URL_LABEL, serviceUrlFromLabelValue } from './serviceUrlLabel';
 
 /** Compose treats `$$` as a literal dollar. A URL typed by the operator is literal. */
@@ -9,11 +9,6 @@ export function escapeComposeLiteral(url: string): string {
 export type ServiceUrlPatch =
   | { ok: true; yaml: string }
   | { ok: false; reason: 'missing-service' | 'parse' };
-
-type YamlNode = {
-  anchor?: string | null;
-  clone: () => YamlNode;
-};
 
 function labelText(item: unknown): string {
   if (typeof item === 'string') return item;
@@ -96,57 +91,6 @@ function isWithin(inner: unknown, outer: unknown): boolean {
   return innerSpan[0] >= outerSpan[0] && innerSpan[1] <= outerSpan[1];
 }
 
-/** A private copy. Anchors defined inside it are removed, and aliases of those anchors are expanded. */
-function unanchoredCopy(node: YamlNode): YamlNode {
-  const copy = node.clone();
-  const localAnchors = new Map<string, YamlNode>();
-  const collect = (current: unknown): void => {
-    if (!current || typeof current !== 'object' || isAlias(current)) return;
-    const name = anchorName(current);
-    if (name) localAnchors.set(name, current as YamlNode);
-    if (isMap(current)) {
-      for (const item of current.items) collect(item.value);
-      return;
-    }
-    if (isSeq(current)) {
-      for (const item of current.items) collect(item);
-    }
-  };
-  collect(copy);
-  const resolving = new Set<string>();
-  const rewrite = (current: unknown, assign: (next: unknown) => void): void => {
-    if (!current || typeof current !== 'object') return;
-    if (isAlias(current)) {
-      const source = (current as { source?: unknown }).source;
-      if (typeof source !== 'string' || resolving.has(source)) return;
-      const target = localAnchors.get(source);
-      if (!target) return;
-      resolving.add(source);
-      const resolved = target.clone();
-      resolved.anchor = null;
-      assign(resolved);
-      rewrite(resolved, () => undefined);
-      resolving.delete(source);
-      return;
-    }
-    if ('anchor' in current) (current as { anchor?: string | null }).anchor = null;
-    if (isMap(current)) {
-      for (const item of current.items) {
-        rewrite(item.value, (next) => { item.value = next as typeof item.value; });
-      }
-      return;
-    }
-    if (isSeq(current)) {
-      for (let index = 0; index < current.items.length; index += 1) {
-        const item = current.items[index];
-        rewrite(item, (next) => { current.items[index] = next as typeof item; });
-      }
-    }
-  };
-  rewrite(copy, () => undefined);
-  return copy;
-}
-
 function aliasSites(doc: unknown, anchor: string): Array<{ parent: unknown; node: unknown }> {
   const sites: Array<{ parent: unknown; node: unknown }> = [];
   visit(doc as Parameters<typeof visit>[0], {
@@ -155,46 +99,6 @@ function aliasSites(doc: unknown, anchor: string): Array<{ parent: unknown; node
     },
   });
   return sites;
-}
-
-function replaceAlias(parent: unknown, node: unknown, replacement: unknown): void {
-  if (isPair(parent) && parent.value === node) {
-    parent.value = replacement as typeof parent.value;
-    return;
-  }
-  if (isSeq(parent)) {
-    const index = parent.items.indexOf(node as typeof parent.items[number]);
-    if (index >= 0) parent.items[index] = replacement as typeof parent.items[number];
-  }
-}
-
-function anchorsInside(node: unknown): YamlNode[] {
-  const found: YamlNode[] = [];
-  const walk = (current: unknown): void => {
-    if (!current || typeof current !== 'object' || isAlias(current)) return;
-    if (anchorName(current)) found.push(current as YamlNode);
-    if (isMap(current)) {
-      for (const item of current.items) walk(item.value);
-      return;
-    }
-    if (isSeq(current)) {
-      for (const item of current.items) walk(item);
-    }
-  };
-  walk(node);
-  return found;
-}
-
-/** Copy every outside alias before this node, including nested anchors, is edited. */
-function detachSharedAnchor(doc: unknown, node: YamlNode): void {
-  for (const anchored of anchorsInside(node)) {
-    const anchor = anchorName(anchored);
-    if (!anchor) continue;
-    for (const site of aliasSites(doc, anchor)) {
-      if (isWithin(site.node, node)) continue;
-      replaceAlias(site.parent, site.node, unanchoredCopy(anchored));
-    }
-  }
 }
 
 /** Service names declared in this compose buffer. Null when the buffer cannot be parsed. */
@@ -240,103 +144,327 @@ export function serviceUrlInSource(source: string, serviceName: string): string 
   }
 }
 
+/** The label text this buffer sets, before it is checked as an absolute URL. */
+function rawServiceUrlFrom(merged: unknown, serviceName: string): string | null {
+  if (!merged || typeof merged !== 'object') return null;
+  const services = (merged as { services?: unknown }).services;
+  if (!services || typeof services !== 'object') return null;
+  const service = (services as Record<string, unknown>)[serviceName];
+  if (!service || typeof service !== 'object') return null;
+  const labels = (service as { labels?: unknown }).labels;
+  if (Array.isArray(labels)) {
+    let found: string | null = null;
+    const prefix = `${SERVICE_URL_LABEL}=`;
+    for (const item of labels) {
+      if (typeof item !== 'string' || !item.startsWith(prefix)) continue;
+      found = item.slice(prefix.length);
+    }
+    return found;
+  }
+  if (!labels || typeof labels !== 'object') return null;
+  const value = (labels as Record<string, unknown>)[SERVICE_URL_LABEL];
+  return typeof value === 'string' ? value : null;
+}
+
 /**
  * True when saving this buffer can change the effective URL. A URL supplied by
  * another compose file is not owned here, so an edit of this file would not apply.
+ * A value that still contains `$` is a Compose interpolation in this file.
  */
 export function serviceUrlOwnedBySource(source: string, serviceName: string, effectiveUrl: string | undefined): boolean {
+  try {
+    return ownsRawUrl(rawServiceUrlFrom(parse(source, { merge: true }), serviceName), effectiveUrl);
+  } catch (error) {
+    console.error('Failed to read the service URL label:', error);
+    return !effectiveUrl;
+  }
+}
+
+function ownsRawUrl(own: string | null, effectiveUrl: string | undefined): boolean {
   if (!effectiveUrl) return true;
-  return serviceUrlInSource(source, serviceName) === effectiveUrl;
+  if (own == null) return false;
+  if (own.includes('$')) return true;
+  return serviceUrlFromLabelValue(own) === effectiveUrl;
 }
 
-/** Give every alias of this value its own copy of the current text, then drop the anchor. */
-function detachScalar(doc: unknown, node: unknown): void {
-  const anchor = anchorName(node);
+/** Services whose effective URL is not the label in this buffer. One parse for the whole file. */
+export function lockedServiceNames(source: string, effectiveUrls: Record<string, string>): Set<string> {
+  const locked = new Set<string>();
+  let merged: unknown;
+  try {
+    merged = parse(source, { merge: true });
+  } catch (error) {
+    console.error('Failed to read the service URL label:', error);
+    return locked;
+  }
+  for (const [name, url] of Object.entries(effectiveUrls)) {
+    if (!ownsRawUrl(rawServiceUrlFrom(merged, name), url)) locked.add(name);
+  }
+  return locked;
+}
+
+interface Splice {
+  start: number;
+  end: number;
+  text: string;
+}
+
+function nodeRange(node: unknown): [number, number, number] | null {
+  if (!node || typeof node !== 'object' || !('range' in node)) return null;
+  const range = (node as { range?: unknown }).range;
+  if (!Array.isArray(range) || range.length < 3) return null;
+  const start = range[0];
+  const valueEnd = range[1];
+  const nodeEnd = range[2];
+  if (typeof start !== 'number' || typeof valueEnd !== 'number' || typeof nodeEnd !== 'number') return null;
+  if (start < 0 || valueEnd < start || nodeEnd < valueEnd) return null;
+  return [start, valueEnd, nodeEnd];
+}
+
+function applySplices(source: string, splices: Splice[]): string {
+  const ordered = [...splices].sort((a, b) => a.start - b.start || a.end - b.end);
+  for (let index = 1; index < ordered.length; index += 1) {
+    if (ordered[index].start < ordered[index - 1].end) throw new Error('overlapping compose edit');
+  }
+  let out = source;
+  for (let index = ordered.length - 1; index >= 0; index -= 1) {
+    const splice = ordered[index];
+    out = out.slice(0, splice.start) + splice.text + out.slice(splice.end);
+  }
+  return out;
+}
+
+function fileNewline(source: string): string {
+  return source.includes('\r\n') ? '\r\n' : '\n';
+}
+
+function indentAt(source: string, index: number): number {
+  const lineStart = source.lastIndexOf('\n', Math.max(0, index - 1)) + 1;
+  let count = 0;
+  while (source[lineStart + count] === ' ') count += 1;
+  return count;
+}
+
+function quoteYaml(value: string): string {
+  return `"${value.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
+}
+
+function emitDocument(value: unknown): string {
+  return new Document(value).toString({ lineWidth: 0 }).replace(/\r?\n$/, '');
+}
+
+function nodeToJs(node: unknown, doc: unknown): unknown {
+  if (!node || typeof node !== 'object' || !('toJS' in node)) return undefined;
+  return (node as { toJS: (doc: unknown) => unknown }).toJS(doc);
+}
+
+function renderBlock(source: string, indent: number, value: unknown, leadingBreak: boolean): string {
+  const nl = fileNewline(source);
+  const pad = ' '.repeat(indent);
+  const body = emitDocument(value)
+    .split(/\r?\n/)
+    .map(line => (line.length === 0 ? line : pad + line))
+    .join(nl);
+  return leadingBreak ? `${nl}${body}` : body;
+}
+
+function replaceNode(source: string, node: unknown, value: unknown): Splice {
+  const range = nodeRange(node);
+  if (!range) throw new Error('missing compose range');
+  const lineStart = source.lastIndexOf('\n', Math.max(0, range[0] - 1)) + 1;
+  const prefix = source.slice(lineStart, range[0]);
+  const onOwnLine = prefix.trim() === '' && prefix.length > 0;
+  const indent = onOwnLine ? prefix.length : indentAt(source, range[0]) + 2;
+  const scalar = typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean' || value == null;
+  let text = scalar
+    ? (value == null ? '' : typeof value === 'string' ? quoteYaml(value) : String(value))
+    : renderBlock(source, indent, value, !onOwnLine);
+  const start = !scalar && onOwnLine ? lineStart : range[0];
+  if (source.slice(start, range[1]).endsWith('\n') && !text.endsWith('\n')) text += fileNewline(source);
+  return { start, end: range[1], text };
+}
+
+function isFlow(source: string, node: unknown): boolean {
+  const range = nodeRange(node);
+  if (!range) return false;
+  const ch = source[range[0]];
+  return ch === '{' || ch === '[';
+}
+
+function collectionIndent(source: string, collection: { items: unknown[] }): number {
+  for (const item of collection.items) {
+    const keyed = item && typeof item === 'object' && 'key' in item
+      ? (item as { key: unknown }).key
+      : item;
+    const range = nodeRange(keyed);
+    if (range) return indentAt(source, range[0]);
+  }
+  const self = nodeRange(collection);
+  return self ? indentAt(source, self[0]) + 2 : 2;
+}
+
+function appendLine(source: string, collection: { items: unknown[] }, line: string): Splice {
+  const range = nodeRange(collection);
+  if (!range) throw new Error('missing compose range');
+  const nl = fileNewline(source);
+  const indent = collectionIndent(source, collection);
+  return { start: range[2], end: range[2], text: `${' '.repeat(indent)}${line}${nl}` };
+}
+
+function deleteSpan(source: string, from: unknown, to: unknown): Splice {
+  const startRange = nodeRange(from);
+  const endRange = nodeRange(to);
+  if (!startRange || !endRange) throw new Error('missing compose range');
+  const lineStart = source.lastIndexOf('\n', startRange[0] - 1) + 1;
+  return { start: lineStart, end: endRange[2], text: '' };
+}
+
+function reindent(source: string, body: string, indent: number): string {
+  const nl = fileNewline(source);
+  const lines = body.replace(/(?:\r?\n)+$/, '').split(/\r?\n/);
+  const widths = lines
+    .filter(line => line.trim().length > 0)
+    .map(line => line.match(/^ */)?.[0].length ?? 0);
+  const base = widths.length > 0 ? Math.min(...widths) : 0;
+  return lines.map(line => (line.trim().length === 0 ? '' : `${' '.repeat(indent)}${line.slice(base)}`)).join(nl);
+}
+
+/** Put a copy of existing source text where an alias stands, keeping that text's scalars. */
+function placeCopy(source: string, alias: unknown, body: string): Splice {
+  const range = nodeRange(alias);
+  if (!range) throw new Error('missing compose range');
+  const lineStart = source.lastIndexOf('\n', Math.max(0, range[0] - 1)) + 1;
+  const prefix = source.slice(lineStart, range[0]);
+  const inline = prefix.trim() !== '';
+  const indent = inline ? indentAt(source, range[0]) + 2 : prefix.length;
+  const text = reindent(source, body, indent);
+  if (inline) {
+    const start = source[range[0] - 1] === ' ' ? range[0] - 1 : range[0];
+    return { start, end: range[1], text: `${fileNewline(source)}${text}` };
+  }
+  const nl = fileNewline(source);
+  return { start: lineStart, end: range[1], text: text.endsWith('\n') ? text : `${text}${nl}` };
+}
+
+/** Replace aliases of this anchor that live outside it, so editing the anchor does not change them. */
+function detachOutside(doc: unknown, source: string, owner: unknown, anchor: string | null, splices: Splice[]): void {
   if (!anchor) return;
-  const original = labelText(node);
   for (const site of aliasSites(doc, anchor)) {
-    replaceAlias(site.parent, site.node, original);
+    if (isWithin(site.node, owner)) continue;
+    if (!nodeRange(site.node)) continue;
+    const resolved = (site.node as { resolve: (doc: unknown) => unknown }).resolve(doc);
+    const body = nodeRange(resolved);
+    if ((isMap(resolved) || isSeq(resolved)) && body) {
+      const contentStart = source.lastIndexOf('\n', Math.max(0, body[0] - 1)) + 1;
+      splices.push(placeCopy(source, site.node, source.slice(contentStart, body[2])));
+      continue;
+    }
+    splices.push(replaceNode(source, site.node, nodeToJs(resolved, doc)));
   }
-  (node as { anchor?: string | null }).anchor = null;
 }
 
-function applyDirect(doc: unknown, labels: unknown, url: string | null): boolean {
-  if (url === null) {
-    if (isMap(labels)) {
-      const pair = labels.items.find(item => labelText(item.key) === SERVICE_URL_LABEL);
-      if (pair) detachScalar(doc, pair.value);
-      labels.delete(SERVICE_URL_LABEL);
-    }
-    if (isSeq(labels)) {
-      for (let i = labels.items.length - 1; i >= 0; i -= 1) {
-        if (resolvedLabelText(doc, labels.items[i]).startsWith(`${SERVICE_URL_LABEL}=`)) {
-          detachScalar(doc, labels.items[i]);
-          labels.delete(i);
-        }
-      }
-    }
-    return true;
+function editMap(source: string, doc: unknown, labels: YAMLMap, url: string | null): Splice[] {
+  const pair = labels.items.find(item => labelText(item.key) === SERVICE_URL_LABEL);
+  const literal = url === null ? null : escapeComposeLiteral(url);
+  if (literal === null) {
+    if (!pair) return [];
+    const splices: Splice[] = [];
+    detachOutside(doc, source, pair.value, anchorName(pair.value), splices);
+    if (labels.items.length === 1) splices.push(replaceNode(source, labels, {}));
+    else splices.push(deleteSpan(source, pair.key, pair.value));
+    return splices;
   }
-  const literal = escapeComposeLiteral(url);
-  if (isMap(labels)) {
-    const pair = labels.items.find(item => labelText(item.key) === SERVICE_URL_LABEL);
-    if (pair) detachScalar(doc, pair.value);
-    labels.set(SERVICE_URL_LABEL, literal);
-    return true;
-  }
-  if (isSeq(labels)) {
-    const line = `${SERVICE_URL_LABEL}=${literal}`;
-    const matches: number[] = [];
-    for (let i = 0; i < labels.items.length; i += 1) {
-      if (resolvedLabelText(doc, labels.items[i]).startsWith(`${SERVICE_URL_LABEL}=`)) {
-        detachScalar(doc, labels.items[i]);
-        matches.push(i);
-      }
-    }
-    if (matches.length === 0) {
-      labels.add(line);
-      return true;
-    }
-    labels.set(matches[0], line);
-    for (let i = matches.length - 1; i >= 1; i -= 1) labels.delete(matches[i]);
-    return true;
-  }
-  return false;
+  if (!pair) return [appendLine(source, labels, `${SERVICE_URL_LABEL}: ${quoteYaml(literal)}`)];
+  const range = nodeRange(pair.value);
+  if (!range) throw new Error('missing compose range');
+  const splices: Splice[] = [];
+  detachOutside(doc, source, pair.value, anchorName(pair.value), splices);
+  splices.push({ start: range[0], end: range[1], text: quoteYaml(literal) });
+  return splices;
 }
 
-function editLabels(docText: string, doc: unknown, service: YAMLMap, serviceName: string, url: string | null): void {
+function editSeq(source: string, doc: unknown, labels: { items: unknown[] }, url: string | null): Splice[] {
+  const prefix = `${SERVICE_URL_LABEL}=`;
+  const matches = labels.items.filter(item => resolvedLabelText(doc, item).startsWith(prefix));
+  const literal = url === null ? null : escapeComposeLiteral(url);
+  if (literal === null) {
+    const splices: Splice[] = [];
+    for (const item of matches) detachOutside(doc, source, item, anchorName(item), splices);
+    if (matches.length > 0 && matches.length === labels.items.length) {
+      splices.push(replaceNode(source, labels, []));
+      return splices;
+    }
+    for (const item of matches) splices.push(deleteSpan(source, item, item));
+    return splices;
+  }
+  const line = `${prefix}${literal}`;
+  if (matches.length === 0) return [appendLine(source, labels, `- ${line}`)];
+  const splices: Splice[] = [];
+  matches.forEach((item, index) => {
+    detachOutside(doc, source, item, anchorName(item), splices);
+    const range = nodeRange(item);
+    if (!range) throw new Error('missing compose range');
+    if (index === 0) splices.push({ start: range[0], end: range[1], text: line });
+    else splices.push(deleteSpan(source, item, item));
+  });
+  return splices;
+}
+
+function insertLabelsBlock(source: string, service: unknown, labels: unknown): Splice {
+  const range = nodeRange(service);
+  if (!range) throw new Error('missing compose range');
+  const nl = fileNewline(source);
+  const indent = collectionIndent(source, service as { items: unknown[] });
+  const block = emitDocument({ labels })
+    .split(/\r?\n/)
+    .map(line => (line.length === 0 ? line : `${' '.repeat(indent)}${line}`))
+    .join(nl);
+  const lineStart = source.lastIndexOf('\n', Math.max(0, range[0] - 1)) + 1;
+  return { start: lineStart, end: lineStart, text: `${block}${nl}` };
+}
+
+function editServiceLabels(source: string, doc: unknown, service: YAMLMap, serviceName: string, url: string | null): Splice[] {
   const labelPair = service.items.find(item => labelText(item.key) === 'labels');
   const labels = labelPair ? labelPair.value : null;
+  if (isAlias(labels)) {
+    const next = copyLabels(effectiveLabels(source, serviceName), url);
+    return next == null ? [] : [replaceNode(source, labels, next)];
+  }
+  const splices: Splice[] = [];
   const anchor = anchorName(labels);
-  if ((isMap(labels) || isSeq(labels)) && anchor && aliasSites(doc, anchor).length > 0) {
-    const edited = unanchoredCopy(labels as YamlNode);
-    if (url === null && isMap(edited) && mapHasMerge(edited)) {
-      const next = copyLabels(effectiveLabels(docText, serviceName), null);
-      detachSharedAnchor(doc, labels as YamlNode);
-      if (next !== null) service.set('labels', next);
-      return;
-    }
-    if (!applyDirect(doc, edited, url)) throw new Error('Service labels are not a map or list');
-    detachSharedAnchor(doc, labels as YamlNode);
-    service.set('labels', edited);
-    return;
-  }
-  const inherited = isAlias(labels)
-    || (labels == null && mapHasMerge(service))
-    || (isMap(labels) && mapHasMerge(labels) && url === null);
-  if (inherited) {
-    const next = copyLabels(effectiveLabels(docText, serviceName), url);
-    if (next !== null) service.set('labels', next);
-    return;
-  }
+  if (anchor) detachOutside(doc, source, labels, anchor, splices);
   if (labels == null) {
-    if (url !== null) service.set('labels', { [SERVICE_URL_LABEL]: escapeComposeLiteral(url) });
-    return;
+    if (url == null && !mapHasMerge(service)) return splices;
+    const next = url == null || mapHasMerge(service)
+      ? copyLabels(effectiveLabels(source, serviceName), url)
+      : { [SERVICE_URL_LABEL]: escapeComposeLiteral(url) };
+    if (next == null) return splices;
+    if (isFlow(source, service)) {
+      const js = nodeToJs(service, doc);
+      if (!js || typeof js !== 'object' || Array.isArray(js)) throw new Error('Service is not a map');
+      splices.push(replaceNode(source, service, { ...(js as Record<string, unknown>), labels: next }));
+      return splices;
+    }
+    splices.push(insertLabelsBlock(source, service, next));
+    return splices;
   }
-  if (!applyDirect(doc, labels, url)) throw new Error('Service labels are not a map or list');
+  if (isMap(labels) && mapHasMerge(labels) && url == null) {
+    const next = copyLabels(effectiveLabels(source, serviceName), null);
+    if (next != null) splices.push(replaceNode(source, labels, next));
+    return splices;
+  }
+  if (isFlow(source, labels)) {
+    const next = copyLabels(effectiveLabels(source, serviceName), url);
+    if (next != null) splices.push(replaceNode(source, labels, next));
+    return splices;
+  }
+  if (isMap(labels)) splices.push(...editMap(source, doc, labels, url));
+  else if (isSeq(labels)) splices.push(...editSeq(source, doc, labels, url));
+  else throw new Error('Service labels are not a map or list');
+  return splices;
 }
 
-/** Set or remove `sencho.service.url` on one service. Other services keep their labels. */
+/** Set or remove `sencho.service.url` on one service. Bytes outside that edit stay as they were. */
 export function patchServiceUrlLabel(source: string, serviceName: string, url: string | null): ServiceUrlPatch {
   try {
     const doc = parseDocument(source);
@@ -346,23 +474,30 @@ export function patchServiceUrlLabel(source: string, serviceName: string, url: s
     const pair = services.items.find(item => labelText(item.key) === serviceName);
     if (!pair) return { ok: false, reason: 'missing-service' };
 
-    let service = pair.value;
-    if (isAlias(service)) {
-      const resolved = service.resolve(doc);
+    const splices: Splice[] = [];
+    if (isAlias(pair.value)) {
+      const resolved = pair.value.resolve(doc);
       if (!isMap(resolved)) return { ok: false, reason: 'parse' };
-      service = unanchoredCopy(resolved);
-      pair.value = service;
-    } else if (isMap(service)) {
-      const anchor = anchorName(service);
-      if (anchor && aliasSites(doc, anchor).length > 0) {
-        detachSharedAnchor(doc, service);
-        service = unanchoredCopy(service);
-        pair.value = service;
+      const body = nodeRange(resolved);
+      if (!body) return { ok: false, reason: 'parse' };
+      const contentStart = source.lastIndexOf('\n', Math.max(0, body[0] - 1)) + 1;
+      const local: Splice[] = [];
+      for (const splice of editServiceLabels(source, doc, resolved, serviceName, url)) {
+        if (splice.start >= contentStart && splice.end <= body[2]) {
+          local.push({ start: splice.start - contentStart, end: splice.end - contentStart, text: splice.text });
+        } else {
+          splices.push(splice);
+        }
       }
+      splices.push(placeCopy(source, pair.value, applySplices(source.slice(contentStart, body[2]), local)));
+    } else if (isMap(pair.value)) {
+      const anchor = anchorName(pair.value);
+      if (anchor) detachOutside(doc, source, pair.value, anchor, splices);
+      splices.push(...editServiceLabels(source, doc, pair.value, serviceName, url));
+    } else {
+      return { ok: false, reason: 'parse' };
     }
-    if (!isMap(service)) return { ok: false, reason: 'parse' };
-    editLabels(source, doc, service, serviceName, url);
-    return { ok: true, yaml: String(doc) };
+    return { ok: true, yaml: applySplices(source, splices) };
   } catch (error) {
     console.error('Failed to update the service URL label:', error);
     return { ok: false, reason: 'parse' };

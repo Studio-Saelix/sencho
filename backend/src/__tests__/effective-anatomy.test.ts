@@ -130,4 +130,13 @@ describe('parseEffectiveAnatomy', () => {
     expect(JSON.stringify(anatomy)).not.toContain('secret.example.com');
     expect(JSON.stringify(anatomy)).not.toContain('user:secret');
   });
+
+  it('turns a rendered $$ back into one literal dollar', () => {
+    const anatomy = parseEffectiveAnatomy({
+      services: {
+        web: { labels: { 'sencho.service.url': 'https://app.example.com/?b=$$x' } },
+      },
+    });
+    expect(anatomy.serviceUrls.web).toBe('https://app.example.com/?b=$x');
+  });
 });

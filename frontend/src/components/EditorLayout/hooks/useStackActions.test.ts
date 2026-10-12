@@ -160,6 +160,7 @@ function setup(over: {
   canReapplyCompose?: boolean;
   hasServiceScopedUpdate?: boolean;
   diffPreviewEnabled?: boolean;
+  onStackFilesChanged?: () => void;
 } = {}) {
   const editorState = makeEditorState(over.editorState);
   const stackListState = makeStackListState(over.stackList);
@@ -195,6 +196,7 @@ function setup(over: {
       hasServiceScopedUpdate: over.hasServiceScopedUpdate ?? false,
       diffPreviewEnabled: over.diffPreviewEnabled ?? false,
       canEditStack: over.canEditStack ?? (() => true),
+      onStackFilesChanged: over.onStackFilesChanged,
       onDeletedOpenStack,
       removeNotificationsForStack,
       isAdmin: over.isAdmin ?? false,
@@ -389,6 +391,36 @@ describe('useStackActions.saveFile', () => {
     await result.current.loadFile('web.yml');
 
     expect(editorState.setEnvInventoryFailed).toHaveBeenCalledWith(true);
+  });
+
+  it('refreshes service URLs only when the open stack is reloaded', async () => {
+    const onStackFilesChanged = vi.fn();
+    vi.mocked(apiFetch).mockImplementation((url: string) => {
+      const u = String(url);
+      if (u === '/stacks/web.yml' || u === '/stacks/other.yml') return Promise.resolve(new Response('services: {}', { status: 200 }));
+      if (u.endsWith('/envs')) return Promise.resolve(new Response(JSON.stringify([]), { status: 200 }));
+      if (u.includes('/containers')) return Promise.resolve(new Response('[]', { status: 200 }));
+      if (u.endsWith('/backup')) return Promise.resolve(new Response(JSON.stringify({ exists: false }), { status: 200 }));
+      if (u.endsWith('/effective-services')) {
+        return Promise.resolve(new Response(JSON.stringify({ renderable: false, services: [] }), { status: 200 }));
+      }
+      return Promise.resolve(new Response('', { status: 404 }));
+    });
+    const same = setup({
+      editorState: { content: 'same', originalContent: 'same' },
+      onStackFilesChanged,
+    });
+    await same.result.current.loadFile('web.yml');
+    expect(onStackFilesChanged).toHaveBeenCalledTimes(1);
+
+    onStackFilesChanged.mockClear();
+    const next = setup({
+      editorState: { content: 'same', originalContent: 'same' },
+      stackList: { selectedFile: 'web.yml' },
+      onStackFilesChanged,
+    });
+    await next.result.current.loadFile('other.yml');
+    expect(onStackFilesChanged).not.toHaveBeenCalled();
   });
 
   it('treats an unreadable env file content as unknown, not empty', async () => {
@@ -2732,28 +2764,33 @@ describe('useStackActions.openStackApp', () => {
     }), { status: 200, headers: { 'content-type': 'application/json' } }));
   });
 
+  function blankPopup() {
+    return { location: { href: '' }, close: vi.fn(), opener: null, closed: false };
+  }
+
   async function openAndCaptureHref(over: Parameters<typeof setup>[0]): Promise<{
     href: string | undefined;
-    clickCount: number;
+    openCount: number;
+    closeCount: number;
   }> {
-    let href: string | undefined;
-    const click = vi
-      .spyOn(HTMLAnchorElement.prototype, 'click')
-      .mockImplementation(function (this: HTMLAnchorElement) {
-        href = this.href;
-      });
+    const popup = blankPopup();
+    const opened = vi.spyOn(window, 'open').mockImplementation(() => popup as unknown as Window);
     try {
       const { result } = setup(over);
       await act(async () => { result.current.openStackApp('web.yml'); });
-      return { href, clickCount: click.mock.calls.length };
+      return {
+        href: popup.location.href || undefined,
+        openCount: opened.mock.calls.length,
+        closeCount: popup.close.mock.calls.length,
+      };
     } finally {
-      click.mockRestore();
+      opened.mockRestore();
     }
   }
 
   it('opens the published port on the browser host for a local node', async () => {
     const { href } = await openAndCaptureHref({ stackList: { stackPorts: { 'web.yml': 8989 } } });
-    expect(href).toBe('http://localhost:8989/');
+    expect(href).toBe('http://localhost:8989');
   });
 
   it('opens on the remote node host derived from its api_url', async () => {
@@ -2761,15 +2798,16 @@ describe('useStackActions.openStackApp', () => {
       stackList: { stackPorts: { 'web.yml': 8989 } },
       activeNode: { id: 2, type: 'remote', api_url: 'http://10.0.0.5:1852' } as Parameters<typeof useStackActions>[0]['activeNode'],
     });
-    expect(href).toBe('http://10.0.0.5:8989/');
+    expect(href).toBe('http://10.0.0.5:8989');
   });
 
   it('does nothing for a remote node with no api_url (pilot) and does not throw', async () => {
-    const { href, clickCount } = await openAndCaptureHref({
+    const { href, openCount, closeCount } = await openAndCaptureHref({
       stackList: { stackPorts: { 'web.yml': 8989 } },
       activeNode: { id: 3, type: 'remote', api_url: '' } as Parameters<typeof useStackActions>[0]['activeNode'],
     });
-    expect(clickCount).toBe(0);
+    expect(openCount).toBe(1);
+    expect(closeCount).toBe(1);
     expect(href).toBeUndefined();
   });
 
@@ -2779,14 +2817,43 @@ describe('useStackActions.openStackApp', () => {
   });
 
   it('does nothing when the stack has no published port', async () => {
-    const { clickCount } = await openAndCaptureHref({});
-    expect(clickCount).toBe(0);
+    const { href, openCount, closeCount } = await openAndCaptureHref({});
+    expect(openCount).toBe(1);
+    expect(closeCount).toBe(1);
+    expect(href).toBeUndefined();
+  });
+
+  it('opens the tab before the service URL lookup finishes', async () => {
+    const order: string[] = [];
+    const popup = blankPopup();
+    const opened = vi.spyOn(window, 'open').mockImplementation(() => {
+      order.push('open');
+      return popup as unknown as Window;
+    });
+    vi.mocked(apiFetch).mockImplementation(() => {
+      order.push('fetch');
+      return Promise.resolve(new Response(JSON.stringify({
+        renderable: true,
+        serviceUrls: {},
+        ports: {},
+      }), { status: 200, headers: { 'content-type': 'application/json' } }));
+    });
+    try {
+      const { result } = setup({ stackList: { stackPorts: { 'web.yml': 8989 } } });
+      await act(async () => { result.current.openStackApp('web.yml'); });
+      expect(order[0]).toBe('open');
+      expect(order[1]).toBe('fetch');
+      expect(popup.location.href).toBe('http://localhost:8989');
+    } finally {
+      opened.mockRestore();
+    }
   });
 
   it('does not open after the operator switches node', async () => {
     let resolveAnatomy: ((response: Response) => void) | null = null;
     vi.mocked(apiFetch).mockImplementation(() => new Promise(resolve => { resolveAnatomy = resolve; }));
-    const click = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {});
+    const popup = blankPopup();
+    const opened = vi.spyOn(window, 'open').mockImplementation(() => popup as unknown as Window);
     try {
       const { result, rerender, activeNodeHolder } = setup({
         stackList: { stackPorts: { 'web.yml': 8989 } },
@@ -2802,26 +2869,33 @@ describe('useStackActions.openStackApp', () => {
         }), { status: 200, headers: { 'content-type': 'application/json' } }));
         await Promise.resolve();
       });
-      expect(click).not.toHaveBeenCalled();
+      expect(popup.location.href).toBe('');
+      expect(popup.close).toHaveBeenCalled();
+      expect(opened).toHaveBeenCalled();
     } finally {
-      click.mockRestore();
+      opened.mockRestore();
     }
   });
 
   it('does not report a failed lookup after the operator switches node', async () => {
     let rejectAnatomy: ((error: Error) => void) | null = null;
+    const opened = vi.spyOn(window, 'open').mockImplementation(() => blankPopup() as unknown as Window);
     vi.mocked(apiFetch).mockImplementation(() => new Promise((_resolve, reject) => { rejectAnatomy = reject; }));
-    const { result, rerender, activeNodeHolder } = setup({
-      stackList: { stackPorts: { 'web.yml': 8989 } },
-    });
-    act(() => { result.current.openStackApp('web.yml'); });
-    activeNodeHolder.current = { id: 2, type: 'remote', api_url: 'http://10.0.0.5:1852' } as ActiveNode;
-    rerender();
-    await act(async () => {
-      rejectAnatomy?.(new Error('offline'));
-      await Promise.resolve();
-    });
-    expect(toast.error).not.toHaveBeenCalled();
+    try {
+      const { result, rerender, activeNodeHolder } = setup({
+        stackList: { stackPorts: { 'web.yml': 8989 } },
+      });
+      act(() => { result.current.openStackApp('web.yml'); });
+      activeNodeHolder.current = { id: 2, type: 'remote', api_url: 'http://10.0.0.5:1852' } as ActiveNode;
+      rerender();
+      await act(async () => {
+        rejectAnatomy?.(new Error('offline'));
+        await Promise.resolve();
+      });
+      expect(toast.error).not.toHaveBeenCalled();
+    } finally {
+      opened.mockRestore();
+    }
   });
 });
 

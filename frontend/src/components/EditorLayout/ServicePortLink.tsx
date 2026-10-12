@@ -57,7 +57,9 @@ export function ServicePortLink({
     || (sourceServices !== null && !!serviceName && sourceServices.includes(serviceName));
   const locked = !!serviceName && !!lockedServices?.has(serviceName);
   const unavailable = !inOpenFile ? OTHER_FILE : locked ? OTHER_LAYER : null;
-  const edit = canEdit && serviceName && onEdit && entry?.status === 'ready' && !unavailable ? (
+  const urlsReady = entry?.status === 'ready'
+    || (entry?.status === 'loading' && Object.keys(entry.serviceUrls).length > 0);
+  const edit = canEdit && serviceName && onEdit && urlsReady && !unavailable ? (
     <button
       type="button"
       aria-label={`Set URL for ${serviceName}`}
@@ -66,7 +68,7 @@ export function ServicePortLink({
     >
       <Pencil className="h-3 w-3" strokeWidth={1.5} />
     </button>
-  ) : canEdit && serviceName && entry?.status === 'ready' && unavailable ? (
+  ) : canEdit && serviceName && urlsReady && unavailable ? (
     <button
       type="button"
       disabled
@@ -82,7 +84,7 @@ export function ServicePortLink({
     return (
       <span className="inline-flex flex-wrap items-center gap-x-2 gap-y-0.5">
         <span>{click.portLabel}</span>
-        <span className="text-stat-subtitle">{click.reason}</span>
+        {click.reason ? <span className="text-stat-subtitle">{click.reason}</span> : null}
         {click.reason === 'Service URL unavailable' && onRetry ? (
           <button type="button" onClick={onRetry} className="text-brand hover:underline max-md:min-h-11">
             Retry

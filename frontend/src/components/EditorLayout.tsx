@@ -27,7 +27,7 @@ import { ThemeQuickSwitch } from './theme/ThemeQuickSwitch';
 import { useNotifications } from './EditorLayout/hooks/useNotifications';
 import { useContainerStats } from './EditorLayout/hooks/useContainerStats';
 import { useSidebarContextMenu } from './EditorLayout/hooks/useSidebarContextMenu';
-import { useServiceUrls, fetchServiceUrlEntry } from './EditorLayout/hooks/useServiceUrls';
+import { useServiceUrls } from './EditorLayout/hooks/useServiceUrls';
 import { ServiceUrlModal } from './EditorLayout/ServiceUrlModal';
 import { patchServiceUrlLabel, serviceUrlOwnedBySource } from '@/lib/composeServiceUrl';
 import { sameServiceUrlTarget, type ServiceUrlDialogTarget } from '@/lib/serviceUrlTarget';
@@ -855,19 +855,18 @@ export default function EditorLayout() {
     const stillHere = () => selectedFileRef.current === captured.stackName && activeNodeIdRef.current === captured.nodeId;
     let next;
     try {
-      next = await fetchServiceUrlEntry(captured.nodeId, captured.stackName);
+      next = await refreshServiceUrls();
     } catch (error) {
       console.error('Failed to verify service URL:', error);
       if (stillHere()) setServiceUrlVerify('The file was saved, but the URL could not be verified.');
       return;
     }
     if (!stillHere()) return;
-    const effective = next.status === 'ready' ? (next.serviceUrls[captured.service] ?? null) : undefined;
-    if (next.status === 'ready' && effective === captured.url) {
+    const effective = next?.status === 'ready' ? (next.serviceUrls[captured.service] ?? null) : undefined;
+    if (next?.status === 'ready' && effective === captured.url) {
       toast.success(captured.url ? 'Service URL saved.' : 'Service URL cleared.');
       setServiceUrlTarget(null);
       setServiceUrlVerify(null);
-      void refreshServiceUrls();
       return;
     }
     const detail = typeof effective === 'string' ? ` Effective URL: ${effective}.` : '';
@@ -888,9 +887,10 @@ export default function EditorLayout() {
       toast.error('You cannot edit this stack.');
       return;
     }
-    const effectiveUrl = serviceUrlEntry?.status === 'ready'
-      ? serviceUrlEntry.serviceUrls[opened.serviceName]
-      : undefined;
+    const knownUrls = serviceUrlEntry && (serviceUrlEntry.status === 'ready' || serviceUrlEntry.status === 'loading')
+      ? serviceUrlEntry.serviceUrls
+      : null;
+    const effectiveUrl = knownUrls ? knownUrls[opened.serviceName] : undefined;
     if (!serviceUrlOwnedBySource(content, opened.serviceName, effectiveUrl)) {
       toast.error('This URL is set in another compose file.');
       return;

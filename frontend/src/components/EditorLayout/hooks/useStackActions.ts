@@ -500,30 +500,47 @@ export function useStackActions(options: UseStackActionsOptions) {
     const capturedNodeId = capturedNode?.id ?? null;
     const port = stackListState.stackPorts[file];
     const cached = serviceUrlsRef?.current ?? null;
-    const open = (target: { url: string } | { error: string } | null) => {
-      if ((activeNodeIdRef.current ?? null) !== capturedNodeId) return;
-      if (!target) return;
-      if ('error' in target) {
-        toast.error(target.error);
+    const finish = (target: { url: string } | { error: string } | null, popup: Window | null) => {
+      if ((activeNodeIdRef.current ?? null) !== capturedNodeId) {
+        popup?.close();
+        return;
+      }
+      if (!target || 'error' in target) {
+        popup?.close();
+        if (target && 'error' in target) toast.error(target.error);
+        return;
+      }
+      if (popup && !popup.closed) {
+        popup.opener = null;
+        popup.location.href = target.url;
         return;
       }
       openServiceUrl(target.url);
     };
     if (cached && cached.stackName === file && cached.nodeId === capturedNodeId) {
-      open(resolveOpenAppTarget({ entry: cached, publicPort: port, node: capturedNode }));
+      finish(resolveOpenAppTarget({ entry: cached, publicPort: port, node: capturedNode }), null);
       return;
     }
+    // Open the tab in this click so a slow lookup does not miss the browser's
+    // user-activation window. The blank tab is navigated, or closed, once the
+    // address is known.
+    const popup = window.open('', '_blank');
+    if (popup) popup.opener = null;
     void fetchServiceUrlEntry(capturedNodeId, file).then(next => {
-      open(resolveOpenAppTarget({ entry: next, publicPort: port, node: capturedNode }));
+      finish(resolveOpenAppTarget({ entry: next, publicPort: port, node: capturedNode }), popup);
     }).catch(error => {
       console.error('Failed to resolve service URL:', error);
-      if ((activeNodeIdRef.current ?? null) !== capturedNodeId) return;
+      if ((activeNodeIdRef.current ?? null) !== capturedNodeId) {
+        popup?.close();
+        return;
+      }
       const target = resolveOpenAppTarget({ entry: null, publicPort: port, node: capturedNode });
       if (!target) {
+        popup?.close();
         toast.error('Service URL unavailable');
         return;
       }
-      open(target);
+      finish(target, popup);
     });
   };
 
@@ -999,13 +1016,14 @@ export function useStackActions(options: UseStackActionsOptions) {
         throw new Error(`Failed to load stack: ${res.status}`);
       }
       const dispatchSpan = beginSpan('state_dispatch', { attemptId, proxied });
+      const reloadingOpenFile = stackListState.selectedFile === filename;
       stackListState.setSelectedFile(filename);
       navState.setActiveView('editor');
       editorState.setContent(text || '');
       editorState.setOriginalContent(text || '');
       editorState.setComposeEtag(res.headers.get('etag'));
       editorState.setComposeFilename(res.headers.get('x-compose-file'));
-      onStackFilesChanged?.();
+      if (reloadingOpenFile) onStackFilesChanged?.();
       endSpan(dispatchSpan);
       detailVisiblePendingRef.current = { attemptId, token: filename, proxied };
       setDetailVisibleEpoch((n) => n + 1);
@@ -1178,7 +1196,6 @@ export function useStackActions(options: UseStackActionsOptions) {
         if (newEtag) editorState.setComposeEtag(newEtag);
         const savedName = response.headers.get('x-compose-file');
         if (savedName) editorState.setComposeFilename(savedName);
-        onStackFilesChanged?.();
       }
       return { ok: true, etag: response.headers.get('etag') };
     } catch (error) {

@@ -61,4 +61,24 @@ describe('useServiceUrls', () => {
     });
     expect(result.current.entry?.serviceUrls.web).toBe('https://b.example.com');
   });
+
+  it('keeps the previous URL while a reload is in flight', async () => {
+    fetchMock.mockResolvedValueOnce(anatomy('https://a.example.com'));
+    const { result } = renderHook(() => useServiceUrls(1, 'web.yaml'));
+    await waitFor(() => expect(result.current.entry?.status).toBe('ready'));
+
+    let release: (response: Response) => void = () => {};
+    fetchMock.mockImplementationOnce(() => new Promise(resolve => { release = resolve; }));
+    let pending: Promise<unknown> = Promise.resolve();
+    act(() => {
+      pending = result.current.refresh();
+    });
+    expect(result.current.entry?.status).toBe('ready');
+    expect(result.current.entry?.serviceUrls.web).toBe('https://a.example.com');
+    await act(async () => {
+      release(anatomy('https://b.example.com'));
+      await pending;
+    });
+    expect(result.current.entry?.serviceUrls.web).toBe('https://b.example.com');
+  });
 });

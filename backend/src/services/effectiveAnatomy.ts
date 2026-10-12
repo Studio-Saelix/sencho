@@ -24,7 +24,7 @@ import { ComposeService } from './ComposeService';
 import { parseMissingRequiredVars } from '../helpers/envVarParse';
 import { getErrorMessage } from '../utils/errors';
 import { redactSensitiveText, sanitizeForLog } from '../utils/safeLog';
-import { serviceUrlFromLabels } from '../helpers/serviceUrlLabel';
+import { SERVICE_URL_LABEL, serviceUrlFromLabels } from '../helpers/serviceUrlLabel';
 
 const MAX_RENDER_ERROR = 600;
 
@@ -110,6 +110,26 @@ function networkKeys(value: unknown): string[] {
   return [];
 }
 
+/** Compose writes a literal `$` as `$$` in rendered config. Undo that once. */
+function unescapeRenderedServiceUrl(labels: unknown): unknown {
+  const unescape = (value: string) => value.replaceAll('$$', '$');
+  if (Array.isArray(labels)) {
+    return labels.map(entry => {
+      if (typeof entry !== 'string') return entry;
+      const eq = entry.indexOf('=');
+      if (eq <= 0 || entry.slice(0, eq) !== SERVICE_URL_LABEL) return entry;
+      return `${SERVICE_URL_LABEL}=${unescape(entry.slice(eq + 1))}`;
+    });
+  }
+  if (labels && typeof labels === 'object') {
+    const copy: Record<string, unknown> = { ...(labels as Record<string, unknown>) };
+    const raw = copy[SERVICE_URL_LABEL];
+    if (typeof raw === 'string') copy[SERVICE_URL_LABEL] = unescape(raw);
+    return copy;
+  }
+  return labels;
+}
+
 /**
  * Map parsed `docker compose config --format json` to the {@link EffectiveAnatomy}
  * shape. Tolerant of missing fields; empty / garbage input yields an empty model
@@ -145,7 +165,7 @@ export function parseEffectiveAnatomy(parsed: unknown): EffectiveAnatomy {
     if (v.length) volumes[name] = v;
     if (restart === null && typeof o.restart === 'string') restart = o.restart;
     for (const n of networkKeys(o.networks)) networks.add(n);
-    const serviceUrl = serviceUrlFromLabels(o.labels);
+    const serviceUrl = serviceUrlFromLabels(unescapeRenderedServiceUrl(o.labels));
     if (serviceUrl) serviceUrls[name] = serviceUrl;
   }
 

@@ -369,6 +369,10 @@ export class FileSystemService {
       const filePath = await this.getComposeFilePath(stackName);
       return await fsPromises.readFile(filePath, 'utf-8');
     } catch (error) {
+      const code = error && typeof error === 'object' && 'code' in error
+        ? (error as { code?: unknown }).code
+        : undefined;
+      if (code === 'SYMLINK_ESCAPE' || code === 'INVALID_PATH' || code === 'INVALID_STACK_NAME') throw error;
       console.error('Error reading stack content:', sanitizeForLog((error as Error)?.message ?? String(error)));
       throw new Error(`Failed to read stack: ${stackName}`);
     }

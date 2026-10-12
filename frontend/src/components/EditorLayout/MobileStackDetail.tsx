@@ -8,7 +8,7 @@ import { StackIdentityHeader, ContainersHealth, StackLogsSection } from './edito
 import { RecoveryPanel } from './RecoveryPanel';
 import { StackOperationBanner } from './StackOperationBanner';
 import { retryHandlerFor } from './recovery-retry';
-import { composeServiceNames, serviceUrlOwnedBySource } from '@/lib/composeServiceUrl';
+import { composeServiceNames, lockedServiceNames } from '@/lib/composeServiceUrl';
 import type { EditorViewProps } from './EditorView';
 
 const SEGMENTS = [
@@ -100,12 +100,11 @@ export function MobileStackDetail(props: EditorViewProps) {
 
     const sourceServices = useMemo(() => composeServiceNames(content || ''), [content]);
     const lockedServices = useMemo(() => {
-      const locked = new Set<string>();
-      if (!serviceUrlEntry || serviceUrlEntry.status !== 'ready') return locked;
-      for (const [name, url] of Object.entries(serviceUrlEntry.serviceUrls)) {
-        if (!serviceUrlOwnedBySource(content || '', name, url)) locked.add(name);
-      }
-      return locked;
+      if (!serviceUrlEntry) return new Set<string>();
+      const usable = serviceUrlEntry.status === 'ready'
+        || (serviceUrlEntry.status === 'loading' && Object.keys(serviceUrlEntry.serviceUrls).length > 0);
+      if (!usable) return new Set<string>();
+      return lockedServiceNames(content || '', serviceUrlEntry.serviceUrls);
     }, [content, serviceUrlEntry]);
     const safeContainers = containers || [];
     const isMultiContainerLayout = safeContainers.length > 1 || effectiveServices.length > 1;
@@ -296,6 +295,7 @@ export function MobileStackDetail(props: EditorViewProps) {
                                 content={content}
                                 envContent={envContent}
                                 selectedEnvFile={selectedEnvFile}
+                                serviceUrlEntry={serviceUrlEntry}
                                 gitSourcePending={gitSourcePendingMap[stackName] ?? null}
                                 onEditCompose={openComposeEditor}
                                 onOpenGitSource={() => setGitSourceOpen(true)}

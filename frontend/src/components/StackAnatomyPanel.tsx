@@ -359,8 +359,13 @@ export default function StackAnatomyPanel({
     // read separately below), so the raw parse stands in directly when there are no
     // effective facts for this stack.
     const fetched = effectiveAnatomy?.stack === stackName ? effectiveAnatomy : null;
-    const shared = serviceUrlEntry !== undefined && gitSource?.stack === stackName && gitSource.multiFile
-      && serviceUrlEntry?.status === 'ready' && serviceUrlEntry.renderable
+    const legacyFacts = serviceUrlEntry?.status === 'unsupported'
+      && ((serviceUrlEntry.services?.length ?? 0) > 0
+        || Object.keys(serviceUrlEntry.ports).length > 0
+        || Object.keys(serviceUrlEntry.volumes ?? {}).length > 0
+        || (serviceUrlEntry.networks?.length ?? 0) > 0);
+    const shared = serviceUrlEntry && gitSource?.stack === stackName && gitSource.multiFile
+      && ((serviceUrlEntry.status === 'ready' && serviceUrlEntry.renderable) || legacyFacts)
       ? {
           stack: stackName,
           services: serviceUrlEntry.services ?? [],

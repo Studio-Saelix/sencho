@@ -1415,13 +1415,23 @@ paths:
       operationId: getStack
       tags: [Stacks]
       summary: Get stack compose file
-      description: Returns the raw `compose.yaml` content for the specified stack.
+      description: >
+        Returns the compose file Sencho resolved for the stack. That file is
+        `compose.yaml`, `compose.yml`, `docker-compose.yaml`, or
+        `docker-compose.yml`, and the `X-Compose-File` response header names it.
+        A compose file that is a symlink to a path outside the stack directory,
+        or a dangling symlink, is refused.
       parameters:
         - $ref: "#/components/parameters/stackName"
         - $ref: "#/components/parameters/nodeId"
       responses:
         "200":
-          description: Raw compose.yaml content.
+          description: Raw compose file content. The `X-Compose-File` header is the basename that was read.
+          headers:
+            X-Compose-File:
+              schema:
+                type: string
+                enum: [compose.yaml, compose.yml, docker-compose.yaml, docker-compose.yml]
           content:
             text/plain:
               schema:
@@ -1432,16 +1442,41 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Error"
+        "409":
+          description: The compose file is a symlink outside the stack directory, or the symlink is dangling.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
         "500":
           $ref: "#/components/responses/InternalError"
     put:
       operationId: updateStack
       tags: [Stacks]
       summary: Update stack compose file
-      description: Overwrites the `compose.yaml` content for the specified stack. Requires `stack:edit` permission.
+      description: >
+        Writes the compose file that was opened. Send `X-Compose-File` with the
+        basename from the matching GET. When that name no longer matches the
+        file Sencho resolves, the response is 412 with code `compose_source_changed`
+        and nothing is written. `If-Match` compares the file modification time;
+        a mismatch is 412 with code `stack_file_changed`. When no compose file
+        exists yet, the write creates `compose.yaml`. Requires `stack:edit` permission.
       parameters:
         - $ref: "#/components/parameters/stackName"
         - $ref: "#/components/parameters/nodeId"
+        - name: X-Compose-File
+          in: header
+          required: false
+          schema:
+            type: string
+            enum: [compose.yaml, compose.yml, docker-compose.yaml, docker-compose.yml]
+          description: Basename returned by the matching GET.
+        - name: If-Match
+          in: header
+          required: false
+          schema:
+            type: string
+          description: ETag from the matching GET.
       requestBody:
         required: true
         content:
@@ -1452,7 +1487,7 @@ paths:
               properties:
                 content:
                   type: string
-                  description: Full compose.yaml content.
+                  description: Full compose file content.
       responses:
         "200":
           description: Stack saved.
@@ -1470,6 +1505,21 @@ paths:
                 $ref: "#/components/schemas/Error"
         "403":
           $ref: "#/components/responses/Forbidden"
+        "409":
+          description: The compose file is a symlink outside the stack directory, or the symlink is dangling.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "412":
+          description: >
+            `compose_source_changed` when the opened filename no longer matches
+            the resolved file. `stack_file_changed` when `If-Match` does not
+            match the file on disk.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
         "500":
           $ref: "#/components/responses/InternalError"
     delete:

@@ -376,6 +376,7 @@ describe.skipIf(isWindows)('FileSystemService symlink-escape: alternate compose 
     await fs.symlink(outside, path.join(stackDir, 'docker-compose.yml'));
     const svc = FileSystemService.getInstance();
     await expect(svc.getStackContentWithMtime(STACK)).rejects.toMatchObject({ code: 'SYMLINK_ESCAPE' });
+    await expect(svc.getStackContent(STACK)).rejects.toMatchObject({ code: 'SYMLINK_ESCAPE' });
     await expect(svc.saveStackContentIfUnchanged(STACK, 'pwned\n', null, 'docker-compose.yml')).rejects.toMatchObject({ code: 'SYMLINK_ESCAPE' });
     expect(await fs.readFile(outside, 'utf-8')).toBe('OUTSIDE=1\n');
     await expect(fs.access(path.join(stackDir, 'compose.yaml'))).rejects.toMatchObject({ code: 'ENOENT' });

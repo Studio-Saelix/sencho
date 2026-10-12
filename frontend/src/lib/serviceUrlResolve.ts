@@ -80,6 +80,19 @@ function hostLabel(url: string): string | null {
   }
 }
 
+/** A refresh that still holds the last rendered model can keep using that model. */
+function usableOverride(entry: ServiceUrlEntry | null): boolean {
+  if (!entry || !entry.renderable) return false;
+  if (entry.status === 'ready') return true;
+  return entry.status === 'loading'
+    && (Object.keys(entry.serviceUrls).length > 0 || Object.keys(entry.ports).length > 0);
+}
+
+function withoutOverride(generated: string | null, portLabel: string, failed: boolean): PortClick {
+  if (generated) return { kind: 'link', href: generated, portLabel, hostLabel: null };
+  return { kind: 'text', portLabel, reason: failed ? UNAVAILABLE : '' };
+}
+
 export function resolvePublishedPortClick(args: {
   entry: ServiceUrlEntry | null;
   serviceName: string | undefined;
@@ -90,13 +103,11 @@ export function resolvePublishedPortClick(args: {
 }): PortClick {
   const { entry, serviceName, publicPort, privatePort, portLabel, node } = args;
   const generated = buildServiceUrl({ node, publicPort, privatePort });
-  // A missing, legacy, or failed URL list has no override to apply, so the
-  // generated host and port stays available. An override is used only after a
-  // ready response names one owner.
-  if (!entry || entry.status !== 'ready' || !entry.renderable) {
-    return generated
-      ? { kind: 'link', href: generated, portLabel, hostLabel: null }
-      : { kind: 'text', portLabel, reason: UNAVAILABLE };
+  // A missing or legacy URL list has no override to apply, so the generated
+  // host and port stays available. A failed load is the only case with no
+  // generated link that offers a retry. A refresh keeps the last ready model.
+  if (!entry || !usableOverride(entry)) {
+    return withoutOverride(generated, portLabel, entry?.status === 'unavailable');
   }
   const owners = tcpOwners(entry.ports, publicPort);
   const withOverride = owners.filter(name => entry.serviceUrls[name]);
@@ -106,9 +117,7 @@ export function resolvePublishedPortClick(args: {
   if (serviceName && owners.includes(serviceName)) {
     const own = entry.serviceUrls[serviceName];
     if (own) return { kind: 'link', href: own, portLabel, hostLabel: hostLabel(own) };
-    return generated
-      ? { kind: 'link', href: generated, portLabel, hostLabel: null }
-      : { kind: 'text', portLabel, reason: UNAVAILABLE };
+    return withoutOverride(generated, portLabel, false);
   }
   if (owners.length > 1 && withOverride.length > 0) {
     return { kind: 'text', portLabel, reason: AMBIGUOUS };
@@ -116,9 +125,7 @@ export function resolvePublishedPortClick(args: {
   if (!serviceName) {
     const sole = owners.length === 1 ? entry.serviceUrls[owners[0]] : undefined;
     if (sole) return { kind: 'link', href: sole, portLabel, hostLabel: hostLabel(sole) };
-    return generated
-      ? { kind: 'link', href: generated, portLabel, hostLabel: null }
-      : { kind: 'text', portLabel, reason: UNAVAILABLE };
+    return withoutOverride(generated, portLabel, false);
   }
   const dynamicOwner = owners.length === 0
     && privatePort !== undefined
@@ -127,9 +134,7 @@ export function resolvePublishedPortClick(args: {
   if (override) {
     return { kind: 'link', href: override, portLabel, hostLabel: hostLabel(override) };
   }
-  return generated
-    ? { kind: 'link', href: generated, portLabel, hostLabel: null }
-    : { kind: 'text', portLabel, reason: UNAVAILABLE };
+  return withoutOverride(generated, portLabel, false);
 }
 
 export function resolveOpenAppTarget(args: {
@@ -138,7 +143,7 @@ export function resolveOpenAppTarget(args: {
   node: ServiceUrlOptions['node'];
 }): { url: string } | { error: string } | null {
   const { entry, publicPort, node } = args;
-  if (!entry || entry.status !== 'ready' || !entry.renderable) {
+  if (!entry || !usableOverride(entry)) {
     if (publicPort === undefined) return null;
     const generated = buildServiceUrl({ node, publicPort });
     return generated ? { url: generated } : { error: UNAVAILABLE };
@@ -178,13 +183,26 @@ export function parseServiceUrlResponse(
     return { ...empty, status: 'unavailable' };
   }
   const record = body as Record<string, unknown>;
-  if (!('serviceUrls' in record)) {
-    return { ...empty, status: 'unsupported' };
-  }
-  const serviceUrls = readServiceUrls(record.serviceUrls);
-  const ports = record.ports && typeof record.ports === 'object'
+  const ports = record.ports && typeof record.ports === 'object' && !Array.isArray(record.ports)
     ? record.ports as Record<string, AnatomyPortRef[]>
     : {};
+  const services = Array.isArray(record.services)
+    ? record.services.filter((name): name is string => typeof name === 'string')
+    : [];
+  const volumes = record.volumes && typeof record.volumes === 'object' && !Array.isArray(record.volumes)
+    ? record.volumes as ServiceUrlEntry['volumes']
+    : {};
+  const restart = typeof record.restart === 'string' ? record.restart : null;
+  const networks = Array.isArray(record.networks)
+    ? record.networks.filter((name): name is string => typeof name === 'string')
+    : [];
+  const facts = { ports, services, volumes, restart, networks };
+  // An older node has the dossier facts and no service URL field. Keep the
+  // facts and mark the URL list unsupported so the generated link stays.
+  if (!('serviceUrls' in record)) {
+    return { ...empty, ...facts, status: 'unsupported', renderable: record.renderable === true };
+  }
+  const serviceUrls = readServiceUrls(record.serviceUrls);
   if (record.renderable === false) {
     return { status: 'unavailable', nodeId, stackName, serviceUrls: {}, ports, renderable: false };
   }
@@ -195,12 +213,10 @@ export function parseServiceUrlResponse(
     serviceUrls,
     ports,
     renderable: true,
-    services: Array.isArray(record.services) ? record.services.filter((name): name is string => typeof name === 'string') : [],
-    volumes: record.volumes && typeof record.volumes === 'object'
-      ? record.volumes as ServiceUrlEntry['volumes']
-      : {},
-    restart: typeof record.restart === 'string' ? record.restart : null,
-    networks: Array.isArray(record.networks) ? record.networks.filter((name): name is string => typeof name === 'string') : [],
+    services,
+    volumes,
+    restart,
+    networks,
   };
 }
 

@@ -178,6 +178,48 @@ describe('PUT /api/stacks/:stackName optimistic concurrency', () => {
     expect(fs.existsSync(path.join(stackDir, 'compose.yaml'))).toBe(false);
   });
 
+  it('updates docker-compose.yml in place when the save does not name the file', async () => {
+    const stackDir = path.join(composeDir, STACK);
+    fs.mkdirSync(stackDir, { recursive: true });
+    const filePath = path.join(stackDir, 'docker-compose.yml');
+    fs.writeFileSync(filePath, 'original', 'utf-8');
+
+    const getRes = await request(app).get(`/api/stacks/${STACK}`).set('Cookie', authCookie);
+    const putRes = await request(app)
+      .put(`/api/stacks/${STACK}`)
+      .set('Cookie', authCookie)
+      .set('If-Match', getRes.headers.etag)
+      .send({ content: 'updated' });
+
+    expect(putRes.status).toBe(200);
+    expect(fs.readFileSync(filePath, 'utf-8')).toBe('updated');
+    expect(fs.existsSync(path.join(stackDir, 'compose.yaml'))).toBe(false);
+  });
+
+  it('reads a compose.yaml symlink that stays inside the stack directory', async () => {
+    const stackDir = path.join(composeDir, STACK);
+    fs.mkdirSync(stackDir, { recursive: true });
+    const target = path.join(stackDir, 'real.yaml');
+    fs.writeFileSync(target, 'inside', 'utf-8');
+    fs.symlinkSync(target, path.join(stackDir, 'compose.yaml'));
+
+    const getRes = await request(app).get(`/api/stacks/${STACK}`).set('Cookie', authCookie);
+    expect(getRes.status).toBe(200);
+    expect(getRes.text).toBe('inside');
+  });
+
+  it('refuses a dangling compose.yaml even when compose.yml is present', async () => {
+    const stackDir = path.join(composeDir, STACK);
+    fs.mkdirSync(stackDir, { recursive: true });
+    fs.symlinkSync(path.join(stackDir, 'missing.yaml'), path.join(stackDir, 'compose.yaml'));
+    fs.writeFileSync(path.join(stackDir, 'compose.yml'), 'fallback', 'utf-8');
+
+    const getRes = await request(app).get(`/api/stacks/${STACK}`).set('Cookie', authCookie);
+    expect(getRes.status).toBe(409);
+    expect(getRes.body.error).toBe('Compose file path is not allowed');
+    expect(fs.readFileSync(path.join(stackDir, 'compose.yml'), 'utf-8')).toBe('fallback');
+  });
+
   it('returns 412 and writes nothing when a higher-priority compose file appears after the read', async () => {
     const stackDir = path.join(composeDir, STACK);
     fs.mkdirSync(stackDir, { recursive: true });

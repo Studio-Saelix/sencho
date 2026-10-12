@@ -43,16 +43,19 @@ export function useServiceUrls(nodeId: number | null, stackName: string | null) 
     }
     const generation = generationRef.current + 1;
     generationRef.current = generation;
-    setEntry(prev => prev && prev.stackName === stackName && prev.nodeId === nodeId
-      ? { ...prev, status: 'loading' }
-      : {
-        status: 'loading',
-        nodeId,
-        stackName,
-        serviceUrls: {},
-        ports: {},
-        renderable: false,
-      });
+    setEntry(prev => {
+      if (prev && prev.stackName === stackName && prev.nodeId === nodeId && prev.status === 'ready') return prev;
+      return prev && prev.stackName === stackName && prev.nodeId === nodeId
+        ? { ...prev, status: 'loading' }
+        : {
+          status: 'loading',
+          nodeId,
+          stackName,
+          serviceUrls: {},
+          ports: {},
+          renderable: false,
+        };
+    });
     let next: ServiceUrlEntry;
     try {
       const res = await apiFetch(`/stacks/${encodeURIComponent(stackName)}/effective-anatomy`, { nodeId });

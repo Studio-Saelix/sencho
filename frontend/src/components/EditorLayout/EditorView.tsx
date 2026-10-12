@@ -52,7 +52,7 @@ import type { Node } from '@/context/NodeContext';
 import type { useAuth } from '@/context/AuthContext';
 import type { useStackMuteActions } from '@/hooks/useMuteRuleActions';
 import type { EffectiveServiceSpec } from '@/types/effectiveServices';
-import { composeServiceNames, serviceUrlOwnedBySource } from '@/lib/composeServiceUrl';
+import { composeServiceNames, lockedServiceNames } from '@/lib/composeServiceUrl';
 import type { ServiceUrlEntry } from '@/lib/serviceUrlResolve';
 import type { GitSourcePendingMap } from '@/lib/gitopsState';
 import type { StackServiceUpdateStatus } from '@/types/imageUpdates';
@@ -336,12 +336,11 @@ export function EditorView(props: EditorViewProps) {
     } = props;
     const sourceServices = useMemo(() => composeServiceNames(content || ''), [content]);
     const lockedServices = useMemo(() => {
-      const locked = new Set<string>();
-      if (!serviceUrlEntry || serviceUrlEntry.status !== 'ready') return locked;
-      for (const [name, url] of Object.entries(serviceUrlEntry.serviceUrls)) {
-        if (!serviceUrlOwnedBySource(content || '', name, url)) locked.add(name);
-      }
-      return locked;
+      if (!serviceUrlEntry) return new Set<string>();
+      const usable = serviceUrlEntry.status === 'ready'
+        || (serviceUrlEntry.status === 'loading' && Object.keys(serviceUrlEntry.serviceUrls).length > 0);
+      if (!usable) return new Set<string>();
+      return lockedServiceNames(content || '', serviceUrlEntry.serviceUrls);
     }, [content, serviceUrlEntry]);
     const monacoEditorRef = useRef<import('monaco-editor').editor.IStandaloneCodeEditor | null>(null);
     const canEditCompose = can('stack:edit', 'stack', stackName, activeNode?.id);
