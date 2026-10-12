@@ -4,6 +4,8 @@ import { serviceUrlFromLabelValue } from './serviceUrlLabel';
 export interface AnatomyPortRef {
   host: string;
   proto: string;
+  /** Container port. Empty host plus this target is a dynamically published port. */
+  container?: string;
 }
 
 export type ServiceUrlStatus = 'loading' | 'ready' | 'unavailable' | 'unsupported';
@@ -36,11 +38,35 @@ function portCovers(host: string, port: number): boolean {
   return Number.isInteger(start) && Number.isInteger(end) && port >= start && port <= end;
 }
 
+function isTcp(row: AnatomyPortRef): boolean {
+  return (row.proto || 'tcp').toLowerCase() !== 'udp';
+}
+
 /** Services that publish this port over TCP. A UDP listener on the same number does not count. */
 export function tcpOwners(ports: Record<string, AnatomyPortRef[]>, publicPort: number): string[] {
   const owners: string[] = [];
   for (const [service, rows] of Object.entries(ports)) {
-    const owns = rows.some(row => (row.proto || 'tcp').toLowerCase() !== 'udp' && portCovers(row.host, publicPort));
+    const owns = rows.some(row => isTcp(row) && portCovers(row.host, publicPort));
+    if (owns) owners.push(service);
+  }
+  return owners;
+}
+
+/**
+ * Services with a target-only TCP binding. Docker assigns the host port later,
+ * so the saved file has no host number to match. When privatePort is omitted,
+ * every such binding counts.
+ */
+export function dynamicTcpOwners(
+  ports: Record<string, AnatomyPortRef[]>,
+  privatePort: number | undefined,
+): string[] {
+  const owners: string[] = [];
+  for (const [service, rows] of Object.entries(ports)) {
+    const owns = rows.some(row => {
+      if (!isTcp(row) || row.host || !row.container) return false;
+      return privatePort === undefined || portCovers(row.container, privatePort);
+    });
     if (owns) owners.push(service);
   }
   return owners;
@@ -82,11 +108,14 @@ export function resolvePublishedPortClick(args: {
   if (owners.length > 1 && withOverride.length > 0) {
     return { kind: 'text', portLabel, reason: AMBIGUOUS };
   }
-  // A named service uses only its own URL, and only when the saved file still
-  // says it is the only owner of this port. A live container can publish a
-  // port that the saved file has since given to another service.
+  // A named service uses only its own URL. A fixed host port must still name
+  // that service as the only owner. A host port Docker assigned later matches
+  // the service's target-only binding instead, and never another service's URL.
   const namedIsSoleOwner = owners.length === 1 && owners[0] === serviceName;
-  const override = namedIsSoleOwner ? entry.serviceUrls[serviceName] : undefined;
+  const dynamicOwner = owners.length === 0
+    && privatePort !== undefined
+    && dynamicTcpOwners(entry.ports, privatePort).includes(serviceName);
+  const override = namedIsSoleOwner || dynamicOwner ? entry.serviceUrls[serviceName] : undefined;
   if (override) {
     return { kind: 'link', href: override, portLabel, hostLabel: hostLabel(override) };
   }
@@ -117,6 +146,11 @@ export function resolveOpenAppTarget(args: {
   if (owners.length > 1 && withOverride.length > 0) return { error: AMBIGUOUS };
   const override = owners.length === 1 ? entry.serviceUrls[owners[0]] : undefined;
   if (override) return { url: override };
+  if (owners.length === 0) {
+    const dynamicWithUrl = dynamicTcpOwners(entry.ports, undefined).filter(name => entry.serviceUrls[name]);
+    if (dynamicWithUrl.length > 1) return { error: AMBIGUOUS };
+    if (dynamicWithUrl.length === 1) return { url: entry.serviceUrls[dynamicWithUrl[0]] };
+  }
   const generated = buildServiceUrl({ node, publicPort });
   return generated ? { url: generated } : { error: UNAVAILABLE };
 }

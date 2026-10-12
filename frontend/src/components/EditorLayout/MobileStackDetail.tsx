@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 import { ChevronLeft } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import ErrorBoundary from '../ErrorBoundary';
@@ -8,6 +8,7 @@ import { StackIdentityHeader, ContainersHealth, StackLogsSection } from './edito
 import { RecoveryPanel } from './RecoveryPanel';
 import { StackOperationBanner } from './StackOperationBanner';
 import { retryHandlerFor } from './recovery-retry';
+import { composeServiceNames } from '@/lib/composeServiceUrl';
 import type { EditorViewProps } from './EditorView';
 
 const SEGMENTS = [
@@ -97,6 +98,7 @@ export function MobileStackDetail(props: EditorViewProps) {
 
     const [segment, setSegment] = useState<Segment>('logs');
 
+    const sourceServices = useMemo(() => composeServiceNames(content || ''), [content]);
     const safeContainers = containers || [];
     const isMultiContainerLayout = safeContainers.length > 1 || effectiveServices.length > 1;
     const isRunning = safeContainers.some(c => c.State === 'running');
@@ -258,6 +260,7 @@ export function MobileStackDetail(props: EditorViewProps) {
                                 onRequestServiceUpdate={onRequestServiceUpdate}
                                 serviceUrlEntry={serviceUrlEntry}
                                 canEditServiceUrl={can('stack:edit', 'stack', stackName, activeNode?.id)}
+                                sourceServices={sourceServices}
                                 onEditServiceUrl={onEditServiceUrl}
                                 onRetryServiceUrls={onRetryServiceUrls}
                                 containersLoadStatus={props.containersLoadStatus}

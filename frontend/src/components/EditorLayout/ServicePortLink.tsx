@@ -5,6 +5,8 @@ import { resolvePublishedPortClick, type ServiceUrlEntry } from '@/lib/serviceUr
 import type { Node } from '@/context/NodeContext';
 import { cn } from '@/lib/utils';
 
+const OTHER_FILE = 'This service is not in the open compose file.';
+
 interface ServicePortLinkProps {
   portLabel: string;
   publicPort: number;
@@ -13,6 +15,8 @@ interface ServicePortLinkProps {
   entry: ServiceUrlEntry | null;
   node: Node | null;
   canEdit: boolean;
+  /** Services declared in the open compose buffer. Omit when the buffer is unknown. */
+  sourceServices?: readonly string[] | null;
   onEdit?: (serviceName: string) => void;
   onRetry?: () => void;
 }
@@ -25,6 +29,7 @@ export function ServicePortLink({
   entry,
   node,
   canEdit,
+  sourceServices,
   onEdit,
   onRetry,
 }: ServicePortLinkProps) {
@@ -44,12 +49,24 @@ export function ServicePortLink({
     node,
   });
 
-  const edit = canEdit && serviceName && onEdit && entry?.status === 'ready' ? (
+  const inOpenFile = sourceServices === undefined
+    || (sourceServices !== null && !!serviceName && sourceServices.includes(serviceName));
+  const edit = canEdit && serviceName && onEdit && entry?.status === 'ready' && inOpenFile ? (
     <button
       type="button"
       aria-label={`Set URL for ${serviceName}`}
       onClick={() => onEdit(serviceName)}
       className="inline-flex h-4 w-4 items-center justify-center rounded text-stat-subtitle hover:text-foreground hover:bg-muted/60 max-md:h-11 max-md:w-11 max-md:shrink-0"
+    >
+      <Pencil className="h-3 w-3" strokeWidth={1.5} />
+    </button>
+  ) : canEdit && serviceName && entry?.status === 'ready' && !inOpenFile ? (
+    <button
+      type="button"
+      disabled
+      title={OTHER_FILE}
+      aria-label={OTHER_FILE}
+      className="inline-flex h-4 w-4 items-center justify-center rounded text-stat-subtitle opacity-40 max-md:h-11 max-md:w-11 max-md:shrink-0"
     >
       <Pencil className="h-3 w-3" strokeWidth={1.5} />
     </button>

@@ -1,4 +1,4 @@
-import { Suspense, useRef, useEffect, useState } from 'react';
+import { Suspense, useMemo, useRef, useEffect, useState } from 'react';
 import { Editor } from '@/lib/monacoLoader';
 import {
     Save,
@@ -52,6 +52,7 @@ import type { Node } from '@/context/NodeContext';
 import type { useAuth } from '@/context/AuthContext';
 import type { useStackMuteActions } from '@/hooks/useMuteRuleActions';
 import type { EffectiveServiceSpec } from '@/types/effectiveServices';
+import { composeServiceNames } from '@/lib/composeServiceUrl';
 import type { ServiceUrlEntry } from '@/lib/serviceUrlResolve';
 import type { GitSourcePendingMap } from '@/lib/gitopsState';
 import type { StackServiceUpdateStatus } from '@/types/imageUpdates';
@@ -333,6 +334,7 @@ export function EditorView(props: EditorViewProps) {
         stackMuteActions,
         hasUnsavedChanges,
     } = props;
+    const sourceServices = useMemo(() => composeServiceNames(content || ''), [content]);
     const monacoEditorRef = useRef<import('monaco-editor').editor.IStandaloneCodeEditor | null>(null);
     const canEditCompose = can('stack:edit', 'stack', stackName, activeNode?.id);
     // Pulling stages images for a deploy, so it takes the edit authority for the
@@ -564,6 +566,7 @@ export function EditorView(props: EditorViewProps) {
                                     onRequestServiceUpdate={onRequestServiceUpdate}
                                     serviceUrlEntry={serviceUrlEntry}
                                     canEditServiceUrl={can('stack:edit', 'stack', stackName, activeNode?.id)}
+                                    sourceServices={sourceServices}
                                     onEditServiceUrl={onEditServiceUrl}
                                     onRetryServiceUrls={onRetryServiceUrls}
                                     containersExpanded={containersExpanded}
@@ -596,6 +599,7 @@ export function EditorView(props: EditorViewProps) {
                                 onRequestServiceUpdate={onRequestServiceUpdate}
                                 serviceUrlEntry={serviceUrlEntry}
                                 canEditServiceUrl={can('stack:edit', 'stack', stackName, activeNode?.id)}
+                                sourceServices={sourceServices}
                                 onEditServiceUrl={onEditServiceUrl}
                                 onRetryServiceUrls={onRetryServiceUrls}
                                 containersLoadStatus={containersLoadStatus}

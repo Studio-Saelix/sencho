@@ -44,7 +44,7 @@ function effectiveLabels(source: string, serviceName: string): unknown {
   return (service as { labels?: unknown }).labels ?? null;
 }
 
-function copyLabels(labels: unknown, url: string | null): Record<string, string> | string[] | null {
+function copyLabels(labels: unknown, url: string | null): Record<string, string | null> | string[] | null {
   const literal = url === null ? null : escapeComposeLiteral(url);
   if (Array.isArray(labels)) {
     const next = labels.filter(item => typeof item === 'string' && !item.startsWith(`${SERVICE_URL_LABEL}=`));
@@ -54,9 +54,14 @@ function copyLabels(labels: unknown, url: string | null): Record<string, string>
   if (!labels || typeof labels !== 'object') {
     return literal === null ? null : { [SERVICE_URL_LABEL]: literal };
   }
-  const next: Record<string, string> = {};
+  const next: Record<string, string | null> = {};
   for (const [key, value] of Object.entries(labels)) {
     if (key === '<<' || key === SERVICE_URL_LABEL) continue;
+    // An empty label (`KEEP:`) is real metadata. Copying the map must keep it.
+    if (value === null) {
+      next[key] = null;
+      continue;
+    }
     if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
       next[key] = String(value);
     }
@@ -65,22 +70,71 @@ function copyLabels(labels: unknown, url: string | null): Record<string, string>
   return next;
 }
 
-/** A private copy. Shared anchors stay on the original node. */
+function nodeSpan(node: unknown): [number, number] | null {
+  if (!node || typeof node !== 'object' || !('range' in node)) return null;
+  const range = (node as { range?: unknown }).range;
+  if (!Array.isArray(range) || range.length < 2) return null;
+  const start = range[0];
+  const end = range[range.length - 1];
+  if (typeof start !== 'number' || typeof end !== 'number' || start < 0) return null;
+  return [start, end];
+}
+
+function isWithin(inner: unknown, outer: unknown): boolean {
+  const innerSpan = nodeSpan(inner);
+  const outerSpan = nodeSpan(outer);
+  if (!innerSpan || !outerSpan) return false;
+  return innerSpan[0] >= outerSpan[0] && innerSpan[1] <= outerSpan[1];
+}
+
+/** A private copy. Anchors defined inside it are removed, and aliases of those anchors are expanded. */
 function unanchoredCopy(node: YamlNode): YamlNode {
   const copy = node.clone();
-  const strip = (current: unknown): void => {
-    if (!current || typeof current !== 'object') return;
-    if ('anchor' in current) (current as { anchor?: string | null }).anchor = null;
-    if (isAlias(current)) return;
+  const localAnchors = new Map<string, YamlNode>();
+  const collect = (current: unknown): void => {
+    if (!current || typeof current !== 'object' || isAlias(current)) return;
+    const name = anchorName(current);
+    if (name) localAnchors.set(name, current as YamlNode);
     if (isMap(current)) {
-      for (const item of current.items) strip(item.value);
+      for (const item of current.items) collect(item.value);
       return;
     }
     if (isSeq(current)) {
-      for (const item of current.items) strip(item);
+      for (const item of current.items) collect(item);
     }
   };
-  strip(copy);
+  collect(copy);
+  const resolving = new Set<string>();
+  const rewrite = (current: unknown, assign: (next: unknown) => void): void => {
+    if (!current || typeof current !== 'object') return;
+    if (isAlias(current)) {
+      const source = (current as { source?: unknown }).source;
+      if (typeof source !== 'string' || resolving.has(source)) return;
+      const target = localAnchors.get(source);
+      if (!target) return;
+      resolving.add(source);
+      const resolved = target.clone();
+      resolved.anchor = null;
+      assign(resolved);
+      rewrite(resolved, () => undefined);
+      resolving.delete(source);
+      return;
+    }
+    if ('anchor' in current) (current as { anchor?: string | null }).anchor = null;
+    if (isMap(current)) {
+      for (const item of current.items) {
+        rewrite(item.value, (next) => { item.value = next as typeof item.value; });
+      }
+      return;
+    }
+    if (isSeq(current)) {
+      for (let index = 0; index < current.items.length; index += 1) {
+        const item = current.items[index];
+        rewrite(item, (next) => { current.items[index] = next as typeof item; });
+      }
+    }
+  };
+  rewrite(copy, () => undefined);
   return copy;
 }
 
@@ -105,12 +159,46 @@ function replaceAlias(parent: unknown, node: unknown, replacement: unknown): voi
   }
 }
 
-/** Give every alias of this anchor its own copy of the value before it is edited. */
+function anchorsInside(node: unknown): YamlNode[] {
+  const found: YamlNode[] = [];
+  const walk = (current: unknown): void => {
+    if (!current || typeof current !== 'object' || isAlias(current)) return;
+    if (anchorName(current)) found.push(current as YamlNode);
+    if (isMap(current)) {
+      for (const item of current.items) walk(item.value);
+      return;
+    }
+    if (isSeq(current)) {
+      for (const item of current.items) walk(item);
+    }
+  };
+  walk(node);
+  return found;
+}
+
+/** Copy every outside alias before this node, including nested anchors, is edited. */
 function detachSharedAnchor(doc: unknown, node: YamlNode): void {
-  const anchor = anchorName(node);
-  if (!anchor) return;
-  for (const site of aliasSites(doc, anchor)) {
-    replaceAlias(site.parent, site.node, unanchoredCopy(node));
+  for (const anchored of anchorsInside(node)) {
+    const anchor = anchorName(anchored);
+    if (!anchor) continue;
+    for (const site of aliasSites(doc, anchor)) {
+      if (isWithin(site.node, node)) continue;
+      replaceAlias(site.parent, site.node, unanchoredCopy(anchored));
+    }
+  }
+}
+
+/** Service names declared in this compose buffer. Null when the buffer cannot be parsed. */
+export function composeServiceNames(source: string): string[] | null {
+  try {
+    const doc = parseDocument(source);
+    if (doc.errors.length > 0) return null;
+    const services = doc.get('services');
+    if (!isMap(services)) return [];
+    return services.items.map(item => labelText(item.key)).filter(name => name.length > 0);
+  } catch (error) {
+    console.error('Failed to read compose service names:', error);
+    return null;
   }
 }
 
