@@ -169,16 +169,18 @@ describe('AppearanceSection', () => {
         expect(screen.getByRole('button', { name: /readable default/i }).getAttribute('aria-pressed')).toBe('false');
     });
 
-    it('reset to default restores Calm and locks while readability is on', () => {
+    it('reset to default restores the fresh-install look and locks while readability is on', () => {
         render(<AppearanceSection onResetAppearance={() => {}} onResetNavigation={() => {}} />);
         fireEvent.click(screen.getByRole('radio', { name: 'Heat' }));
         expect(document.documentElement.dataset.chartStyle).toBe('heat');
 
         fireEvent.click(screen.getByRole('button', { name: 'Reset to default' }));
         expect(document.documentElement.dataset.headings).toBe('clean');
-        expect(document.documentElement.dataset.chartStyle).toBe('muted');
+        expect(document.documentElement.dataset.chartStyle).toBe('signature');
+        expect(document.documentElement.dataset.effects).toBe('reduced');
         expect(document.documentElement.dataset.motion).toBe('reduced');
-        expect(screen.getByRole('button', { name: /readable default/i }).getAttribute('aria-pressed')).toBe('true');
+        expect(screen.getByRole('button', { name: /readable default/i }).getAttribute('aria-pressed')).toBe('false');
+        expect(screen.getByRole('button', { name: /Today's look/i }).getAttribute('aria-pressed')).toBe('false');
 
         fireEvent.click(screen.getByRole('switch', { name: 'Readability mode' }));
         expect((screen.getByRole('button', { name: 'Reset to default' }) as HTMLButtonElement).disabled).toBe(true);

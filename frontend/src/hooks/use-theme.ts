@@ -411,6 +411,18 @@ export function useTheme() {
         });
         notifyPreferenceWrite('appearance', ['visualStyle', 'headingStyle', 'chartStyle', 'reducedEffects', 'reducedMotion']);
     }, []);
+    // The fresh-install look: Calm headings and effects, Signature charts.
+    // That combination matches neither preset card.
+    const resetVisualDefaults = useCallback(() => {
+        setState({
+            visualStyle: DEFAULT_STATE.visualStyle,
+            headingStyle: DEFAULT_STATE.headingStyle,
+            chartStyle: DEFAULT_STATE.chartStyle,
+            reducedEffects: DEFAULT_STATE.reducedEffects,
+            reducedMotion: DEFAULT_STATE.reducedMotion,
+        });
+        notifyPreferenceWrite('appearance', ['visualStyle', 'headingStyle', 'chartStyle', 'reducedEffects', 'reducedMotion']);
+    }, []);
     const setHeadingStyle = useCallback((headingStyle: HeadingStyle) => { setState({ headingStyle }); notifyPreferenceWrite('appearance', ['headingStyle']); }, []);
     const setChartStyle = useCallback((chartStyle: ChartStyle) => { setState({ chartStyle }); notifyPreferenceWrite('appearance', ['chartStyle']); }, []);
     const setReducedEffects = useCallback((reducedEffects: boolean) => { setState({ reducedEffects }); notifyPreferenceWrite('appearance', ['reducedEffects']); }, []);
@@ -443,6 +455,7 @@ export function useTheme() {
         setMonoFont,
         setTypeScale,
         setVisualStyle,
+        resetVisualDefaults,
         setHeadingStyle,
         setChartStyle,
         setReducedEffects,

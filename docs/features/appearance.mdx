@@ -6,13 +6,13 @@ description: Personalize Sencho's look and desktop pane layout. Choose a visual 
 **Settings → Appearance** is where you make Sencho look and fit the way you want. Choose between the Calm and Signature visual styles, set how the security charts are colored, dial in readability, pick a theme and accent, choose the interface and data fonts, scale the text, and set the desktop pane widths. A live preview reflects visual changes as you make them.
 
 <Frame>
-  <img src="/images/settings/appearance-overview.png" alt="The Settings → Appearance page showing the Visual Style section with two preview cards: Calm (selected, with upright Critical heading and muted severity-color dots) and Signature (with italic serif Critical heading and saturated dots). Below are the Security Visualization chart-palette control with Muted selected, and the Readability section with its mode toggle, header-style control, and contrast slider." />
+  <img src="/images/settings/appearance-overview.png" alt="The Settings → Appearance page showing the Visual Style section with two preview cards, neither selected: Calm (upright Critical heading and muted severity-color dots) and Signature (italic serif Critical heading and saturated dots). Below are the Security Visualization chart-palette control with Signature selected, and the Readability section with its mode toggle, header-style control, and contrast slider." />
 </Frame>
 
 Several of these controls are also one click away from anywhere in the app: the **palette button** in the top bar, between the search and notification icons, opens a quick switcher for the theme mode, accent, visual style, readability, and text size. The sliders for contrast, borders, and glow stay in this Settings section.
 
 <Frame>
-  <img src="/images/settings/appearance-quick-switch.png" alt="The top-bar Theme quick-switcher popover: a Mode row with icon-only buttons for Dim, OLED, Light, and Auto (Dim selected); an eight-swatch Accent grid with Cyan selected; a Visual style row with Calm and Signature buttons (Calm selected) above a Readability toggle set to off; a Text size row with S, M, L, and XL preset buttons (M selected); and a footer line reading 'Saved to your account · fine-tune borders & glow in Settings'." />
+  <img src="/images/settings/appearance-quick-switch.png" alt="The top-bar Theme quick-switcher popover: a Mode row with icon-only buttons for Dim, OLED, Light, and Auto (Dim selected); an eight-swatch Accent grid with Cyan selected; a Visual style row with Calm and Signature buttons (neither selected) above a Readability toggle set to off; a Text size row with S, M, L, and XL preset buttons (M selected); and a footer line reading 'Saved to your account · fine-tune borders & glow in Settings'." />
 </Frame>
 
 <Note>
@@ -23,10 +23,10 @@ Several of these controls are also one click away from anywhere in the app: the 
 
 The **Visual style** is the master switch for how intense the interface feels:
 
-- **Calm** (the default) keeps headings upright in the interface font and reduces material effects. Picking it also sets the muted chart palette. It is the most readable setting.
+- **Calm** keeps headings upright in the interface font and reduces material effects. Picking it also sets the muted chart palette. It is the most readable setting.
 - **Signature** uses italic Instrument Serif headings and the fully saturated chart palette for a more editorial look.
 
-Picking a style sets the chart, header, and effects controls below in one move. You are free to adjust any of them afterward to build your own combination. When **Readability mode** is on it overrides these until you turn it off.
+A new account starts with upright headings, reduced effects, and the Signature chart palette, so neither card is selected until you pick a style. Picking a style sets the chart, header, and effects controls below in one move. You are free to adjust any of them afterward to build your own combination. When **Readability mode** is on it overrides these until you turn it off.
 
 ## Security visualization
 
@@ -51,9 +51,9 @@ The **Chart palette** sets the colors used on the Security page charts. **Signat
 
 - Appearance shows a **Constrained graphics** callout whenever Reduced motion is off, pointing you at it as the first thing to try if the active Sencho tab feels heavy on integrated graphics or similar devices.
 - **Reduced motion** minimizes interface animations and transitions (dialogs, menus, expand and collapse). Toasts are unaffected. The **Calm** visual style turns this on by default; choosing **Signature** turns it off. You can still toggle it independently afterward without changing which visual-style card is selected. On constrained graphics, this is the first control to try when the active Sencho tab feels heavy on idle.
-- **Reduced effects** flattens card bevels, the accent glow, and chart gradients, and uses a simpler rendering path: glass blur is off and chrome fills are solid. It also stops the decorative masthead rail animations even if Reduced motion is off. Fresh installs get this through the default **Calm** visual style. Treat it as an optional secondary experiment for material cost; it is not a substitute for Reduced motion on the reported idle-GPU symptom. The impact varies by device, browser, and graphics configuration.
+- **Reduced effects** flattens card bevels, the accent glow, and chart gradients, and uses a simpler rendering path: glass blur is off and chrome fills are solid. It also stops the decorative masthead rail animations even if Reduced motion is off. A new account starts with it on. Treat it as an optional secondary experiment for material cost; it is not a substitute for Reduced motion on the reported idle-GPU symptom. The impact varies by device, browser, and graphics configuration.
 - **Ambient glow** sets the intensity of the soft, accent-tinted glow behind the page. Slide it to zero for a completely flat background. (Reduced effects already dims it and disables the slider.)
-- A **Reset to default** button returns the Visual style to Calm. It is disabled while Readability mode is on.
+- A **Reset to default** button restores upright headings, reduced effects, reduced motion, and the Signature chart palette. It is disabled while Readability mode is on.
 
 If the active Sencho tab feels heavy on constrained graphics, see [High GPU usage on constrained graphics](/operations/troubleshooting#high-gpu-usage-on-constrained-graphics).
 

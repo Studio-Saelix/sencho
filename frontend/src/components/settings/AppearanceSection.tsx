@@ -222,7 +222,7 @@ export function AppearanceSection({
         theme, accent, borderBoost, glow, contrast, uiFont, monoFont, typeScale,
         headingStyle, chartStyle, reducedEffects, reducedMotion, readability,
         setTheme, setAccent, setBorderBoost, setGlow, setContrast, setUiFont, setMonoFont, setTypeScale,
-        setVisualStyle, setHeadingStyle, setChartStyle, setReducedEffects, setReducedMotion, setReadability,
+        setVisualStyle, resetVisualDefaults, setHeadingStyle, setChartStyle, setReducedEffects, setReducedMotion, setReadability,
     } = useTheme();
     const accentLabel = ACCENTS.find((a) => a.id === accent)?.label ?? 'Cyan';
     // Readability is a sticky master: it forces the calm resolution at apply time
@@ -373,7 +373,7 @@ export function AppearanceSection({
 
                 <SettingsActions>
                     <SettingsSecondaryButton
-                        onClick={() => setVisualStyle('calm')}
+                        onClick={resetVisualDefaults}
                         disabled={readability}
                     >
                         Reset to default
