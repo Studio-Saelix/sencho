@@ -117,8 +117,8 @@ Because these images are deliberately held, deleting one directly (by id, includ
 
 Two settings under **Settings > Infrastructure > Stacks > Deploy Guardrails** control the automatic cleanup:
 
-- **Superseded rollback retention** sets how many days a superseded generation is kept before its image is cleaned up. The current generation is unaffected by this window; it stays protected until it is superseded or manually released. Default 7 days.
-- **Maximum retained rollback generations per stack** caps how many generations a stack keeps at once, current generation included, so the oldest superseded generations beyond the cap are cleaned up ahead of the retention window. 0 (default) leaves the count unlimited and relies on the retention window alone.
+- **Superseded rollback retention** sets how many days a superseded generation is kept before its image is cleaned up. It only applies when the generation cap below allows more than one. The current generation is unaffected by this window; it stays protected until it is superseded or manually released. Default 7 days.
+- **Maximum retained rollback generations per stack** caps how many generations a stack keeps at once, current generation included, so the oldest superseded generations beyond the cap are cleaned up ahead of the retention window. The default is 1; set it to 0 to leave the count unlimited and rely on the retention window alone.
 
 ## Classified failures
 

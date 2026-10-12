@@ -119,7 +119,7 @@ Control how Sencho looks and how dense the workspace feels. Your choices follow 
 
 | Control | What it does |
 |---------|--------------|
-| **Chart palette** | Colors the Security page charts: **Muted**, **Heat** (one warm ramp), or **Signature** (saturated). |
+| **Chart palette** | Colors the Security page charts: **Muted**, **Heat** (one warm ramp), or **Signature** (saturated, the default). |
 | **Reduced motion** | Minimizes interface animations and transitions. Calm enables it by default; Signature disables it. Independently toggleable afterward. First control to try for high idle GPU use on constrained graphics. Toasts are unaffected. |
 | **Reduced effects** | Flattens card bevels, the accent glow, and chart gradients, turns off glass blur with solid chrome fills, and stops decorative masthead rail animations. Optional secondary material simplification; not a substitute for Reduced motion on the reported idle-GPU symptom. |
 | **Ambient glow** | Intensity of the accent-tinted page glow. |
@@ -139,7 +139,7 @@ A live preview card shows a sample fleet-status tile so you can see a color choi
 | Control | What it does |
 |---------|--------------|
 | **Density** | **Comfortable** (default spacing, roomier rows and tiles for review and orientation) or **Compact** (tighter rows and tiles, fits more stacks, tasks, and audit entries on screen at once). Affects the dashboard stack table, the resource gauge strip, the Settings Hub sidebar, the Schedules and Audit Log tables, and every other data table in Sencho. Typography, color, and layout structure stay the same; only vertical padding compresses. |
-| **Log chip color** | Applies on multi-service or multi-container stacks (chips are hidden for a single service with a single container). **Unified** uses the accent color for every service's log chip. **Per service** assigns each service a stable label color for faster visual scanning across a busy log stream. |
+| **Log chip color** | Applies on multi-service or multi-container stacks (chips are hidden for a single service with a single container). **Unified** uses the accent color for every service's log chip. **Per service** (the default) assigns each service a stable label color for faster visual scanning across a busy log stream. |
 | **Sidebar layout** | **Fixed** (default) keeps the desktop stacks sidebar at its standard width. **Resizable** makes the sidebar/workspace divider draggable and keyboard-adjustable (248 to 440 px, saved on release or per arrow-key press). **Reset sidebar layout** returns it to Fixed and the default width. Phone layouts are unchanged. |
 | **Stack detail layout** | **Fixed** (default) preserves the even split between stack status and the Anatomy panel. **Resizable** keeps both panes at least 320 px wide and supports an Anatomy preference up to the 4096 px safety ceiling. Width is saved on release or per arrow-key press. **Reset Anatomy panel layout** restores Fixed without changing the sidebar. The compose editor and phone layout are unchanged. |
 
@@ -733,7 +733,7 @@ Stack editor, lifecycle workflow preferences, and deploy guardrails. The Workflo
 
 #### Deploy progress
 
-Sencho streams live output whenever you deploy, restart, update, install, or run a Git operation. It is on by default; turn it off to run operations without it. When it is on, **Progress style** chooses how it appears: **Modal** (a centered overlay that closes automatically on success or stays open on failure) or **Inline** (a quiet status band on the stack detail). See [Deploy Progress](/features/deploy-progress) for the full reference.
+Sencho streams live output whenever you deploy, restart, update, install, or run a Git operation. It is on by default; turn it off to run operations without it. When it is on, **Progress style** chooses how it appears: **Inline** (the default: a quiet status band on the stack detail) or **Modal** (a centered overlay that closes automatically on success or stays open on failure). See [Deploy Progress](/features/deploy-progress) for the full reference.
 
 | Value | Behavior |
 |-------|----------|
@@ -765,7 +765,7 @@ Node-level safety checks and post-deploy observation used during stack deploys a
 |---------|---------|-------------|
 | **Observe health after updates** | On | After a stack deploy or update succeeds, watch its containers for the observation window and record a passed or failed verdict on the stack timeline. Observational only: nothing is restarted or rolled back automatically. |
 | **Observation window** | 90 s | How long to watch containers before declaring the update healthy. Raise it for stacks that take a while to settle. Range 15 to 600 seconds. |
-| **Block deploy on missing required env vars** | Off | When on, a deploy or update is refused before it starts if a required `${VAR:?message}` variable is unset or empty, so the stack fails fast with a clear message instead of mid-deploy. |
+| **Block deploy on missing required env vars** | On | When on, a deploy or update is refused before it starts if a required `${VAR:?message}` variable is unset or empty, so the stack fails fast with a clear message instead of mid-deploy. |
 | **Automatically create missing external networks during deploy** | Off | When on, safe missing external bridge networks are created automatically before deploy continues. When off, interactive deploy prompts first. Advanced drivers and custom options are never auto-created. Any deploy that triggers an auto-creation records a `network_auto_created` entry in Recent activity, including deploys started by non-admin operators. |
 
 Click **Save settings** to apply.

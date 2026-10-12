@@ -62,10 +62,10 @@ describe('use-theme read / validate / migrate', () => {
     // any existing stored object (even {}) is a returning user and fills missing
     // appearance fields from Signature so its look is unchanged (Motion fills false).
 
-    it('a fresh install (no stored key) defaults to the full Calm look with reduced motion', async () => {
+    it('a fresh install (no stored key) defaults to the Calm look with reduced motion and the Signature chart palette', async () => {
         const root = await applyStored();
         expect(root.dataset.headings).toBe('clean');
-        expect(root.dataset.chartStyle).toBe('muted');
+        expect(root.dataset.chartStyle).toBe('signature');
         expect(root.dataset.effects).toBe('reduced');
         expect(root.dataset.motion).toBe('reduced');
     });

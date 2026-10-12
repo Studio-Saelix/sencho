@@ -1,5 +1,5 @@
 /**
- * The opt-in deploy guard: blocks a deploy/update when required env vars are
+ * The deploy guard (on by default): blocks a deploy/update when required env vars are
  * missing, only when the setting is on. Compose's own stderr is the authoritative
  * signal (so an empty `REQ=` with `${REQ:?err}` is caught, which a key-only check
  * could not), and the guard runs before any backup/cleanup/pull/up side effect.

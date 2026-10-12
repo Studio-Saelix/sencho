@@ -2394,10 +2394,10 @@ export class DatabaseService {
         stmt.run('health_gate_enabled', '1');
         stmt.run('health_gate_window_seconds', '90');
         // Superseded-generation retention (days) and a per-stack cap on total
-        // retained generations (0 = unlimited). Never applies to the current
+        // retained generations (0 = unlimited, default 1). Never applies to the current
         // generation, which stays protected until superseded or released.
         stmt.run('recovery_retention_days', '7');
-        stmt.run('recovery_max_generations', '0');
+        stmt.run('recovery_max_generations', '1');
         stmt.run('image_update_check_interval_minutes', '120');
         stmt.run('image_update_check_mode', 'interval');
         stmt.run('image_update_check_cron', '');
@@ -2406,7 +2406,7 @@ export class DatabaseService {
         // current behavior; missing key is also treated as enabled at read time.
         stmt.run('image_update_checks_enabled', '1');
         stmt.run('notification_dispatch_retries', '0');
-        stmt.run('env_block_deploy_on_missing_required', '0');
+        stmt.run('env_block_deploy_on_missing_required', '1');
         stmt.run('auto_create_missing_external_networks', '0');
         // Silently extend an actively-used session's cookie instead of hard
         // expiring it. On by default (matches how most session-based web apps

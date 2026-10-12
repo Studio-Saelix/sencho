@@ -359,6 +359,7 @@ describe('DeployFeedbackContext', () => {
   });
 
   it('modal style starts not minimized and gates the deploy on the stream', async () => {
+    localStorage.setItem(DEPLOY_FEEDBACK_STYLE_KEY, 'modal');
     const { result } = renderHook(() => useDeployFeedback(), { wrapper });
 
     let deployRan = false;

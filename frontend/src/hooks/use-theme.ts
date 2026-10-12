@@ -109,7 +109,8 @@ const LEGACY_KEY = 'sencho-theme';
 // Card matching (activeVisualStyle) still ignores reducedMotion so toggling
 // Motion alone does not deselect Calm/Signature. Migration fills missing fields
 // on an existing stored object from SIGNATURE so returning users look unchanged;
-// a fresh user gets CALM via DEFAULT_STATE (including reducedMotion: true).
+// a fresh user gets CALM via DEFAULT_STATE (including reducedMotion: true), with
+// the Signature chart palette.
 export const CALM_PRESET = {
     visualStyle: 'calm', headingStyle: 'clean', chartStyle: 'muted',
     reducedEffects: true, reducedMotion: true, readability: false,
@@ -143,6 +144,7 @@ const DEFAULT_STATE: ThemeState = {
     theme: 'dim', accent: 'cyan', borderBoost: 0, glow: 0.16, contrast: 0,
     uiFont: 'Geist', monoFont: 'Geist Mono', typeScale: 1,
     ...CALM_PRESET,
+    chartStyle: 'signature',
 };
 
 const MODE_IDS = new Set<string>(THEME_MODES.map((m) => m.id));

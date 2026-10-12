@@ -23,14 +23,14 @@ Several of these controls are also one click away from anywhere in the app: the 
 
 The **Visual style** is the master switch for how intense the interface feels:
 
-- **Calm** (the default) keeps headings upright in the interface font, colors the security charts with a muted palette, and reduces material effects. It is the most readable setting.
+- **Calm** (the default) keeps headings upright in the interface font and reduces material effects. Picking it also sets the muted chart palette. It is the most readable setting.
 - **Signature** uses italic Instrument Serif headings and the fully saturated chart palette for a more editorial look.
 
 Picking a style sets the chart, header, and effects controls below in one move. You are free to adjust any of them afterward to build your own combination. When **Readability mode** is on it overrides these until you turn it off.
 
 ## Security visualization
 
-The **Chart palette** sets the colors used on the Security page charts:
+The **Chart palette** sets the colors used on the Security page charts. **Signature** is the default:
 
 - **Muted** desaturates the severity colors so critical, high, medium, and low read as a calm progression with no jarring color pairings.
 - **Heat** is a single warm ramp from a deep red through amber, with no competing hues.
@@ -89,7 +89,7 @@ Sencho uses three type contexts. The interface and data faces are yours to chang
 The **Display** group holds layout and log-chip preferences for your account:
 
 - **Density** switches between **Comfortable** (roomy rows, the default) and **Compact** (tighter rows and tiles that fit more on screen for dense dashboards).
-- **Log chip color** controls how service chips are colored in log views on multi-service or multi-container stacks. Single-service, single-container stacks do not show chips. **Unified** uses the accent color for all service chips. **Per service** assigns each service a stable label color for faster visual scanning when following multiple services at once.
+- **Log chip color** controls how service chips are colored in log views on multi-service or multi-container stacks. Single-service, single-container stacks do not show chips. **Unified** uses the accent color for all service chips. **Per service** (the default) assigns each service a stable label color for faster visual scanning when following multiple services at once.
 - **Sidebar layout** chooses how the desktop stacks sidebar is sized: **Fixed** (the default) keeps it at its standard width, and **Resizable** makes the divider between the sidebar and the workspace draggable. Drag the divider, or focus it and use the arrow keys, to set any width between 248 and 440 pixels; the width is saved when you release the divider, or with each arrow-key press. A window too narrow for the chosen width temporarily clamps it, and the full width returns when the window is wide again. **Reset sidebar layout** returns the sidebar to the Fixed default and the default width.
 - **Stack detail layout** applies the same choice to the Anatomy panel on the right side of Stack details. **Fixed** uses the standard even split. **Resizable** lets you drag or keyboard-adjust Anatomy from 320 pixels up to the 4096-pixel preference ceiling, with a viewport clamp that keeps the other pane at least 320 pixels wide. **Reset Anatomy panel layout** restores the even split and default preferred width.
 
