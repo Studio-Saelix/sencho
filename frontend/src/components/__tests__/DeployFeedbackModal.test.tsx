@@ -13,6 +13,7 @@ vi.mock('@/lib/serviceUpdate', async (importOriginal) => {
   };
 });
 import { apiFetch } from '@/lib/api';
+import { DEPLOY_FEEDBACK_STYLE_KEY } from '@/hooks/use-deploy-feedback-style';
 import { requestServiceRestore } from '@/lib/serviceUpdate';
 
 // Lets a test simulate a mid-stream drop (onReady then onError) so the panel
@@ -113,6 +114,7 @@ describe('DeployFeedbackModal health gate', () => {
   beforeEach(() => {
     vi.useFakeTimers();
     localStorage.clear();
+    localStorage.setItem(DEPLOY_FEEDBACK_STYLE_KEY, 'modal');
     resolveRun = null;
     ctl.drop = false;
     ctl.lastNodeId = undefined;
@@ -364,6 +366,7 @@ describe('DeployFeedbackModal stalled-output warning', () => {
   beforeEach(() => {
     vi.useFakeTimers();
     localStorage.clear();
+    localStorage.setItem(DEPLOY_FEEDBACK_STYLE_KEY, 'modal');
     resolveRun = null;
     ctl.drop = false;
   });

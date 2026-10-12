@@ -364,8 +364,9 @@ describe('recovery_retention_days (superseded rollback generation retention)', (
 });
 
 describe('recovery_max_generations (cap on retained rollback generations per stack)', () => {
-  it('defaults to 0 (unlimited) in a freshly seeded database', () => {
-    expect(DatabaseService.getInstance().getGlobalSettings().recovery_max_generations).toBe('0');
+  it('defaults to 1 in a freshly seeded database', () => {
+    expect(DatabaseService.getInstance().getGlobalSettings().recovery_max_generations).toBe('1');
+    expect(DatabaseService.getInstance().getRecoveryMaxGenerations()).toBe(1);
   });
 
   it('is exposed through the settings GET projection', async () => {
@@ -381,7 +382,7 @@ describe('recovery_max_generations (cap on retained rollback generations per sta
       .send({ key: 'recovery_max_generations', value: '3' });
     expect(res.status).toBe(200);
     expect(DatabaseService.getInstance().getGlobalSettings().recovery_max_generations).toBe('3');
-    DatabaseService.getInstance().updateGlobalSetting('recovery_max_generations', '0');
+    DatabaseService.getInstance().updateGlobalSetting('recovery_max_generations', '1');
   });
 
   it('rejects a negative value (400) and does not write it', async () => {
@@ -639,8 +640,8 @@ describe('notification_dispatch_retries setting', () => {
 });
 
 describe('env_block_deploy_on_missing_required setting', () => {
-  it('seeds to "0" (opt-in) in a fresh database', () => {
-    expect(DatabaseService.getInstance().getGlobalSettings().env_block_deploy_on_missing_required).toBe('0');
+  it('seeds to "1" (on) in a fresh database', () => {
+    expect(DatabaseService.getInstance().getGlobalSettings().env_block_deploy_on_missing_required).toBe('1');
   });
 
   it('is exposed through the settings GET projection', async () => {
@@ -661,9 +662,9 @@ describe('env_block_deploy_on_missing_required setting', () => {
     const ok = await request(app)
       .post('/api/settings')
       .set('Cookie', adminCookie)
-      .send({ key: 'env_block_deploy_on_missing_required', value: '1' });
+      .send({ key: 'env_block_deploy_on_missing_required', value: '0' });
     expect(ok.status).toBe(200);
-    expect(DatabaseService.getInstance().getGlobalSettings().env_block_deploy_on_missing_required).toBe('1');
+    expect(DatabaseService.getInstance().getGlobalSettings().env_block_deploy_on_missing_required).toBe('0');
 
     const bad = await request(app)
       .post('/api/settings')
@@ -671,9 +672,9 @@ describe('env_block_deploy_on_missing_required setting', () => {
       .send({ key: 'env_block_deploy_on_missing_required', value: 'banana' });
     expect(bad.status).toBe(400);
     expect(bad.body.error).toBe('Validation failed');
-    expect(DatabaseService.getInstance().getGlobalSettings().env_block_deploy_on_missing_required).toBe('1');
+    expect(DatabaseService.getInstance().getGlobalSettings().env_block_deploy_on_missing_required).toBe('0');
 
-    DatabaseService.getInstance().updateGlobalSetting('env_block_deploy_on_missing_required', '0');
+    DatabaseService.getInstance().updateGlobalSetting('env_block_deploy_on_missing_required', '1');
   });
 });
 

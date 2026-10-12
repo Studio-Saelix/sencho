@@ -743,12 +743,12 @@ export class ComposeService {
   } as const;
 
   /**
-   * Opt-in guard: when `env_block_deploy_on_missing_required` is enabled, refuse a
+   * Guard (on by default): when `env_block_deploy_on_missing_required` is enabled, refuse a
    * compose operation whose required `${VAR:?err}` variables are unset OR empty,
    * before any backup, cleanup, pull, or `up` runs. Compose's own resolution is
    * authoritative (it passes process.env), and on the failing path it emits no
-   * rendered model, so no env value is materialized. Default off and any
-   * settings-read failure both fall through without blocking.
+   * rendered model, so no env value is materialized. A settings-read
+   * failure falls through without blocking.
    */
   private async assertRequiredEnvPresent(
     stackName: string,

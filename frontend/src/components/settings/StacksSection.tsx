@@ -225,7 +225,7 @@ export function StacksSection({ onDirtyChange }: StacksSectionProps) {
                         </SettingsField>
                         <SettingsField
                             label="Superseded rollback retention"
-                            helper="Days an older rollback generation is retained after a newer update supersedes it, before its held image is cleaned up automatically. The current generation stays protected until it is superseded or manually released from Resources → Rollback. Default 7 days."
+                            helper="Days an older rollback generation is retained after a newer update supersedes it, before its held image is cleaned up automatically. Only applies when the generation cap below allows more than one. The current generation stays protected until it is superseded or manually released from Resources → Rollback. Default 7 days."
                         >
                             <NumberChip
                                 value={settings.recovery_retention_days || '7'}
@@ -237,10 +237,10 @@ export function StacksSection({ onDirtyChange }: StacksSectionProps) {
                         </SettingsField>
                         <SettingsField
                             label="Maximum retained rollback generations per stack"
-                            helper="Caps how many rollback generations a stack keeps at once, current generation included (so 1 keeps only the current, 2 keeps the current plus one superseded). The oldest superseded generations beyond the cap are cleaned up early, ahead of the retention window above. 0 = unlimited (retention window only)."
+                            helper="Caps how many rollback generations a stack keeps at once, current generation included (so 1 keeps only the current, 2 keeps the current plus one superseded). The oldest superseded generations beyond the cap are cleaned up early, ahead of the retention window above. 0 = unlimited (retention window only). Default 1."
                         >
                             <NumberChip
-                                value={settings.recovery_max_generations || '0'}
+                                value={settings.recovery_max_generations || '1'}
                                 onChange={(v) => onGuardrailChange('recovery_max_generations', v)}
                                 suffix="generations"
                                 min={0}
@@ -249,7 +249,7 @@ export function StacksSection({ onDirtyChange }: StacksSectionProps) {
                         </SettingsField>
                         <SettingsField
                             label="Block deploy on missing required env vars"
-                            helper="When on, a deploy or update is refused before it starts if a required ${VAR:?message} variable is unset or empty, so the stack fails fast with a clear message instead of mid-deploy. Off by default."
+                            helper="When on, a deploy or update is refused before it starts if a required ${VAR:?message} variable is unset or empty, so the stack fails fast with a clear message instead of mid-deploy. On by default."
                         >
                             <TogglePill
                                 checked={settings.env_block_deploy_on_missing_required === '1'}
