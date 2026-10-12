@@ -11590,6 +11590,408 @@ describe('GitSourceService classified plan fingerprint', () => {
         }
     });
 
+    const BLUEPRINT_COMPOSE = 'services:\n  web:\n    image: nginx\n';
+
+    function generationsFor(applicationId: string): number {
+        return (DatabaseService.getInstance().getDb()
+            .prepare('SELECT COUNT(*) AS n FROM gitops_generations WHERE application_id = ?')
+            .get(applicationId) as { n: number }).n;
+    }
+
+    function pullReadyCount(stackName: string): number {
+        return bellRowsForStack(stackName).filter((row) => row.category === 'git_pull_ready').length;
+    }
+
+    type GitSourceSvc = ReturnType<typeof GitSourceService.getInstance>;
+
+    /**
+     * Convert a review-policy source, fetch once, accept that generation, and
+     * rename its candidate directory into the applied directory. Later fetches
+     * in the same test start from that accepted state.
+     */
+    async function stageAcceptedBlueprint(stackName: string, blueprintId: number): Promise<{
+        svc: GitSourceSvc;
+        stackName: string;
+        appId: string;
+        acceptedGenerationId: string;
+        acceptanceRef: string;
+        sha: string;
+        release: () => Promise<void>;
+    }> {
+        const sha = crypto.createHash('sha1').update(stackName).digest('hex');
+        mockSuccessfulClone({ compose: BLUEPRINT_COMPOSE, sha });
+        const svc = GitSourceService.getInstance();
+        const validateSpy = vi.spyOn(svc, 'validateCompose').mockResolvedValue({ ok: true });
+        const release = async () => {
+            validateSpy.mockRestore();
+            DatabaseService.getInstance().getDb()
+                .prepare('DELETE FROM gitops_applications WHERE blueprint_id = ?')
+                .run(blueprintId);
+            await cleanupStackDir(stackName);
+        };
+        try {
+            const { FileSystemService } = await import('../services/FileSystemService');
+            await FileSystemService.getInstance().createStack(stackName);
+            await svc.upsert({
+                stackName,
+                repoUrl: `https://github.com/example/${stackName}.git`,
+                branch: 'main',
+                composePaths: ['compose.yaml'],
+                contextDir: null,
+                syncEnv: false,
+                envPath: null,
+                authType: 'none',
+                autoApplyOnWebhook: false,
+                autoDeployOnApply: false,
+            });
+            const direct = GitOpsStore.getInstance().getLiveDirectApplication(stackName)!;
+            GitOpsTransitions.getInstance().convertDirectToBlueprint({
+                applicationId: direct.id,
+                blueprintId,
+                envelope: testEnvelope(),
+            });
+            const app = GitOpsStore.getInstance().getLiveSourceApplication(stackName)!;
+            const staged = await svc.reconcile({
+                intent: 'fetch',
+                applicationId: app.id,
+                stackName,
+                trigger: 'poll',
+                actor: 'system:source-controller',
+            });
+            expect(staged.outcome).toBe('pending_review');
+            const generationId = GitOpsStore.getInstance().getApplication(app.id)!.candidate_generation_id!;
+            const acceptanceRef = newGitOpsId();
+            GitOpsTransitions.getInstance().sourceAccepted({
+                applicationId: app.id,
+                generationId,
+                artifactSetId: newGitOpsId(),
+                sourceAcceptanceId: acceptanceRef,
+                authority: 'operator',
+                envelope: testEnvelope(),
+            });
+            const { materializeAcceptedGeneration } = await import('../services/gitops/gitManagedMaterialization');
+            const materialized = await materializeAcceptedGeneration(app.id, generationId);
+            expect(materialized.status).toBe('materialized');
+            await drainSettledOutbox();
+            return {
+                svc,
+                stackName,
+                appId: app.id,
+                acceptedGenerationId: generationId,
+                acceptanceRef,
+                sha,
+                release,
+            };
+        } catch (err) {
+            await release();
+            throw err;
+        }
+    }
+
+    async function fetchBlueprint(
+        svc: GitSourceSvc,
+        appId: string,
+        stackName: string,
+    ) {
+        return svc.reconcile({
+            intent: 'fetch',
+            applicationId: appId,
+            stackName,
+            trigger: 'poll',
+            actor: 'system:source-controller',
+        });
+    }
+
+    it('keeps an accepted Blueprint generation when the same commit is fetched again', async () => {
+        const fx = await stageAcceptedBlueprint('bp-accept-same', 987701);
+        try {
+            const before = generationsFor(fx.appId);
+            const readyBefore = pullReadyCount(fx.stackName);
+            const applied = path.join(
+                stackManagedRoot(fx.stackName),
+                GitOpsStore.getInstance().getGeneration(fx.acceptedGenerationId)!.applied_dir,
+                'compose.yaml',
+            );
+            expect(fs.existsSync(applied)).toBe(true);
+
+            mockSuccessfulClone({ compose: BLUEPRINT_COMPOSE, sha: fx.sha });
+            const second = await fetchBlueprint(fx.svc, fx.appId, fx.stackName);
+            mockSuccessfulClone({ compose: BLUEPRINT_COMPOSE, sha: fx.sha });
+            const third = await fetchBlueprint(fx.svc, fx.appId, fx.stackName);
+            await drainSettledOutbox();
+
+            const app = GitOpsStore.getInstance().getApplication(fx.appId)!;
+            expect(second.outcome).toBe('no_source_change');
+            expect(third.outcome).toBe('no_source_change');
+            expect(generationsFor(fx.appId)).toBe(before);
+            expect(app.accepted_generation_id).toBe(fx.acceptedGenerationId);
+            expect(app.source_acceptance_ref).toBe(fx.acceptanceRef);
+            expect(app.candidate_generation_id).toBeNull();
+            expect(app.review_required).toBe(0);
+            expect(pullReadyCount(fx.stackName)).toBe(readyBefore);
+            expect(bellRowsPerAttempt(fx.appId)).toEqual([]);
+            expect(fs.existsSync(applied)).toBe(true);
+        } finally {
+            await fx.release();
+        }
+    });
+
+    it('stages a new Blueprint generation when a later fetch resolves a new commit', async () => {
+        const fx = await stageAcceptedBlueprint('bp-accept-new-sha', 987702);
+        try {
+            const before = generationsFor(fx.appId);
+            const readyBefore = pullReadyCount(fx.stackName);
+            const nextSha = 'ab'.repeat(20);
+            mockSuccessfulClone({ compose: 'services:\n  web:\n    image: nginx:2\n', sha: nextSha });
+            const result = await fetchBlueprint(fx.svc, fx.appId, fx.stackName);
+            await drainSettledOutbox();
+
+            const app = GitOpsStore.getInstance().getApplication(fx.appId)!;
+            expect(result.outcome).toBe('pending_review');
+            expect(generationsFor(fx.appId)).toBe(before + 1);
+            expect(app.candidate_generation_id).toBeTruthy();
+            expect(app.candidate_generation_id).not.toBe(fx.acceptedGenerationId);
+            expect(app.review_required).toBe(1);
+            expect(pullReadyCount(fx.stackName)).toBe(readyBefore + 1);
+        } finally {
+            await fx.release();
+        }
+    });
+
+    it('stages a new Blueprint generation when the same commit no longer matches the source fingerprint', async () => {
+        const fx = await stageAcceptedBlueprint('bp-accept-fingerprint', 987703);
+        try {
+            const before = generationsFor(fx.appId);
+            const src = DatabaseService.getInstance().getGitSource(fx.stackName)!;
+            const next = directSourceIdentity({
+                repoUrl: src.repo_url,
+                branch: 'release',
+                composePaths: src.compose_paths,
+                contextDir: src.context_dir,
+                syncEnv: src.sync_env,
+                envPath: src.env_path,
+            });
+            const db = DatabaseService.getInstance().getDb();
+            db.prepare('UPDATE stack_git_sources SET branch = ? WHERE stack_name = ?').run('release', fx.stackName);
+            db.prepare(
+                'UPDATE gitops_applications SET materialization_fingerprint = ?, configured_ref = ? WHERE id = ?',
+            ).run(next.fingerprint, 'release', fx.appId);
+
+            mockSuccessfulClone({ compose: BLUEPRINT_COMPOSE, sha: fx.sha });
+            const result = await fetchBlueprint(fx.svc, fx.appId, fx.stackName);
+
+            const app = GitOpsStore.getInstance().getApplication(fx.appId)!;
+            expect(result.outcome).toBe('pending_review');
+            expect(generationsFor(fx.appId)).toBe(before + 1);
+            expect(app.candidate_generation_id).toBeTruthy();
+            expect(app.accepted_generation_id).toBe(fx.acceptedGenerationId);
+        } finally {
+            await fx.release();
+        }
+    });
+
+    it('does not reuse an accepted Blueprint generation when only the source fingerprint moved', async () => {
+        const fx = await stageAcceptedBlueprint('bp-accept-source-fp', 987710);
+        try {
+            const before = generationsFor(fx.appId);
+            DatabaseService.getInstance().getDb()
+                .prepare('UPDATE stack_git_sources SET branch = ? WHERE stack_name = ?')
+                .run('release', fx.stackName);
+            mockSuccessfulClone({ compose: BLUEPRINT_COMPOSE, sha: fx.sha });
+            const result = await fetchBlueprint(fx.svc, fx.appId, fx.stackName);
+
+            const app = GitOpsStore.getInstance().getApplication(fx.appId)!;
+            expect(result.outcome).not.toBe('no_source_change');
+            expect(generationsFor(fx.appId)).toBe(before);
+            expect(app.accepted_generation_id).toBe(fx.acceptedGenerationId);
+            expect(app.candidate_generation_id).toBeNull();
+        } finally {
+            await fx.release();
+        }
+    });
+
+    it('stages a new Blueprint generation when the same commit carries different compose bytes', async () => {
+        const fx = await stageAcceptedBlueprint('bp-accept-bytes', 987711);
+        try {
+            const before = generationsFor(fx.appId);
+            const readyBefore = pullReadyCount(fx.stackName);
+            const nextCompose = 'services:\n  web:\n    image: nginx:2\n';
+            mockSuccessfulClone({ compose: nextCompose, sha: fx.sha });
+            const result = await fetchBlueprint(fx.svc, fx.appId, fx.stackName);
+            await drainSettledOutbox();
+
+            const app = GitOpsStore.getInstance().getApplication(fx.appId)!;
+            const staged = GitOpsStore.getInstance().getGeneration(app.candidate_generation_id!)!;
+            const candidateCompose = path.join(stackManagedRoot(fx.stackName), staged.candidate_dir, 'compose.yaml');
+            expect(result.outcome).toBe('pending_review');
+            expect(generationsFor(fx.appId)).toBe(before + 1);
+            expect(fs.readFileSync(candidateCompose, 'utf8')).toBe(nextCompose);
+            expect(pullReadyCount(fx.stackName)).toBe(readyBefore + 1);
+        } finally {
+            await fx.release();
+        }
+    });
+
+    it('stages a new Blueprint generation when the same commit is newly blocked', async () => {
+        const fx = await stageAcceptedBlueprint('bp-accept-blocked', 987704);
+        const proto = GitSourceService.prototype as unknown as {
+            computeChangePlan: (this: GitSourceSvc, opts: never) => Promise<{ blocked: boolean }>;
+        };
+        const original = proto.computeChangePlan;
+        const planSpy = vi.spyOn(proto, 'computeChangePlan').mockImplementation(async function (this: GitSourceSvc, opts: never) {
+            const plan = await original.call(this, opts);
+            return { ...plan, blocked: true };
+        });
+        try {
+            const before = generationsFor(fx.appId);
+            mockSuccessfulClone({ compose: BLUEPRINT_COMPOSE, sha: fx.sha });
+            const readyBefore = pullReadyCount(fx.stackName);
+            const result = await fetchBlueprint(fx.svc, fx.appId, fx.stackName);
+            await drainSettledOutbox();
+
+            const app = GitOpsStore.getInstance().getApplication(fx.appId)!;
+            const staged = GitOpsStore.getInstance().getGeneration(app.candidate_generation_id!)!;
+            const blockedBells = bellRowsForStack(fx.stackName).filter((row) => row.category === 'git_plan_blocked');
+            expect(result.outcome).toBe('blocked');
+            expect(generationsFor(fx.appId)).toBe(before + 1);
+            expect(staged.plan_blocked).toBe(1);
+            expect(staged.id).not.toBe(fx.acceptedGenerationId);
+            expect(blockedBells).toHaveLength(1);
+            expect(pullReadyCount(fx.stackName)).toBe(readyBefore);
+        } finally {
+            planSpy.mockRestore();
+            await fx.release();
+        }
+    });
+
+    it('stages a new Blueprint generation when the accepted row is missing', async () => {
+        const fx = await stageAcceptedBlueprint('bp-accept-missing', 987705);
+        try {
+            DatabaseService.getInstance().getDb()
+                .prepare('DELETE FROM gitops_generations WHERE id = ?')
+                .run(fx.acceptedGenerationId);
+            mockSuccessfulClone({ compose: BLUEPRINT_COMPOSE, sha: fx.sha });
+            const result = await fetchBlueprint(fx.svc, fx.appId, fx.stackName);
+
+            const app = GitOpsStore.getInstance().getApplication(fx.appId)!;
+            expect(result.outcome).toBe('pending_review');
+            expect(generationsFor(fx.appId)).toBe(1);
+            expect(app.candidate_generation_id).toBeTruthy();
+            expect(app.candidate_generation_id).not.toBe(fx.acceptedGenerationId);
+            expect(app.review_required).toBe(1);
+        } finally {
+            await fx.release();
+        }
+    });
+
+    it('stages a new Blueprint generation when the accepted row belongs to another application', async () => {
+        const fx = await stageAcceptedBlueprint('bp-accept-foreign', 987706);
+        try {
+            const before = generationsFor(fx.appId);
+            const foreignId = newGitOpsId();
+            const db = DatabaseService.getInstance().getDb();
+            db.prepare(
+                `INSERT INTO gitops_generations (
+                    id, application_id, commit_sha, repo_url, configured_ref, resolved_ref_kind,
+                    repo_identity_json, manifest_version, candidate_dir, applied_dir,
+                    expected_invocation_json, materialization_fingerprint, validation_ok, plan_blocked,
+                    change_plan_fingerprint, operation_id, trigger, actor, previous_generation_id,
+                    redacted_limitations_json, portable_manifest_json, compose_inputs_json,
+                    source_policy_evidence_json, security_policy_evidence_json, support_requirements_json,
+                    compatibility_requirements_json, secret_capability_json, created_at
+                 )
+                 SELECT
+                    ?, 'foreign-application', commit_sha, repo_url, configured_ref, resolved_ref_kind,
+                    repo_identity_json, manifest_version, candidate_dir, applied_dir,
+                    expected_invocation_json, materialization_fingerprint, validation_ok, plan_blocked,
+                    change_plan_fingerprint, operation_id, trigger, actor, previous_generation_id,
+                    redacted_limitations_json, portable_manifest_json, compose_inputs_json,
+                    source_policy_evidence_json, security_policy_evidence_json, support_requirements_json,
+                    compatibility_requirements_json, secret_capability_json, created_at
+                 FROM gitops_generations WHERE id = ?`,
+            ).run(foreignId, fx.acceptedGenerationId);
+            db.prepare('UPDATE gitops_applications SET accepted_generation_id = ? WHERE id = ?')
+                .run(foreignId, fx.appId);
+
+            mockSuccessfulClone({ compose: BLUEPRINT_COMPOSE, sha: fx.sha });
+            const result = await fetchBlueprint(fx.svc, fx.appId, fx.stackName);
+
+            const app = GitOpsStore.getInstance().getApplication(fx.appId)!;
+            expect(result.outcome).toBe('pending_review');
+            expect(generationsFor(fx.appId)).toBe(before + 1);
+            expect(app.candidate_generation_id).toBeTruthy();
+            expect(app.accepted_generation_id).toBe(foreignId);
+            expect(app.review_required).toBe(1);
+        } finally {
+            await fx.release();
+        }
+    });
+
+    it('stages a new Blueprint generation when the candidate pointer does not load', async () => {
+        const fx = await stageAcceptedBlueprint('bp-accept-dangling', 987707);
+        try {
+            const before = generationsFor(fx.appId);
+            DatabaseService.getInstance().getDb()
+                .prepare('UPDATE gitops_applications SET candidate_generation_id = ? WHERE id = ?')
+                .run('missing-generation', fx.appId);
+            mockSuccessfulClone({ compose: BLUEPRINT_COMPOSE, sha: fx.sha });
+            const result = await fetchBlueprint(fx.svc, fx.appId, fx.stackName);
+
+            const app = GitOpsStore.getInstance().getApplication(fx.appId)!;
+            expect(result.outcome).toBe('pending_review');
+            expect(generationsFor(fx.appId)).toBe(before + 1);
+            expect(app.candidate_generation_id).toBeTruthy();
+            expect(app.candidate_generation_id).not.toBe('missing-generation');
+            expect(app.review_required).toBe(1);
+        } finally {
+            await fx.release();
+        }
+    });
+
+    it('stages a new Blueprint generation when the accepted content digest is missing', async () => {
+        const fx = await stageAcceptedBlueprint('bp-accept-digest-missing', 987708);
+        try {
+            const before = generationsFor(fx.appId);
+            const db = DatabaseService.getInstance().getDb();
+            const row = db.prepare('SELECT compose_inputs_json FROM gitops_generations WHERE id = ?')
+                .get(fx.acceptedGenerationId) as { compose_inputs_json: string };
+            const decoded = JSON.parse(row.compose_inputs_json) as { candidateContentSha256?: string };
+            delete decoded.candidateContentSha256;
+            db.prepare('UPDATE gitops_generations SET compose_inputs_json = ? WHERE id = ?')
+                .run(JSON.stringify(decoded), fx.acceptedGenerationId);
+
+            mockSuccessfulClone({ compose: BLUEPRINT_COMPOSE, sha: fx.sha });
+            const result = await fetchBlueprint(fx.svc, fx.appId, fx.stackName);
+
+            expect(result.outcome).toBe('pending_review');
+            expect(generationsFor(fx.appId)).toBe(before + 1);
+        } finally {
+            await fx.release();
+        }
+    });
+
+    it('stages a new Blueprint generation when the accepted content digest does not match the fetch', async () => {
+        const fx = await stageAcceptedBlueprint('bp-accept-digest-mismatch', 987709);
+        try {
+            const before = generationsFor(fx.appId);
+            const db = DatabaseService.getInstance().getDb();
+            const row = db.prepare('SELECT compose_inputs_json FROM gitops_generations WHERE id = ?')
+                .get(fx.acceptedGenerationId) as { compose_inputs_json: string };
+            const decoded = JSON.parse(row.compose_inputs_json) as { candidateContentSha256?: string };
+            decoded.candidateContentSha256 = 'ab'.repeat(32);
+            db.prepare('UPDATE gitops_generations SET compose_inputs_json = ? WHERE id = ?')
+                .run(JSON.stringify(decoded), fx.acceptedGenerationId);
+
+            mockSuccessfulClone({ compose: BLUEPRINT_COMPOSE, sha: fx.sha });
+            const result = await fetchBlueprint(fx.svc, fx.appId, fx.stackName);
+
+            expect(result.outcome).toBe('pending_review');
+            expect(generationsFor(fx.appId)).toBe(before + 1);
+        } finally {
+            await fx.release();
+        }
+    });
+
     it('lets a reviewed apply record invocation drift and refuses unattended apply', async () => {
         const sha = 'aa11bb22cc33dd44ee55ff6677889900aabbccdd';
         mockSuccessfulClone({ compose: 'services:\n  web:\n    image: nginx\n', sha });
