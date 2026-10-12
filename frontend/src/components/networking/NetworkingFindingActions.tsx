@@ -1,8 +1,4 @@
-import { MoreHorizontal } from 'lucide-react';
 import { Button } from '@/components/ui/button';
-import {
-  DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger,
-} from '@/components/ui/dropdown-menu';
 import { FindingRowActions } from '@/components/ui/finding-row-actions';
 import type { DismissalMode } from '@/types/findingDismissal';
 import type { NetworkingFinding, NetworkingRecommendedAction } from '@/types/networking';
@@ -33,9 +29,9 @@ interface NetworkingFindingActionsProps {
 
 /**
  * The action cluster for one networking finding, shared by the Findings list
- * and the Overview "Operator attention" block: its resolving verb, the rest in
- * an overflow menu, then Dismiss. Exposure intent is set in a popover over the
- * row, so it never leaves the page.
+ * and the Overview "Operator attention" block: its resolving verb, then Dismiss,
+ * then the rest in the trailing overflow menu. Exposure intent is set in a
+ * popover over the row, so it never leaves the page.
  */
 export function NetworkingFindingActions({ finding, controls }: NetworkingFindingActionsProps) {
   const { nodeId, onAction, onAcknowledge, onResolved } = controls;
@@ -48,6 +44,7 @@ export function NetworkingFindingActions({ finding, controls }: NetworkingFindin
 
   return (
     <FindingRowActions
+      more={verbs.more.map(verb => ({ label: verb.label, onSelect: () => run(verb) }))}
       dismissPolicy={finding.dismissPolicy}
       canDismiss={controls.canDismiss(finding)}
       pending={controls.isDismissing(finding)}
@@ -74,22 +71,6 @@ export function NetworkingFindingActions({ finding, controls }: NetworkingFindin
           {primary.label}
         </Button>
       ))}
-      {verbs.more.length > 0 && (
-        <DropdownMenu>
-          <DropdownMenuTrigger asChild>
-            <Button variant="ghost" size="icon" className="h-7 w-7 max-md:min-h-11 max-md:min-w-11" aria-label={`More actions: ${finding.title}`}>
-              <MoreHorizontal className="h-4 w-4" strokeWidth={1.5} />
-            </Button>
-          </DropdownMenuTrigger>
-          <DropdownMenuContent align="end">
-            {verbs.more.map(verb => (
-              <DropdownMenuItem key={`${verb.action.kind}:${verb.label}`} onSelect={() => run(verb)}>
-                {verb.label}
-              </DropdownMenuItem>
-            ))}
-          </DropdownMenuContent>
-        </DropdownMenu>
-      )}
     </FindingRowActions>
   );
 }
