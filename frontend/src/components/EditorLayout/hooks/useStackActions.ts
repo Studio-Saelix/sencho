@@ -24,7 +24,7 @@ import { toast } from '@/components/ui/toast-store';
 import { ENV_READ_FAILED_NOTICE } from '../envNotice';
 import { openServiceUrl } from '@/lib/serviceUrl';
 import { fetchServiceUrlEntry } from './useServiceUrls';
-import { resolveOpenAppTarget } from '@/lib/serviceUrlResolve';
+import { resolveOpenAppTarget, serviceUrlLookupPending } from '@/lib/serviceUrlResolve';
 import { confirmComposeSourceReload } from '@/lib/composeSourceConflict';
 import { requestServiceUpdate as postServiceUpdate, requestServiceRestore as postServiceRestore } from '@/lib/serviceUpdate';
 import type { EffectiveServiceModelResult } from '@/types/effectiveServices';
@@ -518,7 +518,10 @@ export function useStackActions(options: UseStackActionsOptions) {
       }
       openServiceUrl(target.url);
     };
-    if (cached && cached.stackName === file && cached.nodeId === capturedNodeId) {
+    // A completed entry resolves synchronously. A lookup still in flight is
+    // not a cache hit: the tab opens in the click below and waits for the
+    // configured address instead of opening the generated one.
+    if (cached && cached.stackName === file && cached.nodeId === capturedNodeId && !serviceUrlLookupPending(cached)) {
       finish(resolveOpenAppTarget({ entry: cached, publicPort: port, serviceName: portService, node: capturedNode }), null);
       return;
     }

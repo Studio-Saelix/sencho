@@ -34,6 +34,7 @@ export interface ServiceUrlEntry {
 
 export type PortClick =
   | { kind: 'link'; href: string; portLabel: string; hostLabel: string | null }
+  | { kind: 'pending'; portLabel: string }
   | { kind: 'text'; portLabel: string; reason: string };
 
 const UNAVAILABLE = 'Service URL unavailable';
@@ -180,6 +181,17 @@ function usableOverride(entry: ServiceUrlEntry | null): boolean {
     && (Object.keys(entry.serviceUrls).length > 0 || Object.keys(entry.ports).length > 0);
 }
 
+/**
+ * True while the first lookup for this target is in flight and no rendered
+ * model has been retained. No outcome is known yet, so a configured URL could
+ * still arrive: navigation must wait for the lookup instead of falling back to
+ * the generated address. A refresh that still holds the prior model is not
+ * pending; it keeps rendering that model until the new response.
+ */
+export function serviceUrlLookupPending(entry: ServiceUrlEntry | null | undefined): boolean {
+  return entry?.status === 'loading' && !usableOverride(entry);
+}
+
 function withoutOverride(generated: string | null, portLabel: string, failed: boolean): PortClick {
   if (generated) return { kind: 'link', href: generated, portLabel, hostLabel: null };
   return { kind: 'text', portLabel, reason: failed ? UNAVAILABLE : '' };
@@ -195,6 +207,10 @@ export function resolvePublishedPortClick(args: {
 }): PortClick {
   const { entry, serviceName, publicPort, privatePort, portLabel, node } = args;
   const generated = buildServiceUrl({ node, publicPort, privatePort });
+  // A first lookup with no outcome yet keeps the port pending: a configured
+  // URL could still arrive, so the generated address must not open. A refresh
+  // that still holds the prior model keeps using it below.
+  if (serviceUrlLookupPending(entry)) return { kind: 'pending', portLabel };
   // A missing or legacy URL list has no override to apply, so the generated
   // host and port stays available. A failed load is the only case with no
   // generated link that offers a retry. A refresh keeps the last ready model.
@@ -257,6 +273,8 @@ export function resolveOpenAppTarget(args: {
   node: ServiceUrlOptions['node'];
 }): { url: string } | { error: string } | null {
   const { entry, publicPort, serviceName, node } = args;
+  // No outcome yet: the caller resolves the lookup before navigating.
+  if (serviceUrlLookupPending(entry)) return null;
   if (!entry || !usableOverride(entry)) {
     if (publicPort === undefined) return null;
     const generated = buildServiceUrl({ node, publicPort });

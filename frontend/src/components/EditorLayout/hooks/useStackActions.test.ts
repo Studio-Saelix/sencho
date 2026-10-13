@@ -19,6 +19,7 @@ vi.mock('@/components/ui/toast-store', () => ({
 }));
 
 import { apiFetch } from '@/lib/api';
+import type { ServiceUrlEntry } from '@/lib/serviceUrlResolve';
 import { ENV_READ_FAILED_NOTICE } from '../envNotice';
 import {
   absentRevision,
@@ -162,6 +163,7 @@ function setup(over: {
   hasServiceScopedUpdate?: boolean;
   diffPreviewEnabled?: boolean;
   onStackFilesChanged?: () => void;
+  serviceUrlsRef?: { current: ServiceUrlEntry | null };
 } = {}) {
   const editorState = makeEditorState(over.editorState);
   const stackListState = makeStackListState(over.stackList);
@@ -202,6 +204,7 @@ function setup(over: {
       removeNotificationsForStack,
       isAdmin: over.isAdmin ?? false,
       canReapplyCompose: over.canReapplyCompose ?? false,
+      serviceUrlsRef: over.serviceUrlsRef,
     }),
   );
   return { result, rerender, activeNodeHolder, editorState, stackListState, overlayState, navState, setActiveNode, onDeletedOpenStack, removeNotificationsForStack };
@@ -2860,6 +2863,42 @@ describe('useStackActions.openStackApp', () => {
       expect(order[0]).toBe('open');
       expect(order[1]).toBe('fetch');
       expect(popup.location.href).toBe('http://localhost:8989');
+    } finally {
+      opened.mockRestore();
+    }
+  });
+
+  it('waits for the first lookup instead of opening the generated address while it is loading', async () => {
+    // A fresh selection hands out an in-flight entry with no metadata yet. The
+    // handler must not read that as "no override" and open the generated
+    // address: the tab opens in the click and is navigated once the configured
+    // URL is known.
+    const loading: ServiceUrlEntry = {
+      status: 'loading',
+      nodeId: 1,
+      stackName: 'web.yml',
+      serviceUrls: {},
+      serviceUrlEdit: {},
+      serviceUrlClear: {},
+      ports: {},
+      renderable: false,
+    };
+    vi.mocked(apiFetch).mockResolvedValue(new Response(JSON.stringify({
+      renderable: true,
+      serviceUrls: { web: 'https://web.example.com' },
+      ports: { web: [{ host: '8989', proto: 'tcp' }] },
+    }), { status: 200, headers: { 'content-type': 'application/json' } }));
+    const popup = blankPopup();
+    const opened = vi.spyOn(window, 'open').mockImplementation(() => popup as unknown as Window);
+    try {
+      const { result } = setup({
+        stackList: { stackPorts: { 'web.yml': 8989 } },
+        serviceUrlsRef: { current: loading },
+      });
+      await act(async () => { result.current.openStackApp('web.yml'); });
+      expect(opened).toHaveBeenCalled();
+      expect(apiFetch).toHaveBeenCalledWith('/stacks/web.yml/effective-anatomy', expect.objectContaining({ nodeId: 1 }));
+      expect(popup.location.href).toBe('https://web.example.com');
     } finally {
       opened.mockRestore();
     }

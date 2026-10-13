@@ -85,6 +85,16 @@ export function ServicePortLink({
     </button>
   ) : null;
 
+  if (click.kind === 'pending') {
+    // The first lookup is still in flight: a configured URL could still
+    // arrive, so the port stays plain text until the outcome is known.
+    return (
+      <span className="inline-flex flex-wrap items-center gap-x-2 gap-y-0.5">
+        <span>{click.portLabel}</span>
+      </span>
+    );
+  }
+
   if (click.kind === 'text') {
     return (
       <span className="inline-flex flex-wrap items-center gap-x-2 gap-y-0.5">

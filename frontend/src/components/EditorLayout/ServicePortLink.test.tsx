@@ -136,6 +136,38 @@ describe('ServicePortLink edit affordance', () => {
     expect(screen.getByText('Service URL unavailable')).toBeTruthy();
     expect(screen.getByRole('button', { name: 'Retry' })).toBeTruthy();
   });
+
+  it('holds the port until the first lookup resolves, then opens the configured URL', () => {
+    const loading: ServiceUrlEntry = {
+      status: 'loading',
+      nodeId: 1,
+      stackName: 'web',
+      renderable: false,
+      serviceUrls: {},
+      serviceUrlEdit: {},
+      serviceUrlClear: {},
+      ports: {},
+    };
+    const props = {
+      portLabel: '8080',
+      publicPort: 8080,
+      serviceName: 'api',
+      node: { type: 'local' } as Node,
+      canEdit: true,
+      sourceServices: ['api'],
+      onEdit: () => undefined,
+    };
+    const { rerender } = render(<ServicePortLink {...props} entry={loading} />);
+    // No outcome yet: no anchor, and no edit affordance that could act on a
+    // URL that is not known to exist.
+    expect(screen.getByText('8080')).toBeTruthy();
+    expect(screen.queryByRole('link')).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Set URL for api' })).toBeNull();
+
+    rerender(<ServicePortLink {...props} entry={entry} />);
+    expect(screen.getByRole('link').getAttribute('href')).toBe('https://api.example.com');
+    expect(screen.getByRole('button', { name: 'Set URL for api' })).toBeTruthy();
+  });
 });
 
 describe('ServicePortLink runtime ownership', () => {

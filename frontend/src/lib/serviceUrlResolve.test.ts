@@ -77,11 +77,11 @@ describe('resolvePublishedPortClick', () => {
     expect(click).toMatchObject({ kind: 'link', href: 'https://app.example.com', hostLabel: 'app.example.com' });
   });
 
-  it('keeps the generated link when the URL list is missing, legacy, or failed', () => {
+  it('keeps the generated link when the URL list is absent, legacy, or failed', () => {
     const node = { type: 'local' as const };
     for (const entry of [
+      { ...ready, serviceUrls: {} },
       { ...ready, status: 'unsupported' as const, serviceUrls: {} },
-      { ...ready, status: 'loading' as const, serviceUrls: {}, renderable: false },
       { ...ready, status: 'unavailable' as const, serviceUrls: {}, renderable: false },
     ]) {
       const click = resolvePublishedPortClick({
@@ -93,6 +93,38 @@ describe('resolvePublishedPortClick', () => {
       });
       expect(click).toMatchObject({ kind: 'link', href: 'http://localhost:8080' });
     }
+  });
+
+  it('holds the port pending while the first lookup is in flight, then opens the override', () => {
+    const node = { type: 'local' as const };
+    const firstLookup: ServiceUrlEntry = {
+      status: 'loading',
+      nodeId: 1,
+      stackName: 'web',
+      renderable: false,
+      serviceUrls: {},
+      serviceUrlEdit: {},
+      serviceUrlClear: {},
+      ports: {},
+    };
+    // No outcome yet: a configured URL could still arrive, so the generated
+    // address must not open.
+    expect(resolvePublishedPortClick({
+      entry: firstLookup,
+      serviceName: 'web',
+      publicPort: 8080,
+      portLabel: '8080 → 80/tcp',
+      node,
+    })).toEqual({ kind: 'pending', portLabel: '8080 → 80/tcp' });
+    expect(resolveOpenAppTarget({ entry: firstLookup, publicPort: 8080, serviceName: 'web', node })).toBeNull();
+    // Once the lookup resolves, the override opens.
+    expect(resolvePublishedPortClick({
+      entry: ready,
+      serviceName: 'web',
+      publicPort: 8080,
+      portLabel: '8080 → 80/tcp',
+      node,
+    })).toMatchObject({ kind: 'link', href: 'https://app.example.com' });
   });
 
   it('keeps a plain label when a remote node has no host and no override', () => {
