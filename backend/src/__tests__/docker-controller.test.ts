@@ -2099,9 +2099,14 @@ describe('DockerController - getBulkStackStatuses mainPort', () => {
     CacheService.getInstance().flush();
   });
 
-  const withPorts = (project: string, ports: { PrivatePort: number; PublicPort: number; Type?: string }[]) => ({
+  const withPorts = (project: string, ports: { PrivatePort: number; PublicPort: number; Type?: string }[], service?: string) => ({
     Id: `${project}-c1`, Names: [`/${project}-c1`], State: 'running', Status: 'Up',
-    Image: 'nginx', Created: 1000, Labels: { 'com.docker.compose.project': project }, Ports: ports,
+    Image: 'nginx', Created: 1000,
+    Labels: {
+      'com.docker.compose.project': project,
+      ...(service === undefined ? {} : { 'com.docker.compose.service': service }),
+    },
+    Ports: ports,
   });
 
   it('does not set mainPort for a UDP-only published port', async () => {
@@ -2117,11 +2122,22 @@ describe('DockerController - getBulkStackStatuses mainPort', () => {
     mockDocker.listContainers.mockResolvedValue([withPorts('tcp-stack', [
       { PrivatePort: 53, PublicPort: 5353, Type: 'udp' },
       { PrivatePort: 80, PublicPort: 8080, Type: 'tcp' },
-    ])]);
+    ], 'app')]);
     mockDocker.getContainer.mockReturnValue({ inspect: vi.fn().mockResolvedValue({ State: { StartedAt: '2026-06-09T12:00:00.000Z' } }) });
 
     const result = await DockerController.getInstance(1).getBulkStackStatuses(['tcp-stack']);
     expect(result['tcp-stack'].mainPort).toBe(8080);
+    // The runtime owner travels with the port so Open App can use it.
+    expect(result['tcp-stack'].mainPortService).toBe('app');
+  });
+
+  it('leaves mainPortService unset when the container has no compose service label', async () => {
+    mockDocker.listContainers.mockResolvedValue([withPorts('bare-stack', [{ PrivatePort: 80, PublicPort: 8080, Type: 'tcp' }])]);
+    mockDocker.getContainer.mockReturnValue({ inspect: vi.fn().mockResolvedValue({ State: { StartedAt: '2026-06-09T12:00:00.000Z' } }) });
+
+    const result = await DockerController.getInstance(1).getBulkStackStatuses(['bare-stack']);
+    expect(result['bare-stack'].mainPort).toBe(8080);
+    expect(result['bare-stack'].mainPortService).toBeUndefined();
   });
 });
 

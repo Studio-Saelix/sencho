@@ -33,6 +33,34 @@ function isUrlListItem(text: string): boolean {
   return text === SERVICE_URL_LABEL || text.startsWith(`${SERVICE_URL_LABEL}=`);
 }
 
+/**
+ * True when the label list holds an item whose key part carries Compose
+ * interpolation (any `$` but `$$`), like `- "${URL_LABEL}=https://app"`.
+ * Compose resolves the key against the render environment before reading the
+ * list, so neither whether that item writes the URL label nor its order
+ * relative to a written direct label can be established here. The backend
+ * source authority reports the same construct; this check covers an unsaved
+ * draft the authority has not seen.
+ */
+function listLabelKeyInterpolated(labels: unknown): boolean {
+  if (!Array.isArray(labels)) return false;
+  return labels.some(item => {
+    if (typeof item !== 'string') return false;
+    const eq = item.indexOf('=');
+    const key = eq === -1 ? item : item.slice(0, eq);
+    for (let index = 0; index < key.length; index += 1) {
+      if (key[index] !== '$') continue;
+      // `$$` is Compose's literal dollar; anything else starts an interpolation.
+      if (key[index + 1] === '$') {
+        index += 1;
+        continue;
+      }
+      return true;
+    }
+    return false;
+  });
+}
+
 function mapHasMerge(map: YAMLMap): boolean {
   return map.items.some(item => labelText(item.key) === '<<');
 }
@@ -671,6 +699,10 @@ export function patchServiceUrlLabel(source: string, serviceName: string, url: s
   if (!isMap(services)) return { ok: false, reason: 'missing-service' };
   const pair = services.items.find(item => labelText(item.key) === serviceName);
   if (!pair) return { ok: false, reason: 'missing-service' };
+  if (listLabelKeyInterpolated(serviceOf(parsed, serviceName)?.labels)) {
+    console.warn(`Service URL edit on ${serviceName} refused: a label-list key is interpolated, so the effective label cannot be predicted.`);
+    return { ok: false, reason: 'unsupported' };
+  }
   if (url === null && clearUnverifiable(doc, parsed, serviceName)) {
     console.warn(`Service URL clear on ${serviceName} refused: the file or service inherits labels.`);
     return { ok: false, reason: 'unsupported' };

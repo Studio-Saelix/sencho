@@ -7,9 +7,10 @@
 import { describe, it, expect } from 'vitest';
 import { chainFilesAroundRoot, resolveServiceUrlClearState, resolveServiceUrlEditState, serviceUrlFileFacts } from '../services/serviceUrlSource';
 
-function state(override: string | null, services = ['web']): Record<string, string> {
+function state(override: string | null, services = ['web'], rootContent?: string | null): Record<string, string> {
   return resolveServiceUrlEditState({
     rootInChain: true,
+    rootContent,
     otherFiles: override === null ? [] : [{ name: 'compose.override.yaml', content: override }],
     services,
   });
@@ -33,9 +34,10 @@ describe('serviceUrlFileFacts', () => {
     // label when URL_LABEL names it, and the source alone cannot tell.
     const braced = 'services:\n  web:\n    labels:\n      - "${URL_LABEL}=https://later.example.com"\n';
     const bare = 'services:\n  web:\n    labels:\n      - "$URL_LABEL=https://later.example.com"\n';
-    expect(serviceUrlFileFacts(braced)?.unknown.has('web')).toBe(true);
+    expect(serviceUrlFileFacts(braced)?.interpolated.has('web')).toBe(true);
+    expect(serviceUrlFileFacts(braced)?.unknown.has('web')).toBe(false);
     expect(serviceUrlFileFacts(braced)?.sets.has('web')).toBe(false);
-    expect(serviceUrlFileFacts(bare)?.unknown.has('web')).toBe(true);
+    expect(serviceUrlFileFacts(bare)?.interpolated.has('web')).toBe(true);
     // The uncertainty stays with the service that carries the item.
     const sibling = [
       'services:',
@@ -46,17 +48,22 @@ describe('serviceUrlFileFacts', () => {
       '    image: nginx',
       '',
     ].join('\n');
-    expect(serviceUrlFileFacts(sibling)?.unknown.has('web')).toBe(true);
-    expect(serviceUrlFileFacts(sibling)?.unknown.has('api')).toBe(false);
+    expect(serviceUrlFileFacts(sibling)?.interpolated.has('web')).toBe(true);
+    expect(serviceUrlFileFacts(sibling)?.interpolated.has('api')).toBe(false);
     // A literal key with an interpolated value is still a known set: the key
     // decides which label is written.
     const literal = 'services:\n  web:\n    labels:\n      - sencho.service.url=${APP_URL}\n';
     expect(serviceUrlFileFacts(literal)?.sets.has('web')).toBe(true);
-    expect(serviceUrlFileFacts(literal)?.unknown.has('web')).toBe(false);
+    expect(serviceUrlFileFacts(literal)?.interpolated.has('web')).toBe(false);
     // Compose's `$$` escape writes a literal `${URL_LABEL}` key, not this label.
     const escaped = 'services:\n  web:\n    labels:\n      - "$${URL_LABEL}=https://later.example.com"\n';
     expect(serviceUrlFileFacts(escaped)?.sets.has('web')).toBe(false);
-    expect(serviceUrlFileFacts(escaped)?.unknown.has('web')).toBe(false);
+    expect(serviceUrlFileFacts(escaped)?.interpolated.has('web')).toBe(false);
+    // Compose leaves map-form keys literal (`"${URL_LABEL}": value` stays that
+    // exact label name), so only the list form carries the uncertainty.
+    const mapForm = 'services:\n  web:\n    labels:\n      "${URL_LABEL}": https://later.example.com\n';
+    expect(serviceUrlFileFacts(mapForm)?.sets.has('web')).toBe(false);
+    expect(serviceUrlFileFacts(mapForm)?.interpolated.has('web')).toBe(false);
   });
 
   it('resolves anchors and merge keys to a set key', () => {
@@ -169,11 +176,9 @@ describe('resolveServiceUrlEditState', () => {
     expect(state(anchored)).toEqual({ web: 'other' });
   });
 
-  it('audit case 2: an interpolated main label shadowed by a later file', () => {
+  it('audit case 2: a literal main label shadowed by a later file', () => {
     const override = 'services:\n  web:\n    labels:\n      sencho.service.url: https://override.example.com\n';
     expect(state(override)).toEqual({ web: 'other' });
-    // The positive twin: the same interpolation with no later setter stays editable.
-    expect(state(null)).toEqual({ web: 'root' });
   });
 
   it('audit case 3: equal labels in both layers still shadow the main file', () => {
@@ -200,6 +205,52 @@ describe('resolveServiceUrlEditState', () => {
       .toEqual({ web: 'other' });
     expect(state('services:\n  web:\n    labels:\n      sencho.service.url: "${APP_URL}"\n'))
       .toEqual({ web: 'other' });
+  });
+
+  it('audit F01: an interpolated list key in the open file refuses the set', () => {
+    // The set replaces the literal item in place, leaving the interpolated one
+    // after it. Compose reads the list into a map with later entries winning, so
+    // the requested value would never be effective. It is caught before a write.
+    const winning = [
+      'services:',
+      '  web:',
+      '    labels:',
+      '      - sencho.service.url=https://old.example.com',
+      '      - "${URL_LABEL}=https://winning.example.com"',
+      '',
+    ].join('\n');
+    expect(state(null, ['web'], winning)).toEqual({ web: 'unknown' });
+    // Only the service carrying the item is uncertain.
+    const sibling = [
+      'services:',
+      '  web:',
+      '    labels:',
+      '      - "${URL_LABEL}=https://winning.example.com"',
+      '  api:',
+      '    image: nginx',
+      '',
+    ].join('\n');
+    expect(state(null, ['web', 'api'], sibling)).toEqual({ web: 'unknown', api: 'root' });
+    // A `$$` escape and a map-form key stay literal, so both remain editable.
+    expect(state(null, ['web'], 'services:\n  web:\n    labels:\n      - "$${URL_LABEL}=https://x.example.com"\n'))
+      .toEqual({ web: 'root' });
+    expect(state(null, ['web'], 'services:\n  web:\n    labels:\n      "${URL_LABEL}": https://x.example.com\n'))
+      .toEqual({ web: 'root' });
+    // An unreadable open file cannot be ruled out either: it is refused, the
+    // same direction as an unreadable later file.
+    expect(state(null, ['web'], null)).toEqual({ web: 'unknown' });
+    // A top-level `include` does not block a set, but it makes the whole-file
+    // facts null, so the interpolated item must be read independently.
+    const included = [
+      'include:',
+      '  - common.yaml',
+      'services:',
+      '  web:',
+      '    labels:',
+      '      - "${URL_LABEL}=https://winning.example.com"',
+      '',
+    ].join('\n');
+    expect(state(null, ['web'], included)).toEqual({ web: 'unknown' });
   });
 
   it('reports every service unknown when the open file is not part of the chain', () => {

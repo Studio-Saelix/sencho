@@ -213,7 +213,9 @@ describe('resolvePublishedPortClick', () => {
     expect(click).toMatchObject({ kind: 'link', href: 'http://localhost:49152' });
   });
 
-  it('does not use another service URL when a dynamic port was reassigned', () => {
+  it('opens the named service URL when its automatic binding holds a port another service declares', () => {
+    // The card's port is runtime evidence from this container, so this service's
+    // own automatic binding is the owner even though `api` declares the number.
     const click = resolvePublishedPortClick({
       entry: {
         ...ready,
@@ -229,7 +231,59 @@ describe('resolvePublishedPortClick', () => {
       portLabel: '32768',
       node: { type: 'local' },
     });
-    expect(click).toMatchObject({ kind: 'link', href: 'http://localhost:32768' });
+    expect(click).toMatchObject({ kind: 'link', href: 'https://web.example.com' });
+  });
+
+  it('audit F02: a stopped fixed declaration does not take over a dynamic binding', () => {
+    // Docker assigned 49152 to `app`'s automatic publication of container 80.
+    // `stopped` declares 49152 but is not running, so that declaration reserves
+    // nothing and must not receive the named link.
+    const collision = (appHost: string): ServiceUrlEntry => ({
+      ...ready,
+      serviceUrls: { app: 'https://app.example.com', stopped: 'https://stopped.example.com' },
+      ports: {
+        app: [{ host: appHost, container: '80', proto: 'tcp' }],
+        stopped: [{ host: '49152', container: '80', proto: 'tcp' }],
+      },
+    });
+    for (const appHost of ['0', '']) {
+      expect(resolvePublishedPortClick({
+        entry: collision(appHost),
+        serviceName: 'app',
+        publicPort: 49152,
+        privatePort: 80,
+        portLabel: '49152 → 80/tcp',
+        node: { type: 'local' },
+      })).toMatchObject({ kind: 'link', href: 'https://app.example.com', hostLabel: 'app.example.com' });
+    }
+    // A UDP automatic binding is not an owner: the link stays generated, and the
+    // stopped service's URL is never used.
+    expect(resolvePublishedPortClick({
+      entry: {
+        ...collision('0'),
+        ports: {
+          app: [{ host: '0', container: '80', proto: 'udp' }],
+          stopped: [{ host: '49152', container: '80', proto: 'tcp' }],
+        },
+      },
+      serviceName: 'app',
+      publicPort: 49152,
+      privatePort: 80,
+      portLabel: '49152 → 80/tcp',
+      node: { type: 'local' },
+    })).toMatchObject({ kind: 'link', href: 'http://localhost:49152' });
+    // A saved-model-only caller (no runtime private port) has no ownership
+    // proof, so it refuses the single declaration rather than opening the
+    // stopped service. That covers the Dossier's shared port link.
+    for (const inferred of ['stopped', undefined]) {
+      expect(resolvePublishedPortClick({
+        entry: collision('0'),
+        serviceName: inferred,
+        publicPort: 49152,
+        portLabel: '49152',
+        node: { type: 'local' },
+      })).toMatchObject({ kind: 'text', reason: 'More than one service publishes this port' });
+    }
   });
 
   it('keeps the generated link when the named service has no URL', () => {
@@ -366,6 +420,51 @@ describe('resolveOpenAppTarget', () => {
     })).toEqual({ error: 'More than one service publishes this port' });
   });
 
+  it('audit F02: the runtime owner wins over a stopped service fixed declaration', () => {
+    // `stopped` declares the host port Docker assigned to `app`'s automatic
+    // publication. Only the runtime owner proves who holds the port.
+    const collision = (appHost: string): ServiceUrlEntry => ({
+      ...ready,
+      serviceUrls: { app: 'https://app.example.com', stopped: 'https://stopped.example.com' },
+      ports: {
+        app: [{ host: appHost, container: '80', proto: 'tcp' }],
+        stopped: [{ host: '49152', container: '80', proto: 'tcp' }],
+      },
+    });
+    for (const appHost of ['0', '']) {
+      expect(resolveOpenAppTarget({ entry: collision(appHost), publicPort: 49152, serviceName: 'app', node: { type: 'local' } }))
+        .toEqual({ url: 'https://app.example.com' });
+      // Without the runtime owner, a declaration alone is not proof: the dynamic
+      // binding could hold the auto-assigned port, so refuse instead of opening
+      // the stopped service's address.
+      expect(resolveOpenAppTarget({ entry: collision(appHost), publicPort: 49152, node: { type: 'local' } }))
+        .toEqual({ error: 'More than one service publishes this port' });
+    }
+    // A fixed declaration with no automatic sibling anywhere in the model
+    // stays provable without runtime ownership.
+    expect(resolveOpenAppTarget({
+      entry: {
+        ...ready,
+        ports: { web: [{ host: '8080', container: '80', proto: 'tcp' }] },
+      },
+      publicPort: 8080,
+      node: { type: 'local' },
+    })).toEqual({ url: 'https://app.example.com' });
+    // With an automatic sibling present, the declaration alone is not proof
+    // for any host number: refuse instead of guessing.
+    expect(resolveOpenAppTarget({
+      entry: {
+        ...ready,
+        ports: {
+          web: [{ host: '8080', container: '80', proto: 'tcp' }],
+          worker: [{ host: '', container: '9000', proto: 'tcp' }],
+        },
+      },
+      publicPort: 8080,
+      node: { type: 'local' },
+    })).toEqual({ error: 'More than one service publishes this port' });
+  });
+
   it('does not open a labeled sibling when another service also has a dynamic port', () => {
     const entry: ServiceUrlEntry = {
       ...ready,
@@ -445,6 +544,40 @@ describe('patchServiceUrlLabel', () => {
     expect(patched.ok).toBe(true);
     if (patched.ok) expect(patched.yaml).toContain('sencho.service.url=https://app.example.com');
     expect(patchServiceUrlLabel(source, 'api', 'https://app.example.com')).toEqual({ ok: false, reason: 'missing-service' });
+  });
+
+  it('audit F01: refuses a set and a clear when a label-list key is interpolated in the buffer', () => {
+    // Compose resolves the key at render time and reads later list items last,
+    // so a direct item written in place of the literal cannot be proven
+    // effective beside the interpolated one. This covers an unsaved draft the
+    // source authority has not seen.
+    const source = [
+      'services:',
+      '  web:',
+      '    image: nginx',
+      '    labels:',
+      '      - sencho.service.url=https://old.example.com',
+      '      - "${URL_LABEL}=https://winning.example.com"',
+      '',
+    ].join('\n');
+    expect(patchServiceUrlLabel(source, 'web', 'https://requested.example.com'))
+      .toEqual({ ok: false, reason: 'unsupported' });
+    expect(patchServiceUrlLabel(source, 'web', null)).toEqual({ ok: false, reason: 'unsupported' });
+    // Only the service carrying the item is refused, and `$$` stays literal.
+    const sibling = [
+      'services:',
+      '  web:',
+      '    labels:',
+      '      - "${URL_LABEL}=https://winning.example.com"',
+      '  api:',
+      '    image: nginx',
+      '',
+    ].join('\n');
+    expect(patchServiceUrlLabel(sibling, 'api', 'https://api.example.com').ok).toBe(true);
+    const escaped = 'services:\n  web:\n    labels:\n      - "$${URL_LABEL}=https://x.example.com"\n';
+    const patched = patchServiceUrlLabel(escaped, 'web', 'https://app.example.com');
+    expect(patched.ok).toBe(true);
+    if (patched.ok) expect(patched.yaml).toContain('sencho.service.url=https://app.example.com');
   });
 
   it('keeps labels inherited through a merge, and leaves the sibling alone', () => {

@@ -187,6 +187,34 @@ describe('effective-anatomy route', () => {
     expect(res.body.serviceUrlClear).toEqual({ web: 'unknown', api: 'root' });
   });
 
+  it('audit F01: an interpolated list-label key in the open file refuses the set and the clear', async () => {
+    // The audit reproduction: the literal direct label is replaced in place by a
+    // set, the interpolated item survives after it, and Compose lets the later
+    // item win. Neither operation can be written from this file.
+    fs.writeFileSync(path.join(stackDir, 'compose.yaml'), [
+      'services:',
+      '  web:',
+      '    labels:',
+      '      - sencho.service.url=https://old.example.com',
+      '      - "${URL_LABEL}=https://winning.example.com"',
+      '  api:',
+      '    image: nginx:latest',
+      '',
+    ].join('\n'));
+    stubRender(JSON.stringify({
+      services: {
+        web: { labels: { 'sencho.service.url': 'https://winning.example.com' } },
+        api: { image: 'nginx:latest' },
+      },
+      networks: {},
+      volumes: {},
+    }));
+    const res = await request(app).get(`/api/stacks/${STACK}/effective-anatomy`).set('Authorization', authHeader);
+    expect(res.status).toBe(200);
+    expect(res.body.serviceUrlEdit).toEqual({ web: 'unknown', api: 'root' });
+    expect(res.body.serviceUrlClear).toEqual({ web: 'unknown', api: 'root' });
+  });
+
   it('refuses editability when the override uses constructs whose labels cannot be traced', async () => {
     fs.writeFileSync(path.join(stackDir, 'compose.override.yaml'),
       'include:\n  - common.yaml\nservices:\n  web:\n    image: nginx\n');

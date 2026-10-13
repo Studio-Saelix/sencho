@@ -8,8 +8,14 @@
  * Setting a URL in the file the editor has open therefore changes the effective
  * URL exactly when no file merged after it sets that key. For a set, the open
  * file's own constructs (its includes, extends, tags) do not need inspecting: a
- * direct label written into it beats all of them. Clearing is the mirror case
- * where those constructs do matter, and the clear authority below reads them.
+ * direct label written into it beats all of them. The one exception is a list
+ * label whose key is interpolated (`- "${URL_LABEL}=https://app"`): the item
+ * survives the patch in source order, so the direct label written in its place
+ * is not provably the last one Compose reads, and the service is `unknown`
+ * until that item is gone. That covers the open file's saved source; an unsaved
+ * draft carrying the same item is refused by the editor's patch helper.
+ * Clearing is the mirror case where those constructs do matter, and the clear
+ * authority below reads them.
  *
  * Establishing the shadowing from the merged render alone is impossible (a
  * shadowed or invalid value is indistinguishable from an absent one), so this
@@ -44,6 +50,14 @@ export interface ServiceUrlFileFacts {
   unknown: Set<string>;
   /** Services whose `label_file` may contribute the key; the file contents are never read. */
   labelFiles: Set<string>;
+  /**
+   * Services with a list label whose key is interpolated (`- "${K}=v"`). The
+   * key is resolved at render time and is unknown here, so the contribution is
+   * unverifiable. Kept apart from `unknown` because a set is blocked by this
+   * uncertainty only where the key itself could name the URL label: a direct
+   * label still beats `extends` and the other constructs `unknown` records.
+   */
+  interpolated: Set<string>;
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {
@@ -130,7 +144,7 @@ export function serviceUrlFileFacts(source: string): ServiceUrlFileFacts | null 
   }
   const root = asRecord(parsed);
   if (!root || own(root, 'include') !== undefined) return null;
-  const facts: ServiceUrlFileFacts = { sets: new Set(), unknown: new Set(), labelFiles: new Set() };
+  const facts: ServiceUrlFileFacts = { sets: new Set(), unknown: new Set(), labelFiles: new Set(), interpolated: new Set() };
   const services = asRecord(own(root, 'services'));
   if (!services) return facts;
   for (const [name, raw] of Object.entries(services)) {
@@ -143,14 +157,51 @@ export function serviceUrlFileFacts(source: string): ServiceUrlFileFacts | null 
     }
     const labels = own(service, 'labels');
     if (labelsSetUrl(labels)) facts.sets.add(name);
-    if (labelsKeyInterpolated(labels)) facts.unknown.add(name);
+    if (labelsKeyInterpolated(labels)) facts.interpolated.add(name);
   }
   return facts;
+}
+
+/**
+ * Services whose label list carries an interpolated key, read on its own so the
+ * signal survives a file `serviceUrlFileFacts` rejects wholesale (a top-level
+ * `include` or a custom tag). For the open file that matters: neither construct
+ * stops an interpolated item from winning after a written direct label, so the
+ * set authority must still see it. Null when the source cannot be parsed at all.
+ */
+function interpolatedListKeyServices(source: string): Set<string> | null {
+  let parsed: unknown;
+  try {
+    if (parseDocument(source).errors.length > 0) return null;
+    parsed = parse(source, { merge: true });
+  } catch {
+    return null;
+  }
+  const services = asRecord(asRecord(parsed)?.services);
+  const found = new Set<string>();
+  if (!services) return found;
+  for (const [name, raw] of Object.entries(services)) {
+    const service = asRecord(raw);
+    if (service && labelsKeyInterpolated(own(service, 'labels'))) found.add(name);
+  }
+  return found;
 }
 
 export interface ServiceUrlEditInput {
   /** True when the editor's open file is one of the files the authored render merges. */
   rootInChain: boolean;
+  /**
+   * The open file's own source, when it was read. Only its interpolated
+   * list-label keys matter for a set: such a key resolves at render time and
+   * its item survives a patch in source order, so the item can end up after
+   * the direct label and win. The other constructs it could hide behind
+   * (`include`, `extends`, `label_file`) do not block a set, because the
+   * direct label written into the open file beats them. `null` means the open
+   * file exists in the chain but could not be read, so the same uncertainty
+   * cannot be ruled out and every service is refused. Omitting the field
+   * leaves it unchecked for callers that never had the source.
+   */
+  rootContent?: string | null;
   /**
    * The chain files merged AFTER the open file, in precedence order; only these
    * can keep winning after an edit. Null content means the file was unreadable.
@@ -205,17 +256,35 @@ export function chainFilesAroundRoot(chain: string[], rootName: string): {
 export function resolveServiceUrlEditState(input: ServiceUrlEditInput): Record<string, ServiceUrlEditState> {
   const states: Record<string, ServiceUrlEditState> = Object.create(null) as Record<string, ServiceUrlEditState>;
   const facts = input.otherFiles.map(file => (file.content === null ? null : serviceUrlFileFacts(file.content)));
+  const rootFacts = typeof input.rootContent === 'string' ? serviceUrlFileFacts(input.rootContent) : null;
   // An unreadable file, an unverifiable construct, or an open file that the
-  // render does not merge makes every service unverifiable.
-  const globallyUnknown = !input.rootInChain || facts.some(fileFacts => fileFacts === null);
+  // render does not merge makes every service unverifiable. A null rootContent
+  // means the open file is in the chain but could not be read, so its own list
+  // keys cannot be ruled out either.
+  const globallyUnknown = !input.rootInChain
+    || input.rootContent === null
+    || facts.some(fileFacts => fileFacts === null);
   const unknownServices = new Set<string>();
   const setElsewhere = new Set<string>();
   // A later file's `label_file` never shadows an inline set (a direct label
-  // beats it within the merged service), so only `unknown` and `sets` count here.
+  // beats it within the merged service), so only `unknown`, `interpolated`,
+  // and `sets` count here.
   for (const fileFacts of facts) {
     if (!fileFacts) continue;
     for (const name of fileFacts.unknown) unknownServices.add(name);
+    for (const name of fileFacts.interpolated) unknownServices.add(name);
     for (const name of fileFacts.sets) setElsewhere.add(name);
+  }
+  // The open file's own interpolated list keys can also keep winning: the item
+  // survives the patch in source order, so the direct label written in its
+  // place is not provably the last one Compose reads. Read them independently
+  // of the other facts, because a top-level `include` or a custom tag makes
+  // the whole-file facts null without blocking a set or stopping the item.
+  const rootInterpolated = rootFacts
+    ? rootFacts.interpolated
+    : (typeof input.rootContent === 'string' ? interpolatedListKeyServices(input.rootContent) : null);
+  if (rootInterpolated) {
+    for (const name of rootInterpolated) unknownServices.add(name);
   }
   for (const service of new Set([...input.services, ...setElsewhere, ...unknownServices])) {
     states[service] = globallyUnknown || unknownServices.has(service)
@@ -262,6 +331,7 @@ export function resolveServiceUrlClearState(input: ServiceUrlClearInput): Record
   const addFacts = (fileFacts: ServiceUrlFileFacts | null, direct: boolean) => {
     if (!fileFacts) return;
     for (const name of fileFacts.unknown) unknownServices.add(name);
+    for (const name of fileFacts.interpolated) unknownServices.add(name);
     for (const name of fileFacts.labelFiles) unknownServices.add(name);
     if (direct) for (const name of fileFacts.sets) setElsewhere.add(name);
   };

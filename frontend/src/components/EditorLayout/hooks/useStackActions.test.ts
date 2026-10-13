@@ -90,6 +90,7 @@ function makeStackListState(over: Partial<StackListState> = {}): StackListState 
     files: ['web.yml'],
     stackStatuses: { 'web.yml': 'running' },
     stackPorts: {},
+    stackPortServices: {},
     stackSelfFlags: {},
     setSelectedFile: vi.fn(),
     setOptimisticStatus: vi.fn(),
@@ -2814,6 +2815,21 @@ describe('useStackActions.openStackApp', () => {
   it('appends a known service path via the published port', async () => {
     const { href } = await openAndCaptureHref({ stackList: { stackPorts: { 'web.yml': 32400 } } });
     expect(href).toBe('http://localhost:32400/web');
+  });
+
+  it('audit F02: opens the runtime owner URL when another service declares the assigned port', async () => {
+    vi.mocked(apiFetch).mockResolvedValue(new Response(JSON.stringify({
+      renderable: true,
+      serviceUrls: { app: 'https://app.example.com', stopped: 'https://stopped.example.com' },
+      ports: {
+        app: [{ host: '0', container: '80', proto: 'tcp' }],
+        stopped: [{ host: '49152', container: '80', proto: 'tcp' }],
+      },
+    }), { status: 200, headers: { 'content-type': 'application/json' } }));
+    const { href } = await openAndCaptureHref({
+      stackList: { stackPorts: { 'web.yml': 49152 }, stackPortServices: { 'web.yml': 'app' } },
+    });
+    expect(href).toBe('https://app.example.com');
   });
 
   it('does nothing when the stack has no published port', async () => {

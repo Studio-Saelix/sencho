@@ -158,6 +158,20 @@ function hostLabel(url: string): string | null {
   }
 }
 
+/**
+ * True when a service other than `owner` has an automatic TCP binding. Docker
+ * assigns those host ports at run time, so a fixed declaration by `owner` is
+ * not proof of runtime ownership: the declaring service may be stopped while
+ * the automatic one holds the port. Used wherever a saved declaration alone
+ * would otherwise select a URL.
+ */
+function anotherAutomaticOwner(
+  ports: Record<string, AnatomyPortRef[]>,
+  owner: string,
+): boolean {
+  return dynamicTcpOwners(ports, undefined).some(name => name !== owner);
+}
+
 /** A refresh that still holds the last rendered model can keep using that model. */
 function usableOverride(entry: ServiceUrlEntry | null): boolean {
   if (!entry || !entry.renderable) return false;
@@ -187,8 +201,27 @@ export function resolvePublishedPortClick(args: {
   if (!entry || !usableOverride(entry)) {
     return withoutOverride(generated, portLabel, entry?.status === 'unavailable');
   }
+  // A named runtime container's own automatic binding is direct evidence of
+  // ownership: its card carries the host port Docker assigned to the running
+  // container, and the matching automatic binding says that port is this
+  // service's. It opens this service's URL even when another service's saved
+  // file declares the same host port, because that declaration does not prove
+  // the other service is running or holds the port.
+  if (serviceName && privatePort !== undefined
+    && dynamicTcpOwners(entry.ports, privatePort).includes(serviceName)) {
+    const own = serviceKeyGet(entry.serviceUrls, serviceName);
+    if (own) return { kind: 'link', href: own, portLabel, hostLabel: hostLabel(own) };
+  }
   const owners = tcpOwners(entry.ports, publicPort);
   const withOverride = owners.filter(name => serviceKeyGet(entry.serviceUrls, name));
+  // Without a runtime private port there is no evidence that a fixed
+  // declaration is the live owner: another service's automatic binding could
+  // hold the port, so refuse rather than open the saved owner's address.
+  if (privatePort === undefined && owners.length === 1
+    && serviceKeyGet(entry.serviceUrls, owners[0]) !== undefined
+    && anotherAutomaticOwner(entry.ports, owners[0])) {
+    return { kind: 'text', portLabel, reason: AMBIGUOUS };
+  }
   // A named service uses only its own URL. The same host port on another bind
   // address still belongs to this service. A port the saved file gave to a
   // different service does not, including one Docker assigned later.
@@ -205,22 +238,21 @@ export function resolvePublishedPortClick(args: {
     if (sole) return { kind: 'link', href: sole, portLabel, hostLabel: hostLabel(sole) };
     return withoutOverride(generated, portLabel, false);
   }
-  const dynamicOwner = owners.length === 0
-    && privatePort !== undefined
-    && dynamicTcpOwners(entry.ports, privatePort).includes(serviceName);
-  const override = dynamicOwner ? serviceKeyGet(entry.serviceUrls, serviceName) : undefined;
-  if (override) {
-    return { kind: 'link', href: override, portLabel, hostLabel: hostLabel(override) };
-  }
   return withoutOverride(generated, portLabel, false);
 }
 
 export function resolveOpenAppTarget(args: {
   entry: ServiceUrlEntry | null;
   publicPort?: number;
+  /**
+   * The runtime service known to publish `publicPort` (the compose service of
+   * the running container the port was read from). When present, this is
+   * direct ownership evidence and beats every saved declaration.
+   */
+  serviceName?: string;
   node: ServiceUrlOptions['node'];
 }): { url: string } | { error: string } | null {
-  const { entry, publicPort, node } = args;
+  const { entry, publicPort, serviceName, node } = args;
   if (!entry || !usableOverride(entry)) {
     if (publicPort === undefined) return null;
     const generated = buildServiceUrl({ node, publicPort });
@@ -232,9 +264,26 @@ export function resolveOpenAppTarget(args: {
     if (urls.length > 1) return { error: AMBIGUOUS };
     return null;
   }
+  // The runtime owner's URL wins over the saved model: the port was read from
+  // that service's running container, so another service's fixed declaration
+  // of the same host number is not proof that the other service holds it.
+  if (serviceName !== undefined) {
+    const own = serviceKeyGet(entry.serviceUrls, serviceName);
+    if (own) return { url: own };
+    const generated = buildServiceUrl({ node, publicPort });
+    return generated ? { url: generated } : { error: UNAVAILABLE };
+  }
   const owners = tcpOwners(entry.ports, publicPort);
   const withOverride = owners.filter(name => serviceKeyGet(entry.serviceUrls, name));
   if (owners.length > 1 && withOverride.length > 0) return { error: AMBIGUOUS };
+  // A single fixed declaration is not proof of runtime ownership when another
+  // service's automatic binding could have been assigned this host port: the
+  // declaring service may be stopped while the dynamic one holds the port.
+  if (owners.length === 1
+    && serviceKeyGet(entry.serviceUrls, owners[0]) !== undefined
+    && anotherAutomaticOwner(entry.ports, owners[0])) {
+    return { error: AMBIGUOUS };
+  }
   const override = owners.length === 1 ? serviceKeyGet(entry.serviceUrls, owners[0]) : undefined;
   if (override) return { url: override };
   if (owners.length === 0) {

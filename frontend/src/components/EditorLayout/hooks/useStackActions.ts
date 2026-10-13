@@ -499,6 +499,7 @@ export function useStackActions(options: UseStackActionsOptions) {
     const capturedNode = activeNode ?? null;
     const capturedNodeId = capturedNode?.id ?? null;
     const port = stackListState.stackPorts[file];
+    const portService = stackListState.stackPortServices[file];
     const cached = serviceUrlsRef?.current ?? null;
     const finish = (target: { url: string } | { error: string } | null, popup: Window | null) => {
       if ((activeNodeIdRef.current ?? null) !== capturedNodeId) {
@@ -518,7 +519,7 @@ export function useStackActions(options: UseStackActionsOptions) {
       openServiceUrl(target.url);
     };
     if (cached && cached.stackName === file && cached.nodeId === capturedNodeId) {
-      finish(resolveOpenAppTarget({ entry: cached, publicPort: port, node: capturedNode }), null);
+      finish(resolveOpenAppTarget({ entry: cached, publicPort: port, serviceName: portService, node: capturedNode }), null);
       return;
     }
     // Open the tab in this click so a slow lookup does not miss the browser's
@@ -527,14 +528,14 @@ export function useStackActions(options: UseStackActionsOptions) {
     const popup = window.open('', '_blank');
     if (popup) popup.opener = null;
     void fetchServiceUrlEntry(capturedNodeId, file).then(next => {
-      finish(resolveOpenAppTarget({ entry: next, publicPort: port, node: capturedNode }), popup);
+      finish(resolveOpenAppTarget({ entry: next, publicPort: port, serviceName: portService, node: capturedNode }), popup);
     }).catch(error => {
       console.error('Failed to resolve service URL:', error);
       if ((activeNodeIdRef.current ?? null) !== capturedNodeId) {
         popup?.close();
         return;
       }
-      const target = resolveOpenAppTarget({ entry: null, publicPort: port, node: capturedNode });
+      const target = resolveOpenAppTarget({ entry: null, publicPort: port, serviceName: portService, node: capturedNode });
       if (!target) {
         popup?.close();
         toast.error('Service URL unavailable');

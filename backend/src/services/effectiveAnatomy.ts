@@ -308,7 +308,12 @@ async function buildServiceUrlAuthority(
     const input = await editabilityInput(nodeId, stackName);
     if (!input) return unknown;
     return {
-      serviceUrlEdit: resolveServiceUrlEditState({ rootInChain: input.rootInChain, otherFiles: input.otherFiles, services }),
+      serviceUrlEdit: resolveServiceUrlEditState({
+        rootInChain: input.rootInChain,
+        rootContent: input.rootContent,
+        otherFiles: input.otherFiles,
+        services,
+      }),
       serviceUrlClear: resolveServiceUrlClearState({ ...input, services }),
     };
   } catch (error) {
