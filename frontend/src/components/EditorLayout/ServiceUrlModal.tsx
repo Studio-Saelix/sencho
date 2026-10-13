@@ -11,6 +11,8 @@ interface ServiceUrlModalProps {
   dirty: boolean;
   saving: boolean;
   verifyMessage: string | null;
+  /** Why clearing here cannot take effect, or null when the clear is allowed. */
+  clearBlockedMessage: string | null;
   onOpenChange: (open: boolean) => void;
   onSave: (url: string | null) => void;
   onRetryVerify: () => void;
@@ -23,6 +25,7 @@ export function ServiceUrlModal({
   dirty,
   saving,
   verifyMessage,
+  clearBlockedMessage,
   onOpenChange,
   onSave,
   onRetryVerify,
@@ -32,6 +35,9 @@ export function ServiceUrlModal({
   const trimmed = value.trim();
   const parsed = trimmed ? serviceUrlFromLabelValue(trimmed) : null;
   const invalid = trimmed.length > 0 && parsed === null;
+  // An empty field saves a clear; when another contribution would keep or
+  // restore the label, say so and refuse instead of writing a no-op.
+  const clearBlocked = trimmed.length === 0 ? clearBlockedMessage : null;
 
   return (
     <Modal open={open} onOpenChange={onOpenChange} size="md">
@@ -61,6 +67,9 @@ export function ServiceUrlModal({
         {invalid ? (
           <p className="text-xs text-destructive">Use an http or https address with no username or password.</p>
         ) : null}
+        {clearBlocked ? (
+          <p className="text-xs text-destructive">{clearBlocked}</p>
+        ) : null}
         {verifyMessage ? (
           <div className="space-y-2">
             <p className="text-xs text-destructive">{verifyMessage}</p>
@@ -75,7 +84,7 @@ export function ServiceUrlModal({
           <BusyButton
             type="button"
             pending={saving}
-            disabled={invalid || saving}
+            disabled={invalid || saving || clearBlocked !== null}
             onClick={() => onSave(parsed)}
           >
             Save URL

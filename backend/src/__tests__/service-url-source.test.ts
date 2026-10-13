@@ -5,7 +5,7 @@
  * whatever its value (valid, invalid, interpolated, or equal).
  */
 import { describe, it, expect } from 'vitest';
-import { chainFilesShadowsRoot, resolveServiceUrlEditState, serviceUrlFileFacts } from '../services/serviceUrlSource';
+import { chainFilesAroundRoot, resolveServiceUrlClearState, resolveServiceUrlEditState, serviceUrlFileFacts } from '../services/serviceUrlSource';
 
 function state(override: string | null, services = ['web']): Record<string, string> {
   return resolveServiceUrlEditState({
@@ -21,6 +21,9 @@ describe('serviceUrlFileFacts', () => {
     expect(serviceUrlFileFacts('services:\n  web:\n    labels:\n      sencho.service.url:\n')?.sets.has('web')).toBe(true);
     expect(serviceUrlFileFacts('services:\n  web:\n    labels:\n      - sencho.service.url=https://app.example.com\n')?.sets.has('web')).toBe(true);
     expect(serviceUrlFileFacts('services:\n  web:\n    labels:\n      - sencho.service.url=\n')?.sets.has('web')).toBe(true);
+    // A bare list item sets the key to an empty value and shadows earlier files all the same.
+    expect(serviceUrlFileFacts('services:\n  web:\n    labels:\n      - sencho.service.url\n')?.sets.has('web')).toBe(true);
+    expect(serviceUrlFileFacts('services:\n  web:\n    labels: [sencho.service.url]\n')?.sets.has('web')).toBe(true);
     expect(serviceUrlFileFacts('services:\n  web:\n    labels:\n      other.label: x\n')?.sets.has('web')).toBe(false);
     expect(serviceUrlFileFacts('services:\n  web:\n    image: nginx\n')?.sets.has('web')).toBe(false);
   });
@@ -35,6 +38,31 @@ describe('serviceUrlFileFacts', () => {
       '',
     ].join('\n');
     expect(serviceUrlFileFacts(source)?.sets.has('web')).toBe(true);
+    const anchoredBare = [
+      'x-url: &url sencho.service.url',
+      'services:',
+      '  web:',
+      '    labels:',
+      '      - *url',
+      '',
+    ].join('\n');
+    expect(serviceUrlFileFacts(anchoredBare)?.sets.has('web')).toBe(true);
+  });
+
+  it('records services whose labels can also come from label_file', () => {
+    const source = [
+      'services:',
+      '  web:',
+      '    image: nginx',
+      '    label_file:',
+      '      - url.labels',
+      '  api:',
+      '    image: nginx',
+      '',
+    ].join('\n');
+    const facts = serviceUrlFileFacts(source);
+    expect(facts?.labelFiles.has('web')).toBe(true);
+    expect(facts?.labelFiles.has('api')).toBe(false);
   });
 
   it('is unverifiable for a top-level include, a custom tag, or malformed YAML', () => {
@@ -62,25 +90,26 @@ describe('serviceUrlFileFacts', () => {
   });
 });
 
-describe('chainFilesShadowsRoot', () => {
-  it('returns only the files merged after the open file', () => {
+describe('chainFilesAroundRoot', () => {
+  it('returns the files merged before and after the open file', () => {
     // Discovered chain: the open main file is first, the override can shadow it.
-    expect(chainFilesShadowsRoot(['compose.yaml', 'compose.override.yaml'], 'compose.yaml'))
-      .toEqual({ rootInChain: true, shadowing: ['compose.override.yaml'] });
-    // A file merged before the open file cannot shadow it.
-    expect(chainFilesShadowsRoot(['base.yaml', 'compose.yaml'], 'compose.yaml'))
-      .toEqual({ rootInChain: true, shadowing: [] });
+    expect(chainFilesAroundRoot(['compose.yaml', 'compose.override.yaml'], 'compose.yaml'))
+      .toEqual({ rootInChain: true, earlier: [], shadowing: ['compose.override.yaml'] });
+    // A file merged before the open file cannot shadow a set, but can surface after a clear.
+    expect(chainFilesAroundRoot(['base.yaml', 'compose.yaml'], 'compose.yaml'))
+      .toEqual({ rootInChain: true, earlier: ['base.yaml'], shadowing: [] });
     // A later file with the same basename in a subdirectory is still a shadower,
     // not the open file itself.
-    expect(chainFilesShadowsRoot(['base.yaml', './compose.yaml', 'prod.yaml', 'sub/compose.yaml'], 'compose.yaml'))
-      .toEqual({ rootInChain: true, shadowing: ['prod.yaml', 'sub/compose.yaml'] });
+    expect(chainFilesAroundRoot(['base.yaml', './compose.yaml', 'prod.yaml', 'sub/compose.yaml'], 'compose.yaml'))
+      .toEqual({ rootInChain: true, earlier: ['base.yaml'], shadowing: ['prod.yaml', 'sub/compose.yaml'] });
     // An open file the render does not merge is never editable.
-    expect(chainFilesShadowsRoot(['other.yaml'], 'compose.yaml'))
-      .toEqual({ rootInChain: false, shadowing: [] });
-    // A chain that lists the same file twice anchors at the last occurrence, so
-    // the file is not treated as its own shadower.
-    expect(chainFilesShadowsRoot(['compose.yaml', 'prod.yaml', 'compose.yaml'], 'compose.yaml'))
-      .toEqual({ rootInChain: true, shadowing: [] });
+    expect(chainFilesAroundRoot(['other.yaml'], 'compose.yaml'))
+      .toEqual({ rootInChain: false, earlier: [], shadowing: [] });
+    // A chain that lists the same file twice anchors at the last occurrence. The
+    // same-file earlier occurrence is dropped (editing it edits both); an earlier
+    // different file still counts, because it can surface after a clear.
+    expect(chainFilesAroundRoot(['compose.yaml', 'prod.yaml', 'compose.yaml'], 'compose.yaml'))
+      .toEqual({ rootInChain: true, earlier: ['prod.yaml'], shadowing: [] });
   });
 });
 
@@ -93,6 +122,20 @@ describe('resolveServiceUrlEditState', () => {
 
   it('audit case 1: an invalid later label still shadows the main file', () => {
     expect(state('services:\n  web:\n    labels:\n      sencho.service.url: not-a-url\n')).toEqual({ web: 'other' });
+  });
+
+  it('audit F1: a later bare list label counts as a set key and shadows the main file', () => {
+    expect(state('services:\n  web:\n    labels:\n      - sencho.service.url\n')).toEqual({ web: 'other' });
+    // The anchored form resolves through the same parsed path.
+    const anchored = [
+      'x-url: &url sencho.service.url',
+      'services:',
+      '  web:',
+      '    labels:',
+      '      - *url',
+      '',
+    ].join('\n');
+    expect(state(anchored)).toEqual({ web: 'other' });
   });
 
   it('audit case 2: an interpolated main label shadowed by a later file', () => {
@@ -129,6 +172,87 @@ describe('resolveServiceUrlEditState', () => {
   it('keys the state map safely for service names that shadow Object properties', () => {
     const states = state('services:\n  constructor:\n    labels:\n      sencho.service.url: https://c.example.com\n  __proto__:\n    labels:\n      sencho.service.url: https://p.example.com\n', []);
     expect(Object.keys(states).sort()).toEqual(['__proto__', 'constructor']);
+    expect(states.constructor).toBe('other');
+    expect(states.__proto__).toBe('other');
+  });
+});
+
+describe('resolveServiceUrlClearState', () => {
+  const root = 'services:\n  web:\n    labels:\n      sencho.service.url: https://root.example.com\n';
+
+  function clear(args: {
+    rootContent?: string | null;
+    rootInChain?: boolean;
+    earlier?: Array<string | null>;
+    later?: Array<string | null>;
+    services?: string[];
+  } = {}): Record<string, string> {
+    return resolveServiceUrlClearState({
+      rootInChain: args.rootInChain ?? true,
+      rootContent: args.rootContent === undefined ? root : args.rootContent,
+      earlierFiles: (args.earlier ?? []).map((content, index) => ({ name: `base${index}.yaml`, content })),
+      otherFiles: (args.later ?? []).map((content, index) => ({ name: `later${index}.yaml`, content })),
+      services: args.services ?? ['web'],
+    });
+  }
+
+  it('allows a clear when the open file is the only contributor', () => {
+    expect(clear()).toEqual({ web: 'root' });
+  });
+
+  it('audit F2: refuses a clear that would surface an earlier compose file', () => {
+    expect(clear({ earlier: ['services:\n  web:\n    labels:\n      sencho.service.url: https://base.example.com\n'] }))
+      .toEqual({ web: 'other' });
+    // A bare earlier label (empty value) is still a contribution that keeps the clear from taking effect.
+    expect(clear({ earlier: ['services:\n  web:\n    labels:\n      - sencho.service.url\n'] }))
+      .toEqual({ web: 'other' });
+  });
+
+  it('refuses a clear that a later compose file would keep winning', () => {
+    expect(clear({ later: ['services:\n  web:\n    labels:\n      sencho.service.url: https://later.example.com\n'] }))
+      .toEqual({ web: 'other' });
+  });
+
+  it('audit F2: refuses a clear when the open service inherits through extends, include, or label_file', () => {
+    expect(clear({ rootContent: 'services:\n  web:\n    extends:\n      service: base\n' })).toEqual({ web: 'unknown' });
+    expect(clear({ rootContent: 'services:\n  web:\n    image: nginx\n    label_file:\n      - url.labels\n' })).toEqual({ web: 'unknown' });
+    expect(clear({ rootContent: 'include:\n  - common.yaml\nservices:\n  web:\n    image: nginx\n' })).toEqual({ web: 'unknown' });
+  });
+
+  it('refuses a clear when any chain file cannot be established', () => {
+    expect(clear({ earlier: [null] })).toEqual({ web: 'unknown' });
+    expect(clear({ later: [null] })).toEqual({ web: 'unknown' });
+    expect(clear({ rootContent: null })).toEqual({ web: 'unknown' });
+    expect(clear({ earlier: ['services:\n  web:\n    extends:\n      service: base\n'] })).toEqual({ web: 'unknown' });
+    expect(clear({ earlier: ['services:\n  web:\n    image: nginx\n    label_file:\n      - url.labels\n'] })).toEqual({ web: 'unknown' });
+    expect(clear({ later: ['services:\n  web:\n    label_file:\n      - url.labels\n'] })).toEqual({ web: 'unknown' });
+  });
+
+  it('reports every service unknown when the open file is not part of the chain', () => {
+    expect(clear({ rootInChain: false, services: ['web', 'api'] })).toEqual({ web: 'unknown', api: 'unknown' });
+  });
+
+  it('does not let the open file block its own clear', () => {
+    expect(clear({
+      rootContent: [
+        'services:',
+        '  web:',
+        '    labels:',
+        '      sencho.service.url: https://root.example.com',
+        '  api:',
+        '    labels:',
+        '      sencho.service.url: https://api.example.com',
+        '',
+      ].join('\n'),
+      services: ['web', 'api'],
+    })).toEqual({ web: 'root', api: 'root' });
+  });
+
+  it('keys the clear state map safely for service names that shadow Object properties', () => {
+    const states = clear({
+      services: [],
+      later: ['services:\n  constructor:\n    labels:\n      sencho.service.url: https://c.example.com\n  __proto__:\n    labels:\n      sencho.service.url: https://p.example.com\n'],
+    });
     expect(states.constructor).toBe('other');
     expect(states.__proto__).toBe('other');
   });

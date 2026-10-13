@@ -28,7 +28,7 @@ import { authoredComposeEnvFileArgs } from '../utils/authoredComposeArgs';
 import { getErrorMessage } from '../utils/errors';
 import { redactSensitiveText, sanitizeForLog } from '../utils/safeLog';
 import { SERVICE_URL_LABEL, serviceUrlFromLabels } from '../helpers/serviceUrlLabel';
-import { resolveServiceUrlEditState, chainFilesShadowsRoot, type ServiceUrlEditState } from './serviceUrlSource';
+import { resolveServiceUrlEditState, resolveServiceUrlClearState, chainFilesAroundRoot, type ServiceUrlEditState } from './serviceUrlSource';
 
 const MAX_RENDER_ERROR = 600;
 const MAX_CHAIN_FILE_BYTES = 2 * 1024 * 1024;
@@ -70,6 +70,13 @@ export interface EffectiveAnatomyResult extends EffectiveAnatomy {
    * file, so the editor can refuse a write another chain file would shadow.
    */
   serviceUrlEdit: Record<string, ServiceUrlEditState>;
+  /**
+   * Per-service clearing authority of the URL label from the resolved main
+   * compose file. `root` means removing the label there makes the effective URL
+   * disappear; `other` or `unknown` mean another file or an inheritance
+   * construct can supply it, so a clear is refused.
+   */
+  serviceUrlClear: Record<string, ServiceUrlEditState>;
 }
 
 /** Fresh empty anatomy, with fresh maps, so a returned result never shares state. */
@@ -242,12 +249,14 @@ async function readChainFile(nodeId: number, stackName: string, name: string): P
 }
 
 /**
- * The files merged after the resolved main file, plus whether the main file is
- * part of the authored chain at all. Null when the chain itself cannot be
- * established.
+ * The files merged before and after the resolved main file, the main file's own
+ * source, and whether the main file is part of the authored chain at all. Null
+ * when the chain itself cannot be established.
  */
 async function editabilityInput(nodeId: number, stackName: string): Promise<{
   rootInChain: boolean;
+  rootContent: string | null;
+  earlierFiles: Array<{ name: string; content: string | null }>;
   otherFiles: Array<{ name: string; content: string | null }>;
 } | null> {
   const fsSvc = FileSystemService.getInstance(nodeId);
@@ -261,36 +270,51 @@ async function editabilityInput(nodeId: number, stackName: string): Promise<{
     const override = await fsSvc.getOverrideFilename(stackName);
     chain = override ? [rootName, override] : [rootName];
   }
-  // Only files merged after the open file can shadow it; earlier files lose to
-  // its direct label. This also keeps a later same-named file in a subdirectory
-  // from being mistaken for the open file itself.
-  const { rootInChain, shadowing } = chainFilesShadowsRoot(chain, rootName);
+  // Only files merged after the open file can shadow a set; earlier files lose
+  // to its direct label but can surface again after a clear. This also keeps a
+  // later same-named file in a subdirectory from being mistaken for the open
+  // file itself, and drops an earlier occurrence of the same authored file.
+  const { rootInChain, earlier, shadowing } = chainFilesAroundRoot(chain, rootName);
+  if (!rootInChain) return { rootInChain: false, rootContent: null, earlierFiles: [], otherFiles: [] };
+  const earlierFiles: Array<{ name: string; content: string | null }> = [];
+  for (const name of earlier) {
+    earlierFiles.push({ name, content: await readChainFile(nodeId, stackName, name) });
+  }
   const otherFiles: Array<{ name: string; content: string | null }> = [];
   for (const name of shadowing) {
     otherFiles.push({ name, content: await readChainFile(nodeId, stackName, name) });
   }
-  return { rootInChain, otherFiles };
+  return {
+    rootInChain: true,
+    rootContent: await readChainFile(nodeId, stackName, rootName),
+    earlierFiles,
+    otherFiles,
+  };
 }
 
-/** Editability for every rendered service; all `unknown` when the chain cannot be established. */
-async function buildServiceUrlEdit(
+/** Both URL-label authorities for every rendered service; all `unknown` when the chain cannot be established. */
+async function buildServiceUrlAuthority(
   nodeId: number,
   stackName: string,
   services: string[],
-): Promise<Record<string, ServiceUrlEditState>> {
+): Promise<{ serviceUrlEdit: Record<string, ServiceUrlEditState>; serviceUrlClear: Record<string, ServiceUrlEditState> }> {
   const unknownForAll = (): Record<string, ServiceUrlEditState> => {
     const states: Record<string, ServiceUrlEditState> = serviceMap();
     for (const name of services) states[name] = 'unknown';
     return states;
   };
+  const unknown = { serviceUrlEdit: unknownForAll(), serviceUrlClear: unknownForAll() };
   try {
     const input = await editabilityInput(nodeId, stackName);
-    if (!input) return unknownForAll();
-    return resolveServiceUrlEditState({ ...input, services });
+    if (!input) return unknown;
+    return {
+      serviceUrlEdit: resolveServiceUrlEditState({ rootInChain: input.rootInChain, otherFiles: input.otherFiles, services }),
+      serviceUrlClear: resolveServiceUrlClearState({ ...input, services }),
+    };
   } catch (error) {
     console.warn('[EffectiveAnatomy] Could not establish service URL sources for %s:',
       sanitizeForLog(stackName), sanitizeForLog(getErrorMessage(error, 'unknown')));
-    return unknownForAll();
+    return unknown;
   }
 }
 
@@ -312,7 +336,7 @@ export async function buildEffectiveAnatomy(nodeId: number, stackName: string): 
           renderable: true,
           renderError: null,
           ...anatomy,
-          serviceUrlEdit: await buildServiceUrlEdit(nodeId, stackName, anatomy.services),
+          ...await buildServiceUrlAuthority(nodeId, stackName, anatomy.services),
         };
       } catch (parseErr) {
         // JSON.parse errors carry no file content, so the message is safe to log.
@@ -337,5 +361,11 @@ export async function buildEffectiveAnatomy(nodeId: number, stackName: string): 
     renderError = redactSensitiveText(getErrorMessage(err, 'docker compose could not be started.')).slice(0, MAX_RENDER_ERROR).trim()
       || 'Sencho could not run docker compose on this node.';
   }
-  return { renderable: false, renderError, ...emptyAnatomy(), serviceUrlEdit: serviceMap() };
+  return {
+    renderable: false,
+    renderError,
+    ...emptyAnatomy(),
+    serviceUrlEdit: serviceMap(),
+    serviceUrlClear: serviceMap(),
+  };
 }

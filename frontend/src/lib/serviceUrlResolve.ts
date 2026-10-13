@@ -21,6 +21,8 @@ export interface ServiceUrlEntry {
   serviceUrls: Record<string, string>;
   /** Per-service editability of the URL label from the open main compose file. */
   serviceUrlEdit: Record<string, ServiceUrlEditState>;
+  /** Per-service clearing authority of the URL label from the open main compose file. */
+  serviceUrlClear: Record<string, ServiceUrlEditState>;
   ports: Record<string, AnatomyPortRef[]>;
   renderable: boolean;
   services?: string[];
@@ -69,6 +71,36 @@ export function serviceUrlEditBlockedMessage(state: ServiceUrlEditState | undefi
   if (state === 'root') return null;
   if (state === 'other') return 'This URL is set in another compose file.';
   return 'Sencho cannot verify which compose file sets this URL.';
+}
+
+/** The clearing state of one service on an entry, or undefined without metadata. */
+export function serviceUrlClearState(entry: ServiceUrlEntry | null | undefined, serviceName: string): ServiceUrlEditState | undefined {
+  return entry ? serviceKeyGet(entry.serviceUrlClear, serviceName) : undefined;
+}
+
+/**
+ * The refusal message for a clear another contribution would override or
+ * reveal, or null when removing the label here unsets the effective URL.
+ */
+export function serviceUrlClearBlockedMessage(state: ServiceUrlEditState | undefined): string | null {
+  if (state === 'root') return null;
+  if (state === 'other') return 'This URL is also set in another compose file, so clearing it here cannot take effect.';
+  return 'Sencho cannot verify which compose file or inherited service sets this URL, so it cannot be cleared here.';
+}
+
+/**
+ * The refusal for the operation about to be saved (`null` clears), or null when
+ * it may proceed. Setting and clearing read different authorities: a later file
+ * can shadow a set, while a clear can also surface an earlier or inherited one.
+ */
+export function serviceUrlSaveBlockedMessage(
+  entry: ServiceUrlEntry | null | undefined,
+  serviceName: string,
+  url: string | null,
+): string | null {
+  return url === null
+    ? serviceUrlClearBlockedMessage(serviceUrlClearState(entry, serviceName))
+    : serviceUrlEditBlockedMessage(serviceUrlEditState(entry, serviceName));
 }
 
 function portCovers(host: string, port: number): boolean {
@@ -224,6 +256,7 @@ export function parseServiceUrlResponse(
     stackName,
     serviceUrls: createServiceKeyMap<string>(),
     serviceUrlEdit: createServiceKeyMap<ServiceUrlEditState>(),
+    serviceUrlClear: createServiceKeyMap<ServiceUrlEditState>(),
     ports: createServiceKeyMap<AnatomyPortRef[]>(),
     renderable: false,
   };
@@ -247,7 +280,10 @@ export function parseServiceUrlResponse(
     return { ...empty, ...facts, status: 'unsupported', renderable: record.renderable === true };
   }
   const serviceUrls = readServiceUrls(record.serviceUrls);
-  const serviceUrlEdit = readServiceUrlEdit(record.serviceUrlEdit);
+  const serviceUrlEdit = readEditStates(record.serviceUrlEdit);
+  // A response with service URLs but no clear states predates the clear
+  // authority; an absent state reads as unverifiable, so the clear is refused.
+  const serviceUrlClear = readEditStates(record.serviceUrlClear);
   if (record.renderable === false) {
     return {
       status: 'unavailable',
@@ -255,6 +291,7 @@ export function parseServiceUrlResponse(
       stackName,
       serviceUrls: createServiceKeyMap<string>(),
       serviceUrlEdit: createServiceKeyMap<ServiceUrlEditState>(),
+      serviceUrlClear: createServiceKeyMap<ServiceUrlEditState>(),
       ports,
       renderable: false,
     };
@@ -265,6 +302,7 @@ export function parseServiceUrlResponse(
     stackName,
     serviceUrls,
     serviceUrlEdit,
+    serviceUrlClear,
     ports,
     renderable: true,
     services,
@@ -294,7 +332,7 @@ function readVolumeMap(value: unknown): Record<string, { host: string; container
 }
 
 /** Only the three known states are kept; anything else is left absent (no metadata). */
-function readServiceUrlEdit(value: unknown): Record<string, ServiceUrlEditState> {
+function readEditStates(value: unknown): Record<string, ServiceUrlEditState> {
   const states = createServiceKeyMap<ServiceUrlEditState>();
   if (!value || typeof value !== 'object' || Array.isArray(value)) return states;
   for (const [name, raw] of Object.entries(value)) {

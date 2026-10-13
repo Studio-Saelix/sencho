@@ -10,6 +10,7 @@ import request from 'supertest';
 import jwt from 'jsonwebtoken';
 import { setupTestDb, cleanupTestDb, TEST_USERNAME, TEST_JWT_SECRET } from './helpers/setupTestDb';
 import { ComposeService } from '../services/ComposeService';
+import { DatabaseService, type StackGitSource } from '../services/DatabaseService';
 
 let tmpDir: string;
 let app: import('express').Express;
@@ -70,6 +71,7 @@ describe('effective-anatomy route', () => {
     expect(res.body.networks).toEqual(['backend', 'default']);
     // A single-file stack has no other file that could shadow the label.
     expect(res.body.serviceUrlEdit).toEqual({ web: 'root' });
+    expect(res.body.serviceUrlClear).toEqual({ web: 'root' });
   });
 
   it('surfaces a structural error and never raw stderr on render failure', async () => {
@@ -133,8 +135,10 @@ describe('effective-anatomy route', () => {
     const res = await request(app).get(`/api/stacks/${STACK}/effective-anatomy`).set('Authorization', authHeader);
     expect(res.status).toBe(200);
     // An invalid later label still shadows the main file; a service the override
-    // leaves alone stays editable.
+    // leaves alone stays editable. Either way the clear is refused: the override
+    // still supplies (web) or could supply (api is not in it) the label.
     expect(res.body.serviceUrlEdit).toEqual({ web: 'other', api: 'root' });
+    expect(res.body.serviceUrlClear).toEqual({ web: 'other', api: 'root' });
   });
 
   it('keeps services editable when the override leaves the label alone', async () => {
@@ -148,6 +152,21 @@ describe('effective-anatomy route', () => {
     const res = await request(app).get(`/api/stacks/${STACK}/effective-anatomy`).set('Authorization', authHeader);
     expect(res.status).toBe(200);
     expect(res.body.serviceUrlEdit).toEqual({ web: 'root' });
+    expect(res.body.serviceUrlClear).toEqual({ web: 'root' });
+  });
+
+  it('audit F1: a later bare list label blocks the edit', async () => {
+    fs.writeFileSync(path.join(stackDir, 'compose.override.yaml'),
+      'services:\n  web:\n    labels:\n      - sencho.service.url\n');
+    stubRender(JSON.stringify({
+      services: { web: { labels: { 'sencho.service.url': '' } } },
+      networks: {},
+      volumes: {},
+    }));
+    const res = await request(app).get(`/api/stacks/${STACK}/effective-anatomy`).set('Authorization', authHeader);
+    expect(res.status).toBe(200);
+    expect(res.body.serviceUrlEdit).toEqual({ web: 'other' });
+    expect(res.body.serviceUrlClear).toEqual({ web: 'other' });
   });
 
   it('refuses editability when the override uses constructs whose labels cannot be traced', async () => {
@@ -157,6 +176,26 @@ describe('effective-anatomy route', () => {
     const res = await request(app).get(`/api/stacks/${STACK}/effective-anatomy`).set('Authorization', authHeader);
     expect(res.status).toBe(200);
     expect(res.body.serviceUrlEdit).toEqual({ web: 'unknown' });
+    expect(res.body.serviceUrlClear).toEqual({ web: 'unknown' });
+  });
+
+  it('audit F2: an earlier Git chain file blocks the clear but not the set', async () => {
+    fs.writeFileSync(path.join(stackDir, 'base.yaml'),
+      'services:\n  web:\n    labels:\n      sencho.service.url: https://base.example.com\n');
+    fs.writeFileSync(path.join(stackDir, 'compose.yaml'),
+      'services:\n  web:\n    labels:\n      sencho.service.url: https://root.example.com\n');
+    vi.spyOn(DatabaseService.getInstance(), 'getGitSource').mockReturnValue({
+      applied_deploy_spec: { files: ['base.yaml', 'compose.yaml'], contextDir: null },
+    } as StackGitSource);
+    stubRender(JSON.stringify({
+      services: { web: { labels: { 'sencho.service.url': 'https://root.example.com' } } },
+      networks: {},
+      volumes: {},
+    }));
+    const res = await request(app).get(`/api/stacks/${STACK}/effective-anatomy`).set('Authorization', authHeader);
+    expect(res.status).toBe(200);
+    expect(res.body.serviceUrlEdit).toEqual({ web: 'root' });
+    expect(res.body.serviceUrlClear).toEqual({ web: 'other' });
   });
 
   it('refuses editability when COMPOSE_FILE changes the file discovery', async () => {
@@ -165,6 +204,7 @@ describe('effective-anatomy route', () => {
     const res = await request(app).get(`/api/stacks/${STACK}/effective-anatomy`).set('Authorization', authHeader);
     expect(res.status).toBe(200);
     expect(res.body.serviceUrlEdit).toEqual({ web: 'unknown' });
+    expect(res.body.serviceUrlClear).toEqual({ web: 'unknown' });
     fs.rmSync(path.join(stackDir, '.env'));
   });
 

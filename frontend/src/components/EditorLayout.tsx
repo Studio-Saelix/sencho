@@ -30,7 +30,7 @@ import { useSidebarContextMenu } from './EditorLayout/hooks/useSidebarContextMen
 import { useServiceUrls } from './EditorLayout/hooks/useServiceUrls';
 import { ServiceUrlModal } from './EditorLayout/ServiceUrlModal';
 import { patchServiceUrlLabel } from '@/lib/composeServiceUrl';
-import { serviceKeyGet, serviceUrlEditBlockedMessage, serviceUrlEditState } from '@/lib/serviceUrlResolve';
+import { serviceKeyGet, serviceUrlClearBlockedMessage, serviceUrlClearState, serviceUrlSaveBlockedMessage } from '@/lib/serviceUrlResolve';
 import { sameServiceUrlTarget, type ServiceUrlDialogTarget } from '@/lib/serviceUrlTarget';
 import { confirmComposeSourceReload } from '@/lib/composeSourceConflict';
 import { useActiveNodeReapplyEligibility } from './EditorLayout/hooks/useActiveNodeReapplyEligibility';
@@ -888,7 +888,10 @@ export default function EditorLayout() {
       toast.error('You cannot edit this stack.');
       return;
     }
-    const blocked = serviceUrlEditBlockedMessage(serviceUrlEditState(serviceUrlEntry, opened.serviceName));
+    // Clearing has its own authority: an earlier file, the open file's include,
+    // or an inherited service can still supply the label after the direct one is
+    // removed, so only the matching guard for the requested operation applies.
+    const blocked = serviceUrlSaveBlockedMessage(serviceUrlEntry, opened.serviceName, url);
     if (blocked) {
       toast.error(blocked);
       return;
@@ -934,7 +937,7 @@ export default function EditorLayout() {
         // This orders the check, it does not lock the files; a later chain file
         // changed mid-write is caught by the post-save verification instead.
         const fresh = await refreshServiceUrls();
-        const freshBlocked = serviceUrlEditBlockedMessage(serviceUrlEditState(fresh, opened.serviceName));
+        const freshBlocked = serviceUrlSaveBlockedMessage(fresh, opened.serviceName, url);
         if (freshBlocked) {
           toast.error(freshBlocked);
           return;
@@ -1120,6 +1123,9 @@ export default function EditorLayout() {
       dirty={serviceUrlDirty}
       saving={serviceUrlSaving}
       verifyMessage={serviceUrlVerify}
+      clearBlockedMessage={serviceUrlTarget
+        ? serviceUrlClearBlockedMessage(serviceUrlClearState(serviceUrlEntry, serviceUrlTarget.serviceName))
+        : null}
       onOpenChange={(open) => {
         if (!open && !serviceUrlSaving) {
           setServiceUrlTarget(null);

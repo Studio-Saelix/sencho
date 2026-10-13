@@ -11,6 +11,7 @@ const entry: ServiceUrlEntry = {
   renderable: true,
   serviceUrls: { api: 'https://api.example.com' },
   serviceUrlEdit: { api: 'root' },
+  serviceUrlClear: { api: 'root' },
   ports: { api: [{ host: '8080', proto: 'tcp' }] },
 };
 
@@ -98,6 +99,7 @@ describe('ServicePortLink edit affordance', () => {
       renderable: true,
       serviceUrls: {},
       serviceUrlEdit: {},
+      serviceUrlClear: {},
       ports: { web: [{ host: '8080', proto: 'tcp' }] },
     };
     render(

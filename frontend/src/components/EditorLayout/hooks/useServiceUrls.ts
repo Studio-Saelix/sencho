@@ -52,6 +52,7 @@ export function useServiceUrls(nodeId: number | null, stackName: string | null) 
           stackName,
           serviceUrls: createServiceKeyMap<string>(),
           serviceUrlEdit: createServiceKeyMap<ServiceUrlEditState>(),
+          serviceUrlClear: createServiceKeyMap<ServiceUrlEditState>(),
           ports: createServiceKeyMap<AnatomyPortRef[]>(),
           renderable: false,
         };
@@ -85,7 +86,7 @@ export function useServiceUrls(nodeId: number | null, stackName: string | null) 
   const current = useMemo<ServiceUrlEntry | null>(() => {
     if (!stackName) return null;
     if (entry && entry.nodeId === nodeId && entry.stackName === stackName) return entry;
-    return { status: 'loading', nodeId, stackName, serviceUrls: createServiceKeyMap<string>(), serviceUrlEdit: createServiceKeyMap<ServiceUrlEditState>(), ports: createServiceKeyMap<AnatomyPortRef[]>(), renderable: false };
+    return { status: 'loading', nodeId, stackName, serviceUrls: createServiceKeyMap<string>(), serviceUrlEdit: createServiceKeyMap<ServiceUrlEditState>(), serviceUrlClear: createServiceKeyMap<ServiceUrlEditState>(), ports: createServiceKeyMap<AnatomyPortRef[]>(), renderable: false };
   }, [entry, nodeId, stackName]);
 
   return { entry: current, refresh };

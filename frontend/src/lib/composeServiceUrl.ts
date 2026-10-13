@@ -28,6 +28,11 @@ function resolvedLabelText(doc: unknown, item: unknown): string {
   return labelText(item);
 }
 
+/** A label list entry matches the URL key as `key=value`, or as the bare `key` (an empty value). */
+function isUrlListItem(text: string): boolean {
+  return text === SERVICE_URL_LABEL || text.startsWith(`${SERVICE_URL_LABEL}=`);
+}
+
 function mapHasMerge(map: YAMLMap): boolean {
   return map.items.some(item => labelText(item.key) === '<<');
 }
@@ -80,7 +85,7 @@ function copyLabels(source: string, serviceName: string, url: string | null): La
     const texts = Array.isArray(text) ? text : [];
     const items: string[] = [];
     typed.forEach((item, index) => {
-      if (typeof item === 'string' && item.startsWith(prefix)) return;
+      if (typeof item === 'string' && isUrlListItem(item)) return;
       items.push(labelToken(item, texts[index]));
     });
     if (literal !== null) items.push(quoteYaml(`${prefix}${literal}`));
@@ -158,19 +163,32 @@ export function composeServiceNames(source: string): string[] | null {
 /** True when the service's labels carry the URL key at all, even with an empty value. */
 function hasUrlLabel(parsed: unknown, serviceName: string): boolean {
   const labels = serviceOf(parsed, serviceName)?.labels;
-  if (Array.isArray(labels)) return labels.some(item => typeof item === 'string' && item.startsWith(`${SERVICE_URL_LABEL}=`));
+  if (Array.isArray(labels)) return labels.some(item => typeof item === 'string' && isUrlListItem(item));
   return !!labels && typeof labels === 'object' && SERVICE_URL_LABEL in labels;
+}
+
+/**
+ * A clear can leave or reveal an inherited URL: a top-level `include`, or the
+ * edited service's `extends` or `label_file`, can supply the key once the direct
+ * label is gone. Those layouts are refused so a clear never writes a no-op.
+ */
+function clearUnverifiable(doc: ReturnType<typeof parseDocument>, parsed: unknown, serviceName: string): boolean {
+  if (doc.get('include') !== undefined) return true;
+  const service = serviceOf(parsed, serviceName);
+  return !!service && (service.extends !== undefined || service.label_file !== undefined);
 }
 
 /** The label text this buffer sets, before it is checked as an absolute URL. */
 function rawServiceUrlFrom(merged: unknown, serviceName: string): string | null {
   const labels = serviceOf(merged, serviceName)?.labels;
   if (Array.isArray(labels)) {
+    // Compose reads a list into a map, later entries winning, so the last
+    // matching entry is the effective text; a bare key is the empty value.
     let found: string | null = null;
-    const prefix = `${SERVICE_URL_LABEL}=`;
     for (const item of labels) {
-      if (typeof item !== 'string' || !item.startsWith(prefix)) continue;
-      found = item.slice(prefix.length);
+      if (typeof item !== 'string') continue;
+      if (item === SERVICE_URL_LABEL) found = '';
+      else if (item.startsWith(`${SERVICE_URL_LABEL}=`)) found = item.slice(SERVICE_URL_LABEL.length + 1);
     }
     return found;
   }
@@ -495,7 +513,7 @@ function editMap(source: string, doc: unknown, labels: YAMLMap, url: string | nu
 function editSeq(source: string, doc: unknown, labels: { items: unknown[] }, url: string | null): Splice[] {
   const flow = isFlow(source, labels);
   const prefix = `${SERVICE_URL_LABEL}=`;
-  const matches = labels.items.filter(item => resolvedLabelText(doc, item).startsWith(prefix));
+  const matches = labels.items.filter(item => isUrlListItem(resolvedLabelText(doc, item)));
   const literal = url === null ? null : escapeComposeLiteral(url);
   const splices: Splice[] = [];
   for (const item of matches) detachOutside(doc, source, item, anchorName(item), splices);
@@ -582,7 +600,7 @@ function modelWithoutUrl(source: string, serviceName: string, schema?: 'failsafe
   if (record) {
     let labels = record.labels;
     if (Array.isArray(labels)) {
-      labels = labels.filter(item => !(typeof item === 'string' && item.startsWith(`${SERVICE_URL_LABEL}=`)));
+      labels = labels.filter(item => !(typeof item === 'string' && isUrlListItem(item)));
     } else if (labels && typeof labels === 'object') {
       labels = Object.fromEntries(Object.entries(labels).filter(([key]) => key !== SERVICE_URL_LABEL));
     }
@@ -653,6 +671,10 @@ export function patchServiceUrlLabel(source: string, serviceName: string, url: s
   if (!isMap(services)) return { ok: false, reason: 'missing-service' };
   const pair = services.items.find(item => labelText(item.key) === serviceName);
   if (!pair) return { ok: false, reason: 'missing-service' };
+  if (url === null && clearUnverifiable(doc, parsed, serviceName)) {
+    console.warn(`Service URL clear on ${serviceName} refused: the file or service inherits labels.`);
+    return { ok: false, reason: 'unsupported' };
+  }
   if (url === null && !hasUrlLabel(parsed, serviceName)) return { ok: true, yaml: source };
 
   try {

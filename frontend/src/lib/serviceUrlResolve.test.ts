@@ -6,8 +6,11 @@ import {
   resolveOpenAppTarget,
   resolvePublishedPortClick,
   serviceKeyGet,
+  serviceUrlClearBlockedMessage,
+  serviceUrlClearState,
   serviceUrlEditBlockedMessage,
   serviceUrlEditState,
+  serviceUrlSaveBlockedMessage,
   tcpOwners,
   type ServiceUrlEntry,
 } from './serviceUrlResolve';
@@ -22,6 +25,7 @@ const ready: ServiceUrlEntry = {
   renderable: true,
   serviceUrls: { web: 'https://app.example.com' },
   serviceUrlEdit: { web: 'root' },
+  serviceUrlClear: { web: 'root' },
   ports: {
     web: [{ host: '8080', proto: 'tcp' }, { host: '8080', proto: 'udp' }],
   },
@@ -754,6 +758,40 @@ describe('patchServiceUrlLabel', () => {
     expect(afterClear.services.web.labels).toEqual(['keep=yes']);
   });
 
+  it('treats a bare URL list item as the key: replaced on a set, removed on a clear', () => {
+    // Compose reads the list into a map with later entries winning, so a bare
+    // key after the value would otherwise leave the URL empty after a set.
+    const source = [
+      'services:',
+      '  web:',
+      '    image: nginx',
+      '    labels:',
+      '      - sencho.service.url=https://old.example.com',
+      '      - sencho.service.url',
+      '',
+    ].join('\n');
+    const set = patchServiceUrlLabel(source, 'web', 'https://new.example.com');
+    expect(set.ok).toBe(true);
+    if (!set.ok) return;
+    const afterSet = parse(set.yaml, { merge: true }) as { services: { web: { labels: string[] } } };
+    expect(afterSet.services.web.labels).toEqual(['sencho.service.url=https://new.example.com']);
+
+    const cleared = patchServiceUrlLabel(source, 'web', null);
+    expect(cleared.ok).toBe(true);
+    if (!cleared.ok) return;
+    expect(cleared.yaml).not.toContain('sencho.service.url');
+  });
+
+  it('clears a lone bare URL list item', () => {
+    const source = 'services:\n  web:\n    image: nginx\n    labels:\n      - sencho.service.url\n';
+    const cleared = patchServiceUrlLabel(source, 'web', null);
+    expect(cleared.ok).toBe(true);
+    if (!cleared.ok) return;
+    expect(cleared.yaml).not.toContain('sencho.service.url');
+    const merged = parse(cleared.yaml, { merge: true }) as { services: { web: { labels?: string[] } } };
+    expect(merged.services.web.labels ?? []).toEqual([]);
+  });
+
   it('clears a list alias without changing other consumers', () => {
     const source = [
       'x-url: &url sencho.service.url=https://old.example.com',
@@ -1017,6 +1055,20 @@ describe('service URL maps are safe for every legal service name', () => {
     expect(serviceUrlEditState(entry, 'hasOwnProperty')).toBeUndefined();
     expect(serviceUrlEditState(null, 'constructor')).toBeUndefined();
   });
+
+  it('reads the clear state through an own-property lookup too', () => {
+    const entry = parseServiceUrlResponse(1, 'web', true, {
+      renderable: true,
+      serviceUrls: {},
+      serviceUrlEdit: {},
+      serviceUrlClear: JSON.parse('{"constructor":"other","__proto__":"unknown"}') as Record<string, string>,
+      ports: {},
+    });
+    expect(serviceUrlClearState(entry, 'constructor')).toBe('other');
+    expect(serviceUrlClearState(entry, '__proto__')).toBe('unknown');
+    expect(serviceUrlClearState(entry, 'toString')).toBeUndefined();
+    expect(serviceUrlClearState(null, 'constructor')).toBeUndefined();
+  });
 });
 
 describe('service URL editability metadata', () => {
@@ -1048,6 +1100,144 @@ describe('service URL editability metadata', () => {
     expect(entry.serviceUrlEdit).toEqual({});
     expect(lockedServiceUrlReasons(null).size).toBe(0);
     expect(lockedServiceUrlReasons(entry).size).toBe(0);
+  });
+});
+
+describe('service URL clear authority', () => {
+  it('refuses the clear only when another contribution would survive it', () => {
+    const entry = parseServiceUrlResponse(1, 'web', true, {
+      renderable: true,
+      serviceUrls: {},
+      serviceUrlEdit: { web: 'root', api: 'root', db: 'other' },
+      serviceUrlClear: { web: 'other', api: 'unknown', db: 'other' },
+      ports: {},
+    });
+    expect(serviceUrlClearState(entry, 'web')).toBe('other');
+    expect(serviceUrlClearState(entry, 'api')).toBe('unknown');
+    expect(serviceUrlClearState(entry, 'db')).toBe('other');
+    expect(serviceUrlClearState(entry, 'missing')).toBeUndefined();
+    expect(serviceUrlClearBlockedMessage('root')).toBeNull();
+    expect(serviceUrlClearBlockedMessage('other'))
+      .toBe('This URL is also set in another compose file, so clearing it here cannot take effect.');
+    expect(serviceUrlClearBlockedMessage('unknown'))
+      .toBe('Sencho cannot verify which compose file or inherited service sets this URL, so it cannot be cleared here.');
+    expect(serviceUrlClearBlockedMessage(undefined))
+      .toBe('Sencho cannot verify which compose file or inherited service sets this URL, so it cannot be cleared here.');
+  });
+
+  it('treats a response without clear states as unverifiable for clearing', () => {
+    // A node that predates the clear authority still reports set editability.
+    const entry = parseServiceUrlResponse(1, 'web', true, {
+      renderable: true,
+      serviceUrls: { web: 'https://app.example.com' },
+      serviceUrlEdit: { web: 'root' },
+      ports: {},
+    });
+    expect(entry.serviceUrlClear).toEqual({});
+    expect(serviceUrlSaveBlockedMessage(entry, 'web', 'https://app.example.com')).toBeNull();
+    expect(serviceUrlSaveBlockedMessage(entry, 'web', null))
+      .toBe('Sencho cannot verify which compose file or inherited service sets this URL, so it cannot be cleared here.');
+  });
+
+  it('picks the guard for the requested operation', () => {
+    const entry = parseServiceUrlResponse(1, 'web', true, {
+      renderable: true,
+      serviceUrls: { web: 'https://app.example.com' },
+      serviceUrlEdit: { web: 'root' },
+      serviceUrlClear: { web: 'other' },
+      ports: {},
+    });
+    // Setting is allowed even when clearing is not.
+    expect(serviceUrlSaveBlockedMessage(entry, 'web', 'https://new.example.com')).toBeNull();
+    expect(serviceUrlSaveBlockedMessage(entry, 'web', null))
+      .toBe('This URL is also set in another compose file, so clearing it here cannot take effect.');
+
+    const shadowed = parseServiceUrlResponse(1, 'web', true, {
+      renderable: true,
+      serviceUrls: {},
+      serviceUrlEdit: { web: 'other' },
+      serviceUrlClear: { web: 'other' },
+      ports: {},
+    });
+    expect(serviceUrlSaveBlockedMessage(shadowed, 'web', 'https://new.example.com'))
+      .toBe('This URL is set in another compose file.');
+    expect(serviceUrlSaveBlockedMessage(null, 'web', null))
+      .toBe('Sencho cannot verify which compose file or inherited service sets this URL, so it cannot be cleared here.');
+  });
+});
+
+describe('patchServiceUrlLabel refuses a clear an inherited label would survive', () => {
+  it('refuses clearing a service that extends another service', () => {
+    const source = [
+      'services:',
+      '  base:',
+      '    image: nginx',
+      '    labels:',
+      '      sencho.service.url: https://base.example.com',
+      '  web:',
+      '    extends:',
+      '      service: base',
+      '    labels:',
+      '      sencho.service.url: https://web.example.com',
+      '',
+    ].join('\n');
+    expect(patchServiceUrlLabel(source, 'web', null)).toEqual({ ok: false, reason: 'unsupported' });
+    // Setting a URL still works: the direct label beats the inherited one.
+    const set = patchServiceUrlLabel(source, 'web', 'https://new.example.com');
+    expect(set.ok).toBe(true);
+  });
+
+  it('refuses clearing a service whose labels also come from label_file', () => {
+    const source = [
+      'services:',
+      '  web:',
+      '    image: nginx',
+      '    label_file:',
+      '      - url.labels',
+      '    labels:',
+      '      sencho.service.url: https://web.example.com',
+      '',
+    ].join('\n');
+    expect(patchServiceUrlLabel(source, 'web', null)).toEqual({ ok: false, reason: 'unsupported' });
+    const set = patchServiceUrlLabel(source, 'web', 'https://new.example.com');
+    expect(set.ok).toBe(true);
+  });
+
+  it('refuses clearing any label in a file that includes another file', () => {
+    const source = [
+      'include:',
+      '  - sub/included.yaml',
+      'services:',
+      '  web:',
+      '    image: nginx',
+      '    labels:',
+      '      sencho.service.url: https://web.example.com',
+      '',
+    ].join('\n');
+    expect(patchServiceUrlLabel(source, 'web', null)).toEqual({ ok: false, reason: 'unsupported' });
+    const set = patchServiceUrlLabel(source, 'web', 'https://new.example.com');
+    expect(set.ok).toBe(true);
+  });
+
+  it('still clears a label inherited through a YAML merge key, which the patch rewrites locally', () => {
+    const source = [
+      'x-labels: &labels',
+      '  keep: "yes"',
+      '  sencho.service.url: https://default.example.com',
+      'services:',
+      '  web:',
+      '    image: nginx',
+      '    labels: *labels',
+      '',
+    ].join('\n');
+    const cleared = patchServiceUrlLabel(source, 'web', null);
+    expect(cleared.ok).toBe(true);
+    if (!cleared.ok) return;
+    const merged = parse(cleared.yaml, { merge: true }) as {
+      services: { web: { labels: Record<string, string> } };
+    };
+    expect(merged.services.web.labels['sencho.service.url']).toBeUndefined();
+    expect(merged.services.web.labels.keep).toBe('yes');
   });
 });
 
