@@ -92,7 +92,7 @@ import { managedAreaBase } from './gitops/managedPaths';
 import { getRegistryDeliveryContext, getRegistryDeliveryLockContext } from '../helpers/registryDeliveryContext';
 import { copyPreparedPayloadDirectory } from '../helpers/registryDeliveryMaterialize';
 import { runDockerCompose as spawnDockerCompose } from '../helpers/dockerComposeRunner';
-import { classifyInventoryEncryption, buildSecretCapability } from './gitops/sops/capability';
+import { classifyInventoryEncryption, buildSecretCapability, syncEnvInputEntry } from './gitops/sops/capability';
 import { getEncryptedSourcePolicy } from './gitops/sops/identityStore';
 import {
     buildGitOpsDecryptOverlay,
@@ -1829,13 +1829,13 @@ export class GitSourceService {
         }
         inventory.inputs = classified.inputs;
 
-        const capabilityInputs = src.sync_env && envContent !== null
-            // The synced stack-root .env is written by Sencho from repository
-            // content, so the encrypted-source policy must judge it even though
-            // discovery records the repository's interpolation .env as
-            // unmanaged. Without this a plaintext .env is synced and accepted.
-            ? mergeSyncEnvEntry(inventory.inputs, this.syncEnvEntryFor(envContent))
-            : inventory.inputs;
+        // Discovery leaves the repo interpolation .env unmanaged, so policy and
+        // the validation overlay must judge the synced stack-root .env. Otherwise
+        // a plaintext .env is accepted and a SOPS .env is deployed as ciphertext.
+        const capabilityInputs = mergeSyncEnvEntry(
+            inventory.inputs,
+            src.sync_env ? this.syncEnvEntryFor(envContent) : null,
+        );
         const capabilityResult = buildSecretCapability({
             policy,
             inputs: capabilityInputs,
@@ -1885,7 +1885,7 @@ export class GitSourceService {
         const dataDir = process.env.DATA_DIR || path.join(process.cwd(), 'data');
         const candidateAbs = path.join(dataDir, 'git-managed', String(nodeId), stackName, candidateRel);
         let validation: { ok: boolean; error?: string };
-        if (manifestInputsNeedOverlay({ inputs: inventory.inputs })) {
+        if (manifestInputsNeedOverlay({ inputs: capabilityInputs })) {
             const overlay = await buildGitOpsDecryptOverlay({
                 stackName,
                 nodeId,
@@ -1893,7 +1893,7 @@ export class GitSourceService {
                 generationId: `validate-${commitSha.slice(0, 12)}`,
                 commitSha,
                 sourceRoot: candidateAbs,
-                manifest: { inputs: inventory.inputs },
+                manifest: { inputs: capabilityInputs },
             });
             if (!overlay) {
                 validation = await this.validateCandidate(stackName, candidateRel, src.compose_paths, src.context_dir, src.sync_env);
@@ -5466,22 +5466,7 @@ export class GitSourceService {
     /** The sync-env manifest entry for staged env content, or null when there is none. */
     private syncEnvEntryFor(envContent: string | null): ComposeInputEntry | null {
         if (envContent === null) return null;
-        return {
-            sourcePath: null,
-            materializedPath: '.env',
-            role: 'env',
-            dependencyKind: 'sync-env',
-            ownership: 'managed',
-            provenance: 'fetch',
-            sensitivity: 'high',
-            contentSha256: crypto.createHash('sha256').update(envContent).digest('hex'),
-            sizeBytes: Buffer.byteLength(envContent, 'utf8'),
-            state: 'present',
-            deletionAuthority: 'sencho',
-            note: null,
-            encryption: 'none',
-            sopsRecipients: [],
-        };
+        return syncEnvInputEntry(envContent);
     }
 
     /**
@@ -6311,23 +6296,7 @@ export class GitSourceService {
             }
 
             // Assemble the new manifest from the pull-time inventory.
-            const syncEnvEntry: ComposeInputEntry | null =
-                src.sync_env && envContent !== null
-                    ? {
-                          sourcePath: null,
-                          materializedPath: '.env',
-                          role: 'env',
-                          dependencyKind: 'sync-env',
-                          ownership: 'managed',
-                          provenance: 'fetch',
-                          sensitivity: 'high',
-                          contentSha256: crypto.createHash('sha256').update(envContent).digest('hex'),
-                          sizeBytes: Buffer.byteLength(envContent, 'utf8'),
-                          state: 'present',
-                          deletionAuthority: 'sencho',
-                          note: null,
-                      }
-                    : null;
+            const syncEnvEntry = src.sync_env ? this.syncEnvEntryFor(envContent) : null;
             const invocation = plan.candidateInvocation;
             const manifest = manifestSvc.buildManifest({
                 stackName,
@@ -6584,23 +6553,7 @@ export class GitSourceService {
                     const inputs = materialization.value.inventory.inputs.filter(
                         (i) => i.ownership === 'managed' && i.state === 'present' && i.materializedPath !== null,
                     );
-                    const syncEnvEntry: ComposeInputEntry | null =
-                        input.syncEnv && fetched.envContent !== null
-                            ? {
-                                  sourcePath: null,
-                                  materializedPath: '.env',
-                                  role: 'env',
-                                  dependencyKind: 'sync-env',
-                                  ownership: 'managed',
-                                  provenance: 'fetch',
-                                  sensitivity: 'high',
-                                  contentSha256: crypto.createHash('sha256').update(fetched.envContent).digest('hex'),
-                                  sizeBytes: Buffer.byteLength(fetched.envContent, 'utf8'),
-                                  state: 'present',
-                                  deletionAuthority: 'sencho',
-                                  note: null,
-                              }
-                            : null;
+                    const syncEnvEntry = input.syncEnv ? this.syncEnvEntryFor(fetched.envContent) : null;
                     const nodeId = NodeRegistry.getInstance().getDefaultNodeId();
                     const stackDir = path.resolve(NodeRegistry.getInstance().getComposeDir(nodeId), input.stackName);
                     const invocation = buildCandidateComposeInvocation({
@@ -7640,23 +7593,7 @@ export class GitSourceService {
         reviewedLiveHashes?: ReadonlyMap<string, string | null>;
     }): Promise<GitChangePlan> {
         const nodeId = NodeRegistry.getInstance().getDefaultNodeId();
-        const syncEnvEntry: ComposeInputEntry | null =
-            opts.src.sync_env && opts.envContent !== null
-                ? {
-                    sourcePath: null,
-                    materializedPath: '.env',
-                    role: 'env',
-                    dependencyKind: 'sync-env',
-                    ownership: 'managed',
-                    provenance: 'fetch',
-                    sensitivity: 'high',
-                    contentSha256: crypto.createHash('sha256').update(opts.envContent).digest('hex'),
-                    sizeBytes: Buffer.byteLength(opts.envContent, 'utf8'),
-                    state: 'present',
-                    deletionAuthority: 'sencho',
-                    note: null,
-                }
-                : null;
+        const syncEnvEntry = opts.src.sync_env ? this.syncEnvEntryFor(opts.envContent) : null;
         const inputs = mergeSyncEnvEntry(opts.inventory.inputs, syncEnvEntry);
         const liveInvocation = await this.liveInvocationArgs(opts.stackName, nodeId);
         const candidateInvocation = this.candidateInvocationArgs(opts.stackName, opts.src, opts.envContent !== null);

@@ -10861,6 +10861,109 @@ describe('GitSourceService sync-env stacks with a repo .env (audit C-2)', () => 
             await cleanupStackDir('sync-env-policy');
         }
     });
+    it('refuses a SOPS sibling .env when this node has no matching age identity', async () => {
+        const sha = 'abcd4444abcd4444abcd4444abcd4444abcd4444';
+        const svc = GitSourceService.getInstance();
+        const runSpy = vi
+            .spyOn(svc as unknown as { runDockerCompose: (a: string[], c: string, t: number) => Promise<{ code: number; stdout: string; stderr: string }> }, 'runDockerCompose')
+            .mockResolvedValue({ code: 0, stdout: '', stderr: '' });
+        const age = await import('age-encryption');
+        const identity = await age.generateIdentity();
+        const recipient = await age.identityToRecipient(identity);
+        const { buildSopsAgeDotenvDocument } = await import('./helpers/sopsFixtures');
+        const env = await buildSopsAgeDotenvDocument({
+            values: { TOKEN: 's3cret' },
+            identity,
+            recipient,
+        });
+        const { FileSystemService } = await import('../services/FileSystemService');
+        await FileSystemService.getInstance().createStack('sync-env-sops');
+        mockSuccessfulClone({
+            compose: 'services:\n  web:\n    image: nginx\n',
+            env,
+            envPath: '.env',
+            sha,
+        });
+        try {
+            await svc.upsert({
+                stackName: 'sync-env-sops',
+                repoUrl: 'https://github.com/example/repo.git',
+                branch: 'main',
+                composePaths: ['compose.yaml'],
+                contextDir: null,
+                syncEnv: true,
+                envPath: '.env',
+                authType: 'none',
+                autoApplyOnWebhook: false,
+                autoDeployOnApply: false,
+            });
+            await expect(svc.pull('sync-env-sops')).rejects.toThrow(/Required age identity is not available/i);
+        } finally {
+            runSpy.mockRestore();
+            await cleanupStackDir('sync-env-sops');
+        }
+    });
+    it('records a SOPS sibling .env as an age input and keeps ciphertext on disk', async () => {
+        const sha = 'abcd5555abcd5555abcd5555abcd5555abcd5555';
+        const stackName = 'sync-env-sops-apply';
+        const svc = GitSourceService.getInstance();
+        const runSpy = vi
+            .spyOn(svc as unknown as { runDockerCompose: (a: string[], c: string, t: number) => Promise<{ code: number; stdout: string; stderr: string }> }, 'runDockerCompose')
+            .mockResolvedValue({ code: 0, stdout: '', stderr: '' });
+        const age = await import('age-encryption');
+        const identity = await age.generateIdentity();
+        const recipient = await age.identityToRecipient(identity);
+        const { buildSopsAgeDotenvDocument } = await import('./helpers/sopsFixtures');
+        const env = await buildSopsAgeDotenvDocument({
+            values: { TOKEN: 's3cret' },
+            identity,
+            recipient,
+        });
+        const { FileSystemService } = await import('../services/FileSystemService');
+        const fsSvc = FileSystemService.getInstance();
+        await fsSvc.createStack(stackName);
+        mockSuccessfulClone({
+            compose: 'services:\n  web:\n    image: nginx\n',
+            env,
+            envPath: '.env',
+            sha,
+        });
+        try {
+            await svc.upsert({
+                stackName,
+                repoUrl: 'https://github.com/example/repo.git',
+                branch: 'main',
+                composePaths: ['compose.yaml'],
+                contextDir: null,
+                syncEnv: true,
+                envPath: '.env',
+                authType: 'none',
+                autoApplyOnWebhook: false,
+                autoDeployOnApply: false,
+            });
+            const { SopsIdentityStore } = await import('../services/gitops/sops/identityStore');
+            const app = GitOpsStore.getInstance().getLiveDirectApplication(stackName);
+            await SopsIdentityStore.getInstance().importIdentity({
+                applicationId: app?.id ?? stackName,
+                stackName,
+                identity,
+            });
+            const pull = await svc.pull(stackName);
+            const apply = await svc.apply(stackName, pull.commitSha, { deploy: false, ...SKIP_PLAN_FINGERPRINT });
+            expect(apply.applied).toBe(true);
+            const manifest = await svc.getManifest(stackName);
+            const envEntry = manifest?.inputs.find((i) => i.materializedPath === '.env');
+            expect(envEntry?.dependencyKind).toBe('sync-env');
+            expect(envEntry?.encryption).toBe('sops-age');
+            expect(envEntry?.sopsRecipients).toEqual([recipient]);
+            const onDisk = await fsSvc.getEnvContent(stackName);
+            expect(onDisk).toContain('ENC[AES256_GCM');
+            expect(onDisk).not.toContain('TOKEN=s3cret');
+        } finally {
+            runSpy.mockRestore();
+            await cleanupStackDir(stackName);
+        }
+    });
 });
 
 describe('GitSourceService classified plan fingerprint', () => {

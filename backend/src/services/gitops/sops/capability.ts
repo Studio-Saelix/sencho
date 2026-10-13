@@ -8,6 +8,7 @@ import type {
 import { detectSopsContent, isComposePrimaryPath } from './detect';
 import { SopsIdentityStore } from './identityStore';
 import { GitOpsStore } from '../store';
+import { createHash } from 'crypto';
 import { promises as fsPromises } from 'fs';
 import path from 'path';
 
@@ -81,6 +82,26 @@ export function classifyInputEncryption(
     return { encryption: 'sops-unsupported', sopsRecipients: [], refusalReason: detection.reason };
   }
   return { encryption: 'sops-age', sopsRecipients: detection.recipients };
+}
+
+export function syncEnvInputEntry(envContent: string): ComposeInputEntry {
+  const classified = classifyInputEncryption(envContent, 'env');
+  return {
+    sourcePath: null,
+    materializedPath: '.env',
+    role: 'env',
+    dependencyKind: 'sync-env',
+    ownership: 'managed',
+    provenance: 'fetch',
+    sensitivity: 'high',
+    contentSha256: createHash('sha256').update(envContent).digest('hex'),
+    sizeBytes: Buffer.byteLength(envContent, 'utf8'),
+    state: 'present',
+    deletionAuthority: 'sencho',
+    note: classified.refusalReason ?? null,
+    encryption: classified.encryption,
+    sopsRecipients: classified.sopsRecipients,
+  };
 }
 
 export async function classifyInventoryEncryption(
