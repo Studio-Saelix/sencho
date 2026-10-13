@@ -201,14 +201,14 @@ export function resolvePublishedPortClick(args: {
   if (!entry || !usableOverride(entry)) {
     return withoutOverride(generated, portLabel, entry?.status === 'unavailable');
   }
-  // A named runtime container's own automatic binding is direct evidence of
-  // ownership: its card carries the host port Docker assigned to the running
-  // container, and the matching automatic binding says that port is this
-  // service's. It opens this service's URL even when another service's saved
-  // file declares the same host port, because that declaration does not prove
-  // the other service is running or holds the port.
-  if (serviceName && privatePort !== undefined
-    && dynamicTcpOwners(entry.ports, privatePort).includes(serviceName)) {
+  // A named runtime container is direct ownership evidence: its card reads the
+  // host port from the running container, so the compose service that container
+  // belongs to owns that port regardless of what the saved file declares now.
+  // Its own URL wins even when the saved binding changed or was removed since
+  // the container started, and even when the saved file gives the number to
+  // another service that may not be running. Callers without a runtime private
+  // port (the anatomy footer) infer ownership from the saved model below.
+  if (serviceName !== undefined && privatePort !== undefined) {
     const own = serviceKeyGet(entry.serviceUrls, serviceName);
     if (own) return { kind: 'link', href: own, portLabel, hostLabel: hostLabel(own) };
   }

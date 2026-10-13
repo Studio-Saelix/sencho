@@ -201,7 +201,10 @@ describe('resolvePublishedPortClick', () => {
     })).toMatchObject({ kind: 'link', href: 'https://app.example.com', hostLabel: 'app.example.com' });
   });
 
-  it('audit F02: keeps the generated link for a UDP published zero', () => {
+  it('audit F01: the runtime card beats a saved UDP-only declaration for its own service', () => {
+    // The card reads TCP 49152 -> 80 from the running container. The saved file
+    // no longer declares a TCP binding for `web` (only a UDP one), but a running
+    // container's own URL does not depend on the saved declaration.
     const click = resolvePublishedPortClick({
       entry: { ...ready, ports: { web: [{ host: '0', container: '80', proto: 'udp' }] } },
       serviceName: 'web',
@@ -210,7 +213,7 @@ describe('resolvePublishedPortClick', () => {
       portLabel: '49152 → 80/tcp',
       node: { type: 'local' },
     });
-    expect(click).toMatchObject({ kind: 'link', href: 'http://localhost:49152' });
+    expect(click).toMatchObject({ kind: 'link', href: 'https://app.example.com', hostLabel: 'app.example.com' });
   });
 
   it('opens the named service URL when its automatic binding holds a port another service declares', () => {
@@ -230,6 +233,76 @@ describe('resolvePublishedPortClick', () => {
       privatePort: 80,
       portLabel: '32768',
       node: { type: 'local' },
+    });
+    expect(click).toMatchObject({ kind: 'link', href: 'https://web.example.com' });
+  });
+
+  it('audit F01: the runtime card keeps its own URL after a fixed saved port changed', () => {
+    // `web` runs with 8080:80; the saved file now declares 9090:80 and has not
+    // been deployed. The card's port comes from the running container, so the
+    // service's own URL still applies.
+    const click = resolvePublishedPortClick({
+      entry: {
+        ...ready,
+        serviceUrls: { web: 'https://web.example.com' },
+        ports: { web: [{ host: '9090', container: '80', proto: 'tcp' }] },
+      },
+      serviceName: 'web',
+      publicPort: 8080,
+      privatePort: 80,
+      portLabel: '8080 → 80/tcp',
+      node: { type: 'local' },
+    });
+    expect(click).toMatchObject({ kind: 'link', href: 'https://web.example.com', hostLabel: 'web.example.com' });
+  });
+
+  it('audit F01: the runtime card keeps its own URL after its saved binding is removed', () => {
+    const click = resolvePublishedPortClick({
+      entry: {
+        ...ready,
+        serviceUrls: { web: 'https://web.example.com' },
+        ports: {},
+      },
+      serviceName: 'web',
+      publicPort: 8080,
+      privatePort: 80,
+      portLabel: '8080 → 80/tcp',
+      node: { type: 'local' },
+    });
+    expect(click).toMatchObject({ kind: 'link', href: 'https://web.example.com' });
+  });
+
+  it('audit F01: another service saved declaration does not redirect the runtime card', () => {
+    const click = resolvePublishedPortClick({
+      entry: {
+        ...ready,
+        serviceUrls: { web: 'https://web.example.com', api: 'https://api.example.com' },
+        ports: {
+          web: [{ host: '9090', container: '80', proto: 'tcp' }],
+          api: [{ host: '8080', container: '80', proto: 'tcp' }],
+        },
+      },
+      serviceName: 'web',
+      publicPort: 8080,
+      privatePort: 80,
+      portLabel: '8080 → 80/tcp',
+      node: { type: 'local' },
+    });
+    expect(click).toMatchObject({ kind: 'link', href: 'https://web.example.com' });
+  });
+
+  it('audit F01: a hostless remote runtime card opens its own override', () => {
+    const click = resolvePublishedPortClick({
+      entry: {
+        ...ready,
+        serviceUrls: { web: 'https://web.example.com' },
+        ports: { web: [{ host: '9090', container: '80', proto: 'tcp' }] },
+      },
+      serviceName: 'web',
+      publicPort: 8080,
+      privatePort: 80,
+      portLabel: '8080 → 80/tcp',
+      node: { type: 'remote', api_url: '' },
     });
     expect(click).toMatchObject({ kind: 'link', href: 'https://web.example.com' });
   });
@@ -256,8 +329,9 @@ describe('resolvePublishedPortClick', () => {
         node: { type: 'local' },
       })).toMatchObject({ kind: 'link', href: 'https://app.example.com', hostLabel: 'app.example.com' });
     }
-    // A UDP automatic binding is not an owner: the link stays generated, and the
-    // stopped service's URL is never used.
+    // The runtime card for `app` opens `app`'s own URL even when the saved file
+    // no longer declares a TCP binding for it; the stopped service's declaration
+    // never redirects the card.
     expect(resolvePublishedPortClick({
       entry: {
         ...collision('0'),
@@ -271,7 +345,7 @@ describe('resolvePublishedPortClick', () => {
       privatePort: 80,
       portLabel: '49152 → 80/tcp',
       node: { type: 'local' },
-    })).toMatchObject({ kind: 'link', href: 'http://localhost:49152' });
+    })).toMatchObject({ kind: 'link', href: 'https://app.example.com' });
     // A saved-model-only caller (no runtime private port) has no ownership
     // proof, so it refuses the single declaration rather than opening the
     // stopped service. That covers the Dossier's shared port link.
