@@ -81,4 +81,61 @@ describe('useServiceUrls', () => {
     });
     expect(result.current.entry?.serviceUrls.web).toBe('https://b.example.com');
   });
+  it('never returns the previous stack or node URL after the selection changes', async () => {
+    const seen: Array<{ nodeId: number | null; stackName: string | null; entryStack: string | null; entryNode: number | null; url: string | undefined }> = [];
+    fetchMock.mockImplementation(async (path, options) => {
+      const node = (options as { nodeId?: number | null } | undefined)?.nodeId ?? null;
+      return anatomy(`https://${String(path).split('/')[2]}-${node}.example.com`);
+    });
+    const { result, rerender } = renderHook(
+      ({ nodeId, stackName }: { nodeId: number | null; stackName: string | null }) => {
+        const value = useServiceUrls(nodeId, stackName);
+        seen.push({
+          nodeId,
+          stackName,
+          entryStack: value.entry?.stackName ?? null,
+          entryNode: value.entry?.nodeId ?? null,
+          url: value.entry?.serviceUrls.web,
+        });
+        return value;
+      },
+      { initialProps: { nodeId: 1 as number | null, stackName: 'a' as string | null } },
+    );
+    await waitFor(() => expect(result.current.entry?.serviceUrls.web).toBe('https://a-1.example.com'));
+
+    rerender({ nodeId: 1, stackName: 'b' });
+    await waitFor(() => expect(result.current.entry?.serviceUrls.web).toBe('https://b-1.example.com'));
+    rerender({ nodeId: 2, stackName: 'b' });
+    await waitFor(() => expect(result.current.entry?.serviceUrls.web).toBe('https://b-2.example.com'));
+    rerender({ nodeId: 2, stackName: null });
+    expect(result.current.entry).toBeNull();
+
+    for (const render of seen) {
+      if (render.entryStack === null) continue;
+      expect({ stackName: render.entryStack, nodeId: render.entryNode }).toEqual({ stackName: render.stackName, nodeId: render.nodeId });
+      if (render.url) expect(render.url).toBe(`https://${render.stackName}-${render.nodeId}.example.com`);
+    }
+  });
+  it('keeps the new stack when the previous stack answers late', async () => {
+    let releaseA: (response: Response) => void = () => {};
+    const pendingA = new Promise<Response>(resolve => { releaseA = resolve; });
+    fetchMock
+      .mockImplementationOnce(() => pendingA)
+      .mockResolvedValueOnce(anatomy('https://b.example.com'));
+    const { result, rerender } = renderHook(
+      ({ stackName }: { stackName: string }) => useServiceUrls(1, stackName),
+      { initialProps: { stackName: 'a' } },
+    );
+    await act(async () => {
+      await Promise.resolve();
+    });
+    rerender({ stackName: 'b' });
+    await waitFor(() => expect(result.current.entry?.serviceUrls.web).toBe('https://b.example.com'));
+
+    await act(async () => {
+      releaseA(anatomy('https://a.example.com'));
+      await pendingA;
+    });
+    expect(result.current.entry).toMatchObject({ stackName: 'b', status: 'ready', serviceUrls: { web: 'https://b.example.com' } });
+  });
 });

@@ -1419,8 +1419,9 @@ paths:
         Returns the compose file Sencho resolved for the stack. That file is
         `compose.yaml`, `compose.yml`, `docker-compose.yaml`, or
         `docker-compose.yml`, and the `X-Compose-File` response header names it.
-        A compose file that is a symlink to a path outside the stack directory,
-        or a dangling symlink, is refused.
+        A compose file that is a symlink to a path outside the stack directory
+        (including another stack's directory), a stack directory that is itself
+        a symlink, or a dangling symlink, is refused.
       parameters:
         - $ref: "#/components/parameters/stackName"
         - $ref: "#/components/parameters/nodeId"
@@ -1443,7 +1444,7 @@ paths:
               schema:
                 $ref: "#/components/schemas/Error"
         "409":
-          description: The compose file is a symlink outside the stack directory, or the symlink is dangling.
+          description: The compose file is a symlink outside the stack directory, the stack directory is itself a symlink, or the compose file is a dangling symlink.
           content:
             application/json:
               schema:
@@ -1506,7 +1507,7 @@ paths:
         "403":
           $ref: "#/components/responses/Forbidden"
         "409":
-          description: The compose file is a symlink outside the stack directory, or the symlink is dangling.
+          description: The compose file is a symlink outside the stack directory, the stack directory is itself a symlink, or the compose file is a dangling symlink.
           content:
             application/json:
               schema:

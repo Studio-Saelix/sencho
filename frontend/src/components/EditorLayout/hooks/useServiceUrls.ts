@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { apiFetch } from '@/lib/api';
 import {
   acceptServiceUrlGeneration,
@@ -28,11 +28,7 @@ export async function fetchServiceUrlEntry(nodeId: number | null, stackName: str
 export function useServiceUrls(nodeId: number | null, stackName: string | null) {
   const generationRef = useRef(0);
   const targetRef = useRef({ nodeId, stackName });
-  const [entry, setEntry] = useState<ServiceUrlEntry | null>(() => (
-    stackName
-      ? { status: 'loading', nodeId, stackName, serviceUrls: {}, ports: {}, renderable: false }
-      : null
-  ));
+  const [entry, setEntry] = useState<ServiceUrlEntry | null>(null);
 
   const refresh = useCallback(async (): Promise<ServiceUrlEntry | null> => {
     if (targetRef.current.nodeId !== nodeId || targetRef.current.stackName !== stackName) return null;
@@ -80,5 +76,13 @@ export function useServiceUrls(nodeId: number | null, stackName: string | null) 
     return () => { cancelled = true; };
   }, [refresh, nodeId, stackName]);
 
-  return { entry, refresh };
+  // The stored entry lags a selection change by a render or more. Hand it out only for
+  // the node and stack it was read for, so a port never links to the previous target.
+  const current = useMemo<ServiceUrlEntry | null>(() => {
+    if (!stackName) return null;
+    if (entry && entry.nodeId === nodeId && entry.stackName === stackName) return entry;
+    return { status: 'loading', nodeId, stackName, serviceUrls: {}, ports: {}, renderable: false };
+  }, [entry, nodeId, stackName]);
+
+  return { entry: current, refresh };
 }

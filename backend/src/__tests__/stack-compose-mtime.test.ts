@@ -208,6 +208,32 @@ describe('PUT /api/stacks/:stackName optimistic concurrency', () => {
     expect(getRes.text).toBe('inside');
   });
 
+  it('refuses a compose file that links into another stack and leaves that stack untouched', async () => {
+    const otherDir = path.join(composeDir, 'other');
+    fs.mkdirSync(otherDir, { recursive: true });
+    const otherCompose = path.join(otherDir, 'compose.yaml');
+    fs.writeFileSync(otherCompose, 'services: { other: {} }', 'utf-8');
+    const stackDir = path.join(composeDir, STACK);
+    fs.mkdirSync(stackDir, { recursive: true });
+    fs.symlinkSync('../other/compose.yaml', path.join(stackDir, 'docker-compose.yml'));
+
+    try {
+      const getRes = await request(app).get(`/api/stacks/${STACK}`).set('Cookie', authCookie);
+      expect(getRes.status).toBe(409);
+      expect(getRes.text).not.toContain('other');
+
+      const putRes = await request(app)
+        .put(`/api/stacks/${STACK}`)
+        .set('Cookie', authCookie)
+        .set('X-Compose-File', 'docker-compose.yml')
+        .send({ content: 'services: { pwned: {} }' });
+      expect(putRes.status).toBe(409);
+      expect(fs.readFileSync(otherCompose, 'utf-8')).toBe('services: { other: {} }');
+    } finally {
+      fs.rmSync(otherDir, { recursive: true, force: true });
+    }
+  });
+
   it('refuses a dangling compose.yaml even when compose.yml is present', async () => {
     const stackDir = path.join(composeDir, STACK);
     fs.mkdirSync(stackDir, { recursive: true });

@@ -906,7 +906,9 @@ export default function EditorLayout() {
     if (!patched.ok) {
       toast.error(patched.reason === 'missing-service'
         ? 'That service is defined in another compose file.'
-        : 'The compose file could not be updated.');
+        : patched.reason === 'unsupported'
+          ? 'The URL cannot be changed here without changing other parts of this compose file. Edit the label in the editor instead.'
+          : 'The compose file could not be updated.');
       return;
     }
     const captured = {

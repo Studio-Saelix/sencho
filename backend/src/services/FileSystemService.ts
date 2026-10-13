@@ -258,12 +258,14 @@ export class FileSystemService {
 
   /**
    * The compose file this stack resolves to, or null when none of the four
-   * filenames exists. A symlink that escapes the compose dir, or a dangling
-   * link, is rejected here and is not treated as a missing file.
+   * filenames exists. A symlink that escapes the stack's own directory (into
+   * a sibling stack or out of the compose dir), or a dangling link, is
+   * rejected here and is not treated as a missing file.
    */
   private async resolveComposeFile(stackName: string): Promise<{ filename: string; absolute: string } | null> {
     const stackDir = this.resolveStackDir(stackName);
     await this.assertRealWithinBase(stackDir);
+    await this.assertRealWithinStack(stackName, stackDir);
     // Containment sits on the lstat. The stack dir is already checked above,
     // and static analysis only credits the check that sits at the sink.
     const baseResolved = path.resolve(this.baseDir);
@@ -279,6 +281,7 @@ export class FileSystemService {
         throw err;
       }
       await this.assertRealWithinBase(filePath);
+      await this.assertRealWithinStack(stackName, filePath);
       if (isDebugEnabled()) console.debug('[FileSystemService:debug] Resolved compose file', { stackName, file });
       return { filename: file, absolute: filePath };
     }
@@ -408,6 +411,8 @@ export class FileSystemService {
     const stackDir = this.resolveStackDir(stackName);
     const filePath = path.join(stackDir, 'compose.yaml');
     await this.assertRealWithinBase(filePath);
+    await this.assertRealWithinStack(stackName, stackDir);
+    await this.assertRealWithinStack(stackName, filePath);
     try {
       // Buffer input is written byte-exact (the encoding option is ignored for
       // Buffers); string input keeps the utf-8 write. Byte-exactness matters to
@@ -1149,6 +1154,35 @@ export class FileSystemService {
       throw Object.assign(new Error('Path escapes compose directory'), { code: 'INVALID_PATH' });
     }
     return real;
+  }
+
+  /**
+   * Reject when an existing stack file resolves outside that stack's own
+   * directory. Root containment alone lets `a/docker-compose.yml ->
+   * ../b/compose.yaml` pass, so a read or save authorized for stack `a` would
+   * act on stack `b`. The stack dir is compared as `<real root>/<stackName>`,
+   * so a stack dir that is itself a link to a sibling is refused too. Links
+   * that stay inside the stack dir keep working. A path that does not exist
+   * yet has nothing to follow and passes. Call after assertRealWithinBase,
+   * which rejects dangling links.
+   */
+  private async assertRealWithinStack(stackName: string, targetPath: string): Promise<void> {
+    const baseResolved = path.resolve(this.baseDir);
+    const safePath = path.resolve(baseResolved, targetPath);
+    if (!safePath.startsWith(baseResolved + path.sep)) {
+      throw Object.assign(new Error('Path escapes compose directory'), { code: 'INVALID_PATH' });
+    }
+    let realTarget: string;
+    try {
+      realTarget = await fsPromises.realpath(safePath);
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code === 'ENOENT') return;
+      throw e;
+    }
+    const realStackDir = path.join(await fsPromises.realpath(this.baseDir), stackName);
+    if (realTarget !== realStackDir && !realTarget.startsWith(realStackDir + path.sep)) {
+      throw Object.assign(new Error('Compose file resolves outside its stack directory'), { code: 'SYMLINK_ESCAPE' });
+    }
   }
 
   /**

@@ -1,4 +1,4 @@
-import { Document, isAlias, isMap, isSeq, parse, parseDocument, visit, type YAMLMap } from 'yaml';
+import { isAlias, isMap, isPair, isScalar, isSeq, parse, parseDocument, visit, type YAMLMap } from 'yaml';
 import { SERVICE_URL_LABEL, serviceUrlFromLabelValue } from './serviceUrlLabel';
 
 /** Compose treats `$$` as a literal dollar. A URL typed by the operator is literal. */
@@ -8,7 +8,7 @@ export function escapeComposeLiteral(url: string): string {
 
 export type ServiceUrlPatch =
   | { ok: true; yaml: string }
-  | { ok: false; reason: 'missing-service' | 'parse' };
+  | { ok: false; reason: 'missing-service' | 'parse' | 'unsupported' };
 
 function labelText(item: unknown): string {
   if (typeof item === 'string') return item;
@@ -38,57 +38,97 @@ function anchorName(node: unknown): string | null {
   return typeof anchor === 'string' && anchor.length > 0 ? anchor : null;
 }
 
-function effectiveLabels(source: string, serviceName: string): unknown {
-  const merged: unknown = parse(source, { merge: true });
-  if (!merged || typeof merged !== 'object') return null;
-  const services = (merged as { services?: unknown }).services;
+/** A layout this edit cannot make without changing something else. Reported as `unsupported`. */
+class UnsupportedLayout extends Error {}
+
+function serviceOf(parsed: unknown, serviceName: string): Record<string, unknown> | null {
+  if (!parsed || typeof parsed !== 'object') return null;
+  const services = (parsed as { services?: unknown }).services;
   if (!services || typeof services !== 'object') return null;
   const service = (services as Record<string, unknown>)[serviceName];
-  if (!service || typeof service !== 'object') return null;
-  return (service as { labels?: unknown }).labels ?? null;
+  return service && typeof service === 'object' ? service as Record<string, unknown> : null;
 }
 
-function copyLabels(labels: unknown, url: string | null): Record<string, string | null> | string[] | null {
+function effectiveLabels(source: string, serviceName: string, schema?: 'failsafe'): unknown {
+  return serviceOf(parse(source, { merge: true, schema }), serviceName)?.labels ?? null;
+}
+
+/**
+ * Labels to write in place of inherited or shared ones. Values are already YAML text
+ * (null is an empty label); keys are raw label names that `labelKey` quotes when needed.
+ */
+type LabelsCopy =
+  | { kind: 'map'; entries: Array<[string, string | null]> }
+  | { kind: 'list'; items: string[] };
+
+/**
+ * A string is written quoted. Any other plain value (a number, boolean or null) keeps
+ * its source token, so `0440` stays `0440`. Anything else is refused.
+ */
+function labelToken(typed: unknown, text: unknown): string {
+  if (typeof typed === 'string') return quoteYaml(typed);
+  if (typeof text === 'string' && text.length > 0 && !/[\s#:,[\]{}]/.test(text)) return text;
+  throw new UnsupportedLayout('Label value cannot be copied');
+}
+
+function copyLabels(source: string, serviceName: string, url: string | null): LabelsCopy | null {
   const literal = url === null ? null : escapeComposeLiteral(url);
-  if (Array.isArray(labels)) {
-    const next = labels.filter(item => typeof item === 'string' && !item.startsWith(`${SERVICE_URL_LABEL}=`));
-    if (literal !== null) next.push(`${SERVICE_URL_LABEL}=${literal}`);
-    return next;
+  const typed = effectiveLabels(source, serviceName);
+  const text = effectiveLabels(source, serviceName, 'failsafe');
+  if (Array.isArray(typed)) {
+    const prefix = `${SERVICE_URL_LABEL}=`;
+    const texts = Array.isArray(text) ? text : [];
+    const items: string[] = [];
+    typed.forEach((item, index) => {
+      if (typeof item === 'string' && item.startsWith(prefix)) return;
+      items.push(labelToken(item, texts[index]));
+    });
+    if (literal !== null) items.push(quoteYaml(`${prefix}${literal}`));
+    return { kind: 'list', items };
   }
-  if (!labels || typeof labels !== 'object') {
-    return literal === null ? null : { [SERVICE_URL_LABEL]: literal };
+  if (!typed || typeof typed !== 'object') {
+    return literal === null ? null : { kind: 'map', entries: [[SERVICE_URL_LABEL, quoteYaml(literal)]] };
   }
-  const next: Record<string, string | null> = {};
-  for (const [key, value] of Object.entries(labels)) {
+  const texts = text && typeof text === 'object' ? text as Record<string, unknown> : {};
+  const entries: Array<[string, string | null]> = [];
+  for (const [key, value] of Object.entries(typed)) {
     if (key === '<<' || key === SERVICE_URL_LABEL) continue;
     // An empty label (`KEEP:`) is real metadata. Copying the map must keep it.
-    if (value === null) {
-      next[key] = null;
-      continue;
-    }
-    if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
-      next[key] = String(value);
-    }
+    entries.push([key, value === null ? null : labelToken(value, texts[key])]);
   }
-  if (literal !== null) next[SERVICE_URL_LABEL] = literal;
-  return next;
+  if (literal !== null) entries.push([SERVICE_URL_LABEL, quoteYaml(literal)]);
+  return { kind: 'map', entries };
 }
 
-function nodeSpan(node: unknown): [number, number] | null {
-  if (!node || typeof node !== 'object' || !('range' in node)) return null;
-  const range = (node as { range?: unknown }).range;
-  if (!Array.isArray(range) || range.length < 2) return null;
-  const start = range[0];
-  const end = range[range.length - 1];
-  if (typeof start !== 'number' || typeof end !== 'number' || start < 0) return null;
-  return [start, end];
+function labelKey(key: string): string {
+  return /^[A-Za-z0-9_./-]+$/.test(key) ? key : quoteYaml(key);
+}
+
+/** One-line flow text for copied labels: `{ ... }` or `[ ... ]`, or `{}`/`[]` when empty. */
+function flowLabels(copy: LabelsCopy): string {
+  if (copy.kind === 'list') return copy.items.length === 0 ? '[]' : `[ ${copy.items.join(', ')} ]`;
+  if (copy.entries.length === 0) return '{}';
+  return `{ ${copy.entries.map(([key, token]) => (token === null ? `${labelKey(key)}:` : `${labelKey(key)}: ${token}`)).join(', ')} }`;
+}
+
+/** Block lines for copied labels at `indent`, without a trailing newline. */
+function blockLabels(source: string, copy: LabelsCopy, indent: number): string {
+  const pad = ' '.repeat(indent);
+  const lines = copy.kind === 'list'
+    ? copy.items.map(item => `${pad}- ${item}`)
+    : copy.entries.map(([key, token]) => (token === null ? `${pad}${labelKey(key)}:` : `${pad}${labelKey(key)}: ${token}`));
+  return lines.join(fileNewline(source));
+}
+
+function isEmptyCopy(copy: LabelsCopy): boolean {
+  return copy.kind === 'list' ? copy.items.length === 0 : copy.entries.length === 0;
 }
 
 function isWithin(inner: unknown, outer: unknown): boolean {
-  const innerSpan = nodeSpan(inner);
-  const outerSpan = nodeSpan(outer);
+  const innerSpan = nodeRange(inner);
+  const outerSpan = nodeRange(outer);
   if (!innerSpan || !outerSpan) return false;
-  return innerSpan[0] >= outerSpan[0] && innerSpan[1] <= outerSpan[1];
+  return innerSpan[0] >= outerSpan[0] && innerSpan[2] <= outerSpan[2];
 }
 
 function aliasSites(doc: unknown, anchor: string): Array<{ parent: unknown; node: unknown }> {
@@ -115,43 +155,16 @@ export function composeServiceNames(source: string): string[] | null {
   }
 }
 
-/** The URL this buffer itself sets for the service. Null when this file does not set one. */
-export function serviceUrlInSource(source: string, serviceName: string): string | null {
-  try {
-    const merged: unknown = parse(source, { merge: true });
-    if (!merged || typeof merged !== 'object') return null;
-    const services = (merged as { services?: unknown }).services;
-    if (!services || typeof services !== 'object') return null;
-    const service = (services as Record<string, unknown>)[serviceName];
-    if (!service || typeof service !== 'object') return null;
-    const labels = (service as { labels?: unknown }).labels;
-    if (Array.isArray(labels)) {
-      let found: string | null = null;
-      const prefix = `${SERVICE_URL_LABEL}=`;
-      for (const item of labels) {
-        if (typeof item !== 'string' || !item.startsWith(prefix)) continue;
-        const url = serviceUrlFromLabelValue(item.slice(prefix.length));
-        if (url) found = url;
-      }
-      return found;
-    }
-    if (!labels || typeof labels !== 'object') return null;
-    const value = (labels as Record<string, unknown>)[SERVICE_URL_LABEL];
-    return typeof value === 'string' ? serviceUrlFromLabelValue(value) : null;
-  } catch (error) {
-    console.error('Failed to read the service URL label:', error);
-    return null;
-  }
+/** True when the service's labels carry the URL key at all, even with an empty value. */
+function hasUrlLabel(parsed: unknown, serviceName: string): boolean {
+  const labels = serviceOf(parsed, serviceName)?.labels;
+  if (Array.isArray(labels)) return labels.some(item => typeof item === 'string' && item.startsWith(`${SERVICE_URL_LABEL}=`));
+  return !!labels && typeof labels === 'object' && SERVICE_URL_LABEL in labels;
 }
 
 /** The label text this buffer sets, before it is checked as an absolute URL. */
 function rawServiceUrlFrom(merged: unknown, serviceName: string): string | null {
-  if (!merged || typeof merged !== 'object') return null;
-  const services = (merged as { services?: unknown }).services;
-  if (!services || typeof services !== 'object') return null;
-  const service = (services as Record<string, unknown>)[serviceName];
-  if (!service || typeof service !== 'object') return null;
-  const labels = (service as { labels?: unknown }).labels;
+  const labels = serviceOf(merged, serviceName)?.labels;
   if (Array.isArray(labels)) {
     let found: string | null = null;
     const prefix = `${SERVICE_URL_LABEL}=`;
@@ -224,7 +237,7 @@ function nodeRange(node: unknown): [number, number, number] | null {
 function applySplices(source: string, splices: Splice[]): string {
   const ordered = [...splices].sort((a, b) => a.start - b.start || a.end - b.end);
   for (let index = 1; index < ordered.length; index += 1) {
-    if (ordered[index].start < ordered[index - 1].end) throw new Error('overlapping compose edit');
+    if (ordered[index].start < ordered[index - 1].end) throw new UnsupportedLayout('overlapping compose edit');
   }
   let out = source;
   for (let index = ordered.length - 1; index >= 0; index -= 1) {
@@ -249,38 +262,56 @@ function quoteYaml(value: string): string {
   return `"${value.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
 }
 
-function emitDocument(value: unknown): string {
-  return new Document(value).toString({ lineWidth: 0 }).replace(/\r?\n$/, '');
+/**
+ * Text that replaces a value token. A value right after `key:` needs its space, and
+ * an empty value right before `# comment` must stay apart from it.
+ */
+function spacedValue(source: string, start: number, end: number, text: string): string {
+  const lead = source[start - 1] === ':' ? ' ' : '';
+  const trail = start === end && source[end] === '#' ? ' ' : '';
+  return `${lead}${text}${trail}`;
 }
 
-function nodeToJs(node: unknown, doc: unknown): unknown {
-  if (!node || typeof node !== 'object' || !('toJS' in node)) return undefined;
-  return (node as { toJS: (doc: unknown) => unknown }).toJS(doc);
+/** End of the line holding `index`, before its newline. */
+function lineEndAt(source: string, index: number): number {
+  const newline = source.indexOf('\n', index);
+  if (newline === -1) return source.length;
+  return source[newline - 1] === '\r' ? newline - 1 : newline;
 }
 
-function renderBlock(source: string, indent: number, value: unknown, leadingBreak: boolean): string {
-  const nl = fileNewline(source);
-  const pad = ' '.repeat(indent);
-  const body = emitDocument(value)
-    .split(/\r?\n/)
-    .map(line => (line.length === 0 ? line : pad + line))
-    .join(nl);
-  return leadingBreak ? `${nl}${body}` : body;
-}
-
-function replaceNode(source: string, node: unknown, value: unknown): Splice {
+/**
+ * Put copied labels where `node` stands: flow text inside `{ }` or `[ ]`, `{}`/`[]`
+ * after the key when empty, and block lines otherwise.
+ */
+function replaceNode(source: string, node: unknown, copy: LabelsCopy, flow: boolean): Splice {
   const range = nodeRange(node);
-  if (!range) throw new Error('missing compose range');
+  if (!range) throw new UnsupportedLayout('missing compose range');
+  const nl = fileNewline(source);
   const lineStart = source.lastIndexOf('\n', Math.max(0, range[0] - 1)) + 1;
   const prefix = source.slice(lineStart, range[0]);
   const onOwnLine = prefix.trim() === '' && prefix.length > 0;
-  const indent = onOwnLine ? prefix.length : indentAt(source, range[0]) + 2;
-  const scalar = typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean' || value == null;
-  let text = scalar
-    ? (value == null ? '' : typeof value === 'string' ? quoteYaml(value) : String(value))
-    : renderBlock(source, indent, value, !onOwnLine);
-  const start = !scalar && onOwnLine ? lineStart : range[0];
-  if (source.slice(start, range[1]).endsWith('\n') && !text.endsWith('\n')) text += fileNewline(source);
+  let start = range[0];
+  let text: string;
+  const keyColon = source.slice(0, lineStart).trimEnd();
+  const keyLine = keyColon.slice(keyColon.lastIndexOf('\n') + 1);
+  if (!flow && isEmptyCopy(copy) && onOwnLine && keyColon.endsWith(':') && !keyLine.includes('#')) {
+    // A block body emptied out under a plain `key:` line: write `key: {}` there, not `{}` below it.
+    start = keyColon.length;
+    text = ` ${flowLabels(copy)}`;
+  } else if (flow || isEmptyCopy(copy)) {
+    text = spacedValue(source, range[0], range[1], flowLabels(copy));
+  } else if (range[0] === range[1]) {
+    // `labels:` with no value, maybe `labels: # note`: the block goes under that line.
+    start = lineEndAt(source, range[0]);
+    return { start, end: start, text: `${nl}${blockLabels(source, copy, indentAt(source, range[0]) + 2)}` };
+  } else if (onOwnLine) {
+    start = lineStart;
+    text = blockLabels(source, copy, prefix.length);
+  } else {
+    if (source[start - 1] === ' ') start -= 1;
+    text = `${nl}${blockLabels(source, copy, indentAt(source, range[0]) + 2)}`;
+  }
+  if (source.slice(start, range[1]).endsWith('\n') && !text.endsWith('\n')) text += nl;
   return { start, end: range[1], text };
 }
 
@@ -303,20 +334,109 @@ function collectionIndent(source: string, collection: { items: unknown[] }): num
   return self ? indentAt(source, self[0]) + 2 : 2;
 }
 
-function appendLine(source: string, collection: { items: unknown[] }, line: string): Splice {
-  const range = nodeRange(collection);
-  if (!range) throw new Error('missing compose range');
-  const nl = fileNewline(source);
-  const indent = collectionIndent(source, collection);
-  return { start: range[2], end: range[2], text: `${' '.repeat(indent)}${line}${nl}` };
+/** Where the last entry's own text ends. Collection ranges also run over trailing comment lines. */
+function lastEntryEnd(collection: { items: unknown[] }): number {
+  const last = collection.items[collection.items.length - 1];
+  const range = nodeRange(isPair(last) ? (last.value ?? last.key) : last);
+  if (!range) throw new UnsupportedLayout('missing compose range');
+  return range[1];
 }
 
+/** Add a line right after the last entry, before any comment lines that follow it. */
+function appendLine(source: string, collection: { items: unknown[] }, line: string): Splice {
+  const nl = fileNewline(source);
+  const pad = ' '.repeat(collectionIndent(source, collection));
+  const at = lastEntryEnd(collection);
+  if (source[at - 1] === '\n') return { start: at, end: at, text: `${pad}${line}${nl}` };
+  // Finish the last entry's line (it may keep a comment, or have no newline at EOF).
+  const lineEnd = lineEndAt(source, at);
+  return { start: lineEnd, end: lineEnd, text: `${nl}${pad}${line}` };
+}
+
+/** Remove the lines from `from`'s line through the line where `to`'s value ends. */
 function deleteSpan(source: string, from: unknown, to: unknown): Splice {
   const startRange = nodeRange(from);
   const endRange = nodeRange(to);
-  if (!startRange || !endRange) throw new Error('missing compose range');
+  if (!startRange || !endRange) throw new UnsupportedLayout('missing compose range');
   const lineStart = source.lastIndexOf('\n', startRange[0] - 1) + 1;
-  return { start: lineStart, end: endRange[2], text: '' };
+  let end = endRange[1];
+  if (source[end - 1] !== '\n') {
+    end = lineEndAt(source, end);
+    if (source.startsWith('\r\n', end)) end += 2;
+    else if (source[end] === '\n') end += 1;
+  }
+  return { start: lineStart, end, text: '' };
+}
+
+/**
+ * Node ranges start after `&anchor` and `!tag`. Removing a flow item takes those too.
+ * Only a node that has props is scanned, so text before a plain item is never taken.
+ */
+function withProps(source: string, node: unknown, start: number): number {
+  if (!anchorName(node) && !(node && typeof node === 'object' && 'tag' in node && node.tag)) return start;
+  let cursor = start;
+  for (;;) {
+    const before = source.slice(0, cursor).trimEnd();
+    const match = /(?:!<[^>]*>|[&!][^\s,[\]{}]*)$/.exec(before);
+    if (!match) return cursor;
+    cursor = before.length - match[0].length;
+  }
+}
+
+function itemSpan(source: string, item: unknown): [number, number] {
+  const head = isPair(item) ? item.key : item;
+  const headRange = nodeRange(head);
+  if (!headRange) throw new UnsupportedLayout('missing compose range');
+  const tailRange = isPair(item) ? nodeRange(item.value) : null;
+  return [withProps(source, head, headRange[0]), Math.max(headRange[1], tailRange ? tailRange[1] : 0)];
+}
+
+/** A removal that would also take a comment sitting between items is refused, not made silently. */
+function removeGap(source: string, start: number, end: number, removed: Array<[number, number]>): Splice {
+  let cursor = start;
+  for (const [itemStart, itemEnd] of removed) {
+    if (itemEnd <= start || itemStart >= end) continue;
+    if (source.slice(cursor, itemStart).includes('#')) throw new UnsupportedLayout('Comment inside a flow edit');
+    cursor = Math.max(cursor, itemEnd);
+  }
+  if (source.slice(cursor, end).includes('#')) throw new UnsupportedLayout('Comment inside a flow edit');
+  return { start, end, text: '' };
+}
+
+/**
+ * Remove items from a flow `{ }` or `[ ]` and optionally add one entry. Only those
+ * items and their commas change, so the collection keeps its flow syntax and every
+ * other token stays as written.
+ */
+function editFlow(source: string, collection: { items: unknown[] }, remove: Set<unknown>, append: string | null): Splice[] {
+  const range = nodeRange(collection);
+  if (!range) throw new UnsupportedLayout('missing compose range');
+  const open = source[range[0]];
+  const close = open === '{' ? '}' : ']';
+  const items = collection.items;
+  const spans = items.map(item => itemSpan(source, item));
+  const kept = items.flatMap((item, index) => (remove.has(item) ? [] : [index]));
+  const removed = spans.filter((_, index) => remove.has(items[index]));
+  if (kept.length === 0) {
+    removeGap(source, range[0] + 1, range[1] - 1, removed);
+    return [{ start: range[0], end: range[1], text: append === null ? `${open}${close}` : `${open} ${append} ${close}` }];
+  }
+  const splices: Splice[] = [];
+  for (let index = 0; index < items.length; index += 1) {
+    if (!remove.has(items[index])) continue;
+    let last = index;
+    while (last + 1 < items.length && remove.has(items[last + 1])) last += 1;
+    // A run after a kept item goes with the comma before it; a leading run goes with the comma after it.
+    splices.push(index > 0
+      ? removeGap(source, spans[index - 1][1], spans[last][1], removed)
+      : removeGap(source, spans[0][0], spans[last + 1][0], removed));
+    index = last;
+  }
+  if (append !== null) {
+    const at = spans[kept[kept.length - 1]][1];
+    splices.push({ start: at, end: at, text: `, ${append}` });
+  }
+  return splices;
 }
 
 function reindent(source: string, body: string, indent: number): string {
@@ -329,10 +449,10 @@ function reindent(source: string, body: string, indent: number): string {
   return lines.map(line => (line.trim().length === 0 ? '' : `${' '.repeat(indent)}${line.slice(base)}`)).join(nl);
 }
 
-/** Put a copy of existing source text where an alias stands, keeping that text's scalars. */
+/** Put a copy of existing block source text where an alias stands, keeping that text's scalars. */
 function placeCopy(source: string, alias: unknown, body: string): Splice {
   const range = nodeRange(alias);
-  if (!range) throw new Error('missing compose range');
+  if (!range) throw new UnsupportedLayout('missing compose range');
   const lineStart = source.lastIndexOf('\n', Math.max(0, range[0] - 1)) + 1;
   const prefix = source.slice(lineStart, range[0]);
   const inline = prefix.trim() !== '';
@@ -346,159 +466,269 @@ function placeCopy(source: string, alias: unknown, body: string): Splice {
   return { start: lineStart, end: range[1], text: text.endsWith('\n') ? text : `${text}${nl}` };
 }
 
+/**
+ * The source an anchored map or list stands for, without the key or anchor that
+ * defines it. A flow node is its `{ }` or `[ ]` token; a block node is its lines.
+ */
+function anchoredBody(source: string, node: unknown): { start: number; end: number; flow: boolean } | null {
+  const range = nodeRange(node);
+  if (!range) return null;
+  if (isFlow(source, node)) return { start: range[0], end: range[1], flow: true };
+  return { start: source.lastIndexOf('\n', Math.max(0, range[0] - 1)) + 1, end: range[2], flow: false };
+}
+
+function placeBody(source: string, alias: unknown, body: string, flow: boolean): Splice {
+  if (!flow) return placeCopy(source, alias, body);
+  const range = nodeRange(alias);
+  if (!range) throw new UnsupportedLayout('missing compose range');
+  return { start: range[0], end: range[1], text: body };
+}
+
 /** Replace aliases of this anchor that live outside it, so editing the anchor does not change them. */
 function detachOutside(doc: unknown, source: string, owner: unknown, anchor: string | null, splices: Splice[]): void {
   if (!anchor) return;
   for (const site of aliasSites(doc, anchor)) {
     if (isWithin(site.node, owner)) continue;
-    if (!nodeRange(site.node)) continue;
+    const aliasRange = nodeRange(site.node);
+    if (!aliasRange) continue;
     const resolved = (site.node as { resolve: (doc: unknown) => unknown }).resolve(doc);
-    const body = nodeRange(resolved);
-    if ((isMap(resolved) || isSeq(resolved)) && body) {
-      const contentStart = source.lastIndexOf('\n', Math.max(0, body[0] - 1)) + 1;
-      splices.push(placeCopy(source, site.node, source.slice(contentStart, body[2])));
+    if (isMap(resolved) || isSeq(resolved)) {
+      const body = anchoredBody(source, resolved);
+      if (!body) throw new UnsupportedLayout('missing compose range');
+      splices.push(placeBody(source, site.node, source.slice(body.start, body.end), body.flow));
       continue;
     }
-    splices.push(replaceNode(source, site.node, nodeToJs(resolved, doc)));
+    // A scalar is copied as its own token, so `0440` stays `0440` and quoting is kept.
+    const token = nodeRange(resolved);
+    const text = isScalar(resolved) && token ? source.slice(token[0], token[1]) : '';
+    if (text.length === 0 || text.includes('\n')) throw new UnsupportedLayout('Anchored value cannot be copied');
+    splices.push({ start: aliasRange[0], end: aliasRange[1], text });
   }
 }
 
 function editMap(source: string, doc: unknown, labels: YAMLMap, url: string | null): Splice[] {
+  const flow = isFlow(source, labels);
   const pair = labels.items.find(item => labelText(item.key) === SERVICE_URL_LABEL);
   const literal = url === null ? null : escapeComposeLiteral(url);
   if (literal === null) {
     if (!pair) return [];
     const splices: Splice[] = [];
     detachOutside(doc, source, pair.value, anchorName(pair.value), splices);
-    if (labels.items.length === 1) splices.push(replaceNode(source, labels, {}));
+    if (flow) splices.push(...editFlow(source, labels, new Set([pair]), null));
+    else if (labels.items.length === 1) splices.push(replaceNode(source, labels, { kind: 'map', entries: [] }, false));
     else splices.push(deleteSpan(source, pair.key, pair.value));
     return splices;
   }
-  if (!pair) return [appendLine(source, labels, `${SERVICE_URL_LABEL}: ${quoteYaml(literal)}`)];
+  const entry = `${SERVICE_URL_LABEL}: ${quoteYaml(literal)}`;
+  if (!pair) return flow ? editFlow(source, labels, new Set(), entry) : [appendLine(source, labels, entry)];
   const range = nodeRange(pair.value);
-  if (!range) throw new Error('missing compose range');
+  if (!range) throw new UnsupportedLayout('missing compose range');
   const splices: Splice[] = [];
   detachOutside(doc, source, pair.value, anchorName(pair.value), splices);
-  splices.push({ start: range[0], end: range[1], text: quoteYaml(literal) });
+  splices.push({ start: range[0], end: range[1], text: spacedValue(source, range[0], range[1], quoteYaml(literal)) });
   return splices;
 }
 
 function editSeq(source: string, doc: unknown, labels: { items: unknown[] }, url: string | null): Splice[] {
+  const flow = isFlow(source, labels);
   const prefix = `${SERVICE_URL_LABEL}=`;
   const matches = labels.items.filter(item => resolvedLabelText(doc, item).startsWith(prefix));
   const literal = url === null ? null : escapeComposeLiteral(url);
+  const splices: Splice[] = [];
+  for (const item of matches) detachOutside(doc, source, item, anchorName(item), splices);
   if (literal === null) {
-    const splices: Splice[] = [];
-    for (const item of matches) detachOutside(doc, source, item, anchorName(item), splices);
-    if (matches.length > 0 && matches.length === labels.items.length) {
-      splices.push(replaceNode(source, labels, []));
-      return splices;
-    }
-    for (const item of matches) splices.push(deleteSpan(source, item, item));
+    if (matches.length === 0) return splices;
+    if (flow) splices.push(...editFlow(source, labels, new Set(matches), null));
+    else if (matches.length === labels.items.length) splices.push(replaceNode(source, labels, { kind: 'list', items: [] }, false));
+    else for (const item of matches) splices.push(deleteSpan(source, item, item));
     return splices;
   }
   const line = `${prefix}${literal}`;
-  if (matches.length === 0) return [appendLine(source, labels, `- ${line}`)];
-  const splices: Splice[] = [];
-  matches.forEach((item, index) => {
-    detachOutside(doc, source, item, anchorName(item), splices);
-    const range = nodeRange(item);
-    if (!range) throw new Error('missing compose range');
-    if (index === 0) splices.push({ start: range[0], end: range[1], text: line });
-    else splices.push(deleteSpan(source, item, item));
-  });
+  // A URL may hold `,` or `]`, which end a plain item inside `[ ]`.
+  const token = flow ? quoteYaml(line) : line;
+  if (matches.length === 0) return flow ? editFlow(source, labels, new Set(), token) : [appendLine(source, labels, `- ${line}`)];
+  const first = nodeRange(matches[0]);
+  if (!first) throw new UnsupportedLayout('missing compose range');
+  splices.push({ start: first[0], end: first[1], text: token });
+  const rest = matches.slice(1);
+  if (flow && rest.length > 0) splices.push(...editFlow(source, labels, new Set(rest), null));
+  else if (!flow) for (const item of rest) splices.push(deleteSpan(source, item, item));
   return splices;
 }
 
-function insertLabelsBlock(source: string, service: unknown, labels: unknown): Splice {
+function insertLabelsBlock(source: string, service: unknown, copy: LabelsCopy): Splice {
   const range = nodeRange(service);
-  if (!range) throw new Error('missing compose range');
+  if (!range) throw new UnsupportedLayout('missing compose range');
   const nl = fileNewline(source);
   const indent = collectionIndent(source, service as { items: unknown[] });
-  const block = emitDocument({ labels })
-    .split(/\r?\n/)
-    .map(line => (line.length === 0 ? line : `${' '.repeat(indent)}${line}`))
-    .join(nl);
+  const pad = ' '.repeat(indent);
+  const block = isEmptyCopy(copy)
+    ? `${pad}labels: ${flowLabels(copy)}`
+    : `${pad}labels:${nl}${blockLabels(source, copy, indent + 2)}`;
   const lineStart = source.lastIndexOf('\n', Math.max(0, range[0] - 1)) + 1;
   return { start: lineStart, end: lineStart, text: `${block}${nl}` };
 }
 
 function editServiceLabels(source: string, doc: unknown, service: YAMLMap, serviceName: string, url: string | null): Splice[] {
+  const flowService = isFlow(source, service);
   const labelPair = service.items.find(item => labelText(item.key) === 'labels');
   const labels = labelPair ? labelPair.value : null;
   if (isAlias(labels)) {
-    const next = copyLabels(effectiveLabels(source, serviceName), url);
-    return next == null ? [] : [replaceNode(source, labels, next)];
+    const next = copyLabels(source, serviceName, url);
+    return next == null ? [] : [replaceNode(source, labels, next, flowService)];
   }
   const splices: Splice[] = [];
   const anchor = anchorName(labels);
   if (anchor) detachOutside(doc, source, labels, anchor, splices);
-  if (labels == null) {
+  // `labels:` with nothing after it is a null scalar: the service has no labels yet.
+  if (labels == null || (isScalar(labels) && labels.value == null)) {
     if (url == null && !mapHasMerge(service)) return splices;
-    const next = url == null || mapHasMerge(service)
-      ? copyLabels(effectiveLabels(source, serviceName), url)
-      : { [SERVICE_URL_LABEL]: escapeComposeLiteral(url) };
+    const next = copyLabels(source, serviceName, url);
     if (next == null) return splices;
-    if (isFlow(source, service)) {
-      const js = nodeToJs(service, doc);
-      if (!js || typeof js !== 'object' || Array.isArray(js)) throw new Error('Service is not a map');
-      splices.push(replaceNode(source, service, { ...(js as Record<string, unknown>), labels: next }));
-      return splices;
-    }
-    splices.push(insertLabelsBlock(source, service, next));
+    if (labels != null) splices.push(replaceNode(source, labels, next, flowService));
+    else if (flowService) splices.push(...editFlow(source, service, new Set(), `labels: ${flowLabels(next)}`));
+    else splices.push(insertLabelsBlock(source, service, next));
     return splices;
   }
   if (isMap(labels) && mapHasMerge(labels) && url == null) {
-    const next = copyLabels(effectiveLabels(source, serviceName), null);
-    if (next != null) splices.push(replaceNode(source, labels, next));
-    return splices;
-  }
-  if (isFlow(source, labels)) {
-    const next = copyLabels(effectiveLabels(source, serviceName), url);
-    if (next != null) splices.push(replaceNode(source, labels, next));
+    const next = copyLabels(source, serviceName, null);
+    if (next != null) splices.push(replaceNode(source, labels, next, isFlow(source, labels)));
     return splices;
   }
   if (isMap(labels)) splices.push(...editMap(source, doc, labels, url));
   else if (isSeq(labels)) splices.push(...editSeq(source, doc, labels, url));
-  else throw new Error('Service labels are not a map or list');
+  else throw new UnsupportedLayout('Service labels are not a map or list');
   return splices;
 }
 
-/** Set or remove `sencho.service.url` on one service. Bytes outside that edit stay as they were. */
-export function patchServiceUrlLabel(source: string, serviceName: string, url: string | null): ServiceUrlPatch {
-  try {
-    const doc = parseDocument(source);
-    if (doc.errors.length > 0) return { ok: false, reason: 'parse' };
-    const services = doc.get('services');
-    if (!isMap(services)) return { ok: false, reason: 'missing-service' };
-    const pair = services.items.find(item => labelText(item.key) === serviceName);
-    if (!pair) return { ok: false, reason: 'missing-service' };
+function stableJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(stableJson).join(',')}]`;
+  if (value && typeof value === 'object') {
+    const record = value as Record<string, unknown>;
+    return `{${Object.keys(record).sort().map(key => `${JSON.stringify(key)}:${stableJson(record[key])}`).join(',')}}`;
+  }
+  return JSON.stringify(value);
+}
 
+/** The whole file as plain data, with the URL label taken off one service and that service's labels dropped when empty. */
+function modelWithoutUrl(source: string, serviceName: string, schema?: 'failsafe'): string {
+  const parsed: unknown = parse(source, { merge: true, schema });
+  // A JSON copy splits aliased nodes apart, so removing one service's label leaves the rest.
+  const model: unknown = JSON.parse(JSON.stringify(parsed ?? null));
+  const record = serviceOf(model, serviceName);
+  if (record) {
+    let labels = record.labels;
+    if (Array.isArray(labels)) {
+      labels = labels.filter(item => !(typeof item === 'string' && item.startsWith(`${SERVICE_URL_LABEL}=`)));
+    } else if (labels && typeof labels === 'object') {
+      labels = Object.fromEntries(Object.entries(labels).filter(([key]) => key !== SERVICE_URL_LABEL));
+    }
+    const empty = !labels || typeof labels !== 'object' || Object.keys(labels).length === 0;
+    if (empty) delete record.labels;
+    else record.labels = labels;
+  }
+  return stableJson(model);
+}
+
+/**
+ * Why the patched text cannot be saved, or null when it parses, reads like the source
+ * everywhere except the one URL label, and sets that label as asked. The file is read
+ * once with YAML types and once with every scalar as an untyped string (the failsafe
+ * schema), so `0440` turning into `440` or `022` into `22` is caught too.
+ */
+function patchMismatch(source: string, patched: string, serviceName: string, literal: string | null): string | null {
+  if (parseDocument(patched).errors.length > 0) return 'the patched text does not parse';
+  for (const schema of [undefined, 'failsafe'] as const) {
+    if (modelWithoutUrl(source, serviceName, schema) !== modelWithoutUrl(patched, serviceName, schema)) {
+      return `the ${schema ?? 'typed'} model changed outside the URL label`;
+    }
+  }
+  if (rawServiceUrlFrom(parse(patched, { merge: true }), serviceName) !== literal) return 'the URL label did not read back';
+  return null;
+}
+
+/**
+ * Compose gives `!reset` and `!override` meaning that the parsed model does not show,
+ * so a copy that drops one could not be caught. A file that uses any non-standard tag,
+ * anywhere, is refused.
+ */
+function hasCustomTag(doc: Parameters<typeof visit>[0]): boolean {
+  let found = false;
+  visit(doc, {
+    Node(_key, node) {
+      if ('tag' in node && typeof node.tag === 'string' && !node.tag.startsWith('tag:yaml.org,2002:')) {
+        found = true;
+        return visit.BREAK;
+      }
+      return undefined;
+    },
+  });
+  return found;
+}
+
+/**
+ * Set or remove `sencho.service.url` on one service. Only that label changes in the
+ * parsed file. When the edited block is shared through an anchor, whichever side is not
+ * edited keeps its values: a consumer of the edited anchor gets its own copy, and an
+ * edited alias is replaced by an inline copy. Clearing a service with no URL label returns
+ * the source unchanged. A layout that cannot be edited that way is refused as
+ * `unsupported`, before the caller can write anything.
+ */
+export function patchServiceUrlLabel(source: string, serviceName: string, url: string | null): ServiceUrlPatch {
+  let parsed: unknown;
+  let doc: ReturnType<typeof parseDocument>;
+  try {
+    doc = parseDocument(source);
+    if (doc.errors.length > 0) return { ok: false, reason: 'parse' };
+    // Merges are resolved here too, so `<<: 5` is a parse failure, not an unsupported layout.
+    parsed = parse(source, { merge: true });
+  } catch (error) {
+    console.error('Failed to read the compose file for a service URL edit:', error);
+    return { ok: false, reason: 'parse' };
+  }
+  const services = doc.get('services');
+  if (!isMap(services)) return { ok: false, reason: 'missing-service' };
+  const pair = services.items.find(item => labelText(item.key) === serviceName);
+  if (!pair) return { ok: false, reason: 'missing-service' };
+  if (url === null && !hasUrlLabel(parsed, serviceName)) return { ok: true, yaml: source };
+
+  try {
+    if (hasCustomTag(doc)) throw new UnsupportedLayout('The compose file uses a custom YAML tag');
     const splices: Splice[] = [];
     if (isAlias(pair.value)) {
       const resolved = pair.value.resolve(doc);
-      if (!isMap(resolved)) return { ok: false, reason: 'parse' };
-      const body = nodeRange(resolved);
-      if (!body) return { ok: false, reason: 'parse' };
-      const contentStart = source.lastIndexOf('\n', Math.max(0, body[0] - 1)) + 1;
+      if (!isMap(resolved)) {
+        console.warn(`Service URL edit refused: ${serviceName} is an alias to something that is not a map.`);
+        return { ok: false, reason: 'parse' };
+      }
+      const body = anchoredBody(source, resolved);
+      if (!body) throw new UnsupportedLayout('missing compose range');
       const local: Splice[] = [];
       for (const splice of editServiceLabels(source, doc, resolved, serviceName, url)) {
-        if (splice.start >= contentStart && splice.end <= body[2]) {
-          local.push({ start: splice.start - contentStart, end: splice.end - contentStart, text: splice.text });
+        if (splice.start >= body.start && splice.end <= body.end) {
+          local.push({ start: splice.start - body.start, end: splice.end - body.start, text: splice.text });
         } else {
           splices.push(splice);
         }
       }
-      splices.push(placeCopy(source, pair.value, applySplices(source.slice(contentStart, body[2]), local)));
+      splices.push(placeBody(source, pair.value, applySplices(source.slice(body.start, body.end), local), body.flow));
     } else if (isMap(pair.value)) {
       const anchor = anchorName(pair.value);
       if (anchor) detachOutside(doc, source, pair.value, anchor, splices);
       splices.push(...editServiceLabels(source, doc, pair.value, serviceName, url));
     } else {
+      console.warn(`Service URL edit refused: ${serviceName} is not a map.`);
       return { ok: false, reason: 'parse' };
     }
-    return { ok: true, yaml: applySplices(source, splices) };
+    const yaml = applySplices(source, splices);
+    const mismatch = patchMismatch(source, yaml, serviceName, url === null ? null : escapeComposeLiteral(url));
+    if (mismatch) throw new UnsupportedLayout(`Refused a service URL edit: ${mismatch}`);
+    return { ok: true, yaml };
   } catch (error) {
+    if (error instanceof UnsupportedLayout) {
+      console.warn(`Service URL edit on ${serviceName} refused:`, error.message);
+      return { ok: false, reason: 'unsupported' };
+    }
     console.error('Failed to update the service URL label:', error);
     return { ok: false, reason: 'parse' };
   }
