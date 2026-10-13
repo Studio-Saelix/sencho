@@ -2,7 +2,10 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { apiFetch } from '@/lib/api';
 import {
   acceptServiceUrlGeneration,
+  createServiceKeyMap,
   parseServiceUrlResponse,
+  type AnatomyPortRef,
+  type ServiceUrlEditState,
   type ServiceUrlEntry,
 } from '@/lib/serviceUrlResolve';
 
@@ -47,8 +50,9 @@ export function useServiceUrls(nodeId: number | null, stackName: string | null) 
           status: 'loading',
           nodeId,
           stackName,
-          serviceUrls: {},
-          ports: {},
+          serviceUrls: createServiceKeyMap<string>(),
+          serviceUrlEdit: createServiceKeyMap<ServiceUrlEditState>(),
+          ports: createServiceKeyMap<AnatomyPortRef[]>(),
           renderable: false,
         };
     });
@@ -81,7 +85,7 @@ export function useServiceUrls(nodeId: number | null, stackName: string | null) 
   const current = useMemo<ServiceUrlEntry | null>(() => {
     if (!stackName) return null;
     if (entry && entry.nodeId === nodeId && entry.stackName === stackName) return entry;
-    return { status: 'loading', nodeId, stackName, serviceUrls: {}, ports: {}, renderable: false };
+    return { status: 'loading', nodeId, stackName, serviceUrls: createServiceKeyMap<string>(), serviceUrlEdit: createServiceKeyMap<ServiceUrlEditState>(), ports: createServiceKeyMap<AnatomyPortRef[]>(), renderable: false };
   }, [entry, nodeId, stackName]);
 
   return { entry: current, refresh };

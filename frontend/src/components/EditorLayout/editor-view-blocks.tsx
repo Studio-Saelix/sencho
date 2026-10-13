@@ -40,7 +40,7 @@ import { Sparkline } from '../ui/sparkline';
 import { ImageSourceMenu } from '../ImageSourceMenu';
 import { cn } from '@/lib/utils';
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
-import type { ServiceUrlEntry } from '@/lib/serviceUrlResolve';
+import type { ServiceUrlEditBlock, ServiceUrlEntry } from '@/lib/serviceUrlResolve';
 import { ServicePortLink } from './ServicePortLink';
 import ErrorBoundary from '../ErrorBoundary';
 import TerminalComponent from '../Terminal';
@@ -360,7 +360,7 @@ export interface ContainersHealthProps {
     serviceUrlEntry?: ServiceUrlEntry | null;
     canEditServiceUrl?: boolean;
     sourceServices?: readonly string[] | null;
-    lockedServices?: ReadonlySet<string>;
+    lockedServices?: ReadonlyMap<string, ServiceUrlEditBlock>;
     onEditServiceUrl?: (serviceName: string) => void;
     onRetryServiceUrls?: () => void;
 }

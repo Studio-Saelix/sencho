@@ -1,5 +1,5 @@
 import { isAlias, isMap, isPair, isScalar, isSeq, parse, parseDocument, visit, type YAMLMap } from 'yaml';
-import { SERVICE_URL_LABEL, serviceUrlFromLabelValue } from './serviceUrlLabel';
+import { SERVICE_URL_LABEL } from './serviceUrlLabel';
 
 /** Compose treats `$$` as a literal dollar. A URL typed by the operator is literal. */
 export function escapeComposeLiteral(url: string): string {
@@ -177,43 +177,6 @@ function rawServiceUrlFrom(merged: unknown, serviceName: string): string | null 
   if (!labels || typeof labels !== 'object') return null;
   const value = (labels as Record<string, unknown>)[SERVICE_URL_LABEL];
   return typeof value === 'string' ? value : null;
-}
-
-/**
- * True when saving this buffer can change the effective URL. A URL supplied by
- * another compose file is not owned here, so an edit of this file would not apply.
- * A value that still contains `$` is a Compose interpolation in this file.
- */
-export function serviceUrlOwnedBySource(source: string, serviceName: string, effectiveUrl: string | undefined): boolean {
-  try {
-    return ownsRawUrl(rawServiceUrlFrom(parse(source, { merge: true }), serviceName), effectiveUrl);
-  } catch (error) {
-    console.error('Failed to read the service URL label:', error);
-    return !effectiveUrl;
-  }
-}
-
-function ownsRawUrl(own: string | null, effectiveUrl: string | undefined): boolean {
-  if (!effectiveUrl) return true;
-  if (own == null) return false;
-  if (own.includes('$')) return true;
-  return serviceUrlFromLabelValue(own) === effectiveUrl;
-}
-
-/** Services whose effective URL is not the label in this buffer. One parse for the whole file. */
-export function lockedServiceNames(source: string, effectiveUrls: Record<string, string>): Set<string> {
-  const locked = new Set<string>();
-  let merged: unknown;
-  try {
-    merged = parse(source, { merge: true });
-  } catch (error) {
-    console.error('Failed to read the service URL label:', error);
-    return locked;
-  }
-  for (const [name, url] of Object.entries(effectiveUrls)) {
-    if (!ownsRawUrl(rawServiceUrlFrom(merged, name), url)) locked.add(name);
-  }
-  return locked;
 }
 
 interface Splice {

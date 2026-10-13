@@ -10,6 +10,7 @@ const entry: ServiceUrlEntry = {
   stackName: 'web',
   renderable: true,
   serviceUrls: { api: 'https://api.example.com' },
+  serviceUrlEdit: { api: 'root' },
   ports: { api: [{ host: '8080', proto: 'tcp' }] },
 };
 
@@ -60,11 +61,31 @@ describe('ServicePortLink edit affordance', () => {
         node={null}
         canEdit
         sourceServices={['api']}
-        lockedServices={new Set(['api'])}
+        lockedServices={new Map([['api', 'other']])}
         onEdit={onEdit}
       />,
     );
     expect(screen.getByLabelText('This URL is set in another compose file.')).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Set URL for api' })).toBeNull();
+    expect(onEdit).not.toHaveBeenCalled();
+  });
+
+  it('explains an unverifiable source instead of inviting a save', () => {
+    const onEdit = vi.fn();
+    render(
+      <ServicePortLink
+        portLabel="8080"
+        publicPort={8080}
+        serviceName="api"
+        entry={entry}
+        node={null}
+        canEdit
+        sourceServices={['api']}
+        lockedServices={new Map([['api', 'unknown']])}
+        onEdit={onEdit}
+      />,
+    );
+    expect(screen.getByLabelText('Sencho cannot verify which compose file sets this URL.')).toBeTruthy();
     expect(screen.queryByRole('button', { name: 'Set URL for api' })).toBeNull();
     expect(onEdit).not.toHaveBeenCalled();
   });
@@ -76,6 +97,7 @@ describe('ServicePortLink edit affordance', () => {
       stackName: 'web',
       renderable: true,
       serviceUrls: {},
+      serviceUrlEdit: {},
       ports: { web: [{ host: '8080', proto: 'tcp' }] },
     };
     render(

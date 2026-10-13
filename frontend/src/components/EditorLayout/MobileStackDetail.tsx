@@ -8,7 +8,8 @@ import { StackIdentityHeader, ContainersHealth, StackLogsSection } from './edito
 import { RecoveryPanel } from './RecoveryPanel';
 import { StackOperationBanner } from './StackOperationBanner';
 import { retryHandlerFor } from './recovery-retry';
-import { composeServiceNames, lockedServiceNames } from '@/lib/composeServiceUrl';
+import { composeServiceNames } from '@/lib/composeServiceUrl';
+import { lockedServiceUrlReasons } from '@/lib/serviceUrlResolve';
 import type { EditorViewProps } from './EditorView';
 
 const SEGMENTS = [
@@ -99,13 +100,7 @@ export function MobileStackDetail(props: EditorViewProps) {
     const [segment, setSegment] = useState<Segment>('logs');
 
     const sourceServices = useMemo(() => composeServiceNames(content || ''), [content]);
-    const lockedServices = useMemo(() => {
-      if (!serviceUrlEntry) return new Set<string>();
-      const usable = serviceUrlEntry.status === 'ready'
-        || (serviceUrlEntry.status === 'loading' && Object.keys(serviceUrlEntry.serviceUrls).length > 0);
-      if (!usable) return new Set<string>();
-      return lockedServiceNames(content || '', serviceUrlEntry.serviceUrls);
-    }, [content, serviceUrlEntry]);
+    const lockedServices = useMemo(() => lockedServiceUrlReasons(serviceUrlEntry), [serviceUrlEntry]);
     const safeContainers = containers || [];
     const isMultiContainerLayout = safeContainers.length > 1 || effectiveServices.length > 1;
     const isRunning = safeContainers.some(c => c.State === 'running');

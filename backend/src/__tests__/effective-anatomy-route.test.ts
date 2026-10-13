@@ -68,6 +68,8 @@ describe('effective-anatomy route', () => {
     expect(res.body.volumes.web).toEqual([{ host: 'data', container: '/data' }]);
     expect(res.body.restart).toBe('always');
     expect(res.body.networks).toEqual(['backend', 'default']);
+    // A single-file stack has no other file that could shadow the label.
+    expect(res.body.serviceUrlEdit).toEqual({ web: 'root' });
   });
 
   it('surfaces a structural error and never raw stderr on render failure', async () => {
@@ -118,6 +120,52 @@ describe('effective-anatomy route', () => {
     expect(res.status).toBe(200);
     expect(res.body.serviceUrls).toEqual({ web: 'https://app.example.com' });
     expect(JSON.stringify(res.body)).not.toContain(LABEL_SECRET);
+  });
+
+  it('marks a URL label set by another compose file as not editable here', async () => {
+    fs.writeFileSync(path.join(stackDir, 'compose.override.yaml'),
+      'services:\n  web:\n    labels:\n      sencho.service.url: not-a-url\n');
+    stubRender(JSON.stringify({
+      services: { web: { labels: { 'sencho.service.url': 'not-a-url' } }, api: { labels: { 'sencho.service.url': 'https://api.example.com' } } },
+      networks: {},
+      volumes: {},
+    }));
+    const res = await request(app).get(`/api/stacks/${STACK}/effective-anatomy`).set('Authorization', authHeader);
+    expect(res.status).toBe(200);
+    // An invalid later label still shadows the main file; a service the override
+    // leaves alone stays editable.
+    expect(res.body.serviceUrlEdit).toEqual({ web: 'other', api: 'root' });
+  });
+
+  it('keeps services editable when the override leaves the label alone', async () => {
+    fs.writeFileSync(path.join(stackDir, 'compose.override.yaml'),
+      'services:\n  web:\n    restart: always\n');
+    stubRender(JSON.stringify({
+      services: { web: { restart: 'always' } },
+      networks: {},
+      volumes: {},
+    }));
+    const res = await request(app).get(`/api/stacks/${STACK}/effective-anatomy`).set('Authorization', authHeader);
+    expect(res.status).toBe(200);
+    expect(res.body.serviceUrlEdit).toEqual({ web: 'root' });
+  });
+
+  it('refuses editability when the override uses constructs whose labels cannot be traced', async () => {
+    fs.writeFileSync(path.join(stackDir, 'compose.override.yaml'),
+      'include:\n  - common.yaml\nservices:\n  web:\n    image: nginx\n');
+    stubRender(JSON.stringify({ services: { web: { image: 'nginx' } }, networks: {}, volumes: {} }));
+    const res = await request(app).get(`/api/stacks/${STACK}/effective-anatomy`).set('Authorization', authHeader);
+    expect(res.status).toBe(200);
+    expect(res.body.serviceUrlEdit).toEqual({ web: 'unknown' });
+  });
+
+  it('refuses editability when COMPOSE_FILE changes the file discovery', async () => {
+    fs.writeFileSync(path.join(stackDir, '.env'), 'COMPOSE_FILE=compose.yaml:extra.yaml\n');
+    stubRender(JSON.stringify({ services: { web: { image: 'nginx' } }, networks: {}, volumes: {} }));
+    const res = await request(app).get(`/api/stacks/${STACK}/effective-anatomy`).set('Authorization', authHeader);
+    expect(res.status).toBe(200);
+    expect(res.body.serviceUrlEdit).toEqual({ web: 'unknown' });
+    fs.rmSync(path.join(stackDir, '.env'));
   });
 
   it('rejects an unauthenticated request', async () => {

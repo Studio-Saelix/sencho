@@ -139,4 +139,28 @@ describe('parseEffectiveAnatomy', () => {
     });
     expect(anatomy.serviceUrls.web).toBe('https://app.example.com/?b=$x');
   });
+
+  it('keeps legal service names that shadow Object properties out of the prototype chain', () => {
+    // JSON.parse, like the docker compose render, defines `__proto__` as an own key.
+    const rendered = JSON.parse([
+      '{"services":{',
+      '"constructor":{"labels":{"sencho.service.url":"https://c.example.com"}},',
+      '"toString":{},',
+      '"hasOwnProperty":{},',
+      '"__proto__":{"labels":{"sencho.service.url":"https://p.example.com"}}',
+      '}}',
+    ].join('')) as unknown;
+    const anatomy = parseEffectiveAnatomy(rendered);
+    // Each name is an own key with its own value, never an inherited function.
+    expect(Object.prototype.hasOwnProperty.call(anatomy.serviceUrls, 'constructor')).toBe(true);
+    expect(anatomy.serviceUrls.constructor).toBe('https://c.example.com');
+    expect(Object.prototype.hasOwnProperty.call(anatomy.serviceUrls, '__proto__')).toBe(true);
+    expect(anatomy.serviceUrls.__proto__).toBe('https://p.example.com');
+    expect(Object.prototype.hasOwnProperty.call(anatomy.serviceUrls, 'toString')).toBe(false);
+    expect(anatomy.serviceUrls.toString).toBeUndefined();
+    expect(anatomy.serviceUrls.hasOwnProperty).toBeUndefined();
+    // The same names survive serialization as own JSON keys.
+    const serialized = JSON.parse(JSON.stringify(anatomy)) as { serviceUrls: Record<string, string> };
+    expect(Object.keys(serialized.serviceUrls).sort()).toEqual(['__proto__', 'constructor']);
+  });
 });

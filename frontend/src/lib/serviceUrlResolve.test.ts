@@ -1,6 +1,16 @@
 import { describe, expect, it } from 'vitest';
-import { composeServiceNames, patchServiceUrlLabel, serviceUrlOwnedBySource } from './composeServiceUrl';
-import { parseServiceUrlResponse, resolveOpenAppTarget, resolvePublishedPortClick, tcpOwners, type ServiceUrlEntry } from './serviceUrlResolve';
+import { composeServiceNames, patchServiceUrlLabel } from './composeServiceUrl';
+import {
+  lockedServiceUrlReasons,
+  parseServiceUrlResponse,
+  resolveOpenAppTarget,
+  resolvePublishedPortClick,
+  serviceKeyGet,
+  serviceUrlEditBlockedMessage,
+  serviceUrlEditState,
+  tcpOwners,
+  type ServiceUrlEntry,
+} from './serviceUrlResolve';
 import { buildServiceUrl } from './serviceUrl';
 import { serviceUrlFromLabelValue } from './serviceUrlLabel';
 import { parse, parseDocument } from 'yaml';
@@ -11,6 +21,7 @@ const ready: ServiceUrlEntry = {
   stackName: 'web',
   renderable: true,
   serviceUrls: { web: 'https://app.example.com' },
+  serviceUrlEdit: { web: 'root' },
   ports: {
     web: [{ host: '8080', proto: 'tcp' }, { host: '8080', proto: 'udp' }],
   },
@@ -913,32 +924,130 @@ describe('patchServiceUrlLabel', () => {
     expect(patched.yaml.replace(inserted, '')).toBe(source);
   });
 
-  it('does not treat an override URL as owned by the open file', () => {
-    const base = [
+  it('parses and resolves with no URL and no ownership metadata for the open file', () => {
+    // The ownership decision now comes from the backend's `serviceUrlEdit`; the
+    // editor no longer infers it from the label value or its absence.
+    const entry = parseServiceUrlResponse(1, 'web', true, {
+      renderable: true,
+      serviceUrls: {},
+      serviceUrlEdit: { web: 'other' },
+      ports: { web: [{ host: '8080', proto: 'tcp' }] },
+    });
+    expect(entry.serviceUrlEdit).toEqual({ web: 'other' });
+    expect(serviceUrlEditBlockedMessage(entry.serviceUrlEdit.web)).toBe('This URL is set in another compose file.');
+    expect(lockedServiceUrlReasons(entry).get('web')).toBe('other');
+  });
+
+  it('patches a service named __proto__ and never invents an absent reserved name', () => {
+    const source = [
       'services:',
-      '  web:',
+      '  "__proto__":',
+      '    image: nginx',
+      '  constructor:',
       '    image: nginx',
       '',
     ].join('\n');
-    expect(serviceUrlOwnedBySource(base, 'web', 'https://old.example.com')).toBe(false);
-    const owning = [
-      'services:',
-      '  web:',
-      '    image: nginx',
-      '    labels:',
-      '      sencho.service.url: https://app.example.com',
-      '',
-    ].join('\n');
-    expect(serviceUrlOwnedBySource(owning, 'web', 'https://app.example.com')).toBe(true);
-    expect(serviceUrlOwnedBySource(owning, 'web', undefined)).toBe(true);
-    const interpolated = [
-      'services:',
-      '  web:',
-      '    labels:',
-      '      sencho.service.url: https://${APP_HOST}',
-      '',
-    ].join('\n');
-    expect(serviceUrlOwnedBySource(interpolated, 'web', 'https://app.example.com')).toBe(true);
+    const added = patchServiceUrlLabel(source, '__proto__', 'https://proto.example.com');
+    expect(added.ok).toBe(true);
+    if (!added.ok) return;
+    expect(parseDocument(added.yaml).errors).toEqual([]);
+    expect(added.yaml.split('constructor:')[0]).toContain('https://proto.example.com');
+    expect(added.yaml.split('constructor:')[1] ?? '').not.toContain('https://proto.example.com');
+    const cleared = patchServiceUrlLabel(added.yaml, '__proto__', null);
+    expect(cleared.ok).toBe(true);
+    if (!cleared.ok) return;
+    expect(cleared.yaml).not.toContain('sencho.service.url');
+    // A reserved name that is not a service in the file stays a refusal, and
+    // clearing a label that is not there is the documented no-op.
+    expect(patchServiceUrlLabel(source, 'toString', 'https://x.example.com'))
+      .toEqual({ ok: false, reason: 'missing-service' });
+    expect(patchServiceUrlLabel(source, '__proto__', null)).toEqual({ ok: true, yaml: source });
+  });
+});
+
+describe('service URL maps are safe for every legal service name', () => {
+  const node = { type: 'local' as const };
+
+  function parseWith(serviceUrlsJson: string, portsJson: string): ServiceUrlEntry {
+    // JSON.parse, like the /effective-anatomy response, keeps `__proto__` as an own key.
+    return parseServiceUrlResponse(1, 'web', true, JSON.parse(
+      `{"renderable":true,"services":[],"serviceUrls":${serviceUrlsJson},"serviceUrlEdit":{},"ports":${portsJson}}`,
+    ) as unknown);
+  }
+
+  it('returns literal generated links and configured overrides for names that shadow Object properties', () => {
+    for (const name of ['constructor', 'toString', 'hasOwnProperty', '__proto__']) {
+      // Absent label: the generated host and port, never an inherited function.
+      const absent = parseWith('{}', JSON.stringify({ [name]: [{ host: '8080', proto: 'tcp' }] }));
+      const click = resolvePublishedPortClick({ entry: absent, serviceName: name, publicPort: 8080, portLabel: '8080', node });
+      expect(click).toEqual({ kind: 'link', href: 'http://localhost:8080', portLabel: '8080', hostLabel: null });
+      expect(resolveOpenAppTarget({ entry: absent, publicPort: 8080, node })).toEqual({ url: 'http://localhost:8080' });
+
+      // Configured label: the override survives parse and resolution as an own key.
+      const configured = parseWith(
+        JSON.stringify({ [name]: 'https://custom.example.com' }),
+        JSON.stringify({ [name]: [{ host: '8080', proto: 'tcp' }] }),
+      );
+      expect(Object.prototype.hasOwnProperty.call(configured.serviceUrls, name)).toBe(true);
+      expect(resolvePublishedPortClick({ entry: configured, serviceName: name, publicPort: 8080, portLabel: '8080', node }))
+        .toEqual({ kind: 'link', href: 'https://custom.example.com', portLabel: '8080', hostLabel: 'custom.example.com' });
+      expect(resolveOpenAppTarget({ entry: configured, publicPort: 8080, node }))
+        .toEqual({ url: 'https://custom.example.com' });
+    }
+  });
+
+  it('exposes null-prototype lookups so nothing inherited can masquerade as a URL', () => {
+    const entry = parseServiceUrlResponse(1, 'web', true, { renderable: true, serviceUrls: {}, serviceUrlEdit: {}, ports: {} });
+    expect(serviceKeyGet(entry.serviceUrls, 'constructor')).toBeUndefined();
+    expect(serviceKeyGet(entry.ports, 'toString')).toBeUndefined();
+    expect(serviceKeyGet(entry.serviceUrlEdit, 'hasOwnProperty')).toBeUndefined();
+  });
+
+  it('reads one service state through an own-property lookup', () => {
+    const entry = parseServiceUrlResponse(1, 'web', true, {
+      renderable: true,
+      serviceUrls: {},
+      serviceUrlEdit: JSON.parse('{"constructor":"other","__proto__":"unknown"}') as Record<string, string>,
+      ports: {},
+    });
+    expect(serviceUrlEditState(entry, 'constructor')).toBe('other');
+    expect(serviceUrlEditState(entry, '__proto__')).toBe('unknown');
+    // An absent name must not read Object.prototype.
+    expect(serviceUrlEditState(entry, 'toString')).toBeUndefined();
+    expect(serviceUrlEditState(entry, 'hasOwnProperty')).toBeUndefined();
+    expect(serviceUrlEditState(null, 'constructor')).toBeUndefined();
+  });
+});
+
+describe('service URL editability metadata', () => {
+  it('locks only the services a later compose file shadows, with a reason', () => {
+    const entry = parseServiceUrlResponse(1, 'web', true, {
+      renderable: true,
+      serviceUrls: {},
+      serviceUrlEdit: { web: 'other', api: 'unknown', db: 'root' },
+      ports: {},
+    });
+    const locked = lockedServiceUrlReasons(entry);
+    expect(locked.size).toBe(2);
+    expect(locked.get('web')).toBe('other');
+    expect(locked.get('api')).toBe('unknown');
+    expect(locked.has('db')).toBe(false);
+    expect(serviceUrlEditBlockedMessage('other')).toBe('This URL is set in another compose file.');
+    expect(serviceUrlEditBlockedMessage('unknown')).toBe('Sencho cannot verify which compose file sets this URL.');
+    expect(serviceUrlEditBlockedMessage(undefined)).toBe('Sencho cannot verify which compose file sets this URL.');
+    expect(serviceUrlEditBlockedMessage('root')).toBeNull();
+  });
+
+  it('ignores unknown states and non-object payloads from an older or broken node', () => {
+    const entry = parseServiceUrlResponse(1, 'web', true, {
+      renderable: true,
+      serviceUrls: {},
+      serviceUrlEdit: { web: 'somewhere-else', api: 42 },
+      ports: {},
+    });
+    expect(entry.serviceUrlEdit).toEqual({});
+    expect(lockedServiceUrlReasons(null).size).toBe(0);
+    expect(lockedServiceUrlReasons(entry).size).toBe(0);
   });
 });
 

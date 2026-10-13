@@ -29,7 +29,8 @@ import { useContainerStats } from './EditorLayout/hooks/useContainerStats';
 import { useSidebarContextMenu } from './EditorLayout/hooks/useSidebarContextMenu';
 import { useServiceUrls } from './EditorLayout/hooks/useServiceUrls';
 import { ServiceUrlModal } from './EditorLayout/ServiceUrlModal';
-import { patchServiceUrlLabel, serviceUrlOwnedBySource } from '@/lib/composeServiceUrl';
+import { patchServiceUrlLabel } from '@/lib/composeServiceUrl';
+import { serviceKeyGet, serviceUrlEditBlockedMessage, serviceUrlEditState } from '@/lib/serviceUrlResolve';
 import { sameServiceUrlTarget, type ServiceUrlDialogTarget } from '@/lib/serviceUrlTarget';
 import { confirmComposeSourceReload } from '@/lib/composeSourceConflict';
 import { useActiveNodeReapplyEligibility } from './EditorLayout/hooks/useActiveNodeReapplyEligibility';
@@ -862,7 +863,7 @@ export default function EditorLayout() {
       return;
     }
     if (!stillHere()) return;
-    const effective = next?.status === 'ready' ? (next.serviceUrls[captured.service] ?? null) : undefined;
+    const effective = next?.status === 'ready' ? (serviceKeyGet(next.serviceUrls, captured.service) ?? null) : undefined;
     if (next?.status === 'ready' && effective === captured.url) {
       toast.success(captured.url ? 'Service URL saved.' : 'Service URL cleared.');
       setServiceUrlTarget(null);
@@ -887,12 +888,9 @@ export default function EditorLayout() {
       toast.error('You cannot edit this stack.');
       return;
     }
-    const knownUrls = serviceUrlEntry && (serviceUrlEntry.status === 'ready' || serviceUrlEntry.status === 'loading')
-      ? serviceUrlEntry.serviceUrls
-      : null;
-    const effectiveUrl = knownUrls ? knownUrls[opened.serviceName] : undefined;
-    if (!serviceUrlOwnedBySource(content, opened.serviceName, effectiveUrl)) {
-      toast.error('This URL is set in another compose file.');
+    const blocked = serviceUrlEditBlockedMessage(serviceUrlEditState(serviceUrlEntry, opened.serviceName));
+    if (blocked) {
+      toast.error(blocked);
       return;
     }
     let patched: ReturnType<typeof patchServiceUrlLabel>;
@@ -931,6 +929,16 @@ export default function EditorLayout() {
       }
       setServiceUrlSaving(true);
       try {
+        // Re-read the source authority from disk before writing: the anatomy
+        // entry held in state may be older than the compose files themselves.
+        // This orders the check, it does not lock the files; a later chain file
+        // changed mid-write is caught by the post-save verification instead.
+        const fresh = await refreshServiceUrls();
+        const freshBlocked = serviceUrlEditBlockedMessage(serviceUrlEditState(fresh, opened.serviceName));
+        if (freshBlocked) {
+          toast.error(freshBlocked);
+          return;
+        }
         setContent(captured.content);
         const result = await stackActions.saveComposeContent({
           content: captured.content,
@@ -1107,7 +1115,7 @@ export default function EditorLayout() {
       open={serviceUrlTarget !== null}
       serviceName={serviceUrlTarget?.serviceName ?? ''}
       initialUrl={serviceUrlTarget && serviceUrlEntry?.status === 'ready'
-        ? (serviceUrlEntry.serviceUrls[serviceUrlTarget.serviceName] ?? '')
+        ? (serviceKeyGet(serviceUrlEntry.serviceUrls, serviceUrlTarget.serviceName) ?? '')
         : ''}
       dirty={serviceUrlDirty}
       saving={serviceUrlSaving}

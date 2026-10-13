@@ -1,12 +1,16 @@
 import { useEffect, useState } from 'react';
 import { Check, Copy, Pencil } from 'lucide-react';
 import { copyToClipboard } from '@/lib/clipboard';
-import { resolvePublishedPortClick, type ServiceUrlEntry } from '@/lib/serviceUrlResolve';
+import {
+  resolvePublishedPortClick,
+  serviceUrlEditBlockedMessage,
+  type ServiceUrlEditBlock,
+  type ServiceUrlEntry,
+} from '@/lib/serviceUrlResolve';
 import type { Node } from '@/context/NodeContext';
 import { cn } from '@/lib/utils';
 
 const OTHER_FILE = 'This service is not in the open compose file.';
-const OTHER_LAYER = 'This URL is set in another compose file.';
 
 interface ServicePortLinkProps {
   portLabel: string;
@@ -18,8 +22,8 @@ interface ServicePortLinkProps {
   canEdit: boolean;
   /** Services declared in the open compose buffer. Omit when the buffer is unknown. */
   sourceServices?: readonly string[] | null;
-  /** Services whose effective URL is set by a file other than the open buffer. */
-  lockedServices?: ReadonlySet<string>;
+  /** Services whose URL the open compose file does not control, with the reason. */
+  lockedServices?: ReadonlyMap<string, ServiceUrlEditBlock>;
   onEdit?: (serviceName: string) => void;
   onRetry?: () => void;
 }
@@ -55,8 +59,9 @@ export function ServicePortLink({
 
   const inOpenFile = sourceServices === undefined
     || (sourceServices !== null && !!serviceName && sourceServices.includes(serviceName));
-  const locked = !!serviceName && !!lockedServices?.has(serviceName);
-  const unavailable = !inOpenFile ? OTHER_FILE : locked ? OTHER_LAYER : null;
+  const lockedState = serviceName ? lockedServices?.get(serviceName) : undefined;
+  const lockedMessage = lockedState ? serviceUrlEditBlockedMessage(lockedState) : null;
+  const unavailable = !inOpenFile ? OTHER_FILE : lockedMessage;
   const urlsReady = entry?.status === 'ready'
     || (entry?.status === 'loading' && Object.keys(entry.serviceUrls).length > 0);
   const edit = canEdit && serviceName && onEdit && urlsReady && !unavailable ? (

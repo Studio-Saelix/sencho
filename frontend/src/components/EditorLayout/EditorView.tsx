@@ -52,8 +52,8 @@ import type { Node } from '@/context/NodeContext';
 import type { useAuth } from '@/context/AuthContext';
 import type { useStackMuteActions } from '@/hooks/useMuteRuleActions';
 import type { EffectiveServiceSpec } from '@/types/effectiveServices';
-import { composeServiceNames, lockedServiceNames } from '@/lib/composeServiceUrl';
-import type { ServiceUrlEntry } from '@/lib/serviceUrlResolve';
+import { composeServiceNames } from '@/lib/composeServiceUrl';
+import { lockedServiceUrlReasons, type ServiceUrlEntry } from '@/lib/serviceUrlResolve';
 import type { GitSourcePendingMap } from '@/lib/gitopsState';
 import type { StackServiceUpdateStatus } from '@/types/imageUpdates';
 
@@ -335,13 +335,7 @@ export function EditorView(props: EditorViewProps) {
         hasUnsavedChanges,
     } = props;
     const sourceServices = useMemo(() => composeServiceNames(content || ''), [content]);
-    const lockedServices = useMemo(() => {
-      if (!serviceUrlEntry) return new Set<string>();
-      const usable = serviceUrlEntry.status === 'ready'
-        || (serviceUrlEntry.status === 'loading' && Object.keys(serviceUrlEntry.serviceUrls).length > 0);
-      if (!usable) return new Set<string>();
-      return lockedServiceNames(content || '', serviceUrlEntry.serviceUrls);
-    }, [content, serviceUrlEntry]);
+    const lockedServices = useMemo(() => lockedServiceUrlReasons(serviceUrlEntry), [serviceUrlEntry]);
     const monacoEditorRef = useRef<import('monaco-editor').editor.IStandaloneCodeEditor | null>(null);
     const canEditCompose = can('stack:edit', 'stack', stackName, activeNode?.id);
     // Pulling stages images for a deploy, so it takes the edit authority for the
