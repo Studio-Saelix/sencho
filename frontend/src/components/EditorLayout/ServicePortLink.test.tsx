@@ -1,6 +1,10 @@
-import { render, screen } from '@testing-library/react';
+import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
+
+vi.mock('@/lib/clipboard', () => ({ copyToClipboard: vi.fn().mockResolvedValue(undefined) }));
+
 import { ServicePortLink } from './ServicePortLink';
+import { copyToClipboard } from '@/lib/clipboard';
 import type { ServiceUrlEntry } from '@/lib/serviceUrlResolve';
 import type { Node } from '@/context/NodeContext';
 
@@ -214,5 +218,38 @@ describe('ServicePortLink runtime ownership', () => {
     );
     expect(screen.getByText('More than one service publishes this port')).toBeTruthy();
     expect(screen.queryByRole('link')).toBeNull();
+  });
+
+  it('audit F2: a runtime owner without an override keeps the generated anchor and copy target', async () => {
+    // Running container `web` owns 8090:80 and has no override; the saved model
+    // gave 8090 to `a` and `b`, which have one. The runtime card keeps the
+    // generated link, and Copy copies that same address.
+    const conflicting: ServiceUrlEntry = {
+      status: 'ready',
+      nodeId: 1,
+      stackName: 'web',
+      renderable: true,
+      serviceUrls: { a: 'https://a.example.com', b: 'https://b.example.com' },
+      serviceUrlEdit: { a: 'root', b: 'root' },
+      serviceUrlClear: { a: 'root', b: 'root' },
+      ports: {
+        a: [{ host: '8090', container: '80', proto: 'tcp' }],
+        b: [{ host: '8090', container: '80', proto: 'tcp' }],
+      },
+    };
+    render(
+      <ServicePortLink
+        portLabel="8090 → 80/tcp"
+        publicPort={8090}
+        privatePort={80}
+        serviceName="web"
+        entry={conflicting}
+        node={{ type: 'local' } as Node}
+        canEdit={false}
+      />,
+    );
+    expect(screen.getByRole('link').getAttribute('href')).toBe('http://localhost:8090');
+    fireEvent.click(screen.getByRole('button', { name: 'Copy service URL' }));
+    await waitFor(() => expect(copyToClipboard).toHaveBeenCalledWith('http://localhost:8090'));
   });
 });

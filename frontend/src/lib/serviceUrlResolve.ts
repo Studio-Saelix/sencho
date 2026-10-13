@@ -206,11 +206,15 @@ export function resolvePublishedPortClick(args: {
   // belongs to owns that port regardless of what the saved file declares now.
   // Its own URL wins even when the saved binding changed or was removed since
   // the container started, and even when the saved file gives the number to
-  // another service that may not be running. Callers without a runtime private
-  // port (the anatomy footer) infer ownership from the saved model below.
+  // another service that may not be running. Without an override that same
+  // container still keeps the ordinary generated host and port; saved
+  // declarations by other services are no evidence against a live owner.
+  // Callers without a runtime private port (the anatomy footer) infer
+  // ownership from the saved model below.
   if (serviceName !== undefined && privatePort !== undefined) {
     const own = serviceKeyGet(entry.serviceUrls, serviceName);
     if (own) return { kind: 'link', href: own, portLabel, hostLabel: hostLabel(own) };
+    return withoutOverride(generated, portLabel, false);
   }
   const owners = tcpOwners(entry.ports, publicPort);
   const withOverride = owners.filter(name => serviceKeyGet(entry.serviceUrls, name));

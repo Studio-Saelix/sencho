@@ -375,6 +375,49 @@ describe('resolvePublishedPortClick', () => {
     expect(click).toMatchObject({ kind: 'link', href: 'http://localhost:8080' });
   });
 
+  it('audit F2: a runtime owner without an override keeps its generated link', () => {
+    // Running container `web` owns 8090:80 and carries no override. The saved,
+    // undeployed model changed or removed web's own binding and gave 8090 to
+    // `a` and `b`, which have one. The live container is direct ownership
+    // evidence, so its card keeps the ordinary generated link instead of
+    // turning ambiguous over other services' saved declarations.
+    const claimed = {
+      a: [{ host: '8090', container: '80', proto: 'tcp' }],
+      b: [{ host: '8090', container: '80', proto: 'tcp' }],
+    };
+    const shapes: ServiceUrlEntry['ports'][] = [
+      claimed,
+      { web: [{ host: '9090', container: '80', proto: 'tcp' }], ...claimed },
+      { web: [{ host: '9090', container: '80', proto: 'udp' }], ...claimed },
+    ];
+    for (const ports of shapes) {
+      const entry: ServiceUrlEntry = {
+        ...ready,
+        serviceUrls: { a: 'https://a.example.com', b: 'https://b.example.com' },
+        ports,
+      };
+      expect(resolvePublishedPortClick({
+        entry,
+        serviceName: 'web',
+        publicPort: 8090,
+        privatePort: 80,
+        portLabel: '8090 → 80/tcp',
+        node: { type: 'local' },
+      })).toEqual({ kind: 'link', href: 'http://localhost:8090', portLabel: '8090 → 80/tcp', hostLabel: null });
+      expect(resolvePublishedPortClick({
+        entry,
+        serviceName: 'web',
+        publicPort: 8090,
+        privatePort: 80,
+        portLabel: '8090 → 80/tcp',
+        node: { type: 'remote', api_url: 'http://node.example.com:1852' },
+      })).toEqual({ kind: 'link', href: 'http://node.example.com:8090', portLabel: '8090 → 80/tcp', hostLabel: null });
+      // Open App reads the same runtime owner and resolves the same target.
+      expect(resolveOpenAppTarget({ entry, publicPort: 8090, serviceName: 'web', node: { type: 'local' } }))
+        .toEqual({ url: 'http://localhost:8090' });
+    }
+  });
+
   it('uses the inferred owner when that service still publishes the port', () => {
     const click = resolvePublishedPortClick({
       entry: {
@@ -917,6 +960,352 @@ describe('patchServiceUrlLabel', () => {
     expect(merged.services.web.labels['sencho.service.url']).toBeUndefined();
     expect(merged.services.api.labels.KEEP ?? '').toBe('');
     expect(merged.services.api.labels['sencho.service.url']).toBe('https://default.example.com');
+  });
+
+  it('audit F1: clearing a merged URL keeps unrelated comments and tokens', () => {
+    const source = [
+      'x-labels: &base',
+      '  keep: yes',
+      '  sencho.service.url: https://old.example.com',
+      'services:',
+      '  web:',
+      '    image: nginx',
+      '    labels:',
+      '      <<: *base',
+      '      # This is an operator note for KEEP2',
+      '      KEEP2: value',
+      '  api:',
+      '    image: redis',
+      '    labels: *base',
+      '',
+    ].join('\n');
+    const cleared = patchServiceUrlLabel(source, 'web', null);
+    expect(cleared.ok).toBe(true);
+    if (!cleared.ok) return;
+    // Only the merge key line changes: the inherited `keep` is materialized as
+    // authored, and the direct comment and token stay exactly as written.
+    expect(cleared.yaml).toBe([
+      'x-labels: &base',
+      '  keep: yes',
+      '  sencho.service.url: https://old.example.com',
+      'services:',
+      '  web:',
+      '    image: nginx',
+      '    labels:',
+      '      keep: yes',
+      '      # This is an operator note for KEEP2',
+      '      KEEP2: value',
+      '  api:',
+      '    image: redis',
+      '    labels: *base',
+      '',
+    ].join('\n'));
+    const merged = parse(cleared.yaml, { merge: true }) as {
+      services: { web: { labels: Record<string, string> }; api: { labels: Record<string, string> } };
+    };
+    expect(merged.services.web.labels).toEqual({ keep: 'yes', KEEP2: 'value' });
+    expect(merged.services.api.labels['sencho.service.url']).toBe('https://old.example.com');
+  });
+
+  it('audit F1: refuses to clear when a comment sits on the merge key line', () => {
+    // Replacing the merge key cannot keep that comment where it stands, so the
+    // clear is refused before anything is written.
+    const source = [
+      'x-labels: &base',
+      '  keep: yes',
+      '  sencho.service.url: https://old.example.com',
+      'services:',
+      '  web:',
+      '    labels:',
+      '      <<: *base # shared labels',
+      '      KEEP2: value',
+      '',
+    ].join('\n');
+    expect(patchServiceUrlLabel(source, 'web', null)).toEqual({ ok: false, reason: 'unsupported' });
+  });
+
+  it('audit F1: clears a flow merged URL without respelling unrelated tokens', () => {
+    const source = [
+      'x-labels: &base { keep: 0440, sencho.service.url: https://old.example.com }',
+      'services:',
+      '  web: { image: nginx, labels: { <<: *base, KEEP2: value } }',
+      '',
+    ].join('\n');
+    const cleared = patchServiceUrlLabel(source, 'web', null);
+    expect(cleared.ok).toBe(true);
+    if (!cleared.ok) return;
+    expect(cleared.yaml).toBe([
+      'x-labels: &base { keep: 0440, sencho.service.url: https://old.example.com }',
+      'services:',
+      '  web: { image: nginx, labels: { KEEP2: value, keep: 0440 } }',
+      '',
+    ].join('\n'));
+  });
+
+  it('audit F1: clears a merge list with the earlier map winning', () => {
+    const source = [
+      'x-a: &a',
+      '  first: 1',
+      '  sencho.service.url: https://a.example.com',
+      'x-b: &b',
+      '  first: 2',
+      '  second: 3',
+      'services:',
+      '  web:',
+      '    labels:',
+      '      <<: [*a, *b]',
+      '      KEEP2: value',
+      '',
+    ].join('\n');
+    const cleared = patchServiceUrlLabel(source, 'web', null);
+    expect(cleared.ok).toBe(true);
+    if (!cleared.ok) return;
+    const merged = parse(cleared.yaml, { merge: true }) as {
+      services: { web: { labels: Record<string, string | number> } };
+    };
+    expect(merged.services.web.labels).toEqual({ first: 1, second: 3, KEEP2: 'value' });
+    // The same list held in an anchored sequence resolves the same way.
+    const viaSeq = [
+      'x-a: &a',
+      '  first: 1',
+      'x-b: &b',
+      '  second: 3',
+      'x-list: &list',
+      '  - *a',
+      '  - *b',
+      'services:',
+      '  web:',
+      '    labels:',
+      '      <<: *list',
+      '      sencho.service.url: https://old.example.com',
+      '',
+    ].join('\n');
+    const seqCleared = patchServiceUrlLabel(viaSeq, 'web', null);
+    expect(seqCleared.ok).toBe(true);
+    if (!seqCleared.ok) return;
+    const seqMerged = parse(seqCleared.yaml, { merge: true }) as typeof merged;
+    expect(seqMerged.services.web.labels).toEqual({ first: 1, second: 3 });
+  });
+
+  it('audit F1: clears a nested merge through its own map first', () => {
+    const source = [
+      'x-base: &base',
+      '  keep: yes',
+      '  sencho.service.url: https://base.example.com',
+      'x-mid: &mid',
+      '  <<: *base',
+      '  extra: hold',
+      'services:',
+      '  web:',
+      '    labels:',
+      '      <<: *mid',
+      '      KEEP2: value',
+      '',
+    ].join('\n');
+    const cleared = patchServiceUrlLabel(source, 'web', null);
+    expect(cleared.ok).toBe(true);
+    if (!cleared.ok) return;
+    expect(cleared.yaml).toBe([
+      'x-base: &base',
+      '  keep: yes',
+      '  sencho.service.url: https://base.example.com',
+      'x-mid: &mid',
+      '  <<: *base',
+      '  extra: hold',
+      'services:',
+      '  web:',
+      '    labels:',
+      '      extra: hold',
+      '      keep: yes',
+      '      KEEP2: value',
+      '',
+    ].join('\n'));
+  });
+
+  it('audit F1: keeps a scalar another service aliases when the merged clear removes it', () => {
+    const source = [
+      'x-base: &base',
+      '  keep: "yes"',
+      '  extra: "hold"',
+      'services:',
+      '  web:',
+      '    image: nginx',
+      '    labels:',
+      '      <<: *base',
+      '      sencho.service.url: &address https://old.example.com',
+      '  api:',
+      '    image: nginx',
+      '    environment:',
+      '      APP_URL: *address',
+      '',
+    ].join('\n');
+    const cleared = patchServiceUrlLabel(source, 'web', null);
+    expect(cleared.ok).toBe(true);
+    if (!cleared.ok) return;
+    const merged = parse(cleared.yaml, { merge: true }) as {
+      services: {
+        web: { labels: Record<string, string> };
+        api: { environment: Record<string, string> };
+      };
+    };
+    expect(merged.services.web.labels).toEqual({ keep: 'yes', extra: 'hold' });
+    expect(merged.services.api.environment.APP_URL).toBe('https://old.example.com');
+  });
+
+  it('audit F1: materializes a flow merged map into block labels', () => {
+    const source = [
+      'x-labels: &base { keep: 0440, sencho.service.url: https://old.example.com }',
+      'services:',
+      '  web:',
+      '    labels:',
+      '      <<: *base',
+      '      KEEP2: value',
+      '',
+    ].join('\n');
+    const cleared = patchServiceUrlLabel(source, 'web', null);
+    expect(cleared.ok).toBe(true);
+    if (!cleared.ok) return;
+    expect(cleared.yaml).toBe([
+      'x-labels: &base { keep: 0440, sencho.service.url: https://old.example.com }',
+      'services:',
+      '  web:',
+      '    labels:',
+      '      keep: 0440',
+      '      KEEP2: value',
+      '',
+    ].join('\n'));
+  });
+
+  it('audit F1: keeps a CRLF file on CRLF when clearing a merged URL', () => {
+    const source = [
+      'x-labels: &base',
+      '  keep: yes',
+      '  sencho.service.url: https://old.example.com',
+      'services:',
+      '  web:',
+      '    labels:',
+      '      <<: *base',
+      '      # operator note',
+      '      KEEP2: value',
+      '',
+    ].join('\r\n');
+    const cleared = patchServiceUrlLabel(source, 'web', null);
+    expect(cleared.ok).toBe(true);
+    if (!cleared.ok) return;
+    expect(cleared.yaml).toBe([
+      'x-labels: &base',
+      '  keep: yes',
+      '  sencho.service.url: https://old.example.com',
+      'services:',
+      '  web:',
+      '    labels:',
+      '      keep: yes',
+      '      # operator note',
+      '      KEEP2: value',
+      '',
+    ].join('\r\n'));
+  });
+
+  it('audit F1: refuses merged clears it cannot copy faithfully', () => {
+    // An inline merge source is removed with the merge key, so its own comments
+    // could not be kept; an anchored or aliased value could dangle.
+    const inline = [
+      'services:',
+      '  web:',
+      '    labels:',
+      '      <<: { keep: yes, sencho.service.url: https://old.example.com }',
+      '',
+    ].join('\n');
+    expect(patchServiceUrlLabel(inline, 'web', null)).toEqual({ ok: false, reason: 'unsupported' });
+    const anchored = [
+      'x-labels: &base',
+      '  keep: &token yes',
+      '  sencho.service.url: https://old.example.com',
+      'services:',
+      '  web:',
+      '    labels:',
+      '      <<: *base',
+      '',
+    ].join('\n');
+    expect(patchServiceUrlLabel(anchored, 'web', null)).toEqual({ ok: false, reason: 'unsupported' });
+    const tagged = [
+      'x-labels: &base',
+      '  keep: !!str 1',
+      '  sencho.service.url: https://old.example.com',
+      'services:',
+      '  web:',
+      '    labels:',
+      '      <<: *base',
+      '',
+    ].join('\n');
+    expect(patchServiceUrlLabel(tagged, 'web', null)).toEqual({ ok: false, reason: 'unsupported' });
+    // A block value that cannot fit inside flow labels is refused too.
+    const multiLine = [
+      'x-labels: &base',
+      '  keep:',
+      '    nested: 1',
+      '  sencho.service.url: https://old.example.com',
+      'services:',
+      '  web: { labels: { <<: *base, KEEP2: value } }',
+      '',
+    ].join('\n');
+    expect(patchServiceUrlLabel(multiLine, 'web', null)).toEqual({ ok: false, reason: 'unsupported' });
+  });
+
+  it('audit F1: clears a merged URL when the merge supplies nothing else', () => {
+    const source = [
+      'x-base: &base',
+      '  sencho.service.url: https://old.example.com',
+      'services:',
+      '  web:',
+      '    image: nginx',
+      '    labels:',
+      '      <<: *base',
+      '  api:',
+      '    image: redis',
+      '',
+    ].join('\n');
+    const cleared = patchServiceUrlLabel(source, 'web', null);
+    expect(cleared.ok).toBe(true);
+    if (!cleared.ok) return;
+    expect(cleared.yaml).toBe([
+      'x-base: &base',
+      '  sencho.service.url: https://old.example.com',
+      'services:',
+      '  web:',
+      '    image: nginx',
+      '    labels:',
+      '  api:',
+      '    image: redis',
+      '',
+    ].join('\n'));
+    const merged = parse(cleared.yaml, { merge: true }) as { services: { web: { labels?: unknown } } };
+    expect(merged.services.web.labels ?? null).toBeNull();
+  });
+
+  it('audit F1: clears a direct URL beside a merge that never set one', () => {
+    const source = [
+      'x-base: &base',
+      '  keep: yes',
+      'services:',
+      '  web:',
+      '    labels:',
+      '      <<: *base',
+      '      sencho.service.url: https://web.example.com',
+      '',
+    ].join('\n');
+    const cleared = patchServiceUrlLabel(source, 'web', null);
+    expect(cleared.ok).toBe(true);
+    if (!cleared.ok) return;
+    expect(cleared.yaml).toBe([
+      'x-base: &base',
+      '  keep: yes',
+      'services:',
+      '  web:',
+      '    labels:',
+      '      keep: yes',
+      '',
+    ].join('\n'));
   });
 
   it('keeps a nested anchor that another service still uses', () => {

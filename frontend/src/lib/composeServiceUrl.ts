@@ -578,6 +578,180 @@ function insertLabelsBlock(source: string, service: unknown, copy: LabelsCopy): 
   return { start: lineStart, end: lineStart, text: `${block}${nl}` };
 }
 
+/** One label a `<<` merge supplies, with the map style its text is copied from. */
+interface MergedLabel {
+  pair: unknown;
+  /** True when the pair is written in a flow map, where whole-line source text is not available. */
+  flowSource: boolean;
+}
+
+/** True when a node carries a tag, so its token cannot be copied without the property. */
+function taggedNode(node: unknown): boolean {
+  return !!node && typeof node === 'object' && 'tag' in node && !!(node as { tag?: unknown }).tag;
+}
+
+/** Label key identity as Compose reads it, so quoted and plain spellings of one key match. */
+function labelKeyName(node: unknown): string {
+  if (!isScalar(node)) throw new UnsupportedLayout('A label key is not a scalar');
+  const value = node.value;
+  return value == null ? '' : String(value);
+}
+
+function resolveAlias(doc: unknown, node: unknown): unknown {
+  return (node as { resolve: (doc: unknown) => unknown }).resolve(doc);
+}
+
+/** The maps a merge key supplies, refused unless the key is an alias or a list of aliases. */
+function mergeSourceMaps(doc: unknown, value: unknown): YAMLMap[] {
+  const resolved = isAlias(value) ? resolveAlias(doc, value) : value;
+  const items = isSeq(resolved) ? resolved.items : [value];
+  return items.map(item => {
+    // An inline source is removed together with the merge key, so its own text
+    // (and any comment in it) could not be kept.
+    if (!isAlias(item)) throw new UnsupportedLayout('A merge source is written inline');
+    const map = resolveAlias(doc, item);
+    if (!isMap(map)) throw new UnsupportedLayout('A merge source is not a map');
+    return map;
+  });
+}
+
+/**
+ * Every label a `<<` merge supplies, in the order YAML resolves them: a map's own
+ * keys first, then its own merges, earlier entries of a merge list first. The first
+ * occurrence of a key wins. Keys named in `skip` (the direct keys and the URL key)
+ * are never copied. A value whose text cannot be copied faithfully is refused.
+ */
+function collectMergedLabels(
+  source: string,
+  doc: unknown,
+  value: unknown,
+  skip: Set<string>,
+  seen: Set<unknown>,
+  out: MergedLabel[],
+): void {
+  for (const map of mergeSourceMaps(doc, value)) {
+    if (seen.has(map)) continue;
+    seen.add(map);
+    const flowSource = isFlow(source, map);
+    for (const pair of map.items) {
+      const name = labelKeyName(pair.key);
+      if (name === '<<' || skip.has(name)) continue;
+      if (anchorName(pair.key) || anchorName(pair.value) || isAlias(pair.value)
+        || taggedNode(pair.key) || taggedNode(pair.value)) {
+        throw new UnsupportedLayout('A merged label carries an anchor, alias, or tag');
+      }
+      skip.add(name);
+      out.push({ pair, flowSource });
+    }
+    for (const pair of map.items) {
+      if (labelKeyName(pair.key) === '<<') collectMergedLabels(source, doc, pair.value, skip, seen, out);
+    }
+  }
+}
+
+/** `key: value` from a pair's exact scalar tokens, refused when it cannot fit on one line. */
+function flowPairText(source: string, pair: unknown): string {
+  if (!isPair(pair)) throw new UnsupportedLayout('A merged label is not a pair');
+  const key = nodeRange(pair.key);
+  const value = nodeRange(pair.value);
+  if (!key || !value) throw new UnsupportedLayout('missing compose range');
+  const keyText = source.slice(key[0], key[1]);
+  const valueText = source.slice(value[0], value[1]);
+  if (keyText.includes('\n') || valueText.includes('\n')) {
+    throw new UnsupportedLayout('A merged label does not fit on one line');
+  }
+  return valueText.length > 0 ? `${keyText}: ${valueText}` : `${keyText}:`;
+}
+
+/** The pair's own source lines, including a trailing comment on its last line. */
+function blockPairText(source: string, pair: unknown): string {
+  const [start, valueEnd] = itemSpan(source, pair);
+  const lineStart = source.lastIndexOf('\n', Math.max(0, start - 1)) + 1;
+  if (source.slice(lineStart, start).trim() !== '') throw new UnsupportedLayout('A merged label is not on its own line');
+  return source.slice(lineStart, lineEndAt(source, valueEnd));
+}
+
+/**
+ * One flow-label entry, refused when the copied text would drop a comment that
+ * sits on the pair's own line in the merge source.
+ */
+function mergedFlowEntry(source: string, label: MergedLabel): string {
+  if (!label.flowSource) {
+    const span = itemSpan(source, label.pair);
+    if (source.slice(span[1], lineEndAt(source, span[1])).includes('#')) {
+      throw new UnsupportedLayout('A merged label carries a comment');
+    }
+  }
+  return flowPairText(source, label.pair);
+}
+
+/**
+ * The merge key of a label map, its direct URL pairs, and the direct keys a
+ * merged clear must not copy. Refused when the map has more than one merge key.
+ */
+function mergedClearParts(labels: YAMLMap): {
+  mergeItem: YAMLMap['items'][number];
+  urlPairs: YAMLMap['items'][number][];
+  skip: Set<string>;
+} {
+  type LabelPair = YAMLMap['items'][number];
+  const urlPairs: LabelPair[] = [];
+  let mergeItem: LabelPair | null = null;
+  const skip = new Set<string>([SERVICE_URL_LABEL]);
+  for (const pair of labels.items) {
+    const name = labelKeyName(pair.key);
+    if (name === '<<') {
+      if (mergeItem !== null) throw new UnsupportedLayout('More than one merge key on the labels');
+      mergeItem = pair;
+    } else if (name === SERVICE_URL_LABEL) {
+      urlPairs.push(pair);
+    } else {
+      skip.add(name);
+    }
+  }
+  if (mergeItem === null) throw new UnsupportedLayout('missing merge key');
+  return { mergeItem, urlPairs, skip };
+}
+
+/**
+ * A clear inside a label map that also merges another map: the merge key is
+ * replaced by the inherited entries, copied from their own source text, and the
+ * direct URL label is removed. Direct entries, comments and tokens stay exactly
+ * as written. A layout whose text cannot be copied faithfully is refused.
+ */
+function materializeMergedClear(source: string, doc: unknown, labels: YAMLMap): Splice[] {
+  const { mergeItem, urlPairs, skip } = mergedClearParts(labels);
+  const inherited: MergedLabel[] = [];
+  collectMergedLabels(source, doc, mergeItem.value, skip, new Set(), inherited);
+  const splices: Splice[] = [];
+  for (const pair of urlPairs) detachOutside(doc, source, pair.value, anchorName(pair.value), splices);
+  if (isFlow(source, labels)) {
+    const entries = inherited.map(label => mergedFlowEntry(source, label));
+    splices.push(...editFlow(source, labels, new Set([mergeItem, ...urlPairs]), entries.length > 0 ? entries.join(', ') : null));
+    return splices;
+  }
+  const mergeEnd = itemSpan(source, mergeItem)[1];
+  // Replacing the merge key line cannot keep a comment that sits on it, so refuse
+  // instead of dropping that comment.
+  if (source.slice(mergeEnd, lineEndAt(source, mergeEnd)).includes('#')) {
+    throw new UnsupportedLayout('A comment sits on the merge key line');
+  }
+  const nl = fileNewline(source);
+  for (const pair of urlPairs) splices.push(deleteSpan(source, pair.key, pair.value));
+  const span = deleteSpan(source, mergeItem.key, mergeItem.value);
+  if (inherited.length === 0) {
+    splices.push(span);
+    return splices;
+  }
+  const indent = collectionIndent(source, labels);
+  const text = inherited
+    .map(label => (label.flowSource ? flowPairText(source, label.pair) : blockPairText(source, label.pair)))
+    .map(entry => reindent(source, entry, indent))
+    .join(nl);
+  splices.push({ start: span.start, end: span.end, text: source[span.end - 1] === '\n' ? `${text}${nl}` : text });
+  return splices;
+}
+
 function editServiceLabels(source: string, doc: unknown, service: YAMLMap, serviceName: string, url: string | null): Splice[] {
   const flowService = isFlow(source, service);
   const labelPair = service.items.find(item => labelText(item.key) === 'labels');
@@ -600,8 +774,7 @@ function editServiceLabels(source: string, doc: unknown, service: YAMLMap, servi
     return splices;
   }
   if (isMap(labels) && mapHasMerge(labels) && url == null) {
-    const next = copyLabels(source, serviceName, null);
-    if (next != null) splices.push(replaceNode(source, labels, next, isFlow(source, labels)));
+    splices.push(...materializeMergedClear(source, doc, labels));
     return splices;
   }
   if (isMap(labels)) splices.push(...editMap(source, doc, labels, url));
