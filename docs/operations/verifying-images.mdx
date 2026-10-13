@@ -46,15 +46,17 @@ cosign tree saelix/sencho:<tag>
 
 ## Verify SLSA provenance
 
-BuildKit produces an SLSA v1 provenance attestation during every multi-arch build. Retrieve and verify it:
+Every multi-arch release build attaches an SLSA v1 provenance attestation to each published platform manifest. It is stored in the registry as an in-toto attestation rather than a cosign attestation, so read it with `docker buildx imagetools inspect` instead of `cosign verify-attestation`:
 
 ```bash
-cosign verify-attestation \
-  --type slsaprovenance \
-  --certificate-identity-regexp "https://github.com/Studio-Saelix/sencho/.*" \
-  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
-  saelix/sencho:<tag> | jq -r '.payload' | base64 -d | jq
+docker buildx imagetools inspect saelix/sencho:<tag> --format '{{ json .Provenance }}' | jq
 ```
+
+The result is keyed by platform (`linux/amd64` and `linux/arm64`), and each entry holds one SLSA statement with its `buildDefinition` and `runDetails`. The same command without a format lists the attestation manifests next to the platform manifest digest each one is attached to.
+
+<Note>
+This needs Docker CLI with the `buildx` plugin. The CycloneDX, SPDX and VEX attestations below are the cosign-signed ones.
+</Note>
 
 ## Retrieve the CycloneDX SBOM
 
