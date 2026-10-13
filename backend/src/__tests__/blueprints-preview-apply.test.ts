@@ -3,6 +3,7 @@
  */
 import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from 'vitest';
 import request from 'supertest';
+import axios from 'axios';
 import fs from 'fs';
 import path from 'path';
 import { setupTestDb, cleanupTestDb, loginAsTestAdmin } from './helpers/setupTestDb';
@@ -32,6 +33,42 @@ function validBlueprintBody(nodeId: number) {
         selector: { type: 'nodes', ids: [nodeId] },
         drift_mode: 'observe',
     };
+}
+
+/**
+ * A remote node standing in for a leaf, with the proxy target and the leaf's
+ * two HTTP answers stubbed. The preview's create blocker reaches a remote node
+ * through the proxy target, so a test that leaves it unstubbed makes the probe
+ * throw and the catch paint a blocker over the result: it would pass whatever
+ * the projection said. `collides` is whether the leaf lists the stack.
+ *
+ * Both URLs are stubbed separately because a mock answering every GET the same
+ * way cannot show which call was made.
+ */
+async function seedRemoteLeaf(collides: boolean): Promise<{ id: number; stackName: string }> {
+    counter += 1;
+    const db = DatabaseService.getInstance().getDb();
+    const id = db.prepare(
+        `INSERT INTO nodes (name, type, mode, compose_dir, is_default, status, created_at)
+         VALUES (?, 'remote', 'proxy', '/tmp/compose', 0, 'online', ?)`,
+    ).run(`bp-preview-remote-${counter}`, Date.now()).lastInsertRowid as number;
+    const stackName = 'bp-preview-collide';
+
+    const { NodeRegistry } = await import('../services/NodeRegistry');
+    const registry = NodeRegistry.getInstance();
+    vi.spyOn(registry, 'getProxyTarget').mockReturnValue({
+        nodeId: id,
+        apiUrl: 'https://leaf.example.test:1852',
+        apiToken: 'test-token',
+        trustedLoopback: false,
+    } as unknown as ReturnType<typeof registry.getProxyTarget>);
+    const listUrl = 'https://leaf.example.test:1852/api/stacks';
+    vi.spyOn(axios, 'get').mockImplementation((url: string) =>
+        String(url) === listUrl
+            ? Promise.resolve({ status: 200, data: collides ? [stackName] : [] })
+            : Promise.resolve({ status: 404, data: { error: 'File not found', code: 'NOT_FOUND' } }));
+
+    return { id, stackName };
 }
 
 beforeAll(async () => {
@@ -511,6 +548,49 @@ describe('POST /api/blueprints/:id/apply confirm binding', () => {
         // Name-conflict detection must not mutate unmanaged alternate compose files.
         expect(fs.readFileSync(path.join(stackDir, 'docker-compose.yml'), 'utf-8'))
             .toBe('services:\n  app:\n    image: nginx\n');
+    });
+
+    it('marks create as blocked when an unmanaged same-name stack exists on a remote node', async () => {
+        // The preview's create blocker asks one question per node, and on a
+        // remote node it is answered by the leaf's stack list. That list could
+        // only ever answer "no such stack", so a remote collision was never
+        // flagged: the row read as a plain create, the operator was asked to
+        // confirm an action the leaf would then refuse, and the refusal arrived
+        // a round trip later as a parked row instead of here.
+        const remote = await seedRemoteLeaf(true);
+
+        const created = await request(app)
+            .post('/api/blueprints')
+            .set('Cookie', adminCookie)
+            .send({ ...validBlueprintBody(remote.id), name: remote.stackName });
+        expect(created.status).toBe(201);
+
+        const preview = await request(app)
+            .get(`/api/blueprints/${created.body.id}/preview`)
+            .set('Cookie', adminCookie);
+        expect(preview.status).toBe(200);
+        const change = preview.body.changes.find((c: { nodeId: number }) => c.nodeId === remote.id);
+        expect(change.action).toBe('blocked_name_conflict');
+        expect(change.severity).toBe('blocker');
+        expect(preview.body.summary.blocker).toBeGreaterThan(0);
+    });
+
+    it('leaves a remote create as a plain create when the leaf lists no such stack', async () => {
+        const remote = await seedRemoteLeaf(false);
+
+        const created = await request(app)
+            .post('/api/blueprints')
+            .set('Cookie', adminCookie)
+            .send({ ...validBlueprintBody(remote.id), name: remote.stackName });
+        expect(created.status).toBe(201);
+
+        const preview = await request(app)
+            .get(`/api/blueprints/${created.body.id}/preview`)
+            .set('Cookie', adminCookie);
+        expect(preview.status).toBe(200);
+        const change = preview.body.changes.find((c: { nodeId: number }) => c.nodeId === remote.id);
+        expect(change.action).toBe('create');
+        expect(preview.body.summary.blocker).toBe(0);
     });
 
     it('hasNameConflict is false for a matching marker and true for a foreign marker', async () => {
