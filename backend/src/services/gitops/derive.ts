@@ -146,6 +146,7 @@ export function deriveGitOpsRevision(
     applicationId: app.id,
     lifecycleStatus: app.lifecycle_status,
     stackName: app.stack_name,
+    configuredSourceStackName: app.configured_source_stack_name ?? app.stack_name,
     blueprintId: app.blueprint_id,
     rolloutGenerationId: app.rollout_generation_id,
     approvals: {
@@ -2614,8 +2615,10 @@ function deriveActions(
   if (source.status === 'applying' || source.status === 'checking_fetching') return ['none'];
   if (source.status === 'recovery_required' || source.status === 'recovery_failed') return ['none'];
   const actions = new Set<GitOpsAvailableAction>();
-  // Fetch is offered only to live Direct applications: Blueprint Git-source
-  // integration ships later, until then no Blueprint mode advertises fetch.
+  // `fetch` stays Direct-only. It opens the stack change plan. A Git-managed
+  // Blueprint pulls through POST .../source/fetch, which stages a candidate
+  // and, for an automatic policy, may accept and dispatch in the same call.
+  // Drift keys off this action, so a Blueprint must not advertise it.
   if (
     app.target_mode === 'direct'
     && (

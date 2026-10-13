@@ -113,6 +113,7 @@ function liveRevision(overrides: Partial<GitOpsRevisionLive> = {}): GitOpsRevisi
         applicationId: 'app-1',
         lifecycleStatus: 'active',
         stackName: null,
+        configuredSourceStackName: 'bookstack',
         blueprintId: 7,
         rolloutGenerationId: 'rollout-1',
         approvals: noApprovals,

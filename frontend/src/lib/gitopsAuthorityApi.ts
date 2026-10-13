@@ -62,6 +62,31 @@ export interface GitOpsSourceAcceptResult {
   note: string | null;
 }
 
+/** The fetch outcome. An automatic policy may already have accepted and dispatched inside this request. */
+export interface GitOpsSourceFetchResult {
+  outcome: string;
+  reason: string;
+  nextAction: string;
+  commitSha: string | null;
+  candidateGenerationId: string | null;
+}
+
+/** Pull the next commit for a Git-managed Blueprint. The body is the fetch outcome. An automatic policy may accept and dispatch before this returns. */
+export async function fetchGitOpsSource(applicationId: string): Promise<GitOpsSourceFetchResult> {
+  const payload = await postAuthorityAction(
+    `/gitops/applications/${encodeURIComponent(applicationId)}/source/fetch`,
+    {},
+    'Failed to pull the source',
+  );
+  return {
+    outcome: typeof payload.outcome === 'string' ? payload.outcome : 'unknown',
+    reason: typeof payload.reason === 'string' ? payload.reason : '',
+    nextAction: typeof payload.nextAction === 'string' ? payload.nextAction : 'none',
+    commitSha: typeof payload.commitSha === 'string' ? payload.commitSha : null,
+    candidateGenerationId: typeof payload.candidateGenerationId === 'string' ? payload.candidateGenerationId : null,
+  };
+}
+
 /** Accept the waiting candidate generation as source content. */
 export async function acceptGitOpsSource(
   applicationId: string,

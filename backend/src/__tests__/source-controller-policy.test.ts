@@ -19,6 +19,10 @@ import { setupTestDb, cleanupTestDb } from './helpers/setupTestDb';
 import { directApplicationFixture } from './helpers/gitopsFixtures';
 import { GitOpsStore } from '../services/gitops/store';
 import { GitOpsTransitions } from '../services/gitops/transitions';
+import { GitOpsBindingService } from '../services/gitops/binding';
+import { commitBlueprintCreate } from '../services/gitops/blueprintProducers';
+import * as gitManagedMaterialization from '../services/gitops/gitManagedMaterialization';
+import * as gitManagedHandoff from '../services/gitops/gitManagedHandoff';
 import { stackManagedRoot } from '../services/gitops/directApplication';
 import { candidateContentFingerprint } from '../services/gitops/fingerprint';
 import { GitSourceService } from '../services/GitSourceService';
@@ -763,6 +767,50 @@ describe('SourceController automatic acceptance', () => {
         // policy verdict it does not have.
         expect(getApp('app-ev-held').accepted_generation_id).toBeNull();
         expect(GitOpsStore.getInstance().getGeneration('gen-ev-held')?.security_policy_evidence_json).toBeNull();
+    });
+
+    it('accepts an operator fetch on an automatic Git-managed Blueprint through the stored policy', async () => {
+        const stackName = 'fetch-auto-web';
+        stageCandidate('app-fetch-auto', stackName, 'gen-fetch-auto', 'automatic');
+        const blueprint = commitBlueprintCreate({
+            name: 'bp-fetch-auto',
+            description: null,
+            compose_content: 'services:\n  web:\n    image: nginx:1.27\n',
+            selector: { type: 'nodes', ids: [1] },
+            drift_mode: 'suggest',
+            classification: 'stateless',
+            classification_reasons: [],
+            enabled: true,
+            created_by: 'tester',
+        }, () => [1]);
+        GitOpsBindingService.getInstance().convertInlineToGit({
+            blueprintId: blueprint.id,
+            applicationId: 'app-fetch-auto',
+            actor: 'tester',
+        });
+        evaluateCandidatePolicy.mockResolvedValue({ status: 'allowed' });
+        spyOnReconcile().mockResolvedValue({ outcome: 'candidate_already_fetched', reason: 'ok', nextAction: 'none' });
+        vi.spyOn(gitManagedMaterialization, 'prepareAcceptedGitManagedGeneration').mockResolvedValue({
+            materialized: true,
+            artifact: 'resolved',
+            note: null,
+        });
+        const handoff = vi.spyOn(gitManagedHandoff, 'dispatchPreparedGitManagedGeneration')
+            .mockResolvedValue({ status: 'dispatched', reason: null });
+
+        const fetched = await controller.requestFetch('app-fetch-auto', 'ada');
+
+        expect(fetched).toMatchObject({ status: 'settled' });
+        const row = getApp('app-fetch-auto');
+        expect(row.target_mode).toBe('blueprint');
+        expect(row.accepted_generation_id).toBe('gen-fetch-auto');
+        expect(GitOpsStore.getInstance().getApproval(row.source_acceptance_ref!)?.authority).toBe('configured_policy');
+        expect(handoff).toHaveBeenCalledWith(expect.objectContaining({
+            applicationId: 'app-fetch-auto',
+            generationId: 'gen-fetch-auto',
+            actor: 'system:source-controller',
+            trigger: 'manual',
+        }));
     });
 });
 

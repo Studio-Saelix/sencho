@@ -313,7 +313,7 @@ export class GitOpsBindingService {
       application: applicationPreview(app),
       blueprintPreview,
       markers: await this.classifyMarkers(blueprint, blueprintPreview),
-      rollbackLimitations: rollbackLimitationsFor(transition),
+      rollbackLimitations: bindingLimitations(transition, app?.source_policy ?? null),
     };
   }
 
@@ -387,6 +387,20 @@ function classifyMarker(
   if (markerRead.kind === 'missing') return action === 'create' ? 'unmanaged' : 'unproven';
   if (markerRead.marker.blueprintId === blueprintId) return 'managed';
   return 'conflicting';
+}
+
+const MANUAL_SOURCE_PULL =
+  'This source is manual. Polling and provider hooks do not fetch it. Pull source fetches the next commit, and Accept source records it.';
+
+function bindingLimitations(
+  transition: BindingPreview['transition'],
+  sourcePolicy: string | null,
+): string[] {
+  const limitations = rollbackLimitationsFor(transition);
+  if ((transition === 'adopt' || transition === 'convert') && sourcePolicy === 'manual') {
+    limitations.push(MANUAL_SOURCE_PULL);
+  }
+  return limitations;
 }
 
 function rollbackLimitationsFor(transition: BindingPreview['transition']): string[] {

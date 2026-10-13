@@ -30,7 +30,7 @@ Git Source opens as a right-side sheet from the stack editor toolbar. It is not 
 
 The toolbar carries **Pull now** when a source is linked and not suspended, **Detach** when a source is linked, and **Save** for a stack with no source yet, and **Update** for a linked source only while something differs from what is stored, so it never sits there doing nothing. Nested pull/apply and detach confirmations stay as separate dialogs on top of the sheet.
 
-When this Git source belongs to a Git-managed Blueprint, the sheet is read-only. **Save**, **Detach**, and **Pull now** are withheld here. Use **Detach Git** or **Retire to Direct** on that Blueprint to restore stack-owned editing. A live Direct source can **Adopt onto Blueprint**, which moves this source onto an Inline Blueprint with the same move semantics as Convert.
+When this Git source belongs to a Git-managed Blueprint, the sheet withholds **Save** and **Detach**. **Pull source** fetches the next commit into that Blueprint, and **Accept source** records it when you are allowed to accept. Use **Detach Git** or **Retire to Direct** on that Blueprint to restore stack-owned editing. A live Direct source can **Adopt onto Blueprint**, which moves this source onto an Inline Blueprint with the same move semantics as Convert.
 
 A linked source groups its sheet into tabs:
 
@@ -142,7 +142,7 @@ Auto-deploy implies Auto-write: you cannot deploy automatically without also wri
 
 You can always override on the spot: when you click **Apply** in the change plan, a **Deploy after apply** checkbox lets you deploy regardless of the configured mode.
 
-**Manual** is the absence of the cadence rather than a lighter form of review: the other three modes all fetch, and differ in who applies what they found. A manual source still responds when you ask for a pull from the sheet, so switching to it stops unattended movement without stranding you.
+**Manual** is the absence of the cadence rather than a lighter form of review: the other three modes all fetch, and differ in who applies what they found. A manual source still responds when you ask for a pull: **Pull now** on a stack-owned source, **Pull source** on a Git-managed Blueprint. Switching to manual stops unattended movement without stranding you. A manual source is not polled, and provider hooks do not fetch it.
 
 **Suspend** pauses one source temporarily. **Manual** removes it from the cadence until you change it back, and is the right choice for a repository Sencho should only ever read at your request.
 

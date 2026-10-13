@@ -54,6 +54,7 @@ import {
   GIT_MANAGED_ARTIFACT_UNRESOLVED_REASON,
 } from '../services/gitops/gitManagedHandoff';
 import { GitOpsTransitions, GitOpsTransitionError } from '../services/gitops/transitions';
+import { SourceController } from '../services/gitops/SourceController';
 import { targetRestoreInFlight } from '../services/gitops/recoveryClaim';
 import { newGitOpsId } from '../services/gitops/directApplication';
 import { HEALTH_ROLLOUT_POLICIES, isHealthRolloutPolicy } from '../services/gitops/healthPolicy';
@@ -891,6 +892,49 @@ function joinAcceptNotes(parts: Array<string | null>): string | null {
     });
   return sentences.length > 0 ? sentences.join(' ') : null;
 }
+
+/**
+ * Operator pull for a Git-managed Blueprint.
+ *
+ * Stages a candidate through the controller's fetch. A manual or review
+ * policy waits for source/accept. An automatic policy accepts on its own,
+ * inside the controller, the same way a poll does.
+ * The grant is exact stack:edit on the source stack: the person who could
+ * pull that stack before the Blueprint claimed it.
+ */
+gitopsApplicationsRouter.post('/:id/source/fetch', async (req: Request, res: Response): Promise<void> => {
+  const target = resolveAuthorityTarget(req, res);
+  if (!target) return;
+  const sourceStack = target.application.configured_source_stack_name ?? target.application.stack_name;
+  if (!sourceStack) {
+    res.status(409).json({
+      error: 'This Blueprint has no Git source to pull.',
+      code: 'no_source_identity',
+    });
+    return;
+  }
+  if (!requirePermission(req, res, 'stack:edit', 'stack', sourceStack)) return;
+  try {
+    const fetched = await SourceController.getInstance().requestFetch(
+      target.application.id,
+      actorFromRequest(req) ?? 'unknown',
+    );
+    if (fetched.status === 'refused') {
+      res.status(409).json({ error: fetched.error, code: fetched.code });
+      return;
+    }
+    res.json({
+      outcome: fetched.result.outcome,
+      reason: fetched.result.reason,
+      nextAction: fetched.result.nextAction,
+      commitSha: fetched.result.commitSha ?? null,
+      candidateGenerationId: fetched.candidateGenerationId,
+    });
+  } catch (error) {
+    console.error('[GitOps authority] Source fetch failed:', error);
+    res.status(500).json({ error: 'Failed to pull the source' });
+  }
+});
 
 /**
  * Record an operator source acceptance for the waiting candidate generation.

@@ -56,6 +56,9 @@ describe('GitOps binding previews', () => {
     expect(convertPreview.proposedOrigin).toBe('git');
     expect(convertPreview.application.repoUrl).toBe('https://github.com/example/preview-web.git');
     expect(convertPreview.rollbackLimitations.length).toBeGreaterThan(0);
+    expect(convertPreview.rollbackLimitations).toContain(
+      'This source is manual. Polling and provider hooks do not fetch it. Pull source fetches the next commit, and Accept source records it.',
+    );
     assertNoSecrets(convertPreview);
 
     svc.convertInlineToGit({
@@ -74,6 +77,35 @@ describe('GitOps binding previews', () => {
     expect(detachPreview.proposedOrigin).toBe('inline');
     expect(detachPreview.application.stackName).toBeNull();
     assertNoSecrets(detachPreview);
+  });
+
+  it('does not warn about Pull source when the source policy is review', async () => {
+    const blueprint = commitBlueprintCreate({
+      name: 'bp-preview-review',
+      description: null,
+      compose_content: 'services:\n  web:\n    image: nginx:1.27\n',
+      selector: { type: 'nodes', ids: [1] },
+      drift_mode: 'suggest',
+      classification: 'stateless',
+      classification_reasons: [],
+      enabled: true,
+      created_by: 'tester',
+    }, () => [1]);
+    const application = {
+      ...directApplicationFixture('app-preview-review', 'preview-review'),
+      configured_repo_url: 'https://github.com/example/preview-review.git',
+      source_policy: 'review' as const,
+    };
+    GitOpsTransitions.getInstance().activateDirect({
+      application,
+      nodeId: 1,
+      envelope: { operationId: 'op-preview-review', actor: 'tester', trigger: 'manual', at: Date.now() },
+    });
+    const preview = await GitOpsBindingService.getInstance().previewConvertInlineToGit({
+      blueprintId: blueprint.id,
+      applicationId: application.id,
+    });
+    expect(preview.rollbackLimitations.join(' ')).not.toContain('Pull source');
   });
 
   it('reads a marker it could not fetch as unproven, not as no marker at all', async () => {

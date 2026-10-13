@@ -14,7 +14,7 @@ import { buildSystemPolicyGateOptions } from '../../helpers/policyGate';
 import { newGitOpsId } from './directApplication';
 import { NodeRegistry } from '../NodeRegistry';
 import { extractImagesFromCompose } from '../ImageUpdateService';
-import type { ReconcileOutcome } from './outcomes';
+import type { ReconcileOutcome, ReconcileResult } from './outcomes';
 import type { ReconcileTrigger } from './triggers';
 import { redactSensitiveText, sanitizeForLog } from '../../utils/safeLog';
 
@@ -42,6 +42,54 @@ function recoveryWaitHolds(app: GitOpsApplicationRow): boolean {
         || app.failure_stage === 'recovery';
 }
 
+export type OperatorFetchRefusalCode =
+    | 'not_git_managed'
+    | 'no_source_identity'
+    | 'suspended'
+    | 'applying'
+    | 'fetch_in_flight'
+    | 'recovery';
+
+export type OperatorFetchResult =
+    | { status: 'refused'; code: OperatorFetchRefusalCode; error: string }
+    | { status: 'settled'; result: ReconcileResult; candidateGenerationId: string | null };
+
+function refuseFetch(code: OperatorFetchRefusalCode, error: string): OperatorFetchResult {
+    return { status: 'refused', code, error };
+}
+
+/**
+ * Row-level reasons an operator pull must not start. A missing application,
+ * a non-Blueprint row, and a Blueprint that is not active or creating all
+ * refuse the same way: this entry point does not fetch Direct sources,
+ * which keep their own pull route.
+ */
+function operatorFetchBlock(
+    app: GitOpsApplicationRow | undefined,
+    inFlight: boolean,
+): OperatorFetchResult | { app: GitOpsApplicationRow; stackName: string } {
+    if (!app || app.target_mode !== 'blueprint' || (app.lifecycle_status !== 'active' && app.lifecycle_status !== 'creating')) {
+        return refuseFetch('not_git_managed', 'Pull source applies to a Git-managed Blueprint.');
+    }
+    const stackName = app.configured_source_stack_name ?? app.stack_name;
+    if (!stackName) {
+        return refuseFetch('no_source_identity', 'This Blueprint has no Git source to pull.');
+    }
+    if (app.suspended_at) {
+        return refuseFetch('suspended', 'This source is suspended. Resume it before pulling.');
+    }
+    if (app.active_operation_stage === 'apply_started') {
+        return refuseFetch('applying', 'A fetch cannot start while a candidate is being applied.');
+    }
+    if (inFlight || app.active_operation_stage === 'fetch_started') {
+        return refuseFetch('fetch_in_flight', 'A fetch is already running for this source.');
+    }
+    if (recoveryWaitHolds(app)) {
+        return refuseFetch('recovery', 'A fetch cannot start while this source is recovering.');
+    }
+    return { app, stackName };
+}
+
 /**
  * Background driver for unattended GitOps reconciliation: polls sources on
  * their configured interval and re-evaluates applications whose retry_at
@@ -57,7 +105,9 @@ function recoveryWaitHolds(app: GitOpsApplicationRow): boolean {
  * shared dispatch boundary (GitSourceService.dispatchAcceptedGeneration),
  * which revalidates the live target under the stack lock before promoting.
  * Review-policy sources stage candidates for a human; manual
- * sources never join the unattended cadence.
+ * sources never join the unattended cadence. An operator pull of a
+ * Git-managed Blueprint goes through requestFetch, which uses this same
+ * settle path and still leaves a manual source off the cadence.
  *
  * Stage-aware retry lives in GitSourceService.retry(): an operator retry
  * at a source-stage failure re-issues a fetch, an accepted generation
@@ -340,6 +390,41 @@ export class SourceController {
         }
     }
 
+    /**
+     * Operator pull for a Git-managed Blueprint. Stages a candidate through
+     * the same reconcile fetch a poll uses, then settles with the same
+     * post-fetch rules. Manual sources stay off the cadence and are not
+     * accepted here. Automatic sources are accepted by the stored policy,
+     * the same as a poll. A fetch already in this process, or a row already
+     * in fetch_started, is refused so this caller does not run a second
+     * acceptance after reconcile joins.
+     */
+    public async requestFetch(applicationId: string, actor: string): Promise<OperatorFetchResult> {
+        const store = GitOpsStore.getInstance();
+        const blocked = operatorFetchBlock(store.getApplication(applicationId), this.inFlight.has(applicationId));
+        if ('status' in blocked) return blocked;
+        const { app, stackName } = blocked;
+        this.inFlight.add(app.id);
+        try {
+            const result = await GitSourceService.getInstance().reconcile({
+                intent: 'fetch',
+                applicationId: app.id,
+                stackName,
+                trigger: 'manual',
+                actor,
+            });
+            const fresh = store.getApplication(app.id);
+            if (fresh) await this.settleAfterReconcile(fresh, stackName, result, 'manual');
+            return {
+                status: 'settled',
+                result,
+                candidateGenerationId: store.getApplication(app.id)?.candidate_generation_id ?? null,
+            };
+        } finally {
+            this.releaseAndDrainWake(app.id);
+        }
+    }
+
     private async evaluate(app: GitOpsApplicationRow, triggerOverride?: ReconcileTrigger): Promise<void> {
         const stackName = app.stack_name ?? app.configured_source_stack_name;
         if (!stackName) {
@@ -376,23 +461,39 @@ export class SourceController {
             // applies to classified failures the row records as evidence.
             return;
         }
-        // Re-read the row: reconcile mutated it through its own transitions,
-        // and the scheduling/acceptance decisions below must act on what is
-        // durable now, not on the pre-tick snapshot.
         const fresh = GitOpsStore.getInstance().getApplication(app.id);
         if (!fresh) return;
+        await this.settleAfterReconcile(fresh, stackName, result, trigger);
+    }
+
+    /**
+     * What a finished fetch does to the cadence and to an automatic policy.
+     * Shared by the poll and by an operator pull so the two cannot disagree
+     * about which outcome re-arms, retries, or accepts. Manual sources are
+     * declined inside the cursor helpers: a pull must not enroll them.
+     */
+    private async settleAfterReconcile(
+        fresh: GitOpsApplicationRow,
+        stackName: string,
+        result: ReconcileResult,
+        trigger: ReconcileTrigger,
+    ): Promise<void> {
         if (result.outcome === 'failed_previous_intact' || result.outcome === 'retry_scheduled') {
             this.maybeScheduleRetry(fresh);
-        } else if (SUCCESS_SHAPED_OUTCOMES.has(result.outcome)) {
+            return;
+        }
+        if (SUCCESS_SHAPED_OUTCOMES.has(result.outcome)) {
             this.maybeScheduleNextPoll(fresh);
             // Automatic acceptance only runs for a success-shaped outcome. A
             // conflict-blocked candidate settles into 'blocked', so it never
             // reaches acceptance from here; the boundary itself additionally
-            // refuses a durable blocked candidate below
+            // refuses a durable blocked candidate
             // (requireAcceptableCandidate guards against an outcome that
             // misreports the row's state).
             await this.maybeAcceptAutomaticCandidate(fresh, stackName, trigger);
-        } else if (result.outcome === 'recovery_required' && recoveryWaitHolds(fresh)) {
+            return;
+        }
+        if (result.outcome === 'recovery_required' && recoveryWaitHolds(fresh)) {
             // A recovery wait is not terminal: the hold clears through success
             // evidence (an acknowledgement or a bind) that never touches the
             // source. The fetch that just ran consumed the poll cursor, so
@@ -412,6 +513,7 @@ export class SourceController {
      * failure the operator must resolve.
      */
     private maybeScheduleRetry(app: GitOpsApplicationRow): void {
+        if (app.source_policy === 'manual') return;
         const code = app.failure_class;
         if (!code || app.failure_stage !== 'fetch') return;
         if (!isGitSourceErrorCode(code)) return;

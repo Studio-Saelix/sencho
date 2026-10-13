@@ -252,7 +252,7 @@ Click **Edit** on the detail sheet. On an Inline Blueprint, editing the compose 
 
 **Convert to Git** moves an existing live Git source onto this Blueprint. Pick the source, review the preview, and confirm. The Blueprint becomes Git-managed: Git is the content authority, and the previous YAML is stored as a frozen detach snapshot only. Place never runs from that snapshot. When an accepted generation is ready, Sencho authorizes a rollout generation and places the materialized project from that generation onto the approved targets. Credentials stay with the Git source. Conversion also returns placement approval to pending.
 
-The Git Source sheet for that stack becomes read-only until you **Detach Git** or **Retire to Direct**. Save, Detach, and Pull now are blocked there.
+The Git Source sheet for that stack withholds **Save** and **Detach**. **Pull source** on that sheet, and on the Blueprint, fetches the next commit. **Accept source** records it. **Detach Git** or **Retire to Direct** restores stack-owned editing.
 
 One repository backs at most one Git-managed Blueprint. Sencho matches repositories across the forms a Git URL can take, so the HTTPS URL and the SSH URL for the same clone count as one repository, whatever the port, with or without a `.git` suffix, and whatever the host casing. Converting a second Git source that points at a repository already claimed by a Git-managed Blueprint is refused; pick a different source, or **Retire to Direct** or **Detach Git** on the Blueprint that holds the claim first.
 
@@ -266,7 +266,7 @@ A Git-managed Blueprint takes each authority step as its own action. The GitOps 
 
 ### What a new commit does
 
-A Git-managed Blueprint keeps tracking its source. When the source fetches a newer commit, that commit becomes a new candidate generation and the authority chain runs again for it:
+A Git-managed Blueprint keeps tracking its source. **Pull source** fetches the next commit for a manual source. Review and automatic sources also fetch on the poll cadence when polling is on. A manual source is not polled, and provider hooks do not fetch it. When a fetch finds a newer commit, that commit becomes a new candidate generation and the authority chain runs again for it:
 
 - **Accept source** takes the new generation. Accepting it materializes the generation and attempts to resolve its executable artifact identity; if resolution cannot complete, the reconciler retries it before the next authorization. Under **Authorizes without an operator** the system starts the rollout from the accepted generation, so accepting is the whole operator step.
 - **Placement stays approved.** A content change does not move the target set, so the recorded placement approval still applies. A selector or roster change is what requires a fresh review.

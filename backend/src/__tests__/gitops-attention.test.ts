@@ -124,6 +124,7 @@ function liveProjection(overrides?: {
     applicationId: 'app-1',
     lifecycleStatus: 'active',
     stackName: 'web',
+    configuredSourceStackName: 'web',
     blueprintId: null,
     rolloutGenerationId: null,
     approvals: {

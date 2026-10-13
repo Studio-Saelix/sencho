@@ -5,7 +5,11 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { facets, liveRevision, noApprovals, plainSource } from '@/__tests__/gitopsFixtures';
+
+vi.mock('@/context/NodeContext', () => ({
+  useNodes: () => ({ nodes: [{ id: 1, name: 'local', type: 'local', is_default: true }] }),
+}));
+import { facets, liveRevision, noApprovals, plainSource, sourceIdentity } from '@/__tests__/gitopsFixtures';
 import type { FutureRolloutAuthorizationBinding, GitOpsRevisionLive } from '@/types/gitops';
 import type { PermissionAction } from '@/context/AuthContext';
 
@@ -14,6 +18,7 @@ vi.mock('@/lib/gitopsAuthorityApi', async (importOriginal) => {
   return {
     ...actual,
     acceptGitOpsSource: vi.fn(),
+    fetchGitOpsSource: vi.fn(),
     authorizeGitOpsRollout: vi.fn(),
     setGitOpsRolloutAuthorizationPolicy: vi.fn(),
   };
@@ -29,7 +34,7 @@ vi.mock('@/components/ui/toast-store', () => ({
   toast: { error: vi.fn(), success: vi.fn(), warning: vi.fn(), info: vi.fn(), loading: vi.fn(), dismiss: vi.fn() },
 }));
 
-import { acceptGitOpsSource, authorizeGitOpsRollout, setGitOpsRolloutAuthorizationPolicy } from '@/lib/gitopsAuthorityApi';
+import { acceptGitOpsSource, authorizeGitOpsRollout, fetchGitOpsSource, setGitOpsRolloutAuthorizationPolicy } from '@/lib/gitopsAuthorityApi';
 import { toast } from '@/components/ui/toast-store';
 import GitOpsAuthorityActions from './GitOpsAuthorityActions';
 
@@ -130,7 +135,12 @@ function asInline(projection: GitOpsRevisionLive): GitOpsRevisionLive {
 
 function renderActions(
   projection: GitOpsRevisionLive,
-  can: (action: PermissionAction) => boolean = () => true,
+  can: (
+    action: PermissionAction,
+    resourceType?: string,
+    resourceId?: string,
+    nodeId?: number | null,
+  ) => boolean = () => true,
   onChanged: () => void = () => {},
   blueprintEnabled = true,
 ) {
@@ -234,7 +244,8 @@ describe('GitOpsAuthorityActions', () => {
 
   it('offers no rollout authorization without stack:deploy', () => {
     renderActions(rolloutPending(), action => action !== 'stack:deploy');
-    expect(screen.queryByTestId('gitops-authority-actions')).toBeNull();
+    expect(screen.queryByTestId('gitops-action-authorize-rollout')).toBeNull();
+    expect(screen.getByTestId('gitops-action-pull-source')).toBeInTheDocument();
   });
 
   it('offers no source acceptance without stack:create', () => {
@@ -308,6 +319,7 @@ describe('GitOpsAuthorityActions', () => {
     const asInline: GitOpsRevisionLive = { ...demoted, targetMode: 'inline_blueprint' };
     renderActions(asInline);
     expect(screen.queryByTestId('gitops-action-accept-source')).toBeNull();
+    expect(screen.queryByTestId('gitops-action-pull-source')).toBeNull();
     expect(screen.queryByTestId('gitops-action-authorize-rollout')).toBeNull();
   });
 
@@ -348,6 +360,52 @@ describe('GitOpsAuthorityActions', () => {
   it('keeps source acceptance available while the Blueprint is disabled', () => {
     renderActions(sourcePending(), () => true, () => {}, false);
     expect(screen.getByTestId('gitops-action-accept-source')).toBeEnabled();
+  });
+
+  it('offers Pull source on a Blueprint and hides it while the source is suspended', async () => {
+    const user = userEvent.setup();
+    const onChanged = vi.fn();
+    vi.mocked(fetchGitOpsSource).mockResolvedValue({
+      outcome: 'pending_review',
+      reason: 'A newer commit is waiting.',
+      nextAction: 'review',
+      commitSha: 'abc1234ffff',
+      candidateGenerationId: 'gen-2',
+    });
+    const view = renderActions(
+      blueprintRevision({
+        configuredSourceStackName: 'bookstack',
+        facets: facets({
+          source: plainSource('application_generation_accepted', { candidateGenerationId: null }),
+          placement: { status: 'blueprint_bound', completion: 'unknown' },
+          rollout: { status: 'rollout_not_executable', rolloutCandidateId: 'cand-1' },
+        }),
+      }),
+      (action, resourceType, resourceId, nodeId) =>
+        action === 'stack:edit' && resourceType === 'stack' && resourceId === 'bookstack' && nodeId === 1,
+      onChanged,
+    );
+    await user.click(screen.getByTestId('gitops-action-pull-source'));
+    await waitFor(() => expect(fetchGitOpsSource).toHaveBeenCalledWith('bp:5'));
+    expect(toast.success).toHaveBeenCalledWith('Pulled abc1234');
+    expect(onChanged).toHaveBeenCalled();
+    expect(screen.queryByTestId('gitops-action-accept-source')).toBeNull();
+    view.unmount();
+
+    renderActions(blueprintRevision({
+      configuredSourceStackName: 'bookstack',
+      facets: facets({
+        source: {
+          ...sourceIdentity({ candidateGenerationId: null }),
+          status: 'source_suspended',
+          suspendedAt: 1,
+          suspendedReason: null,
+        },
+        placement: { status: 'blueprint_bound', completion: 'unknown' },
+        rollout: { status: 'rollout_not_executable', rolloutCandidateId: 'cand-1' },
+      }),
+    }), (action) => action === 'stack:edit');
+    expect(screen.queryByTestId('gitops-action-pull-source')).toBeNull();
   });
 
   it('offers nothing for a Direct or Inline application', () => {

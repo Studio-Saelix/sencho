@@ -169,6 +169,7 @@ export function liveRevision(overrides: Partial<GitOpsRevisionLive> = {}): GitOp
     applicationId: 'app-1',
     lifecycleStatus: 'active',
     stackName: 'bookstack',
+    configuredSourceStackName: 'bookstack',
     blueprintId: null,
     rolloutGenerationId: null,
     approvals: noApprovals,

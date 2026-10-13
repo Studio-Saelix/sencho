@@ -1058,6 +1058,12 @@ export type GitOpsRevisionProjection =
       applicationId: string;
       lifecycleStatus: GitOpsLifecycleStatus;
       stackName: string | null;
+      /**
+       * The stack whose Git source this application pulls. Direct rows use
+       * their own stack name. A Git-managed Blueprint clears `stackName` and
+       * keeps the source here.
+       */
+      configuredSourceStackName: string | null;
       blueprintId: number | null;
       rolloutGenerationId: string | null;
       approvals: GitOpsApprovalRefs;

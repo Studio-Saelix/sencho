@@ -14,7 +14,7 @@ const nodeCtl = vi.hoisted(() => ({
   activeNode: null as { id: number; type?: string } | null,
   hasCapability: vi.fn(() => true),
   nodeMeta: new Map<number, { capabilities: string[] }>(),
-  nodes: [] as { id: number; type: 'local' | 'remote' }[],
+  nodes: [] as { id: number; type: 'local' | 'remote'; is_default?: boolean }[],
 }));
 const dfCtl = vi.hoisted(() => ({ params: null as null | { stackName: string; action: string; nodeId: number | null } }));
 
@@ -34,6 +34,17 @@ vi.mock('@/context/DeployFeedbackContext', () => ({
 }));
 vi.mock('@/context/NodeContext', () => ({
   useNodes: () => ({ activeNode: nodeCtl.activeNode, hasCapability: nodeCtl.hasCapability, nodeMeta: nodeCtl.nodeMeta, nodes: nodeCtl.nodes }),
+}));
+const authCtl = vi.hoisted(() => ({
+  can: vi.fn((
+    _action: string,
+    _resourceType?: string,
+    _resourceId?: string,
+    _nodeId?: number | null,
+  ) => false),
+}));
+vi.mock('@/context/AuthContext', () => ({
+  useAuth: () => ({ can: authCtl.can }),
 }));
 // Drive applyPull(commitSha, deploy=true) directly without standing up the real
 // diff UI; the panel passes applyPull as onApply.
@@ -187,6 +198,8 @@ beforeEach(() => {
   nodeCtl.hasCapability.mockReturnValue(true);
   nodeCtl.nodeMeta.clear();
   nodeCtl.nodes = [];
+  authCtl.can.mockReset();
+  authCtl.can.mockReturnValue(false);
   dfCtl.params = null;
   vi.mocked(toast.success).mockClear();
   vi.mocked(toast.warning).mockClear();
@@ -1206,6 +1219,48 @@ describe('GitSourcePanel Blueprint binding', () => {
     expect(screen.queryByRole('button', { name: /^review$/i })).not.toBeInTheDocument();
     expect(screen.queryByLabelText(/repository url/i)).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /adopt onto blueprint/i })).not.toBeInTheDocument();
+  });
+
+  it('pulls the Blueprint source and does not call the stack pull', async () => {
+    nodeCtl.nodes = [{ id: 1, type: 'local', is_default: true }];
+    authCtl.can.mockImplementation((action, resourceType, resourceId, nodeId) => {
+      void resourceType;
+      return (action === 'stack:edit' && resourceId === 'bookstack' && nodeId === 1)
+        || action === 'stack:create';
+    });
+    const revision = liveRevision({
+      targetMode: 'blueprint',
+      stackName: null,
+      applicationId: 'bp:9',
+      blueprintId: 9,
+      configuredSourceStackName: 'bookstack',
+      facets: facets({
+        source: plainSource('candidate_ready'),
+      }),
+    });
+    vi.mocked(apiFetch).mockImplementation(async (url: string) => {
+      if (url.includes('/source/fetch')) {
+        return jsonRes({
+          outcome: 'pending_review',
+          reason: 'A newer commit is waiting.',
+          nextAction: 'review',
+          commitSha: 'abc1234ffff',
+          candidateGenerationId: 'gen-2',
+        });
+      }
+      return jsonRes(linkedWith(revision));
+    });
+    render(panel());
+    await sheetLoaded();
+    openTab('Source');
+    expect(await screen.findByTestId('gitops-action-pull-source')).toBeInTheDocument();
+    expect(screen.getByTestId('gitops-action-accept-source')).toBeInTheDocument();
+    fireEvent.click(screen.getByTestId('gitops-action-pull-source'));
+    await waitFor(() => {
+      const urls = vi.mocked(apiFetch).mock.calls.map((call) => String(call[0]));
+      expect(urls.some((url) => url.includes('/source/fetch'))).toBe(true);
+      expect(urls.some((url) => url.includes('/git-source/pull'))).toBe(false);
+    });
   });
 
   it('offers adopt on a live Direct source', async () => {

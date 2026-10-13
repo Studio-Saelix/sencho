@@ -540,6 +540,8 @@ export interface GitOpsRevisionLive {
   applicationId: string;
   lifecycleStatus: GitOpsLifecycleStatus;
   stackName: string | null;
+  /** The stack whose Git source this application pulls. Direct rows copy their stack name here. A Git-managed Blueprint clears stackName and keeps the source stack here. Null when it has none. */
+  configuredSourceStackName: string | null;
   blueprintId: number | null;
   rolloutGenerationId: string | null;
   approvals: GitOpsApprovalRefs;
