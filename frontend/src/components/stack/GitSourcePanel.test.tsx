@@ -36,12 +36,12 @@ vi.mock('@/context/NodeContext', () => ({
   useNodes: () => ({ activeNode: nodeCtl.activeNode, hasCapability: nodeCtl.hasCapability, nodeMeta: nodeCtl.nodeMeta, nodes: nodeCtl.nodes }),
 }));
 const authCtl = vi.hoisted(() => ({
-  can: vi.fn((
-    _action: string,
-    _resourceType?: string,
-    _resourceId?: string,
-    _nodeId?: number | null,
-  ) => false),
+  can: vi.fn<(
+    action: string,
+    resourceType?: string,
+    resourceId?: string,
+    nodeId?: number | null,
+  ) => boolean>(() => false),
 }));
 vi.mock('@/context/AuthContext', () => ({
   useAuth: () => ({ can: authCtl.can }),
