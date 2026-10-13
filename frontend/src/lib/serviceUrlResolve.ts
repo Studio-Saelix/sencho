@@ -2,9 +2,10 @@ import { buildServiceUrl, type ServiceUrlOptions } from './serviceUrl';
 import { serviceUrlFromLabelValue } from './serviceUrlLabel';
 
 export interface AnatomyPortRef {
+  /** Published host port, `''` when the saved file omits one, or `'0'` for explicit automatic allocation. */
   host: string;
   proto: string;
-  /** Container port. Empty host plus this target is a dynamically published port. */
+  /** Container port. An auto host plus this target is a dynamically published port. */
   container?: string;
 }
 
@@ -127,8 +128,9 @@ export function tcpOwners(ports: Record<string, AnatomyPortRef[]>, publicPort: n
 
 /**
  * Services with a target-only TCP binding. Docker assigns the host port later,
- * so the saved file has no host number to match. When privatePort is omitted,
- * every such binding counts.
+ * so the saved file has no host number to match; an explicit `published: 0`
+ * asks for the same automatic allocation. When privatePort is omitted, every
+ * such binding counts.
  */
 export function dynamicTcpOwners(
   ports: Record<string, AnatomyPortRef[]>,
@@ -137,7 +139,10 @@ export function dynamicTcpOwners(
   const owners: string[] = [];
   for (const [service, rows] of Object.entries(ports)) {
     const owns = rows.some(row => {
-      if (!isTcp(row) || row.host || !row.container) return false;
+      // An omitted published host and an explicit `published: 0` both ask
+      // Docker to assign the host port later.
+      const autoHost = row.host === '' || row.host === '0';
+      if (!isTcp(row) || !autoHost || !row.container) return false;
       return privatePort === undefined || portCovers(row.container, privatePort);
     });
     if (owns) owners.push(service);

@@ -169,6 +169,24 @@ describe('effective-anatomy route', () => {
     expect(res.body.serviceUrlClear).toEqual({ web: 'other' });
   });
 
+  it('audit F01: an interpolated list-label key in the override refuses the edit and the clear', async () => {
+    fs.writeFileSync(path.join(stackDir, 'compose.override.yaml'),
+      'services:\n  web:\n    labels:\n      - "${URL_LABEL}=https://later.example.com"\n');
+    stubRender(JSON.stringify({
+      services: {
+        web: { labels: { 'sencho.service.url': 'https://later.example.com' } },
+        api: { image: 'nginx:latest' },
+      },
+      networks: {},
+      volumes: {},
+    }));
+    const res = await request(app).get(`/api/stacks/${STACK}/effective-anatomy`).set('Authorization', authHeader);
+    expect(res.status).toBe(200);
+    // The service whose key the override could hide is refused; its sibling stays editable.
+    expect(res.body.serviceUrlEdit).toEqual({ web: 'unknown', api: 'root' });
+    expect(res.body.serviceUrlClear).toEqual({ web: 'unknown', api: 'root' });
+  });
+
   it('refuses editability when the override uses constructs whose labels cannot be traced', async () => {
     fs.writeFileSync(path.join(stackDir, 'compose.override.yaml'),
       'include:\n  - common.yaml\nservices:\n  web:\n    image: nginx\n');

@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { composeServiceNames, patchServiceUrlLabel } from './composeServiceUrl';
 import {
+  dynamicTcpOwners,
   lockedServiceUrlReasons,
   parseServiceUrlResponse,
   resolveOpenAppTarget,
@@ -47,6 +48,20 @@ describe('tcpOwners', () => {
       web: [{ host: '8080', proto: 'udp' }],
       api: [{ host: '8080', proto: 'tcp' }],
     }, 8080)).toEqual(['api']);
+  });
+});
+
+describe('dynamicTcpOwners', () => {
+  it('audit F02: counts a published zero as automatic allocation', () => {
+    // `ports: ["0:80"]` and `ports: [{ target: 80, published: 0 }]` both render
+    // as `published: "0"`; Docker assigns the host port at run time.
+    expect(dynamicTcpOwners({
+      web: [{ host: '0', container: '80', proto: 'tcp' }],
+      api: [{ host: '', container: '80', proto: 'tcp' }],
+      udp: [{ host: '0', container: '80', proto: 'udp' }],
+    }, undefined)).toEqual(['web', 'api']);
+    expect(dynamicTcpOwners({ web: [{ host: '0', container: '80', proto: 'tcp' }] }, 80)).toEqual(['web']);
+    expect(dynamicTcpOwners({ web: [{ host: '0', container: '80', proto: 'tcp' }] }, 81)).toEqual([]);
   });
 });
 
@@ -160,6 +175,42 @@ describe('resolvePublishedPortClick', () => {
       node: { type: 'remote', api_url: 'http://node.example.com:1852' },
     });
     expect(remote).toMatchObject({ kind: 'link', href: 'https://app.example.com' });
+  });
+
+  it('audit F02: a published zero opens the named service URL at its assigned port', () => {
+    // The rendered anatomy for `ports: ["0:80"]` keeps the Compose wire value
+    // `published: "0"`; Docker then assigns the host port (here 49152).
+    const entry = parseServiceUrlResponse(1, 'web', true, {
+      renderable: true,
+      services: ['web', 'api'],
+      serviceUrls: { web: 'https://app.example.com', api: 'https://api.example.com' },
+      serviceUrlEdit: { web: 'root', api: 'root' },
+      serviceUrlClear: { web: 'root', api: 'root' },
+      ports: {
+        web: [{ host: '0', container: '80', proto: 'tcp' }],
+        api: [{ host: '0', container: '90', proto: 'tcp' }],
+      },
+    });
+    expect(resolvePublishedPortClick({
+      entry,
+      serviceName: 'web',
+      publicPort: 49152,
+      privatePort: 80,
+      portLabel: '49152 → 80/tcp',
+      node: { type: 'local' },
+    })).toMatchObject({ kind: 'link', href: 'https://app.example.com', hostLabel: 'app.example.com' });
+  });
+
+  it('audit F02: keeps the generated link for a UDP published zero', () => {
+    const click = resolvePublishedPortClick({
+      entry: { ...ready, ports: { web: [{ host: '0', container: '80', proto: 'udp' }] } },
+      serviceName: 'web',
+      publicPort: 49152,
+      privatePort: 80,
+      portLabel: '49152 → 80/tcp',
+      node: { type: 'local' },
+    });
+    expect(click).toMatchObject({ kind: 'link', href: 'http://localhost:49152' });
   });
 
   it('does not use another service URL when a dynamic port was reassigned', () => {
@@ -289,6 +340,30 @@ describe('resolveOpenAppTarget', () => {
       publicPort: 32768,
       node: { type: 'remote', api_url: '' },
     })).toEqual({ url: 'https://app.example.com' });
+  });
+
+  it('audit F02: Open App resolves the sole published-zero owner at its assigned port', () => {
+    const entry: ServiceUrlEntry = {
+      ...ready,
+      ports: { web: [{ host: '0', container: '80', proto: 'tcp' }] },
+    };
+    expect(resolveOpenAppTarget({ entry, publicPort: 49152, node: { type: 'local' } }))
+      .toEqual({ url: 'https://app.example.com' });
+    expect(resolveOpenAppTarget({ entry, publicPort: 49152, node: { type: 'remote', api_url: '' } }))
+      .toEqual({ url: 'https://app.example.com' });
+    // Two services publishing an automatic port each with a URL stay ambiguous.
+    expect(resolveOpenAppTarget({
+      entry: {
+        ...ready,
+        serviceUrls: { web: 'https://web.example.com', api: 'https://api.example.com' },
+        ports: {
+          web: [{ host: '0', container: '80', proto: 'tcp' }],
+          api: [{ host: '0', container: '90', proto: 'tcp' }],
+        },
+      },
+      publicPort: 49152,
+      node: { type: 'local' },
+    })).toEqual({ error: 'More than one service publishes this port' });
   });
 
   it('does not open a labeled sibling when another service also has a dynamic port', () => {
@@ -1088,6 +1163,23 @@ describe('service URL editability metadata', () => {
     expect(serviceUrlEditBlockedMessage('unknown')).toBe('Sencho cannot verify which compose file sets this URL.');
     expect(serviceUrlEditBlockedMessage(undefined)).toBe('Sencho cannot verify which compose file sets this URL.');
     expect(serviceUrlEditBlockedMessage('root')).toBeNull();
+  });
+
+  it('audit F01: refuses the save and the clear the interpolated-key metadata marks unknown', () => {
+    const entry = parseServiceUrlResponse(1, 'web', true, {
+      renderable: true,
+      serviceUrls: { web: 'https://later.example.com' },
+      serviceUrlEdit: { web: 'unknown' },
+      serviceUrlClear: { web: 'unknown' },
+      ports: {},
+    });
+    // The save path reads this guard before it builds the write, so an
+    // unverifiable source is refused instead of PUT.
+    expect(serviceUrlSaveBlockedMessage(entry, 'web', 'https://new.example.com'))
+      .toBe('Sencho cannot verify which compose file sets this URL.');
+    expect(serviceUrlSaveBlockedMessage(entry, 'web', null))
+      .toBe('Sencho cannot verify which compose file or inherited service sets this URL, so it cannot be cleared here.');
+    expect(lockedServiceUrlReasons(entry).get('web')).toBe('unknown');
   });
 
   it('ignores unknown states and non-object payloads from an older or broken node', () => {

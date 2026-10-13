@@ -28,6 +28,37 @@ describe('serviceUrlFileFacts', () => {
     expect(serviceUrlFileFacts('services:\n  web:\n    image: nginx\n')?.sets.has('web')).toBe(false);
   });
 
+  it('audit F01: an interpolated list-label key is an unverifiable contribution', () => {
+    // Compose resolves the key at render time: `- "${URL_LABEL}=..."` sets the
+    // label when URL_LABEL names it, and the source alone cannot tell.
+    const braced = 'services:\n  web:\n    labels:\n      - "${URL_LABEL}=https://later.example.com"\n';
+    const bare = 'services:\n  web:\n    labels:\n      - "$URL_LABEL=https://later.example.com"\n';
+    expect(serviceUrlFileFacts(braced)?.unknown.has('web')).toBe(true);
+    expect(serviceUrlFileFacts(braced)?.sets.has('web')).toBe(false);
+    expect(serviceUrlFileFacts(bare)?.unknown.has('web')).toBe(true);
+    // The uncertainty stays with the service that carries the item.
+    const sibling = [
+      'services:',
+      '  web:',
+      '    labels:',
+      '      - "${URL_LABEL}=https://later.example.com"',
+      '  api:',
+      '    image: nginx',
+      '',
+    ].join('\n');
+    expect(serviceUrlFileFacts(sibling)?.unknown.has('web')).toBe(true);
+    expect(serviceUrlFileFacts(sibling)?.unknown.has('api')).toBe(false);
+    // A literal key with an interpolated value is still a known set: the key
+    // decides which label is written.
+    const literal = 'services:\n  web:\n    labels:\n      - sencho.service.url=${APP_URL}\n';
+    expect(serviceUrlFileFacts(literal)?.sets.has('web')).toBe(true);
+    expect(serviceUrlFileFacts(literal)?.unknown.has('web')).toBe(false);
+    // Compose's `$$` escape writes a literal `${URL_LABEL}` key, not this label.
+    const escaped = 'services:\n  web:\n    labels:\n      - "$${URL_LABEL}=https://later.example.com"\n';
+    expect(serviceUrlFileFacts(escaped)?.sets.has('web')).toBe(false);
+    expect(serviceUrlFileFacts(escaped)?.unknown.has('web')).toBe(false);
+  });
+
   it('resolves anchors and merge keys to a set key', () => {
     const source = [
       'x-labels: &labels',
@@ -161,6 +192,16 @@ describe('resolveServiceUrlEditState', () => {
     expect(state('services:\n  web:\n    extends:\n      file: common.yaml\n      service: base\n')).toEqual({ web: 'unknown' });
   });
 
+  it('audit F01: a later interpolated list key refuses the set instead of reporting root', () => {
+    expect(state('services:\n  web:\n    labels:\n      - "${URL_LABEL}=https://later.example.com"\n'))
+      .toEqual({ web: 'unknown' });
+    // A literal known key with an interpolated value still shadows like any set.
+    expect(state('services:\n  web:\n    labels:\n      - sencho.service.url=${APP_URL}\n'))
+      .toEqual({ web: 'other' });
+    expect(state('services:\n  web:\n    labels:\n      sencho.service.url: "${APP_URL}"\n'))
+      .toEqual({ web: 'other' });
+  });
+
   it('reports every service unknown when the open file is not part of the chain', () => {
     expect(resolveServiceUrlEditState({
       rootInChain: false,
@@ -211,6 +252,27 @@ describe('resolveServiceUrlClearState', () => {
   it('refuses a clear that a later compose file would keep winning', () => {
     expect(clear({ later: ['services:\n  web:\n    labels:\n      sencho.service.url: https://later.example.com\n'] }))
       .toEqual({ web: 'other' });
+  });
+
+  it('audit F01: an interpolated list key blocks the clear at either end of the chain', () => {
+    const braced = 'services:\n  web:\n    labels:\n      - "${URL_LABEL}=https://other.example.com"\n';
+    expect(clear({ earlier: [braced] })).toEqual({ web: 'unknown' });
+    expect(clear({ later: [braced] })).toEqual({ web: 'unknown' });
+    // The interpolated item survives the patch helper's literal removal, so a
+    // literal label beside it in the open file does not make the clear safe.
+    expect(clear({
+      rootContent: [
+        'services:',
+        '  web:',
+        '    labels:',
+        '      - sencho.service.url=https://root.example.com',
+        '      - "${URL_LABEL}=https://other.example.com"',
+        '',
+      ].join('\n'),
+    })).toEqual({ web: 'unknown' });
+    // A literal key with an interpolated value is removed as a whole item.
+    expect(clear({ rootContent: 'services:\n  web:\n    labels:\n      - sencho.service.url=${APP_URL}\n' }))
+      .toEqual({ web: 'root' });
   });
 
   it('audit F2: refuses a clear when the open service inherits through extends, include, or label_file', () => {

@@ -84,6 +84,20 @@ describe('parseEffectiveAnatomy', () => {
     ]);
   });
 
+  it('audit F02: keeps both published-zero syntaxes as an automatic host allocation', () => {
+    // `ports: ["0:80"]` and `ports: [{ target: 90, published: 0 }]` both render
+    // as `published: "0"`; Docker assigns the host port at run time, and the
+    // ownership resolution treats that host value as dynamic.
+    const anatomy = parseEffectiveAnatomy({
+      services: {
+        short: { ports: [{ mode: 'ingress', target: 80, published: '0', protocol: 'tcp' }] },
+        long: { ports: [{ mode: 'ingress', target: 90, published: 0, protocol: 'tcp' }] },
+      },
+    });
+    expect(anatomy.ports.short).toEqual([{ host: '0', container: '80', proto: 'tcp', published: true }]);
+    expect(anatomy.ports.long).toEqual([{ host: '0', container: '90', proto: 'tcp', published: true }]);
+  });
+
   it('collects network keys from services and the top level, deduped', () => {
     const rendered = {
       services: {

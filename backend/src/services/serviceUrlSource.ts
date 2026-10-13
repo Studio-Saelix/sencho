@@ -18,6 +18,11 @@
  * label merge cannot be reproduced this way (top-level `include`, `extends` on
  * the service, any non-standard YAML tag), or that cannot be read, could set any
  * service's label, so every service becomes `unknown` and the edit is refused.
+ * A list label whose key is interpolated (`- "${URL_LABEL}=https://app"`) is the
+ * same uncertainty for that service alone: Compose resolves the key against the
+ * render environment, which this module does not read, so the service is
+ * unverifiable rather than unset. A literal key with an interpolated value stays
+ * a known set.
  *
  * Clearing is not the mirror of setting: removing the open file's direct label
  * lets an earlier chain file, the open file's own top-level `include`, the
@@ -70,11 +75,40 @@ function labelsSetUrl(labels: unknown): boolean {
   if (Array.isArray(labels)) {
     const prefix = `${SERVICE_URL_LABEL}=`;
     // A bare `sencho.service.url` item sets the key to an empty value, exactly
-    // like `sencho.service.url=`, and shadows earlier files just the same.
+    // like `sencho.service.url=`, and shadows earlier files just the same. An
+    // interpolated key can never equal either literal; `labelsKeyInterpolated`
+    // records that uncertainty instead.
     return labels.some(item => typeof item === 'string' && (item === SERVICE_URL_LABEL || item.startsWith(prefix)));
   }
   const record = asRecord(labels);
   return record !== null && own(record, SERVICE_URL_LABEL) !== undefined;
+}
+
+/** True when the key part of a list label carries a Compose interpolation (any `$` but `$$`). */
+function labelKeyInterpolated(item: string): boolean {
+  const eq = item.indexOf('=');
+  const key = eq === -1 ? item : item.slice(0, eq);
+  for (let index = 0; index < key.length; index += 1) {
+    if (key[index] !== '$') continue;
+    // `$$` is Compose's literal dollar; anything else starts an interpolation.
+    if (key[index + 1] === '$') {
+      index += 1;
+      continue;
+    }
+    return true;
+  }
+  return false;
+}
+
+/**
+ * True when any list label's key is interpolated (`- "${URL_LABEL}=https://x"`),
+ * so this file may set `sencho.service.url` without naming it. Compose resolves
+ * the key against the render environment, which this module does not read, so
+ * the service's contribution is unverifiable rather than absent. A literal key
+ * with an interpolated value stays a known set: the key decides the label.
+ */
+function labelsKeyInterpolated(labels: unknown): boolean {
+  return Array.isArray(labels) && labels.some(item => typeof item === 'string' && labelKeyInterpolated(item));
 }
 
 /**
@@ -107,7 +141,9 @@ export function serviceUrlFileFacts(source: string): ServiceUrlFileFacts | null 
       facts.unknown.add(name);
       continue;
     }
-    if (labelsSetUrl(own(service, 'labels'))) facts.sets.add(name);
+    const labels = own(service, 'labels');
+    if (labelsSetUrl(labels)) facts.sets.add(name);
+    if (labelsKeyInterpolated(labels)) facts.unknown.add(name);
   }
   return facts;
 }
