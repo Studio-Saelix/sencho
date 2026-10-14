@@ -48,6 +48,12 @@ import {
   type RolloutRollbackTargetResult,
 } from '../services/gitops/rolloutRecovery';
 import { placementEffectCompatible } from '../services/gitops/store';
+import {
+  CONFIRMATION_STALE,
+  driftSentence,
+  parseSourceConfirmation,
+  sourceConfirmationDrift,
+} from '../services/gitops/sourceConfirmation';
 import { formatOperatorSentences, runBoundedGitManagedPostAccept } from '../services/gitops/boundedPostAccept';
 import { GitOpsTransitions, GitOpsTransitionError } from '../services/gitops/transitions';
 import { SourceController } from '../services/gitops/SourceController';
@@ -822,6 +828,11 @@ gitopsApplicationsRouter.get('/:id', async (req: Request, res: Response): Promis
  * finished one.
  * The grant is exact stack:edit on the source stack: the person who could
  * pull that stack before the Blueprint claimed it.
+ *
+ * An automatic source can record the commit from this one request, so it
+ * carries the confirmation naming the approved placement and the rollout
+ * consequence the operator read. A manual or review source only fetches, so
+ * it asks for nothing.
  */
 gitopsApplicationsRouter.post('/:id/source/fetch', async (req: Request, res: Response): Promise<void> => {
   const target = resolveAuthorityTarget(req, res);
@@ -835,10 +846,20 @@ gitopsApplicationsRouter.post('/:id/source/fetch', async (req: Request, res: Res
     return;
   }
   if (!requirePermission(req, res, 'stack:edit', 'stack', sourceStack)) return;
+  let confirmation = null;
+  if (target.application.source_policy === 'automatic') {
+    const parsed = parseSourceConfirmation((req.body ?? {})?.confirmation);
+    if (!parsed.ok) {
+      res.status(400).json({ error: parsed.error, code: 'CONFIRM_REQUIRED' });
+      return;
+    }
+    confirmation = parsed.confirmation;
+  }
   try {
     const fetched = await SourceController.getInstance().requestFetch(
       target.application.id,
       actorFromRequest(req) ?? 'unknown',
+      confirmation ?? undefined,
     );
     if (fetched.status === 'refused') {
       res.status(409).json({ error: fetched.error, code: fetched.code });
@@ -873,6 +894,12 @@ gitopsApplicationsRouter.post('/:id/source/fetch', async (req: Request, res: Res
  * the generation the caller reviewed; the transition refuses anything that is
  * no longer the current candidate, so a stale review cannot accept different
  * content than it named.
+ *
+ * It also echoes the placement approval and the rollout consequence the
+ * confirmation named, because the generation is only half of what this route
+ * decides: an acceptance under automatic rollout authorization can put that
+ * content on a node. Those are checked before the acceptance commits, and again
+ * in the handoff, where preparation has had time to move them.
  */
 gitopsApplicationsRouter.post('/:id/source/accept', async (req: Request, res: Response): Promise<void> => {
   if (!requirePermission(req, res, 'stack:create')) return;
@@ -881,6 +908,17 @@ gitopsApplicationsRouter.post('/:id/source/accept', async (req: Request, res: Re
   const generationId = typeof req.body?.generationId === 'string' ? req.body.generationId : '';
   if (generationId.length === 0) {
     res.status(400).json({ error: 'generationId is required', code: 'CONFIRM_REQUIRED' });
+    return;
+  }
+  const parsedConfirmation = parseSourceConfirmation((req.body ?? {}).confirmation);
+  if (!parsedConfirmation.ok) {
+    res.status(400).json({ error: parsedConfirmation.error, code: 'CONFIRM_REQUIRED' });
+    return;
+  }
+  const confirmation = parsedConfirmation.confirmation;
+  const drift = sourceConfirmationDrift(target.application, confirmation);
+  if (drift) {
+    res.status(409).json({ error: driftSentence(drift), code: CONFIRMATION_STALE });
     return;
   }
   const actor = actorFromRequest(req);
@@ -912,6 +950,7 @@ gitopsApplicationsRouter.post('/:id/source/accept', async (req: Request, res: Re
     generationId,
     actor,
     trigger: 'manual',
+    confirmation,
   });
   res.json({
     ok: true,

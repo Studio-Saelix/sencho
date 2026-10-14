@@ -5,6 +5,7 @@ import { GitSourceService } from '../GitSourceService';
 import { buildAcceptedGeneration } from './handoff';
 import { dispatchPreparedGitManagedGeneration } from './gitManagedHandoff';
 import { runBoundedGitManagedPostAccept } from './boundedPostAccept';
+import { driftSentence, sourceConfirmationDrift, type SourceConfirmation } from './sourceConfirmation';
 import { checkStatefulWithdrawal, holdForStatefulReview, readStagedGeneration } from './statefulGuard';
 import { prepareAcceptedGitManagedGeneration } from './gitManagedMaterialization';
 import { DatabaseService } from '../DatabaseService';
@@ -49,7 +50,8 @@ export type OperatorFetchRefusalCode =
     | 'suspended'
     | 'applying'
     | 'fetch_in_flight'
-    | 'recovery';
+    | 'recovery'
+    | 'confirmation_stale';
 
 /**
  * What settlement did after a fetch, so a caller can tell a staged commit
@@ -76,6 +78,19 @@ const NO_AUTHORITY: FetchAuthorityReport = { status: 'not_applicable' };
 /** Set when an operator pull still has preparation or dispatch running after it answers. */
 interface PostAcceptFollow {
     pending: Promise<void> | null;
+}
+
+/**
+ * What one operator pull carries past its own request.
+ *
+ * `follow` exists only for a pull, which holds its in-flight slot until the
+ * work behind the answer settles; the poll omits it and waits instead.
+ * `confirmation` exists only where an operator confirmed something, and the
+ * poll omits it because a cadence has no confirmation to bind.
+ */
+interface OperatorFollowUp {
+    follow: PostAcceptFollow;
+    confirmation: SourceConfirmation | null;
 }
 
 function refuseFetch(code: OperatorFetchRefusalCode, error: string): OperatorFetchResult {
@@ -439,17 +454,33 @@ export class SourceController {
      * current candidate is refused before reconcile runs. An interrupted
      * fetch stays eligible: the next fetch clears that interruption.
      *
+     * `confirmation` is what the operator confirmed about the placement and
+     * the rollout, and only an automatic source sends one, because only an
+     * automatic source can accept from this request. It is checked here so a
+     * confirmation that is already stale never costs a fetch, again after the
+     * reconcile, where it guards the acceptance, and once more in the handoff,
+     * where it guards the dispatch. The poll sends none: a cadence is
+     * configured, not confirmed.
+     *
      * After acceptance commits, preparation and dispatch are answered within
      * a short deadline. Work still running is reported as continuing, not as
      * a failed pull, and this application stays in flight until it finishes.
      */
-    public async requestFetch(applicationId: string, actor: string): Promise<OperatorFetchResult> {
+    public async requestFetch(
+        applicationId: string,
+        actor: string,
+        confirmation?: SourceConfirmation,
+    ): Promise<OperatorFetchResult> {
         const store = GitOpsStore.getInstance();
         const blocked = operatorFetchBlock(store.getApplication(applicationId), this.inFlight.has(applicationId));
         if ('status' in blocked) return blocked;
         const { app, stackName } = blocked;
+        if (confirmation) {
+            const drift = sourceConfirmationDrift(app, confirmation);
+            if (drift) return refuseFetch('confirmation_stale', driftSentence(drift));
+        }
         this.inFlight.add(app.id);
-        const follow: PostAcceptFollow = { pending: null };
+        const followUp: OperatorFollowUp = { follow: { pending: null }, confirmation: confirmation ?? null };
         try {
             const result = await GitSourceService.getInstance().reconcile({
                 intent: 'fetch',
@@ -460,7 +491,7 @@ export class SourceController {
             });
             const fresh = store.getApplication(app.id);
             const authority = fresh
-                ? await this.settleAfterReconcile(fresh, stackName, result, 'manual', follow)
+                ? await this.settleAfterReconcile(fresh, stackName, result, 'manual', followUp)
                 : NO_AUTHORITY;
             return {
                 status: 'settled',
@@ -469,8 +500,9 @@ export class SourceController {
                 authority,
             };
         } finally {
-            if (follow.pending) {
-                void follow.pending.finally(() => this.releaseAndDrainWake(app.id));
+            const pending = followUp.follow.pending;
+            if (pending) {
+                void pending.finally(() => this.releaseAndDrainWake(app.id));
             } else {
                 this.releaseAndDrainWake(app.id);
             }
@@ -524,15 +556,16 @@ export class SourceController {
      * about which outcome re-arms, retries, or accepts. Manual sources are
      * declined inside the cursor helpers: a pull must not enroll them.
      *
-     * `follow` is set only by an operator pull. The poll omits it and waits
-     * for preparation and dispatch, because no request is held open.
+     * `followUp` is set only by an operator pull. The poll omits it and waits
+     * for preparation and dispatch, because no request is held open and no
+     * operator confirmation is riding along.
      */
     private async settleAfterReconcile(
         fresh: GitOpsApplicationRow,
         stackName: string,
         result: ReconcileResult,
         trigger: ReconcileTrigger,
-        follow?: PostAcceptFollow,
+        followUp?: OperatorFollowUp,
     ): Promise<FetchAuthorityReport> {
         if (result.outcome === 'failed_previous_intact' || result.outcome === 'retry_scheduled') {
             this.maybeScheduleRetry(fresh);
@@ -546,7 +579,7 @@ export class SourceController {
             // refuses a durable blocked candidate
             // (requireAcceptableCandidate guards against an outcome that
             // misreports the row's state).
-            return this.maybeAcceptAutomaticCandidate(fresh, stackName, trigger, follow);
+            return this.maybeAcceptAutomaticCandidate(fresh, stackName, trigger, followUp);
         }
         if (result.outcome === 'recovery_required' && recoveryWaitHolds(fresh)) {
             // A recovery wait is not terminal: the hold clears through success
@@ -617,14 +650,29 @@ export class SourceController {
      * unprovable candidate holds for a human. On the evidence side, a
      * present-but-unreadable `.env` or an unreadable compose file holds
      * (compose-only interpolation happens only when `.env` is absent).
+     *
+     * An operator confirmation is re-read against this row before the
+     * acceptance, because the reconcile above it is the window in which the
+     * placement or the rollout policy the confirmation named could have
+     * changed. A stale confirmation holds the candidate rather than accepting
+     * on a destination the operator did not agree to.
      */
     private async maybeAcceptAutomaticCandidate(
         app: GitOpsApplicationRow,
         stackName: string,
         trigger: ReconcileTrigger,
-        follow?: PostAcceptFollow,
+        followUp?: OperatorFollowUp,
     ): Promise<FetchAuthorityReport> {
         if (app.source_policy !== 'automatic') return NO_AUTHORITY;
+        if (followUp?.confirmation) {
+            const drift = sourceConfirmationDrift(app, followUp.confirmation);
+            if (drift) {
+                console.warn(
+                    `[SourceController] automatic pull held for ${sanitizeForLog(app.id)}: the operator confirmation no longer describes this application`,
+                );
+                return { status: 'held', note: driftSentence(drift) };
+            }
+        }
         if (!app.candidate_generation_id || app.accepted_generation_id === app.candidate_generation_id) {
             return { status: 'fetched_only' };
         }
@@ -732,14 +780,15 @@ export class SourceController {
         // preflight refuses an unresolved artifact set. Both steps are
         // idempotent and the reconciler retries them, so a failure here is
         // reported and the dispatch below still runs (and refuses truthfully).
-        if (app.target_mode === 'blueprint' && follow) {
+        if (app.target_mode === 'blueprint' && followUp) {
             const settled = await runBoundedGitManagedPostAccept({
                 applicationId: app.id,
                 generationId: acceptGeneration.id,
                 actor: 'system:source-controller',
                 trigger,
+                ...(followUp.confirmation ? { confirmation: followUp.confirmation } : {}),
             });
-            follow.pending = settled.pending;
+            followUp.follow.pending = settled.pending;
             return { status: 'accepted', rollout: settled.rollout, note: settled.authorityNote };
         }
         if (app.target_mode === 'blueprint') {

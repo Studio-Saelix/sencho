@@ -8,7 +8,10 @@
  */
 import { apiFetch } from './api';
 import type { PreviewAction } from './blueprintsApi';
+import type { SourceConfirmationClaim } from './gitopsApprovedScope';
 import type { HealthRolloutPolicy } from '@/types/gitops';
+
+export type { SourceConfirmationClaim };
 
 /** The portfolio identity of a Blueprint-backed application. */
 export function blueprintApplicationId(blueprintId: number): string {
@@ -118,11 +121,21 @@ export function claimedBlueprintAuthorityId(
   return blueprintApplicationId(blueprintId);
 }
 
-/** Pull the next commit for a Git-managed Blueprint. The body reports the fetch and the settlement that followed it. */
-export async function fetchGitOpsSource(applicationId: string): Promise<GitOpsSourceFetchResult> {
+/**
+ * Pull the next commit for a Git-managed Blueprint.
+ *
+ * `confirmation` is the claim the operator read before confirming. Only an
+ * automatic source sends one, because only an automatic source can record the
+ * commit from this request; a manual or review pull only fetches and asks for
+ * nothing.
+ */
+export async function fetchGitOpsSource(
+  applicationId: string,
+  confirmation?: SourceConfirmationClaim | null,
+): Promise<GitOpsSourceFetchResult> {
   const payload = await postAuthorityAction(
     `/gitops/applications/${encodeURIComponent(applicationId)}/source/fetch`,
-    {},
+    confirmation ? { confirmation } : {},
     'Failed to pull the source',
   );
   return {
@@ -139,10 +152,11 @@ export async function fetchGitOpsSource(applicationId: string): Promise<GitOpsSo
 export async function acceptGitOpsSource(
   applicationId: string,
   generationId: string,
+  confirmation: SourceConfirmationClaim,
 ): Promise<GitOpsSourceAcceptResult> {
   const payload = await postAuthorityAction(
     `/gitops/applications/${encodeURIComponent(applicationId)}/source/accept`,
-    { generationId },
+    { generationId, confirmation },
     'Failed to accept the source revision',
   );
   return {

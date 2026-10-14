@@ -1147,6 +1147,150 @@ describe('SourceController automatic acceptance', () => {
 });
 
 /**
+ * An operator pull on an automatic source confirms the placement and the
+ * rollout consequence before it runs, and the request carries both. These
+ * tests are the two halves of that guarantee: a confirmation that no longer
+ * describes the application is refused before the fetch and again before the
+ * acceptance, and a confirmation that still describes it changes nothing.
+ */
+describe('SourceController pull confirmation freshness', () => {
+    /** A Git-managed Blueprint with a staged candidate, which a pull can act on. */
+    function gitManagedBlueprint(
+        appId: string,
+        stackName: string,
+        generationId: string,
+        policy: 'manual' | 'automatic' = 'automatic',
+    ): number {
+        stageCandidate(appId, stackName, generationId, policy);
+        DatabaseService.getInstance().getDb().prepare(
+            `UPDATE gitops_applications SET configured_repo_url = ? WHERE id = ?`,
+        ).run(`https://github.com/example/${stackName}.git`, appId);
+        const blueprint = commitBlueprintCreate({
+            name: `bp-${appId}`,
+            description: null,
+            compose_content: 'services:\n  web:\n    image: nginx:1.27\n',
+            selector: { type: 'nodes', ids: [1] },
+            drift_mode: 'suggest',
+            classification: 'stateless',
+            classification_reasons: [],
+            enabled: true,
+            created_by: 'tester',
+        }, () => [1]);
+        GitOpsBindingService.getInstance().convertInlineToGit({
+            blueprintId: blueprint.id,
+            applicationId: appId,
+            actor: 'tester',
+        });
+        return blueprint.id;
+    }
+
+    /** Record the placement approval an operator would have read. */
+    function approvePlacement(appId: string, approvalRef: string): void {
+        DatabaseService.getInstance().getDb().prepare(
+            'UPDATE gitops_applications SET placement_approval_ref = ? WHERE id = ?',
+        ).run(approvalRef, appId);
+    }
+
+    it('refuses a pull whose confirmation named a placement that has moved on', async () => {
+        gitManagedBlueprint('app-stale-entry', 'stale-entry-web', 'gen-stale-entry');
+        approvePlacement('app-stale-entry', 'place-reviewed');
+        const reconcile = spyOnReconcile();
+
+        const fetched = await controller.requestFetch('app-stale-entry', 'ada', {
+            placementApprovalRef: 'place-older',
+            rolloutMayStart: false,
+        });
+
+        expect(fetched).toMatchObject({ status: 'refused', code: 'confirmation_stale' });
+        expect(reconcile).not.toHaveBeenCalled();
+    });
+
+    it('refuses a pull whose confirmation promised a waiting rollout that now authorizes one', async () => {
+        gitManagedBlueprint('app-stale-policy', 'stale-policy-web', 'gen-stale-policy');
+        DatabaseService.getInstance().getDb().prepare(
+            `UPDATE gitops_applications SET rollout_authorization_policy = 'automatic' WHERE id = ?`,
+        ).run('app-stale-policy');
+        const reconcile = spyOnReconcile();
+
+        const fetched = await controller.requestFetch('app-stale-policy', 'ada', {
+            placementApprovalRef: null,
+            rolloutMayStart: false,
+        });
+
+        expect(fetched).toMatchObject({ status: 'refused', code: 'confirmation_stale' });
+        expect(reconcile).not.toHaveBeenCalled();
+    });
+
+    it('holds the candidate when the placement moved while the fetch was running', async () => {
+        gitManagedBlueprint('app-stale-settle', 'stale-settle-web', 'gen-stale-settle');
+        approvePlacement('app-stale-settle', 'place-reviewed');
+        evaluateCandidatePolicy.mockResolvedValue({ status: 'allowed' });
+        spyOnReconcile().mockImplementation(async () => {
+            // Another session approves a different placement while this fetch is
+            // still reading the remote.
+            approvePlacement('app-stale-settle', 'place-reapproved');
+            return { outcome: 'candidate_already_fetched', reason: 'ok', nextAction: 'none' };
+        });
+        const handoff = vi.spyOn(gitManagedHandoff, 'dispatchPreparedGitManagedGeneration');
+
+        const fetched = await controller.requestFetch('app-stale-settle', 'ada', {
+            placementApprovalRef: 'place-reviewed',
+            rolloutMayStart: false,
+        });
+
+        expect(fetched).toMatchObject({
+            status: 'settled',
+            authority: { status: 'held', note: expect.stringContaining('approved placement changed') },
+        });
+        expect(getApp('app-stale-settle').accepted_generation_id).toBeNull();
+        expect(handoff).not.toHaveBeenCalled();
+    });
+
+    it('accepts a pull whose confirmation still describes the application', async () => {
+        gitManagedBlueprint('app-fresh', 'fresh-web', 'gen-fresh');
+        approvePlacement('app-fresh', 'place-reviewed');
+        evaluateCandidatePolicy.mockResolvedValue({ status: 'allowed' });
+        spyOnReconcile().mockResolvedValue({ outcome: 'candidate_already_fetched', reason: 'ok', nextAction: 'none' });
+        vi.spyOn(gitManagedMaterialization, 'prepareAcceptedGitManagedGeneration').mockResolvedValue({
+            materialized: true,
+            artifact: 'resolved',
+            note: null,
+        });
+        const handoff = vi.spyOn(gitManagedHandoff, 'dispatchPreparedGitManagedGeneration')
+            .mockResolvedValue({ status: 'dispatched', reason: null });
+
+        const fetched = await controller.requestFetch('app-fresh', 'ada', {
+            placementApprovalRef: 'place-reviewed',
+            rolloutMayStart: false,
+        });
+
+        expect(fetched).toMatchObject({
+            status: 'settled',
+            authority: { status: 'accepted', rollout: 'started', note: null },
+        });
+        expect(getApp('app-fresh').accepted_generation_id).toBe('gen-fresh');
+        // The confirmation rides along to the handoff, which is the boundary
+        // preparation leaves open for a placement that moved mid-flight.
+        expect(handoff).toHaveBeenCalledWith(expect.objectContaining({
+            applicationId: 'app-fresh',
+            generationId: 'gen-fresh',
+            confirmation: { placementApprovalRef: 'place-reviewed', rolloutMayStart: false },
+        }));
+    });
+
+    it('leaves a manual pull unchanged, because it has nothing to confirm', async () => {
+        gitManagedBlueprint('app-manual-plain', 'manual-plain-web', 'gen-manual-plain', 'manual');
+        approvePlacement('app-manual-plain', 'place-reviewed');
+        const reconcile = spyOnReconcile().mockResolvedValue({ outcome: 'no_source_change', reason: 'ok', nextAction: 'none' });
+
+        const fetched = await controller.requestFetch('app-manual-plain', 'ada');
+
+        expect(fetched).toMatchObject({ status: 'settled', authority: { status: 'not_applicable' } });
+        expect(reconcile).toHaveBeenCalledTimes(1);
+    });
+});
+
+/**
  * The automatic path is the only acceptance route with no human in the loop,
  * so it must never withdraw a stateful workload on its own. Each test stages a
  * real accepted generation with a stateful service on disk, then drives the

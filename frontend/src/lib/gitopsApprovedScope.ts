@@ -11,11 +11,32 @@
  *
  * The reader returns a status and never a sentence. Each surface words its own,
  * because the same status has to read correctly inside two different templates
- * and a phrase that survives one does not survive the other.
+ * and a phrase that survives one does not survive the other. The claim the
+ * requests carry comes from this file too, so a sentence and the request it
+ * authorizes are always one read of one projection.
  */
+import { policyReadFor } from './gitopsAuthorityPolicy';
 import type { ApprovedRolloutScope, GitOpsRevisionProjection } from '@/types/gitops';
 
 export type { ApprovedRolloutScope };
+
+/**
+ * The reviewed placement and rollout consequence one source action carries.
+ *
+ * The confirmation sentences above and this claim are read from the same
+ * projection by the same helper, so a request can never promise a destination
+ * or a rollout the dialog did not name. `placementApprovalRef` is the identity
+ * of the placement approval, which is the pointer the dispatch boundary
+ * resolves the rollout scope from, so the claim and the authorization model
+ * name one thing. `rolloutMayStart` is the sentence's own promise rather than
+ * the policy value behind it.
+ */
+export type SourceConfirmationClaim = {
+  /** The placement approval the confirmation named, or null when it named none. */
+  placementApprovalRef: string | null;
+  /** Whether the confirmation told the operator a rollout could start from it. */
+  rolloutMayStart: boolean;
+};
 
 export type ApprovedScopeReading =
   /** An approval resolves and froze these nodes. */
@@ -78,4 +99,30 @@ export function pullScopeSentence(reading: ApprovedScopeReading): string {
   }
   if (reading.names.length === 0) return 'The placement approves no nodes, so this cannot deploy anything.';
   return `The next commit goes to the approved nodes: ${reading.names.join(', ')}.`;
+}
+
+/**
+ * The claim the two source confirmations send with their requests.
+ *
+ * Read at the moment a confirmation opens and frozen there, so the sentence the
+ * operator reads and the claim the server checks are the same read of the same
+ * projection. An approval that is recorded but does not resolve still carries
+ * its ref: the server compares against the row's pointer, and a scope this
+ * build cannot prove is still a pointer somebody can replace.
+ */
+export function readSourceConfirmation(projection: GitOpsRevisionProjection): SourceConfirmationClaim {
+  const scope = projection.approvedRolloutScope;
+  return {
+    placementApprovalRef: scope && 'approvalRef' in scope ? scope.approvalRef : null,
+    rolloutMayStart: rolloutMayStart(projection),
+  };
+}
+
+/**
+ * Whether the projection says rollout authorization can start a rollout from
+ * an accepted commit, which is the promise both confirmations word.
+ */
+export function rolloutMayStart(projection: GitOpsRevisionProjection): boolean {
+  if (projection.targetMode === 'not_applicable') return false;
+  return policyReadFor(projection.authorityPolicies, 'rollout_authorization')?.configured === 'automatic';
 }

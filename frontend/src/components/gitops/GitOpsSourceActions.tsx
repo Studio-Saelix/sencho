@@ -5,11 +5,18 @@ import { Button } from '@/components/ui/button';
 import { ConfirmModal } from '@/components/ui/modal';
 import { toast } from '@/components/ui/toast-store';
 import { useNodes } from '@/context/NodeContext';
-import { acceptGitOpsSource, fetchGitOpsSource, type GitOpsSourceFetchResult } from '@/lib/gitopsAuthorityApi';
+import {
+  acceptGitOpsSource,
+  fetchGitOpsSource,
+  type GitOpsSourceFetchResult,
+  type SourceConfirmationClaim,
+} from '@/lib/gitopsAuthorityApi';
 import {
   acceptScopeSentence,
   pullScopeSentence,
   readApprovedScope,
+  readSourceConfirmation,
+  rolloutMayStart,
 } from '@/lib/gitopsApprovedScope';
 import { policyReadFor } from '@/lib/gitopsAuthorityPolicy';
 import { liveSourceFacet } from '@/lib/gitopsState';
@@ -33,11 +40,6 @@ function pullConfirms(projection: GitOpsRevisionProjection): boolean {
   return policyReadFor(projection.authorityPolicies, 'source')?.configured === 'automatic';
 }
 
-function rolloutStartsOnPull(projection: GitOpsRevisionProjection): boolean {
-  if (projection.targetMode === 'not_applicable') return false;
-  return policyReadFor(projection.authorityPolicies, 'rollout_authorization')?.configured === 'automatic';
-}
-
 /**
  * The commit, the approved rollout scope, and whether acceptance can start a
  * rollout. Frozen when the confirm opens.
@@ -53,7 +55,7 @@ function acceptPreview(projection: GitOpsRevisionProjection, nodes: readonly { i
   const sha = source?.fetchedCommitSha?.slice(0, 7) ?? null;
   const commit = sha ? `Accept ${sha}.` : 'Accept the waiting commit.';
   const scope = acceptScopeSentence(readApprovedScope(projection, nodes));
-  const rollout = rolloutStartsOnPull(projection)
+  const rollout = rolloutMayStart(projection)
     ? 'Rollout authorization can start that rollout. Starting a rollout is not the same as it finishing.'
     : 'The rollout stays waiting for you.';
   return `${commit} ${scope} ${rollout}`;
@@ -71,7 +73,7 @@ function pullConfirmDescription(
   projection: GitOpsRevisionProjection,
   nodes: readonly { id: number; name: string }[],
 ): string {
-  if (!rolloutStartsOnPull(projection)) {
+  if (!rolloutMayStart(projection)) {
     return 'Pull source fetches the next commit. This source accepts a new commit on its own. The rollout stays waiting for you.';
   }
   const scope = pullScopeSentence(readApprovedScope(projection, nodes));
@@ -99,6 +101,12 @@ function pullFeedback(result: GitOpsSourceFetchResult): { tone: 'success' | 'war
   return { tone: 'success', message: sha ? `Pulled ${sha}` : 'Source pulled' };
 }
 
+/** What a confirmation reads, frozen the moment it opens. */
+interface SourceReview {
+  description: string;
+  confirmation: SourceConfirmationClaim;
+}
+
 interface GitOpsSourceActionsProps {
   applicationId: string;
   projection: GitOpsRevisionProjection;
@@ -112,6 +120,11 @@ interface GitOpsSourceActionsProps {
  * Pull source and Accept source, the two verbs that move a Git-managed
  * Blueprint's commit. Shared by the authority row and the claimed Git
  * source sheet so both call the same routes.
+ *
+ * Both confirmations carry what they read. The description and the claim are
+ * frozen together when the overlay opens and sent as one request, so the server
+ * can refuse a request whose placement or rollout consequence no longer matches
+ * the words the operator agreed to.
  */
 export default function GitOpsSourceActions({
   applicationId,
@@ -123,8 +136,8 @@ export default function GitOpsSourceActions({
 }: GitOpsSourceActionsProps) {
   const { nodes } = useNodes();
   const [pending, setPending] = useState<'pull' | 'accept' | null>(null);
-  const [confirmPull, setConfirmPull] = useState(false);
-  const [acceptReview, setAcceptReview] = useState<{ generationId: string; description: string } | null>(null);
+  const [pullReview, setPullReview] = useState<SourceReview | null>(null);
+  const [acceptReview, setAcceptReview] = useState<(SourceReview & { generationId: string }) | null>(null);
   const showPull = pullSourceVisible(projection, can, sourceNodeId);
   const confirmsPull = pullConfirms(projection);
   const source = liveSourceFacet(projection);
@@ -143,7 +156,7 @@ export default function GitOpsSourceActions({
   async function handlePull(): Promise<void> {
     setBusy('pull');
     try {
-      const result = await fetchGitOpsSource(applicationId);
+      const result = await fetchGitOpsSource(applicationId, pullReview?.confirmation ?? null);
       const feedback = pullFeedback(result);
       toast[feedback.tone](feedback.message);
       onChanged();
@@ -151,14 +164,14 @@ export default function GitOpsSourceActions({
       toast.error(errorMessage(error, 'Failed to pull the source'));
     } finally {
       setBusy(null);
-      setConfirmPull(false);
+      setPullReview(null);
     }
   }
 
-  async function handleAccept(generationId: string): Promise<void> {
+  async function handleAccept(review: SourceReview & { generationId: string }): Promise<void> {
     setBusy('accept');
     try {
-      const result = await acceptGitOpsSource(applicationId, generationId);
+      const result = await acceptGitOpsSource(applicationId, review.generationId, review.confirmation);
       if (result.note) {
         toast.warning(`Source revision accepted. ${result.note}`);
       } else if (result.dispatched) {
@@ -183,8 +196,14 @@ export default function GitOpsSourceActions({
           variant="outline"
           className="gap-1.5 max-md:min-h-11"
           onClick={() => {
-            if (confirmsPull) setConfirmPull(true);
-            else void handlePull();
+            if (!confirmsPull) {
+              void handlePull();
+              return;
+            }
+            setPullReview({
+              description: pullConfirmDescription(projection, nodes),
+              confirmation: readSourceConfirmation(projection),
+            });
           }}
           disabled={pending !== null}
           data-testid="gitops-action-pull-source"
@@ -195,11 +214,13 @@ export default function GitOpsSourceActions({
       )}
       {confirmsPull && (
         <ConfirmModal
-          open={confirmPull}
-          onOpenChange={setConfirmPull}
+          open={pullReview !== null}
+          onOpenChange={(open) => {
+            if (!open) setPullReview(null);
+          }}
           kicker="SOURCE"
           title="Pull source"
-          description={pullConfirmDescription(projection, nodes)}
+          description={pullReview?.description ?? ''}
           confirmLabel="Pull source"
           busyConfirmLabel="Pulling…"
           confirming={pending === 'pull'}
@@ -215,6 +236,7 @@ export default function GitOpsSourceActions({
             setAcceptReview({
               generationId: candidateGenerationId,
               description: acceptPreview(projection, nodes),
+              confirmation: readSourceConfirmation(projection),
             });
           }}
           disabled={pending !== null}
@@ -236,7 +258,7 @@ export default function GitOpsSourceActions({
           confirmLabel="Accept source"
           busyConfirmLabel="Accepting…"
           confirming={pending === 'accept'}
-          onConfirm={() => handleAccept(acceptReview.generationId)}
+          onConfirm={() => handleAccept(acceptReview)}
         />
       )}
     </>

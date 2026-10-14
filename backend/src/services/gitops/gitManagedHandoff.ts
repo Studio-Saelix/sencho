@@ -13,6 +13,7 @@ import { GitOpsStore } from './store';
 import { DatabaseService } from '../DatabaseService';
 import { GitSourceService } from '../GitSourceService';
 import { buildAcceptedGeneration, holdBlockedRolloutDispatch } from './handoff';
+import { driftHoldReason, sourceConfirmationDrift, type SourceConfirmation } from './sourceConfirmation';
 import type { ReconcileTrigger } from './triggers';
 import { sanitizeForLog } from '../../utils/safeLog';
 
@@ -33,16 +34,28 @@ export const GIT_MANAGED_ARTIFACT_UNRESOLVED_REASON = 'the artifact identity is 
  *
  * `skipped` means a gate withheld the handoff (the generation moved on, the
  * source is suspended, the rollout is paused, the policy requires an operator,
- * the Blueprint is disabled, or the artifact identity is not resolved);
- * `blocked` means the handoff was refused and, when the refusal is durable, the
- * rollout was held with the reason (a dispatch refusal, or an unfinished
- * rollback). The caller owns logging and the response.
+ * the Blueprint is disabled, the artifact identity is not resolved, or the
+ * operator's confirmation no longer describes this application); `blocked` means
+ * the handoff was refused and, when the refusal is durable, the rollout was held
+ * with the reason (a dispatch refusal, or an unfinished rollback). The caller
+ * owns logging and the response.
+ *
+ * `confirmation` is the authority state an operator confirmed, and only the two
+ * operator paths send one. Preparation is the asynchronous step before this
+ * point, so this is the last place a changed placement or a newly armed rollout
+ * policy can still be caught before anything is dispatched to a node.
+ *
+ * A confirmation that no longer describes the application is held rather than
+ * merely skipped: the acceptance has already committed, and the reconciler
+ * re-drives any accepted generation with no confirmation to check it against,
+ * so a refusal that recorded nothing would be undone by the next tick.
  */
 export async function dispatchPreparedGitManagedGeneration(args: {
   applicationId: string;
   generationId: string;
   actor: string;
   trigger: ReconcileTrigger;
+  confirmation?: SourceConfirmation;
 }): Promise<GitManagedDispatchOutcome> {
   const store = GitOpsStore.getInstance();
   const app = store.getApplication(args.applicationId);
@@ -51,6 +64,24 @@ export async function dispatchPreparedGitManagedGeneration(args: {
   }
   if (app.suspended_at) return { status: 'skipped', reason: 'the source is suspended' };
   if (app.pause_at) return { status: 'skipped', reason: 'the rollout is paused' };
+  if (args.confirmation) {
+    const drift = sourceConfirmationDrift(app, args.confirmation);
+    if (drift) {
+      const reason = driftHoldReason(drift);
+      // Held, not skipped, for the same reason an unfinished rollback is. The
+      // acceptance stands and the rollout does not move, so the row alone has
+      // to say why. `operator` origin, because only a person may clear it: a
+      // `system` hold is released by the next source acceptance, and on an
+      // automatic source that is the next poll. No live binding is required,
+      // since nothing has been authorized yet and the reason is about the
+      // application rather than about a rollout that exists.
+      holdBlockedRolloutDispatch(app.id, { reason, holdable: true }, {
+        requireLiveBinding: false,
+        origin: 'operator',
+      });
+      return { status: 'skipped', reason };
+    }
+  }
   if (app.rollout_authorization_policy !== 'automatic') {
     return { status: 'skipped', reason: 'the rollout authorization policy requires an operator' };
   }

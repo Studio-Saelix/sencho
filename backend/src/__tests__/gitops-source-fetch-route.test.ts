@@ -24,8 +24,8 @@ let viewerCookie: string;
 let editorCookie: string;
 let otherStackCookie: string;
 
-function seedBlueprint(): { blueprintId: number; applicationId: string; sourceStack: string } {
-  const applicationId = `app-route-fetch-${Date.now()}`;
+function seedBlueprint(policy: 'manual' | 'automatic' = 'manual'): { blueprintId: number; applicationId: string; sourceStack: string } {
+  const applicationId = `app-route-fetch-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
   const sourceStack = `src-${applicationId}`;
   const blueprint = DatabaseService.getInstance().createBlueprint({
     name: `bp-route-fetch-${applicationId.slice(-6)}`,
@@ -46,7 +46,7 @@ function seedBlueprint(): { blueprintId: number; applicationId: string; sourceSt
     stack_name: null,
     configured_source_stack_name: sourceStack,
     blueprint_id: blueprint.id,
-    source_policy: 'manual',
+    source_policy: policy,
   });
   return { blueprintId: blueprint.id, applicationId, sourceStack };
 }
@@ -108,7 +108,7 @@ describe('POST /api/gitops/applications/:id/source/fetch', () => {
       outcome: 'pending_review',
       candidateGenerationId: 'gen-route',
     });
-    expect(fetchSpy).toHaveBeenCalledWith(seeded.applicationId, expect.any(String));
+    expect(fetchSpy).toHaveBeenCalledWith(seeded.applicationId, expect.any(String), undefined);
     expect(nodeId).toBeGreaterThan(0);
     fetchSpy.mockRestore();
   });
@@ -216,7 +216,7 @@ describe('POST /api/gitops/applications/:id/source/fetch', () => {
     expect(portfolio.status).toBe(200);
     expect(portfolio.body.authority).toEqual({ status: 'not_applicable', rollout: null, note: null });
     expect(fetchSpy).toHaveBeenCalledTimes(1);
-    expect(fetchSpy).toHaveBeenCalledWith(seeded.applicationId, expect.any(String));
+    expect(fetchSpy).toHaveBeenCalledWith(seeded.applicationId, expect.any(String), undefined);
     fetchSpy.mockRestore();
   });
 
@@ -269,6 +269,90 @@ describe('POST /api/gitops/applications/:id/source/fetch', () => {
       rollout: 'not_started',
       note: 'The artifact identity cannot be resolved for this content: the accepted generation materializes 2 compose files, which this freeze cannot model.',
     });
+    fetchSpy.mockRestore();
+  });
+});
+
+/**
+ * An automatic source can record the commit from this one request, so the pull
+ * carries the confirmation the operator read. A manual or review source only
+ * fetches, and asks for nothing.
+ */
+describe('POST /api/gitops/applications/:id/source/fetch confirmation', () => {
+  it('asks an automatic source for the confirmation it acts on', async () => {
+    const seeded = seedBlueprint('automatic');
+    const fetchSpy = vi.spyOn(SourceController.getInstance(), 'requestFetch');
+
+    const res = await request(app)
+      .post(`/api/gitops/applications/bp:${seeded.blueprintId}/source/fetch`)
+      .set('Cookie', adminCookie)
+      .send({});
+
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe('CONFIRM_REQUIRED');
+    expect(fetchSpy).not.toHaveBeenCalled();
+    fetchSpy.mockRestore();
+  });
+
+  it('refuses an automatic pull whose confirmation no longer names the placement', async () => {
+    const seeded = seedBlueprint('automatic');
+    const fetchSpy = vi.spyOn(SourceController.getInstance(), 'requestFetch').mockResolvedValue({
+      status: 'refused',
+      code: 'confirmation_stale',
+      error: 'The approved placement changed since you reviewed it; review the current approval and confirm again.',
+    });
+
+    const res = await request(app)
+      .post(`/api/gitops/applications/bp:${seeded.blueprintId}/source/fetch`)
+      .set('Cookie', adminCookie)
+      .send({ confirmation: { placementApprovalRef: 'place-reviewed', rolloutMayStart: false } });
+
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe('confirmation_stale');
+    expect(fetchSpy).toHaveBeenCalledWith(
+      seeded.applicationId,
+      expect.any(String),
+      { placementApprovalRef: 'place-reviewed', rolloutMayStart: false },
+    );
+    fetchSpy.mockRestore();
+  });
+
+  it('passes the confirmation an automatic pull was given', async () => {
+    const seeded = seedBlueprint('automatic');
+    const confirmation = { placementApprovalRef: null, rolloutMayStart: true };
+    const fetchSpy = vi.spyOn(SourceController.getInstance(), 'requestFetch').mockResolvedValue({
+      status: 'settled',
+      result: { outcome: 'candidate_already_fetched', reason: 'ok', nextAction: 'none' },
+      candidateGenerationId: 'gen-confirmed',
+      authority: { status: 'accepted', rollout: 'started', note: null },
+    });
+
+    const res = await request(app)
+      .post(`/api/gitops/applications/bp:${seeded.blueprintId}/source/fetch`)
+      .set('Cookie', adminCookie)
+      .send({ confirmation });
+
+    expect(res.status).toBe(200);
+    expect(fetchSpy).toHaveBeenCalledWith(seeded.applicationId, expect.any(String), confirmation);
+    fetchSpy.mockRestore();
+  });
+
+  it('pulls a manual source with no confirmation at all', async () => {
+    const seeded = seedBlueprint('manual');
+    const fetchSpy = vi.spyOn(SourceController.getInstance(), 'requestFetch').mockResolvedValue({
+      status: 'settled',
+      result: { outcome: 'pending_review', reason: 'A newer commit is waiting.', nextAction: 'review' },
+      candidateGenerationId: 'gen-manual',
+      authority: { status: 'not_applicable' },
+    });
+
+    const res = await request(app)
+      .post(`/api/gitops/applications/bp:${seeded.blueprintId}/source/fetch`)
+      .set('Cookie', adminCookie)
+      .send({});
+
+    expect(res.status).toBe(200);
+    expect(fetchSpy).toHaveBeenCalledWith(seeded.applicationId, expect.any(String), undefined);
     fetchSpy.mockRestore();
   });
 });

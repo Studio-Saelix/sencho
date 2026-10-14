@@ -29,10 +29,20 @@ import type {
   GitOpsRolloutCandidateRow,
 } from '../services/gitops/types';
 
+/**
+ * What Accept source's confirmation carries for a fixture with no placement
+ * approval, which is every one seeded here until the placement route runs.
+ * `rolloutMayStart` is the promise the dialog made, not the policy column.
+ */
+function confirmationFor(rolloutMayStart = false) {
+  return { placementApprovalRef: null, rolloutMayStart };
+}
+
 let tmpDir: string;
 let app: import('express').Express;
 let DatabaseService: typeof import('../services/DatabaseService').DatabaseService;
 let LicenseService: typeof import('../services/LicenseService').LicenseService;
+let BlueprintReconciler: typeof import('../services/BlueprintReconciler').BlueprintReconciler;
 let GitOpsStore: typeof import('../services/gitops/store').GitOpsStore;
 let GitOpsTransitions: typeof import('../services/gitops/transitions').GitOpsTransitions;
 let GitSourceService: typeof import('../services/GitSourceService').GitSourceService;
@@ -270,6 +280,26 @@ function seedGitManagedBlueprint(opts: { sourceAccepted: boolean; nodeCount?: nu
 }
 
 /**
+ * Approve the current placement plan through the real route, and return the
+ * approval ref it recorded.
+ *
+ * Called twice in a row, this is the scenario the source confirmations have to
+ * survive: the first ref is what an operator read, and the second is what
+ * replaced it while their candidate was still waiting.
+ */
+async function approvePlacement(seeded: Seeded): Promise<string> {
+  const preview = await buildBlueprintPreview(seeded.blueprintId);
+  const res = await request(app)
+    .post(`/api/gitops/applications/bp:${seeded.blueprintId}/placement/approve`)
+    .set('Cookie', adminCookie)
+    .send({ planFingerprint: preview!.planFingerprint, actions: preview!.confirmableActions });
+  expect(res.status).toBe(200);
+  const ref = GitOpsStore.getInstance().getApplication(seeded.applicationId)!.placement_approval_ref;
+  expect(ref).toBeTruthy();
+  return ref!;
+}
+
+/**
  * A scoped operator for the policy writes: no `stack:deploy` of their own, just a
  * grant on one stack and node.
  *
@@ -306,6 +336,7 @@ beforeAll(async () => {
   tmpDir = await setupTestDb();
   ({ DatabaseService } = await import('../services/DatabaseService'));
   ({ LicenseService } = await import('../services/LicenseService'));
+  ({ BlueprintReconciler } = await import('../services/BlueprintReconciler'));
   ({ GitOpsStore } = await import('../services/gitops/store'));
   ({ GitOpsTransitions } = await import('../services/gitops/transitions'));
   ({ GitSourceService } = await import('../services/GitSourceService'));
@@ -344,7 +375,7 @@ describe('POST /api/gitops/applications/:id/source/accept', () => {
     const res = await request(app)
       .post(`/api/gitops/applications/bp:${seeded.blueprintId}/source/accept`)
       .set('Cookie', adminCookie)
-      .send({ generationId: seeded.generationId });
+      .send({ generationId: seeded.generationId, confirmation: confirmationFor() });
     expect(res.status).toBe(200);
     const row = GitOpsStore.getInstance().getApplication(seeded.applicationId)!;
     expect(row.accepted_generation_id).toBe(seeded.generationId);
@@ -373,7 +404,7 @@ describe('POST /api/gitops/applications/:id/source/accept', () => {
     const res = await request(app)
       .post(`/api/gitops/applications/bp:${seeded.blueprintId}/source/accept`)
       .set('Cookie', adminCookie)
-      .send({ generationId: seeded.generationId });
+      .send({ generationId: seeded.generationId, confirmation: confirmationFor(true) });
     checkSpy.mockRestore();
 
     expect(res.status).toBe(200);
@@ -397,7 +428,7 @@ describe('POST /api/gitops/applications/:id/source/accept', () => {
     const res = await request(app)
       .post(`/api/gitops/applications/bp:${seeded.blueprintId}/source/accept`)
       .set('Cookie', adminCookie)
-      .send({ generationId: seeded.generationId });
+      .send({ generationId: seeded.generationId, confirmation: confirmationFor(true) });
 
     expect(res.status).toBe(200);
     expect(res.body.dispatched).toBe(false);
@@ -420,7 +451,7 @@ describe('POST /api/gitops/applications/:id/source/accept', () => {
     const res = await request(app)
       .post(`/api/gitops/applications/bp:${seeded.blueprintId}/source/accept`)
       .set('Cookie', adminCookie)
-      .send({ generationId: seeded.generationId });
+      .send({ generationId: seeded.generationId, confirmation: confirmationFor() });
 
     expect(res.status).toBe(200);
     expect(res.body.dispatched).toBe(false);
@@ -439,7 +470,7 @@ describe('POST /api/gitops/applications/:id/source/accept', () => {
     const res = await request(app)
       .post(`/api/gitops/applications/bp:${seeded.blueprintId}/source/accept`)
       .set('Cookie', adminCookie)
-      .send({ generationId: seeded.generationId });
+      .send({ generationId: seeded.generationId, confirmation: confirmationFor() });
 
     expect(res.status).toBe(200);
     expect(res.body.dispatched).toBe(false);
@@ -457,7 +488,7 @@ describe('POST /api/gitops/applications/:id/source/accept', () => {
     const res = await request(app)
       .post(`/api/gitops/applications/bp:${seeded.blueprintId}/source/accept`)
       .set('Cookie', adminCookie)
-      .send({ generationId: seeded.generationId });
+      .send({ generationId: seeded.generationId, confirmation: confirmationFor() });
 
     expect(res.status).toBe(200);
     expect(res.body.dispatched).toBe(false);
@@ -473,7 +504,7 @@ describe('POST /api/gitops/applications/:id/source/accept', () => {
     const res = await request(app)
       .post(`/api/gitops/applications/bp:${seeded.blueprintId}/source/accept`)
       .set('Cookie', adminCookie)
-      .send({ generationId: 'gen-something-else' });
+      .send({ generationId: 'gen-something-else', confirmation: confirmationFor() });
     expect(res.status).toBe(409);
     expect(res.body.code).toBe('SOURCE_ACCEPTANCE_REFUSED');
     expect(GitOpsStore.getInstance().getApplication(seeded.applicationId)!.source_acceptance_ref).toBeNull();
@@ -489,11 +520,177 @@ describe('POST /api/gitops/applications/:id/source/accept', () => {
     expect(res.body.code).toBe('CONFIRM_REQUIRED');
   });
 
+  it('requires the confirmation the operator read', async () => {
+    const seeded = seedGitManagedBlueprint({ sourceAccepted: false });
+    const res = await request(app)
+      .post(`/api/gitops/applications/bp:${seeded.blueprintId}/source/accept`)
+      .set('Cookie', adminCookie)
+      .send({ generationId: seeded.generationId });
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe('CONFIRM_REQUIRED');
+    expect(GitOpsStore.getInstance().getApplication(seeded.applicationId)!.accepted_generation_id).toBeNull();
+  });
+
+  it('refuses a confirmation it cannot read', async () => {
+    const seeded = seedGitManagedBlueprint({ sourceAccepted: false });
+    const res = await request(app)
+      .post(`/api/gitops/applications/bp:${seeded.blueprintId}/source/accept`)
+      .set('Cookie', adminCookie)
+      .send({ generationId: seeded.generationId, confirmation: { placementApprovalRef: null, rolloutMayStart: 'yes' } });
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe('CONFIRM_REQUIRED');
+    expect(GitOpsStore.getInstance().getApplication(seeded.applicationId)!.accepted_generation_id).toBeNull();
+  });
+
+  it('refuses an acceptance whose placement approval was replaced while the candidate waited', async () => {
+    const seeded = seedGitManagedBlueprint({ sourceAccepted: false });
+    const reviewed = await approvePlacement(seeded);
+    const replacement = await approvePlacement(seeded);
+    expect(replacement).not.toBe(reviewed);
+
+    const dispatchSpy = vi.spyOn(GitSourceService.getInstance(), 'dispatchAcceptedGeneration');
+    const res = await request(app)
+      .post(`/api/gitops/applications/bp:${seeded.blueprintId}/source/accept`)
+      .set('Cookie', adminCookie)
+      .send({
+        generationId: seeded.generationId,
+        confirmation: { placementApprovalRef: reviewed, rolloutMayStart: false },
+      });
+
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe('CONFIRMATION_STALE');
+    expect(res.body.error).toContain('approved placement changed');
+    // Nothing consequential happened: the acceptance never committed, so the
+    // generation the operator did not agree to is still only a candidate.
+    const row = GitOpsStore.getInstance().getApplication(seeded.applicationId)!;
+    expect(row.accepted_generation_id).toBeNull();
+    expect(row.source_acceptance_ref).toBeNull();
+    expect(dispatchSpy).not.toHaveBeenCalled();
+    dispatchSpy.mockRestore();
+  });
+
+  it('refuses an acceptance when rollout authorization became automatic after the confirmation promised a wait', async () => {
+    const seeded = seedGitManagedBlueprint({ sourceAccepted: false });
+    const reviewed = await approvePlacement(seeded);
+    DatabaseService.getInstance().getDb().prepare(
+      'UPDATE gitops_applications SET rollout_authorization_policy = ? WHERE id = ?',
+    ).run('automatic', seeded.applicationId);
+    const dispatchSpy = vi.spyOn(GitSourceService.getInstance(), 'dispatchAcceptedGeneration');
+
+    const res = await request(app)
+      .post(`/api/gitops/applications/bp:${seeded.blueprintId}/source/accept`)
+      .set('Cookie', adminCookie)
+      .send({
+        generationId: seeded.generationId,
+        confirmation: { placementApprovalRef: reviewed, rolloutMayStart: false },
+      });
+
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe('CONFIRMATION_STALE');
+    expect(res.body.error).toContain('authorizes without an operator');
+    expect(GitOpsStore.getInstance().getApplication(seeded.applicationId)!.accepted_generation_id).toBeNull();
+    expect(dispatchSpy).not.toHaveBeenCalled();
+    dispatchSpy.mockRestore();
+  });
+
+  it('accepts a confirmation that still names the current placement', async () => {
+    const seeded = seedGitManagedBlueprint({ sourceAccepted: false });
+    const reviewed = await approvePlacement(seeded);
+
+    const res = await request(app)
+      .post(`/api/gitops/applications/bp:${seeded.blueprintId}/source/accept`)
+      .set('Cookie', adminCookie)
+      .send({
+        generationId: seeded.generationId,
+        confirmation: { placementApprovalRef: reviewed, rolloutMayStart: false },
+      });
+
+    expect(res.status).toBe(200);
+    expect(GitOpsStore.getInstance().getApplication(seeded.applicationId)!.accepted_generation_id)
+      .toBe(seeded.generationId);
+  });
+
+  it('stops before the dispatch when the placement moved during preparation', async () => {
+    const seeded = seedGitManagedBlueprint({ sourceAccepted: false });
+    const reviewed = await approvePlacement(seeded);
+    DatabaseService.getInstance().getDb().prepare(
+      'UPDATE gitops_applications SET rollout_authorization_policy = ? WHERE id = ?',
+    ).run('automatic', seeded.applicationId);
+    const materialization = await import('../services/gitops/gitManagedMaterialization');
+    vi.spyOn(materialization, 'prepareAcceptedGitManagedGeneration').mockImplementation(async () => {
+      // The acceptance has committed and preparation is still running, which
+      // is the window a second session can move the placement in.
+      await approvePlacement(seeded);
+      return { materialized: true, artifact: 'resolved' as const, note: null };
+    });
+    const dispatchSpy = vi.spyOn(GitSourceService.getInstance(), 'dispatchAcceptedGeneration');
+
+    const res = await request(app)
+      .post(`/api/gitops/applications/bp:${seeded.blueprintId}/source/accept`)
+      .set('Cookie', adminCookie)
+      .send({
+        generationId: seeded.generationId,
+        confirmation: { placementApprovalRef: reviewed, rolloutMayStart: true },
+      });
+
+    expect(res.status).toBe(200);
+    expect(res.body.dispatched).toBe(false);
+    expect(res.body.note).toContain('approved placement changed');
+    // The acceptance stands and nothing was deployed: the operator's review
+    // was about a placement that no longer exists, so no node was touched.
+    expect(dispatchSpy).not.toHaveBeenCalled();
+    expect(GitOpsStore.getInstance().getApplication(seeded.applicationId)!.accepted_generation_id)
+      .toBe(seeded.generationId);
+
+    // And the refusal outlives this request. The reconciler re-drives any
+    // accepted generation with no confirmation to check, so a pause is the only
+    // thing that keeps it from deploying to the new placement on the next tick.
+    const held = GitOpsStore.getInstance().getApplication(seeded.applicationId)!;
+    expect(held.pause_at).not.toBeNull();
+    expect(held.pause_reason).toContain('approved placement changed');
+    expect(held.pause_origin).toBe('operator');
+    await BlueprintReconciler.getInstance().tick();
+    expect(dispatchSpy).not.toHaveBeenCalled();
+    expect(GitOpsStore.getInstance().getApplication(seeded.applicationId)!.pause_at).not.toBeNull();
+    dispatchSpy.mockRestore();
+  });
+
+  it('lets the operator resume after reviewing the placement that moved', async () => {
+    const seeded = seedGitManagedBlueprint({ sourceAccepted: false });
+    const reviewed = await approvePlacement(seeded);
+    DatabaseService.getInstance().getDb().prepare(
+      'UPDATE gitops_applications SET rollout_authorization_policy = ? WHERE id = ?',
+    ).run('automatic', seeded.applicationId);
+    const materialization = await import('../services/gitops/gitManagedMaterialization');
+    vi.spyOn(materialization, 'prepareAcceptedGitManagedGeneration').mockImplementation(async () => {
+      await approvePlacement(seeded);
+      return { materialized: true, artifact: 'resolved' as const, note: null };
+    });
+    await request(app)
+      .post(`/api/gitops/applications/bp:${seeded.blueprintId}/source/accept`)
+      .set('Cookie', adminCookie)
+      .send({
+        generationId: seeded.generationId,
+        confirmation: { placementApprovalRef: reviewed, rolloutMayStart: true },
+      })
+      .expect(200);
+    expect(GitOpsStore.getInstance().getApplication(seeded.applicationId)!.pause_at).not.toBeNull();
+
+    const resume = await request(app)
+      .post(`/api/gitops/applications/bp:${seeded.blueprintId}/rollout/resume`)
+      .set('Cookie', adminCookie)
+      .send({});
+    expect(resume.status).toBe(200);
+    const resumed = GitOpsStore.getInstance().getApplication(seeded.applicationId)!;
+    expect(resumed.pause_at).toBeNull();
+    expect(resumed.accepted_generation_id).toBe(seeded.generationId);
+  });
+
   it('refuses a Direct application id', async () => {
     const res = await request(app)
       .post('/api/gitops/applications/1:some-direct-app/source/accept')
       .set('Cookie', adminCookie)
-      .send({ generationId: 'gen-1' });
+      .send({ generationId: 'gen-1', confirmation: confirmationFor() });
     expect(res.status).toBe(409);
     expect(res.body.code).toBe('NOT_GIT_MANAGED');
   });
@@ -503,7 +700,7 @@ describe('POST /api/gitops/applications/:id/source/accept', () => {
     const res = await request(app)
       .post(`/api/gitops/applications/bp:${seeded.blueprintId}/source/accept`)
       .set('Cookie', viewerCookie)
-      .send({ generationId: seeded.generationId });
+      .send({ generationId: seeded.generationId, confirmation: confirmationFor() });
     expect(res.status).toBe(403);
   });
 });
@@ -998,7 +1195,7 @@ describe('POST /api/gitops/applications/:id/rollout/authorize', () => {
     const accept = await request(app)
       .post(`/api/gitops/applications/bp:${seeded.blueprintId}/source/accept`)
       .set('Cookie', adminCookie)
-      .send({ generationId: seeded.generationId });
+      .send({ generationId: seeded.generationId, confirmation: confirmationFor() });
     expect(accept.status).toBe(200);
     const accepted = GitOpsStore.getInstance().getApplication(seeded.applicationId)!;
     expect(GitOpsStore.getInstance().getArtifactSet(accepted.artifact_set_id!)?.qualification).toBe('unresolved');
@@ -1030,7 +1227,7 @@ describe('POST /api/gitops/applications/:id/rollout/authorize', () => {
     await request(app)
       .post(`/api/gitops/applications/bp:${seeded.blueprintId}/source/accept`)
       .set('Cookie', adminCookie)
-      .send({ generationId: seeded.generationId })
+      .send({ generationId: seeded.generationId, confirmation: confirmationFor() })
       .expect(200);
     const preview = await buildBlueprintPreview(seeded.blueprintId);
     await request(app)

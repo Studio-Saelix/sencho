@@ -177,6 +177,13 @@ beforeEach(() => {
   vi.clearAllMocks();
 });
 
+/**
+ * What Accept source sends for a fixture with no placement approval and no
+ * rollout policy. The other confirmations assert their own claim, so this one
+ * is only ever the default shape.
+ */
+const UNAPPROVED_CLAIM = { placementApprovalRef: null, rolloutMayStart: false };
+
 async function confirmSourceAccept(user: ReturnType<typeof userEvent.setup>): Promise<void> {
   await user.click(screen.getByTestId('gitops-action-accept-source'));
   const dialog = await screen.findByRole('alertdialog');
@@ -191,7 +198,7 @@ describe('GitOpsAuthorityActions', () => {
     renderActions(sourcePending(), () => true, onChanged);
 
     await confirmSourceAccept(user);
-    await waitFor(() => expect(acceptGitOpsSource).toHaveBeenCalledWith('bp:5', 'gen-candidate'));
+    await waitFor(() => expect(acceptGitOpsSource).toHaveBeenCalledWith('bp:5', 'gen-candidate', UNAPPROVED_CLAIM));
     expect(toast.success).toHaveBeenCalledWith('Source revision accepted');
     expect(onChanged).toHaveBeenCalled();
   });
@@ -238,7 +245,13 @@ describe('GitOpsAuthorityActions', () => {
     expect(screen.queryByRole('alertdialog')).toBeNull();
 
     await confirmSourceAccept(user);
-    await waitFor(() => expect(acceptGitOpsSource).toHaveBeenCalledWith('bp:5', 'gen-candidate'));
+    // The request carries what the dialog read, so the server can refuse it if
+    // the placement it named or the rollout it promised has moved on.
+    await waitFor(() => expect(acceptGitOpsSource).toHaveBeenCalledWith(
+      'bp:5',
+      'gen-candidate',
+      { placementApprovalRef: 'place-1', rolloutMayStart: true },
+    ));
   });
 
   it('says the rollout stays waiting when authorization needs an operator', async () => {
@@ -300,8 +313,8 @@ describe('GitOpsAuthorityActions', () => {
     expect(dialog).toHaveTextContent('Accept a1b2c3d.');
     expect(dialog).not.toHaveTextContent('ffff000');
     await user.click(within(dialog).getByRole('button', { name: 'Accept source' }));
-    await waitFor(() => expect(acceptGitOpsSource).toHaveBeenCalledWith('bp:5', 'gen-candidate'));
-    expect(acceptGitOpsSource).not.toHaveBeenCalledWith('bp:5', 'gen-new');
+    await waitFor(() => expect(acceptGitOpsSource).toHaveBeenCalledWith('bp:5', 'gen-candidate', UNAPPROVED_CLAIM));
+    expect(acceptGitOpsSource).not.toHaveBeenCalledWith('bp:5', 'gen-new', expect.anything());
   });
 
   it('says acceptance does not start a rollout when placement is not approved', async () => {
@@ -605,7 +618,7 @@ it('says nothing is approved on the first placement, before any scope exists', a
     }));
 
     await confirmSourceAccept(user);
-    await waitFor(() => expect(acceptGitOpsSource).toHaveBeenCalledWith('bp:5', 'gen-new'));
+    await waitFor(() => expect(acceptGitOpsSource).toHaveBeenCalledWith('bp:5', 'gen-new', UNAPPROVED_CLAIM));
   });
 
   it('withholds placement and rollout while the Blueprint is disabled', () => {
@@ -648,7 +661,7 @@ it('says nothing is approved on the first placement, before any scope exists', a
       onChanged,
     );
     await user.click(screen.getByTestId('gitops-action-pull-source'));
-    await waitFor(() => expect(fetchGitOpsSource).toHaveBeenCalledWith('bp:5'));
+    await waitFor(() => expect(fetchGitOpsSource).toHaveBeenCalledWith('bp:5', null));
     expect(toast.success).toHaveBeenCalledWith('Pulled abc1234');
     expect(onChanged).toHaveBeenCalled();
     expect(screen.queryByTestId('gitops-action-accept-source')).toBeNull();
@@ -766,7 +779,7 @@ it('says nothing is approved on the first placement, before any scope exists', a
     });
     renderActions(pullable('manual'), canEditSource);
     await user.click(screen.getByTestId('gitops-action-pull-source'));
-    await waitFor(() => expect(fetchGitOpsSource).toHaveBeenCalledWith('bp:5'));
+    await waitFor(() => expect(fetchGitOpsSource).toHaveBeenCalledWith('bp:5', null));
     expect(screen.queryByRole('alertdialog')).toBeNull();
   });
 
@@ -782,7 +795,7 @@ it('says nothing is approved on the first placement, before any scope exists', a
     });
     renderActions(pullable('review'), canEditSource);
     await user.click(screen.getByTestId('gitops-action-pull-source'));
-    await waitFor(() => expect(fetchGitOpsSource).toHaveBeenCalledWith('bp:5'));
+    await waitFor(() => expect(fetchGitOpsSource).toHaveBeenCalledWith('bp:5', null));
     expect(screen.queryByRole('alertdialog')).toBeNull();
     expect(toast.success).toHaveBeenCalledWith('Pulled abc1234');
   });
@@ -866,6 +879,66 @@ it('asks before an automatic pull and does not fetch when cancelled', async () =
     expect(dialog).toHaveTextContent('Starting a rollout is not the same as it finishing.');
     await user.click(within(dialog).getByRole('button', { name: 'Cancel' }));
     expect(fetchGitOpsSource).not.toHaveBeenCalled();
+  });
+
+  // A confirmation is only binding if the request carries what it read. Both
+  // dialogs freeze their claim the moment they open, so a projection refresh
+  // underneath one cannot turn the words the operator agreed to into a request
+  // for somewhere else.
+  it('sends the automatic pull the placement and the rollout promise it showed', async () => {
+    const user = userEvent.setup();
+    vi.mocked(fetchGitOpsSource).mockResolvedValue({
+      outcome: 'candidate_already_fetched',
+      reason: 'A candidate is awaiting acceptance.',
+      nextAction: 'none',
+      commitSha: 'abc1234ffff',
+      candidateGenerationId: 'gen-2',
+      authority: { status: 'accepted', rollout: 'started', note: null },
+    });
+    renderActions({ ...pullable('automatic', 'automatic'), approvedRolloutScope: approvedScope([1, 3], 'place-9') }, canEditSource);
+    await user.click(screen.getByTestId('gitops-action-pull-source'));
+    const dialog = screen.getByRole('alertdialog');
+    expect(dialog).toHaveTextContent('The next commit goes to the approved nodes: local, node 3.');
+    await user.click(within(dialog).getByRole('button', { name: 'Pull source' }));
+
+    await waitFor(() => expect(fetchGitOpsSource).toHaveBeenCalledWith('bp:5', {
+      placementApprovalRef: 'place-9',
+      rolloutMayStart: true,
+    }));
+  });
+
+  it('sends the accept the placement and the rollout promise it showed', async () => {
+    const user = userEvent.setup();
+    vi.mocked(acceptGitOpsSource).mockResolvedValue({ ok: true, materialized: true, artifactResolved: true, dispatched: false, note: null });
+    renderActions(placementApproved([3], {
+      facets: facets({
+        source: plainSource('source_review_pending'),
+        placement: { status: 'source_acceptance_pending', sourceAcceptanceRef: null, candidateGenerationId: 'gen-candidate' },
+        rollout: { status: 'rollout_not_executable', rolloutCandidateId: 'cand-1' },
+      }),
+    }));
+    await confirmSourceAccept(user);
+
+    await waitFor(() => expect(acceptGitOpsSource).toHaveBeenCalledWith('bp:5', 'gen-candidate', {
+      placementApprovalRef: 'place-1',
+      rolloutMayStart: false,
+    }));
+  });
+
+  it('reports a confirmation the server refused rather than a successful acceptance', async () => {
+    // The reviewed placement was replaced between the dialog and the request.
+    // Nothing was accepted, so the operator must not be told it was.
+    const user = userEvent.setup();
+    vi.mocked(acceptGitOpsSource).mockRejectedValue(
+      new Error('The approved placement changed since you reviewed it; review the current approval and confirm again.'),
+    );
+    renderActions(sourcePending());
+    await confirmSourceAccept(user);
+
+    await waitFor(() => expect(toast.error).toHaveBeenCalledWith(
+      'The approved placement changed since you reviewed it; review the current approval and confirm again.',
+    ));
+    expect(toast.success).not.toHaveBeenCalled();
   });
 
   it('reports an accepted automatic pull as started, held, or accepted', async () => {

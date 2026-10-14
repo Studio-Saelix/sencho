@@ -1434,11 +1434,13 @@ export function liveHealthRolloutExecutor(): HealthRolloutExecutor {
  * when no authorization is live: a refusal before the mint is the caller's to
  * report, and pausing there would hold a rollout nothing has authorized.
  *
- * The origin is chosen by the refusal's kind, never by the caller. A dispatch
- * refusal carries `system`, which is what lets a source acceptance clear it when
- * it supersedes the rollout the hold was about. A real health decision (a stop,
- * a pause, a rollback) carries `health` and survives until the operator resumes;
- * an operator pause carries `operator` and does the same.
+ * The origin is chosen by the refusal's kind, never by the caller, except for
+ * an operator-origin hold, which is the one hold nobody can schedule away: a
+ * dispatch refusal carries `system`, which is what lets a source acceptance
+ * clear it when it supersedes the rollout the hold was about. A real health
+ * decision (a stop, a pause, a rollback) carries `health` and survives until the
+ * operator resumes; an operator pause, and a refusal that exists because an
+ * operator asked to review something first, carry `operator` and do the same.
  */
 export function holdBlockedRolloutDispatch(
   applicationId: string,
@@ -1459,9 +1461,11 @@ export function holdBlockedRolloutDispatch(
     /**
      * Who the hold belongs to. `system` for a dispatch refusal (cleared by a
      * source acceptance that supersedes the rollout), `health` for a policy
-     * decision. Defaults to `system`.
+     * decision, `operator` for a hold that exists because an operator asked to
+     * see it before anything moves. Only `system` is released by a later source
+     * acceptance; the other two need the operator. Defaults to `system`.
      */
-    origin?: 'system' | 'health';
+    origin?: 'system' | 'health' | 'operator';
   } = {},
 ): void {
   // A refusal that says nothing durable about the rollout is not a hold for the
