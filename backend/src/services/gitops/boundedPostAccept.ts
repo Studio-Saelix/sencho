@@ -132,14 +132,13 @@ function responseWithin<T>(
 ): Promise<Timed<T>> {
     return new Promise((resolve) => {
         let settled = false;
-        let timer: ReturnType<typeof setTimeout>;
         function finish(value: T, completed: boolean): void {
             if (settled) return;
             settled = true;
             clearTimeout(timer);
             resolve({ value, completed });
         }
-        timer = setTimeout(() => finish(fallback, false), RESPONSE_MS);
+        const timer = setTimeout(() => finish(fallback, false), RESPONSE_MS);
         work.then(
             (value) => finish(value, true),
             (err: unknown) => {
