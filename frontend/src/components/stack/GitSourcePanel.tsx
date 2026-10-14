@@ -831,6 +831,30 @@ export function GitSourcePanel({
   const claimedAuthorityId = revision ? claimedBlueprintAuthorityId(revision, ownerNode) : null;
   const claimedAutomatic = revision?.targetMode === 'blueprint'
     && policyReadFor(revision.authorityPolicies, 'source')?.configured === 'automatic';
+  const renderClaimedSourceActions = (): ReactNode => (
+    claimedAuthorityId && revision ? (
+      <GitOpsSourceActions
+        applicationId={claimedAuthorityId}
+        projection={revision}
+        can={can}
+        sourceNodeId={sourceNodeId}
+        onChanged={() => {
+          void load('refresh');
+          onSourceChanged?.();
+        }}
+      />
+    ) : null
+  );
+  const overviewSourceActions = renderClaimedSourceActions();
+  if (overviewSourceActions) {
+    statusAction = statusAction ? (
+      <div className="flex flex-wrap items-center gap-2">
+        {statusAction}
+        {overviewSourceActions}
+      </div>
+    ) : overviewSourceActions;
+  }
+  const noticeSourceActions = renderClaimedSourceActions();
   const claimedNotice = (
     <div className="space-y-2 rounded-lg border border-card-border bg-card p-3" data-testid="git-source-claimed">
       <p className="font-mono text-[10px] uppercase tracking-[0.18em] text-stat-icon">Bound to a Blueprint</p>
@@ -843,18 +867,9 @@ export function GitSourcePanel({
             : 'Pull source fetches the next commit into it.'
           : 'Pull source for this Blueprint stays on the node that owns it.'}
       </p>
-      {claimedAuthorityId && revision && revision.targetMode === 'blueprint' && (
+      {noticeSourceActions && (
         <div className="flex flex-wrap items-center gap-2">
-          <GitOpsSourceActions
-            applicationId={claimedAuthorityId}
-            projection={revision}
-            can={can}
-            sourceNodeId={sourceNodeId}
-            onChanged={() => {
-              void load('refresh');
-              onSourceChanged?.();
-            }}
-          />
+          {noticeSourceActions}
         </div>
       )}
     </div>

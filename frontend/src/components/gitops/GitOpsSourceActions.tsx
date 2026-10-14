@@ -4,6 +4,7 @@ import { CheckCheck, RefreshCw } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { ConfirmModal } from '@/components/ui/modal';
 import { toast } from '@/components/ui/toast-store';
+import { useNodes } from '@/context/NodeContext';
 import { acceptGitOpsSource, fetchGitOpsSource, type GitOpsSourceFetchResult } from '@/lib/gitopsAuthorityApi';
 import { policyReadFor } from '@/lib/gitopsAuthorityPolicy';
 import { liveSourceFacet } from '@/lib/gitopsState';
@@ -30,6 +31,24 @@ function pullConfirms(projection: GitOpsRevisionProjection): boolean {
 function rolloutStartsOnPull(projection: GitOpsRevisionProjection): boolean {
   if (projection.targetMode === 'not_applicable') return false;
   return policyReadFor(projection.authorityPolicies, 'rollout_authorization')?.configured === 'automatic';
+}
+
+/** The commit, approved targets, and whether acceptance can start a rollout. Frozen when the confirm opens. */
+function acceptPreview(projection: GitOpsRevisionProjection, nodes: readonly { id: number; name: string }[]): string {
+  const source = liveSourceFacet(projection);
+  const sha = source?.fetchedCommitSha?.slice(0, 7) ?? null;
+  const commit = sha ? `Accept ${sha}.` : 'Accept the waiting commit.';
+  if (projection.approvals.placementApprovalRef === null) {
+    return `${commit} Placement is not approved yet, so this acceptance does not start a rollout.`;
+  }
+  const names = projection.targets
+    .filter((target) => !target.tombstoned)
+    .map((target) => nodes.find((node) => node.id === target.nodeId)?.name ?? `node ${target.nodeId}`);
+  const scope = names.length > 0 ? names.join(', ') : 'no targets';
+  const rollout = rolloutStartsOnPull(projection)
+    ? 'Rollout authorization can start a rollout to those targets. Starting a rollout is not the same as it finishing.'
+    : 'The rollout stays waiting for you.';
+  return `${commit} Placement is approved for ${scope}. ${rollout}`;
 }
 
 function pullFeedback(result: GitOpsSourceFetchResult): { tone: 'success' | 'warning' | 'error'; message: string } {
@@ -75,8 +94,10 @@ export default function GitOpsSourceActions({
   onChanged,
   onPendingChange,
 }: GitOpsSourceActionsProps) {
+  const { nodes } = useNodes();
   const [pending, setPending] = useState<'pull' | 'accept' | null>(null);
   const [confirmPull, setConfirmPull] = useState(false);
+  const [acceptReview, setAcceptReview] = useState<{ generationId: string; description: string } | null>(null);
   const showPull = pullSourceVisible(projection, can, sourceNodeId);
   const confirmsPull = pullConfirms(projection);
   const source = liveSourceFacet(projection);
@@ -107,11 +128,10 @@ export default function GitOpsSourceActions({
     }
   }
 
-  async function handleAccept(): Promise<void> {
-    if (!candidateGenerationId) return;
+  async function handleAccept(generationId: string): Promise<void> {
     setBusy('accept');
     try {
-      const result = await acceptGitOpsSource(applicationId, candidateGenerationId);
+      const result = await acceptGitOpsSource(applicationId, generationId);
       if (result.note) {
         toast.warning(`Source revision accepted. ${result.note}`);
       } else if (result.dispatched) {
@@ -124,6 +144,7 @@ export default function GitOpsSourceActions({
       toast.error(errorMessage(error, 'Failed to accept the source revision'));
     } finally {
       setBusy(null);
+      setAcceptReview(null);
     }
   }
 
@@ -164,13 +185,34 @@ export default function GitOpsSourceActions({
         <Button
           size="sm"
           className="gap-1.5 max-md:min-h-11"
-          onClick={() => void handleAccept()}
+          onClick={() => {
+            if (!candidateGenerationId) return;
+            setAcceptReview({
+              generationId: candidateGenerationId,
+              description: acceptPreview(projection, nodes),
+            });
+          }}
           disabled={pending !== null}
           data-testid="gitops-action-accept-source"
         >
           <CheckCheck className="h-3.5 w-3.5" strokeWidth={1.5} />
           {pending === 'accept' ? 'Accepting…' : 'Accept source'}
         </Button>
+      )}
+      {acceptReview && (
+        <ConfirmModal
+          open
+          onOpenChange={(open) => {
+            if (!open) setAcceptReview(null);
+          }}
+          kicker="SOURCE"
+          title="Accept source"
+          description={acceptReview.description}
+          confirmLabel="Accept source"
+          busyConfirmLabel="Accepting…"
+          confirming={pending === 'accept'}
+          onConfirm={() => handleAccept(acceptReview.generationId)}
+        />
       )}
     </>
   );

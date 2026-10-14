@@ -9,7 +9,7 @@ import userEvent from '@testing-library/user-event';
 vi.mock('@/context/NodeContext', () => ({
   useNodes: () => ({ nodes: [{ id: 1, name: 'local', type: 'local', is_default: true }] }),
 }));
-import { facets, liveRevision, noApprovals, plainSource, sourceIdentity } from '@/__tests__/gitopsFixtures';
+import { facets, liveRevision, noApprovals, plainSource, sourceIdentity, target } from '@/__tests__/gitopsFixtures';
 import type { FutureRolloutAuthorizationBinding, GitOpsRevisionLive } from '@/types/gitops';
 import type { PermissionAction } from '@/context/AuthContext';
 
@@ -161,6 +161,12 @@ beforeEach(() => {
   vi.clearAllMocks();
 });
 
+async function confirmSourceAccept(user: ReturnType<typeof userEvent.setup>): Promise<void> {
+  await user.click(screen.getByTestId('gitops-action-accept-source'));
+  const dialog = await screen.findByRole('alertdialog');
+  await user.click(within(dialog).getByRole('button', { name: 'Accept source' }));
+}
+
 describe('GitOpsAuthorityActions', () => {
   it('accepts the reviewed source generation as the next step', async () => {
     const user = userEvent.setup();
@@ -168,11 +174,147 @@ describe('GitOpsAuthorityActions', () => {
     vi.mocked(acceptGitOpsSource).mockResolvedValue({ ok: true, materialized: true, artifactResolved: true, dispatched: false, note: null });
     renderActions(sourcePending(), () => true, onChanged);
 
-    const button = screen.getByTestId('gitops-action-accept-source');
-    await user.click(button);
+    await confirmSourceAccept(user);
     await waitFor(() => expect(acceptGitOpsSource).toHaveBeenCalledWith('bp:5', 'gen-candidate'));
     expect(toast.success).toHaveBeenCalledWith('Source revision accepted');
     expect(onChanged).toHaveBeenCalled();
+  });
+
+  it('asks before accepting a commit that rollout authorization can deploy', async () => {
+    const user = userEvent.setup();
+    vi.mocked(acceptGitOpsSource).mockResolvedValue({ ok: true, materialized: true, artifactResolved: true, dispatched: true, note: null });
+    const pending = sourcePending();
+    renderActions({
+      ...pending,
+      approvals: { ...pending.approvals, placementApprovalRef: 'place-1' },
+      authorityPolicies: [
+        {
+          domain: 'source',
+          configured: 'manual',
+          effectiveFrozen: null,
+          decision: 'awaiting_operator',
+          reason: null,
+          decidedBy: null,
+          decidedAt: null,
+        },
+        {
+          domain: 'rollout_authorization',
+          configured: 'automatic',
+          effectiveFrozen: null,
+          decision: 'policy_authorized',
+          reason: null,
+          decidedBy: null,
+          decidedAt: null,
+        },
+      ],
+    });
+
+    await user.click(screen.getByTestId('gitops-action-accept-source'));
+    expect(acceptGitOpsSource).not.toHaveBeenCalled();
+    const dialog = await screen.findByRole('alertdialog');
+    expect(dialog).toHaveTextContent('Accept a1b2c3d.');
+    expect(dialog).toHaveTextContent('Placement is approved for local.');
+    expect(dialog).toHaveTextContent('Rollout authorization can start a rollout to those targets.');
+    expect(dialog).toHaveTextContent('Starting a rollout is not the same as it finishing.');
+    await user.click(within(dialog).getByRole('button', { name: 'Cancel' }));
+    expect(acceptGitOpsSource).not.toHaveBeenCalled();
+    expect(screen.queryByRole('alertdialog')).toBeNull();
+
+    await confirmSourceAccept(user);
+    await waitFor(() => expect(acceptGitOpsSource).toHaveBeenCalledWith('bp:5', 'gen-candidate'));
+  });
+
+  it('says the rollout stays waiting when authorization needs an operator', async () => {
+    const user = userEvent.setup();
+    const pending = sourcePending();
+    renderActions({
+      ...pending,
+      approvals: { ...pending.approvals, placementApprovalRef: 'place-1' },
+      authorityPolicies: [
+        {
+          domain: 'rollout_authorization',
+          configured: 'manual',
+          effectiveFrozen: null,
+          decision: 'awaiting_operator',
+          reason: null,
+          decidedBy: null,
+          decidedAt: null,
+        },
+      ],
+    });
+
+    await user.click(screen.getByTestId('gitops-action-accept-source'));
+    const dialog = await screen.findByRole('alertdialog');
+    expect(dialog).toHaveTextContent('Accept a1b2c3d.');
+    expect(dialog).toHaveTextContent('Placement is approved for local.');
+    expect(dialog).toHaveTextContent('The rollout stays waiting for you.');
+    expect(dialog).not.toHaveTextContent('can start a rollout');
+    expect(acceptGitOpsSource).not.toHaveBeenCalled();
+  });
+
+  it('posts the generation that was named when Accept source opened', async () => {
+    const user = userEvent.setup();
+    vi.mocked(acceptGitOpsSource).mockResolvedValue({ ok: true, materialized: true, artifactResolved: true, dispatched: false, note: null });
+    const view = renderActions(sourcePending());
+    await user.click(screen.getByTestId('gitops-action-accept-source'));
+    expect(await screen.findByRole('alertdialog')).toHaveTextContent('Accept a1b2c3d.');
+
+    const later = sourcePending();
+    later.facets = {
+      ...later.facets,
+      source: plainSource('source_review_pending', {
+        candidateGenerationId: 'gen-new',
+        fetchedCommitSha: 'ffff000011112222333344445555666677778888',
+      }),
+    };
+    view.rerender(
+      <GitOpsAuthorityActions
+        applicationId="bp:5"
+        blueprintId={5}
+        blueprintName="web"
+        projection={later}
+        onChanged={() => {}}
+        can={() => true}
+        blueprintEnabled
+      />,
+    );
+
+    const dialog = screen.getByRole('alertdialog');
+    expect(dialog).toHaveTextContent('Accept a1b2c3d.');
+    expect(dialog).not.toHaveTextContent('ffff000');
+    await user.click(within(dialog).getByRole('button', { name: 'Accept source' }));
+    await waitFor(() => expect(acceptGitOpsSource).toHaveBeenCalledWith('bp:5', 'gen-candidate'));
+    expect(acceptGitOpsSource).not.toHaveBeenCalledWith('bp:5', 'gen-new');
+  });
+
+  it('says acceptance does not start a rollout when placement is not approved', async () => {
+    const user = userEvent.setup();
+    renderActions(sourcePending());
+    await user.click(screen.getByTestId('gitops-action-accept-source'));
+    const dialog = await screen.findByRole('alertdialog');
+    expect(dialog).toHaveTextContent('Placement is not approved yet, so this acceptance does not start a rollout.');
+    expect(dialog).not.toHaveTextContent('Placement is approved');
+    expect(dialog).not.toHaveTextContent('can start a rollout');
+    expect(acceptGitOpsSource).not.toHaveBeenCalled();
+  });
+
+  it('names live targets and leaves a removed target out of the confirmation', async () => {
+    const user = userEvent.setup();
+    const pending = sourcePending();
+    renderActions({
+      ...pending,
+      approvals: { ...pending.approvals, placementApprovalRef: 'place-1' },
+      targets: [
+        target(),
+        target({ nodeId: 2, stackName: 'retired', tombstoned: true }),
+        target({ nodeId: 3, stackName: 'other' }),
+      ],
+    });
+    await user.click(screen.getByTestId('gitops-action-accept-source'));
+    const dialog = await screen.findByRole('alertdialog');
+    expect(dialog).toHaveTextContent('Placement is approved for local, node 3.');
+    expect(dialog).not.toHaveTextContent('node 2');
+    expect(acceptGitOpsSource).not.toHaveBeenCalled();
   });
 
   it('reports a refused source acceptance without refreshing', async () => {
@@ -181,7 +323,7 @@ describe('GitOpsAuthorityActions', () => {
     vi.mocked(acceptGitOpsSource).mockRejectedValue(new Error('candidate is blocked'));
     renderActions(sourcePending(), () => true, onChanged);
 
-    await user.click(screen.getByTestId('gitops-action-accept-source'));
+    await confirmSourceAccept(user);
     await waitFor(() => expect(toast.error).toHaveBeenCalledWith('candidate is blocked'));
     expect(onChanged).not.toHaveBeenCalled();
   });
@@ -199,7 +341,7 @@ describe('GitOpsAuthorityActions', () => {
     });
     renderActions(sourcePending(), () => true, onChanged);
 
-    await user.click(screen.getByTestId('gitops-action-accept-source'));
+    await confirmSourceAccept(user);
 
     // The acceptance stands; the note names what is still missing.
     await waitFor(() => expect(toast.warning).toHaveBeenCalledWith(`Source revision accepted. ${note}`));
@@ -343,7 +485,7 @@ describe('GitOpsAuthorityActions', () => {
       }),
     }));
 
-    await user.click(screen.getByTestId('gitops-action-accept-source'));
+    await confirmSourceAccept(user);
     await waitFor(() => expect(acceptGitOpsSource).toHaveBeenCalledWith('bp:5', 'gen-new'));
   });
 

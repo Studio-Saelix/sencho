@@ -1266,11 +1266,63 @@ describe('GitSourcePanel Blueprint binding', () => {
       expect(urls.some((url) => url.includes('/git-source/pull'))).toBe(false);
     });
     fireEvent.click(screen.getByTestId('gitops-action-accept-source'));
+    expect(vi.mocked(apiFetch).mock.calls.map((call) => String(call[0])).some((url) => url.includes('/source/accept'))).toBe(false);
+    fireEvent.click(within(await screen.findByRole('alertdialog')).getByRole('button', { name: 'Accept source' }));
     await waitFor(() => {
       const urls = vi.mocked(apiFetch).mock.calls.map((call) => String(call[0]));
       expect(urls.some((url) => url.includes('/gitops/applications/bp%3A9/source/accept'))).toBe(true);
       expect(urls.some((url) => url.includes(internalId))).toBe(false);
     });
+  });
+
+  it('offers Pull source and Accept source on the overview', async () => {
+    nodeCtl.nodes = [{ id: 1, type: 'local', is_default: true }];
+    nodeCtl.activeNode = { id: 1, type: 'local' };
+    authCtl.can.mockImplementation((action, resourceType, resourceId, nodeId) => {
+      void resourceType;
+      return (action === 'stack:edit' && resourceId === 'bookstack' && nodeId === 1)
+        || action === 'stack:create';
+    });
+    const revision = liveRevision({
+      targetMode: 'blueprint',
+      stackName: null,
+      blueprintId: 9,
+      configuredSourceStackName: 'bookstack',
+      facets: facets({
+        source: plainSource('candidate_ready'),
+      }),
+    });
+    vi.mocked(apiFetch).mockResolvedValue(jsonRes(linkedWith(revision)));
+    render(panel());
+    await sheetLoaded();
+    expect(screen.getByRole('tab', { name: 'Overview' })).toHaveAttribute('aria-selected', 'true');
+    expect(screen.getByTestId('gitops-action-pull-source')).toBeInTheDocument();
+    expect(screen.getByTestId('gitops-action-accept-source')).toBeInTheDocument();
+  });
+
+  it('offers Pull source on the overview when no commit is waiting', async () => {
+    nodeCtl.nodes = [{ id: 1, type: 'local', is_default: true }];
+    nodeCtl.activeNode = { id: 1, type: 'local' };
+    authCtl.can.mockImplementation((action, resourceType, resourceId, nodeId) => {
+      void resourceType;
+      return (action === 'stack:edit' && resourceId === 'bookstack' && nodeId === 1)
+        || action === 'stack:create';
+    });
+    const revision = liveRevision({
+      targetMode: 'blueprint',
+      stackName: null,
+      blueprintId: 9,
+      configuredSourceStackName: 'bookstack',
+      facets: facets({
+        source: plainSource('application_generation_accepted', { candidateGenerationId: null }),
+      }),
+    });
+    vi.mocked(apiFetch).mockResolvedValue(jsonRes(linkedWith(revision)));
+    render(panel());
+    await sheetLoaded();
+    expect(screen.getByRole('tab', { name: 'Overview' })).toHaveAttribute('aria-selected', 'true');
+    expect(screen.getByTestId('gitops-action-pull-source')).toBeInTheDocument();
+    expect(screen.queryByTestId('gitops-action-accept-source')).not.toBeInTheDocument();
   });
 
   it('does not pull a hub Blueprint that shares a remote claimed source number', async () => {
@@ -1297,6 +1349,9 @@ describe('GitSourcePanel Blueprint binding', () => {
     vi.mocked(apiFetch).mockResolvedValue(jsonRes(linkedWith(revision)));
     render(panel({ nodeId: 2 }));
     await sheetLoaded();
+    expect(screen.getByRole('tab', { name: 'Overview' })).toHaveAttribute('aria-selected', 'true');
+    expect(screen.queryByTestId('gitops-action-pull-source')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('gitops-action-accept-source')).not.toBeInTheDocument();
     openTab('Source');
     expect(await screen.findByTestId('git-source-claimed')).toHaveTextContent('stays on the node that owns it');
     expect(screen.queryByTestId('gitops-action-pull-source')).not.toBeInTheDocument();
