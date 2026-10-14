@@ -74,7 +74,7 @@ describe('GET /api/dashboard/configuration', () => {
       },
       security: { scanPolicies: { total: expect.any(Number), enabled: expect.any(Number), locked: expect.any(Boolean) } },
       thresholds: expect.any(Object),
-      backup: { provider: expect.any(String), autoUpload: expect.any(Boolean), locked: expect.any(Boolean) },
+      backup: { provider: expect.any(String), autoUpload: expect.any(Boolean), encryptArchives: expect.any(Boolean), locked: expect.any(Boolean) },
     });
   });
 

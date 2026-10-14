@@ -39,7 +39,7 @@ function makePayload(overrides: Partial<ConfigurationStatusPayload> = {}): Confi
       scanPolicies: { total: 0, enabled: 0, locked: false },
     },
     thresholds: { cpuLimit: 90, ramLimit: 90, diskLimit: 90, dockerJanitorGb: 5, globalCrash: false, hostAlertsEnabled: true },
-    backup: { provider: 'disabled', autoUpload: false, locked: false },
+    backup: { provider: 'disabled', autoUpload: false, encryptArchives: false, locked: false },
     ...overrides,
   };
 }
@@ -288,9 +288,11 @@ describe('ConfigurationSummary labels', () => {
 
   it('distinguishes the backup providers', () => {
     for (const [backup, expected] of [
-      [{ provider: 'disabled', autoUpload: false, locked: false }, 'Off'],
-      [{ provider: 'sencho', autoUpload: false, locked: false }, 'Recovery Vault'],
-      [{ provider: 'custom', autoUpload: true, locked: false }, 'Custom S3 (auto)'],
+      [{ provider: 'disabled', autoUpload: false, encryptArchives: false, locked: false }, 'Off'],
+      [{ provider: 'sencho', autoUpload: false, encryptArchives: false, locked: false }, 'Recovery Vault'],
+      [{ provider: 'sencho', autoUpload: false, encryptArchives: true, locked: false }, 'Recovery Vault (encrypted)'],
+      [{ provider: 'custom', autoUpload: true, encryptArchives: false, locked: false }, 'Custom S3 (auto)'],
+      [{ provider: 'custom', autoUpload: true, encryptArchives: true, locked: false }, 'Custom S3 (auto) (encrypted)'],
     ] as const) {
       const { unmount } = renderWith(makeFullPayload({ backup }));
       expand('recovery');

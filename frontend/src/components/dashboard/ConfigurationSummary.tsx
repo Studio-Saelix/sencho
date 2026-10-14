@@ -98,8 +98,9 @@ function ssoLabel(sec: ConfigurationStatusPayload['security']): string {
 
 function vaultLabel(backup: ConfigurationStatusPayload['backup']): string {
   if (backup.provider === 'disabled') return 'Off';
-  if (backup.provider === 'sencho') return 'Recovery Vault';
-  return `Custom S3${backup.autoUpload ? ' (auto)' : ''}`;
+  const encrypted = backup.encryptArchives ? ' (encrypted)' : '';
+  if (backup.provider === 'sencho') return `Recovery Vault${encrypted}`;
+  return `Custom S3${backup.autoUpload ? ' (auto)' : ''}${encrypted}`;
 }
 
 /** `3 rules`, `1 rule`, or the `none` wording for zero. */

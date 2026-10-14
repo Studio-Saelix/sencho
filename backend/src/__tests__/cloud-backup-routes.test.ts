@@ -4,8 +4,11 @@
  * The S3 SDK is mocked at the module level so no network calls happen.
  */
 import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } from 'vitest';
+import { Readable } from 'stream';
+import * as zlib from 'zlib';
 import request from 'supertest';
 import { setupTestDb, cleanupTestDb, loginAsTestAdmin } from './helpers/setupTestDb';
+import { encryptArchive } from '../services/cloudBackupArchive';
 
 const sentSpy = vi.fn();
 
@@ -52,6 +55,8 @@ beforeEach(() => {
         'cloud_backup_secret_key',
         'cloud_backup_path_prefix',
         'cloud_backup_auto_upload',
+        'cloud_backup_encrypt_archives',
+        'cloud_backup_archive_passphrase',
     ]) {
         db.updateGlobalSetting(k, '');
     }
@@ -197,6 +202,15 @@ describe('Cloud backup read routes are admin-only', () => {
         expect(res.body.code).toBe('ADMIN_REQUIRED');
     });
 
+    it('POST download and import return 403 for a non-admin', async () => {
+        const download = await request(app).post(`/api/cloud-backup/object/${keyB64}/download`).set('Cookie', viewerCookie).send({});
+        const imported = await request(app).post(`/api/cloud-backup/object/${keyB64}/import`).set('Cookie', viewerCookie).send({});
+        expect(download.status).toBe(403);
+        expect(download.body.code).toBe('ADMIN_REQUIRED');
+        expect(imported.status).toBe(403);
+        expect(imported.body.code).toBe('ADMIN_REQUIRED');
+    });
+
     it('does not block an admin on GET /snapshots', async () => {
         const res = await request(app).get('/api/cloud-backup/snapshots').set('Cookie', authCookie);
         expect(res.status).not.toBe(403);
@@ -271,6 +285,118 @@ describe('Cloud backup config CRUD', () => {
             .set('Cookie', authCookie)
             .send({ provider: 'custom', custom: { endpoint: '', bucket: '', access_key: '' } });
         expect(res.status).toBe(400);
+    });
+});
+
+describe('Cloud backup archive passphrase', () => {
+    const passphrase = 'correct-horse';
+
+    it('rejects the first enable when the passphrase is missing or a placeholder', async () => {
+        const empty = await request(app).put('/api/cloud-backup/config').set('Cookie', authCookie).send({
+            ...customConfigBody,
+            encrypt_archives: true,
+            archive_passphrase: '',
+        });
+        expect(empty.status).toBe(400);
+
+        const placeholder = await request(app).put('/api/cloud-backup/config').set('Cookie', authCookie).send({
+            ...customConfigBody,
+            encrypt_archives: true,
+            archive_passphrase: '***',
+        });
+        expect(placeholder.status).toBe(400);
+        const settings = DatabaseService.getInstance().getGlobalSettings();
+        expect(settings.cloud_backup_encrypt_archives).not.toBe('1');
+        expect(settings.cloud_backup_provider).toBe('');
+    });
+
+    it('rejects a passphrase shorter than 12 characters', async () => {
+        const res = await request(app).put('/api/cloud-backup/config').set('Cookie', authCookie).send({
+            ...customConfigBody,
+            encrypt_archives: true,
+            archive_passphrase: 'too-short',
+        });
+        expect(res.status).toBe(400);
+    });
+
+    it('stores the passphrase encrypted, redacts it, and keeps it across a placeholder save', async () => {
+        const db = DatabaseService.getInstance();
+        const save = await request(app).put('/api/cloud-backup/config').set('Cookie', authCookie).send({
+            ...customConfigBody,
+            encrypt_archives: true,
+            archive_passphrase: passphrase,
+        });
+        expect(save.status).toBe(204);
+        const stored = db.getGlobalSettings().cloud_backup_archive_passphrase;
+        expect(stored.startsWith('enc:')).toBe(true);
+        expect(stored.includes(passphrase)).toBe(false);
+
+        const read = await request(app).get('/api/cloud-backup/config').set('Cookie', authCookie);
+        expect(read.body.encrypt_archives).toBe(true);
+        expect(read.body.archive_passphrase).toBe('***');
+
+        const again = await request(app).put('/api/cloud-backup/config').set('Cookie', authCookie).send({
+            ...customConfigBody,
+            encrypt_archives: true,
+            archive_passphrase: '***',
+        });
+        expect(again.status).toBe(204);
+        expect(db.getGlobalSettings().cloud_backup_archive_passphrase).toBe(stored);
+
+        const off = await request(app).put('/api/cloud-backup/config').set('Cookie', authCookie).send({
+            ...customConfigBody,
+            encrypt_archives: false,
+        });
+        expect(off.status).toBe(204);
+        expect(db.getGlobalSettings().cloud_backup_encrypt_archives).toBe('0');
+        expect(db.getGlobalSettings().cloud_backup_archive_passphrase).toBe(stored);
+    });
+});
+
+describe('Cloud backup object prefix', () => {
+    it('rejects download, import, and delete outside the snapshot prefix', async () => {
+        await request(app).put('/api/cloud-backup/config').set('Cookie', authCookie).send(customConfigBody);
+        const key = Buffer.from('elsewhere/instances/x/snapshots/1.tar.gz').toString('base64url');
+        const download = await request(app).get(`/api/cloud-backup/object/${key}/download`).set('Cookie', authCookie);
+        const imported = await request(app).post(`/api/cloud-backup/object/${key}/import`).set('Cookie', authCookie).send({});
+        const deleted = await request(app).delete(`/api/cloud-backup/object/${key}`).set('Cookie', authCookie);
+        expect(download.status).toBe(400);
+        expect(imported.status).toBe(400);
+        expect(deleted.status).toBe(400);
+    });
+
+    it('asks for a passphrase when an encrypted object has none stored', async () => {
+        await request(app).put('/api/cloud-backup/config').set('Cookie', authCookie).send(customConfigBody);
+        DatabaseService.getInstance().setSystemState('instance_id', 'inst');
+        const objectKey = 'p/instances/inst/snapshots/1.tar.gz.senc';
+        const blob = await encryptArchive(Buffer.from('hello'), 'correct-horse');
+        sentSpy.mockResolvedValue({ Body: Readable.from(blob) });
+        const key = Buffer.from(objectKey).toString('base64url');
+        const res = await request(app).get(`/api/cloud-backup/object/${key}/download`).set('Cookie', authCookie);
+        expect(res.status).toBe(409);
+        expect(res.body.code).toBe('PASSPHRASE_REQUIRED');
+    });
+
+    it('returns gzip when the download body carries the passphrase', async () => {
+        await request(app).put('/api/cloud-backup/config').set('Cookie', authCookie).send(customConfigBody);
+        DatabaseService.getInstance().setSystemState('instance_id', 'inst');
+        const gzip = zlib.gzipSync(Buffer.from('sealed-bytes'));
+        const blob = await encryptArchive(gzip, 'correct-horse');
+        sentSpy.mockResolvedValue({ Body: Readable.from(blob) });
+        const key = Buffer.from('p/instances/inst/snapshots/1.tar.gz.senc').toString('base64url');
+        const res = await request(app)
+            .post(`/api/cloud-backup/object/${key}/download`)
+            .set('Cookie', authCookie)
+            .send({ passphrase: 'correct-horse' })
+            .buffer(true)
+            .parse((parserRes, callback) => {
+                const chunks: Buffer[] = [];
+                parserRes.on('data', (chunk: Buffer) => chunks.push(chunk));
+                parserRes.on('end', () => callback(null, Buffer.concat(chunks)));
+            });
+        expect(res.status).toBe(200);
+        expect(res.headers['content-type']).toMatch(/gzip/);
+        expect(zlib.gunzipSync(res.body).toString()).toBe('sealed-bytes');
     });
 });
 
