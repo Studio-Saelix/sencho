@@ -64,6 +64,13 @@ export async function dispatchPreparedGitManagedGeneration(args: {
   }
   if (app.suspended_at) return { status: 'skipped', reason: 'the source is suspended' };
   if (app.pause_at) return { status: 'skipped', reason: 'the rollout is paused' };
+  if (app.rollout_authorization_policy !== 'automatic') {
+    return { status: 'skipped', reason: 'the rollout authorization policy requires an operator' };
+  }
+  // Below the policy gate on purpose. A manual policy cannot dispatch from
+  // here at all, and its Authorize is the operator's own decision against the
+  // placement as it stands, so holding the rollout over a confirmation this
+  // handoff could never have acted on would add a resume step and nothing else.
   if (args.confirmation) {
     const drift = sourceConfirmationDrift(app, args.confirmation);
     if (drift) {
@@ -81,9 +88,6 @@ export async function dispatchPreparedGitManagedGeneration(args: {
       });
       return { status: 'skipped', reason };
     }
-  }
-  if (app.rollout_authorization_policy !== 'automatic') {
-    return { status: 'skipped', reason: 'the rollout authorization policy requires an operator' };
   }
   const blueprint = app.blueprint_id !== null
     ? DatabaseService.getInstance().getBlueprint(app.blueprint_id)

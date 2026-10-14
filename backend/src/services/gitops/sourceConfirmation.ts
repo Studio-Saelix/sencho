@@ -18,11 +18,13 @@
  *     behind it. The dialogs say "this can start a rollout" or "this stays
  *     waiting for you", and that sentence is the contract.
  *
- * The check runs at every consequential boundary rather than only at the route,
- * because each boundary is preceded by asynchronous work: a fetch and a
- * preparation both take time another session can spend approving a placement or
- * arming a rollout policy. A check at entry alone would pass a request whose
- * destination moved while it was waiting.
+ * The check runs at every consequential boundary an operator action reaches,
+ * rather than only at the route, because each is preceded by asynchronous work:
+ * a fetch and a preparation both take time another session can spend approving a
+ * placement or arming a rollout policy. A check at entry alone would pass a
+ * request whose destination moved while it was waiting. A cadence carries no
+ * claim to check, so the poll and the reconciler's re-drive are not boundaries
+ * here, and the hold below is what keeps them from undoing a refusal.
  *
  * A refusal after the acceptance has committed is held rather than answered,
  * because the reconciler re-drives any accepted generation with nothing to

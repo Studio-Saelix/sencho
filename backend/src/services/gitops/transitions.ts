@@ -421,6 +421,17 @@ export class GitOpsTransitions {
           throw new GitOpsTransitionError('live direct application already exists');
         }
       },
+      // A Direct application has no rollout to pause, and every resume route
+      // resolves a Git-managed Blueprint, so a pause carried into this mode is
+      // one nothing can clear. Whatever held it was about the Blueprint
+      // rollout that Retire ends.
+      onRetarget: (app) => {
+        if (app.pause_at === null) return {};
+        app.pause_at = null;
+        app.pause_reason = null;
+        app.pause_origin = 'operator';
+        return { pauseAt: null };
+      },
     });
   }
 
@@ -479,12 +490,19 @@ export class GitOpsTransitions {
       // no-op is exact: a row carrying only a dangling `rollout_authorization_ref`
       // would otherwise be reported as having nothing to clear and left with a
       // ref nothing resolves, with no history row admitting it.
+      //
+      // The rollout pause goes with them. A hold is the one column with a verb
+      // that only exists in the mode being left: every resume route resolves a
+      // Git-managed Blueprint and answers `NOT_GIT_MANAGED` for this row
+      // afterwards, so a pause carried across reads as a paused rollout nobody
+      // can clear. Whatever held it was about the rollout this demotion ends.
       onRetarget: (app) => {
         if (app.placement_approval_ref === null
           && app.rollout_authorization_ref === null
           && app.rollout_authorization_policy === 'manual'
           && app.latest_preflight_evidence_json === null
-          && app.preflight_fingerprint === null) {
+          && app.preflight_fingerprint === null
+          && app.pause_at === null) {
           return {};
         }
         app.placement_approval_ref = null;
@@ -492,12 +510,16 @@ export class GitOpsTransitions {
         app.rollout_authorization_policy = 'manual';
         app.latest_preflight_evidence_json = null;
         app.preflight_fingerprint = null;
+        app.pause_at = null;
+        app.pause_reason = null;
+        app.pause_origin = 'operator';
         return {
           placementApprovalRef: null,
           rolloutAuthorizationRef: null,
           rolloutAuthorizationPolicy: 'manual',
           latestPreflightEvidenceJson: null,
           preflightFingerprint: null,
+          pauseAt: null,
         };
       },
     });

@@ -655,6 +655,122 @@ describe('POST /api/gitops/applications/:id/source/accept', () => {
     dispatchSpy.mockRestore();
   });
 
+  it('does not hold the rollout for a stale confirmation a manual policy could not have acted on', async () => {
+    // A manual policy never dispatches from the handoff, and its Authorize is
+    // already the operator's decision against the placement as it stands. A hold
+    // for drift that arrives during preparation would add a resume step before
+    // that, and block the authorize, for a rollout that was never going to
+    // start. The confirmation was current when the route read it, so this is the
+    // only window it can drift in.
+    const seeded = seedGitManagedBlueprint({ sourceAccepted: false });
+    const reviewed = await approvePlacement(seeded);
+    const materialization = await import('../services/gitops/gitManagedMaterialization');
+    vi.spyOn(materialization, 'prepareAcceptedGitManagedGeneration').mockImplementation(async () => {
+      await approvePlacement(seeded);
+      return { materialized: true, artifact: 'resolved' as const, note: null };
+    });
+    const dispatchSpy = vi.spyOn(GitSourceService.getInstance(), 'dispatchAcceptedGeneration');
+
+    const res = await request(app)
+      .post(`/api/gitops/applications/bp:${seeded.blueprintId}/source/accept`)
+      .set('Cookie', adminCookie)
+      .send({
+        generationId: seeded.generationId,
+        confirmation: { placementApprovalRef: reviewed, rolloutMayStart: false },
+      });
+
+    expect(res.status).toBe(200);
+    const row = GitOpsStore.getInstance().getApplication(seeded.applicationId)!;
+    expect(row.accepted_generation_id).toBe(seeded.generationId);
+    expect(row.pause_at).toBeNull();
+    expect(dispatchSpy).not.toHaveBeenCalled();
+    dispatchSpy.mockRestore();
+  });
+
+  it('keeps an operator hold across a later source acceptance', async () => {
+    // The whole reason the hold carries an operator origin. A system hold is
+    // released by the next source acceptance, and on an automatic source that
+    // is the next poll, so an operator-origin hold that a poll could clear
+    // would leave the drift unguarded after one cycle.
+    const seeded = seedGitManagedBlueprint({ sourceAccepted: false });
+    const reviewed = await approvePlacement(seeded);
+    DatabaseService.getInstance().getDb().prepare(
+      'UPDATE gitops_applications SET rollout_authorization_policy = ? WHERE id = ?',
+    ).run('automatic', seeded.applicationId);
+    const materialization = await import('../services/gitops/gitManagedMaterialization');
+    vi.spyOn(materialization, 'prepareAcceptedGitManagedGeneration').mockImplementation(async () => {
+      await approvePlacement(seeded);
+      return { materialized: true, artifact: 'resolved' as const, note: null };
+    });
+    await request(app)
+      .post(`/api/gitops/applications/bp:${seeded.blueprintId}/source/accept`)
+      .set('Cookie', adminCookie)
+      .send({
+        generationId: seeded.generationId,
+        confirmation: { placementApprovalRef: reviewed, rolloutMayStart: true },
+      })
+      .expect(200);
+    expect(GitOpsStore.getInstance().getApplication(seeded.applicationId)!.pause_origin).toBe('operator');
+
+    // A newer commit accepted on the policy's own behalf, which is what a poll
+    // does on an automatic source.
+    const store = GitOpsStore.getInstance();
+    const accepted = store.getApplication(seeded.applicationId)!;
+    DatabaseService.getInstance().getDb().prepare(
+      'UPDATE gitops_applications SET source_policy = ? WHERE id = ?',
+    ).run('automatic', seeded.applicationId);
+    const nextGenerationId = `gen-${seeded.applicationId}-next`;
+    insertGeneration(nextGenerationId, seeded.applicationId, accepted.materialization_fingerprint ?? undefined);
+    const env = {
+      operationId: `fetch-next-${seeded.applicationId}`,
+      actor: 'system:source-controller',
+      trigger: 'poll' as const,
+      at: Date.now(),
+    };
+    GitOpsTransitions.getInstance().fetchStarted(accepted.id, env);
+    GitOpsTransitions.getInstance().fetched(accepted.id, 'c'.repeat(40), env);
+    GitOpsTransitions.getInstance().candidateReady(accepted.id, nextGenerationId, false, env);
+    GitOpsTransitions.getInstance().sourceAccepted({
+      applicationId: accepted.id,
+      generationId: nextGenerationId,
+      artifactSetId: `art-${nextGenerationId}`,
+      sourceAcceptanceId: `sa-${nextGenerationId}`,
+      authority: 'configured_policy',
+      envelope: { operationId: `accept-next-${seeded.applicationId}`, actor: 'system:source-controller', trigger: 'poll', at: Date.now() },
+    });
+
+    const afterAcceptance = store.getApplication(seeded.applicationId)!;
+    expect(afterAcceptance.accepted_generation_id).toBe(nextGenerationId);
+    expect(afterAcceptance.pause_at).not.toBeNull();
+    expect(afterAcceptance.pause_reason).toContain('approved placement changed');
+  });
+
+  it('drops the rollout pause when the Blueprint is demoted', async () => {
+    // Every resume route resolves a Git-managed Blueprint and answers
+    // NOT_GIT_MANAGED for this row afterwards, so a pause carried across the
+    // mode change would be one nothing could clear.
+    const seeded = seedGitManagedBlueprint({ sourceAccepted: true });
+    GitOpsTransitions.getInstance().rolloutPaused(
+      seeded.applicationId,
+      null,
+      'The approved placement changed after this was confirmed; review the current placement, then resume the rollout',
+      { operationId: `pause-${seeded.applicationId}`, actor: 'system:rollout-dispatch', trigger: 'manual', at: Date.now() },
+      'operator',
+    );
+    expect(GitOpsStore.getInstance().getApplication(seeded.applicationId)!.pause_at).not.toBeNull();
+
+    GitOpsTransitions.getInstance().convertBlueprintToDirect({
+      applicationId: seeded.applicationId,
+      stackName: `retired-${seeded.applicationId}`,
+      envelope: { operationId: `retire-${seeded.applicationId}`, actor: 'tester', trigger: 'manual', at: Date.now() },
+    });
+
+    const retired = GitOpsStore.getInstance().getApplication(seeded.applicationId)!;
+    expect(retired.target_mode).toBe('direct');
+    expect(retired.pause_at).toBeNull();
+    expect(retired.pause_reason).toBeNull();
+  });
+
   it('lets the operator resume after reviewing the placement that moved', async () => {
     const seeded = seedGitManagedBlueprint({ sourceAccepted: false });
     const reviewed = await approvePlacement(seeded);
