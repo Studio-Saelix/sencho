@@ -426,6 +426,7 @@ describe('POST /api/gitops/applications/:id/source/accept', () => {
     expect(res.body.dispatched).toBe(false);
     // The fixture's preparation leaves a note, so this is the case where the
     // refusal would otherwise be hidden.
+    expect(res.body.note).toContain('staged candidate');
     expect(res.body.note).toContain('Deploy to node 2 failed: registry unreachable.');
     handoffSpy.mockRestore();
   });

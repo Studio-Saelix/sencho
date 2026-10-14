@@ -3,7 +3,8 @@ import { GitOpsStore } from './store';
 import { GitOpsTransitions } from './transitions';
 import { GitSourceService } from '../GitSourceService';
 import { buildAcceptedGeneration } from './handoff';
-import { dispatchPreparedGitManagedGeneration, GIT_MANAGED_ARTIFACT_UNRESOLVED_REASON } from './gitManagedHandoff';
+import { dispatchPreparedGitManagedGeneration } from './gitManagedHandoff';
+import { runBoundedGitManagedPostAccept } from './boundedPostAccept';
 import { checkStatefulWithdrawal, holdForStatefulReview, readStagedGeneration } from './statefulGuard';
 import { prepareAcceptedGitManagedGeneration } from './gitManagedMaterialization';
 import { DatabaseService } from '../DatabaseService';
@@ -72,91 +73,13 @@ export type OperatorFetchResult =
 
 const NO_AUTHORITY: FetchAuthorityReport = { status: 'not_applicable' };
 
-/**
- * How long an operator pull waits after acceptance before answering.
- * The accept route uses the same bound: a registry lookup or a sequential
- * rollout must not hold an already-committed acceptance open.
- */
-const POST_ACCEPT_RESPONSE_MS = 15_000;
-
-const PREPARATION_CONTINUING_NOTE =
-    'preparation is still running; the rollout becomes authorizable when it completes';
-
-const ROLLOUT_STARTING_NOTE =
-    'the rollout is starting; watch the application for progress';
-
 /** Set when an operator pull still has preparation or dispatch running after it answers. */
 interface PostAcceptFollow {
     pending: Promise<void> | null;
 }
 
-/**
- * Answer with `fallback` when `work` is still running at the response
- * deadline. The underlying promise is left running either way.
- */
-function responseWithin<T>(
-    work: Promise<T>,
-    fallback: T,
-    onError: (err: unknown) => void,
-): Promise<{ value: T; completed: boolean }> {
-    return new Promise((resolve) => {
-        let settled = false;
-        const timer = setTimeout(() => {
-            if (settled) return;
-            settled = true;
-            resolve({ value: fallback, completed: false });
-        }, POST_ACCEPT_RESPONSE_MS);
-        work.then(
-            (value) => {
-                if (settled) return;
-                settled = true;
-                clearTimeout(timer);
-                resolve({ value, completed: true });
-            },
-            (err: unknown) => {
-                onError(err);
-                if (settled) return;
-                settled = true;
-                clearTimeout(timer);
-                resolve({ value: fallback, completed: true });
-            },
-        );
-    });
-}
-
 function refuseFetch(code: OperatorFetchRefusalCode, error: string): OperatorFetchResult {
     return { status: 'refused', code, error };
-}
-
-/**
- * Join note fragments the route will capitalize as one response.
- * A single fragment stays as written. Later fragments become their own sentences.
- */
-function joinAuthorityNotes(parts: Array<string | null>): string | null {
-    const present = parts
-        .map((part) => part?.trim() ?? '')
-        .filter((part) => part.length > 0);
-    if (present.length === 0) return null;
-    if (present.length === 1) return present[0];
-    return present.map((part, index) => {
-        const bare = part.replace(/[.!?]$/, '');
-        if (index === 0) return bare;
-        return `${bare.charAt(0).toUpperCase()}${bare.slice(1)}`;
-    }).join('. ');
-}
-
-/**
- * A skipped handoff that only repeats an unresolved artifact adds nothing
- * once preparation already named why. Any other handoff reason stays.
- */
-function skippedAuthorityNote(
-    prepared: { artifact: string; note: string | null },
-    reason: string | null,
-): string | null {
-    const explained = prepared.artifact !== 'resolved'
-        && prepared.note !== null
-        && reason === GIT_MANAGED_ARTIFACT_UNRESOLVED_REASON;
-    return joinAuthorityNotes([prepared.note, explained ? null : reason]);
 }
 
 /** Prefer a sentence already written for an operator. Internal phrases stay in the log. */
@@ -810,7 +733,14 @@ export class SourceController {
         // idempotent and the reconciler retries them, so a failure here is
         // reported and the dispatch below still runs (and refuses truthfully).
         if (app.target_mode === 'blueprint' && follow) {
-            return this.boundBlueprintPostAccept(app, acceptGeneration.id, trigger, follow);
+            const settled = await runBoundedGitManagedPostAccept({
+                applicationId: app.id,
+                generationId: acceptGeneration.id,
+                actor: 'system:source-controller',
+                trigger,
+            });
+            follow.pending = settled.pending;
+            return { status: 'accepted', rollout: settled.rollout, note: settled.authorityNote };
         }
         if (app.target_mode === 'blueprint') {
             const prepared = await prepareAcceptedGitManagedGeneration({
@@ -882,104 +812,6 @@ export class SourceController {
             );
             return { status: 'accepted', rollout: 'held', note: 'The rollout did not start.' };
         }
-    }
-
-    /**
-     * Answer an automatic Blueprint pull without waiting out preparation or
-     * a sequential rollout. Acceptance has already committed. Each step still
-     * runs once; the in-flight slot stays held until both have settled.
-     */
-    private async boundBlueprintPostAccept(
-        app: GitOpsApplicationRow,
-        generationId: string,
-        trigger: ReconcileTrigger,
-        follow: PostAcceptFollow,
-    ): Promise<FetchAuthorityReport> {
-        const prepareWork = prepareAcceptedGitManagedGeneration({
-            applicationId: app.id,
-            generationId,
-            actor: 'system:source-controller',
-            trigger,
-        });
-        const prepared = await responseWithin(prepareWork, {
-            materialized: false,
-            artifact: 'none',
-            note: PREPARATION_CONTINUING_NOTE,
-        }, (err) => this.warnPostAccept(app.id, 'preparation', err));
-        if (prepared.completed && prepared.value.note) {
-            console.warn(
-                `[SourceController] Git-managed preparation incomplete for ${sanitizeForLog(app.id)}: ${sanitizeForLog(prepared.value.note)}`,
-            );
-        }
-        const dispatchWork = dispatchPreparedGitManagedGeneration({
-            applicationId: app.id,
-            generationId,
-            actor: 'system:source-controller',
-            trigger,
-        });
-        const handoff = await responseWithin(dispatchWork, {
-            status: 'skipped',
-            reason: ROLLOUT_STARTING_NOTE,
-        }, (err) => this.warnPostAccept(app.id, 'dispatch', err));
-        const report = this.boundedBlueprintAuthority(app.id, prepared, handoff);
-        follow.pending = prepared.completed && handoff.completed
-            ? null
-            : Promise.allSettled([prepareWork, dispatchWork]).then((results) => {
-                const dispatched = results[1];
-                if (
-                    !handoff.completed
-                    && dispatched.status === 'fulfilled'
-                    && dispatched.value.status === 'blocked'
-                ) {
-                    this.warnBlockedDispatch(app.id, dispatched.value.reason);
-                }
-            });
-        return report;
-    }
-
-    /** The authority report for a Blueprint pull whose post-accept work may still be running. */
-    private boundedBlueprintAuthority(
-        appId: string,
-        prepared: { completed: boolean; value: { artifact: string; note: string | null } },
-        handoff: { completed: boolean; value: { status: 'dispatched' | 'blocked' | 'skipped'; reason: string | null } },
-    ): FetchAuthorityReport {
-        if (handoff.completed && handoff.value.status === 'dispatched') {
-            return { status: 'accepted', rollout: 'started', note: null };
-        }
-        if (handoff.completed && handoff.value.status === 'blocked') {
-            this.warnBlockedDispatch(appId, handoff.value.reason);
-            const held = handoff.value.reason ?? 'The rollout did not start.';
-            const note = prepared.completed ? joinAuthorityNotes([prepared.value.note, held]) : held;
-            return { status: 'accepted', rollout: 'held', note };
-        }
-        if (!prepared.completed) {
-            return { status: 'accepted', rollout: 'not_started', note: PREPARATION_CONTINUING_NOTE };
-        }
-        if (!handoff.completed) {
-            return {
-                status: 'accepted',
-                rollout: 'not_started',
-                note: joinAuthorityNotes([prepared.value.note, ROLLOUT_STARTING_NOTE]),
-            };
-        }
-        return {
-            status: 'accepted',
-            rollout: 'not_started',
-            note: skippedAuthorityNote(prepared.value, handoff.value.reason),
-        };
-    }
-
-    private warnBlockedDispatch(appId: string, reason: string | null): void {
-        console.warn(
-            `[SourceController] automatic dispatch blocked for ${sanitizeForLog(appId)}: ${sanitizeForLog(reason ?? 'unknown')}`,
-        );
-    }
-
-    private warnPostAccept(appId: string, step: 'preparation' | 'dispatch', err: unknown): void {
-        console.error(
-            `[SourceController] Git-managed ${step} failed for ${sanitizeForLog(appId)}:`,
-            redactSensitiveText(err instanceof Error ? err.message : String(err)),
-        );
     }
 
     /**

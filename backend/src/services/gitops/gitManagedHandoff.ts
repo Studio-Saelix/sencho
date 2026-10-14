@@ -23,8 +23,8 @@ export interface GitManagedDispatchOutcome {
 
 /**
  * The skip reason for a handoff whose accepted generation has no resolved
- * artifact identity. Exported so the accept route can tell it apart from a
- * preparation note that already says the same thing.
+ * artifact identity. Exported so post-accept reporting can suppress this
+ * skip when preparation already recorded an unresolved artifact.
  */
 export const GIT_MANAGED_ARTIFACT_UNRESOLVED_REASON = 'the artifact identity is not resolved yet';
 

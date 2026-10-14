@@ -48,11 +48,7 @@ import {
   type RolloutRollbackTargetResult,
 } from '../services/gitops/rolloutRecovery';
 import { placementEffectCompatible } from '../services/gitops/store';
-import { prepareAcceptedGitManagedGeneration } from '../services/gitops/gitManagedMaterialization';
-import {
-  dispatchPreparedGitManagedGeneration,
-  GIT_MANAGED_ARTIFACT_UNRESOLVED_REASON,
-} from '../services/gitops/gitManagedHandoff';
+import { formatOperatorSentences, runBoundedGitManagedPostAccept } from '../services/gitops/boundedPostAccept';
 import { GitOpsTransitions, GitOpsTransitionError } from '../services/gitops/transitions';
 import { SourceController } from '../services/gitops/SourceController';
 import { targetRestoreInFlight } from '../services/gitops/recoveryClaim';
@@ -814,86 +810,6 @@ gitopsApplicationsRouter.get('/:id', async (req: Request, res: Response): Promis
 });
 
 /**
- * Bound the wait on post-acceptance preparation.
- *
- * The acceptance is already committed when this runs, so a slow registry must
- * not hold the request open until a proxy times out and the operator reads a
- * failure for work that actually landed. The underlying preparation keeps
- * running and the reconciler retries it either way; on timeout the response
- * says so rather than pretending the acceptance failed.
- */
-const PREPARE_TIMEOUT_MS = 15_000;
-
-async function prepareAcceptanceWithinTimeout(
-  applicationId: string,
-  generationId: string,
-  actor: string | null,
-): Promise<Awaited<ReturnType<typeof prepareAcceptedGitManagedGeneration>>> {
-  const fallback = {
-    materialized: false,
-    artifact: 'none' as const,
-    note: 'preparation is still running; the rollout becomes authorizable when it completes',
-  };
-  return new Promise((resolve) => {
-    const timer = setTimeout(() => resolve(fallback), PREPARE_TIMEOUT_MS);
-    void prepareAcceptedGitManagedGeneration({ applicationId, generationId, actor, trigger: 'manual' })
-      .then((prepared) => {
-        clearTimeout(timer);
-        resolve(prepared);
-      })
-      .catch((err: unknown) => {
-        clearTimeout(timer);
-        console.error('[GitOps authority] Source preparation failed:', err);
-        resolve(fallback);
-      });
-  });
-}
-
-/**
- * Bound the wait on the post-acceptance dispatch.
- *
- * A sequential rollout can take minutes across the frozen targets, so the
- * request must not hold it open. The dispatch keeps running in the background;
- * the response reports it as not yet started, and the application view carries
- * the progress and any hold.
- */
-async function dispatchAcceptanceWithinTimeout(
-  applicationId: string,
-  generationId: string,
-  actor: string | null,
-): Promise<Awaited<ReturnType<typeof dispatchPreparedGitManagedGeneration>>> {
-  const fallback = {
-    status: 'skipped' as const,
-    reason: 'the rollout is starting; watch the application for progress',
-  };
-  return new Promise((resolve) => {
-    const timer = setTimeout(() => resolve(fallback), PREPARE_TIMEOUT_MS);
-    void dispatchPreparedGitManagedGeneration({ applicationId, generationId, actor: actor ?? 'operator', trigger: 'manual' })
-      .then((handoff) => {
-        clearTimeout(timer);
-        resolve(handoff);
-      })
-      .catch((err: unknown) => {
-        clearTimeout(timer);
-        console.error('[GitOps authority] Source dispatch failed:', err);
-        resolve(fallback);
-      });
-  });
-}
-
-/** Join the accept route's note fragments as sentences, or null when there are none. */
-function joinAcceptNotes(parts: Array<string | null>): string | null {
-  const sentences = parts
-    .filter((part): part is string => part !== null && part.trim().length > 0)
-    .map((part) => {
-      const trimmed = part.trim();
-      const capitalized = `${trimmed.charAt(0).toUpperCase()}${trimmed.slice(1)}`;
-      return /[.!?]$/.test(capitalized) ? capitalized : `${capitalized}.`;
-    });
-  return sentences.length > 0 ? sentences.join(' ') : null;
-}
-
-/**
  * Operator pull for a Git-managed Blueprint.
  *
  * Stages a candidate through the controller's fetch. A manual or review
@@ -939,7 +855,7 @@ gitopsApplicationsRouter.post('/:id/source/fetch', async (req: Request, res: Res
         status: authority.status,
         rollout: authority.status === 'accepted' ? authority.rollout : null,
         note: authority.status === 'held' || authority.status === 'accepted'
-          ? joinAcceptNotes([authority.note])
+          ? formatOperatorSentences([authority.note])
           : null,
       },
     });
@@ -986,41 +902,23 @@ gitopsApplicationsRouter.post('/:id/source/accept', async (req: Request, res: Re
     res.status(500).json({ error: 'Failed to accept the source revision' });
     return;
   }
-  // The acceptance stands even when this follow-up is incomplete. Materialize
-  // the accepted generation and resolve its artifact set so the operator's next
-  // step (approve placement, authorize rollout) acts on a prepared generation;
-  // both steps are idempotent and the reconciler retries them, so a failure is
-  // reported as a note rather than undoing the acceptance. The wait is bounded:
-  // a slow registry must not hold an already-committed acceptance open.
-  const prepared = await prepareAcceptanceWithinTimeout(target.application.id, generationId, actor);
-  // The same handoff the automatic paths use: under an automatic rollout policy
-  // it authorizes and starts the rollout, under a manual policy it skips and
-  // the operator authorizes. A durable refusal is held by the handoff. The wait
-  // is bounded: a sequential rollout must not hold the request open.
-  //
-  // The configured Automatic policy is the authority for starting the rollout,
-  // exactly as it is for the SourceController's automatic acceptance: the
-  // acceptance is `stack:create`, and the policy (which someone with deploy
-  // configured) decides that the rollout starts. The authorize, pause, resume
-  // and policy routes keep `stack:deploy`, because those are operator
-  // decisions, and the reconciler completes a skipped handoff within a tick.
-  const handoff = await dispatchAcceptanceWithinTimeout(target.application.id, generationId, actor);
-  // Both can have something to say; neither may hide the other. A skipped
-  // handoff is surfaced too: its reason is what tells the operator whether the
-  // rollout is starting, waiting for authorization, paused, or held, instead of
-  // a plain "accepted" that reads the same in every case. The one exception is
-  // the unresolved-artifact skip: when the preparation did not resolve the
-  // identity, its own note already says so, and repeating it reads as noise.
-  const handoffNote = handoff.status === 'dispatched'
-    || (prepared.artifact !== 'resolved' && handoff.reason === GIT_MANAGED_ARTIFACT_UNRESOLVED_REASON)
-    ? null
-    : handoff.reason;
+  // Acceptance has committed. Each follow-up step answers within its own
+  // deadline and keeps running when that deadline wins. The rollout
+  // authorization policy decides whether the handoff starts a rollout.
+  // Accept source is stack:create. Authorize, pause, resume, and the policy
+  // routes stay on stack:deploy, because those are operator decisions.
+  const settled = await runBoundedGitManagedPostAccept({
+    applicationId: target.application.id,
+    generationId,
+    actor,
+    trigger: 'manual',
+  });
   res.json({
     ok: true,
-    materialized: prepared.materialized,
-    artifactResolved: prepared.artifact === 'resolved',
-    dispatched: handoff.status === 'dispatched',
-    note: joinAcceptNotes([prepared.note, handoffNote]),
+    materialized: settled.materialized,
+    artifactResolved: settled.artifactResolved,
+    dispatched: settled.dispatched,
+    note: settled.acceptNote,
   });
 });
 
