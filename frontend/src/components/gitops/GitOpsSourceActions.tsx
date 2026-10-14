@@ -38,7 +38,7 @@ function acceptPreview(projection: GitOpsRevisionProjection, nodes: readonly { i
   const source = liveSourceFacet(projection);
   const sha = source?.fetchedCommitSha?.slice(0, 7) ?? null;
   const commit = sha ? `Accept ${sha}.` : 'Accept the waiting commit.';
-  if (projection.approvals.placementApprovalRef === null) {
+  if (projection.targetMode !== 'blueprint' || projection.approvals.placementApprovalRef === null) {
     return `${commit} Placement is not approved yet, so this acceptance does not start a rollout.`;
   }
   const names = projection.targets
