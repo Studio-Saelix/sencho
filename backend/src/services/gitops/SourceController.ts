@@ -187,6 +187,16 @@ function operatorFetchBlock(
     if (app.active_operation_stage === 'apply_started') {
         return refuseFetch('applying', 'A fetch cannot start while a candidate is being applied.');
     }
+    // A fetch may replace the candidate. Apply recovery is eligible only while
+    // the interrupted generation is still that candidate, so the pull waits.
+    // An interrupted fetch stays pullable: the next fetch clears it.
+    if (
+        app.interruption_stage === 'apply_started'
+        && app.interruption_generation_id !== null
+        && app.interruption_generation_id === app.candidate_generation_id
+    ) {
+        return refuseFetch('applying', 'A fetch cannot start while an interrupted apply is still unresolved.');
+    }
     if (inFlight || app.active_operation_stage === 'fetch_started') {
         return refuseFetch('fetch_in_flight', 'A fetch is already running for this source.');
     }
@@ -501,9 +511,10 @@ export class SourceController {
      * the same reconcile fetch a poll uses, then settles with the same
      * post-fetch rules. Manual sources stay off the cadence and are not
      * accepted here. Automatic sources are accepted by the stored policy,
-     * the same as a poll. A fetch already in this process, or a row already
-     * in fetch_started, is refused so this caller does not run a second
-     * acceptance after reconcile joins.
+     * the same as a poll. A fetch already in this process, a row already
+     * in fetch_started, or an interrupted apply that still names the
+     * current candidate is refused before reconcile runs. An interrupted
+     * fetch stays eligible: the next fetch clears that interruption.
      *
      * After acceptance commits, preparation and dispatch are answered within
      * a short deadline. Work still running is reported as continuing, not as

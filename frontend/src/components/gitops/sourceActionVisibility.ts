@@ -26,7 +26,16 @@ export function pullSourceVisible(
   const sourceStack = projection.configuredSourceStackName;
   if (!sourceStack || can?.('stack:edit', 'stack', sourceStack, sourceNodeId) !== true) return false;
   const source = liveSourceFacet(projection);
-  return source !== null && !PULL_BLOCKED.has(source.status);
+  if (source === null || PULL_BLOCKED.has(source.status)) return false;
+  // Apply recovery needs this candidate. A pull may replace it, so it waits.
+  // An interrupted fetch stays visible: that pull clears the interruption.
+  if (
+    source.status === 'source_unknown'
+    && source.interruptedStage === 'apply_started'
+    && source.interruptedGenerationId !== null
+    && source.interruptedGenerationId === source.candidateGenerationId
+  ) return false;
+  return true;
 }
 
 export function acceptSourceVisible(

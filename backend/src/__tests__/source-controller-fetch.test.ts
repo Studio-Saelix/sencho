@@ -35,8 +35,8 @@ function spyOnReconcile() {
     return vi.spyOn(GitSourceService.getInstance(), 'reconcile');
 }
 
-/** A live Git-managed Blueprint retaining the named source stack. */
-function seedBlueprint(policy: 'manual' | 'review' | 'automatic'): { applicationId: string; stackName: string } {
+/** A live Direct source that can still be claimed by a Blueprint. */
+function activateClaimable(policy: 'manual' | 'review' | 'automatic'): { applicationId: string; stackName: string } {
     seq += 1;
     const stackName = `fetch-web-${seq}`;
     const applicationId = `app-fetch-${seq}`;
@@ -50,6 +50,10 @@ function seedBlueprint(policy: 'manual' | 'review' | 'automatic'): { application
         nodeId: 1,
         envelope: { operationId: `seed-${applicationId}`, actor: 'tester', trigger: 'manual', at: Date.now() },
     });
+    return { applicationId, stackName };
+}
+
+function claimAsBlueprint(applicationId: string): void {
     const blueprint = commitBlueprintCreate({
         name: `bp-fetch-${seq}`,
         description: null,
@@ -66,7 +70,35 @@ function seedBlueprint(policy: 'manual' | 'review' | 'automatic'): { application
         applicationId,
         actor: 'tester',
     });
-    return { applicationId, stackName };
+}
+
+/** A live Git-managed Blueprint retaining the named source stack. */
+function seedBlueprint(policy: 'manual' | 'review' | 'automatic'): { applicationId: string; stackName: string } {
+    const seeded = activateClaimable(policy);
+    claimAsBlueprint(seeded.applicationId);
+    return seeded;
+}
+
+/** Apply, claim, then interrupt, so the interrupted generation is still the candidate. */
+function interruptedApply(): { applicationId: string; generationId: string } {
+    const seeded = activateClaimable('manual');
+    const generationId = `gen-${seeded.applicationId}`;
+    stageCandidate(getApp(seeded.applicationId), generationId);
+    const tx = GitOpsTransitions.getInstance();
+    tx.applyStarted(seeded.applicationId, generationId, {
+        operationId: `apply-${seeded.applicationId}`,
+        actor: 'ada',
+        trigger: 'manual',
+        at: Date.now(),
+    });
+    claimAsBlueprint(seeded.applicationId);
+    tx.interruptActiveOperations(seeded.applicationId, {
+        operationId: `boot-${seeded.applicationId}`,
+        actor: 'system',
+        trigger: 'manual',
+        at: Date.now(),
+    });
+    return { applicationId: seeded.applicationId, generationId };
 }
 
 /** What a real fetch records when it stages the commit it just read. */
@@ -198,6 +230,64 @@ describe('SourceController.requestFetch', () => {
 
         expect(fetched).toMatchObject({ status: 'refused', code: 'suspended' });
         expect(reconcile).not.toHaveBeenCalled();
+    });
+
+    it('refuses a pull while an interrupted apply still names its candidate', async () => {
+        const { applicationId, generationId } = interruptedApply();
+        const before = getApp(applicationId);
+        expect(before.target_mode).toBe('blueprint');
+        expect(before.interruption_stage).toBe('apply_started');
+        expect(before.candidate_generation_id).toBe(generationId);
+        expect(before.interruption_generation_id).toBe(generationId);
+        const reconcile = spyOnReconcile();
+
+        const fetched = await controller.requestFetch(applicationId, 'ada');
+
+        expect(fetched).toMatchObject({ status: 'refused', code: 'applying' });
+        expect(reconcile).not.toHaveBeenCalled();
+        const after = getApp(applicationId);
+        expect(after.candidate_generation_id).toBe(generationId);
+        expect(after.interruption_generation_id).toBe(generationId);
+    });
+
+    it('still pulls when an interrupted apply no longer names the current candidate', async () => {
+        const { applicationId, generationId } = interruptedApply();
+        const replacementId = `gen-${applicationId}-next`;
+        stageCandidate(getApp(applicationId), replacementId);
+        const row = getApp(applicationId);
+        expect(row.interruption_stage).toBe('apply_started');
+        expect(row.interruption_generation_id).toBe(generationId);
+        expect(row.candidate_generation_id).toBe(replacementId);
+        const reconcile = spyOnReconcile().mockResolvedValue(okResult);
+
+        const fetched = await controller.requestFetch(applicationId, 'ada');
+
+        expect(fetched.status).toBe('settled');
+        expect(reconcile).toHaveBeenCalledTimes(1);
+    });
+
+    it('still pulls after an interrupted fetch', async () => {
+        const seeded = seedBlueprint('manual');
+        const tx = GitOpsTransitions.getInstance();
+        tx.fetchStarted(seeded.applicationId, {
+            operationId: `fetch-${seeded.applicationId}`,
+            actor: 'ada',
+            trigger: 'manual',
+            at: Date.now(),
+        });
+        tx.interruptActiveOperations(seeded.applicationId, {
+            operationId: `boot-${seeded.applicationId}`,
+            actor: 'system',
+            trigger: 'manual',
+            at: Date.now(),
+        });
+        expect(getApp(seeded.applicationId).interruption_stage).toBe('fetch_started');
+        const reconcile = spyOnReconcile().mockResolvedValue(okResult);
+
+        const fetched = await controller.requestFetch(seeded.applicationId, 'ada');
+
+        expect(fetched.status).toBe('settled');
+        expect(reconcile).toHaveBeenCalledTimes(1);
     });
 
     it('refuses a pull while a candidate is being applied', async () => {

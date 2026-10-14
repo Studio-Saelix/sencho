@@ -447,6 +447,52 @@ describe('GitOpsAuthorityActions', () => {
     nodeId?: number | null,
   ) => action === 'stack:edit' && resourceType === 'stack' && resourceId === 'bookstack' && nodeId === 1;
 
+  function unknownSource(stage: 'fetch_started' | 'apply_started'): GitOpsRevisionLive {
+    return blueprintRevision({
+      configuredSourceStackName: 'bookstack',
+      facets: facets({
+        source: {
+          ...sourceIdentity({ candidateGenerationId: 'gen-interrupted' }),
+          status: 'source_unknown',
+          interruptedStage: stage,
+          interruptedAt: 1,
+          interruptedOperationId: 'op-1',
+          interruptedGenerationId: 'gen-interrupted',
+        },
+        placement: { status: 'blueprint_bound', completion: 'unknown' },
+        rollout: { status: 'rollout_not_executable', rolloutCandidateId: 'cand-1' },
+      }),
+    });
+  }
+
+  it('withholds Pull source during an interrupted apply and keeps it for an interrupted fetch', () => {
+    const hidden = renderActions(unknownSource('apply_started'), canEditSource);
+    expect(screen.queryByTestId('gitops-action-pull-source')).toBeNull();
+    hidden.unmount();
+
+    renderActions(unknownSource('fetch_started'), canEditSource);
+    expect(screen.getByTestId('gitops-action-pull-source')).toBeEnabled();
+  });
+
+  it('keeps Pull source when an interrupted apply no longer names the current candidate', () => {
+    renderActions(blueprintRevision({
+      configuredSourceStackName: 'bookstack',
+      facets: facets({
+        source: {
+          ...sourceIdentity({ candidateGenerationId: 'gen-new' }),
+          status: 'source_unknown',
+          interruptedStage: 'apply_started',
+          interruptedAt: 1,
+          interruptedOperationId: 'op-1',
+          interruptedGenerationId: 'gen-old',
+        },
+        placement: { status: 'blueprint_bound', completion: 'unknown' },
+        rollout: { status: 'rollout_not_executable', rolloutCandidateId: 'cand-1' },
+      }),
+    }), canEditSource);
+    expect(screen.getByTestId('gitops-action-pull-source')).toBeEnabled();
+  });
+
   it('pulls a manual source immediately', async () => {
     const user = userEvent.setup();
     vi.mocked(fetchGitOpsSource).mockResolvedValue({
