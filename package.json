@@ -31,9 +31,9 @@
   "devDependencies": {
     "@commitlint/cli": "^21.2.3",
     "@commitlint/config-conventional": "^21.0.2",
-    "@playwright/test": "^1.63.0",
+    "@playwright/test": "^1.64.0",
     "husky": "^9.1.7",
-    "js-yaml": "^5.4.2",
+    "js-yaml": "^5.4.3",
     "otplib": "^13.5.0"
   }
 }
