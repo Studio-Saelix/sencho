@@ -768,6 +768,10 @@ export class SourceController {
                 artifactSetId: newGitOpsId(),
                 sourceAcceptanceId: newGitOpsId(),
                 authority: 'configured_policy',
+                // The operator's confirmation, recorded on the acceptance so the
+                // automatic paths that outlive this pull still know which
+                // placement it named. Null when the pull was not confirmed.
+                confirmedPlacementApprovalRef: followUp?.confirmation?.placementApprovalRef ?? null,
                 envelope: { operationId: randomUUID(), actor: 'system:source-controller', trigger, at: Date.now() },
             });
         } catch (e) {

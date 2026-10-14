@@ -929,6 +929,10 @@ gitopsApplicationsRouter.post('/:id/source/accept', async (req: Request, res: Re
       artifactSetId: newGitOpsId(),
       sourceAcceptanceId: newGitOpsId(),
       authority: 'operator',
+      // Recorded on the acceptance, not just carried by this request: the
+      // automatic authorization paths that outlive this request have nothing
+      // else to check the precondition against.
+      confirmedPlacementApprovalRef: confirmation.placementApprovalRef,
       envelope: { operationId: newGitOpsId(), actor, trigger: 'manual', at: Date.now() },
     });
   } catch (error) {

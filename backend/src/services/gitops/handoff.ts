@@ -46,6 +46,22 @@ import { mapWithConcurrency } from '../../utils/mapWithConcurrency';
 
 export { setRegistryReadinessDepsForTests };
 
+/**
+ * Why a mint is refused because the placement it was about is no longer the one
+ * preflight covered. Refused rather than retried here: the next evaluation runs
+ * against the placement as it stands, which is the only evidence that can
+ * describe the current target set.
+ */
+export const AUTHORIZATION_INPUTS_MOVED_REASON =
+  'The approved placement changed while registry readiness was being evaluated; nothing was authorized.';
+
+/**
+ * The hold an automatic authorization places when the acceptance it would
+ * authorize was confirmed against a placement that has since been replaced.
+ */
+export const CONFIRMED_PLACEMENT_STALE =
+  'The approved placement changed after this commit was confirmed; review it, then resume the rollout';
+
 const PREFLIGHT_EVAL_TIMEOUT_MS = 30_000;
 
 /** Serialize one evaluation per application so concurrent dispatch cannot double-probe. */
@@ -391,6 +407,35 @@ export async function ensureRolloutAuthorization(
       return { ok: false, reason: 'The rollout authorization policy requires an operator to authorize.' };
     }
 
+    // The durable half of a source confirmation. The claim rides on the request
+    // that carried it, which is long gone by the time preparation resolves, the
+    // reconciler re-drives, or a restart comes back; the precondition it stood
+    // for does not, because the acceptance recorded it.
+    //
+    // Enforced here, at the one funnel every mint passes, rather than on the
+    // routes that issue the requests: this is the only place that runs for an
+    // unattended dispatch. An operator mint is exempt on purpose, because asking
+    // to authorize the rollout is the decision the confirmation deferred, taken
+    // against the placement as it stands now.
+    //
+    // Held rather than merely refused, because a refusal with nothing behind it
+    // is re-attempted on the next reconcile and the operator would watch a
+    // rollout sit queued with no reason attached to it. The acceptance stands:
+    // the content is recorded, and only its destination needs a person.
+    if (!alreadyAuthorized && authority === 'configured_policy') {
+      const confirmed = store.confirmedPlacementForAcceptance(app);
+      if (confirmed !== null && confirmed !== app.placement_approval_ref) {
+        const reason = CONFIRMED_PLACEMENT_STALE;
+        holdBlockedRolloutDispatch(app.id, { reason, holdable: true }, {
+          actor: 'system:rollout-dispatch',
+          trigger: 'blueprint_dispatch',
+          requireLiveBinding: false,
+          origin: 'operator',
+        });
+        return { ok: false, reason };
+      }
+    }
+
     const artifactRefusal = executableArtifactRefusalReason(
       store.getArtifactSet(ingredients.artifactSetId)?.qualification,
     );
@@ -426,6 +471,23 @@ export async function ensureRolloutAuthorization(
     // Re-read after the await: a pause placed while preflight ran must not
     // mint, supersede, or invalidate the authorization it is holding.
     if (shouldAbort?.()) return { ok: false, reason: 'The rollout is paused.' };
+
+    // The evidence above is about the target set that was read before the
+    // await, and the mint below is written against whatever the row says by
+    // then. A placement re-approved during preflight replaces both the approval
+    // and the frozen set, which would pair readiness evaluated for the old
+    // nodes with an authorization naming the new ones. Refuse rather than write
+    // that: a rollout generation is immutable, so a mismatched mint could only
+    // be undone by superseding the rollout it already queued.
+    const settled = store.authorizationIngredients(store.getApplication(applicationId) ?? app);
+    if (!settled || settled.placementApprovalRef !== ingredients.placementApprovalRef) {
+      return { ok: false, reason: AUTHORIZATION_INPUTS_MOVED_REASON };
+    }
+    if (settled.requiredNodeIds.length !== ingredients.requiredNodeIds.length
+      || settled.requiredNodeIds.some((nodeId, index) => nodeId !== ingredients.requiredNodeIds[index])) {
+      return { ok: false, reason: AUTHORIZATION_INPUTS_MOVED_REASON };
+    }
+
     const preflightEvidenceJson = encodePreflightEvidenceJson(preflight);
     const preflightFingerprint = fingerprintPreflightEvidence(preflight);
     const transitions = GitOpsTransitions.getInstance();

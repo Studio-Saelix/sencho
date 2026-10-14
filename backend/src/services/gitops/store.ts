@@ -1421,6 +1421,45 @@ export class GitOpsStore {
   }
 
   /**
+   * The placement approval the current source acceptance was confirmed against,
+   * or null when it was accepted without a confirmation.
+   *
+   * The acceptance row is the only durable place that precondition can live:
+   * the request that carried it is long gone by the time preparation resolves or
+   * a restart brings the reconciler back. Null is a real answer, not missing
+   * evidence. It means nothing was confirmed, so there is nothing to keep bound
+   * and the configured policy alone governs the rollout.
+   */
+  confirmedPlacementForAcceptance(app: GitOpsApplicationRow): string | null {
+    if (!app.source_acceptance_ref) return null;
+    const acceptance = this.getApproval(app.source_acceptance_ref);
+    if (!acceptance || acceptance.kind !== 'source_acceptance') return null;
+    return acceptance.placement_approval_ref;
+  }
+
+  /**
+   * Release an acceptance's confirmed placement.
+   *
+   * The operator's resume is the answer to a hold: they have seen the reason and
+   * want the rollout to carry on under the placement as it stands, so the
+   * acceptance is no longer bound to the one it was confirmed against. Narrow on
+   * purpose, and the only column this ever writes on an approval: the decision
+   * itself (generation, authority, actor) is immutable, and what this clears is
+   * the precondition this same module attaches to it.
+   */
+  releaseConfirmedPlacement(applicationId: string): boolean {
+    const app = this.getApplication(applicationId);
+    if (!app?.source_acceptance_ref) return false;
+    const acceptance = this.getApproval(app.source_acceptance_ref);
+    if (!acceptance || acceptance.kind !== 'source_acceptance') return false;
+    if (acceptance.placement_approval_ref === null) return false;
+    const result = this.db().prepare(
+      'UPDATE gitops_approvals SET placement_approval_ref = NULL WHERE id = ? AND kind = ?',
+    ).run(acceptance.id, 'source_acceptance');
+    return result.changes > 0;
+  }
+
+  /**
    * Authorization ingredients excluding the preflight fingerprint, so a
    * caller can decide whether minting authorization is possible before
    * writing one.

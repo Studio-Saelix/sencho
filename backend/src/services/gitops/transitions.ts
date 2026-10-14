@@ -118,6 +118,18 @@ export type AppliedArgs = {
   authority: Exclude<GitOpsApprovalAuthority, 'legacy_combined'>;
   envelope: EventEnvelope;
   activateCreating?: boolean;
+  /**
+   * The placement approval an operator confirmed this acceptance against, or
+   * null when nobody confirmed one.
+   *
+   * Recorded on the acceptance itself so the precondition outlives the request
+   * that carried it. A confirmation that lives only in a request body is gone
+   * by the time preparation resolves or a restart brings the reconciler back,
+   * and those are exactly the paths that would otherwise deploy the accepted
+   * content to a placement nobody reviewed. An automatic acceptance made by the
+   * poll records none, because a cadence is configured rather than confirmed.
+   */
+  confirmedPlacementApprovalRef?: string | null;
 };
 
 /**
@@ -2199,6 +2211,12 @@ export class GitOpsTransitions {
         app.pause_at = null;
         app.pause_reason = null;
         app.pause_origin = 'operator';
+        // An application-wide resume is the operator's answer to whatever the
+        // hold said, so an acceptance bound to a placement they have now seen
+        // stops binding it. Only the fleet-wide verb does this: a target-scoped
+        // resume answers one target's fence and says nothing about where the
+        // application as a whole may deploy.
+        this.store().releaseConfirmedPlacement(applicationId);
         // A resume answers a *hold*: the operator has seen it and wants the
         // rollout to carry on, so the target the hold was about is deployed again
         // and the policy decides afresh. `health_attempts` is deliberately kept, so
@@ -4617,7 +4635,10 @@ export class GitOpsTransitions {
       rollout_candidate_id: null,
       rollout_generation_id: null,
       source_acceptance_ref: null,
-      placement_approval_ref: null,
+      // Not a decision of its own: the acceptance this row records was made
+      // against this placement, and the automatic authorization path compares
+      // it with the live pointer before it mints for a destination.
+      placement_approval_ref: args.confirmedPlacementApprovalRef ?? null,
       required_targets_json: null,
       preflight_fingerprint: null,
       fingerprint: null,
