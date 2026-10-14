@@ -95,6 +95,19 @@ export interface GitOpsApprovalRefs {
   legacyCombinedApprovalRef: string | null;
 }
 
+/**
+ * The rollout scope an approved placement froze, which is what a dispatch would
+ * target. Not the same as `targets`, which are the nodes an application is
+ * observed to run on: a Blueprint approved for a node no rollout has reached yet
+ * has no row there, and a node it was withdrawn from keeps one. A confirmation
+ * that reads `targets` would name somewhere the action will not go.
+ */
+export type ApprovedRolloutScope =
+  | { status: 'not_applicable' }
+  | { status: 'unapproved' }
+  | { status: 'unresolved'; approvalRef: string; reason: 'no_candidate' | 'unreadable_required_targets' | 'approval_does_not_resolve' }
+  | { status: 'approved'; approvalRef: string; nodeIds: number[] };
+
 // --- source facet -----------------------------------------------------------
 
 export interface SourceIdentityFields {
@@ -531,6 +544,7 @@ export interface GitOpsRevisionAbsent {
   limitations: readonly GitOpsLimitation[];
   availableActions: readonly [];
   approvals: null;
+  approvedRolloutScope?: ApprovedRolloutScope;
 }
 
 /** A live application. `availableActions` is never empty: "nothing to do" is ['none']. */
@@ -545,6 +559,12 @@ export interface GitOpsRevisionLive {
   blueprintId: number | null;
   rolloutGenerationId: string | null;
   approvals: GitOpsApprovalRefs;
+  /**
+   * The rollout scope the placement approval froze. Absent on a projection from
+   * a remote running an older build, which reads as "no scope is proven" rather
+   * than as an empty approved scope.
+   */
+  approvedRolloutScope?: ApprovedRolloutScope;
   facets: GitOpsFacets;
   targets: readonly GitOpsTargetProjection[];
   drift: readonly GitOpsDriftItem[];

@@ -6,7 +6,8 @@
  * still running. Each step has its own 15 second bound. `pending` is the work
  * still running after the answer. The operator pull holds it until it settles,
  * so a deadline does not release the in-flight slot. Accept source does not
- * hold a slot.
+ * hold a slot. A step that rejects instead of answering has finished and
+ * failed, which is reported as a hold and never as work still running.
  */
 import {
     dispatchPreparedGitManagedGeneration,
@@ -30,16 +31,29 @@ const ROLLOUT_STARTING_NOTE =
 
 const ROLLOUT_HELD_NOTE = 'The rollout did not start.';
 
+// A rejection is not a step still running. The acceptance has committed, but
+// the work behind it failed before it began, so saying it is starting would
+// send the operator to wait on something that will never report.
+const PREPARATION_FAILED_NOTE = 'preparation failed; the next reconcile retries it';
+
+const ROLLOUT_FAILED_NOTE = 'the rollout could not be started';
+
 interface PreparedStep {
     materialized: boolean;
     artifact: GitManagedFreezeStatus;
     note: string | null;
 }
 
-interface Timed<T> {
-    value: T;
-    completed: boolean;
-}
+/**
+ * One step, bounded by the response deadline.
+ *
+ * `timeout` is the only state that means work is still running. A `rejected`
+ * step is finished and failed, which is a different fact from progress and has
+ * its own note.
+ */
+type Timed<T> =
+    | { state: 'fulfilled' | 'timeout'; value: T }
+    | { state: 'rejected' };
 
 const PREPARE_CONTINUING: PreparedStep = {
     materialized: false,
@@ -104,25 +118,10 @@ function repeatsUnresolvedArtifact(artifact: GitManagedFreezeStatus, reason: str
 }
 
 /**
- * A skipped handoff that only repeats an unresolved artifact adds nothing
- * once preparation already named why. Any other handoff reason stays.
- */
-function skippedAuthorityNote(prepared: PreparedStep, reason: string | null): string | null {
-    const alreadyNamed = prepared.note !== null && repeatsUnresolvedArtifact(prepared.artifact, reason);
-    return joinAuthorityNotes([prepared.note, alreadyNamed ? null : reason]);
-}
-
-/** A started rollout has no extra sentence. The generic unresolved-artifact skip is left off the accept note. */
-function handoffReasonForAccept(prepared: PreparedStep, handoff: GitManagedDispatchOutcome): string | null {
-    if (handoff.status === 'dispatched') return null;
-    if (repeatsUnresolvedArtifact(prepared.artifact, handoff.reason)) return null;
-    return handoff.reason;
-}
-
-/**
  * Answer with `fallback` if `work` is still running at the deadline.
  * The deadline does not cancel that work. A rejection before the deadline
- * counts as finished, so the slot does not wait on it. A rejection after
+ * settles as a failure of its own, so the slot does not wait on it and the
+ * operator is not told the step is still running. A rejection after
  * the deadline is still logged.
  */
 function responseWithin<T>(
@@ -132,18 +131,18 @@ function responseWithin<T>(
 ): Promise<Timed<T>> {
     return new Promise((resolve) => {
         let settled = false;
-        function finish(value: T, completed: boolean): void {
+        function finish(value: Timed<T>): void {
             if (settled) return;
             settled = true;
             clearTimeout(timer);
-            resolve({ value, completed });
+            resolve(value);
         }
-        const timer = setTimeout(() => finish(fallback, false), RESPONSE_MS);
+        const timer = setTimeout(() => finish({ state: 'timeout', value: fallback }), RESPONSE_MS);
         work.then(
-            (value) => finish(value, true),
+            (value) => finish({ state: 'fulfilled', value }),
             (err: unknown) => {
                 onError(err);
-                finish(fallback, true);
+                finish({ state: 'rejected' });
             },
         );
     });
@@ -164,36 +163,92 @@ function logBlocked(applicationId: string, reason: string | null): void {
 }
 
 /**
- * Authority note order is the result: dispatched, then blocked, then preparation
- * still running, then dispatch still running. Anything else keeps the skipped note.
+ * Preparation's note. A step that is still running says so, and a step that
+ * failed says that, so neither is ever reported as the other.
+ *
+ * A preparation that timed out is still running, so this says so even when the
+ * dispatch then failed. Both are true at once: preparation carries on
+ * preparing, and the rollout did not start. Nothing here cancels the other.
+ */
+function preparedNote(prepared: Timed<PreparedStep>): string | null {
+    if (prepared.state === 'fulfilled') return prepared.value.note;
+    if (prepared.state === 'timeout') return PREPARATION_CONTINUING_NOTE;
+    return PREPARATION_FAILED_NOTE;
+}
+
+/**
+ * The dispatch's note, for the accept note. A started rollout adds nothing, and
+ * a skip that only repeats an unresolved artifact adds nothing once preparation
+ * has named why. Every other outcome names itself, including a rejection: it
+ * finished and failed, which is a different fact from progress.
+ */
+function handoffNote(prepared: Timed<PreparedStep>, handoff: Timed<GitManagedDispatchOutcome>): string | null {
+    if (handoff.state === 'rejected') return ROLLOUT_FAILED_NOTE;
+    if (handoff.state === 'timeout') return ROLLOUT_STARTING_NOTE;
+    if (handoff.value.status === 'dispatched') return null;
+    // Preparation that has not answered has not resolved the artifact either,
+    // so the generic skip adds nothing beside its continuing or failed note.
+    const artifact = prepared.state === 'fulfilled' ? prepared.value.artifact : ('none' as const);
+    if (repeatsUnresolvedArtifact(artifact, handoff.value.reason)) return null;
+    return handoff.value.reason;
+}
+
+/**
+ * Authority note order is the result: dispatched, then a dispatch that failed
+ * or was blocked, then preparation that failed, then work still running.
+ * Anything else keeps the skipped reason.
+ *
+ * The accept note is built from the same two fragments as the authority note, so
+ * the pull and the acceptance can never disagree about what happened. Where a
+ * branch deliberately drops one of them, both drop it.
  */
 function projectPostAccept(
     prepared: Timed<PreparedStep>,
     handoff: Timed<GitManagedDispatchOutcome>,
 ): Omit<BoundedPostAccept, 'pending'> {
     let rollout: BoundedRollout = 'not_started';
-    let authorityNote: string | null = skippedAuthorityNote(prepared.value, handoff.value.reason);
-    if (handoff.completed && handoff.value.status === 'dispatched') {
+    let authorityNote: string | null;
+    if (handoff.state === 'fulfilled' && handoff.value.status === 'dispatched') {
         rollout = 'started';
         authorityNote = null;
-    } else if (handoff.completed && handoff.value.status === 'blocked') {
+    } else if (handoff.state === 'rejected') {
+        // Nothing is queued and nothing is running, so this is a hold on an
+        // acceptance that did commit, not progress towards one. Preparation's
+        // note joins when it has one of its own to report, which is what keeps
+        // two failures from reading as one.
         rollout = 'held';
-        const held = handoff.value.reason ?? ROLLOUT_HELD_NOTE;
-        authorityNote = prepared.completed ? joinAuthorityNotes([prepared.value.note, held]) : held;
-    } else if (!prepared.completed) {
+        authorityNote = joinAuthorityNotes([preparedNote(prepared), ROLLOUT_FAILED_NOTE]);
+    } else if (handoff.state === 'fulfilled' && handoff.value.status === 'blocked') {
+        // A blocked dispatch is never running, so its own reason is always the
+        // note. Preparation's note joins it when preparation answered with one,
+        // and is left out when preparation is still running or has failed,
+        // because neither of those says anything about why this one was blocked.
+        rollout = 'held';
+        const blocked = handoff.value.reason ?? ROLLOUT_HELD_NOTE;
+        authorityNote = prepared.state === 'fulfilled' && prepared.value.note !== null
+            ? joinAuthorityNotes([prepared.value.note, blocked])
+            : blocked;
+    } else if (prepared.state === 'rejected') {
+        authorityNote = PREPARATION_FAILED_NOTE;
+    } else if (prepared.state === 'timeout') {
         authorityNote = PREPARATION_CONTINUING_NOTE;
-    } else if (!handoff.completed) {
-        authorityNote = joinAuthorityNotes([prepared.value.note, ROLLOUT_STARTING_NOTE]);
+    } else {
+        // Only a skipped handoff remains here, and it keeps preparation's note
+        // beside it unless it would just repeat the same unresolved artifact.
+        const repeated = repeatsUnresolvedArtifact(prepared.value.artifact, handoff.value.reason)
+            ? null
+            : handoff.value.reason;
+        authorityNote = joinAuthorityNotes([prepared.value.note, repeated]);
     }
     return {
         rollout,
         authorityNote,
-        materialized: prepared.value.materialized,
-        artifactResolved: prepared.value.artifact === 'resolved',
-        dispatched: handoff.value.status === 'dispatched',
+        materialized: prepared.state === 'fulfilled' && prepared.value.materialized,
+        artifactResolved: prepared.state === 'fulfilled' && prepared.value.artifact === 'resolved',
+        dispatched: handoff.state === 'fulfilled' && handoff.value.status === 'dispatched',
         acceptNote: formatOperatorSentences([
-            prepared.value.note,
-            handoffReasonForAccept(prepared.value, handoff.value),
+            preparedNote(prepared),
+            handoffNote(prepared, handoff),
         ]),
     };
 }
@@ -215,7 +270,7 @@ export async function runBoundedGitManagedPostAccept(args: {
     const prepared = await responseWithin(prepareWork, PREPARE_CONTINUING, (err) => {
         logStepFailure(applicationId, 'preparation', err);
     });
-    if (prepared.completed && prepared.value.note) {
+    if (prepared.state === 'fulfilled' && prepared.value.note) {
         console.warn(
             `[GitOps] preparation incomplete for ${sanitizeForLog(applicationId)}: ${sanitizeForLog(prepared.value.note)}`,
         );
@@ -229,12 +284,12 @@ export async function runBoundedGitManagedPostAccept(args: {
     const handoff = await responseWithin(dispatchWork, DISPATCH_CONTINUING, (err) => {
         logStepFailure(applicationId, 'dispatch', err);
     });
-    if (handoff.completed && handoff.value.status === 'blocked') {
+    if (handoff.state === 'fulfilled' && handoff.value.status === 'blocked') {
         logBlocked(applicationId, handoff.value.reason);
     }
-    const pending = prepared.completed && handoff.completed
-        ? null
-        : unfinishedFollow(applicationId, prepareWork, dispatchWork, handoff.completed);
+    const pending = prepared.state === 'timeout' || handoff.state === 'timeout'
+        ? unfinishedFollow(applicationId, prepareWork, dispatchWork, handoff.state !== 'timeout')
+        : null;
     return { ...projectPostAccept(prepared, handoff), pending };
 }
 

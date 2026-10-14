@@ -161,6 +161,7 @@ function liveProjectionFixture(input: {
       rolloutAuthorizationRef: null,
       legacyCombinedApprovalRef: null,
     },
+    approvedRolloutScope: { status: 'unapproved' },
     facets: input.facets,
     targets: [],
     drift: [],

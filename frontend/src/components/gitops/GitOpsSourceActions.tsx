@@ -6,6 +6,11 @@ import { ConfirmModal } from '@/components/ui/modal';
 import { toast } from '@/components/ui/toast-store';
 import { useNodes } from '@/context/NodeContext';
 import { acceptGitOpsSource, fetchGitOpsSource, type GitOpsSourceFetchResult } from '@/lib/gitopsAuthorityApi';
+import {
+  acceptScopeSentence,
+  pullScopeSentence,
+  readApprovedScope,
+} from '@/lib/gitopsApprovedScope';
 import { policyReadFor } from '@/lib/gitopsAuthorityPolicy';
 import { liveSourceFacet } from '@/lib/gitopsState';
 import { acceptSourceVisible, pullSourceVisible, type SourceActionCan } from '@/components/gitops/sourceActionVisibility';
@@ -33,22 +38,44 @@ function rolloutStartsOnPull(projection: GitOpsRevisionProjection): boolean {
   return policyReadFor(projection.authorityPolicies, 'rollout_authorization')?.configured === 'automatic';
 }
 
-/** The commit, approved targets, and whether acceptance can start a rollout. Frozen when the confirm opens. */
+/**
+ * The commit, the approved rollout scope, and whether acceptance can start a
+ * rollout. Frozen when the confirm opens.
+ *
+ * The scope comes from the placement approval, never from the observed target
+ * rows. They disagree whenever placement has moved since the last rollout ran,
+ * and a confirmation naming the wrong nodes is worse than no confirmation. A
+ * scope that cannot be read is said to be unreadable rather than named, so the
+ * confirmation never claims a destination it did not read.
+ */
 function acceptPreview(projection: GitOpsRevisionProjection, nodes: readonly { id: number; name: string }[]): string {
   const source = liveSourceFacet(projection);
   const sha = source?.fetchedCommitSha?.slice(0, 7) ?? null;
   const commit = sha ? `Accept ${sha}.` : 'Accept the waiting commit.';
-  if (projection.targetMode !== 'blueprint' || projection.approvals.placementApprovalRef === null) {
-    return `${commit} Placement is not approved yet, so this acceptance does not start a rollout.`;
-  }
-  const names = projection.targets
-    .filter((target) => !target.tombstoned)
-    .map((target) => nodes.find((node) => node.id === target.nodeId)?.name ?? `node ${target.nodeId}`);
-  const scope = names.length > 0 ? names.join(', ') : 'no targets';
+  const scope = acceptScopeSentence(readApprovedScope(projection, nodes));
   const rollout = rolloutStartsOnPull(projection)
-    ? 'Rollout authorization can start a rollout to those targets. Starting a rollout is not the same as it finishing.'
+    ? 'Rollout authorization can start that rollout. Starting a rollout is not the same as it finishing.'
     : 'The rollout stays waiting for you.';
-  return `${commit} Placement is approved for ${scope}. ${rollout}`;
+  return `${commit} ${scope} ${rollout}`;
+}
+
+/**
+ * What Pull source can do to a source that authorizes itself.
+ *
+ * The next commit is not knowable before the fetch, which is no reason to hide
+ * the placement scope the operator already approved: this request can record
+ * the commit and start a rollout in one call, so its destination is the part
+ * the operator cannot check afterwards.
+ */
+function pullConfirmDescription(
+  projection: GitOpsRevisionProjection,
+  nodes: readonly { id: number; name: string }[],
+): string {
+  if (!rolloutStartsOnPull(projection)) {
+    return 'Pull source fetches the next commit. This source accepts a new commit on its own. The rollout stays waiting for you.';
+  }
+  const scope = pullScopeSentence(readApprovedScope(projection, nodes));
+  return `Pull source fetches the next commit. This source accepts a new commit on its own, and rollout authorization can start a rollout from it. ${scope} Starting a rollout is not the same as it finishing.`;
 }
 
 function pullFeedback(result: GitOpsSourceFetchResult): { tone: 'success' | 'warning' | 'error'; message: string } {
@@ -172,9 +199,7 @@ export default function GitOpsSourceActions({
           onOpenChange={setConfirmPull}
           kicker="SOURCE"
           title="Pull source"
-          description={rolloutStartsOnPull(projection)
-            ? 'Pull source fetches the next commit. This source accepts a new commit on its own, and rollout authorization can start a rollout from it. Starting a rollout is not the same as it finishing.'
-            : 'Pull source fetches the next commit. This source accepts a new commit on its own. The rollout stays waiting for you.'}
+          description={pullConfirmDescription(projection, nodes)}
           confirmLabel="Pull source"
           busyConfirmLabel="Pulling…"
           confirming={pending === 'pull'}

@@ -150,6 +150,57 @@ describe('runBoundedGitManagedPostAccept', () => {
         expect(settled.acceptNote).toContain('unfinished rollback');
     });
 
+    it('keeps a blocked reason whatever the artifact evidence says', async () => {
+        // A blocked dispatch is a finished refusal, so its reason is always the
+        // report. Suppressing it because the artifact is unresolved would swap
+        // "this target has an unfinished rollback" for a generic sentence that
+        // names a different problem entirely.
+        vi.spyOn(gitManagedMaterialization, 'prepareAcceptedGitManagedGeneration')
+            .mockResolvedValue({ materialized: false, artifact: 'refused', note: transientNote });
+        vi.spyOn(gitManagedHandoff, 'dispatchPreparedGitManagedGeneration')
+            .mockResolvedValue({
+                status: 'blocked',
+                reason: gitManagedHandoff.GIT_MANAGED_ARTIFACT_UNRESOLVED_REASON,
+            });
+
+        const settled = await runBoundedGitManagedPostAccept({
+            applicationId: 'app-1',
+            generationId: 'gen-1',
+            actor: 'ada',
+            trigger: 'manual',
+        });
+
+        expect(settled.rollout).toBe('held');
+        expect(settled.authorityNote).toBe(`${transientNote}. The artifact identity is not resolved yet`);
+        expect(settled.acceptNote).toContain('could not be materialized yet');
+    });
+
+    it('keeps a blocked reason while preparation is still running', async () => {
+        // Preparation that has not answered says nothing about why the dispatch
+        // was blocked, so the blocked reason stands alone rather than being
+        // padded with a continuing note that names a different step.
+        vi.useFakeTimers();
+        vi.spyOn(gitManagedMaterialization, 'prepareAcceptedGitManagedGeneration')
+            .mockReturnValue(new Promise(() => {}));
+        vi.spyOn(gitManagedHandoff, 'dispatchPreparedGitManagedGeneration')
+            .mockResolvedValue({ status: 'blocked', reason: gitManagedHandoff.GIT_MANAGED_ARTIFACT_UNRESOLVED_REASON });
+
+        const pending = runBoundedGitManagedPostAccept({
+            applicationId: 'app-1',
+            generationId: 'gen-1',
+            actor: 'ada',
+            trigger: 'manual',
+        });
+        await vi.advanceTimersByTimeAsync(15_000);
+        const settled = await pending;
+
+        expect(settled.rollout).toBe('held');
+        expect(settled.authorityNote).toBe(gitManagedHandoff.GIT_MANAGED_ARTIFACT_UNRESOLVED_REASON);
+        // The accept note still says preparation is running: that is true, and
+        // it is the note the operator reads for the preparation step.
+        expect(settled.acceptNote).toContain('Preparation is still running');
+    });
+
     it('treats a rejected step as finished so the slot can release', async () => {
         const prepare = vi.spyOn(gitManagedMaterialization, 'prepareAcceptedGitManagedGeneration')
             .mockRejectedValue(new Error('registry down'));
@@ -166,5 +217,104 @@ describe('runBoundedGitManagedPostAccept', () => {
         expect(settled.pending).toBeNull();
         expect(prepare).toHaveBeenCalledTimes(1);
         expect(dispatch).toHaveBeenCalledTimes(1);
+    });
+
+    // The three below separate a step that is still running from one that
+    // finished and failed. Both settle inside the deadline and release the
+    // slot, so only the wording tells them apart, and calling a settled
+    // failure "starting" sends the operator to wait for work that is not
+    // running. The deadline cases above keep the continuing wording.
+    it('holds the rollout when the dispatch rejects before the deadline', async () => {
+        vi.spyOn(gitManagedMaterialization, 'prepareAcceptedGitManagedGeneration').mockResolvedValue({
+            materialized: true,
+            artifact: 'resolved',
+            note: null,
+        });
+        vi.spyOn(gitManagedHandoff, 'dispatchPreparedGitManagedGeneration')
+            .mockRejectedValue(new Error('could not read the dispatch entry'));
+
+        const settled = await runBoundedGitManagedPostAccept({
+            applicationId: 'app-1',
+            generationId: 'gen-1',
+            actor: 'ada',
+            trigger: 'manual',
+        });
+
+        expect(settled.pending).toBeNull();
+        expect(settled.rollout).toBe('held');
+        expect(settled.dispatched).toBe(false);
+        expect(settled.authorityNote).toBe('the rollout could not be started');
+        expect(settled.acceptNote).toBe('The rollout could not be started.');
+        expect(settled.acceptNote).not.toMatch(/starting|still running/);
+    });
+
+    it('reports a rejected preparation as failed rather than still running', async () => {
+        vi.spyOn(gitManagedMaterialization, 'prepareAcceptedGitManagedGeneration')
+            .mockRejectedValue(new Error('registry down'));
+        vi.spyOn(gitManagedHandoff, 'dispatchPreparedGitManagedGeneration')
+            .mockResolvedValue({ status: 'skipped', reason: gitManagedHandoff.GIT_MANAGED_ARTIFACT_UNRESOLVED_REASON });
+
+        const settled = await runBoundedGitManagedPostAccept({
+            applicationId: 'app-1',
+            generationId: 'gen-1',
+            actor: 'ada',
+            trigger: 'manual',
+        });
+
+        expect(settled.pending).toBeNull();
+        expect(settled.rollout).toBe('not_started');
+        expect(settled.authorityNote).toBe('preparation failed; the next reconcile retries it');
+        expect(settled.acceptNote).toBe('Preparation failed; the next reconcile retries it.');
+        expect(settled.acceptNote).not.toMatch(/starting|still running/);
+    });
+
+    it('reports both steps failing once, rather than repeating one failure', async () => {
+        vi.spyOn(gitManagedMaterialization, 'prepareAcceptedGitManagedGeneration')
+            .mockRejectedValue(new Error('registry down'));
+        vi.spyOn(gitManagedHandoff, 'dispatchPreparedGitManagedGeneration')
+            .mockRejectedValue(new Error('could not read the dispatch entry'));
+
+        const settled = await runBoundedGitManagedPostAccept({
+            applicationId: 'app-1',
+            generationId: 'gen-1',
+            actor: 'ada',
+            trigger: 'manual',
+        });
+
+        expect(settled.pending).toBeNull();
+        expect(settled.rollout).toBe('held');
+        expect(settled.authorityNote).toBe(
+            'preparation failed; the next reconcile retries it. The rollout could not be started',
+        );
+        expect(settled.acceptNote).toBe(
+            'Preparation failed; the next reconcile retries it. The rollout could not be started.',
+        );
+    });
+
+    it('reports a preparation still running beside a dispatch that failed', async () => {
+        // Both statements are true at once and neither cancels the other:
+        // preparation carries on, and the rollout did not start. Reporting only
+        // one would misdescribe the other.
+        vi.useFakeTimers();
+        vi.spyOn(gitManagedMaterialization, 'prepareAcceptedGitManagedGeneration')
+            .mockReturnValue(new Promise(() => {}));
+        vi.spyOn(gitManagedHandoff, 'dispatchPreparedGitManagedGeneration')
+            .mockRejectedValue(new Error('could not read the dispatch entry'));
+
+        const pending = runBoundedGitManagedPostAccept({
+            applicationId: 'app-1',
+            generationId: 'gen-1',
+            actor: 'ada',
+            trigger: 'manual',
+        });
+        await vi.advanceTimersByTimeAsync(15_000);
+        const settled = await pending;
+
+        // Preparation outlived the deadline, so the slot is still held on it.
+        expect(settled.pending).not.toBeNull();
+        expect(settled.rollout).toBe('held');
+        expect(settled.acceptNote).toBe(
+            'Preparation is still running; the rollout becomes authorizable when it completes. The rollout could not be started.',
+        );
     });
 });

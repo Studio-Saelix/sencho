@@ -133,6 +133,7 @@ function liveProjection(overrides?: {
       rolloutAuthorizationRef: null,
       legacyCombinedApprovalRef: null,
     },
+    approvedRolloutScope: { status: 'not_applicable' },
     facets: {
       source: overrides?.source ?? RESTING_SOURCE,
       artifact: overrides?.artifact ?? artifactAt('artifact_exact'),

@@ -38,6 +38,7 @@ import {
 } from './preflight';
 import type { BlueprintObservationStage } from './transitions';
 import type {
+  ApprovedRolloutScope,
   ArtifactExpectedIdentity,
   ArtifactFacet,
   ArtifactLatestEvidence,
@@ -83,6 +84,7 @@ const NOT_APPLICABLE: GitOpsRevisionProjection = {
   limitations: [],
   availableActions: [],
   approvals: null,
+  approvedRolloutScope: { status: 'not_applicable' },
   // An application that does not exist has no policy to report. Present and
   // empty rather than absent, so a reader never has to tell "no application"
   // from "an older build said nothing".
@@ -155,6 +157,7 @@ export function deriveGitOpsRevision(
       rolloutAuthorizationRef: app.rollout_authorization_ref,
       legacyCombinedApprovalRef: app.legacy_combined_approval_ref,
     },
+    approvedRolloutScope: deriveApprovedRolloutScope(app),
     facets: { source, artifact, placement, rollout },
     targets,
     drift: collectDrift(app, facts.targets, targets, availableActions, {
@@ -167,6 +170,52 @@ export function deriveGitOpsRevision(
     availableActions,
     authorityPolicies: authorityPolicyReads(app, { source, placement, rollout }),
   };
+}
+
+/**
+ * The rollout scope an approved placement froze.
+ *
+ * Read from the rollout candidate's required targets and accepted only once
+ * `resolveApprovalRef` confirms the placement approval stands for that set,
+ * which is the same pair `store.authorizationIngredients` hands the dispatch
+ * boundary. So this names the scope execution would use, not a set the
+ * projection chose.
+ *
+ * The observed `targets` rows cannot answer this. A Blueprint approved for a
+ * node no rollout has reached yet has no row there, and a node it was withdrawn
+ * from keeps one, so the two sets disagree exactly when a confirmation is
+ * worth reading.
+ */
+function deriveApprovedRolloutScope(app: GitOpsApplicationRow): ApprovedRolloutScope {
+  if (app.target_mode !== 'blueprint') return { status: 'not_applicable' };
+  const approvalRef = app.placement_approval_ref;
+  if (!approvalRef) return { status: 'unapproved' };
+  const store = GitOpsStore.getInstance();
+  const candidate = app.rollout_candidate_id
+    ? store.getRolloutCandidate(app.rollout_candidate_id)
+    : undefined;
+  if (!candidate || candidate.application_id !== app.id || !app.intent_revision_id) {
+    return { status: 'unresolved', approvalRef, reason: 'no_candidate' };
+  }
+  if (candidate.intent_revision_id !== app.intent_revision_id) {
+    return { status: 'unresolved', approvalRef, reason: 'no_candidate' };
+  }
+  let requiredNodeIds: number[];
+  try {
+    requiredNodeIds = decodeGitOpsRequiredTargetsJson(candidate.required_targets_json).nodeIds;
+  } catch {
+    return { status: 'unresolved', approvalRef, reason: 'unreadable_required_targets' };
+  }
+  const resolves = store.resolveApprovalRef(approvalRef, {
+    kind: 'placement_approval',
+    applicationId: app.id,
+    intentRevisionId: app.intent_revision_id,
+    requiredNodeIds,
+  }) !== null;
+  if (!resolves) {
+    return { status: 'unresolved', approvalRef, reason: 'approval_does_not_resolve' };
+  }
+  return { status: 'approved', approvalRef, nodeIds: requiredNodeIds };
 }
 
 /**
@@ -2751,6 +2800,7 @@ function unreachableApplicationRevision(limitation: GitOpsLimitation): GitOpsRev
     limitations: [limitation],
     availableActions: [],
     approvals: null,
+    approvedRolloutScope: { status: 'not_applicable' },
     // A fault carries no application either, so it has no policy to report, and
     // it is deliberately not the shared sentinel's identity.
     authorityPolicies: [],

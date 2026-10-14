@@ -9,7 +9,7 @@ import userEvent from '@testing-library/user-event';
 vi.mock('@/context/NodeContext', () => ({
   useNodes: () => ({ nodes: [{ id: 1, name: 'local', type: 'local', is_default: true }] }),
 }));
-import { facets, liveRevision, noApprovals, plainSource, sourceIdentity, target } from '@/__tests__/gitopsFixtures';
+import { approvedScope, facets, liveRevision, noApprovals, plainSource, sourceIdentity, target, unapprovedScope } from '@/__tests__/gitopsFixtures';
 import type { FutureRolloutAuthorizationBinding, GitOpsRevisionLive } from '@/types/gitops';
 import type { PermissionAction } from '@/context/AuthContext';
 
@@ -56,11 +56,27 @@ function blueprintRevision(overrides: Partial<GitOpsRevisionLive> = {}): GitOpsR
     stackName: null,
     blueprintId: 5,
     approvals: noApprovals,
+    // No placement approval yet, so a confirmation says the acceptance does not
+    // start a rollout. Tests that approve placement set the scope as well as
+    // the ref, because the scope is what the confirmation reads.
+    approvedRolloutScope: unapprovedScope,
     facets: facets({
       source: plainSource('application_generation_accepted', { candidateGenerationId: null }),
       placement: { status: 'placement_review_pending' },
       rollout: { status: 'rollout_not_executable', rolloutCandidateId: 'cand-1' },
     }),
+    ...overrides,
+  });
+}
+
+/**
+ * An application whose placement approval froze `nodeIds`, which is what a
+ * confirmation names as the rollout scope.
+ */
+function placementApproved(nodeIds: number[], overrides: Partial<GitOpsRevisionLive> = {}): GitOpsRevisionLive {
+  return blueprintRevision({
+    approvals: { ...noApprovals, placementApprovalRef: 'place-1' },
+    approvedRolloutScope: approvedScope(nodeIds),
     ...overrides,
   });
 }
@@ -187,6 +203,7 @@ describe('GitOpsAuthorityActions', () => {
     renderActions({
       ...pending,
       approvals: { ...pending.approvals, placementApprovalRef: 'place-1' },
+      approvedRolloutScope: approvedScope([1]),
       authorityPolicies: [
         {
           domain: 'source',
@@ -214,7 +231,7 @@ describe('GitOpsAuthorityActions', () => {
     const dialog = await screen.findByRole('alertdialog');
     expect(dialog).toHaveTextContent('Accept a1b2c3d.');
     expect(dialog).toHaveTextContent('Placement is approved for local.');
-    expect(dialog).toHaveTextContent('Rollout authorization can start a rollout to those targets.');
+    expect(dialog).toHaveTextContent('Rollout authorization can start that rollout.');
     expect(dialog).toHaveTextContent('Starting a rollout is not the same as it finishing.');
     await user.click(within(dialog).getByRole('button', { name: 'Cancel' }));
     expect(acceptGitOpsSource).not.toHaveBeenCalled();
@@ -226,10 +243,10 @@ describe('GitOpsAuthorityActions', () => {
 
   it('says the rollout stays waiting when authorization needs an operator', async () => {
     const user = userEvent.setup();
-    const pending = sourcePending();
     renderActions({
-      ...pending,
-      approvals: { ...pending.approvals, placementApprovalRef: 'place-1' },
+      ...sourcePending(),
+      approvals: { ...noApprovals, placementApprovalRef: 'place-1' },
+      approvedRolloutScope: approvedScope([1]),
       authorityPolicies: [
         {
           domain: 'rollout_authorization',
@@ -298,22 +315,124 @@ describe('GitOpsAuthorityActions', () => {
     expect(acceptGitOpsSource).not.toHaveBeenCalled();
   });
 
-  it('names live targets and leaves a removed target out of the confirmation', async () => {
+  // The scope a confirmation names is the placement approval's frozen set, and
+// not the nodes a target row happens to exist on. The two disagree whenever
+// placement has moved since the last rollout ran, which is exactly when a
+// confirmation is worth reading: the observed set can name a node the rollout
+// will withdraw from, and can omit one it will place on for the first time.
+it('names the approved scope, not the observed targets', async () => {
     const user = userEvent.setup();
-    const pending = sourcePending();
-    renderActions({
-      ...pending,
-      approvals: { ...pending.approvals, placementApprovalRef: 'place-1' },
+    renderActions(placementApproved([3], {
+      facets: facets({
+        source: plainSource('source_review_pending'),
+        placement: { status: 'source_acceptance_pending', sourceAcceptanceRef: null, candidateGenerationId: 'gen-candidate' },
+        rollout: { status: 'rollout_not_executable', rolloutCandidateId: 'cand-1' },
+      }),
       targets: [
         target(),
         target({ nodeId: 2, stackName: 'retired', tombstoned: true }),
-        target({ nodeId: 3, stackName: 'other' }),
       ],
-    });
+    }));
+
     await user.click(screen.getByTestId('gitops-action-accept-source'));
     const dialog = await screen.findByRole('alertdialog');
-    expect(dialog).toHaveTextContent('Placement is approved for local, node 3.');
+    // Node 1 still has an active observed target row and node 3 has none. The
+    // approval names node 3, so the confirmation names node 3 and not node 1.
+    expect(dialog).toHaveTextContent('Placement is approved for node 3.');
+    expect(dialog).not.toHaveTextContent('node 1');
     expect(dialog).not.toHaveTextContent('node 2');
+    expect(acceptGitOpsSource).not.toHaveBeenCalled();
+  });
+
+it('treats a projection carrying no scope field as unreadable, not as approved', async () => {
+    // The mixed-fleet case: the control node runs this build, the projection
+    // came from a node on an older one, so the field is absent. The scope
+    // cannot be proven, and a confirmation must not claim an approval it could
+    // not read. This is why the field is optional on the wire: dropping the
+    // whole confirmation would be worse, since the action is still reachable.
+    const user = userEvent.setup();
+    const projection = placementApproved([3], {
+      facets: facets({
+        source: plainSource('source_review_pending'),
+        placement: { status: 'source_acceptance_pending', sourceAcceptanceRef: null, candidateGenerationId: 'gen-candidate' },
+        rollout: { status: 'rollout_not_executable', rolloutCandidateId: 'cand-1' },
+      }),
+    });
+    delete projection.approvedRolloutScope;
+    renderActions(projection);
+
+    await user.click(screen.getByTestId('gitops-action-accept-source'));
+    const dialog = await screen.findByRole('alertdialog');
+    expect(dialog).toHaveTextContent('The recorded placement approval cannot be read, so this acceptance does not start a rollout.');
+    expect(dialog).not.toHaveTextContent('Placement is approved');
+    expect(acceptGitOpsSource).not.toHaveBeenCalled();
+  });
+
+it('names every approved node in a multi-node scope', async () => {
+    const user = userEvent.setup();
+    renderActions(placementApproved([1, 3], {
+      facets: facets({
+        source: plainSource('source_review_pending'),
+        placement: { status: 'source_acceptance_pending', sourceAcceptanceRef: null, candidateGenerationId: 'gen-candidate' },
+        rollout: { status: 'rollout_not_executable', rolloutCandidateId: 'cand-1' },
+      }),
+    }));
+
+    await user.click(screen.getByTestId('gitops-action-accept-source'));
+    expect(await screen.findByRole('alertdialog')).toHaveTextContent('Placement is approved for local, node 3.');
+  });
+
+it('says the scope is unreadable rather than naming a set it could not prove', async () => {
+    const user = userEvent.setup();
+    renderActions({
+      ...placementApproved([3], {
+        facets: facets({
+          source: plainSource('source_review_pending'),
+          placement: { status: 'source_acceptance_pending', sourceAcceptanceRef: null, candidateGenerationId: 'gen-candidate' },
+          rollout: { status: 'rollout_not_executable', rolloutCandidateId: 'cand-1' },
+        }),
+      }),
+      approvedRolloutScope: { status: 'unresolved', approvalRef: 'place-1', reason: 'approval_does_not_resolve' },
+    });
+
+    await user.click(screen.getByTestId('gitops-action-accept-source'));
+    const dialog = await screen.findByRole('alertdialog');
+    expect(dialog).toHaveTextContent('The recorded placement approval cannot be read, so this acceptance does not start a rollout.');
+    expect(dialog).not.toHaveTextContent('Placement is approved');
+    expect(acceptGitOpsSource).not.toHaveBeenCalled();
+  });
+
+it('says an approval over no nodes approves no nodes, not an empty destination', async () => {
+    const user = userEvent.setup();
+    renderActions(placementApproved([], {
+      facets: facets({
+        source: plainSource('source_review_pending'),
+        placement: { status: 'source_acceptance_pending', sourceAcceptanceRef: null, candidateGenerationId: 'gen-candidate' },
+        rollout: { status: 'rollout_not_executable', rolloutCandidateId: 'cand-1' },
+      }),
+    }));
+
+    await user.click(screen.getByTestId('gitops-action-accept-source'));
+    const dialog = await screen.findByRole('alertdialog');
+    expect(dialog).toHaveTextContent('Placement is approved, but for no nodes.');
+    expect(dialog).not.toHaveTextContent('no targets');
+    expect(acceptGitOpsSource).not.toHaveBeenCalled();
+  });
+
+it('says nothing is approved on the first placement, before any scope exists', async () => {
+    const user = userEvent.setup();
+    renderActions(blueprintRevision({
+      facets: facets({
+        source: plainSource('source_review_pending'),
+        placement: { status: 'source_acceptance_pending', sourceAcceptanceRef: null, candidateGenerationId: 'gen-candidate' },
+        rollout: { status: 'rollout_not_executable', rolloutCandidateId: 'cand-1' },
+      }),
+    }));
+
+    await user.click(screen.getByTestId('gitops-action-accept-source'));
+    const dialog = await screen.findByRole('alertdialog');
+    expect(dialog).toHaveTextContent('Placement is not approved yet, so this acceptance does not start a rollout.');
+    expect(dialog).not.toHaveTextContent('no targets');
     expect(acceptGitOpsSource).not.toHaveBeenCalled();
   });
 
@@ -668,9 +787,79 @@ describe('GitOpsAuthorityActions', () => {
     expect(toast.success).toHaveBeenCalledWith('Pulled abc1234');
   });
 
-  it('asks before an automatic pull and does not fetch when cancelled', async () => {
+  // The automatic pull is the only confirmation before a request that can both
+// record a commit and start a rollout, so it has to name the destination. The
+// next commit is not knowable before the fetch, which is no reason to hide the
+// placement scope the operator already approved.
+it('names the approved rollout scope before an automatic pull', async () => {
     const user = userEvent.setup();
-    renderActions(pullable('automatic', 'automatic'), canEditSource);
+    renderActions({ ...pullable('automatic', 'automatic'), approvedRolloutScope: approvedScope([1, 3]) }, canEditSource);
+    await user.click(screen.getByTestId('gitops-action-pull-source'));
+    expect(fetchGitOpsSource).not.toHaveBeenCalled();
+    const dialog = screen.getByRole('alertdialog');
+    expect(dialog).toHaveTextContent('The next commit goes to the approved nodes: local, node 3.');
+    expect(dialog).toHaveTextContent('Starting a rollout is not the same as it finishing.');
+    await user.click(within(dialog).getByRole('button', { name: 'Cancel' }));
+    expect(fetchGitOpsSource).not.toHaveBeenCalled();
+    expect(screen.queryByRole('alertdialog')).toBeNull();
+  });
+
+it('keeps an observed target outside the approval out of the pull confirmation', async () => {
+    const user = userEvent.setup();
+    renderActions({
+      ...pullable('automatic', 'automatic'),
+      approvedRolloutScope: approvedScope([3]),
+      targets: [target(), target({ nodeId: 3, stackName: 'other' })],
+    }, canEditSource);
+    await user.click(screen.getByTestId('gitops-action-pull-source'));
+    const dialog = screen.getByRole('alertdialog');
+    expect(dialog).toHaveTextContent('The next commit goes to the approved nodes: node 3.');
+    expect(dialog).not.toHaveTextContent('local');
+    expect(fetchGitOpsSource).not.toHaveBeenCalled();
+  });
+
+it('says the destination is unreadable rather than implying a reviewed one', async () => {
+    // Two ways the scope can be unproven, both of which must read as "this
+    // cannot deploy" rather than as a destination: an approval the projection
+    // could not resolve, and a projection from a node carrying no scope field.
+    const user = userEvent.setup();
+    const unresolved = {
+      ...pullable('automatic', 'automatic'),
+      approvedRolloutScope: { status: 'unresolved' as const, approvalRef: 'place-1', reason: 'no_candidate' as const },
+    };
+    renderActions(unresolved, canEditSource);
+    await user.click(screen.getByTestId('gitops-action-pull-source'));
+    let dialog = screen.getByRole('alertdialog');
+    expect(dialog).toHaveTextContent('The recorded placement approval cannot be read, so this cannot start a rollout.');
+    expect(dialog).not.toHaveTextContent('approved nodes:');
+    await user.click(within(dialog).getByRole('button', { name: 'Cancel' }));
+    expect(fetchGitOpsSource).not.toHaveBeenCalled();
+
+    const legacy = { ...pullable('automatic', 'automatic') };
+    delete legacy.approvedRolloutScope;
+    renderActions(legacy, canEditSource);
+    await user.click(screen.getAllByTestId('gitops-action-pull-source')[1]);
+    dialog = screen.getByRole('alertdialog');
+    expect(dialog).toHaveTextContent('The recorded placement approval cannot be read, so this cannot start a rollout.');
+    expect(fetchGitOpsSource).not.toHaveBeenCalled();
+  });
+
+it('says the pull cannot deploy when placement is approved for no nodes', async () => {
+    // A Blueprint withdrawn from every node still holds a standing approval.
+    // "Approved for no nodes" would read as a destination rather than as the
+    // absence of one.
+    const user = userEvent.setup();
+    renderActions({ ...pullable('automatic', 'automatic'), approvedRolloutScope: approvedScope([]) }, canEditSource);
+    await user.click(screen.getByTestId('gitops-action-pull-source'));
+    expect(screen.getByRole('alertdialog')).toHaveTextContent(
+      'The placement approves no nodes, so this cannot deploy anything.',
+    );
+    expect(fetchGitOpsSource).not.toHaveBeenCalled();
+  });
+
+it('asks before an automatic pull and does not fetch when cancelled', async () => {
+    const user = userEvent.setup();
+    renderActions({ ...pullable('automatic', 'automatic'), approvedRolloutScope: approvedScope([1]) }, canEditSource);
     await user.click(screen.getByTestId('gitops-action-pull-source'));
     expect(fetchGitOpsSource).not.toHaveBeenCalled();
     const dialog = screen.getByRole('alertdialog');

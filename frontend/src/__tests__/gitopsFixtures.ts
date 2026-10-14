@@ -5,6 +5,7 @@
 // itself: vitest collects only *.test.* / *.spec.*.
 
 import type {
+  ApprovedRolloutScope,
   ArtifactFacet,
   GitOpsApprovalRefs,
   GitOpsDriftItem,
@@ -39,6 +40,23 @@ export const noApprovals: GitOpsApprovalRefs = {
   rolloutAuthorizationRef: null,
   legacyCombinedApprovalRef: null,
 };
+
+/**
+ * A Blueprint whose placement approval froze one node.
+ *
+ * The default rather than `unapproved` because these fixtures describe an
+ * application mid-authority-chain, where a placement approval exists and the
+ * surface has to say where a rollout would go. A suite that cares about the
+ * first placement passes `unapprovedScope`.
+ */
+export function approvedScope(
+  nodeIds: number[] = [1],
+  approvalRef = 'place-1',
+): ApprovedRolloutScope {
+  return { status: 'approved', approvalRef, nodeIds };
+}
+
+export const unapprovedScope: ApprovedRolloutScope = { status: 'unapproved' };
 
 export function sourceIdentity(overrides: Partial<SourceIdentityFields> = {}): SourceIdentityFields {
   return {
@@ -173,6 +191,7 @@ export function liveRevision(overrides: Partial<GitOpsRevisionLive> = {}): GitOp
     blueprintId: null,
     rolloutGenerationId: null,
     approvals: noApprovals,
+    approvedRolloutScope: { status: 'not_applicable' },
     facets: facets(),
     targets: [target()],
     drift: [],
