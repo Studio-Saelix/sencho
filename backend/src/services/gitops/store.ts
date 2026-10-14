@@ -1438,6 +1438,21 @@ export class GitOpsStore {
   }
 
   /**
+   * Re-point an acceptance's confirmed placement at the one an operator has now
+   * decided.
+   *
+   * An operator mint is exempt from the confirmation guard, because asking to
+   * authorize the rollout is the decision the confirmation deferred. Without
+   * this, that decision would be re-litigated the next time the authorization
+   * lapsed and the automatic policy tried again, asking the operator to resume a
+   * placement they had already authorized deliberately. Re-pointing rather than
+   * clearing keeps the guard working for the next replacement.
+   */
+  recordConfirmedPlacement(applicationId: string, placementApprovalRef: string | null): boolean {
+    return this.writeConfirmedPlacement(applicationId, placementApprovalRef);
+  }
+
+  /**
    * Release an acceptance's confirmed placement.
    *
    * The operator's resume is the answer to a hold: they have seen the reason and
@@ -1445,17 +1460,23 @@ export class GitOpsStore {
    * acceptance is no longer bound to the one it was confirmed against. Narrow on
    * purpose, and the only column this ever writes on an approval: the decision
    * itself (generation, authority, actor) is immutable, and what this clears is
-   * the precondition this same module attaches to it.
+   * the precondition this same module attaches to it. What was confirmed stays
+   * recoverable from the `source_accepted` history row, which snapshots the
+   * application's placement pointer as it stood at that moment.
    */
   releaseConfirmedPlacement(applicationId: string): boolean {
+    return this.writeConfirmedPlacement(applicationId, null);
+  }
+
+  private writeConfirmedPlacement(applicationId: string, placementApprovalRef: string | null): boolean {
     const app = this.getApplication(applicationId);
     if (!app?.source_acceptance_ref) return false;
     const acceptance = this.getApproval(app.source_acceptance_ref);
     if (!acceptance || acceptance.kind !== 'source_acceptance') return false;
-    if (acceptance.placement_approval_ref === null) return false;
+    if (acceptance.placement_approval_ref === placementApprovalRef) return false;
     const result = this.db().prepare(
-      'UPDATE gitops_approvals SET placement_approval_ref = NULL WHERE id = ? AND kind = ?',
-    ).run(acceptance.id, 'source_acceptance');
+      'UPDATE gitops_approvals SET placement_approval_ref = ? WHERE id = ? AND kind = ?',
+    ).run(placementApprovalRef, acceptance.id, 'source_acceptance');
     return result.changes > 0;
   }
 

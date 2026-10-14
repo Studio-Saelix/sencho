@@ -2822,6 +2822,16 @@ export class GitOpsTransitions {
         );
         const requiredTargetsJson = encodeGitOpsRequiredTargetsJson(ingredients.requiredNodeIds);
 
+        // An operator mint is the decision a source confirmation deferred, so
+        // the acceptance it authorizes stops being bound to the placement the
+        // confirmation named. Re-pointed rather than cleared, so a later
+        // replacement is still caught. Written here, inside the mint's own
+        // transaction, so a recorded authorization and a stale precondition
+        // cannot both be left standing.
+        if (args.authority === 'operator') {
+          this.store().recordConfirmedPlacement(args.applicationId, ingredients.placementApprovalRef);
+        }
+
         this.store().insertApproval({
           id: args.approvalId,
           kind: 'rollout_authorization',

@@ -62,6 +62,29 @@ export const AUTHORIZATION_INPUTS_MOVED_REASON =
 export const CONFIRMED_PLACEMENT_STALE =
   'The approved placement changed after this commit was confirmed; review it, then resume the rollout';
 
+/**
+ * Whether the ingredients a mint is about to write still describe the ones
+ * registry preflight was run against.
+ *
+ * Compared field by field rather than by a subset, because the mint copies
+ * every one of them onto a rollout generation that cannot be edited afterwards,
+ * and a silent mismatch is a rollout whose recorded readiness describes
+ * something other than what it authorizes.
+ */
+function sameAuthorizationIngredients(
+  left: Omit<FutureRolloutAuthorizationBinding, 'preflightFingerprint'>,
+  right: Omit<FutureRolloutAuthorizationBinding, 'preflightFingerprint'>,
+): boolean {
+  if (left.rolloutCandidateId !== right.rolloutCandidateId) return false;
+  if (left.acceptedGenerationId !== right.acceptedGenerationId) return false;
+  if (left.artifactSetId !== right.artifactSetId) return false;
+  if (left.intentRevisionId !== right.intentRevisionId) return false;
+  if (left.sourceAcceptanceRef !== right.sourceAcceptanceRef) return false;
+  if (left.placementApprovalRef !== right.placementApprovalRef) return false;
+  return left.requiredNodeIds.length === right.requiredNodeIds.length
+    && left.requiredNodeIds.every((nodeId, index) => nodeId === right.requiredNodeIds[index]);
+}
+
 const PREFLIGHT_EVAL_TIMEOUT_MS = 30_000;
 
 /** Serialize one evaluation per application so concurrent dispatch cannot double-probe. */
@@ -472,19 +495,22 @@ export async function ensureRolloutAuthorization(
     // mint, supersede, or invalidate the authorization it is holding.
     if (shouldAbort?.()) return { ok: false, reason: 'The rollout is paused.' };
 
-    // The evidence above is about the target set that was read before the
-    // await, and the mint below is written against whatever the row says by
-    // then. A placement re-approved during preflight replaces both the approval
-    // and the frozen set, which would pair readiness evaluated for the old
-    // nodes with an authorization naming the new ones. Refuse rather than write
-    // that: a rollout generation is immutable, so a mismatched mint could only
-    // be undone by superseding the rollout it already queued.
+    // The evidence above is about the ingredients read before the await, and
+    // the mint below is written against whatever the row says by then. Anything
+    // that moved in between would pair readiness evaluated for one target set
+    // with an authorization minted for another: a placement re-approved during
+    // preflight changes the approval and the frozen set, and a source
+    // acceptance landing in the same window changes the generation, the artifact
+    // set and the acceptance without touching the other pair. Compared in full,
+    // because every one of these is something the mint writes onto an
+    // immutable rollout generation.
+    //
+    // Refuse rather than write: a rollout generation cannot be edited, so a
+    // mismatched mint could only be undone by superseding the rollout it already
+    // queued. The next evaluation runs against the ingredients as they stand,
+    // which is the only evidence that can describe the current state.
     const settled = store.authorizationIngredients(store.getApplication(applicationId) ?? app);
-    if (!settled || settled.placementApprovalRef !== ingredients.placementApprovalRef) {
-      return { ok: false, reason: AUTHORIZATION_INPUTS_MOVED_REASON };
-    }
-    if (settled.requiredNodeIds.length !== ingredients.requiredNodeIds.length
-      || settled.requiredNodeIds.some((nodeId, index) => nodeId !== ingredients.requiredNodeIds[index])) {
+    if (!settled || !sameAuthorizationIngredients(ingredients, settled)) {
       return { ok: false, reason: AUTHORIZATION_INPUTS_MOVED_REASON };
     }
 
