@@ -3,7 +3,7 @@ import { GitOpsStore } from './store';
 import { GitOpsTransitions } from './transitions';
 import { GitSourceService } from '../GitSourceService';
 import { buildAcceptedGeneration } from './handoff';
-import { dispatchPreparedGitManagedGeneration } from './gitManagedHandoff';
+import { dispatchPreparedGitManagedGeneration, GIT_MANAGED_ARTIFACT_UNRESOLVED_REASON } from './gitManagedHandoff';
 import { checkStatefulWithdrawal, holdForStatefulReview, readStagedGeneration } from './statefulGuard';
 import { prepareAcceptedGitManagedGeneration } from './gitManagedMaterialization';
 import { DatabaseService } from '../DatabaseService';
@@ -126,6 +126,37 @@ function responseWithin<T>(
 
 function refuseFetch(code: OperatorFetchRefusalCode, error: string): OperatorFetchResult {
     return { status: 'refused', code, error };
+}
+
+/**
+ * Join note fragments the route will capitalize as one response.
+ * A single fragment stays as written. Later fragments become their own sentences.
+ */
+function joinAuthorityNotes(parts: Array<string | null>): string | null {
+    const present = parts
+        .map((part) => part?.trim() ?? '')
+        .filter((part) => part.length > 0);
+    if (present.length === 0) return null;
+    if (present.length === 1) return present[0];
+    return present.map((part, index) => {
+        const bare = part.replace(/[.!?]$/, '');
+        if (index === 0) return bare;
+        return `${bare.charAt(0).toUpperCase()}${bare.slice(1)}`;
+    }).join('. ');
+}
+
+/**
+ * A skipped handoff that only repeats an unresolved artifact adds nothing
+ * once preparation already named why. Any other handoff reason stays.
+ */
+function skippedAuthorityNote(
+    prepared: { artifact: string; note: string | null },
+    reason: string | null,
+): string | null {
+    const explained = prepared.artifact !== 'resolved'
+        && prepared.note !== null
+        && reason === GIT_MANAGED_ARTIFACT_UNRESOLVED_REASON;
+    return joinAuthorityNotes([prepared.note, explained ? null : reason]);
 }
 
 /** Prefer a sentence already written for an operator. Internal phrases stay in the log. */
@@ -879,7 +910,7 @@ export class SourceController {
             status: 'skipped',
             reason: ROLLOUT_STARTING_NOTE,
         }, (err) => this.warnPostAccept(app.id, 'dispatch', err));
-        const report = this.boundedBlueprintAuthority(app.id, prepared.completed, handoff);
+        const report = this.boundedBlueprintAuthority(app.id, prepared, handoff);
         follow.pending = prepared.completed && handoff.completed
             ? null
             : Promise.allSettled([prepareWork, dispatchWork]).then((results) => {
@@ -898,7 +929,7 @@ export class SourceController {
     /** The authority report for a Blueprint pull whose post-accept work may still be running. */
     private boundedBlueprintAuthority(
         appId: string,
-        prepareCompleted: boolean,
+        prepared: { completed: boolean; value: { artifact: string; note: string | null } },
         handoff: { completed: boolean; value: { status: 'dispatched' | 'blocked' | 'skipped'; reason: string | null } },
     ): FetchAuthorityReport {
         if (handoff.completed && handoff.value.status === 'dispatched') {
@@ -906,15 +937,25 @@ export class SourceController {
         }
         if (handoff.completed && handoff.value.status === 'blocked') {
             this.warnBlockedDispatch(appId, handoff.value.reason);
-            return { status: 'accepted', rollout: 'held', note: handoff.value.reason ?? 'The rollout did not start.' };
+            const held = handoff.value.reason ?? 'The rollout did not start.';
+            const note = prepared.completed ? joinAuthorityNotes([prepared.value.note, held]) : held;
+            return { status: 'accepted', rollout: 'held', note };
         }
-        if (!prepareCompleted) {
+        if (!prepared.completed) {
             return { status: 'accepted', rollout: 'not_started', note: PREPARATION_CONTINUING_NOTE };
         }
         if (!handoff.completed) {
-            return { status: 'accepted', rollout: 'not_started', note: ROLLOUT_STARTING_NOTE };
+            return {
+                status: 'accepted',
+                rollout: 'not_started',
+                note: joinAuthorityNotes([prepared.value.note, ROLLOUT_STARTING_NOTE]),
+            };
         }
-        return { status: 'accepted', rollout: 'not_started', note: handoff.value.reason };
+        return {
+            status: 'accepted',
+            rollout: 'not_started',
+            note: skippedAuthorityNote(prepared.value, handoff.value.reason),
+        };
     }
 
     private warnBlockedDispatch(appId: string, reason: string | null): void {

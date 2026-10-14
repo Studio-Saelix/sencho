@@ -247,4 +247,28 @@ describe('POST /api/gitops/applications/:id/source/fetch', () => {
     });
     fetchSpy.mockRestore();
   });
+
+  it('reports a preparation refusal as the pull note', async () => {
+    const seeded = seedBlueprint();
+    const note = 'the artifact identity cannot be resolved for this content: the accepted generation materializes 2 compose files, which this freeze cannot model';
+    const fetchSpy = vi.spyOn(SourceController.getInstance(), 'requestFetch').mockResolvedValue({
+      status: 'settled',
+      result: { outcome: 'candidate_already_fetched', reason: 'ok', nextAction: 'none' },
+      candidateGenerationId: 'gen-refused',
+      authority: { status: 'accepted', rollout: 'not_started', note },
+    });
+
+    const res = await request(app)
+      .post(`/api/gitops/applications/bp:${seeded.blueprintId}/source/fetch`)
+      .set('Cookie', adminCookie)
+      .send({});
+
+    expect(res.status).toBe(200);
+    expect(res.body.authority).toEqual({
+      status: 'accepted',
+      rollout: 'not_started',
+      note: 'The artifact identity cannot be resolved for this content: the accepted generation materializes 2 compose files, which this freeze cannot model.',
+    });
+    fetchSpy.mockRestore();
+  });
 });

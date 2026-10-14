@@ -606,6 +606,41 @@ describe('GitOpsAuthorityActions', () => {
     expect(toast.error).not.toHaveBeenCalled();
   });
 
+  it('warns with a preparation refusal or a transient failure, and does not call that a failure', async () => {
+    const user = userEvent.setup();
+    const refusal = 'The artifact identity cannot be resolved for this content: the accepted generation materializes 2 compose files, which this freeze cannot model.';
+    vi.mocked(fetchGitOpsSource).mockResolvedValue({
+      outcome: 'candidate_already_fetched',
+      reason: 'ok',
+      nextAction: 'none',
+      commitSha: 'abc1234ffff',
+      candidateGenerationId: 'gen-2',
+      authority: { status: 'accepted', rollout: 'not_started', note: refusal },
+    });
+    const refused = renderActions(pullable('automatic', 'automatic'), canEditSource);
+    await user.click(screen.getByTestId('gitops-action-pull-source'));
+    await user.click(within(screen.getByRole('alertdialog')).getByRole('button', { name: 'Pull source' }));
+    await waitFor(() => expect(toast.warning).toHaveBeenCalledWith(`Source revision accepted. ${refusal}`));
+    expect(toast.error).not.toHaveBeenCalled();
+    refused.unmount();
+
+    vi.mocked(toast.warning).mockClear();
+    const transient = 'The accepted generation could not be materialized yet; the next reconcile retries it.';
+    vi.mocked(fetchGitOpsSource).mockResolvedValue({
+      outcome: 'candidate_already_fetched',
+      reason: 'ok',
+      nextAction: 'none',
+      commitSha: 'abc1234ffff',
+      candidateGenerationId: 'gen-2',
+      authority: { status: 'accepted', rollout: 'not_started', note: transient },
+    });
+    renderActions(pullable('automatic', 'automatic'), canEditSource);
+    await user.click(screen.getByTestId('gitops-action-pull-source'));
+    await user.click(within(screen.getByRole('alertdialog')).getByRole('button', { name: 'Pull source' }));
+    await waitFor(() => expect(toast.warning).toHaveBeenCalledWith(`Source revision accepted. ${transient}`));
+    expect(toast.error).not.toHaveBeenCalled();
+  });
+
   it('does not claim a pull when nothing changed and acceptance is held', async () => {
     const user = userEvent.setup();
     vi.mocked(fetchGitOpsSource).mockResolvedValue({

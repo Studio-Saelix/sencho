@@ -36,7 +36,7 @@ A linked source groups its sheet into tabs:
 
 - **Overview.** One block: the source's state with the commit it concerns, and the action that resolves it right there (**Review update** for a waiting update, **Retry** for a failed or retry-scheduled source, **Resume** for a suspended one, each when that action is offered). A row beneath names each stage that applies, and **Evidence** opens the recorded authority, targets, and anything the projection could not prove. The sheet header shows the last-applied commit (or **never applied**), the source's state, and the ref.
 - **Source.** The repository, ref, compose files, project directory, sibling `.env` sync, authentication and custom CA, read out as a summary. **Edit** opens the form, and **Update** appears in the toolbar once something differs from what is stored; **Cancel** puts it back. A live Direct source can also **Adopt onto Blueprint** from here. Below it, the managed-project manifest summary.
-- **Automation.** The apply behavior (Manual, Review only, Auto-write files, Auto-deploy), **Suspend** or **Resume** for the source's reconciliation when that action is offered, and the provider hooks: one endpoint per supported Git host (GitHub, GitLab, Gitea, Forgejo, Bitbucket Cloud), available when the stack owns a direct Git source; while the source is read-only on a Git-managed Blueprint the tab shows a notice instead of the endpoint controls. Changing the apply behavior also offers **Update**.
+- **Automation.** The apply behavior (Manual, Review only, Auto-write files, Auto-deploy), **Suspend** or **Resume** for the source's reconciliation when that action is offered, and the provider hooks: one endpoint per supported Git host (GitHub, GitLab, Gitea, Forgejo, Bitbucket Cloud), available when the stack owns a direct Git source; on a Git-managed Blueprint the tab shows a notice instead of the provider-hook controls. Changing the apply behavior also offers **Update**.
 - **Secrets.** Age identities for SOPS-encrypted env files and file-backed secrets, encrypted-source policy, and a readiness chip for whether this node can decrypt what the repository expects.
 - **Drift.** Only while the application has drift: each confirmed divergence, expected versus observed. See [the drift model](/features/gitops-drift-model).
 
@@ -142,7 +142,7 @@ Auto-deploy implies Auto-write: you cannot deploy automatically without also wri
 
 You can always override on the spot: when you click **Apply** in the change plan, a **Deploy after apply** checkbox lets you deploy regardless of the configured mode.
 
-**Manual** is the absence of the cadence rather than a lighter form of review: the other three modes all fetch, and differ in who applies what they found. A manual source still responds when you ask for a pull: **Pull now** on a stack-owned source, **Pull source** on a Git-managed Blueprint. That pull only fetches. On an automatic Git-managed Blueprint, **Pull source** asks before it fetches, and the result says whether the commit was recorded, held, or used to start a rollout. When preparation or the rollout is still running, the result says so and that work continues. The pull is not reported as failed. Switching to manual stops unattended movement without stranding you. A manual source is not polled, and provider hooks do not fetch it.
+**Manual** is the absence of the cadence rather than a lighter form of review: the other three modes all fetch, and differ in who applies what they found. A manual source still responds when you ask for a pull: **Pull now** on a stack-owned source, **Pull source** on a Git-managed Blueprint. That pull only fetches. On an automatic Git-managed Blueprint, **Pull source** asks before it fetches, and the result says whether the commit was recorded, held, or used to start a rollout. When preparation or the rollout is still running, the result says so and that work continues. The pull is not reported as failed. When preparation reports a reason, the result includes it. Switching to manual stops unattended movement without stranding you. A manual source is not polled, and provider hooks do not fetch it.
 
 **Suspend** pauses one source temporarily. **Manual** removes it from the cadence until you change it back, and is the right choice for a repository Sencho should only ever read at your request.
 
@@ -200,7 +200,7 @@ Click **Dismiss** in the change plan to discard a pending update without applyin
 
 When your Git host can deliver push (and optionally pull request) events directly, register a **provider hook** on the Git Source sheet instead of calling Sencho from CI. Sencho exposes one ingest URL per stack and provider kind, verifies the host's signature or shared secret, and queues reconciliation through the same Git source pipeline as **Pull now** or a generic webhook.
 
-Provider hooks apply only to **direct** stack-owned sources. A source that is read-only because it lives on a Git-managed Blueprint cannot register an endpoint; detach or retire the Blueprint binding first.
+Provider hooks apply only to **direct** stack-owned sources. A Git-managed Blueprint source cannot register an endpoint. Use **Detach Git** or **Retire to Direct** on that Blueprint first.
 
 ### Create an endpoint
 
@@ -454,7 +454,7 @@ Back up both the Sencho data directory encryption key (`encryption.key`) and any
 
 ## Known limitations
 
-- **Git-managed Blueprint binding.** Convert or Adopt moves a live Direct source onto a Blueprint. That stack's Git Source sheet is then read-only until you Detach Git or Retire to Direct on the Blueprint. Git-managed Blueprints bind and show a blocked rollout state; they do not deploy from the stored snapshot. Fleet place for those Blueprints waits on registry preflight before rollout authorization. See [Blueprints](/features/blueprint-model).
+- **Git-managed Blueprint binding.** Convert or Adopt moves a live Direct source onto a Blueprint. That stack's Git Source sheet withholds **Save**, **Detach**, and edits to the repository, ref, and provider hooks. **Pull source** fetches the next commit when the sheet is reading this Sencho's own source, and **Accept source** records it when you are allowed to accept. **Detach Git** or **Retire to Direct** restores stack-owned editing. Git-managed Blueprints bind and show a blocked rollout state; they do not deploy from the stored snapshot. Fleet place for those Blueprints waits on registry preflight before rollout authorization. See [Blueprints](/features/blueprint-model).
 - **HTTPS and SSH.** HTTPS uses tokens; SSH uses deploy keys with strict host-key verification. Custom URL schemes are not supported.
 - **No Git LFS.** Compose and env files stored via LFS are rejected. Commit plain files instead.
 - **No submodules.** Submodule contents are not fetched. Inputs and build contexts that reference submodule contents are refused with an actionable message; a warning is shown when `.gitmodules` is present.

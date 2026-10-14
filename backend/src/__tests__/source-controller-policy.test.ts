@@ -1075,6 +1075,75 @@ describe('SourceController automatic acceptance', () => {
         expect(accept).toHaveBeenCalledTimes(1);
         expect(dispatch).toHaveBeenCalledTimes(1);
     });
+
+    const refusalNote = 'the artifact identity cannot be resolved for this content: the accepted generation materializes 2 compose files, which this freeze cannot model';
+    const transientNote = 'the accepted generation could not be materialized yet; the next reconcile retries it';
+
+    async function pullPrepared(
+        id: string,
+        stackName: string,
+        generationId: string,
+        prepared: { materialized: boolean; artifact: 'resolved' | 'none' | 'refused'; note: string | null },
+        handoff: { status: 'skipped' | 'blocked' | 'dispatched'; reason: string | null },
+    ) {
+        seedAutomaticPull(id, stackName, generationId);
+        evaluateCandidatePolicy.mockResolvedValue({ status: 'allowed' });
+        spyOnReconcile().mockResolvedValue({ outcome: 'candidate_already_fetched', reason: 'ok', nextAction: 'none' });
+        vi.spyOn(gitManagedMaterialization, 'prepareAcceptedGitManagedGeneration').mockResolvedValue(prepared);
+        vi.spyOn(gitManagedHandoff, 'dispatchPreparedGitManagedGeneration').mockResolvedValue(handoff);
+        return controller.requestFetch(id, 'ada');
+    }
+
+    it('reports a permanent preparation refusal instead of the unresolved-artifact skip', async () => {
+        const fetched = await pullPrepared(
+            'app-bound-refused',
+            'bound-refused-web',
+            'gen-bound-refused',
+            { materialized: true, artifact: 'refused', note: refusalNote },
+            { status: 'skipped', reason: gitManagedHandoff.GIT_MANAGED_ARTIFACT_UNRESOLVED_REASON },
+        );
+
+        expect(fetched).toMatchObject({
+            status: 'settled',
+            authority: { status: 'accepted', rollout: 'not_started', note: refusalNote },
+        });
+        expect(getApp('app-bound-refused').accepted_generation_id).toBe('gen-bound-refused');
+    });
+
+    it('reports a transient preparation failure instead of the unresolved-artifact skip', async () => {
+        const fetched = await pullPrepared(
+            'app-bound-transient',
+            'bound-transient-web',
+            'gen-bound-transient',
+            { materialized: false, artifact: 'none', note: transientNote },
+            { status: 'skipped', reason: gitManagedHandoff.GIT_MANAGED_ARTIFACT_UNRESOLVED_REASON },
+        );
+
+        expect(fetched).toMatchObject({
+            status: 'settled',
+            authority: { status: 'accepted', rollout: 'not_started', note: transientNote },
+        });
+        expect(getApp('app-bound-transient').accepted_generation_id).toBe('gen-bound-transient');
+    });
+
+    it('keeps a distinct handoff reason beside a completed preparation note', async () => {
+        const fetched = await pullPrepared(
+            'app-bound-paused-note',
+            'bound-paused-note-web',
+            'gen-bound-paused-note',
+            { materialized: false, artifact: 'none', note: transientNote },
+            { status: 'skipped', reason: 'the rollout is paused' },
+        );
+
+        expect(fetched).toMatchObject({
+            status: 'settled',
+            authority: {
+                status: 'accepted',
+                rollout: 'not_started',
+                note: `${transientNote}. The rollout is paused`,
+            },
+        });
+    });
 });
 
 /**
