@@ -899,8 +899,11 @@ function joinAcceptNotes(parts: Array<string | null>): string | null {
  * Stages a candidate through the controller's fetch. A manual or review
  * policy waits for source/accept. An automatic policy accepts on its own,
  * inside the controller, the same way a poll does. `authority` is that
- * settlement, read after it finishes: fetched only, held, accepted, or a
- * rollout that was started. A started rollout is not a finished one.
+ * settlement: fetched only, held, accepted, or a rollout that was started.
+ * Preparation and a sequential rollout do not hold the response open after
+ * acceptance. When either is still running, the result says so and the work
+ * continues. A deadline is not a failed pull. A started rollout is not a
+ * finished one.
  * The grant is exact stack:edit on the source stack: the person who could
  * pull that stack before the Blueprint claimed it.
  */

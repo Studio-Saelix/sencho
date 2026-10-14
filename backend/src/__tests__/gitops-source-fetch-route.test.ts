@@ -219,4 +219,32 @@ describe('POST /api/gitops/applications/:id/source/fetch', () => {
     expect(fetchSpy).toHaveBeenCalledWith(seeded.applicationId, expect.any(String));
     fetchSpy.mockRestore();
   });
+
+  it('reports a pull whose rollout is still starting as success', async () => {
+    const seeded = seedBlueprint();
+    const fetchSpy = vi.spyOn(SourceController.getInstance(), 'requestFetch').mockResolvedValue({
+      status: 'settled',
+      result: { outcome: 'candidate_already_fetched', reason: 'ok', nextAction: 'none' },
+      candidateGenerationId: 'gen-continuing',
+      authority: {
+        status: 'accepted',
+        rollout: 'not_started',
+        note: 'the rollout is starting; watch the application for progress',
+      },
+    });
+
+    const res = await request(app)
+      .post(`/api/gitops/applications/bp:${seeded.blueprintId}/source/fetch`)
+      .set('Cookie', adminCookie)
+      .send({});
+
+    expect(res.status).toBe(200);
+    expect(res.body.outcome).toBe('candidate_already_fetched');
+    expect(res.body.authority).toEqual({
+      status: 'accepted',
+      rollout: 'not_started',
+      note: 'The rollout is starting; watch the application for progress.',
+    });
+    fetchSpy.mockRestore();
+  });
 });

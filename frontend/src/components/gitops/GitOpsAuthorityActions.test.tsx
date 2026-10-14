@@ -561,6 +561,51 @@ describe('GitOpsAuthorityActions', () => {
     expect(toast.success).not.toHaveBeenCalled();
   });
 
+  it('warns when an automatic pull is still preparing or starting, and does not call that a failure', async () => {
+    const user = userEvent.setup();
+    vi.mocked(fetchGitOpsSource).mockResolvedValue({
+      outcome: 'candidate_already_fetched',
+      reason: 'ok',
+      nextAction: 'none',
+      commitSha: 'abc1234ffff',
+      candidateGenerationId: 'gen-2',
+      authority: {
+        status: 'accepted',
+        rollout: 'not_started',
+        note: 'Preparation is still running; the rollout becomes authorizable when it completes.',
+      },
+    });
+    const preparing = renderActions(pullable('automatic', 'automatic'), canEditSource);
+    await user.click(screen.getByTestId('gitops-action-pull-source'));
+    await user.click(within(screen.getByRole('alertdialog')).getByRole('button', { name: 'Pull source' }));
+    await waitFor(() => expect(toast.warning).toHaveBeenCalledWith(
+      'Source revision accepted. Preparation is still running; the rollout becomes authorizable when it completes.',
+    ));
+    expect(toast.error).not.toHaveBeenCalled();
+    preparing.unmount();
+
+    vi.mocked(toast.warning).mockClear();
+    vi.mocked(fetchGitOpsSource).mockResolvedValue({
+      outcome: 'candidate_already_fetched',
+      reason: 'ok',
+      nextAction: 'none',
+      commitSha: 'abc1234ffff',
+      candidateGenerationId: 'gen-2',
+      authority: {
+        status: 'accepted',
+        rollout: 'not_started',
+        note: 'The rollout is starting; watch the application for progress.',
+      },
+    });
+    renderActions(pullable('automatic', 'automatic'), canEditSource);
+    await user.click(screen.getByTestId('gitops-action-pull-source'));
+    await user.click(within(screen.getByRole('alertdialog')).getByRole('button', { name: 'Pull source' }));
+    await waitFor(() => expect(toast.warning).toHaveBeenCalledWith(
+      'Source revision accepted. The rollout is starting; watch the application for progress.',
+    ));
+    expect(toast.error).not.toHaveBeenCalled();
+  });
+
   it('does not claim a pull when nothing changed and acceptance is held', async () => {
     const user = userEvent.setup();
     vi.mocked(fetchGitOpsSource).mockResolvedValue({

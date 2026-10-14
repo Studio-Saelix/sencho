@@ -938,6 +938,143 @@ describe('SourceController automatic acceptance', () => {
         });
         expect(getApp('app-fetch-paused').accepted_generation_id).toBe('gen-fetch-paused');
     });
+
+    /** An automatic Blueprint whose next pull can accept under the stored policy. */
+    function seedAutomaticPull(id: string, stackName: string, generationId: string): void {
+        stageCandidate(id, stackName, generationId, 'automatic');
+        DatabaseService.getInstance().getDb().prepare(
+            `UPDATE gitops_applications SET configured_repo_url = ? WHERE id = ?`,
+        ).run(`https://github.com/example/${stackName}.git`, id);
+        const blueprint = commitBlueprintCreate({
+            name: `bp-${id}`,
+            description: null,
+            compose_content: 'services:\n  web:\n    image: nginx:1.27\n',
+            selector: { type: 'nodes', ids: [1] },
+            drift_mode: 'suggest',
+            classification: 'stateless',
+            classification_reasons: [],
+            enabled: true,
+            created_by: 'tester',
+        }, () => [1]);
+        GitOpsBindingService.getInstance().convertInlineToGit({
+            blueprintId: blueprint.id,
+            applicationId: id,
+            actor: 'tester',
+        });
+    }
+
+    /** Pump the fake clock until the pull has reached `ready`, or fail. */
+    async function flushUntil(ready: () => boolean): Promise<void> {
+        for (let i = 0; i < 40 && !ready(); i++) {
+            await vi.advanceTimersByTimeAsync(0);
+        }
+        expect(ready()).toBe(true);
+    }
+
+    it('answers while preparation continues and does not run that work twice', async () => {
+        const id = 'app-bound-prepare';
+        seedAutomaticPull(id, 'bound-prepare-web', 'gen-bound-prepare');
+        evaluateCandidatePolicy.mockResolvedValue({ status: 'allowed' });
+        spyOnReconcile().mockResolvedValue({ outcome: 'candidate_already_fetched', reason: 'ok', nextAction: 'none' });
+        let releasePrepare!: (value: { materialized: boolean; artifact: 'resolved'; note: null }) => void;
+        const prepareGate = new Promise<{ materialized: boolean; artifact: 'resolved'; note: null }>((resolve) => {
+            releasePrepare = resolve;
+        });
+        const prepare = vi.spyOn(gitManagedMaterialization, 'prepareAcceptedGitManagedGeneration')
+            .mockReturnValue(prepareGate);
+        const dispatch = vi.spyOn(gitManagedHandoff, 'dispatchPreparedGitManagedGeneration')
+            .mockResolvedValue({ status: 'skipped', reason: 'the artifact identity is not resolved yet' });
+        const accept = vi.spyOn(GitOpsTransitions.getInstance(), 'sourceAccepted');
+
+        const pending = controller.requestFetch(id, 'ada');
+        await flushUntil(() => prepare.mock.calls.length === 1);
+        await vi.advanceTimersByTimeAsync(15_000);
+        const fetched = await pending;
+
+        expect(fetched).toMatchObject({
+            status: 'settled',
+            result: { outcome: 'candidate_already_fetched' },
+            authority: {
+                status: 'accepted',
+                rollout: 'not_started',
+                note: 'preparation is still running; the rollout becomes authorizable when it completes',
+            },
+        });
+        expect(getApp(id).accepted_generation_id).toBe('gen-bound-prepare');
+        expect(accept).toHaveBeenCalledTimes(1);
+        expect(prepare).toHaveBeenCalledTimes(1);
+        expect(dispatch).toHaveBeenCalledTimes(1);
+
+        const overlapped = await controller.requestFetch(id, 'ada');
+        expect(overlapped).toMatchObject({ status: 'refused', code: 'fetch_in_flight' });
+        expect(accept).toHaveBeenCalledTimes(1);
+        expect(prepare).toHaveBeenCalledTimes(1);
+        expect(dispatch).toHaveBeenCalledTimes(1);
+
+        releasePrepare({ materialized: true, artifact: 'resolved', note: null });
+        await vi.advanceTimersByTimeAsync(0);
+        expect(accept).toHaveBeenCalledTimes(1);
+        expect(prepare).toHaveBeenCalledTimes(1);
+        expect(dispatch).toHaveBeenCalledTimes(1);
+
+        const again = await controller.requestFetch(id, 'ada');
+        expect(again).toMatchObject({ status: 'settled', authority: { status: 'fetched_only' } });
+        expect(accept).toHaveBeenCalledTimes(1);
+        expect(prepare).toHaveBeenCalledTimes(1);
+        expect(dispatch).toHaveBeenCalledTimes(1);
+    });
+
+    it('answers while dispatch continues and does not dispatch twice', async () => {
+        const id = 'app-bound-dispatch';
+        seedAutomaticPull(id, 'bound-dispatch-web', 'gen-bound-dispatch');
+        evaluateCandidatePolicy.mockResolvedValue({ status: 'allowed' });
+        spyOnReconcile().mockResolvedValue({ outcome: 'candidate_already_fetched', reason: 'ok', nextAction: 'none' });
+        vi.spyOn(gitManagedMaterialization, 'prepareAcceptedGitManagedGeneration').mockResolvedValue({
+            materialized: true,
+            artifact: 'resolved',
+            note: null,
+        });
+        let releaseDispatch!: (value: { status: 'dispatched'; reason: null }) => void;
+        const dispatchGate = new Promise<{ status: 'dispatched'; reason: null }>((resolve) => {
+            releaseDispatch = resolve;
+        });
+        const dispatch = vi.spyOn(gitManagedHandoff, 'dispatchPreparedGitManagedGeneration')
+            .mockReturnValue(dispatchGate);
+        const accept = vi.spyOn(GitOpsTransitions.getInstance(), 'sourceAccepted');
+
+        const pending = controller.requestFetch(id, 'ada');
+        await flushUntil(() => dispatch.mock.calls.length === 1);
+        await vi.advanceTimersByTimeAsync(15_000);
+        const fetched = await pending;
+
+        expect(fetched).toMatchObject({
+            status: 'settled',
+            result: { outcome: 'candidate_already_fetched' },
+            authority: {
+                status: 'accepted',
+                rollout: 'not_started',
+                note: 'the rollout is starting; watch the application for progress',
+            },
+        });
+        expect(getApp(id).accepted_generation_id).toBe('gen-bound-dispatch');
+        expect(accept).toHaveBeenCalledTimes(1);
+        expect(dispatch).toHaveBeenCalledTimes(1);
+
+        const overlapped = await controller.requestFetch(id, 'ada');
+        expect(overlapped).toMatchObject({ status: 'refused', code: 'fetch_in_flight' });
+        expect(accept).toHaveBeenCalledTimes(1);
+        expect(dispatch).toHaveBeenCalledTimes(1);
+
+        releaseDispatch({ status: 'dispatched', reason: null });
+        await vi.advanceTimersByTimeAsync(0);
+        expect(accept).toHaveBeenCalledTimes(1);
+        expect(dispatch).toHaveBeenCalledTimes(1);
+
+        const again = await controller.requestFetch(id, 'ada');
+        expect(again).toMatchObject({ status: 'settled', authority: { status: 'fetched_only' } });
+        expect(accept).toHaveBeenCalledTimes(1);
+        expect(dispatch).toHaveBeenCalledTimes(1);
+    });
 });
 
 /**

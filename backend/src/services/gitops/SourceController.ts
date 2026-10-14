@@ -72,6 +72,58 @@ export type OperatorFetchResult =
 
 const NO_AUTHORITY: FetchAuthorityReport = { status: 'not_applicable' };
 
+/**
+ * How long an operator pull waits after acceptance before answering.
+ * The accept route uses the same bound: a registry lookup or a sequential
+ * rollout must not hold an already-committed acceptance open.
+ */
+const POST_ACCEPT_RESPONSE_MS = 15_000;
+
+const PREPARATION_CONTINUING_NOTE =
+    'preparation is still running; the rollout becomes authorizable when it completes';
+
+const ROLLOUT_STARTING_NOTE =
+    'the rollout is starting; watch the application for progress';
+
+/** Set when an operator pull still has preparation or dispatch running after it answers. */
+interface PostAcceptFollow {
+    pending: Promise<void> | null;
+}
+
+/**
+ * Answer with `fallback` when `work` is still running at the response
+ * deadline. The underlying promise is left running either way.
+ */
+function responseWithin<T>(
+    work: Promise<T>,
+    fallback: T,
+    onError: (err: unknown) => void,
+): Promise<{ value: T; completed: boolean }> {
+    return new Promise((resolve) => {
+        let settled = false;
+        const timer = setTimeout(() => {
+            if (settled) return;
+            settled = true;
+            resolve({ value: fallback, completed: false });
+        }, POST_ACCEPT_RESPONSE_MS);
+        work.then(
+            (value) => {
+                if (settled) return;
+                settled = true;
+                clearTimeout(timer);
+                resolve({ value, completed: true });
+            },
+            (err: unknown) => {
+                onError(err);
+                if (settled) return;
+                settled = true;
+                clearTimeout(timer);
+                resolve({ value: fallback, completed: true });
+            },
+        );
+    });
+}
+
 function refuseFetch(code: OperatorFetchRefusalCode, error: string): OperatorFetchResult {
     return { status: 'refused', code, error };
 }
@@ -421,6 +473,10 @@ export class SourceController {
      * the same as a poll. A fetch already in this process, or a row already
      * in fetch_started, is refused so this caller does not run a second
      * acceptance after reconcile joins.
+     *
+     * After acceptance commits, preparation and dispatch are answered within
+     * a short deadline. Work still running is reported as continuing, not as
+     * a failed pull, and this application stays in flight until it finishes.
      */
     public async requestFetch(applicationId: string, actor: string): Promise<OperatorFetchResult> {
         const store = GitOpsStore.getInstance();
@@ -428,6 +484,7 @@ export class SourceController {
         if ('status' in blocked) return blocked;
         const { app, stackName } = blocked;
         this.inFlight.add(app.id);
+        const follow: PostAcceptFollow = { pending: null };
         try {
             const result = await GitSourceService.getInstance().reconcile({
                 intent: 'fetch',
@@ -438,7 +495,7 @@ export class SourceController {
             });
             const fresh = store.getApplication(app.id);
             const authority = fresh
-                ? await this.settleAfterReconcile(fresh, stackName, result, 'manual')
+                ? await this.settleAfterReconcile(fresh, stackName, result, 'manual', follow)
                 : NO_AUTHORITY;
             return {
                 status: 'settled',
@@ -447,7 +504,11 @@ export class SourceController {
                 authority,
             };
         } finally {
-            this.releaseAndDrainWake(app.id);
+            if (follow.pending) {
+                void follow.pending.finally(() => this.releaseAndDrainWake(app.id));
+            } else {
+                this.releaseAndDrainWake(app.id);
+            }
         }
     }
 
@@ -497,12 +558,16 @@ export class SourceController {
      * Shared by the poll and by an operator pull so the two cannot disagree
      * about which outcome re-arms, retries, or accepts. Manual sources are
      * declined inside the cursor helpers: a pull must not enroll them.
+     *
+     * `follow` is set only by an operator pull. The poll omits it and waits
+     * for preparation and dispatch, because no request is held open.
      */
     private async settleAfterReconcile(
         fresh: GitOpsApplicationRow,
         stackName: string,
         result: ReconcileResult,
         trigger: ReconcileTrigger,
+        follow?: PostAcceptFollow,
     ): Promise<FetchAuthorityReport> {
         if (result.outcome === 'failed_previous_intact' || result.outcome === 'retry_scheduled') {
             this.maybeScheduleRetry(fresh);
@@ -516,7 +581,7 @@ export class SourceController {
             // refuses a durable blocked candidate
             // (requireAcceptableCandidate guards against an outcome that
             // misreports the row's state).
-            return this.maybeAcceptAutomaticCandidate(fresh, stackName, trigger);
+            return this.maybeAcceptAutomaticCandidate(fresh, stackName, trigger, follow);
         }
         if (result.outcome === 'recovery_required' && recoveryWaitHolds(fresh)) {
             // A recovery wait is not terminal: the hold clears through success
@@ -592,6 +657,7 @@ export class SourceController {
         app: GitOpsApplicationRow,
         stackName: string,
         trigger: ReconcileTrigger,
+        follow?: PostAcceptFollow,
     ): Promise<FetchAuthorityReport> {
         if (app.source_policy !== 'automatic') return NO_AUTHORITY;
         if (!app.candidate_generation_id || app.accepted_generation_id === app.candidate_generation_id) {
@@ -701,6 +767,9 @@ export class SourceController {
         // preflight refuses an unresolved artifact set. Both steps are
         // idempotent and the reconciler retries them, so a failure here is
         // reported and the dispatch below still runs (and refuses truthfully).
+        if (app.target_mode === 'blueprint' && follow) {
+            return this.boundBlueprintPostAccept(app, acceptGeneration.id, trigger, follow);
+        }
         if (app.target_mode === 'blueprint') {
             const prepared = await prepareAcceptedGitManagedGeneration({
                 applicationId: app.id,
@@ -771,6 +840,94 @@ export class SourceController {
             );
             return { status: 'accepted', rollout: 'held', note: 'The rollout did not start.' };
         }
+    }
+
+    /**
+     * Answer an automatic Blueprint pull without waiting out preparation or
+     * a sequential rollout. Acceptance has already committed. Each step still
+     * runs once; the in-flight slot stays held until both have settled.
+     */
+    private async boundBlueprintPostAccept(
+        app: GitOpsApplicationRow,
+        generationId: string,
+        trigger: ReconcileTrigger,
+        follow: PostAcceptFollow,
+    ): Promise<FetchAuthorityReport> {
+        const prepareWork = prepareAcceptedGitManagedGeneration({
+            applicationId: app.id,
+            generationId,
+            actor: 'system:source-controller',
+            trigger,
+        });
+        const prepared = await responseWithin(prepareWork, {
+            materialized: false,
+            artifact: 'none',
+            note: PREPARATION_CONTINUING_NOTE,
+        }, (err) => this.warnPostAccept(app.id, 'preparation', err));
+        if (prepared.completed && prepared.value.note) {
+            console.warn(
+                `[SourceController] Git-managed preparation incomplete for ${sanitizeForLog(app.id)}: ${sanitizeForLog(prepared.value.note)}`,
+            );
+        }
+        const dispatchWork = dispatchPreparedGitManagedGeneration({
+            applicationId: app.id,
+            generationId,
+            actor: 'system:source-controller',
+            trigger,
+        });
+        const handoff = await responseWithin(dispatchWork, {
+            status: 'skipped',
+            reason: ROLLOUT_STARTING_NOTE,
+        }, (err) => this.warnPostAccept(app.id, 'dispatch', err));
+        const report = this.boundedBlueprintAuthority(app.id, prepared.completed, handoff);
+        follow.pending = prepared.completed && handoff.completed
+            ? null
+            : Promise.allSettled([prepareWork, dispatchWork]).then((results) => {
+                const dispatched = results[1];
+                if (
+                    !handoff.completed
+                    && dispatched.status === 'fulfilled'
+                    && dispatched.value.status === 'blocked'
+                ) {
+                    this.warnBlockedDispatch(app.id, dispatched.value.reason);
+                }
+            });
+        return report;
+    }
+
+    /** The authority report for a Blueprint pull whose post-accept work may still be running. */
+    private boundedBlueprintAuthority(
+        appId: string,
+        prepareCompleted: boolean,
+        handoff: { completed: boolean; value: { status: 'dispatched' | 'blocked' | 'skipped'; reason: string | null } },
+    ): FetchAuthorityReport {
+        if (handoff.completed && handoff.value.status === 'dispatched') {
+            return { status: 'accepted', rollout: 'started', note: null };
+        }
+        if (handoff.completed && handoff.value.status === 'blocked') {
+            this.warnBlockedDispatch(appId, handoff.value.reason);
+            return { status: 'accepted', rollout: 'held', note: handoff.value.reason ?? 'The rollout did not start.' };
+        }
+        if (!prepareCompleted) {
+            return { status: 'accepted', rollout: 'not_started', note: PREPARATION_CONTINUING_NOTE };
+        }
+        if (!handoff.completed) {
+            return { status: 'accepted', rollout: 'not_started', note: ROLLOUT_STARTING_NOTE };
+        }
+        return { status: 'accepted', rollout: 'not_started', note: handoff.value.reason };
+    }
+
+    private warnBlockedDispatch(appId: string, reason: string | null): void {
+        console.warn(
+            `[SourceController] automatic dispatch blocked for ${sanitizeForLog(appId)}: ${sanitizeForLog(reason ?? 'unknown')}`,
+        );
+    }
+
+    private warnPostAccept(appId: string, step: 'preparation' | 'dispatch', err: unknown): void {
+        console.error(
+            `[SourceController] Git-managed ${step} failed for ${sanitizeForLog(appId)}:`,
+            redactSensitiveText(err instanceof Error ? err.message : String(err)),
+        );
     }
 
     /**
