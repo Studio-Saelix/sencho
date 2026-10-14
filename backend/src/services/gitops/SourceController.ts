@@ -50,12 +50,35 @@ export type OperatorFetchRefusalCode =
     | 'fetch_in_flight'
     | 'recovery';
 
+/**
+ * What settlement did after a fetch, so a caller can tell a staged commit
+ * from an acceptance, a started rollout, or a hold. `started` means the
+ * rollout was handed off, not that it finished.
+ */
+export type FetchAuthorityReport =
+    | { status: 'not_applicable' }
+    | { status: 'fetched_only' }
+    | { status: 'held'; note: string }
+    | { status: 'accepted'; rollout: 'started' | 'held' | 'not_started'; note: string | null };
+
 export type OperatorFetchResult =
     | { status: 'refused'; code: OperatorFetchRefusalCode; error: string }
-    | { status: 'settled'; result: ReconcileResult; candidateGenerationId: string | null };
+    | {
+        status: 'settled';
+        result: ReconcileResult;
+        candidateGenerationId: string | null;
+        authority: FetchAuthorityReport;
+    };
+
+const NO_AUTHORITY: FetchAuthorityReport = { status: 'not_applicable' };
 
 function refuseFetch(code: OperatorFetchRefusalCode, error: string): OperatorFetchResult {
     return { status: 'refused', code, error };
+}
+
+/** Prefer a sentence already written for an operator. Internal phrases stay in the log. */
+function operatorHoldNote(reason: string): string {
+    return reason.startsWith('The ') ? reason : 'The candidate was not accepted.';
 }
 
 /**
@@ -414,11 +437,14 @@ export class SourceController {
                 actor,
             });
             const fresh = store.getApplication(app.id);
-            if (fresh) await this.settleAfterReconcile(fresh, stackName, result, 'manual');
+            const authority = fresh
+                ? await this.settleAfterReconcile(fresh, stackName, result, 'manual')
+                : NO_AUTHORITY;
             return {
                 status: 'settled',
                 result,
                 candidateGenerationId: store.getApplication(app.id)?.candidate_generation_id ?? null,
+                authority,
             };
         } finally {
             this.releaseAndDrainWake(app.id);
@@ -477,10 +503,10 @@ export class SourceController {
         stackName: string,
         result: ReconcileResult,
         trigger: ReconcileTrigger,
-    ): Promise<void> {
+    ): Promise<FetchAuthorityReport> {
         if (result.outcome === 'failed_previous_intact' || result.outcome === 'retry_scheduled') {
             this.maybeScheduleRetry(fresh);
-            return;
+            return NO_AUTHORITY;
         }
         if (SUCCESS_SHAPED_OUTCOMES.has(result.outcome)) {
             this.maybeScheduleNextPoll(fresh);
@@ -490,8 +516,7 @@ export class SourceController {
             // refuses a durable blocked candidate
             // (requireAcceptableCandidate guards against an outcome that
             // misreports the row's state).
-            await this.maybeAcceptAutomaticCandidate(fresh, stackName, trigger);
-            return;
+            return this.maybeAcceptAutomaticCandidate(fresh, stackName, trigger);
         }
         if (result.outcome === 'recovery_required' && recoveryWaitHolds(fresh)) {
             // A recovery wait is not terminal: the hold clears through success
@@ -503,6 +528,7 @@ export class SourceController {
             // withholds progression.
             this.maybeScheduleNextPoll(fresh);
         }
+        return NO_AUTHORITY;
     }
 
     /**
@@ -566,19 +592,25 @@ export class SourceController {
         app: GitOpsApplicationRow,
         stackName: string,
         trigger: ReconcileTrigger,
-    ): Promise<void> {
-        if (app.source_policy !== 'automatic') return;
+    ): Promise<FetchAuthorityReport> {
+        if (app.source_policy !== 'automatic') return NO_AUTHORITY;
+        if (!app.candidate_generation_id || app.accepted_generation_id === app.candidate_generation_id) {
+            return { status: 'fetched_only' };
+        }
         // A source that already fell back to review under a safety refusal
         // waits for the operator: re-evaluating every tick would repeat the
         // refusal without changing anything. The reason field, not the plain
         // review flag, is the marker: a review-policy candidate later switched
         // to automatic has no refusal to honor and must evaluate normally.
-        if (app.review_block_reason !== null) return;
-        if (!app.candidate_generation_id || app.accepted_generation_id === app.candidate_generation_id) return;
+        if (app.review_block_reason !== null) {
+            return { status: 'held', note: 'A previous safety check is still waiting for an operator.' };
+        }
         const generation = GitOpsStore.getInstance().getGeneration(app.candidate_generation_id);
-        if (!generation) return;
+        if (!generation) return { status: 'held', note: 'The candidate generation is not available.' };
         const imageRefs = this.candidateImageRefs(stackName, app, generation);
-        if (imageRefs === null) return;
+        if (imageRefs === null) {
+            return { status: 'held', note: 'The candidate could not be read, so it was not accepted.' };
+        }
         let evaluation;
         try {
             evaluation = await evaluateCandidatePolicy(
@@ -592,7 +624,7 @@ export class SourceController {
                 `[SourceController] policy evaluation failed for ${sanitizeForLog(app.id)}:`,
                 e instanceof Error ? e.message : String(e),
             );
-            return;
+            return { status: 'held', note: 'The security policy could not be evaluated, so the candidate was not accepted.' };
         }
         if (evaluation.status !== 'allowed') {
             // Fail closed and log the policy verdict: the retained `candidate_ready`
@@ -602,7 +634,7 @@ export class SourceController {
             console.warn(
                 `[SourceController] automatic candidate held for ${sanitizeForLog(app.id)}: policy verdict ${evaluation.status}`,
             );
-            return;
+            return { status: 'held', note: 'The security policy did not allow this candidate, so it was not accepted.' };
         }
         let acceptGeneration: GitOpsGenerationRow;
         try {
@@ -617,12 +649,12 @@ export class SourceController {
                 console.warn(
                     `[SourceController] automatic candidate held for ${sanitizeForLog(app.id)}: ${sanitizeForLog(revalidated.reason)}`,
                 );
-                return;
+                return { status: 'held', note: operatorHoldNote(revalidated.reason) };
             }
             acceptGeneration = revalidated.generation;
         } catch (e) {
             this.warnSkipped(app.id, 'source revalidation failed', e);
-            return;
+            return { status: 'held', note: 'The candidate could not be checked again, so it was not accepted.' };
         }
         // Stateful safety: this acceptance route has no human in the loop, so
         // it must prove the candidate does not withdraw or rename a stateful
@@ -643,7 +675,12 @@ export class SourceController {
             console.warn(
                 `[SourceController] automatic candidate held for ${sanitizeForLog(app.id)}: ${detail}; an operator must accept explicitly${unrecorded}`,
             );
-            return;
+            return {
+                status: 'held',
+                note: withdrawal.status === 'withdrawn'
+                    ? 'The candidate changes stateful services, so an operator must accept it.'
+                    : 'A stateful change could not be ruled out, so an operator must accept it.',
+            };
         }
         try {
             GitOpsTransitions.getInstance().sourceAccepted({
@@ -656,7 +693,7 @@ export class SourceController {
             });
         } catch (e) {
             this.warnSkipped(app.id, 'automatic acceptance failed', e);
-            return;
+            return { status: 'held', note: 'The candidate was not accepted.' };
         }
         // A Git-managed Blueprint needs its accepted generation materialized and
         // its artifact set resolved before the dispatch boundary can authorize
@@ -688,14 +725,18 @@ export class SourceController {
                 actor: 'system:source-controller',
                 trigger,
             });
+            if (handoff.status === 'dispatched') {
+                return { status: 'accepted', rollout: 'started', note: null };
+            }
             if (handoff.status === 'blocked') {
                 // The acceptance stands while the apply is refused, so the row
                 // alone cannot explain why nothing moved: log the reason.
                 console.warn(
                     `[SourceController] automatic dispatch blocked for ${sanitizeForLog(app.id)}: ${sanitizeForLog(handoff.reason ?? 'unknown')}`,
                 );
+                return { status: 'accepted', rollout: 'held', note: handoff.reason ?? 'The rollout did not start.' };
             }
-            return;
+            return { status: 'accepted', rollout: 'not_started', note: handoff.reason };
         }
         // Direct: the shared dispatch boundary promotes the generation through
         // completeGitApply, under the stack lock. A reserved dispatch never
@@ -714,7 +755,9 @@ export class SourceController {
                 console.warn(
                     `[SourceController] automatic dispatch blocked for ${sanitizeForLog(app.id)}: ${sanitizeForLog(dispatch.reason)}`,
                 );
+                return { status: 'accepted', rollout: 'held', note: dispatch.reason };
             }
+            return { status: 'accepted', rollout: 'started', note: null };
         } catch (e) {
             // Reaching here means nothing was reserved, so no durable row
             // exists and the next tick will not retry (the acceptance cleared
@@ -726,6 +769,7 @@ export class SourceController {
                 `[SourceController] automatic dispatch failed for ${sanitizeForLog(app.id)} before reserving an attempt. The generation remains accepted and will not auto-apply; dispatch it manually:`,
                 redactSensitiveText(e instanceof Error ? e.stack ?? e.message : String(e)),
             );
+            return { status: 'accepted', rollout: 'held', note: 'The rollout did not start.' };
         }
     }
 

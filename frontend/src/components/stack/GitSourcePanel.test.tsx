@@ -1223,15 +1223,17 @@ describe('GitSourcePanel Blueprint binding', () => {
 
   it('pulls the Blueprint source and does not call the stack pull', async () => {
     nodeCtl.nodes = [{ id: 1, type: 'local', is_default: true }];
+    nodeCtl.activeNode = { id: 1, type: 'local' };
     authCtl.can.mockImplementation((action, resourceType, resourceId, nodeId) => {
       void resourceType;
       return (action === 'stack:edit' && resourceId === 'bookstack' && nodeId === 1)
         || action === 'stack:create';
     });
+    const internalId = '11111111-1111-4111-8111-111111111111';
     const revision = liveRevision({
       targetMode: 'blueprint',
       stackName: null,
-      applicationId: 'bp:9',
+      applicationId: internalId,
       blueprintId: 9,
       configuredSourceStackName: 'bookstack',
       facets: facets({
@@ -1246,6 +1248,7 @@ describe('GitSourcePanel Blueprint binding', () => {
           nextAction: 'review',
           commitSha: 'abc1234ffff',
           candidateGenerationId: 'gen-2',
+          authority: { status: 'fetched_only', rollout: null, note: null },
         });
       }
       return jsonRes(linkedWith(revision));
@@ -1258,9 +1261,48 @@ describe('GitSourcePanel Blueprint binding', () => {
     fireEvent.click(screen.getByTestId('gitops-action-pull-source'));
     await waitFor(() => {
       const urls = vi.mocked(apiFetch).mock.calls.map((call) => String(call[0]));
-      expect(urls.some((url) => url.includes('/source/fetch'))).toBe(true);
+      expect(urls.some((url) => url.includes('/gitops/applications/bp%3A9/source/fetch'))).toBe(true);
+      expect(urls.some((url) => url.includes(internalId))).toBe(false);
       expect(urls.some((url) => url.includes('/git-source/pull'))).toBe(false);
     });
+    fireEvent.click(screen.getByTestId('gitops-action-accept-source'));
+    await waitFor(() => {
+      const urls = vi.mocked(apiFetch).mock.calls.map((call) => String(call[0]));
+      expect(urls.some((url) => url.includes('/gitops/applications/bp%3A9/source/accept'))).toBe(true);
+      expect(urls.some((url) => url.includes(internalId))).toBe(false);
+    });
+  });
+
+  it('does not pull a hub Blueprint that shares a remote claimed source number', async () => {
+    nodeCtl.nodes = [
+      { id: 1, type: 'local', is_default: true },
+      { id: 2, type: 'remote' },
+    ];
+    nodeCtl.activeNode = { id: 1, type: 'local' };
+    authCtl.can.mockImplementation((action, resourceType, resourceId, nodeId) => {
+      void resourceType;
+      return (action === 'stack:edit' && resourceId === 'bookstack' && nodeId === 1)
+        || action === 'stack:create';
+    });
+    const revision = liveRevision({
+      targetMode: 'blueprint',
+      stackName: null,
+      applicationId: '22222222-2222-4222-8222-222222222222',
+      blueprintId: 1,
+      configuredSourceStackName: 'bookstack',
+      facets: facets({
+        source: plainSource('candidate_ready'),
+      }),
+    });
+    vi.mocked(apiFetch).mockResolvedValue(jsonRes(linkedWith(revision)));
+    render(panel({ nodeId: 2 }));
+    await sheetLoaded();
+    openTab('Source');
+    expect(await screen.findByTestId('git-source-claimed')).toHaveTextContent('stays on the node that owns it');
+    expect(screen.queryByTestId('gitops-action-pull-source')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('gitops-action-accept-source')).not.toBeInTheDocument();
+    const urls = vi.mocked(apiFetch).mock.calls.map((call) => String(call[0]));
+    expect(urls.some((url) => url.includes('/gitops/applications/'))).toBe(false);
   });
 
   it('offers adopt on a live Direct source', async () => {

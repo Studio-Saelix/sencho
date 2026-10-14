@@ -95,6 +95,7 @@ describe('POST /api/gitops/applications/:id/source/fetch', () => {
       status: 'settled',
       result: { outcome: 'pending_review', reason: 'A newer commit is waiting.', nextAction: 'review' },
       candidateGenerationId: 'gen-route',
+      authority: { status: 'not_applicable' },
     });
 
     const res = await request(app)
@@ -155,6 +156,67 @@ describe('POST /api/gitops/applications/:id/source/fetch', () => {
 
     expect(res.status).toBe(409);
     expect(res.body.code).toBe('suspended');
+    fetchSpy.mockRestore();
+  });
+
+  it('takes the portfolio id from the stack sheet and refuses the internal id', async () => {
+    const seeded = seedBlueprint();
+    DatabaseService.getInstance().upsertGitSource({
+      stack_name: seeded.sourceStack,
+      repo_url: 'https://github.com/example/repo.git',
+      branch: 'main',
+      compose_path: 'compose.yaml',
+      compose_paths: ['compose.yaml'],
+      context_dir: null,
+      sync_env: false,
+      env_path: null,
+      auth_type: 'none',
+      encrypted_token: null,
+      encrypted_deploy_key: null,
+      ssh_known_hosts_entry: null,
+      ssh_host_key_fingerprint: null,
+      encrypted_ca_bundle: null,
+      auto_apply_on_webhook: false,
+      auto_deploy_on_apply: false,
+      last_applied_commit_sha: null,
+      last_applied_content_hash: null,
+      pending_commit_sha: null,
+      pending_compose_content: null,
+      pending_env_content: null,
+      pending_fetched_at: null,
+      last_debounce_at: null,
+    });
+    const fetchSpy = vi.spyOn(SourceController.getInstance(), 'requestFetch').mockResolvedValue({
+      status: 'settled',
+      result: { outcome: 'pending_review', reason: 'A newer commit is waiting.', nextAction: 'review' },
+      candidateGenerationId: 'gen-route',
+      authority: { status: 'not_applicable' },
+    });
+
+    const sheet = await request(app)
+      .get(`/api/stacks/${seeded.sourceStack}/git-source`)
+      .set('Cookie', adminCookie);
+    expect(sheet.status).toBe(200);
+    expect(sheet.body.gitopsRevision.applicationId).toBe(seeded.applicationId);
+    expect(sheet.body.gitopsRevision.blueprintId).toBe(seeded.blueprintId);
+    expect(String(sheet.body.gitopsRevision.applicationId).startsWith('bp:')).toBe(false);
+
+    const raw = await request(app)
+      .post(`/api/gitops/applications/${seeded.applicationId}/source/fetch`)
+      .set('Cookie', adminCookie)
+      .send({});
+    expect(raw.status).toBe(400);
+    expect(raw.body.error).toBe('Application id is not a portfolio id');
+    expect(fetchSpy).not.toHaveBeenCalled();
+
+    const portfolio = await request(app)
+      .post(`/api/gitops/applications/bp:${seeded.blueprintId}/source/fetch`)
+      .set('Cookie', adminCookie)
+      .send({});
+    expect(portfolio.status).toBe(200);
+    expect(portfolio.body.authority).toEqual({ status: 'not_applicable', rollout: null, note: null });
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    expect(fetchSpy).toHaveBeenCalledWith(seeded.applicationId, expect.any(String));
     fetchSpy.mockRestore();
   });
 });

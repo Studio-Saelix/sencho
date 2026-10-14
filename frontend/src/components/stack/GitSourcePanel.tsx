@@ -12,6 +12,8 @@ import { useDeployFeedback } from '@/context/DeployFeedbackContext';
 import { useNodes } from '@/context/NodeContext';
 import { useAuth } from '@/context/AuthContext';
 import GitOpsSourceActions from '@/components/gitops/GitOpsSourceActions';
+import { claimedBlueprintAuthorityId } from '@/lib/gitopsAuthorityApi';
+import { policyReadFor } from '@/lib/gitopsAuthorityPolicy';
 import { toast } from '@/components/ui/toast-store';
 import { GitSourceDiffDialog, type PullResult, type PublicPendingPlan } from './GitSourceDiffDialog';
 import { GitSourceFields, type ApplyMode, type GitSourceFieldsPart } from './GitSourceFields';
@@ -825,16 +827,26 @@ export function GitSourcePanel({
     />
   );
 
+  const ownerNode = panelNodeId == null ? null : nodes.find((node) => node.id === panelNodeId) ?? null;
+  const claimedAuthorityId = revision ? claimedBlueprintAuthorityId(revision, ownerNode) : null;
+  const claimedAutomatic = revision?.targetMode === 'blueprint'
+    && policyReadFor(revision.authorityPolicies, 'source')?.configured === 'automatic';
   const claimedNotice = (
     <div className="space-y-2 rounded-lg border border-card-border bg-card p-3" data-testid="git-source-claimed">
       <p className="font-mono text-[10px] uppercase tracking-[0.18em] text-stat-icon">Bound to a Blueprint</p>
       <p className="text-xs text-stat-subtitle leading-relaxed">
-        This Git source belongs to a Git-managed Blueprint. Save and Detach stay on that Blueprint. Pull source fetches the next commit into it.
+        This Git source belongs to a Git-managed Blueprint. Save and Detach stay on that Blueprint.
+        {' '}
+        {claimedAuthorityId
+          ? claimedAutomatic
+            ? 'Pull source fetches the next commit into it. This source accepts a new commit on its own, so Pull source asks before it fetches.'
+            : 'Pull source fetches the next commit into it.'
+          : 'Pull source for this Blueprint stays on the node that owns it.'}
       </p>
-      {revision && revision.targetMode === 'blueprint' && (
+      {claimedAuthorityId && revision && revision.targetMode === 'blueprint' && (
         <div className="flex flex-wrap items-center gap-2">
           <GitOpsSourceActions
-            applicationId={revision.applicationId}
+            applicationId={claimedAuthorityId}
             projection={revision}
             can={can}
             sourceNodeId={sourceNodeId}

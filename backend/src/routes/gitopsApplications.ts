@@ -898,7 +898,9 @@ function joinAcceptNotes(parts: Array<string | null>): string | null {
  *
  * Stages a candidate through the controller's fetch. A manual or review
  * policy waits for source/accept. An automatic policy accepts on its own,
- * inside the controller, the same way a poll does.
+ * inside the controller, the same way a poll does. `authority` is that
+ * settlement, read after it finishes: fetched only, held, accepted, or a
+ * rollout that was started. A started rollout is not a finished one.
  * The grant is exact stack:edit on the source stack: the person who could
  * pull that stack before the Blueprint claimed it.
  */
@@ -923,12 +925,20 @@ gitopsApplicationsRouter.post('/:id/source/fetch', async (req: Request, res: Res
       res.status(409).json({ error: fetched.error, code: fetched.code });
       return;
     }
+    const authority = fetched.authority;
     res.json({
       outcome: fetched.result.outcome,
       reason: fetched.result.reason,
       nextAction: fetched.result.nextAction,
       commitSha: fetched.result.commitSha ?? null,
       candidateGenerationId: fetched.candidateGenerationId,
+      authority: {
+        status: authority.status,
+        rollout: authority.status === 'accepted' ? authority.rollout : null,
+        note: authority.status === 'held' || authority.status === 'accepted'
+          ? joinAcceptNotes([authority.note])
+          : null,
+      },
     });
   } catch (error) {
     console.error('[GitOps authority] Source fetch failed:', error);

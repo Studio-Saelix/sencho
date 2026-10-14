@@ -151,6 +151,7 @@ describe('SourceController.requestFetch', () => {
         expect(fetched).toMatchObject({
             status: 'settled',
             candidateGenerationId: `gen-${seeded.applicationId}`,
+            authority: { status: 'not_applicable' },
         });
         const row = getApp(seeded.applicationId);
         expect(row.candidate_generation_id).toBe(`gen-${seeded.applicationId}`);
@@ -177,8 +178,9 @@ describe('SourceController.requestFetch', () => {
         const seeded = seedBlueprint('review');
         spyOnReconcile().mockResolvedValue({ outcome: 'no_source_change', reason: 'ok', nextAction: 'none' });
 
-        await controller.requestFetch(seeded.applicationId, 'ada');
+        const fetched = await controller.requestFetch(seeded.applicationId, 'ada');
 
+        expect(fetched).toMatchObject({ authority: { status: 'not_applicable' } });
         expect(getApp(seeded.applicationId).next_poll_at).toBe(Date.now() + 5 * 60 * 1000);
         expect(getApp(seeded.applicationId).accepted_generation_id).toBeNull();
     });

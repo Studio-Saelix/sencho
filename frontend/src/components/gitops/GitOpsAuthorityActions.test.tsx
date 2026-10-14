@@ -3,7 +3,7 @@
  * who may see it, and what a write reports back.
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { render, screen, waitFor } from '@testing-library/react';
+import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 
 vi.mock('@/context/NodeContext', () => ({
@@ -371,6 +371,7 @@ describe('GitOpsAuthorityActions', () => {
       nextAction: 'review',
       commitSha: 'abc1234ffff',
       candidateGenerationId: 'gen-2',
+      authority: { status: 'not_applicable', rollout: null, note: null },
     });
     const view = renderActions(
       blueprintRevision({
@@ -406,6 +407,177 @@ describe('GitOpsAuthorityActions', () => {
       }),
     }), (action) => action === 'stack:edit');
     expect(screen.queryByTestId('gitops-action-pull-source')).toBeNull();
+  });
+
+  function pullable(sourceConfigured: string, rolloutConfigured = 'manual'): GitOpsRevisionLive {
+    return blueprintRevision({
+      configuredSourceStackName: 'bookstack',
+      authorityPolicies: [
+        {
+          domain: 'source',
+          configured: sourceConfigured,
+          effectiveFrozen: null,
+          decision: 'awaiting_operator',
+          reason: null,
+          decidedBy: null,
+          decidedAt: null,
+        },
+        {
+          domain: 'rollout_authorization',
+          configured: rolloutConfigured,
+          effectiveFrozen: null,
+          decision: 'awaiting_operator',
+          reason: null,
+          decidedBy: null,
+          decidedAt: null,
+        },
+      ],
+      facets: facets({
+        source: plainSource('application_generation_accepted', { candidateGenerationId: null }),
+        placement: { status: 'blueprint_bound', completion: 'unknown' },
+        rollout: { status: 'rollout_not_executable', rolloutCandidateId: 'cand-1' },
+      }),
+    });
+  }
+
+  const canEditSource = (
+    action: PermissionAction,
+    resourceType?: string,
+    resourceId?: string,
+    nodeId?: number | null,
+  ) => action === 'stack:edit' && resourceType === 'stack' && resourceId === 'bookstack' && nodeId === 1;
+
+  it('pulls a manual source immediately', async () => {
+    const user = userEvent.setup();
+    vi.mocked(fetchGitOpsSource).mockResolvedValue({
+      outcome: 'pending_review',
+      reason: 'A newer commit is waiting.',
+      nextAction: 'review',
+      commitSha: 'abc1234ffff',
+      candidateGenerationId: 'gen-2',
+      authority: { status: 'not_applicable', rollout: null, note: null },
+    });
+    renderActions(pullable('manual'), canEditSource);
+    await user.click(screen.getByTestId('gitops-action-pull-source'));
+    await waitFor(() => expect(fetchGitOpsSource).toHaveBeenCalledWith('bp:5'));
+    expect(screen.queryByRole('alertdialog')).toBeNull();
+  });
+
+  it('pulls a review source immediately', async () => {
+    const user = userEvent.setup();
+    vi.mocked(fetchGitOpsSource).mockResolvedValue({
+      outcome: 'pending_review',
+      reason: 'A newer commit is waiting.',
+      nextAction: 'review',
+      commitSha: 'abc1234ffff',
+      candidateGenerationId: 'gen-2',
+      authority: { status: 'not_applicable', rollout: null, note: null },
+    });
+    renderActions(pullable('review'), canEditSource);
+    await user.click(screen.getByTestId('gitops-action-pull-source'));
+    await waitFor(() => expect(fetchGitOpsSource).toHaveBeenCalledWith('bp:5'));
+    expect(screen.queryByRole('alertdialog')).toBeNull();
+    expect(toast.success).toHaveBeenCalledWith('Pulled abc1234');
+  });
+
+  it('asks before an automatic pull and does not fetch when cancelled', async () => {
+    const user = userEvent.setup();
+    renderActions(pullable('automatic', 'automatic'), canEditSource);
+    await user.click(screen.getByTestId('gitops-action-pull-source'));
+    expect(fetchGitOpsSource).not.toHaveBeenCalled();
+    const dialog = screen.getByRole('alertdialog');
+    expect(dialog).toHaveTextContent('Starting a rollout is not the same as it finishing.');
+    await user.click(within(dialog).getByRole('button', { name: 'Cancel' }));
+    expect(fetchGitOpsSource).not.toHaveBeenCalled();
+  });
+
+  it('reports an accepted automatic pull as started, held, or accepted', async () => {
+    const user = userEvent.setup();
+    vi.mocked(fetchGitOpsSource).mockResolvedValue({
+      outcome: 'candidate_already_fetched',
+      reason: 'A candidate is awaiting acceptance.',
+      nextAction: 'review',
+      commitSha: 'abc1234ffff',
+      candidateGenerationId: 'gen-2',
+      authority: { status: 'accepted', rollout: 'started', note: null },
+    });
+    const started = renderActions(pullable('automatic', 'automatic'), canEditSource);
+    await user.click(screen.getByTestId('gitops-action-pull-source'));
+    await user.click(within(screen.getByRole('alertdialog')).getByRole('button', { name: 'Pull source' }));
+    await waitFor(() => expect(toast.success).toHaveBeenCalledWith('Source revision accepted and the rollout started'));
+    expect(toast.success).not.toHaveBeenCalledWith(expect.stringMatching(/complet/i));
+    started.unmount();
+
+    vi.mocked(toast.success).mockClear();
+    vi.mocked(toast.warning).mockClear();
+    vi.mocked(fetchGitOpsSource).mockResolvedValue({
+      outcome: 'candidate_already_fetched',
+      reason: 'A candidate is awaiting acceptance.',
+      nextAction: 'review',
+      commitSha: 'abc1234ffff',
+      candidateGenerationId: 'gen-2',
+      authority: { status: 'accepted', rollout: 'held', note: 'The rollout is paused.' },
+    });
+    const heldRollout = renderActions(pullable('automatic'), canEditSource);
+    await user.click(screen.getByTestId('gitops-action-pull-source'));
+    expect(screen.getByRole('alertdialog')).toHaveTextContent('The rollout stays waiting for you.');
+    await user.click(within(screen.getByRole('alertdialog')).getByRole('button', { name: 'Pull source' }));
+    await waitFor(() => expect(toast.warning).toHaveBeenCalledWith('Source revision accepted. The rollout is paused.'));
+    expect(toast.success).not.toHaveBeenCalled();
+    heldRollout.unmount();
+
+    vi.mocked(toast.warning).mockClear();
+    vi.mocked(fetchGitOpsSource).mockResolvedValue({
+      outcome: 'candidate_already_fetched',
+      reason: 'A candidate is awaiting acceptance.',
+      nextAction: 'none',
+      commitSha: 'abc1234ffff',
+      candidateGenerationId: 'gen-2',
+      authority: { status: 'held', rollout: null, note: 'The security policy did not allow this candidate, so it was not accepted.' },
+    });
+    renderActions(pullable('automatic'), canEditSource);
+    await user.click(screen.getByTestId('gitops-action-pull-source'));
+    await user.click(within(screen.getByRole('alertdialog')).getByRole('button', { name: 'Pull source' }));
+    await waitFor(() => expect(toast.warning).toHaveBeenCalledWith(
+      'Source pulled. The security policy did not allow this candidate, so it was not accepted.',
+    ));
+    expect(toast.success).not.toHaveBeenCalled();
+  });
+
+  it('warns when an automatic pull accepts but does not start the rollout', async () => {
+    const user = userEvent.setup();
+    vi.mocked(fetchGitOpsSource).mockResolvedValue({
+      outcome: 'candidate_already_fetched',
+      reason: 'ok',
+      nextAction: 'none',
+      commitSha: 'abc1234ffff',
+      candidateGenerationId: 'gen-2',
+      authority: { status: 'accepted', rollout: 'not_started', note: 'The rollout is paused.' },
+    });
+    renderActions(pullable('automatic', 'automatic'), canEditSource);
+    await user.click(screen.getByTestId('gitops-action-pull-source'));
+    await user.click(within(screen.getByRole('alertdialog')).getByRole('button', { name: 'Pull source' }));
+    await waitFor(() => expect(toast.warning).toHaveBeenCalledWith('Source revision accepted. The rollout is paused.'));
+    expect(toast.success).not.toHaveBeenCalled();
+  });
+
+  it('does not claim a pull when nothing changed and acceptance is held', async () => {
+    const user = userEvent.setup();
+    vi.mocked(fetchGitOpsSource).mockResolvedValue({
+      outcome: 'no_source_change',
+      reason: 'ok',
+      nextAction: 'none',
+      commitSha: 'abc1234ffff',
+      candidateGenerationId: null,
+      authority: { status: 'held', rollout: null, note: 'The security policy did not allow this candidate, so it was not accepted.' },
+    });
+    renderActions(pullable('automatic'), canEditSource);
+    await user.click(screen.getByTestId('gitops-action-pull-source'));
+    await user.click(within(screen.getByRole('alertdialog')).getByRole('button', { name: 'Pull source' }));
+    await waitFor(() => expect(toast.warning).toHaveBeenCalledWith(
+      'The security policy did not allow this candidate, so it was not accepted.',
+    ));
+    expect(toast.success).not.toHaveBeenCalled();
   });
 
   it('offers nothing for a Direct or Inline application', () => {
