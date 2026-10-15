@@ -156,6 +156,20 @@ describe('buildGitOpsStatus', () => {
     expect(model?.answer.detail).toContain('a1b2c3d');
   });
 
+  it('states a paused rollout hold as the answer when that pause is what needs attention', () => {
+    const reason = 'Rollout authorization started authorizing without an operator after this was confirmed; review it, then resume the rollout';
+    const model = buildGitOpsStatus(
+      liveRevision({
+        facets: facets({
+          rollout: { status: 'rollout_paused', pauseAt: 1, pauseReason: reason },
+        }),
+      }),
+      portfolioRow({ posture: 'attention', attention: ['rollout_paused'] }),
+    );
+    expect(model?.answer.line).toBe(reason);
+    expect(model?.answer.line).not.toBe('The rollout is paused.');
+  });
+
   it('speaks for the application posture when the portfolio row is given', () => {
     const model = buildGitOpsStatus(liveRevision(), portfolioRow({ posture: 'failed', attention: ['health_failed'] }));
     expect(model?.answer.title).toBe('failed');

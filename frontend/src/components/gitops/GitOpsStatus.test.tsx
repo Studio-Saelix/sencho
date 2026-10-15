@@ -63,6 +63,22 @@ describe('GitOpsStatus', () => {
     expect(within(screen.getByTestId('gitops-answer')).getByRole('button', { name: 'Review' })).toBeInTheDocument();
   });
 
+  it('shows a rollout hold reason without opening evidence', () => {
+    const reason = 'review it, then resume the rollout';
+    render(<GitOpsStatus
+      revision={liveRevision({
+        facets: facets({
+          rollout: { status: 'rollout_paused', pauseAt: 1, pauseReason: reason },
+        }),
+      })}
+      row={portfolioRow({ posture: 'attention', attention: ['rollout_paused'] })}
+    />);
+    const hold = screen.getByText(reason);
+    expect(hold).toBeVisible();
+    expect(hold.closest('.sr-only')).toBeNull();
+    expect(screen.queryByTestId('gitops-stage-note-rollout')).toBeNull();
+  });
+
   it('uses the portfolio posture as the answer when the row is given', () => {
     render(<GitOpsStatus revision={liveRevision()} row={portfolioRow({ posture: 'attention', attention: ['rollout_paused'] })} />);
     const posture = screen.getByTestId('gitops-posture');
