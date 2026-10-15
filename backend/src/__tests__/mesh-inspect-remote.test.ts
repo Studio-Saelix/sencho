@@ -52,9 +52,52 @@ describe('MeshService.inspectStackServices dispatch (C-3 fix)', () => {
         const out = await (svc as unknown as { inspectStackServices: (n: number, s: string) => Promise<unknown> })
             .inspectStackServices(localNodeId, 'audit-mesh-prod');
 
-        expect(localSpy).toHaveBeenCalledWith('audit-mesh-prod');
+        expect(localSpy).toHaveBeenCalledWith('audit-mesh-prod', undefined);
         expect(fetchSpy).not.toHaveBeenCalled();
         expect(out).toEqual([{ service: 'echo', ports: [9000] }]);
+    });
+
+    // A failed Docker inspection must not be read as "the stack is stopped",
+    // or the refresh strips that stack's hostnames from every other node's
+    // override on this tick. Driven through the real local inspector with a
+    // failing Dockerode, not a mocked method, so the catch under test is the
+    // one that actually runs in production.
+    async function withLocalDocker(listContainers: () => Promise<unknown[]>): Promise<void> {
+        const { default: DockerController } = await import('../services/DockerController');
+        vi.spyOn(DockerController, 'getInstance').mockReturnValue({
+            getDocker: () => ({ listContainers }),
+        } as unknown as ReturnType<typeof DockerController.getInstance>);
+    }
+
+    it('marks a local inspection failure as unreachable, not as a stopped stack', async () => {
+        const svc = MeshService.getInstance();
+        const db = DatabaseService.getInstance();
+        const localNodeId = db.getNodes()[0].id;
+        await withLocalDocker(() => Promise.reject(new Error('docker daemon unreachable')));
+
+        const reach = { reachable: true };
+        const out = await (svc as unknown as {
+            inspectStackServices: (n: number, s: string, r?: { reachable: boolean }) => Promise<unknown>;
+        }).inspectStackServices(localNodeId, 'audit-mesh-prod', reach);
+
+        expect(out).toEqual([]);
+        expect(reach.reachable).toBe(false);
+    });
+
+    it('keeps a local node reachable when its stack is merely stopped', async () => {
+        // The other half of the distinction: an empty answer is a stopped
+        // stack, which drops aliases but does not freeze them.
+        const svc = MeshService.getInstance();
+        const db = DatabaseService.getInstance();
+        const localNodeId = db.getNodes()[0].id;
+        await withLocalDocker(() => Promise.resolve([]));
+
+        const reach = { reachable: true };
+        await (svc as unknown as {
+            inspectStackServices: (n: number, s: string, r?: { reachable: boolean }) => Promise<unknown>;
+        }).inspectStackServices(localNodeId, 'audit-mesh-prod', reach);
+
+        expect(reach.reachable).toBe(true);
     });
 
     it('fetches /api/mesh/local-services for remote nodes and forwards the proxy target headers', async () => {
