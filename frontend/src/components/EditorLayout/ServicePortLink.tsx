@@ -111,17 +111,17 @@ export function ServicePortLink({
     );
   }
 
-  const visible = click.hostLabel ? `${click.portLabel} · ${click.hostLabel}` : click.portLabel;
   return (
-    <span className="inline-flex min-w-0 max-w-full items-center gap-1">
+    <span className="inline-flex w-fit max-w-full items-center gap-1">
       <a
         href={click.href}
         target="_blank"
         rel="noopener noreferrer"
         title={click.href}
-        className="inline-flex min-w-0 items-center gap-1 overflow-hidden text-brand hover:underline"
+        className="inline-flex min-w-0 max-w-full items-center gap-1 text-brand hover:underline"
       >
-        <span className="min-w-0 truncate">{visible}</span>
+        <span className="shrink-0">{click.portLabel}</span>
+        {click.hostLabel ? <span className="min-w-0 truncate">{click.hostLabel}</span> : null}
         <ArrowUpRight className="h-3 w-3 shrink-0" strokeWidth={1.5} />
       </a>
       <TooltipProvider>

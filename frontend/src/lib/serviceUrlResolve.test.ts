@@ -1431,8 +1431,10 @@ describe('patchServiceUrlLabel', () => {
     expect(listClear.ok).toBe(true);
     if (!listClear.ok) return;
     const listCleared = parse(listClear.yaml, { merge: true }) as typeof listMerged;
-    expect(listCleared.services.web.labels).toEqual([]);
+    expect(listCleared.services.web.labels).toBeUndefined();
     expect(listCleared.services.api.labels).toEqual(['sencho.service.url=https://old.example.com']);
+    expect(listClear.yaml).not.toContain('*address');
+    expect(listClear.yaml).toContain('sencho.service.url=https://old.example.com');
   });
 
   it('replaces every repeated URL list entry', () => {
@@ -2090,6 +2092,21 @@ describe('patchServiceUrlLabel on flow, anchored, and edge layouts', () => {
     expect(patchTo('services:\r\n  web:\r\n    labels:\r\n      sencho.service.url: x\r\n    image: y\r\n', 'web', null))
       .toBe('services:\r\n  web:\r\n    image: y\r\n');
     expect(patchTo('services:\n  web:\n    labels:\n      sencho.service.url: "https://app.example.com/#/dashboard"\n    image: y\n', 'web', null))
+      .toBe('services:\n  web:\n    image: y\n');
+  });
+
+  it('removes the labels key when the only list entry is cleared', () => {
+    expect(patchTo('services:\n  web:\n    labels:\n      - sencho.service.url=http://x\n    image: y\n', 'web', null))
+      .toBe('services:\n  web:\n    image: y\n');
+    expect(patchTo('services:\r\n  web:\r\n    labels:\r\n      - sencho.service.url=http://x\r\n    image: y\r\n', 'web', null))
+      .toBe('services:\r\n  web:\r\n    image: y\r\n');
+    expect(patchTo('services:\n  web:\n    labels:\n      - "sencho.service.url=https://app.example.com/#/dashboard"\n    image: y\n', 'web', null))
+      .toBe('services:\n  web:\n    image: y\n');
+    expect(patchTo('services:\n  web:\n    labels: [ sencho.service.url=http://x ]\n    image: y\n', 'web', null))
+      .toBe('services:\n  web:\n    image: y\n');
+    expect(patchTo('services:\n  web: { image: y, labels: [ sencho.service.url=http://x ] }\n', 'web', null))
+      .toBe('services:\n  web: { image: y }\n');
+    expect(patchTo('services:\n  web:\n    labels:\n      - sencho.service.url=http://a\n      - sencho.service.url=http://b\n    image: y\n', 'web', null))
       .toBe('services:\n  web:\n    image: y\n');
   });
 

@@ -585,8 +585,8 @@ export function ContainersHealth({
 
                         return (
                             <div key={container?.Id || Math.random()} className="rounded-lg border border-card-border border-t-card-border-top bg-card shadow-card-bevel px-3 py-2.5">
-                                <div className="flex items-start justify-between gap-4">
-                                    <div className="flex items-start gap-3 min-w-0 flex-1">
+                                <div className="flex items-start justify-between gap-4 max-md:flex-wrap">
+                                    <div className="flex items-start gap-3 min-w-0 flex-1 max-md:basis-full">
                                         <div className={cn('mt-1 inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-full text-[10px] font-bold', badgeClass)}>
                                             {badgeGlyph}
                                         </div>

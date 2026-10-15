@@ -162,26 +162,40 @@ function soleUrlMap(labels: YAMLMap): boolean {
   return labels.items.length === 1 && labelText(labels.items[0].key) === SERVICE_URL_LABEL;
 }
 
-/** True when `#` sits in `region` outside the URL value, so it is a comment. */
-function commentOutsideValue(region: string, regionStart: number, value: unknown): boolean {
-  const span = nodeRange(value);
-  if (!span || span[0] < regionStart || span[2] > regionStart + region.length) return region.includes('#');
-  const from = span[0] - regionStart;
-  const to = span[2] - regionStart;
-  return `${region.slice(0, from)}${region.slice(to)}`.includes('#');
+/** True when every list entry is the service URL, so the labels key can go. */
+function soleUrlSeq(doc: unknown, labels: { items: unknown[] }): boolean {
+  return labels.items.length > 0 && labels.items.every(item => isUrlListItem(resolvedLabelText(doc, item)));
+}
+
+/** True when `#` sits in `region` outside every URL value, so it is a comment. */
+function commentOutsideValues(region: string, regionStart: number, values: unknown[]): boolean {
+  const cuts: Array<[number, number]> = [];
+  for (const value of values) {
+    const span = nodeRange(value);
+    if (!span || span[0] < regionStart || span[2] > regionStart + region.length) return region.includes('#');
+    cuts.push([span[0] - regionStart, span[2] - regionStart]);
+  }
+  cuts.sort((left, right) => left[0] - right[0]);
+  let text = '';
+  let cursor = 0;
+  for (const [from, to] of cuts) {
+    if (from > cursor) text += region.slice(cursor, from);
+    cursor = Math.max(cursor, to);
+  }
+  return `${text}${region.slice(cursor)}`.includes('#');
 }
 
 /**
- * Remove a labels key whose only entry is the service URL.
- * Returns false when a comment outside that URL has to stay, so the caller
- * writes an empty map under the comment instead of dropping it.
+ * Remove a labels key whose only entries are the service URL.
+ * Returns false when a comment outside those values has to stay, so the caller
+ * writes an empty map or list under the comment instead of dropping it.
  */
-function clearSoleUrlLabel(
+function clearSoleLabelsKey(
   source: string,
   doc: unknown,
   service: YAMLMap,
   labelPair: YAMLMap['items'][number],
-  labels: YAMLMap,
+  values: unknown[],
   flowService: boolean,
   splices: Splice[],
 ): boolean {
@@ -190,9 +204,8 @@ function clearSoleUrlLabel(
     ? [removed.start, removed.end]
     : itemSpan(source, labelPair);
   const region = source.slice(regionStart, regionEnd);
-  const urlPair = labels.items[0];
-  if (commentOutsideValue(region, regionStart, urlPair.value)) return false;
-  detachOutside(doc, source, urlPair.value, anchorName(urlPair.value), splices);
+  if (commentOutsideValues(region, regionStart, values)) return false;
+  for (const value of values) detachOutside(doc, source, value, anchorName(value), splices);
   if (flowService) splices.push(...editFlow(source, service, new Set([labelPair]), null));
   else if (removed) splices.push(removed);
   return true;
@@ -819,7 +832,11 @@ function editServiceLabels(source: string, doc: unknown, service: YAMLMap, servi
     return splices;
   }
   if (isMap(labels) && url == null && labelPair && soleUrlMap(labels)
-    && clearSoleUrlLabel(source, doc, service, labelPair, labels, flowService, splices)) {
+    && clearSoleLabelsKey(source, doc, service, labelPair, [labels.items[0].value], flowService, splices)) {
+    return splices;
+  }
+  if (isSeq(labels) && url == null && labelPair && soleUrlSeq(doc, labels)
+    && clearSoleLabelsKey(source, doc, service, labelPair, labels.items, flowService, splices)) {
     return splices;
   }
   if (isMap(labels)) splices.push(...editMap(source, doc, labels, url));
