@@ -292,18 +292,32 @@ export function lkgBlockedByMissingRecipients(
   return undecryptableInputs(cap, identityRecipients).length > 0;
 }
 
-/** Active generation's secret capability for the node in scope. */
+/**
+ * Secret capability recorded for one generation on this node.
+ *
+ * `deployed` (the default) starts at `deployed_generation_id`. `applied`
+ * starts at `applied_generation_id`, then `deployed_generation_id` when
+ * nothing has been applied. Both then fall back to the accepted generation,
+ * then the candidate. An explicit `gitopsGenerationId` wins over that chain.
+ * Direct mutation passes `applied`, so a generation that is applied but not
+ * yet deployed still supplies its recipient list.
+ */
 export function resolveActiveCapability(args: {
   stackName: string;
   nodeId: number;
   gitopsGenerationId?: string | null;
+  basis?: 'applied' | 'deployed';
 }): SecretCapability | null {
   const store = GitOpsStore.getInstance();
   const app = store.getLiveDirectApplication(args.stackName);
   if (!app) return null;
 
+  const target = store.getTarget(app.id, args.nodeId);
+  const recorded = args.basis === 'applied'
+    ? target?.applied_generation_id ?? target?.deployed_generation_id
+    : target?.deployed_generation_id;
   const generationId = args.gitopsGenerationId
-    ?? store.getTarget(app.id, args.nodeId)?.deployed_generation_id
+    ?? recorded
     ?? app.accepted_generation_id
     ?? app.candidate_generation_id;
   if (!generationId) return null;
@@ -316,6 +330,7 @@ export function resolveActiveRequiredRecipients(args: {
   stackName: string;
   nodeId: number;
   gitopsGenerationId?: string | null;
+  basis?: 'applied' | 'deployed';
 }): string[] {
   return resolveActiveCapability(args)?.requiredRecipients ?? [];
 }

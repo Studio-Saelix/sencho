@@ -603,6 +603,88 @@ function publicComposeValidationError(
     return scrubCredentials(scrubInternalPaths(text, ...roots));
 }
 
+const MIN_REDACTED_ENV_VALUE = 4;
+const WITHHELD_VALIDATION_ERROR = 'Compose validation failed. The message was withheld because a decrypted env file could not be read.';
+
+/** Values Compose would interpolate from a decrypted env file. Short values stay so ordinary diagnostics remain readable. */
+function decryptedEnvValues(content: string): string[] {
+    const values: string[] = [];
+    for (const rawLine of content.split(/\r?\n/)) {
+        let line = rawLine.trim();
+        if (!line || line.startsWith('#')) continue;
+        if (line.startsWith('export ')) line = line.slice('export '.length).trim();
+        const eq = line.indexOf('=');
+        if (eq <= 0) continue;
+        const key = line.slice(0, eq).trim();
+        if (!key || key.startsWith('sops_') || key.startsWith('age__list_')) continue;
+        for (const value of envValuesComposeWouldRead(line.slice(eq + 1))) {
+            if (value.length >= MIN_REDACTED_ENV_VALUE) values.push(value);
+        }
+    }
+    return values;
+}
+
+/** Quoted inner value first, including a trailing comment after the closing quote. A bare value drops its trailing ` #` comment. */
+function envValuesComposeWouldRead(rawValue: string): string[] {
+    const trimmed = rawValue.trim();
+    const quote = trimmed[0];
+    if (quote === '"' || quote === "'") {
+        let inner = '';
+        let i = 1;
+        while (i < trimmed.length) {
+            const ch = trimmed[i];
+            if (quote === '"' && ch === '\\' && i + 1 < trimmed.length) {
+                const next = trimmed[i + 1];
+                inner += next === 'n' ? '\n' : next === 'r' ? '\r' : next === 't' ? '\t' : next;
+                i += 2;
+                continue;
+            }
+            if (ch === quote) {
+                const unescaped = quote === '"' ? inner.replace(/\$\$/g, '$') : inner;
+                return unescaped === inner ? [unescaped] : [unescaped, inner];
+            }
+            inner += ch;
+            i += 1;
+        }
+    }
+    const commentIdx = trimmed.search(/\s#/);
+    const bare = (commentIdx >= 0 ? trimmed.slice(0, commentIdx) : trimmed).trim();
+    return bare ? [bare] : [];
+}
+
+function redactSecretValues(message: string, secrets: readonly string[]): string {
+    const unique = [...new Set(secrets.filter((value) => value.length >= MIN_REDACTED_ENV_VALUE))]
+        .sort((a, b) => b.length - a.length);
+    let out = message;
+    for (const secret of unique) {
+        if (out.includes(secret)) out = out.split(secret).join('[redacted]');
+    }
+    return out;
+}
+
+async function overlayEnvSecrets(
+    overlayDir: string,
+    inputs: ComposeInputEntry[],
+): Promise<{ values: string[]; unreadable: boolean }> {
+    const values: string[] = [];
+    const root = path.resolve(overlayDir);
+    for (const input of inputs) {
+        if (input.encryption !== 'sops-age' || input.role !== 'env' || !input.materializedPath) continue;
+        if (input.materializedPath.includes('..') || path.isAbsolute(input.materializedPath)) {
+            return { values, unreadable: true };
+        }
+        const target = path.resolve(root, input.materializedPath);
+        if (!target.startsWith(root + path.sep)) return { values, unreadable: true };
+        try {
+            values.push(...decryptedEnvValues(await fsPromises.readFile(target, 'utf8')));
+        } catch (err) {
+            if ((err as NodeJS.ErrnoException).code === 'ENOENT') continue;
+            return { values, unreadable: true };
+        }
+    }
+    return { values, unreadable: false };
+}
+
 /**
  * Extract just the hostname for log lines so we never echo a full
  * repo URL that could contain an inline credential. Falls back to
@@ -2012,7 +2094,16 @@ export class GitSourceService {
         });
         if (!overlay) return validate();
         try {
-            return await validate(overlay.overlayDir);
+            const result = await validate(overlay.overlayDir);
+            if (result.ok || !result.error) return result;
+            const secrets = await overlayEnvSecrets(overlay.overlayDir, args.inputs);
+            if (secrets.unreadable) return { ok: false, error: WITHHELD_VALIDATION_ERROR };
+            return { ok: false, error: redactSecretValues(result.error, secrets.values) };
+        } catch (err) {
+            const secrets = await overlayEnvSecrets(overlay.overlayDir, args.inputs).catch(() => null);
+            const message = err instanceof Error ? err.message : String(err);
+            if (!secrets || secrets.unreadable) throw new Error(WITHHELD_VALIDATION_ERROR);
+            throw new Error(redactSecretValues(message, secrets.values));
         } finally {
             await destroyGitOpsOverlay(overlay.binding);
         }
@@ -7645,7 +7736,7 @@ export class GitSourceService {
         try {
             return [
                 ...authoredComposeFileArgs(stackName, nodeId),
-                ...(await authoredComposeEnvFileArgs(stackName, nodeId)),
+                ...(await authoredComposeEnvFileArgs(stackName, nodeId, undefined, undefined, { missingMode: 'skip' })),
             ];
         } catch (e) {
             const detail = e instanceof Error ? e.message : String(e);

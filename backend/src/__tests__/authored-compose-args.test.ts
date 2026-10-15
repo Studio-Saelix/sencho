@@ -228,6 +228,26 @@ describe('authoredComposeEnvFileArgs', () => {
         await expect(authoredComposeEnvFileArgs(stackName)).rejects.toThrow(/permission denied/);
         spy.mockRestore();
     });
+
+    it('reads a configured .env from a decrypt overlay and rejects an arbitrary override', async () => {
+        const stackName = 'env-overlay-root';
+        const nodeId = NodeRegistry.getInstance().getDefaultNodeId();
+        const liveDir = makeStackDir(stackName, true);
+        fs.writeFileSync(path.join(liveDir, '.env'), 'TOKEN=stale-live\n');
+        DatabaseService.getInstance().setStackProjectEnvFiles(nodeId, stackName, ['.env']);
+        const { gitSecretsAreaBase } = await import('../services/gitops/managedPaths');
+        const overlay = path.join(gitSecretsAreaBase(), String(nodeId), stackName, 'op-overlay');
+        fs.mkdirSync(overlay, { recursive: true });
+        fs.writeFileSync(path.join(overlay, '.env'), 'TOKEN=from-overlay\n');
+        const args = await authoredComposeEnvFileArgs(stackName, nodeId, overlay);
+        expect(args).toEqual(['--env-file', await fs.promises.realpath(path.join(overlay, '.env'))]);
+        expect(args[1]).not.toBe(await fs.promises.realpath(path.join(liveDir, '.env')));
+
+        const evil = path.join(tmpDir, 'evil-env-root');
+        fs.mkdirSync(evil, { recursive: true });
+        fs.writeFileSync(path.join(evil, '.env'), 'TOKEN=evil\n');
+        await expect(authoredComposeEnvFileArgs(stackName, nodeId, evil)).rejects.toThrow(/escapes/);
+    });
 });
 
 describe('candidateValidationEnvFileArgs', () => {
@@ -360,5 +380,56 @@ describe('candidateValidationEnvFileArgs', () => {
             contextDir: null,
             syncEnv: false,
         })).rejects.toThrow(/missing/);
+    });
+
+    it('uses the candidate copy of a configured .env when the live file is missing or stale', async () => {
+        const stackName = 'val-configured-env';
+        const nodeId = NodeRegistry.getInstance().getDefaultNodeId();
+        const liveDir = makeStackDir(stackName, false);
+        DatabaseService.getInstance().setStackProjectEnvFiles(nodeId, stackName, ['.env']);
+        const candidateAbs = path.join(tmpDir, 'candidate-configured-env');
+        fs.mkdirSync(candidateAbs, { recursive: true });
+        fs.writeFileSync(path.join(candidateAbs, '.env'), 'PORT=8080\n');
+        const absent = await candidateValidationEnvFileArgs({
+            stackName,
+            nodeId,
+            candidateAbs,
+            contextDir: null,
+            syncEnv: true,
+        });
+        expect(absent).toEqual(['--env-file', await fs.promises.realpath(path.join(candidateAbs, '.env'))]);
+
+        fs.writeFileSync(path.join(liveDir, '.env'), 'PORT=stale-live-sentinel\n');
+        const stale = await candidateValidationEnvFileArgs({
+            stackName,
+            nodeId,
+            candidateAbs,
+            contextDir: null,
+            syncEnv: true,
+        });
+        expect(stale).toEqual(absent);
+        expect(stale.join(' ')).not.toContain(path.join(liveDir, '.env'));
+    });
+
+    it('keeps a configured file the candidate does not carry on the live stack', async () => {
+        const stackName = 'val-configured-mixed';
+        const nodeId = NodeRegistry.getInstance().getDefaultNodeId();
+        const liveDir = makeStackDir(stackName, false);
+        fs.writeFileSync(path.join(liveDir, 'prod.env'), 'FOO=live\n');
+        DatabaseService.getInstance().setStackProjectEnvFiles(nodeId, stackName, ['.env', 'prod.env']);
+        const candidateAbs = path.join(tmpDir, 'candidate-configured-mixed');
+        fs.mkdirSync(candidateAbs, { recursive: true });
+        fs.writeFileSync(path.join(candidateAbs, '.env'), 'PORT=8080\n');
+        const args = await candidateValidationEnvFileArgs({
+            stackName,
+            nodeId,
+            candidateAbs,
+            contextDir: 'app',
+            syncEnv: true,
+        });
+        expect(args).toEqual([
+            '--env-file', await fs.promises.realpath(path.join(candidateAbs, '.env')),
+            '--env-file', await fs.promises.realpath(path.join(liveDir, 'prod.env')),
+        ]);
     });
 });

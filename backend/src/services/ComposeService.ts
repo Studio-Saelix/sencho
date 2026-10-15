@@ -44,7 +44,7 @@ import {
 import { digestPinsOverlayYaml, type DigestPinsMap } from './gitops/digestPins';
 import { DIGEST_PIN_TEMP_PREFIX } from '../helpers/digestPinTempDir';
 import { assertGitOverlaySource, SOPS_DIRECT_MUTATION_MESSAGE } from './gitops/sops/prepareOverlay';
-import { resolveActiveRequiredRecipients } from './gitops/sops/capability';
+import { classifyInputEncryption, resolveActiveRequiredRecipients } from './gitops/sops/capability';
 import { GitOpsDecryptOverlay } from './gitops/sops/overlay';
 import { buildUnifiedHeldImagePredicate } from './recoveryHeldImages';
 import { invalidateNodeCaches } from '../helpers/cacheInvalidation';
@@ -256,10 +256,48 @@ export class ComposeService {
     return path.join(this.baseDir, stackName);
   }
 
-  private assertSopsOverlayOrRefuse(stackName: string, overlayDir?: string): void {
-    const required = resolveActiveRequiredRecipients({ stackName, nodeId: this.nodeId });
-    if (required.length === 0 || overlayDir) return;
-    throw new Error(SOPS_DIRECT_MUTATION_MESSAGE);
+  private async assertSopsOverlayOrRefuse(stackName: string, overlayDir?: string): Promise<void> {
+    if (overlayDir) return;
+    const required = resolveActiveRequiredRecipients({
+      stackName,
+      nodeId: this.nodeId,
+      basis: 'applied',
+    });
+    if (required.length > 0) throw new Error(SOPS_DIRECT_MUTATION_MESSAGE);
+    await this.assertLiveEnvNotEncrypted(stackName);
+  }
+
+  /**
+   * Refuse a direct mutation on a git-linked stack when the live `.env`
+   * or a configured project env file is still age-encrypted. The caller
+   * uses this when the applied generation recorded no required recipients.
+   */
+  private async assertLiveEnvNotEncrypted(stackName: string): Promise<void> {
+    if (!DatabaseService.getInstance().getGitSource(stackName)) return;
+    const names = new Set<string>(['.env']);
+    for (const file of DatabaseService.getInstance().getStackProjectEnvFiles(this.nodeId, stackName)) {
+      if (file && !file.includes('/') && !file.includes('\\') && !file.includes('..')) names.add(file);
+    }
+    const stackDir = path.resolve(this.baseDir, stackName);
+    for (const name of names) {
+      const target = path.resolve(stackDir, name);
+      if (!target.startsWith(stackDir + path.sep)) continue;
+      let content: string;
+      try {
+        content = await fs.promises.readFile(target, 'utf8');
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code === 'ENOENT') continue;
+        console.error(
+          '[ComposeService] could not read %s while checking encrypted env:',
+          sanitizeForLog(name),
+          err instanceof Error ? err.message : String(err),
+        );
+        throw new Error(`Could not read project env file "${name}" for stack "${stackName}".`);
+      }
+      if (classifyInputEncryption(content, 'env').encryption === 'sops-age') {
+        throw new Error(SOPS_DIRECT_MUTATION_MESSAGE);
+      }
+    }
   }
 
   private async authoredComposeArgs(
@@ -1060,7 +1098,7 @@ export class ComposeService {
     if (ctx?.overlayDir) {
       assertGitOverlaySource(ctx.source);
     }
-    this.assertSopsOverlayOrRefuse(stackName, ctx?.overlayDir);
+    await this.assertSopsOverlayOrRefuse(stackName, ctx?.overlayDir);
     const stackDir = this.resolveStackDir(stackName, ctx);
     await this.assertRequiredEnvPresent(stackName, ctx?.overlayDir);
     await this.assertSafePilotBindMapping(stackName);
@@ -1692,7 +1730,7 @@ export class ComposeService {
     ws?: WebSocket,
     atomic?: boolean,
   ): Promise<{ recoveryId: string | null; deployedGenerationId: string | null; gitopsOperationId: string | null }> {
-    this.assertSopsOverlayOrRefuse(stackName);
+    await this.assertSopsOverlayOrRefuse(stackName);
     await this.assertRequiredEnvPresent(stackName);
     await this.assertSafePilotBindMapping(stackName);
     const stackDir = path.join(this.baseDir, stackName);
@@ -1955,7 +1993,7 @@ export class ComposeService {
     // Same preflight every sibling compose operation runs. Without it, ${VAR} in
     // an image reference resolves against still-encrypted files on a SOPS stack,
     // so the pull can fetch a different image than a deploy would use.
-    this.assertSopsOverlayOrRefuse(stackName);
+    await this.assertSopsOverlayOrRefuse(stackName);
     // No `blocked` clause: the editor surfaces this behind its own "Image pull
     // failed:" prefix, and the remedy names the action the operator actually chose.
     await this.assertRequiredEnvPresent(stackName, undefined, {
@@ -1996,7 +2034,7 @@ export class ComposeService {
    * prune here; the orchestrator owns per-service post-update reconciliation.
    */
   async updateService(stackName: string, serviceName: string, hasBuild: boolean, ws?: WebSocket): Promise<void> {
-    this.assertSopsOverlayOrRefuse(stackName);
+    await this.assertSopsOverlayOrRefuse(stackName);
     await this.assertRequiredEnvPresent(stackName);
     await this.assertSafePilotBindMapping(stackName);
     const stackDir = path.join(this.baseDir, stackName);
@@ -2024,7 +2062,7 @@ export class ComposeService {
    * never `--remove-orphans`.
    */
   async recreateServiceFromLocal(stackName: string, serviceName: string, ws?: WebSocket): Promise<void> {
-    this.assertSopsOverlayOrRefuse(stackName);
+    await this.assertSopsOverlayOrRefuse(stackName);
     await this.assertRequiredEnvPresent(stackName);
     await this.assertSafePilotBindMapping(stackName);
     const stackDir = path.join(this.baseDir, stackName);

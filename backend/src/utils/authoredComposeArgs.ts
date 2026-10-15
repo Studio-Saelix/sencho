@@ -1,6 +1,7 @@
 import path from 'path';
 import { promises as fsPromises } from 'fs';
 import { DatabaseService } from '../services/DatabaseService';
+import { gitSecretsAreaBase, managedAreaBase } from '../services/gitops/managedPaths';
 import { NodeRegistry } from '../services/NodeRegistry';
 import { isPathWithinBase, isValidRelativeStackPath } from './validation';
 
@@ -57,6 +58,19 @@ export function authoredComposeFileArgs(stackName: string, nodeId?: number, stac
   return args;
 }
 
+function rejectBadProjectEnvName(stackName: string, file: string): void {
+  if (!file || !isValidRelativeStackPath(file)) {
+    throw new Error(`Invalid project env file path for stack "${stackName}": "${file}"`);
+  }
+  // Project env files live at the stack root, matching Compose auto-discovery.
+  if (file.includes('/') || file.includes('\\')) {
+    throw new Error(
+      `Project env file "${file}" for stack "${stackName}" must be at the stack root. ` +
+      `Update the project env file selection in the Environment tab.`
+    );
+  }
+}
+
 /**
  * Build `--env-file` arguments for the stack's configured project env files.
  *
@@ -65,6 +79,14 @@ export function authoredComposeFileArgs(stackName: string, nodeId?: number, stac
  * validated for containment and file type, and emitted as a repeated
  * `--env-file <absPath>` flag. Configured files apply to ALL stack types
  * (single-file, multi-file Git, non-Git).
+ *
+ * A file that exists in `preferredEnvDir` (the candidate or decrypt overlay
+ * being validated) is taken from there. A deploy `stackDirOverride` under the
+ * git-secrets or git-managed area is treated the same way. Files that are not
+ * in that tree stay on the live stack. An override outside those roots and
+ * outside the live stack is rejected. `options.missingMode: 'skip'` omits a
+ * configured file that is not on disk. The change-plan snapshot uses that so
+ * a pull can continue. Deploy still refuses a missing file.
  *
  * When no project env files are configured, fall back to the legacy behavior:
  * pass `--env-file <stackDir>/.env` only for multi-file Git stacks whose
@@ -75,43 +97,67 @@ export async function authoredComposeEnvFileArgs(
   stackName: string,
   nodeId?: number,
   stackDirOverride?: string,
+  preferredEnvDir?: string,
+  options?: { missingMode?: 'throw' | 'skip' },
 ): Promise<string[]> {
+  const missingMode = options?.missingMode ?? 'throw';
   const resolvedNodeId = nodeId ?? NodeRegistry.getInstance().getDefaultNodeId();
   const db = DatabaseService.getInstance();
   const configuredFiles = db.getStackProjectEnvFiles(resolvedNodeId, stackName);
 
   if (configuredFiles.length > 0) {
     const baseResolved = path.resolve(NodeRegistry.getInstance().getComposeDir(resolvedNodeId));
-    const stackDir = stackDirOverride ? path.resolve(stackDirOverride) : path.resolve(baseResolved, stackName);
-    if (!stackDirOverride && !stackDir.startsWith(baseResolved + path.sep)) return [];
+    const liveDir = path.resolve(baseResolved, stackName);
+    if (!stackDirOverride && !preferredEnvDir && !liveDir.startsWith(baseResolved + path.sep)) return [];
+
+    const preferred = preferredEnvDir ? path.resolve(preferredEnvDir) : null;
+    const override = stackDirOverride ? path.resolve(stackDirOverride) : null;
+    const secretsRoot = path.resolve(gitSecretsAreaBase());
+    const managedRoot = path.resolve(managedAreaBase());
+    let overrideRoot: string | null = null;
+    if (override && !preferred) {
+      if (override.startsWith(secretsRoot + path.sep)) overrideRoot = secretsRoot;
+      else if (override.startsWith(managedRoot + path.sep)) overrideRoot = managedRoot;
+      else if (override !== liveDir && !override.startsWith(liveDir + path.sep)) {
+        const file = configuredFiles[0] ?? '';
+        throw new Error(`Project env file path escapes stack directory for stack "${stackName}": "${file}"`);
+      }
+    }
 
     const args: string[] = [];
     for (const file of configuredFiles) {
-      if (!file || !isValidRelativeStackPath(file)) {
-        throw new Error(`Invalid project env file path for stack "${stackName}": "${file}"`);
+      rejectBadProjectEnvName(stackName, file);
+      let envDir = liveDir;
+      let allowedRoot = baseResolved;
+      const prefer = preferred ?? (overrideRoot ? override : null);
+      if (prefer) {
+        const preferPath = path.resolve(prefer, file);
+        // Barrier for a candidate or overlay dir, inline with the access sink.
+        if (preferPath.startsWith(prefer + path.sep)) {
+          try {
+            await fsPromises.access(preferPath);
+            envDir = prefer;
+            allowedRoot = overrideRoot && !preferred ? overrideRoot : prefer;
+          } catch (err) {
+            if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+          }
+        }
       }
-      // Reject paths with directory separators: project env files live at the
-      // stack root, matching Compose's auto-discovery behavior.
-      if (file.includes('/') || file.includes('\\')) {
-        throw new Error(
-          `Project env file "${file}" for stack "${stackName}" must be at the stack root. ` +
-          `Update the project env file selection in the Environment tab.`
-        );
-      }
-      const envPath = path.resolve(stackDir, file);
-      // Canonical js/path-injection barrier against the compose root (not stackDir).
-      // CodeQL still treats paths checked only against stackDir as tainted because
-      // stackDir itself embeds user-controlled stackName.
-      if (!envPath.startsWith(baseResolved + path.sep)) {
+      const envPath = path.resolve(envDir, file);
+      // Canonical js/path-injection barrier. Live files are checked against
+      // the compose root. A preferred candidate or decrypt overlay is checked
+      // against that directory. A deploy override under git-secrets or
+      // git-managed is checked against that area root. CodeQL still treats a
+      // check against only a directory that embeds stackName as tainted.
+      if (!envPath.startsWith(allowedRoot + path.sep)) {
         throw new Error(`Project env file path escapes stack directory for stack "${stackName}": "${file}"`);
       }
-      // Verify the real path stays within the compose root, defending against
-      // symlinks that were created or swapped after configuration.
       let realEnvPath: string;
       try {
         realEnvPath = await fsPromises.realpath(envPath);
       } catch (err) {
         if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+          if (missingMode === 'skip') continue;
           throw new Error(
             `Project env file "${file}" configured for stack "${stackName}" is missing. ` +
             `Restore the file or update the project env file selection in the Environment tab.`
@@ -119,7 +165,13 @@ export async function authoredComposeEnvFileArgs(
         }
         throw err;
       }
-      if (!realEnvPath.startsWith(baseResolved + path.sep)) {
+      if (!realEnvPath.startsWith(allowedRoot + path.sep)) {
+        throw new Error(
+          `Project env file "${file}" for stack "${stackName}" resolves outside the stack directory. ` +
+          `Update the project env file selection in the Environment tab.`
+        );
+      }
+      if (envDir !== liveDir && !realEnvPath.startsWith(path.resolve(envDir) + path.sep)) {
         throw new Error(
           `Project env file "${file}" for stack "${stackName}" resolves outside the stack directory. ` +
           `Update the project env file selection in the Environment tab.`
@@ -162,11 +214,13 @@ export async function authoredComposeEnvFileArgs(
 
 /**
  * `--env-file` arguments for candidate `docker compose config` validation.
- * Configured project env files stay live-stack paths (same as deploy).
- * Otherwise a context-dir stack uses the candidate `.env` when that file
- * exists on the candidate. If it does not, fall back to the live legacy `.env`
- * only when that file will survive promotion (`syncEnv` is false). A managed
- * synced `.env` that this generation omits must not be used for validation.
+ * A configured project env file that exists on the candidate (or the decrypt
+ * overlay passed as `candidateAbs`) is read from there. Configured files the
+ * candidate does not carry stay on the live stack. Otherwise a context-dir
+ * stack uses the candidate `.env` when that file exists on the candidate. If
+ * it does not, fall back to the live legacy `.env` only when that file will
+ * survive promotion (`syncEnv` is false). A managed synced `.env` that this
+ * generation omits must not be used for validation.
  */
 export async function candidateValidationEnvFileArgs(opts: {
   stackName: string;
@@ -177,7 +231,7 @@ export async function candidateValidationEnvFileArgs(opts: {
 }): Promise<string[]> {
   const configured = DatabaseService.getInstance().getStackProjectEnvFiles(opts.nodeId, opts.stackName);
   if (configured.length > 0) {
-    return authoredComposeEnvFileArgs(opts.stackName, opts.nodeId);
+    return authoredComposeEnvFileArgs(opts.stackName, opts.nodeId, undefined, opts.candidateAbs);
   }
   if (!opts.contextDir) return [];
   // Canonical js/path-injection barrier inline with the access sink. CodeQL
