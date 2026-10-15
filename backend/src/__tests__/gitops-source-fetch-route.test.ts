@@ -298,7 +298,7 @@ describe('POST /api/gitops/applications/:id/source/fetch confirmation', () => {
     const seeded = seedBlueprint('automatic');
     const fetchSpy = vi.spyOn(SourceController.getInstance(), 'requestFetch').mockResolvedValue({
       status: 'refused',
-      code: 'confirmation_stale',
+      code: 'CONFIRMATION_STALE',
       error: 'The approved placement changed since you reviewed it; review the current approval and confirm again.',
     });
 
@@ -308,7 +308,7 @@ describe('POST /api/gitops/applications/:id/source/fetch confirmation', () => {
       .send({ confirmation: { placementApprovalRef: 'place-reviewed', rolloutMayStart: false } });
 
     expect(res.status).toBe(409);
-    expect(res.body.code).toBe('confirmation_stale');
+    expect(res.body.code).toBe('CONFIRMATION_STALE');
     expect(fetchSpy).toHaveBeenCalledWith(
       seeded.applicationId,
       expect.any(String),

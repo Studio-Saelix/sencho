@@ -51,7 +51,7 @@ export type OperatorFetchRefusalCode =
     | 'applying'
     | 'fetch_in_flight'
     | 'recovery'
-    | 'confirmation_stale';
+    | typeof CONFIRMATION_STALE;
 
 /**
  * What settlement did after a fetch, so a caller can tell a staged commit
@@ -477,7 +477,7 @@ export class SourceController {
         const { app, stackName } = blocked;
         if (confirmation) {
             const drift = sourceConfirmationDrift(app, confirmation);
-            if (drift) return refuseFetch('confirmation_stale', driftSentence(drift));
+            if (drift) return refuseFetch(CONFIRMATION_STALE, driftSentence(drift));
         }
         this.inFlight.add(app.id);
         const followUp: OperatorFollowUp = { follow: { pending: null }, confirmation: confirmation ?? null };

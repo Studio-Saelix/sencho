@@ -1202,7 +1202,7 @@ describe('SourceController pull confirmation freshness', () => {
             rolloutMayStart: false,
         });
 
-        expect(fetched).toMatchObject({ status: 'refused', code: 'confirmation_stale' });
+        expect(fetched).toMatchObject({ status: 'refused', code: 'CONFIRMATION_STALE' });
         expect(reconcile).not.toHaveBeenCalled();
     });
 
@@ -1218,7 +1218,7 @@ describe('SourceController pull confirmation freshness', () => {
             rolloutMayStart: false,
         });
 
-        expect(fetched).toMatchObject({ status: 'refused', code: 'confirmation_stale' });
+        expect(fetched).toMatchObject({ status: 'refused', code: 'CONFIRMATION_STALE' });
         expect(reconcile).not.toHaveBeenCalled();
     });
 

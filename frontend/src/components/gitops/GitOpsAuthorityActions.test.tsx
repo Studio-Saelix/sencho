@@ -278,6 +278,9 @@ describe('GitOpsAuthorityActions', () => {
     expect(dialog).toHaveTextContent('Accept a1b2c3d.');
     expect(dialog).toHaveTextContent('Placement is approved for local.');
     expect(dialog).toHaveTextContent('The rollout stays waiting for you.');
+    const acceptBody = screen.getByTestId('gitops-source-confirm-body');
+    expect(acceptBody).toBeVisible();
+    expect(acceptBody.closest('.sr-only')).toBeNull();
     expect(dialog).not.toHaveTextContent('can start a rollout');
     expect(acceptGitOpsSource).not.toHaveBeenCalled();
   });
@@ -811,6 +814,9 @@ it('names the approved rollout scope before an automatic pull', async () => {
     expect(fetchGitOpsSource).not.toHaveBeenCalled();
     const dialog = screen.getByRole('alertdialog');
     expect(dialog).toHaveTextContent('The next commit goes to the approved nodes: local, node 3.');
+    const pullBody = screen.getByTestId('gitops-source-confirm-body');
+    expect(pullBody).toBeVisible();
+    expect(pullBody.closest('.sr-only')).toBeNull();
     expect(dialog).toHaveTextContent('Starting a rollout is not the same as it finishing.');
     await user.click(within(dialog).getByRole('button', { name: 'Cancel' }));
     expect(fetchGitOpsSource).not.toHaveBeenCalled();

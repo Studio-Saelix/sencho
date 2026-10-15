@@ -70,8 +70,10 @@ import {
   buildAcceptedGeneration,
   ensureRolloutAuthorization,
   frozenStrategyFor,
+  gitManagedDispatchWarranted,
   holdBlockedRolloutDispatch,
 } from '../services/gitops/handoff';
+import { dispatchPreparedGitManagedGeneration } from '../services/gitops/gitManagedHandoff';
 import { GitSourceService } from '../services/GitSourceService';
 import { sanitizeForLog } from '../utils/safeLog';
 import {
@@ -1472,12 +1474,89 @@ gitopsApplicationsRouter.post('/:id/rollout/health-policy', async (req: Request,
   res.json({ ok: true, policy });
 });
 
+function resumedNote(reason: string | null, fallback: string): string {
+  if (!reason) return fallback;
+  const sentence = /[.!?]$/.test(reason) ? reason : `${reason}.`;
+  return `The rollout is resumed. ${sentence}`;
+}
+
+/** Why an automatic resume cannot hand off yet. A missing Blueprint is not a delayed start. */
+function automaticResumeBlockedNote(app: GitOpsApplicationRow): string {
+  const blueprint = app.blueprint_id !== null
+    ? DatabaseService.getInstance().getBlueprint(app.blueprint_id)
+    : undefined;
+  if (!blueprint?.enabled) {
+    return 'The rollout is resumed. The Blueprint is not enabled, so the automatic policy cannot start it.';
+  }
+  if (app.accepted_generation_id) {
+    const latest = GitOpsStore.getInstance().latestRolloutAuthorizationForAcceptedGeneration(
+      app.id,
+      app.accepted_generation_id,
+    );
+    if (latest && latest.withdrawn_at !== null) {
+      return 'The rollout is resumed, but that authorization was withdrawn; authorize the rollout to start it again.';
+    }
+  }
+  return 'The rollout is resumed. The automatic policy will start it once this generation is ready to roll out.';
+}
+
+/**
+ * What an application-wide resume can do when no rollout is authorized.
+ *
+ * Unpausing does not mint authority. A manual policy still needs Authorize.
+ * An automatic policy starts only from a state the reconciler would hand off,
+ * and it starts now: waiting for the next pass is what left a resumed rollout
+ * sitting after the response had already said it would start.
+ */
+async function resumeWithoutLiveAuthorization(
+  app: GitOpsApplicationRow,
+  actor: string | null,
+): Promise<{ dispatched: boolean; note: string | null }> {
+  const store = GitOpsStore.getInstance();
+  const rollbackPending = store.listTargets(app.id).some(
+    (target) => target.target_status === 'active' && target.health_stop_reason === 'rollback_pending',
+  );
+  if (rollbackPending) {
+    return {
+      dispatched: false,
+      note: 'The rollout is resumed, but a target has an unfinished rollback; finish the rollback and resume again.',
+    };
+  }
+  if (app.rollout_authorization_policy !== 'automatic') {
+    return {
+      dispatched: false,
+      note: 'The rollout is resumed, but no live authorization exists; authorize the rollout to start it.',
+    };
+  }
+  if (!app.placement_approval_ref) {
+    return {
+      dispatched: false,
+      note: 'The rollout is resumed, but no placement is approved, so the automatic policy cannot start it.',
+    };
+  }
+  if (!app.accepted_generation_id || !gitManagedDispatchWarranted(app)) {
+    return { dispatched: false, note: automaticResumeBlockedNote(app) };
+  }
+  const handoff = await dispatchPreparedGitManagedGeneration({
+    applicationId: app.id,
+    generationId: app.accepted_generation_id,
+    actor: actor ?? 'operator',
+    trigger: 'manual',
+  });
+  if (handoff.status === 'dispatched') return { dispatched: true, note: null };
+  return {
+    dispatched: false,
+    note: resumedNote(handoff.reason, 'The rollout is resumed; the automatic policy did not start it.'),
+  };
+}
+
 /**
  * Resume a paused rollout and continue the queue when one is still authorized.
  *
  * Unpausing is the decision; continuing is the executor's answer. A resume
- * with no live authorization reports that nothing started rather than
- * minting authority the operator never granted.
+ * with no live authorization does not mint one for a manual policy. An
+ * automatic policy hands off immediately when the accepted generation is
+ * ready, and otherwise says why it cannot.
  */
 gitopsApplicationsRouter.post('/:id/rollout/resume', async (req: Request, res: Response): Promise<void> => {
   const target = resolveAuthorityTarget(req, res);
@@ -1528,20 +1607,31 @@ gitopsApplicationsRouter.post('/:id/rollout/resume', async (req: Request, res: R
   const app = store.getApplication(target.application.id) ?? target.application;
   const binding = store.currentAuthorizationBinding(app);
   if (!binding) {
-    // A resumed rollout with no authorization has nothing to dispatch, and an
-    // unfinished rollback would be deployed over if the operator authorized
-    // next. Name both, and do not tell an Automatic operator to authorize when
-    // the reconciler will start it on its own.
-    const automatic = app.rollout_authorization_policy === 'automatic';
-    const rollbackPending = store.listTargets(app.id).some(
-      (target) => target.target_status === 'active' && target.health_stop_reason === 'rollback_pending',
-    );
-    const note = rollbackPending
-      ? 'The rollout is resumed, but a target has an unfinished rollback; finish the rollback and resume again.'
-      : automatic
-        ? 'The rollout is resumed; the automatic policy will start it shortly.'
+    // A target resume only clears that target. It does not release the
+    // application's confirmation, and it must not mint a fleet rollout.
+    if (nodeId !== null) {
+      const note = app.rollout_authorization_policy === 'automatic'
+        ? 'The target is resumed. No rollout is authorized yet; the automatic policy starts one when this generation is ready.'
         : 'The rollout is resumed, but no live authorization exists; authorize the rollout to start it.';
-    res.json({ ok: true, dispatched: false, note });
+      res.json({ ok: true, dispatched: false, note });
+      return;
+    }
+    try {
+      const continued = await resumeWithoutLiveAuthorization(app, actorFromRequest(req));
+      res.json({ ok: true, dispatched: continued.dispatched, note: continued.note });
+    } catch (error) {
+      // The pause is already cleared. A failure to start must not turn that into
+      // a failed resume; the reconciler retries an automatic policy that is ready.
+      console.error(
+        '[GitOps authority] Automatic resume handoff failed:',
+        sanitizeForLog(error instanceof Error ? error.message : String(error)),
+      );
+      res.json({
+        ok: true,
+        dispatched: false,
+        note: 'The rollout is resumed, but the automatic policy could not start it. It will try again.',
+      });
+    }
     return;
   }
   const genRow = store.getGeneration(binding.acceptedGenerationId);

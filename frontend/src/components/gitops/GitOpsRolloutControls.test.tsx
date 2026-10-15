@@ -122,6 +122,15 @@ describe('GitOpsRolloutControls', () => {
     expect(onChanged).toHaveBeenCalled();
   });
 
+  it('shows the hold reason on the resume control', () => {
+    const reason = 'review it, then resume the rollout';
+    renderControls(blueprintRevision({ status: 'rollout_paused', pauseAt: 1, pauseReason: reason }));
+    const hold = screen.getByTestId('gitops-rollout-hold-reason');
+    expect(hold).toHaveTextContent(reason);
+    expect(hold).toBeVisible();
+    expect(hold.closest('.sr-only')).toBeNull();
+  });
+
   it('resumes a paused rollout and reports a started dispatch', async () => {
     const user = userEvent.setup();
     const onChanged = vi.fn();

@@ -34,6 +34,15 @@ function errorMessage(error: unknown, fallback: string): string {
   return error instanceof Error && error.message.length > 0 ? error.message : fallback;
 }
 
+/** The sentence the operator agrees to. ConfirmModal's description is screen-reader-only. */
+function confirmSentence(text: string) {
+  return (
+    <p data-testid="gitops-source-confirm-body" className="font-mono text-[11px] leading-relaxed text-foreground/80">
+      {text}
+    </p>
+  );
+}
+
 /** Manual and review pulls only fetch. An automatic source can accept, and may start a rollout. */
 function pullConfirms(projection: GitOpsRevisionProjection): boolean {
   if (projection.targetMode === 'not_applicable') return false;
@@ -220,12 +229,13 @@ export default function GitOpsSourceActions({
           }}
           kicker="SOURCE"
           title="Pull source"
-          description={pullReview?.description ?? ''}
           confirmLabel="Pull source"
           busyConfirmLabel="Pulling…"
           confirming={pending === 'pull'}
           onConfirm={() => handlePull()}
-        />
+        >
+          {pullReview ? confirmSentence(pullReview.description) : undefined}
+        </ConfirmModal>
       )}
       {showAccept && (
         <Button
@@ -254,12 +264,13 @@ export default function GitOpsSourceActions({
           }}
           kicker="SOURCE"
           title="Accept source"
-          description={acceptReview.description}
           confirmLabel="Accept source"
           busyConfirmLabel="Accepting…"
           confirming={pending === 'accept'}
           onConfirm={() => handleAccept(acceptReview)}
-        />
+        >
+          {confirmSentence(acceptReview.description)}
+        </ConfirmModal>
       )}
     </>
   );
