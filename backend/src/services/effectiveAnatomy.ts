@@ -331,6 +331,11 @@ async function buildServiceUrlAuthority(
  * the dossier can fall back to its root-only view.
  */
 export async function buildEffectiveAnatomy(nodeId: number, stackName: string): Promise<EffectiveAnatomyResult> {
+  // docker compose follows a compose file, and the override it discovers, when
+  // either links at a sibling stack. Reading or saving refuses the compose
+  // file. This render refuses that file and the discovered override, or the
+  // response would include the sibling's ports and service URL.
+  await FileSystemService.getInstance(nodeId).assertComposeFileWithinStack(stackName);
   let renderError: string;
   try {
     const result = await ComposeService.getInstance(nodeId).renderConfig(stackName);

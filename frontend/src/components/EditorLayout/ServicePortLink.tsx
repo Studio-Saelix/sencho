@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
-import { Check, Copy, Pencil } from 'lucide-react';
+import { ArrowUpRight, Check, Copy, Pencil } from 'lucide-react';
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
 import { copyToClipboard } from '@/lib/clipboard';
 import {
   resolvePublishedPortClick,
@@ -69,7 +70,7 @@ export function ServicePortLink({
       type="button"
       aria-label={`Set URL for ${serviceName}`}
       onClick={() => onEdit(serviceName)}
-      className="inline-flex h-4 w-4 items-center justify-center rounded text-stat-subtitle hover:text-foreground hover:bg-muted/60 max-md:h-11 max-md:w-11 max-md:shrink-0"
+      className="inline-flex h-4 w-4 shrink-0 items-center justify-center rounded text-stat-subtitle hover:text-foreground hover:bg-muted/60 max-md:h-11 max-md:w-11"
     >
       <Pencil className="h-3 w-3" strokeWidth={1.5} />
     </button>
@@ -79,7 +80,7 @@ export function ServicePortLink({
       disabled
       title={unavailable}
       aria-label={unavailable}
-      className="inline-flex h-4 w-4 items-center justify-center rounded text-stat-subtitle opacity-40 max-md:h-11 max-md:w-11 max-md:shrink-0"
+      className="inline-flex h-4 w-4 shrink-0 items-center justify-center rounded text-stat-subtitle opacity-40 max-md:h-11 max-md:w-11"
     >
       <Pencil className="h-3 w-3" strokeWidth={1.5} />
     </button>
@@ -112,25 +113,34 @@ export function ServicePortLink({
 
   const visible = click.hostLabel ? `${click.portLabel} · ${click.hostLabel}` : click.portLabel;
   return (
-    <span className="inline-flex shrink-0 items-center gap-1 whitespace-nowrap">
+    <span className="inline-flex min-w-0 max-w-full items-center gap-1">
       <a
         href={click.href}
         target="_blank"
         rel="noopener noreferrer"
-        className="inline-flex items-center gap-1 whitespace-nowrap text-brand hover:underline"
+        title={click.href}
+        className="inline-flex min-w-0 items-center gap-1 overflow-hidden text-brand hover:underline"
       >
-        {visible}
+        <span className="min-w-0 truncate">{visible}</span>
+        <ArrowUpRight className="h-3 w-3 shrink-0" strokeWidth={1.5} />
       </a>
-      <button
-        type="button"
-        aria-label={copied ? 'Copied' : 'Copy service URL'}
-        onClick={() => {
-          void copyToClipboard(click.href).then(() => setCopied(true)).catch(() => { /* clipboard unavailable */ });
-        }}
-        className={cn('inline-flex h-4 w-4 items-center justify-center rounded text-stat-subtitle hover:text-foreground hover:bg-muted/60')}
-      >
-        {copied ? <Check className="h-3 w-3" strokeWidth={2} /> : <Copy className="h-3 w-3" strokeWidth={1.5} />}
-      </button>
+      <TooltipProvider>
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <button
+              type="button"
+              aria-label={copied ? 'Copied' : 'Copy service URL'}
+              onClick={() => {
+                void copyToClipboard(click.href).then(() => setCopied(true)).catch(() => { /* clipboard unavailable */ });
+              }}
+              className={cn('inline-flex h-4 w-4 shrink-0 items-center justify-center rounded text-stat-subtitle hover:text-foreground hover:bg-muted/60')}
+            >
+              {copied ? <Check className="h-3 w-3" strokeWidth={2} /> : <Copy className="h-3 w-3" strokeWidth={1.5} />}
+            </button>
+          </TooltipTrigger>
+          <TooltipContent>Copy service URL</TooltipContent>
+        </Tooltip>
+      </TooltipProvider>
       {edit}
     </span>
   );

@@ -157,6 +157,47 @@ function isEmptyCopy(copy: LabelsCopy): boolean {
   return copy.kind === 'list' ? copy.items.length === 0 : copy.entries.length === 0;
 }
 
+/** True when the label map's only entry is the service URL. */
+function soleUrlMap(labels: YAMLMap): boolean {
+  return labels.items.length === 1 && labelText(labels.items[0].key) === SERVICE_URL_LABEL;
+}
+
+/** True when `#` sits in `region` outside the URL value, so it is a comment. */
+function commentOutsideValue(region: string, regionStart: number, value: unknown): boolean {
+  const span = nodeRange(value);
+  if (!span || span[0] < regionStart || span[2] > regionStart + region.length) return region.includes('#');
+  const from = span[0] - regionStart;
+  const to = span[2] - regionStart;
+  return `${region.slice(0, from)}${region.slice(to)}`.includes('#');
+}
+
+/**
+ * Remove a labels key whose only entry is the service URL.
+ * Returns false when a comment outside that URL has to stay, so the caller
+ * writes an empty map under the comment instead of dropping it.
+ */
+function clearSoleUrlLabel(
+  source: string,
+  doc: unknown,
+  service: YAMLMap,
+  labelPair: YAMLMap['items'][number],
+  labels: YAMLMap,
+  flowService: boolean,
+  splices: Splice[],
+): boolean {
+  const removed = flowService ? null : deleteSpan(source, labelPair.key, labelPair.value);
+  const [regionStart, regionEnd] = removed
+    ? [removed.start, removed.end]
+    : itemSpan(source, labelPair);
+  const region = source.slice(regionStart, regionEnd);
+  const urlPair = labels.items[0];
+  if (commentOutsideValue(region, regionStart, urlPair.value)) return false;
+  detachOutside(doc, source, urlPair.value, anchorName(urlPair.value), splices);
+  if (flowService) splices.push(...editFlow(source, service, new Set([labelPair]), null));
+  else if (removed) splices.push(removed);
+  return true;
+}
+
 function isWithin(inner: unknown, outer: unknown): boolean {
   const innerSpan = nodeRange(inner);
   const outerSpan = nodeRange(outer);
@@ -775,6 +816,10 @@ function editServiceLabels(source: string, doc: unknown, service: YAMLMap, servi
   }
   if (isMap(labels) && mapHasMerge(labels) && url == null) {
     splices.push(...materializeMergedClear(source, doc, labels));
+    return splices;
+  }
+  if (isMap(labels) && url == null && labelPair && soleUrlMap(labels)
+    && clearSoleUrlLabel(source, doc, service, labelPair, labels, flowService, splices)) {
     return splices;
   }
   if (isMap(labels)) splices.push(...editMap(source, doc, labels, url));

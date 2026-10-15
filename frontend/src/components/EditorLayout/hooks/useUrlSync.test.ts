@@ -506,6 +506,33 @@ describe('useUrlSync', () => {
     expect(window.location.pathname).toBe('/nodes/local/stacks/radarr/compose');
   });
 
+  it('shows a refused compose path instead of a connection problem', async () => {
+    window.history.replaceState({ senchoIdx: 0 }, '', '/nodes/local/stacks/radarr/compose');
+    const loadFileForRoute = vi.fn().mockResolvedValue({
+      ok: false,
+      error: 'Could not open "radarr". Compose file path is not allowed',
+    });
+
+    const { result } = renderHook(
+      (props) => useUrlSync(props),
+      {
+        initialProps: makeOpts({
+          isMobile: true,
+          loadFileForRoute,
+          activeView: 'editor',
+          files: ['radarr'],
+        }),
+      },
+    );
+
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(result.current.routeDetailError).toBe('Could not open "radarr". Compose file path is not allowed');
+    expect(result.current.routeDetailError).not.toContain('connection');
+  });
+
   it('clears routeDetailError after a successful retry', async () => {
     window.history.replaceState({ senchoIdx: 0 }, '', '/nodes/local/stacks/radarr/compose');
     const loadFileForRoute = vi.fn().mockResolvedValue({ ok: false });

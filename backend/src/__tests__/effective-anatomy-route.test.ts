@@ -259,6 +259,75 @@ describe('effective-anatomy route', () => {
     expect(res.status).toBe(401);
   });
 
+  it.skipIf(process.platform === 'win32')('refuses a compose file that links at a sibling stack', async () => {
+    const siblingName = 'effanat-sibling';
+    const sibling = path.join(path.dirname(stackDir), siblingName);
+    const secret = 'https://sibling.example/private';
+    fs.rmSync(sibling, { recursive: true, force: true });
+    fs.mkdirSync(sibling);
+    fs.writeFileSync(
+      path.join(sibling, 'compose.yaml'),
+      `services:\n  other:\n    ports:\n      - "9090:90"\n    labels:\n      sencho.service.url: ${secret}\n`,
+    );
+    fs.rmSync(path.join(stackDir, 'compose.yaml'));
+    fs.symlinkSync(`../${siblingName}/compose.yaml`, path.join(stackDir, 'compose.yaml'));
+    const render = vi.spyOn(ComposeService.prototype, 'renderConfig').mockResolvedValue({
+      rendered: JSON.stringify({
+        services: {
+          other: {
+            labels: { 'sencho.service.url': secret },
+            ports: [{ target: 90, published: '9090', protocol: 'tcp' }],
+          },
+        },
+      }),
+      stderr: '',
+      code: 0,
+      timedOut: false,
+    });
+    try {
+      const res = await request(app).get(`/api/stacks/${STACK}/effective-anatomy`).set('Authorization', authHeader);
+      expect(res.status).toBe(409);
+      expect(res.body).toEqual({ error: 'Compose file path is not allowed' });
+      expect(render).not.toHaveBeenCalled();
+    } finally {
+      fs.rmSync(sibling, { recursive: true, force: true });
+    }
+  });
+
+  it.skipIf(process.platform === 'win32')('refuses an override file that links at a sibling stack', async () => {
+    const siblingName = 'effanat-override-sibling';
+    const sibling = path.join(path.dirname(stackDir), siblingName);
+    const secret = 'https://override.example/private';
+    fs.rmSync(sibling, { recursive: true, force: true });
+    fs.mkdirSync(sibling);
+    fs.writeFileSync(
+      path.join(sibling, 'compose.override.yaml'),
+      `services:\n  other:\n    ports:\n      - "9091:91"\n    labels:\n      sencho.service.url: ${secret}\n`,
+    );
+    fs.symlinkSync(`../${siblingName}/compose.override.yaml`, path.join(stackDir, 'compose.override.yaml'));
+    const render = vi.spyOn(ComposeService.prototype, 'renderConfig').mockResolvedValue({
+      rendered: JSON.stringify({
+        services: {
+          other: {
+            labels: { 'sencho.service.url': secret },
+            ports: [{ target: 91, published: '9091', protocol: 'tcp' }],
+          },
+        },
+      }),
+      stderr: '',
+      code: 0,
+      timedOut: false,
+    });
+    try {
+      const res = await request(app).get(`/api/stacks/${STACK}/effective-anatomy`).set('Authorization', authHeader);
+      expect(res.status).toBe(409);
+      expect(res.body).toEqual({ error: 'Compose file path is not allowed' });
+      expect(render).not.toHaveBeenCalled();
+    } finally {
+      fs.rmSync(sibling, { recursive: true, force: true });
+    }
+  });
+
   it('returns 404 for a stack that does not exist', async () => {
     stubRender(JSON.stringify({ name: 'x', services: {}, networks: {}, volumes: {} }));
     const res = await request(app).get('/api/stacks/nope-not-here/effective-anatomy').set('Authorization', authHeader);

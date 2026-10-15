@@ -26,6 +26,7 @@ import { openServiceUrl } from '@/lib/serviceUrl';
 import { fetchServiceUrlEntry } from './useServiceUrls';
 import { resolveOpenAppTarget, serviceUrlLookupPending } from '@/lib/serviceUrlResolve';
 import { confirmComposeSourceReload } from '@/lib/composeSourceConflict';
+import { StackOpenError, stackOpenConnectionMessage, stackOpenRefusalMessage } from '@/lib/stackOpenError';
 import { requestServiceUpdate as postServiceUpdate, requestServiceRestore as postServiceRestore } from '@/lib/serviceUpdate';
 import type { EffectiveServiceModelResult } from '@/types/effectiveServices';
 import { absentFault, pendingSourceStatus, type GitSourcePendingMap } from '@/lib/gitopsState';
@@ -1017,7 +1018,8 @@ export function useStackActions(options: UseStackActionsOptions) {
       bodySpan = null;
       if (signal.aborted) { abortAttempt(attemptId); return { ok: false }; }
       if (!res.ok) {
-        throw new Error(`Failed to load stack: ${res.status}`);
+        const refused = stackOpenRefusalMessage(filename, res.status, text);
+        throw refused ? new StackOpenError(refused) : new Error(`Failed to load stack: ${res.status}`);
       }
       const dispatchSpan = beginSpan('state_dispatch', { attemptId, proxied });
       const reloadingOpenFile = stackListState.selectedFile === filename;
@@ -1067,7 +1069,8 @@ export function useStackActions(options: UseStackActionsOptions) {
       if (bodySpan !== null) endSpan(bodySpan, { outcome: 'error' });
       if (isAbortError(error) || signal.aborted) { abortAttempt(attemptId); return { ok: false }; }
       console.error('Failed to load file:', error);
-      toast.error(`Could not open "${filename.replace(/\.(ya?ml)$/, '')}". Check your connection and try again.`);
+      const refused = error instanceof StackOpenError ? error.message : undefined;
+      toast.error(refused ?? stackOpenConnectionMessage(filename));
       stackListState.setSelectedFile(null);
       editorState.setContent('');
       editorState.setOriginalContent('');
@@ -1080,7 +1083,7 @@ export function useStackActions(options: UseStackActionsOptions) {
       editorState.setContainersLoadStatus('idle');
       editorState.setContainersLoadError(null);
       editorState.setEffectiveServices([]);
-      return { ok: false };
+      return { ok: false, error: refused };
     } finally {
       if (!signal.aborted) {
         editorState.setIsFileLoading(false);

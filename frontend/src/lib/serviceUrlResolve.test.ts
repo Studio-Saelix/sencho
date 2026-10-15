@@ -1404,7 +1404,7 @@ describe('patchServiceUrlLabel', () => {
     expect(mapClear.ok).toBe(true);
     if (!mapClear.ok) return;
     const mapCleared = parse(mapClear.yaml, { merge: true }) as typeof mapMerged;
-    expect(mapCleared.services.web.labels['sencho.service.url']).toBeUndefined();
+    expect(mapCleared.services.web.labels?.['sencho.service.url']).toBeUndefined();
     expect(mapCleared.services.api.environment.APP_URL).toBe('https://old.example.com');
 
     const listSource = [
@@ -2084,9 +2084,26 @@ describe('patchServiceUrlLabel on flow, anchored, and edge layouts', () => {
       .toBe('services:\n  web:\n    labels:\n      sencho.service.url: "https://app.example.com"\n      keep: yes\n');
   });
 
-  it('writes `labels: {}` on the key line when the only label is cleared', () => {
+  it('removes the labels key when the only label is cleared', () => {
     expect(patchTo('services:\n  web:\n    labels:\n      sencho.service.url: x\n    image: y\n', 'web', null))
-      .toBe('services:\n  web:\n    labels: {}\n    image: y\n');
+      .toBe('services:\n  web:\n    image: y\n');
+    expect(patchTo('services:\r\n  web:\r\n    labels:\r\n      sencho.service.url: x\r\n    image: y\r\n', 'web', null))
+      .toBe('services:\r\n  web:\r\n    image: y\r\n');
+    expect(patchTo('services:\n  web:\n    labels:\n      sencho.service.url: "https://app.example.com/#/dashboard"\n    image: y\n', 'web', null))
+      .toBe('services:\n  web:\n    image: y\n');
+  });
+
+  it('round-trips a service that had no labels', () => {
+    const source = 'services:\n  web:\n    image: nginx\n';
+    const added = patchServiceUrlLabel(source, 'web', URL);
+    expect(added.ok).toBe(true);
+    if (!added.ok) return;
+    expect(patchServiceUrlLabel(added.yaml, 'web', null)).toEqual({ ok: true, yaml: source });
+    const flow = 'services:\n  web: { image: nginx }\n';
+    const flowAdded = patchServiceUrlLabel(flow, 'web', URL);
+    expect(flowAdded.ok).toBe(true);
+    if (!flowAdded.ok) return;
+    expect(patchServiceUrlLabel(flowAdded.yaml, 'web', null)).toEqual({ ok: true, yaml: flow });
   });
 
   it('never writes the emptied labels into a comment that ends in a colon', () => {

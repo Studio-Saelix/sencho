@@ -299,6 +299,37 @@ export class FileSystemService {
   }
 
   /**
+   * Reject a compose file that resolves outside this stack. A missing file is
+   * not an error: there is nothing to follow. Also rejects the first override
+   * file docker compose merges on its own, which is a different path from the
+   * compose file read and save check.
+   */
+  async assertComposeFileWithinStack(stackName: string): Promise<void> {
+    await this.resolveComposeFile(stackName);
+    await this.assertDiscoveredOverrideWithinStack(stackName);
+  }
+
+  private async assertDiscoveredOverrideWithinStack(stackName: string): Promise<void> {
+    const stackDir = this.resolveStackDir(stackName);
+    const baseResolved = path.resolve(this.baseDir);
+    for (const file of COMPOSE_OVERRIDE_FILENAMES) {
+      const target = path.resolve(stackDir, file);
+      if (!target.startsWith(baseResolved + path.sep)) {
+        throw Object.assign(new Error('Path escapes compose directory'), { code: 'INVALID_PATH' });
+      }
+      try {
+        await fsPromises.lstat(target);
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code === 'ENOENT') continue;
+        throw err;
+      }
+      await this.assertRealWithinBase(target);
+      await this.assertRealWithinStack(stackName, target);
+      return;
+    }
+  }
+
+  /**
    * The stack's hand-authored compose override filename (bare basename, e.g.
    * `compose.override.yml`), or `null` when none exists. Mirrors how docker compose
    * itself resolves the default override: the first existing variant in priority order.

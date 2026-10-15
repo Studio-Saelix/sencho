@@ -168,6 +168,31 @@ describe('ServicePortLink edit affordance', () => {
     expect(screen.getByRole('link').getAttribute('href')).toBe('https://api.example.com');
     expect(screen.getByRole('button', { name: 'Set URL for api' })).toBeTruthy();
   });
+
+  it('keeps a long host inside the card and restores the open arrow', () => {
+    render(
+      <ServicePortLink
+        portLabel="8080 → 80/tcp"
+        publicPort={8080}
+        serviceName="api"
+        entry={{ ...entry, serviceUrls: { api: 'https://whoami.homelab.example.com' } }}
+        node={{ type: 'local' } as Node}
+        canEdit
+        sourceServices={['api']}
+        onEdit={() => undefined}
+      />,
+    );
+    const link = screen.getByRole('link');
+    const row = link.parentElement;
+    expect(link.querySelector('svg')).toBeTruthy();
+    expect(link.textContent).toContain('whoami.homelab.example.com');
+    expect(link.querySelector('span')?.className).toContain('min-w-0');
+    expect(row?.className).toContain('min-w-0');
+    expect(row?.className).not.toContain('whitespace-nowrap');
+    expect(row?.className).not.toContain('shrink-0');
+    expect(screen.getByRole('button', { name: 'Copy service URL' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Set URL for api' })).toBeTruthy();
+  });
 });
 
 describe('ServicePortLink runtime ownership', () => {
@@ -281,6 +306,7 @@ describe('ServicePortLink runtime ownership', () => {
       />,
     );
     expect(screen.getByRole('link').getAttribute('href')).toBe('http://localhost:8090');
+    expect(screen.getByRole('link').querySelector('svg')).toBeTruthy();
     fireEvent.click(screen.getByRole('button', { name: 'Copy service URL' }));
     await waitFor(() => expect(copyToClipboard).toHaveBeenCalledWith('http://localhost:8090'));
   });

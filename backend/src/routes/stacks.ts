@@ -1937,6 +1937,10 @@ stacksRouter.get('/:stackName/effective-anatomy', async (req: Request, res: Resp
   try {
     res.json(await buildEffectiveAnatomy(req.nodeId, stackName));
   } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === 'SYMLINK_ESCAPE' || code === 'INVALID_PATH') {
+      return res.status(409).json({ error: 'Compose file path is not allowed' });
+    }
     console.error('[Stacks] Failed to build effective anatomy for %s:', sanitizeForLog(stackName),
       sanitizeForLog(inspect(error, { depth: 4 })));
     res.status(500).json({ error: 'Failed to build effective anatomy' });

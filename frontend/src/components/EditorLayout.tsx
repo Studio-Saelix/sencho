@@ -30,6 +30,7 @@ import { useSidebarContextMenu } from './EditorLayout/hooks/useSidebarContextMen
 import { useServiceUrls } from './EditorLayout/hooks/useServiceUrls';
 import { ServiceUrlModal } from './EditorLayout/ServiceUrlModal';
 import { patchServiceUrlLabel } from '@/lib/composeServiceUrl';
+import { commitServiceUrlWrite } from '@/lib/serviceUrlWrite';
 import { serviceKeyGet, serviceUrlClearBlockedMessage, serviceUrlClearState, serviceUrlSaveBlockedMessage } from '@/lib/serviceUrlResolve';
 import { sameServiceUrlTarget, type ServiceUrlDialogTarget } from '@/lib/serviceUrlTarget';
 import { confirmComposeSourceReload } from '@/lib/composeSourceConflict';
@@ -942,14 +943,20 @@ export default function EditorLayout() {
           toast.error(freshBlocked);
           return;
         }
-        setContent(captured.content);
-        const result = await stackActions.saveComposeContent({
-          content: captured.content,
-          stackName: captured.stackName,
-          nodeId: captured.nodeId,
-          etag: captured.etag,
-          filename: captured.filename,
-        });
+        const result = await commitServiceUrlWrite(
+          captured.content,
+          () => stackActions.saveComposeContent({
+            content: captured.content,
+            stackName: captured.stackName,
+            nodeId: captured.nodeId,
+            etag: captured.etag,
+            filename: captured.filename,
+          }),
+          (next) => {
+            if (selectedFileRef.current !== captured.stackName || activeNodeIdRef.current !== captured.nodeId) return;
+            setContent(next);
+          },
+        );
         if (!result.ok) {
           if (result.conflict && result.code === 'compose_source_changed'
             && selectedFileRef.current === captured.stackName
@@ -964,7 +971,7 @@ export default function EditorLayout() {
               toast.info('Reloaded the current compose file.');
               void refreshServiceUrls();
             } else {
-              toast.error('The compose file on disk changed, so the URL was not saved. Your edits are still in the editor.');
+              toast.error('The compose file on disk changed, so the URL was not saved.');
             }
             return;
           }
