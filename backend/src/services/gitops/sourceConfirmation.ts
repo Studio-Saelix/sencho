@@ -22,13 +22,13 @@
  * rather than only at the route, because each is preceded by asynchronous work:
  * a fetch and a preparation both take time another session can spend approving a
  * placement or arming a rollout policy. A check at entry alone would pass a
- * request whose destination moved while it was waiting. A cadence carries no
- * claim to check, so the poll and the reconciler's re-drive are not boundaries
- * here, and the hold below is what keeps them from undoing a refusal.
+ * request whose destination moved while it was waiting. The acceptance stores
+ * the whole claim, and unattended authorization reads that record, so a restart
+ * or a later re-drive still has it. A poll that carries no confirmation stores
+ * none, and the configured policy governs that acceptance.
  *
- * A refusal after the acceptance has committed is held rather than answered,
- * because the reconciler re-drives any accepted generation with nothing to
- * check it against. See `driftHoldReason`.
+ * A refusal after the acceptance has committed is held rather than answered.
+ * See `driftHoldReason`.
  */
 import { isRecord } from './json';
 import type { GitOpsApplicationRow } from './types';
@@ -105,14 +105,58 @@ export function driftSentence(drift: ConfirmationDrift): string {
  * The reason recorded when the refusal lands after the acceptance committed.
  *
  * There is nothing left to confirm: the commit stands, and the rollout has to
- * wait for a person. It is a hold reason rather than a note because the refusal
- * has to outlast this request. The reconciler re-drives any accepted generation
- * with no confirmation to check, so a refusal that wrote no durable row would be
- * undone by the next tick and the operator would be told to review a change that
- * then deployed on its own.
+ * wait for a person. It is a hold reason rather than a note because the
+ * refusal has to outlast this request. The re-drive reads the stored claim, so
+ * it will not mint, but without this pause the rollout stays queued with no
+ * reason on the row.
  */
 export function driftHoldReason(drift: ConfirmationDrift): string {
     return drift === 'placement_changed'
         ? 'The approved placement changed after this was confirmed; review the current placement, then resume the rollout'
         : 'Rollout authorization started authorizing without an operator after this was confirmed; review it, then resume the rollout';
+}
+
+/** A stored confirmation that cannot be read. Unattended authorization holds rather than guessing. */
+export const UNREADABLE_SOURCE_CONFIRMATION =
+    'The confirmation recorded with this commit could not be read; review it, then resume the rollout';
+
+/** What a source-acceptance row recorded about the operator's confirmation. */
+export type StoredSourceConfirmation =
+    | { status: 'absent' }
+    | { status: 'present'; confirmation: SourceConfirmation }
+    | { status: 'unreadable' };
+
+/** Persist a confirmation. A null placement stays inside the object, distinct from a missing one. */
+export function encodeSourceConfirmation(confirmation: SourceConfirmation): string {
+    return JSON.stringify({
+        placementApprovalRef: confirmation.placementApprovalRef,
+        rolloutMayStart: confirmation.rolloutMayStart,
+    });
+}
+
+/**
+ * Read a stored confirmation.
+ *
+ * Null and empty are absence: the acceptance was not confirmed. A present
+ * object may still name a null placement. Anything else is unreadable, which
+ * the caller holds rather than treating as permission to roll out.
+ */
+export function decodeSourceConfirmation(raw: string | null | undefined): StoredSourceConfirmation {
+    if (raw == null || raw === '') return { status: 'absent' };
+    let parsed: unknown;
+    try {
+        parsed = JSON.parse(raw);
+    } catch {
+        return { status: 'unreadable' };
+    }
+    if (!isRecord(parsed) || typeof parsed.rolloutMayStart !== 'boolean' || !isApprovalRef(parsed.placementApprovalRef)) {
+        return { status: 'unreadable' };
+    }
+    return {
+        status: 'present',
+        confirmation: {
+            placementApprovalRef: parsed.placementApprovalRef,
+            rolloutMayStart: parsed.rolloutMayStart,
+        },
+    };
 }

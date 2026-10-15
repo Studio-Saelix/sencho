@@ -2,6 +2,12 @@ import type Database from 'better-sqlite3';
 import { DatabaseService, type HealthGateRunRow, type StackGitSource } from '../DatabaseService';
 import type { GitOpsHistoryCursor, GitOpsHistoryStage } from './history';
 import {
+  decodeSourceConfirmation,
+  encodeSourceConfirmation,
+  type SourceConfirmation,
+  type StoredSourceConfirmation,
+} from './sourceConfirmation';
+import {
   decodeArtifactEvidenceJson,
   decodeGitOpsApprovedTargetEffectJson,
   decodeGitOpsJson,
@@ -943,19 +949,22 @@ export class GitOpsStore {
       else decodeGitOpsJson(row.blast_json);
     }
     if (row.policy_provenance_json !== null) decodeGitOpsJson(row.policy_provenance_json);
+    if (row.source_confirmation_json != null && decodeSourceConfirmation(row.source_confirmation_json).status !== 'present') {
+      throw new GitOpsJsonError('source_confirmation_json is not a confirmation');
+    }
     this.db().prepare(
       `INSERT INTO gitops_approvals (
         id, kind, authority, authoritative, application_id, generation_id, intent_revision_id,
         artifact_set_id, rollout_candidate_id, rollout_generation_id, source_acceptance_ref,
         placement_approval_ref, required_targets_json, preflight_fingerprint, fingerprint,
-        blast_json, policy_provenance_json, actor, created_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        blast_json, policy_provenance_json, source_confirmation_json, actor, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     ).run(
       row.id, row.kind, row.authority, row.authoritative, row.application_id, row.generation_id,
       row.intent_revision_id, row.artifact_set_id, row.rollout_candidate_id, row.rollout_generation_id,
       row.source_acceptance_ref, row.placement_approval_ref, row.required_targets_json,
       row.preflight_fingerprint, row.fingerprint, row.blast_json, row.policy_provenance_json,
-      row.actor, row.created_at,
+      row.source_confirmation_json ?? null, row.actor, row.created_at,
     );
   }
 
@@ -1421,62 +1430,97 @@ export class GitOpsStore {
   }
 
   /**
-   * The placement approval the current source acceptance was confirmed against,
-   * or null when it was accepted without a confirmation.
+   * The confirmation stored on the current source acceptance.
    *
-   * The acceptance row is the only durable place that precondition can live:
-   * the request that carried it is long gone by the time preparation resolves or
-   * a restart brings the reconciler back. Null is a real answer, not missing
-   * evidence. It means nothing was confirmed, so there is nothing to keep bound
-   * and the configured policy alone governs the rollout.
+   * Absent means there is no confirmation object and no legacy placement
+   * pointer. That covers a poll and a confirmation a person later released.
+   * Present means they confirmed, and the placement inside it may still be
+   * null: they confirmed that none was approved. A placement pointer written
+   * before the confirmation object existed is read as a confirmation of that
+   * placement whose rollout was not allowed to start, the direction that waits
+   * for a person rather than rolling out on a claim this build cannot read.
    */
-  confirmedPlacementForAcceptance(app: GitOpsApplicationRow): string | null {
-    if (!app.source_acceptance_ref) return null;
+  storedSourceConfirmation(app: GitOpsApplicationRow): StoredSourceConfirmation {
+    if (!app.source_acceptance_ref) return { status: 'absent' };
     const acceptance = this.getApproval(app.source_acceptance_ref);
-    if (!acceptance || acceptance.kind !== 'source_acceptance') return null;
-    return acceptance.placement_approval_ref;
+    if (!acceptance || acceptance.kind !== 'source_acceptance') return { status: 'absent' };
+    const stored = decodeSourceConfirmation(acceptance.source_confirmation_json);
+    if (stored.status === 'absent' && acceptance.placement_approval_ref) {
+      return {
+        status: 'present',
+        confirmation: {
+          placementApprovalRef: acceptance.placement_approval_ref,
+          rolloutMayStart: false,
+        },
+      };
+    }
+    return stored;
   }
 
   /**
-   * Re-point an acceptance's confirmed placement at the one an operator has now
-   * decided.
+   * The placement pointer inside a stored confirmation, or null when the
+   * confirmation named none or the acceptance was not confirmed.
+   *
+   * This does not tell those two apart. Callers that enforce the confirmation
+   * use `storedSourceConfirmation`.
+   */
+  confirmedPlacementForAcceptance(app: GitOpsApplicationRow): string | null {
+    const stored = this.storedSourceConfirmation(app);
+    if (stored.status !== 'present') return null;
+    return stored.confirmation.placementApprovalRef;
+  }
+
+  /**
+   * Re-point an acceptance's confirmation at the placement an operator has now
+   * authorized, and record that a rollout may start.
    *
    * An operator mint is exempt from the confirmation guard, because asking to
    * authorize the rollout is the decision the confirmation deferred. Without
    * this, that decision would be re-litigated the next time the authorization
    * lapsed and the automatic policy tried again, asking the operator to resume a
    * placement they had already authorized deliberately. Re-pointing rather than
-   * clearing keeps the guard working for the next replacement.
+   * clearing keeps the guard working for the next replacement, and recording
+   * that a rollout may start is what lets that later attempt proceed.
    */
   recordConfirmedPlacement(applicationId: string, placementApprovalRef: string | null): boolean {
-    return this.writeConfirmedPlacement(applicationId, placementApprovalRef);
+    return this.writeSourceConfirmation(applicationId, {
+      placementApprovalRef,
+      rolloutMayStart: true,
+    });
   }
 
   /**
-   * Release an acceptance's confirmed placement.
+   * Release an acceptance's confirmation.
    *
    * The operator's resume is the answer to a hold: they have seen the reason and
-   * want the rollout to carry on under the placement as it stands, so the
-   * acceptance is no longer bound to the one it was confirmed against. Narrow on
-   * purpose, and the only column this ever writes on an approval: the decision
-   * itself (generation, authority, actor) is immutable, and what this clears is
-   * the precondition this same module attaches to it. What was confirmed stays
-   * recoverable from the `source_accepted` history row, which snapshots the
-   * application's placement pointer as it stood at that moment.
+   * want the rollout to carry on under the placement and the rollout policy as
+   * they stand, so the acceptance is no longer bound to either fact it was
+   * confirmed against. Narrow on purpose. The decision itself (generation,
+   * authority, actor) is immutable, and what this clears is the precondition
+   * this same module attaches to it. The history row keeps the application's
+   * placement pointer and rollout policy at that moment. It does not keep the
+   * confirmation object, so it cannot separate an acceptance nobody confirmed
+   * from one that confirmed no placement was approved.
    */
   releaseConfirmedPlacement(applicationId: string): boolean {
-    return this.writeConfirmedPlacement(applicationId, null);
+    return this.writeSourceConfirmation(applicationId, null);
   }
 
-  private writeConfirmedPlacement(applicationId: string, placementApprovalRef: string | null): boolean {
+  private writeSourceConfirmation(applicationId: string, confirmation: SourceConfirmation | null): boolean {
     const app = this.getApplication(applicationId);
     if (!app?.source_acceptance_ref) return false;
     const acceptance = this.getApproval(app.source_acceptance_ref);
     if (!acceptance || acceptance.kind !== 'source_acceptance') return false;
-    if (acceptance.placement_approval_ref === placementApprovalRef) return false;
+    const json = confirmation ? encodeSourceConfirmation(confirmation) : null;
+    const placement = confirmation?.placementApprovalRef ?? null;
+    if ((acceptance.source_confirmation_json ?? null) === json && acceptance.placement_approval_ref === placement) {
+      return false;
+    }
     const result = this.db().prepare(
-      'UPDATE gitops_approvals SET placement_approval_ref = ? WHERE id = ? AND kind = ?',
-    ).run(placementApprovalRef, acceptance.id, 'source_acceptance');
+      `UPDATE gitops_approvals
+       SET placement_approval_ref = ?, source_confirmation_json = ?
+       WHERE id = ? AND kind = ?`,
+    ).run(placement, json, acceptance.id, 'source_acceptance');
     return result.changes > 0;
   }
 

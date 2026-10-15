@@ -808,6 +808,7 @@ describe('SourceController automatic acceptance', () => {
         expect(row.target_mode).toBe('blueprint');
         expect(row.accepted_generation_id).toBe('gen-fetch-auto');
         expect(GitOpsStore.getInstance().getApproval(row.source_acceptance_ref!)?.authority).toBe('configured_policy');
+        expect(GitOpsStore.getInstance().storedSourceConfirmation(row)).toEqual({ status: 'absent' });
         expect(handoff).toHaveBeenCalledWith(expect.objectContaining({
             applicationId: 'app-fetch-auto',
             generationId: 'gen-fetch-auto',
@@ -1269,13 +1270,215 @@ describe('SourceController pull confirmation freshness', () => {
             authority: { status: 'accepted', rollout: 'started', note: null },
         });
         expect(getApp('app-fresh').accepted_generation_id).toBe('gen-fresh');
-        // The confirmation rides along to the handoff, which is the boundary
-        // preparation leaves open for a placement that moved mid-flight.
+        // The handoff reads the stored claim, not the request that has already
+        // ended. A placement that moves after this is caught from that record.
+        expect(GitOpsStore.getInstance().storedSourceConfirmation(getApp('app-fresh'))).toEqual({
+            status: 'present',
+            confirmation: { placementApprovalRef: 'place-reviewed', rolloutMayStart: false },
+        });
         expect(handoff).toHaveBeenCalledWith(expect.objectContaining({
             applicationId: 'app-fresh',
             generationId: 'gen-fresh',
-            confirmation: { placementApprovalRef: 'place-reviewed', rolloutMayStart: false },
         }));
+    });
+
+    async function flushMicrotasks(): Promise<void> {
+        for (let i = 0; i < 20; i += 1) await vi.advanceTimersByTimeAsync(0);
+    }
+
+    function deferred(): { promise: Promise<void>; resolve: () => void } {
+        let resolve: () => void = () => {};
+        const promise = new Promise<void>((done) => {
+            resolve = done;
+        });
+        return { promise, resolve };
+    }
+
+    it('does not accept when rollout authorization is armed while the security check is running', async () => {
+        gitManagedBlueprint('app-stale-eval', 'stale-eval-web', 'gen-stale-eval');
+        approvePlacement('app-stale-eval', 'place-reviewed');
+        const gate = deferred();
+        let entered = false;
+        evaluateCandidatePolicy.mockImplementation(async () => {
+            entered = true;
+            await gate.promise;
+            return { status: 'allowed' };
+        });
+        spyOnReconcile().mockResolvedValue({ outcome: 'candidate_already_fetched', reason: 'ok', nextAction: 'none' });
+        const prepare = vi.spyOn(gitManagedMaterialization, 'prepareAcceptedGitManagedGeneration');
+        const handoff = vi.spyOn(gitManagedHandoff, 'dispatchPreparedGitManagedGeneration');
+
+        const pending = controller.requestFetch('app-stale-eval', 'ada', {
+            placementApprovalRef: 'place-reviewed',
+            rolloutMayStart: false,
+        });
+        await flushMicrotasks();
+        expect(entered).toBe(true);
+        GitOpsTransitions.getInstance().rolloutAuthorizationPolicyChanged({
+            applicationId: 'app-stale-eval',
+            policy: 'automatic',
+            envelope: { operationId: 'policy-stale-eval', actor: 'tester', trigger: 'manual', at: Date.now() },
+        });
+        gate.resolve();
+        const fetched = await pending;
+
+        expect(fetched).toMatchObject({
+            status: 'settled',
+            authority: { status: 'held', note: expect.stringContaining('authorizes without an operator') },
+        });
+        expect(getApp('app-stale-eval').accepted_generation_id).toBeNull();
+        expect(prepare).not.toHaveBeenCalled();
+        expect(handoff).not.toHaveBeenCalled();
+    });
+
+    it('does not accept when the placement is replaced while the candidate is checked again', async () => {
+        gitManagedBlueprint('app-stale-reval', 'stale-reval-web', 'gen-stale-reval');
+        approvePlacement('app-stale-reval', 'place-reviewed');
+        evaluateCandidatePolicy.mockResolvedValue({ status: 'allowed' });
+        const gate = deferred();
+        let entered = false;
+        vi.spyOn(GitSourceService.getInstance(), 'revalidateSourceCandidateBeforeAccept').mockImplementation(async () => {
+            entered = true;
+            await gate.promise;
+            const generation = GitOpsStore.getInstance().getGeneration('gen-stale-reval');
+            if (!generation) throw new Error('generation missing');
+            return { status: 'reuse', generation };
+        });
+        spyOnReconcile().mockResolvedValue({ outcome: 'candidate_already_fetched', reason: 'ok', nextAction: 'none' });
+        const prepare = vi.spyOn(gitManagedMaterialization, 'prepareAcceptedGitManagedGeneration');
+        const handoff = vi.spyOn(gitManagedHandoff, 'dispatchPreparedGitManagedGeneration');
+
+        const pending = controller.requestFetch('app-stale-reval', 'ada', {
+            placementApprovalRef: 'place-reviewed',
+            rolloutMayStart: false,
+        });
+        await flushMicrotasks();
+        expect(entered).toBe(true);
+        approvePlacement('app-stale-reval', 'place-replaced');
+        gate.resolve();
+        const fetched = await pending;
+
+        expect(fetched).toMatchObject({
+            status: 'settled',
+            authority: { status: 'held', note: expect.stringContaining('approved placement changed') },
+        });
+        expect(getApp('app-stale-reval').accepted_generation_id).toBeNull();
+        expect(prepare).not.toHaveBeenCalled();
+        expect(handoff).not.toHaveBeenCalled();
+    });
+
+    it('holds a confirmed waiting rollout after preparation outlasts the request', async () => {
+        gitManagedBlueprint('app-delay', 'delay-web', 'gen-delay');
+        approvePlacement('app-delay', 'place-reviewed');
+        evaluateCandidatePolicy.mockResolvedValue({ status: 'allowed' });
+        spyOnReconcile().mockResolvedValue({ outcome: 'candidate_already_fetched', reason: 'ok', nextAction: 'none' });
+        let releasePrepare: (value: { materialized: boolean; artifact: 'resolved'; note: null }) => void = () => {};
+        let prepareEntered = false;
+        vi.spyOn(gitManagedMaterialization, 'prepareAcceptedGitManagedGeneration').mockImplementation(
+            () => new Promise((resolve) => {
+                prepareEntered = true;
+                releasePrepare = resolve;
+            }),
+        );
+        const dispatch = vi.spyOn(GitSourceService.getInstance(), 'dispatchAcceptedGeneration');
+
+        const pending = controller.requestFetch('app-delay', 'ada', {
+            placementApprovalRef: 'place-reviewed',
+            rolloutMayStart: false,
+        });
+        await flushMicrotasks();
+        expect(prepareEntered).toBe(true);
+        await vi.advanceTimersByTimeAsync(15_000);
+        const fetched = await pending;
+
+        expect(fetched).toMatchObject({ status: 'settled', authority: { status: 'accepted', rollout: 'not_started' } });
+        expect(getApp('app-delay').accepted_generation_id).toBe('gen-delay');
+        expect(getApp('app-delay').pause_at).toBeNull();
+        expect(dispatch).not.toHaveBeenCalled();
+        expect(GitOpsStore.getInstance().storedSourceConfirmation(getApp('app-delay'))).toEqual({
+            status: 'present',
+            confirmation: { placementApprovalRef: 'place-reviewed', rolloutMayStart: false },
+        });
+
+        GitOpsTransitions.getInstance().rolloutAuthorizationPolicyChanged({
+            applicationId: 'app-delay',
+            policy: 'automatic',
+            envelope: { operationId: 'policy-delay', actor: 'tester', trigger: 'manual', at: Date.now() },
+        });
+        SourceController.resetForTests();
+        GitOpsTransitions.resetForTests();
+        const handoff = await gitManagedHandoff.dispatchPreparedGitManagedGeneration({
+            applicationId: 'app-delay',
+            generationId: 'gen-delay',
+            actor: 'system:blueprint-reconciler',
+            trigger: 'retry',
+        });
+
+        expect(handoff.status).not.toBe('dispatched');
+        expect(dispatch).not.toHaveBeenCalled();
+        const held = getApp('app-delay');
+        expect(held.pause_reason).toContain('authorizing without an operator');
+        expect(held.rollout_authorization_ref).toBeNull();
+
+        GitOpsTransitions.getInstance().rolloutUnpaused('app-delay', null, {
+            operationId: 'resume-delay', actor: 'ada', trigger: 'manual', at: Date.now(),
+        });
+        const resumed = getApp('app-delay');
+        expect(GitOpsStore.getInstance().storedSourceConfirmation(resumed)).toEqual({ status: 'absent' });
+        const afterResume = await gitManagedHandoff.dispatchPreparedGitManagedGeneration({
+            applicationId: 'app-delay',
+            generationId: 'gen-delay',
+            actor: 'system:blueprint-reconciler',
+            trigger: 'retry',
+        });
+        expect(afterResume.status).toBe('skipped');
+        expect(getApp('app-delay').pause_reason).toBeNull();
+        expect(dispatch).not.toHaveBeenCalled();
+
+        releasePrepare({ materialized: true, artifact: 'resolved', note: null });
+        await flushMicrotasks();
+    });
+
+    it('does not re-hold a rollout an operator already authorized while preparation is still running', async () => {
+        gitManagedBlueprint('app-released', 'released-web', 'gen-released');
+        approvePlacement('app-released', 'place-reviewed');
+        evaluateCandidatePolicy.mockResolvedValue({ status: 'allowed' });
+        spyOnReconcile().mockResolvedValue({ outcome: 'candidate_already_fetched', reason: 'ok', nextAction: 'none' });
+        let releasePrepare: (value: { materialized: boolean; artifact: 'resolved'; note: null }) => void = () => {};
+        vi.spyOn(gitManagedMaterialization, 'prepareAcceptedGitManagedGeneration').mockImplementation(
+            () => new Promise((resolve) => {
+                releasePrepare = resolve;
+            }),
+        );
+
+        const pending = controller.requestFetch('app-released', 'ada', {
+            placementApprovalRef: 'place-reviewed',
+            rolloutMayStart: false,
+        });
+        await flushMicrotasks();
+        // Authorize rewrites the stored claim before the bounded handoff runs.
+        // That handoff used to still be holding the request, whose promise was
+        // that the rollout would wait.
+        expect(GitOpsStore.getInstance().recordConfirmedPlacement('app-released', 'place-reviewed')).toBe(true);
+        GitOpsTransitions.getInstance().rolloutAuthorizationPolicyChanged({
+            applicationId: 'app-released',
+            policy: 'automatic',
+            envelope: { operationId: 'policy-released', actor: 'tester', trigger: 'manual', at: Date.now() },
+        });
+        await vi.advanceTimersByTimeAsync(15_000);
+        const fetched = await pending;
+
+        expect(fetched).toMatchObject({ status: 'settled', authority: { status: 'accepted' } });
+        const row = getApp('app-released');
+        expect(row.pause_at).toBeNull();
+        expect(row.pause_reason).toBeNull();
+        expect(GitOpsStore.getInstance().storedSourceConfirmation(row)).toEqual({
+            status: 'present',
+            confirmation: { placementApprovalRef: 'place-reviewed', rolloutMayStart: true },
+        });
+
+        releasePrepare({ materialized: true, artifact: 'resolved', note: null });
+        await flushMicrotasks();
     });
 
     it('leaves a manual pull unchanged, because it has nothing to confirm', async () => {

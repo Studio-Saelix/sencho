@@ -929,15 +929,17 @@ gitopsApplicationsRouter.post('/:id/source/accept', async (req: Request, res: Re
       artifactSetId: newGitOpsId(),
       sourceAcceptanceId: newGitOpsId(),
       authority: 'operator',
-      // Recorded on the acceptance, not just carried by this request: the
-      // automatic authorization paths that outlive this request have nothing
-      // else to check the precondition against.
-      confirmedPlacementApprovalRef: confirmation.placementApprovalRef,
+      // Recorded on the acceptance. A later re-drive and a restart read this
+      // stored claim, not the request body that is gone by then.
+      confirmation,
       envelope: { operationId: newGitOpsId(), actor, trigger: 'manual', at: Date.now() },
     });
   } catch (error) {
     if (error instanceof GitOpsTransitionError) {
-      res.status(409).json({ error: error.message, code: 'SOURCE_ACCEPTANCE_REFUSED' });
+      res.status(409).json({
+        error: error.message,
+        code: error.code === CONFIRMATION_STALE ? CONFIRMATION_STALE : 'SOURCE_ACCEPTANCE_REFUSED',
+      });
       return;
     }
     console.error('[GitOps authority] Source acceptance failed:', error);
@@ -954,7 +956,6 @@ gitopsApplicationsRouter.post('/:id/source/accept', async (req: Request, res: Re
     generationId,
     actor,
     trigger: 'manual',
-    confirmation,
   });
   res.json({
     ok: true,

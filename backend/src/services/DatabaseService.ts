@@ -1294,6 +1294,7 @@ export class DatabaseService {
         this.migrateGitOpsCreateCheckpointSshDeployKey();
         this.migrateGitOpsPauseOrigin();
         this.migrateGitOpsRolloutWithdrawal();
+        this.migrateGitOpsSourceConfirmation();
         this.migrateNodeUpdateSkips();
         this.migrateNodeSealingKeys();
         this.migrateStackAlertServiceScope();
@@ -3076,6 +3077,16 @@ stmt.run('gitops_schema_version', '1');
             }
         })();
         this.cachedGlobalSettings = null;
+    }
+
+    private migrateGitOpsSourceConfirmation(): void {
+        // A confirmed absence of placement has to stay distinct from an
+        // acceptance nobody confirmed, and the promise that a rollout would
+        // wait has to survive the request. Both live in this object. A null
+        // column means no object was stored. When the placement pointer is
+        // also set, the reader treats that pointer as a confirmation that
+        // must wait for a person.
+        this.tryAddColumn('gitops_approvals', 'source_confirmation_json', 'TEXT NULL');
     }
 
     private migrateGitOpsCreateCheckpointSshDeployKey(): void {

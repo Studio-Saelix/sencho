@@ -1,11 +1,11 @@
 import { randomUUID } from 'crypto';
 import { GitOpsStore } from './store';
-import { GitOpsTransitions } from './transitions';
+import { GitOpsTransitionError, GitOpsTransitions } from './transitions';
 import { GitSourceService } from '../GitSourceService';
 import { buildAcceptedGeneration } from './handoff';
 import { dispatchPreparedGitManagedGeneration } from './gitManagedHandoff';
 import { runBoundedGitManagedPostAccept } from './boundedPostAccept';
-import { driftSentence, sourceConfirmationDrift, type SourceConfirmation } from './sourceConfirmation';
+import { CONFIRMATION_STALE, driftSentence, sourceConfirmationDrift, type SourceConfirmation } from './sourceConfirmation';
 import { checkStatefulWithdrawal, holdForStatefulReview, readStagedGeneration } from './statefulGuard';
 import { prepareAcceptedGitManagedGeneration } from './gitManagedMaterialization';
 import { DatabaseService } from '../DatabaseService';
@@ -768,13 +768,19 @@ export class SourceController {
                 artifactSetId: newGitOpsId(),
                 sourceAcceptanceId: newGitOpsId(),
                 authority: 'configured_policy',
-                // The operator's confirmation, recorded on the acceptance so the
-                // automatic paths that outlive this pull still know which
-                // placement it named. Null when the pull was not confirmed.
-                confirmedPlacementApprovalRef: followUp?.confirmation?.placementApprovalRef ?? null,
+                // The operator's confirmation, recorded whole so a later re-drive
+                // still has the placement and the rollout promise. Omitted when
+                // the pull was not confirmed.
+                ...(followUp?.confirmation ? { confirmation: followUp.confirmation } : {}),
                 envelope: { operationId: randomUUID(), actor: 'system:source-controller', trigger, at: Date.now() },
             });
         } catch (e) {
+            if (e instanceof GitOpsTransitionError && e.code === CONFIRMATION_STALE) {
+                console.warn(
+                    `[SourceController] automatic pull held for ${sanitizeForLog(app.id)}: the operator confirmation no longer describes this application`,
+                );
+                return { status: 'held', note: e.message };
+            }
             this.warnSkipped(app.id, 'automatic acceptance failed', e);
             return { status: 'held', note: 'The candidate was not accepted.' };
         }
@@ -790,7 +796,6 @@ export class SourceController {
                 generationId: acceptGeneration.id,
                 actor: 'system:source-controller',
                 trigger,
-                ...(followUp.confirmation ? { confirmation: followUp.confirmation } : {}),
             });
             followUp.follow.pending = settled.pending;
             return { status: 'accepted', rollout: settled.rollout, note: settled.authorityNote };

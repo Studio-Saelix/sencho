@@ -23,6 +23,11 @@ import {
   type RegistryReadinessDeps,
 } from './registryReadiness';
 import { readAppliedComposeContent } from './gitManagedMaterialization';
+import {
+  driftHoldReason,
+  sourceConfirmationDrift,
+  UNREADABLE_SOURCE_CONFIRMATION,
+} from './sourceConfirmation';
 import { decodeGitOpsRequiredTargetsJson } from './json';
 import { configuredSnapshotFor, encodePolicySnapshot } from './policyComposition';
 import { recoveryBindingForTarget } from './recoveryCapture';
@@ -56,11 +61,23 @@ export const AUTHORIZATION_INPUTS_MOVED_REASON =
   'The approved placement changed while registry readiness was being evaluated; nothing was authorized.';
 
 /**
- * The hold an automatic authorization places when the acceptance it would
- * authorize was confirmed against a placement that has since been replaced.
+ * Why unattended authorization must not mint for this acceptance, or null when
+ * the stored confirmation still describes the application (or there is none).
+ *
+ * Only the stored claim is read. Authorize rewrites it and Resume clears it,
+ * and either can land while the request that accepted the commit is still
+ * handing off. Checking that request again would pause a rollout those
+ * decisions had already released. The object keeps whichever placement was
+ * named, including none, and whichever rollout promise was confirmed.
+ * An operator mint does not call this: authorizing is that decision.
  */
-export const CONFIRMED_PLACEMENT_STALE =
-  'The approved placement changed after this commit was confirmed; review it, then resume the rollout';
+export function sourceConfirmationHoldReason(app: GitOpsApplicationRow): string | null {
+  const stored = GitOpsStore.getInstance().storedSourceConfirmation(app);
+  if (stored.status === 'unreadable') return UNREADABLE_SOURCE_CONFIRMATION;
+  if (stored.status !== 'present') return null;
+  const drift = sourceConfirmationDrift(app, stored.confirmation);
+  return drift ? driftHoldReason(drift) : null;
+}
 
 /**
  * Whether the ingredients a mint is about to write still describe the ones
@@ -430,25 +447,23 @@ export async function ensureRolloutAuthorization(
       return { ok: false, reason: 'The rollout authorization policy requires an operator to authorize.' };
     }
 
-    // The durable half of a source confirmation. The claim rides on the request
-    // that carried it, which is long gone by the time preparation resolves, the
-    // reconciler re-drives, or a restart comes back; the precondition it stood
-    // for does not, because the acceptance recorded it.
+    // The durable half of a source confirmation. The request that carried it is
+    // gone by the time preparation resolves, the reconciler re-drives, or a
+    // restart comes back. The acceptance recorded the placement and whether a
+    // rollout was allowed to start, including a confirmation that no placement
+    // was approved.
     //
-    // Enforced here, at the one funnel every mint passes, rather than on the
-    // routes that issue the requests: this is the only place that runs for an
-    // unattended dispatch. An operator mint is exempt on purpose, because asking
-    // to authorize the rollout is the decision the confirmation deferred, taken
-    // against the placement as it stands now.
+    // Enforced here, at the one funnel every mint passes. An operator mint is
+    // exempt on purpose, because asking to authorize the rollout is the
+    // decision the confirmation deferred, taken against the placement as it
+    // stands now.
     //
     // Held rather than merely refused, because a refusal with nothing behind it
     // is re-attempted on the next reconcile and the operator would watch a
-    // rollout sit queued with no reason attached to it. The acceptance stands:
-    // the content is recorded, and only its destination needs a person.
+    // rollout sit queued with no reason attached to it. The acceptance stands.
     if (!alreadyAuthorized && authority === 'configured_policy') {
-      const confirmed = store.confirmedPlacementForAcceptance(app);
-      if (confirmed !== null && confirmed !== app.placement_approval_ref) {
-        const reason = CONFIRMED_PLACEMENT_STALE;
+      const reason = sourceConfirmationHoldReason(app);
+      if (reason) {
         holdBlockedRolloutDispatch(app.id, { reason, holdable: true }, {
           actor: 'system:rollout-dispatch',
           trigger: 'blueprint_dispatch',

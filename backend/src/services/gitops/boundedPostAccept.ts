@@ -8,9 +8,9 @@
  * so a deadline does not release the in-flight slot. Accept source does not
  * hold a slot. A step that rejects instead of answering has finished and
  * failed, which is reported as a hold and never as work still running.
- * An operator's confirmation rides along to the handoff, because preparation is
- * exactly the window in which the placement or the rollout policy it named can
- * move.
+ * The handoff reads the confirmation the acceptance stored. Preparation is
+ * the window in which the placement or the rollout policy can move, and
+ * Authorize or Resume may already have replaced that stored claim.
  */
 import {
     dispatchPreparedGitManagedGeneration,
@@ -21,7 +21,6 @@ import {
     prepareAcceptedGitManagedGeneration,
     type GitManagedFreezeStatus,
 } from './gitManagedMaterialization';
-import type { SourceConfirmation } from './sourceConfirmation';
 import type { ReconcileTrigger } from './triggers';
 import { redactSensitiveText, sanitizeForLog } from '../../utils/safeLog';
 
@@ -263,10 +262,8 @@ export async function runBoundedGitManagedPostAccept(args: {
     generationId: string;
     actor: string | null;
     trigger: ReconcileTrigger;
-    /** The authority state the operator confirmed, when there was one. */
-    confirmation?: SourceConfirmation;
 }): Promise<BoundedPostAccept> {
-    const { applicationId, generationId, actor, trigger, confirmation } = args;
+    const { applicationId, generationId, actor, trigger } = args;
     const prepareWork = prepareAcceptedGitManagedGeneration({
         applicationId,
         generationId,
@@ -286,7 +283,6 @@ export async function runBoundedGitManagedPostAccept(args: {
         generationId,
         actor: actor ?? 'operator',
         trigger,
-        ...(confirmation ? { confirmation } : {}),
     });
     const handoff = await responseWithin(dispatchWork, DISPATCH_CONTINUING, (err) => {
         logStepFailure(applicationId, 'dispatch', err);

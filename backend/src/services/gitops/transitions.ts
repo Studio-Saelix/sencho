@@ -18,6 +18,7 @@ import {
 } from './json';
 import { insertHistory, type DeployDispatchedPayload, type DeployIntentRefusedPayload, type GitOpsHistoryStage, type HistoryOutcome, type PromotionCommittedPayload } from './history';
 import { emptyTargetRow, GitOpsStore } from './store';
+import { CONFIRMATION_STALE, driftSentence, encodeSourceConfirmation, sourceConfirmationDrift, type SourceConfirmation } from './sourceConfirmation';
 import { canonicalRepoKeyFromUrl } from './repoIdentity';
 import { SopsIdentityStore } from './sops/identityStore';
 import type {
@@ -119,17 +120,16 @@ export type AppliedArgs = {
   envelope: EventEnvelope;
   activateCreating?: boolean;
   /**
-   * The placement approval an operator confirmed this acceptance against, or
-   * null when nobody confirmed one.
+   * The confirmation an operator made for this acceptance. Omitted when nobody
+   * confirmed one, which is a poll: a cadence is configured rather than confirmed.
    *
-   * Recorded on the acceptance itself so the precondition outlives the request
-   * that carried it. A confirmation that lives only in a request body is gone
-   * by the time preparation resolves or a restart brings the reconciler back,
-   * and those are exactly the paths that would otherwise deploy the accepted
-   * content to a placement nobody reviewed. An automatic acceptance made by the
-   * poll records none, because a cadence is configured rather than confirmed.
+   * Recorded whole. The placement may be null, and the rollout promise may say
+   * the rollout would wait. A confirmation that lives only in a request body is
+   * gone by the time preparation resolves or a restart brings the reconciler
+   * back, and those are exactly the paths that would otherwise deploy somewhere
+   * the operator did not name, or start a rollout they were told would wait.
    */
-  confirmedPlacementApprovalRef?: string | null;
+  confirmation?: SourceConfirmation;
 };
 
 /**
@@ -911,6 +911,14 @@ export class GitOpsTransitions {
       // in the shared requireAcceptableCandidate guard.
       if (app.suspended_at) throw new GitOpsTransitionError('source is suspended');
       this.requireAcceptableCandidate(app, args);
+      // After every await that led here. The row was re-read inside this
+      // transaction, so a placement or a rollout policy that moved during
+      // policy evaluation or candidate revalidation refuses the commit instead
+      // of accepting a claim that no longer describes the application.
+      if (args.confirmation) {
+        const drift = sourceConfirmationDrift(app, args.confirmation);
+        if (drift) throw new GitOpsTransitionError(driftSentence(drift), CONFIRMATION_STALE);
+      }
       this.invalidateAuthorizationOnSourceChange(app, args.envelope, extras);
       this.applySourceAcceptanceMutation(app, args);
       // Blueprint-only in effect: a Direct application has no rollout
@@ -4645,10 +4653,11 @@ export class GitOpsTransitions {
       rollout_candidate_id: null,
       rollout_generation_id: null,
       source_acceptance_ref: null,
-      // Not a decision of its own: the acceptance this row records was made
-      // against this placement, and the automatic authorization path compares
-      // it with the live pointer before it mints for a destination.
-      placement_approval_ref: args.confirmedPlacementApprovalRef ?? null,
+      // This column copies the confirmation's placement, which is null both when
+      // nobody confirmed and when they confirmed that none was approved. The
+      // object below is what distinguishes those two.
+      placement_approval_ref: args.confirmation?.placementApprovalRef ?? null,
+      source_confirmation_json: args.confirmation ? encodeSourceConfirmation(args.confirmation) : null,
       required_targets_json: null,
       preflight_fingerprint: null,
       fingerprint: null,

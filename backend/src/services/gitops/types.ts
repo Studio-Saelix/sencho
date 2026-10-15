@@ -357,6 +357,13 @@ export type GitOpsApprovalRow = {
   fingerprint: string | null;
   blast_json: string | null;
   policy_provenance_json: string | null;
+  /**
+   * The confirmation object stored with a source acceptance, or null when no
+   * object was stored. A missing property is read the same way. Null plus a
+   * non-null placement pointer is not "unconfirmed": `storedSourceConfirmation`
+   * reads that pointer as a confirmation whose rollout must wait.
+   */
+  source_confirmation_json?: string | null;
   actor: string | null;
   created_at: number;
 };
