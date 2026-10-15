@@ -92,7 +92,13 @@ import { managedAreaBase } from './gitops/managedPaths';
 import { getRegistryDeliveryContext, getRegistryDeliveryLockContext } from '../helpers/registryDeliveryContext';
 import { copyPreparedPayloadDirectory } from '../helpers/registryDeliveryMaterialize';
 import { runDockerCompose as spawnDockerCompose } from '../helpers/dockerComposeRunner';
-import { classifyInventoryEncryption, buildSecretCapability, syncEnvInputEntry } from './gitops/sops/capability';
+import {
+    capabilityUnderstatesEncryption,
+    classifyInventoryEncryption,
+    buildSecretCapability,
+    parseSecretCapabilityFromJson,
+    syncEnvInputEntry,
+} from './gitops/sops/capability';
 import { getEncryptedSourcePolicy } from './gitops/sops/identityStore';
 import {
     buildGitOpsDecryptOverlay,
@@ -216,6 +222,9 @@ function mergeSyncEnvEntry(inputs: ComposeInputEntry[], syncEntry: ComposeInputE
     if (!syncEntry) return inputs;
     return [...inputs.filter((i) => i.materializedPath !== syncEntry.materializedPath), syncEntry];
 }
+
+const STALE_SECRET_CAPABILITY_MESSAGE =
+    'The staged candidate does not record the age recipients for its encrypted files. Pull the source again before applying.';
 
 /** A single compose file fetched from a repo, keyed by its repo-relative path. */
 export interface ComposeFile {
@@ -1884,36 +1893,18 @@ export class GitSourceService {
 
         const dataDir = process.env.DATA_DIR || path.join(process.cwd(), 'data');
         const candidateAbs = path.join(dataDir, 'git-managed', String(nodeId), stackName, candidateRel);
-        let validation: { ok: boolean; error?: string };
-        if (manifestInputsNeedOverlay({ inputs: capabilityInputs })) {
-            const overlay = await buildGitOpsDecryptOverlay({
-                stackName,
-                nodeId,
-                applicationId,
-                generationId: `validate-${commitSha.slice(0, 12)}`,
-                commitSha,
-                sourceRoot: candidateAbs,
-                manifest: { inputs: capabilityInputs },
-            });
-            if (!overlay) {
-                validation = await this.validateCandidate(stackName, candidateRel, src.compose_paths, src.context_dir, src.sync_env);
-            } else {
-                try {
-                    validation = await this.validateCandidate(
-                        stackName,
-                        candidateRel,
-                        src.compose_paths,
-                        src.context_dir,
-                        src.sync_env,
-                        overlay.overlayDir,
-                    );
-                } finally {
-                    await destroyGitOpsOverlay(overlay.binding);
-                }
-            }
-        } else {
-            validation = await this.validateCandidate(stackName, candidateRel, src.compose_paths, src.context_dir, src.sync_env);
-        }
+        const validation = await this.validateStagedCandidate({
+            stackName,
+            candidateRelPath: candidateRel,
+            composePaths: src.compose_paths,
+            contextDir: src.context_dir,
+            syncEnv: src.sync_env,
+            inputs: capabilityInputs,
+            applicationId,
+            commitSha,
+            generationId: `validate-${commitSha.slice(0, 12)}`,
+            sourceRoot: candidateAbs,
+        });
         return {
             inventory,
             contextCopyPlans: inventory.contextCopyPlans,
@@ -1982,6 +1973,73 @@ export class GitSourceService {
             ok: false,
             error: `${publicComposeValidationError(result.stderr, result.code, candidateAbs, dataDir)}${timeoutHint}`,
         };
+    }
+
+    /**
+     * Validate a staged candidate, decrypting SOPS inputs into an overlay
+     * first. The overlay is removed before this returns, including when
+     * compose config fails. Live and staged files stay ciphertext.
+     */
+    private async validateStagedCandidate(args: {
+        stackName: string;
+        candidateRelPath: string;
+        composePaths: string[];
+        contextDir: string | null;
+        syncEnv: boolean;
+        inputs: ComposeInputEntry[];
+        applicationId: string;
+        commitSha: string;
+        generationId: string;
+        sourceRoot: string;
+    }): Promise<{ ok: boolean; error?: string }> {
+        const validate = (root?: string) => this.validateCandidate(
+            args.stackName,
+            args.candidateRelPath,
+            args.composePaths,
+            args.contextDir,
+            args.syncEnv,
+            root,
+        );
+        if (!manifestInputsNeedOverlay({ inputs: args.inputs })) return validate();
+        const overlay = await buildGitOpsDecryptOverlay({
+            stackName: args.stackName,
+            nodeId: NodeRegistry.getInstance().getDefaultNodeId(),
+            applicationId: args.applicationId,
+            generationId: args.generationId,
+            commitSha: args.commitSha,
+            sourceRoot: args.sourceRoot,
+            manifest: { inputs: args.inputs },
+        });
+        if (!overlay) return validate();
+        try {
+            return await validate(overlay.overlayDir);
+        } finally {
+            await destroyGitOpsOverlay(overlay.binding);
+        }
+    }
+
+    /**
+     * Reason to refuse promotion when the generation's stored capability
+     * does not cover the encrypted inputs about to be published. Null when
+     * the stored evidence is sufficient.
+     */
+    private capabilityPromotionBlock(
+        stackName: string,
+        applicationId: string,
+        inputs: ComposeInputEntry[],
+        storedJson: string | null,
+    ): string | null {
+        const result = buildSecretCapability({
+            policy: getEncryptedSourcePolicy(stackName),
+            inputs,
+            applicationId,
+            stackName,
+        });
+        if (result.refusal) return result.refusal.reason;
+        if (capabilityUnderstatesEncryption(parseSecretCapabilityFromJson(storedJson), result.capability)) {
+            return STALE_SECRET_CAPABILITY_MESSAGE;
+        }
+        return null;
     }
 
     private runDockerCompose(args: string[], cwd: string, timeoutMs: number) {
@@ -2659,12 +2717,22 @@ export class GitSourceService {
                     : reviewRequired
                         ? gitopsApp.review_required === 1
                         : gitopsApp.review_required === 0 || gitopsApp.review_block_reason !== null;
+                // Same commit is not enough when the stored capability still
+                // calls an encrypted input plaintext. Reuse would let apply
+                // publish ciphertext while the direct-mutation guard sees no
+                // recipients. The previous row stays; the new one carries the
+                // recipients. A safety hold on the stale row is not reused.
+                const capabilityCoversInputs = !capabilityUnderstatesEncryption(
+                    parseSecretCapabilityFromJson(staged?.secret_capability_json ?? null),
+                    materialization.value.secretCapability,
+                );
                 if (
                     staged &&
                     staged.commit_sha === fetched.commitSha &&
                     staged.materialization_fingerprint === identity.fingerprint &&
                     staged.plan_blocked === (plan?.blocked === true ? 1 : 0) &&
                     reviewStateMatches &&
+                    capabilityCoversInputs &&
                     storedCandidateContentSha256(staged.compose_inputs_json) !== null
                 ) {
                     return;
@@ -5338,17 +5406,6 @@ export class GitSourceService {
             return { ok: false, reason: 'The accepted candidate is no longer staged; pull the source again.' };
         }
 
-        const candValidation = await this.validateCandidate(
-            stackName,
-            candidateRelPath,
-            src.compose_paths,
-            src.context_dir,
-            src.sync_env,
-        );
-        if (!candValidation.ok) {
-            return { ok: false, reason: `Candidate validation failed: ${candValidation.error}` };
-        }
-
         // The synced env was staged into the candidate at pull; read it back
         // from there rather than from any pending row the pull wrote.
         let envContent: string | null = null;
@@ -5382,6 +5439,31 @@ export class GitSourceService {
             };
         }
         inventory.inputs = classified.inputs;
+        const syncEnvEntry = src.sync_env ? this.syncEnvEntryFor(envContent) : null;
+        const capabilityInputs = mergeSyncEnvEntry(inventory.inputs, syncEnvEntry);
+        const capabilityBlock = this.capabilityPromotionBlock(
+            stackName,
+            generation.applicationId,
+            capabilityInputs,
+            genRow.secret_capability_json,
+        );
+        if (capabilityBlock) return { ok: false, reason: capabilityBlock };
+
+        const candValidation = await this.validateStagedCandidate({
+            stackName,
+            candidateRelPath,
+            composePaths: src.compose_paths,
+            contextDir: src.context_dir,
+            syncEnv: src.sync_env,
+            inputs: capabilityInputs,
+            applicationId: generation.applicationId,
+            commitSha: generation.commitSha,
+            generationId: generation.generationId,
+            sourceRoot: candidateAbs,
+        });
+        if (!candValidation.ok) {
+            return { ok: false, reason: `Candidate validation failed: ${candValidation.error}` };
+        }
         const plan = await this.computeChangePlan({
             stackName,
             commitSha: generation.commitSha,
@@ -5424,7 +5506,6 @@ export class GitSourceService {
             };
         }
 
-        const syncEnvEntry = src.sync_env ? this.syncEnvEntryFor(envContent) : null;
         const manifest = manifestSvc.buildManifest({
             stackName,
             repoUrl: src.repo_url,
@@ -6205,13 +6286,21 @@ export class GitSourceService {
             }
 
             // Re-validate the exact candidate before touching the live project.
-            const candValidation = await this.validateCandidate(
+            // Encrypted inputs are decrypted in an overlay for this check only.
+            const syncEnvEntry = src.sync_env ? this.syncEnvEntryFor(envContent) : null;
+            const capabilityInputs = mergeSyncEnvEntry(pending.inventory.inputs, syncEnvEntry);
+            const candValidation = await this.validateStagedCandidate({
                 stackName,
-                pending.candidateRelPath,
-                src.compose_paths,
-                src.context_dir,
-                src.sync_env,
-            );
+                candidateRelPath: pending.candidateRelPath,
+                composePaths: src.compose_paths,
+                contextDir: src.context_dir,
+                syncEnv: src.sync_env,
+                inputs: capabilityInputs,
+                applicationId: gitopsApp?.id ?? stackName,
+                commitSha,
+                generationId: gitopsGenerationId ?? `validate-${commitSha.slice(0, 12)}`,
+                sourceRoot: candidateAbs,
+            });
             if (!candValidation.ok) {
                 if (diag) console.log(`[GitSource:diag] apply candidate validation fail stack=${stackName}`);
                 throw new GitSourceError('GIT_ERROR', `Candidate validation failed: ${candValidation.error}`);
@@ -6296,7 +6385,15 @@ export class GitSourceService {
             }
 
             // Assemble the new manifest from the pull-time inventory.
-            const syncEnvEntry = src.sync_env ? this.syncEnvEntryFor(envContent) : null;
+            // Refuse before promotion when this generation's stored capability
+            // would still tell the direct-mutation guard the files are plaintext.
+            const capabilityBlock = this.capabilityPromotionBlock(
+                stackName,
+                gitopsApp?.id ?? stackName,
+                capabilityInputs,
+                gitopsGenerationId ? (candidateGeneration?.secret_capability_json ?? null) : null,
+            );
+            if (capabilityBlock) throw new GitSourceError('GIT_ERROR', capabilityBlock);
             const invocation = plan.candidateInvocation;
             const manifest = manifestSvc.buildManifest({
                 stackName,

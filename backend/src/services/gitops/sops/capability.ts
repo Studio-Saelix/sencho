@@ -29,6 +29,46 @@ export function requiredRecipientsFromCapability(cap: SecretCapability | null): 
   return cap.requiredRecipients ?? [];
 }
 
+function capabilityInputKey(input: SecretCapability['inputs'][number]): string {
+  return input.materializedPath ?? input.sourcePath ?? '';
+}
+
+/**
+ * True when the computed capability names encrypted inputs or recipients
+ * the stored generation does not. A null stored capability understates
+ * only when the current inputs are encrypted; a plaintext generation with
+ * no stored capability is not stale.
+ */
+export function capabilityUnderstatesEncryption(
+  stored: SecretCapability | null,
+  computed: SecretCapability,
+): boolean {
+  const computedEncrypted = computed.inputs.filter((input) => input.encryption !== 'none');
+  if (computedEncrypted.length === 0 && computed.requiredRecipients.length === 0) return false;
+  if (!stored) return true;
+
+  const storedByKey = new Map<string, SecretCapability['inputs'][number]>();
+  for (const input of stored.inputs) {
+    const key = capabilityInputKey(input);
+    if (key) storedByKey.set(key, input);
+  }
+
+  for (const input of computedEncrypted) {
+    const prior = storedByKey.get(capabilityInputKey(input));
+    if (!prior || prior.encryption !== input.encryption) return true;
+    const priorRecipients = new Set(prior.recipientIds);
+    for (const recipient of input.recipientIds) {
+      if (!priorRecipients.has(recipient)) return true;
+    }
+  }
+
+  const storedRecipients = new Set(stored.requiredRecipients ?? []);
+  for (const recipient of computed.requiredRecipients) {
+    if (!storedRecipients.has(recipient)) return true;
+  }
+  return false;
+}
+
 /**
  * Encrypted inputs whose recipients have no overlap with the identities on
  * this node. A file encrypted to several recipients is decryptable by any one

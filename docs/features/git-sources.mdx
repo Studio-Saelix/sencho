@@ -349,7 +349,7 @@ Pulls, applies, and create-from-git operations on the same stack are serialized 
 
 ## Repository secrets (SOPS and age)
 
-Some teams store sensitive env files or file-backed secrets in Git as [SOPS](https://github.com/getsops/sops)-encrypted documents. That includes a sibling `.env` synced with the source and env files named by the compose file. Sencho keeps ciphertext in the repository and on disk. Decryption happens only in a short-lived overlay during candidate validation, Git apply, Git deploy, or rollback. A manual Deploy or image Update on a SOPS-managed stack is refused so Compose never reads ciphertext from the live stack directory.
+Some teams store sensitive env files or file-backed secrets in Git as [SOPS](https://github.com/getsops/sops)-encrypted documents. That includes a sibling `.env` synced with the source and env files named by the compose file. Sencho keeps ciphertext in the repository and on disk. Decryption happens only in a short-lived overlay during candidate validation, Git apply, Git deploy, or rollback. A manual Deploy or image Update on a SOPS-managed stack is refused so Compose never reads ciphertext from the live stack directory. Apply also refuses a staged candidate that does not record the recipients for those encrypted files. Pull the source again so the candidate records them, then apply.
 
 Open **Git Source** on a linked stack and select the **Secrets** tab.
 

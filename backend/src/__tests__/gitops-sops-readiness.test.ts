@@ -2,10 +2,12 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { setupTestDb, cleanupTestDb } from './helpers/setupTestDb';
 import {
   buildSecretCapability,
+  capabilityUnderstatesEncryption,
   lkgBlockedByMissingRecipients,
   missingRecipientsForCapability,
   syncEnvInputEntry,
 } from '../services/gitops/sops/capability';
+import type { SecretCapability } from '../services/gitops/sops/types';
 import { manifestInputsNeedOverlay } from '../services/gitops/sops/prepareOverlay';
 import { SopsIdentityStore } from '../services/gitops/sops/identityStore';
 import type { ComposeInputEntry } from '../types/gitProjectManifest';
@@ -148,6 +150,37 @@ describe('SOPS capability readiness', () => {
     });
     expect(result.capability.requiredRecipients).toEqual([recipient]);
     expect(manifestInputsNeedOverlay({ inputs: [entry] })).toBe(true);
+  });
+
+  it('treats a plaintext capability as understating an age-encrypted synced .env', () => {
+    const computed: SecretCapability = {
+      policy: 'allow_plaintext',
+      inputs: [{
+        role: 'env',
+        encryption: 'sops-age',
+        recipientIds: ['age1aaa'],
+        sourcePath: null,
+        materializedPath: '.env',
+      }],
+      ready: true,
+      requiredRecipients: ['age1aaa'],
+    };
+    const stored: SecretCapability = {
+      ...computed,
+      inputs: [{ ...computed.inputs[0], encryption: 'none', recipientIds: [] }],
+      requiredRecipients: [],
+    };
+    expect(capabilityUnderstatesEncryption(stored, computed)).toBe(true);
+    expect(capabilityUnderstatesEncryption(null, computed)).toBe(true);
+    expect(capabilityUnderstatesEncryption(computed, computed)).toBe(false);
+    const plaintext: SecretCapability = {
+      policy: 'allow_plaintext',
+      inputs: [{ ...computed.inputs[0], encryption: 'none', recipientIds: [] }],
+      ready: true,
+      requiredRecipients: [],
+    };
+    expect(capabilityUnderstatesEncryption(null, plaintext)).toBe(false);
+    expect(capabilityUnderstatesEncryption(plaintext, plaintext)).toBe(false);
   });
 
   it('records a plaintext sibling .env with no recipients', () => {
