@@ -68,6 +68,29 @@ On every one of these actions, Sencho:
 
 Pre-flight scans use the same 24-hour digest cache as on-demand scans, so the second deploy of the same image does not pay the full scan time.
 
+## Evidence availability
+
+A block policy can only block on what it managed to find out. When the scanner could not run, or a scan did not finish, Sencho has no finding to evaluate, and that is a different situation from "every image was scanned and nothing matched."
+
+**Evidence availability** on the **Policies** tab decides what a deploy gate may do in those situations. Each row shows the active setting and the shipped default:
+
+| Setting | Applies when | Default | Allow | Warn | Block |
+|---|---|---|---|---|---|
+| **Scanner unavailable** | The vulnerability scanner is not installed or not responding on this node. | Allow | Deploy proceeds, with a warning alert once per hour per stack. | Deploy proceeds, with a warning alert. | The deploy is rejected. |
+| **Scan failed** | A scan started for an image and did not finish. | Block | Deploy proceeds. | Deploy proceeds, with a warning alert. | The deploy is rejected. |
+| **Candidate not evaluated** | An image a Git-managed source is about to accept cannot be evaluated. | Block | The candidate is accepted. | The candidate is accepted, with a warning alert. | The candidate is held and the source is not accepted. |
+
+Some details worth knowing:
+
+- **The candidate row is separate from the two above, and stricter by default.** A Git-managed source accepts code without a person in the loop, so a setting you relax to get past a scanner outage at the keyboard does not become standing authority for an unattended automation. **Candidate not evaluated** alone decides a candidate, in either direction: setting it to allow lets a source accept a candidate whose scan failed even while **Scan failed** is still set to block, and leaving it on block holds the candidate even while **Scan failed** is set to allow.
+- **A finding always blocks, and it always blocks for the right reason.** These settings decide what happens when there is no finding to evaluate. They never suppress a finding, because a known vulnerability does not expire, and a deploy stopped by one reports the finding rather than the evidence gap.
+- **A blocked deploy says which of the two it was.** A block on a matched finding and a block on missing evidence are different events, and both the block dialog and the message shown on automated paths (bulk deploy, scheduled runs, Auto-Update, Git sources, rollback) distinguish them.
+- **Scanner unavailable** behaves the same whether it is set to allow or warn, because a warning alert is sent in both cases. The distinction matters on the other rows, where allow is silent.
+
+Freshness bounds on stored evidence, and the trust and signature evidence a future admission check will require, are not configured here yet; they arrive with the consumers that can act on them.
+
+Changing any of these takes effect on the next deploy. The gate is the same for a deploy from the editor, the API, the scheduler, a webhook, a Git source, a Blueprint, or Auto-Update, so there is one place to look and one place to change.
+
 ## What the block dialog shows
 
 This is a hard gate: the deploy is rejected and cannot proceed without an admin bypass. It is a different dialog from the optional [pre-deploy scan advisory](/features/vulnerability-scanning#pre-deploy-scan-advisory), which only shows scan results for review on a manual deploy and never blocks.
@@ -81,7 +104,7 @@ The dialog shows:
 - A kicker with the stack name, the words **SCAN POLICY**, and **BLOCKED** in the destructive accent color.
 - The policy name and a sentence naming every condition the policy blocks on.
 - One row per offending image, with the image reference in monospace, the counts of critical and high findings (plus known-exploited and fixable counts when present), a badge for each matched condition (`Severity`, `KEV`, or `Fixable`), and a severity chip in the matching color.
-- If an image could not be scanned rather than failing a policy check, the row shows a **Could not be scanned** subtitle and the scan error text. A note below the list reads "The deploy was blocked because the scan did not complete. Resolve the issue above and deploy again, or bypass if you accept the risk."
+- If an image could not be evaluated rather than failing a policy check, the row shows a **Could not be evaluated** subtitle and the reason it could not be, which names whether the scan failed or the evaluation did. A note below the list reads "The deploy was blocked because the scan did not complete. Resolve the issue above and deploy again, or bypass if you accept the risk." This is the default: a scan that started and did not finish blocks, so a transient scanner failure is retried rather than waved through.
 - A **Close** button that dismisses the dialog without deploying.
 - A destructive **Deploy anyway** button when the current user is an admin (see bypass below). For non-admin sessions the primary slot is replaced by a disabled outline button labeled **Admin required to bypass**.
 
@@ -132,9 +155,10 @@ Neither drift mechanism blocks, stops, or quarantines a running stack automatica
   <Accordion title="The gate let a deploy through even though I have a block policy">
     Check the following in order:
 
-    1. Open the **Security** page → **Scanner setup** tab on the target node and confirm Trivy is installed. Sencho fails open when Trivy is missing, dispatching a warning alert instead of blocking. [Install Trivy](/operations/trivy-setup) to enforce the policy.
+    1. Open the **Security** page → **Scanner setup** tab on the target node and confirm Trivy is installed. When Trivy is missing, Sencho dispatches a warning alert and allows the deploy, because a missing tool should not lock you out of deploying. You can change that to block or to warn-and-continue on the **Policies** tab, under **Evidence availability**. [Install Trivy](/operations/trivy-setup) to make the policy enforceable.
     2. Confirm the policy is enabled and the stack pattern matches the stack name. `prod-*` matches `prod-api` but not `production-api`. An empty pattern matches every stack on the node.
     3. Check the latest scan for each image against the policy's block conditions. If no image carried a known-exploited CVE, a fixable Critical/High finding, or (when the severity threshold is on) a finding at or above the threshold, the gate correctly allowed the deploy.
+    4. If a scan could not be completed, check **Evidence availability** on the **Policies** tab. A scan that started and did not finish blocks the deploy by default, so a scanner that is failing rather than missing stops the deploy through that setting.
   </Accordion>
   <Accordion title="A deploy is blocked and I cannot bypass as a non-admin">
     Only users with the `admin` role can bypass a block. Ask an admin to review the violations and either bypass the single deploy, upgrade the base image, or [suppress](/features/cve-suppressions) the offending CVE with an expiry.

@@ -15,6 +15,7 @@ import { SettingsPrimaryButton } from '@/components/settings/SettingsActions';
 import { useNodes } from '@/context/NodeContext';
 import { useAuth } from '@/context/AuthContext';
 import { useTrivyStatus } from '@/hooks/useTrivyStatus';
+import { EvidencePolicyPanel } from './EvidencePolicyPanel';
 import type { FleetRole, ScanPolicy, VulnSeverity } from '@/types/security';
 
 const SEVERITY_OPTIONS: Array<{ value: VulnSeverity; label: string }> = [
@@ -434,6 +435,8 @@ export function ScanPolicyManager() {
           />
         </div>
       )}
+
+      {!isRemote && <EvidencePolicyPanel />}
 
       <Modal open={dialogOpen} onOpenChange={setDialogOpen} size="md">
         <ModalHeader

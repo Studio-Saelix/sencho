@@ -8,6 +8,7 @@ import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { SeverityChip } from '@/components/VulnerabilityScanSheet';
 import type { VulnSeverity } from '@/types/security';
+import { buildEvidenceLines } from './policyBlockEvidence';
 
 /** Risk inputs a deploy gate can block on; mirrors the backend reason set. */
 export type PolicyBlockReason = 'severity' | 'kev' | 'fixable';
@@ -19,12 +20,32 @@ export interface PolicyBlockViolation {
   highCount: number;
   kevCount: number;
   fixableCount: number;
-  /** Which inputs matched (empty when the image could not be scanned). */
+  /** Which inputs matched (empty when the image could not be evaluated). */
   reasons: PolicyBlockReason[];
   scanId: number;
-  /** Set when the gate blocked because the image could not be scanned or
-   *  evaluated (a scan/parse failure), rather than a policy input matching. */
+  /** Set when the gate blocked because the image could not be evaluated, which
+   *  covers a scan or parse failure and an evaluation that threw. The message
+   *  names which, so the row's subtitle does not have to distinguish them. */
   error?: string;
+}
+
+/** One configured rule the gate applied to one piece of evidence. */
+export interface PolicyBlockEvidenceApplication {
+  source: string;
+  state: string;
+  outcome: 'allow' | 'warn' | 'block';
+  rule: string;
+  /** Present when the application is about one image rather than the whole node. */
+  target?: string;
+}
+
+/** One piece of evidence the gate obtained, or failed to. */
+export interface PolicyBlockEvidenceRecord {
+  source: string;
+  state: string;
+  target: string;
+  collectedAt?: number | null;
+  reason?: string;
 }
 
 export interface PolicyBlockPayload {
@@ -42,6 +63,17 @@ export interface PolicyBlockPayload {
       }
     | null;
   violations: PolicyBlockViolation[];
+  /**
+   * Why the gate lacked the evidence it needed, and which setting turned that
+   * into a refusal. Absent on older control payloads and whenever the block was
+   * a genuine policy match, which needs no explanation beyond the findings.
+   */
+  evidence?: {
+    outcome: 'allow' | 'warn' | 'block';
+    summary: string;
+    records?: PolicyBlockEvidenceRecord[];
+    applications?: PolicyBlockEvidenceApplication[];
+  };
 }
 
 const REASON_LABEL: Record<PolicyBlockReason, string> = {
@@ -49,6 +81,7 @@ const REASON_LABEL: Record<PolicyBlockReason, string> = {
   kev: 'KEV',
   fixable: 'Fixable',
 };
+
 
 /** Plain-language list of the inputs a policy blocks on, for the dialog copy. */
 function describePolicyInputs(policy: PolicyBlockPayload['policy']): string {
@@ -93,6 +126,16 @@ export function PolicyBlockDialog({
   const policyName = payload?.policy?.name ?? 'policy';
   const inputsText = describePolicyInputs(payload?.policy ?? null);
   const violations = payload?.violations ?? [];
+  // Anything the gate could not obtain is worth explaining. Applications name
+  // the configured rule that produced the outcome; records cover a state no
+  // policy governs, such as partial evidence the gate fails closed on by
+  // definition. Together they mean the dialog never shows a bare refusal.
+  const evidenceLines = buildEvidenceLines(payload?.evidence);
+  // A payload can carry both a genuine match and an evidence gap. The gap is
+  // still worth naming, but the "not a proven vulnerability" sentence is a claim
+  // about the whole block and is false when any image matched on the merits.
+  const genuineCount = violations.filter((v) => !v.error).length;
+  const hasGenuineViolation = genuineCount > 0;
 
   return (
     <Modal open={open} onOpenChange={(next) => { if (!next) onClose(); }} size="xl">
@@ -105,7 +148,12 @@ export function PolicyBlockDialog({
         <p className="text-sm text-muted-foreground">
           Policy <span className="font-medium text-foreground">{policyName}</span> blocks deploys
           on <span className="font-medium text-foreground">{inputsText}</span>.{' '}
-          The following {violations.length === 1 ? 'image' : `${violations.length} images`} triggered the block.
+          {hasGenuineViolation
+            ? // Counted over the genuine matches only. On a mixed payload the
+              // remaining rows are evidence placeholders, which did not trigger
+              // anything on the merits.
+              `The following ${genuineCount === 1 ? 'image' : `${genuineCount} images`} triggered the block.`
+            : 'No image was found to match those conditions. The deploy was stopped because the evidence needed to check them could not be obtained.'}
         </p>
         <div className="border border-glass-border bg-card/60 shadow-card-bevel divide-y divide-glass-border">
           {violations.length === 0 ? (
@@ -120,7 +168,7 @@ export function PolicyBlockDialog({
                   {v.error ? (
                     <>
                       <div className="font-mono text-[10px] uppercase tracking-[0.18em] text-stat-subtitle">
-                        Could not be scanned
+                        Could not be evaluated
                       </div>
                       <div className="text-xs text-muted-foreground mt-1 break-words">{v.error}</div>
                     </>
@@ -150,9 +198,42 @@ export function PolicyBlockDialog({
         </div>
         {violations.some((v) => v.error) && (
           <p className="text-sm text-muted-foreground mt-3">
-            The deploy was blocked because the scan did not complete. Resolve the issue above and
-            deploy again, or bypass if you accept the risk.
+            {hasGenuineViolation
+              ? // On a mixed payload this banner is additional context, not the
+                // reason for the block, and saying otherwise would be the same
+                // false whole-block claim the paragraph above avoids. Said as two
+                // facts the operator can act on rather than one about what the
+                // block "may rest on": which images are unevaluated, and that the
+                // counts above do not cover them. "Unevaluated" rather than
+                // "unscanned" because a row here also covers an image whose scan
+                // completed and whose policy evaluation failed, and calling that a
+                // scan failure would point at the wrong thing. The recovery hint
+                // still applies either way.
+                'Some images could not be evaluated. They are listed above without a finding count, so the counts above do not cover them. Resolve the failure and deploy again, or bypass if you accept the risk.'
+              : 'The deploy was blocked because the scan did not complete. Resolve the issue above and deploy again, or bypass if you accept the risk.'}
           </p>
+        )}
+        {evidenceLines.length > 0 && (
+          <div className="mt-3 rounded-lg border border-glass-border bg-card/60 shadow-card-bevel px-3 py-2.5">
+            <div className="font-mono text-[10px] uppercase tracking-[0.18em] text-stat-subtitle">
+              Evidence unavailable
+            </div>
+            <p className="text-xs text-muted-foreground mt-1">
+              {hasGenuineViolation
+                ? 'This deploy was also affected by missing evidence. Alongside the findings above, the evidence below could not be obtained, and your settings say what to do in that case.'
+                : 'This deploy was not stopped by a proven vulnerability. It was stopped because the evidence the policy needs could not be obtained, and your settings say what to do in that case.'}
+            </p>
+            <ul className="mt-2 space-y-1">
+              {evidenceLines.map((line) => (
+                <li key={line.key} className="text-xs text-muted-foreground break-words">
+                  {line.text}
+                </li>
+              ))}
+            </ul>
+            <p className="text-xs text-muted-foreground mt-2">
+              Change this on the Security page &rarr; Policies tab, under Evidence availability.
+            </p>
+          </div>
         )}
       </ModalBody>
       <ModalFooter

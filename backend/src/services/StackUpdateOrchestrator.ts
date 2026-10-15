@@ -527,7 +527,7 @@ export class StackUpdateOrchestrator {
     if (gate.ok || gate.bypassed) return null;
     return serviceFailed(
       'policy_blocked',
-      `Service "${serviceName}": ${describePolicyBlock(gate.policy, gate.violations, action)}`,
+      `Service "${serviceName}": ${describePolicyBlock(gate.policy, gate.violations, action, gate.evidence)}`,
       { serviceName, mutationStage: 'policy', recoveryId },
     );
   }

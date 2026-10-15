@@ -234,7 +234,7 @@ labelsRouter.post('/:id/action', authMiddleware, async (req: Request, res: Respo
               buildPolicyGateOptions(req),
             );
             if (!gate.ok) {
-              const blockedMsg = describePolicyBlock(gate.policy, gate.violations);
+              const blockedMsg = describePolicyBlock(gate.policy, gate.violations, 'deploy', gate.evidence);
               results.push({ stackName, success: false, error: blockedMsg, ...(isDryRun ? { dryRun: true } : {}) });
               continue;
             }

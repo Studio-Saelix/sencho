@@ -11,7 +11,7 @@ This tutorial covers one block-on-deploy policy scoped to a single stack pattern
 ## Prerequisites
 
 - The `admin` role. Creating and editing a policy needs the `stack:edit` permission, which both the `admin` and `node-admin` roles hold, but only `admin` can click **Deploy anyway** on a blocked deploy: `node-admin` can configure policies but not bypass a block.
-- The Trivy scanner installed and running on the node you're deploying to (**Security** → **Scanner setup**). Deploy Enforcement fails open, letting the deploy through with a warning alert instead of a block, when Trivy isn't installed.
+- The Trivy scanner installed and running on the node you're deploying to (**Security** → **Scanner setup**). Deploy Enforcement lets the deploy through with a warning alert instead of a block when Trivy isn't installed. You can change that on the **Policies** tab under **Evidence availability**.
 - Available on every tier; no Admiral requirement.
 - This tutorial uses a small stack called `prod-web`:
 
