@@ -124,6 +124,7 @@ function liveProjection(overrides?: {
     applicationId: 'app-1',
     lifecycleStatus: 'active',
     stackName: 'web',
+    configuredSourceStackName: 'web',
     blueprintId: null,
     rolloutGenerationId: null,
     approvals: {
@@ -132,6 +133,7 @@ function liveProjection(overrides?: {
       rolloutAuthorizationRef: null,
       legacyCombinedApprovalRef: null,
     },
+    approvedRolloutScope: { status: 'not_applicable' },
     facets: {
       source: overrides?.source ?? RESTING_SOURCE,
       artifact: overrides?.artifact ?? artifactAt('artifact_exact'),
