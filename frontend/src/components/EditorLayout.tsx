@@ -430,12 +430,21 @@ export default function EditorLayout() {
   const [serviceUrlDirty, setServiceUrlDirty] = useState(false);
   const [serviceUrlSaving, setServiceUrlSaving] = useState(false);
   const [serviceUrlVerify, setServiceUrlVerify] = useState<string | null>(null);
+  const [serviceUrlEditBlock, setServiceUrlEditBlock] = useState<string | null>(null);
+  const [serviceUrlEditBlockId, setServiceUrlEditBlockId] = useState(0);
+  // An edit to the open compose buffer can make a refused save possible again.
+  const serviceUrlContentSeen = useRef(content);
+  if (serviceUrlContentSeen.current !== content) {
+    serviceUrlContentSeen.current = content;
+    if (serviceUrlEditBlock !== null) setServiceUrlEditBlock(null);
+  }
   if (serviceUrlTarget && !sameServiceUrlTarget(serviceUrlTarget, {
     nodeId: activeNode?.id ?? null,
     stackName: selectedFile,
   })) {
     setServiceUrlTarget(null);
     setServiceUrlVerify(null);
+    setServiceUrlEditBlock(null);
   }
 
   const serviceUrlVerifyTarget = useRef<{
@@ -892,9 +901,13 @@ export default function EditorLayout() {
     // Clearing has its own authority: an earlier file, the open file's include,
     // or an inherited service can still supply the label after the direct one is
     // removed, so only the matching guard for the requested operation applies.
+    const refuseEdit = (message: string) => {
+      setServiceUrlEditBlock(message);
+      setServiceUrlEditBlockId((id) => id + 1);
+    };
     const blocked = serviceUrlSaveBlockedMessage(serviceUrlEntry, opened.serviceName, url);
     if (blocked) {
-      toast.error(blocked);
+      refuseEdit(blocked);
       return;
     }
     let patched: ReturnType<typeof patchServiceUrlLabel>;
@@ -906,7 +919,7 @@ export default function EditorLayout() {
       return;
     }
     if (!patched.ok) {
-      toast.error(patched.reason === 'missing-service'
+      refuseEdit(patched.reason === 'missing-service'
         ? 'That service is defined in another compose file.'
         : patched.reason === 'unsupported'
           ? 'The URL cannot be changed here without changing other parts of this compose file. Edit the label in the editor instead.'
@@ -940,7 +953,7 @@ export default function EditorLayout() {
         const fresh = await refreshServiceUrls();
         const freshBlocked = serviceUrlSaveBlockedMessage(fresh, opened.serviceName, url);
         if (freshBlocked) {
-          toast.error(freshBlocked);
+          refuseEdit(freshBlocked);
           return;
         }
         const result = await commitServiceUrlWrite(
@@ -1087,6 +1100,7 @@ export default function EditorLayout() {
         if (!selectedFile) return;
         setServiceUrlDirty(content !== editorState.originalContent);
         setServiceUrlVerify(null);
+        setServiceUrlEditBlock(null);
         setServiceUrlTarget({
           nodeId: activeNode?.id ?? null,
           stackName: selectedFile,
@@ -1133,10 +1147,13 @@ export default function EditorLayout() {
       clearBlockedMessage={serviceUrlTarget
         ? serviceUrlClearBlockedMessage(serviceUrlClearState(serviceUrlEntry, serviceUrlTarget.serviceName))
         : null}
+      editBlockedMessage={serviceUrlEditBlock}
+      editBlockId={serviceUrlEditBlockId}
       onOpenChange={(open) => {
         if (!open && !serviceUrlSaving) {
           setServiceUrlTarget(null);
           setServiceUrlVerify(null);
+          setServiceUrlEditBlock(null);
         }
       }}
       onSave={(url) => { void commitServiceUrl(url); }}

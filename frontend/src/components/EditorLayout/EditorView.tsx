@@ -551,7 +551,8 @@ export function EditorView(props: EditorViewProps) {
                         <CardContent className="p-4 pt-2 flex-1 min-h-0">
                             {/* `block` keeps every card inside the pane width: the default
                                 table wrapper sizes a card to its widest row, which pushes
-                                the port link's copy and pencil past the pane edge. */}
+                                the port link past the pane edge. The card wraps its action
+                                icons so that clamp does not crush the port line. */}
                             <ScrollArea className="h-full" block>
                                 <ContainersHealth
                                     safeContainers={safeContainers}

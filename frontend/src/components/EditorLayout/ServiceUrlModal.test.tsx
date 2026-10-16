@@ -14,6 +14,8 @@ function setup(overrides: Partial<Parameters<typeof ServiceUrlModal>[0]> = {}) {
     saving: false,
     verifyMessage: null,
     clearBlockedMessage: null,
+    editBlockedMessage: null,
+    editBlockId: 0,
     onOpenChange: vi.fn(),
     onSave,
     onRetryVerify: vi.fn(),
@@ -40,6 +42,38 @@ describe('ServiceUrlModal clear gate', () => {
     fireEvent.change(input(), { target: { value: 'https://new.example.com' } });
     expect(screen.queryByText(CLEAR_BLOCKED)).toBeNull();
     expect(save().disabled).toBe(false);
+  });
+
+  it('keeps Save disabled until the URL field changes, then accepts the next refusal', () => {
+    const refused = 'The URL cannot be changed here without changing other parts of this compose file. Edit the label in the editor instead.';
+    const onSave = vi.fn();
+    const props: Parameters<typeof ServiceUrlModal>[0] = {
+      open: true,
+      serviceName: 'web',
+      initialUrl: 'https://app.example.com',
+      dirty: false,
+      saving: false,
+      verifyMessage: null,
+      clearBlockedMessage: null,
+      editBlockedMessage: refused,
+      editBlockId: 1,
+      onOpenChange: vi.fn(),
+      onSave,
+      onRetryVerify: vi.fn(),
+    };
+    const { rerender } = render(<ServiceUrlModal {...props} />);
+    expect(screen.getByText(refused)).toBeTruthy();
+    expect(save().disabled).toBe(true);
+    fireEvent.click(save());
+    expect(onSave).not.toHaveBeenCalled();
+
+    fireEvent.change(input(), { target: { value: 'https://new.example.com' } });
+    expect(screen.queryByText(refused)).toBeNull();
+    expect(save().disabled).toBe(false);
+
+    rerender(<ServiceUrlModal {...props} editBlockId={2} />);
+    expect(screen.getByText(refused)).toBeTruthy();
+    expect(save().disabled).toBe(true);
   });
 
   it('saves an empty field as a clear when clearing is allowed', () => {

@@ -13,6 +13,10 @@ interface ServiceUrlModalProps {
   verifyMessage: string | null;
   /** Why clearing here cannot take effect, or null when the clear is allowed. */
   clearBlockedMessage: string | null;
+  /** Why this save was refused, or null. Shown until the URL field changes. */
+  editBlockedMessage: string | null;
+  /** Bumps on every new refusal so the same text can be shown again. */
+  editBlockId: number;
   onOpenChange: (open: boolean) => void;
   onSave: (url: string | null) => void;
   onRetryVerify: () => void;
@@ -26,11 +30,15 @@ export function ServiceUrlModal({
   saving,
   verifyMessage,
   clearBlockedMessage,
+  editBlockedMessage,
+  editBlockId,
   onOpenChange,
   onSave,
   onRetryVerify,
 }: ServiceUrlModalProps) {
   const [value, setValue] = useState(initialUrl);
+  const [dismissedBlockId, setDismissedBlockId] = useState<number | null>(null);
+  const shownBlock = editBlockedMessage && dismissedBlockId !== editBlockId ? editBlockedMessage : null;
 
   const trimmed = value.trim();
   const parsed = trimmed ? serviceUrlFromLabelValue(trimmed) : null;
@@ -51,7 +59,10 @@ export function ServiceUrlModal({
           <span className="font-mono text-[10px] uppercase tracking-[0.18em] text-stat-subtitle">URL</span>
           <input
             value={value}
-            onChange={(event) => setValue(event.target.value)}
+            onChange={(event) => {
+              setValue(event.target.value);
+              if (editBlockedMessage) setDismissedBlockId(editBlockId);
+            }}
             placeholder="https://app.example.com"
             autoComplete="off"
             spellCheck={false}
@@ -70,6 +81,9 @@ export function ServiceUrlModal({
         {clearBlocked ? (
           <p className="text-xs text-destructive">{clearBlocked}</p>
         ) : null}
+        {shownBlock ? (
+          <p className="text-xs text-destructive">{shownBlock}</p>
+        ) : null}
         {verifyMessage ? (
           <div className="space-y-2">
             <p className="text-xs text-destructive">{verifyMessage}</p>
@@ -84,7 +98,7 @@ export function ServiceUrlModal({
           <BusyButton
             type="button"
             pending={saving}
-            disabled={invalid || saving || clearBlocked !== null}
+            disabled={invalid || saving || clearBlocked !== null || shownBlock !== null}
             onClick={() => onSave(parsed)}
           >
             Save URL
