@@ -189,11 +189,17 @@ RUN cp vendor.mod go.mod && cp vendor.sum go.sum && \
 # carries CVE-2026-46680 (runAsNonRoot evasion in containerd's runtime
 # executor). v2.2.4 cleared that one, but a later containerd advisory cluster
 # (CVE-2026-53488, CVE-2026-53489, CVE-2026-53492, all CRI checkpoint/restore
-# and restart-monitor issues) affects v2.2.4 and is fixed in v2.2.5. The go get
-# step below bumps containerd/v2 to v2.2.5 to clear all four. These are
+# and restart-monitor issues) affects v2.2.4 and is fixed in v2.2.5. Two more
+# advisories landed after that: CVE-2026-95837 (CRI checkpoint restore applies
+# the credentials, capabilities, no_new_privs, and seccomp state stored in the
+# checkpoint instead of the destination ContainerConfig, fixed in v2.2.7) and
+# CVE-2026-95838 (repeated directory traversal while unpacking layers that use
+# opaque whiteouts, fixed in v2.2.8). The go get step below bumps containerd/v2
+# to v2.2.10, the newest v2.2.x patch, to clear all of them. These are
 # patch-level fixes with no breaking API changes. Every vulnerable code path is
-# daemon-side (containerd's CRI service) and is not reached by compose at all,
-# so this is defense-in-depth rather than a live exposure.
+# daemon-side (containerd's CRI service and its layer unpack handler) and is not
+# reached by compose at all, so this is defense-in-depth rather than a live
+# exposure.
 #
 # The same go get also bumps google.golang.org/grpc from v1.80.0 to v1.83.2 to
 # clear GHSA-hrxh-6v49-42gf (xDS RBAC fail-open and HTTP/2 transport issues)
@@ -232,8 +238,9 @@ RUN mkdir -p /build
 
 # Patch otel/sdk and exporters from v1.42.0 → v1.44.0 to clear CVE-2026-39883,
 # CVE-2026-39882, and CVE-2026-41178 (present through v1.43.0; v1.44.0 is also
-# grpc v1.83.2's minimum below), bump containerd/v2 from v2.2.3 → v2.2.5 to
-# clear CVE-2026-46680 plus the CVE-2026-53488 / 53489 / 53492 cluster, bump
+# grpc v1.83.2's minimum below), bump containerd/v2 from v2.2.3 → v2.2.10 to
+# clear CVE-2026-46680, the CVE-2026-53488 / 53489 / 53492 cluster, and
+# CVE-2026-95837 / CVE-2026-95838, bump
 # google.golang.org/grpc to v1.83.2 to clear GHSA-hrxh-6v49-42gf,
 # CVE-2026-84304, and CVE-2026-84445, bump golang.org/x/net to v0.60.0 (which
 # also requires golang.org/x/text v0.42.0) to clear CVE-2026-46600 and
@@ -252,7 +259,7 @@ RUN --mount=type=cache,id=go-mod,sharing=locked,target=/go/pkg/mod \
            go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp@v1.44.0 \
            go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetricgrpc@v1.44.0 \
            go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetrichttp@v1.44.0 \
-           github.com/containerd/containerd/v2@v2.2.5 \
+           github.com/containerd/containerd/v2@v2.2.10 \
            google.golang.org/grpc@v1.83.2 \
            golang.org/x/text@v0.42.0 \
            golang.org/x/net@v0.60.0 \
