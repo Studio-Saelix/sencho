@@ -11240,6 +11240,130 @@ describe('GitSourceService sync-env stacks with a repo .env (audit C-2)', () => 
         }
     });
 
+    type DeployBoundary = { args: string[]; cwd: string; env: string };
+
+    /**
+     * Stub the execution boundary of a Git apply deploy: the `docker compose up`
+     * run itself and the container reads that follow it. Both services hand out
+     * a fresh instance per `getInstance()` call, so the spies go on the
+     * prototype. `fail` simulates the Compose run itself failing.
+     */
+    async function stubDeployExecution(fail: boolean): Promise<{ executed: DeployBoundary[]; restore: () => void }> {
+        const { ComposeService } = await import('../services/ComposeService');
+        const { default: DockerController } = await import('../services/DockerController');
+        const executed: DeployBoundary[] = [];
+        const executeSpy = vi
+            .spyOn(ComposeService.prototype as unknown as { execute: (command: string, args: string[], cwd: string) => Promise<void> }, 'execute')
+            .mockImplementation(async (_command, args, cwd) => {
+                const flag = args.indexOf('--env-file');
+                const envPath = flag >= 0 ? args[flag + 1] : path.join(cwd, '.env');
+                executed.push({ args, cwd, env: fs.readFileSync(envPath, 'utf8') });
+                if (fail) throw new Error('compose up failed');
+            });
+        const orphanSpy = vi.spyOn(DockerController.prototype, 'getLegacyOrphanContainersByStack').mockResolvedValue([]);
+        const dockerSpy = vi.spyOn(DockerController.prototype, 'getDocker').mockReturnValue({
+            listContainers: async () => [],
+        } as unknown as ReturnType<typeof DockerController.prototype.getDocker>);
+        return {
+            executed,
+            restore: () => {
+                executeSpy.mockRestore();
+                orphanSpy.mockRestore();
+                dockerSpy.mockRestore();
+            },
+        };
+    }
+
+    /**
+     * Push one encrypted sync-env generation through pull + apply with the real
+     * deploy overlay preparation and Compose argument construction. The caller
+     * runs `restore` (and removes the stack) after asserting the result.
+     */
+    async function observeEncryptedSyncEnvDeploy(
+        stackName: string,
+        sha: string,
+        failExecution: boolean,
+    ): Promise<{ apply: Awaited<ReturnType<typeof GitSourceService.prototype.apply>>; executed: DeployBoundary[]; restore: () => void }> {
+        const { executed, restore } = await stubDeployExecution(failExecution);
+        try {
+            const { svc } = await stageSopsSyncEnv(
+                stackName,
+                sha,
+                'services:\n  web:\n    image: nginx:1.27-alpine\n    environment:\n      AUDIT_PORT: ${PORT}\n',
+            );
+            // Validation runs for real, against the decrypted overlay.
+            const pull = await svc.pull(stackName);
+            expect(pull.validation.ok).toBe(true);
+            const apply = await svc.apply(stackName, sha, { deploy: true, ...SKIP_PLAN_FINGERPRINT });
+            return { apply, executed, restore };
+        } catch (err) {
+            restore();
+            await cleanupStackDir(stackName);
+            throw err;
+        }
+    }
+
+    /** The live project and the staged candidate both stay ciphertext. */
+    async function expectStoredEnvCiphertext(stackName: string): Promise<void> {
+        const { FileSystemService } = await import('../services/FileSystemService');
+        const onDisk = await FileSystemService.getInstance().getEnvContent(stackName);
+        expect(onDisk).toContain('ENC[AES256_GCM');
+        expect(onDisk).not.toContain('PORT=8080');
+        const staged = managedEnvContents(stackName);
+        expect(staged.length).toBeGreaterThan(0);
+        expect(staged.every((env) => env.includes('ENC[AES256_GCM') && !env.includes('PORT=8080'))).toBe(true);
+    }
+
+    it('deploys the decrypted synced env through Git apply and removes the overlay', async () => {
+        const sha = 'abcd0a0aabcd0a0aabcd0a0aabcd0a0aabcd0a0a';
+        const stackName = 'sync-env-sops-deploy';
+        const { gitSecretsAreaBase } = await import('../services/gitops/managedPaths');
+        const { apply, executed, restore } = await observeEncryptedSyncEnvDeploy(stackName, sha, false);
+        try {
+            expect(apply.applied).toBe(true);
+            expect(apply.deployed).toBe(true);
+            expect(apply.deployError).toBeUndefined();
+            // The execution boundary received a decrypted project: Compose ran
+            // from the overlay, and the env file it would read there is plaintext.
+            expect(executed).toHaveLength(1);
+            const call = executed[0];
+            expect(call.cwd.startsWith(path.resolve(gitSecretsAreaBase()) + path.sep)).toBe(true);
+            expect(call.args[0]).toBe('compose');
+            expect(call.args).toContain('up');
+            // No --env-file is authored for this single-file stack, so Compose
+            // reads the project-directory `.env` that `call.env` captured.
+            expect(call.args).not.toContain('--env-file');
+            expect(call.env).toContain('PORT=8080');
+            expect(call.env).not.toContain('ENC[AES256_GCM');
+            await expectStoredEnvCiphertext(stackName);
+            // Neither the validation overlay nor the deploy overlay survived.
+            expect(await overlayEntries(stackName)).toEqual([]);
+        } finally {
+            restore();
+            await cleanupStackDir(stackName);
+        }
+    });
+
+    it('removes the deploy overlay when a Git apply deploy fails', async () => {
+        const sha = 'abcd0b0babcd0b0babcd0b0babcd0b0babcd0b0b';
+        const stackName = 'sync-env-sops-deploy-fail';
+        const { apply, executed, restore } = await observeEncryptedSyncEnvDeploy(stackName, sha, true);
+        try {
+            expect(apply.applied).toBe(true);
+            expect(apply.deployed).toBe(false);
+            expect(apply.deployError).toContain('compose up failed');
+            // The failing Compose run still received the decrypted env.
+            expect(executed).toHaveLength(1);
+            expect(executed[0].env).toContain('PORT=8080');
+            expect(executed[0].env).not.toContain('ENC[AES256_GCM');
+            await expectStoredEnvCiphertext(stackName);
+            expect(await overlayEntries(stackName)).toEqual([]);
+        } finally {
+            restore();
+            await cleanupStackDir(stackName);
+        }
+    });
+
     it('blocks accepted dispatch when the generation does not record the synced age recipients', async () => {
         const sha = 'abcdbdbbabcdbdbbabcdbdbbabcdbdbbabcdbdbb';
         const stackName = 'sync-env-sops-stale-dispatch';
@@ -11564,6 +11688,96 @@ describe('GitSourceService sync-env stacks with a repo .env (audit C-2)', () => 
                 compose,
                 { AUDIT_HOST_PORT: sentinel },
             );
+            const pull = await svc.pull(stackName);
+            expect(pull.validation.ok).toBe(false);
+            expect(pull.validation.error).toBe(WITHHELD_DECRYPTED_DIAGNOSTIC);
+            expect(pull.validation.error).not.toContain(sentinel);
+            expect(JSON.stringify(pull)).not.toContain(sentinel);
+            expect(logs.join('\n')).not.toContain(sentinel);
+            const row = DatabaseService.getInstance().getDb()
+                .prepare('SELECT pending_compose_content, pending_env_content, pending_plan_summary FROM stack_git_sources WHERE stack_name = ?')
+                .get(stackName) as { pending_compose_content: string | null; pending_env_content: string | null; pending_plan_summary: string | null };
+            expect(JSON.stringify(row)).not.toContain(sentinel);
+            expect(await overlayEntries(stackName)).toEqual([]);
+            const staged = managedEnvContents(stackName);
+            expect(staged.length).toBeGreaterThan(0);
+            expect(staged.every((env) => env.includes('ENC[AES256_GCM') && !env.includes(sentinel))).toBe(true);
+        } finally {
+            logSpy.mockRestore();
+            warnSpy.mockRestore();
+            errorSpy.mockRestore();
+            fs.rmSync(controlDir, { recursive: true, force: true });
+            await cleanupStackDir(stackName);
+        }
+    });
+
+    it('withholds a real compose diagnostic for a YAML SOPS sibling .env', async () => {
+        const sentinel = 'audit-secret-yaml-sentinel';
+        const sha = 'abcdf0f0abcdf0f0abcdf0f0abcdf0f0abcdf0f0';
+        const stackName = 'sync-env-sops-redact-yaml';
+        const compose = 'services:\n  web:\n    image: nginx:1.27-alpine\n    ports:\n      - "${AUDIT_HOST_PORT}:80"\n';
+        // Control: Compose parses a proposed value from a colon assignment in
+        // an env file, so the decrypted YAML representation reaches its stderr
+        // and would leak through any `KEY=value`-only filter.
+        const controlDir = fs.mkdtempSync(path.join(os.tmpdir(), 'sencho-compose-yaml-'));
+        fs.writeFileSync(path.join(controlDir, 'compose.yaml'), compose);
+        fs.writeFileSync(path.join(controlDir, '.env'), `AUDIT_HOST_PORT: ${sentinel}\n`);
+        let rawStderr = '';
+        try {
+            execFileSync('docker', ['compose', '-f', 'compose.yaml', 'config', '--quiet'], {
+                cwd: controlDir,
+                stdio: ['ignore', 'pipe', 'pipe'],
+                timeout: 20_000,
+            });
+        } catch (err) {
+            const stderr = (err as { stderr?: Buffer }).stderr;
+            rawStderr = stderr ? stderr.toString() : '';
+        }
+        expect(rawStderr).toContain(sentinel);
+
+        const logs: string[] = [];
+        const logSpy = vi.spyOn(console, 'log').mockImplementation((...args: unknown[]) => {
+            logs.push(args.map((part) => String(part)).join(' '));
+        });
+        const warnSpy = vi.spyOn(console, 'warn').mockImplementation((...args: unknown[]) => {
+            logs.push(args.map((part) => String(part)).join(' '));
+        });
+        const errorSpy = vi.spyOn(console, 'error').mockImplementation((...args: unknown[]) => {
+            logs.push(args.map((part) => String(part)).join(' '));
+        });
+        try {
+            const svc = GitSourceService.getInstance();
+            const age = await import('age-encryption');
+            const identity = await age.generateIdentity();
+            const recipient = await age.identityToRecipient(identity);
+            const { buildSopsAgeDocument } = await import('./helpers/sopsFixtures');
+            const env = await buildSopsAgeDocument({
+                values: { AUDIT_HOST_PORT: sentinel },
+                identity,
+                recipient,
+            });
+            const { FileSystemService } = await import('../services/FileSystemService');
+            await FileSystemService.getInstance().createStack(stackName);
+            mockSuccessfulClone({ compose, env, envPath: '.env', sha });
+            await svc.upsert({
+                stackName,
+                repoUrl: 'https://github.com/example/repo.git',
+                branch: 'main',
+                composePaths: ['compose.yaml'],
+                contextDir: null,
+                syncEnv: true,
+                envPath: '.env',
+                authType: 'none',
+                autoApplyOnWebhook: false,
+                autoDeployOnApply: false,
+            });
+            const { SopsIdentityStore } = await import('../services/gitops/sops/identityStore');
+            const app = GitOpsStore.getInstance().getLiveDirectApplication(stackName);
+            await SopsIdentityStore.getInstance().importIdentity({
+                applicationId: app?.id ?? stackName,
+                stackName,
+                identity,
+            });
             const pull = await svc.pull(stackName);
             expect(pull.validation.ok).toBe(false);
             expect(pull.validation.error).toBe(WITHHELD_DECRYPTED_DIAGNOSTIC);

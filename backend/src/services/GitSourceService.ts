@@ -603,86 +603,17 @@ function publicComposeValidationError(
     return scrubCredentials(scrubInternalPaths(text, ...roots));
 }
 
-const WITHHELD_VALIDATION_ERROR = 'Compose validation failed. The message was withheld because a decrypted env file could not be read.';
-
-/** Returned instead of Compose stderr once a decrypted env file has any value Compose would read. */
-export const WITHHELD_DECRYPTED_DIAGNOSTIC = 'Compose validation failed. The diagnostic was withheld because this candidate includes decrypted env values.';
-
-type OverlayEnvRead = 'absent' | 'present' | 'unreadable';
-
-/** True when the decrypted file has a value Compose would interpolate. Empty assignments do not count. */
-function envFileHasComposeValue(content: string): boolean {
-    for (const rawLine of content.split(/\r?\n/)) {
-        let line = rawLine.trim();
-        if (!line || line.startsWith('#')) continue;
-        if (line.startsWith('export ')) line = line.slice('export '.length).trim();
-        const eq = line.indexOf('=');
-        if (eq <= 0) continue;
-        const key = line.slice(0, eq).trim();
-        if (!key || key.startsWith('sops_') || key.startsWith('age__list_')) continue;
-        if (envValuesComposeWouldRead(line.slice(eq + 1)).some((value) => value.length > 0)) return true;
-    }
-    return false;
-}
-
-/** Quoted inner value first, including a trailing comment after the closing quote. A bare value drops its trailing ` #` comment. */
-function envValuesComposeWouldRead(rawValue: string): string[] {
-    const trimmed = rawValue.trim();
-    const quote = trimmed[0];
-    if (quote === '"' || quote === "'") {
-        let inner = '';
-        let i = 1;
-        while (i < trimmed.length) {
-            const ch = trimmed[i];
-            if (quote === '"' && ch === '\\' && i + 1 < trimmed.length) {
-                const next = trimmed[i + 1];
-                inner += next === 'n' ? '\n' : next === 'r' ? '\r' : next === 't' ? '\t' : next;
-                i += 2;
-                continue;
-            }
-            if (ch === quote) {
-                const unescaped = quote === '"' ? inner.replace(/\$\$/g, '$') : inner;
-                return unescaped === inner ? [unescaped] : [unescaped, inner];
-            }
-            inner += ch;
-            i += 1;
-        }
-    }
-    const commentIdx = trimmed.search(/\s#/);
-    const bare = (commentIdx >= 0 ? trimmed.slice(0, commentIdx) : trimmed).trim();
-    return bare ? [bare] : [];
-}
-
 /**
- * Whether a decrypted env input can appear in a Compose diagnostic.
- * Any non-empty value fails closed: short values, fragments, and spellings
- * changed by path scrubbing cannot be removed from free-form stderr.
+ * Returned instead of Compose stderr whenever validation ran against an
+ * overlay that holds decrypted inputs. The decrypted content is never
+ * interpreted: Compose reads several of those files itself (env and label
+ * files are parsed, not just passed through) and accepts representations a
+ * second parser here would only reimplement badly (dotenv assignments,
+ * quoted values, YAML-style colon assignments), while a value embedded in
+ * free-form stderr cannot be stripped safely. Withholding the whole
+ * diagnostic fails closed for every accepted format and every malformed one.
  */
-async function readOverlayEnv(
-    overlayDir: string,
-    inputs: ComposeInputEntry[],
-): Promise<OverlayEnvRead> {
-    const root = path.resolve(overlayDir);
-    for (const input of inputs) {
-        if (input.encryption !== 'sops-age' || input.role !== 'env' || !input.materializedPath) continue;
-        if (input.materializedPath.includes('..') || path.isAbsolute(input.materializedPath)) return 'unreadable';
-        const target = path.resolve(root, input.materializedPath);
-        if (!target.startsWith(root + path.sep)) return 'unreadable';
-        try {
-            if (envFileHasComposeValue(await fsPromises.readFile(target, 'utf8'))) return 'present';
-        } catch (err) {
-            if ((err as NodeJS.ErrnoException).code === 'ENOENT') continue;
-            return 'unreadable';
-        }
-    }
-    return 'absent';
-}
-
-function withheldDecryptedValidationError(read: OverlayEnvRead | null): string | null {
-    if (read === 'absent') return null;
-    if (read === 'present') return WITHHELD_DECRYPTED_DIAGNOSTIC;
-    return WITHHELD_VALIDATION_ERROR;
-}
+export const WITHHELD_DECRYPTED_DIAGNOSTIC = 'Compose validation failed. The diagnostic was withheld because this candidate includes decrypted secret files.';
 
 /**
  * Extract just the hostname for log lines so we never echo a full
@@ -2059,7 +1990,9 @@ export class GitSourceService {
     /**
      * Validate a staged candidate, decrypting SOPS inputs into an overlay
      * first. The overlay is removed before this returns, including when
-     * compose config fails. Live and staged files stay ciphertext.
+     * compose config fails. Live and staged files stay ciphertext. A failure
+     * is reported as WITHHELD_DECRYPTED_DIAGNOSTIC rather than Compose's own
+     * message, because the overlay held decrypted content for this attempt.
      */
     private async validateStagedCandidate(args: {
         stackName: string;
@@ -2092,19 +2025,19 @@ export class GitSourceService {
             manifest: { inputs: args.inputs },
         });
         if (!overlay) return validate();
+        // Reaching this point means the overlay decrypted at least one managed
+        // input (buildGitOpsDecryptOverlay returns null when none qualifies and
+        // throws when one cannot be decrypted), so a failing validation is
+        // withheld wholesale rather than returned.
         try {
             const result = await validate(overlay.overlayDir);
             if (result.ok || !result.error) return result;
-            const withheld = withheldDecryptedValidationError(
-                await readOverlayEnv(overlay.overlayDir, args.inputs),
-            );
-            return withheld ? { ok: false, error: withheld } : result;
-        } catch (err) {
-            const withheld = withheldDecryptedValidationError(
-                await readOverlayEnv(overlay.overlayDir, args.inputs).catch(() => null),
-            );
-            if (withheld) throw new Error(withheld);
-            throw err instanceof Error ? err : new Error(String(err));
+            return { ok: false, error: WITHHELD_DECRYPTED_DIAGNOSTIC };
+        } catch {
+            // A thrown validation error is withheld for the same reason: the
+            // overlay held decrypted content for this attempt, and an error
+            // wrapped around a Compose diagnostic would leak it.
+            throw new Error(WITHHELD_DECRYPTED_DIAGNOSTIC);
         } finally {
             await destroyGitOpsOverlay(overlay.binding);
         }
