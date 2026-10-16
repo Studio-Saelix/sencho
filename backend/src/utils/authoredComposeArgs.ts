@@ -116,6 +116,14 @@ function rejectBadProjectEnvName(stackName: string, file: string): void {
   }
 }
 
+/** Refusal for a configured env file that resolves outside its authorized tree. */
+function envResolvesOutsideError(stackName: string, file: string): Error {
+  return new Error(
+    `Project env file "${file}" for stack "${stackName}" resolves outside the stack directory. ` +
+    `Update the project env file selection in the Environment tab.`
+  );
+}
+
 /**
  * Build `--env-file` arguments for the stack's configured project env files.
  *
@@ -129,9 +137,12 @@ function rejectBadProjectEnvName(stackName: string, file: string): void {
  * being validated) is taken from there. A deploy `stackDirOverride` under the
  * git-secrets or git-managed area is treated the same way. Files that are not
  * in that tree stay on the live stack. An override outside those roots and
- * outside the live stack is rejected. `options.missingMode: 'skip'` omits a
- * configured file that is not on disk. The change-plan snapshot uses that so
- * a pull can continue. Deploy still refuses a missing file.
+ * outside the live stack is rejected. Containment is checked on real paths
+ * against real roots, so a relocated (symlinked) data or compose directory is
+ * accepted while a link out of the authorized tree is refused.
+ * `options.missingMode: 'skip'` omits a configured file that is not on disk.
+ * The change-plan snapshot uses that so a pull can continue. Deploy still
+ * refuses a missing file.
  *
  * When no project env files are configured, fall back to the legacy behavior:
  * pass `--env-file <stackDir>/.env` only for multi-file Git stacks whose
@@ -139,9 +150,11 @@ function rejectBadProjectEnvName(stackName: string, file: string): void {
  * A root `.env` under git-secrets or git-managed is resolved to the path its
  * name claims after realpath, so a relocated data directory still matches and
  * a link inside the area does not. The area root is those two directories,
- * not the candidate. Validation uses the same check. An override outside the
- * live stack and those areas is rejected. A live stack with no override stays
- * on the compose-root path.
+ * not the candidate. An area that sits inside the compose root (DATA_DIR
+ * nested under COMPOSE_DIR) is still recognized as an area, so validation and
+ * deployment select the same file. Validation uses the same check. An override
+ * outside the live stack and those areas is rejected. A live stack with no
+ * override stays on the compose-root path.
  */
 export async function authoredComposeEnvFileArgs(
   stackName: string,
@@ -216,16 +229,20 @@ export async function authoredComposeEnvFileArgs(
         throw err;
       }
       if (!realEnvPath.startsWith(allowedRoot + path.sep)) {
-        throw new Error(
-          `Project env file "${file}" for stack "${stackName}" resolves outside the stack directory. ` +
-          `Update the project env file selection in the Environment tab.`
-        );
+        // A relocated data or compose directory (a symlinked DATA_DIR, or a
+        // symlinked COMPOSE_DIR) makes the physical file path differ from the
+        // lexical root while the file is exactly where its name claims, so the
+        // real path is compared against the real root.
+        const realAllowedRoot = await fsPromises.realpath(allowedRoot);
+        if (!realEnvPath.startsWith(realAllowedRoot + path.sep)) {
+          throw envResolvesOutsideError(stackName, file);
+        }
       }
       if (envDir !== liveDir && !realEnvPath.startsWith(path.resolve(envDir) + path.sep)) {
-        throw new Error(
-          `Project env file "${file}" for stack "${stackName}" resolves outside the stack directory. ` +
-          `Update the project env file selection in the Environment tab.`
-        );
+        const realEnvDir = await fsPromises.realpath(envDir);
+        if (!realEnvPath.startsWith(realEnvDir + path.sep)) {
+          throw envResolvesOutsideError(stackName, file);
+        }
       }
       const stat = await fsPromises.stat(realEnvPath);
       if (!stat.isFile()) {
@@ -253,11 +270,13 @@ export async function authoredComposeEnvFileArgs(
   const secretsRoot = path.resolve(gitSecretsAreaBase());
   const managedRoot = path.resolve(managedAreaBase());
   const envPath = path.resolve(stackDir, '.env');
-  const onComposeRoot = envPath.startsWith(baseResolved + path.sep);
-  if (!onComposeRoot && envPath.startsWith(secretsRoot + path.sep)) {
+  // Area membership is checked before compose-root membership: DATA_DIR can be
+  // nested under COMPOSE_DIR, and an area there is still an authorized area.
+  // Candidate validation accepts it, so deployment must select the same file.
+  if (envPath.startsWith(secretsRoot + path.sep)) {
     return readClaimedAreaEnv(stackName, envPath, secretsRoot);
   }
-  if (!onComposeRoot && envPath.startsWith(managedRoot + path.sep)) {
+  if (envPath.startsWith(managedRoot + path.sep)) {
     return readClaimedAreaEnv(stackName, envPath, managedRoot);
   }
   if (stackDirOverride) {

@@ -411,6 +411,180 @@ describe('authoredComposeEnvFileArgs', () => {
             expect(fs.existsSync(managed)).toBe(false);
         }
     });
+
+    /**
+     * An authorized git-secrets/git-managed area can sit inside the compose
+     * root when DATA_DIR is nested beneath COMPOSE_DIR. Deployment must
+     * recognize the area override there exactly as candidate validation does,
+     * or a source that validates cannot deploy.
+     */
+    describe('authorized area inside the compose root', () => {
+        const compose = [
+            'services:',
+            '  web:',
+            '    image: nginx:1.27-alpine',
+            '    ports:',
+            '      - "${PORT}:80"',
+            '    environment:',
+            '      TOKEN: ${TOKEN}',
+            '',
+        ].join('\n');
+
+        it.each([
+            { area: 'git-secrets' as const, nested: false, label: 'sibling data root' },
+            { area: 'git-secrets' as const, nested: true, label: 'data root nested under COMPOSE_DIR' },
+            { area: 'git-managed' as const, nested: false, label: 'sibling data root' },
+            { area: 'git-managed' as const, nested: true, label: 'data root nested under COMPOSE_DIR' },
+        ])('$area override: $label', async ({ area, nested }) => {
+            const stackName = `ctx-area-${area}-${nested ? 'nested' : 'sibling'}`;
+            const nodeId = NodeRegistry.getInstance().getDefaultNodeId();
+            seedSource(stackName, ['compose.yaml']);
+            DatabaseService.getInstance().setGitSourceAppliedSpec(stackName, {
+                files: ['compose.yaml'],
+                contextDir: 'context',
+            });
+            const liveDir = makeStackDir(stackName, false);
+            const composeDir = NodeRegistry.getInstance().getComposeDir(nodeId);
+            const dataDir = nested ? path.join(composeDir, '.sencho-data') : path.join(tmpDir, 'sibling-data');
+            fs.mkdirSync(dataDir, { recursive: true });
+            const previousDataDir = process.env.DATA_DIR;
+            process.env.DATA_DIR = dataDir;
+            try {
+                const { gitSecretsAreaBase, managedAreaBase } = await import('../services/gitops/managedPaths');
+                const areaRoot = area === 'git-secrets' ? gitSecretsAreaBase() : managedAreaBase();
+                const areaStack = path.join(areaRoot, String(nodeId), stackName, 'area-ctx');
+                fs.mkdirSync(path.join(areaStack, 'context'), { recursive: true });
+                const areaEnv = path.join(areaStack, '.env');
+                fs.writeFileSync(areaEnv, 'TOKEN=from-area\nPORT=8080\n');
+                fs.writeFileSync(path.join(areaStack, 'compose.yaml'), compose);
+
+                const { candidateValidationEnvFileArgs } = await import('../utils/authoredComposeArgs');
+                const fileArgs = authoredComposeFileArgs(stackName, nodeId, areaStack);
+                const deployEnv = await authoredComposeEnvFileArgs(stackName, nodeId, areaStack);
+                const validationEnv = await candidateValidationEnvFileArgs({
+                    stackName,
+                    nodeId,
+                    candidateAbs: areaStack,
+                    contextDir: 'context',
+                    syncEnv: true,
+                });
+                const areaEnvReal = await fs.promises.realpath(areaEnv);
+                expect(deployEnv).toEqual(['--env-file', areaEnvReal]);
+                expect(validationEnv).toEqual(deployEnv);
+                expect(deployEnv.join(' ')).not.toContain(path.join(liveDir, '.env'));
+
+                const deployModel = composeEffectiveModel(areaStack, [...fileArgs, ...deployEnv]);
+                const validationModel = composeEffectiveModel(areaStack, [...fileArgs, ...validationEnv]);
+                expect(deployModel).toEqual({ token: 'from-area', published: '8080' });
+                expect(validationModel).toEqual(deployModel);
+            } finally {
+                process.env.DATA_DIR = previousDataDir;
+            }
+        });
+    });
+
+    /**
+     * A relocated data directory (a symlinked DATA_DIR) must not be mistaken
+     * for an escaping path when project env files are configured: the candidate
+     * and decrypt-overlay copies are selected by their physical location, while
+     * links that leave the authorized tree stay rejected. A symlinked compose
+     * root behaves the same way for the live copy.
+     */
+    describe('configured project env files under relocated roots', () => {
+        it('selects the candidate and overlay copy and still rejects escaping links', async () => {
+            const stackName = 'env-configured-relocated';
+            const nodeId = NodeRegistry.getInstance().getDefaultNodeId();
+            const liveDir = makeStackDir(stackName, true);
+            fs.writeFileSync(path.join(liveDir, '.env'), 'TOKEN=live\n');
+            DatabaseService.getInstance().setStackProjectEnvFiles(nodeId, stackName, ['.env']);
+            const realData = fs.mkdtempSync(path.join(tmpDir, 'real-configured-data-'));
+            const linkData = path.join(tmpDir, 'linked-configured-data');
+            fs.symlinkSync(realData, linkData);
+            const previousDataDir = process.env.DATA_DIR;
+            process.env.DATA_DIR = linkData;
+            try {
+                const { gitSecretsAreaBase, managedAreaBase } = await import('../services/gitops/managedPaths');
+                const overlay = path.join(gitSecretsAreaBase(), String(nodeId), stackName, 'op-relocated');
+                const candidate = path.join(managedAreaBase(), String(nodeId), stackName, 'candidate-relocated');
+                fs.mkdirSync(overlay, { recursive: true });
+                fs.mkdirSync(candidate, { recursive: true });
+                fs.writeFileSync(path.join(overlay, '.env'), 'TOKEN=overlay-relocated\n');
+                fs.writeFileSync(path.join(candidate, '.env'), 'TOKEN=candidate-relocated\n');
+                const overlayEnvReal = await fs.promises.realpath(path.join(overlay, '.env'));
+                const candidateEnvReal = await fs.promises.realpath(path.join(candidate, '.env'));
+
+                const { candidateValidationEnvFileArgs } = await import('../utils/authoredComposeArgs');
+                expect(await authoredComposeEnvFileArgs(stackName, nodeId, overlay)).toEqual([
+                    '--env-file', overlayEnvReal,
+                ]);
+                const validation = await candidateValidationEnvFileArgs({
+                    stackName,
+                    nodeId,
+                    candidateAbs: candidate,
+                    contextDir: null,
+                    syncEnv: true,
+                });
+                expect(validation).toEqual(['--env-file', candidateEnvReal]);
+                expect(await authoredComposeEnvFileArgs(stackName, nodeId)).toEqual([
+                    '--env-file', path.join(liveDir, '.env'),
+                ]);
+
+                // A link inside the area but outside this stack's own tree is
+                // still refused: the file must resolve to where its name claims.
+                const otherStackDir = path.join(gitSecretsAreaBase(), String(nodeId), 'env-configured-other');
+                fs.mkdirSync(otherStackDir, { recursive: true });
+                fs.writeFileSync(path.join(otherStackDir, '.env'), 'TOKEN=other-stack\n');
+                fs.rmSync(path.join(overlay, '.env'));
+                fs.symlinkSync(path.join(otherStackDir, '.env'), path.join(overlay, '.env'));
+                await expect(authoredComposeEnvFileArgs(stackName, nodeId, overlay)).rejects.toThrow(/resolves outside/);
+
+                const outside = path.join(tmpDir, 'outside-relocated-env');
+                fs.writeFileSync(outside, 'TOKEN=escaped\n');
+                fs.rmSync(path.join(overlay, '.env'));
+                fs.symlinkSync(outside, path.join(overlay, '.env'));
+                await expect(authoredComposeEnvFileArgs(stackName, nodeId, overlay)).rejects.toThrow(/resolves outside/);
+                expect(fs.readFileSync(outside, 'utf8')).toBe('TOKEN=escaped\n');
+            } finally {
+                process.env.DATA_DIR = previousDataDir;
+                fs.rmSync(linkData, { force: true });
+                fs.rmSync(realData, { recursive: true, force: true });
+            }
+        });
+
+        it('selects the live .env under a symlinked compose root and still rejects an escaping link', async () => {
+            const stackName = 'env-configured-compose-link';
+            const nodeId = NodeRegistry.getInstance().getDefaultNodeId();
+            const db = DatabaseService.getInstance();
+            const realCompose = fs.mkdtempSync(path.join(tmpDir, 'real-compose-'));
+            const linkCompose = path.join(tmpDir, 'linked-compose-dir');
+            fs.symlinkSync(realCompose, linkCompose);
+            const previousComposeDir = db.getNode(nodeId)?.compose_dir ?? null;
+            db.updateNode(nodeId, { compose_dir: linkCompose });
+            try {
+                const liveDir = path.join(linkCompose, stackName);
+                fs.mkdirSync(liveDir, { recursive: true });
+                fs.writeFileSync(path.join(liveDir, '.env'), 'TOKEN=live-linked-compose\n');
+                db.setStackProjectEnvFiles(nodeId, stackName, ['.env']);
+
+                const liveEnvReal = await fs.promises.realpath(path.join(liveDir, '.env'));
+                expect(await authoredComposeEnvFileArgs(stackName, nodeId)).toEqual([
+                    '--env-file', liveEnvReal,
+                ]);
+
+                const outside = path.join(tmpDir, 'outside-compose-link-env');
+                fs.writeFileSync(outside, 'TOKEN=escaped\n');
+                fs.rmSync(path.join(liveDir, '.env'));
+                fs.symlinkSync(outside, path.join(liveDir, '.env'));
+                await expect(authoredComposeEnvFileArgs(stackName, nodeId)).rejects.toThrow(/resolves outside/);
+                expect(fs.readFileSync(outside, 'utf8')).toBe('TOKEN=escaped\n');
+            } finally {
+                db.setStackProjectEnvFiles(nodeId, stackName, []);
+                if (previousComposeDir) db.updateNode(nodeId, { compose_dir: previousComposeDir });
+                fs.rmSync(linkCompose, { force: true });
+                fs.rmSync(realCompose, { recursive: true, force: true });
+            }
+        });
+    });
 });
 
 function composeEffectiveModel(cwd: string, args: string[]): { token: string; published: string } {
