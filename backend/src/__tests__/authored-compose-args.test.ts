@@ -10,6 +10,7 @@
  *   - any spec file path or context dir that is absolute / contains ".." throws
  *     before any args are returned (it is spliced straight into child-process argv)
  */
+import { execFileSync } from 'child_process';
 import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from 'vitest';
 import path from 'path';
 import fs from 'fs';
@@ -248,7 +249,190 @@ describe('authoredComposeEnvFileArgs', () => {
         fs.writeFileSync(path.join(evil, '.env'), 'TOKEN=evil\n');
         await expect(authoredComposeEnvFileArgs(stackName, nodeId, evil)).rejects.toThrow(/escapes/);
     });
+
+    it('rejects an implicit .env override outside the live stack and decrypt areas', async () => {
+        const stackName = 'ctx-implicit-evil';
+        const nodeId = NodeRegistry.getInstance().getDefaultNodeId();
+        seedSource(stackName, ['compose.yaml']);
+        DatabaseService.getInstance().setGitSourceAppliedSpec(stackName, {
+            files: ['compose.yaml'],
+            contextDir: 'context',
+        });
+        const liveDir = makeStackDir(stackName, true);
+        const evil = path.join(tmpDir, 'evil-implicit-env');
+        fs.mkdirSync(path.join(evil, 'context'), { recursive: true });
+        fs.writeFileSync(path.join(evil, '.env'), 'TOKEN=evil\n');
+        await expect(authoredComposeEnvFileArgs(stackName, nodeId, evil)).rejects.toThrow(/escapes/);
+        expect(fs.readFileSync(path.join(liveDir, '.env'), 'utf8')).toBe('TAG=1\n');
+    });
+
+    it('returns [] when an authorized overlay has no root .env', async () => {
+        const stackName = 'ctx-overlay-no-env';
+        const nodeId = NodeRegistry.getInstance().getDefaultNodeId();
+        seedSource(stackName, ['compose.yaml']);
+        DatabaseService.getInstance().setGitSourceAppliedSpec(stackName, {
+            files: ['compose.yaml'],
+            contextDir: 'context',
+        });
+        makeStackDir(stackName, false);
+        const { gitSecretsAreaBase } = await import('../services/gitops/managedPaths');
+        const overlay = path.join(gitSecretsAreaBase(), String(nodeId), stackName, 'op-empty');
+        fs.mkdirSync(overlay, { recursive: true });
+        try {
+            expect(await authoredComposeEnvFileArgs(stackName, nodeId, overlay)).toEqual([]);
+        } finally {
+            fs.rmSync(overlay, { recursive: true, force: true });
+        }
+    });
+
+    it('rejects an overlay .env symlink that resolves outside the decrypt area', async () => {
+        const stackName = 'ctx-implicit-symlink';
+        const nodeId = NodeRegistry.getInstance().getDefaultNodeId();
+        seedSource(stackName, ['compose.yaml']);
+        DatabaseService.getInstance().setGitSourceAppliedSpec(stackName, {
+            files: ['compose.yaml'],
+            contextDir: 'context',
+        });
+        makeStackDir(stackName, false);
+        const { gitSecretsAreaBase } = await import('../services/gitops/managedPaths');
+        const overlay = path.join(gitSecretsAreaBase(), String(nodeId), stackName, 'op-link');
+        fs.mkdirSync(overlay, { recursive: true });
+        const outsideEnv = path.join(tmpDir, 'outside-implicit-env');
+        fs.writeFileSync(outsideEnv, 'TOKEN=escaped-secret\n');
+        fs.symlinkSync(outsideEnv, path.join(overlay, '.env'));
+        try {
+            await expect(authoredComposeEnvFileArgs(stackName, nodeId, overlay)).rejects.toThrow(/resolves outside/);
+        } finally {
+            fs.rmSync(overlay, { recursive: true, force: true });
+        }
+        expect(fs.readFileSync(outsideEnv, 'utf8')).toBe('TOKEN=escaped-secret\n');
+    });
+
+    it('accepts an implicit .env when the data directory itself is a symlink', async () => {
+        const stackName = 'ctx-implicit-relocated';
+        const nodeId = NodeRegistry.getInstance().getDefaultNodeId();
+        seedSource(stackName, ['compose.yaml']);
+        DatabaseService.getInstance().setGitSourceAppliedSpec(stackName, {
+            files: ['compose.yaml'],
+            contextDir: 'context',
+        });
+        const realData = fs.mkdtempSync(path.join(tmpDir, 'real-data-'));
+        const linkData = path.join(tmpDir, 'linked-data-dir');
+        fs.symlinkSync(realData, linkData);
+        const previous = process.env.DATA_DIR;
+        process.env.DATA_DIR = linkData;
+        try {
+            const { gitSecretsAreaBase } = await import('../services/gitops/managedPaths');
+            const overlay = path.join(gitSecretsAreaBase(), String(nodeId), stackName, 'op-relocated');
+            fs.mkdirSync(overlay, { recursive: true });
+            fs.writeFileSync(path.join(overlay, '.env'), 'TOKEN=relocated\n');
+            const args = await authoredComposeEnvFileArgs(stackName, nodeId, overlay);
+            expect(args).toEqual(['--env-file', await fs.promises.realpath(path.join(overlay, '.env'))]);
+            expect(args[1].startsWith(await fs.promises.realpath(realData) + path.sep)).toBe(true);
+        } finally {
+            process.env.DATA_DIR = previous;
+            fs.rmSync(linkData, { force: true });
+            fs.rmSync(realData, { recursive: true, force: true });
+        }
+    });
+
+    it('passes the overlay root .env for a context directory when no project env files are configured', async () => {
+        const stackName = 'ctx-overlay-implicit-env';
+        const nodeId = NodeRegistry.getInstance().getDefaultNodeId();
+        seedSource(stackName, ['compose.yaml']);
+        DatabaseService.getInstance().setGitSourceAppliedSpec(stackName, {
+            files: ['compose.yaml'],
+            contextDir: 'context',
+        });
+        const liveDir = makeStackDir(stackName, false);
+        const age = await import('age-encryption');
+        const identity = await age.generateIdentity();
+        const recipient = await age.identityToRecipient(identity);
+        const { buildSopsAgeDotenvDocument } = await import('./helpers/sopsFixtures');
+        const ciphertext = await buildSopsAgeDotenvDocument({
+            values: { PORT: '8080', TOKEN: 'audit-plain-token' },
+            identity,
+            recipient,
+        });
+        fs.writeFileSync(path.join(liveDir, '.env'), ciphertext);
+        const { gitSecretsAreaBase, managedAreaBase } = await import('../services/gitops/managedPaths');
+        const overlay = path.join(gitSecretsAreaBase(), String(nodeId), stackName, 'op-ctx');
+        const managed = path.join(managedAreaBase(), String(nodeId), stackName, 'candidate-ctx');
+        fs.mkdirSync(path.join(overlay, 'context'), { recursive: true });
+        fs.mkdirSync(path.join(managed, 'context'), { recursive: true });
+        const compose = [
+            'services:',
+            '  web:',
+            '    image: nginx:1.27-alpine',
+            '    environment:',
+            '      TOKEN: ${TOKEN}',
+            '    ports:',
+            '      - "${PORT}:80"',
+            '',
+        ].join('\n');
+        const plaintext = 'PORT=8080\nTOKEN=audit-plain-token\n';
+        fs.writeFileSync(path.join(overlay, 'compose.yaml'), compose);
+        fs.writeFileSync(path.join(overlay, '.env'), plaintext);
+        fs.writeFileSync(path.join(managed, 'compose.yaml'), compose);
+        fs.writeFileSync(path.join(managed, '.env'), plaintext);
+        try {
+            const fileArgs = authoredComposeFileArgs(stackName, nodeId, overlay);
+            const deployEnv = await authoredComposeEnvFileArgs(stackName, nodeId, overlay);
+            const managedEnv = await authoredComposeEnvFileArgs(stackName, nodeId, managed);
+            const { candidateValidationEnvFileArgs } = await import('../utils/authoredComposeArgs');
+            const validationEnv = await candidateValidationEnvFileArgs({
+                stackName,
+                nodeId,
+                candidateAbs: overlay,
+                contextDir: 'context',
+                syncEnv: true,
+            });
+            const overlayEnvReal = await fs.promises.realpath(path.join(overlay, '.env'));
+            const managedEnvReal = await fs.promises.realpath(path.join(managed, '.env'));
+            expect(deployEnv).toEqual(['--env-file', overlayEnvReal]);
+            expect(managedEnv).toEqual(['--env-file', managedEnvReal]);
+            expect(await fs.promises.realpath(validationEnv[1])).toBe(overlayEnvReal);
+            expect(fileArgs).toContain(path.resolve(overlay, 'context'));
+            expect(overlayEnvReal).not.toBe(path.join(liveDir, '.env'));
+
+            const deployModel = composeEffectiveModel(overlay, [...fileArgs, ...deployEnv]);
+            const validationModel = composeEffectiveModel(overlay, [...fileArgs, ...validationEnv]);
+            expect(deployModel).toEqual({ token: 'audit-plain-token', published: '8080' });
+            expect(validationModel).toEqual(deployModel);
+
+            const liveAfter = fs.readFileSync(path.join(liveDir, '.env'), 'utf8');
+            expect(liveAfter).toBe(ciphertext);
+            expect(liveAfter).toContain('ENC[AES256_GCM');
+            expect(liveAfter).not.toContain('audit-plain-token');
+        } finally {
+            fs.rmSync(overlay, { recursive: true, force: true });
+            fs.rmSync(managed, { recursive: true, force: true });
+            expect(fs.existsSync(overlay)).toBe(false);
+            expect(fs.existsSync(managed)).toBe(false);
+        }
+    });
 });
+
+function composeEffectiveModel(cwd: string, args: string[]): { token: string; published: string } {
+    const stdout = execFileSync('docker', ['compose', ...args, 'config', '--format', 'json'], {
+        cwd,
+        encoding: 'utf8',
+        timeout: 20_000,
+    });
+    const parsed = JSON.parse(stdout) as {
+        services?: Record<string, {
+            environment?: Record<string, string>;
+            ports?: Array<{ published?: string | number }>;
+        }>;
+    };
+    const web = parsed.services?.web;
+    if (!web) throw new Error(`compose config has no web service: ${stdout}`);
+    const published = web.ports?.[0]?.published;
+    return {
+        token: web.environment?.TOKEN ?? '',
+        published: published == null ? '' : String(published),
+    };
+}
 
 describe('candidateValidationEnvFileArgs', () => {
     let candidateValidationEnvFileArgs: typeof import('../utils/authoredComposeArgs').candidateValidationEnvFileArgs;
@@ -285,8 +469,27 @@ describe('candidateValidationEnvFileArgs', () => {
             contextDir: 'app',
             syncEnv: true,
         });
-        expect(args).toEqual(['--env-file', path.resolve(candidateAbs, '.env')]);
+        expect(args).toEqual(['--env-file', await fs.promises.realpath(path.join(candidateAbs, '.env'))]);
         expect(args).not.toContain(path.resolve(liveDir, '.env'));
+    });
+
+    it('rejects a candidate .env symlink that leaves the candidate', async () => {
+        const stackName = 'val-env-symlink';
+        seedSource(stackName, ['compose.yaml']);
+        const candidateAbs = path.join(tmpDir, 'candidate-env-link');
+        fs.mkdirSync(candidateAbs, { recursive: true });
+        const outside = path.join(tmpDir, 'outside-candidate-env');
+        fs.writeFileSync(outside, 'TOKEN=escaped\n');
+        fs.symlinkSync(outside, path.join(candidateAbs, '.env'));
+        const nodeId = NodeRegistry.getInstance().getDefaultNodeId();
+        await expect(candidateValidationEnvFileArgs({
+            stackName,
+            nodeId,
+            candidateAbs,
+            contextDir: 'app',
+            syncEnv: true,
+        })).rejects.toThrow(/resolves outside/);
+        expect(fs.readFileSync(outside, 'utf8')).toBe('TOKEN=escaped\n');
     });
 
     it('does not fall back to a live .env when sync-env omits the candidate file', async () => {

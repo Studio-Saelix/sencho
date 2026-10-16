@@ -58,6 +58,70 @@ export function authoredComposeFileArgs(stackName: string, nodeId?: number, stac
   return args;
 }
 
+/** Path of `target` under `root`, or null when it is the root or climbs out. `path.relative` only emits `..` as a prefix. */
+function positionUnder(root: string, target: string): string | null {
+  const relative = path.relative(path.resolve(root), path.resolve(target));
+  if (
+    relative === ''
+    || path.isAbsolute(relative)
+    || relative === '..'
+    || relative.startsWith(`..${path.sep}`)
+  ) {
+    return null;
+  }
+  return relative;
+}
+
+/**
+ * `--env-file` for an implicit root `.env` in an authorized directory.
+ * The path passed to the filesystem is contained lexically. After realpath,
+ * the file must be exactly where that name claims, under both the area root
+ * and the directory. A symlink of the data directory stays valid. A link
+ * inside the area, or a `.env` that leaves it, does not.
+ */
+async function authorizedImplicitEnvFile(
+  stackName: string,
+  envDir: string,
+  allowedRoot: string,
+): Promise<string[]> {
+  const root = path.resolve(allowedRoot);
+  const dir = path.resolve(envDir);
+  const envPath = path.resolve(dir, '.env');
+  if (!envPath.startsWith(root + path.sep) || !envPath.startsWith(dir + path.sep)) {
+    throw new Error(`Project env file path escapes stack directory for stack "${stackName}": ".env"`);
+  }
+  const fromRoot = positionUnder(root, envPath);
+  const fromDir = positionUnder(dir, envPath);
+  if (!fromRoot || !fromDir) {
+    throw new Error(`Project env file path escapes stack directory for stack "${stackName}": ".env"`);
+  }
+  try {
+    await fsPromises.access(envPath);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return [];
+    throw err;
+  }
+  let realRoot: string;
+  let realDir: string;
+  let realEnvPath: string;
+  try {
+    realRoot = await fsPromises.realpath(root);
+    realDir = await fsPromises.realpath(dir);
+    realEnvPath = await fsPromises.realpath(envPath);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return [];
+    throw err;
+  }
+  if (path.resolve(realRoot, fromRoot) !== realEnvPath || path.resolve(realDir, fromDir) !== realEnvPath) {
+    throw new Error(`Stack root .env for stack "${stackName}" resolves outside the stack directory.`);
+  }
+  const stat = await fsPromises.stat(realEnvPath);
+  if (!stat.isFile()) {
+    throw new Error(`Stack root .env for stack "${stackName}" is not a regular file.`);
+  }
+  return ['--env-file', realEnvPath];
+}
+
 function rejectBadProjectEnvName(stackName: string, file: string): void {
   if (!file || !isValidRelativeStackPath(file)) {
     throw new Error(`Invalid project env file path for stack "${stackName}": "${file}"`);
@@ -90,8 +154,13 @@ function rejectBadProjectEnvName(stackName: string, file: string): void {
  *
  * When no project env files are configured, fall back to the legacy behavior:
  * pass `--env-file <stackDir>/.env` only for multi-file Git stacks whose
- * deploy spec sets a contextDir and whose root `.env` actually exists. This
- * preserves byte-identical behavior for existing stacks.
+ * deploy spec sets a contextDir and whose root `.env` actually exists.
+ * A deploy override under git-secrets or git-managed resolves that root
+ * `.env` to the path its name claims after realpath, so a relocated data
+ * directory still matches and a link inside the area does not. Validation
+ * uses the same check, so both sides select that file or both refuse it.
+ * An override outside the live stack and those areas is rejected. A live
+ * stack with no override stays on the compose-root path.
  */
 export async function authoredComposeEnvFileArgs(
   stackName: string,
@@ -199,7 +268,23 @@ export async function authoredComposeEnvFileArgs(
   // the inline guards in renderConfig and validateCompose.
   const baseResolved = path.resolve(NodeRegistry.getInstance().getComposeDir(resolvedNodeId));
   const stackDir = stackDirOverride ? path.resolve(stackDirOverride) : path.resolve(baseResolved, stackName);
-  if (!stackDirOverride && !stackDir.startsWith(baseResolved + path.sep)) return [];
+  if (stackDirOverride) {
+    const secretsRoot = path.resolve(gitSecretsAreaBase());
+    const managedRoot = path.resolve(managedAreaBase());
+    if (stackDir.startsWith(secretsRoot + path.sep)) {
+      return authorizedImplicitEnvFile(stackName, stackDir, secretsRoot);
+    }
+    if (stackDir.startsWith(managedRoot + path.sep)) {
+      return authorizedImplicitEnvFile(stackName, stackDir, managedRoot);
+    }
+    const liveDir = path.resolve(baseResolved, stackName);
+    const onLiveStack = stackDir === liveDir || stackDir.startsWith(liveDir + path.sep);
+    if (!onLiveStack || !stackDir.startsWith(baseResolved + path.sep)) {
+      throw new Error(`Project env file path escapes stack directory for stack "${stackName}": ".env"`);
+    }
+  } else if (!stackDir.startsWith(baseResolved + path.sep)) {
+    return [];
+  }
   const envPath = path.resolve(stackDir, '.env');
   // Barrier must sit on the path passed to access/return, against the compose root.
   if (!envPath.startsWith(baseResolved + path.sep)) return [];
@@ -234,18 +319,9 @@ export async function candidateValidationEnvFileArgs(opts: {
     return authoredComposeEnvFileArgs(opts.stackName, opts.nodeId, undefined, opts.candidateAbs);
   }
   if (!opts.contextDir) return [];
-  // Canonical js/path-injection barrier inline with the access sink. CodeQL
-  // does not credit a wrapped helper or a check separated from the sink.
   const baseResolved = path.resolve(opts.candidateAbs);
-  const candidateEnv = path.resolve(baseResolved, '.env');
-  try {
-    if (candidateEnv.startsWith(baseResolved + path.sep)) {
-      await fsPromises.access(candidateEnv);
-      return ['--env-file', candidateEnv];
-    }
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
-  }
+  const fromCandidate = await authorizedImplicitEnvFile(opts.stackName, baseResolved, baseResolved);
+  if (fromCandidate.length > 0) return fromCandidate;
   if (opts.syncEnv) return [];
   return authoredComposeEnvFileArgs(opts.stackName, opts.nodeId);
 }

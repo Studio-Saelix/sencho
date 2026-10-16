@@ -127,12 +127,13 @@ vi.mock('../services/gitops/artifactResolve', async () => {
 let tmpDir: string;
 let GitSourceService: typeof import('../services/GitSourceService').GitSourceService;
 let GitSourceError: typeof import('../services/GitSourceService').GitSourceError;
+let WITHHELD_DECRYPTED_DIAGNOSTIC: typeof import('../services/GitSourceService').WITHHELD_DECRYPTED_DIAGNOSTIC;
 let DatabaseService: typeof import('../services/DatabaseService').DatabaseService;
 let parseReconcileResultPayload: typeof import('../services/gitops/outcomes').parseReconcileResultPayload;
 
 beforeAll(async () => {
     tmpDir = await setupTestDb();
-    ({ GitSourceService, GitSourceError } = await import('../services/GitSourceService'));
+    ({ GitSourceService, GitSourceError, WITHHELD_DECRYPTED_DIAGNOSTIC } = await import('../services/GitSourceService'));
     ({ DatabaseService } = await import('../services/DatabaseService'));
     ({ parseReconcileResultPayload } = await import('../services/gitops/outcomes'));
 });
@@ -11302,7 +11303,7 @@ describe('GitSourceService sync-env stacks with a repo .env (audit C-2)', () => 
                     return { code: 1, stdout: '', stderr: 'ciphertext reached compose' };
                 }
                 seenPlaintext.push(env.includes('PORT=8080'));
-                return { code: 1, stdout: '', stderr: 'forced validation failure' };
+                return { code: 1, stdout: '', stderr: 'forced validation failure PORT=8080' };
             });
         try {
             const { svc } = await stageSopsSyncEnv(
@@ -11312,7 +11313,9 @@ describe('GitSourceService sync-env stacks with a repo .env (audit C-2)', () => 
             );
             const pull = await svc.pull(stackName);
             expect(pull.validation.ok).toBe(false);
-            expect(pull.validation.error).toMatch(/forced validation failure/);
+            expect(pull.validation.error).toBe(WITHHELD_DECRYPTED_DIAGNOSTIC);
+            expect(pull.validation.error).not.toContain('PORT=8080');
+            expect(pull.validation.error).not.toContain('forced validation failure');
             expect(seenPlaintext).toEqual([true]);
             expect(await overlayEntries(stackName)).toEqual([]);
             const staged = managedEnvContents(stackName);
@@ -11563,7 +11566,7 @@ describe('GitSourceService sync-env stacks with a repo .env (audit C-2)', () => 
             );
             const pull = await svc.pull(stackName);
             expect(pull.validation.ok).toBe(false);
-            expect(pull.validation.error).toMatch(/hostPort/);
+            expect(pull.validation.error).toBe(WITHHELD_DECRYPTED_DIAGNOSTIC);
             expect(pull.validation.error).not.toContain(sentinel);
             expect(JSON.stringify(pull)).not.toContain(sentinel);
             expect(logs.join('\n')).not.toContain(sentinel);
@@ -11604,12 +11607,115 @@ describe('GitSourceService sync-env stacks with a repo .env (audit C-2)', () => 
             const { svc } = await stageSopsSyncEnv(stackName, sha, compose, { QUOTED: sentinel });
             const pull = await svc.pull(stackName);
             expect(pull.validation.ok).toBe(false);
-            expect(pull.validation.error).toMatch(/hostPort/);
+            expect(pull.validation.error).toBe(WITHHELD_DECRYPTED_DIAGNOSTIC);
             expect(pull.validation.error).not.toContain(sentinel);
             expect(pull.validation.error).not.toContain('audit$$quoted$$sentinel');
         } finally {
             runSpy.mockRestore();
             await cleanupStackDir(stackName);
+        }
+    });
+
+    it('withholds short, partial, and normalized decrypted values from real compose diagnostics', async () => {
+        const cases: Array<{
+            label: string;
+            sha: string;
+            stackName: string;
+            compose: string;
+            values: Record<string, string>;
+            rawLeak: string;
+            leaks: string[];
+        }> = [
+            {
+                label: 'short',
+                sha: '1111aaaa1111aaaa1111aaaa1111aaaa1111aaaa',
+                stackName: 'sync-env-sops-redact-short',
+                compose: 'services:\n  web:\n    image: nginx:1.27-alpine\n    ports:\n      - "${AUDIT_HOST_PORT}:80"\n',
+                values: { AUDIT_HOST_PORT: 'q7z' },
+                rawLeak: 'q7z',
+                leaks: ['q7z', 'invalid hostPort: q7z'],
+            },
+            {
+                label: 'fragment',
+                sha: '2222bbbb2222bbbb2222bbbb2222bbbb2222bbbb',
+                stackName: 'sync-env-sops-redact-fragment',
+                compose: 'services:\n  web:\n    image: nginx:1.27-alpine\n    ports:\n      - "${AUDIT_PORT}"\n',
+                values: { AUDIT_PORT: 'audit-secret:80' },
+                rawLeak: 'audit-secret',
+                leaks: ['audit-secret:80', 'audit-secret'],
+            },
+            {
+                label: 'normalized',
+                sha: '3333cccc3333cccc3333cccc3333cccc3333cccc',
+                stackName: 'sync-env-sops-redact-slash',
+                compose: 'services:\n  web:\n    image: nginx:1.27-alpine\n    ports:\n      - "${AUDIT_HOST_PORT}:80"\n',
+                values: { AUDIT_HOST_PORT: 'audit//secret//sentinel' },
+                rawLeak: 'audit//secret//sentinel',
+                leaks: ['audit//secret//sentinel', 'audit/secret/sentinel'],
+            },
+        ];
+        const controls: string[] = [];
+        try {
+            for (const item of cases) {
+                const controlDir = fs.mkdtempSync(path.join(os.tmpdir(), 'sencho-compose-leak-'));
+                controls.push(controlDir);
+                fs.writeFileSync(path.join(controlDir, 'compose.yaml'), item.compose);
+                const envLine = Object.entries(item.values).map(([key, value]) => `${key}=${value}`).join('\n');
+                fs.writeFileSync(path.join(controlDir, '.env'), `${envLine}\n`);
+                let rawStderr = '';
+                try {
+                    execFileSync('docker', ['compose', '-f', 'compose.yaml', 'config', '--quiet'], {
+                        cwd: controlDir,
+                        stdio: ['ignore', 'pipe', 'pipe'],
+                        timeout: 20_000,
+                    });
+                } catch (err) {
+                    const stderr = (err as { stderr?: Buffer }).stderr;
+                    rawStderr = stderr ? stderr.toString() : '';
+                }
+                expect(rawStderr, item.label).toContain(item.rawLeak);
+
+                const logs: string[] = [];
+                const logSpy = vi.spyOn(console, 'log').mockImplementation((...args: unknown[]) => {
+                    logs.push(args.map((part) => String(part)).join(' '));
+                });
+                const warnSpy = vi.spyOn(console, 'warn').mockImplementation((...args: unknown[]) => {
+                    logs.push(args.map((part) => String(part)).join(' '));
+                });
+                const errorSpy = vi.spyOn(console, 'error').mockImplementation((...args: unknown[]) => {
+                    logs.push(args.map((part) => String(part)).join(' '));
+                });
+                try {
+                    const { svc } = await stageSopsSyncEnv(item.stackName, item.sha, item.compose, item.values);
+                    const pull = await svc.pull(item.stackName);
+                    expect(pull.validation.ok, item.label).toBe(false);
+                    expect(pull.validation.error, item.label).toBe(WITHHELD_DECRYPTED_DIAGNOSTIC);
+                    const errorText = pull.validation.error ?? '';
+                    const logText = logs.join('\n');
+                    const pullJson = JSON.stringify(pull);
+                    for (const leak of item.leaks) {
+                        expect(errorText, `${item.label} ${leak}`).not.toContain(leak);
+                        expect(logText, `${item.label} ${leak}`).not.toContain(leak);
+                        if (leak.length >= 8) {
+                            expect(pullJson, `${item.label} ${leak}`).not.toContain(leak);
+                        }
+                    }
+                    expect(await overlayEntries(item.stackName), item.label).toEqual([]);
+                    const staged = managedEnvContents(item.stackName);
+                    expect(staged.length, item.label).toBeGreaterThan(0);
+                    expect(staged.every((env) => env.includes('ENC[AES256_GCM')), item.label).toBe(true);
+                    if (item.rawLeak.length >= 8) {
+                        expect(staged.every((env) => !env.includes(item.rawLeak)), item.label).toBe(true);
+                    }
+                } finally {
+                    logSpy.mockRestore();
+                    warnSpy.mockRestore();
+                    errorSpy.mockRestore();
+                }
+            }
+        } finally {
+            for (const dir of controls) fs.rmSync(dir, { recursive: true, force: true });
+            for (const item of cases) await cleanupStackDir(item.stackName);
         }
     });
 

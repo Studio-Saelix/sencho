@@ -603,12 +603,15 @@ function publicComposeValidationError(
     return scrubCredentials(scrubInternalPaths(text, ...roots));
 }
 
-const MIN_REDACTED_ENV_VALUE = 4;
 const WITHHELD_VALIDATION_ERROR = 'Compose validation failed. The message was withheld because a decrypted env file could not be read.';
 
-/** Values Compose would interpolate from a decrypted env file. Short values stay so ordinary diagnostics remain readable. */
-function decryptedEnvValues(content: string): string[] {
-    const values: string[] = [];
+/** Returned instead of Compose stderr once a decrypted env file has any value Compose would read. */
+export const WITHHELD_DECRYPTED_DIAGNOSTIC = 'Compose validation failed. The diagnostic was withheld because this candidate includes decrypted env values.';
+
+type OverlayEnvRead = 'absent' | 'present' | 'unreadable';
+
+/** True when the decrypted file has a value Compose would interpolate. Empty assignments do not count. */
+function envFileHasComposeValue(content: string): boolean {
     for (const rawLine of content.split(/\r?\n/)) {
         let line = rawLine.trim();
         if (!line || line.startsWith('#')) continue;
@@ -617,11 +620,9 @@ function decryptedEnvValues(content: string): string[] {
         if (eq <= 0) continue;
         const key = line.slice(0, eq).trim();
         if (!key || key.startsWith('sops_') || key.startsWith('age__list_')) continue;
-        for (const value of envValuesComposeWouldRead(line.slice(eq + 1))) {
-            if (value.length >= MIN_REDACTED_ENV_VALUE) values.push(value);
-        }
+        if (envValuesComposeWouldRead(line.slice(eq + 1)).some((value) => value.length > 0)) return true;
     }
-    return values;
+    return false;
 }
 
 /** Quoted inner value first, including a trailing comment after the closing quote. A bare value drops its trailing ` #` comment. */
@@ -652,37 +653,35 @@ function envValuesComposeWouldRead(rawValue: string): string[] {
     return bare ? [bare] : [];
 }
 
-function redactSecretValues(message: string, secrets: readonly string[]): string {
-    const unique = [...new Set(secrets.filter((value) => value.length >= MIN_REDACTED_ENV_VALUE))]
-        .sort((a, b) => b.length - a.length);
-    let out = message;
-    for (const secret of unique) {
-        if (out.includes(secret)) out = out.split(secret).join('[redacted]');
-    }
-    return out;
-}
-
-async function overlayEnvSecrets(
+/**
+ * Whether a decrypted env input can appear in a Compose diagnostic.
+ * Any non-empty value fails closed: short values, fragments, and spellings
+ * changed by path scrubbing cannot be removed from free-form stderr.
+ */
+async function readOverlayEnv(
     overlayDir: string,
     inputs: ComposeInputEntry[],
-): Promise<{ values: string[]; unreadable: boolean }> {
-    const values: string[] = [];
+): Promise<OverlayEnvRead> {
     const root = path.resolve(overlayDir);
     for (const input of inputs) {
         if (input.encryption !== 'sops-age' || input.role !== 'env' || !input.materializedPath) continue;
-        if (input.materializedPath.includes('..') || path.isAbsolute(input.materializedPath)) {
-            return { values, unreadable: true };
-        }
+        if (input.materializedPath.includes('..') || path.isAbsolute(input.materializedPath)) return 'unreadable';
         const target = path.resolve(root, input.materializedPath);
-        if (!target.startsWith(root + path.sep)) return { values, unreadable: true };
+        if (!target.startsWith(root + path.sep)) return 'unreadable';
         try {
-            values.push(...decryptedEnvValues(await fsPromises.readFile(target, 'utf8')));
+            if (envFileHasComposeValue(await fsPromises.readFile(target, 'utf8'))) return 'present';
         } catch (err) {
             if ((err as NodeJS.ErrnoException).code === 'ENOENT') continue;
-            return { values, unreadable: true };
+            return 'unreadable';
         }
     }
-    return { values, unreadable: false };
+    return 'absent';
+}
+
+function withheldDecryptedValidationError(read: OverlayEnvRead | null): string | null {
+    if (read === 'absent') return null;
+    if (read === 'present') return WITHHELD_DECRYPTED_DIAGNOSTIC;
+    return WITHHELD_VALIDATION_ERROR;
 }
 
 /**
@@ -2096,14 +2095,16 @@ export class GitSourceService {
         try {
             const result = await validate(overlay.overlayDir);
             if (result.ok || !result.error) return result;
-            const secrets = await overlayEnvSecrets(overlay.overlayDir, args.inputs);
-            if (secrets.unreadable) return { ok: false, error: WITHHELD_VALIDATION_ERROR };
-            return { ok: false, error: redactSecretValues(result.error, secrets.values) };
+            const withheld = withheldDecryptedValidationError(
+                await readOverlayEnv(overlay.overlayDir, args.inputs),
+            );
+            return withheld ? { ok: false, error: withheld } : result;
         } catch (err) {
-            const secrets = await overlayEnvSecrets(overlay.overlayDir, args.inputs).catch(() => null);
-            const message = err instanceof Error ? err.message : String(err);
-            if (!secrets || secrets.unreadable) throw new Error(WITHHELD_VALIDATION_ERROR);
-            throw new Error(redactSecretValues(message, secrets.values));
+            const withheld = withheldDecryptedValidationError(
+                await readOverlayEnv(overlay.overlayDir, args.inputs).catch(() => null),
+            );
+            if (withheld) throw new Error(withheld);
+            throw err instanceof Error ? err : new Error(String(err));
         } finally {
             await destroyGitOpsOverlay(overlay.binding);
         }
