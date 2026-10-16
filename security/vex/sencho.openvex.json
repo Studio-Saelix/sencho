@@ -15,11 +15,11 @@
       },
       "products": [
         {
-          "@id": "pkg:golang/github.com/in-toto/in-toto-golang@v0.10.0"
+          "@id": "pkg:golang/github.com/in-toto/in-toto-golang@v0.11.0"
         }
       ],
       "status": "fixed",
-      "status_notes": "Fixed upstream rather than triaged: docker/compose v5.6.0 resolves github.com/in-toto/in-toto-golang v0.11.0, the release that aligns the glob-negation operators in artifact rule patterns, and the source-built Compose plugin now embeds that version. The image no longer carries v0.10.0, so this statement records the resolution instead of suppressing a finding."
+      "status_notes": "Fixed upstream rather than triaged. docker/compose v5.6.0 resolves github.com/in-toto/in-toto-golang v0.11.0, the release that aligns the glob-negation operators in artifact rule patterns, and the source-built Compose plugin embeds that version, so the v0.10.0 build this statement used to cover is no longer shipped. The product below is the version the image carries now, and this statement records the resolution rather than suppressing a finding."
     },
     {
       "vulnerability": {
