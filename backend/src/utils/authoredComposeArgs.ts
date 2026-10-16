@@ -58,41 +58,24 @@ export function authoredComposeFileArgs(stackName: string, nodeId?: number, stac
   return args;
 }
 
-/** Path of `target` under `root`, or null when it is the root or climbs out. `path.relative` only emits `..` as a prefix. */
-function positionUnder(root: string, target: string): string | null {
-  const relative = path.relative(path.resolve(root), path.resolve(target));
-  if (
-    relative === ''
-    || path.isAbsolute(relative)
-    || relative === '..'
-    || relative.startsWith(`..${path.sep}`)
-  ) {
-    return null;
-  }
-  return relative;
-}
-
 /**
- * `--env-file` for an implicit root `.env` in an authorized directory.
- * The path passed to the filesystem is contained lexically. After realpath,
- * the file must be exactly where that name claims, under both the area root
- * and the directory. A symlink of the data directory stays valid. A link
- * inside the area, or a `.env` that leaves it, does not.
+ * `--env-file` for a root `.env` already known to sit under an area root
+ * (`git-secrets` or `git-managed` only; never the candidate directory).
+ * The path passed to the filesystem is contained against that area root.
+ * After realpath, the file must be exactly where its name claims. A symlink
+ * of the data directory stays valid. A link inside the area does not.
  */
-async function authorizedImplicitEnvFile(
+async function readClaimedAreaEnv(
   stackName: string,
-  envDir: string,
-  allowedRoot: string,
+  envPath: string,
+  areaRoot: string,
 ): Promise<string[]> {
-  const root = path.resolve(allowedRoot);
-  const dir = path.resolve(envDir);
-  const envPath = path.resolve(dir, '.env');
-  if (!envPath.startsWith(root + path.sep) || !envPath.startsWith(dir + path.sep)) {
+  const root = path.resolve(areaRoot);
+  if (!envPath.startsWith(root + path.sep)) {
     throw new Error(`Project env file path escapes stack directory for stack "${stackName}": ".env"`);
   }
-  const fromRoot = positionUnder(root, envPath);
-  const fromDir = positionUnder(dir, envPath);
-  if (!fromRoot || !fromDir) {
+  const relative = path.relative(root, envPath);
+  if (relative === '' || path.isAbsolute(relative) || relative === '..' || relative.startsWith(`..${path.sep}`)) {
     throw new Error(`Project env file path escapes stack directory for stack "${stackName}": ".env"`);
   }
   try {
@@ -102,17 +85,15 @@ async function authorizedImplicitEnvFile(
     throw err;
   }
   let realRoot: string;
-  let realDir: string;
   let realEnvPath: string;
   try {
     realRoot = await fsPromises.realpath(root);
-    realDir = await fsPromises.realpath(dir);
     realEnvPath = await fsPromises.realpath(envPath);
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code === 'ENOENT') return [];
     throw err;
   }
-  if (path.resolve(realRoot, fromRoot) !== realEnvPath || path.resolve(realDir, fromDir) !== realEnvPath) {
+  if (path.resolve(realRoot, relative) !== realEnvPath) {
     throw new Error(`Stack root .env for stack "${stackName}" resolves outside the stack directory.`);
   }
   const stat = await fsPromises.stat(realEnvPath);
@@ -155,12 +136,12 @@ function rejectBadProjectEnvName(stackName: string, file: string): void {
  * When no project env files are configured, fall back to the legacy behavior:
  * pass `--env-file <stackDir>/.env` only for multi-file Git stacks whose
  * deploy spec sets a contextDir and whose root `.env` actually exists.
- * A deploy override under git-secrets or git-managed resolves that root
- * `.env` to the path its name claims after realpath, so a relocated data
- * directory still matches and a link inside the area does not. Validation
- * uses the same check, so both sides select that file or both refuse it.
- * An override outside the live stack and those areas is rejected. A live
- * stack with no override stays on the compose-root path.
+ * A root `.env` under git-secrets or git-managed is resolved to the path its
+ * name claims after realpath, so a relocated data directory still matches and
+ * a link inside the area does not. The area root is those two directories,
+ * not the candidate. Validation uses the same check. An override outside the
+ * live stack and those areas is rejected. A live stack with no override stays
+ * on the compose-root path.
  */
 export async function authoredComposeEnvFileArgs(
   stackName: string,
@@ -262,21 +243,24 @@ export async function authoredComposeEnvFileArgs(
   const spec = DatabaseService.getInstance().getGitSource(stackName)?.applied_deploy_spec;
   if (!spec || spec.files.length === 0 || !spec.contextDir) return [];
 
-  // Inline js/path-injection barrier at the fs sink: resolve against a known-safe
-  // base and assert containment with startsWith right here. CodeQL does not credit
-  // the wrapped isPathWithinBase helper or a check separated from the sink, matching
-  // the inline guards in renderConfig and validateCompose.
+  // Inline barrier at the fs sink. Area files are checked against the
+  // git-secrets or git-managed root. Live files are checked against the
+  // compose root. A check against only a directory that embeds stackName
+  // does not count, and neither does a helper whose root argument is sometimes
+  // the candidate directory.
   const baseResolved = path.resolve(NodeRegistry.getInstance().getComposeDir(resolvedNodeId));
   const stackDir = stackDirOverride ? path.resolve(stackDirOverride) : path.resolve(baseResolved, stackName);
+  const secretsRoot = path.resolve(gitSecretsAreaBase());
+  const managedRoot = path.resolve(managedAreaBase());
+  const envPath = path.resolve(stackDir, '.env');
+  const onComposeRoot = envPath.startsWith(baseResolved + path.sep);
+  if (!onComposeRoot && envPath.startsWith(secretsRoot + path.sep)) {
+    return readClaimedAreaEnv(stackName, envPath, secretsRoot);
+  }
+  if (!onComposeRoot && envPath.startsWith(managedRoot + path.sep)) {
+    return readClaimedAreaEnv(stackName, envPath, managedRoot);
+  }
   if (stackDirOverride) {
-    const secretsRoot = path.resolve(gitSecretsAreaBase());
-    const managedRoot = path.resolve(managedAreaBase());
-    if (stackDir.startsWith(secretsRoot + path.sep)) {
-      return authorizedImplicitEnvFile(stackName, stackDir, secretsRoot);
-    }
-    if (stackDir.startsWith(managedRoot + path.sep)) {
-      return authorizedImplicitEnvFile(stackName, stackDir, managedRoot);
-    }
     const liveDir = path.resolve(baseResolved, stackName);
     const onLiveStack = stackDir === liveDir || stackDir.startsWith(liveDir + path.sep);
     if (!onLiveStack || !stackDir.startsWith(baseResolved + path.sep)) {
@@ -285,7 +269,6 @@ export async function authoredComposeEnvFileArgs(
   } else if (!stackDir.startsWith(baseResolved + path.sep)) {
     return [];
   }
-  const envPath = path.resolve(stackDir, '.env');
   // Barrier must sit on the path passed to access/return, against the compose root.
   if (!envPath.startsWith(baseResolved + path.sep)) return [];
   try {
@@ -320,8 +303,32 @@ export async function candidateValidationEnvFileArgs(opts: {
   }
   if (!opts.contextDir) return [];
   const baseResolved = path.resolve(opts.candidateAbs);
-  const fromCandidate = await authorizedImplicitEnvFile(opts.stackName, baseResolved, baseResolved);
-  if (fromCandidate.length > 0) return fromCandidate;
+  const candidateEnv = path.resolve(baseResolved, '.env');
+  const secretsRoot = path.resolve(gitSecretsAreaBase());
+  const managedRoot = path.resolve(managedAreaBase());
+  if (candidateEnv.startsWith(baseResolved + path.sep) && candidateEnv.startsWith(secretsRoot + path.sep)) {
+    const claimed = await readClaimedAreaEnv(opts.stackName, candidateEnv, secretsRoot);
+    if (claimed.length > 0) return claimed;
+  } else if (candidateEnv.startsWith(baseResolved + path.sep) && candidateEnv.startsWith(managedRoot + path.sep)) {
+    const claimed = await readClaimedAreaEnv(opts.stackName, candidateEnv, managedRoot);
+    if (claimed.length > 0) return claimed;
+  } else {
+    try {
+      if (candidateEnv.startsWith(baseResolved + path.sep)) {
+        await fsPromises.access(candidateEnv);
+        const stat = await fsPromises.lstat(candidateEnv);
+        if (stat.isSymbolicLink()) {
+          throw new Error(`Stack root .env for stack "${opts.stackName}" resolves outside the stack directory.`);
+        }
+        if (!stat.isFile()) {
+          throw new Error(`Stack root .env for stack "${opts.stackName}" is not a regular file.`);
+        }
+        return ['--env-file', candidateEnv];
+      }
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+    }
+  }
   if (opts.syncEnv) return [];
   return authoredComposeEnvFileArgs(opts.stackName, opts.nodeId);
 }
