@@ -4,10 +4,12 @@
  * module level so no network calls happen.
  */
 import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from 'vitest';
+import * as fs from 'fs';
 import * as zlib from 'zlib';
 import * as tar from 'tar-stream';
 import { Readable } from 'stream';
 import { setupTestDb, cleanupTestDb } from './helpers/setupTestDb';
+import { isEncryptedArchive, MAX_ARCHIVE_OBJECT_BYTES, openSnapshotArchive } from '../services/cloudBackupArchive';
 
 const sentSpy = vi.fn();
 const s3ClientCtorSpy = vi.fn();
@@ -29,12 +31,13 @@ let tmpDir: string;
 let DatabaseService: typeof import('../services/DatabaseService').DatabaseService;
 let CryptoService: typeof import('../services/CryptoService').CryptoService;
 let CloudBackupService: typeof import('../services/CloudBackupService').CloudBackupService;
+let SnapshotKeyError: typeof import('../services/CloudBackupService').SnapshotKeyError;
 
 beforeAll(async () => {
     tmpDir = await setupTestDb();
     ({ DatabaseService } = await import('../services/DatabaseService'));
     ({ CryptoService } = await import('../services/CryptoService'));
-    ({ CloudBackupService } = await import('../services/CloudBackupService'));
+    ({ CloudBackupService, SnapshotKeyError } = await import('../services/CloudBackupService'));
 });
 
 afterAll(() => {
@@ -56,6 +59,8 @@ beforeEach(() => {
         'cloud_backup_secret_key',
         'cloud_backup_path_prefix',
         'cloud_backup_auto_upload',
+        'cloud_backup_encrypt_archives',
+        'cloud_backup_archive_passphrase',
     ]) {
         db.updateGlobalSetting(k, '');
     }
@@ -195,8 +200,8 @@ describe('CloudBackupService — uploadSnapshot', () => {
         // No dossier metadata was captured, so the archive omits documentation.json.
         expect(entries.find(e => e.name === 'documentation.json')).toBeUndefined();
 
-        // Content is encrypted at rest but the archive must carry plaintext so a
-        // downloaded snapshot restores on any instance (portability contract).
+        // Encryption is off, so the archive carries plaintext. A downloaded
+        // snapshot can be read on any instance.
         const composeEntry = entries.find(e => e.name === 'nodes/1_gateway/web/compose.yaml');
         expect(composeEntry?.content).toBe('services: {}\n');
         const envEntry = entries.find(e => e.name === 'nodes/1_gateway/web/.env');
@@ -345,13 +350,227 @@ describe('CloudBackupService — listCloudSnapshots', () => {
 
         sentSpy.mockResolvedValueOnce({
             Contents: [
-                { Key: 'sencho/instances/test-instance-id/snapshots/3_2026-01-01_a.tar.gz', Size: 100, LastModified: new Date('2026-01-01T00:00:00Z') },
+                { Key: 'sencho/instances/test-instance-id/snapshots/3_2026-01-01_a.tar.gz.senc', Size: 100, LastModified: new Date('2026-01-01T00:00:00Z') },
                 { Key: 'sencho/instances/test-instance-id/snapshots/7_2026-04-01_b.tar.gz', Size: 200, LastModified: new Date('2026-04-01T00:00:00Z') },
             ],
         });
         const list = await CloudBackupService.getInstance().listCloudSnapshots();
         expect(list).toHaveLength(2);
         expect(list[0].snapshotId).toBe(7);
+        expect(list[0].encrypted).toBe(false);
         expect(list[1].snapshotId).toBe(3);
+        expect(list[1].encrypted).toBe(true);
+    });
+});
+
+const ARCHIVE_PASSPHRASE = 'correct-horse';
+
+function seedCustomBucket(): void {
+    const db = DatabaseService.getInstance();
+    const crypto = CryptoService.getInstance();
+    db.updateGlobalSetting('cloud_backup_provider', 'custom');
+    db.updateGlobalSetting('cloud_backup_endpoint', 'https://s3.example.com');
+    db.updateGlobalSetting('cloud_backup_region', 'us-east-1');
+    db.updateGlobalSetting('cloud_backup_bucket', 'my-bucket');
+    db.updateGlobalSetting('cloud_backup_access_key', 'AKIA1234');
+    db.updateGlobalSetting('cloud_backup_secret_key', crypto.encrypt('test-secret'));
+    db.updateGlobalSetting('cloud_backup_path_prefix', 'sencho/');
+}
+
+function composeNames(): string[] {
+    return fs.readdirSync(process.env.COMPOSE_DIR || '').sort();
+}
+
+function snapshotCounts(): { headers: number; files: number } {
+    const db = DatabaseService.getInstance().getDb();
+    const headers = db.prepare('SELECT COUNT(*) AS n FROM fleet_snapshots').get() as { n: number };
+    const files = db.prepare('SELECT COUNT(*) AS n FROM fleet_snapshot_files').get() as { n: number };
+    return { headers: headers.n, files: files.n };
+}
+
+function putObjectInput(): { Key: string; Body: Buffer; ContentType: string } {
+    const putCall = sentSpy.mock.calls.find(c => c[0].name === 'PutObjectCommand');
+    return putCall![0].input as { Key: string; Body: Buffer; ContentType: string };
+}
+
+describe('CloudBackupService archive encryption', () => {
+    it('uploads ciphertext with a .senc key when encryption is on', async () => {
+        seedCustomBucket();
+        const db = DatabaseService.getInstance();
+        db.updateGlobalSetting('cloud_backup_encrypt_archives', '1');
+        db.updateGlobalSetting('cloud_backup_archive_passphrase', CryptoService.getInstance().encrypt(ARCHIVE_PASSPHRASE));
+        const snapshotId = db.createSnapshot('Sealed backup', 'admin', 1, 1, '[]');
+        db.insertSnapshotFiles(snapshotId, [
+            { nodeId: 1, nodeName: 'gateway', stackName: 'web', filename: 'compose.yaml', content: 'services: {}\n' },
+            { nodeId: 1, nodeName: 'gateway', stackName: 'web', filename: '.env', content: 'KEY=value\n' },
+        ]);
+
+        sentSpy.mockResolvedValue({});
+        await CloudBackupService.getInstance().uploadSnapshot(snapshotId);
+
+        const input = putObjectInput();
+        expect(input.Key).toMatch(/\.tar\.gz\.senc$/);
+        expect(input.ContentType).toBe('application/octet-stream');
+        expect(isEncryptedArchive(input.Body)).toBe(true);
+        expect(input.Body.includes(Buffer.from('services: {}'))).toBe(false);
+        expect(input.Body.includes(Buffer.from('KEY=value'))).toBe(false);
+
+        const opened = await openSnapshotArchive(input.Body, ARCHIVE_PASSPHRASE);
+        expect(opened.files.find(file => file.filename === 'compose.yaml')?.content).toBe('services: {}\n');
+        expect(opened.files.find(file => file.filename === '.env')?.content).toBe('KEY=value\n');
+    });
+
+    it('does not call PutObject when encryption is on and no passphrase is saved', async () => {
+        seedCustomBucket();
+        const db = DatabaseService.getInstance();
+        db.updateGlobalSetting('cloud_backup_encrypt_archives', '1');
+        const snapshotId = db.createSnapshot('Unsealed', 'admin', 0, 0, '[]');
+        sentSpy.mockClear();
+        await expect(CloudBackupService.getInstance().uploadSnapshot(snapshotId)).rejects.toThrow(/no passphrase is saved/i);
+        expect(sentSpy.mock.calls.filter(c => c[0].name === 'PutObjectCommand')).toHaveLength(0);
+    });
+
+    it('imports a plaintext archive into a new local snapshot and leaves the compose directory alone', async () => {
+        seedCustomBucket();
+        const db = DatabaseService.getInstance();
+        const snapshotId = db.createSnapshot('Plain archive', 'admin', 1, 1, '[]');
+        db.insertSnapshotFiles(snapshotId, [
+            { nodeId: 1, nodeName: 'gateway', stackName: 'web', filename: 'compose.yaml', content: 'services: { web: {} }\n' },
+        ]);
+        sentSpy.mockResolvedValue({});
+        await CloudBackupService.getInstance().uploadSnapshot(snapshotId);
+        const uploaded = putObjectInput();
+        const before = snapshotCounts();
+        const composeBefore = composeNames();
+
+        sentSpy.mockImplementation(async (cmd: { name: string }) => {
+            if (cmd.name === 'GetObjectCommand') return { Body: Readable.from(uploaded.Body) };
+            return {};
+        });
+        const importedId = await CloudBackupService.getInstance().importSnapshot(uploaded.Key);
+        const after = snapshotCounts();
+        expect(importedId).not.toBe(snapshotId);
+        expect(after.headers).toBe(before.headers + 1);
+        expect(after.files).toBe(before.files + 1);
+        const imported = db.getSnapshotFiles(importedId).find(file => file.available && file.filename === 'compose.yaml');
+        expect(imported && imported.available ? imported.content : '').toBe('services: { web: {} }\n');
+        const stored = db.getDb().prepare(
+            'SELECT content FROM fleet_snapshot_files WHERE snapshot_id = ? AND filename = ?',
+        ).get(importedId, 'compose.yaml') as { content: string };
+        expect(stored.content.startsWith('enc:')).toBe(true);
+        expect(stored.content.includes('services:')).toBe(false);
+        expect(composeNames()).toEqual(composeBefore);
+    });
+
+    it('imports an encrypted archive with only the passphrase', async () => {
+        seedCustomBucket();
+        const db = DatabaseService.getInstance();
+        db.updateGlobalSetting('cloud_backup_encrypt_archives', '1');
+        db.updateGlobalSetting('cloud_backup_archive_passphrase', CryptoService.getInstance().encrypt(ARCHIVE_PASSPHRASE));
+        const snapshotId = db.createSnapshot('Sealed import', 'admin', 1, 1, '[]');
+        db.insertSnapshotFiles(snapshotId, [
+            { nodeId: 1, nodeName: 'edge_gw', stackName: 'web', filename: '.env', content: 'TOKEN=abc\n' },
+        ]);
+        sentSpy.mockResolvedValue({});
+        await CloudBackupService.getInstance().uploadSnapshot(snapshotId);
+        const uploaded = putObjectInput();
+        const before = snapshotCounts();
+
+        sentSpy.mockImplementation(async (cmd: { name: string }) => {
+            if (cmd.name === 'GetObjectCommand') return { Body: Readable.from(uploaded.Body) };
+            return {};
+        });
+        const withStored = await CloudBackupService.getInstance().importSnapshot(uploaded.Key);
+        expect(withStored).not.toBe(snapshotId);
+        const downloaded = await CloudBackupService.getInstance().downloadSnapshot(uploaded.Key);
+        expect(isEncryptedArchive(downloaded)).toBe(false);
+        expect(zlib.gunzipSync(downloaded).includes(Buffer.from('TOKEN=abc'))).toBe(true);
+
+        db.updateGlobalSetting('cloud_backup_archive_passphrase', '');
+        const importedId = await CloudBackupService.getInstance().importSnapshot(uploaded.Key, ARCHIVE_PASSPHRASE);
+        expect(snapshotCounts().headers).toBe(before.headers + 2);
+        const imported = db.getSnapshotFiles(importedId).find(file => file.available && file.filename === '.env');
+        expect(imported && imported.available ? imported.content : '').toBe('TOKEN=abc\n');
+    });
+
+    it('inserts nothing when the passphrase is wrong', async () => {
+        seedCustomBucket();
+        const db = DatabaseService.getInstance();
+        db.updateGlobalSetting('cloud_backup_encrypt_archives', '1');
+        db.updateGlobalSetting('cloud_backup_archive_passphrase', CryptoService.getInstance().encrypt(ARCHIVE_PASSPHRASE));
+        const snapshotId = db.createSnapshot('Bad passphrase', 'admin', 1, 1, '[]');
+        db.insertSnapshotFiles(snapshotId, [
+            { nodeId: 1, nodeName: 'gateway', stackName: 'web', filename: 'compose.yaml', content: 'services: {}\n' },
+        ]);
+        sentSpy.mockResolvedValue({});
+        await CloudBackupService.getInstance().uploadSnapshot(snapshotId);
+        const uploaded = putObjectInput();
+        const before = snapshotCounts();
+        const composeBefore = composeNames();
+        sentSpy.mockImplementation(async (cmd: { name: string }) => {
+            if (cmd.name === 'GetObjectCommand') return { Body: Readable.from(uploaded.Body) };
+            return {};
+        });
+        await expect(CloudBackupService.getInstance().importSnapshot(uploaded.Key, 'not-the-passphrase')).rejects.toThrow(/incorrect/i);
+        expect(snapshotCounts()).toEqual(before);
+        expect(composeNames()).toEqual(composeBefore);
+    });
+
+    it('rolls back the snapshot header when a file write fails inside the transaction', async () => {
+        const db = DatabaseService.getInstance();
+        const before = snapshotCounts();
+        const crypto = CryptoService.getInstance();
+        const real = crypto.encrypt.bind(crypto);
+        let calls = 0;
+        const spy = vi.spyOn(crypto, 'encrypt').mockImplementation((value: string) => {
+            calls += 1;
+            if (calls >= 2) throw new Error('forced write failure');
+            return real(value);
+        });
+        try {
+            expect(() => db.importSnapshotArchive({
+                description: 'partial',
+                createdBy: 'admin',
+                createdAt: 1,
+                nodeCount: 1,
+                stackCount: 1,
+                skippedNodes: '[]',
+                skippedStacks: '[]',
+                documentation: '{"stacks":[]}',
+                files: [{ nodeId: 1, nodeName: 'gateway', stackName: 'web', filename: 'compose.yaml', content: 'services: {}\n' }],
+            })).toThrow(/forced write failure/);
+        } finally {
+            spy.mockRestore();
+        }
+        expect(snapshotCounts()).toEqual(before);
+    });
+
+    it('rejects an object larger than the import limit', async () => {
+        seedCustomBucket();
+        const db = DatabaseService.getInstance();
+        const instanceId = db.getSystemState('instance_id') || 'unknown';
+        const objectKey = `sencho/instances/${instanceId}/snapshots/big.tar.gz`;
+        sentSpy.mockResolvedValue({
+            ContentLength: MAX_ARCHIVE_OBJECT_BYTES + 1,
+            Body: Readable.from(Buffer.from('x')),
+        });
+        await expect(CloudBackupService.getInstance().importSnapshot(objectKey)).rejects.toMatchObject({ code: 'TOO_LARGE' });
+
+        const chunks: Buffer[] = [];
+        const chunk = Buffer.alloc(1024 * 1024);
+        for (let i = 0; i < 33; i += 1) chunks.push(chunk);
+        sentSpy.mockResolvedValue({ Body: Readable.from(chunks) });
+        await expect(CloudBackupService.getInstance().importSnapshot(objectKey)).rejects.toMatchObject({ code: 'TOO_LARGE' });
+    });
+
+    it('rejects object keys outside this instance snapshot prefix', async () => {
+        seedCustomBucket();
+        const svc = CloudBackupService.getInstance();
+        const foreign = 'other/instances/test-instance-id/snapshots/1.tar.gz';
+        sentSpy.mockClear();
+        await expect(svc.downloadSnapshot(foreign)).rejects.toBeInstanceOf(SnapshotKeyError);
+        await expect(svc.importSnapshot(foreign)).rejects.toBeInstanceOf(SnapshotKeyError);
+        await expect(svc.deleteCloudSnapshot(foreign)).rejects.toBeInstanceOf(SnapshotKeyError);
+        expect(sentSpy).not.toHaveBeenCalled();
     });
 });

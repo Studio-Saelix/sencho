@@ -1,7 +1,8 @@
 import { Router, type Request, type Response } from 'express';
-import { CloudBackupService } from '../services/CloudBackupService';
+import { CloudBackupService, SnapshotKeyError } from '../services/CloudBackupService';
 import { DatabaseService } from '../services/DatabaseService';
 import { CryptoService } from '../services/CryptoService';
+import { ArchiveFormatError, passphraseIsLongEnough } from '../services/cloudBackupArchive';
 import { requireAdmin, requirePaid } from '../middleware/tierGates';
 import { rejectApiTokenScope } from '../middleware/apiTokenScope';
 import { getErrorMessage } from '../utils/errors';
@@ -55,6 +56,58 @@ function decodeObjectKey(req: Request, res: Response): string | null {
     }
 }
 
+function passphraseFromBody(req: Request): string | null {
+    const value = req.body?.passphrase;
+    if (typeof value !== 'string' || value === '') return null;
+    return value;
+}
+
+function sendArchiveFailure(res: Response, error: unknown, fallback: string): void {
+    if (error instanceof SnapshotKeyError) {
+        res.status(400).json({ error: error.message });
+        return;
+    }
+    if (error instanceof ArchiveFormatError) {
+        const status = error.code === 'PASSPHRASE_REQUIRED' ? 409 : error.code === 'TOO_LARGE' ? 413 : 400;
+        res.status(status).json({ error: error.message, code: error.code });
+        return;
+    }
+    console.error('[CloudBackup] object error:', error);
+    res.status(502).json({ error: getErrorMessage(error, fallback) });
+}
+
+type ArchiveWrite = { enabling: boolean; hasFlag: boolean; passphrase: string | null };
+
+function planArchiveSettings(body: Record<string, unknown>): ArchiveWrite | string | null {
+    const settings = DatabaseService.getInstance().getGlobalSettings();
+    const hasFlag = typeof body.encrypt_archives === 'boolean';
+    const rawPass = body.archive_passphrase;
+    if (!hasFlag && typeof rawPass !== 'string') return null;
+
+    const stored = !!settings.cloud_backup_archive_passphrase;
+    const enabling = hasFlag ? body.encrypt_archives === true : settings.cloud_backup_encrypt_archives === '1';
+    const passphrase = typeof rawPass === 'string' && rawPass !== '' && rawPass !== SECRET_REDACTED
+        ? rawPass
+        : null;
+    if (passphrase && !passphraseIsLongEnough(passphrase)) return 'Archive passphrase must be at least 12 characters';
+    if (enabling && !passphrase && !stored) return 'Save an archive passphrase before enabling encryption';
+    return { enabling, hasFlag, passphrase };
+}
+
+function writeArchiveSettings(plan: ArchiveWrite): void {
+    const db = DatabaseService.getInstance();
+    if (plan.passphrase) {
+        db.updateGlobalSetting('cloud_backup_archive_passphrase', CryptoService.getInstance().encrypt(plan.passphrase));
+    }
+    if (plan.hasFlag) db.updateGlobalSetting('cloud_backup_encrypt_archives', plan.enabling ? '1' : '0');
+}
+
+function archiveDownloadName(objectKey: string): string {
+    const base = objectKey.split('/').pop() || 'snapshot.tar.gz';
+    const stripped = base.endsWith('.senc') ? base.slice(0, -'.senc'.length) : base;
+    return /^[A-Za-z0-9._-]+$/.test(stripped) ? stripped : 'snapshot.tar.gz';
+}
+
 export const cloudBackupRouter = Router();
 
 cloudBackupRouter.get('/config', (req: Request, res: Response): void => {
@@ -77,6 +130,8 @@ cloudBackupRouter.get('/config', (req: Request, res: Response): void => {
                 path_prefix: settings.cloud_backup_path_prefix || 'sencho/',
                 auto_upload: settings.cloud_backup_auto_upload === '1',
             },
+            encrypt_archives: settings.cloud_backup_encrypt_archives === '1',
+            archive_passphrase: settings.cloud_backup_archive_passphrase ? SECRET_REDACTED : '',
         });
     } catch (error) {
         console.error('[CloudBackup] config get error:', error);
@@ -95,6 +150,11 @@ cloudBackupRouter.put('/config', (req: Request, res: Response): void => {
             return;
         }
         if (!gateForRequestedProvider(req, res, provider)) return;
+        const archivePlan = planArchiveSettings(body as Record<string, unknown>);
+        if (typeof archivePlan === 'string') {
+            res.status(400).json({ error: archivePlan });
+            return;
+        }
         const db = DatabaseService.getInstance();
         const crypto = CryptoService.getInstance();
         db.updateGlobalSetting('cloud_backup_provider', provider);
@@ -129,6 +189,8 @@ cloudBackupRouter.put('/config', (req: Request, res: Response): void => {
                 db.updateGlobalSetting('cloud_backup_secret_key', crypto.encrypt(incomingSecret));
             }
         }
+
+        if (archivePlan) writeArchiveSettings(archivePlan);
 
         res.status(204).send();
     } catch (error) {
@@ -233,17 +295,48 @@ cloudBackupRouter.get('/object/:keyB64/download', async (req: Request, res: Resp
     const objectKey = decodeObjectKey(req, res);
     if (!objectKey) return;
     try {
-        const buffer = await CloudBackupService.getInstance().downloadSnapshot(objectKey);
-        const filename = objectKey.split('/').pop() || 'snapshot.tar.gz';
-        res.setHeader('Content-Type', 'application/gzip');
-        res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
-        res.setHeader('Content-Length', String(buffer.byteLength));
-        res.end(buffer);
+        const buffer = await CloudBackupService.getInstance().downloadSnapshot(objectKey, null);
+        sendArchive(res, objectKey, buffer);
     } catch (error) {
-        console.error('[CloudBackup] download error:', error);
-        res.status(502).json({ error: getErrorMessage(error, 'Failed to download cloud snapshot') });
+        sendArchiveFailure(res, error, 'Failed to download cloud snapshot');
     }
 });
+
+cloudBackupRouter.post('/object/:keyB64/download', async (req: Request, res: Response): Promise<void> => {
+    if (rejectApiTokenScope(req, res, SCOPE_MESSAGE)) return;
+    if (!requireAdmin(req, res)) return;
+    if (!gateForCurrentProvider(req, res)) return;
+    const objectKey = decodeObjectKey(req, res);
+    if (!objectKey) return;
+    try {
+        const buffer = await CloudBackupService.getInstance().downloadSnapshot(objectKey, passphraseFromBody(req));
+        sendArchive(res, objectKey, buffer);
+    } catch (error) {
+        sendArchiveFailure(res, error, 'Failed to download cloud snapshot');
+    }
+});
+
+cloudBackupRouter.post('/object/:keyB64/import', async (req: Request, res: Response): Promise<void> => {
+    if (rejectApiTokenScope(req, res, SCOPE_MESSAGE)) return;
+    if (!requireAdmin(req, res)) return;
+    if (!gateForCurrentProvider(req, res)) return;
+    const objectKey = decodeObjectKey(req, res);
+    if (!objectKey) return;
+    try {
+        const snapshotId = await CloudBackupService.getInstance().importSnapshot(objectKey, passphraseFromBody(req));
+        res.status(201).json({ snapshot_id: snapshotId });
+    } catch (error) {
+        sendArchiveFailure(res, error, 'Failed to import cloud snapshot');
+    }
+});
+
+function sendArchive(res: Response, objectKey: string, buffer: Buffer): void {
+    const filename = archiveDownloadName(objectKey);
+    res.setHeader('Content-Type', 'application/gzip');
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+    res.setHeader('Content-Length', String(buffer.byteLength));
+    res.end(buffer);
+}
 
 cloudBackupRouter.delete('/object/:keyB64', async (req: Request, res: Response): Promise<void> => {
     if (rejectApiTokenScope(req, res, SCOPE_MESSAGE)) return;
@@ -255,7 +348,6 @@ cloudBackupRouter.delete('/object/:keyB64', async (req: Request, res: Response):
         await CloudBackupService.getInstance().deleteCloudSnapshot(objectKey);
         res.status(204).send();
     } catch (error) {
-        console.error('[CloudBackup] delete error:', error);
-        res.status(502).json({ error: getErrorMessage(error, 'Failed to delete cloud snapshot') });
+        sendArchiveFailure(res, error, 'Failed to delete cloud snapshot');
     }
 });

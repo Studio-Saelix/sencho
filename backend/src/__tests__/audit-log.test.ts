@@ -52,6 +52,10 @@ describe('getAuditSummary()', () => {
     expect(getAuditSummary('POST', '/stacks/mystack')).toBe('Created stack: mystack');
   });
 
+  it('resolves a cloud snapshot import', () => {
+    expect(getAuditSummary('POST', '/cloud-backup/object/abc/import')).toBe('Imported cloud snapshot: abc');
+  });
+
   it('resolves wildcard match: POST /stacks/mystack/deploy', () => {
     expect(getAuditSummary('POST', '/stacks/mystack/deploy')).toBe('Deployed stack: mystack');
   });
