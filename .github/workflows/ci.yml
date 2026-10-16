@@ -348,16 +348,18 @@ jobs:
       - name: Validate workflows
         uses: docker://rhysd/actionlint@sha256:b1934ee5f1c509618f2508e6eb47ee0d3520686341fec936f3b79331f9315667 # v1.7.12
         with:
-          args: .github/workflows/release-please.yml .github/workflows/ci.yml
+          args: .github/workflows/release-please.yml .github/workflows/ci.yml .github/workflows/pr-title.yml
 
       - name: Syntax check
         run: |
           node --check scripts/credit-changelog-contributors.mjs
           node --check scripts/release-notes-from-changelog.mjs
           node --check scripts/audit-with-vex.mjs
+          node --check scripts/check-pr-title.mjs
 
       - name: Unit tests
         run: |
           node --test scripts/credit-changelog-contributors.test.mjs
           node --test scripts/release-notes-from-changelog.test.mjs
           node --test scripts/audit-with-vex.test.mjs
+          node --test scripts/check-pr-title.test.mjs

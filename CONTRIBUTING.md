@@ -65,12 +65,13 @@ Sencho and Studio Saelix names and logos are trademarks. AGPLv3 does not grant t
 - Fill in the pull request template (summary, type of change, testing performed).
 - The CLA Assistant check must pass. First-time contributors are prompted to sign [CLA.md](CLA.md).
 - Ensure CI passes before requesting review
-- Use [Conventional Commits](https://www.conventionalcommits.org/) for commit messages
+- Use [Conventional Commits](https://www.conventionalcommits.org/) for commit messages, and make the PR title one too. Squash-merging uses the title as the commit subject, so a title that is not a conventional commit drops the change from the release notes entirely.
+- For a dependency PR that clears a security advisory, use `security(deps):` or `fix(deps):` rather than the default `chore(deps):`. `chore` and `security` are both valid types, but only the latter two reach the changelog, and `chore(deps)` on an advisory means operators never learn the release carries the fix.
 - Update documentation if your change affects user-facing behavior
 - Add tests for new functionality
 - Keep PRs focused: one feature or fix per PR
 - Do not include secrets, tokens, credentials, or real hostnames/IPs in the diff, commits, or PR description.
-- Do not edit `CHANGELOG.md` directly. It is generated from conventional-commit subjects by release-please. If a user-facing change needs more context, enrich the auto-opened Release PR description before merging.
+- Do not edit `CHANGELOG.md` directly. It is generated from conventional-commit subjects by release-please. To correct or add context to an entry after the change is merged, add a `BEGIN_COMMIT_OVERRIDE` block to that PR's body and let the next release-please run regenerate the notes from it.
 
 ## Reporting Bugs
 

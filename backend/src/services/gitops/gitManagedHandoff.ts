@@ -12,7 +12,7 @@
 import { GitOpsStore } from './store';
 import { DatabaseService } from '../DatabaseService';
 import { GitSourceService } from '../GitSourceService';
-import { buildAcceptedGeneration, holdBlockedRolloutDispatch } from './handoff';
+import { buildAcceptedGeneration, holdBlockedRolloutDispatch, sourceConfirmationHoldReason } from './handoff';
 import type { ReconcileTrigger } from './triggers';
 import { sanitizeForLog } from '../../utils/safeLog';
 
@@ -23,8 +23,8 @@ export interface GitManagedDispatchOutcome {
 
 /**
  * The skip reason for a handoff whose accepted generation has no resolved
- * artifact identity. Exported so the accept route can tell it apart from a
- * preparation note that already says the same thing.
+ * artifact identity. Exported so post-accept reporting can suppress this
+ * skip when preparation already recorded an unresolved artifact.
  */
 export const GIT_MANAGED_ARTIFACT_UNRESOLVED_REASON = 'the artifact identity is not resolved yet';
 
@@ -33,10 +33,23 @@ export const GIT_MANAGED_ARTIFACT_UNRESOLVED_REASON = 'the artifact identity is 
  *
  * `skipped` means a gate withheld the handoff (the generation moved on, the
  * source is suspended, the rollout is paused, the policy requires an operator,
- * the Blueprint is disabled, or the artifact identity is not resolved);
- * `blocked` means the handoff was refused and, when the refusal is durable, the
- * rollout was held with the reason (a dispatch refusal, or an unfinished
- * rollback). The caller owns logging and the response.
+ * the Blueprint is disabled, the artifact identity is not resolved, or the
+ * operator's confirmation no longer describes this application); `blocked` means
+ * the handoff was refused and, when the refusal is durable, the rollout was held
+ * with the reason (a dispatch refusal, or an unfinished rollback). The caller
+ * owns logging and the response.
+ *
+ * The acceptance stored the operator's confirmation, when there was one.
+ * Preparation is the asynchronous step before this point, so this is the last
+ * place a changed placement or a newly armed rollout policy can still be
+ * caught before anything is dispatched to a node. The stored claim is what
+ * this reads, including a re-drive that has no request left. Authorize and
+ * Resume update that claim, so a request body from the acceptance must not
+ * be checked again here.
+ *
+ * A stored confirmation that no longer describes the application is held
+ * rather than merely skipped. The hold is what puts the reason on the row.
+ * The stored claim is what stops the next automatic re-drive from minting.
  */
 export async function dispatchPreparedGitManagedGeneration(args: {
   applicationId: string;
@@ -53,6 +66,27 @@ export async function dispatchPreparedGitManagedGeneration(args: {
   if (app.pause_at) return { status: 'skipped', reason: 'the rollout is paused' };
   if (app.rollout_authorization_policy !== 'automatic') {
     return { status: 'skipped', reason: 'the rollout authorization policy requires an operator' };
+  }
+  // Below the policy gate on purpose. A manual policy cannot dispatch from
+  // here at all, and its Authorize is the operator's own decision against the
+  // placement as it stands, so holding the rollout over a confirmation this
+  // handoff could never have acted on would add a resume step and nothing else.
+  // Once the policy does authorize on its own, the stored claim is enforced.
+  // A manual policy returned above, so this read does not run for it.
+  const holdReason = sourceConfirmationHoldReason(app);
+  if (holdReason) {
+    // Held, not skipped, for the same reason an unfinished rollback is. The
+    // acceptance stands and the rollout does not move, so the row alone has
+    // to say why. `operator` origin, because only a person may clear it: a
+    // `system` hold is released by the next source acceptance, and on an
+    // automatic source that is the next poll. No live binding is required,
+    // since nothing has been authorized yet and the reason is about the
+    // application rather than about a rollout that exists.
+    holdBlockedRolloutDispatch(app.id, { reason: holdReason, holdable: true }, {
+      requireLiveBinding: false,
+      origin: 'operator',
+    });
+    return { status: 'skipped', reason: holdReason };
   }
   const blueprint = app.blueprint_id !== null
     ? DatabaseService.getInstance().getBlueprint(app.blueprint_id)

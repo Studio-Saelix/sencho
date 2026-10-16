@@ -163,101 +163,69 @@ RUN cp vendor.mod go.mod && cp vendor.sum go.sum && \
 
 # Stage 4b: Build Docker Compose from source against Go 1.27.2
 #
-# Compose v5.1.3 moved github.com/docker/docker from a direct require to an
-# indirect dep (the direct surface is now moby/moby/api + moby/moby/client),
-# but the docker/docker module is still pulled into the binary via buildkit
-# and other transitive paths. Several daemon-side CVEs against docker/docker
-# v28.5.2 (CVE-2026-34040, CVE-2026-33997, CVE-2026-41567, CVE-2026-41568,
-# CVE-2026-42306) therefore still appear in scans of the compose binary;
-# they are tracked as not_affected in security/vex/sencho.openvex.json
-# because compose is the client and the vulnerable code paths are reached
-# only by Docker Engine the daemon. Rebuilding with the patched Go
-# toolchain eliminates Go stdlib CVEs from the binary's SBOM.
+# Compose v5.6.0 requires Go 1.26.8 or newer, which the pinned 1.27.2 toolchain
+# satisfies. That toolchain also carries the stdlib fixes for CVE-2026-78667
+# (net/http Range-header denial of service) and CVE-2026-97031 (crypto/tls ECH
+# denial of service), so the binary's SBOM carries no Go stdlib CVEs.
 #
-# Compose v5.1.3 still bundles otel/sdk v1.42.0 transitively via buildkit
-# v0.29.0. The go get step below bumps otel to v1.44.0 to resolve
-# CVE-2026-39883 (BSD kenv), CVE-2026-39882 (OTLP response OOM), and
-# CVE-2026-41178 (baggage header parsing dropped its raw-length cap, allowing
-# resource exhaustion via an oversized header, present through v1.43.0) so
-# that the compose binary scans completely clean; v1.44.0 is also grpc
-# v1.83.2's minimum below. It also bumps github.com/moby/go-archive to v0.3.0
-# for CVE-2026-17106 (HIGH), where a crafted tar archive can write outside the
-# extraction directory; compose pulls the same archive code in transitively
-# through buildkit.
+# The v5.6.0 tag lifts almost every module floor this stage used to carry by
+# hand. Its own go.mod resolves otel/sdk v1.46.0 (CVE-2026-39883,
+# CVE-2026-39882, CVE-2026-41178), google.golang.org/grpc v1.84.0
+# (GHSA-hrxh-6v49-42gf, CVE-2026-84304, CVE-2026-84445), moby/go-archive
+# v0.3.3 (CVE-2026-17106), moby/buildkit v0.33.1 (CVE-2026-61711), and
+# containerd/containerd/v2 v2.4.1 (CVE-2026-46680, the CVE-2026-53488 / 53489 /
+# 53492 cluster, CVE-2026-95837, CVE-2026-95838), so the go get step below no
+# longer pins any of them.
 #
-# Compose v5.1.3 also pins github.com/containerd/containerd/v2 v2.2.3, which
-# carries CVE-2026-46680 (runAsNonRoot evasion in containerd's runtime
-# executor). v2.2.4 cleared that one, but a later containerd advisory cluster
-# (CVE-2026-53488, CVE-2026-53489, CVE-2026-53492, all CRI checkpoint/restore
-# and restart-monitor issues) affects v2.2.4 and is fixed in v2.2.5. The go get
-# step below bumps containerd/v2 to v2.2.5 to clear all four. These are
-# patch-level fixes with no breaking API changes. Every vulnerable code path is
-# daemon-side (containerd's CRI service) and is not reached by compose at all,
-# so this is defense-in-depth rather than a live exposure.
+# Six VEX statements written for earlier Compose tags no longer describe what
+# this stage builds. Five cover daemon-side advisories against
+# github.com/docker/docker v28.5.2 (CVE-2026-34040, CVE-2026-33997,
+# CVE-2026-41567, CVE-2026-41568, CVE-2026-42306): v5.6.0 drops that module
+# from the graph, with moby/moby/api v1.56.1 and moby/moby/client v0.6.1 as the
+# direct API surface, so those statements are deleted. The sixth,
+# GHSA-pmwq-pjrm-6p5r, was waiting on an upstream tag that pulled
+# in-toto-golang v0.11.0 rather than v0.10.0; v5.6.0 is that tag, so its
+# statement now records the fix (status: fixed) instead of a not_affected
+# triage.
 #
-# The same go get also bumps google.golang.org/grpc from v1.80.0 to v1.83.2 to
-# clear GHSA-hrxh-6v49-42gf (xDS RBAC fail-open and HTTP/2 transport issues)
-# and CVE-2026-84304 (unauthenticated peer OOM via fragmented HTTP/2 DATA
-# frames buffered per-message), golang.org/x/text from v0.38.0 to v0.42.0 to
-# clear CVE-2026-56852 (norm.Iter infinite loop on crafted input) and satisfy
-# x/net v0.60.0's minimum, golang.org/x/net from v0.55.0 to v0.60.0 to clear
-# CVE-2026-46600 (dnsmessage denial of service) and CVE-2026-78669 (HTTP/2
-# SETTINGS-flood denial of service) while satisfying grpc v1.83.2's minimum
-# version, and golang.org/x/crypto from v0.53.0 to v0.57.0 to clear
-# CVE-2026-56854 (SSH host-key verification bypass) and satisfy x/net
-# v0.60.0's minimum.
+# Three floors remain, because v5.6.0 still resolves earlier versions of them:
+# golang.org/x/net v0.60.0, from v0.58.0, for CVE-2026-46600 (dnsmessage denial
+# of service) and CVE-2026-78669 (HTTP/2 SETTINGS-flood denial of service);
+# golang.org/x/text v0.42.0, from v0.41.0, for CVE-2026-56852 (norm.Iter
+# infinite loop on crafted input); and golang.org/x/crypto v0.57.0, from
+# v0.56.0, for CVE-2026-56854 (SSH host-key verification bypass). x/net v0.60.0
+# requires exactly those x/text and x/crypto minimums, which is why the three
+# move together.
 # Base image pinned by digest (same image as cli-builder above) so both
-# source builds share an identical, immutable Go toolchain. The 1.27.2
-# toolchain carries the stdlib fixes for CVE-2026-78667 (net/http
-# Range-header denial of service) and CVE-2026-97031 (crypto/tls ECH denial
-# of service).
+# source builds share an identical, immutable Go toolchain.
 FROM --platform=$BUILDPLATFORM golang:1.27.2-alpine@sha256:85dc1069ac644ea3c527b177303a406eb3358192816cd7f9e5848eb658851673 AS compose-builder
 
 ARG TARGETARCH
 
 RUN apk add --no-cache git
 
-# Fetch by commit SHA. The SHA below resolves to the docker/compose v5.1.3
+# Fetch by commit SHA. The SHA below resolves to the docker/compose v5.6.0
 # release; recorded here for traceability since the raw SHA does not carry
 # semantic information.
 RUN git init /src/docker-compose && \
     cd /src/docker-compose && \
     git remote add origin https://github.com/docker/compose.git && \
-    git fetch --depth=1 origin 5b2badbda44f3410b2a6c58dff79def21fe8b13e && \
+    git fetch --depth=1 origin 42f48072bbf92ee9b0e43f9fdf2008d03546e7ca && \
     git checkout FETCH_HEAD
 
 WORKDIR /src/docker-compose
 
 RUN mkdir -p /build
 
-# Patch otel/sdk and exporters from v1.42.0 → v1.44.0 to clear CVE-2026-39883,
-# CVE-2026-39882, and CVE-2026-41178 (present through v1.43.0; v1.44.0 is also
-# grpc v1.83.2's minimum below), bump containerd/v2 from v2.2.3 → v2.2.5 to
-# clear CVE-2026-46680 plus the CVE-2026-53488 / 53489 / 53492 cluster, bump
-# google.golang.org/grpc to v1.83.2 to clear GHSA-hrxh-6v49-42gf,
-# CVE-2026-84304, and CVE-2026-84445, bump golang.org/x/net to v0.60.0 (which
-# also requires golang.org/x/text v0.42.0) to clear CVE-2026-46600 and
-# CVE-2026-78669, and bump golang.org/x/crypto to v0.57.0 to clear
-# CVE-2026-56854 and satisfy x/net v0.60.0's minimum. The containerd bump is
-# patch-level; the otel, grpc, x/net, and x/crypto bumps are minor security
-# releases. None introduce breaking API changes.
+# Carry three floors above what v5.6.0 resolves: golang.org/x/net v0.60.0
+# (CVE-2026-46600, CVE-2026-78669), golang.org/x/text v0.42.0
+# (CVE-2026-56852), and golang.org/x/crypto v0.57.0 (CVE-2026-56854). x/net
+# v0.60.0's own go.mod requires those exact x/text and x/crypto minimums.
+# Every other floor this stage used to carry is now resolved by the tag itself.
 RUN --mount=type=cache,id=go-mod,sharing=locked,target=/go/pkg/mod \
-    go get go.opentelemetry.io/otel@v1.44.0 \
-           go.opentelemetry.io/otel/sdk@v1.44.0 \
-           go.opentelemetry.io/otel/sdk/metric@v1.44.0 \
-           go.opentelemetry.io/otel/metric@v1.44.0 \
-           go.opentelemetry.io/otel/trace@v1.44.0 \
-           go.opentelemetry.io/otel/exporters/otlp/otlptrace@v1.44.0 \
-           go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc@v1.44.0 \
-           go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp@v1.44.0 \
-           go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetricgrpc@v1.44.0 \
-           go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetrichttp@v1.44.0 \
-           github.com/containerd/containerd/v2@v2.2.5 \
-           google.golang.org/grpc@v1.83.2 \
-           golang.org/x/text@v0.42.0 \
+    go get golang.org/x/text@v0.42.0 \
            golang.org/x/net@v0.60.0 \
-           golang.org/x/crypto@v0.57.0 \
-           github.com/moby/go-archive@v0.3.0 && \
+           golang.org/x/crypto@v0.57.0 && \
     go mod tidy
 
 # Build target is ./cmd (the package main with plugin.Run), per docker/compose's
@@ -268,7 +236,7 @@ RUN --mount=type=cache,id=go-mod,sharing=locked,target=/go/pkg/mod \
     CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH} go build \
       -trimpath \
       -ldflags "-s -w -extldflags=-static \
-        -X github.com/docker/compose/v5/internal.Version=v5.1.3" \
+        -X github.com/docker/compose/v5/internal.Version=v5.6.0" \
       -o /build/docker-compose \
       ./cmd
 
