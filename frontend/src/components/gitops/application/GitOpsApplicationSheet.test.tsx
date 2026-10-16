@@ -14,7 +14,7 @@ vi.mock('@/lib/api', () => ({ apiFetch: vi.fn() }));
 const grants = { fleet: false };
 
 vi.mock('@/context/AuthContext', () => ({ useAuth: () => ({ can: (action: string) => grants.fleet && action === 'node:read' }) }));
-vi.mock('@/context/NodeContext', () => ({ useNodes: () => ({ hasCapability: () => grants.fleet, nodeMeta: new Map() }) }));
+vi.mock('@/context/NodeContext', () => ({ useNodes: () => ({ hasCapability: () => grants.fleet, nodeMeta: new Map(), nodes: [] }) }));
 
 const mockFetch = vi.mocked(apiFetch);
 

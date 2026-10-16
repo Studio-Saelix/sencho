@@ -475,11 +475,11 @@ export function EditorView(props: EditorViewProps) {
 
     return (
         <ErrorBoundary>
-            <div className={`grid gap-6 ${filesFullscreen ? 'grid-cols-1' : anatomyResizable ? 'grid-cols-1 lg:grid-cols-[minmax(0,1fr)_24px_auto] lg:gap-0' : 'grid-cols-1 lg:grid-cols-2'} min-h-[600px] h-[calc(100vh-160px)] max-h-[1040px]`}>
+            <div className={`grid min-w-0 gap-6 ${filesFullscreen ? 'grid-cols-1' : anatomyResizable ? 'grid-cols-1 lg:grid-cols-[minmax(0,1fr)_24px_auto] lg:gap-0' : 'grid-cols-1 lg:grid-cols-2'} min-h-[600px] h-[calc(100vh-160px)] max-h-[1040px]`}>
                 {/* Left column: identity + health strip + logs, stacked. Hidden in
                     files fullscreen so the editor card fills the width. */}
                 {!filesFullscreen && (
-                <div className="flex flex-col gap-6 min-h-0" data-testid="stack-detail-primary-pane">
+                <div className="flex min-h-0 min-w-0 flex-col gap-6" data-testid="stack-detail-primary-pane">
                     {/* Command Center Card (identity + health strip). Hidden when
                         the logs are expanded so the logs pane fills the column. */}
                     {!logsExpanded && (
@@ -607,9 +607,11 @@ export function EditorView(props: EditorViewProps) {
 
                 {/* Right column: anatomy panel by default, Monaco editor when editing */}
                 {editingCompose ? (
-                    <Card className="rounded-xl border-muted overflow-hidden flex flex-col h-full min-h-0 bg-card">
-                        <div className="p-4 border-b border-muted flex items-center justify-between shrink-0">
-                            <div className="flex items-center gap-4">
+                    <Card className="rounded-xl border-muted overflow-hidden flex flex-col h-full min-h-0 min-w-0 bg-card">
+                        {/* Wrap inside the pane. Do not shrink the split save control,
+                            or its chevron gets clipped. */}
+                        <div className="p-4 border-b border-muted flex flex-wrap items-center gap-x-4 gap-y-2 shrink-0 min-w-0">
+                            <div className="flex flex-wrap items-center gap-4 min-w-0">
                                 <Tabs value={activeTab} onValueChange={(value) => setActiveTab(value as 'compose' | 'env' | 'files')}>
                                     <TabsList>
                                         <TabsHighlight className="rounded-md bg-brand/20" transition={springs.snappy}>
@@ -646,7 +648,7 @@ export function EditorView(props: EditorViewProps) {
                                     </Select>
                                 )}
                             </div>
-                            <div className="flex items-center gap-2">
+                            <div className="ml-auto flex max-w-full flex-wrap items-center justify-end gap-2">
                                 {activeTab !== 'files' && canEditCompose && (
                                     <>
                                         <Button
@@ -661,14 +663,14 @@ export function EditorView(props: EditorViewProps) {
                                                 <span className="absolute -top-1 -right-1 w-2.5 h-2.5 rounded-full bg-brand animate-pulse" />
                                             )}
                                         </Button>
-                                        <div className="flex items-center">
+                                        <div className="flex shrink-0 items-center">
                                             <Button size="sm" variant="default" className="rounded-l-lg rounded-r-none" onClick={requestSaveAndDeploy} disabled={lifecycleBusy || !actionsReady}>
                                                 <Rocket className="w-4 h-4 mr-2" strokeWidth={1.5} />
                                                 {canSaveAndReapply ? 'Save & Reapply' : 'Save & Deploy'}
                                             </Button>
                                             <DropdownMenu modal={false}>
                                                 <DropdownMenuTrigger asChild>
-                                                    <Button size="sm" variant="default" className="rounded-r-lg rounded-l-none border-l border-primary-foreground/20 px-1.5" disabled={lifecycleBusy}>
+                                                    <Button size="sm" variant="default" className="rounded-r-lg rounded-l-none border-l border-primary-foreground/20 px-1.5" disabled={lifecycleBusy} aria-label="More save actions">
                                                         <ChevronDown className="w-3.5 h-3.5" />
                                                     </Button>
                                                 </DropdownMenuTrigger>

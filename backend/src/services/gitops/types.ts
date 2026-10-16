@@ -357,6 +357,13 @@ export type GitOpsApprovalRow = {
   fingerprint: string | null;
   blast_json: string | null;
   policy_provenance_json: string | null;
+  /**
+   * The confirmation object stored with a source acceptance, or null when no
+   * object was stored. A missing property is read the same way. Null plus a
+   * non-null placement pointer is not "unconfirmed": `storedSourceConfirmation`
+   * reads that pointer as a confirmation whose rollout must wait.
+   */
+  source_confirmation_json?: string | null;
   actor: string | null;
   created_at: number;
 };
@@ -498,6 +505,28 @@ export type ResolveApprovalExpected =
   | { kind: 'placement_approval'; applicationId: string; intentRevisionId: string; requiredNodeIds: readonly number[] }
   | { kind: 'rollout_authorization'; applicationId: string; binding: FutureRolloutAuthorizationBinding }
   | { kind: 'legacy_combined'; applicationId: string };
+
+/**
+ * The rollout scope an approved placement froze: the node ids a subsequent
+ * rollout authorization would authorize a dispatch against.
+ *
+ * Distinct from `targets`, which are observed applications on nodes. They
+ * answer different questions and disagree routinely: a Blueprint approved for
+ * node B before its first rollout has an observed target on node A from an
+ * earlier placement, and none on B until a rollout places one. A confirmation
+ * that names the observed rows would tell the operator the action deploys
+ * somewhere it will not.
+ *
+ * `approved` carries only a set `resolveApprovalRef` accepts against the
+ * current intent, so `unresolved` covers a dangling or stale approval reference
+ * as well as unreadable evidence. All three non-approved states read as "no
+ * scope is proven", which is what the execution path does with them.
+ */
+export type ApprovedRolloutScope =
+  | { status: 'not_applicable' }
+  | { status: 'unapproved' }
+  | { status: 'unresolved'; approvalRef: string; reason: 'no_candidate' | 'unreadable_required_targets' | 'approval_does_not_resolve' }
+  | { status: 'approved'; approvalRef: string; nodeIds: number[] };
 
 export type FutureGitOpsEvidence = {
   readonly applicationId: string;
@@ -1045,6 +1074,12 @@ export type GitOpsRevisionProjection =
       availableActions: [];
       approvals: null;
       /**
+       * No application, so no approved placement and no rollout scope.
+       * Present rather than missing so a reader never has to tell "no
+       * application" from "a build that said nothing".
+       */
+      approvedRolloutScope: ApprovedRolloutScope;
+      /**
        * Empty, because an application that does not exist has no configured
        * policy to report. The field is present rather than absent so a reader
        * never has to tell "no application" from "an older build said nothing",
@@ -1058,9 +1093,22 @@ export type GitOpsRevisionProjection =
       applicationId: string;
       lifecycleStatus: GitOpsLifecycleStatus;
       stackName: string | null;
+      /**
+       * The stack whose Git source this application pulls. Direct rows use
+       * their own stack name. A Git-managed Blueprint clears `stackName` and
+       * keeps the source here.
+       */
+      configuredSourceStackName: string | null;
       blueprintId: number | null;
       rolloutGenerationId: string | null;
       approvals: GitOpsApprovalRefs;
+      /**
+       * The rollout scope the placement approval froze, which is what a
+       * dispatch would target. Read here so a confirmation can name it
+       * without re-deriving it, and because it is the same reader execution
+       * goes through.
+       */
+      approvedRolloutScope: ApprovedRolloutScope;
       facets: GitOpsFacets;
       targets: GitOpsTargetProjection[];
       drift: GitOpsDriftItem[];
