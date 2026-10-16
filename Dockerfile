@@ -128,7 +128,7 @@ RUN if [ "$TARGETARCH" = "$BUILDARCH" ]; then \
 # 1.27.2 toolchain carries the stdlib fixes for CVE-2026-78667 (net/http
 # Range-header denial of service) and CVE-2026-97031 (crypto/tls ECH denial
 # of service).
-FROM --platform=$BUILDPLATFORM golang:1.27.2-alpine@sha256:85dc1069ac644ea3c527b177303a406eb3358192816cd7f9e5848eb658851673 AS cli-builder
+FROM --platform=$BUILDPLATFORM golang:1.27.2-alpine@sha256:f92b6ef800e499660581efdabdf25d9d817a9d124eaf900924f0504e7e27e12d AS cli-builder
 
 ARG TARGETARCH
 
@@ -198,7 +198,7 @@ RUN cp vendor.mod go.mod && cp vendor.sum go.sum && \
 # move together.
 # Base image pinned by digest (same image as cli-builder above) so both
 # source builds share an identical, immutable Go toolchain.
-FROM --platform=$BUILDPLATFORM golang:1.27.2-alpine@sha256:85dc1069ac644ea3c527b177303a406eb3358192816cd7f9e5848eb658851673 AS compose-builder
+FROM --platform=$BUILDPLATFORM golang:1.27.2-alpine@sha256:f92b6ef800e499660581efdabdf25d9d817a9d124eaf900924f0504e7e27e12d AS compose-builder
 
 ARG TARGETARCH
 
