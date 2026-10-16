@@ -203,6 +203,10 @@ export default function GitOpsRolloutControls({
   const rolloutPolicyRead = policyReadFor(live?.authorityPolicies, 'rollout_authorization');
   const canSetRolloutPolicy = !!live && allowed('stack:deploy');
 
+  const holdReason = rollout?.status === 'rollout_paused' && rollout.pauseReason
+    ? rollout.pauseReason
+    : null;
+
   if (!canPause && !canResume && !canReplan && !canSupersede && !canRollback && !canSetHealthPolicy && !canSetRolloutPolicy) {
     return null;
   }
@@ -278,8 +282,9 @@ export default function GitOpsRolloutControls({
     <>
       <div
         data-testid="gitops-rollout-controls"
-        className="flex flex-wrap items-center gap-2 rounded-md border border-card-border bg-glass-highlight px-3 py-2"
+        className="flex flex-col gap-1.5 rounded-md border border-card-border bg-glass-highlight px-3 py-2"
       >
+        <div className="flex flex-wrap items-center gap-2">
         <span className="font-mono text-[10px] uppercase tracking-[0.18em] text-stat-subtitle">
           Rollout controls
         </span>
@@ -361,6 +366,12 @@ export default function GitOpsRolloutControls({
               )}
             </DropdownMenuContent>
           </DropdownMenu>
+        )}
+        </div>
+        {holdReason && (
+          <p data-testid="gitops-rollout-hold-reason" className="font-mono text-[11px] leading-relaxed text-foreground/80">
+            {holdReason}
+          </p>
         )}
       </div>
 

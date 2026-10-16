@@ -38,6 +38,7 @@ import {
 } from './preflight';
 import type { BlueprintObservationStage } from './transitions';
 import type {
+  ApprovedRolloutScope,
   ArtifactExpectedIdentity,
   ArtifactFacet,
   ArtifactLatestEvidence,
@@ -83,6 +84,7 @@ const NOT_APPLICABLE: GitOpsRevisionProjection = {
   limitations: [],
   availableActions: [],
   approvals: null,
+  approvedRolloutScope: { status: 'not_applicable' },
   // An application that does not exist has no policy to report. Present and
   // empty rather than absent, so a reader never has to tell "no application"
   // from "an older build said nothing".
@@ -146,6 +148,7 @@ export function deriveGitOpsRevision(
     applicationId: app.id,
     lifecycleStatus: app.lifecycle_status,
     stackName: app.stack_name,
+    configuredSourceStackName: app.configured_source_stack_name ?? app.stack_name,
     blueprintId: app.blueprint_id,
     rolloutGenerationId: app.rollout_generation_id,
     approvals: {
@@ -154,6 +157,7 @@ export function deriveGitOpsRevision(
       rolloutAuthorizationRef: app.rollout_authorization_ref,
       legacyCombinedApprovalRef: app.legacy_combined_approval_ref,
     },
+    approvedRolloutScope: deriveApprovedRolloutScope(app),
     facets: { source, artifact, placement, rollout },
     targets,
     drift: collectDrift(app, facts.targets, targets, availableActions, {
@@ -166,6 +170,52 @@ export function deriveGitOpsRevision(
     availableActions,
     authorityPolicies: authorityPolicyReads(app, { source, placement, rollout }),
   };
+}
+
+/**
+ * The rollout scope an approved placement froze.
+ *
+ * Read from the rollout candidate's required targets and accepted only once
+ * `resolveApprovalRef` confirms the placement approval stands for that set,
+ * which is the same pair `store.authorizationIngredients` hands the dispatch
+ * boundary. So this names the scope execution would use, not a set the
+ * projection chose.
+ *
+ * The observed `targets` rows cannot answer this. A Blueprint approved for a
+ * node no rollout has reached yet has no row there, and a node it was withdrawn
+ * from keeps one, so the two sets disagree exactly when a confirmation is
+ * worth reading.
+ */
+function deriveApprovedRolloutScope(app: GitOpsApplicationRow): ApprovedRolloutScope {
+  if (app.target_mode !== 'blueprint') return { status: 'not_applicable' };
+  const approvalRef = app.placement_approval_ref;
+  if (!approvalRef) return { status: 'unapproved' };
+  const store = GitOpsStore.getInstance();
+  const candidate = app.rollout_candidate_id
+    ? store.getRolloutCandidate(app.rollout_candidate_id)
+    : undefined;
+  if (!candidate || candidate.application_id !== app.id || !app.intent_revision_id) {
+    return { status: 'unresolved', approvalRef, reason: 'no_candidate' };
+  }
+  if (candidate.intent_revision_id !== app.intent_revision_id) {
+    return { status: 'unresolved', approvalRef, reason: 'no_candidate' };
+  }
+  let requiredNodeIds: number[];
+  try {
+    requiredNodeIds = decodeGitOpsRequiredTargetsJson(candidate.required_targets_json).nodeIds;
+  } catch {
+    return { status: 'unresolved', approvalRef, reason: 'unreadable_required_targets' };
+  }
+  const resolves = store.resolveApprovalRef(approvalRef, {
+    kind: 'placement_approval',
+    applicationId: app.id,
+    intentRevisionId: app.intent_revision_id,
+    requiredNodeIds,
+  }) !== null;
+  if (!resolves) {
+    return { status: 'unresolved', approvalRef, reason: 'approval_does_not_resolve' };
+  }
+  return { status: 'approved', approvalRef, nodeIds: requiredNodeIds };
 }
 
 /**
@@ -2614,8 +2664,10 @@ function deriveActions(
   if (source.status === 'applying' || source.status === 'checking_fetching') return ['none'];
   if (source.status === 'recovery_required' || source.status === 'recovery_failed') return ['none'];
   const actions = new Set<GitOpsAvailableAction>();
-  // Fetch is offered only to live Direct applications: Blueprint Git-source
-  // integration ships later, until then no Blueprint mode advertises fetch.
+  // `fetch` stays Direct-only. It opens the stack change plan. A Git-managed
+  // Blueprint pulls through POST .../source/fetch, which stages a candidate
+  // and, for an automatic policy, may accept and dispatch in the same call.
+  // Drift keys off this action, so a Blueprint must not advertise it.
   if (
     app.target_mode === 'direct'
     && (
@@ -2748,6 +2800,7 @@ function unreachableApplicationRevision(limitation: GitOpsLimitation): GitOpsRev
     limitations: [limitation],
     availableActions: [],
     approvals: null,
+    approvedRolloutScope: { status: 'not_applicable' },
     // A fault carries no application either, so it has no policy to report, and
     // it is deliberately not the shared sentinel's identity.
     authorityPolicies: [],

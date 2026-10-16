@@ -296,13 +296,8 @@ describe('EditorView env creation affordance', () => {
 });
 
 describe('EditorView image pull affordance', () => {
-  /** Opens the save dropdown attached to Save & Deploy. The trigger is the
-   *  chevron Radix marks with aria-haspopup, which is the only stable handle:
-   *  the button carries an icon and no text. */
   const openSaveMenu = async () => {
-    const trigger = document.querySelector('[aria-haspopup="menu"]');
-    if (!trigger) throw new Error('save menu trigger not found');
-    await userEvent.click(trigger);
+    await userEvent.click(screen.getByRole('button', { name: 'More save actions' }));
   };
 
   it('offers Save & Pull Images when the user holds stack:edit and stack:deploy', async () => {
@@ -355,9 +350,7 @@ describe('EditorView image pull affordance', () => {
     expect(deployButton).toBeDisabled();
     // The chevron shares the primary's disabled state, so the whole split control
     // is inert rather than half-open.
-    const trigger = document.querySelector('[aria-haspopup="menu"]');
-    expect(trigger).not.toBeNull();
-    expect(trigger?.closest('button')).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'More save actions' })).toBeDisabled();
   });
 
   it('leaves the save row live during an unrelated action', async () => {

@@ -468,8 +468,37 @@ describe('POST /api/gitops/applications/:id/rollout/resume', () => {
       .send({});
     expect(res.status).toBe(200);
     expect(res.body.dispatched).toBe(false);
-    expect(res.body.note).toContain('the automatic policy will start it shortly');
+    expect(res.body.note).toContain('no placement is approved, so the automatic policy cannot start it');
     expect(GitOpsStore.getInstance().getApplication(seeded.applicationId)!.pause_at).toBeNull();
+  });
+
+  it('starts an automatic rollout on resume when the accepted generation is ready', async () => {
+    const seeded = seedGitManagedBlueprint();
+    DatabaseService.getInstance().getDb().prepare(
+      'UPDATE gitops_applications SET placement_approval_ref = ? WHERE id = ?',
+    ).run('place-1', seeded.applicationId);
+    const transitions = (await import('../services/gitops/transitions')).GitOpsTransitions.getInstance();
+    transitions.rolloutPaused(seeded.applicationId, null, 'hold', {
+      operationId: randomUUID(), actor: 'tester', trigger: 'test', at: Date.now(),
+    });
+    const handoff = vi.spyOn(
+      await import('../services/gitops/gitManagedHandoff'),
+      'dispatchPreparedGitManagedGeneration',
+    ).mockResolvedValue({ status: 'dispatched', reason: null });
+
+    const res = await request(app)
+      .post(`/api/gitops/applications/bp:${seeded.blueprintId}/rollout/resume`)
+      .set('Cookie', adminCookie)
+      .send({});
+
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({ ok: true, dispatched: true, note: null });
+    expect(handoff).toHaveBeenCalledWith(expect.objectContaining({
+      applicationId: seeded.applicationId,
+      generationId: seeded.generationId,
+      trigger: 'manual',
+    }));
+    handoff.mockRestore();
   });
 
   it('refuses to resume a rollout that is not paused', async () => {
