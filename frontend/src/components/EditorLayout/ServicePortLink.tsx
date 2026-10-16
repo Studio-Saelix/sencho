@@ -133,7 +133,7 @@ export function ServicePortLink({
               onClick={() => {
                 void copyToClipboard(click.href).then(() => setCopied(true)).catch(() => { /* clipboard unavailable */ });
               }}
-              className={cn('inline-flex h-4 w-4 shrink-0 items-center justify-center rounded text-stat-subtitle hover:text-foreground hover:bg-muted/60')}
+              className={cn('inline-flex h-4 w-4 shrink-0 items-center justify-center rounded text-stat-subtitle hover:text-foreground hover:bg-muted/60 max-md:h-11 max-md:w-11')}
             >
               {copied ? <Check className="h-3 w-3" strokeWidth={2} /> : <Copy className="h-3 w-3" strokeWidth={1.5} />}
             </button>

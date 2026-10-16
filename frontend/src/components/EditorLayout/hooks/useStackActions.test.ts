@@ -399,7 +399,7 @@ describe('useStackActions.saveFile', () => {
 
   it('names a refused compose path instead of a connection problem', async () => {
     vi.mocked(apiFetch).mockResolvedValue(new Response(
-      JSON.stringify({ error: 'Compose file path is not allowed' }),
+      JSON.stringify({ error: 'The compose file does not resolve inside the stack directory' }),
       { status: 409, headers: { 'Content-Type': 'application/json' } },
     ));
     const { result } = setup({ stackList: { selectedFile: null } });
@@ -407,8 +407,8 @@ describe('useStackActions.saveFile', () => {
     await act(async () => {
       loaded = await result.current.loadFileForRoute('linked.yml');
     });
-    expect(loaded).toEqual({ ok: false, error: 'Could not open "linked". Compose file path is not allowed' });
-    expect(toast.error).toHaveBeenCalledWith('Could not open "linked". Compose file path is not allowed');
+    expect(loaded).toEqual({ ok: false, error: 'Could not open "linked". The compose file does not resolve inside the stack directory' });
+    expect(toast.error).toHaveBeenCalledWith('Could not open "linked". The compose file does not resolve inside the stack directory');
     expect(vi.mocked(toast.error).mock.calls.some(([message]) => String(message).includes('connection'))).toBe(false);
   });
 

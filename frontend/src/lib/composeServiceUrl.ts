@@ -1,5 +1,13 @@
-import { isAlias, isMap, isPair, isScalar, isSeq, parse, parseDocument, visit, type YAMLMap } from 'yaml';
+import { isAlias, isMap, isPair, isScalar, isSeq, parse, parseDocument, visit, type YAMLMap, type YAMLSeq } from 'yaml';
 import { SERVICE_URL_LABEL } from './serviceUrlLabel';
+
+/**
+ * A custom YAML tag (`!reset`, `!override`) makes the parser warn about the tag it
+ * cannot resolve. Those layouts are refused here deliberately, with their own
+ * message, so the library warning would only add noise to every read and edit of
+ * such a file. Parse errors still surface through `doc.errors`.
+ */
+const QUIET_TAGS = { logLevel: 'error' } as const;
 
 /** Compose treats `$$` as a literal dollar. A URL typed by the operator is literal. */
 export function escapeComposeLiteral(url: string): string {
@@ -83,7 +91,7 @@ function serviceOf(parsed: unknown, serviceName: string): Record<string, unknown
 }
 
 function effectiveLabels(source: string, serviceName: string, schema?: 'failsafe'): unknown {
-  return serviceOf(parse(source, { merge: true, schema }), serviceName)?.labels ?? null;
+  return serviceOf(parse(source, { ...QUIET_TAGS, merge: true, schema }), serviceName)?.labels ?? null;
 }
 
 /**
@@ -167,13 +175,17 @@ function soleUrlSeq(doc: unknown, labels: { items: unknown[] }): boolean {
   return labels.items.length > 0 && labels.items.every(item => isUrlListItem(resolvedLabelText(doc, item)));
 }
 
-/** True when `#` sits in `region` outside every URL value, so it is a comment. */
+/**
+ * True when `#` sits in `region` outside every URL value's own token, so it is a
+ * comment. The token ends at the value's scalar: a comment after it on the same
+ * line is outside it even though the node's own range covers that comment.
+ */
 function commentOutsideValues(region: string, regionStart: number, values: unknown[]): boolean {
   const cuts: Array<[number, number]> = [];
   for (const value of values) {
     const span = nodeRange(value);
     if (!span || span[0] < regionStart || span[2] > regionStart + region.length) return region.includes('#');
-    cuts.push([span[0] - regionStart, span[2] - regionStart]);
+    cuts.push([span[0] - regionStart, span[1] - regionStart]);
   }
   cuts.sort((left, right) => left[0] - right[0]);
   let text = '';
@@ -186,9 +198,81 @@ function commentOutsideValues(region: string, regionStart: number, values: unkno
 }
 
 /**
- * Remove a labels key whose only entries are the service URL.
- * Returns false when a comment outside those values has to stay, so the caller
- * writes an empty map or list under the comment instead of dropping it.
+ * End of the run of comment-only lines below `from` that sit deeper than `indent`,
+ * so a comment block that closes the labels counts as part of it. A blank line, an
+ * entry, or a comment at the key's own indentation ends the run.
+ */
+function commentLinesEnd(source: string, from: number, indent: number): number {
+  let end = from;
+  for (;;) {
+    const newline = source.indexOf('\n', end);
+    const stop = newline === -1 ? source.length : newline;
+    const line = source.slice(end, stop);
+    if (!line.trimStart().startsWith('#') || line.search(/\S/) <= indent) return end;
+    end = newline === -1 ? source.length : newline + 1;
+  }
+}
+
+/** The empty flow text a labels collection narrows to when its entries are removed. */
+function emptyLabelsText(isList: boolean): string {
+  return isList ? '[]' : '{}';
+}
+
+/** The first non-space character of the line starting at `lineStart`. */
+function lineContentStart(source: string, lineStart: number): number {
+  let index = lineStart;
+  while (source[index] === ' ' || source[index] === '\t') index += 1;
+  return index;
+}
+
+/**
+ * Replace a block labels collection's entries with an empty flow collection, so the
+ * key line and every comment outside those entries stay exactly as written. The
+ * entry's own line marker goes too: a list entry keeps its `-`, rather than
+ * turning into a `- []` nested empty sequence. A comment between the entries
+ * cannot be kept once they become one token, so that layout is refused.
+ */
+function emptyEntriesInPlace(source: string, items: unknown[], values: unknown[], isList: boolean): Splice {
+  const head = itemSpan(source, items[0])[0];
+  const start = lineContentStart(source, source.lastIndexOf('\n', Math.max(0, head - 1)) + 1);
+  const end = itemSpan(source, items[items.length - 1])[1];
+  if (commentOutsideValues(source.slice(start, end), start, values)) {
+    throw new UnsupportedLayout('A comment sits between the labels being removed');
+  }
+  return { start, end, text: emptyLabelsText(isList) };
+}
+
+/**
+ * Remove a labels key that is left with no entries. Compose does not render
+ * `labels:` without a value, so the key itself goes; a comment the removal would
+ * drop (on one of the removed lines, or a comment-only line that closes the block)
+ * keeps the value in place as an empty map or list instead.
+ */
+function emptyLabelsKey(
+  source: string,
+  doc: unknown,
+  labelPair: YAMLMap['items'][number],
+  entries: { items: unknown[] },
+  values: unknown[],
+  isList: boolean,
+  splices: Splice[],
+): void {
+  const removed = deleteSpan(source, labelPair.key, labelPair.value);
+  const keyRange = nodeRange(labelPair.key);
+  const regionEnd = keyRange === null ? removed.end : commentLinesEnd(source, removed.end, indentAt(source, keyRange[0]));
+  if (commentOutsideValues(source.slice(removed.start, regionEnd), removed.start, values)) {
+    splices.push(emptyEntriesInPlace(source, entries.items, values, isList));
+    return;
+  }
+  for (const value of values) detachOutside(doc, source, value, anchorName(value), splices);
+  splices.push(removed);
+}
+
+/**
+ * Remove a labels key whose only entries are the service URL, or empty it in place
+ * when a comment the removal would drop has to stay. Returns false when the caller
+ * has to edit the collection itself: a flow labels value, or a flow service, keeps
+ * its own flow edit and its own refusals there.
  */
 function clearSoleLabelsKey(
   source: string,
@@ -196,18 +280,24 @@ function clearSoleLabelsKey(
   service: YAMLMap,
   labelPair: YAMLMap['items'][number],
   values: unknown[],
+  isList: boolean,
   flowService: boolean,
   splices: Splice[],
 ): boolean {
   const removed = flowService ? null : deleteSpan(source, labelPair.key, labelPair.value);
-  const [regionStart, regionEnd] = removed
-    ? [removed.start, removed.end]
-    : itemSpan(source, labelPair);
-  const region = source.slice(regionStart, regionEnd);
-  if (commentOutsideValues(region, regionStart, values)) return false;
+  const [regionStart, regionEnd] = removed ? [removed.start, removed.end] : itemSpan(source, labelPair);
+  const keyRange = nodeRange(labelPair.key);
+  const regionEndWithComments = removed !== null && keyRange !== null
+    ? commentLinesEnd(source, regionEnd, indentAt(source, keyRange[0]))
+    : regionEnd;
+  const keepsComment = commentOutsideValues(source.slice(regionStart, regionEndWithComments), regionStart, values);
+  // A comment has to stay, and only the caller's own flow edit can keep it where it
+  // stands, so a flow service or a flow labels value is left to that path.
+  if (keepsComment && (removed === null || isFlow(source, labelPair.value))) return false;
   for (const value of values) detachOutside(doc, source, value, anchorName(value), splices);
-  if (flowService) splices.push(...editFlow(source, service, new Set([labelPair]), null));
-  else if (removed) splices.push(removed);
+  if (removed === null) splices.push(...editFlow(source, service, new Set([labelPair]), null));
+  else if (keepsComment) splices.push(emptyEntriesInPlace(source, (labelPair.value as YAMLMap | YAMLSeq).items, values, isList));
+  else splices.push(removed);
   return true;
 }
 
@@ -231,7 +321,7 @@ function aliasSites(doc: unknown, anchor: string): Array<{ parent: unknown; node
 /** Service names declared in this compose buffer. Null when the buffer cannot be parsed. */
 export function composeServiceNames(source: string): string[] | null {
   try {
-    const doc = parseDocument(source);
+    const doc = parseDocument(source, QUIET_TAGS);
     if (doc.errors.length > 0) return null;
     const services = doc.get('services');
     if (!isMap(services)) return [];
@@ -773,13 +863,18 @@ function mergedClearParts(labels: YAMLMap): {
  * direct URL label is removed. Direct entries, comments and tokens stay exactly
  * as written. A layout whose text cannot be copied faithfully is refused.
  */
-function materializeMergedClear(source: string, doc: unknown, labels: YAMLMap): Splice[] {
+function materializeMergedClear(
+  source: string,
+  doc: unknown,
+  labels: YAMLMap,
+  labelPair: YAMLMap['items'][number],
+): Splice[] {
   const { mergeItem, urlPairs, skip } = mergedClearParts(labels);
   const inherited: MergedLabel[] = [];
   collectMergedLabels(source, doc, mergeItem.value, skip, new Set(), inherited);
   const splices: Splice[] = [];
-  for (const pair of urlPairs) detachOutside(doc, source, pair.value, anchorName(pair.value), splices);
   if (isFlow(source, labels)) {
+    for (const pair of urlPairs) detachOutside(doc, source, pair.value, anchorName(pair.value), splices);
     const entries = inherited.map(label => mergedFlowEntry(source, label));
     splices.push(...editFlow(source, labels, new Set([mergeItem, ...urlPairs]), entries.length > 0 ? entries.join(', ') : null));
     return splices;
@@ -790,13 +885,18 @@ function materializeMergedClear(source: string, doc: unknown, labels: YAMLMap): 
   if (source.slice(mergeEnd, lineEndAt(source, mergeEnd)).includes('#')) {
     throw new UnsupportedLayout('A comment sits on the merge key line');
   }
-  const nl = fileNewline(source);
-  for (const pair of urlPairs) splices.push(deleteSpan(source, pair.key, pair.value));
-  const span = deleteSpan(source, mergeItem.key, mergeItem.value);
-  if (inherited.length === 0) {
-    splices.push(span);
+  const direct = labels.items.filter(item => item !== mergeItem && !urlPairs.includes(item));
+  if (inherited.length === 0 && direct.length === 0) {
+    // Nothing is left in the map, and `labels:` without a value does not render:
+    // the key goes, or the entries narrow to `{}` when a comment has to stay.
+    const values = [mergeItem.value, ...urlPairs.map(pair => pair.value)];
+    emptyLabelsKey(source, doc, labelPair, labels, values, false, splices);
     return splices;
   }
+  for (const pair of urlPairs) detachOutside(doc, source, pair.value, anchorName(pair.value), splices);
+  for (const pair of urlPairs) splices.push(deleteSpan(source, pair.key, pair.value));
+  const span = deleteSpan(source, mergeItem.key, mergeItem.value);
+  const nl = fileNewline(source);
   const indent = collectionIndent(source, labels);
   const text = inherited
     .map(label => (label.flowSource ? flowPairText(source, label.pair) : blockPairText(source, label.pair)))
@@ -827,16 +927,16 @@ function editServiceLabels(source: string, doc: unknown, service: YAMLMap, servi
     else splices.push(insertLabelsBlock(source, service, next));
     return splices;
   }
-  if (isMap(labels) && mapHasMerge(labels) && url == null) {
-    splices.push(...materializeMergedClear(source, doc, labels));
+  if (isMap(labels) && mapHasMerge(labels) && url == null && labelPair) {
+    splices.push(...materializeMergedClear(source, doc, labels, labelPair));
     return splices;
   }
   if (isMap(labels) && url == null && labelPair && soleUrlMap(labels)
-    && clearSoleLabelsKey(source, doc, service, labelPair, [labels.items[0].value], flowService, splices)) {
+    && clearSoleLabelsKey(source, doc, service, labelPair, [labels.items[0].value], false, flowService, splices)) {
     return splices;
   }
   if (isSeq(labels) && url == null && labelPair && soleUrlSeq(doc, labels)
-    && clearSoleLabelsKey(source, doc, service, labelPair, labels.items, flowService, splices)) {
+    && clearSoleLabelsKey(source, doc, service, labelPair, labels.items, true, flowService, splices)) {
     return splices;
   }
   if (isMap(labels)) splices.push(...editMap(source, doc, labels, url));
@@ -856,7 +956,7 @@ function stableJson(value: unknown): string {
 
 /** The whole file as plain data, with the URL label taken off one service and that service's labels dropped when empty. */
 function modelWithoutUrl(source: string, serviceName: string, schema?: 'failsafe'): string {
-  const parsed: unknown = parse(source, { merge: true, schema });
+  const parsed: unknown = parse(source, { ...QUIET_TAGS, merge: true, schema });
   // A JSON copy splits aliased nodes apart, so removing one service's label leaves the rest.
   const model: unknown = JSON.parse(JSON.stringify(parsed ?? null));
   const record = serviceOf(model, serviceName);
@@ -881,13 +981,13 @@ function modelWithoutUrl(source: string, serviceName: string, schema?: 'failsafe
  * schema), so `0440` turning into `440` or `022` into `22` is caught too.
  */
 function patchMismatch(source: string, patched: string, serviceName: string, literal: string | null): string | null {
-  if (parseDocument(patched).errors.length > 0) return 'the patched text does not parse';
+  if (parseDocument(patched, QUIET_TAGS).errors.length > 0) return 'the patched text does not parse';
   for (const schema of [undefined, 'failsafe'] as const) {
     if (modelWithoutUrl(source, serviceName, schema) !== modelWithoutUrl(patched, serviceName, schema)) {
       return `the ${schema ?? 'typed'} model changed outside the URL label`;
     }
   }
-  if (rawServiceUrlFrom(parse(patched, { merge: true }), serviceName) !== literal) return 'the URL label did not read back';
+  if (rawServiceUrlFrom(parse(patched, { ...QUIET_TAGS, merge: true }), serviceName) !== literal) return 'the URL label did not read back';
   return null;
 }
 
@@ -922,10 +1022,10 @@ export function patchServiceUrlLabel(source: string, serviceName: string, url: s
   let parsed: unknown;
   let doc: ReturnType<typeof parseDocument>;
   try {
-    doc = parseDocument(source);
+    doc = parseDocument(source, QUIET_TAGS);
     if (doc.errors.length > 0) return { ok: false, reason: 'parse' };
     // Merges are resolved here too, so `<<: 5` is a parse failure, not an unsupported layout.
-    parsed = parse(source, { merge: true });
+    parsed = parse(source, { ...QUIET_TAGS, merge: true });
   } catch (error) {
     console.error('Failed to read the compose file for a service URL edit:', error);
     return { ok: false, reason: 'parse' };

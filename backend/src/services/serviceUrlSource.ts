@@ -41,6 +41,14 @@ import path from 'path';
 import { parse, parseDocument, visit } from 'yaml';
 import { SERVICE_URL_LABEL } from '../helpers/serviceUrlLabel';
 
+/**
+ * A custom YAML tag (`!reset`, `!override`) makes the parser warn about the tag it
+ * cannot resolve. Those layouts are refused here deliberately, with their own
+ * message, so the library warning would only add noise to every anatomy read of
+ * such a file. Parse errors still surface through `doc.errors`.
+ */
+const QUIET_TAGS = { logLevel: 'error' } as const;
+
 export type ServiceUrlEditState = 'root' | 'other' | 'unknown';
 
 export interface ServiceUrlFileFacts {
@@ -134,11 +142,11 @@ export function serviceUrlFileFacts(source: string): ServiceUrlFileFacts | null 
   let doc: ReturnType<typeof parseDocument>;
   let parsed: unknown;
   try {
-    doc = parseDocument(source);
+    doc = parseDocument(source, QUIET_TAGS);
     if (doc.errors.length > 0) return null;
     if (hasCustomTag(doc)) return null;
     // Merges are resolved so `<<:` templates and anchors count as set keys.
-    parsed = parse(source, { merge: true });
+    parsed = parse(source, { ...QUIET_TAGS, merge: true });
   } catch {
     return null;
   }
@@ -172,8 +180,8 @@ export function serviceUrlFileFacts(source: string): ServiceUrlFileFacts | null 
 function interpolatedListKeyServices(source: string): Set<string> | null {
   let parsed: unknown;
   try {
-    if (parseDocument(source).errors.length > 0) return null;
-    parsed = parse(source, { merge: true });
+    if (parseDocument(source, QUIET_TAGS).errors.length > 0) return null;
+    parsed = parse(source, { ...QUIET_TAGS, merge: true });
   } catch {
     return null;
   }

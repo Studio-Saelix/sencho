@@ -1306,13 +1306,248 @@ describe('patchServiceUrlLabel', () => {
       'services:',
       '  web:',
       '    image: nginx',
-      '    labels:',
       '  api:',
       '    image: redis',
       '',
     ].join('\n'));
     const merged = parse(cleared.yaml, { merge: true }) as { services: { web: { labels?: unknown } } };
     expect(merged.services.web.labels ?? null).toBeNull();
+  });
+
+  it('audit F9: never leaves a labels key without a value when a merged URL is cleared', () => {
+    // Compose rejects `labels:` with no value (`must be a mapping`), so a clear
+    // that empties the map has to take the key with it. A shared anchor keeps the
+    // address for every other consumer.
+    const source = [
+      'x-m: &m',
+      '  sencho.service.url: &u "https://m.example.com"',
+      'x-lbl: &lbl',
+      '  sencho.service.url: "https://shared.example.com"',
+      'services:',
+      '  ra:',
+      '    image: nginx',
+      '    labels:',
+      '      <<: *m',
+      '  rb:',
+      '    image: nginx',
+      '    labels: *lbl',
+      '  rc:',
+      '    image: nginx',
+      '    labels:',
+      '      <<: *lbl',
+      '',
+    ].join('\n');
+    const anchored = patchServiceUrlLabel(source, 'ra', null);
+    expect(anchored.ok).toBe(true);
+    if (!anchored.ok) return;
+    expect(parseDocument(anchored.yaml).errors).toEqual([]);
+    expect(anchored.yaml).toContain('sencho.service.url: &u "https://m.example.com"');
+    let merged = parse(anchored.yaml, { merge: true }) as {
+      services: Record<string, { labels?: unknown }>;
+    };
+    expect(merged.services.ra.labels).toBeUndefined();
+
+    const shared = patchServiceUrlLabel(source, 'rc', null);
+    expect(shared.ok).toBe(true);
+    if (!shared.ok) return;
+    merged = parse(shared.yaml, { merge: true }) as typeof merged;
+    expect(merged.services.rc.labels).toBeUndefined();
+    expect((merged.services.rb.labels as Record<string, string>)['sencho.service.url'])
+      .toBe('https://shared.example.com');
+
+    // A flow labels map narrows in place instead, and still renders.
+    const flow = 'x-m: &m { sencho.service.url: "https://m.example.com" }\nservices:\n  ra: { image: nginx, labels: { <<: *m } }\n';
+    const flowCleared = patchServiceUrlLabel(flow, 'ra', null);
+    expect(flowCleared.ok).toBe(true);
+    if (!flowCleared.ok) return;
+    const flowMerged = parse(flowCleared.yaml, { merge: true }) as { services: { ra: { labels: unknown } } };
+    expect(flowMerged.services.ra.labels).toEqual({});
+  });
+
+  it('audit F9: keeps a comment that closes the emptied labels block as an empty value', () => {
+    const inside = [
+      'x-m: &m',
+      '  sencho.service.url: "https://m.example.com"',
+      'services:',
+      '  ra:',
+      '    image: nginx',
+      '    labels:',
+      '      # from the shared file',
+      '      <<: *m',
+      '  api:',
+      '    image: redis',
+      '',
+    ].join('\n');
+    const cleared = patchServiceUrlLabel(inside, 'ra', null);
+    expect(cleared.ok).toBe(true);
+    if (!cleared.ok) return;
+    expect(cleared.yaml).toBe([
+      'x-m: &m',
+      '  sencho.service.url: "https://m.example.com"',
+      'services:',
+      '  ra:',
+      '    image: nginx',
+      '    labels:',
+      '      # from the shared file',
+      '      {}',
+      '  api:',
+      '    image: redis',
+      '',
+    ].join('\n'));
+
+    const below = [
+      'x-m: &m',
+      '  sencho.service.url: "https://m.example.com"',
+      'services:',
+      '  ra:',
+      '    image: nginx',
+      '    labels:',
+      '      <<: *m',
+      '      # explain the port',
+      '    ports: ["8090:80"]',
+      '',
+    ].join('\n');
+    const kept = patchServiceUrlLabel(below, 'ra', null);
+    expect(kept.ok).toBe(true);
+    if (!kept.ok) return;
+    expect(kept.yaml).toBe([
+      'x-m: &m',
+      '  sencho.service.url: "https://m.example.com"',
+      'services:',
+      '  ra:',
+      '    image: nginx',
+      '    labels:',
+      '      {}',
+      '      # explain the port',
+      '    ports: ["8090:80"]',
+      '',
+    ].join('\n'));
+    const merged = parse(kept.yaml, { merge: true }) as { services: { ra: { labels: unknown } } };
+    expect(merged.services.ra.labels).toEqual({});
+  });
+
+  it('audit F9: never writes a null labels value for any cleared layout', () => {
+    // Compose rejects `labels:` with no value (`must be a mapping`), so every
+    // layout the clear supports has to leave the key gone or an explicit `{}`/`[]`.
+    const fixtures = [
+      'services:\n  web:\n    image: nginx\n    labels:\n      sencho.service.url: "https://web.example.com"\n  api:\n    image: nginx\n',
+      'services:\n  web:\n    image: nginx\n    labels:\n      sencho.service.url: "https://web.example.com" # served\n  api:\n    image: nginx\n',
+      'services:\n  web:\n    image: nginx\n    labels:\n      sencho.service.url: "https://web.example.com"\n      # note\n  api:\n    image: nginx\n',
+      'services:\n  web:\n    image: nginx\n    labels:\n      - sencho.service.url=https://web.example.com\n  api:\n    image: nginx\n',
+      'services:\n  web:\n    image: nginx\n    labels: { sencho.service.url: "https://web.example.com" }\n  api:\n    image: nginx\n',
+      'x-m: &m\n  sencho.service.url: &u "https://m.example.com"\nservices:\n  web:\n    image: nginx\n    labels:\n      <<: *m\n  api:\n    image: nginx\n',
+      'x-m: &m\n  sencho.service.url: "https://m.example.com"\nservices:\n  web:\n    image: nginx\n    labels:\n      # note\n      <<: *m\n  api:\n    image: nginx\n',
+      'x-m: &m { sencho.service.url: "https://m.example.com" }\nservices:\n  web: { image: nginx, labels: { <<: *m } }\n  api:\n    image: nginx\n',
+      'x-m: &m\r\n  sencho.service.url: "https://m.example.com"\r\nservices:\r\n  web:\r\n    image: nginx\r\n    labels:\r\n      <<: *m\r\n  api:\r\n    image: nginx\r\n',
+    ];
+    for (const source of fixtures) {
+      const cleared = patchServiceUrlLabel(source, 'web', null);
+      expect(cleared.ok).toBe(true);
+      if (!cleared.ok) continue;
+      expect(parseDocument(cleared.yaml).errors).toEqual([]);
+      const labels = (parse(cleared.yaml, { merge: true }) as {
+        services: { web: { labels?: unknown } };
+      }).services.web.labels;
+      // `typeof null` is `object`, so null has to be excluded explicitly.
+      expect(labels === undefined || (labels !== null && typeof labels === 'object')).toBe(true);
+    }
+  });
+
+  it('audit F9: refuses a merged clear that would drop a comment between the entries', () => {
+    const source = [
+      'x-m: &m',
+      '  sencho.service.url: "https://m.example.com"',
+      'services:',
+      '  ra:',
+      '    image: nginx',
+      '    labels:',
+      '      <<: *m # the merge itself',
+      '      # between the merge and the value',
+      '      sencho.service.url: "https://own.example.com"',
+      '',
+    ].join('\n');
+    expect(patchServiceUrlLabel(source, 'ra', null)).toEqual({ ok: false, reason: 'unsupported' });
+  });
+
+  it('audit F9: keeps a trailing comment when the only label is cleared', () => {
+    // The node's own range covers a trailing comment, so the value token alone
+    // decides: a comment outside it has to stay, which keeps `labels:` as an
+    // empty map or list rather than dropping both.
+    const map = [
+      'services:',
+      '  web:',
+      '    image: nginx',
+      '    labels:',
+      '      sencho.service.url: "https://web.example.com" # served by the rewrite',
+      '  api:',
+      '    image: redis',
+      '',
+    ].join('\n');
+    const mapCleared = patchServiceUrlLabel(map, 'web', null);
+    expect(mapCleared.ok).toBe(true);
+    if (!mapCleared.ok) return;
+    expect(mapCleared.yaml).toBe([
+      'services:',
+      '  web:',
+      '    image: nginx',
+      '    labels:',
+      '      {} # served by the rewrite',
+      '  api:',
+      '    image: redis',
+      '',
+    ].join('\n'));
+
+    const list = [
+      'services:',
+      '  web:',
+      '    image: nginx',
+      '    labels:',
+      '      - sencho.service.url=https://web.example.com # served by the rewrite',
+      '  api:',
+      '    image: redis',
+      '',
+    ].join('\n');
+    const listCleared = patchServiceUrlLabel(list, 'web', null);
+    expect(listCleared.ok).toBe(true);
+    if (!listCleared.ok) return;
+    expect(listCleared.yaml).toBe([
+      'services:',
+      '  web:',
+      '    image: nginx',
+      '    labels:',
+      '      [] # served by the rewrite',
+      '  api:',
+      '    image: redis',
+      '',
+    ].join('\n'));
+
+    // A comment line below the only label stays inside the block instead of
+    // being orphaned under the previous key.
+    const below = [
+      'services:',
+      '  web:',
+      '    image: nginx',
+      '    labels:',
+      '      sencho.service.url: "https://web.example.com"',
+      '      # still worth knowing',
+      '  api:',
+      '    image: redis',
+      '',
+    ].join('\n');
+    const belowCleared = patchServiceUrlLabel(below, 'web', null);
+    expect(belowCleared.ok).toBe(true);
+    if (!belowCleared.ok) return;
+    expect(belowCleared.yaml).toBe([
+      'services:',
+      '  web:',
+      '    image: nginx',
+      '    labels:',
+      '      {}',
+      '      # still worth knowing',
+      '  api:',
+      '    image: redis',
+      '',
+    ].join('\n'));
   });
 
   it('audit F1: clears a direct URL beside a merge that never set one', () => {

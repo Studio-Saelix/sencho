@@ -510,7 +510,7 @@ describe('useUrlSync', () => {
     window.history.replaceState({ senchoIdx: 0 }, '', '/nodes/local/stacks/radarr/compose');
     const loadFileForRoute = vi.fn().mockResolvedValue({
       ok: false,
-      error: 'Could not open "radarr". Compose file path is not allowed',
+      error: 'Could not open "radarr". The compose file does not resolve inside the stack directory',
     });
 
     const { result } = renderHook(
@@ -529,7 +529,7 @@ describe('useUrlSync', () => {
       await Promise.resolve();
     });
 
-    expect(result.current.routeDetailError).toBe('Could not open "radarr". Compose file path is not allowed');
+    expect(result.current.routeDetailError).toBe('Could not open "radarr". The compose file does not resolve inside the stack directory');
     expect(result.current.routeDetailError).not.toContain('connection');
   });
 

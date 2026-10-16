@@ -6,9 +6,9 @@ describe('stackOpenRefusalMessage', () => {
     const message = stackOpenRefusalMessage(
       'linked.yml',
       409,
-      JSON.stringify({ error: 'Compose file path is not allowed' }),
+      JSON.stringify({ error: 'The compose file does not resolve inside the stack directory' }),
     );
-    expect(message).toBe('Could not open "linked". Compose file path is not allowed');
+    expect(message).toBe('Could not open "linked". The compose file does not resolve inside the stack directory');
     expect(message).not.toContain('connection');
   });
 
