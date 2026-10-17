@@ -25,7 +25,7 @@ vi.mock('@/context/AuthContext', () => ({
 }));
 
 vi.mock('@/context/NodeContext', () => ({
-  useNodes: () => ({ hasCapability: () => session.fleet, nodeMeta: new Map() }),
+  useNodes: () => ({ hasCapability: () => session.fleet, nodeMeta: new Map(), nodes: [] }),
 }));
 
 // The Git source host mounts with the workplace; this suite never opens it.

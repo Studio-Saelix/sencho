@@ -113,9 +113,11 @@ function liveRevision(overrides: Partial<GitOpsRevisionLive> = {}): GitOpsRevisi
         applicationId: 'app-1',
         lifecycleStatus: 'active',
         stackName: null,
+        configuredSourceStackName: 'bookstack',
         blueprintId: 7,
         rolloutGenerationId: 'rollout-1',
         approvals: noApprovals,
+        approvedRolloutScope: { status: 'approved', approvalRef: 'place-1', nodeIds: [1] },
         facets: {
             source: acceptedSource,
             artifact: exactArtifact,
@@ -141,6 +143,7 @@ const absent: GitOpsRevisionProjection = {
     limitations: [],
     availableActions: [],
     approvals: null,
+    approvedRolloutScope: { status: 'not_applicable' },
     authorityPolicies: [],
 };
 

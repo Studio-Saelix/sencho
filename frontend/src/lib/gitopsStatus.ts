@@ -283,6 +283,14 @@ function stageAnswer(stage: GitOpsStatusStage): GitOpsStatusAnswer {
   return { tone: stage.tone, title: stage.word, line: stage.line, detail: stage.detail, status: stage.status, icon: stage.icon };
 }
 
+/** The operator-authored or system hold, when the rollout is paused for a reason. */
+function pausedRolloutReason(revision: GitOpsRevisionProjection): string | null {
+  const rollout = liveRolloutFacet(revision);
+  if (rollout?.status !== 'rollout_paused') return null;
+  const reason = rollout.pauseReason?.trim() ?? '';
+  return reason.length > 0 ? reason : null;
+}
+
 /**
  * The status of one application, layered.
  *
@@ -312,6 +320,10 @@ export function buildGitOpsStatus(
   const faults = absentFault(revision);
   if (row) {
     const { answer, otherReasons } = postureAnswer(row, faults.length > 0 ? faults[0].message : null);
+    // The portfolio label only says the rollout is paused. The hold reason is
+    // why Resume exists, so it is the answer when that pause is what needs attention.
+    const holdReason = faults.length === 0 ? pausedRolloutReason(revision) : null;
+    if (holdReason && row.attention[0] === 'rollout_paused') answer.line = holdReason;
     const stages = applicableStages(revision, omit);
     return {
       kind: 'posture',

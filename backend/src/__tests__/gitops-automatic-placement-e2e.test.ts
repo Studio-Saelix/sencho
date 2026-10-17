@@ -1123,6 +1123,47 @@ describe('a bounded_auto application reaches an approval', () => {
     // never read as the stateless answer that approves.
     expect(outcome).toEqual({ status: 'operator_review', reason: 'unknown_workload' });
   });
+
+  it('does not authorize a first automatic placement after a confirmation that none was approved', async () => {
+    const nodeId = addNode(`n-${randomUUID().slice(0, 6)}`);
+    const app = seed({ nodeIds: [nodeId], accepted: false });
+    const store = GitOpsStore.getInstance();
+    const generation = store.listGenerationsForApplication(app.id)[0];
+    const envelope = { operationId: `op-${app.id}`, actor: 'tester', trigger: 'manual' as const, at: Date.now() };
+    GitOpsTransitions.getInstance().candidateReady(app.id, generation.id, false, envelope);
+    GitOpsTransitions.getInstance().sourceAccepted({
+      applicationId: app.id,
+      generationId: generation.id,
+      artifactSetId: `art-${generation.id}`,
+      sourceAcceptanceId: `sa-${generation.id}`,
+      authority: 'operator',
+      confirmation: { placementApprovalRef: null, rolloutMayStart: true },
+      envelope,
+    });
+
+    const placed = applyAutomaticPlacement(app.id, {
+      ...envelope, operationId: `place-${app.id}`, trigger: 'placement_policy',
+    });
+    expect(placed).toEqual({ status: 'auto_approved', reason: 'stateless_addition' });
+
+    const { dispatchPreparedGitManagedGeneration } = await import('../services/gitops/gitManagedHandoff');
+    const handoff = await dispatchPreparedGitManagedGeneration({
+      applicationId: app.id,
+      generationId: generation.id,
+      actor: 'system:blueprint-reconciler',
+      trigger: 'retry',
+    });
+
+    const live = store.getApplication(app.id)!;
+    expect(live.placement_approval_ref).toBeTruthy();
+    expect(live.rollout_authorization_ref).toBeNull();
+    expect(live.pause_reason).toContain('approved placement changed');
+    expect(handoff.status).not.toBe('dispatched');
+    expect(store.storedSourceConfirmation(live)).toEqual({
+      status: 'present',
+      confirmation: { placementApprovalRef: null, rolloutMayStart: true },
+    });
+  });
 });
 
 describe('a refusal recorded for an operation that has since finished', () => {

@@ -699,7 +699,8 @@ export class BlueprintService {
      * node and the on-disk marker is missing, malformed, or references a
      * different blueprint ID. Throws BlueprintOwnershipProbeError when the
      * directory or marker cannot be probed (non-ENOENT I/O, a remote list
-     * failure, or a marker read that failed).
+     * failure, a remote list this version cannot read, or a marker read that
+     * failed).
      *
      * "Malformed" is local-only. A corrupt marker read off local disk is a fact
      * about the node and reports a conflict, while a remote marker that could
@@ -750,9 +751,34 @@ export class BlueprintService {
                 `Cannot verify stack ownership on remote node "${node.name}" (HTTP ${listRes.status})`,
             );
         }
-        const stacks = Array.isArray(listRes.data) ? listRes.data as Array<{ name?: string }> : [];
-        const exists = stacks.some(s => s?.name === blueprintName);
-        if (!exists) return false;
+        const raw: unknown = listRes.data;
+        const listed: unknown[] = Array.isArray(raw) ? raw : [];
+        // GET /api/stacks answers with the stack names themselves, so the
+        // entries are the names and not objects carrying one. The list is
+        // load-bearing rather than a fast path: the marker read below cannot
+        // tell "stack is here with no marker" from "there is no such stack",
+        // because both answer not-found. Reading the entries as objects made
+        // the match below silently match nothing, so every remote name read as
+        // clear from the day this arm was written.
+        const names = listed.filter((entry): entry is string => typeof entry === 'string');
+        // The array check is load-bearing: without it a non-array body yields two
+        // empty lists, whose lengths match, and the body would read as a fully
+        // readable empty node.
+        const fullyReadable = Array.isArray(raw) && names.length === listed.length;
+        if (!names.includes(blueprintName)) {
+            // A name absent from a list this probe could read end to end is a
+            // real answer. A name absent from a list that also held entries this
+            // version cannot read is not: the entry that was dropped could be
+            // the one being asked about, so refuse rather than report the name
+            // free. Reading it as free is the failure this reader exists to
+            // stop repeating.
+            if (!fullyReadable) {
+                throw new BlueprintOwnershipProbeError(
+                    `Cannot verify stack ownership on remote node "${node.name}": the node answered with a stack list this version cannot read`,
+                );
+            }
+            return false;
+        }
         // A marker this node could not be asked about is not a marker that is
         // absent, and reporting it as a conflict would tell the operator a stack
         // they do not own is sitting there. The local arm above throws in the

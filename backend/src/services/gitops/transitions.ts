@@ -18,6 +18,7 @@ import {
 } from './json';
 import { insertHistory, type DeployDispatchedPayload, type DeployIntentRefusedPayload, type GitOpsHistoryStage, type HistoryOutcome, type PromotionCommittedPayload } from './history';
 import { emptyTargetRow, GitOpsStore } from './store';
+import { CONFIRMATION_STALE, driftSentence, encodeSourceConfirmation, sourceConfirmationDrift, type SourceConfirmation } from './sourceConfirmation';
 import { canonicalRepoKeyFromUrl } from './repoIdentity';
 import { SopsIdentityStore } from './sops/identityStore';
 import type {
@@ -118,6 +119,17 @@ export type AppliedArgs = {
   authority: Exclude<GitOpsApprovalAuthority, 'legacy_combined'>;
   envelope: EventEnvelope;
   activateCreating?: boolean;
+  /**
+   * The confirmation an operator made for this acceptance. Omitted when nobody
+   * confirmed one, which is a poll: a cadence is configured rather than confirmed.
+   *
+   * Recorded whole. The placement may be null, and the rollout promise may say
+   * the rollout would wait. A confirmation that lives only in a request body is
+   * gone by the time preparation resolves or a restart brings the reconciler
+   * back, and those are exactly the paths that would otherwise deploy somewhere
+   * the operator did not name, or start a rollout they were told would wait.
+   */
+  confirmation?: SourceConfirmation;
 };
 
 /**
@@ -421,6 +433,17 @@ export class GitOpsTransitions {
           throw new GitOpsTransitionError('live direct application already exists');
         }
       },
+      // A Direct application has no rollout to pause, and every resume route
+      // resolves a Git-managed Blueprint, so a pause carried into this mode is
+      // one nothing can clear. Whatever held it was about the Blueprint
+      // rollout that Retire ends.
+      onRetarget: (app) => {
+        if (app.pause_at === null) return {};
+        app.pause_at = null;
+        app.pause_reason = null;
+        app.pause_origin = 'operator';
+        return { pauseAt: null };
+      },
     });
   }
 
@@ -479,12 +502,19 @@ export class GitOpsTransitions {
       // no-op is exact: a row carrying only a dangling `rollout_authorization_ref`
       // would otherwise be reported as having nothing to clear and left with a
       // ref nothing resolves, with no history row admitting it.
+      //
+      // The rollout pause goes with them. A hold is the one column with a verb
+      // that only exists in the mode being left: every resume route resolves a
+      // Git-managed Blueprint and answers `NOT_GIT_MANAGED` for this row
+      // afterwards, so a pause carried across reads as a paused rollout nobody
+      // can clear. Whatever held it was about the rollout this demotion ends.
       onRetarget: (app) => {
         if (app.placement_approval_ref === null
           && app.rollout_authorization_ref === null
           && app.rollout_authorization_policy === 'manual'
           && app.latest_preflight_evidence_json === null
-          && app.preflight_fingerprint === null) {
+          && app.preflight_fingerprint === null
+          && app.pause_at === null) {
           return {};
         }
         app.placement_approval_ref = null;
@@ -492,12 +522,16 @@ export class GitOpsTransitions {
         app.rollout_authorization_policy = 'manual';
         app.latest_preflight_evidence_json = null;
         app.preflight_fingerprint = null;
+        app.pause_at = null;
+        app.pause_reason = null;
+        app.pause_origin = 'operator';
         return {
           placementApprovalRef: null,
           rolloutAuthorizationRef: null,
           rolloutAuthorizationPolicy: 'manual',
           latestPreflightEvidenceJson: null,
           preflightFingerprint: null,
+          pauseAt: null,
         };
       },
     });
@@ -877,6 +911,14 @@ export class GitOpsTransitions {
       // in the shared requireAcceptableCandidate guard.
       if (app.suspended_at) throw new GitOpsTransitionError('source is suspended');
       this.requireAcceptableCandidate(app, args);
+      // After every await that led here. The row was re-read inside this
+      // transaction, so a placement or a rollout policy that moved during
+      // policy evaluation or candidate revalidation refuses the commit instead
+      // of accepting a claim that no longer describes the application.
+      if (args.confirmation) {
+        const drift = sourceConfirmationDrift(app, args.confirmation);
+        if (drift) throw new GitOpsTransitionError(driftSentence(drift), CONFIRMATION_STALE);
+      }
       this.invalidateAuthorizationOnSourceChange(app, args.envelope, extras);
       this.applySourceAcceptanceMutation(app, args);
       // Blueprint-only in effect: a Direct application has no rollout
@@ -2177,6 +2219,12 @@ export class GitOpsTransitions {
         app.pause_at = null;
         app.pause_reason = null;
         app.pause_origin = 'operator';
+        // An application-wide resume is the operator's answer to whatever the
+        // hold said, so an acceptance bound to a placement they have now seen
+        // stops binding it. Only the fleet-wide verb does this: a target-scoped
+        // resume answers one target's fence and says nothing about where the
+        // application as a whole may deploy.
+        this.store().releaseConfirmedPlacement(applicationId);
         // A resume answers a *hold*: the operator has seen it and wants the
         // rollout to carry on, so the target the hold was about is deployed again
         // and the policy decides afresh. `health_attempts` is deliberately kept, so
@@ -2781,6 +2829,16 @@ export class GitOpsTransitions {
           ingredients.artifactSetId,
         );
         const requiredTargetsJson = encodeGitOpsRequiredTargetsJson(ingredients.requiredNodeIds);
+
+        // An operator mint is the decision a source confirmation deferred, so
+        // the acceptance it authorizes stops being bound to the placement the
+        // confirmation named. Re-pointed rather than cleared, so a later
+        // replacement is still caught. Written here, inside the mint's own
+        // transaction, so a recorded authorization and a stale precondition
+        // cannot both be left standing.
+        if (args.authority === 'operator') {
+          this.store().recordConfirmedPlacement(args.applicationId, ingredients.placementApprovalRef);
+        }
 
         this.store().insertApproval({
           id: args.approvalId,
@@ -4595,7 +4653,11 @@ export class GitOpsTransitions {
       rollout_candidate_id: null,
       rollout_generation_id: null,
       source_acceptance_ref: null,
-      placement_approval_ref: null,
+      // This column copies the confirmation's placement, which is null both when
+      // nobody confirmed and when they confirmed that none was approved. The
+      // object below is what distinguishes those two.
+      placement_approval_ref: args.confirmation?.placementApprovalRef ?? null,
+      source_confirmation_json: args.confirmation ? encodeSourceConfirmation(args.confirmation) : null,
       required_targets_json: null,
       preflight_fingerprint: null,
       fingerprint: null,
