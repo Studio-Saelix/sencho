@@ -8,7 +8,10 @@
  */
 import { apiFetch } from './api';
 import type { PreviewAction } from './blueprintsApi';
+import type { SourceConfirmationClaim } from './gitopsApprovedScope';
 import type { HealthRolloutPolicy } from '@/types/gitops';
+
+export type { SourceConfirmationClaim };
 
 /** The portfolio identity of a Blueprint-backed application. */
 export function blueprintApplicationId(blueprintId: number): string {
@@ -62,14 +65,98 @@ export interface GitOpsSourceAcceptResult {
   note: string | null;
 }
 
+/**
+ * What settlement did after the fetch. `started` means a rollout was handed
+ * off, not that it finished.
+ */
+export interface GitOpsSourceFetchAuthority {
+  status: 'not_applicable' | 'fetched_only' | 'held' | 'accepted';
+  rollout: 'started' | 'held' | 'not_started' | null;
+  note: string | null;
+}
+
+/** The fetch outcome plus the settlement that followed it. */
+export interface GitOpsSourceFetchResult {
+  outcome: string;
+  reason: string;
+  nextAction: string;
+  commitSha: string | null;
+  candidateGenerationId: string | null;
+  authority: GitOpsSourceFetchAuthority;
+}
+
+const NO_FETCH_AUTHORITY: GitOpsSourceFetchAuthority = {
+  status: 'not_applicable',
+  rollout: null,
+  note: null,
+};
+
+function readFetchAuthority(payload: Record<string, unknown>): GitOpsSourceFetchAuthority {
+  if (!isRecord(payload.authority)) return NO_FETCH_AUTHORITY;
+  const authority = payload.authority;
+  const status = authority.status === 'fetched_only' || authority.status === 'held' || authority.status === 'accepted'
+    ? authority.status
+    : 'not_applicable';
+  const rollout = authority.rollout === 'started' || authority.rollout === 'held' || authority.rollout === 'not_started'
+    ? authority.rollout
+    : null;
+  const note = typeof authority.note === 'string' && authority.note.length > 0 ? authority.note : null;
+  return { status, rollout, note };
+}
+
+/**
+ * The portfolio id for a Blueprint revision that this hub owns.
+ *
+ * A stack sheet can be reading another node's projection. That projection's
+ * blueprint number is that node's, and these writes stay on this hub, so a
+ * remote row must not be turned into `bp:<n>` here.
+ */
+export function claimedBlueprintAuthorityId(
+  revision: { targetMode: string; blueprintId?: number | null },
+  owner: { type: string } | null,
+): string | null {
+  if (revision.targetMode !== 'blueprint' || owner?.type !== 'local') return null;
+  const blueprintId = revision.blueprintId;
+  if (blueprintId == null || !Number.isSafeInteger(blueprintId) || blueprintId <= 0) return null;
+  return blueprintApplicationId(blueprintId);
+}
+
+/**
+ * Pull the next commit for a Git-managed Blueprint.
+ *
+ * `confirmation` is the claim the operator read before confirming. Only an
+ * automatic source sends one, because only an automatic source can record the
+ * commit from this request; a manual or review pull only fetches and asks for
+ * nothing.
+ */
+export async function fetchGitOpsSource(
+  applicationId: string,
+  confirmation?: SourceConfirmationClaim | null,
+): Promise<GitOpsSourceFetchResult> {
+  const payload = await postAuthorityAction(
+    `/gitops/applications/${encodeURIComponent(applicationId)}/source/fetch`,
+    confirmation ? { confirmation } : {},
+    'Failed to pull the source',
+  );
+  return {
+    outcome: typeof payload.outcome === 'string' ? payload.outcome : 'unknown',
+    reason: typeof payload.reason === 'string' ? payload.reason : '',
+    nextAction: typeof payload.nextAction === 'string' ? payload.nextAction : 'none',
+    commitSha: typeof payload.commitSha === 'string' ? payload.commitSha : null,
+    candidateGenerationId: typeof payload.candidateGenerationId === 'string' ? payload.candidateGenerationId : null,
+    authority: readFetchAuthority(payload),
+  };
+}
+
 /** Accept the waiting candidate generation as source content. */
 export async function acceptGitOpsSource(
   applicationId: string,
   generationId: string,
+  confirmation: SourceConfirmationClaim,
 ): Promise<GitOpsSourceAcceptResult> {
   const payload = await postAuthorityAction(
     `/gitops/applications/${encodeURIComponent(applicationId)}/source/accept`,
-    { generationId },
+    { generationId, confirmation },
     'Failed to accept the source revision',
   );
   return {

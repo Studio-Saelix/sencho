@@ -179,6 +179,35 @@ function composeInputsForCandidate(
 }
 
 /**
+ * A Blueprint fetch that still resolves to the generation this application
+ * already accepted. A Direct pull with no live candidate always stages a new
+ * generation, because an already-accepted generation cannot be accepted again.
+ *
+ * The candidate pointer must be null. A lookup that fails is not absence, and
+ * a generation owned by another application is not this acceptance. The stored
+ * compose-file digest has to equal the digest of the compose files this fetch
+ * just wrote. A missing digest does not match.
+ */
+function acceptedBlueprintGenerationMatches(args: {
+    app: GitOpsApplicationRow;
+    accepted: GitOpsGenerationRow | undefined;
+    commitSha: string;
+    fingerprint: string;
+    planBlocked: boolean;
+    freshDigest: string | null;
+}): boolean {
+    const accepted = args.accepted;
+    if (args.app.target_mode !== 'blueprint' || args.app.candidate_generation_id !== null) return false;
+    if (!accepted || accepted.application_id !== args.app.id) return false;
+    if (accepted.commit_sha !== args.commitSha) return false;
+    if (accepted.materialization_fingerprint !== args.fingerprint) return false;
+    if (accepted.materialization_fingerprint !== args.app.materialization_fingerprint) return false;
+    if (accepted.plan_blocked !== (args.planBlocked ? 1 : 0)) return false;
+    const stored = storedCandidateContentSha256(accepted.compose_inputs_json);
+    return stored !== null && stored === args.freshDigest;
+}
+
+/**
  * Map a SOPS decrypt failure to its Git-source error code. Used by the fetch,
  * apply, and reconcile failure paths so all three record and classify the same
  * way: a decrypt failure is operator action, never a transient git fault.
@@ -2722,9 +2751,11 @@ export class GitSourceService {
                 // verdict, review requirement) must not mint a lookalike
                 // generation and rewrite the candidate pointers. The staged
                 // generation stands; only the fetch above is new. A candidate
-                // for a different commit, or no candidate at all, mints anew:
-                // staging after an apply is a new dispatch cycle and needs its
-                // own generation to accept.
+                // for a different commit, or no candidate at all, mints anew
+                // for a Direct source: staging after an apply is a new dispatch
+                // cycle and needs its own generation to accept. A Blueprint
+                // source keeps the accepted generation when this fetch still
+                // matches it.
                 //
                 // A safety-held candidate counts as the expected state for an
                 // automatic source even though its review flag reads 1: the
@@ -2760,6 +2791,25 @@ export class GitSourceService {
                     capabilityCoversInputs &&
                     storedCandidateContentSha256(staged.compose_inputs_json) !== null
                 ) {
+                    return;
+                }
+                const accepted = gitopsApp.target_mode === 'blueprint'
+                    && gitopsApp.candidate_generation_id === null
+                    && gitopsApp.accepted_generation_id
+                    ? GitOpsStore.getInstance().getGeneration(gitopsApp.accepted_generation_id)
+                    : undefined;
+                if (acceptedBlueprintGenerationMatches({
+                    app: gitopsApp,
+                    accepted,
+                    commitSha: fetched.commitSha,
+                    fingerprint: identity.fingerprint,
+                    planBlocked: plan?.blocked === true,
+                    freshDigest: candidateContentSha256FromDisk(
+                        stackName,
+                        materialization.value.candidateRelPath,
+                        src.compose_paths,
+                    ),
+                })) {
                     return;
                 }
                 const generationId = newGitOpsId();
@@ -2864,14 +2914,19 @@ export class GitSourceService {
                 const candidate = staged
                     ? candidateIdentityFromApplication(staged)
                     : null;
-                this.recordGitActivity(
-                    stackName,
-                    plan.blocked ? 'git_plan_blocked' : 'git_pull_ready',
-                    `Git ${plan.blocked ? 'plan blocked' : 'pull ready'} for ${stackName} (${shortSha}, op ${GitSourceService.shortOperationId(gitopsOperationId)}, plan ${fpPrefix})`,
-                    actor,
-                    plan.blocked ? 'warning' : undefined,
-                    { operationId: gitopsOperationId, candidate },
-                );
+                // No staged candidate means this fetch did not open a review.
+                // The attempt key is new on every poll, so an accepted Blueprint
+                // generation left in place would announce again for the same commit.
+                if (candidate) {
+                    this.recordGitActivity(
+                        stackName,
+                        plan.blocked ? 'git_plan_blocked' : 'git_pull_ready',
+                        `Git ${plan.blocked ? 'plan blocked' : 'pull ready'} for ${stackName} (${shortSha}, op ${GitSourceService.shortOperationId(gitopsOperationId)}, plan ${fpPrefix})`,
+                        actor,
+                        plan.blocked ? 'warning' : undefined,
+                        { operationId: gitopsOperationId, candidate },
+                    );
+                }
             }
         }
 

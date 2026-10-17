@@ -10,6 +10,10 @@ import { runSourceControllerAction } from '@/lib/gitSourceControllerAction';
 import { isSupportedGitRepoUrl, UNSUPPORTED_GIT_REPO_URL_MESSAGE } from '@/lib/gitRepoUrl';
 import { useDeployFeedback } from '@/context/DeployFeedbackContext';
 import { useNodes } from '@/context/NodeContext';
+import { useAuth } from '@/context/AuthContext';
+import GitOpsSourceActions from '@/components/gitops/GitOpsSourceActions';
+import { claimedBlueprintAuthorityId } from '@/lib/gitopsAuthorityApi';
+import { policyReadFor } from '@/lib/gitopsAuthorityPolicy';
 import { toast } from '@/components/ui/toast-store';
 import { GitSourceDiffDialog, type PullResult, type PublicPendingPlan } from './GitSourceDiffDialog';
 import { GitSourceFields, type ApplyMode, type GitSourceFieldsPart } from './GitSourceFields';
@@ -198,6 +202,8 @@ export function GitSourcePanel({
 
   const { runWithLog } = useDeployFeedback();
   const { activeNode, hasCapability, nodeMeta, nodes } = useNodes();
+  const { can } = useAuth();
+  const sourceNodeId = nodes.find((node) => node.is_default)?.id ?? null;
   // The node this panel acts on: an explicit host node, else the active one.
   const panelNodeId = nodeId !== undefined ? nodeId : activeNode?.id ?? null;
   // An explicit node answers from its own meta, optimistic while unknown,
@@ -821,12 +827,51 @@ export function GitSourcePanel({
     />
   );
 
+  const ownerNode = panelNodeId == null ? null : nodes.find((node) => node.id === panelNodeId) ?? null;
+  const claimedAuthorityId = revision ? claimedBlueprintAuthorityId(revision, ownerNode) : null;
+  const claimedAutomatic = revision?.targetMode === 'blueprint'
+    && policyReadFor(revision.authorityPolicies, 'source')?.configured === 'automatic';
+  const renderClaimedSourceActions = (): ReactNode => (
+    claimedAuthorityId && revision ? (
+      <GitOpsSourceActions
+        applicationId={claimedAuthorityId}
+        projection={revision}
+        can={can}
+        sourceNodeId={sourceNodeId}
+        onChanged={() => {
+          void load('refresh');
+          onSourceChanged?.();
+        }}
+      />
+    ) : null
+  );
+  const overviewSourceActions = renderClaimedSourceActions();
+  if (overviewSourceActions) {
+    statusAction = statusAction ? (
+      <div className="flex flex-wrap items-center gap-2">
+        {statusAction}
+        {overviewSourceActions}
+      </div>
+    ) : overviewSourceActions;
+  }
+  const noticeSourceActions = renderClaimedSourceActions();
   const claimedNotice = (
     <div className="space-y-2 rounded-lg border border-card-border bg-card p-3" data-testid="git-source-claimed">
       <p className="font-mono text-[10px] uppercase tracking-[0.18em] text-stat-icon">Bound to a Blueprint</p>
       <p className="text-xs text-stat-subtitle leading-relaxed">
-        This Git source belongs to a Git-managed Blueprint. Save, Detach, and Pull now are blocked here. Use Detach Git on that Blueprint to restore stack-owned editing.
+        This Git source belongs to a Git-managed Blueprint. Save and Detach stay on that Blueprint.
+        {' '}
+        {claimedAuthorityId
+          ? claimedAutomatic
+            ? 'Pull source fetches the next commit into it. This source accepts a new commit on its own, so Pull source asks before it fetches.'
+            : 'Pull source fetches the next commit into it.'
+          : 'Pull source for this Blueprint stays on the node that owns it.'}
       </p>
+      {noticeSourceActions && (
+        <div className="flex flex-wrap items-center gap-2">
+          {noticeSourceActions}
+        </div>
+      )}
     </div>
   );
 
