@@ -46,6 +46,12 @@ import { DIGEST_PIN_TEMP_PREFIX } from '../helpers/digestPinTempDir';
 import { assertGitOverlaySource, SOPS_DIRECT_MUTATION_MESSAGE } from './gitops/sops/prepareOverlay';
 import { classifyInputEncryption, resolveActiveRequiredRecipients } from './gitops/sops/capability';
 import { GitOpsDecryptOverlay } from './gitops/sops/overlay';
+import {
+  decryptedComposeOutputWithheld,
+  runWithDecryptedComposeOutput,
+  WITHHELD_DECRYPTED_COMPOSE_OUTPUT,
+  WITHHELD_DECRYPTED_COMPOSE_STREAM,
+} from '../helpers/decryptedComposeOutput';
 import { buildUnifiedHeldImagePredicate } from './recoveryHeldImages';
 import { invalidateNodeCaches } from '../helpers/cacheInvalidation';
 import type { NotificationCategory } from './NotificationService';
@@ -405,6 +411,10 @@ export class ComposeService {
   ): Promise<void> {
     const deliveryAbortSignal = getRegistryDeliveryContext()?.abortSignal;
     const effectiveAbortSignal = abortSignal ?? deliveryAbortSignal;
+    // Read once, at the top of the run: a decrypted operation must not leak
+    // the subprocess output that reaches the progress stream or the rejection,
+    // and the decision has to be stable for the life of the child.
+    const withholdOutput = decryptedComposeOutputWithheld();
 
     if (effectiveAbortSignal?.aborted) {
       return Promise.reject(new Error('OPERATION_ABORTED: client disconnected'));
@@ -427,11 +437,19 @@ export class ComposeService {
       let timeout: ReturnType<typeof setTimeout> | null = null;
       let forceKillTimeout: ReturnType<typeof setTimeout> | null = null;
       let idleTimeout: ReturnType<typeof setTimeout> | null = null;
+      let withheldNoticeSent = false;
 
       const sendOutput = (text: string) => {
         if (ws && ws.readyState === WebSocket.OPEN) {
           ws.send(text);
         }
+      };
+
+      /** One notice in place of a withheld stream, so silence reads as policy. */
+      const sendWithheldNotice = () => {
+        if (withheldNoticeSent) return;
+        withheldNoticeSent = true;
+        sendOutput(WITHHELD_DECRYPTED_COMPOSE_STREAM);
       };
 
       const terminateChild = (error: Error) => {
@@ -518,8 +536,14 @@ export class ComposeService {
 
       const onData = (data: Buffer) => {
         const text = data.toString();
-        errorLog += text;
-        sendOutput(text);
+        if (withholdOutput) {
+          // Compose echoes interpolated values back, so the chunk is dropped
+          // rather than filtered; the stall backstop still counts it as output.
+          sendWithheldNotice();
+        } else {
+          errorLog += text;
+          sendOutput(text);
+        }
         armIdleTimeout();
       };
 
@@ -536,7 +560,11 @@ export class ComposeService {
             return;
           }
           if (code === 0) resolve();
-          else if (throwOnError) reject(new Error(redactSensitiveText(errorLog.trim()) || `Command failed with code ${code}`));
+          else if (throwOnError) reject(new Error(
+            withholdOutput
+              ? WITHHELD_DECRYPTED_COMPOSE_OUTPUT
+              : redactSensitiveText(errorLog.trim()) || `Command failed with code ${code}`,
+          ));
           else resolve();
         });
       });
@@ -817,6 +845,11 @@ export class ComposeService {
           child.on('error', reject);
           child.on('close', (code) => resolve({ stderr, code }));
         });
+        // This spawn bypasses execute, so it carries the overlay-substitution
+        // boundary with it: `stderr` is read here for variable NAMES and must
+        // never be logged, streamed, or returned. With a decrypt overlay,
+        // Compose echoes interpolated values the same way it does in any other
+        // diagnostic, and a name-only parse is what keeps them out.
         missing = parseMissingRequiredVars(result.stderr);
       } catch {
         return;
@@ -1097,6 +1130,15 @@ export class ComposeService {
   ): Promise<{ recoveryId: string | null; deployedGenerationId: string | null; gitopsOperationId: string | null }> {
     if (ctx?.overlayDir) {
       assertGitOverlaySource(ctx.source);
+      // The whole deploy reads the overlay, so every Compose run it starts,
+      // including the compensation compose up in the catch below, runs inside
+      // this scope and withholds its output.
+      if (!decryptedComposeOutputWithheld()) {
+        return runWithDecryptedComposeOutput(
+          { stackName, nodeId: this.nodeId },
+          () => this.deployStack(stackName, ws, atomic, ctx),
+        );
+      }
     }
     await this.assertSopsOverlayOrRefuse(stackName, ctx?.overlayDir);
     const stackDir = this.resolveStackDir(stackName, ctx);
@@ -1444,6 +1486,14 @@ export class ComposeService {
     invocation?: RollbackInvocationRecord | null,
     overlay?: Pick<DeployInvocationContext, 'overlayDir' | 'overlayBinding'>,
   ): Promise<ComposeMutationResult> {
+    // Same confidentiality boundary as a deploy against an overlay: a manual
+    // rollback restores into one and streams its Compose output.
+    if (overlay?.overlayDir && !decryptedComposeOutputWithheld()) {
+      return runWithDecryptedComposeOutput(
+        { stackName, nodeId: this.nodeId },
+        () => this.composeUpWithRecoveryOverride(stackName, overridePath, ws, invocation, overlay),
+      );
+    }
     if (overlay?.overlayDir && overlay.overlayBinding) {
       GitOpsDecryptOverlay.getInstance().assertBinding(overlay.overlayDir, overlay.overlayBinding);
     }

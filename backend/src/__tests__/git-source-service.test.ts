@@ -26,6 +26,7 @@ import { setRegistryReadinessDepsForTests, setEvaluateRegistryReadinessForTests 
 import { buildPreflightEvidence } from '../services/gitops/preflight';
 import { StackOpLockService } from '../services/StackOpLockService';
 import { coalesceKey, deliveryKey, type ReconcileRequest, type ReconcileTrigger } from '../services/gitops/triggers';
+import { WITHHELD_DECRYPTED_COMPOSE_OUTPUT } from '../helpers/decryptedComposeOutput';
 import {
     buildDirectApplicationRow,
     buildGenerationRow,
@@ -11360,6 +11361,129 @@ describe('GitSourceService sync-env stacks with a repo .env (audit C-2)', () => 
             expect(await overlayEntries(stackName)).toEqual([]);
         } finally {
             restore();
+            await cleanupStackDir(stackName);
+        }
+    });
+
+    /**
+     * A stand-in `docker` placed first on PATH for the duration of one test.
+     * Its `compose up` reproduces what Compose does with a value interpolated
+     * out of a decrypted project env file: it names the value in its diagnostic
+     * and exits non-zero. Every other compose subcommand succeeds, so
+     * validation passes and the deploy failure is the first thing to carry the
+     * value. Nothing is created, pulled, or started.
+     *
+     * The real Compose behaviour this stands in for is established by the
+     * control in `keeps a decrypted sentinel out of validation results, logs,
+     * and stored rows`, which runs the real binary and shows an interpolated
+     * value reaching its stderr.
+     */
+    function installEchoingComposeBinary(): string {
+        const binDir = fs.mkdtempSync(path.join(os.tmpdir(), 'sencho-echoing-docker-'));
+        fs.writeFileSync(
+            path.join(binDir, 'docker'),
+            [
+                '#!/bin/sh',
+                'case " $* " in',
+                '  *" up "*)',
+                '    value=$(sed -n "s/^AUDIT_IMAGE=//p" .env | head -n 1)',
+                '    printf "unable to get image \'%s:?\': Error response from daemon: invalid reference format\\n" "$value" >&2',
+                '    exit 1',
+                '    ;;',
+                'esac',
+                'echo "{}"',
+                'exit 0',
+                '',
+            ].join('\n'),
+            { mode: 0o755 },
+        );
+        return binDir;
+    }
+
+    /** Capture every console line written while the test body runs. */
+    function captureConsole(logs: string[]): () => void {
+        const record = (...args: unknown[]) => { logs.push(args.map((part) => String(part)).join(' ')); };
+        const logSpy = vi.spyOn(console, 'log').mockImplementation(record);
+        const warnSpy = vi.spyOn(console, 'warn').mockImplementation(record);
+        const errorSpy = vi.spyOn(console, 'error').mockImplementation(record);
+        return () => {
+            logSpy.mockRestore();
+            warnSpy.mockRestore();
+            errorSpy.mockRestore();
+        };
+    }
+
+    it('keeps a decrypted value out of a failed deploy result, logs, and stored rows', async () => {
+        const sentinel = 'audit-deploy-secret-marker';
+        const sha = 'abcd0c0cabcd0c0cabcd0c0cabcd0c0cabcd0c0c';
+        const stackName = 'sync-env-sops-deploy-redact';
+        // `image: ${AUDIT_IMAGE}` is the shape that makes Compose quote the
+        // decrypted value back: the overlay's project `.env` supplies it.
+        const compose = 'services:\n  web:\n    image: ${AUDIT_IMAGE}\n';
+        const binDir = installEchoingComposeBinary();
+        // PATH, the Console spies, and the DockerController spy are all set up
+        // inside the try: a throw in any of them still restores PATH, which
+        // every later test in this file depends on when it shells out to docker.
+        const originalPath = process.env.PATH;
+        const logs: string[] = [];
+        let orphanSpy: { mockRestore: () => void } | null = null;
+        let restoreConsole: (() => void) | null = null;
+        try {
+            process.env.PATH = `${binDir}${path.delimiter}${originalPath ?? ''}`;
+            const { default: DockerController } = await import('../services/DockerController');
+            orphanSpy = vi
+                .spyOn(DockerController.prototype, 'getLegacyOrphanContainersByStack')
+                .mockResolvedValue([]);
+            restoreConsole = captureConsole(logs);
+            // Control: the stand-in really does emit the decrypted value, so a
+            // green assertion below is the confidentiality boundary working and
+            // not a Compose run that failed for some other reason.
+            const controlDir = fs.mkdtempSync(path.join(os.tmpdir(), 'sencho-echo-control-'));
+            fs.writeFileSync(path.join(controlDir, '.env'), `AUDIT_IMAGE=${sentinel}\n`);
+            let controlStderr = '';
+            try {
+                execFileSync(path.join(binDir, 'docker'), ['compose', 'up', '-d'], {
+                    cwd: controlDir,
+                    stdio: ['ignore', 'pipe', 'pipe'],
+                    timeout: 20_000,
+                });
+            } catch (err) {
+                const stderr = (err as { stderr?: Buffer }).stderr;
+                controlStderr = stderr ? stderr.toString() : '';
+            }
+            fs.rmSync(controlDir, { recursive: true, force: true });
+            expect(controlStderr).toContain(sentinel);
+
+            const { svc } = await stageSopsSyncEnv(stackName, sha, compose, { AUDIT_IMAGE: sentinel });
+            const pull = await svc.pull(stackName);
+            // The value passes Compose validation; only the deploy fails.
+            expect(pull.validation.ok).toBe(true);
+            const apply = await svc.apply(stackName, sha, { deploy: true, ...SKIP_PLAN_FINGERPRINT });
+            expect(apply.applied).toBe(true);
+            expect(apply.deployed).toBe(false);
+            expect(apply.deployError).toBe(WITHHELD_DECRYPTED_COMPOSE_OUTPUT);
+            expect(JSON.stringify(apply)).not.toContain(sentinel);
+            expect(logs.join('\n')).not.toContain(sentinel);
+            const row = DatabaseService.getInstance().getDb()
+                .prepare('SELECT pending_compose_content, pending_env_content, pending_plan_summary FROM stack_git_sources WHERE stack_name = ?')
+                .get(stackName);
+            expect(JSON.stringify(row)).not.toContain(sentinel);
+            // The durable GitOps record of the failed deploy exists, and it
+            // classifies the failure without carrying the diagnostic.
+            const app = GitOpsStore.getInstance().getLiveDirectApplication(stackName)!;
+            const history = DatabaseService.getInstance().getDb()
+                .prepare('SELECT stage, outcome, after_json FROM gitops_history WHERE application_id = ?')
+                .all(app.id);
+            expect(history.length).toBeGreaterThan(0);
+            expect(JSON.stringify(history)).not.toContain(sentinel);
+            await expectStoredEnvCiphertext(stackName);
+            expect(await overlayEntries(stackName)).toEqual([]);
+        } finally {
+            restoreConsole?.();
+            orphanSpy?.mockRestore();
+            if (originalPath === undefined) delete process.env.PATH;
+            else process.env.PATH = originalPath;
+            fs.rmSync(binDir, { recursive: true, force: true });
             await cleanupStackDir(stackName);
         }
     });

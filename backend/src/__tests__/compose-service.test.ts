@@ -7,6 +7,7 @@ import { EventEmitter } from 'events';
 import os from 'os';
 import path from 'path';
 import type WebSocket from 'ws';
+import { WITHHELD_DECRYPTED_COMPOSE_OUTPUT } from '../helpers/decryptedComposeOutput';
 
 // ── Hoisted mocks ──────────────────────────────────────────────────────
 
@@ -1452,6 +1453,54 @@ describe('ComposeService - deployStack', () => {
     } finally {
       spy.mockRestore();
     }
+  });
+
+  // A deploy against a GitOps decrypt overlay runs Compose over decrypted
+  // secret files, and Compose echoes interpolated values back in its
+  // diagnostics (`unable to get image 'audit-...?': invalid reference
+  // format`). Nothing about that text is recognisable as a secret, so the
+  // whole subprocess output is withheld for the life of the operation rather
+  // than filtered. The control below pins the other side of the same
+  // boundary: a deploy without an overlay still reports Compose's words.
+  const leakingDiagnostic = 'unable to get image \'audit-decrypted-value-marker:?\': invalid reference format';
+
+  async function runFailingDeploy(
+    ctx?: { source: 'git_apply'; overlayDir: string },
+  ): Promise<{ error: Error | null; streamed: string }> {
+    const proc = createMockProcess();
+    mockSpawn.mockReturnValue(proc);
+    mockGetGlobalSettings.mockReturnValue({});
+    mockGetLegacyOrphanContainersByStack.mockResolvedValue([]);
+    const ws = createMockWs();
+
+    const result = ComposeService.getInstance(1)
+      .deployStack('my-stack', ws, false, ctx)
+      .then(() => null, (e: Error) => e);
+
+    await waitForSpawn();
+    proc.stderr.emit('data', Buffer.from(`${leakingDiagnostic}\n`));
+    proc.emit('close', 1);
+
+    const error = await result;
+    const streamed = ws.send.mock.calls.map((call) => String(call[0])).join('');
+    return { error, streamed };
+  }
+
+  it('withholds Compose output when the deploy runs against a decrypt overlay', async () => {
+    const { error, streamed } = await runFailingDeploy({
+      source: 'git_apply',
+      overlayDir: '/tmp/git-secrets/1/my-stack/op-1',
+    });
+    expect(error?.message).toBe(WITHHELD_DECRYPTED_COMPOSE_OUTPUT);
+    expect(streamed).not.toContain('audit-decrypted-value-marker');
+    // Sencho's own framing still reaches the operator: it names no secret.
+    expect(streamed).toContain('Command exited with code 1');
+  });
+
+  it('still surfaces the Compose diagnostic when no decrypt overlay is in play', async () => {
+    const { error, streamed } = await runFailingDeploy();
+    expect(error?.message).toContain(leakingDiagnostic);
+    expect(streamed).toContain(leakingDiagnostic);
   });
 });
 
