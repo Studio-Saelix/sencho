@@ -9,6 +9,7 @@ import { DatabaseService } from '../DatabaseService';
 import { FileSystemService } from '../FileSystemService';
 import { parseEffectiveModel, type EffectiveModel } from '../preflight/effectiveModel';
 import { parseMissingRequiredVars } from '../../helpers/envVarParse';
+import { WITHHELD_DECRYPTED_RENDER_OUTPUT } from '../../helpers/decryptedComposeOutput';
 import { getErrorMessage } from '../../utils/errors';
 import { redactSensitiveText, sanitizeForLog } from '../../utils/safeLog';
 import {
@@ -89,9 +90,10 @@ async function renderModel(
   nodeId: number,
   stackName: string,
   guardrailEnabled: boolean,
+  renderCtx?: { stackDirOverride?: string },
 ): Promise<{ model: EffectiveModel | null; renderError: string | null }> {
   try {
-    const result = await ComposeService.getInstance(nodeId).renderConfig(stackName);
+    const result = await ComposeService.getInstance(nodeId).renderConfig(stackName, renderCtx);
     if (result.rendered !== null) {
       try {
         return { model: parseEffectiveModel(JSON.parse(result.rendered), stackName), renderError: null };
@@ -103,6 +105,14 @@ async function renderModel(
         );
         return { model: null, renderError: 'Sencho could not parse the rendered Compose model.' };
       }
+    }
+    // A render that resolved its model from decrypted secret files reports the
+    // gate's own withholding instead of Compose's words, which would carry
+    // interpolated plaintext into the refusal. The deploy's missing-variable
+    // guardrail already ran against that same overlay, by name only, before
+    // this gate, so nothing is lost by withholding here.
+    if (result.withheld) {
+      return { model: null, renderError: WITHHELD_DECRYPTED_RENDER_OUTPUT };
     }
     const missing = parseMissingRequiredVars(result.stderr);
     if (missing.length > 0) {
@@ -135,13 +145,24 @@ async function renderModel(
   }
 }
 
+/**
+ * Which external networks the stack declares but this node does not have.
+ *
+ * `renderCtx.stackDirOverride` renders the GitOps decrypt overlay a deploy is
+ * about to run Compose in, so the gate reads the same model that deploy will:
+ * a port or network name held in an encrypted env file resolves to its
+ * decrypted value here, and a refusal means the model itself is wrong rather
+ * than the ciphertext that stands in for it. Omitted by every other caller,
+ * which reads the live project.
+ */
 export async function resolveMissingExternalNetworks(
   nodeId: number,
   stackName: string,
+  renderCtx?: { stackDirOverride?: string },
 ): Promise<MissingExternalNetworksEnvelope> {
   const autoCreateEnabled = isAutoCreateEnabled(nodeId);
   const guardrailEnabled = isGuardrailEnabled(nodeId);
-  const { model, renderError } = await renderModel(nodeId, stackName, guardrailEnabled);
+  const { model, renderError } = await renderModel(nodeId, stackName, guardrailEnabled, renderCtx);
   if (!model) {
     return {
       status: 'render_unavailable',

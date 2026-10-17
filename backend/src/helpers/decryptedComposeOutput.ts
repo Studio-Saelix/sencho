@@ -53,3 +53,13 @@ export const WITHHELD_DECRYPTED_COMPOSE_OUTPUT =
 /** Sent once in place of the first withheld chunk on the progress stream. */
 export const WITHHELD_DECRYPTED_COMPOSE_STREAM =
   '=== Compose output is withheld for this operation because it runs with decrypted secret files ===\n';
+
+/**
+ * Stands in for the withheld diagnostic of a preflight render that resolved
+ * its model from decrypted secret files (the mandatory external-network gate
+ * on a Git deploy). The gate still fails closed on a render it could not read,
+ * it just cannot quote Compose's own words, which would carry interpolated
+ * plaintext into the refusal the operator sees.
+ */
+export const WITHHELD_DECRYPTED_RENDER_OUTPUT =
+  'Sencho could not render the effective Compose model for this deploy. The render read decrypted secret files, so its output was withheld and no Compose diagnostic can be shown here.';

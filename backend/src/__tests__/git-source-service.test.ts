@@ -11345,6 +11345,113 @@ describe('GitSourceService sync-env stacks with a repo .env (audit C-2)', () => 
         }
     });
 
+/**
+     * F1 regression: the mandatory external-network gate runs before `up` and
+     * renders the Compose model. A Git deploy runs Compose out of the decrypt
+     * overlay while the live `.env` stays ciphertext, so a gate that rendered
+     * the live project resolved the published port out of `ENC[...]` and
+     * refused the deploy (`invalid IP address: ENC[AES256_GCM,...`) even though
+     * candidate validation had already passed on the decrypted overlay. The
+     * compose file below uses `${PORT}` in `ports`, which real Compose rejects
+     * when the value is ciphertext; `environment` would not, which is why the
+     * existing deploy regression cannot see this.
+     */
+    it('deploys an encrypted synced port through the real external-network preflight', async () => {
+        const sha = 'abcd9a0aabcd9a0aabcd9a0aabcd9a0aabcd9a0a';
+        const stackName = 'sync-env-sops-deploy-port';
+        const { executed, restore } = await stubDeployExecution(false);
+        try {
+            const { svc } = await stageSopsSyncEnv(
+                stackName,
+                sha,
+                'services:\n  web:\n    image: nginx:1.27-alpine\n    ports:\n      - "${PORT}:80"\n',
+            );
+            // Validation renders for real, against the decrypted overlay.
+            const pull = await svc.pull(stackName);
+            expect(pull.validation.ok).toBe(true);
+            const apply = await svc.apply(stackName, sha, { deploy: true, ...SKIP_PLAN_FINGERPRINT });
+            expect(apply.applied).toBe(true);
+            expect(apply.deployed).toBe(true);
+            expect(apply.deployError).toBeUndefined();
+            // Reaching the execution boundary at all is the gate passing on the
+            // decrypted model, because Compose is never asked to render the
+            // ciphertext for it.
+            expect(executed).toHaveLength(1);
+            expect(executed[0].env).toContain('PORT=8080');
+            expect(executed[0].env).not.toContain('ENC[AES256_GCM');
+            await expectStoredEnvCiphertext(stackName);
+            expect(await overlayEntries(stackName)).toEqual([]);
+        } finally {
+            restore();
+            await cleanupStackDir(stackName);
+        }
+    });
+
+    /**
+     * The second half of the same model mismatch: an encrypted env file naming
+     * an external network. The gate has to classify the decrypted name, or the
+     * ciphertext is what gets created on the node (and, failing `isValidDocker-
+     * NetworkName` first, what gets refused as an unsupported name instead).
+     * Docker's own snapshot and network creation are stubbed so nothing is
+     * created anywhere; the render is the real one.
+     */
+    it('creates the decrypted external network name, never the ciphertext one', async () => {
+        const sha = 'abcd9b0babcd9b0babcd9b0babcd9b0babcd9b0b';
+        const stackName = 'sync-env-sops-deploy-network';
+        const compose = 'services:\n  web:\n    image: nginx:1.27-alpine\n    networks:\n      - bridge\n'
+            + 'networks:\n  bridge:\n    external: true\n    name: "${NET_NAME}"\n';
+        const { executed, restore } = await stubDeployExecution(false);
+        const { default: DockerController } = await import('../services/DockerController');
+        const { DatabaseService: DB } = await import('../services/DatabaseService');
+        const created: string[] = [];
+        const live = new Set<string>();
+        const createSpy = vi
+            .spyOn(DockerController.prototype, 'createNetwork')
+            .mockImplementation(async (options: { Name?: string }) => {
+                const name = options.Name ?? '';
+                created.push(name);
+                live.add(name);
+                return { id: `net-${name}` } as never;
+            });
+        const snapshotSpy = vi
+            .spyOn(DockerController.prototype, 'getDependencySnapshot')
+            .mockImplementation(async () => ({
+                containers: [],
+                networks: [...live].map((name) => ({ name, id: `net-${name}`, containers: [] })),
+                volumes: [],
+                stacks: {},
+            }) as never);
+        const previousAutoCreate = DB.getInstance().getGlobalSettings()['auto_create_missing_external_networks'];
+        DB.getInstance().updateGlobalSetting('auto_create_missing_external_networks', '1');
+        try {
+            const { svc } = await stageSopsSyncEnv(
+                stackName,
+                sha,
+                compose,
+                { NET_NAME: 'sencho_audit_bridge' },
+            );
+            const pull = await svc.pull(stackName);
+            expect(pull.validation.ok).toBe(true);
+            const apply = await svc.apply(stackName, sha, { deploy: true, ...SKIP_PLAN_FINGERPRINT });
+            expect(apply.deployed).toBe(true);
+            expect(apply.deployError).toBeUndefined();
+            expect(created).toEqual(['sencho_audit_bridge']);
+            expect(created.some((name) => name.includes('ENC['))).toBe(false);
+            expect(executed).toHaveLength(1);
+            await expectStoredEnvCiphertext(stackName);
+            expect(await overlayEntries(stackName)).toEqual([]);
+        } finally {
+            DB.getInstance().updateGlobalSetting(
+                'auto_create_missing_external_networks',
+                previousAutoCreate === '1' ? '1' : '0',
+            );
+            snapshotSpy.mockRestore();
+            createSpy.mockRestore();
+            restore();
+            await cleanupStackDir(stackName);
+        }
+    });
+
     it('removes the deploy overlay when a Git apply deploy fails', async () => {
         const sha = 'abcd0b0babcd0b0babcd0b0babcd0b0babcd0b0b';
         const stackName = 'sync-env-sops-deploy-fail';

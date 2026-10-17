@@ -8,6 +8,8 @@ import os from 'os';
 import path from 'path';
 import type WebSocket from 'ws';
 import { WITHHELD_DECRYPTED_COMPOSE_OUTPUT } from '../helpers/decryptedComposeOutput';
+import { WITHHELD_DECRYPTED_RENDER_OUTPUT } from '../helpers/decryptedComposeOutput';
+import { gitSecretsAreaBase } from '../services/gitops/managedPaths';
 
 // ── Hoisted mocks ──────────────────────────────────────────────────────
 
@@ -1501,6 +1503,183 @@ describe('ComposeService - deployStack', () => {
     const { error, streamed } = await runFailingDeploy();
     expect(error?.message).toContain(leakingDiagnostic);
     expect(streamed).toContain(leakingDiagnostic);
+  });
+
+  // The external-network gate renders the Compose model before `up`. On a Git
+  // deploy the model the deploy will use is the decrypt overlay's, so the gate
+  // has to read that one: a live render resolves typed values (a published
+  // port, an external network name) out of ciphertext and refuses a deploy
+  // whose own model already validated.
+  it('gates external networks on the overlay the deploy runs Compose in', async () => {
+    setupAutoCloseSpawn(0);
+    mockListContainers.mockResolvedValue([]);
+    const overlayDir = path.join(gitSecretsAreaBase(), '1', 'my-stack', 'op-1');
+
+    await ComposeService.getInstance(1).deployStack('my-stack', undefined, false, {
+      source: 'git_apply',
+      overlayDir,
+    });
+
+    expect(mockResolveMissingExternalNetworks).toHaveBeenCalledWith(1, 'my-stack', {
+      stackDirOverride: overlayDir,
+    });
+  });
+
+  it('surfaces the withheld render text, not Compose words, when the gate cannot read the model', async () => {
+    mockListContainers.mockResolvedValue([]);
+    mockResolveMissingExternalNetworks.mockResolvedValue({
+      status: 'render_unavailable',
+      autoCreateEnabled: false,
+      stackName: 'my-stack',
+      networks: [],
+      declaredExternalCount: 0,
+      renderError: WITHHELD_DECRYPTED_RENDER_OUTPUT,
+    });
+
+    const error = await ComposeService.getInstance(1)
+      .deployStack('my-stack', undefined, false, {
+        source: 'git_apply',
+        overlayDir: path.join(gitSecretsAreaBase(), '1', 'my-stack', 'op-1'),
+      })
+      .then(() => null, (e: Error) => e);
+
+    expect(error?.message).toBe(WITHHELD_DECRYPTED_RENDER_OUTPUT);
+    expect(error?.message).not.toContain('audit-decrypted-value-marker');
+    expect(mockSpawn).not.toHaveBeenCalled();
+  });
+
+  it('gates external networks on the live project when no overlay is in play', async () => {
+    setupAutoCloseSpawn(0);
+    mockListContainers.mockResolvedValue([]);
+
+    await ComposeService.getInstance(1).deployStack('my-stack');
+
+    expect(mockResolveMissingExternalNetworks).toHaveBeenCalledWith(1, 'my-stack', {
+      stackDirOverride: undefined,
+    });
+  });
+});
+
+// ── renderConfig: the decrypt-overlay preflight render ────────────────
+
+describe('ComposeService - renderConfig over a decrypt overlay', () => {
+  const overlayDir = path.join(gitSecretsAreaBase(), '1', 'my-stack', 'op-1');
+
+  it('renders from the overlay working directory', async () => {
+    const proc = createMockProcess();
+    mockSpawn.mockReturnValue(proc);
+
+    const promise = ComposeService.getInstance(1).renderConfig('my-stack', { stackDirOverride: overlayDir });
+    await waitForSpawn();
+    proc.stdout.emit('data', Buffer.from(JSON.stringify({ name: 'my-stack', services: {}, networks: {} })));
+    proc.emit('close', 0);
+    const result = await promise;
+
+    expect(mockSpawn).toHaveBeenCalledWith(
+      'docker',
+      expect.arrayContaining(['compose', 'config', '--format', 'json']),
+      expect.objectContaining({ cwd: overlayDir }),
+    );
+    expect(result.rendered).toContain('my-stack');
+  });
+
+  it('pins the stack project name on the overlay render, the way the deploy does', async () => {
+    const proc = createMockProcess();
+    mockSpawn.mockReturnValue(proc);
+
+    const promise = ComposeService.getInstance(1).renderConfig('my-stack', { stackDirOverride: overlayDir });
+    await waitForSpawn();
+    proc.emit('close', 0);
+    await promise;
+
+    const args = mockSpawn.mock.calls[0][1] as string[];
+    expect(args.slice(0, 3)).toEqual(['compose', '-p', 'my-stack']);
+  });
+
+  it('leaves the live render without a project-name pin', async () => {
+    const proc = createMockProcess();
+    mockSpawn.mockReturnValue(proc);
+
+    const promise = ComposeService.getInstance(1).renderConfig('my-stack');
+    await waitForSpawn();
+    proc.emit('close', 0);
+    await promise;
+
+    const args = mockSpawn.mock.calls[0][1] as string[];
+    expect(args).not.toContain('-p');
+  });
+
+  it('withholds Compose stderr from the decrypted render while keeping the model', async () => {
+    const proc = createMockProcess();
+    mockSpawn.mockReturnValue(proc);
+
+    const promise = ComposeService.getInstance(1).renderConfig('my-stack', { stackDirOverride: overlayDir });
+    await waitForSpawn();
+    proc.stdout.emit('data', Buffer.from(JSON.stringify({ name: 'my-stack', services: {}, networks: {} })));
+    proc.stderr.emit('data', Buffer.from('invalid IP address: audit-decrypted-value-marker'));
+    proc.emit('close', 0);
+    const result = await promise;
+
+    expect(result.rendered).toContain('my-stack');
+    expect(result.stderr).toBe('');
+    expect(result.withheld).toBe(true);
+    expect(JSON.stringify(result)).not.toContain('audit-decrypted-value-marker');
+  });
+
+  it('withholds a failed decrypted render, which is the failure a typed ciphertext value produces', async () => {
+    const proc = createMockProcess();
+    mockSpawn.mockReturnValue(proc);
+
+    const promise = ComposeService.getInstance(1).renderConfig('my-stack', { stackDirOverride: overlayDir });
+    await waitForSpawn();
+    proc.stderr.emit('data', Buffer.from('invalid IP address: audit-decrypted-value-marker'));
+    proc.emit('close', 1);
+    const result = await promise;
+
+    expect(result.rendered).toBeNull();
+    expect(result.stderr).toBe('');
+    expect(result.withheld).toBe(true);
+    expect(JSON.stringify(result)).not.toContain('audit-decrypted-value-marker');
+  });
+
+  it('reports no model for a decrypted render that exceeded the size limit', async () => {
+    const proc = createMockProcess();
+    mockSpawn.mockReturnValue(proc);
+
+    const promise = ComposeService.getInstance(1).renderConfig('my-stack', { stackDirOverride: overlayDir });
+    await waitForSpawn();
+    // Past the 5 MiB cap renderConfig enforces, with a decrypted value in it.
+    proc.stdout.emit('data', Buffer.from(`"AUDIT_TOKEN":"audit-decrypted-value-marker${'x'.repeat(5 * 1024 * 1024)}"`));
+    proc.emit('close', 0);
+    const result = await promise;
+
+    expect(result.rendered).toBeNull();
+    expect(result.stderr).toBe('');
+    expect(result.withheld).toBe(true);
+    expect(JSON.stringify(result)).not.toContain('audit-decrypted-value-marker');
+  });
+
+  it('refuses a working directory outside the git-secrets area, before any spawn', async () => {
+    mockSpawn.mockClear();
+
+    await expect(
+      ComposeService.getInstance(1).renderConfig('my-stack', { stackDirOverride: '/etc' }),
+    ).rejects.toThrow('Invalid stack path');
+    expect(mockSpawn).not.toHaveBeenCalled();
+  });
+
+  it('keeps reporting Compose stderr for a live render', async () => {
+    const proc = createMockProcess();
+    mockSpawn.mockReturnValue(proc);
+
+    const promise = ComposeService.getInstance(1).renderConfig('my-stack');
+    await waitForSpawn();
+    proc.stderr.emit('data', Buffer.from('invalid proto: udp/tcp'));
+    proc.emit('close', 1);
+    const result = await promise;
+
+    expect(result.stderr).toBe('invalid proto: udp/tcp');
+    expect(result.withheld).toBeUndefined();
   });
 });
 

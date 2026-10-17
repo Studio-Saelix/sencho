@@ -46,6 +46,7 @@ import { DIGEST_PIN_TEMP_PREFIX } from '../helpers/digestPinTempDir';
 import { assertGitOverlaySource, SOPS_DIRECT_MUTATION_MESSAGE } from './gitops/sops/prepareOverlay';
 import { classifyInputEncryption, resolveActiveRequiredRecipients } from './gitops/sops/capability';
 import { GitOpsDecryptOverlay } from './gitops/sops/overlay';
+import { gitSecretsAreaBase } from './gitops/managedPaths';
 import {
   decryptedComposeOutputWithheld,
   runWithDecryptedComposeOutput,
@@ -867,6 +868,15 @@ export class ComposeService {
     );
   }
 
+  /**
+   * Pilot host-path guard. Renders the live project on purpose, unlike the
+   * external-network gate: what it checks is where the operator's relative
+   * binds land on the host, and the live stack directory is what the Pilot
+   * Agent maps. Rendering the decrypt overlay instead would move that base to
+   * the overlay directory and quietly stop flagging the relative binds the
+   * overlay deploy is about to resolve. So an encrypted project whose live
+   * render fails skips this check, as it always has.
+   */
   private async assertSafePilotBindMapping(stackName: string): Promise<void> {
     if (process.env.SENCHO_MODE !== 'pilot') return;
 
@@ -908,12 +918,25 @@ export class ComposeService {
   /**
    * Missing-external gate: after env/Pilot asserts, before atomic backup.
    * Creates safe bridge networks only when the opt-in setting is on.
+   *
+   * A Git deploy runs Compose out of a decrypt overlay, so the gate renders
+   * that same overlay. Reading the live project instead resolves a published
+   * port or an external network name out of ciphertext, refuses the deploy
+   * before `up`, and leaves the applied generation and the running one
+   * describing different models.
+   *
+   * Overlay parity covers the node, project identity, authored files, and env
+   * inputs. It does not cover the layers only `up` adds: the generated mesh
+   * override (which `renderConfig` omits by design, so it cannot report the
+   * managed `sencho_mesh` network as missing) and an ephemeral digest-pin
+   * overlay (which changes image digests, not network declarations).
    */
   private async ensureExternalNetworksForDeploy(
     stackName: string,
     ctx?: DeployInvocationContext,
   ): Promise<void> {
-    const resolved = await resolveMissingExternalNetworks(this.nodeId, stackName);
+    const renderCtx = { stackDirOverride: ctx?.overlayDir };
+    const resolved = await resolveMissingExternalNetworks(this.nodeId, stackName, renderCtx);
     if (resolved.status === 'render_unavailable') {
       // The resolver already reduced the render failure to a specific,
       // redacted cause. Surface it rather than a generic sentence that names
@@ -994,8 +1017,8 @@ export class ComposeService {
       }
     }
 
-    // Re-resolve before Compose.
-    const recheck = await resolveMissingExternalNetworks(this.nodeId, stackName);
+    // Re-resolve before Compose, out of the same project the first pass read.
+    const recheck = await resolveMissingExternalNetworks(this.nodeId, stackName, renderCtx);
     if (recheck.status !== 'ok' || recheck.networks.length > 0) {
       recordCreatedNetworks('warning');
       throw new MissingExternalNetworksError({
@@ -2344,10 +2367,26 @@ export class ComposeService {
    * on a non-zero exit, so the Compose Doctor can turn a failed render into a
    * finding rather than an exception. Bounded by a timeout and an output cap.
    * Rejects only when the docker binary cannot be spawned.
+   *
+   * `opts.stackDirOverride` renders the model the deployment it gates will
+   * actually use: a GitOps decrypt overlay, whose env files are plaintext while
+   * the live stack's stay ciphertext. The working directory, the authored
+   * files, the env-file arguments, and the project-name pin are all selected
+   * for that overlay, so the preflight and the Compose run that follows resolve
+   * the same project, the same variables, and the same typed values (a
+   * published port, an external network name).
+   *
+   * Such a render withholds its own diagnostics: `stderr` comes back empty and
+   * `withheld` is set, because Compose quotes interpolated values back and those
+   * are plaintext secrets. The rendered model is still returned, since the
+   * caller reads it structurally (which external networks are declared) and
+   * never hands it to the operator; a caller that has to explain a failed
+   * render reports the withheld text instead of Compose's own words.
    */
   public async renderConfig(
     stackName: string,
-  ): Promise<{ rendered: string | null; stderr: string; code: number | null; timedOut: boolean }> {
+    opts?: { stackDirOverride?: string },
+  ): Promise<{ rendered: string | null; stderr: string; code: number | null; timedOut: boolean; withheld?: boolean }> {
     if (!isValidStackName(stackName)) {
       throw new Error('Invalid stack path');
     }
@@ -2357,21 +2396,41 @@ export class ComposeService {
     // closure, so the spawn is hoisted out of the executor. startsWith already
     // rejects the base dir itself, since base does not start with base + sep.
     const baseResolved = path.resolve(this.baseDir);
-    const stackDir = path.resolve(baseResolved, stackName);
-    if (!stackDir.startsWith(baseResolved + path.sep)) {
-      throw new Error('Invalid stack path');
+    const overlayDir = opts?.stackDirOverride ? path.resolve(opts.stackDirOverride) : null;
+    let stackDir: string;
+    if (overlayDir) {
+      // The git-secrets root is the only tree a decrypt overlay lives in, so it
+      // is the one base an overridden working directory may be contained by.
+      // Checked here, at the sink, rather than trusted from the caller.
+      const secretsRoot = path.resolve(gitSecretsAreaBase());
+      if (!overlayDir.startsWith(secretsRoot + path.sep)) {
+        throw new Error('Invalid stack path');
+      }
+      stackDir = overlayDir;
+    } else {
+      stackDir = path.resolve(baseResolved, stackName);
+      if (!stackDir.startsWith(baseResolved + path.sep)) {
+        throw new Error('Invalid stack path');
+      }
     }
+    const stackDirOverride = overlayDir ?? undefined;
     // Render the authored multi-file model (no mesh override) so the Compose Doctor
     // sees every override file; single-file stacks get an empty prefix. The env-file
     // flag keeps render resolving the same root .env the validator and deploy use.
     let filePrefix: string[];
     try {
-      filePrefix = authoredComposeFileArgs(stackName, this.nodeId);
+      filePrefix = authoredComposeFileArgs(stackName, this.nodeId, stackDirOverride);
     } catch (err) {
       throw err instanceof Error ? err : new Error(String(err));
     }
-    const envFileArgs = await authoredComposeEnvFileArgs(stackName, this.nodeId);
-    const child = spawn('docker', ['compose', ...filePrefix, ...envFileArgs, 'config', '--format', 'json'], {
+    const envFileArgs = await authoredComposeEnvFileArgs(stackName, this.nodeId, stackDirOverride);
+    const composeArgs = ['compose', ...filePrefix, ...envFileArgs, 'config', '--format', 'json'];
+    // The overlay renames the working directory to the operation id, so the
+    // render gets the same project-name pin the ensuing `up` gets. A no-op for
+    // the live path, where the stack directory already names the project.
+    this.pinProjectNameForOverride(stackName, composeArgs, stackDirOverride);
+    const withholdDiagnostics = overlayDir !== null;
+    const child = spawn('docker', composeArgs, {
       cwd: stackDir,
       env: {
         ...process.env,
@@ -2387,7 +2446,7 @@ export class ComposeService {
       let capped = false;
       let settled = false;
       const timer = setTimeout(() => { timedOut = true; child.kill('SIGKILL'); }, TIMEOUT_MS);
-      const finish = (result: { rendered: string | null; stderr: string; code: number | null; timedOut: boolean }) => {
+      const finish = (result: { rendered: string | null; stderr: string; code: number | null; timedOut: boolean; withheld?: boolean }) => {
         if (settled) return;
         settled = true;
         clearTimeout(timer);
@@ -2398,6 +2457,7 @@ export class ComposeService {
         if (stdout.length > MAX_OUTPUT && !capped) { capped = true; child.kill('SIGKILL'); }
       });
       child.stderr.on('data', (data: Buffer) => {
+        if (withholdDiagnostics) return;
         if (stderr.length < MAX_OUTPUT) stderr += data.toString();
       });
       child.on('error', (err: NodeJS.ErrnoException) => {
@@ -2407,7 +2467,14 @@ export class ComposeService {
         reject(new Error(describeSpawnError(err, { command: 'docker compose' }).message));
       });
       child.on('close', (code) => {
-        if (timedOut) finish({ rendered: null, stderr: stderr.trim() || 'docker compose config timed out', code, timedOut: true });
+        if (withholdDiagnostics) {
+          // A decrypted render keeps the model, which the caller reads
+          // structurally, and drops the diagnostic, which is where Compose
+          // quotes interpolated values back. Every failure reason collapses
+          // into that one withheld result.
+          const rendered = code === 0 && !timedOut && !capped ? stdout : null;
+          finish({ rendered, stderr: '', code, timedOut, withheld: true });
+        } else if (timedOut) finish({ rendered: null, stderr: stderr.trim() || 'docker compose config timed out', code, timedOut: true });
         else if (capped) finish({ rendered: null, stderr: 'Rendered model exceeded the size limit', code, timedOut: false });
         else if (code === 0) finish({ rendered: stdout, stderr, code, timedOut: false });
         else finish({ rendered: null, stderr: stderr.trim() || `docker compose config failed with code ${code}`, code, timedOut: false });
