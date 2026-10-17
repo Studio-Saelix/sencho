@@ -1164,6 +1164,7 @@ stackGitSourceRouter.get('/:stackName/git-source/sops-identities', async (req: R
   const capability = resolveActiveCapability({
     stackName,
     nodeId: req.nodeId ?? 0,
+    basis: 'applied',
   });
   const readiness = SopsIdentityStore.getInstance().computeReadiness({
     applicationId,

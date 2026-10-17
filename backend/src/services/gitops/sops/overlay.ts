@@ -157,14 +157,21 @@ export class GitOpsDecryptOverlay {
     if (!metaResolved.startsWith(overlayResolved + path.sep)) {
       throw new Error('Overlay metadata path escapes the overlay directory');
     }
-    await fsPromises.writeFile(metaResolved, JSON.stringify({
+    const decryptedRelPaths: string[] = [];
+    for (const input of args.inputs) {
+      if (input.encryption !== 'sops-age' || !input.materializedPath) continue;
+      decryptedRelPaths.push(input.materializedPath.replace(/\\/g, '/'));
+    }
+    const meta: OverlayBinding & { decryptedRelPaths: string[] } = {
       applicationId: args.binding.applicationId,
       commitSha: args.binding.commitSha,
       generationId: args.binding.generationId,
       operationId: validatedOperationSegment(args.binding.operationId),
       stackName: validatedStackSegment(args.binding.stackName),
       nodeId: args.binding.nodeId,
-    } satisfies OverlayBinding), { mode: 0o600 });
+      decryptedRelPaths,
+    };
+    await fsPromises.writeFile(metaResolved, JSON.stringify(meta), { mode: 0o600 });
 
     try {
       for (const input of args.inputs) {
