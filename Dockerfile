@@ -283,9 +283,15 @@ ARG APK_CACHE_BUST=unset
 # cached earlier the same day, and the scanned image kept shipping the previous
 # pcre2 (CVE-2026-103111, fixed in 10.49-r0). Naming the floor rebuilds this
 # layer and keeps a stale cache from serving a version below the fix again.
+#
+# libexpat arrives the same way, as a transitive dependency of git, and a
+# reused layer serves it stale for the same reason. Its floor is named for the
+# same purpose: CVE-2026-77214 (heap over-read in XML_ParseBuffer, HIGH, fixed
+# in 2.9.0-r0) was published while this layer's cache from earlier the same day
+# still held 2.8.5-r0, so the scan failed on an image the cache had pinned.
 RUN echo "apk cache bust: ${APK_CACHE_BUST}" && \
     apk upgrade --no-cache && \
-    apk add --no-cache bash su-exec git tini 'openssh-client>=10.3_p1-r1' 'pcre2>=10.49-r0' && \
+    apk add --no-cache bash su-exec git tini 'openssh-client>=10.3_p1-r1' 'pcre2>=10.49-r0' 'libexpat>=2.9.0-r0' && \
     mkdir -p /usr/local/lib/docker/cli-plugins
 
 # Copy the source-built Docker CLI and Compose plugin from their builder stages.
