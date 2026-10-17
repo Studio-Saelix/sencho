@@ -35,11 +35,11 @@ describe('ServicePortLink edit affordance', () => {
       />,
     );
     expect(screen.getByLabelText('This service is not in the open compose file.')).toBeTruthy();
-    expect(screen.queryByRole('button', { name: 'Set URL for api' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Edit service URL' })).toBeNull();
     expect(onEdit).not.toHaveBeenCalled();
   });
 
-  it('offers a save when the service is in the open compose file', () => {
+  it('offers a save when the service is in the open compose file', async () => {
     render(
       <ServicePortLink
         portLabel="8080"
@@ -52,7 +52,9 @@ describe('ServicePortLink edit affordance', () => {
         onEdit={() => undefined}
       />,
     );
-    expect(screen.getByRole('button', { name: 'Set URL for api' })).toBeTruthy();
+    const pencil = screen.getByRole('button', { name: 'Edit service URL' });
+    fireEvent.focus(pencil);
+    expect((await screen.findByRole('tooltip')).textContent).toBe('Edit service URL');
   });
 
   it('does not invite a save when another file sets the URL', () => {
@@ -71,7 +73,7 @@ describe('ServicePortLink edit affordance', () => {
       />,
     );
     expect(screen.getByLabelText('This URL is set in another compose file.')).toBeTruthy();
-    expect(screen.queryByRole('button', { name: 'Set URL for api' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Edit service URL' })).toBeNull();
     expect(onEdit).not.toHaveBeenCalled();
   });
 
@@ -91,7 +93,7 @@ describe('ServicePortLink edit affordance', () => {
       />,
     );
     expect(screen.getByLabelText('Sencho cannot verify which compose file sets this URL.')).toBeTruthy();
-    expect(screen.queryByRole('button', { name: 'Set URL for api' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Edit service URL' })).toBeNull();
     expect(onEdit).not.toHaveBeenCalled();
   });
 
@@ -120,6 +122,76 @@ describe('ServicePortLink edit affordance', () => {
     expect(screen.getByText('8080')).toBeTruthy();
     expect(screen.queryByText('Service URL unavailable')).toBeNull();
     expect(screen.queryByRole('button', { name: 'Retry' })).toBeNull();
+  });
+
+  it('keeps the generated link and a retry when a local list fails to load', () => {
+    const onEdit = vi.fn();
+    const onRetry = vi.fn();
+    render(
+      <ServicePortLink
+        portLabel="8080 → 80/tcp"
+        publicPort={8080}
+        privatePort={80}
+        serviceName="api"
+        entry={{ ...entry, status: 'unavailable', serviceUrls: {}, serviceUrlEdit: {}, serviceUrlClear: {}, renderable: false, ports: {} }}
+        node={{ type: 'local' } as Node}
+        canEdit
+        sourceServices={['api']}
+        onEdit={onEdit}
+        onRetry={onRetry}
+      />,
+    );
+    expect(screen.getByRole('link').getAttribute('href')).toContain(':8080');
+    expect(screen.getByText('Service URL unavailable')).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+    expect(onRetry).toHaveBeenCalledTimes(1);
+    const pencil = screen.getByRole('button', { name: 'Service URL unavailable' });
+    expect((pencil as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.click(pencil);
+    expect(onEdit).not.toHaveBeenCalled();
+    expect(screen.queryByRole('button', { name: 'Edit service URL' })).toBeNull();
+  });
+
+  it('keeps the last address and the pencil when a refresh fails', () => {
+    const onRetry = vi.fn();
+    render(
+      <ServicePortLink
+        portLabel="8080 → 80/tcp"
+        publicPort={8080}
+        serviceName="api"
+        entry={{ ...entry, refreshFailed: true }}
+        node={{ type: 'local' } as Node}
+        canEdit
+        sourceServices={['api']}
+        onEdit={() => undefined}
+        onRetry={onRetry}
+      />,
+    );
+    expect(screen.getByRole('link').getAttribute('href')).toBe('https://api.example.com');
+    expect(screen.getByRole('button', { name: 'Edit service URL' })).toBeTruthy();
+    expect(screen.getByText('Could not refresh')).toBeTruthy();
+    expect(screen.queryByText('Service URL unavailable')).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+    expect(onRetry).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not offer a retry when an older node omits service URLs', () => {
+    render(
+      <ServicePortLink
+        portLabel="8080"
+        publicPort={8080}
+        serviceName="api"
+        entry={{ ...entry, status: 'unsupported', serviceUrls: {}, renderable: true }}
+        node={{ type: 'local' } as Node}
+        canEdit
+        sourceServices={['api']}
+        onEdit={() => undefined}
+        onRetry={() => undefined}
+      />,
+    );
+    expect(screen.queryByRole('button', { name: 'Retry' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Edit service URL' })).toBeNull();
+    expect(screen.queryByText('Service URL unavailable')).toBeNull();
   });
 
   it('offers a retry only after the service URL list failed to load', () => {
@@ -162,11 +234,11 @@ describe('ServicePortLink edit affordance', () => {
     // URL that is not known to exist.
     expect(screen.getByText('8080')).toBeTruthy();
     expect(screen.queryByRole('link')).toBeNull();
-    expect(screen.queryByRole('button', { name: 'Set URL for api' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Edit service URL' })).toBeNull();
 
     rerender(<ServicePortLink {...props} entry={entry} />);
     expect(screen.getByRole('link').getAttribute('href')).toBe('https://api.example.com');
-    expect(screen.getByRole('button', { name: 'Set URL for api' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Edit service URL' })).toBeTruthy();
   });
 
   it('keeps a long host inside the card and restores the open arrow', () => {
@@ -198,7 +270,7 @@ describe('ServicePortLink edit affordance', () => {
     expect(row?.className).not.toContain('min-w-0');
     expect(row?.className).not.toContain('whitespace-nowrap');
     expect(screen.getByRole('button', { name: 'Copy service URL' })).toBeTruthy();
-    expect(screen.getByRole('button', { name: 'Set URL for api' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Edit service URL' })).toBeTruthy();
   });
 });
 

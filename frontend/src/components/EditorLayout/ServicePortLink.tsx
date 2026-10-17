@@ -12,6 +12,38 @@ import type { Node } from '@/context/NodeContext';
 import { cn } from '@/lib/utils';
 
 const OTHER_FILE = 'This service is not in the open compose file.';
+const LIST_UNAVAILABLE = 'Service URL unavailable';
+const REFRESH_FAILED = 'Could not refresh';
+const EDIT_SERVICE_URL = 'Edit service URL';
+
+function PortPencil({ label, disabled, onClick }: { label: string; disabled?: boolean; onClick?: () => void }) {
+  const button = (
+    <button
+      type="button"
+      disabled={disabled}
+      title={disabled ? label : undefined}
+      aria-label={label}
+      onClick={onClick}
+      className={cn(
+        'inline-flex h-4 w-4 shrink-0 items-center justify-center rounded text-stat-subtitle max-md:h-11 max-md:w-11',
+        disabled ? 'opacity-40' : 'hover:text-foreground hover:bg-muted/60',
+      )}
+    >
+      <Pencil className="h-3 w-3" strokeWidth={1.5} />
+    </button>
+  );
+  if (disabled) return button;
+  return (
+    <TooltipProvider>
+      <Tooltip>
+        <TooltipTrigger asChild>
+          {button}
+        </TooltipTrigger>
+        <TooltipContent>{label}</TooltipContent>
+      </Tooltip>
+    </TooltipProvider>
+  );
+}
 
 interface ServicePortLinkProps {
   portLabel: string;
@@ -63,26 +95,21 @@ export function ServicePortLink({
   const lockedState = serviceName ? lockedServices?.get(serviceName) : undefined;
   const lockedMessage = lockedState ? serviceUrlEditBlockedMessage(lockedState) : null;
   const unavailable = !inOpenFile ? OTHER_FILE : lockedMessage;
+  const listUnavailable = entry?.status === 'unavailable';
   const urlsReady = entry?.status === 'ready'
     || (entry?.status === 'loading' && Object.keys(entry.serviceUrls).length > 0);
+  // An unavailable list has no edit authority. The disabled pencil says so
+  // unless a lock message already labels it.
   const edit = canEdit && serviceName && onEdit && urlsReady && !unavailable ? (
-    <button
-      type="button"
-      aria-label={`Set URL for ${serviceName}`}
-      onClick={() => onEdit(serviceName)}
-      className="inline-flex h-4 w-4 shrink-0 items-center justify-center rounded text-stat-subtitle hover:text-foreground hover:bg-muted/60 max-md:h-11 max-md:w-11"
-    >
-      <Pencil className="h-3 w-3" strokeWidth={1.5} />
-    </button>
-  ) : canEdit && serviceName && urlsReady && unavailable ? (
-    <button
-      type="button"
-      disabled
-      title={unavailable}
-      aria-label={unavailable}
-      className="inline-flex h-4 w-4 shrink-0 items-center justify-center rounded text-stat-subtitle opacity-40 max-md:h-11 max-md:w-11"
-    >
-      <Pencil className="h-3 w-3" strokeWidth={1.5} />
+    <PortPencil label={EDIT_SERVICE_URL} onClick={() => onEdit(serviceName)} />
+  ) : canEdit && serviceName && (urlsReady || listUnavailable) && unavailable ? (
+    <PortPencil label={unavailable} disabled />
+  ) : canEdit && serviceName && listUnavailable ? (
+    <PortPencil label={LIST_UNAVAILABLE} disabled />
+  ) : null;
+  const retry = (listUnavailable || entry?.refreshFailed) && onRetry ? (
+    <button type="button" onClick={onRetry} className="text-brand hover:underline max-md:min-h-11">
+      Retry
     </button>
   ) : null;
 
@@ -101,18 +128,15 @@ export function ServicePortLink({
       <span className="inline-flex flex-wrap items-center gap-x-2 gap-y-0.5">
         <span>{click.portLabel}</span>
         {click.reason ? <span className="text-stat-subtitle">{click.reason}</span> : null}
-        {click.reason === 'Service URL unavailable' && onRetry ? (
-          <button type="button" onClick={onRetry} className="text-brand hover:underline max-md:min-h-11">
-            Retry
-          </button>
-        ) : null}
+        {entry?.refreshFailed ? <span className="text-stat-subtitle">{REFRESH_FAILED}</span> : null}
+        {retry}
         {edit}
       </span>
     );
   }
 
   return (
-    <span className="inline-flex w-fit max-w-full items-center gap-1">
+    <span className="inline-flex w-fit max-w-full flex-wrap items-center gap-x-1 gap-y-0.5">
       <a
         href={click.href}
         target="_blank"
@@ -142,6 +166,9 @@ export function ServicePortLink({
         </Tooltip>
       </TooltipProvider>
       {edit}
+      {listUnavailable ? <span className="text-stat-subtitle">{LIST_UNAVAILABLE}</span> : null}
+      {entry?.refreshFailed ? <span className="text-stat-subtitle">{REFRESH_FAILED}</span> : null}
+      {retry}
     </span>
   );
 }

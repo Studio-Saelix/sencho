@@ -1,5 +1,6 @@
 import { act, renderHook, waitFor } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { serviceUrlSaveBlockedMessage } from '@/lib/serviceUrlResolve';
 import { useServiceUrls } from './useServiceUrls';
 
 vi.mock('@/lib/api', () => ({ apiFetch: vi.fn() }));
@@ -81,6 +82,76 @@ describe('useServiceUrls', () => {
     });
     expect(result.current.entry?.serviceUrls.web).toBe('https://b.example.com');
   });
+
+  it('keeps the last URL when a refresh request fails and returns the failure to the caller', async () => {
+    fetchMock.mockResolvedValueOnce(anatomy('https://a.example.com'));
+    const { result } = renderHook(() => useServiceUrls(1, 'web.yaml'));
+    await waitFor(() => expect(result.current.entry?.status).toBe('ready'));
+
+    fetchMock.mockResolvedValueOnce({ ok: false, json: async () => ({ error: 'down' }) } as Response);
+    const returned: { status?: string; blocked?: string | null } = {};
+    await act(async () => {
+      const next = await result.current.refresh();
+      returned.status = next?.status;
+      returned.blocked = serviceUrlSaveBlockedMessage(next, 'web', 'https://new.example.com');
+    });
+    expect(returned.status).toBe('unavailable');
+    expect(returned.blocked).toBeTruthy();
+    expect(result.current.entry).toMatchObject({
+      status: 'ready',
+      refreshFailed: true,
+      serviceUrls: { web: 'https://a.example.com' },
+    });
+
+    fetchMock.mockRejectedValueOnce(new Error('network'));
+    await act(async () => {
+      const next = await result.current.refresh();
+      returned.status = next?.status;
+      returned.blocked = serviceUrlSaveBlockedMessage(next, 'web', null);
+    });
+    expect(returned.status).toBe('unavailable');
+    expect(returned.blocked).toBeTruthy();
+    expect(result.current.entry?.serviceUrls.web).toBe('https://a.example.com');
+
+    fetchMock.mockResolvedValueOnce(anatomy('https://b.example.com'));
+    await act(async () => {
+      await result.current.refresh();
+    });
+    expect(result.current.entry).toMatchObject({
+      status: 'ready',
+      serviceUrls: { web: 'https://b.example.com' },
+    });
+    expect(result.current.entry?.refreshFailed).toBeUndefined();
+  });
+
+  it('does not keep a model when the first load fails', async () => {
+    fetchMock.mockResolvedValueOnce({ ok: false, json: async () => ({ error: 'down' }) } as Response);
+    const { result } = renderHook(() => useServiceUrls(1, 'web.yaml'));
+    await waitFor(() => expect(result.current.entry?.status).toBe('unavailable'));
+    expect(result.current.entry?.refreshFailed).toBeUndefined();
+    expect(result.current.entry?.serviceUrls.web).toBeUndefined();
+  });
+
+  it('drops the last URL when the compose file no longer renders', async () => {
+    fetchMock.mockResolvedValueOnce(anatomy('https://a.example.com'));
+    const { result } = renderHook(() => useServiceUrls(1, 'web.yaml'));
+    await waitFor(() => expect(result.current.entry?.status).toBe('ready'));
+
+    fetchMock.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({ renderable: false, serviceUrls: {}, ports: {} }),
+    } as Response);
+    let blocked: string | null = null;
+    await act(async () => {
+      const next = await result.current.refresh();
+      blocked = serviceUrlSaveBlockedMessage(next, 'web', 'https://new.example.com');
+    });
+    expect(blocked).toBeTruthy();
+    expect(result.current.entry?.status).toBe('unavailable');
+    expect(result.current.entry?.serviceUrls.web).toBeUndefined();
+    expect(result.current.entry?.refreshFailed).toBeUndefined();
+  });
+
   it('never returns the previous stack or node URL after the selection changes', async () => {
     const seen: Array<{ nodeId: number | null; stackName: string | null; entryStack: string | null; entryNode: number | null; url: string | undefined }> = [];
     fetchMock.mockImplementation(async (path, options) => {

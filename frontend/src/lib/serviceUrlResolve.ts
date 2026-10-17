@@ -30,6 +30,8 @@ export interface ServiceUrlEntry {
   volumes?: Record<string, { host: string; container: string }[]>;
   restart?: string | null;
   networks?: string[];
+  /** The last refresh failed. This entry is still the previous ready model. */
+  refreshFailed?: boolean;
 }
 
 export type PortClick =
@@ -211,9 +213,9 @@ export function resolvePublishedPortClick(args: {
   // URL could still arrive, so the generated address must not open. A refresh
   // that still holds the prior model keeps using it below.
   if (serviceUrlLookupPending(entry)) return { kind: 'pending', portLabel };
-  // A missing or legacy URL list has no override to apply, so the generated
-  // host and port stays available. A failed load is the only case with no
-  // generated link that offers a retry. A refresh keeps the last ready model.
+  // No usable override. Keep a generated link when one exists. Attach the
+  // unavailable reason only when the status is unavailable and there is no
+  // generated link.
   if (!entry || !usableOverride(entry)) {
     return withoutOverride(generated, portLabel, entry?.status === 'unavailable');
   }
