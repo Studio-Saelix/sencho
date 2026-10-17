@@ -52,6 +52,7 @@ import {
   runWithDecryptedComposeOutput,
   WITHHELD_DECRYPTED_COMPOSE_OUTPUT,
   WITHHELD_DECRYPTED_COMPOSE_STREAM,
+  WITHHELD_DECRYPTED_REQUIRED_ENV_OUTPUT,
 } from '../helpers/decryptedComposeOutput';
 import { buildUnifiedHeldImagePredicate } from './recoveryHeldImages';
 import { invalidateNodeCaches } from '../helpers/cacheInvalidation';
@@ -810,12 +811,25 @@ export class ComposeService {
   } as const;
 
   /**
+   * Ceiling on the decrypt-overlay required-variable check, matching
+   * `renderConfig`'s. It only reads an exit code, so the bound matters: without
+   * one, a Compose that never returns would hold the deploy open forever with
+   * no diagnostic to explain the wait.
+   */
+  private static readonly REQUIRED_ENV_CHECK_TIMEOUT_MS = 20_000;
+
+  /**
    * Guard (on by default): when `env_block_deploy_on_missing_required` is enabled, refuse a
    * compose operation whose required `${VAR:?err}` variables are unset OR empty,
    * before any backup, cleanup, pull, or `up` runs. Compose's own resolution is
-   * authoritative (it passes process.env), and on the failing path it emits no
-   * rendered model, so no env value is materialized. A settings-read
-   * failure falls through without blocking.
+   * authoritative (it passes process.env). A settings-read failure falls
+   * through without blocking.
+   *
+   * Two confidentiality regimes, split by the input. The live project is
+   * readable by whoever can read the stack directory, so its diagnostic is
+   * parsed and the refusal names the variables. A GitOps decrypt overlay holds
+   * plaintext secrets, so its diagnostic is never read at all; see the overlay
+   * branch for why a name-only parse is not a boundary there.
    */
   private async assertRequiredEnvPresent(
     stackName: string,
@@ -829,39 +843,55 @@ export class ComposeService {
       return; // safe default: a settings-read failure never blocks a deploy
     }
     if (!enabled) return;
-    let missing: string[] = [];
+    const lead = wording.blocked ? `${wording.blocked} ` : '';
     if (stackDirOverride) {
+      // Withheld for the same reason renderConfig withholds it for this input:
+      // Compose quotes whatever it resolved back into its diagnostic, and a
+      // `:?` message is itself interpolated, so a decrypted value can land
+      // inside it. Nothing here collects output at all, so nothing here can
+      // leak it.
+      let code: number | null;
       try {
         const args = await this.authoredComposeArgs(stackName, ['config', '--quiet'], stackDirOverride);
-        const result = await new Promise<{ stderr: string; code: number | null }>((resolve, reject) => {
+        code = await new Promise<number | null>((resolve, reject) => {
+          // Both streams to /dev/null: no pipe to fill, and no collected text
+          // that could later be mistaken for something safe to publish.
           const child = spawn('docker', args, {
             cwd: stackDirOverride,
+            stdio: 'ignore',
             env: {
               ...process.env,
               PATH: process.env.PATH || '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin',
             },
           });
-          let stderr = '';
-          child.stderr.on('data', (chunk: Buffer) => { stderr += chunk.toString(); });
-          child.on('error', reject);
-          child.on('close', (code) => resolve({ stderr, code }));
+          // The exit code is the only signal this check gets, so a wedged
+          // Compose is bounded here rather than left to hang the deploy.
+          const timer = setTimeout(() => child.kill('SIGKILL'), ComposeService.REQUIRED_ENV_CHECK_TIMEOUT_MS);
+          child.on('error', (err) => {
+            clearTimeout(timer);
+            reject(err);
+          });
+          child.on('close', (code) => {
+            clearTimeout(timer);
+            resolve(code);
+          });
         });
-        // This spawn bypasses execute, so it carries the overlay-substitution
-        // boundary with it: `stderr` is read here for variable NAMES and must
-        // never be logged, streamed, or returned. With a decrypt overlay,
-        // Compose echoes interpolated values the same way it does in any other
-        // diagnostic, and a name-only parse is what keeps them out.
-        missing = parseMissingRequiredVars(result.stderr);
       } catch {
-        return;
+        return; // a launch failure is not a missing variable
       }
-    } else {
-      const result = await this.renderConfig(stackName);
-      missing = parseMissingRequiredVars(result.stderr);
+      // A render that resolved reports no required-variable error at all, so
+      // the exit code is the whole signal here. Anything else, including a
+      // child killed on timeout (which closes with no code at all), is refused
+      // without a name: the guard cannot tell a missing variable from any
+      // other render fault without reading the diagnostic it must not read,
+      // so it fails closed the way the network gate already does.
+      if (code === 0) return;
+      throw new Error(`${lead}${WITHHELD_DECRYPTED_REQUIRED_ENV_OUTPUT}${wording.remedy}`);
     }
+    const result = await this.renderConfig(stackName);
+    const missing = parseMissingRequiredVars(result.stderr);
     if (missing.length === 0) return;
     const plural = missing.length > 1;
-    const lead = wording.blocked ? `${wording.blocked} ` : '';
     throw new Error(
       `${lead}required environment variable${plural ? 's' : ''} ${missing.join(', ')} ` +
       `${plural ? 'are' : 'is'} missing. Define ${plural ? 'them' : 'it'} in a .env or env_file, ${wording.remedy}`,

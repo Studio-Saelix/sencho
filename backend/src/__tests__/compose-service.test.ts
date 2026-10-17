@@ -8,7 +8,7 @@ import os from 'os';
 import path from 'path';
 import type WebSocket from 'ws';
 import { WITHHELD_DECRYPTED_COMPOSE_OUTPUT } from '../helpers/decryptedComposeOutput';
-import { WITHHELD_DECRYPTED_RENDER_OUTPUT } from '../helpers/decryptedComposeOutput';
+import { WITHHELD_DECRYPTED_RENDER_OUTPUT, WITHHELD_DECRYPTED_REQUIRED_ENV_OUTPUT } from '../helpers/decryptedComposeOutput';
 import { gitSecretsAreaBase } from '../services/gitops/managedPaths';
 
 // ── Hoisted mocks ──────────────────────────────────────────────────────
@@ -1557,6 +1557,117 @@ describe('ComposeService - deployStack', () => {
     expect(mockResolveMissingExternalNetworks).toHaveBeenCalledWith(1, 'my-stack', {
       stackDirOverride: undefined,
     });
+  });
+
+  // The required-variable guard spawns its own `config --quiet` instead of going
+  // through execute, so the overlay-substitution boundary does not come for
+  // free: that render reads plaintext secrets, and a `:?` message is itself
+  // interpolated, so Compose prints a decrypted value inside the very phrase the
+  // name-only parser keys on. The guard must refuse on the exit code alone.
+  const nestedGuardDiagnostic =
+    'required variable MISSING is missing a value: required variable audit-decrypted-value-marker is missing\n';
+
+  async function runOverlayGuardDeploy(): Promise<Error> {
+    const proc = createMockProcess();
+    mockSpawn.mockReturnValue(proc);
+    mockGetGlobalSettings.mockReturnValue({ env_block_deploy_on_missing_required: '1' });
+
+    const result = ComposeService.getInstance(1)
+      .deployStack('my-stack', undefined, false, {
+        source: 'git_apply',
+        overlayDir: path.join(gitSecretsAreaBase(), '1', 'my-stack', 'op-1'),
+      })
+      .then(() => null, (e: Error) => e);
+
+    await waitForSpawn();
+    proc.stderr.emit('data', Buffer.from(nestedGuardDiagnostic));
+    proc.emit('close', 1);
+
+    try {
+      const error = await result;
+      expect(error).not.toBeNull();
+      return error as Error;
+    } finally {
+      // The file's beforeEach clears call records but not implementations, so a
+      // guard left on here would put an extra config render in front of every
+      // later test.
+      mockGetGlobalSettings.mockReturnValue({});
+    }
+  }
+
+  it('refuses an overlay deploy whose variable check failed, without naming a variable', async () => {
+    const error = await runOverlayGuardDeploy();
+
+    expect(error.message).toBe(`Deploy blocked: ${WITHHELD_DECRYPTED_REQUIRED_ENV_OUTPUT}then deploy again.`);
+    expect(error.message).not.toContain('audit-decrypted-value-marker');
+    expect(error.message).not.toContain('MISSING');
+    // The refusal came before anything was pulled, created, or started.
+    expect(mockSpawn).toHaveBeenCalledTimes(1);
+    expect(mockResolveMissingExternalNetworks).not.toHaveBeenCalled();
+    // The check is handed no stream to read at all, so the diagnostic could not
+    // be collected even by a later change: this is not a promise about the code
+    // that runs today, it is the shape of the spawn.
+    expect(mockSpawn).toHaveBeenCalledWith(
+      'docker',
+      expect.arrayContaining(['config', '--quiet']),
+      expect.objectContaining({ stdio: 'ignore' }),
+    );
+  });
+
+  it('lets an overlay deploy through when its variable check resolved', async () => {
+    mockListContainers.mockResolvedValue([]);
+    setupAutoCloseSpawn(0);
+    mockGetGlobalSettings.mockReturnValue({ env_block_deploy_on_missing_required: '1' });
+    const overlayDir = path.join(gitSecretsAreaBase(), '1', 'my-stack', 'op-1');
+
+    try {
+      await ComposeService.getInstance(1).deployStack('my-stack', undefined, false, {
+        source: 'git_apply',
+        overlayDir,
+      });
+
+      // Reaching the network gate is proof the guard let the deploy past: a
+      // failing check would have refused it first.
+      expect(mockResolveMissingExternalNetworks).toHaveBeenCalledWith(1, 'my-stack', {
+        stackDirOverride: overlayDir,
+      });
+    } finally {
+      mockGetGlobalSettings.mockReturnValue({});
+    }
+  });
+
+  it('refuses rather than waits on an overlay variable check that never returns', async () => {
+    // The check reads nothing but an exit code, so an unbounded one would hold
+    // the deploy open with no diagnostic to explain the wait. A killed child
+    // closes with no code, which the guard treats as a refusal.
+    const proc = createMockProcess();
+    proc.kill = vi.fn(() => {
+      proc.emit('close', null);
+      return true;
+    });
+    mockSpawn.mockReturnValue(proc);
+    mockGetGlobalSettings.mockReturnValue({ env_block_deploy_on_missing_required: '1' });
+
+    try {
+      const result = ComposeService.getInstance(1)
+        .deployStack('my-stack', undefined, false, {
+          source: 'git_apply',
+          overlayDir: path.join(gitSecretsAreaBase(), '1', 'my-stack', 'op-1'),
+        })
+        .then(() => null, (e: Error) => e);
+
+      await waitForSpawn();
+      await vi.advanceTimersByTimeAsync(20_000);
+      const error = await result;
+
+      expect(proc.kill).toHaveBeenCalledWith('SIGKILL');
+      expect(error?.message).toBe(
+        `Deploy blocked: ${WITHHELD_DECRYPTED_REQUIRED_ENV_OUTPUT}then deploy again.`,
+      );
+      expect(mockSpawn).toHaveBeenCalledTimes(1);
+    } finally {
+      mockGetGlobalSettings.mockReturnValue({});
+    }
   });
 });
 

@@ -26,7 +26,7 @@ import { setRegistryReadinessDepsForTests, setEvaluateRegistryReadinessForTests 
 import { buildPreflightEvidence } from '../services/gitops/preflight';
 import { StackOpLockService } from '../services/StackOpLockService';
 import { coalesceKey, deliveryKey, type ReconcileRequest, type ReconcileTrigger } from '../services/gitops/triggers';
-import { WITHHELD_DECRYPTED_COMPOSE_OUTPUT } from '../helpers/decryptedComposeOutput';
+import { WITHHELD_DECRYPTED_COMPOSE_OUTPUT, WITHHELD_DECRYPTED_REQUIRED_ENV_OUTPUT } from '../helpers/decryptedComposeOutput';
 import {
     buildDirectApplicationRow,
     buildGenerationRow,
@@ -11586,6 +11586,138 @@ describe('GitSourceService sync-env stacks with a repo .env (audit C-2)', () => 
             await expectStoredEnvCiphertext(stackName);
             expect(await overlayEntries(stackName)).toEqual([]);
         } finally {
+            restoreConsole?.();
+            orphanSpy?.mockRestore();
+            if (originalPath === undefined) delete process.env.PATH;
+            else process.env.PATH = originalPath;
+            fs.rmSync(binDir, { recursive: true, force: true });
+            await cleanupStackDir(stackName);
+        }
+    });
+
+    /**
+     * The required-variable guard's own diagnostic, reproduced the way real
+     * Compose produces it: a `:?` message is itself interpolated, so
+     * `${MISSING:?required variable ${SECRET} is missing}` reports the resolved
+     * value of SECRET inside the phrase that identifies the missing variable.
+     * The value is read out of the decrypted overlay `.env` rather than
+     * hardcoded, so the stand-in cannot pass by emitting a fixed string.
+     *
+     * `compose up` fails for an unrelated reason, which is what leaves the stack
+     * applied with a failed deploy: the state a deploy retry resumes from. The
+     * `config --quiet` failure is behind an env flag so the retry can turn it on
+     * after the apply, standing in for an operator emptying an unmanaged runtime
+     * env input between the two attempts. Every other subcommand succeeds, so
+     * candidate validation passes and nothing is created, pulled, or started.
+     *
+     * The real Compose behaviour this stands in for is established by the
+     * control in `assertRequiredEnvPresent over a GitOps decrypt overlay`, which
+     * runs the real binary against the same project and shows the interpolated
+     * value reaching its stderr.
+     *
+     * The value read out of the overlay has to be spelled with the characters a
+     * variable name is spelled with. That is the whole danger: a parse keyed on
+     * the phrase around the name collects the resolved value as though it were
+     * the name, and a value containing a character the pattern rejects would
+     * hide the bug instead of showing it.
+     */
+    function installGuardRefusingComposeBinary(): string {
+        const binDir = fs.mkdtempSync(path.join(os.tmpdir(), 'sencho-guard-docker-'));
+        fs.writeFileSync(
+            path.join(binDir, 'docker'),
+            [
+                '#!/bin/sh',
+                'value=$(sed -n "s/^SECRET=//p" .env | head -n 1)',
+                'case " $* " in',
+                '  *" up "*)',
+                '    printf "unable to start container web\\n" >&2',
+                '    exit 1',
+                '    ;;',
+                '  *" config --quiet "*)',
+                '    if [ -n "$SENCHO_AUDIT_GUARD_REFUSES" ]; then',
+                '      printf "error while interpolating services.web.environment.[]: required variable MISSING is missing a value: required variable %s is missing\\n" "$value" >&2',
+                '      exit 1',
+                '    fi',
+                '    ;;',
+                'esac',
+                'echo "{}"',
+                'exit 0',
+                '',
+            ].join('\n'),
+            { mode: 0o755 },
+        );
+        return binDir;
+    }
+
+    /**
+     * C1 regression: a deploy retry resumes from the manifest already on disk,
+     * with no candidate validation in front of it, so a required variable that
+     * was satisfied when the generation applied can be missing by the time the
+     * operator retries. The guard then refuses against a decrypt overlay, and
+     * its refusal lands in the returned reason, the server log, and the durable
+     * settlement. None of those may carry the decrypted value.
+     */
+    it('keeps a decrypted value out of a retried deploy refused by the variable guard', async () => {
+        const sentinel = 'audit_guard_retry_secret_marker';
+        const sha = 'abcd0d0dabcd0d0dabcd0d0dabcd0d0dabcd0d0d';
+        const stackName = 'sync-env-sops-guard-retry';
+        const binDir = installGuardRefusingComposeBinary();
+        const originalPath = process.env.PATH;
+        const logs: string[] = [];
+        let orphanSpy: { mockRestore: () => void } | null = null;
+        let restoreConsole: (() => void) | null = null;
+        try {
+            process.env.PATH = `${binDir}${path.delimiter}${originalPath ?? ''}`;
+            const { default: DockerController } = await import('../services/DockerController');
+            orphanSpy = vi
+                .spyOn(DockerController.prototype, 'getLegacyOrphanContainersByStack')
+                .mockResolvedValue([]);
+            restoreConsole = captureConsole(logs);
+
+            // The shape that makes Compose quote the decrypted value back: the
+            // overlay's project `.env` holds SECRET, and the `:?` message for
+            // the unset MISSING interpolates it.
+            const compose = 'services:\n  web:\n    image: nginx:1.27-alpine\n    environment:\n'
+                + '      - "FAIL=${MISSING:?required variable ${SECRET} is missing}"\n';
+            const { svc } = await stageSopsSyncEnv(stackName, sha, compose, { SECRET: sentinel });
+            const pull = await svc.pull(stackName);
+            expect(pull.validation.ok).toBe(true);
+            // The apply's own deploy fails for an unrelated reason, leaving the
+            // generation applied and its deploy failed: the retry's starting state.
+            const apply = await svc.apply(stackName, sha, { deploy: true, ...SKIP_PLAN_FINGERPRINT });
+            expect(apply.applied).toBe(true);
+            expect(apply.deployed).toBe(false);
+            logs.length = 0;
+
+            // The operator empties the unmanaged runtime env input between the two
+            // attempts. The retry reuses the manifest already on disk, so nothing
+            // revalidates the generation in front of the guard.
+            process.env.SENCHO_AUDIT_GUARD_REFUSES = '1';
+            mockGitClone.mockClear();
+            const result = await svc.retry(stackName, { actor: 'tester' });
+            delete process.env.SENCHO_AUDIT_GUARD_REFUSES;
+
+            // The refusal is the guard's own, and it says nothing Compose said.
+            expect(result.outcome).toBe('blocked');
+            expect(result.reason).toContain(
+                `Deploy blocked: ${WITHHELD_DECRYPTED_REQUIRED_ENV_OUTPUT}then deploy again.`,
+            );
+            expect(result.reason).not.toContain(sentinel);
+            expect(result.reason).not.toContain('MISSING');
+            expect(JSON.stringify(result)).not.toContain(sentinel);
+            // No refetch, so no candidate validation could have run in front of it.
+            expect(mockGitClone).not.toHaveBeenCalled();
+            expect(logs.join('\n')).not.toContain(sentinel);
+            const app = GitOpsStore.getInstance().getLiveDirectApplication(stackName)!;
+            const history = DatabaseService.getInstance().getDb()
+                .prepare('SELECT stage, outcome, after_json FROM gitops_history WHERE application_id = ?')
+                .all(app.id);
+            expect(JSON.stringify(history)).not.toContain(sentinel);
+            expect(JSON.stringify(history)).toContain('recovery_required');
+            await expectStoredEnvCiphertext(stackName);
+            expect(await overlayEntries(stackName)).toEqual([]);
+        } finally {
+            delete process.env.SENCHO_AUDIT_GUARD_REFUSES;
             restoreConsole?.();
             orphanSpy?.mockRestore();
             if (originalPath === undefined) delete process.env.PATH;

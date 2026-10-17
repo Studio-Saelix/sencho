@@ -109,8 +109,10 @@ async function renderModel(
     // A render that resolved its model from decrypted secret files reports the
     // gate's own withholding instead of Compose's words, which would carry
     // interpolated plaintext into the refusal. The deploy's missing-variable
-    // guardrail already ran against that same overlay, by name only, before
-    // this gate, so nothing is lost by withholding here.
+    // guardrail runs against that same overlay before this gate and withholds on
+    // the same rule, so a decrypt-overlay deploy whose model cannot be rendered
+    // is refused either way; which of the two fixed messages the operator reads
+    // depends on which check reached the failure first.
     if (result.withheld) {
       return { model: null, renderError: WITHHELD_DECRYPTED_RENDER_OUTPUT };
     }

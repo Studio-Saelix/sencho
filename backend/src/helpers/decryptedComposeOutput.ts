@@ -63,3 +63,19 @@ export const WITHHELD_DECRYPTED_COMPOSE_STREAM =
  */
 export const WITHHELD_DECRYPTED_RENDER_OUTPUT =
   'Sencho could not render the effective Compose model for this deploy. The render read decrypted secret files, so its output was withheld and no Compose diagnostic can be shown here.';
+
+/**
+ * Reason clause for the required-variable guard's refusal when it checked a
+ * render that resolved from decrypted secret files.
+ *
+ * A `:?` message is itself interpolated, so `${MISSING:?required variable
+ * ${SECRET} is missing}` makes Compose print the resolved value of SECRET inside
+ * its own diagnostic. A name-only parse of that text publishes the value as
+ * though it were a variable name, so the guard cannot read the diagnostic at
+ * all for this input: it refuses on the render's exit code and says nothing
+ * Compose said. Splice this between the guard's own `blocked` prefix and its
+ * remedy, so an operation that is not a deploy keeps its own remedy.
+ */
+export const WITHHELD_DECRYPTED_REQUIRED_ENV_OUTPUT =
+  'this project failed its Compose check, which read decrypted secret files, so Compose\'s diagnostic was withheld and no variable can be named. '
+  + 'A required environment variable with no value is the usual cause: define it in a .env or env_file, ';
