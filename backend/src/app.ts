@@ -79,7 +79,8 @@ export function createApp(): express.Express {
       directives: {
         defaultSrc: ["'self'"],
         baseUri: ["'self'"],
-        fontSrc: ["'self'", 'https:', 'data:'],
+        // Typefaces ship with the instance. https: would allow a remote font host.
+        fontSrc: ["'self'", 'data:'],
         formAction: ["'self'"],
         frameAncestors: ["'self'"],
         // img-src: 'https:' is required for App Store template icons hosted on
@@ -88,7 +89,9 @@ export function createApp(): express.Express {
         objectSrc: ["'none'"],
         scriptSrc: ["'self'"],
         scriptSrcAttr: ["'none'"],
-        styleSrc: ["'self'", 'https:', "'unsafe-inline'"],
+        // unsafe-inline covers component style attributes. https: is omitted so a
+        // remote stylesheet cannot load.
+        styleSrc: ["'self'", "'unsafe-inline'"],
         // connect-src: explicit 'self' covers same-origin fetch/XHR/WebSocket.
         // ws: and wss: are included for WebSocket connections in any scheme context.
         connectSrc: ["'self'", 'ws:', 'wss:'],
