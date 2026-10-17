@@ -11,6 +11,8 @@ type DiffPreview = {
   original: string;
   modified: string;
   fileName: string;
+  /** When set, confirm runs this instead of the editor's active-tab save. */
+  onConfirm?: () => Promise<void>;
 };
 
 type PolicyBlock = {

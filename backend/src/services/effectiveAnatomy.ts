@@ -7,11 +7,13 @@
  * facts. Rendering the merged model and extracting the same anatomy shape keeps
  * those signals honest.
  *
- * Reads only structural fields (service keys, ports, volumes, restart, network
- * keys); it never reads `environment`, `command`, `entrypoint`, `labels`,
- * `secrets`, or `configs`, so a secret INJECTED through those fields can never
- * reach this payload. The exception is a secret interpolated INTO a structural
- * field (a bind path, network name, or published port built from a `${VAR}`):
+ * Reads structural fields (service keys, ports, volumes, restart, network keys)
+ * plus one allowlisted label, `sencho.service.url`, and only when that value is
+ * an http(s) URL with no userinfo. It never reads `environment`, `command`,
+ * `entrypoint`, other label values, `secrets`, or `configs`, so a secret
+ * INJECTED through those fields can never reach this payload. The exception is
+ * a secret interpolated INTO a structural field or into the allowlisted label
+ * (a bind path, network name, published port, or URL built from a `${VAR}`):
  * `docker compose config` resolves it before this parse, leaving no provenance
  * to distinguish it, so the resolved value is returned. That value is already
  * readable at the same `stack:read` scope via the stack's files, so this is a
@@ -19,11 +21,22 @@
  * exposure.
  */
 import { ComposeService } from './ComposeService';
+import { DatabaseService } from './DatabaseService';
+import { FileSystemService } from './FileSystemService';
 import { parseMissingRequiredVars } from '../helpers/envVarParse';
+import { authoredComposeEnvFileArgs } from '../utils/authoredComposeArgs';
 import { getErrorMessage } from '../utils/errors';
 import { redactSensitiveText, sanitizeForLog } from '../utils/safeLog';
+import { SERVICE_URL_LABEL, serviceUrlFromLabels } from '../helpers/serviceUrlLabel';
+import { resolveServiceUrlEditState, resolveServiceUrlClearState, chainFilesAroundRoot, type ServiceUrlEditState } from './serviceUrlSource';
 
 const MAX_RENDER_ERROR = 600;
+const MAX_CHAIN_FILE_BYTES = 2 * 1024 * 1024;
+
+/** Service-keyed maps use a null prototype so a service named `constructor` cannot read an inherited value. */
+function serviceMap<T>(): Record<string, T> {
+  return Object.create(null) as Record<string, T>;
+}
 
 export interface EffectiveAnatomyPort {
   host: string;
@@ -43,6 +56,8 @@ export interface EffectiveAnatomy {
   volumes: Record<string, EffectiveAnatomyVolume[]>;
   restart: string | null;
   networks: string[];
+  /** Validated `sencho.service.url` values, keyed by service. Omitted services have none. */
+  serviceUrls: Record<string, string>;
 }
 
 export interface EffectiveAnatomyResult extends EffectiveAnatomy {
@@ -50,9 +65,24 @@ export interface EffectiveAnatomyResult extends EffectiveAnatomy {
   renderable: boolean;
   /** A redacted, secret-safe reason when the render failed, else null. */
   renderError: string | null;
+  /**
+   * Per-service editability of the URL label from the resolved main compose
+   * file, so the editor can refuse a write another chain file would shadow.
+   */
+  serviceUrlEdit: Record<string, ServiceUrlEditState>;
+  /**
+   * Per-service clearing authority of the URL label from the resolved main
+   * compose file. `root` means removing the label there makes the effective URL
+   * disappear; `other` or `unknown` mean another file or an inheritance
+   * construct can supply it, so a clear is refused.
+   */
+  serviceUrlClear: Record<string, ServiceUrlEditState>;
 }
 
-const EMPTY: EffectiveAnatomy = { services: [], ports: {}, volumes: {}, restart: null, networks: [] };
+/** Fresh empty anatomy, with fresh maps, so a returned result never shares state. */
+function emptyAnatomy(): EffectiveAnatomy {
+  return { services: [], ports: serviceMap(), volumes: serviceMap(), restart: null, networks: [], serviceUrls: serviceMap() };
+}
 
 function asString(v: unknown): string | undefined {
   if (typeof v === 'string') return v;
@@ -105,6 +135,26 @@ function networkKeys(value: unknown): string[] {
   return [];
 }
 
+/** Compose writes a literal `$` as `$$` in rendered config. Undo that once. */
+function unescapeRenderedServiceUrl(labels: unknown): unknown {
+  const unescape = (value: string) => value.replaceAll('$$', '$');
+  if (Array.isArray(labels)) {
+    return labels.map(entry => {
+      if (typeof entry !== 'string') return entry;
+      const eq = entry.indexOf('=');
+      if (eq <= 0 || entry.slice(0, eq) !== SERVICE_URL_LABEL) return entry;
+      return `${SERVICE_URL_LABEL}=${unescape(entry.slice(eq + 1))}`;
+    });
+  }
+  if (labels && typeof labels === 'object') {
+    const copy: Record<string, unknown> = { ...(labels as Record<string, unknown>) };
+    const raw = copy[SERVICE_URL_LABEL];
+    if (typeof raw === 'string') copy[SERVICE_URL_LABEL] = unescape(raw);
+    return copy;
+  }
+  return labels;
+}
+
 /**
  * Map parsed `docker compose config --format json` to the {@link EffectiveAnatomy}
  * shape. Tolerant of missing fields; empty / garbage input yields an empty model
@@ -112,17 +162,18 @@ function networkKeys(value: unknown): string[] {
  * dossier reads the same facts whether they came from a single file or the merge.
  */
 export function parseEffectiveAnatomy(parsed: unknown): EffectiveAnatomy {
-  if (!parsed || typeof parsed !== 'object') return { ...EMPTY };
+  if (!parsed || typeof parsed !== 'object') return emptyAnatomy();
   const root = parsed as Record<string, unknown>;
   const servicesObj = (root.services && typeof root.services === 'object' && !Array.isArray(root.services))
     ? root.services as Record<string, unknown>
     : {};
   const serviceNames = Object.keys(servicesObj);
 
-  const ports: Record<string, EffectiveAnatomyPort[]> = {};
-  const volumes: Record<string, EffectiveAnatomyVolume[]> = {};
+  const ports: Record<string, EffectiveAnatomyPort[]> = serviceMap();
+  const volumes: Record<string, EffectiveAnatomyVolume[]> = serviceMap();
   let restart: string | null = null;
   const networks = new Set<string>();
+  const serviceUrls: Record<string, string> = serviceMap();
 
   for (const name of serviceNames) {
     const svc = servicesObj[name];
@@ -139,13 +190,137 @@ export function parseEffectiveAnatomy(parsed: unknown): EffectiveAnatomy {
     if (v.length) volumes[name] = v;
     if (restart === null && typeof o.restart === 'string') restart = o.restart;
     for (const n of networkKeys(o.networks)) networks.add(n);
+    const serviceUrl = serviceUrlFromLabels(unescapeRenderedServiceUrl(o.labels));
+    if (serviceUrl) serviceUrls[name] = serviceUrl;
   }
 
   if (root.networks && typeof root.networks === 'object' && !Array.isArray(root.networks)) {
     for (const n of Object.keys(root.networks as Record<string, unknown>)) networks.add(n);
   }
 
-  return { services: serviceNames, ports, volumes, restart, networks: Array.from(networks) };
+  return { services: serviceNames, ports, volumes, restart, networks: Array.from(networks), serviceUrls };
+}
+
+/**
+ * COMPOSE_FILE replaces Compose's own file discovery, so the explicit chain
+ * (resolved main file plus the auto-discovered override) can no longer be
+ * trusted. Sencho does not manage that variable anywhere, so a stack that sets
+ * it is reported unverifiable instead of guessing. Explicit `-f` args (multi-file
+ * Git stacks) ignore COMPOSE_FILE, so this check only runs for discovered chains.
+ */
+async function composeFileDiscoveryOverridden(nodeId: number, stackName: string): Promise<boolean> {
+  if (process.env.COMPOSE_FILE) return true;
+  const fsSvc = FileSystemService.getInstance(nodeId);
+  const candidates: string[] = [];
+  try {
+    candidates.push(await fsSvc.getEnvContent(stackName));
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') return true;
+  }
+  try {
+    const args = await authoredComposeEnvFileArgs(stackName, nodeId);
+    for (let index = 0; index + 1 < args.length; index += 2) {
+      if (args[index] !== '--env-file') continue;
+      const envPath = args[index + 1];
+      if (!envPath) continue;
+      try {
+        candidates.push(await fsSvc.readFile(envPath));
+      } catch {
+        return true;
+      }
+    }
+  } catch {
+    return true;
+  }
+  return candidates.some(content => /^\s*(?:export\s+)?COMPOSE_FILE\s*=/m.test(content));
+}
+
+/** One other chain file's label contribution; null content means it could not be read. */
+async function readChainFile(nodeId: number, stackName: string, name: string): Promise<string | null> {
+  try {
+    const file = await FileSystemService.getInstance(nodeId).readStackFile(stackName, name, MAX_CHAIN_FILE_BYTES);
+    if (file.binary || file.oversized || typeof file.content !== 'string') return null;
+    return file.content;
+  } catch (error) {
+    console.warn('[EffectiveAnatomy] Could not read compose file %s for stack %s:',
+      sanitizeForLog(name), sanitizeForLog(stackName), sanitizeForLog(getErrorMessage(error, 'unknown')));
+    return null;
+  }
+}
+
+/**
+ * The files merged before and after the resolved main file, the main file's own
+ * source, and whether the main file is part of the authored chain at all. Null
+ * when the chain itself cannot be established.
+ */
+async function editabilityInput(nodeId: number, stackName: string): Promise<{
+  rootInChain: boolean;
+  rootContent: string | null;
+  earlierFiles: Array<{ name: string; content: string | null }>;
+  otherFiles: Array<{ name: string; content: string | null }>;
+} | null> {
+  const fsSvc = FileSystemService.getInstance(nodeId);
+  const rootName = await fsSvc.getComposeFilename(stackName);
+  const spec = DatabaseService.getInstance().getGitSource(stackName)?.applied_deploy_spec;
+  let chain: string[];
+  if (spec && spec.files.length > 0) {
+    chain = [...spec.files];
+  } else {
+    if (await composeFileDiscoveryOverridden(nodeId, stackName)) return null;
+    const override = await fsSvc.getOverrideFilename(stackName);
+    chain = override ? [rootName, override] : [rootName];
+  }
+  // Only files merged after the open file can shadow a set; earlier files lose
+  // to its direct label but can surface again after a clear. This also keeps a
+  // later same-named file in a subdirectory from being mistaken for the open
+  // file itself, and drops an earlier occurrence of the same authored file.
+  const { rootInChain, earlier, shadowing } = chainFilesAroundRoot(chain, rootName);
+  if (!rootInChain) return { rootInChain: false, rootContent: null, earlierFiles: [], otherFiles: [] };
+  const earlierFiles: Array<{ name: string; content: string | null }> = [];
+  for (const name of earlier) {
+    earlierFiles.push({ name, content: await readChainFile(nodeId, stackName, name) });
+  }
+  const otherFiles: Array<{ name: string; content: string | null }> = [];
+  for (const name of shadowing) {
+    otherFiles.push({ name, content: await readChainFile(nodeId, stackName, name) });
+  }
+  return {
+    rootInChain: true,
+    rootContent: await readChainFile(nodeId, stackName, rootName),
+    earlierFiles,
+    otherFiles,
+  };
+}
+
+/** Both URL-label authorities for every rendered service; all `unknown` when the chain cannot be established. */
+async function buildServiceUrlAuthority(
+  nodeId: number,
+  stackName: string,
+  services: string[],
+): Promise<{ serviceUrlEdit: Record<string, ServiceUrlEditState>; serviceUrlClear: Record<string, ServiceUrlEditState> }> {
+  const unknownForAll = (): Record<string, ServiceUrlEditState> => {
+    const states: Record<string, ServiceUrlEditState> = serviceMap();
+    for (const name of services) states[name] = 'unknown';
+    return states;
+  };
+  const unknown = { serviceUrlEdit: unknownForAll(), serviceUrlClear: unknownForAll() };
+  try {
+    const input = await editabilityInput(nodeId, stackName);
+    if (!input) return unknown;
+    return {
+      serviceUrlEdit: resolveServiceUrlEditState({
+        rootInChain: input.rootInChain,
+        rootContent: input.rootContent,
+        otherFiles: input.otherFiles,
+        services,
+      }),
+      serviceUrlClear: resolveServiceUrlClearState({ ...input, services }),
+    };
+  } catch (error) {
+    console.warn('[EffectiveAnatomy] Could not establish service URL sources for %s:',
+      sanitizeForLog(stackName), sanitizeForLog(getErrorMessage(error, 'unknown')));
+    return unknown;
+  }
 }
 
 /**
@@ -156,12 +331,23 @@ export function parseEffectiveAnatomy(parsed: unknown): EffectiveAnatomy {
  * the dossier can fall back to its root-only view.
  */
 export async function buildEffectiveAnatomy(nodeId: number, stackName: string): Promise<EffectiveAnatomyResult> {
+  // docker compose follows a compose file, and the override it discovers, when
+  // either links at a sibling stack. Reading or saving refuses the compose
+  // file. This render refuses that file and the discovered override, or the
+  // response would include the sibling's ports and service URL.
+  await FileSystemService.getInstance(nodeId).assertComposeFileWithinStack(stackName);
   let renderError: string;
   try {
     const result = await ComposeService.getInstance(nodeId).renderConfig(stackName);
     if (result.rendered !== null) {
       try {
-        return { renderable: true, renderError: null, ...parseEffectiveAnatomy(JSON.parse(result.rendered)) };
+        const anatomy = parseEffectiveAnatomy(JSON.parse(result.rendered));
+        return {
+          renderable: true,
+          renderError: null,
+          ...anatomy,
+          ...await buildServiceUrlAuthority(nodeId, stackName, anatomy.services),
+        };
       } catch (parseErr) {
         // JSON.parse errors carry no file content, so the message is safe to log.
         console.warn('[EffectiveAnatomy] Effective model parse failed for %s:',
@@ -185,5 +371,11 @@ export async function buildEffectiveAnatomy(nodeId: number, stackName: string): 
     renderError = redactSensitiveText(getErrorMessage(err, 'docker compose could not be started.')).slice(0, MAX_RENDER_ERROR).trim()
       || 'Sencho could not run docker compose on this node.';
   }
-  return { renderable: false, renderError, ...EMPTY };
+  return {
+    renderable: false,
+    renderError,
+    ...emptyAnatomy(),
+    serviceUrlEdit: serviceMap(),
+    serviceUrlClear: serviceMap(),
+  };
 }

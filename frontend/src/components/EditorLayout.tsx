@@ -27,6 +27,13 @@ import { ThemeQuickSwitch } from './theme/ThemeQuickSwitch';
 import { useNotifications } from './EditorLayout/hooks/useNotifications';
 import { useContainerStats } from './EditorLayout/hooks/useContainerStats';
 import { useSidebarContextMenu } from './EditorLayout/hooks/useSidebarContextMenu';
+import { useServiceUrls } from './EditorLayout/hooks/useServiceUrls';
+import { ServiceUrlModal } from './EditorLayout/ServiceUrlModal';
+import { patchServiceUrlLabel } from '@/lib/composeServiceUrl';
+import { commitServiceUrlWrite } from '@/lib/serviceUrlWrite';
+import { serviceKeyGet, serviceUrlClearBlockedMessage, serviceUrlClearState, serviceUrlSaveBlockedMessage } from '@/lib/serviceUrlResolve';
+import { sameServiceUrlTarget, type ServiceUrlDialogTarget } from '@/lib/serviceUrlTarget';
+import { confirmComposeSourceReload } from '@/lib/composeSourceConflict';
 import { useActiveNodeReapplyEligibility } from './EditorLayout/hooks/useActiveNodeReapplyEligibility';
 import { useHomeNavigation } from './EditorLayout/hooks/useHomeNavigation';
 import { resolveNodeSettleAction } from './EditorLayout/resolveNodeSettleAction';
@@ -371,6 +378,10 @@ export default function EditorLayout() {
   );
 
   const serviceUpdateStatuses = useServiceUpdateStatus(stackUpdates, selectedFile);
+  const serviceUrlsRef = useRef<import('@/lib/serviceUrlResolve').ServiceUrlEntry | null>(null);
+  const onStackFilesChangedRef = useRef<() => void>(() => {});
+  const selectedFileRef = useRef(selectedFile);
+  const canRef = useRef(can);
 
   const stackActions = useStackActions({
     editorState,
@@ -390,6 +401,8 @@ export default function EditorLayout() {
       const stackName = stackNameOrFilename.replace(/\.(ya?ml)$/, '');
       return can('stack:edit', 'stack', stackName, activeNode?.id);
     },
+    serviceUrlsRef,
+    onStackFilesChanged: () => onStackFilesChangedRef.current(),
     canOfferVolumeRemoval,
     onDeletedOpenStack: () => onDeletedOpenStackRef.current(),
     removeNotificationsForStack,
@@ -403,6 +416,43 @@ export default function EditorLayout() {
 
   // Wire the ref now that stackActions is available
   resetEditorStateRef.current = stackActions.resetEditorState;
+
+  const { entry: serviceUrlEntry, refresh: refreshServiceUrls } = useServiceUrls(activeNode?.id ?? null, selectedFile);
+  useEffect(() => {
+    selectedFileRef.current = selectedFile;
+    activeNodeIdRef.current = activeNode?.id ?? null;
+    canRef.current = can;
+    serviceUrlsRef.current = serviceUrlEntry;
+    onStackFilesChangedRef.current = () => { void refreshServiceUrls(); };
+  }, [selectedFile, activeNode?.id, can, serviceUrlEntry, refreshServiceUrls]);
+
+  const [serviceUrlTarget, setServiceUrlTarget] = useState<ServiceUrlDialogTarget | null>(null);
+  const [serviceUrlDirty, setServiceUrlDirty] = useState(false);
+  const [serviceUrlSaving, setServiceUrlSaving] = useState(false);
+  const [serviceUrlVerify, setServiceUrlVerify] = useState<string | null>(null);
+  const [serviceUrlEditBlock, setServiceUrlEditBlock] = useState<string | null>(null);
+  const [serviceUrlEditBlockId, setServiceUrlEditBlockId] = useState(0);
+  // An edit to the open compose buffer can make a refused save possible again.
+  const serviceUrlContentSeen = useRef(content);
+  if (serviceUrlContentSeen.current !== content) {
+    serviceUrlContentSeen.current = content;
+    if (serviceUrlEditBlock !== null) setServiceUrlEditBlock(null);
+  }
+  if (serviceUrlTarget && !sameServiceUrlTarget(serviceUrlTarget, {
+    nodeId: activeNode?.id ?? null,
+    stackName: selectedFile,
+  })) {
+    setServiceUrlTarget(null);
+    setServiceUrlVerify(null);
+    setServiceUrlEditBlock(null);
+  }
+
+  const serviceUrlVerifyTarget = useRef<{
+    nodeId: number | null;
+    stackName: string;
+    service: string;
+    url: string | null;
+  } | null>(null);
 
   const { syncStale: containersSyncStale, retrySync: retryContainersSync } = useSelectedStackLiveRefresh({
     selectedFile,
@@ -458,6 +508,7 @@ export default function EditorLayout() {
     activeNode,
     isAdmin,
     can,
+    serviceUrlEntry,
   });
 
   const {
@@ -806,7 +857,181 @@ export default function EditorLayout() {
     [openFleetUpdates],
   );
 
+  const verifySavedUrl = useCallback(async (captured: {
+    nodeId: number | null;
+    stackName: string;
+    service: string;
+    url: string | null;
+  }) => {
+    const stillHere = () => selectedFileRef.current === captured.stackName && activeNodeIdRef.current === captured.nodeId;
+    let next;
+    try {
+      next = await refreshServiceUrls();
+    } catch (error) {
+      console.error('Failed to verify service URL:', error);
+      if (stillHere()) setServiceUrlVerify('The file was saved, but the URL could not be verified.');
+      return;
+    }
+    if (!stillHere()) return;
+    const effective = next?.status === 'ready' ? (serviceKeyGet(next.serviceUrls, captured.service) ?? null) : undefined;
+    if (next?.status === 'ready' && effective === captured.url) {
+      toast.success(captured.url ? 'Service URL saved.' : 'Service URL cleared.');
+      setServiceUrlTarget(null);
+      setServiceUrlVerify(null);
+      return;
+    }
+    const detail = typeof effective === 'string' ? ` Effective URL: ${effective}.` : '';
+    setServiceUrlVerify(`The file was saved, but the URL could not be verified.${detail}`);
+  }, [refreshServiceUrls]);
+
+  const commitServiceUrl = useCallback(async (url: string | null) => {
+    const opened = serviceUrlTarget;
+    if (!opened) return;
+    const current = { nodeId: activeNode?.id ?? null, stackName: selectedFile };
+    if (!sameServiceUrlTarget(opened, current)) {
+      setServiceUrlTarget(null);
+      toast.error('This stack is no longer open, so the URL was not saved.');
+      return;
+    }
+    const stackKey = opened.stackName.replace(/\.(ya?ml)$/, '');
+    if (!can('stack:edit', 'stack', stackKey, opened.nodeId)) {
+      toast.error('You cannot edit this stack.');
+      return;
+    }
+    // Clearing has its own authority: an earlier file, the open file's include,
+    // or an inherited service can still supply the label after the direct one is
+    // removed, so only the matching guard for the requested operation applies.
+    const refuseEdit = (message: string) => {
+      setServiceUrlEditBlock(message);
+      setServiceUrlEditBlockId((id) => id + 1);
+    };
+    const blocked = serviceUrlSaveBlockedMessage(serviceUrlEntry, opened.serviceName, url);
+    if (blocked) {
+      refuseEdit(blocked);
+      return;
+    }
+    let patched: ReturnType<typeof patchServiceUrlLabel>;
+    try {
+      patched = patchServiceUrlLabel(content, opened.serviceName, url);
+    } catch (error) {
+      console.error('Failed to update the service URL label:', error);
+      toast.error('The compose file could not be updated.');
+      return;
+    }
+    if (!patched.ok) {
+      refuseEdit(patched.reason === 'missing-service'
+        ? 'That service is defined in another compose file.'
+        : patched.reason === 'unsupported'
+          ? 'The URL cannot be changed here without changing other parts of this compose file. Edit the label in the editor instead.'
+          : 'The compose file could not be updated.');
+      return;
+    }
+    const captured = {
+      stackName: opened.stackName,
+      nodeId: opened.nodeId,
+      etag: editorState.composeEtag,
+      filename: editorState.composeFilename,
+      service: opened.serviceName,
+      url,
+      content: patched.yaml,
+    };
+    const write = async () => {
+      if (!canRef.current('stack:edit', 'stack', stackKey, captured.nodeId)) {
+        toast.error('You cannot edit this stack.');
+        return;
+      }
+      if (selectedFileRef.current !== captured.stackName || activeNodeIdRef.current !== captured.nodeId) {
+        toast.error('This stack is no longer open, so the URL was not saved.');
+        return;
+      }
+      setServiceUrlSaving(true);
+      try {
+        // Re-read the source authority from disk before writing: the anatomy
+        // entry held in state may be older than the compose files themselves.
+        // This orders the check, it does not lock the files; a later chain file
+        // changed mid-write is caught by the post-save verification instead.
+        const fresh = await refreshServiceUrls();
+        const freshBlocked = serviceUrlSaveBlockedMessage(fresh, opened.serviceName, url);
+        if (freshBlocked) {
+          refuseEdit(freshBlocked);
+          return;
+        }
+        const result = await commitServiceUrlWrite(
+          captured.content,
+          () => stackActions.saveComposeContent({
+            content: captured.content,
+            stackName: captured.stackName,
+            nodeId: captured.nodeId,
+            etag: captured.etag,
+            filename: captured.filename,
+          }),
+          (next) => {
+            if (selectedFileRef.current !== captured.stackName || activeNodeIdRef.current !== captured.nodeId) return;
+            setContent(next);
+          },
+        );
+        if (!result.ok) {
+          if (result.conflict && result.code === 'compose_source_changed'
+            && selectedFileRef.current === captured.stackName
+            && activeNodeIdRef.current === captured.nodeId) {
+            const reload = confirmComposeSourceReload(message => window.confirm(message));
+            if (reload) {
+              setContent(result.currentContent);
+              editorState.setOriginalContent(result.currentContent);
+              editorState.setComposeEtag(result.etag);
+              editorState.setComposeFilename(result.filename);
+              setServiceUrlTarget(null);
+              toast.info('Reloaded the current compose file.');
+              void refreshServiceUrls();
+            } else {
+              toast.error('The compose file on disk changed, so the URL was not saved.');
+            }
+            return;
+          }
+          toast.error(result.conflict
+            ? 'The compose file changed before it could be saved.'
+            : result.error);
+          return;
+        }
+        if (selectedFileRef.current !== captured.stackName || activeNodeIdRef.current !== captured.nodeId) return;
+        await verifySavedUrl(captured);
+        serviceUrlVerifyTarget.current = captured;
+      } finally {
+        setServiceUrlSaving(false);
+      }
+    };
+    if (diffPreviewEnabled && patched.yaml !== editorState.originalContent) {
+      overlayState.setDiffPreview({
+        mode: 'save',
+        language: 'yaml',
+        original: editorState.originalContent,
+        modified: patched.yaml,
+        fileName: editorState.composeFilename || 'compose.yaml',
+        onConfirm: write,
+      });
+      return;
+    }
+    await write();
+  }, [
+    activeNode?.id,
+    can,
+    content,
+    serviceUrlEntry,
+    diffPreviewEnabled,
+    editorState.composeEtag,
+    editorState.composeFilename,
+    editorState.originalContent,
+    overlayState,
+    refreshServiceUrls,
+    selectedFile,
+    serviceUrlTarget,
+    setContent,
+    stackActions,
+    verifySavedUrl,
+  ]);
+
   const renderEditor = (headerActions?: ReactNode) => (
+    <>
     <EditorView
       headerActions={headerActions}
       requestedAnatomyTab={pendingAnatomyTab}
@@ -870,6 +1095,19 @@ export default function EditorLayout() {
         if (!selectedFile) return;
         void stackActions.requestServiceUpdate(selectedFile, serviceName, mode);
       }}
+      serviceUrlEntry={serviceUrlEntry}
+      onEditServiceUrl={(serviceName) => {
+        if (!selectedFile) return;
+        setServiceUrlDirty(content !== editorState.originalContent);
+        setServiceUrlVerify(null);
+        setServiceUrlEditBlock(null);
+        setServiceUrlTarget({
+          nodeId: activeNode?.id ?? null,
+          stackName: selectedFile,
+          serviceName,
+        });
+      }}
+      onRetryServiceUrls={() => { void refreshServiceUrls(); }}
       setActiveTab={setActiveTab}
       setLogsMode={setLogsMode}
       setEditingCompose={setEditingCompose}
@@ -896,6 +1134,35 @@ export default function EditorLayout() {
       hasUnsavedChanges={stackActions.hasUnsavedChanges}
       stackMuteActions={selectedFile ? stackMuteActions : undefined}
     />
+    <ServiceUrlModal
+      key={serviceUrlTarget ? `${serviceUrlTarget.nodeId}:${serviceUrlTarget.stackName}:${serviceUrlTarget.serviceName}` : 'closed'}
+      open={serviceUrlTarget !== null}
+      serviceName={serviceUrlTarget?.serviceName ?? ''}
+      initialUrl={serviceUrlTarget && serviceUrlEntry?.status === 'ready'
+        ? (serviceKeyGet(serviceUrlEntry.serviceUrls, serviceUrlTarget.serviceName) ?? '')
+        : ''}
+      dirty={serviceUrlDirty}
+      saving={serviceUrlSaving}
+      verifyMessage={serviceUrlVerify}
+      clearBlockedMessage={serviceUrlTarget
+        ? serviceUrlClearBlockedMessage(serviceUrlClearState(serviceUrlEntry, serviceUrlTarget.serviceName))
+        : null}
+      editBlockedMessage={serviceUrlEditBlock}
+      editBlockId={serviceUrlEditBlockId}
+      onOpenChange={(open) => {
+        if (!open && !serviceUrlSaving) {
+          setServiceUrlTarget(null);
+          setServiceUrlVerify(null);
+          setServiceUrlEditBlock(null);
+        }
+      }}
+      onSave={(url) => { void commitServiceUrl(url); }}
+      onRetryVerify={() => {
+        const captured = serviceUrlVerifyTarget.current;
+        if (captured) void verifySavedUrl(captured);
+      }}
+    />
+    </>
   );
 
   // Track the last "committed" node id so the node-switch dirty guard can

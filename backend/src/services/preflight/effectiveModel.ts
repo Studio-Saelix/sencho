@@ -10,6 +10,7 @@
  */
 
 import { classifyComposeHealthcheck } from '../../helpers/healthcheckPresence';
+import { serviceUrlFromLabels } from '../../helpers/serviceUrlLabel';
 
 /** A host-published port range declared by a service (start==end for one port). */
 export interface EffPortSpec {
@@ -93,6 +94,11 @@ export interface EffService {
   extraHosts: string[];
   /** Label KEY names only. Values are never extracted (a label value can carry a secret). */
   labelKeys: string[];
+  /**
+   * True when `sencho.service.url` is a validated http(s) URL. The URL string
+   * itself stays off this model; anatomy is the reader that returns it.
+   */
+  hasServiceUrl?: boolean;
 }
 
 /**
@@ -513,6 +519,7 @@ export function parseEffectiveModel(parsed: unknown, fallbackProjectName: string
       networks: parseServiceNetworks(svc.networks),
       extraHosts: parseExtraHosts(svc.extra_hosts),
       labelKeys: labelKeysOf(svc.labels),
+      hasServiceUrl: serviceUrlFromLabels(svc.labels) !== null,
     });
   }
 

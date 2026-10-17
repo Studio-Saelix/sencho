@@ -298,6 +298,16 @@ describe.skipIf(isWindows)('FileSystemService symlink-escape: symlinked compose 
     await fs.rm(tmpBase, { recursive: true, force: true });
   });
 
+  it('reads and saves the compose file through the symlinked root', async () => {
+    const svc = FileSystemService.getInstance();
+    const read = await svc.getStackContentWithMtime(STACK);
+    expect(read).toMatchObject({ content: 'services: {}\n', filename: 'compose.yaml' });
+    const saved = await svc.saveStackContentIfUnchanged(STACK, 'services: { web: {} }\n', read.mtimeMs, 'compose.yaml');
+    expect(saved).toMatchObject({ ok: true, filename: 'compose.yaml' });
+    await svc.saveStackContent(STACK, 'services: { api: {} }\n');
+    expect(await fs.readFile(path.join(realBase, STACK, 'compose.yaml'), 'utf-8')).toBe('services: { api: {} }\n');
+  });
+
   it('getEnvContent reads through the symlinked root', async () => {
     const svc = FileSystemService.getInstance();
     await expect(svc.getEnvContent(STACK)).resolves.toBe('OK=1\n');
@@ -349,6 +359,107 @@ describe.skipIf(isWindows)('FileSystemService symlink-escape: migrate skips an e
     // The escaping entry was skipped: nothing was written through the symlink.
     await expect(fs.access(path.join(externalTarget, 'compose.yaml'))).rejects.toMatchObject({ code: 'ENOENT' });
     warn.mockRestore();
+  });
+});
+
+describe.skipIf(isWindows)('FileSystemService symlink-escape: alternate compose filename', () => {
+  let tmpBase: string;
+  let composeDir: string;
+  let stackDir: string;
+  let outside: string;
+
+  beforeEach(async () => {
+    tmpBase = await fs.mkdtemp(path.join(os.tmpdir(), 'sencho-symcompose-'));
+    composeDir = path.join(tmpBase, 'compose');
+    stackDir = path.join(composeDir, STACK);
+    outside = path.join(tmpBase, 'outside.yml');
+    await fs.mkdir(stackDir, { recursive: true });
+    await fs.writeFile(outside, 'OUTSIDE=1\n', 'utf-8');
+    mockState.composeDir = composeDir;
+  });
+
+  afterEach(async () => {
+    await fs.rm(tmpBase, { recursive: true, force: true });
+  });
+
+  it('rejects a docker-compose.yml symlink that leaves the compose dir and does not create compose.yaml', async () => {
+    await fs.symlink(outside, path.join(stackDir, 'docker-compose.yml'));
+    const svc = FileSystemService.getInstance();
+    await expect(svc.getStackContentWithMtime(STACK)).rejects.toMatchObject({ code: 'SYMLINK_ESCAPE' });
+    await expect(svc.getStackContent(STACK)).rejects.toMatchObject({ code: 'SYMLINK_ESCAPE' });
+    await expect(svc.saveStackContentIfUnchanged(STACK, 'pwned\n', null, 'docker-compose.yml')).rejects.toMatchObject({ code: 'SYMLINK_ESCAPE' });
+    expect(await fs.readFile(outside, 'utf-8')).toBe('OUTSIDE=1\n');
+    await expect(fs.access(path.join(stackDir, 'compose.yaml'))).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
+  it('rejects a dangling docker-compose.yml instead of treating it as a missing compose file', async () => {
+    const link = path.join(stackDir, 'docker-compose.yml');
+    await fs.symlink(path.join(stackDir, 'missing.yml'), link);
+    const svc = FileSystemService.getInstance();
+    await expect(svc.saveStackContentIfUnchanged(STACK, 'fresh\n', null)).rejects.toMatchObject({ code: 'SYMLINK_ESCAPE' });
+    expect((await fs.lstat(link)).isSymbolicLink()).toBe(true);
+    await expect(fs.access(path.join(stackDir, 'compose.yaml'))).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
+  it.each(['compose.yaml', 'compose.yml', 'docker-compose.yaml', 'docker-compose.yml'])(
+    'refuses a %s that links into a sibling stack and leaves both stacks untouched',
+    async (basename) => {
+      const sibling = path.join(composeDir, 'other');
+      await fs.mkdir(sibling);
+      await fs.writeFile(path.join(sibling, 'compose.yaml'), 'services: { other: {} }\n', 'utf-8');
+      await fs.symlink('../other/compose.yaml', path.join(stackDir, basename));
+      const svc = FileSystemService.getInstance();
+      await expect(svc.getStackContentWithMtime(STACK)).rejects.toMatchObject({ code: 'SYMLINK_ESCAPE' });
+      await expect(svc.getStackContent(STACK)).rejects.toMatchObject({ code: 'SYMLINK_ESCAPE' });
+      await expect(svc.saveStackContentIfUnchanged(STACK, 'pwned\n', null, basename)).rejects.toMatchObject({ code: 'SYMLINK_ESCAPE' });
+      await expect(svc.saveStackContentIfUnchanged(STACK, 'pwned\n', null)).rejects.toMatchObject({ code: 'SYMLINK_ESCAPE' });
+      expect(await fs.readFile(path.join(sibling, 'compose.yaml'), 'utf-8')).toBe('services: { other: {} }\n');
+      expect((await fs.lstat(path.join(stackDir, basename))).isSymbolicLink()).toBe(true);
+    },
+  );
+
+  it('refuses a stack dir that is a link to a sibling stack', async () => {
+    const sibling = path.join(composeDir, 'other');
+    await fs.mkdir(sibling);
+    await fs.writeFile(path.join(sibling, 'compose.yaml'), 'services: { other: {} }\n', 'utf-8');
+    await fs.symlink('other', path.join(composeDir, 'alias'));
+    const svc = FileSystemService.getInstance();
+    await expect(svc.getStackContentWithMtime('alias')).rejects.toMatchObject({ code: 'SYMLINK_ESCAPE' });
+    await expect(svc.saveStackContentIfUnchanged('alias', 'pwned\n', null, 'compose.yaml')).rejects.toMatchObject({ code: 'SYMLINK_ESCAPE' });
+    await expect(svc.saveStackContent('alias', 'pwned\n')).rejects.toMatchObject({ code: 'SYMLINK_ESCAPE' });
+    expect(await fs.readFile(path.join(sibling, 'compose.yaml'), 'utf-8')).toBe('services: { other: {} }\n');
+  });
+
+  it('refuses a first save into a stack dir linked to a directory with no compose file', async () => {
+    const sibling = path.join(composeDir, 'other');
+    await fs.mkdir(sibling);
+    await fs.symlink('other', path.join(composeDir, 'alias'));
+    const svc = FileSystemService.getInstance();
+    await expect(svc.saveStackContentIfUnchanged('alias', 'pwned\n', null)).rejects.toMatchObject({ code: 'SYMLINK_ESCAPE' });
+    await expect(fs.access(path.join(sibling, 'compose.yaml'))).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
+  it('saveStackContent refuses a compose.yaml that links into a sibling stack', async () => {
+    const sibling = path.join(composeDir, 'other');
+    await fs.mkdir(sibling);
+    await fs.writeFile(path.join(sibling, 'compose.yaml'), 'services: { other: {} }\n', 'utf-8');
+    await fs.symlink('../other/compose.yaml', path.join(stackDir, 'compose.yaml'));
+    const svc = FileSystemService.getInstance();
+    await expect(svc.saveStackContent(STACK, 'pwned\n')).rejects.toMatchObject({ code: 'SYMLINK_ESCAPE' });
+    expect(await fs.readFile(path.join(sibling, 'compose.yaml'), 'utf-8')).toBe('services: { other: {} }\n');
+  });
+
+  it('reads and saves through a compose link that stays inside the stack dir', async () => {
+    await fs.mkdir(path.join(stackDir, 'env'));
+    await fs.writeFile(path.join(stackDir, 'env', 'prod.yml'), 'services: { web: {} }\n', 'utf-8');
+    await fs.symlink('env/prod.yml', path.join(stackDir, 'docker-compose.yml'));
+    const svc = FileSystemService.getInstance();
+    const read = await svc.getStackContentWithMtime(STACK);
+    expect(read).toMatchObject({ content: 'services: { web: {} }\n', filename: 'docker-compose.yml' });
+    const saved = await svc.saveStackContentIfUnchanged(STACK, 'services: { api: {} }\n', read.mtimeMs, 'docker-compose.yml');
+    expect(saved).toMatchObject({ ok: true, filename: 'docker-compose.yml' });
+    expect(await fs.readFile(path.join(stackDir, 'env', 'prod.yml'), 'utf-8')).toBe('services: { api: {} }\n');
+    expect((await fs.lstat(path.join(stackDir, 'docker-compose.yml'))).isSymbolicLink()).toBe(true);
   });
 });
 

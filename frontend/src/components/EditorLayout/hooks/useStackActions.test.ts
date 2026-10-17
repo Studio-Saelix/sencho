@@ -19,6 +19,7 @@ vi.mock('@/components/ui/toast-store', () => ({
 }));
 
 import { apiFetch } from '@/lib/api';
+import type { ServiceUrlEntry } from '@/lib/serviceUrlResolve';
 import { ENV_READ_FAILED_NOTICE } from '../envNotice';
 import {
   absentRevision,
@@ -73,6 +74,8 @@ function makeEditorState(over: Partial<EditorState> = {}): EditorState {
     setIsFileLoading: vi.fn(),
     setGitSourcePendingMap: vi.fn(),
     setComposeEtag: vi.fn(),
+    composeFilename: 'compose.yaml',
+    setComposeFilename: vi.fn(),
     setEnvEtag: vi.fn(),
     effectiveServices: [],
     setEffectiveServices: vi.fn(),
@@ -88,6 +91,7 @@ function makeStackListState(over: Partial<StackListState> = {}): StackListState 
     files: ['web.yml'],
     stackStatuses: { 'web.yml': 'running' },
     stackPorts: {},
+    stackPortServices: {},
     stackSelfFlags: {},
     setSelectedFile: vi.fn(),
     setOptimisticStatus: vi.fn(),
@@ -158,6 +162,8 @@ function setup(over: {
   canReapplyCompose?: boolean;
   hasServiceScopedUpdate?: boolean;
   diffPreviewEnabled?: boolean;
+  onStackFilesChanged?: () => void;
+  serviceUrlsRef?: { current: ServiceUrlEntry | null };
 } = {}) {
   const editorState = makeEditorState(over.editorState);
   const stackListState = makeStackListState(over.stackList);
@@ -193,10 +199,12 @@ function setup(over: {
       hasServiceScopedUpdate: over.hasServiceScopedUpdate ?? false,
       diffPreviewEnabled: over.diffPreviewEnabled ?? false,
       canEditStack: over.canEditStack ?? (() => true),
+      onStackFilesChanged: over.onStackFilesChanged,
       onDeletedOpenStack,
       removeNotificationsForStack,
       isAdmin: over.isAdmin ?? false,
       canReapplyCompose: over.canReapplyCompose ?? false,
+      serviceUrlsRef: over.serviceUrlsRef,
     }),
   );
   return { result, rerender, activeNodeHolder, editorState, stackListState, overlayState, navState, setActiveNode, onDeletedOpenStack, removeNotificationsForStack };
@@ -227,6 +235,51 @@ describe('useStackActions.saveFile', () => {
     const ok = await result.current.saveFile();
     expect(ok).toBe(false);
     expect(editorState.setOriginalContent).not.toHaveBeenCalled();
+  });
+
+  it('keeps a dirty compose draft when the opened file is no longer the source', async () => {
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(false);
+    vi.mocked(apiFetch).mockResolvedValue(new Response(JSON.stringify({
+      code: 'compose_source_changed',
+      currentContent: '',
+      filename: null,
+    }), { status: 412 }));
+    const { result, editorState } = setup({
+      editorState: { content: 'local draft', originalContent: 'old', composeFilename: 'docker-compose.yml' },
+    });
+    try {
+      const ok = await result.current.saveFile();
+      expect(ok).toBe(false);
+      expect(editorState.setContent).not.toHaveBeenCalled();
+      expect(editorState.setOriginalContent).not.toHaveBeenCalled();
+      expect(editorState.setComposeFilename).not.toHaveBeenCalled();
+    } finally {
+      confirm.mockRestore();
+    }
+  });
+
+  it('reloads a changed compose source only after the operator discards the draft', async () => {
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(true);
+    vi.mocked(apiFetch).mockResolvedValue(new Response(JSON.stringify({
+      code: 'compose_source_changed',
+      currentContent: 'remote file',
+      filename: 'compose.yaml',
+    }), {
+      status: 412,
+      headers: { etag: 'W/"9"', 'x-compose-file': 'compose.yaml' },
+    }));
+    const { result, editorState } = setup({
+      editorState: { content: 'local draft', originalContent: 'old', composeFilename: 'docker-compose.yml' },
+    });
+    try {
+      const ok = await result.current.saveFile();
+      expect(ok).toBe(false);
+      expect(editorState.setContent).toHaveBeenCalledWith('remote file');
+      expect(editorState.setOriginalContent).toHaveBeenCalledWith('remote file');
+      expect(editorState.setComposeFilename).toHaveBeenCalledWith('compose.yaml');
+    } finally {
+      confirm.mockRestore();
+    }
   });
 
   it('returns false when no stack is selected', async () => {
@@ -342,6 +395,51 @@ describe('useStackActions.saveFile', () => {
     await result.current.loadFile('web.yml');
 
     expect(editorState.setEnvInventoryFailed).toHaveBeenCalledWith(true);
+  });
+
+  it('names a refused compose path instead of a connection problem', async () => {
+    vi.mocked(apiFetch).mockResolvedValue(new Response(
+      JSON.stringify({ error: 'The compose file does not resolve inside the stack directory' }),
+      { status: 409, headers: { 'Content-Type': 'application/json' } },
+    ));
+    const { result } = setup({ stackList: { selectedFile: null } });
+    let loaded: { ok: boolean; error?: string } = { ok: true };
+    await act(async () => {
+      loaded = await result.current.loadFileForRoute('linked.yml');
+    });
+    expect(loaded).toEqual({ ok: false, error: 'Could not open "linked". The compose file does not resolve inside the stack directory' });
+    expect(toast.error).toHaveBeenCalledWith('Could not open "linked". The compose file does not resolve inside the stack directory');
+    expect(vi.mocked(toast.error).mock.calls.some(([message]) => String(message).includes('connection'))).toBe(false);
+  });
+
+  it('refreshes service URLs only when the open stack is reloaded', async () => {
+    const onStackFilesChanged = vi.fn();
+    vi.mocked(apiFetch).mockImplementation((url: string) => {
+      const u = String(url);
+      if (u === '/stacks/web.yml' || u === '/stacks/other.yml') return Promise.resolve(new Response('services: {}', { status: 200 }));
+      if (u.endsWith('/envs')) return Promise.resolve(new Response(JSON.stringify([]), { status: 200 }));
+      if (u.includes('/containers')) return Promise.resolve(new Response('[]', { status: 200 }));
+      if (u.endsWith('/backup')) return Promise.resolve(new Response(JSON.stringify({ exists: false }), { status: 200 }));
+      if (u.endsWith('/effective-services')) {
+        return Promise.resolve(new Response(JSON.stringify({ renderable: false, services: [] }), { status: 200 }));
+      }
+      return Promise.resolve(new Response('', { status: 404 }));
+    });
+    const same = setup({
+      editorState: { content: 'same', originalContent: 'same' },
+      onStackFilesChanged,
+    });
+    await same.result.current.loadFile('web.yml');
+    expect(onStackFilesChanged).toHaveBeenCalledTimes(1);
+
+    onStackFilesChanged.mockClear();
+    const next = setup({
+      editorState: { content: 'same', originalContent: 'same' },
+      stackList: { selectedFile: 'web.yml' },
+      onStackFilesChanged,
+    });
+    await next.result.current.loadFile('other.yml');
+    expect(onStackFilesChanged).not.toHaveBeenCalled();
   });
 
   it('treats an unreadable env file content as unknown, not empty', async () => {
@@ -2674,57 +2772,200 @@ describe('useStackActions.getStackMenuVisibility', () => {
 describe('useStackActions.openStackApp', () => {
   beforeEach(() => {
     vi.mocked(apiFetch).mockReset();
+    vi.mocked(apiFetch).mockResolvedValue(new Response(JSON.stringify({
+      renderable: true,
+      serviceUrls: {},
+      ports: {},
+      services: [],
+      networks: [],
+      volumes: {},
+      restart: null,
+    }), { status: 200, headers: { 'content-type': 'application/json' } }));
   });
 
-  function openAndCaptureHref(over: Parameters<typeof setup>[0]): {
+  function blankPopup() {
+    return { location: { href: '' }, close: vi.fn(), opener: null, closed: false };
+  }
+
+  async function openAndCaptureHref(over: Parameters<typeof setup>[0]): Promise<{
     href: string | undefined;
-    clickCount: number;
-  } {
-    let href: string | undefined;
-    const click = vi
-      .spyOn(HTMLAnchorElement.prototype, 'click')
-      .mockImplementation(function (this: HTMLAnchorElement) {
-        href = this.href;
-      });
+    openCount: number;
+    closeCount: number;
+  }> {
+    const popup = blankPopup();
+    const opened = vi.spyOn(window, 'open').mockImplementation(() => popup as unknown as Window);
     try {
       const { result } = setup(over);
-      result.current.openStackApp('web.yml');
-      return { href, clickCount: click.mock.calls.length };
+      await act(async () => { result.current.openStackApp('web.yml'); });
+      return {
+        href: popup.location.href || undefined,
+        openCount: opened.mock.calls.length,
+        closeCount: popup.close.mock.calls.length,
+      };
     } finally {
-      click.mockRestore();
+      opened.mockRestore();
     }
   }
 
-  it('opens the published port on the browser host for a local node', () => {
-    const { href } = openAndCaptureHref({ stackList: { stackPorts: { 'web.yml': 8989 } } });
-    expect(href).toBe('http://localhost:8989/');
+  it('opens the published port on the browser host for a local node', async () => {
+    const { href } = await openAndCaptureHref({ stackList: { stackPorts: { 'web.yml': 8989 } } });
+    expect(href).toBe('http://localhost:8989');
   });
 
-  it('opens on the remote node host derived from its api_url', () => {
-    const { href } = openAndCaptureHref({
+  it('opens on the remote node host derived from its api_url', async () => {
+    const { href } = await openAndCaptureHref({
       stackList: { stackPorts: { 'web.yml': 8989 } },
       activeNode: { id: 2, type: 'remote', api_url: 'http://10.0.0.5:1852' } as Parameters<typeof useStackActions>[0]['activeNode'],
     });
-    expect(href).toBe('http://10.0.0.5:8989/');
+    expect(href).toBe('http://10.0.0.5:8989');
   });
 
-  it('does nothing for a remote node with no api_url (pilot) and does not throw', () => {
-    const { href, clickCount } = openAndCaptureHref({
+  it('does nothing for a remote node with no api_url (pilot) and does not throw', async () => {
+    const { href, openCount, closeCount } = await openAndCaptureHref({
       stackList: { stackPorts: { 'web.yml': 8989 } },
       activeNode: { id: 3, type: 'remote', api_url: '' } as Parameters<typeof useStackActions>[0]['activeNode'],
     });
-    expect(clickCount).toBe(0);
+    expect(openCount).toBe(1);
+    expect(closeCount).toBe(1);
     expect(href).toBeUndefined();
   });
 
-  it('appends a known service path via the published port', () => {
-    const { href } = openAndCaptureHref({ stackList: { stackPorts: { 'web.yml': 32400 } } });
+  it('appends a known service path via the published port', async () => {
+    const { href } = await openAndCaptureHref({ stackList: { stackPorts: { 'web.yml': 32400 } } });
     expect(href).toBe('http://localhost:32400/web');
   });
 
-  it('does nothing when the stack has no published port', () => {
-    const { clickCount } = openAndCaptureHref({});
-    expect(clickCount).toBe(0);
+  it('audit F02: opens the runtime owner URL when another service declares the assigned port', async () => {
+    vi.mocked(apiFetch).mockResolvedValue(new Response(JSON.stringify({
+      renderable: true,
+      serviceUrls: { app: 'https://app.example.com', stopped: 'https://stopped.example.com' },
+      ports: {
+        app: [{ host: '0', container: '80', proto: 'tcp' }],
+        stopped: [{ host: '49152', container: '80', proto: 'tcp' }],
+      },
+    }), { status: 200, headers: { 'content-type': 'application/json' } }));
+    const { href } = await openAndCaptureHref({
+      stackList: { stackPorts: { 'web.yml': 49152 }, stackPortServices: { 'web.yml': 'app' } },
+    });
+    expect(href).toBe('https://app.example.com');
+  });
+
+  it('does nothing when the stack has no published port', async () => {
+    const { href, openCount, closeCount } = await openAndCaptureHref({});
+    expect(openCount).toBe(1);
+    expect(closeCount).toBe(1);
+    expect(href).toBeUndefined();
+  });
+
+  it('opens the tab before the service URL lookup finishes', async () => {
+    const order: string[] = [];
+    const popup = blankPopup();
+    const opened = vi.spyOn(window, 'open').mockImplementation(() => {
+      order.push('open');
+      return popup as unknown as Window;
+    });
+    vi.mocked(apiFetch).mockImplementation(() => {
+      order.push('fetch');
+      return Promise.resolve(new Response(JSON.stringify({
+        renderable: true,
+        serviceUrls: {},
+        ports: {},
+      }), { status: 200, headers: { 'content-type': 'application/json' } }));
+    });
+    try {
+      const { result } = setup({ stackList: { stackPorts: { 'web.yml': 8989 } } });
+      await act(async () => { result.current.openStackApp('web.yml'); });
+      expect(order[0]).toBe('open');
+      expect(order[1]).toBe('fetch');
+      expect(popup.location.href).toBe('http://localhost:8989');
+    } finally {
+      opened.mockRestore();
+    }
+  });
+
+  it('waits for the first lookup instead of opening the generated address while it is loading', async () => {
+    // A fresh selection hands out an in-flight entry with no metadata yet. The
+    // handler must not read that as "no override" and open the generated
+    // address: the tab opens in the click and is navigated once the configured
+    // URL is known.
+    const loading: ServiceUrlEntry = {
+      status: 'loading',
+      nodeId: 1,
+      stackName: 'web.yml',
+      serviceUrls: {},
+      serviceUrlEdit: {},
+      serviceUrlClear: {},
+      ports: {},
+      renderable: false,
+    };
+    vi.mocked(apiFetch).mockResolvedValue(new Response(JSON.stringify({
+      renderable: true,
+      serviceUrls: { web: 'https://web.example.com' },
+      ports: { web: [{ host: '8989', proto: 'tcp' }] },
+    }), { status: 200, headers: { 'content-type': 'application/json' } }));
+    const popup = blankPopup();
+    const opened = vi.spyOn(window, 'open').mockImplementation(() => popup as unknown as Window);
+    try {
+      const { result } = setup({
+        stackList: { stackPorts: { 'web.yml': 8989 } },
+        serviceUrlsRef: { current: loading },
+      });
+      await act(async () => { result.current.openStackApp('web.yml'); });
+      expect(opened).toHaveBeenCalled();
+      expect(apiFetch).toHaveBeenCalledWith('/stacks/web.yml/effective-anatomy', expect.objectContaining({ nodeId: 1 }));
+      expect(popup.location.href).toBe('https://web.example.com');
+    } finally {
+      opened.mockRestore();
+    }
+  });
+
+  it('does not open after the operator switches node', async () => {
+    let resolveAnatomy: ((response: Response) => void) | null = null;
+    vi.mocked(apiFetch).mockImplementation(() => new Promise(resolve => { resolveAnatomy = resolve; }));
+    const popup = blankPopup();
+    const opened = vi.spyOn(window, 'open').mockImplementation(() => popup as unknown as Window);
+    try {
+      const { result, rerender, activeNodeHolder } = setup({
+        stackList: { stackPorts: { 'web.yml': 8989 } },
+      });
+      act(() => { result.current.openStackApp('web.yml'); });
+      activeNodeHolder.current = { id: 2, type: 'remote', api_url: 'http://10.0.0.5:1852' } as ActiveNode;
+      rerender();
+      await act(async () => {
+        resolveAnatomy?.(new Response(JSON.stringify({
+          renderable: true,
+          serviceUrls: { web: 'https://app.example.com' },
+          ports: {},
+        }), { status: 200, headers: { 'content-type': 'application/json' } }));
+        await Promise.resolve();
+      });
+      expect(popup.location.href).toBe('');
+      expect(popup.close).toHaveBeenCalled();
+      expect(opened).toHaveBeenCalled();
+    } finally {
+      opened.mockRestore();
+    }
+  });
+
+  it('does not report a failed lookup after the operator switches node', async () => {
+    let rejectAnatomy: ((error: Error) => void) | null = null;
+    const opened = vi.spyOn(window, 'open').mockImplementation(() => blankPopup() as unknown as Window);
+    vi.mocked(apiFetch).mockImplementation(() => new Promise((_resolve, reject) => { rejectAnatomy = reject; }));
+    try {
+      const { result, rerender, activeNodeHolder } = setup({
+        stackList: { stackPorts: { 'web.yml': 8989 } },
+      });
+      act(() => { result.current.openStackApp('web.yml'); });
+      activeNodeHolder.current = { id: 2, type: 'remote', api_url: 'http://10.0.0.5:1852' } as ActiveNode;
+      rerender();
+      await act(async () => {
+        rejectAnatomy?.(new Error('offline'));
+        await Promise.resolve();
+      });
+      expect(toast.error).not.toHaveBeenCalled();
+    } finally {
+      opened.mockRestore();
+    }
   });
 });
 
