@@ -589,7 +589,7 @@ describe('BlueprintService marker edge cases', () => {
         const listUrl = 'https://leaf.example.test:1852/api/stacks';
         vi.spyOn(axios, 'get').mockImplementation((url: string) => {
             if (String(url) === listUrl) {
-                return Promise.resolve({ status: 200, data: [{ name: 'bp-edge-conflict' }] });
+                return Promise.resolve({ status: 200, data: ['bp-edge-conflict'] });
             }
             expect(String(url), 'only the marker read may fail here').toContain('files/content');
             return Promise.reject(new Error('socket hang up'));

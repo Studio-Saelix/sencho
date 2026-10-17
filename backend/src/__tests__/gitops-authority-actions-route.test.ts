@@ -21,6 +21,7 @@ import {
   encodeGitOpsRequiredTargetsJson,
 } from '../services/gitops/json';
 import { buildBlueprintPreview } from '../services/blueprintPreviewProjection';
+import { buildPreflightEvidence } from '../services/gitops/preflight';
 import type {
   GitOpsApplicationRow,
   GitOpsArtifactSetRow,
@@ -29,10 +30,20 @@ import type {
   GitOpsRolloutCandidateRow,
 } from '../services/gitops/types';
 
+/**
+ * What Accept source's confirmation carries for a fixture with no placement
+ * approval, which is every one seeded here until the placement route runs.
+ * `rolloutMayStart` is the promise the dialog made, not the policy column.
+ */
+function confirmationFor(rolloutMayStart = false) {
+  return { placementApprovalRef: null, rolloutMayStart };
+}
+
 let tmpDir: string;
 let app: import('express').Express;
 let DatabaseService: typeof import('../services/DatabaseService').DatabaseService;
 let LicenseService: typeof import('../services/LicenseService').LicenseService;
+let BlueprintReconciler: typeof import('../services/BlueprintReconciler').BlueprintReconciler;
 let GitOpsStore: typeof import('../services/gitops/store').GitOpsStore;
 let GitOpsTransitions: typeof import('../services/gitops/transitions').GitOpsTransitions;
 let GitSourceService: typeof import('../services/GitSourceService').GitSourceService;
@@ -270,6 +281,26 @@ function seedGitManagedBlueprint(opts: { sourceAccepted: boolean; nodeCount?: nu
 }
 
 /**
+ * Approve the current placement plan through the real route, and return the
+ * approval ref it recorded.
+ *
+ * Called twice in a row, this is the scenario the source confirmations have to
+ * survive: the first ref is what an operator read, and the second is what
+ * replaced it while their candidate was still waiting.
+ */
+async function approvePlacement(seeded: Seeded): Promise<string> {
+  const preview = await buildBlueprintPreview(seeded.blueprintId);
+  const res = await request(app)
+    .post(`/api/gitops/applications/bp:${seeded.blueprintId}/placement/approve`)
+    .set('Cookie', adminCookie)
+    .send({ planFingerprint: preview!.planFingerprint, actions: preview!.confirmableActions });
+  expect(res.status).toBe(200);
+  const ref = GitOpsStore.getInstance().getApplication(seeded.applicationId)!.placement_approval_ref;
+  expect(ref).toBeTruthy();
+  return ref!;
+}
+
+/**
  * A scoped operator for the policy writes: no `stack:deploy` of their own, just a
  * grant on one stack and node.
  *
@@ -306,6 +337,7 @@ beforeAll(async () => {
   tmpDir = await setupTestDb();
   ({ DatabaseService } = await import('../services/DatabaseService'));
   ({ LicenseService } = await import('../services/LicenseService'));
+  ({ BlueprintReconciler } = await import('../services/BlueprintReconciler'));
   ({ GitOpsStore } = await import('../services/gitops/store'));
   ({ GitOpsTransitions } = await import('../services/gitops/transitions'));
   ({ GitSourceService } = await import('../services/GitSourceService'));
@@ -334,8 +366,11 @@ beforeEach(() => {
   setRegistryReadinessDepsForTests(registryReadyTestDeps());
 });
 
-afterEach(() => {
+afterEach(async () => {
   setRegistryReadinessDepsForTests(null);
+  // A case that fails while the interceptor holds preflight open would leave
+  // every later evaluation awaiting a promise nobody releases.
+  (await import('../services/gitops/registryReadiness')).setEvaluateRegistryReadinessForTests(null);
 });
 
 describe('POST /api/gitops/applications/:id/source/accept', () => {
@@ -344,7 +379,7 @@ describe('POST /api/gitops/applications/:id/source/accept', () => {
     const res = await request(app)
       .post(`/api/gitops/applications/bp:${seeded.blueprintId}/source/accept`)
       .set('Cookie', adminCookie)
-      .send({ generationId: seeded.generationId });
+      .send({ generationId: seeded.generationId, confirmation: confirmationFor() });
     expect(res.status).toBe(200);
     const row = GitOpsStore.getInstance().getApplication(seeded.applicationId)!;
     expect(row.accepted_generation_id).toBe(seeded.generationId);
@@ -373,7 +408,7 @@ describe('POST /api/gitops/applications/:id/source/accept', () => {
     const res = await request(app)
       .post(`/api/gitops/applications/bp:${seeded.blueprintId}/source/accept`)
       .set('Cookie', adminCookie)
-      .send({ generationId: seeded.generationId });
+      .send({ generationId: seeded.generationId, confirmation: confirmationFor(true) });
     checkSpy.mockRestore();
 
     expect(res.status).toBe(200);
@@ -397,7 +432,7 @@ describe('POST /api/gitops/applications/:id/source/accept', () => {
     const res = await request(app)
       .post(`/api/gitops/applications/bp:${seeded.blueprintId}/source/accept`)
       .set('Cookie', adminCookie)
-      .send({ generationId: seeded.generationId });
+      .send({ generationId: seeded.generationId, confirmation: confirmationFor(true) });
 
     expect(res.status).toBe(200);
     expect(res.body.dispatched).toBe(false);
@@ -420,12 +455,13 @@ describe('POST /api/gitops/applications/:id/source/accept', () => {
     const res = await request(app)
       .post(`/api/gitops/applications/bp:${seeded.blueprintId}/source/accept`)
       .set('Cookie', adminCookie)
-      .send({ generationId: seeded.generationId });
+      .send({ generationId: seeded.generationId, confirmation: confirmationFor() });
 
     expect(res.status).toBe(200);
     expect(res.body.dispatched).toBe(false);
     // The fixture's preparation leaves a note, so this is the case where the
     // refusal would otherwise be hidden.
+    expect(res.body.note).toContain('staged candidate');
     expect(res.body.note).toContain('Deploy to node 2 failed: registry unreachable.');
     handoffSpy.mockRestore();
   });
@@ -438,7 +474,7 @@ describe('POST /api/gitops/applications/:id/source/accept', () => {
     const res = await request(app)
       .post(`/api/gitops/applications/bp:${seeded.blueprintId}/source/accept`)
       .set('Cookie', adminCookie)
-      .send({ generationId: seeded.generationId });
+      .send({ generationId: seeded.generationId, confirmation: confirmationFor() });
 
     expect(res.status).toBe(200);
     expect(res.body.dispatched).toBe(false);
@@ -456,7 +492,7 @@ describe('POST /api/gitops/applications/:id/source/accept', () => {
     const res = await request(app)
       .post(`/api/gitops/applications/bp:${seeded.blueprintId}/source/accept`)
       .set('Cookie', adminCookie)
-      .send({ generationId: seeded.generationId });
+      .send({ generationId: seeded.generationId, confirmation: confirmationFor() });
 
     expect(res.status).toBe(200);
     expect(res.body.dispatched).toBe(false);
@@ -472,7 +508,7 @@ describe('POST /api/gitops/applications/:id/source/accept', () => {
     const res = await request(app)
       .post(`/api/gitops/applications/bp:${seeded.blueprintId}/source/accept`)
       .set('Cookie', adminCookie)
-      .send({ generationId: 'gen-something-else' });
+      .send({ generationId: 'gen-something-else', confirmation: confirmationFor() });
     expect(res.status).toBe(409);
     expect(res.body.code).toBe('SOURCE_ACCEPTANCE_REFUSED');
     expect(GitOpsStore.getInstance().getApplication(seeded.applicationId)!.source_acceptance_ref).toBeNull();
@@ -488,11 +524,806 @@ describe('POST /api/gitops/applications/:id/source/accept', () => {
     expect(res.body.code).toBe('CONFIRM_REQUIRED');
   });
 
+  it('requires the confirmation the operator read', async () => {
+    const seeded = seedGitManagedBlueprint({ sourceAccepted: false });
+    const res = await request(app)
+      .post(`/api/gitops/applications/bp:${seeded.blueprintId}/source/accept`)
+      .set('Cookie', adminCookie)
+      .send({ generationId: seeded.generationId });
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe('CONFIRM_REQUIRED');
+    expect(GitOpsStore.getInstance().getApplication(seeded.applicationId)!.accepted_generation_id).toBeNull();
+  });
+
+  it('refuses a confirmation it cannot read', async () => {
+    const seeded = seedGitManagedBlueprint({ sourceAccepted: false });
+    const res = await request(app)
+      .post(`/api/gitops/applications/bp:${seeded.blueprintId}/source/accept`)
+      .set('Cookie', adminCookie)
+      .send({ generationId: seeded.generationId, confirmation: { placementApprovalRef: null, rolloutMayStart: 'yes' } });
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe('CONFIRM_REQUIRED');
+    expect(GitOpsStore.getInstance().getApplication(seeded.applicationId)!.accepted_generation_id).toBeNull();
+  });
+
+  it('refuses an acceptance whose placement approval was replaced while the candidate waited', async () => {
+    const seeded = seedGitManagedBlueprint({ sourceAccepted: false });
+    const reviewed = await approvePlacement(seeded);
+    const replacement = await approvePlacement(seeded);
+    expect(replacement).not.toBe(reviewed);
+
+    const dispatchSpy = vi.spyOn(GitSourceService.getInstance(), 'dispatchAcceptedGeneration');
+    const res = await request(app)
+      .post(`/api/gitops/applications/bp:${seeded.blueprintId}/source/accept`)
+      .set('Cookie', adminCookie)
+      .send({
+        generationId: seeded.generationId,
+        confirmation: { placementApprovalRef: reviewed, rolloutMayStart: false },
+      });
+
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe('CONFIRMATION_STALE');
+    expect(res.body.error).toContain('approved placement changed');
+    // Nothing consequential happened: the acceptance never committed, so the
+    // generation the operator did not agree to is still only a candidate.
+    const row = GitOpsStore.getInstance().getApplication(seeded.applicationId)!;
+    expect(row.accepted_generation_id).toBeNull();
+    expect(row.source_acceptance_ref).toBeNull();
+    expect(dispatchSpy).not.toHaveBeenCalled();
+    dispatchSpy.mockRestore();
+  });
+
+  it('refuses an acceptance when rollout authorization became automatic after the confirmation promised a wait', async () => {
+    const seeded = seedGitManagedBlueprint({ sourceAccepted: false });
+    const reviewed = await approvePlacement(seeded);
+    DatabaseService.getInstance().getDb().prepare(
+      'UPDATE gitops_applications SET rollout_authorization_policy = ? WHERE id = ?',
+    ).run('automatic', seeded.applicationId);
+    const dispatchSpy = vi.spyOn(GitSourceService.getInstance(), 'dispatchAcceptedGeneration');
+
+    const res = await request(app)
+      .post(`/api/gitops/applications/bp:${seeded.blueprintId}/source/accept`)
+      .set('Cookie', adminCookie)
+      .send({
+        generationId: seeded.generationId,
+        confirmation: { placementApprovalRef: reviewed, rolloutMayStart: false },
+      });
+
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe('CONFIRMATION_STALE');
+    expect(res.body.error).toContain('authorizes without an operator');
+    expect(GitOpsStore.getInstance().getApplication(seeded.applicationId)!.accepted_generation_id).toBeNull();
+    expect(dispatchSpy).not.toHaveBeenCalled();
+    dispatchSpy.mockRestore();
+  });
+
+  it('accepts a confirmation that still names the current placement', async () => {
+    const seeded = seedGitManagedBlueprint({ sourceAccepted: false });
+    const reviewed = await approvePlacement(seeded);
+
+    const res = await request(app)
+      .post(`/api/gitops/applications/bp:${seeded.blueprintId}/source/accept`)
+      .set('Cookie', adminCookie)
+      .send({
+        generationId: seeded.generationId,
+        confirmation: { placementApprovalRef: reviewed, rolloutMayStart: false },
+      });
+
+    expect(res.status).toBe(200);
+    expect(GitOpsStore.getInstance().getApplication(seeded.applicationId)!.accepted_generation_id)
+      .toBe(seeded.generationId);
+  });
+
+  it('stops before the dispatch when the placement moved during preparation', async () => {
+    const seeded = seedGitManagedBlueprint({ sourceAccepted: false });
+    const reviewed = await approvePlacement(seeded);
+    DatabaseService.getInstance().getDb().prepare(
+      'UPDATE gitops_applications SET rollout_authorization_policy = ? WHERE id = ?',
+    ).run('automatic', seeded.applicationId);
+    const materialization = await import('../services/gitops/gitManagedMaterialization');
+    vi.spyOn(materialization, 'prepareAcceptedGitManagedGeneration').mockImplementation(async () => {
+      // The acceptance has committed and preparation is still running, which
+      // is the window a second session can move the placement in.
+      await approvePlacement(seeded);
+      return { materialized: true, artifact: 'resolved' as const, note: null };
+    });
+    const dispatchSpy = vi.spyOn(GitSourceService.getInstance(), 'dispatchAcceptedGeneration');
+
+    const res = await request(app)
+      .post(`/api/gitops/applications/bp:${seeded.blueprintId}/source/accept`)
+      .set('Cookie', adminCookie)
+      .send({
+        generationId: seeded.generationId,
+        confirmation: { placementApprovalRef: reviewed, rolloutMayStart: true },
+      });
+
+    expect(res.status).toBe(200);
+    expect(res.body.dispatched).toBe(false);
+    expect(res.body.note).toContain('approved placement changed');
+    // The acceptance stands and nothing was deployed: the operator's review
+    // was about a placement that no longer exists, so no node was touched.
+    expect(dispatchSpy).not.toHaveBeenCalled();
+    expect(GitOpsStore.getInstance().getApplication(seeded.applicationId)!.accepted_generation_id)
+      .toBe(seeded.generationId);
+
+    // And the refusal outlives this request. The reconciler re-drives any
+    // accepted generation with no confirmation to check, so a pause is the only
+    // thing that keeps it from deploying to the new placement on the next tick.
+    const held = GitOpsStore.getInstance().getApplication(seeded.applicationId)!;
+    expect(held.pause_at).not.toBeNull();
+    expect(held.pause_reason).toContain('approved placement changed');
+    expect(held.pause_origin).toBe('operator');
+    await BlueprintReconciler.getInstance().tick();
+    expect(dispatchSpy).not.toHaveBeenCalled();
+    expect(GitOpsStore.getInstance().getApplication(seeded.applicationId)!.pause_at).not.toBeNull();
+    dispatchSpy.mockRestore();
+  });
+
+  it('does not hold the rollout for a stale confirmation a manual policy could not have acted on', async () => {
+    // A manual policy never dispatches from the handoff, and its Authorize is
+    // already the operator's decision against the placement as it stands. A hold
+    // for drift that arrives during preparation would add a resume step before
+    // that, and block the authorize, for a rollout that was never going to
+    // start. The confirmation was current when the route read it, so this is the
+    // only window it can drift in.
+    const seeded = seedGitManagedBlueprint({ sourceAccepted: false });
+    const reviewed = await approvePlacement(seeded);
+    const materialization = await import('../services/gitops/gitManagedMaterialization');
+    vi.spyOn(materialization, 'prepareAcceptedGitManagedGeneration').mockImplementation(async () => {
+      await approvePlacement(seeded);
+      return { materialized: true, artifact: 'resolved' as const, note: null };
+    });
+    const dispatchSpy = vi.spyOn(GitSourceService.getInstance(), 'dispatchAcceptedGeneration');
+
+    const res = await request(app)
+      .post(`/api/gitops/applications/bp:${seeded.blueprintId}/source/accept`)
+      .set('Cookie', adminCookie)
+      .send({
+        generationId: seeded.generationId,
+        confirmation: { placementApprovalRef: reviewed, rolloutMayStart: false },
+      });
+
+    expect(res.status).toBe(200);
+    const row = GitOpsStore.getInstance().getApplication(seeded.applicationId)!;
+    expect(row.accepted_generation_id).toBe(seeded.generationId);
+    expect(row.pause_at).toBeNull();
+    expect(dispatchSpy).not.toHaveBeenCalled();
+    dispatchSpy.mockRestore();
+  });
+
+  it('keeps an operator hold across a later source acceptance', async () => {
+    // The whole reason the hold carries an operator origin. A system hold is
+    // released by the next source acceptance, and on an automatic source that
+    // is the next poll, so an operator-origin hold that a poll could clear
+    // would leave the drift unguarded after one cycle.
+    const seeded = seedGitManagedBlueprint({ sourceAccepted: false });
+    const reviewed = await approvePlacement(seeded);
+    DatabaseService.getInstance().getDb().prepare(
+      'UPDATE gitops_applications SET rollout_authorization_policy = ? WHERE id = ?',
+    ).run('automatic', seeded.applicationId);
+    const materialization = await import('../services/gitops/gitManagedMaterialization');
+    vi.spyOn(materialization, 'prepareAcceptedGitManagedGeneration').mockImplementation(async () => {
+      await approvePlacement(seeded);
+      return { materialized: true, artifact: 'resolved' as const, note: null };
+    });
+    await request(app)
+      .post(`/api/gitops/applications/bp:${seeded.blueprintId}/source/accept`)
+      .set('Cookie', adminCookie)
+      .send({
+        generationId: seeded.generationId,
+        confirmation: { placementApprovalRef: reviewed, rolloutMayStart: true },
+      })
+      .expect(200);
+    expect(GitOpsStore.getInstance().getApplication(seeded.applicationId)!.pause_origin).toBe('operator');
+
+    // A newer commit accepted on the policy's own behalf, which is what a poll
+    // does on an automatic source.
+    const store = GitOpsStore.getInstance();
+    const accepted = store.getApplication(seeded.applicationId)!;
+    DatabaseService.getInstance().getDb().prepare(
+      'UPDATE gitops_applications SET source_policy = ? WHERE id = ?',
+    ).run('automatic', seeded.applicationId);
+    const nextGenerationId = `gen-${seeded.applicationId}-next`;
+    insertGeneration(nextGenerationId, seeded.applicationId, accepted.materialization_fingerprint ?? undefined);
+    const env = {
+      operationId: `fetch-next-${seeded.applicationId}`,
+      actor: 'system:source-controller',
+      trigger: 'poll' as const,
+      at: Date.now(),
+    };
+    GitOpsTransitions.getInstance().fetchStarted(accepted.id, env);
+    GitOpsTransitions.getInstance().fetched(accepted.id, 'c'.repeat(40), env);
+    GitOpsTransitions.getInstance().candidateReady(accepted.id, nextGenerationId, false, env);
+    GitOpsTransitions.getInstance().sourceAccepted({
+      applicationId: accepted.id,
+      generationId: nextGenerationId,
+      artifactSetId: `art-${nextGenerationId}`,
+      sourceAcceptanceId: `sa-${nextGenerationId}`,
+      authority: 'configured_policy',
+      envelope: { operationId: `accept-next-${seeded.applicationId}`, actor: 'system:source-controller', trigger: 'poll', at: Date.now() },
+    });
+
+    const afterAcceptance = store.getApplication(seeded.applicationId)!;
+    expect(afterAcceptance.accepted_generation_id).toBe(nextGenerationId);
+    expect(afterAcceptance.pause_at).not.toBeNull();
+    expect(afterAcceptance.pause_reason).toContain('approved placement changed');
+  });
+
+  it('drops the rollout pause when the Blueprint is demoted', async () => {
+    // Every resume route resolves a Git-managed Blueprint and answers
+    // NOT_GIT_MANAGED for this row afterwards, so a pause carried across the
+    // mode change would be one nothing could clear.
+    const seeded = seedGitManagedBlueprint({ sourceAccepted: true });
+    GitOpsTransitions.getInstance().rolloutPaused(
+      seeded.applicationId,
+      null,
+      'The approved placement changed after this was confirmed; review the current placement, then resume the rollout',
+      { operationId: `pause-${seeded.applicationId}`, actor: 'system:rollout-dispatch', trigger: 'manual', at: Date.now() },
+      'operator',
+    );
+    expect(GitOpsStore.getInstance().getApplication(seeded.applicationId)!.pause_at).not.toBeNull();
+
+    GitOpsTransitions.getInstance().convertBlueprintToDirect({
+      applicationId: seeded.applicationId,
+      stackName: `retired-${seeded.applicationId}`,
+      envelope: { operationId: `retire-${seeded.applicationId}`, actor: 'tester', trigger: 'manual', at: Date.now() },
+    });
+
+    const retired = GitOpsStore.getInstance().getApplication(seeded.applicationId)!;
+    expect(retired.target_mode).toBe('direct');
+    expect(retired.pause_at).toBeNull();
+    expect(retired.pause_reason).toBeNull();
+  });
+
+  it('records the confirmed placement on the acceptance it commits', async () => {
+    const seeded = seedGitManagedBlueprint({ sourceAccepted: false });
+    const reviewed = await approvePlacement(seeded);
+
+    const res = await request(app)
+      .post(`/api/gitops/applications/bp:${seeded.blueprintId}/source/accept`)
+      .set('Cookie', adminCookie)
+      .send({
+        generationId: seeded.generationId,
+        confirmation: { placementApprovalRef: reviewed, rolloutMayStart: false },
+      });
+
+    expect(res.status).toBe(200);
+    const row = GitOpsStore.getInstance().getApplication(seeded.applicationId)!;
+    // The whole claim has to outlive this request. A later re-drive carries no
+    // confirmation of its own, so this stored claim is what it checks.
+    expect(GitOpsStore.getInstance().storedSourceConfirmation(row)).toEqual({
+      status: 'present',
+      confirmation: { placementApprovalRef: reviewed, rolloutMayStart: false },
+    });
+  });
+
+  it('records a confirmation that no placement was approved', async () => {
+    // Naming none is a real answer. It is not the same as an acceptance that
+    // was never confirmed, and a placement that appears afterwards is a
+    // different destination.
+    const seeded = seedGitManagedBlueprint({ sourceAccepted: false });
+
+    const res = await request(app)
+      .post(`/api/gitops/applications/bp:${seeded.blueprintId}/source/accept`)
+      .set('Cookie', adminCookie)
+      .send({ generationId: seeded.generationId, confirmation: { placementApprovalRef: null, rolloutMayStart: false } });
+
+    expect(res.status).toBe(200);
+    const row = GitOpsStore.getInstance().getApplication(seeded.applicationId)!;
+    expect(GitOpsStore.getInstance().storedSourceConfirmation(row)).toEqual({
+      status: 'present',
+      confirmation: { placementApprovalRef: null, rolloutMayStart: false },
+    });
+  });
+
+  /** The unresolved seed the acceptance writes is version 1; this is the next one. */
+  function recordExecutableArtifact(seeded: Seeded): void {
+    GitOpsTransitions.getInstance().recordArtifactEvidence({
+      applicationId: seeded.applicationId,
+      generationId: seeded.generationId,
+      artifactSetId: `art-${randomUUID().slice(0, 8)}`,
+      evidenceVersion: 2,
+      qualification: 'exact',
+      evidenceJson: encodeArtifactEvidenceJson({ kind: 'exact', identity: 'sha256:deadbeef' }),
+      authoritative: 0,
+      envelope: { operationId: randomUUID(), actor: 'tester', trigger: 'manual', at: Date.now() },
+    });
+  }
+
+  it('holds a confirmed waiting rollout when authorization is armed after the request is gone', async () => {
+    const seeded = seedGitManagedBlueprint({ sourceAccepted: false });
+    const reviewed = await approvePlacement(seeded);
+    const accepted = await request(app)
+      .post(`/api/gitops/applications/bp:${seeded.blueprintId}/source/accept`)
+      .set('Cookie', adminCookie)
+      .send({
+        generationId: seeded.generationId,
+        confirmation: { placementApprovalRef: reviewed, rolloutMayStart: false },
+      });
+    expect(accepted.status).toBe(200);
+    const store = GitOpsStore.getInstance();
+    expect(store.getApplication(seeded.applicationId)!.pause_at).toBeNull();
+    recordExecutableArtifact(seeded);
+    GitOpsTransitions.getInstance().rolloutAuthorizationPolicyChanged({
+      applicationId: seeded.applicationId,
+      policy: 'automatic',
+      envelope: { operationId: randomUUID(), actor: 'tester', trigger: 'manual', at: Date.now() },
+    });
+    const { SourceController } = await import('../services/gitops/SourceController');
+    SourceController.resetForTests();
+    GitOpsTransitions.resetForTests();
+    const dispatchSpy = vi.spyOn(GitSourceService.getInstance(), 'dispatchAcceptedGeneration');
+
+    await BlueprintReconciler.getInstance().tick();
+
+    expect(dispatchSpy).not.toHaveBeenCalled();
+    const held = store.getApplication(seeded.applicationId)!;
+    expect(held.pause_reason).toContain('authorizing without an operator');
+    expect(held.pause_origin).toBe('operator');
+    expect(held.rollout_authorization_ref).toBeNull();
+    expect(held.accepted_generation_id).toBe(seeded.generationId);
+    expect(store.storedSourceConfirmation(held)).toEqual({
+      status: 'present',
+      confirmation: { placementApprovalRef: reviewed, rolloutMayStart: false },
+    });
+    dispatchSpy.mockRestore();
+  });
+
+  it('holds when a placement appears after a confirmation that none was approved', async () => {
+    const seeded = seedGitManagedBlueprint({ sourceAccepted: false });
+    const accepted = await request(app)
+      .post(`/api/gitops/applications/bp:${seeded.blueprintId}/source/accept`)
+      .set('Cookie', adminCookie)
+      .send({
+        generationId: seeded.generationId,
+        confirmation: { placementApprovalRef: null, rolloutMayStart: true },
+      });
+    expect(accepted.status).toBe(200);
+    GitOpsTransitions.getInstance().rolloutAuthorizationPolicyChanged({
+      applicationId: seeded.applicationId,
+      policy: 'automatic',
+      envelope: { operationId: randomUUID(), actor: 'tester', trigger: 'manual', at: Date.now() },
+    });
+    const reviewed = await approvePlacement(seeded);
+    recordExecutableArtifact(seeded);
+    const { SourceController } = await import('../services/gitops/SourceController');
+    SourceController.resetForTests();
+    GitOpsTransitions.resetForTests();
+    const dispatchSpy = vi.spyOn(GitSourceService.getInstance(), 'dispatchAcceptedGeneration');
+
+    await BlueprintReconciler.getInstance().tick();
+
+    expect(dispatchSpy).not.toHaveBeenCalled();
+    const held = GitOpsStore.getInstance().getApplication(seeded.applicationId)!;
+    expect(held.pause_reason).toContain('approved placement changed');
+    expect(held.rollout_authorization_ref).toBeNull();
+    expect(held.placement_approval_ref).toBe(reviewed);
+    dispatchSpy.mockRestore();
+  });
+
+  it('lets an operator authorize replace a promise that the rollout would wait', async () => {
+    const seeded = seedGitManagedBlueprint({ sourceAccepted: false });
+    const reviewed = await approvePlacement(seeded);
+    const accepted = await request(app)
+      .post(`/api/gitops/applications/bp:${seeded.blueprintId}/source/accept`)
+      .set('Cookie', adminCookie)
+      .send({
+        generationId: seeded.generationId,
+        confirmation: { placementApprovalRef: reviewed, rolloutMayStart: false },
+      });
+    expect(accepted.status).toBe(200);
+    recordExecutableArtifact(seeded);
+    GitOpsTransitions.getInstance().rolloutAuthorizationPolicyChanged({
+      applicationId: seeded.applicationId,
+      policy: 'automatic',
+      envelope: { operationId: randomUUID(), actor: 'tester', trigger: 'manual', at: Date.now() },
+    });
+    setRegistryReadinessDepsForTests(registryReadyTestDeps());
+
+    const authorize = await request(app)
+      .post(`/api/gitops/applications/bp:${seeded.blueprintId}/rollout/authorize`)
+      .set('Cookie', adminCookie)
+      .send({});
+
+    expect(authorize.status).toBe(200);
+    const row = GitOpsStore.getInstance().getApplication(seeded.applicationId)!;
+    expect(row.rollout_authorization_ref).toBeTruthy();
+    expect(GitOpsStore.getInstance().storedSourceConfirmation(row)).toEqual({
+      status: 'present',
+      confirmation: { placementApprovalRef: reviewed, rolloutMayStart: true },
+    });
+    // A later test ticks every Blueprint. This rollout is authorized, so that
+    // tick would dispatch it; the case under test is the claim, not the dispatch.
+    DatabaseService.getInstance().getDb().prepare(
+      `UPDATE gitops_applications SET rollout_authorization_policy = 'manual' WHERE id = ?`,
+    ).run(seeded.applicationId);
+  });
+
+  it('still authorizes an acceptance that was never confirmed', async () => {
+    const seeded = seedGitManagedBlueprint({ sourceAccepted: false });
+    await approvePlacement(seeded);
+    const envelope = {
+      operationId: `poll-${seeded.applicationId}`,
+      actor: 'system:source-controller',
+      trigger: 'poll' as const,
+      at: Date.now(),
+    };
+    GitOpsTransitions.getInstance().sourcePolicyChanged(seeded.applicationId, 'automatic', envelope);
+    GitOpsTransitions.getInstance().rolloutAuthorizationPolicyChanged({
+      applicationId: seeded.applicationId,
+      policy: 'automatic',
+      envelope: { ...envelope, operationId: `roll-${seeded.applicationId}` },
+    });
+    GitOpsTransitions.getInstance().sourceAccepted({
+      applicationId: seeded.applicationId,
+      generationId: seeded.generationId,
+      artifactSetId: `art-${seeded.generationId}`,
+      sourceAcceptanceId: `sa-${seeded.generationId}`,
+      authority: 'configured_policy',
+      envelope,
+    });
+    recordExecutableArtifact(seeded);
+    setRegistryReadinessDepsForTests(registryReadyTestDeps());
+    const { ensureRolloutAuthorization } = await import('../services/gitops/handoff');
+
+    const auth = await ensureRolloutAuthorization(
+      seeded.applicationId, 'system:source-controller', 'blueprint_dispatch', undefined, 'configured_policy',
+    );
+
+    const row = GitOpsStore.getInstance().getApplication(seeded.applicationId)!;
+    expect(auth.ok).toBe(true);
+    expect(row.pause_at).toBeNull();
+    expect(row.rollout_authorization_ref).toBeTruthy();
+    expect(GitOpsStore.getInstance().storedSourceConfirmation(row)).toEqual({ status: 'absent' });
+    // A later test ticks every Blueprint. This rollout is authorized, so that
+    // tick would dispatch it; the case under test is the missing confirmation.
+    DatabaseService.getInstance().getDb().prepare(
+      `UPDATE gitops_applications SET rollout_authorization_policy = 'manual' WHERE id = ?`,
+    ).run(seeded.applicationId);
+  });
+
+  it('treats a placement pointer recorded without a confirmation object as a promise to wait', async () => {
+    const seeded = seedGitManagedBlueprint({ sourceAccepted: false });
+    await approvePlacement(seeded);
+    const envelope = {
+      operationId: `legacy-${seeded.applicationId}`,
+      actor: 'system:source-controller',
+      trigger: 'poll' as const,
+      at: Date.now(),
+    };
+    GitOpsTransitions.getInstance().sourcePolicyChanged(seeded.applicationId, 'automatic', envelope);
+    GitOpsTransitions.getInstance().rolloutAuthorizationPolicyChanged({
+      applicationId: seeded.applicationId,
+      policy: 'automatic',
+      envelope: { ...envelope, operationId: `roll-${seeded.applicationId}` },
+    });
+    GitOpsTransitions.getInstance().sourceAccepted({
+      applicationId: seeded.applicationId,
+      generationId: seeded.generationId,
+      artifactSetId: `art-${seeded.generationId}`,
+      sourceAcceptanceId: `sa-${seeded.generationId}`,
+      authority: 'configured_policy',
+      envelope,
+    });
+    const store = GitOpsStore.getInstance();
+    const accepted = store.getApplication(seeded.applicationId)!;
+    DatabaseService.getInstance().getDb().prepare(
+      'UPDATE gitops_approvals SET placement_approval_ref = ? WHERE id = ?',
+    ).run(accepted.placement_approval_ref, accepted.source_acceptance_ref);
+    recordExecutableArtifact(seeded);
+    setRegistryReadinessDepsForTests(registryReadyTestDeps());
+    const { ensureRolloutAuthorization } = await import('../services/gitops/handoff');
+
+    const auth = await ensureRolloutAuthorization(
+      seeded.applicationId, 'system:source-controller', 'blueprint_dispatch', undefined, 'configured_policy',
+    );
+
+    expect(auth.ok).toBe(false);
+    const held = store.getApplication(seeded.applicationId)!;
+    expect(held.pause_reason).toContain('authorizing without an operator');
+    expect(held.rollout_authorization_ref).toBeNull();
+    expect(store.storedSourceConfirmation(held)).toEqual({
+      status: 'present',
+      confirmation: { placementApprovalRef: accepted.placement_approval_ref, rolloutMayStart: false },
+    });
+  });
+
+  /**
+   * An application holding an acceptance that recorded the placement the
+   * operator confirmed, whose policy authorizes on its own, with executable
+   * artifact evidence so authorization can actually reach its mint.
+   *
+   * Driven through the real route, because the recording is the route's
+   * contract. Returns the accepted generation id.
+   */
+  async function confirmedAcceptedApp(opts: { nodeCount?: number } = {}): Promise<{ seeded: Seeded; acceptedGenerationId: string }> {
+    const seeded = seedGitManagedBlueprint({ sourceAccepted: false, nodeCount: opts.nodeCount });
+    const reviewed = await approvePlacement(seeded);
+    const res = await request(app)
+      .post(`/api/gitops/applications/bp:${seeded.blueprintId}/source/accept`)
+      .set('Cookie', adminCookie)
+      .send({
+        generationId: seeded.generationId,
+        confirmation: { placementApprovalRef: reviewed, rolloutMayStart: true },
+      });
+    expect(res.status).toBe(200);
+    const row = GitOpsStore.getInstance().getApplication(seeded.applicationId)!;
+    expect(GitOpsStore.getInstance().confirmedPlacementForAcceptance(row)).toBe(reviewed);
+    // A new row advancing the pointer: the acceptance seeded an unresolved set
+    // and this evidence is the next version of it.
+    GitOpsTransitions.getInstance().recordArtifactEvidence({
+      applicationId: seeded.applicationId,
+      generationId: seeded.generationId,
+      artifactSetId: `art-${randomUUID().slice(0, 8)}`,
+      evidenceVersion: 2,
+      qualification: 'exact',
+      evidenceJson: encodeArtifactEvidenceJson({ kind: 'exact', identity: 'sha256:deadbeef' }),
+      authoritative: 0,
+      envelope: { operationId: randomUUID(), actor: 'tester', trigger: 'manual', at: Date.now() },
+    });
+    // Whatever the accept route answered or held is not what these cases are
+    // about; they start from a clean row with the acceptance in force.
+    DatabaseService.getInstance().getDb().prepare(
+      `UPDATE gitops_applications SET rollout_authorization_policy = 'automatic', pause_at = NULL,
+         pause_reason = NULL, pause_origin = 'operator', preflight_fingerprint = NULL,
+         latest_preflight_evidence_json = NULL WHERE id = ?`,
+    ).run(seeded.applicationId);
+    setRegistryReadinessDepsForTests(registryReadyTestDeps());
+    return { seeded, acceptedGenerationId: seeded.generationId };
+  }
+
+  it('refuses to authorize a confirmed acceptance whose placement was replaced', async () => {
+    const { seeded, acceptedGenerationId } = await confirmedAcceptedApp({ nodeCount: 2 });
+    const store = GitOpsStore.getInstance();
+    const reviewed = store.getApplication(seeded.applicationId)!.placement_approval_ref;
+    const replacement = await approvePlacement(seeded);
+    expect(replacement).not.toBe(reviewed);
+    const dispatchSpy = vi.spyOn(GitSourceService.getInstance(), 'dispatchAcceptedGeneration');
+
+    const { ensureRolloutAuthorization } = await import('../services/gitops/handoff');
+    const auth = await ensureRolloutAuthorization(
+      seeded.applicationId, 'system:source-controller', 'blueprint_dispatch', undefined, 'configured_policy',
+    );
+
+    // This is the reconciler's call shape, and it carries no confirmation: the
+    // durable record is the only thing that can refuse it.
+    expect(auth.ok).toBe(false);
+    expect(dispatchSpy).not.toHaveBeenCalled();
+    const held = store.getApplication(seeded.applicationId)!;
+    expect(held.pause_at).not.toBeNull();
+    expect(held.pause_reason).toContain('approved placement changed');
+    expect(held.pause_origin).toBe('operator');
+    // The accepted content stands. Only its destination needs a person.
+    expect(held.accepted_generation_id).toBe(acceptedGenerationId);
+    expect(held.rollout_authorization_ref).toBeNull();
+
+    // A later reconcile must not get through either, which is what the hold is for.
+    await BlueprintReconciler.getInstance().tick();
+    expect(dispatchSpy).not.toHaveBeenCalled();
+    dispatchSpy.mockRestore();
+  });
+
+  it('lets an operator resume after a confirmed acceptance is held', async () => {
+    const { seeded } = await confirmedAcceptedApp({ nodeCount: 2 });
+    const store = GitOpsStore.getInstance();
+    await approvePlacement(seeded);
+
+    const { ensureRolloutAuthorization } = await import('../services/gitops/handoff');
+    const refused = await ensureRolloutAuthorization(
+      seeded.applicationId, 'system:source-controller', 'blueprint_dispatch', undefined, 'configured_policy',
+    );
+    expect(refused.ok).toBe(false);
+    expect(store.getApplication(seeded.applicationId)!.pause_at).not.toBeNull();
+
+    // Resume is the operator saying they have looked, so the acceptance stops
+    // being bound to the placement it was confirmed against.
+    const resume = await request(app)
+      .post(`/api/gitops/applications/bp:${seeded.blueprintId}/rollout/resume`)
+      .set('Cookie', adminCookie)
+      .send({});
+    expect(resume.status).toBe(200);
+    const resumed = store.getApplication(seeded.applicationId)!;
+    expect(resumed.pause_at).toBeNull();
+    expect(store.storedSourceConfirmation(resumed)).toEqual({ status: 'absent' });
+  });
+
+  it('refuses to mint when the placement changed while preflight was evaluating', async () => {
+    const { seeded } = await confirmedAcceptedApp({ nodeCount: 2 });
+    const store = GitOpsStore.getInstance();
+
+    // Hold preflight open once it has been handed the node set it is about, so
+    // the placement can be replaced while that await is outstanding. The whole
+    // evaluation is intercepted rather than one probe inside it, because which
+    // probes run depends on the artifact's registry hosts and the await under
+    // test is the one the mint sits behind either way.
+    let release!: () => void;
+    const opened = new Promise<void>((resolve) => { release = resolve; });
+    let preflighted: readonly number[] = [];
+    const { setEvaluateRegistryReadinessForTests } = await import('../services/gitops/registryReadiness');
+    setEvaluateRegistryReadinessForTests(async (input) => {
+      preflighted = [...input.requiredNodeIds];
+      await opened;
+      return buildPreflightEvidence({
+        artifactSetId: input.artifactSetId,
+        registryReadiness: 'not_required',
+        targets: input.requiredNodeIds.map((nodeId) => ({
+          nodeId,
+          sourceClass: 'public' as const,
+          readiness: 'not_required' as const,
+          hosts: [],
+          expired: false,
+        })),
+      });
+    });
+
+    const { ensureRolloutAuthorization } = await import('../services/gitops/handoff');
+    const pending = ensureRolloutAuthorization(
+      seeded.applicationId, 'system:source-controller', 'blueprint_dispatch', undefined, 'configured_policy',
+    );
+    await vi.waitFor(() => expect(preflighted.length).toBeGreaterThan(0));
+    const preflightPlacement = store.getApplication(seeded.applicationId)!.placement_approval_ref;
+    const replacement = await approvePlacement(seeded);
+    expect(replacement).not.toBe(preflightPlacement);
+    release();
+    const auth = await pending;
+
+    // Readiness evidence was collected for the nodes read before the await.
+    // Minting a rollout that names the replacement ones would pair the two.
+    expect(auth.ok).toBe(false);
+    const after = store.getApplication(seeded.applicationId)!;
+    expect(after.rollout_authorization_ref).toBeNull();
+  });
+
+  it('refuses to mint when a source acceptance lands while preflight is evaluating', async () => {
+    // The same window, on the source half. An acceptance does not move the
+    // placement or the frozen set, so a check that watched only those two would
+    // pass here and mint a rollout naming the new generation and artifact set
+    // with readiness evidence evaluated for the old ones.
+    const { seeded } = await confirmedAcceptedApp({ nodeCount: 2 });
+    const store = GitOpsStore.getInstance();
+
+    let release!: () => void;
+    const opened = new Promise<void>((resolve) => { release = resolve; });
+    let entered = false;
+    const { setEvaluateRegistryReadinessForTests } = await import('../services/gitops/registryReadiness');
+    setEvaluateRegistryReadinessForTests(async (input) => {
+      entered = true;
+      await opened;
+      return buildPreflightEvidence({
+        artifactSetId: input.artifactSetId,
+        registryReadiness: 'not_required',
+        targets: input.requiredNodeIds.map((nodeId) => ({
+          nodeId,
+          sourceClass: 'public' as const,
+          readiness: 'not_required' as const,
+          hosts: [],
+          expired: false,
+        })),
+      });
+    });
+
+    const { ensureRolloutAuthorization } = await import('../services/gitops/handoff');
+    const pending = ensureRolloutAuthorization(
+      seeded.applicationId, 'system:source-controller', 'blueprint_dispatch', undefined, 'configured_policy',
+    );
+    await vi.waitFor(() => expect(entered).toBe(true));
+
+    // A newer commit accepted by the policy's own behalf, the ordinary way
+    // content moves while a rollout is being prepared.
+    const before = store.getApplication(seeded.applicationId)!;
+    // A policy acceptance is refused on a source that is not automatic, so this
+    // stands for the ordinary automatic source the acceptance would race on.
+    DatabaseService.getInstance().getDb().prepare(
+      'UPDATE gitops_applications SET source_policy = ? WHERE id = ?',
+    ).run('automatic', seeded.applicationId);
+    const nextGenerationId = `gen-${seeded.applicationId}-midflight`;
+    insertGeneration(nextGenerationId, seeded.applicationId, before.materialization_fingerprint ?? undefined);
+    const envelope = {
+      operationId: `fetch-mid-${seeded.applicationId}`,
+      actor: 'system:source-controller',
+      trigger: 'poll' as const,
+      at: Date.now(),
+    };
+    GitOpsTransitions.getInstance().fetchStarted(before.id, envelope);
+    GitOpsTransitions.getInstance().fetched(before.id, 'd'.repeat(40), envelope);
+    GitOpsTransitions.getInstance().candidateReady(before.id, nextGenerationId, false, envelope);
+    GitOpsTransitions.getInstance().sourceAccepted({
+      applicationId: before.id,
+      generationId: nextGenerationId,
+      artifactSetId: `art-${nextGenerationId}`,
+      sourceAcceptanceId: `sa-${nextGenerationId}`,
+      authority: 'configured_policy',
+      envelope,
+    });
+    release();
+    const auth = await pending;
+
+    expect(auth.ok).toBe(false);
+    expect(store.getApplication(seeded.applicationId)!.rollout_authorization_ref).toBeNull();
+  });
+
+  it('does not re-litigate a placement the operator has already authorized', async () => {
+    // The operator's own authorize is exempt from the confirmation guard,
+    // because it is the decision the confirmation deferred. If the recording
+    // stayed pointing at the replaced approval, the next time the authorization
+    // lapsed the automatic policy would hold a rollout asking the operator to
+    // resume a placement they had deliberately authorized.
+    const { seeded } = await confirmedAcceptedApp({ nodeCount: 2 });
+    const store = GitOpsStore.getInstance();
+    const staleRecording = store.confirmedPlacementForAcceptance(store.getApplication(seeded.applicationId)!);
+    expect(staleRecording).toBeTruthy();
+    const replacement = await approvePlacement(seeded);
+    expect(replacement).not.toBe(staleRecording);
+
+    const authorize = await request(app)
+      .post(`/api/gitops/applications/bp:${seeded.blueprintId}/rollout/authorize`)
+      .set('Cookie', adminCookie)
+      .send({});
+    expect(authorize.status).toBe(200);
+
+    const authorized = store.getApplication(seeded.applicationId)!;
+    expect(authorized.rollout_authorization_ref).toBeTruthy();
+    expect(authorized.pause_at).toBeNull();
+    // Re-pointed at what the operator decided, and the rollout they just
+    // authorized is allowed to start, so a later replacement is still caught
+    // rather than the guard going quiet for good.
+    expect(store.storedSourceConfirmation(authorized)).toEqual({
+      status: 'present',
+      confirmation: { placementApprovalRef: replacement, rolloutMayStart: true },
+    });
+  });
+
+  it('authorizes normally when the placement did not change during preflight', async () => {
+    const { seeded } = await confirmedAcceptedApp({ nodeCount: 2 });
+    const store = GitOpsStore.getInstance();
+
+    const { ensureRolloutAuthorization } = await import('../services/gitops/handoff');
+    const auth = await ensureRolloutAuthorization(
+      seeded.applicationId, 'system:source-controller', 'blueprint_dispatch', undefined, 'configured_policy',
+    );
+
+    expect(auth.ok).toBe(true);
+    const after = store.getApplication(seeded.applicationId)!;
+    expect(after.rollout_authorization_ref).toBeTruthy();
+    expect(after.pause_at).toBeNull();
+  });
+
+  it('lets the operator resume after reviewing the placement that moved', async () => {
+    const seeded = seedGitManagedBlueprint({ sourceAccepted: false });
+    const reviewed = await approvePlacement(seeded);
+    DatabaseService.getInstance().getDb().prepare(
+      'UPDATE gitops_applications SET rollout_authorization_policy = ? WHERE id = ?',
+    ).run('automatic', seeded.applicationId);
+    const materialization = await import('../services/gitops/gitManagedMaterialization');
+    vi.spyOn(materialization, 'prepareAcceptedGitManagedGeneration').mockImplementation(async () => {
+      await approvePlacement(seeded);
+      return { materialized: true, artifact: 'resolved' as const, note: null };
+    });
+    await request(app)
+      .post(`/api/gitops/applications/bp:${seeded.blueprintId}/source/accept`)
+      .set('Cookie', adminCookie)
+      .send({
+        generationId: seeded.generationId,
+        confirmation: { placementApprovalRef: reviewed, rolloutMayStart: true },
+      })
+      .expect(200);
+    expect(GitOpsStore.getInstance().getApplication(seeded.applicationId)!.pause_at).not.toBeNull();
+
+    const resume = await request(app)
+      .post(`/api/gitops/applications/bp:${seeded.blueprintId}/rollout/resume`)
+      .set('Cookie', adminCookie)
+      .send({});
+    expect(resume.status).toBe(200);
+    const resumed = GitOpsStore.getInstance().getApplication(seeded.applicationId)!;
+    expect(resumed.pause_at).toBeNull();
+    expect(resumed.accepted_generation_id).toBe(seeded.generationId);
+  });
+
   it('refuses a Direct application id', async () => {
     const res = await request(app)
       .post('/api/gitops/applications/1:some-direct-app/source/accept')
       .set('Cookie', adminCookie)
-      .send({ generationId: 'gen-1' });
+      .send({ generationId: 'gen-1', confirmation: confirmationFor() });
     expect(res.status).toBe(409);
     expect(res.body.code).toBe('NOT_GIT_MANAGED');
   });
@@ -502,7 +1333,7 @@ describe('POST /api/gitops/applications/:id/source/accept', () => {
     const res = await request(app)
       .post(`/api/gitops/applications/bp:${seeded.blueprintId}/source/accept`)
       .set('Cookie', viewerCookie)
-      .send({ generationId: seeded.generationId });
+      .send({ generationId: seeded.generationId, confirmation: confirmationFor() });
     expect(res.status).toBe(403);
   });
 });
@@ -997,7 +1828,7 @@ describe('POST /api/gitops/applications/:id/rollout/authorize', () => {
     const accept = await request(app)
       .post(`/api/gitops/applications/bp:${seeded.blueprintId}/source/accept`)
       .set('Cookie', adminCookie)
-      .send({ generationId: seeded.generationId });
+      .send({ generationId: seeded.generationId, confirmation: confirmationFor() });
     expect(accept.status).toBe(200);
     const accepted = GitOpsStore.getInstance().getApplication(seeded.applicationId)!;
     expect(GitOpsStore.getInstance().getArtifactSet(accepted.artifact_set_id!)?.qualification).toBe('unresolved');
@@ -1029,7 +1860,7 @@ describe('POST /api/gitops/applications/:id/rollout/authorize', () => {
     await request(app)
       .post(`/api/gitops/applications/bp:${seeded.blueprintId}/source/accept`)
       .set('Cookie', adminCookie)
-      .send({ generationId: seeded.generationId })
+      .send({ generationId: seeded.generationId, confirmation: confirmationFor() })
       .expect(200);
     const preview = await buildBlueprintPreview(seeded.blueprintId);
     await request(app)
