@@ -97,5 +97,11 @@
     "title": "Save & Pull Images",
     "blurb": "Download a stack's images without deploying it. The compose editor's save menu now writes your edits and fetches the registry images in one step, so the next deploy in a maintenance window has nothing left to download. Running containers are left exactly as they are.",
     "docUrl": "https://docs.sencho.io/features/editor"
+  },
+  {
+    "id": "service-url-override",
+    "title": "Custom service URLs",
+    "blurb": "A published port can open the address you configure for that service, such as a tunnel or reverse-proxy domain. Set it from the pencil on the port, or with the sencho.service.url Compose label. With no override, the port still opens the generated host and port.",
+    "docUrl": "https://docs.sencho.io/features/stack-management"
   }
 ]

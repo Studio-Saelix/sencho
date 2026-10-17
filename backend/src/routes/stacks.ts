@@ -9,7 +9,7 @@ import * as tar from 'tar-stream';
 import { inspect } from 'node:util';
 import YAML from 'yaml';
 import multer from 'multer';
-import { FileSystemService } from '../services/FileSystemService';
+import { FileSystemService, isComposeBasename } from '../services/FileSystemService';
 import { StackFileRootsService, STACK_SOURCE_ROOT_ID, stackSourceFileRoot, type StackFileRoot } from '../services/StackFileRootsService';
 import { FileRootGateway } from '../services/FileRootGateway';
 import { ComposeService, getComposeRollbackInfo } from '../services/ComposeService';
@@ -729,10 +729,15 @@ stacksRouter.get('/discovery', async (req: Request, res: Response) => {
 stacksRouter.get('/:stackName', async (req: Request, res: Response) => {
   try {
     const stackName = req.params.stackName as string;
-    const { content, mtimeMs } = await FileSystemService.getInstance(req.nodeId).getStackContentWithMtime(stackName);
+    const { content, mtimeMs, filename } = await FileSystemService.getInstance(req.nodeId).getStackContentWithMtime(stackName);
     res.setHeader('ETag', stackFileEtag(mtimeMs));
+    res.setHeader('X-Compose-File', filename);
     res.send(content);
   } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === 'SYMLINK_ESCAPE' || code === 'INVALID_PATH') {
+      return res.status(409).json({ error: 'The compose file does not resolve inside the stack directory' });
+    }
     res.status(500).json({ error: 'Failed to read stack' });
   }
 });
@@ -747,24 +752,38 @@ stacksRouter.put('/:stackName', async (req: Request, res: Response) => {
       return res.status(400).json({ error: 'Content must be a string' });
     }
     if (isDebugEnabled()) console.debug(`[Stacks:debug] Save starting`, { stackName: sanitizeForLog(stackName), bytes: content.length, nodeId: req.nodeId });
+    const rawFilename = req.header('x-compose-file');
+    if (rawFilename !== undefined && !isComposeBasename(rawFilename)) {
+      return res.status(400).json({ error: 'Unknown compose file' });
+    }
     const expectedMtimeMs = parseIfMatchMtime(req.header('if-match'));
     const result = await FileSystemService.getInstance(req.nodeId)
-      .saveStackContentIfUnchanged(stackName, content, expectedMtimeMs);
+      .saveStackContentIfUnchanged(stackName, content, expectedMtimeMs, rawFilename ?? null);
     if (!result.ok) {
-      res.setHeader('ETag', stackFileEtag(result.currentMtimeMs));
+      if (result.currentMtimeMs > 0) res.setHeader('ETag', stackFileEtag(result.currentMtimeMs));
+      if (result.filename) res.setHeader('X-Compose-File', result.filename);
+      const sourceChanged = result.reason === 'source';
       return res.status(412).json({
-        error: `${stackName}'s compose file changed since you opened it.`,
-        code: 'stack_file_changed',
+        error: sourceChanged
+          ? `${stackName}'s compose file is no longer the file that was opened.`
+          : `${stackName}'s compose file changed since you opened it.`,
+        code: sourceChanged ? 'compose_source_changed' : 'stack_file_changed',
         currentMtimeMs: result.currentMtimeMs,
         currentContent: result.currentContent,
+        filename: result.filename,
       });
     }
     invalidateNodeCaches(req.nodeId);
     StackFileRootsService.invalidate(req.nodeId, stackName);
     dlog(`[Stacks] Compose file saved: ${sanitizeForLog(stackName)}`);
     res.setHeader('ETag', stackFileEtag(result.mtimeMs));
-    res.json({ message: 'Stack saved successfully', mtimeMs: result.mtimeMs });
+    res.setHeader('X-Compose-File', result.filename);
+    res.json({ message: 'Stack saved successfully', mtimeMs: result.mtimeMs, filename: result.filename });
   } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === 'SYMLINK_ESCAPE' || code === 'INVALID_PATH') {
+      return res.status(409).json({ error: 'The compose file does not resolve inside the stack directory' });
+    }
     console.error('Failed to save stack:', sanitizeForLog(getErrorMessage(error, 'unknown')));
     res.status(500).json({ error: 'Failed to save stack' });
   }
@@ -1906,8 +1925,9 @@ stacksRouter.get('/:stackName/storage', async (req: Request, res: Response) => {
 // restart) from the fully-merged effective model, so a multi-file Git source's
 // dossier and doc-drift reflect every override file, not just the root compose.
 // Read-only and advisory; auto-proxies to the active node. The response carries
-// only structural fields; resolved env, label, and command values are never
-// extracted. A secret interpolated INTO a structural field still resolves into
+// structural fields plus a validated `sencho.service.url` per service. Other
+// resolved env, label, and command values are never extracted. A secret
+// interpolated INTO a structural field or that allowlisted label still resolves into
 // the payload, but is already readable at the same stack:read scope via the
 // stack's files (see docs/features/environment-guardrails).
 stacksRouter.get('/:stackName/effective-anatomy', async (req: Request, res: Response) => {
@@ -1917,6 +1937,10 @@ stacksRouter.get('/:stackName/effective-anatomy', async (req: Request, res: Resp
   try {
     res.json(await buildEffectiveAnatomy(req.nodeId, stackName));
   } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === 'SYMLINK_ESCAPE' || code === 'INVALID_PATH') {
+      return res.status(409).json({ error: 'The compose file does not resolve inside the stack directory' });
+    }
     console.error('[Stacks] Failed to build effective anatomy for %s:', sanitizeForLog(stackName),
       sanitizeForLog(inspect(error, { depth: 4 })));
     res.status(500).json({ error: 'Failed to build effective anatomy' });

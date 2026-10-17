@@ -265,6 +265,18 @@ describe('GET /api/stacks/statuses caching', () => {
     expect(second.body).toEqual(first.body);
   });
 
+  it('carries the runtime main-port owner through the served payload', async () => {
+    mockGetStacks.mockResolvedValue(['web.yml']);
+    mockGetBulkStackStatuses.mockResolvedValue({
+      web: { status: 'running', mainPort: 49152, mainPortService: 'app' },
+    });
+
+    const res = await request(app).get('/api/stacks/statuses').set('Cookie', authCookie);
+
+    expect(res.status).toBe(200);
+    expect(res.body['web.yml']).toMatchObject({ mainPort: 49152, mainPortService: 'app' });
+  });
+
   it('invalidates on POST /api/stacks', async () => {
     mockGetStacks.mockResolvedValue(['web']);
     mockGetBulkStackStatuses.mockResolvedValue({ web: { status: 'running' } });

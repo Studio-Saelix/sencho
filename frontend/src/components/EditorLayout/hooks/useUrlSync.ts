@@ -15,6 +15,7 @@ import {
   type ReachabilityContext,
 } from '@/lib/routing/reachability';
 import type { StacksLoadStatus } from './useStackListState';
+import { stackOpenConnectionMessage } from '@/lib/stackOpenError';
 
 type RoutePhase = 'initial' | 'applying' | 'settled' | 'frozen';
 type RouteIntent = 'push' | 'replace' | 'none';
@@ -326,7 +327,7 @@ export function useUrlSync(options: UseUrlSyncOptions) {
     if (!loadResult.ok) {
       phaseRef.current = 'frozen';
       pendingRouteRef.current = null;
-      setRouteDetailError(`Could not open "${attempted.replace(/\.(ya?ml)$/, '')}". Check your connection and try again.`);
+      setRouteDetailError(loadResult.error ?? stackOpenConnectionMessage(attempted));
       resolvingRef.current = false;
       return;
     }

@@ -307,6 +307,8 @@ export function ShellOverlays({
               // afterSave: the diff-preview path saves before pulling too, so a
               // pull that skips is a split outcome here as well.
               if (saved) await stackActions.pullStackImages(undefined, { afterSave: true });
+            } else if (snapshot?.onConfirm) {
+              await snapshot.onConfirm();
             } else {
               // Plain Save is never gated by status readiness.
               await stackActions.saveFile();

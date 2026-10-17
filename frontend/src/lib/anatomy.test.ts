@@ -42,6 +42,28 @@ describe('parseAnatomy', () => {
     expect(a.ports.web).toEqual([{ host: '8080', container: '80', proto: 'tcp', published: true }]);
   });
 
+  it('keeps ports and volumes for service names that shadow Object properties', () => {
+    const a = parseAnatomy([
+      'services:',
+      '  "__proto__":',
+      '    image: x',
+      '    ports:',
+      '      - "18085:80"',
+      '  constructor:',
+      '    image: x',
+      '    volumes:',
+      '      - ./data:/data',
+      '',
+    ].join('\n'))!;
+    expect(a.services).toEqual(['__proto__', 'constructor']);
+    expect(Object.prototype.hasOwnProperty.call(a.ports, '__proto__')).toBe(true);
+    expect(a.ports.__proto__).toEqual([{ host: '18085', container: '80', proto: 'tcp', published: true }]);
+    expect(a.ports.constructor).toBeUndefined();
+    expect(primaryPublishedHostPort(a.ports)).toBe(18085);
+    expect(a.volumes.constructor).toEqual([{ host: './data', container: '/data' }]);
+    expect(a.volumes.__proto__).toBeUndefined();
+  });
+
   it('parses long-syntax object ports and volumes', () => {
     const a = parseAnatomy(
       'services:\n  app:\n    image: x\n    ports:\n      - target: 80\n        published: 8080\n        protocol: udp\n    volumes:\n      - type: bind\n        source: ./data\n        target: /data\n',

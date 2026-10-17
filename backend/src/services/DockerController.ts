@@ -131,6 +131,12 @@ export function isContainerFailed(state: string, status: string | undefined): bo
 export interface BulkStackInfo {
   status: 'running' | 'exited' | 'unknown' | 'partial';
   mainPort?: number;
+  /**
+   * Compose service label of the running container that supplied `mainPort`.
+   * The port is direct runtime evidence, so this names its owner without
+   * guessing from the saved model.
+   */
+  mainPortService?: string;
   /** Unix seconds of the oldest running container's last start (approximates stack uptime). */
   runningSince?: number;
   /** Running container count for the stack (set when the stack has containers). */
@@ -2449,7 +2455,11 @@ class DockerController {
           const mainPort = selectMainWebPort(
             container.Ports as { PrivatePort?: number; PublicPort?: number; Type?: string }[],
           );
-          if (mainPort) result[stackDir].mainPort = mainPort;
+          if (mainPort) {
+            result[stackDir].mainPort = mainPort;
+            const service = (container as { Labels?: Record<string, unknown> }).Labels?.['com.docker.compose.service'];
+            if (typeof service === 'string' && service.length > 0) result[stackDir].mainPortService = service;
+          }
         }
       } else if (isContainerFailed(container.State, container.Status)) {
         counts.failed += 1;
