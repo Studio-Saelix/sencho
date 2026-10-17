@@ -19,7 +19,7 @@ import { recordRegistryDeliveryEvent } from '../helpers/registryDeliveryEvidence
 import { resolveRegistryAuthAtSeam } from '../helpers/registryDeliverySeam';
 import { DriftLedgerService } from './DriftLedgerService';
 import SelfIdentityService from './SelfIdentityService';
-import { parseEffectiveModel } from './preflight/effectiveModel';
+import { parseEffectiveModel, type EffectiveModel } from './preflight/effectiveModel';
 import { deriveStackExposure } from './preflight/exposure';
 
 import { isDebugEnabled } from '../utils/debug';
@@ -899,15 +899,19 @@ export class ComposeService {
   }
 
   /**
-   * Pilot host-path guard. Renders the live project on purpose, unlike the
-   * external-network gate: what it checks is where the operator's relative
-   * binds land on the host, and the live stack directory is what the Pilot
-   * Agent maps. Rendering the decrypt overlay instead would move that base to
-   * the overlay directory and quietly stop flagging the relative binds the
-   * overlay deploy is about to resolve. So an encrypted project whose live
-   * render fails skips this check, as it always has.
+   * Pilot host-path guard. The question it answers is whether any bind resolves
+   * into a directory Sencho manages for the stack, given that the host path for
+   * that directory is somewhere else: the live stack directory is what the Pilot
+   * Agent maps, so a relative bind lands on a host path Sencho did not choose.
+   *
+   * `overlayDir` is the GitOps decrypt overlay a Git deploy runs Compose in. The
+   * live project cannot answer the question for such a deploy when a typed value
+   * (a published port, an external network name) is held in an encrypted env
+   * file, because the live render fails on the ciphertext. Reading the overlay is
+   * therefore not a way around the check, it is how the check still runs; see
+   * `renderPilotBinds` for why the overlay is the render that speaks for a deploy.
    */
-  private async assertSafePilotBindMapping(stackName: string): Promise<void> {
+  private async assertSafePilotBindMapping(stackName: string, overlayDir?: string): Promise<void> {
     if (process.env.SENCHO_MODE !== 'pilot') return;
 
     let mounts: Array<{ source: string; destination: string }> | null;
@@ -923,26 +927,91 @@ export class ComposeService {
     const hostComposeDir = resolveHostBindPath(composeDir, mounts);
     if (!hostComposeDir || pathsMatch(hostComposeDir, composeDir)) return;
 
-    const rendered = await this.renderConfig(stackName);
-    if (rendered.rendered === null) return;
+    const analysis = await this.renderPilotBinds(stackName, overlayDir);
+    if (!analysis) return;
 
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(rendered.rendered);
-    } catch (error) {
-      console.warn('[ComposeService] Could not inspect rendered binds for pilot path safety:', sanitizeForLog(getErrorMessage(error, 'unknown')));
-      return;
-    }
-    const model = parseEffectiveModel(parsed, stackName);
-    const unsafeBind = model.services
+    const unsafeBind = analysis.model.services
       .flatMap((service) => service.binds)
-      .find((bind) => isPathWithinBase(path.resolve(bind.source), composeDir));
+      .find((bind) => analysis.bases.some((base) => isPathWithinBase(path.resolve(bind.source), base)));
     if (!unsafeBind) return;
 
     throw new Error(
-      `Deploy blocked: relative bind mounts resolve under ${composeDir}, but the host path is ${hostComposeDir}. ` +
+      `Deploy blocked: a bind mount resolves into a directory Sencho manages on this node. ` +
+      `The host maps ${composeDir} to ${hostComposeDir}, so the data would land at a path this stack was not configured for. ` +
       `Use a 1:1 mount with the same absolute path on the host and in the Pilot Agent, then retry.`,
     );
+  }
+
+  /**
+   * The rendered binds for the pilot check, with the trees a bind must stay out
+   * of.
+   *
+   * The render has to describe the project Compose will actually run, and for a
+   * Git deploy that is the overlay, so the overlay is the only render that speaks
+   * for it. Reading the live project instead inspects a model the deploy does not
+   * use, and a bind can resolve differently once the values in front of it are
+   * decrypted. An interpolated source is the clearest case: ciphertext that
+   * Compose accepts as a relative path resolves under the live stack directory,
+   * while the decrypted value beside it can name an absolute external path the
+   * deploy is entitled to use.
+   *
+   * An overlay adds a second tree to stay out of, it does not replace the first.
+   * Compose resolves a relative bind against the directory it rendered in, so a
+   * bind under the overlay's own tree is a bind declared relative; the tree to
+   * compare that against sits one level above that directory, the same depth
+   * `this.baseDir` sits above a live stack. Comparing against the overlay
+   * directory itself would let `../data` through, which on the live stack the same
+   * declaration does not. The compose tree stays in the set as well, because a
+   * bind can also name it outright, and that is the tree the Pilot Agent maps.
+   *
+   * The set has the same reach the live arm has always had, no more: one level of
+   * `..` from the project directory is inside it and two is not, and a bind is
+   * read from a `type: bind` mount only. Widening either is a separate change.
+   * The overlay tree is taken from the directory the render ran in rather than
+   * rebuilt from the stack identity, so it can never fail to contain the project
+   * Compose just resolved against, whatever shape the overlay layout takes.
+   *
+   * `null` when the render could not be read, which leaves the guard without a
+   * decision, exactly as an unreadable render always has.
+   */
+  private async renderPilotBinds(
+    stackName: string,
+    overlayDir?: string,
+  ): Promise<{ model: EffectiveModel; bases: string[] } | null> {
+    const rendered = overlayDir
+      ? await this.renderConfig(stackName, { stackDirOverride: overlayDir })
+      : await this.renderConfig(stackName);
+    if (rendered.rendered === null) return null;
+
+    const model = this.parsePilotBinds(rendered.rendered, stackName);
+    if (!model) return null;
+
+    const composeDir = path.resolve(this.baseDir);
+    return {
+      model,
+      bases: overlayDir ? [path.dirname(path.resolve(overlayDir)), composeDir] : [composeDir],
+    };
+  }
+
+  /**
+   * Parse one rendered model for the pilot check. Only the bind sources are read,
+   * and neither this nor the refusal quotes one: an overlay's bind source can be
+   * an interpolated value, and the operator is told which two paths disagree,
+   * not what a bind said.
+   */
+  private parsePilotBinds(rendered: string, stackName: string): EffectiveModel | null {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(rendered);
+    } catch {
+      // A parse error quotes the text around the fault, and an overlay render can
+      // carry a decrypted value, so the log names the fault without Compose's own
+      // words on either arm. The render is JSON by construction, so this is only
+      // reachable through corrupt output.
+      console.warn('[ComposeService] Could not inspect rendered binds for pilot path safety: the render was not JSON.');
+      return null;
+    }
+    return parseEffectiveModel(parsed, stackName);
   }
 
   /**
@@ -1196,7 +1265,9 @@ export class ComposeService {
     await this.assertSopsOverlayOrRefuse(stackName, ctx?.overlayDir);
     const stackDir = this.resolveStackDir(stackName, ctx);
     await this.assertRequiredEnvPresent(stackName, ctx?.overlayDir);
-    await this.assertSafePilotBindMapping(stackName);
+    // The overlay is the project this deploy will actually run, so the guard
+    // reads it rather than the live stack.
+    await this.assertSafePilotBindMapping(stackName, ctx?.overlayDir);
     await this.ensureExternalNetworksForDeploy(stackName, ctx);
 
     const debug = isDebugEnabled();

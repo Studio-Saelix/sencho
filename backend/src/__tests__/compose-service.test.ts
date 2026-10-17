@@ -922,6 +922,100 @@ describe('ComposeService - deployStack', () => {
     expect(mockGetLegacyOrphanContainersByStack).toHaveBeenCalledWith('my-stack');
   });
 
+  // A Git deploy runs Compose out of a decrypt overlay, so the guard has to read
+  // the overlay: the live project may fail outright (a typed value held in an
+  // encrypted env file), and where it does render it describes a model the deploy
+  // is not about to run, which Compose can resolve differently once the values in
+  // front of a bind are decrypted. The mock below branches on the spawn's cwd, so
+  // each render is answered with the model that belongs to it: the live project
+  // clears the bind below, the overlay does not, and the refusal has to come from
+  // the overlay. Without a cwd branch one render would answer for both, which is
+  // the mistake this test exists to catch.
+  function setupOverlayBindRenders(options: {
+    overlayDir: string;
+    overlayBindSource: string;
+  }): () => number {
+    const composeDir = path.resolve('/test/compose');
+    // Reset explicitly: the file's beforeEach clears call records but not
+    // implementations, so a guard left on by an earlier test would put an extra
+    // Compose render in front of the assertions below.
+    mockGetGlobalSettings.mockReturnValue({});
+    mockGetBindMounts.mockResolvedValue([
+      { source: '/srv/example-apps', destination: composeDir },
+    ]);
+    let spawnCount = 0;
+    mockSpawn.mockImplementation((_command: string, _args: string[], opts: { cwd?: string }) => {
+      spawnCount += 1;
+      const proc = createMockProcess();
+      const source = opts?.cwd === options.overlayDir
+        ? options.overlayBindSource
+        : '/srv/postgres/data';
+      Promise.resolve().then(() => {
+        proc.stdout.emit('data', Buffer.from(JSON.stringify({
+          name: 'my-stack',
+          services: {
+            db: {
+              image: 'postgres:17',
+              volumes: [{
+                type: 'bind',
+                source,
+                target: '/var/lib/postgresql/data',
+              }],
+            },
+          },
+        })));
+        proc.emit('close', 0);
+      });
+      return proc;
+    });
+    return () => spawnCount;
+  }
+
+  it('refuses a mismapped pilot overlay deploy whose overlay resolves a relative bind', async () => {
+    process.env.SENCHO_MODE = 'pilot';
+    const overlayDir = path.join(gitSecretsAreaBase(), '1', 'my-stack', 'op-1');
+    const spawnCount = setupOverlayBindRenders({
+      overlayDir,
+      overlayBindSource: path.join(overlayDir, 'data'),
+    });
+
+    const error = await ComposeService.getInstance(1)
+      .deployStack('my-stack', undefined, false, { source: 'git_apply', overlayDir })
+      .then(() => null, (e: Error) => e);
+
+    expect(error, 'the deploy must refuse, not resolve, on a relative bind only the overlay shows').not.toBeNull();
+    expect(error?.message).toContain('1:1');
+    expect(error?.message).toContain(path.resolve('/test/compose'));
+    expect(error?.message).toContain('/srv/example-apps');
+    // The refusal came before anything was cleaned up, removed, or started.
+    expect(mockGetLegacyOrphanContainersByStack).not.toHaveBeenCalled();
+    expect(mockRemoveContainers).not.toHaveBeenCalled();
+    // One render, no compose up: the containers were never replaced.
+    expect(spawnCount()).toBe(1);
+    expect(
+      mockSpawn.mock.calls.some((call) => Array.isArray(call[1]) && (call[1] as string[]).includes('up')),
+      'compose up must never run for a refused deploy',
+    ).toBe(false);
+  });
+
+  it('allows a mismapped pilot overlay deploy whose binds are all absolute external sources', async () => {
+    process.env.SENCHO_MODE = 'pilot';
+    const overlayDir = path.join(gitSecretsAreaBase(), '1', 'my-stack', 'op-1');
+    setupOverlayBindRenders({ overlayDir, overlayBindSource: '/srv/postgres/data' });
+    mockListContainers.mockResolvedValue([]);
+
+    const promise = ComposeService.getInstance(1)
+      .deployStack('my-stack', undefined, false, { source: 'git_apply', overlayDir });
+    await vi.advanceTimersByTimeAsync(3100);
+
+    await expect(promise).resolves.toEqual({
+      recoveryId: null,
+      deployedGenerationId: null,
+      gitopsOperationId: null,
+    });
+    expect(mockGetLegacyOrphanContainersByStack).toHaveBeenCalledWith('my-stack');
+  });
+
   it('blocks a pilot service restore with relative binds before Compose up', async () => {
     process.env.SENCHO_MODE = 'pilot';
     const composeDir = path.resolve('/test/compose');
