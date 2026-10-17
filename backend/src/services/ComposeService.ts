@@ -170,6 +170,28 @@ function getComposeStallTimeoutMs(): number {
 }
 
 /**
+ * Top-level `volumes.*.driver_opts.device` values from a rendered model.
+ *
+ * A named volume whose local driver binds a host directory carries its host
+ * path here rather than in a service mount, so the pilot mapping check has to
+ * read it from the same render. Read only to compare containment against the
+ * managed trees; the values are never retained, logged, or quoted, because a
+ * device can be interpolated from a decrypted env file.
+ */
+function volumeDeviceSources(parsed: unknown): string[] {
+  const volumes = (parsed as { volumes?: unknown } | null)?.volumes;
+  if (!volumes || typeof volumes !== 'object' || Array.isArray(volumes)) return [];
+  const devices: string[] = [];
+  for (const entry of Object.values(volumes as Record<string, unknown>)) {
+    const opts = (entry as { driver_opts?: unknown } | null)?.driver_opts;
+    if (!opts || typeof opts !== 'object' || Array.isArray(opts)) continue;
+    const device = (opts as Record<string, unknown>).device;
+    if (typeof device === 'string' && device !== '') devices.push(device);
+  }
+  return devices;
+}
+
+/**
  * ComposeService - local docker compose CLI execution.
  *
  * In the Distributed API model, remote node compose operations are handled
@@ -399,6 +421,7 @@ export class ComposeService {
     const plan = await planPersistentBindRemap({
       overlayDir,
       liveRoot: this.resolveValidatedStackDir(stackName),
+      liveComposeRoot: path.resolve(this.baseDir),
       secretsRoot: path.resolve(gitSecretsAreaBase()),
       composeArgs: args,
       refuseIfUnreadable,
@@ -974,10 +997,11 @@ export class ComposeService {
   }
 
   /**
-   * Pilot host-path guard. The question it answers is whether any bind resolves
-   * into a directory Sencho manages for the stack, given that the host path for
-   * that directory is somewhere else: the live stack directory is what the Pilot
-   * Agent maps, so a relative bind lands on a host path Sencho did not choose.
+   * Pilot host-path guard. The question it answers is whether any host path
+   * resolves into a directory Sencho manages for the stack, given that the host
+   * path for that directory is somewhere else: the live stack directory is what
+   * the Pilot Agent maps, so a relative bind, or the host directory a named
+   * volume's local driver binds, lands on a host path Sencho did not choose.
    *
    * `overlayDir` is the GitOps decrypt overlay a Git deploy runs Compose in. The
    * live project cannot answer the question for such a deploy when a typed value
@@ -1008,10 +1032,16 @@ export class ComposeService {
     const unsafeBind = analysis.model.services
       .flatMap((service) => service.binds)
       .find((bind) => analysis.bases.some((base) => isPathWithinBase(path.resolve(bind.source), base)));
-    if (!unsafeBind) return;
+    // Only an absolute device is a host path; a remote export (`:/export`,
+    // `//server/share`) is not, and must not be resolved against the process
+    // working directory to decide whether it lands in a managed tree.
+    const unsafeDevice = analysis.deviceSources
+      .filter((device) => path.isAbsolute(device))
+      .find((device) => analysis.bases.some((base) => isPathWithinBase(device, base)));
+    if (!unsafeBind && !unsafeDevice) return;
 
     throw new Error(
-      `Deploy blocked: a bind mount resolves into a directory Sencho manages on this node. ` +
+      `Deploy blocked: a mount resolves into a directory Sencho manages on this node. ` +
       `The host maps ${composeDir} to ${hostComposeDir}, so the data would land at a path this stack was not configured for. ` +
       `Use a 1:1 mount with the same absolute path on the host and in the Pilot Agent, then retry.`,
     );
@@ -1040,9 +1070,16 @@ export class ComposeService {
    * it. The compose tree stays in the set as well, because a bind can also name
    * it outright, and that is the tree the Pilot Agent maps.
    *
+   * A named volume whose local driver binds a host directory is read from the
+   * same render: its path is a `driver_opts.device`, not a service mount, and a
+   * relative device is rewritten onto the live stack exactly as a relative bind
+   * is. Leaving that form out would let a rewritten device reach the host as
+   * the container path this check exists to refuse.
+   *
    * The set has the same reach the live arm has always had, no more: one level of
-   * `..` from the project directory is inside it and two is not, and a bind is
-   * read from a `type: bind` mount only. Widening either is a separate change.
+   * `..` from the project directory is inside it and two is not, and a service
+   * bind is read from a `type: bind` mount only. Widening either is a separate
+   * change.
    * The overlay tree is taken from the directory the render ran in rather than
    * rebuilt from the stack identity, so it can never fail to contain the project
    * Compose just resolved against, whatever shape the overlay layout takes.
@@ -1053,29 +1090,33 @@ export class ComposeService {
   private async renderPilotBinds(
     stackName: string,
     overlayDir?: string,
-  ): Promise<{ model: EffectiveModel; bases: string[] } | null> {
+  ): Promise<{ model: EffectiveModel; bases: string[]; deviceSources: string[] } | null> {
     const rendered = overlayDir
       ? await this.renderConfig(stackName, { stackDirOverride: overlayDir })
       : await this.renderConfig(stackName);
     if (rendered.rendered === null) return null;
 
-    const model = this.parsePilotBinds(rendered.rendered, stackName);
-    if (!model) return null;
+    const parsed = this.parsePilotBinds(rendered.rendered, stackName);
+    if (!parsed) return null;
 
     const composeDir = path.resolve(this.baseDir);
     return {
-      model,
+      model: parsed.model,
       bases: overlayDir ? [path.dirname(path.resolve(overlayDir)), composeDir] : [composeDir],
+      deviceSources: parsed.deviceSources,
     };
   }
 
   /**
-   * Parse one rendered model for the pilot check. Only the bind sources are read,
-   * and neither this nor the refusal quotes one: an overlay's bind source can be
-   * an interpolated value, and the operator is told which two paths disagree,
-   * not what a bind said.
+   * Parse one rendered model for the pilot check. Only the bind sources and the
+   * named-volume devices are read, and neither this nor the refusal quotes one:
+   * an overlay's source can be an interpolated value, and the operator is told
+   * which two paths disagree, not what a bind said.
    */
-  private parsePilotBinds(rendered: string, stackName: string): EffectiveModel | null {
+  private parsePilotBinds(
+    rendered: string,
+    stackName: string,
+  ): { model: EffectiveModel; deviceSources: string[] } | null {
     let parsed: unknown;
     try {
       parsed = JSON.parse(rendered);
@@ -1087,7 +1128,7 @@ export class ComposeService {
       console.warn('[ComposeService] Could not inspect rendered binds for pilot path safety: the render was not JSON.');
       return null;
     }
-    return parseEffectiveModel(parsed, stackName);
+    return { model: parseEffectiveModel(parsed, stackName), deviceSources: volumeDeviceSources(parsed) };
   }
 
   /**
