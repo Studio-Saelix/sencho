@@ -421,7 +421,12 @@ export class ComposeService {
   /** Name the base compose file before adding another `-f`, which disables discovery. */
   private async pinComposeFilesForRemap(stackName: string, args: string[]): Promise<void> {
     if (args.includes('-f') || args.includes('--file')) return;
-    const liveRoot = this.resolveValidatedStackDir(stackName);
+    // Canonical js/path-injection barrier at the existsSync sink.
+    const baseResolved = path.resolve(this.baseDir);
+    const liveRoot = path.resolve(baseResolved, stackName);
+    if (!liveRoot.startsWith(baseResolved + path.sep)) {
+      throw new Error('Invalid stack path');
+    }
     if (!fs.existsSync(liveRoot)) return;
     try {
       await this.ensureExplicitComposeFiles(stackName, args, true);
