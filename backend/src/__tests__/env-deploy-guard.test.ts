@@ -361,7 +361,15 @@ describe('pilot bind guard over a GitOps decrypt overlay', () => {
     fs.mkdirSync(sharedDir, { recursive: true });
     fs.writeFileSync(
       path.join(sharedDir, 'inc.yaml'),
-      'services:\n  app:\n    volumes:\n      - ./idata:/idata\n',
+      // The included service is named apart from the including file's service and
+      // carries its own image on purpose. Compose 2.x refuses a model where an
+      // included file and the including file declare the same service
+      // (`services.<name> conflicts with imported resource`), and it also refuses
+      // an included service that has neither an image nor a build context; 5.x
+      // merges the two declarations and fills both gaps. Written self-contained,
+      // this renders on either version, and the bind still resolves against the
+      // included file's own directory, which is the routing under test.
+      'services:\n  helper:\n    image: alpine:3\n    volumes:\n      - ./idata:/idata\n',
     );
     const includeCompose = [
       'include:',
