@@ -1,12 +1,16 @@
 import path from 'path';
+import { promises as fsPromises } from 'fs';
 import type { ComposeInputEntry, GitProjectManifest } from '../../../types/gitProjectManifest';
 import { GitOpsDecryptOverlay, newOverlayOperationId, scrubOverlayPaths } from './overlay';
 import { SopsIdentityStore } from './identityStore';
 import type { OverlayBinding, SecretCapability, SopsFailureClass } from './types';
 import { SopsDecryptError } from './decode';
-import { missingRecipientsForCapability, parseSecretCapabilityFromJson } from './capability';
+import { classifyInputEncryption, missingRecipientsForCapability, parseSecretCapabilityFromJson } from './capability';
+import { isComposePrimaryPath } from './detect';
 import { GitOpsStore } from '../store';
 import { NodeRegistry } from '../../NodeRegistry';
+import { DatabaseService } from '../../DatabaseService';
+import { isValidRelativeStackPath } from '../../../utils/validation';
 
 const GIT_OVERLAY_SOURCES = new Set([
   'from_git',
@@ -131,20 +135,43 @@ export async function prepareRecoveryComposeOverlay(args: {
   const genRow = store.getGeneration(args.gitopsGenerationId);
   if (!genRow) return null;
   const cap = parseSecretCapabilityFromJson(genRow.secret_capability_json);
-  if (!cap || cap.requiredRecipients.length === 0) return null;
-
   const identityMap = SopsIdentityStore.getInstance().getIdentityMap(app.id, args.stackName);
-  const missing = missingRecipientsForCapability(cap, new Set(identityMap.keys()));
-  if (missing.length > 0) {
-    return {
-      error: `Rollback requires age recipient(s) that are not available on this node: ${missing.join(', ')}`,
-      failureClass: 'missing_key',
-    };
-  }
 
-  const inputsOrError = sopsInputsFromCapability(cap);
-  if ('error' in inputsOrError) return inputsOrError;
-  if (inputsOrError.length === 0) return null;
+  let inputs: ComposeInputEntry[];
+  if (cap && cap.requiredRecipients.length > 0) {
+    const missing = missingRecipientsForCapability(cap, new Set(identityMap.keys()));
+    if (missing.length > 0) {
+      return {
+        error: `Rollback requires age recipient(s) that are not available on this node: ${missing.join(', ')}`,
+        failureClass: 'missing_key',
+      };
+    }
+    const inputsOrError = sopsInputsFromCapability(cap);
+    if ('error' in inputsOrError) return inputsOrError;
+    inputs = inputsOrError;
+  } else {
+    // A generation stored before the synced sibling .env was classified records
+    // no recipients for it, and a zero-length recipient list does not make the
+    // restored file plaintext. The restored bytes are the authority instead: an
+    // age document carries its own recipients, so a decryptable input is built
+    // from it and an input that no identity can decrypt refuses the rollback
+    // rather than letting Compose launch the ciphertext.
+    const verified = await restoredEncryptedEnvInputs({
+      stackName: args.stackName,
+      nodeId: args.nodeId,
+      capability: cap,
+      available: new Set(identityMap.keys()),
+    });
+    if (verified.inputs.length === 0) return null;
+    if (verified.missingRecipients.length > 0) {
+      return {
+        error: `Rollback requires age recipient(s) that are not available on this node: ${verified.missingRecipients.join(', ')}`,
+        failureClass: 'missing_key',
+      };
+    }
+    inputs = verified.inputs;
+  }
+  if (inputs.length === 0) return null;
 
   const sourceRoot = path.join(NodeRegistry.getInstance().getComposeDir(args.nodeId), args.stackName);
   const overlay = await buildGitOpsDecryptOverlay({
@@ -155,7 +182,81 @@ export async function prepareRecoveryComposeOverlay(args: {
     commitSha: genRow.commit_sha,
     operationId: newOverlayOperationId(),
     sourceRoot,
-    manifest: { inputs: inputsOrError },
+    manifest: { inputs },
   });
   return overlay;
+}
+
+/**
+ * Env inputs at the stack root whose restored bytes are still age ciphertext.
+ *
+ * Read for a generation whose stored capability names no recipient, where the
+ * capability cannot say what the restored files are. `.env` and the configured
+ * project env files are the same set the direct-mutation guard reads, so a
+ * synced sibling `.env` is covered even though the generation never recorded
+ * it, and the generation's own recorded paths are added so a secret stored
+ * below the stack root is covered too, under the role the generation gave it,
+ * so a dotenv secret keeps the output form that role selects. A file that is
+ * not an age document is skipped, which is what keeps a genuinely plaintext
+ * generation on the plain path. The recipients come from the file itself.
+ */
+async function restoredEncryptedEnvInputs(args: {
+  stackName: string;
+  nodeId: number;
+  capability: SecretCapability | null;
+  available: Set<string>;
+}): Promise<{ inputs: ComposeInputEntry[]; missingRecipients: string[] }> {
+  const stackDir = path.resolve(
+    NodeRegistry.getInstance().getComposeDir(args.nodeId),
+    args.stackName,
+  );
+  const candidates = new Map<string, string>([['.env', 'env']]);
+  for (const input of args.capability?.inputs ?? []) {
+    // A compose file is refused as an encrypted input everywhere else, and it
+    // is not read here either.
+    if (isComposePrimaryPath(input.role)) continue;
+    const rel = input.materializedPath ?? input.sourcePath;
+    if (rel && isValidRelativeStackPath(rel) && rel !== '') candidates.set(rel, input.role);
+  }
+  for (const name of DatabaseService.getInstance().getStackProjectEnvFiles(args.nodeId, args.stackName)) {
+    if (name && isValidRelativeStackPath(name) && name !== '') candidates.set(name, 'env');
+  }
+
+  const inputs: ComposeInputEntry[] = [];
+  const missingRecipients = new Set<string>();
+  for (const [rel, role] of candidates) {
+    const target = path.resolve(stackDir, rel);
+    if (!target.startsWith(stackDir + path.sep)) continue;
+    let content: string;
+    try {
+      content = await fsPromises.readFile(target, 'utf8');
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') continue;
+      throw new Error(
+        `Rollback could not read "${rel}" for stack "${args.stackName}" to verify whether it is encrypted`,
+      );
+    }
+    const classified = classifyInputEncryption(content, role);
+    if (classified.encryption !== 'sops-age') continue;
+    for (const recipient of classified.sopsRecipients) {
+      if (!args.available.has(recipient)) missingRecipients.add(recipient);
+    }
+    inputs.push({
+      sourcePath: rel,
+      materializedPath: rel,
+      role: role as ComposeInputEntry['role'],
+      dependencyKind: 'env_file',
+      ownership: 'managed',
+      provenance: 'fetch',
+      sensitivity: 'high',
+      contentSha256: null,
+      sizeBytes: null,
+      state: 'present',
+      deletionAuthority: 'sencho',
+      note: null,
+      encryption: 'sops-age',
+      sopsRecipients: classified.sopsRecipients,
+    });
+  }
+  return { inputs, missingRecipients: [...missingRecipients] };
 }
