@@ -395,6 +395,30 @@ describe('pilot bind guard over a GitOps decrypt overlay', () => {
     await expect(pilotGuard(stackName, overlayDir)).resolves.toBeUndefined();
   });
 
+  it('clears the guard entirely when the host maps the compose directory 1:1', async () => {
+    // The remedy the refusal tells the operator to apply has to work, and this is
+    // also the control on the early return the overlay work sits behind. With the
+    // same absolute path on both sides there is no mapping to disagree with, so a
+    // relative bind is fine. The project renders on purpose here: if the guard ever
+    // stopped deciding on the mapping alone, it would render this one, find the
+    // relative bind inside the compose tree, and refuse.
+    const stackName = 'pilot-mapping-1to1';
+    writeLiveStack(stackName, RELATIVE_BIND_COMPOSE, 'PORT=8080\n');
+    const composeDir = NodeRegistry.getInstance().getComposeDir(nodeId);
+    vi.spyOn(SelfIdentityService.getInstance(), 'getBindMounts').mockResolvedValue([
+      { source: composeDir, destination: composeDir },
+    ]);
+
+    // Control: this project really does carry a bind the guard refuses when the
+    // mapping disagrees, so the pass below is the mapping decision and not an
+    // unreadable render.
+    const live = await ComposeService.getInstance(nodeId).renderConfig(stackName);
+    expect(live.rendered).not.toBeNull();
+    expect(live.rendered).toContain(path.join(composeDir, stackName, 'data'));
+
+    await expect(pilotGuard(stackName)).resolves.toBeUndefined();
+  });
+
   it('leaves the live-only behaviour alone when no overlay is in play', async () => {
     // Unchanged from before the overlay existed: a live render that cannot be
     // read leaves the guard without a decision, and the network gate refuses.
