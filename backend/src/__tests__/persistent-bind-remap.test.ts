@@ -13,6 +13,7 @@ import type { ComposeInputEntry } from '../types/gitProjectManifest';
 import type { RollbackInvocationRecord } from '../types/rollbackGeneration';
 import {
   PERSISTENT_BIND_REFUSAL,
+  PERSISTENT_BIND_RESERVED_NAME,
   PERSISTENT_BIND_UNSAFE,
   readDecryptedRelPaths,
   remapPersistentBindModel,
@@ -130,6 +131,55 @@ const REMOTE_VOLUME = [
   '',
 ].join('\n');
 
+/** A directly mounted decrypted secret, and a data path, whose names both hold a literal dollar. */
+const DOLLAR_BINDS = [
+  'services:',
+  '  app:',
+  '    image: alpine:3',
+  '    volumes:',
+  '      - ./secret$1.env:/run/secrets/env:ro',
+  '      - ./data$1:/var/lib/app',
+  '',
+].join('\n');
+
+/** A mount that covers a decrypted secret in a directory whose name holds a literal dollar. */
+const DOLLAR_COVER = [
+  'services:',
+  '  app:',
+  '    image: alpine:3',
+  '    volumes:',
+  '      - ./secrets$1:/srv/secrets',
+  '',
+].join('\n');
+
+/** A bind that names an external host directory, which no mapping changes. */
+const EXTERNAL_BIND = [
+  'services:',
+  '  app:',
+  '    image: alpine:3',
+  '    volumes:',
+  '      - /srv/postgres/data:/var/lib/app',
+  '',
+].join('\n');
+
+/** A relative data bind and a local-driver volume device, the two forms the remap moves. */
+const BIND_AND_DEVICE = [
+  'services:',
+  '  app:',
+  '    image: alpine:3',
+  '    volumes:',
+  '      - ./data:/var/lib/app',
+  '      - localdata:/srv/localdata',
+  'volumes:',
+  '  localdata:',
+  '    driver: local',
+  '    driver_opts:',
+  '      type: none',
+  '      o: bind',
+  '      device: ./vol-data',
+  '',
+].join('\n');
+
 beforeAll(async () => {
   tmpDir = await setupTestDb();
   ({ DatabaseService } = await import('../services/DatabaseService'));
@@ -225,7 +275,12 @@ async function writeLiveStack(stackName: string, compose: string, dataRel: strin
   return { stackDir, dataDir, identity, recipient };
 }
 
-async function openOverlay(stackName: string, stackDir: string, recipient: string) {
+async function openOverlay(
+  stackName: string,
+  stackDir: string,
+  recipient: string,
+  inputs?: ComposeInputEntry[],
+) {
   const overlay = await buildGitOpsDecryptOverlay({
     stackName,
     nodeId,
@@ -233,10 +288,89 @@ async function openOverlay(stackName: string, stackDir: string, recipient: strin
     generationId: `gen-${stackName}`,
     commitSha: 'a'.repeat(40),
     sourceRoot: stackDir,
-    manifest: { inputs: [envInput(recipient)] },
+    manifest: { inputs: inputs ?? [envInput(recipient)] },
   });
   expect(overlay).not.toBeNull();
   return overlay!;
+}
+
+/**
+ * A Git source whose applied deploy spec names these compose files, which is
+ * what the deploy and recovery argument assembly reads. `contextDir` moves the
+ * Compose project directory below the stack root, as a Git source may.
+ */
+function recordGitSource(stackName: string, files: string[], contextDir: string | null = null): void {
+  DatabaseService.getInstance().upsertGitSource({
+    stack_name: stackName,
+    repo_url: 'https://github.com/example/repo.git',
+    branch: 'main',
+    compose_path: files[0] ?? 'compose.yaml',
+    compose_paths: [...files],
+    context_dir: contextDir,
+    sync_env: true,
+    env_path: null,
+    auth_type: 'none',
+    encrypted_token: null,
+    encrypted_deploy_key: null,
+    ssh_known_hosts_entry: null,
+    ssh_host_key_fingerprint: null,
+    encrypted_ca_bundle: null,
+    auto_apply_on_webhook: false,
+    auto_deploy_on_apply: false,
+    last_applied_commit_sha: null,
+    last_applied_content_hash: null,
+    pending_commit_sha: null,
+    pending_compose_content: null,
+    pending_env_content: null,
+    pending_fetched_at: null,
+    last_debounce_at: null,
+  });
+  DatabaseService.getInstance().setGitSourceAppliedSpec(stackName, { files, contextDir });
+}
+
+/** A captured generation's invocation, as a rollback rebuilds it. */
+function capturedInvocation(
+  stackName: string,
+  stackDir: string,
+  composeFile = 'compose.yaml',
+): RollbackInvocationRecord {
+  return {
+    composeArgsPrefix: ['-f', composeFile, '-p', stackName],
+    projectDirectory: stackDir,
+    projectName: stackName,
+    explicitComposeFiles: [composeFile],
+  };
+}
+
+/** The pinned-image layer a rollback restores, as the recovery service writes it. */
+function writeRecoveryOverride(stackDir: string): string {
+  const file = path.join(stackDir, '.sencho-recovery-test.yml');
+  fs.writeFileSync(file, 'services:\n  app:\n    image: alpine:3\n');
+  return file;
+}
+
+/** The source Compose reports for one bind target, with the `$$` it renders for a literal dollar undone. */
+function renderSource(rendered: string, target: string): string | null {
+  const source = bindSource(rendered, target);
+  return source === null ? null : source.replace(/\$\$/g, '$');
+}
+
+/**
+ * Record every model the Pilot guard reads, while still running the real
+ * render. What the guard was handed is the whole question for a recovery: the
+ * invocation it judged has to be the one the up is about to run.
+ */
+function spyOnPilotRenders(compose: InstanceType<typeof ComposeService>): Array<{
+  stackDirOverride?: string;
+  composePrefix?: string[];
+}> {
+  const renders: Array<{ stackDirOverride?: string; composePrefix?: string[] }> = [];
+  const realRender = compose.renderConfig.bind(compose);
+  vi.spyOn(compose, 'renderConfig').mockImplementation(async (stackName, opts) => {
+    renders.push({ stackDirOverride: opts?.stackDirOverride, composePrefix: opts?.composePrefix });
+    return realRender(stackName, opts);
+  });
+  return renders;
 }
 
 async function renderedModel(stackName: string, overlayDir: string): Promise<string> {
@@ -291,35 +425,7 @@ describe('decrypt overlay keeps ordinary data binds on the live stack', () => {
   it('resolves a context-directory bind against the live project directory', async () => {
     const stackName = 'bind-ctx';
     const { stackDir, dataDir, recipient } = await writeLiveStack(stackName, COMPOSE, path.join('app', 'data'));
-    DatabaseService.getInstance().upsertGitSource({
-      stack_name: stackName,
-      repo_url: 'https://github.com/example/repo.git',
-      branch: 'main',
-      compose_path: 'compose.yaml',
-      compose_paths: ['compose.yaml'],
-      context_dir: 'app',
-      sync_env: true,
-      env_path: null,
-      auth_type: 'none',
-      encrypted_token: null,
-      encrypted_deploy_key: null,
-      ssh_known_hosts_entry: null,
-      ssh_host_key_fingerprint: null,
-      encrypted_ca_bundle: null,
-      auto_apply_on_webhook: false,
-      auto_deploy_on_apply: false,
-      last_applied_commit_sha: null,
-      last_applied_content_hash: null,
-      pending_commit_sha: null,
-      pending_compose_content: null,
-      pending_env_content: null,
-      pending_fetched_at: null,
-      last_debounce_at: null,
-    });
-    DatabaseService.getInstance().setGitSourceAppliedSpec(stackName, {
-      files: ['compose.yaml'],
-      contextDir: 'app',
-    });
+    recordGitSource(stackName, ['compose.yaml'], 'app');
     const overlay = await openOverlay(stackName, stackDir, recipient);
 
     const source = bindSource(await renderedModel(stackName, overlay.overlayDir), '/var/lib/app');
@@ -378,17 +484,11 @@ describe('decrypt overlay keeps ordinary data binds on the live stack', () => {
     const stackName = 'bind-recover';
     const { stackDir, dataDir, recipient } = await writeLiveStack(stackName, COMPOSE, 'data');
     const overlay = await openOverlay(stackName, stackDir, recipient);
-    const invocation: RollbackInvocationRecord = {
-      composeArgsPrefix: ['-f', 'compose.yaml', '-p', stackName],
-      projectDirectory: stackDir,
-      projectName: stackName,
-      explicitComposeFiles: ['compose.yaml'],
-    };
     const args = await ComposeService.getInstance(nodeId).buildComposeArgsWithRecoveryOverride(
       stackName,
       ['config', '--format', 'json'],
       null,
-      invocation,
+      capturedInvocation(stackName, stackDir),
       overlay.overlayDir,
     );
     expect(args.some((token) => token.endsWith('.sencho-bind-remap.yml'))).toBe(true);
@@ -426,17 +526,11 @@ describe('decrypt overlay keeps ordinary data binds on the live stack', () => {
     // Recovery rebuilds its arguments through the same layer, so a rollback
     // selects the live device too.
     const third = await openOverlay(stackName, stackDir, recipient);
-    const invocation: RollbackInvocationRecord = {
-      composeArgsPrefix: ['-f', 'compose.yaml', '-p', stackName],
-      projectDirectory: stackDir,
-      projectName: stackName,
-      explicitComposeFiles: ['compose.yaml'],
-    };
     const args = await ComposeService.getInstance(nodeId).buildComposeArgsWithRecoveryOverride(
       stackName,
       ['config', '--format', 'json'],
       null,
-      invocation,
+      capturedInvocation(stackName, stackDir),
       third.overlayDir,
     );
     expect(volumeDevice(await renderComposeArgs(third.overlayDir, args), 'localdata')).toBe(deviceDir);
@@ -503,35 +597,7 @@ describe('decrypt overlay keeps ordinary data binds on the live stack', () => {
       PARENT_THREE_FROM_CONTEXT,
       path.join('app', 'data'),
     );
-    DatabaseService.getInstance().upsertGitSource({
-      stack_name: stackName,
-      repo_url: 'https://github.com/example/repo.git',
-      branch: 'main',
-      compose_path: 'compose.yaml',
-      compose_paths: ['compose.yaml'],
-      context_dir: 'app',
-      sync_env: true,
-      env_path: null,
-      auth_type: 'none',
-      encrypted_token: null,
-      encrypted_deploy_key: null,
-      ssh_known_hosts_entry: null,
-      ssh_host_key_fingerprint: null,
-      encrypted_ca_bundle: null,
-      auto_apply_on_webhook: false,
-      auto_deploy_on_apply: false,
-      last_applied_commit_sha: null,
-      last_applied_content_hash: null,
-      pending_commit_sha: null,
-      pending_compose_content: null,
-      pending_env_content: null,
-      pending_fetched_at: null,
-      last_debounce_at: null,
-    });
-    DatabaseService.getInstance().setGitSourceAppliedSpec(stackName, {
-      files: ['compose.yaml'],
-      contextDir: 'app',
-    });
+    recordGitSource(stackName, ['compose.yaml'], 'app');
     const sharedDir = path.join(tmpDir, 'shared3');
     fs.mkdirSync(sharedDir, { recursive: true });
     fs.writeFileSync(path.join(sharedDir, 'sentinel'), 'kept');
@@ -656,6 +722,212 @@ describe('decrypt overlay keeps ordinary data binds on the live stack', () => {
     const args = await authored.authoredComposeArgs(stackName, ['config'], overlay.overlayDir);
     expect(args.some((token) => token.endsWith('.sencho-bind-remap.yml'))).toBe(false);
     expect(fs.readFileSync(path.join(dataDir, 'sentinel'), 'utf8')).toBe('kept');
+    await GitOpsDecryptOverlay.getInstance().destroy(nodeId, stackName, overlay.binding.operationId);
+  });
+
+  it('remaps persistent storage when an authored compose file ends with the generated layer name', async () => {
+    const stackName = 'bind-authored-suffix';
+    const authored = 'custom.sencho-bind-remap.yml';
+    const { stackDir, dataDir, recipient } = await writeLiveStack(stackName, BIND_AND_DEVICE, 'data');
+    const deviceDir = path.join(stackDir, 'vol-data');
+    fs.mkdirSync(deviceDir, { recursive: true });
+    fs.writeFileSync(path.join(deviceDir, 'sentinel'), 'kept');
+    fs.renameSync(path.join(stackDir, 'compose.yaml'), path.join(stackDir, authored));
+    recordGitSource(stackName, [authored]);
+    const overlay = await openOverlay(stackName, stackDir, recipient);
+    const compose = ComposeService.getInstance(nodeId);
+
+    const deployArgs = await compose.buildComposeArgsWithRecoveryOverride(
+      stackName,
+      ['config', '--format', 'json'],
+      null,
+      null,
+      overlay.overlayDir,
+    );
+    const deployModel = await renderComposeArgs(overlay.overlayDir, deployArgs);
+    expect(bindSource(deployModel, '/var/lib/app')).toBe(dataDir);
+    expect(volumeDevice(deployModel, 'localdata')).toBe(deviceDir);
+
+    // Recovery rebuilds its arguments from the captured generation, so it shares
+    // the same skip decision.
+    const recoveryArgs = await compose.buildComposeArgsWithRecoveryOverride(
+      stackName,
+      ['config', '--format', 'json'],
+      null,
+      capturedInvocation(stackName, stackDir, authored),
+      overlay.overlayDir,
+    );
+    const recoveryModel = await renderComposeArgs(overlay.overlayDir, recoveryArgs);
+    expect(bindSource(recoveryModel, '/var/lib/app')).toBe(dataDir);
+    expect(volumeDevice(recoveryModel, 'localdata')).toBe(deviceDir);
+
+    fs.writeFileSync(path.join(dataDir, 'written-during-deploy'), 'new');
+    fs.writeFileSync(path.join(deviceDir, 'written-during-deploy'), 'new');
+    await GitOpsDecryptOverlay.getInstance().destroy(nodeId, stackName, overlay.binding.operationId);
+    expect(fs.existsSync(overlay.overlayDir)).toBe(false);
+    expect(fs.readFileSync(path.join(dataDir, 'sentinel'), 'utf8')).toBe('kept');
+    expect(fs.readFileSync(path.join(dataDir, 'written-during-deploy'), 'utf8')).toBe('new');
+    expect(fs.readFileSync(path.join(deviceDir, 'sentinel'), 'utf8')).toBe('kept');
+    expect(fs.readFileSync(path.join(deviceDir, 'written-during-deploy'), 'utf8')).toBe('new');
+  });
+
+  it('refuses instead of overwriting an authored compose file that holds the reserved layer name', async () => {
+    const stackName = 'bind-reserved-name';
+    const authored = '.sencho-bind-remap.yml';
+    const { stackDir, dataDir, recipient } = await writeLiveStack(stackName, COMPOSE, 'data');
+    fs.renameSync(path.join(stackDir, 'compose.yaml'), path.join(stackDir, authored));
+    recordGitSource(stackName, [authored]);
+    const overlay = await openOverlay(stackName, stackDir, recipient);
+
+    await expect(renderedModel(stackName, overlay.overlayDir))
+      .rejects.toThrow(PERSISTENT_BIND_RESERVED_NAME);
+    // The authored document is untouched in the overlay, so nothing was written
+    // over it, and no container was ever handed the mismatched model.
+    expect(fs.readFileSync(path.join(overlay.overlayDir, authored), 'utf8')).toBe(COMPOSE);
+    expect(fs.readFileSync(path.join(dataDir, 'sentinel'), 'utf8')).toBe('kept');
+    await GitOpsDecryptOverlay.getInstance().destroy(nodeId, stackName, overlay.binding.operationId);
+    expect(fs.readFileSync(path.join(stackDir, authored), 'utf8')).toBe(COMPOSE);
+  });
+
+  it('refuses a recovery up that would mount a host path the Pilot mapping moves', async () => {
+    const stackName = 'recover-pilot-mismatch';
+    const { stackDir, dataDir, recipient } = await writeLiveStack(stackName, COMPOSE, 'data');
+    process.env.SENCHO_MODE = 'pilot';
+    vi.spyOn(SelfIdentityService.getInstance(), 'getBindMounts').mockResolvedValue([
+      { source: '/host/compose', destination: composeDir },
+    ]);
+    const overlay = await openOverlay(stackName, stackDir, recipient);
+    const compose = ComposeService.getInstance(nodeId);
+    const execute = vi.spyOn(compose as unknown as {
+      execute: (...args: unknown[]) => Promise<void>;
+    }, 'execute').mockResolvedValue(undefined);
+    const renders = spyOnPilotRenders(compose);
+    const overridePath = writeRecoveryOverride(stackDir);
+
+    await expect(compose.composeUpWithRecoveryOverride(
+      stackName,
+      overridePath,
+      undefined,
+      capturedInvocation(stackName, stackDir),
+      { overlayDir: overlay.overlayDir, overlayBinding: overlay.binding },
+    )).rejects.toThrow(/1:1/);
+
+    // The refusal came from reading the invocation the up was about to run, and
+    // it landed before the execution boundary: no Compose up was handed the
+    // remapped relative mount, and the live data is still where it was.
+    expect(renders).toHaveLength(1);
+    expect(renders[0].stackDirOverride).toBe(overlay.overlayDir);
+    expect(renders[0].composePrefix).toContain(overridePath);
+    expect(execute).not.toHaveBeenCalled();
+    expect(fs.readFileSync(path.join(dataDir, 'sentinel'), 'utf8')).toBe('kept');
+    await GitOpsDecryptOverlay.getInstance().destroy(nodeId, stackName, overlay.binding.operationId);
+  });
+
+  it('runs a recovery up when the Pilot host and container paths match 1:1', async () => {
+    const stackName = 'recover-pilot-mapped';
+    const { stackDir, recipient } = await writeLiveStack(stackName, COMPOSE, 'data');
+    process.env.SENCHO_MODE = 'pilot';
+    vi.spyOn(SelfIdentityService.getInstance(), 'getBindMounts').mockResolvedValue([
+      { source: composeDir, destination: composeDir },
+    ]);
+    const overlay = await openOverlay(stackName, stackDir, recipient);
+    const compose = ComposeService.getInstance(nodeId);
+    const execute = vi.spyOn(compose as unknown as {
+      execute: (...args: unknown[]) => Promise<void>;
+    }, 'execute').mockResolvedValue(undefined);
+
+    await expect(compose.composeUpWithRecoveryOverride(
+      stackName,
+      writeRecoveryOverride(stackDir),
+      undefined,
+      capturedInvocation(stackName, stackDir),
+      { overlayDir: overlay.overlayDir, overlayBinding: overlay.binding },
+    )).resolves.toEqual({ mutatedByCompose: true });
+    expect(execute).toHaveBeenCalledTimes(1);
+    await GitOpsDecryptOverlay.getInstance().destroy(nodeId, stackName, overlay.binding.operationId);
+  });
+
+  it('runs a recovery up whose only storage source is an external absolute path', async () => {
+    const stackName = 'recover-pilot-external';
+    const { stackDir, recipient } = await writeLiveStack(stackName, EXTERNAL_BIND, 'data');
+    process.env.SENCHO_MODE = 'pilot';
+    vi.spyOn(SelfIdentityService.getInstance(), 'getBindMounts').mockResolvedValue([
+      { source: '/host/compose', destination: composeDir },
+    ]);
+    const overlay = await openOverlay(stackName, stackDir, recipient);
+    const compose = ComposeService.getInstance(nodeId);
+    const execute = vi.spyOn(compose as unknown as {
+      execute: (...args: unknown[]) => Promise<void>;
+    }, 'execute').mockResolvedValue(undefined);
+    const renders = spyOnPilotRenders(compose);
+    const overridePath = writeRecoveryOverride(stackDir);
+
+    await expect(compose.composeUpWithRecoveryOverride(
+      stackName,
+      overridePath,
+      undefined,
+      capturedInvocation(stackName, stackDir),
+      { overlayDir: overlay.overlayDir, overlayBinding: overlay.binding },
+    )).resolves.toEqual({ mutatedByCompose: true });
+
+    // The guard read the rebuilt invocation and let it through, so this control
+    // shows a decision, not a guard that never ran.
+    expect(renders).toHaveLength(1);
+    expect(renders[0].stackDirOverride).toBe(overlay.overlayDir);
+    expect(renders[0].composePrefix).toContain(overridePath);
+    expect(execute).toHaveBeenCalledTimes(1);
+    await GitOpsDecryptOverlay.getInstance().destroy(nodeId, stackName, overlay.binding.operationId);
+  });
+
+  it('keeps a literal-dollar secret mount on the decrypted overlay file and the data path on the live stack', async () => {
+    const stackName = 'bind-dollar';
+    const secretRel = 'secret$1.env';
+    const stackDir = path.join(composeDir, stackName);
+    const dataDir = path.join(stackDir, 'data$1');
+    fs.mkdirSync(dataDir, { recursive: true });
+    fs.writeFileSync(path.join(stackDir, 'compose.yaml'), DOLLAR_BINDS);
+    const age = await import('age-encryption');
+    const identity = await age.generateIdentity();
+    const recipient = await age.identityToRecipient(identity);
+    fs.writeFileSync(path.join(stackDir, secretRel), await encryptedEnv(identity, recipient), { mode: 0o600 });
+    fs.writeFileSync(path.join(dataDir, 'sentinel'), 'kept');
+    await importIdentity(stackName, identity);
+    const overlay = await openOverlay(stackName, stackDir, recipient, [
+      { ...envInput(recipient), sourcePath: secretRel, materializedPath: secretRel, role: 'secret' },
+    ]);
+
+    const rendered = await renderedModel(stackName, overlay.overlayDir);
+    const secretSource = renderSource(rendered, '/run/secrets/env');
+    expect(secretSource).toBe(path.join(overlay.overlayDir, secretRel));
+    expect(fs.readFileSync(secretSource!, 'utf8')).toContain('decrypted-token');
+    expect(renderSource(rendered, '/var/lib/app')).toBe(dataDir);
+
+    fs.writeFileSync(path.join(dataDir, 'written-during-deploy'), 'new');
+    await GitOpsDecryptOverlay.getInstance().destroy(nodeId, stackName, overlay.binding.operationId);
+    expect(fs.existsSync(overlay.overlayDir)).toBe(false);
+    expect(fs.readFileSync(path.join(dataDir, 'sentinel'), 'utf8')).toBe('kept');
+    expect(fs.readFileSync(path.join(dataDir, 'written-during-deploy'), 'utf8')).toBe('new');
+    expect(fs.readFileSync(path.join(stackDir, secretRel), 'utf8')).not.toContain('decrypted-token');
+  });
+
+  it('refuses a mount covering a decrypted secret in a directory whose name holds a literal dollar', async () => {
+    const stackName = 'bind-dollar-cover';
+    const secretRel = 'secrets$1/app.env';
+    const stackDir = path.join(composeDir, stackName);
+    fs.mkdirSync(path.join(stackDir, path.dirname(secretRel)), { recursive: true });
+    fs.writeFileSync(path.join(stackDir, 'compose.yaml'), DOLLAR_COVER);
+    const age = await import('age-encryption');
+    const identity = await age.generateIdentity();
+    const recipient = await age.identityToRecipient(identity);
+    fs.writeFileSync(path.join(stackDir, secretRel), await encryptedEnv(identity, recipient), { mode: 0o600 });
+    await importIdentity(stackName, identity);
+    const overlay = await openOverlay(stackName, stackDir, recipient, [
+      { ...envInput(recipient), sourcePath: secretRel, materializedPath: secretRel, role: 'secret' },
+    ]);
+
+    await expect(renderedModel(stackName, overlay.overlayDir))
+      .rejects.toThrow(/decrypted secret and persistent data/);
+    expect(fs.readFileSync(path.join(stackDir, secretRel), 'utf8')).not.toContain('decrypted-token');
     await GitOpsDecryptOverlay.getInstance().destroy(nodeId, stackName, overlay.binding.operationId);
   });
 

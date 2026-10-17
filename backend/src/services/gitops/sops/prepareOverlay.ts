@@ -5,7 +5,7 @@ import { GitOpsDecryptOverlay, newOverlayOperationId, scrubOverlayPaths } from '
 import { SopsIdentityStore } from './identityStore';
 import type { OverlayBinding, SecretCapability, SopsFailureClass } from './types';
 import { SopsDecryptError } from './decode';
-import { classifyInputEncryption, missingRecipientsForCapability, parseSecretCapabilityFromJson } from './capability';
+import { classifyInputEncryption, missingRecipientsForCapability, missingRecipientsForInputs, parseSecretCapabilityFromJson } from './capability';
 import { isComposePrimaryPath } from './detect';
 import { GitOpsStore } from '../store';
 import { NodeRegistry } from '../../NodeRegistry';
@@ -124,6 +124,17 @@ export async function destroyGitOpsOverlay(binding: OverlayBinding): Promise<voi
   await GitOpsDecryptOverlay.getInstance().destroy(binding.nodeId, binding.stackName, binding.operationId);
 }
 
+/** The capability view of one restored input, for the per-file readiness rule. */
+function capabilityInputOf(input: ComposeInputEntry): SecretCapability['inputs'][number] {
+  return {
+    role: input.role,
+    encryption: input.encryption ?? 'none',
+    recipientIds: input.sopsRecipients ?? [],
+    sourcePath: input.sourcePath,
+    materializedPath: input.materializedPath,
+  };
+}
+
 export async function prepareRecoveryComposeOverlay(args: {
   stackName: string;
   nodeId: number;
@@ -136,10 +147,14 @@ export async function prepareRecoveryComposeOverlay(args: {
   if (!genRow) return null;
   const cap = parseSecretCapabilityFromJson(genRow.secret_capability_json);
   const identityMap = SopsIdentityStore.getInstance().getIdentityMap(app.id, args.stackName);
+  const available = new Set(identityMap.keys());
 
-  let inputs: ComposeInputEntry[];
+  // The recorded inputs come first, and the key a generation names is the
+  // refusal an operator can act on, so it is reported before the files the
+  // generation never classified are read.
+  let recorded: ComposeInputEntry[] = [];
   if (cap && cap.requiredRecipients.length > 0) {
-    const missing = missingRecipientsForCapability(cap, new Set(identityMap.keys()));
+    const missing = missingRecipientsForCapability(cap, available);
     if (missing.length > 0) {
       return {
         error: `Rollback requires age recipient(s) that are not available on this node: ${missing.join(', ')}`,
@@ -148,29 +163,32 @@ export async function prepareRecoveryComposeOverlay(args: {
     }
     const inputsOrError = sopsInputsFromCapability(cap);
     if ('error' in inputsOrError) return inputsOrError;
-    inputs = inputsOrError;
-  } else {
-    // A generation stored before the synced sibling .env was classified records
-    // no recipients for it, and a zero-length recipient list does not make the
-    // restored file plaintext. The restored bytes are the authority instead: an
-    // age document carries its own recipients, so a decryptable input is built
-    // from it and an input that no identity can decrypt refuses the rollback
-    // rather than letting Compose launch the ciphertext.
-    const verified = await restoredEncryptedEnvInputs({
-      stackName: args.stackName,
-      nodeId: args.nodeId,
-      capability: cap,
-      available: new Set(identityMap.keys()),
-    });
-    if (verified.inputs.length === 0) return null;
-    if (verified.missingRecipients.length > 0) {
-      return {
-        error: `Rollback requires age recipient(s) that are not available on this node: ${verified.missingRecipients.join(', ')}`,
-        failureClass: 'missing_key',
-      };
-    }
-    inputs = verified.inputs;
+    recorded = inputsOrError;
   }
+
+  // The restored bytes are the authority for a file the generation did not
+  // classify as encrypted, whatever its capability recorded for other files. A
+  // generation can hold recipients for a recognized encrypted `env_file` while
+  // its synced sibling `.env` was classified as plaintext, and Compose would
+  // interpolate that ciphertext. Each restored file that is an age document is
+  // verified against the identities on this node: decryptable when any one of
+  // its recipients is available, refused before Compose when none is. A file
+  // both sets name keeps the role and path the generation recorded.
+  const restored = await restoredEncryptedEnvInputs({
+    stackName: args.stackName,
+    nodeId: args.nodeId,
+    capability: cap,
+  });
+  const recordedPaths = new Set(recorded.map((input) => input.materializedPath ?? ''));
+  const discovered = restored.filter((input) => !recordedPaths.has(input.materializedPath ?? ''));
+  const missingRestored = missingRecipientsForInputs(discovered.map(capabilityInputOf), available);
+  if (missingRestored.length > 0) {
+    return {
+      error: `Rollback requires age recipient(s) that are not available on this node: ${missingRestored.join(', ')}`,
+      failureClass: 'missing_key',
+    };
+  }
+  const inputs = [...recorded, ...discovered];
   if (inputs.length === 0) return null;
 
   const sourceRoot = path.join(NodeRegistry.getInstance().getComposeDir(args.nodeId), args.stackName);
@@ -190,11 +208,12 @@ export async function prepareRecoveryComposeOverlay(args: {
 /**
  * Env inputs at the stack root whose restored bytes are still age ciphertext.
  *
- * Read for a generation whose stored capability names no recipient, where the
- * capability cannot say what the restored files are. `.env` and the configured
- * project env files are the same set the direct-mutation guard reads, so a
- * synced sibling `.env` is covered even though the generation never recorded
- * it, and the generation's own recorded paths are added so a secret stored
+ * Read for every recovery, not only a generation whose capability names no
+ * recipient: the stored capability says what the generation recorded, while the
+ * restored bytes say what is on disk now, and only the second covers a synced
+ * sibling `.env` an older generation classified as plaintext. `.env` and the
+ * configured project env files are the same set the direct-mutation guard
+ * reads, and the generation's own recorded paths are added so a secret stored
  * below the stack root is covered too, under the role the generation gave it,
  * so a dotenv secret keeps the output form that role selects. A file that is
  * not an age document is skipped, which is what keeps a genuinely plaintext
@@ -204,8 +223,7 @@ async function restoredEncryptedEnvInputs(args: {
   stackName: string;
   nodeId: number;
   capability: SecretCapability | null;
-  available: Set<string>;
-}): Promise<{ inputs: ComposeInputEntry[]; missingRecipients: string[] }> {
+}): Promise<ComposeInputEntry[]> {
   const stackDir = path.resolve(
     NodeRegistry.getInstance().getComposeDir(args.nodeId),
     args.stackName,
@@ -223,7 +241,6 @@ async function restoredEncryptedEnvInputs(args: {
   }
 
   const inputs: ComposeInputEntry[] = [];
-  const missingRecipients = new Set<string>();
   for (const [rel, role] of candidates) {
     const target = path.resolve(stackDir, rel);
     if (!target.startsWith(stackDir + path.sep)) continue;
@@ -238,9 +255,6 @@ async function restoredEncryptedEnvInputs(args: {
     }
     const classified = classifyInputEncryption(content, role);
     if (classified.encryption !== 'sops-age') continue;
-    for (const recipient of classified.sopsRecipients) {
-      if (!args.available.has(recipient)) missingRecipients.add(recipient);
-    }
     inputs.push({
       sourcePath: rel,
       materializedPath: rel,
@@ -258,5 +272,5 @@ async function restoredEncryptedEnvInputs(args: {
       sopsRecipients: classified.sopsRecipients,
     });
   }
-  return { inputs, missingRecipients: [...missingRecipients] };
+  return inputs;
 }

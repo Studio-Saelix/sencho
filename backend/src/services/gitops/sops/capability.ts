@@ -70,20 +70,43 @@ export function capabilityUnderstatesEncryption(
 }
 
 /**
- * Encrypted inputs whose recipients have no overlap with the identities on
- * this node. A file encrypted to several recipients is decryptable by any one
- * of them, so readiness is per input, not per recipient.
+ * True when one input names recipients and no identity on this node opens it.
+ * A file encrypted to several recipients is decryptable by any one of them, so
+ * readiness is per input, not per recipient.
  */
+function inputIsUndecryptable(
+  input: SecretCapability['inputs'][number],
+  available: Set<string>,
+): boolean {
+  const recipients = input.recipientIds ?? [];
+  return input.encryption === 'sops-age'
+    && recipients.length > 0
+    && !recipients.some((recipient) => available.has(recipient));
+}
+
+/** Inputs from this capability that no identity on this node opens, in declared order. */
 export function undecryptableInputs(
   cap: SecretCapability,
   available: Set<string>,
 ): SecretCapability['inputs'] {
-  return cap.inputs.filter((input) => {
-    const recipients = input.recipientIds ?? [];
-    return input.encryption === 'sops-age'
-      && recipients.length > 0
-      && !recipients.some((recipient) => available.has(recipient));
-  });
+  return cap.inputs.filter((input) => inputIsUndecryptable(input, available));
+}
+
+/**
+ * Recipients named by inputs no available identity can decrypt, in first-seen
+ * order. The same per-file rule, for a caller that holds inputs rather than a
+ * whole capability (inputs discovered from the files a rollback restored).
+ */
+export function missingRecipientsForInputs(
+  inputs: SecretCapability['inputs'],
+  available: Set<string>,
+): string[] {
+  const missing = new Set<string>();
+  for (const input of inputs) {
+    if (!inputIsUndecryptable(input, available)) continue;
+    for (const recipient of input.recipientIds ?? []) missing.add(recipient);
+  }
+  return [...missing];
 }
 
 /** Recipients named by inputs that no available identity can decrypt. */
@@ -91,11 +114,7 @@ export function missingRecipientsForCapability(
   cap: SecretCapability,
   available: Set<string>,
 ): string[] {
-  const missing = new Set<string>();
-  for (const input of undecryptableInputs(cap, available)) {
-    for (const recipient of input.recipientIds ?? []) missing.add(recipient);
-  }
-  return [...missing];
+  return missingRecipientsForInputs(cap.inputs, available);
 }
 
 export function classifyInputEncryption(

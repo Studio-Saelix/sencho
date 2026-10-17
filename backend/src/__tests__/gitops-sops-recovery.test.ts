@@ -14,8 +14,12 @@ afterAll(() => {
   cleanupTestDb(tmpDir);
 });
 
-/** A generation whose stored capability names no recipient for its inputs. */
-function insertZeroRecipientGeneration(args: {
+/**
+ * A generation row, with the capability under test recorded on it. A capability
+ * that names no recipient is the legacy shape: the generation was stored before
+ * the synced sibling `.env` was classified, so its inputs say nothing about it.
+ */
+function insertGenerationWithCapability(args: {
   appId: string;
   genId: string;
   capability: Record<string, unknown>;
@@ -50,6 +54,39 @@ function insertZeroRecipientGeneration(args: {
     secret_capability_json: JSON.stringify(args.capability),
     created_at: Date.now(),
   });
+}
+
+/**
+ * The state a rollback finds on disk: a live application, its restored files,
+ * the identities this node holds, and the generation that was stored for them.
+ */
+async function seedRecoveryGeneration(args: {
+  stackName: string;
+  appId: string;
+  capability: Record<string, unknown>;
+  files: Record<string, string>;
+  identities?: string[];
+}): Promise<{ stackDir: string; genId: string }> {
+  const fs = await import('fs');
+  const path = await import('path');
+  const app = directApplicationFixture(args.appId, args.stackName);
+  GitOpsStore.getInstance().insertApplication(app);
+  const { SopsIdentityStore } = await import('../services/gitops/sops/identityStore');
+  for (const identity of args.identities ?? []) {
+    await SopsIdentityStore.getInstance().importIdentity({
+      applicationId: app.id,
+      stackName: args.stackName,
+      identity,
+    });
+  }
+  const stackDir = path.join(process.env.COMPOSE_DIR || '', args.stackName);
+  for (const [rel, content] of Object.entries(args.files)) {
+    fs.mkdirSync(path.dirname(path.join(stackDir, rel)), { recursive: true });
+    fs.writeFileSync(path.join(stackDir, rel), content, { mode: 0o600 });
+  }
+  const genId = `gen-${args.stackName}`;
+  insertGenerationWithCapability({ appId: app.id, genId, capability: args.capability });
+  return { stackDir, genId };
 }
 
 const ZERO_RECIPIENT_CAPABILITY = {
@@ -313,7 +350,7 @@ describe('prepareRecoveryComposeOverlay', () => {
     fs.writeFileSync(path.join(stackDir, '.env'), ciphertext, { mode: 0o600 });
 
     const genId = 'gen-sops-legacy-env';
-    insertZeroRecipientGeneration({ appId: app.id, genId, capability: ZERO_RECIPIENT_CAPABILITY });
+    insertGenerationWithCapability({ appId: app.id, genId, capability: ZERO_RECIPIENT_CAPABILITY });
 
     const { prepareRecoveryComposeOverlay, destroyGitOpsOverlay } = await import('../services/gitops/sops/prepareOverlay');
     const result = await prepareRecoveryComposeOverlay({ stackName, nodeId: 1, gitopsGenerationId: genId });
@@ -346,7 +383,7 @@ describe('prepareRecoveryComposeOverlay', () => {
     fs.writeFileSync(path.join(stackDir, '.env'), ciphertext, { mode: 0o600 });
 
     const genId = 'gen-sops-legacy-missing';
-    insertZeroRecipientGeneration({ appId: app.id, genId, capability: ZERO_RECIPIENT_CAPABILITY });
+    insertGenerationWithCapability({ appId: app.id, genId, capability: ZERO_RECIPIENT_CAPABILITY });
 
     const { prepareRecoveryComposeOverlay } = await import('../services/gitops/sops/prepareOverlay');
     const result = await prepareRecoveryComposeOverlay({ stackName, nodeId: 1, gitopsGenerationId: genId });
@@ -368,7 +405,7 @@ describe('prepareRecoveryComposeOverlay', () => {
     fs.writeFileSync(path.join(stackDir, '.env'), 'TOKEN=plain\n', { mode: 0o600 });
 
     const genId = 'gen-sops-legacy-plain';
-    insertZeroRecipientGeneration({ appId: app.id, genId, capability: ZERO_RECIPIENT_CAPABILITY });
+    insertGenerationWithCapability({ appId: app.id, genId, capability: ZERO_RECIPIENT_CAPABILITY });
 
     const { prepareRecoveryComposeOverlay } = await import('../services/gitops/sops/prepareOverlay');
     const result = await prepareRecoveryComposeOverlay({ stackName, nodeId: 1, gitopsGenerationId: genId });
@@ -402,7 +439,7 @@ describe('prepareRecoveryComposeOverlay', () => {
     fs.writeFileSync(path.join(stackDir, 'secrets', 'app.env'), ciphertext, { mode: 0o600 });
 
     const genId = 'gen-sops-legacy-role';
-    insertZeroRecipientGeneration({
+    insertGenerationWithCapability({
       appId: app.id,
       genId,
       capability: {
@@ -518,5 +555,227 @@ describe('prepareRecoveryComposeOverlay', () => {
     if (!result || !('overlayDir' in result)) return;
     expect(fs.readFileSync(path.join(result.overlayDir, 'secrets', 'db.env'), 'utf8')).toContain('pre-rotation');
     await destroyGitOpsOverlay(result.binding);
+  });
+
+  it('decrypts a synced .env the generation never classified beside a recorded encrypted env file', async () => {
+    const fs = await import('fs');
+    const path = await import('path');
+    const { buildSopsAgeDotenvDocument } = await import('./helpers/sopsFixtures');
+    const age = await import('age-encryption');
+    const identity = await age.generateIdentity();
+    const recipient = await age.identityToRecipient(identity);
+    const stackName = 'sops-recovery-mixed-same';
+    const { stackDir, genId } = await seedRecoveryGeneration({
+      stackName,
+      appId: 'app-sops-mixed-same',
+      identities: [identity],
+      files: {
+        'extra.env': await buildSopsAgeDotenvDocument({ values: { EXTRA: 'from-extra' }, identity, recipient }),
+        '.env': await buildSopsAgeDotenvDocument({ values: { TOKEN: 'from-root-env' }, identity, recipient }),
+      },
+      capability: {
+        policy: 'allow_plaintext',
+        inputs: [{
+          role: 'env',
+          encryption: 'sops-age',
+          recipientIds: [recipient],
+          sourcePath: 'extra.env',
+          materializedPath: 'extra.env',
+        }],
+        ready: true,
+        requiredRecipients: [recipient],
+      },
+    });
+
+    const { prepareRecoveryComposeOverlay, destroyGitOpsOverlay } = await import('../services/gitops/sops/prepareOverlay');
+    const result = await prepareRecoveryComposeOverlay({ stackName, nodeId: 1, gitopsGenerationId: genId });
+    expect(result && 'overlayDir' in result).toBe(true);
+    if (!result || !('overlayDir' in result)) return;
+    expect(fs.readFileSync(path.join(result.overlayDir, 'extra.env'), 'utf8')).toContain('from-extra');
+    expect(fs.readFileSync(path.join(result.overlayDir, '.env'), 'utf8')).toContain('from-root-env');
+    expect(fs.readFileSync(path.join(stackDir, '.env'), 'utf8')).not.toContain('from-root-env');
+    await destroyGitOpsOverlay(result.binding);
+  });
+
+  it('decrypts both restored env inputs when each was encrypted for a different held identity', async () => {
+    const fs = await import('fs');
+    const path = await import('path');
+    const { buildSopsAgeDotenvDocument } = await import('./helpers/sopsFixtures');
+    const age = await import('age-encryption');
+    const firstIdentity = await age.generateIdentity();
+    const firstRecipient = await age.identityToRecipient(firstIdentity);
+    const secondIdentity = await age.generateIdentity();
+    const secondRecipient = await age.identityToRecipient(secondIdentity);
+    const stackName = 'sops-recovery-mixed-distinct';
+    const { genId } = await seedRecoveryGeneration({
+      stackName,
+      appId: 'app-sops-mixed-distinct',
+      identities: [firstIdentity, secondIdentity],
+      files: {
+        'extra.env': await buildSopsAgeDotenvDocument({
+          values: { EXTRA: 'from-extra' }, identity: firstIdentity, recipient: firstRecipient,
+        }),
+        '.env': await buildSopsAgeDotenvDocument({
+          values: { TOKEN: 'from-root-env' }, identity: secondIdentity, recipient: secondRecipient,
+        }),
+      },
+      capability: {
+        policy: 'allow_plaintext',
+        inputs: [{
+          role: 'env',
+          encryption: 'sops-age',
+          recipientIds: [firstRecipient],
+          sourcePath: 'extra.env',
+          materializedPath: 'extra.env',
+        }],
+        ready: true,
+        requiredRecipients: [firstRecipient],
+      },
+    });
+
+    const { prepareRecoveryComposeOverlay, destroyGitOpsOverlay } = await import('../services/gitops/sops/prepareOverlay');
+    const result = await prepareRecoveryComposeOverlay({ stackName, nodeId: 1, gitopsGenerationId: genId });
+    expect(result && 'overlayDir' in result).toBe(true);
+    if (!result || !('overlayDir' in result)) return;
+    expect(fs.readFileSync(path.join(result.overlayDir, 'extra.env'), 'utf8')).toContain('from-extra');
+    expect(fs.readFileSync(path.join(result.overlayDir, '.env'), 'utf8')).toContain('from-root-env');
+    await destroyGitOpsOverlay(result.binding);
+  });
+
+  it('refuses a mixed legacy recovery when the sibling .env has no identity on this node', async () => {
+    const fs = await import('fs');
+    const path = await import('path');
+    const { buildSopsAgeDotenvDocument } = await import('./helpers/sopsFixtures');
+    const age = await import('age-encryption');
+    const identity = await age.generateIdentity();
+    const recipient = await age.identityToRecipient(identity);
+    const otherIdentity = await age.generateIdentity();
+    const otherRecipient = await age.identityToRecipient(otherIdentity);
+    const stackName = 'sops-recovery-mixed-missing';
+    const { stackDir, genId } = await seedRecoveryGeneration({
+      stackName,
+      appId: 'app-sops-mixed-missing',
+      identities: [identity],
+      files: {
+        'extra.env': await buildSopsAgeDotenvDocument({ values: { EXTRA: 'from-extra' }, identity, recipient }),
+        '.env': await buildSopsAgeDotenvDocument({
+          values: { TOKEN: 'unreachable' }, identity: otherIdentity, recipient: otherRecipient,
+        }),
+      },
+      capability: {
+        policy: 'allow_plaintext',
+        inputs: [{
+          role: 'env',
+          encryption: 'sops-age',
+          recipientIds: [recipient],
+          sourcePath: 'extra.env',
+          materializedPath: 'extra.env',
+        }],
+        ready: true,
+        requiredRecipients: [recipient],
+      },
+    });
+
+    const { prepareRecoveryComposeOverlay } = await import('../services/gitops/sops/prepareOverlay');
+    const result = await prepareRecoveryComposeOverlay({ stackName, nodeId: 1, gitopsGenerationId: genId });
+    expect(result).toEqual(expect.objectContaining({
+      failureClass: 'missing_key',
+      error: expect.stringContaining(otherRecipient),
+    }));
+    expect(fs.existsSync(path.join(stackDir, '.env'))).toBe(true);
+  });
+
+  it('rolls back a restored file this node can open with one of its recipients', async () => {
+    const fs = await import('fs');
+    const path = await import('path');
+    const { buildSopsAgeDotenvDocument } = await import('./helpers/sopsFixtures');
+    const age = await import('age-encryption');
+    const identity = await age.generateIdentity();
+    const recipient = await age.identityToRecipient(identity);
+    const otherRecipient = await age.identityToRecipient(await age.generateIdentity());
+    const stackName = 'sops-recovery-any-recipient';
+    const { genId } = await seedRecoveryGeneration({
+      stackName,
+      appId: 'app-sops-any-recipient',
+      identities: [identity],
+      files: {
+        '.env': await buildSopsAgeDotenvDocument({
+          values: { TOKEN: 'legacy-multi-recipient' },
+          identity,
+          recipient,
+          extraRecipients: [otherRecipient],
+        }),
+      },
+      capability: ZERO_RECIPIENT_CAPABILITY,
+    });
+
+    const { prepareRecoveryComposeOverlay, destroyGitOpsOverlay } = await import('../services/gitops/sops/prepareOverlay');
+    const result = await prepareRecoveryComposeOverlay({ stackName, nodeId: 1, gitopsGenerationId: genId });
+    expect(result && 'overlayDir' in result).toBe(true);
+    if (!result || !('overlayDir' in result)) return;
+    expect(fs.readFileSync(path.join(result.overlayDir, '.env'), 'utf8')).toContain('legacy-multi-recipient');
+    await destroyGitOpsOverlay(result.binding);
+  });
+
+  it('rolls back the same restored file from its other recipient', async () => {
+    const fs = await import('fs');
+    const path = await import('path');
+    const { buildSopsAgeDotenvDocument } = await import('./helpers/sopsFixtures');
+    const age = await import('age-encryption');
+    const firstIdentity = await age.generateIdentity();
+    const firstRecipient = await age.identityToRecipient(firstIdentity);
+    const secondIdentity = await age.generateIdentity();
+    const secondRecipient = await age.identityToRecipient(secondIdentity);
+    const stackName = 'sops-recovery-other-recipient';
+    const { genId } = await seedRecoveryGeneration({
+      stackName,
+      appId: 'app-sops-other-recipient',
+      identities: [secondIdentity],
+      files: {
+        '.env': await buildSopsAgeDotenvDocument({
+          values: { TOKEN: 'legacy-multi-recipient' },
+          identity: firstIdentity,
+          recipient: firstRecipient,
+          extraRecipients: [secondRecipient],
+        }),
+      },
+      capability: ZERO_RECIPIENT_CAPABILITY,
+    });
+
+    const { prepareRecoveryComposeOverlay, destroyGitOpsOverlay } = await import('../services/gitops/sops/prepareOverlay');
+    const result = await prepareRecoveryComposeOverlay({ stackName, nodeId: 1, gitopsGenerationId: genId });
+    expect(result && 'overlayDir' in result).toBe(true);
+    if (!result || !('overlayDir' in result)) return;
+    expect(fs.readFileSync(path.join(result.overlayDir, '.env'), 'utf8')).toContain('legacy-multi-recipient');
+    await destroyGitOpsOverlay(result.binding);
+  });
+
+  it('refuses a multi-recipient restored file when no identity here opens it', async () => {
+    const { buildSopsAgeDotenvDocument } = await import('./helpers/sopsFixtures');
+    const age = await import('age-encryption');
+    const firstIdentity = await age.generateIdentity();
+    const firstRecipient = await age.identityToRecipient(firstIdentity);
+    const secondRecipient = await age.identityToRecipient(await age.generateIdentity());
+    const stackName = 'sops-recovery-no-recipient';
+    const { genId } = await seedRecoveryGeneration({
+      stackName,
+      appId: 'app-sops-no-recipient',
+      files: {
+        '.env': await buildSopsAgeDotenvDocument({
+          values: { TOKEN: 'unreachable' },
+          identity: firstIdentity,
+          recipient: firstRecipient,
+          extraRecipients: [secondRecipient],
+        }),
+      },
+      capability: ZERO_RECIPIENT_CAPABILITY,
+    });
+
+    const { prepareRecoveryComposeOverlay } = await import('../services/gitops/sops/prepareOverlay');
+    const result = await prepareRecoveryComposeOverlay({ stackName, nodeId: 1, gitopsGenerationId: genId });
+    expect(result).toEqual(expect.objectContaining({
+      failureClass: 'missing_key',
+      error: expect.stringContaining(firstRecipient),
+    }));
   });
 });

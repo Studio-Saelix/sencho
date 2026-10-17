@@ -48,7 +48,6 @@ import { classifyInputEncryption, resolveActiveRequiredRecipients } from './gito
 import { GitOpsDecryptOverlay } from './gitops/sops/overlay';
 import { gitSecretsAreaBase } from './gitops/managedPaths';
 import {
-  BIND_REMAP_FILENAME,
   PERSISTENT_BIND_REFUSAL,
   PERSISTENT_BIND_UNSAFE,
   planPersistentBindRemap,
@@ -342,6 +341,27 @@ export class ComposeService {
     stackDirOverride?: string,
     refuseIfUnreadable = false,
   ): Promise<string[]> {
+    const args = await this.authoredComposePrefix(stackName, stackDirOverride);
+    await this.appendPersistentBindRemap(
+      stackName,
+      args,
+      stackDirOverride,
+      refuseIfUnreadable || action.includes('up') || action.includes('create'),
+    );
+    args.push(...action);
+    return args;
+  }
+
+  /**
+   * Global-flag prefix for one command: authored `-f` files, the stack's env
+   * files, the Mesh override layer, and the project-name pin. No action, and no
+   * bind remap: a caller that layers a file of its own (a recovery override)
+   * between the two appends both itself, so the remap stays the last layer.
+   */
+  private async authoredComposePrefix(
+    stackName: string,
+    stackDirOverride?: string,
+  ): Promise<string[]> {
     const args: string[] = ['compose'];
     const filePrefix = authoredComposeFileArgs(stackName, this.nodeId, stackDirOverride);
     args.push(...filePrefix);
@@ -393,13 +413,6 @@ export class ComposeService {
       args.push('-f', overridePath);
     }
     this.pinProjectNameForOverride(stackName, args, stackDirOverride);
-    await this.appendPersistentBindRemap(
-      stackName,
-      args,
-      stackDirOverride,
-      refuseIfUnreadable || action.includes('up') || action.includes('create'),
-    );
-    args.push(...action);
     return args;
   }
 
@@ -415,7 +428,7 @@ export class ComposeService {
     stackDirOverride?: string,
     refuseIfUnreadable = false,
   ): Promise<void> {
-    const overlayDir = this.remapOverlayDir(stackDirOverride, args);
+    const overlayDir = this.remapOverlayDir(stackDirOverride);
     if (!overlayDir) return;
     await this.pinComposeFilesForRemap(stackName, args);
     const plan = await planPersistentBindRemap({
@@ -432,12 +445,18 @@ export class ComposeService {
     args.push('-f', plan.file);
   }
 
-  private remapOverlayDir(stackDirOverride: string | undefined, args: string[]): string | null {
+  /**
+   * The GitOps decrypt overlay a command runs in, or null when it does not run
+   * in one. Which layers an argv carries is not part of the question: the
+   * generated remap layer is appended once per assembly, by the callers below,
+   * so nothing here has to recognize it back out of a token (see
+   * `planPersistentBindRemap` for the one collision this could otherwise hide).
+   */
+  private remapOverlayDir(stackDirOverride: string | undefined): string | null {
     if (!stackDirOverride) return null;
     const overlayDir = path.resolve(stackDirOverride);
     const secretsRoot = path.resolve(gitSecretsAreaBase());
     if (!overlayDir.startsWith(secretsRoot + path.sep) || !fs.existsSync(overlayDir)) return null;
-    if (args.some((token) => token.endsWith(BIND_REMAP_FILENAME))) return null;
     return overlayDir;
   }
 
@@ -1009,8 +1028,18 @@ export class ComposeService {
    * file, because the live render fails on the ciphertext. Reading the overlay is
    * therefore not a way around the check, it is how the check still runs; see
    * `renderPilotBinds` for why the overlay is the render that speaks for a deploy.
+   *
+   * `composeArgsPrefix` is for a command whose invocation was rebuilt rather than
+   * derived from live state (a rollback from a captured generation). The caller
+   * hands over the exact prefix it is about to execute, so the model this guard
+   * reads is the one that command would run: same files, env selection, recovery
+   * layer, and working directory.
    */
-  private async assertSafePilotBindMapping(stackName: string, overlayDir?: string): Promise<void> {
+  private async assertSafePilotBindMapping(
+    stackName: string,
+    overlayDir?: string,
+    composeArgsPrefix?: string[],
+  ): Promise<void> {
     if (process.env.SENCHO_MODE !== 'pilot') return;
 
     let mounts: Array<{ source: string; destination: string }> | null;
@@ -1026,7 +1055,7 @@ export class ComposeService {
     const hostComposeDir = resolveHostBindPath(composeDir, mounts);
     if (!hostComposeDir || pathsMatch(hostComposeDir, composeDir)) return;
 
-    const analysis = await this.renderPilotBinds(stackName, overlayDir);
+    const analysis = await this.renderPilotBinds(stackName, overlayDir, composeArgsPrefix);
     if (!analysis) return;
 
     const unsafeBind = analysis.model.services
@@ -1090,10 +1119,18 @@ export class ComposeService {
   private async renderPilotBinds(
     stackName: string,
     overlayDir?: string,
+    composeArgsPrefix?: string[],
   ): Promise<{ model: EffectiveModel; bases: string[]; deviceSources: string[] } | null> {
-    const rendered = overlayDir
-      ? await this.renderConfig(stackName, { stackDirOverride: overlayDir })
-      : await this.renderConfig(stackName);
+    let rendered: Awaited<ReturnType<ComposeService['renderConfig']>>;
+    if (composeArgsPrefix) {
+      // A rebuilt invocation is the project this command runs, so the render
+      // reuses its exact global flags instead of deriving a second one.
+      rendered = await this.renderConfig(stackName, { stackDirOverride: overlayDir, composePrefix: composeArgsPrefix });
+    } else if (overlayDir) {
+      rendered = await this.renderConfig(stackName, { stackDirOverride: overlayDir });
+    } else {
+      rendered = await this.renderConfig(stackName);
+    }
     if (rendered.rendered === null) return null;
 
     const parsed = this.parsePilotBinds(rendered.rendered, stackName);
@@ -1742,16 +1779,30 @@ export class ComposeService {
     const sendOutput = (data: string) => {
       if (ws && ws.readyState === WebSocket.OPEN) ws.send(data);
     };
+    const upAction = ['up', '-d', '--remove-orphans', '--pull', 'never', '--no-build'];
+    const args = await this.buildComposeArgsWithRecoveryOverride(
+      stackName,
+      upAction,
+      overridePath,
+      invocation ?? null,
+      stackDir,
+    );
+    // The recovery is about to run this exact invocation, so the Pilot host-path
+    // guard reads the same one: the captured file set, the env selection, the
+    // recovery layer, and the decrypt overlay, all as assembled. Ordinary
+    // deployment already refuses a mismapped overlay; a rollback restoring a
+    // relative mount has the same consequence, so it refuses on the same terms.
+    // `buildComposeArgsWithRecoveryOverride` appends the action last, so the
+    // global-flag prefix is this argv without those tokens.
+    await this.assertSafePilotBindMapping(
+      stackName,
+      overlay?.overlayDir,
+      args.slice(0, args.length - upAction.length),
+    );
     await this.withRegistryAuth(async (env) => {
       await this.execute(
         'docker',
-        await this.buildComposeArgsWithRecoveryOverride(
-          stackName,
-          ['up', '-d', '--remove-orphans', '--pull', 'never', '--no-build'],
-          overridePath,
-          invocation ?? null,
-          stackDir,
-        ),
+        args,
         stackDir,
         ws,
         true,
@@ -1763,9 +1814,10 @@ export class ComposeService {
   }
 
   /**
-   * Authored (+ mesh) compose args with an optional recovery override layered LAST.
-   * When `invocation` is provided, use its validated captured prefix so recovery
-   * does not mix restored files with the live deploy-spec / project-env selection.
+   * Authored (+ mesh) compose args with an optional recovery override, and the
+   * bind remap layered last. When `invocation` is provided, use its validated
+   * captured prefix so recovery does not mix restored files with the live
+   * deploy-spec / project-env selection.
    */
   public async buildComposeArgsWithRecoveryOverride(
     stackName: string,
@@ -1777,7 +1829,7 @@ export class ComposeService {
     const useCaptured = hasUsableCapturedInvocation(invocation);
     const out = useCaptured
       ? ['compose', ...this.composePrefixFromCapturedInvocation(stackName, invocation, stackDirOverride)]
-      : await this.authoredComposeArgsPrefix(stackName, stackDirOverride);
+      : await this.authoredComposePrefix(stackName, stackDirOverride);
 
     if (useCaptured && invocation.meshEnabled) {
       await this.appendCapturedMeshLayer(stackName, out);
@@ -1812,17 +1864,6 @@ export class ComposeService {
     }
     await this.ensureExplicitComposeFiles(stackName, args, true);
     args.push('-f', overridePath);
-  }
-
-  /** Slice the global-flag prefix from authoredComposeArgs (no action tokens). */
-  private async authoredComposeArgsPrefix(
-    stackName: string,
-    stackDirOverride?: string,
-  ): Promise<string[]> {
-    const withSentinel = await this.authoredComposeArgs(stackName, ['__SENCHO_ACTION_SENTINEL__'], stackDirOverride);
-    const idx = withSentinel.indexOf('__SENCHO_ACTION_SENTINEL__');
-    const prefix = idx >= 0 ? withSentinel.slice(0, idx) : withSentinel;
-    return [...prefix];
   }
 
   /**
@@ -2606,10 +2647,16 @@ export class ComposeService {
    * caller reads it structurally (which external networks are declared) and
    * never hands it to the operator; a caller that has to explain a failed
    * render reports the withheld text instead of Compose's own words.
+   *
+   * `opts.composePrefix` renders a caller-assembled invocation (a rollback
+   * rebuilt from a captured generation) instead of one derived from live
+   * state. The prefix already carries the files, the env selection, the
+   * project-name pin, and any generated layer, so it is used verbatim; only
+   * the action is replaced with the render.
    */
   public async renderConfig(
     stackName: string,
-    opts?: { stackDirOverride?: string },
+    opts?: { stackDirOverride?: string; composePrefix?: string[] },
   ): Promise<{ rendered: string | null; stderr: string; code: number | null; timedOut: boolean; withheld?: boolean }> {
     if (!isValidStackName(stackName)) {
       throw new Error('Invalid stack path');
@@ -2638,24 +2685,29 @@ export class ComposeService {
       }
     }
     const stackDirOverride = overlayDir ?? undefined;
-    // Render the authored multi-file model (no mesh override) so the Compose Doctor
-    // sees every override file; single-file stacks get an empty prefix. The env-file
-    // flag keeps render resolving the same root .env the validator and deploy use.
-    let filePrefix: string[];
-    try {
-      filePrefix = authoredComposeFileArgs(stackName, this.nodeId, stackDirOverride);
-    } catch (err) {
-      throw err instanceof Error ? err : new Error(String(err));
+    let composeArgs: string[];
+    if (opts?.composePrefix) {
+      composeArgs = [...opts.composePrefix];
+    } else {
+      // Render the authored multi-file model (no mesh override) so the Compose Doctor
+      // sees every override file; single-file stacks get an empty prefix. The env-file
+      // flag keeps render resolving the same root .env the validator and deploy use.
+      let filePrefix: string[];
+      try {
+        filePrefix = authoredComposeFileArgs(stackName, this.nodeId, stackDirOverride);
+      } catch (err) {
+        throw err instanceof Error ? err : new Error(String(err));
+      }
+      const envFileArgs = await authoredComposeEnvFileArgs(stackName, this.nodeId, stackDirOverride);
+      composeArgs = ['compose', ...filePrefix, ...envFileArgs];
+      // The overlay renames the working directory to the operation id, so the
+      // render gets the same project-name pin the ensuing `up` gets. A no-op for
+      // the live path, where the stack directory already names the project.
+      // The bind remap is the same layer `up` loads, so the bind sources in this
+      // model are the ones the deploy will mount.
+      this.pinProjectNameForOverride(stackName, composeArgs, stackDirOverride);
+      if (overlayDir) await this.appendPersistentBindRemap(stackName, composeArgs, overlayDir);
     }
-    const envFileArgs = await authoredComposeEnvFileArgs(stackName, this.nodeId, stackDirOverride);
-    const composeArgs = ['compose', ...filePrefix, ...envFileArgs];
-    // The overlay renames the working directory to the operation id, so the
-    // render gets the same project-name pin the ensuing `up` gets. A no-op for
-    // the live path, where the stack directory already names the project.
-    // The bind remap is the same layer `up` loads, so the bind sources in this
-    // model are the ones the deploy will mount.
-    this.pinProjectNameForOverride(stackName, composeArgs, stackDirOverride);
-    if (overlayDir) await this.appendPersistentBindRemap(stackName, composeArgs, overlayDir);
     composeArgs.push('config', '--format', 'json');
     const withholdDiagnostics = overlayDir !== null;
     const child = spawn('docker', composeArgs, {

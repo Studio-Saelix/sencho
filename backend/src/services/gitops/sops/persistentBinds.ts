@@ -13,6 +13,9 @@ export const PERSISTENT_BIND_REFUSAL =
 export const PERSISTENT_BIND_UNSAFE =
   'Deploy blocked: Sencho could not keep a persistent mount on the stack directory while decrypting repository secrets. The deploy was not started.';
 
+export const PERSISTENT_BIND_RESERVED_NAME =
+  'Deploy blocked: the compose file ".sencho-bind-remap.yml" holds the reserved name Sencho uses for the storage layer it generates while decrypting repository secrets. Rename that file, then retry.';
+
 export type BindRemapPlan =
   | { action: 'skip' }
   | { action: 'refuse'; reason: string }
@@ -43,6 +46,23 @@ function isInside(child: string, parent: string): boolean {
   const base = path.resolve(parent);
   const target = path.resolve(child);
   return target === base || target.startsWith(base + path.sep);
+}
+
+/**
+ * Compose renders a literal `$` in a JSON model as `$$`, so a path read out of
+ * a render arrives in that escaped form while the same path on disk, in the
+ * overlay metadata, and in a refusal carries the literal character. Every path
+ * decision below is made in filesystem terms, so each value read from a render
+ * is reduced to its literal form once, at the point it is read, and a path
+ * written back into the generated layer is escaped again, because Compose
+ * interpolates the layers it loads.
+ */
+function literalDollars(value: string): string {
+  return value.split('$$').join('$');
+}
+
+function escapedDollars(value: string): string {
+  return value.split('$').join('$$');
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {
@@ -109,7 +129,8 @@ function isProjectRelativeSource(source: string): boolean {
 
 function relocate(source: string, ctx: RemapContext): Relocation {
   // The render is read with `--no-path-resolution`, so a relative source
-  // arrives in its authored form and the depth it climbs is still visible.
+  // arrives as the authored path, unresolved against any directory, and the
+  // depth it climbs is still visible.
   // Resolving it against the overlay's project directory gives the path this
   // run would use; the same source against the live project directory gives
   // the path the stack would use without the overlay, at every parent depth.
@@ -148,7 +169,7 @@ function relocate(source: string, ctx: RemapContext): Relocation {
 function bindSource(volume: unknown): string | null {
   const record = asRecord(volume);
   if (!record || record.type !== 'bind' || typeof record.source !== 'string') return null;
-  return record.source;
+  return literalDollars(record.source);
 }
 
 /** Top-level volume devices, by volume key. Absent for anything else. */
@@ -156,7 +177,7 @@ function volumeDevices(volumes: unknown): Map<string, string> {
   const devices = new Map<string, string>();
   for (const [name, entry] of Object.entries(asRecord(volumes) ?? {})) {
     const device = asRecord(asRecord(entry)?.driver_opts)?.device;
-    if (typeof device === 'string' && device !== '') devices.set(name, device);
+    if (typeof device === 'string' && device !== '') devices.set(name, literalDollars(device));
   }
   return devices;
 }
@@ -171,7 +192,9 @@ function rewriteServiceVolumes(
     if (!source) continue;
     const decision = relocate(source, ctx);
     if (decision.action === 'refuse') return { error: decision.reason };
-    if (decision.action === 'move') rewritten.push({ ...asRecord(volume), source: decision.live });
+    if (decision.action === 'move') {
+      rewritten.push({ ...asRecord(volume), source: escapedDollars(decision.live) });
+    }
   }
   return { volumes: rewritten };
 }
@@ -215,7 +238,9 @@ function rewriteVolumeDevices(
     }
     const decision = relocate(device, ctx);
     if (decision.action === 'refuse') return { error: decision.reason };
-    if (decision.action === 'move') entries[name] = { driver_opts: { device: decision.live } };
+    if (decision.action === 'move') {
+      entries[name] = { driver_opts: { device: escapedDollars(decision.live) } };
+    }
   }
   return { entries };
 }
@@ -225,6 +250,32 @@ function flagValue(args: string[], flag: string): string | undefined {
     if (args[i] === flag) return args[i + 1];
   }
   return undefined;
+}
+
+/** `-f` / `--file` values in one argv, in order. A flag's value is consumed, never read as a flag itself. */
+function composeFileValues(args: string[]): string[] {
+  const files: string[] = [];
+  for (let i = 0; i < args.length; i++) {
+    if (args[i] !== '-f' && args[i] !== '--file') continue;
+    const value = args[i + 1];
+    if (value !== undefined) files.push(value);
+    i += 1;
+  }
+  return files;
+}
+
+/**
+ * True when a compose file in this argv resolves to the reserved path the
+ * generated layer is written to, so writing it would replace a document the
+ * command is about to load. Identity is the resolved path, never the name: an
+ * authored file that merely ends with the reserved name is an ordinary compose
+ * file, and one that is exactly the reserved name elsewhere in the tree (a
+ * context directory, say) collides with nothing.
+ */
+function reservedRemapPathTaken(args: string[], overlayDir: string): boolean {
+  const overlay = path.resolve(overlayDir);
+  const target = path.resolve(overlay, BIND_REMAP_FILENAME);
+  return composeFileValues(args).some((value) => path.resolve(overlay, value) === target);
 }
 
 export function resolveOverlayProjectDir(composeArgs: string[], overlayRoot: string): string {
@@ -380,7 +431,8 @@ function readModel(
  * whose local driver binds a host directory. A failed render is skipped for a
  * read, so that command can report the real Compose failure. A command that
  * would start containers refuses instead: skipping there would let `up` mount
- * the overlay copies. A render we cannot trust always refuses.
+ * the overlay copies. A render we cannot trust always refuses, and so does a
+ * write that would land on a compose file the same argv already names.
  */
 export async function planPersistentBindRemap(args: {
   overlayDir: string;
@@ -422,6 +474,9 @@ export async function planPersistentBindRemap(args: {
   const decision = remapPersistentBindModel(rendered, ctx, resolvedDevices);
   if (!decision.ok) return { action: 'refuse', reason: decision.reason };
   if (!decision.override) return { action: 'skip' };
+  if (reservedRemapPathTaken(args.composeArgs, args.overlayDir)) {
+    return { action: 'refuse', reason: PERSISTENT_BIND_RESERVED_NAME };
+  }
   const file = await writeRemapFile(args.overlayDir, args.secretsRoot, YAML.stringify(decision.override));
   return { action: 'rewrite', file };
 }
