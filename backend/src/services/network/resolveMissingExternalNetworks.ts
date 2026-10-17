@@ -10,6 +10,7 @@ import { FileSystemService } from '../FileSystemService';
 import { parseEffectiveModel, type EffectiveModel } from '../preflight/effectiveModel';
 import { parseMissingRequiredVars } from '../../helpers/envVarParse';
 import { WITHHELD_DECRYPTED_RENDER_OUTPUT } from '../../helpers/decryptedComposeOutput';
+import { PERSISTENT_BIND_REFUSAL, PERSISTENT_BIND_UNSAFE } from '../gitops/sops/persistentBinds';
 import { getErrorMessage } from '../../utils/errors';
 import { redactSensitiveText, sanitizeForLog } from '../../utils/safeLog';
 import {
@@ -139,6 +140,8 @@ async function renderModel(
         : `Sencho could not render the effective Compose model. ${RENDER_GUIDANCE}`,
     };
   } catch (err) {
+    const raw = getErrorMessage(err, '');
+    if (raw === PERSISTENT_BIND_REFUSAL || raw === PERSISTENT_BIND_UNSAFE) throw err;
     const msg = redactSensitiveText(getErrorMessage(err, 'docker compose could not be started.'))
       .slice(0, MAX_RENDER_ERROR)
       .trim()

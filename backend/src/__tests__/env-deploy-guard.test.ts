@@ -270,13 +270,15 @@ describe('pilot bind guard over a GitOps decrypt overlay', () => {
 
     // Controls on both renders, so a green refusal below cannot mean the guard
     // simply found nothing to look at: the live one really does fail on the
-    // ciphertext port, and the overlay one really does resolve the relative bind
-    // against the overlay.
+    // ciphertext port, and the overlay one is rewritten onto the live stack
+    // directory, which is the path a mismatched Pilot mapping must still refuse.
     const compose = ComposeService.getInstance(nodeId);
     expect((await compose.renderConfig(stackName)).rendered).toBeNull();
     const overlay = await compose.renderConfig(stackName, { stackDirOverride: overlayDir });
     expect(overlay.rendered).not.toBeNull();
-    expect(overlay.rendered).toContain(path.join(overlayDir, 'data'));
+    const liveData = path.join(NodeRegistry.getInstance().getComposeDir(nodeId), stackName, 'data');
+    expect(overlay.rendered).toContain(liveData);
+    expect(overlay.rendered).not.toContain(path.join(overlayDir, 'data'));
 
     const error = await pilotGuard(stackName, overlayDir).then(() => null, (e: Error) => e);
 
@@ -315,11 +317,13 @@ describe('pilot bind guard over a GitOps decrypt overlay', () => {
     writeLiveStack(stackName, parentBindCompose, `PORT=${CIPHERTEXT_PORT}\n`);
     const overlayDir = writeOverlay(stackName, parentBindCompose, 'PORT=8080\n');
 
-    // Control: the bind really does leave the overlay directory and land beside
-    // it, which is the shape the containment check has to catch.
+    // Control: `../data` is rewritten to the live stack's parent, the same path
+    // the declaration has on a deploy that does not use an overlay.
     const overlay = await ComposeService.getInstance(nodeId).renderConfig(stackName, { stackDirOverride: overlayDir });
     expect(overlay.rendered).not.toBeNull();
-    expect(overlay.rendered).toContain(path.join(path.dirname(overlayDir), 'data'));
+    const composeDir = NodeRegistry.getInstance().getComposeDir(nodeId);
+    expect(overlay.rendered).toContain(path.join(composeDir, 'data'));
+    expect(overlay.rendered).not.toContain(path.join(path.dirname(overlayDir), 'data'));
 
     const error = await pilotGuard(stackName, overlayDir).then(() => null, (e: Error) => e);
 

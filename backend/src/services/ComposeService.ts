@@ -48,6 +48,12 @@ import { classifyInputEncryption, resolveActiveRequiredRecipients } from './gito
 import { GitOpsDecryptOverlay } from './gitops/sops/overlay';
 import { gitSecretsAreaBase } from './gitops/managedPaths';
 import {
+  BIND_REMAP_FILENAME,
+  PERSISTENT_BIND_REFUSAL,
+  PERSISTENT_BIND_UNSAFE,
+  planPersistentBindRemap,
+} from './gitops/sops/persistentBinds';
+import {
   decryptedComposeOutputWithheld,
   runWithDecryptedComposeOutput,
   WITHHELD_DECRYPTED_COMPOSE_OUTPUT,
@@ -312,6 +318,7 @@ export class ComposeService {
     stackName: string,
     action: string[],
     stackDirOverride?: string,
+    refuseIfUnreadable = false,
   ): Promise<string[]> {
     const args: string[] = ['compose'];
     const filePrefix = authoredComposeFileArgs(stackName, this.nodeId, stackDirOverride);
@@ -363,9 +370,67 @@ export class ComposeService {
       }
       args.push('-f', overridePath);
     }
-    args.push(...action);
     this.pinProjectNameForOverride(stackName, args, stackDirOverride);
+    await this.appendPersistentBindRemap(
+      stackName,
+      args,
+      stackDirOverride,
+      refuseIfUnreadable || action.includes('up') || action.includes('create'),
+    );
+    args.push(...action);
     return args;
+  }
+
+  /**
+   * Ordinary relative data binds must keep the live stack as their host path
+   * when Compose's working directory is a decrypt overlay. Secret files that
+   * were decrypted into the overlay stay there. The rewrite is a compose layer
+   * inside the overlay, so cleanup removes it with the decrypted copies.
+   */
+  private async appendPersistentBindRemap(
+    stackName: string,
+    args: string[],
+    stackDirOverride?: string,
+    refuseIfUnreadable = false,
+  ): Promise<void> {
+    const overlayDir = this.remapOverlayDir(stackDirOverride, args);
+    if (!overlayDir) return;
+    await this.pinComposeFilesForRemap(stackName, args);
+    const plan = await planPersistentBindRemap({
+      overlayDir,
+      liveRoot: this.resolveValidatedStackDir(stackName),
+      secretsRoot: path.resolve(gitSecretsAreaBase()),
+      composeArgs: args,
+      refuseIfUnreadable,
+    });
+    if (plan.action === 'skip') return;
+    if (plan.action === 'refuse') throw new Error(plan.reason);
+    if (!args.includes('-f') && !args.includes('--file')) throw new Error(PERSISTENT_BIND_UNSAFE);
+    args.push('-f', plan.file);
+  }
+
+  private remapOverlayDir(stackDirOverride: string | undefined, args: string[]): string | null {
+    if (!stackDirOverride) return null;
+    const overlayDir = path.resolve(stackDirOverride);
+    const secretsRoot = path.resolve(gitSecretsAreaBase());
+    if (!overlayDir.startsWith(secretsRoot + path.sep) || !fs.existsSync(overlayDir)) return null;
+    if (args.some((token) => token.endsWith(BIND_REMAP_FILENAME))) return null;
+    return overlayDir;
+  }
+
+  /** Name the base compose file before adding another `-f`, which disables discovery. */
+  private async pinComposeFilesForRemap(stackName: string, args: string[]): Promise<void> {
+    if (args.includes('-f') || args.includes('--file')) return;
+    const liveRoot = this.resolveValidatedStackDir(stackName);
+    if (!fs.existsSync(liveRoot)) return;
+    try {
+      await this.ensureExplicitComposeFiles(stackName, args, true);
+    } catch (err) {
+      const code = (err as { code?: string }).code;
+      if (code === 'INVALID_STACK_NAME' || code === 'INVALID_PATH' || code === 'SYMLINK_ESCAPE') throw err;
+      if (err instanceof Error && err.message.startsWith('No compose file found')) return;
+      throw err;
+    }
   }
 
   /**
@@ -388,7 +453,7 @@ export class ComposeService {
         flag: 'wx',
         mode: 0o600,
       });
-      const args = await this.authoredComposeArgs(stackName, [], stackDirOverride);
+      const args = await this.authoredComposeArgs(stackName, [], stackDirOverride, true);
       await this.ensureExplicitComposeFiles(stackName, args, true);
       args.push('-f', overlayPath, ...action, '--pull', 'never');
       return { args, overlayDir };
@@ -876,7 +941,12 @@ export class ComposeService {
             resolve(code);
           });
         });
-      } catch {
+      } catch (err) {
+        if (err instanceof Error && (
+          err.message === PERSISTENT_BIND_REFUSAL || err.message === PERSISTENT_BIND_UNSAFE
+        )) {
+          throw err;
+        }
         return; // a launch failure is not a missing variable
       }
       // A render that resolved reports no required-variable error at all, so
@@ -956,13 +1026,14 @@ export class ComposeService {
    * deploy is entitled to use.
    *
    * An overlay adds a second tree to stay out of, it does not replace the first.
-   * Compose resolves a relative bind against the directory it rendered in, so a
-   * bind under the overlay's own tree is a bind declared relative; the tree to
-   * compare that against sits one level above that directory, the same depth
+   * Ordinary relative data binds are rewritten onto the live stack before this
+   * render, so they show up inside the compose tree. A decrypted secret file
+   * that is itself mounted stays under the overlay, and the tree to compare
+   * that against sits one level above the overlay directory, the same depth
    * `this.baseDir` sits above a live stack. Comparing against the overlay
-   * directory itself would let `../data` through, which on the live stack the same
-   * declaration does not. The compose tree stays in the set as well, because a
-   * bind can also name it outright, and that is the tree the Pilot Agent maps.
+   * directory itself would let `../data` through when the rewrite did not move
+   * it. The compose tree stays in the set as well, because a bind can also name
+   * it outright, and that is the tree the Pilot Agent maps.
    *
    * The set has the same reach the live arm has always had, no more: one level of
    * `..` from the project directory is inside it and two is not, and a bind is
@@ -1672,6 +1743,12 @@ export class ComposeService {
       await this.ensureExplicitComposeFiles(stackName, out, !useCaptured);
       out.push('-f', recoveryOverridePath);
     }
+    await this.appendPersistentBindRemap(
+      stackName,
+      out,
+      stackDirOverride,
+      action.includes('up') || action.includes('create'),
+    );
     out.push(...action);
     return out;
   }
@@ -2525,11 +2602,15 @@ export class ComposeService {
       throw err instanceof Error ? err : new Error(String(err));
     }
     const envFileArgs = await authoredComposeEnvFileArgs(stackName, this.nodeId, stackDirOverride);
-    const composeArgs = ['compose', ...filePrefix, ...envFileArgs, 'config', '--format', 'json'];
+    const composeArgs = ['compose', ...filePrefix, ...envFileArgs];
     // The overlay renames the working directory to the operation id, so the
     // render gets the same project-name pin the ensuing `up` gets. A no-op for
     // the live path, where the stack directory already names the project.
+    // The bind remap is the same layer `up` loads, so the bind sources in this
+    // model are the ones the deploy will mount.
     this.pinProjectNameForOverride(stackName, composeArgs, stackDirOverride);
+    if (overlayDir) await this.appendPersistentBindRemap(stackName, composeArgs, overlayDir);
+    composeArgs.push('config', '--format', 'json');
     const withholdDiagnostics = overlayDir !== null;
     const child = spawn('docker', composeArgs, {
       cwd: stackDir,

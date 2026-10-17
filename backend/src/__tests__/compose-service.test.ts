@@ -143,6 +143,7 @@ vi.mock('child_process', () => ({ spawn: mockSpawn, execFile: vi.fn() }));
 
 vi.mock('fs', () => ({
   default: {
+    existsSync: () => false,
     mkdtempSync: (...args: unknown[]) => mockMkdtempSync(...args),
     writeFileSync: (...args: unknown[]) => mockWriteFileSync(...args),
     unlinkSync: (...args: unknown[]) => mockUnlinkSync(...args),
@@ -154,6 +155,7 @@ vi.mock('fs', () => ({
       rm: (path: string, opts?: unknown) => mockPromisesRm(path, opts),
     },
   },
+  existsSync: () => false,
   mkdtempSync: (...args: unknown[]) => mockMkdtempSync(...args),
   writeFileSync: (...args: unknown[]) => mockWriteFileSync(...args),
   unlinkSync: (...args: unknown[]) => mockUnlinkSync(...args),
