@@ -494,6 +494,20 @@ describe('resolveRollbackInventory: inputs that cannot be captured', () => {
     expect(inventory.uncapturedInputs[0]).toContain('[redacted]');
   });
 
+  it.each([
+    ['a token as the user info', 'https://ghp_t0kenvalue123@example.com/base.yaml', 'ghp_t0kenvalue123', 'https://[redacted]@example.com/base.yaml'],
+    ['a token in the query string', 'https://example.com/base.yaml?token=abc123secret', 'abc123secret', 'https://example.com/base.yaml?[redacted]'],
+    ['a token in the fragment', 'https://example.com/base.yaml#access=abc123secret', 'abc123secret', 'https://example.com/base.yaml?[redacted]'],
+  ])('redacts %s from the notes', async (_label, url, secret, shown) => {
+    await writeCompose(`include:\n  - path: "${url}"\nservices:\n  web:\n    image: nginx\n`);
+
+    const inventory = await resolveRollbackInventory(1, STACK);
+
+    expect(inventory.uncapturedInputs).toHaveLength(1);
+    expect(inventory.uncapturedInputs[0]).not.toContain(secret);
+    expect(inventory.uncapturedInputs[0]).toContain(shown);
+  });
+
   it('leaves an ordinary override file name readable in the notes', async () => {
     await writeCompose('include:\n  - path: ../shared-common/docker-compose.production.override.yml\nservices:\n  web:\n    image: nginx\n');
 

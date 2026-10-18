@@ -397,9 +397,16 @@ async function resolveAuthoredInventory(
   const uncaptured = new Set<string>();
   const uncapturedPaths = new Set<string>();
 
-  /** Notes reach logs and the readiness API, and a URL include can carry credentials. */
+  /**
+   * Notes reach logs and the readiness API, and a URL include can carry
+   * credentials in its user info (`https://token@host`) or its query string.
+   */
   const addUncaptured = (note: string): void => {
-    uncaptured.add(note.replace(/(\b[a-z][a-z0-9+.-]*:\/\/)[^/\s:@]+:[^/\s@]+@/gi, '$1[redacted]@'));
+    uncaptured.add(
+      note
+        .replace(/(\b[a-z][a-z0-9+.-]*:\/\/)[^/\s@]*@/gi, '$1[redacted]@')
+        .replace(/(\b[a-z][a-z0-9+.-]*:\/\/[^\s?#]*)[?#]\S*/gi, '$1?[redacted]'),
+    );
   };
 
   /**
