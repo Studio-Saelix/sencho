@@ -1828,7 +1828,7 @@ export class ComposeService {
   ): Promise<string[]> {
     const useCaptured = hasUsableCapturedInvocation(invocation);
     const out = useCaptured
-      ? ['compose', ...this.composePrefixFromCapturedInvocation(stackName, invocation, stackDirOverride)]
+      ? ['compose', ...await this.composePrefixFromCapturedInvocation(stackName, invocation, stackDirOverride)]
       : await this.authoredComposePrefix(stackName, stackDirOverride);
 
     if (useCaptured && invocation.meshEnabled) {
@@ -1989,16 +1989,73 @@ export class ComposeService {
   }
 
   /**
+   * The real form of a captured path, falling back to the lexical one when it
+   * does not resolve (missing, dangling, or unreadable). Compose reports a
+   * missing env file itself; an unresolvable path is not a path escape.
+   */
+  private async realCapturedPath(abs: string): Promise<string> {
+  try {
+    return await fs.promises.realpath(abs);
+  } catch {
+    return abs;
+  }
+}
+
+  /**
+   * Resolve a captured `--env-file` to the path recovery must launch with.
+   *
+   * Capture emits the resolved real path of a selected project env file, and
+   * the helper that produced it authorizes any path inside the compose root,
+   * not only inside the stack directory. A stack whose selected env file links
+   * to a sibling in that root therefore captures an env-file recovery has to
+   * accept, so recovery validates against the same root instead of a narrower
+   * one. Containment is decided on the real path, as capture does, so a name
+   * inside the root whose link target leaves it is refused rather than followed.
+   * An in-stack path is mirrored under the overlay root; an authorized path
+   * outside the stack directory keeps its live location, because a recovery
+   * overlay mirrors the stack directory alone. Both the lexical and the real
+   * compose root are matched, so a relocated (symlinked) compose directory
+   * still resolves. Anything outside the compose root is refused.
+   */
+  private async resolveCapturedEnvFile(
+    stackName: string,
+    abs: string,
+    stackDir: string,
+    pathRoot: string,
+  ): Promise<string> {
+    const baseResolved = path.resolve(this.baseDir);
+    // Real compose base plus the lexical stack name, the same rule the
+    // generation store applies, so a stack dir that links elsewhere stays out.
+    const realBase = await this.realCapturedPath(baseResolved);
+    const roots = [{ stackDir, base: baseResolved }];
+    if (realBase !== baseResolved) {
+      roots.push({ stackDir: path.join(realBase, stackName), base: realBase });
+    }
+    const realAbs = await this.realCapturedPath(abs);
+    for (const root of roots) {
+      if (!isPathWithinBase(realAbs, root.stackDir)) continue;
+      const remapped = this.remapCapturedAbsToRoot(abs, root.stackDir, pathRoot);
+      if (!remapped) {
+        throw new Error(`Captured env-file path escapes overlay directory for "${stackName}"`);
+      }
+      return remapped;
+    }
+    if (roots.some(root => isPathWithinBase(realAbs, root.base))) return abs;
+    throw new Error(`Captured env-file path escapes stack directory for "${stackName}"`);
+  }
+
+  /**
    * Rebuild a spawn-safe compose global-flag prefix from a generation's
    * captured invocation. Captured paths must resolve inside the stack
-   * directory; when overlayDir is set, absolute --env-file and
-   * --project-directory paths are rewritten under that overlay.
+   * directory (a captured `--env-file` inside the compose root, which is the
+   * root its capture-time validation uses); when overlayDir is set, absolute
+   * --env-file and --project-directory paths are rewritten under that overlay.
    */
-  private composePrefixFromCapturedInvocation(
+  private async composePrefixFromCapturedInvocation(
     stackName: string,
     invocation: RollbackInvocationRecord,
     overlayDir?: string,
-  ): string[] {
+  ): Promise<string[]> {
     const stackDir = this.resolveValidatedStackDir(stackName);
     const pathRoot = overlayDir ? path.resolve(overlayDir) : stackDir;
     // Empty prefix is valid (single-file auto-discovery at capture time).
@@ -2022,15 +2079,12 @@ export class ComposeService {
         if (!envPath) {
           throw new Error(`Invalid captured --env-file for stack "${stackName}"`);
         }
-        const abs = path.resolve(envPath);
-        if (!isPathWithinBase(abs, stackDir)) {
-          throw new Error(`Captured env-file path escapes stack directory for "${stackName}"`);
-        }
-        const remapped = this.remapCapturedAbsToRoot(abs, stackDir, pathRoot);
-        if (!remapped) {
-          throw new Error(`Captured env-file path escapes overlay directory for "${stackName}"`);
-        }
-        out.push('--env-file', remapped);
+        out.push('--env-file', await this.resolveCapturedEnvFile(
+          stackName,
+          path.resolve(envPath),
+          stackDir,
+          pathRoot,
+        ));
         continue;
       }
       if (token === '--project-directory') {
@@ -2450,7 +2504,7 @@ export class ComposeService {
     // scan with the live deploy-spec / project-env selection.
     const useCaptured = hasUsableCapturedInvocation(invocation);
     const fileAndEnvPrefix = useCaptured
-      ? [...this.composePrefixFromCapturedInvocation(stackName, invocation)]
+      ? await this.composePrefixFromCapturedInvocation(stackName, invocation)
       : [
         ...authoredComposeFileArgs(stackName, this.nodeId),
         ...(await authoredComposeEnvFileArgs(stackName, this.nodeId)),
