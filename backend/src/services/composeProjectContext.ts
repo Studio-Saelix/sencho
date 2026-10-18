@@ -131,11 +131,17 @@ class AuthoredComposeProjectContext implements ComposeProjectContext {
     }
 
     const inventory = await resolveRollbackInventory(this.nodeId, this.stackName);
+    // The live uncaptured paths travel with the entries: they are the managed
+    // inputs this generation cannot hold, and a restore that never saw them
+    // would leave a link created after capture in place and read its target.
     return RollbackGenerationStore.restoreGeneration(
       this.nodeId,
       this.stackName,
       generationId,
-      inventory.entries.map((e) => e.relativePath),
+      [
+        ...inventory.entries.map((e) => e.relativePath),
+        ...inventory.uncapturedRelativePaths,
+      ],
       transactionMeta,
     );
   }

@@ -287,6 +287,7 @@ async function resolveGitInventory(
     projectDirectory: null,
     projectName: stackName,
     explicitComposeFiles: [],
+    composeLayers: [],
     meshOverrideRelativePath: null,
     meshEnabled: false,
   };
@@ -361,6 +362,9 @@ async function resolveGitInventory(
     projectDirectory: read.project.effectiveProjectDir,
     projectName: read.project.projectName || stackName,
     explicitComposeFiles: [...gitSourceLocalComposeFiles(read.project.composeFiles)],
+    // The manifest's compose files are the deploy's own -f list, so they are
+    // also its complete set of project-root layers.
+    composeLayers: [...gitSourceLocalComposeFiles(read.project.composeFiles)],
     meshOverrideRelativePath: null,
     meshEnabled,
   };
@@ -409,8 +413,36 @@ async function resolveAuthoredInventory(
     );
   };
 
-  /**
-   * True only for a regular file, or a link to one that stays inside the stack.
+  /** Both Compose interpolation forms, matching isDynamicPath's own definition. */
+const INTERPOLATION_PATTERN = /\$\{[^}]*\}|\$[A-Za-z_][A-Za-z0-9_]*/g;
+
+/**
+ * The one stack-relative path a dynamic source path could still resolve to: the
+ * literal suffix after its last interpolation, with the substituted value
+ * standing in for the directory above it. A capture that cannot read the
+ * substitution has to treat that name as an input it does not hold, because
+ * Compose may point the input at it later. A source that escapes the stack, or
+ * whose suffix does, names nothing a capture could have held. Over-reporting
+ * only leaves a file the operator owns in place; it never widens what a
+ * generation captures.
+ */
+function literalTailCandidate(sourcePath: string): string | null {
+  if (isHostAbsolutePath(sourcePath)) return null;
+  if (sourcePath.split('/').some((seg) => seg === '..')) return null;
+  let afterInterpolation = -1;
+  for (const match of sourcePath.matchAll(INTERPOLATION_PATTERN)) {
+    afterInterpolation = match.index + match[0].length;
+  }
+  if (afterInterpolation === -1) return null;
+  // The leading separator is the join with the substituted directory, which may
+  // be empty or ".", so it is dropped before the tail is validated.
+  const tail = posixRel(sourcePath.slice(afterInterpolation).replace(/^\/+/, ''));
+  if (!tail || !isValidRelativeStackPath(tail)) return null;
+  return tail;
+}
+
+/**
+ * True only for a regular file, or a link to one that stays inside the stack.
    * Anything else returns false. A link capture cannot hold is recorded by
    * `mode`: 'refuse' stops the capture (compose files), 'note' lists it as not
    * captured, 'silent' skips the note for application data. In the last two its
@@ -444,12 +476,17 @@ async function resolveAuthoredInventory(
     return false;
   };
 
-  const composePaths: string[] = [];
+  // Every capturable root is captured, but Compose selects exactly one and adds
+// its implicit override. composePaths holds the whole captured set;
+// selectedLayers holds what a compose run with no explicit -f would load.
+const composePaths: string[] = [];
+  const selectedLayers: string[] = [];
   for (const name of ROOT_COMPOSE_FILENAMES) {
     const resolved = resolveStackRel(stackRoot, name);
     if (!resolved) continue;
     if (!(await capturable(resolved.relativePath, 'refuse'))) continue;
     composePaths.push(resolved.relativePath);
+    if (selectedLayers.length === 0) selectedLayers.push(resolved.relativePath);
     upsertEntry(map, foldedOwners, {
       relativePath: resolved.relativePath,
       dependencyKind: 'compose-root',
@@ -465,6 +502,10 @@ async function resolveAuthoredInventory(
     if (resolved && await capturable(resolved.relativePath, 'refuse')) {
       if (!composePaths.includes(resolved.relativePath)) {
         composePaths.push(resolved.relativePath);
+        // Same first-match-wins rule getOverrideFilename already resolved, so a
+        // stack holding both compose.yaml and docker-compose.yml pins only the
+        // one Compose would have discovered.
+        if (selectedLayers.length === 1) selectedLayers.push(resolved.relativePath);
       }
       upsertEntry(map, foldedOwners, {
         relativePath: resolved.relativePath,
@@ -542,6 +583,8 @@ async function resolveAuthoredInventory(
         addUncaptured(
           `${dyn.kind} ${dyn.sourcePath}${refs} is resolved by Compose at deploy time and is not captured`,
         );
+        const candidate = literalTailCandidate(dyn.sourcePath);
+        if (candidate) uncapturedPaths.add(candidate);
       }
 
       for (const input of parsed.inputs) {
@@ -616,6 +659,9 @@ async function resolveAuthoredInventory(
       projectDirectory: null,
       projectName: stackName,
       explicitComposeFiles: explicitComposeFiles.length > 0 ? explicitComposeFiles : composePaths,
+      // The layer set Compose would auto-select, so recovery pins exactly what
+      // the capture-time run loaded rather than merging every root that exists.
+      composeLayers: [...selectedLayers],
       meshOverrideRelativePath: null,
       meshEnabled,
     },

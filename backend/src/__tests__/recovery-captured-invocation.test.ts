@@ -330,4 +330,113 @@ describe('captured invocation on recovery Compose args', () => {
       db.setStackProjectEnvFiles(nodeId, stackName, []);
     }
   });
+
+  it('pins the captured root when an ordinary stack captured no -f and a higher-priority root appeared', async () => {
+    const stackName = 'inv-late-root';
+    const stackDir = path.join(composeDir, stackName);
+    await fs.promises.mkdir(stackDir, { recursive: true });
+    await fs.promises.writeFile(
+      path.join(stackDir, 'docker-compose.yml'),
+      'services:\n  web:\n    image: nginx\n',
+      'utf8',
+    );
+
+    // A real authored capture: no applied deploy spec, so the prefix is empty
+    // and Compose's own discovery chose docker-compose.yml at deploy time.
+    const { resolveRollbackInventory } = await import('../services/rollbackInventory');
+    const inventory = await resolveRollbackInventory(nodeId, stackName);
+    expect(inventory.coverageRefusal).toBeNull();
+    expect(inventory.invocation.composeArgsPrefix).toEqual([]);
+    expect(inventory.invocation.composeLayers).toEqual(['docker-compose.yml']);
+
+    const captured = {
+      composeArgsPrefix: inventory.invocation.composeArgsPrefix,
+      projectDirectory: null,
+      projectName: stackName,
+      explicitComposeFiles: inventory.invocation.explicitComposeFiles,
+      composeLayers: inventory.invocation.composeLayers,
+    };
+
+    // A later edit adds a root Compose prefers over the captured one.
+    await fs.promises.writeFile(
+      path.join(stackDir, 'compose.yaml'),
+      'services:\n  web:\n    image: nginx\n    command: ["false"]\n',
+      'utf8',
+    );
+
+    const { ComposeService } = await import('../services/ComposeService');
+    const args = await ComposeService.getInstance(nodeId).buildComposeArgsWithRecoveryOverride(
+      stackName,
+      ['up', '-d'],
+      null,
+      captured,
+    );
+    expect(args).toEqual(['compose', '-f', 'docker-compose.yml', 'up', '-d']);
+  });
+
+  it('names the implicit override for a generation captured before compose layers were recorded', async () => {
+    const stackName = 'inv-legacy-override';
+    const stackDir = path.join(composeDir, stackName);
+    await fs.promises.mkdir(stackDir, { recursive: true });
+    await fs.promises.writeFile(path.join(stackDir, 'compose.yaml'), 'services:\n  web:\n    image: nginx\n', 'utf8');
+    await fs.promises.writeFile(
+      path.join(stackDir, 'docker-compose.override.yml'),
+      'services:\n  web:\n    environment:\n      - FOO=bar\n',
+      'utf8',
+    );
+
+    const { ComposeService } = await import('../services/ComposeService');
+    const captured = {
+      composeArgsPrefix: [],
+      projectDirectory: null,
+      projectName: stackName,
+      explicitComposeFiles: [],
+    };
+
+    const recoveryOverride = path.join(stackDir, '.sencho-recovery-aaaaaaaaaaaa.yml');
+    const args = await ComposeService.getInstance(nodeId).buildComposeArgsWithRecoveryOverride(
+      stackName,
+      ['up', '-d'],
+      recoveryOverride,
+      captured,
+    );
+    // The trailing recovery layer would otherwise suppress the override the
+    // stack's own compose run loads.
+    expect(args).toEqual([
+      'compose',
+      '-f', 'compose.yaml',
+      '-f', 'docker-compose.override.yml',
+      '-f', recoveryOverride,
+      'up', '-d',
+    ]);
+  });
+
+  it('does not pin an included file as a project-root layer', async () => {
+    const stackName = 'inv-include-layer';
+    const stackDir = path.join(composeDir, stackName);
+    await fs.promises.mkdir(path.join(stackDir, 'inc'), { recursive: true });
+    await fs.promises.writeFile(path.join(stackDir, 'inc', 'base.yaml'), 'services: {}\n', 'utf8');
+    await fs.promises.writeFile(
+      path.join(stackDir, 'docker-compose.yml'),
+      'include:\n  - ./inc/base.yaml\nservices:\n  web:\n    image: nginx\n',
+      'utf8',
+    );
+
+    const { resolveRollbackInventory } = await import('../services/rollbackInventory');
+    const inventory = await resolveRollbackInventory(nodeId, stackName);
+    expect(inventory.coverageRefusal).toBeNull();
+    // The include is an input, so it is named as an explicit compose file but
+    // never as a project-root layer.
+    expect(inventory.invocation.explicitComposeFiles).toContain('inc/base.yaml');
+    expect(inventory.invocation.composeLayers).toEqual(['docker-compose.yml']);
+
+    const { ComposeService } = await import('../services/ComposeService');
+    const args = await ComposeService.getInstance(nodeId).buildComposeArgsWithRecoveryOverride(
+      stackName,
+      ['up', '-d'],
+      null,
+      inventory.invocation,
+    );
+    expect(args).toEqual(['compose', '-f', 'docker-compose.yml', 'up', '-d']);
+  });
 });

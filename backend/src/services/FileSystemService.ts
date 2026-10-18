@@ -91,6 +91,11 @@ const COMPOSE_OVERRIDE_FILENAMES = [
 ] as const;
 const COMPOSE_OVERRIDE_FILENAME_SET = new Set<string>(COMPOSE_OVERRIDE_FILENAMES);
 
+/** True when `name` is an override filename docker compose can auto-discover, and nothing else. */
+export function isComposeOverrideBasename(name: string): boolean {
+  return COMPOSE_OVERRIDE_FILENAME_SET.has(name);
+}
+
 /** True for adopt-scan candidates: any .yml/.yaml that is not a compose override. */
 function isAdoptYamlFilename(name: string): boolean {
   return !COMPOSE_OVERRIDE_FILENAME_SET.has(name) && (name.endsWith('.yml') || name.endsWith('.yaml'));

@@ -1836,9 +1836,14 @@ export class ComposeService {
     }
 
     if (recoveryOverridePath) {
-      // Captured invocations already encode their file set; live args may need
-      // an explicit base (+ user override) so docker compose accepts a trailing -f.
-      await this.ensureExplicitComposeFiles(stackName, out, !useCaptured);
+      // A captured invocation encodes its file set once it recorded its compose
+      // layers; older generations did not, so for those the implicit override
+      // still has to be named or the trailing layer silently drops it.
+      await this.ensureExplicitComposeFiles(
+        stackName,
+        out,
+        !useCaptured || !invocation?.composeLayers,
+      );
       out.push('-f', recoveryOverridePath);
     }
     await this.appendPersistentBindRemap(
@@ -2061,6 +2066,23 @@ export class ComposeService {
     // Empty prefix is valid (single-file auto-discovery at capture time).
     const raw = [...invocation.composeArgsPrefix];
     const out: string[] = [];
+    // Compose picks the root compose file and the implicit override by name, so
+    // an ordinary single-file stack captured no -f and left the choice to
+    // discovery. Recovery pins the layers the generation captured instead:
+    // otherwise a root added after capture wins discovery and the recovery runs
+    // a configuration the generation never held. Only the layers Compose
+    // selects at the project root belong here, never an included file.
+    if (invocation.composeLayers && !raw.includes('-f') && !raw.includes('--file')) {
+      for (const layer of invocation.composeLayers) {
+        if (!isValidRelativeStackPath(layer)) {
+          throw new Error(`Invalid captured compose layer path for stack "${stackName}"`);
+        }
+        if (!isPathWithinBase(path.resolve(stackDir, layer), stackDir)) {
+          throw new Error(`Captured compose layer path escapes stack directory for "${stackName}"`);
+        }
+        out.push('-f', layer);
+      }
+    }
     for (let i = 0; i < raw.length; i++) {
       const token = raw[i];
       if (token === '-f' || token === '--file') {

@@ -50,6 +50,19 @@ export interface RollbackInvocationRecord {
   projectDirectory: string | null;
   projectName: string | null;
   explicitComposeFiles: string[];
+  /**
+   * Stack-relative Compose layers this invocation selected at the project root,
+   * in application order: the single root compose file Compose discovers, plus
+   * its implicit override when one exists. Distinct from `explicitComposeFiles`,
+   * which also names included and extended files, because those are inputs
+   * rather than invocation layers. Recovery pins this set when the captured
+   * prefix carries no `-f`, so a root that appeared after capture cannot shadow
+   * the captured project through Compose's own auto-discovery. Omitted on
+   * generations captured before it was recorded: those keep the prefix they were
+   * captured with, so a rollback that also re-applies a recovery override names
+   * the base compose file without the implicit override.
+   */
+  composeLayers?: string[];
   /** Stack-relative mesh override path when Mesh was part of the capture invocation. */
   meshOverrideRelativePath?: string | null;
   /** True when Mesh was enabled for the stack at capture time. */

@@ -12,7 +12,7 @@ import { createHash, randomUUID } from 'crypto';
 import { promises as fsPromises } from 'fs';
 import path from 'path';
 import { CryptoService } from './CryptoService';
-import { FileSystemService } from './FileSystemService';
+import { FileSystemService, isComposeBasename, isComposeOverrideBasename } from './FileSystemService';
 import { isValidStackName } from '../utils/validation';
 import {
   ROLLBACK_GENERATION_SCHEMA_VERSION,
@@ -37,10 +37,16 @@ const PRE_RESTORE_BLOBS = 'blobs';
 
 interface PreRestoreIndexEntry {
   relativePath: string;
-  state: 'present' | 'absent';
+  state: 'present' | 'absent' | 'link';
   blobId?: string;
   mode?: number | null;
   encrypted?: boolean;
+  /**
+   * Raw readlink value for state 'link'. A managed path that is now a link out
+   * of the stack has no content to snapshot, so the link itself is recorded:
+   * restore may unlink it, and a revert has to be able to put it back.
+   */
+  linkTarget?: string;
 }
 
 interface PreRestoreIndex {
@@ -529,7 +535,12 @@ export class RollbackGenerationStore {
    * inside the managed set). Paths outside both sets are left untouched, and
    * so are the manifest's uncapturedRelativePaths even when a caller lists them.
    * A generation that recorded uncaptured inputs ignores liveManagedPaths for
-   * deletes, because it cannot tell which live files those inputs named.
+   * deletes, because it cannot tell which live files those inputs named, except
+   * for Compose layers: Compose selects a root or an implicit override by name
+   * and never through an interpolatable input, so a live layer the generation
+   * did not record was added after capture and must not shadow the captured
+   * project. Compose layers are removed as leaves, so a shared target is never
+   * followed or deleted.
    *
    * Durability: copies the affected live paths into pre-restore/ and writes
    * restore-intent.json (including Git DB + manifesto preimage) before mutation.
@@ -573,10 +584,18 @@ export class RollbackGenerationStore {
     }
     // A partial generation cannot say what its uncaptured inputs resolved to,
     // so a file that appeared since capture may be one of them (an env file a
-    // ${VAR} path now names). Only what the generation itself recorded is
-    // deleted; the live discovery is not trusted to add to that.
+    // ${VAR} path now names). A Compose layer is the exception: Compose picks a
+    // root or an implicit override by name and never resolves one through an
+    // interpolatable input, so a live layer the generation did not record was
+    // added after capture and would otherwise shadow the captured project for
+    // recovery and for the next ordinary action alike.
     if ((manifest.uncapturedInputs ?? []).length === 0) {
       for (const rel of liveManagedPaths) considerDelete(rel);
+    } else {
+      for (const rel of liveManagedPaths) {
+        const key = posixRel(rel);
+        if (isComposeBasename(key) || isComposeOverrideBasename(key)) considerDelete(key);
+      }
     }
 
     const restores: Array<{
@@ -594,17 +613,30 @@ export class RollbackGenerationStore {
       });
     }
 
-    const affectedPaths = [
-      ...restores.map((r) => r.relativePath),
-      ...deleteRelByKey.values(),
-    ];
+    const restorablePaths = restores.map((r) => r.relativePath);
+    const affectedPaths = [...restorablePaths, ...deleteRelByKey.values()];
 
     const fsSvc = FileSystemService.getInstance(nodeId);
     const scope = { protectedEnabled: false as const };
 
     // Refuse directory-at-file-path collisions before any snapshot or mutation.
-    for (const rel of affectedPaths) {
+    // A path being written is followed, because the write itself follows it and
+    // has to stay inside the stack. A path only being deleted is observed on the
+    // leaf, so a managed path that has become a link is judged as a link: the
+    // delete removes the link and never reaches a target outside the stack.
+    for (const rel of restorablePaths) {
       const kind = await fsSvc.pathKind(stackName, rel, scope);
+      if (kind === 'directory') {
+        throw Object.assign(
+          new Error(
+            `Managed path "${rel}" is a directory; refusing restore that would replace or delete it as a file`,
+          ),
+          { code: 'DIRECTORY_COLLISION' },
+        );
+      }
+    }
+    for (const rel of deleteRelByKey.values()) {
+      const kind = await fsSvc.observeStackPath(stackName, rel, scope);
       if (kind === 'directory') {
         throw Object.assign(
           new Error(
@@ -671,7 +703,7 @@ export class RollbackGenerationStore {
 
       for (const rel of deleteRelByKey.values()) {
         try {
-          const kind = await fsSvc.pathKind(stackName, rel, scope);
+          const kind = await fsSvc.observeStackPath(stackName, rel, scope);
           if (kind === null) continue;
           if (kind === 'directory') {
             throw Object.assign(
@@ -811,6 +843,29 @@ export class RollbackGenerationStore {
     }
   }
 
+  private static async recreateManagedSymlink(
+    nodeId: number,
+    stackName: string,
+    rel: string,
+    linkTarget: string,
+  ): Promise<void> {
+    const composeBase = path.resolve(FileSystemService.getInstance(nodeId).getBaseDir());
+    const stackRoot = path.resolve(composeBase, stackName);
+    if (!stackRoot.startsWith(composeBase + path.sep)) {
+      throw Object.assign(new Error('Stack name escapes compose directory'), { code: 'INVALID_PATH' });
+    }
+    const linkPath = path.resolve(stackRoot, posixRel(rel));
+    // Inline barrier at the symlink sink: the path being created is contained
+    // against the stack root. linkTarget is the operator's own value and is
+    // intentionally not resolved, because restoring a link means restoring the
+    // link, and nothing is written through it.
+    if (!linkPath.startsWith(stackRoot + path.sep)) {
+      throw Object.assign(new Error('Path escapes stack root'), { code: 'INVALID_PATH' });
+    }
+    await fsPromises.mkdir(path.dirname(linkPath), { recursive: true });
+    await fsPromises.symlink(linkTarget, linkPath);
+  }
+
   private static async lstatManagedPath(
     nodeId: number,
     stackName: string,
@@ -873,6 +928,18 @@ export class RollbackGenerationStore {
       const srcCandidate = path.resolve(stackRoot, rel);
       if (!srcCandidate.startsWith(stackRoot + path.sep)) continue;
       try {
+        // A leaf that is a link is snapshotted as a link. Its content belongs to
+        // whatever it points at, which restore never writes, but restore may
+        // unlink the leaf, so a revert needs the link back.
+        const leafStat = await fsPromises.lstat(srcCandidate);
+        if (leafStat.isSymbolicLink()) {
+          index.entries.push({
+            relativePath: rel,
+            state: 'link',
+            linkTarget: await fsPromises.readlink(srcCandidate),
+          });
+          continue;
+        }
         const realSrc = await fsPromises.realpath(srcCandidate);
         if (!realSrc.startsWith(stackRoot + path.sep)) continue;
         const st = await fsPromises.lstat(realSrc);
@@ -969,6 +1036,22 @@ export class RollbackGenerationStore {
     for (const entry of index.entries) {
       const rel = posixRel(entry.relativePath);
       if (!rel) continue;
+      if (entry.state === 'link') {
+        // Recreate the link exactly as it was. The target is deliberately not
+        // resolved or checked: it is the operator's own, may sit outside the
+        // stack, and restore never wrote through it.
+        if (typeof entry.linkTarget !== 'string' || entry.linkTarget === '') {
+          throw Object.assign(
+            new Error(`Pre-restore link entry for "${rel}" has no target`),
+            { code: 'PRE_RESTORE_INDEX_INVALID' },
+          );
+        }
+        const liveKind = await this.lstatManagedPath(nodeId, stackName, rel);
+        if (liveKind === 'missing') {
+          await this.recreateManagedSymlink(nodeId, stackName, rel, entry.linkTarget);
+        }
+        continue;
+      }
       if (entry.state === 'absent') {
         const liveKind = await this.lstatManagedPath(nodeId, stackName, rel);
         if (liveKind === 'missing') continue;
