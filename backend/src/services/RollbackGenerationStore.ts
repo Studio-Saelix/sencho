@@ -1026,38 +1026,47 @@ export class RollbackGenerationStore {
         }
         const realSrc = await fsPromises.realpath(srcCandidate);
         if (!realSrc.startsWith(realStackRoot + path.sep)) continue;
-        const st = await fsPromises.lstat(realSrc);
-        if (!st.isFile()) {
-          throw Object.assign(
-            new Error(
-              `Managed path "${rel}" is not a regular file; refusing to snapshot it as absent`,
-            ),
-            { code: 'DIRECTORY_COLLISION' },
-          );
-        }
-        const bytes = await fsPromises.readFile(realSrc);
-        const blobId = randomUUID();
-        const blobPath = path.resolve(blobsRoot, blobId);
-        if (!blobPath.startsWith(blobsRoot + path.sep)) continue;
-        const encrypted = shouldEncryptPreRestore(sensitivity) && bytes.length > 0;
-        if (encrypted) {
-          const crypto = CryptoService.getInstance();
-          const cipher = crypto.encrypt(bytes.toString('base64'));
-          if (!crypto.isEncrypted(cipher)) {
-            throw new Error(`Could not encrypt pre-restore content for ${rel}`);
+        // Open the validated path once and stat and read on that descriptor, so
+        // the containment check and the bytes come from the same inode.
+        // Anything that can write inside the stack could otherwise swap the
+        // checked file for a link out of it between the two calls.
+        const fh = await fsPromises.open(realSrc, 'r');
+        try {
+          const st = await fh.stat();
+          if (!st.isFile()) {
+            throw Object.assign(
+              new Error(
+                `Managed path "${rel}" is not a regular file; refusing to snapshot it as absent`,
+              ),
+              { code: 'DIRECTORY_COLLISION' },
+            );
           }
-          await writePrivate(blobPath, cipher);
-        } else {
-          await writePrivate(blobPath, bytes);
+          const bytes = await fh.readFile();
+          const blobId = randomUUID();
+          const blobPath = path.resolve(blobsRoot, blobId);
+          if (!blobPath.startsWith(blobsRoot + path.sep)) continue;
+          const encrypted = shouldEncryptPreRestore(sensitivity) && bytes.length > 0;
+          if (encrypted) {
+            const crypto = CryptoService.getInstance();
+            const cipher = crypto.encrypt(bytes.toString('base64'));
+            if (!crypto.isEncrypted(cipher)) {
+              throw new Error(`Could not encrypt pre-restore content for ${rel}`);
+            }
+            await writePrivate(blobPath, cipher);
+          } else {
+            await writePrivate(blobPath, bytes);
+          }
+          index.entries.push({
+            relativePath: rel,
+            state: 'present',
+            blobId,
+            mode: st.mode & 0o777,
+            encrypted,
+            linkTarget,
+          });
+        } finally {
+          await fh.close();
         }
-        index.entries.push({
-          relativePath: rel,
-          state: 'present',
-          blobId,
-          mode: st.mode & 0o777,
-          encrypted,
-          linkTarget,
-        });
       } catch (e) {
         if ((e as NodeJS.ErrnoException).code === 'ENOENT') {
           index.entries.push({ relativePath: rel, state: 'absent' });
