@@ -667,6 +667,8 @@ describe('FileSystemService stack methods', () => {
         await expect(service.hasComposeFile(externalDir)).rejects.toMatchObject({ code: 'INVALID_PATH' });
         await expect(service.hasComposeFile(path.join(mockState.composeDir, '..'))).rejects
           .toMatchObject({ code: 'INVALID_PATH' });
+        // The compose base is not a stack, so it is refused rather than read.
+        await expect(service.hasComposeFile(mockState.composeDir)).rejects.toMatchObject({ code: 'INVALID_PATH' });
       } finally {
         await fs.rm(externalDir, { recursive: true, force: true });
       }
