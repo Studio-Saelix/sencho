@@ -657,6 +657,28 @@ describe('FileSystemService stack methods', () => {
       const service = FileSystemService.getInstance();
       await expect(service.readStackFile(STACK, 'escape-link')).rejects.toMatchObject({ code: 'SYMLINK_ESCAPE' });
     });
+
+    it('hasComposeFile refuses a directory outside the compose base', async () => {
+      const externalDir = await fs.mkdtemp(path.join(os.tmpdir(), 'sencho-fsp-outside-'));
+      await fs.writeFile(path.join(externalDir, 'compose.yaml'), 'services: {}\n');
+
+      const service = FileSystemService.getInstance();
+      try {
+        await expect(service.hasComposeFile(externalDir)).rejects.toMatchObject({ code: 'INVALID_PATH' });
+        await expect(service.hasComposeFile(path.join(mockState.composeDir, '..'))).rejects
+          .toMatchObject({ code: 'INVALID_PATH' });
+      } finally {
+        await fs.rm(externalDir, { recursive: true, force: true });
+      }
+    });
+
+    it('hasComposeFile answers for a stack directory inside the compose base', async () => {
+      await fs.writeFile(path.join(stackDir, 'compose.yaml'), 'services: {}\n');
+
+      const service = FileSystemService.getInstance();
+      expect(await service.hasComposeFile(stackDir)).toBe(true);
+      expect(await service.hasComposeFile(path.join(mockState.composeDir, 'no-such-stack'))).toBe(false);
+    });
   });
 
   // ── symlink semantics ────────────────────────────────────────────────────

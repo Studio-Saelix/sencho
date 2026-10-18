@@ -2669,18 +2669,20 @@ export class ComposeService {
     const baseResolved = path.resolve(this.baseDir);
     const overlayDir = opts?.stackDirOverride ? path.resolve(opts.stackDirOverride) : null;
     let stackDir: string;
+    let allowedRoot: string;
     if (overlayDir) {
       // The git-secrets root is the only tree a decrypt overlay lives in, so it
       // is the one base an overridden working directory may be contained by.
       // Checked here, at the sink, rather than trusted from the caller.
-      const secretsRoot = path.resolve(gitSecretsAreaBase());
-      if (!overlayDir.startsWith(secretsRoot + path.sep)) {
+      allowedRoot = path.resolve(gitSecretsAreaBase());
+      if (!overlayDir.startsWith(allowedRoot + path.sep)) {
         throw new Error('Invalid stack path');
       }
       stackDir = overlayDir;
     } else {
+      allowedRoot = baseResolved;
       stackDir = path.resolve(baseResolved, stackName);
-      if (!stackDir.startsWith(baseResolved + path.sep)) {
+      if (!stackDir.startsWith(allowedRoot + path.sep)) {
         throw new Error('Invalid stack path');
       }
     }
@@ -2710,8 +2712,16 @@ export class ComposeService {
     }
     composeArgs.push('config', '--format', 'json');
     const withholdDiagnostics = overlayDir !== null;
+    // Canonical inline js/path-injection barrier immediately above the spawn
+    // sink: the checks above are scoped to the branch that assigned stackDir,
+    // and only a check that dominates the sink line is credited. `allowedRoot`
+    // is the root of whichever branch assigned it.
+    const cwdResolved = path.resolve(stackDir);
+    if (!cwdResolved.startsWith(allowedRoot + path.sep)) {
+      throw new Error('Invalid stack path');
+    }
     const child = spawn('docker', composeArgs, {
-      cwd: stackDir,
+      cwd: cwdResolved,
       env: {
         ...process.env,
         PATH: process.env.PATH || '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin',
