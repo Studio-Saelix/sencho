@@ -37,6 +37,9 @@ vi.mock('../services/DatabaseService', () => ({
   DatabaseService: {
     getInstance: () => ({
       getGlobalSettings: () => state.settings,
+      // The gate asks which kind of node it is observing before it reads:
+      // local nodes are read in-process, remote ones over the proxy.
+      getNode: (nodeId: number) => ({ id: nodeId, type: 'local' }),
       insertHealthGateRun: (run: StoredRun) => { state.runs.set(run.id, { ...run }); },
       finalizeHealthGateRun: (id: string, status: StoredRun['status'], reason: string | null, endedAt: number, containersJson: string, failureSource: StoredRun['failure_source'] = null) => {
         const run = state.runs.get(id);

@@ -3,7 +3,6 @@ import { classifyReferenceKind } from '../composeProjectContext';
 import { buildEffectiveServiceModel, type EffectiveServiceSpec } from '../effectiveServiceModel';
 import DockerController from '../DockerController';
 import type { ContainerInfo } from 'dockerode';
-import axios from 'axios';
 import { RegistryService } from '../RegistryService';
 import {
   parseImageRef,
@@ -11,10 +10,6 @@ import {
   selectLocalRepoDigests,
 } from '../registry-api';
 import { DatabaseService } from '../DatabaseService';
-import { NodeRegistry } from '../NodeRegistry';
-import { LicenseService } from '../LicenseService';
-import { PROXY_TIER_HEADER } from '../license-headers';
-import { safeAxiosTransport } from '../../utils/outboundTarget';
 import type { BuildContextPlan } from '../../types/gitProjectManifest';
 import type { ArtifactQualification } from './types';
 import {
@@ -33,6 +28,7 @@ import { GitOpsStore } from './store';
 import { GitOpsTransitions, type EventEnvelope } from './transitions';
 import { newGitOpsId } from './directApplication';
 import { sanitizeForLog } from '../../utils/safeLog';
+import { readNodeProxyJson } from '../../helpers/nodeProxyJson';
 import {
   loadEffectiveArtifactContext,
   platformLabelOf,
@@ -361,58 +357,25 @@ export async function fetchRemoteEffectiveArtifactContext(
   nodeId: number,
   stackName: string,
 ): Promise<EffectiveArtifactContext | null> {
-  const target = NodeRegistry.getInstance().getProxyTarget(nodeId);
-  if (!target) {
+  const read = await readNodeProxyJson({
+    nodeId,
+    path: `/api/stacks/${encodeURIComponent(stackName)}/effective-artifact-context`,
+    timeoutMs: REMOTE_RESOLVE_TIMEOUT_MS,
+    logLabel: `remote effective-artifact-context for ${sanitizeForLog(stackName)}`,
+  });
+  if (read.kind !== 'ok') return null;
+  if (!isEffectiveArtifactContext(read.data)) {
     console.warn(
-      '[GitOpsArtifactResolve] No proxy target for remote effective-artifact-context on node %s (%s)',
-      nodeId,
+      '[GitOpsArtifactResolve] Remote effective-artifact-context invalid shape for %s on node %s',
       sanitizeForLog(stackName),
+      nodeId,
     );
     return null;
   }
-  const proxy = LicenseService.getInstance().getProxyHeaders();
-  const url = `${target.apiUrl.replace(/\/$/, '')}/api/stacks/${encodeURIComponent(stackName)}/effective-artifact-context`;
-  try {
-    const res = await axios.get(url, {
-      ...safeAxiosTransport(target.trustedLoopback),
-      headers: {
-        Authorization: `Bearer ${target.apiToken}`,
-        [PROXY_TIER_HEADER]: proxy.tier,
-        'Content-Type': 'application/json',
-      },
-      timeout: REMOTE_RESOLVE_TIMEOUT_MS,
-      validateStatus: () => true,
-    });
-    if (res.status !== 200) {
-      console.warn(
-        '[GitOpsArtifactResolve] Remote effective-artifact-context returned %s for %s on node %s',
-        res.status,
-        sanitizeForLog(stackName),
-        nodeId,
-      );
-      return null;
-    }
-    if (!isEffectiveArtifactContext(res.data)) {
-      console.warn(
-        '[GitOpsArtifactResolve] Remote effective-artifact-context invalid shape for %s on node %s',
-        sanitizeForLog(stackName),
-        nodeId,
-      );
-      return null;
-    }
-    return {
-      ...res.data,
-      platform: res.data.platform ? canonicalNodePlatform(res.data.platform) : null,
-    };
-  } catch (err) {
-    console.warn(
-      '[GitOpsArtifactResolve] Remote effective-artifact-context failed for %s on node %s: %s',
-      sanitizeForLog(stackName),
-      nodeId,
-      sanitizeForLog(err instanceof Error ? err.message : String(err)),
-    );
-    return null;
-  }
+  return {
+    ...read.data,
+    platform: read.data.platform ? canonicalNodePlatform(read.data.platform) : null,
+  };
 }
 
 /**
@@ -426,56 +389,23 @@ export async function fetchRemoteRuntimeArtifactIdentity(
   nodeId: number,
   stackName: string,
 ): Promise<ObservedArtifactIdentity | null> {
-  const target = NodeRegistry.getInstance().getProxyTarget(nodeId);
-  if (!target) {
-    console.warn(
-      '[GitOpsArtifactResolve] No proxy target for remote runtime identity on node %s (%s)',
-      nodeId,
-      sanitizeForLog(stackName),
-    );
-    return null;
-  }
-  const proxy = LicenseService.getInstance().getProxyHeaders();
-  const url = `${target.apiUrl.replace(/\/$/, '')}/api/stacks/${encodeURIComponent(stackName)}/runtime-artifact-identity`;
+  const read = await readNodeProxyJson({
+    nodeId,
+    path: `/api/stacks/${encodeURIComponent(stackName)}/runtime-artifact-identity`,
+    timeoutMs: REMOTE_RESOLVE_TIMEOUT_MS,
+    logLabel: `remote runtime identity for ${sanitizeForLog(stackName)}`,
+  });
+  if (read.kind !== 'ok') return null;
+  // A leaf that answers with something this module cannot read is no
+  // evidence. Decoding separately keeps an unreadable payload distinguishable
+  // in the log from a leaf that could not be reached at all.
   try {
-    const res = await axios.get(url, {
-      ...safeAxiosTransport(target.trustedLoopback),
-      headers: {
-        Authorization: `Bearer ${target.apiToken}`,
-        [PROXY_TIER_HEADER]: proxy.tier,
-        'Content-Type': 'application/json',
-      },
-      timeout: REMOTE_RESOLVE_TIMEOUT_MS,
-      validateStatus: () => true,
-    });
-    if (res.status !== 200) {
-      console.warn(
-        '[GitOpsArtifactResolve] Remote runtime-artifact-identity returned %s for %s on node %s',
-        res.status,
-        sanitizeForLog(stackName),
-        nodeId,
-      );
-      return null;
-    }
-    // A leaf that answers with something this module cannot read is no
-    // evidence. Decoding separately keeps an unreadable payload distinguishable
-    // in the log from a leaf that could not be reached at all.
-    try {
-      return decodeObservedArtifactIdentity(JSON.stringify(res.data));
-    } catch {
-      console.warn(
-        '[GitOpsArtifactResolve] Remote runtime-artifact-identity invalid shape for %s on node %s',
-        sanitizeForLog(stackName),
-        nodeId,
-      );
-      return null;
-    }
-  } catch (err) {
+    return decodeObservedArtifactIdentity(JSON.stringify(read.data));
+  } catch {
     console.warn(
-      '[GitOpsArtifactResolve] Remote runtime-artifact-identity failed for %s on node %s: %s',
+      '[GitOpsArtifactResolve] Remote runtime-artifact-identity invalid shape for %s on node %s',
       sanitizeForLog(stackName),
       nodeId,
-      sanitizeForLog(err instanceof Error ? err.message : String(err)),
     );
     return null;
   }
@@ -595,47 +525,16 @@ async function readPlatformForNode(nodeId: number): Promise<NodePlatformRead> {
  * leaf could not answer right now".
  */
 async function fetchRemotePlatform(nodeId: number): Promise<NodePlatformRead> {
-  const target = NodeRegistry.getInstance().getProxyTarget(nodeId);
-  if (!target) {
-    console.warn(
-      '[GitOpsArtifactResolve] No proxy target for remote platform read on node %s',
-      nodeId,
-    );
-    return { status: 'ok', platform: null };
-  }
-  const proxy = LicenseService.getInstance().getProxyHeaders();
-  const url = `${target.apiUrl.replace(/\/$/, '')}/api/stacks/platform/docker-context`;
-  try {
-    const res = await axios.get(url, {
-      ...safeAxiosTransport(target.trustedLoopback),
-      headers: {
-        Authorization: `Bearer ${target.apiToken}`,
-        [PROXY_TIER_HEADER]: proxy.tier,
-        'Content-Type': 'application/json',
-      },
-      timeout: REMOTE_RESOLVE_TIMEOUT_MS,
-      validateStatus: () => true,
-    });
-    if (res.status === 404) {
-      return { status: 'route_missing' };
-    }
-    if (res.status !== 200) {
-      console.warn(
-        '[GitOpsArtifactResolve] Remote platform read returned %s for node %s',
-        res.status,
-        nodeId,
-      );
-      return { status: 'ok', platform: null };
-    }
-    return { status: 'ok', platform: decodeNodePlatform(res.data?.platform) };
-  } catch (err) {
-    console.warn(
-      '[GitOpsArtifactResolve] Remote platform read failed for node %s: %s',
-      nodeId,
-      sanitizeForLog(err instanceof Error ? err.message : String(err)),
-    );
-    return { status: 'ok', platform: null };
-  }
+  const read = await readNodeProxyJson({
+    nodeId,
+    path: '/api/stacks/platform/docker-context',
+    timeoutMs: REMOTE_RESOLVE_TIMEOUT_MS,
+    logLabel: 'remote platform read',
+  });
+  if (read.kind === 'route_missing') return { status: 'route_missing' };
+  if (read.kind !== 'ok') return { status: 'ok', platform: null };
+  const data = isRecord(read.data) ? read.data : {};
+  return { status: 'ok', platform: decodeNodePlatform(data.platform) };
 }
 
 function buildArtifactEvidence(

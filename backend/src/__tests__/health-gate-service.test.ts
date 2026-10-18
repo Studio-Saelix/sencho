@@ -41,6 +41,9 @@ vi.mock('../services/DatabaseService', () => ({
   DatabaseService: {
     getInstance: () => ({
       getGlobalSettings: () => state.settings,
+      // The gate asks which kind of node it is observing before it reads:
+      // local nodes are read in-process, remote ones over the proxy.
+      getNode: (nodeId: number) => ({ id: nodeId, type: 'local' }),
       insertHealthGateRun: (run: StoredRun) => { state.runs.set(run.id, { ...run }); },
       finalizeHealthGateRun: (id: string, status: StoredRun['status'], reason: string | null, endedAt: number, containersJson: string, failureSource: StoredRun['failure_source'] = null) => {
         if (state.failFinalizeFor === id) throw new Error('row is unreadable');
@@ -368,6 +371,21 @@ describe('HealthGateService verdicts', () => {
     await ticks(1);
     expect(latest().status).toBe('failed');
     expect(latest().reason).toContain('exited during observation');
+  });
+
+  it('ends unknown, not failed, when the declared intent cannot be rendered', async () => {
+    // Without the render, a container that finished exactly as declared and one
+    // that died look identical, and a rollback policy must not restore a
+    // workload on evidence that was never read.
+    state.renderConfig.mockResolvedValue({ rendered: null, stderr: 'render failed', code: 1, timedOut: false });
+
+    svc().beginStack(0, 'web', 'update', 'tester', { deployedGenerationId: null });
+    await ticks(1);
+    setContainers([{ id: 'aaa', name: 'web-app-1', state: 'exited', exitCode: 0, restartPolicy: 'no' }]);
+    await ticks(1);
+
+    expect(latest().status).toBe('unknown');
+    expect(latest().reason).toContain('declared restart intent could not be read');
   });
 
   it('fails fast when a healthcheck reports unhealthy', async () => {

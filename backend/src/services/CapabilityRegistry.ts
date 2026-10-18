@@ -74,6 +74,7 @@ export const CAPABILITIES = [
   'gitops-source-controller',
   'fleet-readiness-v1',
   'blueprint-digest-pins-v1',
+  'health-gate-observation-v1',
 ] as const;
 
 /**
@@ -175,22 +176,23 @@ export const GITOPS_SOURCE_CONTROLLER_CAPABILITY =
 export const FLEET_READINESS_V1_CAPABILITY = 'fleet-readiness-v1' as const satisfies Capability;
 
 /**
- * Capability key the hub probes a remote target for before sending it
- * non-observe health work.
+ * A node that serves `GET /api/stacks/:stackName/health-observation`: the
+ * runtime facts a hub-driven health gate reads for a rollout target on it.
  *
- * Deliberately NOT in the advertised `CAPABILITIES` list. The hub runs a health
- * gate on a target's behalf by reading that target's Docker directly, and a
- * remote node's Docker is only reachable over the HTTP proxy, so no node can
- * serve that verdict for a hub-driven rollout yet. Advertising the key would
- * make every same-version remote answer "supported", the refusal would never
- * fire, and the rollout would advance on a run that can only end unknown.
+ * The gate runs on the instance that owns the rollout, so for a target on
+ * another node it cannot read that node's Docker. A node advertising this key
+ * answers for its own containers, which is what lets a rollout to it be
+ * health-gated.
  *
- * With the key absent, `probeRemoteCapability` fails closed for every remote and
- * the refusal is honest. Adding it to the list is the single switch that opens
- * non-observe rollout to remote targets, and it belongs with the leaf-side
- * health protocol that would make the verdict real, not before.
+ * A hub probes this key before sending a non-observe policy to a remote target
+ * and refuses, before any deploy, when the target does not advertise it.
+ * `gitops-health-rollout-policy` was the placeholder for this switch and is
+ * deliberately never advertised by any build: a hub old enough to probe that
+ * key would run its own hub-local gate against the remote node, which can only
+ * end unknown, so only a hub that speaks this protocol may see it as supported.
  */
-export const HEALTH_ROLLOUT_POLICY_CAPABILITY = 'gitops-health-rollout-policy';
+export const HEALTH_GATE_OBSERVATION_CAPABILITY =
+  'health-gate-observation-v1' as const satisfies Capability;
 
 /**
  * Leaves whose `/api/blueprints/apply-local` honors `digestPins` (deploys each

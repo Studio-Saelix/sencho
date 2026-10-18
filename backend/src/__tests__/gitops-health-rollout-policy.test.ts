@@ -2324,10 +2324,28 @@ describe('remote targets', () => {
     const result = await dispatch(fixture);
 
     expect(result.status).toBe('blocked');
-    if (result.status === 'blocked') expect(result.reason).toMatch(/does not support health-gated rollout/i);
+    if (result.status === 'blocked') expect(result.reason).toMatch(/does not report the observed health/i);
     expect(deploySpy).not.toHaveBeenCalled();
     // Refused before the apply and before any reservation.
     expect(latestRolloutRun(fixture)).toBeUndefined();
+  });
+
+  it('dispatches to a remote target that serves observations, reserving its run', async () => {
+    const fixture = await authorizeWithPolicy('pause', 1, { remote: true });
+    setHealthCapabilityProbeForTests(async () => ({ kind: 'supported' }));
+    const deploySpy = vi.spyOn(BlueprintService.getInstance(), 'deployAuthorizedMaterialization')
+      .mockResolvedValue({ status: 'active' });
+
+    const result = await dispatch(fixture);
+
+    if (result.status === 'blocked') throw new Error(result.reason);
+    expect(result.status).toBe('dispatched');
+    expect(deploySpy).toHaveBeenCalledTimes(1);
+    // The run is the target's own, on the node that will answer for it.
+    const reserved = finishedRolloutRuns(fixture);
+    expect(reserved).toHaveLength(1);
+    expect(reserved[0]!.node_id).toBe(fixture.nodeId);
+    expect(reserved[0]!.status).toBe('observing');
   });
 
   it('treats an unreachable target as refused, not as supported', async () => {

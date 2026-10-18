@@ -103,5 +103,11 @@
     "title": "Custom service URLs",
     "blurb": "A published port can open the address you configure for that service, such as a tunnel or reverse-proxy domain. Set it from the pencil on the port, or with the sencho.service.url Compose label. With no override, the port still opens the generated host and port.",
     "docUrl": "https://docs.sencho.io/features/stack-management"
+  },
+  {
+    "id": "remote-rollout-health",
+    "title": "Health-gated rollouts across the fleet",
+    "blurb": "Health rollout policies work on every node in a Blueprint's placement, not just the one you are signed in to: each target's own node reports the health of the stack it runs, so a remote rollout settles on a real verdict.",
+    "docUrl": "https://docs.sencho.io/features/health-rollout-policy"
   }
 ]
