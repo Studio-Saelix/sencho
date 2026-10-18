@@ -980,8 +980,9 @@ describe('Snapshot restore: recovery generation contract', () => {
             lastAppliedContentHash: null,
             manifestState: null,
             manifestGeneration: null,
-            exactCoverage: true,
             coverageRefusal: null,
+            uncapturedInputs: [],
+            uncapturedRelativePaths: [],
         };
     }
 

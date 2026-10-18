@@ -1,5 +1,6 @@
 import type { PreflightStatus } from '../preflight/types';
 import type { UpdatePreviewImage, UpdatePreviewSummary } from '../UpdatePreviewService';
+import type { ResolvedRollbackInventory } from '../../types/rollbackGeneration';
 import type {
   ContainerProbe,
   ReadinessSignal,
@@ -342,6 +343,36 @@ export interface RollbackInputs {
   managedInputs: { covered: boolean; detail: string } | Errored | null;
   /** Age identity readiness for SOPS-encrypted restore targets; null when not Git-managed. */
   sopsKeys: { ready: boolean; detail: string } | Errored | null;
+}
+
+const MAX_LISTED_UNCAPTURED_INPUTS = 5;
+
+/**
+ * Managed-input coverage for the readiness report. A refused capture and a
+ * partial one both read as not covered (a warning), but only the partial one
+ * names the inputs a rollback would take from the live stack.
+ */
+export function describeManagedInputs(
+  inventory: Pick<ResolvedRollbackInventory, 'coverageRefusal' | 'uncapturedInputs' | 'entries'>,
+): { covered: boolean; detail: string } {
+  if (inventory.coverageRefusal !== null) {
+    return { covered: false, detail: inventory.coverageRefusal };
+  }
+  const { uncapturedInputs } = inventory;
+  if (uncapturedInputs.length > 0) {
+    const listed = uncapturedInputs.slice(0, MAX_LISTED_UNCAPTURED_INPUTS).join('; ');
+    const more = uncapturedInputs.length > MAX_LISTED_UNCAPTURED_INPUTS
+      ? `; and ${uncapturedInputs.length - MAX_LISTED_UNCAPTURED_INPUTS} more`
+      : '';
+    return {
+      covered: false,
+      detail: `${uncapturedInputs.length} input(s) are not captured and a rollback uses their current content: ${listed}${more}.`,
+    };
+  }
+  return {
+    covered: true,
+    detail: `Exact authored-project coverage includes ${inventory.entries.length} managed path(s).`,
+  };
 }
 
 export function buildRollbackItems(inputs: RollbackInputs, now: number): RollbackReadinessItem[] {

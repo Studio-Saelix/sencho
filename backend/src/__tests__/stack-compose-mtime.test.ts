@@ -242,7 +242,7 @@ describe('PUT /api/stacks/:stackName optimistic concurrency', () => {
 
     const getRes = await request(app).get(`/api/stacks/${STACK}`).set('Cookie', authCookie);
     expect(getRes.status).toBe(409);
-    expect(getRes.body.error).toBe('The compose file does not resolve inside the stack directory');
+    expect(getRes.body.error).toBe('The compose file links outside the stack directory. Use include: to share a file between stacks.');
     expect(fs.readFileSync(path.join(stackDir, 'compose.yml'), 'utf-8')).toBe('fallback');
   });
 

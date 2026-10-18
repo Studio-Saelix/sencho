@@ -88,6 +88,14 @@ export interface RollbackGenerationManifest {
    * also appear in the caller-supplied liveManagedPaths discovery set.
    */
   managedRelativePaths: string[];
+  /**
+   * Stack-relative paths of links left out of the capture (pointing outside
+   * the stack, at nothing, or at a non-file). Restore neither writes nor
+   * deletes them. Omitted on generations captured before this was recorded.
+   */
+  uncapturedRelativePaths?: string[];
+  /** The operator-facing notes for everything left out of the capture. Omitted on older generations. */
+  uncapturedInputs?: string[];
   invocation: RollbackInvocationRecord;
   git: RollbackGitIdentity | null;
   /** Prior applied/deployed/LKG refs when known (opaque strings). */
@@ -163,7 +171,26 @@ export interface ResolvedRollbackInventory {
   lastAppliedContentHash: string | null;
   manifestState: string | null;
   manifestGeneration: string | null;
-  /** True when inventory claims exact atomic coverage. */
-  exactCoverage: boolean;
+  /**
+   * Why capture must not proceed, or null: for example no readable compose
+   * file, a compose file that links outside the stack, case-colliding paths,
+   * or an unreadable Mesh setting. This is the only signal that blocks a
+   * capture; inputs listed in `uncapturedInputs` do not.
+   */
   coverageRefusal: string | null;
+  /**
+   * Operator-facing notes, one per declared input a generation cannot hold:
+   * files outside the stack directory, paths Compose resolves at deploy time,
+   * and links that leave the stack or point at nothing. The deploy proceeds and
+   * a rollback uses their current content. Always empty when `coverageRefusal`
+   * is set, and for Git-managed inventories.
+   */
+  uncapturedInputs: string[];
+  /**
+   * Stack-relative paths of links inside the stack that were left out of the
+   * capture (they point outside the stack, at nothing, or at a non-file).
+   * Restore neither writes nor deletes these paths. Not every note in
+   * `uncapturedInputs` has a path here.
+   */
+  uncapturedRelativePaths: string[];
 }

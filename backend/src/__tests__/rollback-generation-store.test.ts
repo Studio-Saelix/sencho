@@ -58,8 +58,9 @@ function inventoryFor(
     lastAppliedContentHash: null,
     manifestState: null,
     manifestGeneration: null,
-    exactCoverage: true,
     coverageRefusal: null,
+    uncapturedInputs: [],
+    uncapturedRelativePaths: [],
   };
 }
 
@@ -827,5 +828,205 @@ describe('RollbackGenerationStore', () => {
     expect(await fsPromises.readFile(path.join(scratchDir, 'keep.txt'), 'utf8')).toBe('unrelated\n');
     const genDir = RollbackGenerationStore.getGenerationDir(NODE, stackName, generationId);
     await expect(fsPromises.access(path.join(genDir, 'restore-intent.json'))).resolves.toBeUndefined();
+  });
+});
+
+describe('RollbackGenerationStore uncaptured paths', () => {
+  let composeDir: string;
+  let dataDir: string;
+  let originalDataDir: string | undefined;
+
+  beforeEach(async () => {
+    composeDir = await fsPromises.mkdtemp(path.join(os.tmpdir(), 'sencho-compose-'));
+    dataDir = await fsPromises.mkdtemp(path.join(os.tmpdir(), 'sencho-data-'));
+    mockState.composeDir = composeDir;
+    mockState.composeDirs = new Map([[1, composeDir]]);
+    originalDataDir = process.env.DATA_DIR;
+    process.env.DATA_DIR = dataDir;
+  });
+
+  afterEach(async () => {
+    if (originalDataDir === undefined) delete process.env.DATA_DIR;
+    else process.env.DATA_DIR = originalDataDir;
+    await fsPromises.rm(composeDir, { recursive: true, force: true });
+    await fsPromises.rm(dataDir, { recursive: true, force: true });
+    vi.restoreAllMocks();
+  });
+
+  async function captureWithExcludedEnv(stackName: string): Promise<{ stackDir: string; generationId: string }> {
+    const stackDir = path.join(composeDir, stackName);
+    await fsPromises.mkdir(stackDir, { recursive: true });
+    await fsPromises.writeFile(path.join(stackDir, 'compose.yaml'), 'services: {}\n', 'utf8');
+    const shared = path.join(composeDir, 'shared.env');
+    await fsPromises.writeFile(shared, 'A=1\n', 'utf8');
+    await fsPromises.symlink(shared, path.join(stackDir, '.env'));
+
+    const generationId = randomUUID();
+    const inventory = {
+      ...inventoryFor(stackName, [
+        { relativePath: 'compose.yaml', absolutePath: path.join(stackDir, 'compose.yaml') },
+      ]),
+      uncapturedInputs: ['.env links outside the stack directory and is not captured'],
+      uncapturedRelativePaths: ['.env'],
+    };
+    const manifest = await RollbackGenerationStore.captureGeneration({
+      nodeId: NODE,
+      stackName,
+      generationId,
+      inventory,
+    });
+    expect(manifest.uncapturedRelativePaths).toEqual(['.env']);
+    expect(manifest.entries.map((e) => e.relativePath)).toEqual(['compose.yaml']);
+    return { stackDir, generationId };
+  }
+
+  it('persists the excluded paths on the verified generation', async () => {
+    const { generationId } = await captureWithExcludedEnv('persist');
+
+    const read = await RollbackGenerationStore.readVerifiedGeneration(NODE, 'persist', generationId);
+
+    expect(read.uncapturedRelativePaths).toEqual(['.env']);
+  });
+
+  it('does not delete a real file that replaced an excluded link when it restores', async () => {
+    const { stackDir, generationId } = await captureWithExcludedEnv('keep');
+    await fsPromises.rm(path.join(stackDir, '.env'));
+    await fsPromises.writeFile(path.join(stackDir, '.env'), 'NEW=2\n', 'utf8');
+    await fsPromises.writeFile(path.join(stackDir, 'compose.yaml'), 'services: {x: {}}\n', 'utf8');
+
+    await RollbackGenerationStore.restoreGeneration(NODE, 'keep', generationId, ['compose.yaml', '.env']);
+
+    expect(await fsPromises.readFile(path.join(stackDir, 'compose.yaml'), 'utf8')).toBe('services: {}\n');
+    expect(await fsPromises.readFile(path.join(stackDir, '.env'), 'utf8')).toBe('NEW=2\n');
+  });
+
+  it('keeps a real file that replaced a data link even when no input was noted', async () => {
+    const stackName = 'datalink';
+    const stackDir = path.join(composeDir, stackName);
+    await fsPromises.mkdir(stackDir, { recursive: true });
+    await fsPromises.writeFile(path.join(stackDir, 'compose.yaml'), 'services: {}\n', 'utf8');
+    const generationId = randomUUID();
+    await RollbackGenerationStore.captureGeneration({
+      nodeId: NODE,
+      stackName,
+      generationId,
+      inventory: {
+        ...inventoryFor(stackName, [
+          { relativePath: 'compose.yaml', absolutePath: path.join(stackDir, 'compose.yaml') },
+        ]),
+        uncapturedInputs: [],
+        uncapturedRelativePaths: ['config.json'],
+      },
+    });
+    await fsPromises.writeFile(path.join(stackDir, 'config.json'), '{"keep":true}\n', 'utf8');
+
+    await RollbackGenerationStore.restoreGeneration(NODE, stackName, generationId, ['compose.yaml', 'config.json']);
+
+    expect(await fsPromises.readFile(path.join(stackDir, 'config.json'), 'utf8')).toBe('{"keep":true}\n');
+  });
+
+  it('does not delete a live file the caller discovered when the generation has uncaptured inputs', async () => {
+    const { stackDir, generationId } = await captureWithExcludedEnv('discovered');
+    const genJson = path.join(RollbackGenerationStore.getGenerationDir(NODE, 'discovered', generationId), 'generation.json');
+    const withNote = JSON.parse(await fsPromises.readFile(genJson, 'utf8'));
+    expect(withNote.uncapturedInputs).toHaveLength(1);
+    await fsPromises.writeFile(path.join(stackDir, 'app.env'), 'SECRET=1\n', 'utf8');
+
+    await RollbackGenerationStore.restoreGeneration(NODE, 'discovered', generationId, ['compose.yaml', 'app.env']);
+
+    expect(await fsPromises.readFile(path.join(stackDir, 'app.env'), 'utf8')).toBe('SECRET=1\n');
+  });
+
+  it('rejects a generation manifest whose uncaptured list is malformed', async () => {
+    const { generationId } = await captureWithExcludedEnv('malformed');
+    const genJson = path.join(RollbackGenerationStore.getGenerationDir(NODE, 'malformed', generationId), 'generation.json');
+    const broken = JSON.parse(await fsPromises.readFile(genJson, 'utf8'));
+    broken.uncapturedRelativePaths = '.env';
+    await fsPromises.writeFile(genJson, JSON.stringify(broken), 'utf8');
+
+    await expect(RollbackGenerationStore.readVerifiedGeneration(NODE, 'malformed', generationId))
+      .rejects.toThrow(/malformed uncaptured list/);
+  });
+
+  it('still deletes a file discovered after capture when the generation is complete', async () => {
+    const stackDir = path.join(composeDir, 'complete');
+    await fsPromises.mkdir(stackDir, { recursive: true });
+    await fsPromises.writeFile(path.join(stackDir, 'compose.yaml'), 'services: {}\n', 'utf8');
+    const generationId = randomUUID();
+    await RollbackGenerationStore.captureGeneration({
+      nodeId: NODE,
+      stackName: 'complete',
+      generationId,
+      inventory: inventoryFor('complete', [
+        { relativePath: 'compose.yaml', absolutePath: path.join(stackDir, 'compose.yaml') },
+      ]),
+    });
+    await fsPromises.writeFile(path.join(stackDir, 'extra.env'), 'X=1\n', 'utf8');
+
+    await RollbackGenerationStore.restoreGeneration(NODE, 'complete', generationId, ['compose.yaml', 'extra.env']);
+
+    await expect(fsPromises.access(path.join(stackDir, 'extra.env'))).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+});
+
+describe('RollbackGenerationStore with a linked compose directory', () => {
+  let realDir: string;
+  let linkDir: string;
+  let dataDir: string;
+  let originalDataDir: string | undefined;
+
+  beforeEach(async () => {
+    realDir = await fsPromises.mkdtemp(path.join(os.tmpdir(), 'sencho-realroot-'));
+    linkDir = `${realDir}-link`;
+    await fsPromises.symlink(realDir, linkDir);
+    dataDir = await fsPromises.mkdtemp(path.join(os.tmpdir(), 'sencho-data-'));
+    mockState.composeDir = linkDir;
+    mockState.composeDirs = new Map([[1, linkDir]]);
+    originalDataDir = process.env.DATA_DIR;
+    process.env.DATA_DIR = dataDir;
+  });
+
+  afterEach(async () => {
+    if (originalDataDir === undefined) delete process.env.DATA_DIR;
+    else process.env.DATA_DIR = originalDataDir;
+    await fsPromises.rm(linkDir, { force: true });
+    await fsPromises.rm(realDir, { recursive: true, force: true });
+    await fsPromises.rm(dataDir, { recursive: true, force: true });
+    vi.restoreAllMocks();
+  });
+
+  it('captures a plain stack when the compose directory is itself a link', async () => {
+    const stackDir = path.join(linkDir, 'plain');
+    await fsPromises.mkdir(stackDir, { recursive: true });
+    await fsPromises.writeFile(path.join(stackDir, 'compose.yaml'), 'services: {}\n', 'utf8');
+
+    const manifest = await RollbackGenerationStore.captureGeneration({
+      nodeId: NODE,
+      stackName: 'plain',
+      generationId: randomUUID(),
+      inventory: inventoryFor('plain', [
+        { relativePath: 'compose.yaml', absolutePath: path.join(stackDir, 'compose.yaml') },
+      ]),
+    });
+
+    expect(manifest.entries.map((e) => e.relativePath)).toEqual(['compose.yaml']);
+  });
+
+  it('still refuses a stack directory that links to another location', async () => {
+    const elsewhere = path.join(realDir, 'elsewhere');
+    await fsPromises.mkdir(elsewhere, { recursive: true });
+    await fsPromises.writeFile(path.join(elsewhere, 'compose.yaml'), 'services: {}\n', 'utf8');
+    await fsPromises.symlink(elsewhere, path.join(realDir, 'moved'));
+
+    await expect(
+      RollbackGenerationStore.captureGeneration({
+        nodeId: NODE,
+        stackName: 'moved',
+        generationId: randomUUID(),
+        inventory: inventoryFor('moved', [
+          { relativePath: 'compose.yaml', absolutePath: path.join(linkDir, 'moved', 'compose.yaml') },
+        ]),
+      }),
+    ).rejects.toMatchObject({ code: 'SYMLINK_ESCAPE' });
   });
 });

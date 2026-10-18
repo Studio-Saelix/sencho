@@ -11,6 +11,7 @@ import { ComposeService } from './ComposeService';
 import { FileSystemService } from './FileSystemService';
 import { buildEffectiveServiceModel } from './effectiveServiceModel';
 import { getErrorMessage } from '../utils/errors';
+import { sanitizeForLog } from '../utils/safeLog';
 import { resolveRollbackInventory } from './rollbackInventory';
 import { RollbackGenerationStore } from './RollbackGenerationStore';
 import type {
@@ -48,8 +49,11 @@ export interface ComposeProjectContext {
   toComposeArgs(action: string[]): Promise<string[]>;
   validateForMutation(): Promise<void>;
   /**
-   * Capture a staged generation. When exactCoverage is required and inventory
-   * refuses it, throws before writing any generation content.
+   * Capture a staged generation. Throws ROLLBACK_COVERAGE_UNAVAILABLE (message
+   * prefixed "Rollback coverage is unavailable: ") before writing any generation
+   * content when the inventory has a coverage refusal. Inputs the inventory lists
+   * as uncaptured do not refuse: the generation holds everything else, records
+   * them, and a log line names them.
    */
   backupFromContext(operation: BackupOperation): Promise<string>;
   restoreFromContext(
@@ -78,16 +82,12 @@ class AuthoredComposeProjectContext implements ComposeProjectContext {
 
   async backupFromContext(operation: BackupOperation): Promise<string> {
     const inventory = await resolveRollbackInventory(this.nodeId, this.stackName);
-    if (!inventory.exactCoverage) {
+    if (inventory.coverageRefusal !== null) {
       throw Object.assign(
-        new Error(
-          inventory.coverageRefusal
-            || 'Exact authored-project rollback coverage is unavailable for this stack',
-        ),
+        new Error(`Rollback coverage is unavailable: ${inventory.coverageRefusal}`),
         { code: 'ROLLBACK_COVERAGE_UNAVAILABLE' },
       );
     }
-
     // Do not refresh the legacy single-slot backup. Clearing that reused slot
     // would destroy a pre-migration recovery point if a later capture step fails.
 
@@ -99,6 +99,11 @@ class AuthoredComposeProjectContext implements ComposeProjectContext {
       inventory,
       operationKind: operation,
     });
+    if (inventory.uncapturedInputs.length > 0) {
+      console.warn(
+        `[ComposeProjectContext] Recovery generation ${generationId} for ${sanitizeForLog(this.stackName)} is partial, a rollback uses the current content of these inputs: ${sanitizeForLog(inventory.uncapturedInputs.join('; '))}`,
+      );
+    }
     this.backupSlotId = generationId;
     return generationId;
   }

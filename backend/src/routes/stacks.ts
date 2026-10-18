@@ -220,6 +220,9 @@ function rejectIfStackOpBlocksRootTrustFileWrite(
   return true;
 }
 
+const COMPOSE_OUTSIDE_STACK_ERROR =
+  'The compose file links outside the stack directory. Use include: to share a file between stacks.';
+
 function stackFileEtag(mtimeMs: number): string {
   return `W/"${Math.floor(mtimeMs)}"`;
 }
@@ -736,7 +739,7 @@ stacksRouter.get('/:stackName', async (req: Request, res: Response) => {
   } catch (error) {
     const code = (error as NodeJS.ErrnoException).code;
     if (code === 'SYMLINK_ESCAPE' || code === 'INVALID_PATH') {
-      return res.status(409).json({ error: 'The compose file does not resolve inside the stack directory' });
+      return res.status(409).json({ error: COMPOSE_OUTSIDE_STACK_ERROR });
     }
     res.status(500).json({ error: 'Failed to read stack' });
   }
@@ -782,7 +785,7 @@ stacksRouter.put('/:stackName', async (req: Request, res: Response) => {
   } catch (error) {
     const code = (error as NodeJS.ErrnoException).code;
     if (code === 'SYMLINK_ESCAPE' || code === 'INVALID_PATH') {
-      return res.status(409).json({ error: 'The compose file does not resolve inside the stack directory' });
+      return res.status(409).json({ error: COMPOSE_OUTSIDE_STACK_ERROR });
     }
     console.error('Failed to save stack:', sanitizeForLog(getErrorMessage(error, 'unknown')));
     res.status(500).json({ error: 'Failed to save stack' });
@@ -1939,7 +1942,7 @@ stacksRouter.get('/:stackName/effective-anatomy', async (req: Request, res: Resp
   } catch (error) {
     const code = (error as NodeJS.ErrnoException).code;
     if (code === 'SYMLINK_ESCAPE' || code === 'INVALID_PATH') {
-      return res.status(409).json({ error: 'The compose file does not resolve inside the stack directory' });
+      return res.status(409).json({ error: COMPOSE_OUTSIDE_STACK_ERROR });
     }
     console.error('[Stacks] Failed to build effective anatomy for %s:', sanitizeForLog(stackName),
       sanitizeForLog(inspect(error, { depth: 4 })));

@@ -287,7 +287,7 @@ describe('effective-anatomy route', () => {
     try {
       const res = await request(app).get(`/api/stacks/${STACK}/effective-anatomy`).set('Authorization', authHeader);
       expect(res.status).toBe(409);
-      expect(res.body).toEqual({ error: 'The compose file does not resolve inside the stack directory' });
+      expect(res.body).toEqual({ error: 'The compose file links outside the stack directory. Use include: to share a file between stacks.' });
       expect(render).not.toHaveBeenCalled();
     } finally {
       fs.rmSync(sibling, { recursive: true, force: true });
@@ -321,7 +321,7 @@ describe('effective-anatomy route', () => {
     try {
       const res = await request(app).get(`/api/stacks/${STACK}/effective-anatomy`).set('Authorization', authHeader);
       expect(res.status).toBe(409);
-      expect(res.body).toEqual({ error: 'The compose file does not resolve inside the stack directory' });
+      expect(res.body).toEqual({ error: 'The compose file links outside the stack directory. Use include: to share a file between stacks.' });
       expect(render).not.toHaveBeenCalled();
     } finally {
       fs.rmSync(sibling, { recursive: true, force: true });

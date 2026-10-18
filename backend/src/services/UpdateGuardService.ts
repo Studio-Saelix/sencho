@@ -18,6 +18,7 @@ import {
   buildRollbackItems,
   buildServicesSignal,
   containersSignal,
+  describeManagedInputs,
   diskSignal,
   driftSignal,
   healthchecksSignal,
@@ -257,17 +258,7 @@ export class UpdateGuardService {
     const managedInputs = await this.collect('managed inputs', stackName, async () => {
       const { resolveRollbackInventory } = await import('./rollbackInventory');
       const inventory = await resolveRollbackInventory(nodeId, stackName);
-      if (inventory.exactCoverage) {
-        return {
-          covered: true,
-          detail: `Exact authored-project coverage includes ${inventory.entries.length} managed path(s).`,
-        };
-      }
-      return {
-        covered: false,
-        detail: inventory.coverageRefusal
-          || 'Exact authored-project coverage is incomplete for this stack.',
-      };
+      return describeManagedInputs(inventory);
     });
 
     const sopsKeys = await this.collect('repository secrets', stackName, async () => {

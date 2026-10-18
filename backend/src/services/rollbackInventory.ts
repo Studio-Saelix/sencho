@@ -135,6 +135,68 @@ async function pathExistsAsFile(stackRoot: string, relativePath: string): Promis
   }
 }
 
+/**
+ * What an authored candidate path is, resolved the way capture will read it.
+ * - file: a regular file, or a link to one, that stays inside the stack.
+ * - absent: nothing there, or a directory or special file.
+ * - outside: resolves outside the stack directory (a link on the path itself
+ *   or on any parent directory).
+ * - dangling / loop: a link that reaches nothing, or never ends.
+ * - not-a-file: a link whose target is a directory or special file.
+ */
+type AuthoredFileState = 'file' | 'absent' | 'outside' | 'dangling' | 'loop' | 'not-a-file';
+
+const LINK_PROBLEMS: Record<Exclude<AuthoredFileState, 'file' | 'absent'>, string> = {
+  outside: 'links outside the stack directory',
+  dangling: 'is a link to a missing file',
+  loop: 'is a link that never resolves',
+  'not-a-file': 'is a link to something that is not a regular file',
+};
+
+/**
+ * Classify an authored candidate before capture reads it, so a link that a
+ * generation cannot hold is reported instead of making capture throw.
+ */
+async function classifyAuthoredFile(stackRoot: string, relativePath: string): Promise<AuthoredFileState> {
+  // Inline containment barrier before every fs sink below.
+  const baseResolved = path.resolve(stackRoot);
+  const abs = path.resolve(baseResolved, relativePath);
+  if (!abs.startsWith(baseResolved + path.sep)) return 'absent';
+  let st;
+  try {
+    st = await fsPromises.lstat(abs);
+  } catch (e) {
+    const code = (e as NodeJS.ErrnoException).code;
+    if (code === 'ENOENT' || code === 'ENOTDIR') return 'absent';
+    if (code === 'ELOOP') return 'loop';
+    throw e;
+  }
+  if (!st.isFile() && !st.isSymbolicLink()) return 'absent';
+  // Always resolve: lstat does not see a link on a parent directory.
+  let real: string;
+  try {
+    real = await fsPromises.realpath(abs);
+  } catch (e) {
+    const code = (e as NodeJS.ErrnoException).code;
+    if (code === 'ENOENT' || code === 'ENOTDIR') return 'dangling';
+    if (code === 'ELOOP') return 'loop';
+    throw e;
+  }
+  // Same root capture uses: the real compose dir plus the stack name, so a
+  // stack dir that links elsewhere is refused and a linked compose dir is not.
+  const realRoot = path.join(await fsPromises.realpath(path.dirname(baseResolved)), path.basename(baseResolved));
+  if (!real.startsWith(realRoot + path.sep)) return 'outside';
+  return (await fsPromises.stat(real)).isFile() ? 'file' : 'not-a-file';
+}
+
+/** Kinds that are application data or build inputs, never part of a generation. */
+const UNCAPTURED_SILENT_KINDS = new Set<RollbackEntryKind>([
+  'bind-mount',
+  'build-context',
+  'build-additional-context',
+  'dockerfile',
+]);
+
 function authoredSensitivity(kind: RollbackEntryKind): InputSensitivity {
   if (kind === 'secret' || kind === 'config' || kind === 'build-secret') return 'high';
   if (
@@ -182,8 +244,9 @@ function refusedGitInventory(
     lastAppliedContentHash: gitSource.last_applied_content_hash,
     manifestState: gitSource.manifest_state,
     manifestGeneration: gitSource.manifest_generation,
-    exactCoverage: false,
     coverageRefusal,
+    uncapturedInputs: [],
+    uncapturedRelativePaths: [],
   };
 }
 
@@ -302,7 +365,6 @@ async function resolveGitInventory(
     meshEnabled,
   };
 
-  const meshRefused = meshReadFailed !== null;
   return {
     entries: [...map.values()].sort((a, b) => a.relativePath.localeCompare(b.relativePath)),
     invocation,
@@ -316,8 +378,9 @@ async function resolveGitInventory(
     lastAppliedContentHash: gitSource.last_applied_content_hash,
     manifestState: gitSource.manifest_state,
     manifestGeneration: gitSource.manifest_generation,
-    exactCoverage: !refused && !meshRefused,
     coverageRefusal: coverageRefusal ?? meshReadFailed,
+    uncapturedInputs: [],
+    uncapturedRelativePaths: [],
   };
 }
 
@@ -331,12 +394,54 @@ async function resolveAuthoredInventory(
   const foldedOwners = new Map<string, string>();
   const coverageNotes: string[] = [];
   const caseCollisions: string[] = [];
+  const uncaptured = new Set<string>();
+  const uncapturedPaths = new Set<string>();
+
+  /** Notes reach logs and the readiness API, and a URL include can carry credentials. */
+  const addUncaptured = (note: string): void => {
+    uncaptured.add(note.replace(/(\b[a-z][a-z0-9+.-]*:\/\/)[^/\s:@]+:[^/\s@]+@/gi, '$1[redacted]@'));
+  };
+
+  /**
+   * True only for a regular file, or a link to one that stays inside the stack.
+   * Anything else returns false. A link capture cannot hold is recorded by
+   * `mode`: 'refuse' stops the capture (compose files), 'note' lists it as not
+   * captured, 'silent' skips the note for application data. In the last two its
+   * path joins `uncapturedRelativePaths`, so a restore never deletes it.
+   */
+  const capturable = async (
+    relativePath: string,
+    mode: 'refuse' | 'note' | 'silent',
+  ): Promise<boolean> => {
+    let state: AuthoredFileState;
+    try {
+      state = await classifyAuthoredFile(stackRoot, relativePath);
+    } catch (e) {
+      if (mode === 'silent') {
+        uncapturedPaths.add(relativePath);
+      } else {
+        coverageNotes.push(`Could not inspect ${relativePath} for rollback capture: ${(e as Error).message}`);
+      }
+      return false;
+    }
+    if (state === 'file') return true;
+    if (state === 'absent') return false;
+    const problem = LINK_PROBLEMS[state];
+    if (mode === 'refuse') {
+      const hint = state === 'outside' ? '. Use include: to share a file between stacks' : '';
+      coverageNotes.push(`Compose file ${relativePath} ${problem}${hint}`);
+      return false;
+    }
+    uncapturedPaths.add(relativePath);
+    if (mode === 'note') addUncaptured(`${relativePath} ${problem} and is not captured`);
+    return false;
+  };
 
   const composePaths: string[] = [];
   for (const name of ROOT_COMPOSE_FILENAMES) {
     const resolved = resolveStackRel(stackRoot, name);
     if (!resolved) continue;
-    if (!(await pathExistsAsFile(stackRoot, resolved.relativePath))) continue;
+    if (!(await capturable(resolved.relativePath, 'refuse'))) continue;
     composePaths.push(resolved.relativePath);
     upsertEntry(map, foldedOwners, {
       relativePath: resolved.relativePath,
@@ -350,7 +455,7 @@ async function resolveAuthoredInventory(
   const overrideName = await fsSvc.getOverrideFilename(stackName);
   if (overrideName) {
     const resolved = resolveStackRel(stackRoot, overrideName);
-    if (resolved && await pathExistsAsFile(stackRoot, resolved.relativePath)) {
+    if (resolved && await capturable(resolved.relativePath, 'refuse')) {
       if (!composePaths.includes(resolved.relativePath)) {
         composePaths.push(resolved.relativePath);
       }
@@ -370,8 +475,11 @@ async function resolveAuthoredInventory(
   }
   for (const envFile of envCandidates) {
     const resolved = resolveStackRel(stackRoot, envFile);
-    if (!resolved) continue;
-    if (!(await pathExistsAsFile(stackRoot, resolved.relativePath))) continue;
+    if (!resolved) {
+      addUncaptured(`${envFile} is not a path inside the stack directory and is not captured`);
+      continue;
+    }
+    if (!(await capturable(resolved.relativePath, 'note'))) continue;
     upsertEntry(map, foldedOwners, {
       relativePath: resolved.relativePath,
       dependencyKind: envFile === DOT_ENV ? 'interpolation-env' : 'project-env',
@@ -420,9 +528,10 @@ async function resolveAuthoredInventory(
       if (parsed.parseErrors.length > 0) {
         coverageNotes.push(...parsed.parseErrors);
       }
-      if (parsed.dynamic.length > 0) {
-        coverageNotes.push(
-          `${parsed.dynamic.length} dynamic path declaration(s) cannot be captured exactly`,
+      for (const dyn of parsed.dynamic) {
+        if (UNCAPTURED_SILENT_KINDS.has(dyn.kind)) continue;
+        addUncaptured(
+          `${dyn.kind} ${dyn.sourcePath} is resolved by Compose at deploy time and is not captured`,
         );
       }
 
@@ -432,9 +541,12 @@ async function resolveAuthoredInventory(
           || input.materializedPath === null;
 
         if (hostAbs) {
-          if (input.kind === 'include' || input.kind === 'extends') {
-            coverageNotes.push(
-              `Host-absolute ${input.kind} path cannot be captured for exact rollback`,
+          if (input.sourcePath !== null && !UNCAPTURED_SILENT_KINDS.has(input.kind)) {
+            const refs = input.kind === 'include' || input.kind === 'extends'
+              ? ' (and the files it references)'
+              : '';
+            addUncaptured(
+              `${input.kind} ${input.sourcePath}${refs} is outside the stack directory and is not captured`,
             );
           }
           continue;
@@ -444,9 +556,10 @@ async function resolveAuthoredInventory(
         if (!candidate) continue;
         const resolved = resolveStackRel(stackRoot, candidate);
         if (!resolved) continue;
-        if (!(await pathExistsAsFile(stackRoot, resolved.relativePath))) continue;
-
         const kind = input.kind;
+        const mode = UNCAPTURED_SILENT_KINDS.has(kind) ? 'silent' : 'note';
+        if (!(await capturable(resolved.relativePath, mode))) continue;
+
         upsertEntry(map, foldedOwners, {
           relativePath: resolved.relativePath,
           dependencyKind: kind,
@@ -484,13 +597,8 @@ async function resolveAuthoredInventory(
     coverageNotes.push(`Could not read Mesh enablement: ${(e as Error).message}`);
   }
 
-  const exactCoverage = coverageNotes.length === 0 && composePaths.length > 0;
-  const coverageRefusal = exactCoverage
-    ? null
-    : (coverageNotes[0]
-      ?? (composePaths.length === 0
-        ? 'No compose file found in the stack directory'
-        : 'Exact coverage unavailable'));
+  const coverageRefusal = coverageNotes[0]
+    ?? (composePaths.length === 0 ? 'No compose file found in the stack directory' : null);
 
   return {
     entries: [...map.values()].sort((a, b) => a.relativePath.localeCompare(b.relativePath)),
@@ -507,17 +615,23 @@ async function resolveAuthoredInventory(
     lastAppliedContentHash: null,
     manifestState: null,
     manifestGeneration: null,
-    exactCoverage,
     coverageRefusal,
+    // A refused capture writes nothing, so it carries no partial-capture lists.
+    uncapturedInputs: coverageRefusal === null ? [...uncaptured] : [],
+    uncapturedRelativePaths: coverageRefusal === null
+      ? [...uncapturedPaths].sort((a, b) => a.localeCompare(b))
+      : [],
   };
 }
 
 /**
- * Prefer an exact Git-managed inventory when available. When the manifesto is
- * missing on a true first apply (no applied revision yet), merge authored disk
- * discovery with the Git identity fields so capture preserves nullable Git
- * state. Established missing/corrupt manifesto cases fail closed via
- * resolveGitInventory and are not overwritten by authored exactCoverage.
+ * Prefer a Git-managed inventory that has no coverage refusal. When the
+ * manifest is missing on a true first apply (no applied revision yet), merge
+ * authored disk discovery with the Git identity fields so capture preserves
+ * nullable Git state. Established missing or corrupt manifests fail closed via
+ * resolveGitInventory and are not overwritten by the authored inventory, and
+ * neither is a first apply whose authored inventory is itself refused. A stack
+ * with no Git source gets the authored inventory.
  */
 export async function resolveRollbackInventory(
   nodeId: number,
@@ -528,20 +642,21 @@ export async function resolveRollbackInventory(
 
   try {
     const gitInventory = await resolveGitInventory(nodeId, stackName, stackRoot);
-    if (gitInventory?.exactCoverage) return gitInventory;
+    if (gitInventory && gitInventory.coverageRefusal === null) return gitInventory;
 
     const authored = await resolveAuthoredInventory(nodeId, stackName, stackRoot, fsSvc);
 
-    if (gitInventory && !gitInventory.exactCoverage) {
+    if (gitInventory) {
       const established = Boolean(
         gitInventory.appliedDeploySpec
         || gitInventory.lastAppliedContentHash
         || gitInventory.git?.commitSha,
       );
       const firstApplyCorrupt = Boolean(gitInventory.coverageRefusal?.includes('unreadable'));
-      // Established or corrupt first-apply: fail closed. Otherwise merge Git
-      // identity onto authored exact coverage for a true first apply.
-      if (established || firstApplyCorrupt || !authored.exactCoverage) {
+      // Fail closed when the Git state is established, the manifest is
+      // unreadable, or the authored inventory is refused. Otherwise merge the
+      // Git identity onto the authored inventory for a true first apply.
+      if (established || firstApplyCorrupt || authored.coverageRefusal !== null) {
         return gitInventory;
       }
       return {
@@ -554,8 +669,7 @@ export async function resolveRollbackInventory(
       };
     }
 
-    if (authored.exactCoverage) return authored;
-    return gitInventory ?? authored;
+    return authored;
   } catch (e) {
     console.error(
       '[rollbackInventory] Failed to resolve inventory:',

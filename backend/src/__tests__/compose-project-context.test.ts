@@ -95,8 +95,9 @@ describe('composeProjectContext backupFromContext', () => {
       lastAppliedContentHash: null,
       manifestState: null,
       manifestGeneration: null,
-      exactCoverage: true,
       coverageRefusal: null,
+      uncapturedInputs: [],
+      uncapturedRelativePaths: [],
     });
     vi.spyOn(RollbackGenerationStore, 'captureGeneration').mockRejectedValue(
       new Error('injected capture failure'),
@@ -108,5 +109,88 @@ describe('composeProjectContext backupFromContext', () => {
     expect(await fsPromises.readFile(backupPath)).toEqual(originalBackup);
     await fsSvc.restoreStackFiles(stackName);
     expect(await fsPromises.readFile(path.join(stackDir, 'compose.yaml'), 'utf8')).toBe('ORIGINAL\n');
+  });
+});
+
+describe('composeProjectContext backupFromContext coverage', () => {
+  let composeDir: string;
+  let dataDir: string;
+  let originalDataDir: string | undefined;
+  const stackName = 'partial';
+
+  function inventory(over: Partial<Awaited<ReturnType<typeof resolveRollbackInventory>>> = {}) {
+    return {
+      entries: [{
+        relativePath: 'compose.yaml',
+        dependencyKind: 'compose-root' as const,
+        provenance: 'authored' as const,
+        sensitivity: 'low' as const,
+        absolutePath: path.join(composeDir, stackName, 'compose.yaml'),
+      }],
+      invocation: {
+        composeArgsPrefix: [],
+        projectDirectory: null,
+        projectName: stackName,
+        explicitComposeFiles: ['compose.yaml'],
+        meshEnabled: false,
+        meshOverrideRelativePath: null,
+      },
+      git: null,
+      appliedDeploySpec: null,
+      lastAppliedContentHash: null,
+      manifestState: null,
+      manifestGeneration: null,
+      coverageRefusal: null,
+      uncapturedInputs: [],
+      uncapturedRelativePaths: [],
+      ...over,
+    };
+  }
+
+  beforeEach(async () => {
+    composeDir = await fsPromises.mkdtemp(path.join(os.tmpdir(), 'sencho-compose-'));
+    dataDir = await fsPromises.mkdtemp(path.join(os.tmpdir(), 'sencho-data-'));
+    mockState.composeDir = composeDir;
+    mockState.composeDirs = new Map([[1, composeDir]]);
+    originalDataDir = process.env.DATA_DIR;
+    process.env.DATA_DIR = dataDir;
+    await fsPromises.mkdir(path.join(composeDir, stackName), { recursive: true });
+    await fsPromises.writeFile(path.join(composeDir, stackName, 'compose.yaml'), 'services: {}\n', 'utf8');
+  });
+
+  afterEach(async () => {
+    if (originalDataDir === undefined) delete process.env.DATA_DIR;
+    else process.env.DATA_DIR = originalDataDir;
+    await fsPromises.rm(composeDir, { recursive: true, force: true });
+    await fsPromises.rm(dataDir, { recursive: true, force: true });
+    vi.restoreAllMocks();
+  });
+
+  it('captures a partial generation and logs what was left out', async () => {
+    const note = 'include ../shared/base.yaml is outside the stack directory and is not captured';
+    vi.mocked(resolveRollbackInventory).mockResolvedValue(inventory({ uncapturedInputs: [note] }));
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    const ctx = await resolveComposeProjectContext(1, stackName);
+    const generationId = await ctx.backupFromContext('deployment');
+
+    const manifest = await RollbackGenerationStore.readVerifiedGeneration(1, stackName, generationId);
+    expect(manifest.entries.map((e) => e.relativePath)).toEqual(['compose.yaml']);
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(warn.mock.calls[0][0]).toContain('../shared/base.yaml');
+  });
+
+  it('refuses before writing anything when the inventory has a blocking reason', async () => {
+    vi.mocked(resolveRollbackInventory).mockResolvedValue(
+      inventory({ coverageRefusal: 'Case-colliding managed paths "A" and "a"' }),
+    );
+    const capture = vi.spyOn(RollbackGenerationStore, 'captureGeneration');
+
+    const ctx = await resolveComposeProjectContext(1, stackName);
+    await expect(ctx.backupFromContext('deployment')).rejects.toMatchObject({
+      code: 'ROLLBACK_COVERAGE_UNAVAILABLE',
+      message: 'Rollback coverage is unavailable: Case-colliding managed paths "A" and "a"',
+    });
+    expect(capture).not.toHaveBeenCalled();
   });
 });

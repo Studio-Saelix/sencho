@@ -193,6 +193,11 @@ export class RollbackGenerationStore {
       throw Object.assign(new Error('Stack name escapes compose directory'), { code: 'INVALID_PATH' });
     }
 
+    // Real files are compared against <real compose dir>/<stack>, so a compose
+    // dir that is itself a link still works while a stack dir that links to
+    // another location stays refused (the same rule FileSystemService applies).
+    const realStackRoot = path.join(await fsPromises.realpath(composeBase), stackName);
+
     const stagingName = `staging-${randomUUID()}`;
     const stagingDir = path.resolve(gensResolved, stagingName);
     if (!stagingDir.startsWith(gensResolved + path.sep)) {
@@ -248,7 +253,7 @@ export class RollbackGenerationStore {
             { cause: e },
           );
         }
-        if (!realPath.startsWith(stackRoot + path.sep)) {
+        if (!realPath.startsWith(realStackRoot + path.sep)) {
           throw Object.assign(
             new Error(`Inventory path escapes stack root via symlink: ${relativePath}`),
             { code: 'SYMLINK_ESCAPE' },
@@ -355,6 +360,8 @@ export class RollbackGenerationStore {
         operationKind,
         entries,
         managedRelativePaths,
+        uncapturedRelativePaths: [...inventory.uncapturedRelativePaths],
+        uncapturedInputs: [...inventory.uncapturedInputs],
         invocation: inventory.invocation,
         git: inventory.git,
         priorRecords: {
@@ -519,7 +526,10 @@ export class RollbackGenerationStore {
    * content checksums before any live mutation. Writes present entries;
    * deletes live paths that are in managedRelativePaths or liveManagedPaths
    * but not present in the generation (tombstones and post-capture additions
-   * inside the managed set). Paths outside both sets are left untouched.
+   * inside the managed set). Paths outside both sets are left untouched, and
+   * so are the manifest's uncapturedRelativePaths even when a caller lists them.
+   * A generation that recorded uncaptured inputs ignores liveManagedPaths for
+   * deletes, because it cannot tell which live files those inputs named.
    *
    * Durability: copies the affected live paths into pre-restore/ and writes
    * restore-intent.json (including Git DB + manifesto preimage) before mutation.
@@ -545,10 +555,15 @@ export class RollbackGenerationStore {
       if (entry.state === 'present') presentByKey.set(posixRel(entry.relativePath), entry);
     }
 
+    // Paths left out at capture (links that escaped the stack, dangled, or
+    // pointed at a non-file) were never part of the generation. A real file
+    // there now is the operator's, so it is not stale managed content to remove,
+    // even when the caller's live discovery lists it.
+    const uncapturedKeys = new Set((manifest.uncapturedRelativePaths ?? []).map(posixRel));
     const deleteRelByKey = new Map<string, string>();
     const considerDelete = (relRaw: string): void => {
       const rel = posixRel(relRaw);
-      if (presentByKey.has(rel) || deleteRelByKey.has(rel)) return;
+      if (presentByKey.has(rel) || deleteRelByKey.has(rel) || uncapturedKeys.has(rel)) return;
       deleteRelByKey.set(rel, rel);
     };
 
@@ -556,7 +571,13 @@ export class RollbackGenerationStore {
     for (const entry of manifest.entries) {
       if (entry.state === 'tombstoned') considerDelete(entry.relativePath);
     }
-    for (const rel of liveManagedPaths) considerDelete(rel);
+    // A partial generation cannot say what its uncaptured inputs resolved to,
+    // so a file that appeared since capture may be one of them (an env file a
+    // ${VAR} path now names). Only what the generation itself recorded is
+    // deleted; the live discovery is not trusted to add to that.
+    if ((manifest.uncapturedInputs ?? []).length === 0) {
+      for (const rel of liveManagedPaths) considerDelete(rel);
+    }
 
     const restores: Array<{
       relativePath: string;
@@ -1097,6 +1118,11 @@ export class RollbackGenerationStore {
     }
     if (!Array.isArray(manifest.entries) || !Array.isArray(manifest.managedRelativePaths)) {
       throw new Error('Generation manifest is missing entries or managedRelativePaths');
+    }
+    for (const field of [manifest.uncapturedRelativePaths, manifest.uncapturedInputs]) {
+      if (field !== undefined && !(Array.isArray(field) && field.every((v) => typeof v === 'string'))) {
+        throw new Error('Generation manifest has a malformed uncaptured list');
+      }
     }
     await this.verifyManifestContent(genResolved, manifest);
     return manifest;

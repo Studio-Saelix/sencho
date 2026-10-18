@@ -402,7 +402,7 @@ describe('failure classification on deploy/update error responses', () => {
 
   it('classifies rollback coverage refusals', async () => {
     mockDeployStack.mockRejectedValue(
-      new Error('Host-absolute include path cannot be captured for exact rollback'),
+      new Error('Rollback coverage is unavailable: Case-colliding managed paths "App.conf" and "app.conf"'),
     );
 
     const res = await request(app)

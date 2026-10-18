@@ -20,6 +20,7 @@ vi.mock('../services/NodeRegistry', () => ({
 import {
   aggregateRollbackOverall,
   buildRollbackItems,
+  describeManagedInputs,
   type RollbackInputs,
 } from '../services/updateGuard/readiness';
 import type { ContainerProbe } from '../services/updateGuard/types';
@@ -45,6 +46,51 @@ const baseInputs = (over: Partial<RollbackInputs> = {}): RollbackInputs => ({
 
 const itemById = (inputs: RollbackInputs, id: string) =>
   buildRollbackItems(inputs, NOW).find(i => i.id === id)!;
+
+describe('describeManagedInputs', () => {
+  const entries = [{
+    relativePath: 'compose.yaml',
+    dependencyKind: 'compose-root' as const,
+    provenance: 'authored' as const,
+    sensitivity: 'low' as const,
+    absolutePath: '/x/compose.yaml',
+  }];
+
+  it('reads as covered when nothing is left out', () => {
+    expect(describeManagedInputs({ coverageRefusal: null, uncapturedInputs: [], entries })).toEqual({
+      covered: true,
+      detail: 'Exact authored-project coverage includes 1 managed path(s).',
+    });
+  });
+
+  it('names a refused capture by its reason alone, even when notes are present', () => {
+    expect(describeManagedInputs({
+      coverageRefusal: 'Case-colliding managed paths "A" and "a"',
+      uncapturedInputs: ['ignored'],
+      entries,
+    })).toEqual({ covered: false, detail: 'Case-colliding managed paths "A" and "a"' });
+  });
+
+  it('lists what a partial capture leaves out and says a rollback uses the current content', () => {
+    const result = describeManagedInputs({
+      coverageRefusal: null,
+      uncapturedInputs: ['include ../shared/base.yaml is outside the stack directory and is not captured'],
+      entries,
+    });
+    expect(result.covered).toBe(false);
+    expect(result.detail).toBe(
+      '1 input(s) are not captured and a rollback uses their current content: include ../shared/base.yaml is outside the stack directory and is not captured.',
+    );
+  });
+
+  it('caps a long list and counts the rest', () => {
+    const uncapturedInputs = Array.from({ length: 8 }, (_, i) => `n${i}`);
+    const result = describeManagedInputs({ coverageRefusal: null, uncapturedInputs, entries });
+    expect(result.detail).toContain('8 input(s) are not captured');
+    expect(result.detail).toContain('n0; n1; n2; n3; n4; and 3 more.');
+    expect(result.detail).not.toContain('n5');
+  });
+});
 
 describe('buildRollbackItems', () => {
   it('reports the full set of rollback readiness items', () => {
