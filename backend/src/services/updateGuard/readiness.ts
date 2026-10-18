@@ -593,8 +593,11 @@ export function buildRollbackItems(inputs: RollbackInputs, now: number): Rollbac
 
 /**
  * compose_source gates not_ready; ready additionally requires env coverage and
- * a known previous image tag. volume_data, healthchecks, and last_deploy are
- * disclosures and never gate the overall state.
+ * a known previous image tag. A generation that records its own omissions, or
+ * whose coverage could not be read or was never recorded, restores partially,
+ * so it caps the overall state at partial rather than letting the badge
+ * contradict the rows beneath it. volume_data, healthchecks, and last_deploy
+ * are disclosures and never gate the overall state.
  */
 export function aggregateRollbackOverall(items: RollbackReadinessItem[]): RollbackOverall {
   const byId = new Map(items.map(i => [i.id, i.state]));
@@ -609,7 +612,8 @@ export function aggregateRollbackOverall(items: RollbackReadinessItem[]): Rollba
     return 'partial';
   }
   if (byId.get('env_keys') === 'ready' && byId.get('previous_images') === 'ready') {
-    return 'ready';
+    const managed = byId.get('managed_inputs');
+    return managed === 'warning' || managed === 'unknown' ? 'partial' : 'ready';
   }
   return 'partial';
 }

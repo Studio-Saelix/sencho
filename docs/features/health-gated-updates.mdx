@@ -99,6 +99,8 @@ The Stack Dossier carries a **Rollback readiness** section that answers one ques
 - **Rollback eligibility**: whether policy allows restore for the current generation (integrity and held-image posture).
 - **Application data**: always reported as not covered. Named volumes and bind-mounted data are not included; a rollback restores the managed authored inventory (and held images where available), and your application data keeps its current state. This row exists so the limit is stated where you decide, not discovered during an incident.
 
+The overall state never reads **Ready** while managed-input coverage is partial or unknown, so the headline always agrees with the rows beneath it. A generation that leaves inputs out, or that recorded no coverage at all, holds the overall state at **Partial** even when compose files, env coverage and the previous image are all otherwise ready.
+
 ## Automatic rollback images
 
 Before an atomic deploy, a full-stack update, or a Git apply that will promote (including apply-with-deploy), Sencho captures the running image of every service as an opaque, uniquely named copy so it can restore the prior runtime when a failure after handoff requires it. These copies exist in Docker as `sencho-rb/<generation>/<service>:hold`, but they are Sencho-internal recovery state, not part of your image inventory: they are kept out of **Resources → Images** and listed instead in **Resources → Rollback**. If a captured image still carries its original registry tag alongside the hold tag (a compose file pinned to an immutable tag, for example), it stays visible in the Images tab too, badged **Rollback protected** instead of the usual unused label, since it is held on purpose rather than left behind by accident.

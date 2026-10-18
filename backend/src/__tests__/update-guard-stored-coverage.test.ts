@@ -267,4 +267,46 @@ describe('rollback readiness coverage comes from the stored generation', () => {
     expect(managed.detail).toContain('../shared-common/base.yaml');
     expect(managed.detail).not.toMatch(/not recorded/);
   });
+
+  describe('overall readiness never contradicts the stored coverage rows', () => {
+    beforeEach(async () => {
+      // A backup slot with an env file, so env coverage is ready and the
+      // overall state turns on managed-input coverage alone.
+      const backupDir = path.join(dataDir, 'backups', String(NODE), STACK);
+      await fsPromises.mkdir(backupDir, { recursive: true });
+      await fsPromises.writeFile(path.join(backupDir, '.env'), 'A=1\nB=2\n', 'utf8');
+      await fsPromises.writeFile(path.join(backupDir, '.timestamp'), String(Date.now()), 'utf8');
+    });
+
+    async function overall() {
+      return (await UpdateGuardService.getInstance().computeRollbackReadiness(NODE, STACK)).overall;
+    }
+
+    it('is ready when the stored generation holds every input', async () => {
+      await fsPromises.writeFile(path.join(stackDir, 'compose.yaml'), PLAIN, 'utf8');
+      await captureCurrent();
+
+      expect(await overall()).toBe('ready');
+    });
+
+    it('is partial when the stored generation recorded omissions', async () => {
+      await fsPromises.writeFile(path.join(stackDir, 'compose.yaml'), WITH_INCLUDE, 'utf8');
+      await captureCurrent();
+      await fsPromises.writeFile(path.join(stackDir, 'compose.yaml'), PLAIN, 'utf8');
+
+      expect(await overall()).toBe('partial');
+    });
+
+    it('is partial when the stored generation recorded no coverage at all', async () => {
+      await fsPromises.writeFile(path.join(stackDir, 'compose.yaml'), PLAIN, 'utf8');
+      const generationId = await captureCurrent();
+      const genJson = path.join(RollbackGenerationStore.getGenerationDir(NODE, STACK, generationId), 'generation.json');
+      const legacy = JSON.parse(await fsPromises.readFile(genJson, 'utf8'));
+      delete legacy.uncapturedInputs;
+      delete legacy.uncapturedRelativePaths;
+      await fsPromises.writeFile(genJson, JSON.stringify(legacy), 'utf8');
+
+      expect(await overall()).toBe('partial');
+    });
+  });
 });

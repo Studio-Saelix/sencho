@@ -370,6 +370,45 @@ describe('aggregateRollbackOverall', () => {
     const items = buildRollbackItems(baseInputs({ containers: 'error' }), NOW);
     expect(aggregateRollbackOverall(items)).toBe('ready');
   });
+
+  it.each(['omits_inputs', 'not_recorded'] as const)(
+    'is partial when the generation coverage is %s, so the overall state never contradicts the rows',
+    (restoreCoverage) => {
+      const items = buildRollbackItems(baseInputs({
+        recoveryGeneration: { exists: true, shortId: 'abc123', restoreCoverage },
+        policyEligibility: 'eligible',
+        managedInputs: { covered: false, detail: 'Stored generation is partial or unrecorded.' },
+      }), NOW);
+      expect(items.find(i => i.id === 'managed_inputs')!.state).toBe('warning');
+      expect(aggregateRollbackOverall(items)).toBe('partial');
+    },
+  );
+
+  it('stays ready when the generation recorded complete coverage', () => {
+    const items = buildRollbackItems(baseInputs({
+      recoveryGeneration: { exists: true, shortId: 'abc123', restoreCoverage: 'complete' },
+      policyEligibility: 'eligible',
+    }), NOW);
+    expect(aggregateRollbackOverall(items)).toBe('ready');
+  });
+
+  it('leaves an unreadable generation to its existing partial result', () => {
+    const items = buildRollbackItems(baseInputs({
+      recoveryGeneration: { exists: true, shortId: 'abc123', restoreCoverage: 'unreadable' },
+      policyEligibility: 'eligible',
+      managedInputs: 'error',
+    }), NOW);
+    expect(aggregateRollbackOverall(items)).toBe('partial');
+  });
+
+  it.each(['error', null] as const)(
+    'is partial when managed input coverage is %s, so an unread coverage claim is never Ready',
+    (managedInputs) => {
+      const items = buildRollbackItems(baseInputs({ managedInputs }), NOW);
+      expect(items.find(i => i.id === 'managed_inputs')!.state).toBe('unknown');
+      expect(aggregateRollbackOverall(items)).toBe('partial');
+    },
+  );
   it('is not_ready when policy eligibility is blocked', () => {
     const items = buildRollbackItems(baseInputs({
       recoveryGeneration: { exists: true, shortId: 'abc', restoreCoverage: 'complete' },
