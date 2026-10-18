@@ -18,7 +18,9 @@ import {
   buildRollbackItems,
   buildServicesSignal,
   containersSignal,
-  describeManagedInputs,
+  describeRollbackManagedInputs,
+  storedRestoreCoverage,
+  type RestoreCoverage,
   diskSignal,
   driftSignal,
   healthchecksSignal,
@@ -244,21 +246,39 @@ export class UpdateGuardService {
 
     const { StackUpdateRecoveryService, shortGenerationId } = await import('./StackUpdateRecoveryService');
     const { assessGenerationEligibility } = await import('./rollbackEligibility');
+    const { RollbackGenerationStore } = await import('./RollbackGenerationStore');
     const recoverySvc = StackUpdateRecoveryService.getInstance();
     const currentGen = recoverySvc.getCurrent(nodeId, stackName);
 
+    // A rollback restores the stored generation, so its coverage is read from
+    // that generation. A row with no stored content has no coverage recorded,
+    // and a stored manifest that cannot be read is reported as unreadable.
+    const storedManifest = currentGen?.content_path
+      ? await this.collect('recovery generation content', stackName, () =>
+        RollbackGenerationStore.readVerifiedGeneration(nodeId, stackName, currentGen.content_path!))
+      : null;
+    const restoreCoverage: RestoreCoverage = storedManifest === null
+      ? 'not_recorded'
+      : storedManifest === 'error'
+        ? 'unreadable'
+        : storedRestoreCoverage(storedManifest);
+
     const recoveryGeneration = currentGen
-      ? { exists: true as const, shortId: shortGenerationId(currentGen.id) }
+      ? { exists: true as const, shortId: shortGenerationId(currentGen.id), restoreCoverage }
       : { exists: false as const };
 
     const policyEligibility = currentGen
       ? await this.collect('rollback eligibility', stackName, () => assessGenerationEligibility(currentGen))
       : null;
 
-    const managedInputs = await this.collect('managed inputs', stackName, async () => {
+    const liveInventory = await this.collect('managed inputs', stackName, async () => {
       const { resolveRollbackInventory } = await import('./rollbackInventory');
-      const inventory = await resolveRollbackInventory(nodeId, stackName);
-      return describeManagedInputs(inventory);
+      return resolveRollbackInventory(nodeId, stackName);
+    });
+    const managedInputs = describeRollbackManagedInputs({
+      coverage: currentGen ? restoreCoverage : null,
+      stored: storedManifest === null || storedManifest === 'error' ? null : storedManifest,
+      live: liveInventory,
     });
 
     const sopsKeys = await this.collect('repository secrets', stackName, async () => {

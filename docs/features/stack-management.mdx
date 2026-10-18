@@ -5,6 +5,8 @@ description: Create, deploy, control, and remove Docker Compose stacks.
 
 A **stack** in Sencho is a Docker Compose project: a directory inside your `COMPOSE_DIR` that contains at least a `compose.yaml` (or `docker-compose.yml`) file. Sencho discovers every subdirectory as a stack and surfaces them in the left sidebar.
 
+A stack's compose file has to be a file inside its own directory, or a link that stays inside it. A compose file that is a link to another folder is refused when you open or deploy the stack, because it would let one stack read and change another stack's configuration. To share a file between stacks, `include:` or `extends:` it from each stack's own compose file. A recovery generation does not hold a shared file, and Rollback readiness lists it.
+
 <Frame>
   <img src="/images/stack-management/sidebar-grouped.png" alt="Sencho sidebar showing the stack list grouped by label, with filter chips at the top" />
 </Frame>

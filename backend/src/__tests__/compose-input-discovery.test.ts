@@ -767,6 +767,22 @@ describe('nested-primary runtime path equivalence (audit round 9 B-3)', () => {
     });
 });
 
+describe('Git discovery keeps refusing what authored rollback capture only reports', () => {
+    it.each([
+        ['an interpolated include path', 'include:\n  - "${COMMON_DIR}/base.yaml"\nservices: {}\n', [['parse-error', null], ['dynamic-include', '${COMMON_DIR}/base.yaml']]],
+        ['an interpolated extends file', 'services:\n  web:\n    extends:\n      file: ${BASE_FILE:-base.yaml}\n      service: base\n', [['parse-error', null], ['dynamic-include', '${BASE_FILE:-base.yaml}']]],
+        ['an include project_directory outside the base', 'include:\n  - path: ./local.yaml\n    project_directory: ../shared-common\nservices: {}\n', [['parse-error', null]]],
+    ])('refuses %s as fatal', async (_label, compose, expected) => {
+        const clone = makeClone({
+            'compose.yaml': compose,
+            'local.yaml': 'services:\n  web:\n    image: nginx\n',
+        });
+        const result = await discovery().discoverFromClone({ cloneDir: clone, composePaths: ['compose.yaml'], contextDir: null, bounds: BOUNDS });
+        expect(result.refusals.map((r) => [r.kind, r.sourcePath])).toEqual(expected);
+        expect(result.refusals.every((r) => r.actionable)).toBe(true);
+    });
+});
+
 describe('included-project default env and project-base includes (audit round 10 B-1/B-2)', () => {
     it('materializes an included project\'s default .env as a managed sensitive input', async () => {
         const clone = makeClone({

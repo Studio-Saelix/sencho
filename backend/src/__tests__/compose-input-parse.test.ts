@@ -452,3 +452,153 @@ describe('isDynamicPath', () => {
         expect(isDynamicPath('plain.env')).toBe(false);
     });
 });
+
+describe('parseDeclaredInputs reportUnenumerable mode', () => {
+    const run = (files: Record<string, string>, reportUnenumerable: boolean) => {
+        const r = repo(files);
+        return parseDeclaredInputs([{ path: 'compose.yaml', content: files['compose.yaml'] }], {
+            projectRoot: null,
+            read: r.read,
+            reportUnenumerable,
+        });
+    };
+
+    const interpolatedInclude = { 'compose.yaml': 'include:\n  - "${COMMON_DIR}/base.yaml"\nservices: {}\n' };
+    const interpolatedExtends = {
+        'compose.yaml': 'services:\n  web:\n    extends:\n      file: ${BASE_FILE:-base.yaml}\n      service: base\n',
+    };
+    const outsideProjectDir = {
+        'compose.yaml': 'include:\n  - path: ./local.yaml\n    project_directory: ../shared-common\nservices: {}\n',
+        'local.yaml': 'services:\n  web:\n    image: nginx\n',
+    };
+
+    it.each([
+        ['an interpolated include', interpolatedInclude, /is unreadable/],
+        ['an interpolated extends file', interpolatedExtends, /is unreadable/],
+        ['a project_directory outside the base', outsideProjectDir, /escapes its base/],
+    ])('keeps %s a parse error by default, for Git materialization', (_label, files, message) => {
+        const result = run(files, false);
+        expect(result.parseErrors.some((e) => message.test(e))).toBe(true);
+    });
+
+    it('leaves an interpolated project_directory unreported by default, for Git materialization', () => {
+        const result = run({
+            'compose.yaml': 'include:\n  - path: ./local.yaml\n    project_directory: "${PD:-inc}"\nservices: {}\n',
+            'local.yaml': 'services:\n  web:\n    image: nginx\n',
+        }, false);
+        expect(result.dynamic).toEqual([]);
+        expect(result.inputs.some((i) => i.kind === 'include' && i.baseDir === 'host')).toBe(false);
+    });
+
+    it.each([
+        ['an interpolated include', interpolatedInclude],
+        ['an interpolated extends file', interpolatedExtends],
+        ['a project_directory outside the base', outsideProjectDir],
+    ])('reports %s instead of failing the parse when partial', (_label, files) => {
+        const result = run(files, true);
+        expect(result.parseErrors).toEqual([]);
+    });
+
+    it('lists an interpolated include and extends file as dynamic when partial', () => {
+        expect(run(interpolatedInclude, true).dynamic.map((d) => [d.kind, d.sourcePath]))
+            .toEqual([['include', '${COMMON_DIR}/base.yaml']]);
+        expect(run(interpolatedExtends, true).dynamic.map((d) => [d.kind, d.sourcePath]))
+            .toEqual([['extends', '${BASE_FILE:-base.yaml}']]);
+    });
+
+    it('records an outside project_directory as an outside include when partial', () => {
+        const outside = run(outsideProjectDir, true).inputs.filter((i) => i.baseDir === 'host');
+        expect(outside.map((i) => [i.kind, i.sourcePath])).toEqual([['include', '../shared-common']]);
+    });
+
+    it('still reports a missing static include and keeps recursing into readable ones when partial', () => {
+        const missing = run({ 'compose.yaml': 'include:\n  - ./missing.yaml\nservices: {}\n' }, true);
+        expect(missing.parseErrors.some((e) => /missing\.yaml is unreadable/.test(e))).toBe(true);
+
+        const nested = run({
+            'compose.yaml': 'include:\n  - ./inner.yaml\nservices: {}\n',
+            'inner.yaml': 'services:\n  web:\n    image: nginx\n    env_file: ./app.env\n',
+        }, true);
+        expect(nested.parseErrors).toEqual([]);
+        expect(nested.inputs.filter((i) => i.kind === 'env_file').map((i) => i.sourcePath)).toEqual(['app.env']);
+    });
+
+    it('lists an interpolated project_directory as dynamic and still records the included file', () => {
+        const result = run({
+            'compose.yaml': 'include:\n  - path: ./local.yaml\n    project_directory: "${PROJ_DIR}"\nservices: {}\n',
+            'local.yaml': 'services:\n  web:\n    image: nginx\n    env_file: ./local.env\n',
+        }, true);
+        expect(result.parseErrors).toEqual([]);
+        expect(result.dynamic.map((d) => [d.kind, d.sourcePath])).toEqual([['include', '${PROJ_DIR}']]);
+        expect(result.inputs.filter((i) => i.kind === 'include').map((i) => i.sourcePath)).toEqual(['local.yaml']);
+        // The included project's directory is unknown, so its own references are not enumerated.
+        expect(result.inputs.filter((i) => i.kind === 'env_file')).toEqual([]);
+    });
+
+    it('follows a literal sibling include entry beside an interpolated one', () => {
+        const result = run({
+            'compose.yaml': 'include:\n  - ./a.yaml\n  - "${X}/b.yaml"\nservices: {}\n',
+            'a.yaml': 'services:\n  web:\n    image: nginx\n    env_file: ./a.env\n',
+        }, true);
+        expect(result.parseErrors).toEqual([]);
+        expect(result.dynamic.map((d) => d.sourcePath)).toEqual(['${X}/b.yaml']);
+        expect(result.inputs.filter((i) => i.kind === 'env_file').map((i) => i.sourcePath)).toEqual(['a.env']);
+    });
+
+    it('reports an interpolated path that follows a literal path in one include entry', () => {
+        const result = run({
+            'compose.yaml': 'include:\n  - path: ["./a.yaml", "${X}/b.yaml"]\nservices: {}\n',
+            'a.yaml': 'services:\n  web:\n    image: nginx\n',
+        }, true);
+        expect(result.parseErrors).toEqual([]);
+        expect(result.dynamic.map((d) => [d.kind, d.sourcePath])).toEqual([['include', '${X}/b.yaml']]);
+        expect(result.inputs.filter((i) => i.kind === 'include').map((i) => i.sourcePath)).toEqual(['a.yaml']);
+    });
+
+    it.each([
+        ['an outside project_directory', 'include:\n  - path: ./inc/base.yaml\n    project_directory: ../shared-common\n    env_file: ./inc.env\nservices: {}\n'],
+        ['an interpolated project_directory', 'include:\n  - path: ./inc/base.yaml\n    project_directory: "${PD:-inc}"\n    env_file: ./inc.env\nservices: {}\n'],
+        ['an interpolated main file', 'include:\n  - path: ["${X}/a.yaml", ./inc/base.yaml]\n    env_file: ./inc.env\nservices: {}\n'],
+        ['an outside main file', 'include:\n  - path: ../shared-common/base.yaml\n    env_file: ./inc.env\nservices: {}\n'],
+    ])('still records the include env_file beside %s', (_label, compose) => {
+        const result = run({ 'compose.yaml': compose, 'inc/base.yaml': 'services: {}\n' }, true);
+        expect(result.parseErrors).toEqual([]);
+        expect(result.inputs.filter((i) => i.kind === 'include-env').map((i) => i.sourcePath)).toEqual(['inc.env']);
+    });
+
+    it('keeps skipping the include env_file for an outside main file by default', () => {
+        const result = run({
+            'compose.yaml': 'include:\n  - path: ../shared-common/base.yaml\n    env_file: ./inc.env\nservices: {}\n',
+        }, false);
+        expect(result.inputs.filter((i) => i.kind === 'include-env')).toEqual([]);
+    });
+
+    it('does not enumerate a literal override listed after an interpolated main file', () => {
+        const result = run({
+            'compose.yaml': 'include:\n  - path: ["${DIR}/base.yaml", "./override.yaml"]\nservices: {}\n',
+            'override.yaml': 'services:\n  web:\n    image: nginx\n    env_file: ./o.env\n',
+        }, true);
+        expect(result.parseErrors).toEqual([]);
+        expect(result.dynamic.map((d) => d.sourcePath)).toEqual(['${DIR}/base.yaml']);
+        // The first path defines the included project's directory, which is unknown here.
+        expect(result.inputs.filter((i) => i.kind === 'env_file')).toEqual([]);
+    });
+
+    it('records one outside input when both the included file and its project_directory are outside', () => {
+        const result = run({
+            'compose.yaml': 'include:\n  - path: ../shared-common/base.yaml\n    project_directory: ../shared-common\nservices: {}\n',
+        }, true);
+        expect(result.parseErrors).toEqual([]);
+        expect(result.inputs.filter((i) => i.baseDir === 'host').map((i) => [i.kind, i.sourcePath]))
+            .toEqual([['include', '../shared-common/base.yaml']]);
+    });
+
+    it('does not follow an interpolated include inside a readable included file', () => {
+        const result = run({
+            'compose.yaml': 'include:\n  - ./inner.yaml\nservices: {}\n',
+            'inner.yaml': 'include:\n  - "${DIR}/more.yaml"\nservices: {}\n',
+        }, true);
+        expect(result.parseErrors).toEqual([]);
+        expect(result.dynamic.map((d) => d.sourcePath)).toEqual(['${DIR}/more.yaml']);
+    });
+});

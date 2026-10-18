@@ -530,6 +530,7 @@ async function resolveAuthoredInventory(
       const parsed = parseDeclaredInputs(orderedContents, {
         projectRoot: null,
         read: readCallback,
+        reportUnenumerable: true,
       });
 
       if (parsed.parseErrors.length > 0) {
@@ -537,8 +538,9 @@ async function resolveAuthoredInventory(
       }
       for (const dyn of parsed.dynamic) {
         if (UNCAPTURED_SILENT_KINDS.has(dyn.kind)) continue;
+        const refs = dyn.kind === 'include' || dyn.kind === 'extends' ? ' (and the files it references)' : '';
         addUncaptured(
-          `${dyn.kind} ${dyn.sourcePath} is resolved by Compose at deploy time and is not captured`,
+          `${dyn.kind} ${dyn.sourcePath}${refs} is resolved by Compose at deploy time and is not captured`,
         );
       }
 

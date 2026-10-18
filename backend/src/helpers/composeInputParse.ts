@@ -66,7 +66,22 @@ export interface ParseOptions {
     projectRoot: string | null;
     /** Fetches a repo-relative file's content for include/extends recursion; null when unreadable. */
     read: (repoPath: string) => string | null;
+    /**
+     * Report what cannot be enumerated instead of failing on it: an include or
+     * extends path that holds a variable is listed as dynamic and not followed,
+     * an include `project_directory` that holds a variable is listed as dynamic
+     * and its project is not walked, and one outside the project root is
+     * recorded as an outside input. Authored rollback capture sets this because
+     * it accepts a partial generation. Git materialization leaves it unset: a
+     * project it cannot enumerate completely must not be materialized.
+     */
+    reportUnenumerable?: boolean;
 }
+
+/** An include or extends target that is reported but not read. */
+const NOT_FOLLOWED: Readonly<{ source: null; materialized: null }> = { source: null, materialized: null };
+
+const DYNAMIC_PATH_NOTE = 'Path contains a variable; resolved by Compose at deploy time, not enumerated.';
 
 interface ComposeRefs {
     inputs: DeclaredInput[];
@@ -132,7 +147,7 @@ function emitInput(
     required = true,
 ): void {
     if (rawPath !== null && isDynamicPath(rawPath)) {
-        refs.dynamic.push({ sourcePath: rawPath, kind, note: 'Path contains a variable; resolved by Compose at deploy time, not enumerated.' });
+        refs.dynamic.push({ sourcePath: rawPath, kind, note: DYNAMIC_PATH_NOTE });
         return;
     }
     refs.inputs.push({ sourcePath, materializedPath, baseDir, kind, role, fromFile, service, required });
@@ -474,7 +489,8 @@ function parseFileInner(
                     const fileTarget = asString((ext as Record<string, unknown>).file);
                     if (fileTarget !== undefined) {
                         const resolved = emitFileRelative(refs, fileTarget, 'extends', 'compose-additional', normalized, ctx);
-                        readAndRecurse(resolved, ctx, opts, refs, visited, stack, depth, 'extends.file target');
+                        const followed = opts.reportUnenumerable && isDynamicPath(fileTarget) ? NOT_FOLLOWED : resolved;
+                        readAndRecurse(followed, ctx, opts, refs, visited, stack, depth, 'extends.file target');
                     }
                 }
             }
@@ -519,8 +535,19 @@ function processIncludeEntry(
     stack: Set<string>,
     depth: number,
 ): void {
-    const resolvedPaths = paths.map((p) => emitFileRelative(refs, p, 'include', 'compose-additional', fromFile, ctx));
+    const resolvedPaths = paths.map((p) => {
+        const resolved = emitFileRelative(refs, p, 'include', 'compose-additional', fromFile, ctx);
+        return opts.reportUnenumerable && isDynamicPath(p) ? NOT_FOLLOWED : resolved;
+    });
     const first = resolvedPaths[0];
+    // Explicit env_file accepts a string or a list of strings; resolves
+    // against the current level's project base (compose-go include env), so it
+    // does not depend on where the included project lives.
+    const emitIncludeEnvFiles = (): void => {
+        for (const env of asStringList(map?.env_file)) {
+            emitFileRelative(refs, env, 'include-env', 'env', fromFile, ctx);
+        }
+    };
     // interpolation: false disables interpolation for the included project,
     // so its default .env is never probed.
     const interpolate = map?.interpolation !== false;
@@ -528,10 +555,25 @@ function processIncludeEntry(
     let childProjectBase: string | null;
     let childRuntimeProjectBase: string | null;
     if (projectDir !== undefined) {
+        if (opts.reportUnenumerable && isDynamicPath(projectDir)) {
+            refs.dynamic.push({ sourcePath: projectDir, kind: 'include', note: DYNAMIC_PATH_NOTE });
+            emitIncludeEnvFiles();
+            return;
+        }
         childProjectBase = resolveWithinBase(ctx.projectBase, projectDir);
         childRuntimeProjectBase = resolveWithinBase(ctx.runtimeProjectBase, projectDir);
         if (childProjectBase === null || childRuntimeProjectBase === null) {
-            refs.parseErrors.push(`Include project_directory ${projectDir} in ${fromFile} escapes its base`);
+            if (!opts.reportUnenumerable) {
+                refs.parseErrors.push(`Include project_directory ${projectDir} in ${fromFile} escapes its base`);
+            } else {
+                if (first?.source != null) {
+                    // The main included file was followed (it is inside the base) but its
+                    // project lives outside it: that directory is what a rollback cannot
+                    // restore. A main file that was not followed was already reported.
+                    emitInput(refs, projectDir, projectDir, null, 'include', 'compose-additional', fromFile, 'host');
+                }
+                emitIncludeEnvFiles();
+            }
             return;
         }
     } else if (first !== undefined && first.source !== null && first.materialized !== null) {
@@ -541,7 +583,9 @@ function processIncludeEntry(
         childProjectBase = dirOf(first.source);
         childRuntimeProjectBase = dirOf(first.materialized);
     } else {
-        return; // host/URL/escape: emitted, the classifier decides
+        // host/URL/escape: emitted, the classifier decides
+        if (opts.reportUnenumerable) emitIncludeEnvFiles();
+        return;
     }
 
     // The included project's interpolation env defaults to .env in its
@@ -558,11 +602,7 @@ function processIncludeEntry(
         readAndRecurse(resolved, ctx, opts, refs, visited, stack, depth, 'Included compose file', childOverride);
     }
 
-    // Explicit env_file accepts a string or a list of strings; resolves
-    // against the current level's project base (compose-go include env).
-    for (const env of asStringList(map?.env_file)) {
-        emitFileRelative(refs, env, 'include-env', 'env', fromFile, ctx);
-    }
+    emitIncludeEnvFiles();
 }
 
 /** Read a resolved include/extends target and recurse when it is a repository file. */

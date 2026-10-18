@@ -104,6 +104,88 @@ describe('rollback capture with inputs outside the stack', () => {
     ]));
   });
 
+  it.each([
+    ['an interpolated include path', 'include:\n  - "${COMMON_DIR}/base.yaml"\nservices:\n  web:\n    image: nginx\n', 'include ${COMMON_DIR}/base.yaml (and the files it references) is resolved by Compose at deploy time and is not captured'],
+    ['an interpolated extends file', 'services:\n  web:\n    extends:\n      file: ${BASE_FILE:-base.yaml}\n      service: base\n', 'extends ${BASE_FILE:-base.yaml} (and the files it references) is resolved by Compose at deploy time and is not captured'],
+    ['a long-form include with a project_directory outside the stack', 'include:\n  - path: ../shared-common/base.yaml\n    project_directory: ../shared-common\nservices:\n  web:\n    image: nginx\n', 'include ../shared-common/base.yaml (and the files it references) is outside the stack directory and is not captured'],
+  ])('captures a stack with %s and records what it left out', async (_label, compose, expectedNote) => {
+    await fsPromises.writeFile(path.join(stackDir, 'compose.yaml'), compose, 'utf8');
+
+    const inventory = await resolveRollbackInventory(NODE, STACK);
+    expect(inventory.coverageRefusal).toBeNull();
+
+    const manifest = await RollbackGenerationStore.captureGeneration({
+      nodeId: NODE,
+      stackName: STACK,
+      generationId: randomUUID(),
+      inventory,
+    });
+
+    expect(manifest.entries.map((e) => e.relativePath)).toEqual(['compose.yaml']);
+    expect(manifest.uncapturedInputs).toEqual([expectedNote]);
+  });
+
+  it('captures an include entry that lists a literal file and then an interpolated one', async () => {
+    await fsPromises.writeFile(
+      path.join(stackDir, 'compose.yaml'),
+      'include:\n  - path: ["./a.yaml", "${X}/b.yaml"]\nservices: {}\n',
+      'utf8',
+    );
+    await fsPromises.writeFile(path.join(stackDir, 'a.yaml'), 'services:\n  web:\n    image: nginx\n', 'utf8');
+
+    const inventory = await resolveRollbackInventory(NODE, STACK);
+
+    expect(inventory.coverageRefusal).toBeNull();
+    expect(inventory.entries.map((e) => e.relativePath)).toEqual(['a.yaml', 'compose.yaml']);
+    expect(inventory.uncapturedInputs).toEqual([
+      'include ${X}/b.yaml (and the files it references) is resolved by Compose at deploy time and is not captured',
+    ]);
+  });
+
+  it('captures the include env_file when the project_directory is outside the stack', async () => {
+    await fsPromises.mkdir(path.join(stackDir, 'inc'));
+    await fsPromises.writeFile(path.join(stackDir, 'inc', 'base.yaml'), 'services:\n  web:\n    image: nginx\n', 'utf8');
+    await fsPromises.writeFile(path.join(stackDir, 'inc.env'), 'A=1\n', 'utf8');
+    await fsPromises.writeFile(
+      path.join(stackDir, 'compose.yaml'),
+      'include:\n  - path: ./inc/base.yaml\n    project_directory: ../shared-common\n    env_file: ./inc.env\nservices: {}\n',
+      'utf8',
+    );
+
+    const inventory = await resolveRollbackInventory(NODE, STACK);
+
+    expect(inventory.coverageRefusal).toBeNull();
+    expect(inventory.entries.map((e) => e.relativePath)).toEqual(['compose.yaml', 'inc.env', 'inc/base.yaml']);
+    expect(inventory.uncapturedInputs).toEqual([
+      'include ../shared-common (and the files it references) is outside the stack directory and is not captured',
+    ]);
+  });
+
+  it('notes an outside project_directory even when the included file is inside the stack', async () => {
+    await fsPromises.writeFile(
+      path.join(stackDir, 'compose.yaml'),
+      'include:\n  - path: ./local.yaml\n    project_directory: ../shared-common\nservices: {}\n',
+      'utf8',
+    );
+    await fsPromises.writeFile(path.join(stackDir, 'local.yaml'), 'services:\n  web:\n    image: nginx\n', 'utf8');
+
+    const inventory = await resolveRollbackInventory(NODE, STACK);
+
+    expect(inventory.coverageRefusal).toBeNull();
+    expect(inventory.entries.map((e) => e.relativePath)).toEqual(['compose.yaml', 'local.yaml']);
+    expect(inventory.uncapturedInputs).toEqual([
+      'include ../shared-common (and the files it references) is outside the stack directory and is not captured',
+    ]);
+  });
+
+  it('still refuses invalid YAML and a missing static include inside the stack', async () => {
+    await fsPromises.writeFile(path.join(stackDir, 'compose.yaml'), 'services: [unclosed\n', 'utf8');
+    expect((await resolveRollbackInventory(NODE, STACK)).coverageRefusal).toMatch(/^Cannot parse compose file compose\.yaml/);
+
+    await fsPromises.writeFile(path.join(stackDir, 'compose.yaml'), 'include:\n  - ./missing.yaml\nservices: {}\n', 'utf8');
+    expect((await resolveRollbackInventory(NODE, STACK)).coverageRefusal).toMatch(/missing\.yaml is unreadable/);
+  });
+
   it('admits a plain stack when the compose directory is itself a link', async () => {
     const linkDir = `${composeDir}-link`;
     await fsPromises.symlink(composeDir, linkDir);
