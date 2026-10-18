@@ -72,6 +72,11 @@ vi.mock('../services/FileSystemService', () => ({
       envExists: mockEnvExists,
       getBaseDir: () => mockState.composeDir,
       getOverrideFilename: async () => null,
+      // The real inventory resolves COMPOSE_FILE through these, so a stack whose
+      // env sets it must read as unverifiable rather than as a read failure.
+      getEnvContent: async (stackName: string) =>
+        fs.readFileSync(path.join(mockState.composeDir, stackName, '.env'), 'utf8'),
+      readFile: async (absPath: string) => fs.readFileSync(absPath, 'utf8'),
     }),
   },
 }));

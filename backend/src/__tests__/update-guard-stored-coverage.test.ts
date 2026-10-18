@@ -79,6 +79,8 @@ vi.mock('../services/rollbackEligibility', () => ({
 vi.mock('../utils/authoredComposeArgs', () => ({
   authoredComposeFileArgs: () => ['-f', 'compose.yaml'],
   authoredComposeEnvFileArgs: async () => [],
+  DEFAULT_PATH_SEPARATOR: ':',
+  composeFileEnvVarSelection: async () => ({ kind: 'absent' }),
 }));
 
 vi.mock('systeminformation', () => ({ default: { fsSize: async () => [{ mount: '/', use: 10 }] } }));

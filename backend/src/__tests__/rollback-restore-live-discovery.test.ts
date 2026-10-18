@@ -247,7 +247,57 @@ describe('restore selects the captured Compose project', () => {
     );
   });
 
-  it('reinstates an external symlink when a restore is later reconciled', async () => {
+  it.each([
+  ['a bare variable', '$FILE'],
+  ['a defaulted variable', '${FILE:-compose.yaml}'],
+  ['a braced variable', '${FILE}'],
+])('keeps a compose filename that %s include could resolve to', async (_label, includePath) => {
+  // The whole filename is interpolated, so no literal tail identifies the file
+  // and the capture cannot put it on its uncaptured-paths list. The shared env
+  // it comes from lives outside this stack, so it is a recorded omission.
+  await fsPromises.mkdir(path.join(composeDir, 'shared'), { recursive: true });
+  await fsPromises.writeFile(path.join(composeDir, 'shared', 'paths.env'), 'FILE=compose.yaml\n', 'utf8');
+  await fsPromises.writeFile(
+    path.join(composeDir, 'shared', 'base.yaml'),
+    'services: {}\n',
+    'utf8',
+  );
+  await fsPromises.writeFile(
+    path.join(stackDir, 'docker-compose.yml'),
+    `include:\n  - ${includePath}\nservices:\n  web:\n    image: nginx\n`,
+    'utf8',
+  );
+  await fsPromises.writeFile(
+    path.join(stackDir, '.env'),
+    `SHARED_ENV=${path.join(composeDir, 'shared', 'paths.env')}\n`,
+    'utf8',
+  );
+
+  const captured = await resolveRollbackInventory(NODE, 'app');
+  expect(captured.coverageRefusal).toBeNull();
+  expect(captured.uncapturedInputs.length).toBeGreaterThan(0);
+  expect(captured.hasUnnamedDynamicInput).toBe(true);
+
+  const generationId = randomUUID();
+  await RollbackGenerationStore.captureGeneration({
+    nodeId: NODE,
+    stackName: 'app',
+    generationId,
+    inventory: captured,
+  });
+
+  // The shared env later resolves the include to a conventional compose file
+  // that now exists in the stack. Its name proves nothing about ownership.
+  const required = 'services:\n  extra:\n    image: busybox\n';
+  await fsPromises.writeFile(path.join(stackDir, 'compose.yaml'), required, 'utf8');
+
+  const ctx = await resolveComposeProjectContextForGeneration(NODE, 'app', generationId);
+  await ctx.restoreFromContext();
+
+  expect(await fsPromises.readFile(path.join(stackDir, 'compose.yaml'), 'utf8')).toBe(required);
+});
+
+it('reinstates an external symlink when a restore is later reconciled', async () => {
     await fsPromises.mkdir(path.join(composeDir, 'shared'), { recursive: true });
     await fsPromises.writeFile(path.join(composeDir, 'shared', 'common.env'), 'A=1\n', 'utf8');
     await fsPromises.writeFile(

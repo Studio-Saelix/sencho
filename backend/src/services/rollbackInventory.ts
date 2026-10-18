@@ -11,7 +11,12 @@ import { GitProjectManifestService } from './GitProjectManifestService';
 import { collectManifestFilePaths } from '../helpers/manifestFilePaths';
 import { isHostAbsolutePath, parseDeclaredInputs } from '../helpers/composeInputParse';
 import { isValidRelativeStackPath, isValidStackName } from '../utils/validation';
-import { authoredComposeEnvFileArgs, authoredComposeFileArgs } from '../utils/authoredComposeArgs';
+import {
+  authoredComposeEnvFileArgs,
+  authoredComposeFileArgs,
+  composeFileEnvVarSelection,
+  DEFAULT_PATH_SEPARATOR,
+} from '../utils/authoredComposeArgs';
 import { gitSourceLocalComposeFiles } from '../utils/gitComposeFiles';
 import type {
   ComposeInputEntry,
@@ -25,14 +30,69 @@ import type {
   RollbackInvocationRecord,
 } from '../types/rollbackGeneration';
 
+const DOT_ENV = '.' + 'env';
+
+/**
+ * Compose's own auto-discovery names, in the order docker compose resolves them
+ * (first existing file wins). It is not alphabetical and not uniform: the
+ * compose.* family prefers .yaml over .yml, while the docker-compose.* family
+ * and every override prefer .yml over .yaml. Verified against docker compose
+ * v5, which warns and names its pick whenever a stack holds more than one
+ * candidate. Sencho's import lists order the legacy family the other way round,
+ * which is harmless for picking a file to read but wrong for the layer set a
+ * recovery run must load.
+ */
 const ROOT_COMPOSE_FILENAMES = [
   'compose.yaml',
   'compose.yml',
-  'docker-compose.yaml',
   'docker-compose.yml',
+  'docker-compose.yaml',
 ] as const;
 
-const DOT_ENV = '.' + 'env';
+const OVERRIDE_COMPOSE_FILENAMES = [
+  'compose.override.yml',
+  'compose.override.yaml',
+  'docker-compose.override.yml',
+  'docker-compose.override.yaml',
+] as const;
+
+/**
+ * A URL token inside a note: scheme, "://", and everything up to whitespace.
+ * Redaction rewrites the whole token rather than matching credentials in place,
+ * so the authority is parsed as an authority instead of scanned for "@".
+ */
+const URL_TOKEN_PATTERN = /\b[a-z][a-z0-9+.-]*:\/\/\S+/gi;
+
+/**
+ * Strip everything before the host from a URL authority, plus the query and
+ * fragment. Userinfo ends at the LAST "@" of the authority, because "@" is legal
+ * unencoded inside a password (`https://user:p@ss@host`): stopping at the first
+ * one leaves the rest of the password in the note. A "?" or "#" that appears
+ * inside the authority is malformed, so it is kept with the userinfo instead of
+ * being treated as the start of a query, which keeps nothing before the host.
+ */
+function redactUrlCredentials(token: string): string {
+  const schemeEnd = token.indexOf('://') + 3;
+  const scheme = token.slice(0, schemeEnd);
+  const rest = token.slice(schemeEnd);
+  const pathStart = rest.indexOf('/');
+  const authority = pathStart === -1 ? rest : rest.slice(0, pathStart);
+  const userinfoEnd = authority.lastIndexOf('@');
+  const visible = (userinfoEnd === -1 ? authority : authority.slice(userinfoEnd + 1))
+    + (pathStart === -1 ? '' : rest.slice(pathStart));
+  const queryStart = visible.search(/[?#]/);
+  const kept = queryStart === -1 ? visible : visible.slice(0, queryStart);
+  return `${scheme}${userinfoEnd === -1 ? '' : '[redacted]@'}${kept}${queryStart === -1 ? '' : '?[redacted]'}`;
+}
+
+/**
+ * Remove credentials from any URL in a note. Notes reach the generation
+ * manifest, the capture log and the readiness API, so a URL include's userinfo,
+ * query and fragment must be gone before the text leaves the inventory.
+ */
+function redactNoteCredentials(note: string): string {
+  return note.replace(URL_TOKEN_PATTERN, redactUrlCredentials);
+}
 
 const COMPOSE_INVOCATION_KINDS = new Set<RollbackEntryKind>([
   'compose-root',
@@ -187,6 +247,41 @@ async function classifyAuthoredFile(stackRoot: string, relativePath: string): Pr
   const realRoot = path.join(await fsPromises.realpath(path.dirname(baseResolved)), path.basename(baseResolved));
   if (!real.startsWith(realRoot + path.sep)) return 'outside';
   return (await fsPromises.stat(real)).isFile() ? 'file' : 'not-a-file';
+}
+
+/**
+ * The layers a COMPOSE_FILE value names, in order. Split on the active
+ * separator only, because Compose does: on a stock configuration a layer may
+ * legitimately contain a semicolon, and splitting on both would turn one valid
+ * name into two unresolvable ones. Compose applies the same naive split to
+ * whatever separator it is given, so matching it exactly is what reproduces the
+ * chain. An empty COMPOSE_PATH_SEPARATOR falls back to the default, as it does
+ * there.
+ */
+function parseComposeFileChain(value: string, separator: string): string[] {
+  return value.split(separator.length > 0 ? separator : DEFAULT_PATH_SEPARATOR)
+    .filter((entry) => entry.length > 0);
+}
+
+/**
+ * The implicit override docker compose would auto-discover: the first candidate
+ * whose target stats as something, which is compose's own rule. A dangling link
+ * is skipped exactly as Compose skips it, while a link to a real file elsewhere
+ * is returned so the capture refuses the file a run would actually load instead
+ * of quietly selecting a lower-priority name Compose never reads.
+ */
+async function firstSelectedLayer(
+  stackRoot: string,
+  names: readonly string[],
+): Promise<string | null> {
+  for (const name of names) {
+    const resolved = resolveStackRel(stackRoot, name);
+    if (!resolved) continue;
+    const state = await classifyAuthoredFile(stackRoot, resolved.relativePath);
+    if (state === 'absent' || state === 'dangling' || state === 'loop') continue;
+    return resolved.relativePath;
+  }
+  return null;
 }
 
 /** Kinds that are application data or build inputs, never part of a generation. */
@@ -392,7 +487,6 @@ async function resolveAuthoredInventory(
   nodeId: number,
   stackName: string,
   stackRoot: string,
-  fsSvc: FileSystemService,
 ): Promise<ResolvedRollbackInventory> {
   const map = new Map<string, InventoryAccum>();
   const foldedOwners = new Map<string, string>();
@@ -400,17 +494,16 @@ async function resolveAuthoredInventory(
   const caseCollisions: string[] = [];
   const uncaptured = new Set<string>();
   const uncapturedPaths = new Set<string>();
+  /** A dynamic input whose filename is interpolated end to end, so nothing names it. */
+  let hasUnnamedDynamicInput = false;
 
   /**
    * Notes reach logs and the readiness API, and a URL include can carry
-   * credentials in its user info (`https://token@host`) or its query string.
+   * credentials in its authority, query string or fragment, so they are removed
+   * here rather than at each consumer.
    */
   const addUncaptured = (note: string): void => {
-    uncaptured.add(
-      note
-        .replace(/(\b[a-z][a-z0-9+.-]*:\/\/)[^/\s@]*@/gi, '$1[redacted]@')
-        .replace(/(\b[a-z][a-z0-9+.-]*:\/\/[^\s?#]*)[?#]\S*/gi, '$1?[redacted]'),
-    );
+    uncaptured.add(redactNoteCredentials(note));
   };
 
   /** Both Compose interpolation forms, matching isDynamicPath's own definition. */
@@ -496,15 +589,14 @@ const composePaths: string[] = [];
     }, caseCollisions);
   }
 
-  const overrideName = await fsSvc.getOverrideFilename(stackName);
+  const overrideName = await firstSelectedLayer(stackRoot, OVERRIDE_COMPOSE_FILENAMES);
   if (overrideName) {
     const resolved = resolveStackRel(stackRoot, overrideName);
     if (resolved && await capturable(resolved.relativePath, 'refuse')) {
       if (!composePaths.includes(resolved.relativePath)) {
         composePaths.push(resolved.relativePath);
-        // Same first-match-wins rule getOverrideFilename already resolved, so a
-        // stack holding both compose.yaml and docker-compose.yml pins only the
-        // one Compose would have discovered.
+        // Same first-match-wins rule, so a stack holding both compose.yaml and
+        // docker-compose.yml pins only the one Compose would have discovered.
         if (selectedLayers.length === 1) selectedLayers.push(resolved.relativePath);
       }
       upsertEntry(map, foldedOwners, {
@@ -584,7 +676,14 @@ const composePaths: string[] = [];
           `${dyn.kind} ${dyn.sourcePath}${refs} is resolved by Compose at deploy time and is not captured`,
         );
         const candidate = literalTailCandidate(dyn.sourcePath);
+        // A path that is interpolated end to end (`include: [ $FILE ]`) names
+        // no filename a capture could protect by path, and Compose resolves it
+        // to whatever the variable holds later. Any conventional compose file
+        // could therefore be that dependency, so a restore must stop treating
+        // an unrecorded one as disposable. Over-reporting only leaves an
+        // operator-owned file in place.
         if (candidate) uncapturedPaths.add(candidate);
+        else hasUnnamedDynamicInput = true;
       }
 
       for (const input of parsed.inputs) {
@@ -649,6 +748,66 @@ const composePaths: string[] = [];
     coverageNotes.push(`Could not read Mesh enablement: ${(e as Error).message}`);
   }
 
+  // A `-f` flag replaces Compose's own file discovery, and Compose ignores
+  // COMPOSE_FILE entirely once a `-f` list is given, so a captured prefix that
+  // already carries one leaves nothing to reconcile.
+  const capturedPinsFiles = composeArgsPrefix.some((t) => t === '-f' || t === '--file');
+  let composeLayers: string[] = [...selectedLayers];
+  if (!capturedPinsFiles) {
+    const selection = await composeFileEnvVarSelection(stackName, nodeId);
+    if (selection.kind === 'absent') {
+      // Compose's own discovery decides, and selectedLayers already holds it.
+    } else if (selection.kind === 'unknown') {
+      // Nothing here can say what the variable holds, and a recovery run always
+      // appends a layer of its own, which suppresses the variable along with
+      // discovery. Guessing the chain would restore a project the capture never
+      // held.
+      coverageNotes.push('Could not read the environment that selects the compose layers through COMPOSE_FILE');
+    } else {
+      // COMPOSE_FILE replaces discovery, and `-f a -f b` loads exactly the layers
+      // `COMPOSE_FILE=a:b` does, so pinning the chain reproduces the capture-time
+      // project and still layers a trailing recovery override on top of it.
+      // Inferring a root instead would override the variable and restore a
+      // different stack. An entry that does not resolve refuses below, which
+      // also covers a value this reader could not reproduce in full.
+      const chain = parseComposeFileChain(selection.value, selection.pathSeparator);
+      if (chain.length === 0) {
+        // An empty value selects no file, and a run that pins none would load a
+        // different project than the one this stack runs.
+        coverageNotes.push('COMPOSE_FILE selects compose layers this generation cannot reproduce: it names no layer');
+      } else {
+        const resolvedChain: string[] = [];
+        let unusable: string | null = null;
+        for (const entry of chain) {
+          const resolved = entry.includes('$') ? null : resolveStackRel(stackRoot, entry);
+          if (!resolved) {
+            // A layer that is not a stack-relative path cannot be pinned at all,
+            // and an entry still holding a variable cannot be resolved here.
+            unusable = redactNoteCredentials(entry.includes('$')
+              ? `Compose layer "${entry}" is selected by COMPOSE_FILE and still holds an unresolved variable`
+              : `Compose layer "${entry}" is selected by COMPOSE_FILE and is not a path inside the stack directory`);
+            break;
+          }
+          resolvedChain.push(resolved.relativePath);
+          // The layer is loaded whatever it is, so it is pinned either way. What
+          // the capture can hold is a separate question, asked the same way it
+          // is for every other declared input: a link that leaves the stack, a
+          // link to nothing, or a path no captured compose file declares is
+          // recorded as not captured and never deleted by a restore.
+          await capturable(resolved.relativePath, 'note');
+          if (map.has(resolved.relativePath)) continue;
+          // A regular file that no captured compose file declares: the
+          // generation cannot hold it, so a restore must leave whatever is
+          // there alone and read its current content.
+          uncapturedPaths.add(resolved.relativePath);
+          addUncaptured(`compose layer ${resolved.relativePath} is selected by COMPOSE_FILE and is not captured`);
+        }
+        if (unusable === null) composeLayers = resolvedChain;
+        else coverageNotes.push(unusable);
+      }
+    }
+  }
+
   const coverageRefusal = coverageNotes[0]
     ?? (composePaths.length === 0 ? 'No compose file found in the stack directory' : null);
 
@@ -659,9 +818,9 @@ const composePaths: string[] = [];
       projectDirectory: null,
       projectName: stackName,
       explicitComposeFiles: explicitComposeFiles.length > 0 ? explicitComposeFiles : composePaths,
-      // The layer set Compose would auto-select, so recovery pins exactly what
-      // the capture-time run loaded rather than merging every root that exists.
-      composeLayers: [...selectedLayers],
+      // The layer set Compose actually loaded, so recovery pins exactly that
+      // rather than a root chosen from the stack directory alone.
+      composeLayers,
       meshOverrideRelativePath: null,
       meshEnabled,
     },
@@ -676,6 +835,7 @@ const composePaths: string[] = [];
     uncapturedRelativePaths: coverageRefusal === null
       ? [...uncapturedPaths].sort((a, b) => a.localeCompare(b))
       : [],
+    hasUnnamedDynamicInput: coverageRefusal === null && hasUnnamedDynamicInput,
   };
 }
 
@@ -699,7 +859,7 @@ export async function resolveRollbackInventory(
     const gitInventory = await resolveGitInventory(nodeId, stackName, stackRoot);
     if (gitInventory && gitInventory.coverageRefusal === null) return gitInventory;
 
-    const authored = await resolveAuthoredInventory(nodeId, stackName, stackRoot, fsSvc);
+    const authored = await resolveAuthoredInventory(nodeId, stackName, stackRoot);
 
     if (gitInventory) {
       const established = Boolean(

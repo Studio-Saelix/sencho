@@ -1,6 +1,7 @@
 import path from 'path';
 import { promises as fsPromises } from 'fs';
 import { DatabaseService } from '../services/DatabaseService';
+import { FileSystemService } from '../services/FileSystemService';
 import { gitSecretsAreaBase, managedAreaBase } from '../services/gitops/managedPaths';
 import { NodeRegistry } from '../services/NodeRegistry';
 import { isPathWithinBase, isValidRelativeStackPath } from './validation';
@@ -300,7 +301,104 @@ export async function authoredComposeEnvFileArgs(
 }
 
 /**
- * `--env-file` arguments for candidate `docker compose config` validation.
+ * What COMPOSE_FILE decides about a run's compose layers.
+ *
+ * Compose replaces its own file discovery with that variable's value whenever it
+ * is set in the process environment or in the env file it loads, and a `-f`
+ * flag replaces the variable in turn, so `-f a -f b` and `COMPOSE_FILE=a:b` load
+ * the same layers. Sencho never sets it, so a stack that does selects its layers
+ * from something the stack directory alone does not describe.
+ *
+ * `unknown` means an env file Compose loads could not be read, so nothing here
+ * can claim what the variable holds. Callers must treat it as deciding, because
+ * inferring a layer set and pinning it is the failure this exists to prevent.
+ */
+export type ComposeFileEnvSelection =
+  | { kind: 'absent' }
+  | { kind: 'value'; value: string; pathSeparator: string }
+  | { kind: 'unknown' };
+
+/** Compose's chain separator when COMPOSE_PATH_SEPARATOR is unset or empty. */
+export const DEFAULT_PATH_SEPARATOR = ':';
+
+/** One dotenv assignment, with Compose's quoting and comment rules applied. */
+function unquoteDotenvValue(raw: string): string {
+  const quote = raw[0];
+  if (quote === '"' || quote === "'") {
+    const closing = raw.indexOf(quote, 1);
+    return closing === -1 ? raw.slice(1) : raw.slice(1, closing);
+  }
+  return raw.replace(/\s+#.*$/, '').trim();
+}
+
+/**
+ * Every assignment in dotenv text, last definition of a name winning.
+ *
+ * Covers the single-line forms Compose reads the same way: an unquoted trailing
+ * `# ...` is a comment, a quoted value keeps its `#` verbatim, and a value may
+ * be wrapped in matching single or double quotes. A quoted value continued on a
+ * following line is read as its first line only, which for COMPOSE_FILE means the
+ * chain does not resolve and the capture refuses rather than pinning a guess.
+ */
+export function parseDotenv(content: string): Map<string, string> {
+  const assignments = new Map<string, string>();
+  for (const line of content.split(/\r?\n/)) {
+    const match = /^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$/.exec(line);
+    if (match) assignments.set(match[1], unquoteDotenvValue(match[2]));
+  }
+  return assignments;
+}
+
+export async function composeFileEnvVarSelection(stackName: string, nodeId?: number): Promise<ComposeFileEnvSelection> {
+  const resolvedNodeId = nodeId ?? NodeRegistry.getInstance().getDefaultNodeId();
+  const fsSvc = FileSystemService.getInstance(resolvedNodeId);
+  let envArgs: string[];
+  try {
+    envArgs = await authoredComposeEnvFileArgs(stackName, resolvedNodeId);
+  } catch {
+    return { kind: 'unknown' };
+  }
+  const selected = envArgs.filter((_, index) => index % 2 === 1 && envArgs[index - 1] === '--env-file');
+  // Compose reads a selected --env-file INSTEAD of the project .env, so the
+  // project file only decides the value when no --env-file was given. Reading
+  // both and taking one of them would answer for a variable Compose never
+  // consulted.
+  const sources = selected.length > 0 ? selected : [null];
+  // Compose applies env files in the order given and lets a later one win.
+  const merged = new Map<string, string>();
+  for (const envPath of sources) {
+    let content: string;
+    try {
+      content = envPath === null ? await fsSvc.getEnvContent(stackName) : await fsSvc.readFile(envPath);
+    } catch (err) {
+      if (envPath === null && (err as NodeJS.ErrnoException).code === 'ENOENT') continue;
+      return { kind: 'unknown' };
+    }
+    for (const [name, value] of parseDotenv(content)) merged.set(name, value);
+  }
+  // The process environment sits above every file.
+  const value = process.env.COMPOSE_FILE ?? merged.get('COMPOSE_FILE');
+  if (value === undefined) return { kind: 'absent' };
+  return {
+    kind: 'value',
+    value,
+    pathSeparator: process.env.COMPOSE_PATH_SEPARATOR ?? merged.get('COMPOSE_PATH_SEPARATOR') ?? DEFAULT_PATH_SEPARATOR,
+  };
+}
+
+/**
+ * True when COMPOSE_FILE, not Compose's own file discovery, decides which
+ * compose files a run loads. Anything that cannot be read counts as deciding.
+ *
+ * Shared by the effective-anatomy renderer and the rollback inventory so both
+ * agree on which stacks are unverifiable.
+ */
+export async function composeFileEnvVarSelectsLayers(stackName: string, nodeId?: number): Promise<boolean> {
+  return (await composeFileEnvVarSelection(stackName, nodeId)).kind !== 'absent';
+}
+
+/**
+ * `env_file` arguments for candidate `docker compose config` validation.
  * A configured project env file that exists on the candidate (or the decrypt
  * overlay passed as `candidateAbs`) is read from there. Configured files the
  * candidate does not carry stay on the live stack. Otherwise a context-dir

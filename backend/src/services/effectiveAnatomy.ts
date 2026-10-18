@@ -24,7 +24,7 @@ import { ComposeService } from './ComposeService';
 import { DatabaseService } from './DatabaseService';
 import { FileSystemService } from './FileSystemService';
 import { parseMissingRequiredVars } from '../helpers/envVarParse';
-import { authoredComposeEnvFileArgs } from '../utils/authoredComposeArgs';
+import { composeFileEnvVarSelectsLayers } from '../utils/authoredComposeArgs';
 import { getErrorMessage } from '../utils/errors';
 import { redactSensitiveText, sanitizeForLog } from '../utils/safeLog';
 import { SERVICE_URL_LABEL, serviceUrlFromLabels } from '../helpers/serviceUrlLabel';
@@ -201,40 +201,6 @@ export function parseEffectiveAnatomy(parsed: unknown): EffectiveAnatomy {
   return { services: serviceNames, ports, volumes, restart, networks: Array.from(networks), serviceUrls };
 }
 
-/**
- * COMPOSE_FILE replaces Compose's own file discovery, so the explicit chain
- * (resolved main file plus the auto-discovered override) can no longer be
- * trusted. Sencho does not manage that variable anywhere, so a stack that sets
- * it is reported unverifiable instead of guessing. Explicit `-f` args (multi-file
- * Git stacks) ignore COMPOSE_FILE, so this check only runs for discovered chains.
- */
-async function composeFileDiscoveryOverridden(nodeId: number, stackName: string): Promise<boolean> {
-  if (process.env.COMPOSE_FILE) return true;
-  const fsSvc = FileSystemService.getInstance(nodeId);
-  const candidates: string[] = [];
-  try {
-    candidates.push(await fsSvc.getEnvContent(stackName));
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') return true;
-  }
-  try {
-    const args = await authoredComposeEnvFileArgs(stackName, nodeId);
-    for (let index = 0; index + 1 < args.length; index += 2) {
-      if (args[index] !== '--env-file') continue;
-      const envPath = args[index + 1];
-      if (!envPath) continue;
-      try {
-        candidates.push(await fsSvc.readFile(envPath));
-      } catch {
-        return true;
-      }
-    }
-  } catch {
-    return true;
-  }
-  return candidates.some(content => /^\s*(?:export\s+)?COMPOSE_FILE\s*=/m.test(content));
-}
-
 /** One other chain file's label contribution; null content means it could not be read. */
 async function readChainFile(nodeId: number, stackName: string, name: string): Promise<string | null> {
   try {
@@ -266,7 +232,13 @@ async function editabilityInput(nodeId: number, stackName: string): Promise<{
   if (spec && spec.files.length > 0) {
     chain = [...spec.files];
   } else {
-    if (await composeFileDiscoveryOverridden(nodeId, stackName)) return null;
+    // COMPOSE_FILE replaces Compose's own file discovery, so the explicit chain
+    // (resolved main file plus the auto-discovered override) can no longer be
+    // trusted. Sencho does not manage that variable anywhere, so a stack that
+    // sets it is reported unverifiable instead of guessing. Explicit `-f` args
+    // (multi-file Git stacks) ignore COMPOSE_FILE, so this only runs for a
+    // discovered chain.
+    if (await composeFileEnvVarSelectsLayers(stackName, nodeId)) return null;
     const override = await fsSvc.getOverrideFilename(stackName);
     chain = override ? [rootName, override] : [rootName];
   }

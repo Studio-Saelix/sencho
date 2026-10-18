@@ -1803,7 +1803,12 @@ export class FileSystemService {
    * requires stack:edit, which already grants equivalent host access via
    * compose. Tracked as a follow-up hardening, not a per-root regression.
    */
-  private async resolveSafePathWithin(rootAbsDir: string, relPath: string): Promise<string> {
+  private async resolveSafePathWithin(rootAbsDir: string, relPath: string, realRootDir?: string): Promise<string> {
+    // `realRootDir` is the physical form of `rootAbsDir`, for callers whose root
+    // is a lexical path that a symlinked parent can make differ from the paths
+    // realpath resolves. Omit it when the root already is the canonical one (a
+    // bind-mount root, which its caller pre-authorizes by realpath).
+    const containmentRoot = realRootDir ?? rootAbsDir;
     // Canonical js/path-injection barrier inline with the realpath sinks below:
     // isPathWithinBase performs the same containment check, but static analysis
     // only credits the path.resolve + startsWith form when it sits at the sink.
@@ -1837,7 +1842,7 @@ export class FileSystemService {
           // Reached the root: realpath the untainted base (never a tainted input)
           // and reattach the not-yet-existing suffix.
           const realBase = await fsPromises.realpath(baseResolved);
-          if (!isPathWithinBase(realBase, rootAbsDir)) {
+          if (!isPathWithinBase(realBase, containmentRoot)) {
             throw Object.assign(new Error('Symlink escapes root directory'), { code: 'SYMLINK_ESCAPE' });
           }
           realTarget = path.join(realBase, ...suffix);
@@ -1850,7 +1855,7 @@ export class FileSystemService {
         }
         try {
           const realExisting = await fsPromises.realpath(existing);
-          if (!isPathWithinBase(realExisting, rootAbsDir)) {
+          if (!isPathWithinBase(realExisting, containmentRoot)) {
             throw Object.assign(new Error('Symlink escapes root directory'), { code: 'SYMLINK_ESCAPE' });
           }
           realTarget = path.join(realExisting, ...suffix);
@@ -1863,7 +1868,7 @@ export class FileSystemService {
       }
     }
 
-    if (!isPathWithinBase(realTarget, rootAbsDir)) {
+    if (!isPathWithinBase(realTarget, containmentRoot)) {
       throw Object.assign(new Error('Symlink escapes root directory'), { code: 'SYMLINK_ESCAPE' });
     }
 
@@ -1891,7 +1896,29 @@ export class FileSystemService {
     if (!isPathWithinBase(stackDir, this.baseDir)) {
       throw Object.assign(new Error('Stack name escapes compose directory'), { code: 'INVALID_PATH' });
     }
-    return this.resolveSafePathWithin(stackDir, relPath);
+    return this.resolveSafePathWithin(stackDir, relPath, await this.realStackRoot(stackName));
+  }
+
+  /**
+   * The physical stack directory, `<real compose root>/<stackName>`, the same
+   * rule assertRealWithinStack applies.
+   *
+   * Stack path resolution compares realpath'd targets against the root it is
+   * given, so a lexical root is wrong the moment COMPOSE_DIR is itself a
+   * symlink: every file resolves through the link to a physical prefix the
+   * lexical root never matches, and a legitimate stack would read as an escape.
+   * A stack directory that links somewhere else is still refused, because its
+   * real root is the compose root plus the stack name, not the link target.
+   */
+  private async realStackRoot(stackName: string): Promise<string> {
+    const baseResolved = path.resolve(this.baseDir);
+    try {
+      return path.join(await fsPromises.realpath(baseResolved), stackName);
+    } catch (e) {
+      // A compose root that does not exist yet holds nothing to resolve through.
+      if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw e;
+      return path.resolve(baseResolved, stackName);
+    }
   }
 
   /**
@@ -2255,16 +2282,20 @@ export class FileSystemService {
    * target) for operations where following would mutate a file other than
    * the one the user clicked on.
    */
-  private async resolveSafeLeafPathWithin(rootAbsDir: string, relPath: string): Promise<string> {
+  private async resolveSafeLeafPathWithin(rootAbsDir: string, relPath: string, realRootDir?: string): Promise<string> {
     if (relPath === '' || relPath === '.') {
-      return this.resolveSafePathWithin(rootAbsDir, '');
+      return this.resolveSafePathWithin(rootAbsDir, '', realRootDir);
     }
     const parentRel = path.dirname(relPath);
     const baseName = path.basename(relPath);
     if (!baseName || baseName === '.' || baseName === '..') {
       throw Object.assign(new Error('Invalid path'), { code: 'INVALID_PATH' });
     }
-    const safeParent = await this.resolveSafePathWithin(rootAbsDir, parentRel === '.' ? '' : parentRel);
+    const safeParent = await this.resolveSafePathWithin(
+      rootAbsDir,
+      parentRel === '.' ? '' : parentRel,
+      realRootDir,
+    );
     return path.join(safeParent, baseName);
   }
 
@@ -2273,7 +2304,7 @@ export class FileSystemService {
     if (!isPathWithinBase(stackDir, this.baseDir)) {
       throw Object.assign(new Error('Stack name escapes compose directory'), { code: 'INVALID_PATH' });
     }
-    return this.resolveSafeLeafPathWithin(stackDir, relPath);
+    return this.resolveSafeLeafPathWithin(stackDir, relPath, await this.realStackRoot(stackName));
   }
 
   async deleteStackPath(stackName: string, relPath: string, recursive: boolean = false, scope?: FileRootScope): Promise<void> {

@@ -354,7 +354,293 @@ describe('RollbackGenerationStore', () => {
     await expect(fsPromises.access(path.join(genDir, 'restore-intent.json'))).rejects.toMatchObject({ code: 'ENOENT' });
   });
 
-  it('restores a snapshotted Git manifesto on compensate path helper', async () => {
+  it('restores the prior bytes of an in-stack link target when a restore fails', async () => {
+    const stackName = 'linkwrite';
+    const stackDir = path.join(composeDir, stackName);
+    await fsPromises.mkdir(stackDir, { recursive: true });
+    await fsPromises.writeFile(path.join(stackDir, 'compose.yaml'), 'services: {}\n', 'utf8');
+    await fsPromises.writeFile(path.join(stackDir, 'app.env'), 'MARK=captured\n', 'utf8');
+
+    const generationId = randomUUID();
+    await RollbackGenerationStore.captureGeneration({
+      nodeId: NODE,
+      stackName,
+      generationId,
+      inventory: inventoryFor(stackName, [
+        { relativePath: 'compose.yaml', absolutePath: path.join(stackDir, 'compose.yaml') },
+        {
+          relativePath: 'app.env',
+          absolutePath: path.join(stackDir, 'app.env'),
+          kind: 'env_file',
+          sensitivity: 'medium',
+        },
+      ]),
+    });
+
+    // Before restore, an operator swaps the managed env file for a link that
+    // stays inside the stack. The restore write follows the link, so the bytes
+    // that change are the target's, and the sensitive-entry chmod then refuses
+    // the link, which is the failure this has to survive.
+    await fsPromises.rm(path.join(stackDir, 'app.env'));
+    await fsPromises.writeFile(path.join(stackDir, 'target.env'), 'MARK=before-restore\n', 'utf8');
+    await fsPromises.symlink('target.env', path.join(stackDir, 'app.env'));
+
+    await expect(
+      RollbackGenerationStore.restoreGeneration(NODE, stackName, generationId, ['compose.yaml', 'app.env']),
+    ).rejects.toMatchObject({ code: 'RESTORE_CHMOD_FAILED' });
+
+    // The revert has to put the target's own bytes back, not just leave the
+    // link alone, and the link itself is still the operator's.
+    expect(await fsPromises.readFile(path.join(stackDir, 'target.env'), 'utf8')).toBe('MARK=before-restore\n');
+    expect((await fsPromises.lstat(path.join(stackDir, 'app.env'))).isSymbolicLink()).toBe(true);
+    expect(await fsPromises.readlink(path.join(stackDir, 'app.env'))).toBe('target.env');
+
+    const genDir = RollbackGenerationStore.getGenerationDir(NODE, stackName, generationId);
+    // The revert landed, so there is no longer a restore half-applied.
+    await expect(fsPromises.access(path.join(genDir, 'restore-intent.json'))).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
+  it('puts a vanished link back before restoring the bytes it carried', async () => {
+    const stackName = 'linkgone';
+    const stackDir = path.join(composeDir, stackName);
+    await fsPromises.mkdir(stackDir, { recursive: true });
+    await fsPromises.writeFile(path.join(stackDir, 'compose.yaml'), 'services: {}\n', 'utf8');
+    await fsPromises.writeFile(path.join(stackDir, 'app.env'), 'MARK=captured\n', 'utf8');
+
+    const generationId = randomUUID();
+    await RollbackGenerationStore.captureGeneration({
+      nodeId: NODE,
+      stackName,
+      generationId,
+      inventory: inventoryFor(stackName, [
+        { relativePath: 'compose.yaml', absolutePath: path.join(stackDir, 'compose.yaml') },
+        {
+          relativePath: 'app.env',
+          absolutePath: path.join(stackDir, 'app.env'),
+          kind: 'env_file',
+          sensitivity: 'medium',
+        },
+      ]),
+    });
+
+    // The managed env file becomes a link to a target with its own bytes.
+    await fsPromises.rm(path.join(stackDir, 'app.env'));
+    await fsPromises.writeFile(path.join(stackDir, 'target.env'), 'MARK=before-restore\n', 'utf8');
+    await fsPromises.symlink('target.env', path.join(stackDir, 'app.env'));
+
+    // Restore runs, then the link is removed before the revert, which is the
+    // window a revert has to survive.
+    const { FileSystemService } = await import('../services/FileSystemService');
+    let linkRemoved = false;
+    const realWrite = FileSystemService.prototype.writeStackFile;
+    vi.spyOn(FileSystemService.prototype, 'writeStackFile').mockImplementation(
+      async function (this: InstanceType<typeof FileSystemService>, stack, rel, content) {
+        const result = await realWrite.call(this, stack, rel, content);
+        // The link is removed after the restore wrote through it, which is the
+        // window a revert has to survive. Once, so the revert's own write is
+        // left alone.
+        if (rel === 'app.env' && !linkRemoved) {
+          linkRemoved = true;
+          await fsPromises.rm(path.join(stackDir, 'app.env'), { force: true });
+        }
+        return result;
+      },
+    );
+    // The real chmod refuses a symlink, which is what makes the restore of a
+    // sensitive linked entry fail and hand over to the revert. A revert skips
+    // the chmod for a linked entry, so this only ever fires on the restore.
+    vi.spyOn(FileSystemService.prototype, 'chmodStackPath').mockImplementation(
+      async (_stack: string, rel: string) => {
+        if (rel === 'app.env') {
+          throw Object.assign(new Error('Cannot change permissions of a symlink.'), {
+            code: 'LINK_CHMOD_UNSUPPORTED',
+          });
+        }
+      },
+    );
+
+    await expect(
+      RollbackGenerationStore.restoreGeneration(NODE, stackName, generationId, ['compose.yaml', 'app.env']),
+    ).rejects.toMatchObject({ code: 'RESTORE_CHMOD_FAILED' });
+
+    // The bytes belong to the target, so a revert that dropped the link first
+    // would leave them in a plain file and the target still mutated.
+    expect((await fsPromises.lstat(path.join(stackDir, 'app.env'))).isSymbolicLink()).toBe(true);
+    expect(await fsPromises.readlink(path.join(stackDir, 'app.env'))).toBe('target.env');
+    expect(await fsPromises.readFile(path.join(stackDir, 'target.env'), 'utf8')).toBe('MARK=before-restore\n');
+  });
+
+  it('does not write the preimage through a link the operator has replaced', async () => {
+    const stackName = 'linkreplaced';
+    const stackDir = path.join(composeDir, stackName);
+    await fsPromises.mkdir(stackDir, { recursive: true });
+    await fsPromises.writeFile(path.join(stackDir, 'compose.yaml'), 'services: {}\n', 'utf8');
+    await fsPromises.writeFile(path.join(stackDir, 'app.env'), 'MARK=captured\n', 'utf8');
+
+    const generationId = randomUUID();
+    await RollbackGenerationStore.captureGeneration({
+      nodeId: NODE,
+      stackName,
+      generationId,
+      inventory: inventoryFor(stackName, [
+        { relativePath: 'compose.yaml', absolutePath: path.join(stackDir, 'compose.yaml') },
+        {
+          relativePath: 'app.env',
+          absolutePath: path.join(stackDir, 'app.env'),
+          kind: 'env_file',
+          sensitivity: 'medium',
+        },
+      ]),
+    });
+
+    await fsPromises.rm(path.join(stackDir, 'app.env'));
+    await fsPromises.writeFile(path.join(stackDir, 'target.env'), 'MARK=before-restore\n', 'utf8');
+    await fsPromises.symlink('target.env', path.join(stackDir, 'app.env'));
+
+    const { FileSystemService } = await import('../services/FileSystemService');
+    let swapDone = false;
+    const realWrite = FileSystemService.prototype.writeStackFile;
+    vi.spyOn(FileSystemService.prototype, 'writeStackFile').mockImplementation(
+      async function (this: InstanceType<typeof FileSystemService>, stack, rel, content) {
+        const result = await realWrite.call(this, stack, rel, content);
+        if (rel === 'app.env' && !swapDone) {
+          swapDone = true;
+          await fsPromises.rm(path.join(stackDir, 'app.env'), { force: true });
+          await fsPromises.writeFile(path.join(stackDir, 'other.env'), 'MARK=operator\n', 'utf8');
+          await fsPromises.symlink('other.env', path.join(stackDir, 'app.env'));
+        }
+        return result;
+      },
+    );
+    vi.spyOn(FileSystemService.prototype, 'chmodStackPath').mockImplementation(
+      async (_stack: string, rel: string) => {
+        if (rel === 'app.env') {
+          throw Object.assign(new Error('Cannot change permissions of a symlink.'), {
+            code: 'LINK_CHMOD_UNSUPPORTED',
+          });
+        }
+      },
+    );
+
+    await expect(
+      RollbackGenerationStore.restoreGeneration(NODE, stackName, generationId, ['compose.yaml', 'app.env']),
+    ).rejects.toMatchObject({ code: 'RESTORE_CHMOD_FAILED' });
+
+    // The revert restores the link the snapshot recorded, so the bytes land
+    // back on the target the restore changed. Writing through the replacement
+    // would instead clobber a file the operator created.
+    expect(await fsPromises.readlink(path.join(stackDir, 'app.env'))).toBe('target.env');
+    expect(await fsPromises.readFile(path.join(stackDir, 'target.env'), 'utf8')).toBe('MARK=before-restore\n');
+    expect(await fsPromises.readFile(path.join(stackDir, 'other.env'), 'utf8')).toBe('MARK=operator\n');
+  });
+
+it('refuses to recreate a managed link whose parent now leaves the stack', async () => {
+    const stackName = 'linkparent';
+    const stackDir = path.join(composeDir, stackName);
+    await fsPromises.mkdir(path.join(stackDir, 'config'), { recursive: true });
+    await fsPromises.writeFile(path.join(stackDir, 'compose.yaml'), 'services: {}\n', 'utf8');
+    await fsPromises.writeFile(path.join(stackDir, 'config', 'app.env'), 'A=1\n', 'utf8');
+    await fsPromises.writeFile(path.join(stackDir, 'config', 'target.env'), 'A=before\n', 'utf8');
+
+    const generationId = randomUUID();
+    await RollbackGenerationStore.captureGeneration({
+      nodeId: NODE,
+      stackName,
+      generationId,
+      inventory: inventoryFor(stackName, [
+        { relativePath: 'compose.yaml', absolutePath: path.join(stackDir, 'compose.yaml') },
+        {
+          relativePath: 'config/app.env',
+          absolutePath: path.join(stackDir, 'config', 'app.env'),
+          kind: 'env_file',
+          sensitivity: 'medium',
+        },
+      ]),
+    });
+
+    // The managed env file becomes a link inside the stack, so the snapshot
+    // records its bytes and its target.
+    await fsPromises.rm(path.join(stackDir, 'config', 'app.env'));
+    await fsPromises.symlink('target.env', path.join(stackDir, 'config', 'app.env'));
+
+    const outside = await fsPromises.mkdtemp(path.join(os.tmpdir(), 'sencho-outside-'));
+    const { FileSystemService } = await import('../services/FileSystemService');
+    // The restore itself succeeds and leaves the intent plus the pre-restore
+    // snapshot on disk, which is the state startup reconciliation finds.
+    vi.spyOn(FileSystemService.prototype, 'chmodStackPath').mockResolvedValue(undefined);
+    await RollbackGenerationStore.restoreGeneration(NODE, stackName, generationId, ['compose.yaml', 'config/app.env']);
+    expect(await RollbackGenerationStore.hasPendingRestoreIntent(NODE, stackName, generationId)).toBe(true);
+
+    // The whole parent directory is replaced by a link out of the stack while
+    // the process was down, so the recorded link can no longer be put back
+    // where it belongs.
+    await fsPromises.rename(path.join(stackDir, 'config'), path.join(composeDir, `${stackName}-config-moved`));
+    await fsPromises.symlink(outside, path.join(stackDir, 'config'));
+
+    await expect(
+      RollbackGenerationStore.reconcileInterruptedRestore(NODE, stackName, generationId),
+    ).rejects.toMatchObject({ code: 'SYMLINK_ESCAPE' });
+
+    // Nothing may be created through the escaped parent.
+    expect(await fsPromises.readdir(outside)).toEqual([]);
+    await fsPromises.rm(outside, { recursive: true, force: true });
+    await fsPromises.rm(path.join(composeDir, `${stackName}-config-moved`), { recursive: true, force: true });
+  });
+
+it('leaves an external file alone when the recorded link is reconciled elsewhere', async () => {
+    const stackName = 'linkexternal';
+    const stackDir = path.join(composeDir, stackName);
+    await fsPromises.mkdir(path.join(stackDir, 'config'), { recursive: true });
+    await fsPromises.writeFile(path.join(stackDir, 'compose.yaml'), 'services: {}\n', 'utf8');
+    await fsPromises.writeFile(path.join(stackDir, 'config', 'app.env'), 'A=1\n', 'utf8');
+    await fsPromises.writeFile(path.join(stackDir, 'config', 'target.env'), 'A=before\n', 'utf8');
+
+    const generationId = randomUUID();
+    await RollbackGenerationStore.captureGeneration({
+      nodeId: NODE,
+      stackName,
+      generationId,
+      inventory: inventoryFor(stackName, [
+        { relativePath: 'compose.yaml', absolutePath: path.join(stackDir, 'compose.yaml') },
+        {
+          relativePath: 'config/app.env',
+          absolutePath: path.join(stackDir, 'config', 'app.env'),
+          kind: 'env_file',
+          sensitivity: 'medium',
+        },
+      ]),
+    });
+
+    await fsPromises.rm(path.join(stackDir, 'config', 'app.env'));
+    await fsPromises.symlink('target.env', path.join(stackDir, 'config', 'app.env'));
+
+    const { FileSystemService } = await import('../services/FileSystemService');
+    vi.spyOn(FileSystemService.prototype, 'chmodStackPath').mockResolvedValue(undefined);
+    await RollbackGenerationStore.restoreGeneration(NODE, stackName, generationId, ['compose.yaml', 'config/app.env']);
+    expect(await RollbackGenerationStore.hasPendingRestoreIntent(NODE, stackName, generationId)).toBe(true);
+
+    // The parent becomes a link to a folder that holds a differently pointed
+    // link at the managed name. Containment has to be settled before that link
+    // is read or removed, or reconciliation would delete a file outside the
+    // stack on its way to refusing.
+    const outside = await fsPromises.mkdtemp(path.join(os.tmpdir(), 'sencho-outside-'));
+    const outsideTarget = path.join(outside, 'elsewhere.env');
+    await fsPromises.writeFile(outsideTarget, 'OPERATOR=1\n', 'utf8');
+    await fsPromises.symlink('elsewhere.env', path.join(outside, 'app.env'));
+    await fsPromises.rename(path.join(stackDir, 'config'), path.join(composeDir, `${stackName}-config-moved`));
+    await fsPromises.symlink(outside, path.join(stackDir, 'config'));
+
+    await expect(
+      RollbackGenerationStore.reconcileInterruptedRestore(NODE, stackName, generationId),
+    ).rejects.toMatchObject({ code: 'SYMLINK_ESCAPE' });
+
+    expect((await fsPromises.lstat(path.join(outside, 'app.env'))).isSymbolicLink()).toBe(true);
+    expect(await fsPromises.readFile(outsideTarget, 'utf8')).toBe('OPERATOR=1\n');
+    await fsPromises.rm(outside, { recursive: true, force: true });
+    await fsPromises.rm(path.join(composeDir, `${stackName}-config-moved`), { recursive: true, force: true });
+  });
+
+it('restores a snapshotted Git manifesto on compensate path helper', async () => {
     const stackName = 'gitman';
     const stackDir = path.join(composeDir, stackName);
     await fsPromises.mkdir(stackDir, { recursive: true });
@@ -1010,6 +1296,41 @@ describe('RollbackGenerationStore with a linked compose directory', () => {
     });
 
     expect(manifest.entries.map((e) => e.relativePath)).toEqual(['compose.yaml']);
+  });
+
+  it('restores and reconciles a generation captured under the linked compose directory', async () => {
+    const stackName = 'linkedrestore';
+    const stackDir = path.join(realDir, stackName);
+    await fsPromises.mkdir(stackDir, { recursive: true });
+    await fsPromises.writeFile(path.join(stackDir, 'compose.yaml'), 'services: {}\n', 'utf8');
+    const generationId = randomUUID();
+    await RollbackGenerationStore.captureGeneration({
+      nodeId: NODE,
+      stackName,
+      generationId,
+      inventory: inventoryFor(stackName, [
+        { relativePath: 'compose.yaml', absolutePath: path.join(stackDir, 'compose.yaml') },
+      ]),
+    });
+
+    await fsPromises.writeFile(path.join(stackDir, 'compose.yaml'), 'services:\n  web: {}\n', 'utf8');
+    await fsPromises.writeFile(path.join(stackDir, 'later.txt'), 'added after capture\n', 'utf8');
+
+    await RollbackGenerationStore.restoreGeneration(NODE, stackName, generationId, ['compose.yaml', 'later.txt']);
+
+    // The capture is only admissible if its restore actually runs, so the
+    // physical path of every file must clear the real stack root, not the
+    // lexical one that the compose-directory link makes different.
+    expect(await fsPromises.readFile(path.join(stackDir, 'compose.yaml'), 'utf8')).toBe('services: {}\n');
+    await expect(fsPromises.access(path.join(stackDir, 'later.txt'))).rejects.toMatchObject({ code: 'ENOENT' });
+
+    // A compose up or health failure after a successful restore reverts it from
+    // the same snapshot, which resolves paths the same way.
+    expect(await RollbackGenerationStore.reconcileInterruptedRestore(NODE, stackName, generationId)).toBe(true);
+    expect(await fsPromises.readFile(path.join(stackDir, 'compose.yaml'), 'utf8')).toBe(
+      'services:\n  web: {}\n',
+    );
+    expect(await fsPromises.readFile(path.join(stackDir, 'later.txt'), 'utf8')).toBe('added after capture\n');
   });
 
   it('still refuses a stack directory that links to another location', async () => {

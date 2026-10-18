@@ -109,6 +109,13 @@ export interface RollbackGenerationManifest {
   uncapturedRelativePaths?: string[];
   /** The operator-facing notes for everything left out of the capture. Omitted on older generations. */
   uncapturedInputs?: string[];
+  /**
+   * True when a declared input's whole filename is interpolated. Restore may
+   * then not delete an unrecorded file because of its name alone. Omitted on
+   * generations captured before this was recorded, which never had such inputs
+   * excluded from deletion.
+   */
+  hasUnnamedDynamicInput?: boolean;
   invocation: RollbackInvocationRecord;
   git: RollbackGitIdentity | null;
   /** Prior applied/deployed/LKG refs when known (opaque strings). */
@@ -206,4 +213,12 @@ export interface ResolvedRollbackInventory {
    * `uncapturedInputs` has a path here.
    */
   uncapturedRelativePaths: string[];
+  /**
+   * True when a declared input's whole filename is interpolated, so no literal
+   * tail identifies the file Compose will read and the capture cannot say which
+   * paths that input names. A restore may then not delete an unrecorded file
+   * just because its name is a conventional compose filename. False on
+   * Git-managed inventories, which carry their own file list.
+   */
+  hasUnnamedDynamicInput?: boolean;
 }
