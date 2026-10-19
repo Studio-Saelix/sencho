@@ -2057,11 +2057,57 @@ export class ComposeService {
   }
 
   /**
+   * Refuse a captured compose layer whose real target Compose would open
+   * outside the compose root. The path is the one recovery passes to `-f`,
+   * resolved against the working directory (the stack, or an overlay outside
+   * that root). A lexical name inside the stack can still be a symlink.
+   * A missing path is left for Compose: restore writes held files back, and an
+   * omitted layer that is simply absent is not an escape. A dangling or
+   * looping link cannot be shown to stay inside the root, so it is refused.
+   * A target inside the compose root stays allowed, including a shared file
+   * outside the stack directory. When the working directory itself is an
+   * overlay outside the compose root, a target inside that overlay is allowed
+   * too.
+   */
+  private async assertCapturedComposeLayerTarget(layer: string, pathRoot: string): Promise<void> {
+    const lexical = path.resolve(pathRoot, layer);
+    try {
+      await fs.promises.lstat(lexical);
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code === 'ENOENT') return;
+      throw e;
+    }
+    let real: string;
+    try {
+      real = await fs.promises.realpath(lexical);
+    } catch (e) {
+      const code = (e as NodeJS.ErrnoException).code;
+      if (code === 'ENOENT' || code === 'ELOOP' || code === 'ENOTDIR') {
+        throw Object.assign(
+          new Error(`Captured compose layer "${layer}" does not resolve inside the compose directory`),
+          { code: 'SYMLINK_ESCAPE' },
+        );
+      }
+      throw e;
+    }
+    const baseResolved = path.resolve(this.baseDir);
+    const realBase = await this.realCapturedPath(baseResolved);
+    if (isPathWithinBase(real, baseResolved) || isPathWithinBase(real, realBase)) return;
+    const cwdInside = isPathWithinBase(pathRoot, baseResolved) || isPathWithinBase(pathRoot, realBase);
+    if (!cwdInside && isPathWithinBase(real, pathRoot)) return;
+    throw Object.assign(
+      new Error(`Captured compose layer "${layer}" resolves outside the compose directory`),
+      { code: 'SYMLINK_ESCAPE' },
+    );
+  }
+
+  /**
    * Rebuild a spawn-safe compose global-flag prefix from a generation's
    * captured invocation. Captured paths must resolve inside the stack
    * directory (a captured `--env-file` inside the compose root, which is the
    * root its capture-time validation uses); when overlayDir is set, absolute
    * --env-file and --project-directory paths are rewritten under that overlay.
+   * Compose layers are also checked on the real path Compose will open.
    */
   private async composePrefixFromCapturedInvocation(
     stackName: string,
@@ -2087,6 +2133,7 @@ export class ComposeService {
         if (!isPathWithinBase(path.resolve(stackDir, layer), stackDir)) {
           throw new Error(`Captured compose layer path escapes stack directory for "${stackName}"`);
         }
+        await this.assertCapturedComposeLayerTarget(layer, pathRoot);
         out.push('-f', layer);
       }
     }
@@ -2100,6 +2147,7 @@ export class ComposeService {
         if (!isPathWithinBase(path.resolve(stackDir, file), stackDir)) {
           throw new Error(`Captured compose file path escapes stack directory for "${stackName}"`);
         }
+        await this.assertCapturedComposeLayerTarget(file, pathRoot);
         out.push('-f', file);
         continue;
       }

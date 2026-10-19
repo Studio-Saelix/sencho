@@ -9,7 +9,7 @@
  * owns generation content directories.
  */
 import { createHash, randomUUID } from 'crypto';
-import { promises as fsPromises } from 'fs';
+import { constants as fsConstants, promises as fsPromises } from 'fs';
 import path from 'path';
 import { CryptoService } from './CryptoService';
 import { FileSystemService } from './FileSystemService';
@@ -1041,11 +1041,18 @@ export class RollbackGenerationStore {
         }
         const realSrc = await fsPromises.realpath(srcCandidate);
         if (!realSrc.startsWith(realStackRoot + path.sep)) continue;
-        // Stat and read on one descriptor of the validated path, so the metadata
-        // and the bytes describe the same inode even if the path is replaced
-        // between the calls. The realpath check above is a string check on the
-        // path, not on this descriptor, so it does not establish that identity.
-        const fh = await fsPromises.open(realSrc, 'r');
+        // Refuse a fifo, device, or directory before opening it. A blocking
+        // open of a fifo waits for a writer and never reaches the descriptor
+        // check. Stat does not block. O_NONBLOCK covers a fifo swapped in
+        // between this stat and the open; the descriptor check still rejects it.
+        const srcStat = await fsPromises.stat(realSrc);
+        if (!srcStat.isFile()) {
+          throw Object.assign(
+            new Error(`Managed path "${rel}" is not a regular file; refusing to snapshot it as absent`),
+            { code: 'DIRECTORY_COLLISION' },
+          );
+        }
+        const fh = await fsPromises.open(realSrc, fsConstants.O_RDONLY | fsConstants.O_NONBLOCK);
         try {
           const { bytes, mode } = await readSnapshotBytes(fh, rel);
           const blobId = randomUUID();

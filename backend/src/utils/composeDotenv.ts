@@ -104,16 +104,29 @@ function readName(text: string, from: number): string {
 }
 
 /**
- * Index of the brace that closes the `${` at `openIndex`, or -1. Nested braces
- * are counted, so a default that itself holds a reference stays inside.
+ * Compose's template pattern. A literal `{` is text inside a default; only
+ * `${` starts another template. The `}` that ends a match is the pattern's
+ * own closer, which is why `${UNSET:-foo{bar}` is a complete template.
  */
-function matchingBrace(text: string, openIndex: number): number {
+const COMPOSE_TEMPLATE =
+  /\$(?:(\$)|([_a-zA-Z][_a-zA-Z0-9]*)|\{(?:([_a-zA-Z][_a-zA-Z0-9]*(?::?[-+?](.*))?)\}|()))/g;
+
+/**
+ * Where Compose cuts a matched template so the remainder is expanded on its
+ * own. A `{` counts as a nesting level and the following byte is skipped, the
+ * same walk as compose-go's `getFirstBraceClosingIndex`. -1 leaves the regex
+ * match whole, which is still a valid template when the pattern found a closer.
+ */
+function firstBraceClose(text: string): number {
   let depth = 0;
-  for (let i = openIndex; i < text.length; i++) {
-    if (text[i] === '{') depth++;
-    else if (text[i] === '}') {
+  for (let i = 0; i < text.length; i++) {
+    if (text[i] === '}') {
       depth--;
       if (depth === 0) return i;
+    }
+    if (text[i] === '{') {
+      depth++;
+      i++;
     }
   }
   return -1;
@@ -151,37 +164,29 @@ export function expandComposeEnvEscapes(raw: string): string {
  * template or a required variable with no value is an error, because Compose
  * fails the run there and no layer set can be claimed.
  */
-export function expandComposeEnvTemplate(text: string, lookup: ComposeEnvLookup): string {
-  let out = '';
-  for (let i = 0; i < text.length; i++) {
-    const char = text[i];
-    if (char !== '$') {
-      out += char;
-      continue;
-    }
-    const next = text[i + 1];
-    if (next === '$') {
-      out += '$';
-      i++;
-      continue;
-    }
-    if (next === '{') {
-      const close = matchingBrace(text, i + 1);
-      if (close === -1) throw new ComposeEnvFileError(`Invalid template: "${text.slice(i)}"`);
-      out += substituteBraced(text.slice(i + 2, close), lookup);
-      i = close;
-      continue;
-    }
-    const name = next === undefined ? '' : readName(text, i + 1);
-    if (name !== '') {
-      out += lookup(name) ?? '';
-      i += name.length;
-      continue;
-    }
-    // `$` followed by anything else is not a template: Compose leaves it alone.
-    out += char;
+function expandMatchedTemplate(matched: string, lookup: ComposeEnvLookup): string {
+  const close = firstBraceClose(matched);
+  const cut = close > -1 && close < matched.length - 1;
+  const body = cut ? matched.slice(0, close + 1) : matched;
+  const rest = cut ? matched.slice(close + 1) : '';
+  const pattern = new RegExp(COMPOSE_TEMPLATE.source);
+  const found = pattern.exec(body);
+  if (!found || found[0] !== body) {
+    throw new ComposeEnvFileError(`Invalid template: "${matched}"`);
   }
-  return out;
+  let value: string;
+  if (found[1] !== undefined) value = '$';
+  else if (found[2] !== undefined) value = lookup(found[2]) ?? '';
+  else if (found[3] !== undefined) value = substituteBraced(found[3], lookup);
+  else throw new ComposeEnvFileError(`Invalid template: "${matched}"`);
+  return rest === '' ? value : value + expandComposeEnvTemplate(rest, lookup);
+}
+
+export function expandComposeEnvTemplate(text: string, lookup: ComposeEnvLookup): string {
+  // A fresh lastIndex per call: a default expands recursively while the outer
+  // replace is still walking the same pattern.
+  const pattern = new RegExp(COMPOSE_TEMPLATE.source, 'g');
+  return text.replace(pattern, (matched) => expandMatchedTemplate(matched, lookup));
 }
 
 /** One `${...}` body: a name, optionally followed by a substitution operator. */

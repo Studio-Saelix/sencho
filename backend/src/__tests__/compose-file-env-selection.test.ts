@@ -32,11 +32,13 @@ vi.mock('../services/DatabaseService', () => ({
     getInstance: () => ({
       getGitSource: mockGetGitSource,
       getStackProjectEnvFiles: mockGetStackProjectEnvFiles,
+      isMeshStackEnabled: () => false,
     }),
   },
 }));
 
 import { composeFileEnvVarSelection } from '../utils/authoredComposeArgs';
+import { resolveRollbackInventory } from '../services/rollbackInventory';
 import {
   ComposeEnvFiles,
   ComposeEnvFileError,
@@ -195,6 +197,37 @@ describe('ComposeEnvFiles', () => {
     expect(expandComposeEnvTemplate('${A:-${B:-deep}}', () => undefined)).toBe('deep');
   });
 
+  // A literal `{` is text. Compose closes the template at the `}` the pattern
+  // finds, and an unused default is discarded with the braces it held.
+  it.each([
+    ['a literal brace in a used default', '${UNSET:-foo{bar}', undefined, 'foo{bar'],
+    ['a literal brace and a leftover closer', '${UNSET:-foo{bar}}', undefined, 'foo{bar}'],
+    ['text after a literal brace', '${UNSET:-foo{bar}}TAIL', undefined, 'foo{bar}TAIL'],
+    ['a literal brace inside the default text', '${UNSET:-foo{bar}tail}', undefined, 'foo{bar}tail'],
+    ['an unused default with a literal brace', '${SET:-foo{bar}', 'value', 'value'],
+    ['an unused default that holds both closers', '${SET:-foo{bar}}TAIL', 'value', 'valueTAIL'],
+    ['an alternate value with a literal brace', '${SET:+foo{bar}', 'value', 'foo{bar'],
+    ['an alternate value that holds a closer', '${SET:+foo{bar}}', 'value', 'foo{bar}'],
+    ['an unset alternate', '${UNSET:+foo{bar}', undefined, ''],
+    ['a hard default with a literal brace', '${UNSET-foo{bar}}', undefined, 'foo{bar}'],
+    ['a nested default', '${A:-${B:-deep}}', undefined, 'deep'],
+    ['a nested default with a literal brace', '${A:-${B:-foo{bar}}}', undefined, 'foo{bar}'],
+    ['a nested default whose closer is consumed', '${A:-${B:-foo{bar}}', undefined, 'foo{bar'],
+    ['a cut before a later brace', '${A:-foo}bar}', undefined, 'foobar}'],
+  ])('expands %s', (_label, template, setValue, expected) => {
+    const lookup = (name: string) => (name === 'SET' ? setValue : undefined);
+    expect(expandComposeEnvTemplate(template, lookup)).toBe(expected);
+  });
+
+  it.each([
+    ['an unclosed default', '${UNSET:-foo{bar'],
+    ['an unclosed name', '${BAD'],
+    ['an empty template', '${}'],
+    ['an empty nested template', '${A:-${}}'],
+  ])('still refuses %s', (_label, template) => {
+    expect(() => expandComposeEnvTemplate(template, () => undefined)).toThrow(ComposeEnvFileError);
+  });
+
   it('reads a file that starts with a UTF-8 BOM, as Compose does', () => {
     // Compose drops a leading BOM from the file's bytes before parsing, so an
     // editor that saves one must not turn a valid stack into an unknown layer
@@ -265,6 +298,18 @@ describe('composeFileEnvVarSelection', () => {
 
   afterAll(() => {
     fs.rmSync(mockState.composeDir, { recursive: true, force: true });
+  });
+
+  it('reads a literal brace in an unrelated assignment without changing the layer set', async () => {
+    writeStackFile('.env', 'LABEL=${UNSET:-foo{bar}\n');
+    writeStackFile('compose.yaml', 'services:\n  web:\n    image: nginx\n');
+
+    const selection = await composeFileEnvVarSelection(STACK, 1);
+    expect(selection.kind).toBe('absent');
+
+    const inventory = await resolveRollbackInventory(1, STACK);
+    expect(inventory.coverageRefusal).toBeNull();
+    expect(inventory.invocation.composeLayers).toEqual(['compose.yaml']);
   });
 
   it('reports absent when no env file sets it', async () => {

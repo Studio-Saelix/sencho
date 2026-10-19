@@ -3,6 +3,7 @@
  * restore round-trip, mid-capture failure isolation, and managed-set tombstones.
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { execFileSync } from 'child_process';
 import path from 'path';
 import os from 'os';
 import { promises as fsPromises } from 'fs';
@@ -842,6 +843,99 @@ it('restores a snapshotted Git manifesto on compensate path helper', async () =>
 
     expect(await fsPromises.readFile(path.join(stackDir, 'compose.yaml', 'sentinel.txt'), 'utf8')).toBe('keep-me\n');
   });
+
+  it.skipIf(process.platform === 'win32')('rejects a managed file replaced by a fifo before opening it', async () => {
+    const stackName = 'fiforestore';
+    const stackDir = path.join(composeDir, stackName);
+    await fsPromises.mkdir(stackDir, { recursive: true });
+    await fsPromises.writeFile(path.join(stackDir, 'compose.yaml'), 'services: {}\n', 'utf8');
+    await fsPromises.writeFile(path.join(stackDir, '.env'), 'MARK=captured\n', 'utf8');
+
+    const generationId = randomUUID();
+    await RollbackGenerationStore.captureGeneration({
+      nodeId: NODE,
+      stackName,
+      generationId,
+      inventory: inventoryFor(stackName, [
+        { relativePath: 'compose.yaml', absolutePath: path.join(stackDir, 'compose.yaml') },
+        { relativePath: '.env', absolutePath: path.join(stackDir, '.env'), kind: 'interpolation-env' },
+      ]),
+    });
+
+    await fsPromises.rm(path.join(stackDir, '.env'));
+    execFileSync('mkfifo', [path.join(stackDir, '.env')]);
+
+    await expect(
+      RollbackGenerationStore.restoreGeneration(NODE, stackName, generationId, ['.env', 'compose.yaml']),
+    ).rejects.toMatchObject({ code: 'DIRECTORY_COLLISION' });
+
+    const fifo = await fsPromises.lstat(path.join(stackDir, '.env'));
+    expect(fifo.isFIFO()).toBe(true);
+    expect(await fsPromises.readFile(path.join(stackDir, 'compose.yaml'), 'utf8')).toBe('services: {}\n');
+  }, 3_000);
+
+  it.skipIf(process.platform === 'win32')('rejects a delete-only fifo without a writer', async () => {
+    const stackName = 'fifodelete';
+    const stackDir = path.join(composeDir, stackName);
+    await fsPromises.mkdir(stackDir, { recursive: true });
+    await fsPromises.writeFile(path.join(stackDir, 'compose.yaml'), 'services: {}\n', 'utf8');
+
+    const generationId = randomUUID();
+    await RollbackGenerationStore.captureGeneration({
+      nodeId: NODE,
+      stackName,
+      generationId,
+      inventory: inventoryFor(stackName, [
+        { relativePath: 'compose.yaml', absolutePath: path.join(stackDir, 'compose.yaml') },
+      ]),
+    });
+
+    execFileSync('mkfifo', [path.join(stackDir, 'discovered.fifo')]);
+
+    await expect(
+      RollbackGenerationStore.restoreGeneration(
+        NODE,
+        stackName,
+        generationId,
+        ['compose.yaml', 'discovered.fifo'],
+      ),
+    ).rejects.toMatchObject({ code: 'DIRECTORY_COLLISION' });
+
+    expect((await fsPromises.lstat(path.join(stackDir, 'discovered.fifo'))).isFIFO()).toBe(true);
+    expect(await fsPromises.readFile(path.join(stackDir, 'compose.yaml'), 'utf8')).toBe('services: {}\n');
+  }, 3_000);
+
+  it.skipIf(process.platform === 'win32')('rejects a managed path replaced by a symlink to an in-stack fifo', async () => {
+    const stackName = 'fifolink';
+    const stackDir = path.join(composeDir, stackName);
+    await fsPromises.mkdir(stackDir, { recursive: true });
+    await fsPromises.writeFile(path.join(stackDir, 'compose.yaml'), 'services: {}\n', 'utf8');
+    await fsPromises.writeFile(path.join(stackDir, '.env'), 'MARK=captured\n', 'utf8');
+
+    const generationId = randomUUID();
+    await RollbackGenerationStore.captureGeneration({
+      nodeId: NODE,
+      stackName,
+      generationId,
+      inventory: inventoryFor(stackName, [
+        { relativePath: 'compose.yaml', absolutePath: path.join(stackDir, 'compose.yaml') },
+        { relativePath: '.env', absolutePath: path.join(stackDir, '.env'), kind: 'interpolation-env' },
+      ]),
+    });
+
+    const fifo = path.join(stackDir, 'pipe.fifo');
+    execFileSync('mkfifo', [fifo]);
+    await fsPromises.rm(path.join(stackDir, '.env'));
+    await fsPromises.symlink(fifo, path.join(stackDir, '.env'));
+
+    await expect(
+      RollbackGenerationStore.restoreGeneration(NODE, stackName, generationId, ['.env']),
+    ).rejects.toMatchObject({ code: 'DIRECTORY_COLLISION' });
+
+    expect((await fsPromises.lstat(path.join(stackDir, '.env'))).isSymbolicLink()).toBe(true);
+    expect((await fsPromises.lstat(fifo)).isFIFO()).toBe(true);
+    expect(await fsPromises.readFile(path.join(stackDir, 'compose.yaml'), 'utf8')).toBe('services: {}\n');
+  }, 3_000);
 
   it('restores a legitimate file whose name ends with .sencho-tombstone (index-based snapshot)', async () => {
     const stackName = 'tombname';

@@ -1,7 +1,7 @@
 /**
  * Git manifesto inventory: first-apply merge vs established fail-closed.
  */
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import path from 'path';
 import os from 'os';
 import { promises as fsPromises } from 'fs';
@@ -65,7 +65,8 @@ vi.mock('../utils/authoredComposeArgs', () => ({
   composeFileEnvVarSelection: (...args: unknown[]) => mockComposeFileEnvVarSelection(...(args as [])),
 }));
 
-import { resolveRollbackInventory } from '../services/rollbackInventory';
+import { resolveRollbackInventory, selectedProjectEnvFile } from '../services/rollbackInventory';
+import { storedRestoreCoverage } from '../services/updateGuard/readiness';
 
 describe('resolveRollbackInventory', () => {
   let composeDir: string;
@@ -532,6 +533,195 @@ describe('resolveRollbackInventory: the env files a Git run loads', () => {
     expect(inventory.uncapturedInputs).toEqual([]);
     expect(inventory.uncapturedRelativePaths).toEqual([]);
   });
+
+  it('records a project-directory env file the manifest does not hold', async () => {
+    const stackDir = path.join(composeDir, STACK);
+    await fsPromises.mkdir(path.join(stackDir, 'sub'), { recursive: true });
+    await fsPromises.writeFile(path.join(stackDir, 'sub', 'compose.yaml'), 'services:\n  web:\n    image: nginx\n', 'utf8');
+    await fsPromises.writeFile(path.join(stackDir, 'sub', '.env'), 'SUBVAR=from-sub\n', 'utf8');
+    const body = manifest();
+    const project = (body as { project: { composeFiles: string[]; invocation: string[] } }).project;
+    project.composeFiles = ['sub/compose.yaml'];
+    project.invocation = ['-f', 'sub/compose.yaml', '-p', STACK];
+    mockReadManifest.mockResolvedValue(body);
+
+    const inventory = await resolveRollbackInventory(1, STACK);
+
+    expect(inventory.coverageRefusal).toBeNull();
+    expect(inventory.entries.map((entry) => entry.relativePath)).not.toContain('sub/.env');
+    expect(inventory.uncapturedRelativePaths).toContain('sub/.env');
+    expect(inventory.uncapturedInputs.join(' ')).toContain('sub/.env');
+    expect(storedRestoreCoverage({ uncapturedInputs: inventory.uncapturedInputs })).toBe('omits_inputs');
+  });
+
+  it('does not omit a project-directory env file the manifest already holds', async () => {
+    const stackDir = path.join(composeDir, STACK);
+    await fsPromises.mkdir(path.join(stackDir, 'sub'), { recursive: true });
+    await fsPromises.writeFile(path.join(stackDir, 'sub', '.env'), 'SUBVAR=from-sub\n', 'utf8');
+    const body = manifest([{
+      sourcePath: 'sub/.env',
+      materializedPath: 'sub/.env',
+      role: 'env',
+      dependencyKind: 'interpolation-env',
+      ownership: 'managed',
+      provenance: 'fetch',
+      sensitivity: 'medium',
+      contentSha256: null,
+      sizeBytes: null,
+      state: 'present',
+      deletionAuthority: 'sencho',
+      note: null,
+    }]);
+    const project = (body as { project: { invocation: string[] } }).project;
+    project.invocation = ['-f', 'sub/compose.yaml', '-p', STACK];
+    mockReadManifest.mockResolvedValue(body);
+
+    const inventory = await resolveRollbackInventory(1, STACK);
+
+    expect(inventory.uncapturedInputs.join(' ')).not.toContain('sub/.env');
+    expect(inventory.entries.map((entry) => entry.relativePath)).toContain('sub/.env');
+  });
+
+  it('does not omit a project-directory env file under an absolute project directory', async () => {
+    // A deploy spec with a context directory names it by absolute path, and
+    // that path is inside the stack, so the file it loads is a stack file the
+    // manifest can hold.
+    const stackDir = path.join(composeDir, STACK);
+    await fsPromises.mkdir(path.join(stackDir, 'sub'), { recursive: true });
+    await fsPromises.writeFile(path.join(stackDir, 'sub', '.env'), 'SUBVAR=from-sub\n', 'utf8');
+    const body = manifest([{
+      sourcePath: 'sub/.env',
+      materializedPath: 'sub/.env',
+      role: 'env',
+      dependencyKind: 'interpolation-env',
+      ownership: 'managed',
+      provenance: 'fetch',
+      sensitivity: 'medium',
+      contentSha256: null,
+      sizeBytes: null,
+      state: 'present',
+      deletionAuthority: 'sencho',
+      note: null,
+    }]);
+    const project = (body as { project: { invocation: string[] } }).project;
+    project.invocation = [
+      '--project-directory', path.join(stackDir, 'sub'),
+      '-f', 'sub/compose.yaml',
+      '-p', STACK,
+    ];
+    mockReadManifest.mockResolvedValue(body);
+
+    const inventory = await resolveRollbackInventory(1, STACK);
+
+    expect(inventory.uncapturedInputs).toEqual([]);
+    expect(inventory.uncapturedRelativePaths).not.toContain('sub/.env');
+    expect(inventory.entries.map((entry) => entry.relativePath)).toContain('sub/.env');
+  });
+
+  it('records an unheld project-directory env file under an absolute project directory', async () => {
+    const stackDir = path.join(composeDir, STACK);
+    await fsPromises.mkdir(path.join(stackDir, 'sub'), { recursive: true });
+    await fsPromises.writeFile(path.join(stackDir, 'sub', '.env'), 'SUBVAR=from-sub\n', 'utf8');
+    const body = manifest();
+    const project = (body as { project: { composeFiles: string[]; invocation: string[] } }).project;
+    project.composeFiles = ['sub/compose.yaml'];
+    project.invocation = [
+      '--project-directory', path.join(stackDir, 'sub'),
+      '-f', 'sub/compose.yaml',
+      '-p', STACK,
+    ];
+    mockReadManifest.mockResolvedValue(body);
+
+    const inventory = await resolveRollbackInventory(1, STACK);
+
+    expect(inventory.coverageRefusal).toBeNull();
+    expect(inventory.uncapturedRelativePaths).toContain('sub/.env');
+    expect(inventory.uncapturedInputs.join(' ')).toContain('sub/.env');
+    expect(storedRestoreCoverage({ uncapturedInputs: inventory.uncapturedInputs })).toBe('omits_inputs');
+  });
+
+  it('does not invent an omission when the project directory has no env file', async () => {
+    const body = manifest();
+    const project = (body as { project: { invocation: string[] } }).project;
+    project.invocation = ['-f', 'sub/compose.yaml', '-p', STACK];
+    mockReadManifest.mockResolvedValue(body);
+
+    const inventory = await resolveRollbackInventory(1, STACK);
+
+    expect(inventory.uncapturedInputs.join(' ')).not.toContain('sub/.env');
+    expect(inventory.uncapturedRelativePaths).not.toContain('sub/.env');
+    expect(storedRestoreCoverage({ uncapturedInputs: inventory.uncapturedInputs })).toBe('complete');
+  });
+});
+
+describe('selectedProjectEnvFile', () => {
+  const saved: Record<string, string | undefined> = {};
+  const STACK_ROOT = path.join(os.tmpdir(), 'sencho-project-env');
+
+  beforeEach(() => {
+    for (const key of ['COMPOSE_ENV_FILES', 'COMPOSE_DISABLE_ENV_FILE']) {
+      saved[key] = process.env[key];
+      delete process.env[key];
+    }
+  });
+
+  afterEach(() => {
+    for (const [key, value] of Object.entries(saved)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  });
+
+  it('names the env file of the first compose file directory', () => {
+    expect(selectedProjectEnvFile(['-f', 'sub/compose.yaml', '-p', 'app'], ['compose.yaml'], STACK_ROOT))
+      .toEqual({ kind: 'relative', relativePath: 'sub/.env' });
+  });
+
+  it('prefers an explicit project directory over the compose file directory', () => {
+    expect(selectedProjectEnvFile(
+      ['--project-directory', 'sub', '-f', 'compose.yaml'],
+      ['compose.yaml'],
+      STACK_ROOT,
+    )).toEqual({ kind: 'relative', relativePath: 'sub/.env' });
+  });
+
+  it('names the env file of an absolute project directory inside the stack', () => {
+    // A deploy spec with a context directory names it by absolute path.
+    expect(selectedProjectEnvFile(
+      ['--project-directory', path.join(STACK_ROOT, 'sub'), '-f', 'compose.yaml'],
+      ['compose.yaml'],
+      STACK_ROOT,
+    )).toEqual({ kind: 'relative', relativePath: 'sub/.env' });
+  });
+
+  it('reports a project directory outside the stack', () => {
+    expect(selectedProjectEnvFile(
+      ['--project-directory', path.join(STACK_ROOT, '..', 'other'), '-f', 'compose.yaml'],
+      ['compose.yaml'],
+      STACK_ROOT,
+    )).toEqual({ kind: 'outside' });
+    expect(selectedProjectEnvFile(
+      ['--project-directory', '/elsewhere/project', '-f', 'compose.yaml'],
+      ['compose.yaml'],
+      STACK_ROOT,
+    )).toEqual({ kind: 'outside' });
+  });
+
+  it('returns null for the stack root and for a replaced default env file', () => {
+    expect(selectedProjectEnvFile(['-f', 'compose.yaml'], [], STACK_ROOT)).toBeNull();
+    expect(selectedProjectEnvFile([], ['compose.yaml'], STACK_ROOT)).toBeNull();
+    expect(selectedProjectEnvFile(['--env-file', 'custom.env', '-f', 'sub/compose.yaml'], [], STACK_ROOT)).toBeNull();
+    process.env.COMPOSE_ENV_FILES = 'custom.env';
+    expect(selectedProjectEnvFile(['-f', 'sub/compose.yaml'], [], STACK_ROOT)).toBeNull();
+    delete process.env.COMPOSE_ENV_FILES;
+    process.env.COMPOSE_DISABLE_ENV_FILE = 'true';
+    expect(selectedProjectEnvFile(['-f', 'sub/compose.yaml'], [], STACK_ROOT)).toBeNull();
+  });
+
+  it('uses the captured layer directory when the invocation pins no file', () => {
+    expect(selectedProjectEnvFile([], ['sub/compose.yaml'], STACK_ROOT))
+      .toEqual({ kind: 'relative', relativePath: 'sub/.env' });
+  });
 });
 
 describe('resolveRollbackInventory: the layer set recovery pins', () => {
@@ -584,6 +774,107 @@ describe('resolveRollbackInventory: the layer set recovery pins', () => {
     // layer the generation never held.
     expect(inventory.invocation.composeLayers).toEqual(['compose.yaml', expected]);
     expect(inventory.entries.map((e) => e.relativePath)).toContain(expected);
+  });
+
+  it('holds the env file of a project directory COMPOSE_FILE selects', async () => {
+    await fsPromises.mkdir(path.join(composeDir, STACK, 'sub'), { recursive: true });
+    await write('compose.yaml', [
+      'services:',
+      '  web:',
+      '    extends:',
+      '      file: sub/compose.yaml',
+      '      service: web',
+      '',
+    ].join('\n'));
+    await write('sub/compose.yaml', 'services:\n  web:\n    image: nginx\n');
+    await write('.env', 'COMPOSE_FILE=sub/compose.yaml\n');
+    await write('sub/.env', 'SUBVAR=captured\n');
+    mockComposeFileEnvVarSelection.mockResolvedValue({
+      kind: 'value',
+      value: 'sub/compose.yaml',
+      pathSeparator: ':',
+      composeEnvFiles: [],
+      loadedEnvFiles: [],
+    });
+
+    const inventory = await resolveRollbackInventory(1, STACK);
+
+    expect(inventory.coverageRefusal).toBeNull();
+    expect(inventory.invocation.composeLayers).toEqual(['sub/compose.yaml']);
+    expect(inventory.entries.map((entry) => entry.relativePath)).toEqual(
+      expect.arrayContaining(['.env', 'compose.yaml', 'sub/compose.yaml', 'sub/.env']),
+    );
+    expect(inventory.uncapturedInputs).toEqual([]);
+    expect(inventory.uncapturedRelativePaths).not.toContain('sub/.env');
+    expect(storedRestoreCoverage({ uncapturedInputs: inventory.uncapturedInputs })).toBe('complete');
+  });
+
+  it('does not treat a missing project-directory env file as partial coverage', async () => {
+    await fsPromises.mkdir(path.join(composeDir, STACK, 'sub'), { recursive: true });
+    await write('compose.yaml', 'services:\n  web:\n    image: nginx\n');
+    await write('sub/compose.yaml', 'services:\n  web:\n    image: nginx\n');
+    mockComposeFileEnvVarSelection.mockResolvedValue({
+      kind: 'value',
+      value: 'sub/compose.yaml',
+      pathSeparator: ':',
+      composeEnvFiles: [],
+      loadedEnvFiles: [],
+    });
+
+    const inventory = await resolveRollbackInventory(1, STACK);
+
+    expect(inventory.coverageRefusal).toBeNull();
+    expect(inventory.uncapturedInputs.join(' ')).not.toContain('sub/.env');
+    expect(inventory.entries.map((entry) => entry.relativePath)).not.toContain('sub/.env');
+  });
+
+  it('holds the env file of an absolute project directory inside the stack', async () => {
+    // A deploy spec with a context directory names it by absolute path, and
+    // that path is inside the stack, so the env file it loads is a stack file.
+    await fsPromises.mkdir(path.join(composeDir, STACK, 'sub'), { recursive: true });
+    await write('compose.yaml', 'services:\n  web:\n    image: nginx\n');
+    await write('sub/compose.yaml', 'services:\n  web:\n    image: nginx\n');
+    await write('sub/.env', 'SUBVAR=captured\n');
+    mockAuthoredComposeFileArgs.mockReturnValue([
+      '--project-directory', path.join(composeDir, STACK, 'sub'),
+      '-f', 'sub/compose.yaml',
+      '-p', STACK,
+    ]);
+
+    const inventory = await resolveRollbackInventory(1, STACK);
+
+    expect(inventory.coverageRefusal).toBeNull();
+    expect(inventory.entries.map((entry) => entry.relativePath)).toContain('sub/.env');
+    expect(inventory.uncapturedInputs).toEqual([]);
+    expect(inventory.uncapturedRelativePaths).not.toContain('sub/.env');
+    expect(storedRestoreCoverage({ uncapturedInputs: inventory.uncapturedInputs })).toBe('complete');
+  });
+
+  it('records a project env file that links into the shared compose directory', async () => {
+    // Compose reads the link, so the file stays loaded, but the bytes belong to
+    // the shared target: the generation cannot hold them, so the omission keeps
+    // readiness honest.
+    await fsPromises.mkdir(path.join(composeDir, STACK, 'sub'), { recursive: true });
+    await write('compose.yaml', 'services:\n  web:\n    image: nginx\n');
+    await write('sub/compose.yaml', 'services:\n  web:\n    image: nginx\n');
+    await fsPromises.writeFile(path.join(composeDir, 'shared.env'), 'SUBVAR=shared\n', 'utf8');
+    await fsPromises.symlink(
+      path.join(composeDir, 'shared.env'),
+      path.join(composeDir, STACK, 'sub', '.env'),
+    );
+    mockAuthoredComposeFileArgs.mockReturnValue([
+      '--project-directory', path.join(composeDir, STACK, 'sub'),
+      '-f', 'sub/compose.yaml',
+      '-p', STACK,
+    ]);
+
+    const inventory = await resolveRollbackInventory(1, STACK);
+
+    expect(inventory.coverageRefusal).toBeNull();
+    expect(inventory.entries.map((entry) => entry.relativePath)).not.toContain('sub/.env');
+    expect(inventory.uncapturedRelativePaths).toContain('sub/.env');
+    expect(inventory.uncapturedInputs.join(' ')).toContain('sub/.env');
+    expect(storedRestoreCoverage({ uncapturedInputs: inventory.uncapturedInputs })).toBe('omits_inputs');
   });
 
   it('pins the layer chain COMPOSE_FILE selects', async () => {

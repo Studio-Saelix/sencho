@@ -537,4 +537,121 @@ describe('captured invocation on recovery Compose args', () => {
     );
     expect(args).toEqual(['compose', '-f', 'docker-compose.yml', 'up', '-d']);
   });
+
+  function layerInvocation(stackName: string, layers: string[], prefix: string[] = []) {
+    return {
+      composeArgsPrefix: prefix,
+      projectDirectory: null,
+      projectName: stackName,
+      explicitComposeFiles: layers,
+      composeLayers: prefix.some((token) => token === '-f' || token === '--file') ? undefined : layers,
+      meshEnabled: false,
+    };
+  }
+
+  it('accepts a shared compose layer whose target stays inside the compose root', async () => {
+    const stackName = 'inv-shared-layer';
+    const stackDir = path.join(composeDir, stackName);
+    const shared = path.join(composeDir, 'shared-base.yaml');
+    await fs.promises.mkdir(stackDir, { recursive: true });
+    await fs.promises.writeFile(shared, 'services:\n  web:\n    image: nginx\n', 'utf8');
+    await fs.promises.symlink(shared, path.join(stackDir, 'compose.yaml'));
+
+    const { ComposeService } = await import('../services/ComposeService');
+    const args = await ComposeService.getInstance(nodeId).buildComposeArgsWithRecoveryOverride(
+      stackName,
+      ['up', '-d'],
+      null,
+      layerInvocation(stackName, ['compose.yaml']),
+    );
+
+    expect(args).toEqual(['compose', '-f', 'compose.yaml', 'up', '-d']);
+  });
+
+  it('refuses a compose layer retargeted outside the compose root before Compose runs', async () => {
+    const stackName = 'inv-escaped-layer';
+    const stackDir = path.join(composeDir, stackName);
+    await fs.promises.mkdir(stackDir, { recursive: true });
+    const inside = path.join(composeDir, 'inside.yaml');
+    const outside = path.join(tmpDir, 'outside.yaml');
+    await fs.promises.writeFile(inside, 'services:\n  web:\n    image: nginx\n', 'utf8');
+    await fs.promises.writeFile(outside, 'services:\n  web:\n    image: evil\n', 'utf8');
+    const link = path.join(stackDir, 'compose.yaml');
+    await fs.promises.symlink(inside, link);
+    await fs.promises.unlink(link);
+    await fs.promises.symlink(outside, link);
+
+    const { FileSystemService } = await import('../services/FileSystemService');
+    await expect(FileSystemService.getInstance(nodeId).getStackContent(stackName))
+      .rejects.toMatchObject({ code: 'SYMLINK_ESCAPE' });
+
+    const { ComposeService } = await import('../services/ComposeService');
+    const svc = ComposeService.getInstance(nodeId);
+    const invocation = layerInvocation(stackName, ['compose.yaml']);
+    await expect(svc.buildComposeArgsWithRecoveryOverride(
+      stackName,
+      ['up', '-d'],
+      null,
+      invocation,
+    )).rejects.toMatchObject({ code: 'SYMLINK_ESCAPE' });
+    await expect(svc.composeUpWithRecoveryOverride(
+      stackName,
+      path.join(stackDir, '.sencho-recovery-unused.yml'),
+      undefined,
+      invocation,
+    )).rejects.toMatchObject({ code: 'SYMLINK_ESCAPE' });
+    expect(await fs.promises.readFile(outside, 'utf8')).toContain('evil');
+  });
+
+  it('refuses an explicit -f layer and a shared override retargeted outside the compose root', async () => {
+    const stackName = 'inv-escaped-override';
+    const stackDir = path.join(composeDir, stackName);
+    await fs.promises.mkdir(stackDir, { recursive: true });
+    await fs.promises.writeFile(path.join(stackDir, 'compose.yaml'), 'services:\n  web:\n    image: nginx\n', 'utf8');
+    const outside = path.join(tmpDir, 'outside-override.yaml');
+    await fs.promises.writeFile(outside, 'services:\n  web:\n    image: evil\n', 'utf8');
+    await fs.promises.symlink(outside, path.join(stackDir, 'compose.override.yml'));
+
+    const { ComposeService } = await import('../services/ComposeService');
+    const svc = ComposeService.getInstance(nodeId);
+    await expect(svc.buildComposeArgsWithRecoveryOverride(
+      stackName,
+      ['up', '-d'],
+      null,
+      layerInvocation(stackName, ['compose.yaml', 'compose.override.yml']),
+    )).rejects.toMatchObject({ code: 'SYMLINK_ESCAPE' });
+    await expect(svc.buildComposeArgsWithRecoveryOverride(
+      stackName,
+      ['up', '-d'],
+      null,
+      layerInvocation(stackName, ['compose.yaml'], ['-f', 'compose.override.yml']),
+    )).rejects.toMatchObject({ code: 'SYMLINK_ESCAPE' });
+  });
+
+  it('allows a missing captured layer and refuses a dangling one', async () => {
+    const stackName = 'inv-missing-layer';
+    const stackDir = path.join(composeDir, stackName);
+    await fs.promises.mkdir(stackDir, { recursive: true });
+    const file = path.join(stackDir, 'compose.yaml');
+    await fs.promises.writeFile(file, 'services: {}\n', 'utf8');
+    await fs.promises.rm(file);
+
+    const { ComposeService } = await import('../services/ComposeService');
+    const svc = ComposeService.getInstance(nodeId);
+    const args = await svc.buildComposeArgsWithRecoveryOverride(
+      stackName,
+      ['up', '-d'],
+      null,
+      layerInvocation(stackName, ['compose.yaml']),
+    );
+    expect(args).toContain('compose.yaml');
+
+    await fs.promises.symlink(path.join(stackDir, 'gone.yaml'), file);
+    await expect(svc.buildComposeArgsWithRecoveryOverride(
+      stackName,
+      ['up', '-d'],
+      null,
+      layerInvocation(stackName, ['compose.yaml']),
+    )).rejects.toMatchObject({ code: 'SYMLINK_ESCAPE' });
+  });
 });

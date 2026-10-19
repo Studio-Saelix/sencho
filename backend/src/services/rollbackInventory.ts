@@ -158,6 +158,83 @@ function resolveStackRel(
   return { relativePath, absolutePath };
 }
 
+/** Go's strconv.ParseBool true set, which is what Compose accepts for COMPOSE_DISABLE_ENV_FILE. */
+const GO_BOOL_TRUE = new Set(['1', 't', 'T', 'TRUE', 'true', 'True']);
+
+const PROJECT_ENV_OUTSIDE_NOTE =
+  'a project env file is loaded by Compose from the selected project directory outside the stack and is not captured';
+
+function flagValue(args: readonly string[], flag: string): string | undefined {
+  for (let i = 0; i < args.length - 1; i++) {
+    if (args[i] === flag) return args[i + 1];
+  }
+  return undefined;
+}
+
+/**
+ * Compose replaces the default project `.env` when the invocation names
+ * `--env-file`, when COMPOSE_ENV_FILES lists a file, or when
+ * COMPOSE_DISABLE_ENV_FILE is true. Those cases are accounted for elsewhere.
+ */
+function defaultProjectEnvSuppressed(args: readonly string[]): boolean {
+  if (flagValue(args, '--env-file') !== undefined) return true;
+  const listed = process.env.COMPOSE_ENV_FILES;
+  if (listed !== undefined && listed.split(',').some((entry) => entry.length > 0)) return true;
+  const disabled = process.env.COMPOSE_DISABLE_ENV_FILE;
+  return disabled !== undefined && GO_BOOL_TRUE.has(disabled);
+}
+
+/** The directory whose `.env` Compose loads once the project directory is chosen. */
+function selectedProjectDirectory(
+  args: readonly string[],
+  composeLayers: readonly string[],
+): string | null {
+  const explicit = flagValue(args, '--project-directory');
+  if (explicit !== undefined && explicit.length > 0) return explicit.replace(/\\/g, '/');
+  for (let i = 0; i < args.length - 1; i++) {
+    if (args[i] !== '-f' && args[i] !== '--file') continue;
+    return path.posix.dirname(args[i + 1].replace(/\\/g, '/'));
+  }
+  if (composeLayers.length === 0) return null;
+  return path.posix.dirname(composeLayers[0].replace(/\\/g, '/'));
+}
+
+/**
+ * The project `.env` Compose loads after it selects a project directory, when
+ * that file is not the stack-root `.env` already in the inventory.
+ *
+ * The project directory is `--project-directory` when the invocation sets it,
+ * otherwise the directory of the first `-f` / `--file`, otherwise the directory
+ * of the first captured layer. A root project loads only the stack `.env`.
+ * An explicit env file, COMPOSE_ENV_FILES, or COMPOSE_DISABLE_ENV_FILE replaces
+ * that default, so this returns null and the other accounting stands.
+ *
+ * The project directory is resolved against the stack root, so a directory that
+ * lands inside the stack names a file the generation can hold. A deploy spec
+ * with a context directory names it by absolute path, and that path is inside
+ * the stack, so it is a stack file rather than an outside one.
+ * `outside` is a directory that lands outside the stack; the caller records an
+ * omission without the absolute path.
+ */
+export function selectedProjectEnvFile(
+  composeArgs: readonly string[],
+  composeLayers: readonly string[] | undefined,
+  stackRoot: string,
+): { kind: 'relative'; relativePath: string } | { kind: 'outside' } | null {
+  if (defaultProjectEnvSuppressed(composeArgs)) return null;
+  const projectDir = selectedProjectDirectory(composeArgs, composeLayers ?? []);
+  if (projectDir === null || projectDir === '.' || projectDir === '') return null;
+  const baseResolved = path.resolve(stackRoot);
+  const absoluteDir = path.resolve(baseResolved, projectDir);
+  if (!absoluteDir.startsWith(baseResolved + path.sep)) return { kind: 'outside' };
+  const relativeDir = posixRel(path.relative(baseResolved, absoluteDir));
+  if (!relativeDir) return null;
+  const relativePath = posixRel(`${relativeDir}/${DOT_ENV}`);
+  if (relativePath === DOT_ENV) return null;
+  if (!isValidRelativeStackPath(relativePath)) return { kind: 'outside' };
+  return { kind: 'relative', relativePath };
+}
+
 async function pathExistsAsFile(stackRoot: string, relativePath: string): Promise<boolean> {
   // Inline barrier at the lstat sink.
   const baseResolved = path.resolve(stackRoot);
@@ -558,6 +635,27 @@ async function resolveGitInventory(
       uncapturedPaths.add(resolved.relativePath);
       uncaptured.add(redactNoteCredentials(
         `${resolved.relativePath} is loaded by Compose for interpolation and is not captured`,
+      ));
+    }
+    // A `-f` or COMPOSE_FILE chain moves the project directory, and Compose then
+    // loads that directory's `.env` as well as any file the invocation named.
+    // The manifest is still the coverage boundary, so a file it does not hold
+    // is an omission rather than a capture.
+    const projectEnv = selectedProjectEnvFile(
+      invocation.composeArgsPrefix,
+      invocation.composeLayers,
+      stackRoot,
+    );
+    if (projectEnv?.kind === 'outside') {
+      uncaptured.add(redactNoteCredentials(PROJECT_ENV_OUTSIDE_NOTE));
+    } else if (
+      projectEnv?.kind === 'relative'
+      && !map.has(projectEnv.relativePath)
+      && await pathExistsAsFile(stackRoot, projectEnv.relativePath)
+    ) {
+      uncapturedPaths.add(projectEnv.relativePath);
+      uncaptured.add(redactNoteCredentials(
+        `${projectEnv.relativePath} is loaded by Compose from the selected project directory and is not captured`,
       ));
     }
   }
@@ -965,6 +1063,31 @@ const capturable = async (
       if (unusable === null) composeLayers = resolvedChain;
       else coverageNotes.push(unusable);
     }
+  }
+
+  // After the layer set is final: a project directory other than the stack root
+  // loads its own `.env`. Hold a regular file inside the stack so a restore
+  // puts it back. A link that cannot be held is already an omission. A directory
+  // outside the stack is recorded without its path.
+  const projectEnv = selectedProjectEnvFile(composeArgsPrefix, composeLayers, stackRoot);
+  if (projectEnv?.kind === 'outside') {
+    addUncaptured(PROJECT_ENV_OUTSIDE_NOTE);
+  } else if (projectEnv?.kind === 'relative') {
+    const resolved = resolveStackRel(stackRoot, projectEnv.relativePath);
+    if (!resolved) {
+      addUncaptured(PROJECT_ENV_OUTSIDE_NOTE);
+    } else if ((await capturable(resolved.relativePath, 'note')) === 'captured') {
+      upsertEntry(map, foldedOwners, {
+        relativePath: resolved.relativePath,
+        dependencyKind: 'interpolation-env',
+        provenance: 'authored',
+        sensitivity: authoredSensitivity('interpolation-env'),
+        absolutePath: resolved.absolutePath,
+      }, caseCollisions);
+    }
+  }
+  if (caseCollisions.length > 0 && !coverageNotes.includes(caseCollisions[0])) {
+    coverageNotes.push(caseCollisions[0]);
   }
 
   const coverageRefusal = coverageNotes[0]

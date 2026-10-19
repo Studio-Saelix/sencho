@@ -78,6 +78,18 @@ const CASES: Case[] = [
     },
   },
   {
+    // A literal `{` inside a default is valid Compose. The assignment does not
+    // select a layer, so a reader that rejects it must not refuse the capture
+    // or change the project.
+    name: 'an unrelated env assignment with a literal brace',
+    stack: 'layerbrace',
+    files: {
+      'compose.yaml': SERVICE('busybox:1.36.1', 'plain'),
+      '.env': 'LABEL=${UNSET:-foo{bar}\n',
+    },
+    expectLayers: ['compose.yaml'],
+  },
+  {
     // The legacy family prefers .yml over .yaml, the compose.* family the other
     // way round, and every override prefers .yml.
     name: 'competing legacy roots and overrides',
@@ -784,5 +796,115 @@ describe.skipIf(!hasDocker)('recovery loads the model the capture-time run loade
       services: Record<string, { command?: string[] }>;
     };
     expect(recovery.services.web.command).toEqual(['echo', 'shared-v2']);
+  });
+
+  it('holds the env file Compose loads from the selected project directory', async () => {
+    const stack = 'layerprojectenv';
+    const stackDir = path.join(composeDir, stack);
+    fs.mkdirSync(path.join(stackDir, 'sub'), { recursive: true });
+    fs.writeFileSync(path.join(stackDir, 'compose.yaml'), [
+      'services:',
+      '  web:',
+      '    extends:',
+      '      file: sub/compose.yaml',
+      '      service: web',
+      '',
+    ].join('\n'), 'utf8');
+    fs.writeFileSync(path.join(stackDir, 'sub', 'compose.yaml'), SERVICE('busybox:1.36.1', '${SUBVAR}'), 'utf8');
+    fs.writeFileSync(path.join(stackDir, '.env'), 'COMPOSE_FILE=sub/compose.yaml\n', 'utf8');
+    fs.writeFileSync(path.join(stackDir, 'sub', '.env'), 'SUBVAR=captured\n', 'utf8');
+    const recoveryLayer = path.join(stackDir, '.sencho-recovery-test.yml');
+    fs.writeFileSync(
+      recoveryLayer,
+      'services:\n  web:\n    labels:\n      sencho.recovery-test: "1"\n',
+      'utf8',
+    );
+
+    const { resolveRollbackInventory } = await import('../../services/rollbackInventory');
+    const { RollbackGenerationStore } = await import('../../services/RollbackGenerationStore');
+    const { storedRestoreCoverage } = await import('../../services/updateGuard/readiness');
+    const { resolveComposeProjectContextForGeneration } = await import('../../services/composeProjectContext');
+    const { ComposeService } = await import('../../services/ComposeService');
+
+    const inventory = await resolveRollbackInventory(nodeId, stack);
+    expect(inventory.coverageRefusal).toBeNull();
+    expect(inventory.invocation.composeLayers).toEqual(['sub/compose.yaml']);
+    expect(inventory.entries.map((entry) => entry.relativePath)).toEqual(
+      expect.arrayContaining(['.env', 'compose.yaml', 'sub/compose.yaml', 'sub/.env']),
+    );
+    expect(inventory.uncapturedInputs).toEqual([]);
+
+    const generationId = randomUUID();
+    await RollbackGenerationStore.captureGeneration({
+      nodeId,
+      stackName: stack,
+      generationId,
+      inventory,
+    });
+    const stored = await RollbackGenerationStore.readVerifiedGeneration(nodeId, stack, generationId);
+    expect(storedRestoreCoverage(stored)).toBe('complete');
+    expect(stored.entries.map((entry) => entry.relativePath)).toContain('sub/.env');
+
+    fs.writeFileSync(path.join(stackDir, 'sub', '.env'), 'SUBVAR=changed\n', 'utf8');
+    const changed = renderModel([], stackDir, stack) as {
+      services: Record<string, { command?: string[] }>;
+    };
+    expect(changed.services.web.command).toEqual(['echo', 'changed']);
+
+    const ctx = await resolveComposeProjectContextForGeneration(nodeId, stack, generationId);
+    await ctx.restoreFromContext();
+    expect(fs.readFileSync(path.join(stackDir, 'sub', '.env'), 'utf8')).toBe('SUBVAR=captured\n');
+
+    const args = await ComposeService.getInstance(nodeId).buildComposeArgsWithRecoveryOverride(
+      stack,
+      ['config'],
+      recoveryLayer,
+      stored.invocation,
+    );
+    const recovery = renderModel(args.slice(1, args.indexOf('config')), stackDir, stack) as {
+      services: Record<string, { command?: string[] }>;
+    };
+    expect(recovery.services.web.command).toEqual(['echo', 'captured']);
+    const live = renderModel([], stackDir, stack) as {
+      services: Record<string, { command?: string[] }>;
+    };
+    expect(live.services.web.command).toEqual(['echo', 'captured']);
+  });
+
+  it('expands literal braces the way the Compose CLI does', async () => {
+    const { expandComposeEnvTemplate } = await import('../../utils/composeDotenv');
+    const cases: Array<{ name: string; template: string; env: string; set: boolean; expected: string | null }> = [
+      { name: 'audit', template: '${UNSET:-foo{bar}', env: 'LABEL=${UNSET:-foo{bar}\n', set: false, expected: 'foo{bar' },
+      { name: 'two', template: '${UNSET:-foo{bar}}', env: 'LABEL=${UNSET:-foo{bar}}\n', set: false, expected: 'foo{bar}' },
+      { name: 'set-after', template: '${SET:-foo{bar}}TAIL', env: 'SET=value\nLABEL=${SET:-foo{bar}}TAIL\n', set: true, expected: 'valueTAIL' },
+      { name: 'nested', template: '${A:-${B:-deep}}', env: 'LABEL=${A:-${B:-deep}}\n', set: false, expected: 'deep' },
+      { name: 'nested-brace', template: '${A:-${B:-foo{bar}}}', env: 'LABEL=${A:-${B:-foo{bar}}}\n', set: false, expected: 'foo{bar}' },
+      { name: 'unclosed', template: '${UNSET:-foo{bar', env: 'LABEL=${UNSET:-foo{bar\n', set: false, expected: null },
+      { name: 'empty', template: '${}', env: 'LABEL=${}\n', set: false, expected: null },
+    ];
+    const root = fs.mkdtempSync(path.join(composeDir, 'brace-cli-'));
+    const lookup = (set: boolean) => (name: string) => (set && name === 'SET' ? 'value' : undefined);
+    try {
+      for (const testCase of cases) {
+        const dir = path.join(root, testCase.name);
+        fs.mkdirSync(dir, { recursive: true });
+        fs.writeFileSync(path.join(dir, 'compose.yaml'), SERVICE('busybox:1.36.1', '${LABEL}'), 'utf8');
+        fs.writeFileSync(path.join(dir, '.env'), testCase.env, 'utf8');
+        if (testCase.expected === null) {
+          expect(() => renderModel([], dir, `brace${testCase.name}`), testCase.name).toThrow(/Invalid template/);
+          expect(() => expandComposeEnvTemplate(testCase.template, lookup(testCase.set)), testCase.name)
+            .toThrow(/Invalid template/);
+          continue;
+        }
+        const model = renderModel([], dir, `brace${testCase.name}`) as {
+          services: Record<string, { command?: string[] }>;
+        };
+        expect(model.services.web.command?.[1], testCase.name).toBe(testCase.expected);
+        expect(expandComposeEnvTemplate(testCase.template, lookup(testCase.set)), testCase.name)
+          .toBe(testCase.expected);
+      }
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
   });
 });
