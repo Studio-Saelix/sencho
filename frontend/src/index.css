@@ -125,6 +125,9 @@
   --destructive-foreground: oklch(0.94 0 0);
   --destructive-muted: oklch(0.72 0.18 20 / 0.15);
   --input: oklch(var(--card-l) 0 0);
+  /* Fill for outline buttons and filter triggers. Card-level in Dim so they sit flush
+     with the surface they are on; OLED and Light point it back at the page background. */
+  --control: oklch(var(--card-l) 0 0);
 
   /* Glass: solid surface system (no blur on static surfaces) */
   --glass-border: var(--card-border);
@@ -297,6 +300,7 @@
   --accent-l: 0.745; --brand-fg: oklch(0.11 0 0);
   --glow-l: 0.46; --glow-c: 0.085;
   --pop-l: 0.06; --pop-a: 0.86;
+  --control: var(--background);
 }
 
 /* ─────────────────────────────────────────────────────────────
@@ -332,6 +336,7 @@
   --destructive-foreground: oklch(1 0 0);
   --destructive-muted: oklch(0.63 0.18 20 / 0.12);
   --input: oklch(0.97 0 0);
+  --control: var(--background);
 
   --glass-border: var(--card-border);
   --glass-highlight: oklch(0 0 0 / 0.06);
@@ -548,6 +553,7 @@ html[data-effects="reduced"] .masthead-rail-shimmer {
   --color-glass: var(--glass);
   --color-glass-border: var(--glass-border);
   --color-glass-highlight: var(--glass-highlight);
+  --color-control: var(--control);
 
   --color-stat-value: var(--stat-value);
   --color-stat-title: var(--stat-title);

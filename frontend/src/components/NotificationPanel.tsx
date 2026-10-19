@@ -409,6 +409,15 @@ function NotificationRow({ notif, showNodeName, onDelete, onMarkRead, onNavigate
     const isUnread = !notif.is_read;
     const isRoutable = Boolean(onNavigate && (notif.stack_name || notif.category === 'node_update_available'));
 
+    // Reserve room for the absolutely positioned action cluster (24px buttons).
+    const actionCount = (canMute ? 1 : 0) + (isUnread ? 1 : 0) + 1;
+    let messageInset = 'pr-6';
+    if (actionCount === 3) {
+        messageInset = 'pr-[4.5rem]';
+    } else if (actionCount === 2) {
+        messageInset = 'pr-11';
+    }
+
     const surfaceClasses = cn(
         'flex w-full items-start gap-3 px-[var(--density-row-x)] py-[var(--density-row-y)] text-left transition-colors',
         isRoutable && 'cursor-pointer hover:bg-accent/40 focus-visible:bg-accent/40 focus-visible:outline-none',
@@ -423,7 +432,8 @@ function NotificationRow({ notif, showNodeName, onDelete, onMarkRead, onNavigate
             <div className="min-w-0 flex-1">
                 <p
                     className={cn(
-                        'break-words pr-6 text-sm leading-snug',
+                        'break-words text-sm leading-snug',
+                        messageInset,
                         isUnread ? 'text-stat-value' : 'text-stat-subtitle',
                     )}
                 >
@@ -505,6 +515,7 @@ function NotificationRow({ notif, showNodeName, onDelete, onMarkRead, onNavigate
                     className="h-6 w-6"
                     onClick={() => onDelete(notif)}
                     title="Dismiss"
+                    aria-label="Dismiss"
                 >
                     <X className="h-3 w-3" strokeWidth={1.5} />
                 </Button>

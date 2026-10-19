@@ -125,16 +125,33 @@ describe('scheduledActions registry', () => {
     expect(DEFAULT_SCHEDULED_ACTION_ID).toBe('restart');
   });
 
+  it('places compose backups in the Backups lane', () => {
+    expect(getActionById('auto_backup')?.category).toBe('backups');
+    expect(getActionById('snapshot')?.category).toBe('backups');
+  });
+
+  it('keeps each category contiguous so the picker renders one group header per category', () => {
+    const seen = new Set<ScheduledActionCategory>();
+    let previous: ScheduledActionCategory | null = null;
+    for (const def of SCHEDULED_ACTIONS) {
+      if (def.category !== previous) {
+        expect(seen.has(def.category)).toBe(false);
+        seen.add(def.category);
+        previous = def.category;
+      }
+    }
+  });
+
   it('orders actions by category group', () => {
     const ids = SCHEDULED_ACTIONS.map(a => a.id);
     // Verify the exact order: lifecycle first, then updates, security, maintenance, backups.
     expect(ids).toEqual([
-      'auto_backup', 'auto_start', 'restart', 'auto_stop', 'auto_down',
+      'auto_start', 'restart', 'auto_stop', 'auto_down',
       'container-restart', 'container-stop', 'container-start',
       'update', 'update-fleet', 'update-by-label',
       'scan',
       'prune',
-      'snapshot',
+      'auto_backup', 'snapshot',
     ]);
   });
 

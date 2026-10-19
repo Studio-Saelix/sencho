@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import {
-  LayoutDashboard, Network, GitBranch, AlertTriangle, RefreshCw, Plus, Unplug,
+  LayoutDashboard, Network, GraphStar, AlertTriangle, RefreshCw, Plus, Unplug,
 } from 'lucide-react';
 import { Tabs, TabsContent, TabsList, TabsTrigger, TabsHighlight, TabsHighlightItem } from '@/components/ui/tabs';
 import { PageMasthead, type MastheadMetadataItem } from '@/components/ui/PageMasthead';
@@ -49,7 +49,7 @@ interface NetworkingViewProps {
 const TABS: { value: NetworkingTab; label: string; icon: typeof LayoutDashboard }[] = [
   { value: 'overview', label: 'Overview', icon: LayoutDashboard },
   { value: 'networks', label: 'Networks', icon: Network },
-  { value: 'topology', label: 'Topology', icon: GitBranch },
+  { value: 'topology', label: 'Topology', icon: GraphStar },
   { value: 'findings', label: 'Findings', icon: AlertTriangle },
 ];
 
