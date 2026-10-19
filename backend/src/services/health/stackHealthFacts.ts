@@ -106,10 +106,13 @@ export async function readStackHealthFacts(args: {
  * The declared Compose restart intent per service, which is what tells a
  * completed one-shot apart from a container that died.
  *
- * Null when the stack is not renderable or the node cannot answer: the caller
- * fails closed to an empty map, so an exit is read as a failure rather than a
- * one-shot completion nobody can prove. Rendering a remote stack is the leaf's
- * job for the same reason the container read is.
+ * Null when the stack is not renderable or the node cannot answer. The caller
+ * keeps that null rather than substituting an empty map, because the two mean
+ * opposite things: a loaded map says an exit with no `restart: "no"` intent is
+ * a failure, while null says a clean exit cannot be told from a completed
+ * one-shot, so the observation ends unknown instead of failing on evidence it
+ * never read. Every definite failure still fails. Rendering a remote stack is
+ * the leaf's job for the same reason the container read is.
  */
 export async function readStackDeclaredRestartIntent(args: {
   nodeId: number;

@@ -1174,6 +1174,7 @@ export class HealthGateService {
     const summary = this.summarize(gate.expected, byName);
 
     // Second pass: fail fast on a clearly bad state.
+    let ambiguousExit = false;
     for (const [name, baseline] of gate.expected) {
       const current = byName.get(name);
       if (!current) {
@@ -1191,12 +1192,18 @@ export class HealthGateService {
       // this is an expected one-shot (exit 0 + explicit declared restart "no").
       // Without the declared intent, a clean exit is ambiguous: a rollback
       // policy would restore a workload that may have completed exactly as
-      // declared. Unknown holds the rollout instead. A non-zero exit is a
-      // failure either way, so it is reported as one.
+      // declared. A non-zero exit is a failure either way, so it is reported
+      // as one.
       if (current.state === 'exited' && baseline.restarts === current.restarts && !cleanOneShot) {
         if (this.ambiguousCleanExit(gate, current)) {
-          this.finalize(gate, 'unknown', DECLARED_INTENT_UNAVAILABLE_REASON, summary);
-          return;
+          // Hold the ambiguity until the rest of the set has been inspected:
+          // a peer that is unhealthy or exited non-zero is a definite failure,
+          // and the order Docker listed the containers in must not decide
+          // between unknown and a failure policy. This container's own
+          // residual health is not evidence against it, so its remaining
+          // checks are skipped, exactly as when this ended the cycle.
+          ambiguousExit = true;
+          continue;
         }
         this.finalize(gate, 'failed', `container ${name} exited during observation`, summary);
         return;
@@ -1224,31 +1231,40 @@ export class HealthGateService {
       gate.expected.set(name, current);
     }
 
-    if (elapsedMs < gate.windowSeconds * 1000) return;
-
-    // Window complete: pass requires everything running (or a clean one-shot
-    // completion) and healthy wherever a healthcheck exists. A health state
-    // still 'starting' is not a pass (except residual health on a clean one-shot).
-    const stillStarting = observed.filter(
-      c => c.health === 'starting' && !isDeclaredCleanOneShot(gate, c),
-    );
-    if (stillStarting.length > 0) {
-      this.finalize(gate, 'unknown', 'a healthcheck was still starting when the observation window ended', summary);
+    // An ambiguity ends the observation mid-window, because no later poll can
+    // resolve it. At the window end the checks below decide instead, so a
+    // missing or otherwise unsatisfied expected container, which is a definite
+    // failure there, is not softened to unknown by an ambiguous peer.
+    if (ambiguousExit && elapsedMs < gate.windowSeconds * 1000) {
+      this.finalize(gate, 'unknown', DECLARED_INTENT_UNAVAILABLE_REASON, summary);
       return;
     }
+
+    if (elapsedMs < gate.windowSeconds * 1000) return;
+
+    // Window complete: a definite failure outranks every unknown conclusion.
+    // Every unsatisfied container has to be a clean exit whose declared intent
+    // was never read for the window to end without a verdict; a missing,
+    // restarting, or non-zero-exited container is a failure the gate can name.
     const notRunning = [...gate.expected.keys()].filter(
       name => !isObservedContainerSatisfied(gate, byName.get(name)),
     );
     if (notRunning.length > 0) {
-      // Same ambiguity as an early exit, and only there: every unsatisfied
-      // container has to be a clean exit for the window to end without a
-      // verdict. A missing, restarting, or non-zero-exited container is a
-      // failure the gate can name.
       if (notRunning.every(name => this.ambiguousCleanExit(gate, byName.get(name)))) {
         this.finalize(gate, 'unknown', DECLARED_INTENT_UNAVAILABLE_REASON, summary);
         return;
       }
       this.finalize(gate, 'failed', `not running at the end of the window: ${notRunning.join(', ')}`, summary);
+      return;
+    }
+    // Only then is a healthcheck that never finished starting the remaining
+    // reason the window cannot pass (residual health on a clean one-shot does
+    // not count against it).
+    const stillStarting = observed.filter(
+      c => c.health === 'starting' && !isDeclaredCleanOneShot(gate, c),
+    );
+    if (stillStarting.length > 0) {
+      this.finalize(gate, 'unknown', 'a healthcheck was still starting when the observation window ended', summary);
       return;
     }
     this.finalize(gate, 'passed', null, summary);
@@ -1338,6 +1354,7 @@ export class HealthGateService {
       }
     }
 
+    let ambiguousRole: GateRole | null = null;
     for (const [name, baseline] of gate.expected) {
       const role = gate.roleByName.get(name) ?? 'collateral';
       const noun = role === 'primary' ? 'replica' : 'sibling';
@@ -1355,10 +1372,13 @@ export class HealthGateService {
       const cleanOneShot = isDeclaredCleanOneShot(gate, current);
       if (current.state === 'exited' && baseline.restarts === current.restarts && !cleanOneShot) {
         // Same ambiguity as the stack cycle, and the same limit: only a clean
-        // exit is undecidable without the declared intent.
+        // exit is undecidable without the declared intent. Hold it until the
+        // whole set has been inspected so a definite failure on a later
+        // replica or sibling decides the verdict, and remember the role so an
+        // ambiguity-only outcome keeps its attribution.
         if (this.ambiguousCleanExit(gate, current)) {
-          this.finalize(gate, 'unknown', DECLARED_INTENT_UNAVAILABLE_REASON, summary, role);
-          return;
+          ambiguousRole ??= role;
+          continue;
         }
         this.finalize(gate, 'failed', `${noun} ${name} exited during observation`, summary, role);
         return;
@@ -1383,8 +1403,106 @@ export class HealthGateService {
       gate.expected.set(name, current);
     }
 
+    // A replica of the operated service that appeared after the gate armed is
+    // still evidence, and an unhealthy one fails here, where it is seen: a
+    // healthcheck that recovers would erase the only trace of the failure by the
+    // window end. An exited one persists until the window end, so the checks
+    // below cover it; a container removed before then is not end-state evidence.
+    // The tracked replicas are checked in the loop above.
+    for (const c of observed) {
+      if (c.service !== serviceName || gate.expected.has(c.name)) continue;
+      if (c.state === 'running' && c.health === 'unhealthy') {
+        this.finalize(gate, 'failed', `replica ${c.name} reported unhealthy`, summary, 'primary');
+        return;
+      }
+    }
+
+    // Same window-end precedence as the stack cycle: an ambiguity that is the
+    // only unsatisfied evidence still ends unknown below, while a replica or
+    // sibling the window-end check can name as failed wins over it.
+    if (ambiguousRole !== null && elapsedMs < gate.windowSeconds * 1000) {
+      this.finalize(gate, 'unknown', DECLARED_INTENT_UNAVAILABLE_REASON, summary, ambiguousRole);
+      return;
+    }
+
     if (elapsedMs < gate.windowSeconds * 1000) return;
 
+    // Window complete. A definite failure outranks every unknown conclusion, in
+    // both scopes at once so that neither an ambiguous replica nor an ambiguous
+    // sibling softens the other's definite failure. What the gate tracks is
+    // inspected alongside what the poll returned: a tracked replica the
+    // observation never returned is a definite failure, and one whose place was
+    // taken by an untracked replica still leaves its own exit unexplained.
+    // Keyed by name so one replica is counted once however it was seen. A
+    // scale-0 service has no replicas to account for: a container of it that is
+    // still running is already count drift, and a leftover exited one is not
+    // this rollout's evidence.
+    const replicaByName = new Map<string, ObservedContainer | undefined>();
+    if (gate.expectedReplicas > 0) {
+      for (const name of gate.expected.keys()) {
+        if (gate.roleByName.get(name) === 'primary') replicaByName.set(name, byName.get(name));
+      }
+      for (const c of observed) {
+        if (c.service === serviceName && !gate.expected.has(c.name)) replicaByName.set(c.name, c);
+      }
+    }
+    const unsatisfiedReplicas = [...replicaByName]
+      .map(([name, current]) => ({ name, current }))
+      .filter(replica => !isObservedContainerSatisfied(gate, replica.current));
+    const definiteReplicas = unsatisfiedReplicas.filter(replica => !this.ambiguousCleanExit(gate, replica.current));
+    const collateralNotRunning = [...gate.expected.keys()]
+      .filter(name => gate.roleByName.get(name) === 'collateral')
+      .filter(name => !isObservedContainerSatisfied(gate, byName.get(name)));
+    const definiteCollateral = collateralNotRunning.filter(name => !this.ambiguousCleanExit(gate, byName.get(name)));
+    const satisfiedReplicas = observed.filter(
+      c => c.service === serviceName && isObservedContainerSatisfied(gate, c),
+    ).length;
+
+    if (definiteReplicas.length > 0) {
+      this.finalize(
+        gate, 'failed',
+        satisfiedReplicas === gate.expectedReplicas
+          ? `replica(s) not running at the end of the window: ${definiteReplicas.map(replica => replica.name).join(', ')}`
+          : `service ${serviceName} has ${satisfiedReplicas} satisfied replica(s), expected ${gate.expectedReplicas}`,
+        summary, 'primary',
+      );
+      return;
+    }
+    if (definiteCollateral.length > 0) {
+      this.finalize(gate, 'failed', `sibling(s) not running at the end of the window: ${definiteCollateral.join(', ')}`, summary, 'collateral');
+      return;
+    }
+    // A shortfall only clean exits explain is the ambiguity the declared intent
+    // would have resolved, and only when those exits can account for all of it:
+    // a replica the gate watched over that never came up is a definite failure
+    // however its peers ended.
+    const replicaDeficit = gate.expectedReplicas - satisfiedReplicas;
+    if (replicaDeficit > 0 && unsatisfiedReplicas.length >= replicaDeficit) {
+      this.finalize(gate, 'unknown', DECLARED_INTENT_UNAVAILABLE_REASON, summary, 'primary');
+      return;
+    }
+    if (satisfiedReplicas !== gate.expectedReplicas) {
+      this.finalize(
+        gate, 'failed',
+        `service ${serviceName} has ${satisfiedReplicas} satisfied replica(s), expected ${gate.expectedReplicas}`,
+        summary, 'primary',
+      );
+      return;
+    }
+    if (unsatisfiedReplicas.length > 0) {
+      // The count is satisfied, but not by the replicas the gate watched: a
+      // replacement covering the count says nothing about why a tracked replica
+      // left, so the exit stays unexplained rather than becoming a pass.
+      this.finalize(gate, 'unknown', DECLARED_INTENT_UNAVAILABLE_REASON, summary, 'primary');
+      return;
+    }
+    if (collateralNotRunning.length > 0) {
+      this.finalize(gate, 'unknown', DECLARED_INTENT_UNAVAILABLE_REASON, summary, 'collateral');
+      return;
+    }
+    // Only then is a healthcheck that never finished starting the remaining
+    // reason the window cannot pass (residual health on a clean one-shot does
+    // not count against it).
     const stillStarting = observed.filter(
       c => c.health === 'starting'
         && !isDeclaredCleanOneShot(gate, c)
@@ -1392,38 +1510,6 @@ export class HealthGateService {
     );
     if (stillStarting.length > 0) {
       this.finalize(gate, 'unknown', 'a healthcheck was still starting when the observation window ended', summary);
-      return;
-    }
-    const satisfiedPrimary = observed.filter(
-      c => c.service === serviceName && isObservedContainerSatisfied(gate, c),
-    );
-    if (satisfiedPrimary.length !== gate.expectedReplicas) {
-      const unsatisfiedPrimary = observed.filter(
-        c => c.service === serviceName && !isObservedContainerSatisfied(gate, c),
-      );
-      // Only clean exits are undecidable without the declared intent. A replica
-      // missing from the list, or one that is restarting or exited non-zero, is
-      // a failure the count mismatch is already reporting.
-      if (unsatisfiedPrimary.length > 0 && unsatisfiedPrimary.every(c => this.ambiguousCleanExit(gate, c))) {
-        this.finalize(gate, 'unknown', DECLARED_INTENT_UNAVAILABLE_REASON, summary, 'primary');
-        return;
-      }
-      this.finalize(
-        gate, 'failed',
-        `service ${serviceName} has ${satisfiedPrimary.length} satisfied replica(s), expected ${gate.expectedReplicas}`,
-        summary, 'primary',
-      );
-      return;
-    }
-    const collateralNotRunning = [...gate.expected.keys()]
-      .filter(name => gate.roleByName.get(name) === 'collateral')
-      .filter(name => !isObservedContainerSatisfied(gate, byName.get(name)));
-    if (collateralNotRunning.length > 0) {
-      if (collateralNotRunning.every(name => this.ambiguousCleanExit(gate, byName.get(name)))) {
-        this.finalize(gate, 'unknown', DECLARED_INTENT_UNAVAILABLE_REASON, summary, 'collateral');
-        return;
-      }
-      this.finalize(gate, 'failed', `sibling(s) not running at the end of the window: ${collateralNotRunning.join(', ')}`, summary, 'collateral');
       return;
     }
     this.finalize(gate, 'passed', null, summary);

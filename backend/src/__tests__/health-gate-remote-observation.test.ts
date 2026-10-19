@@ -216,6 +216,29 @@ describe('HealthGateService on a remote target', () => {
     expect(latest().reason).toContain('declared restart intent could not be read');
   });
 
+  it('lets a definite peer decide the verdict even when the ambiguous exit is listed first', async () => {
+    // The accounting on the node's facts is the same one the local gate runs:
+    // the completed job alone would be undecidable, but the unhealthy
+    // application container beside it is a failure the ambiguity must not hide.
+    state.readFacts.mockResolvedValue({
+      kind: 'ok',
+      containers: [
+        container({
+          id: 'job'.padEnd(64, '0'), name: 'web-migrate-1', service: 'migrate',
+          state: 'exited', exitCode: 0, restartPolicy: 'no',
+        }),
+        container({ id: 'app'.padEnd(64, '0'), health: 'unhealthy' }),
+      ],
+    });
+    state.readDeclared.mockResolvedValue(null);
+
+    svc().beginStack(REMOTE_NODE_ID, 'web', 'update', 'tester', { deployedGenerationId: null });
+    await ticks(2);
+
+    expect(latest().status).toBe('failed');
+    expect(latest().reason).toBe('container web-app-1 reported unhealthy');
+  });
+
   it('still fails an exit that cannot be a completed one-shot', async () => {
     // A non-zero exit is a failure whether or not the compose declared
     // `restart: "no"`, so the missing intent must not soften it.

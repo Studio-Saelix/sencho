@@ -58,7 +58,7 @@ The hold is also what survives a restart. A rollout held by a policy stays held 
 
 A rollout target on another node is observed by that node. Sencho asks the node for the running containers of the stack it hosts, so a health verdict on a remote target is about the containers that node actually has, never about a Docker daemon on the instance running the rollout.
 
-Before a rollout deploys anything, it checks that every node in the placement can report its runtime facts. A node that cannot is refused for the whole rollout, and the deployment log says why. A node that stops answering once the rollout is under way leaves that target without a verdict, which is never treated as a pass: **Observe** records it and carries on, and every other mode pauses the rollout and waits for you.
+Before a rollout under any mode other than **Observe** deploys anything, it checks that every node in the placement can report its runtime facts. A node that cannot is refused for the whole rollout, and the deployment log says why. **Observe** never holds the rollout, so it skips that preflight and records the verdict each target reaches. A node that stops answering once the rollout is under way leaves that target without a verdict, which is never treated as a pass: **Observe** records it and carries on, and every other mode pauses the rollout and waits for you.
 
 ## Relationship to the other policies
 

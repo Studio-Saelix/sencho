@@ -100,6 +100,7 @@ vi.mock('../services/ComposeService', () => ({
 }));
 
 import { HealthGateService } from '../services/HealthGateService';
+import { decideHealthRolloutAction } from '../services/gitops/healthPolicy';
 
 type ContainerFixture = {
   id: string;
@@ -386,6 +387,110 @@ describe('HealthGateService verdicts', () => {
 
     expect(latest().status).toBe('unknown');
     expect(latest().reason).toContain('declared restart intent could not be read');
+  });
+
+  // An ambiguous clean exit is not a verdict until the rest of the observed set
+  // has been checked. A peer that is unhealthy or exited non-zero is a definite
+  // failure whatever the ambiguous container turns out to be, so the verdict
+  // (and the policy action it selects) must not depend on the order Docker
+  // returned the containers in.
+  const mixedObservations = [
+    {
+      label: 'an unhealthy peer',
+      peer: { state: 'running', health: 'unhealthy' },
+      reason: 'reported unhealthy',
+    },
+    {
+      label: 'a non-zero-exited peer',
+      peer: { state: 'exited', exitCode: 1 },
+      reason: 'exited during observation',
+    },
+  ] as const;
+
+  for (const mixed of mixedObservations) {
+    for (const ambiguousFirst of [true, false]) {
+      it(`fails on ${mixed.label} with the ambiguous exit ${ambiguousFirst ? 'first' : 'last'}`, async () => {
+        state.renderConfig.mockResolvedValue({ rendered: null, stderr: 'render failed', code: 1, timedOut: false });
+
+        const job: ContainerFixture = {
+          id: 'job', name: 'web-migrate-1', service: 'migrate', restartPolicy: 'no',
+        };
+        const app: ContainerFixture = {
+          id: 'app', name: 'web-app-1', service: 'app', restartPolicy: 'unless-stopped',
+        };
+        const ordered = (jobContainer: ContainerFixture, appContainer: ContainerFixture): ContainerFixture[] =>
+          ambiguousFirst ? [jobContainer, appContainer] : [appContainer, jobContainer];
+
+        setContainers(ordered(job, app));
+        svc().beginStack(0, 'web', 'update', 'tester', { deployedGenerationId: null });
+        await ticks(1); // baseline
+
+        setContainers(ordered({ ...job, state: 'exited', exitCode: 0 }, { ...app, ...mixed.peer }));
+        await ticks(1);
+
+        const report = latest();
+        expect(report.status).toBe('failed');
+        expect(report.reason).toContain(mixed.reason);
+        if (report.status === 'failed') {
+          expect(decideHealthRolloutAction({
+            policy: 'rollback', verdict: report.status, attemptsUsed: 0, recoveryAvailable: true,
+          }).action).toBe('rollback');
+        }
+      });
+    }
+  }
+
+  it('fails on a missing peer at the window end instead of softening it to unknown', async () => {
+    // The clean exit is ambiguous, but the other expected container was never
+    // returned. At the window end that is a definite failure, and it must not
+    // be excused by the ambiguity.
+    state.renderConfig.mockResolvedValue({ rendered: null, stderr: 'render failed', code: 1, timedOut: false });
+
+    const job: ContainerFixture = {
+      id: 'job', name: 'web-migrate-1', service: 'migrate', restartPolicy: 'no',
+    };
+    const app: ContainerFixture = {
+      id: 'app', name: 'web-app-1', service: 'app', restartPolicy: 'unless-stopped',
+    };
+    setContainers([job, app]);
+    svc().beginStack(0, 'web', 'update', 'tester', { deployedGenerationId: null });
+    await ticks(1); // baseline
+    await ticks(4); // stay healthy through the window
+
+    setContainers([{ ...job, state: 'exited', exitCode: 0 }]); // app is gone
+    await ticks(1); // reach the 30s window end
+
+    const report = latest();
+    expect(report.status).toBe('failed');
+    expect(report.reason).toContain('not running at the end of the window');
+    if (report.status === 'failed') {
+      expect(decideHealthRolloutAction({
+        policy: 'rollback', verdict: report.status, attemptsUsed: 0, recoveryAvailable: true,
+      }).action).toBe('rollback');
+    }
+  });
+
+  it('fails on a missing peer at the window end instead of softening it to a starting healthcheck', async () => {
+    // A healthcheck that never finished starting is not a pass, but it is not a
+    // definite failure either: a peer the poll never returned is, and it must
+    // decide the verdict rather than ending the window unknown.
+    const app: ContainerFixture = {
+      id: 'app', name: 'web-app-1', service: 'app', restartPolicy: 'unless-stopped',
+    };
+    const worker: ContainerFixture = {
+      id: 'worker', name: 'web-worker-1', service: 'worker', restartPolicy: 'unless-stopped',
+    };
+    setContainers([app, worker]);
+    svc().beginStack(0, 'web', 'update', 'tester', { deployedGenerationId: null });
+    await ticks(1); // baseline
+    await ticks(4); // stay healthy through the window
+
+    setContainers([{ ...app, health: 'starting' }]); // the worker is gone
+    await ticks(1); // reach the 30s window end
+
+    const report = latest();
+    expect(report.status).toBe('failed');
+    expect(report.reason).toContain('not running at the end of the window');
   });
 
   it('fails fast when a healthcheck reports unhealthy', async () => {
