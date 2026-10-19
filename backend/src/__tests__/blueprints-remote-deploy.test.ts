@@ -331,6 +331,81 @@ describe('BlueprintService remote deploy', () => {
         expect(DatabaseService.getInstance().getDeployment(bp.id, node.id)).toBeUndefined();
     });
 
+    it('removes the hub mute rule for the withdrawn stack on that node only', async () => {
+        const db = DatabaseService.getInstance();
+        const node = seedRemoteNode();
+        const bp = seedBlueprint([node.id]);
+        const nodeObj = db.getNode(node.id)!;
+        const bpObj = db.getBlueprint(bp.id)!;
+        db.upsertDeployment({
+            blueprint_id: bp.id,
+            node_id: node.id,
+            status: 'active',
+            applied_revision: bpObj.revision,
+        });
+        const now = Date.now();
+        const seed = (name: string, nodeId: number | null) => db.createNotificationSuppressionRule({
+            name,
+            node_id: nodeId,
+            stack_patterns: [bp.name],
+            label_ids: null,
+            categories: null,
+            levels: null,
+            applies_to: 'both',
+            enabled: true,
+            expires_at: null,
+            schedule: null,
+            created_at: now,
+            updated_at: now,
+        });
+        const onNode = seed(`Mute ${bp.name} on node`, node.id);
+        const allNodes = seed(`Mute ${bp.name} everywhere`, null);
+        vi.spyOn(axios, 'post').mockResolvedValue({ status: 200, data: { status: 'withdrawn' } });
+
+        const result = await BlueprintService.getInstance().withdrawFromNode(bpObj, nodeObj);
+
+        expect(result.status).toBe('withdrawn');
+        expect(db.getNotificationSuppressionRule(onNode.id)).toBeUndefined();
+        expect(db.getNotificationSuppressionRule(allNodes.id)).toBeDefined();
+        db.deleteNotificationSuppressionRule(allNodes.id);
+    });
+
+    it('keeps the hub mute rule when the remote refuses the withdraw', async () => {
+        const db = DatabaseService.getInstance();
+        const node = seedRemoteNode();
+        const bp = seedBlueprint([node.id]);
+        const nodeObj = db.getNode(node.id)!;
+        const bpObj = db.getBlueprint(bp.id)!;
+        db.upsertDeployment({
+            blueprint_id: bp.id,
+            node_id: node.id,
+            status: 'active',
+            applied_revision: bpObj.revision,
+        });
+        const now = Date.now();
+        const rule = db.createNotificationSuppressionRule({
+            name: `Mute ${bp.name}`,
+            node_id: node.id,
+            stack_patterns: [bp.name],
+            label_ids: null,
+            categories: null,
+            levels: null,
+            applies_to: 'both',
+            enabled: true,
+            expires_at: null,
+            schedule: null,
+            created_at: now,
+            updated_at: now,
+        });
+        vi.spyOn(axios, 'post').mockResolvedValue({ status: 409, data: { code: 'stack_op_in_progress', error: 'busy' } });
+
+        const result = await BlueprintService.getInstance().withdrawFromNode(bpObj, nodeObj);
+
+        expect(result.status).toBe('failed');
+        expect(db.getNotificationSuppressionRule(rule.id)).toBeDefined();
+        db.deleteNotificationSuppressionRule(rule.id);
+    });
+
     it('maps remote withdraw-local lock conflict to failed without fallback delete', async () => {
         const node = seedRemoteNode();
         const bp = seedBlueprint([node.id]);
