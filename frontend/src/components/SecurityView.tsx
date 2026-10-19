@@ -23,7 +23,6 @@ import { VulnerabilityScanSheet } from './VulnerabilityScanSheet';
 import { SuppressionsPanel } from './settings/SuppressionsPanel';
 import { MisconfigAckPanel } from './settings/MisconfigAckPanel';
 import { OverviewTab } from './security/OverviewTab';
-import { SecurityReasonActions } from './security/SecurityReasonActions';
 import { useSecurityReasons } from './security/useSecurityReasons';
 import {
   type ImagesTargetingInput,
@@ -483,11 +482,6 @@ export function SecurityView({ activeTab, onTabChange, headerActions }: Security
     );
   }
 
-  // The masthead offers the verb of the blocker its primary action came from, so it acts like the queue row.
-  const mastheadReason = nodeOverview?.posture === 'Action needed' && nodeOverview.primaryAction
-    ? nodeOverview.postureReasons?.find((r) => r.kind === nodeOverview.primaryAction?.kind && r.severity === 'blocker') ?? null
-    : null;
-
   return (
     <div className="h-full overflow-auto p-6">
       <PageMasthead
@@ -502,11 +496,7 @@ export function SecurityView({ activeTab, onTabChange, headerActions }: Security
           { label: 'HIGH', value: String(overview.high), tone: overview.high > 0 ? 'warn' : 'value' },
           { label: 'LAST SCAN', value: overview.lastSuccessfulScanAt ? formatTimeAgo(overview.lastSuccessfulScanAt) : 'never', tone: 'subtitle' },
         ] : undefined}
-      >
-        {mastheadReason ? (
-          <SecurityReasonActions reason={mastheadReason} verb={reasons.verbFor(mastheadReason)} controls={reasons.controls} />
-        ) : null}
-      </PageMasthead>
+      />
 
       <Tabs value={activeTab} onValueChange={(v) => onTabChange(v as SecurityTab)}>
         {/* Standard full-width tab band (matches Fleet): the list's own pill band
