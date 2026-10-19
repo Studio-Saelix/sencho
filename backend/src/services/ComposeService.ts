@@ -2021,7 +2021,8 @@ export class ComposeService {
    * Both the lexical and the real compose root are matched, so a relocated
    * (symlinked) compose directory still resolves, and the mirror is derived in
    * the coordinates of the root that matched. Anything outside the compose root
-   * is refused.
+   * is refused, at the entry barrier in the form static analysis credits and
+   * again on the real path below.
    */
   private async resolveCapturedEnvFile(
     stackName: string,
@@ -2033,11 +2034,30 @@ export class ComposeService {
     // Real compose base plus the lexical stack name, the same rule the
     // generation store applies, so a stack dir that links elsewhere stays out.
     const realBase = await this.realCapturedPath(baseResolved);
+    // Canonical js/path-injection barrier inline with the realpath read below:
+    // the check sits at the read because static analysis credits neither the
+    // caller's check nor a helper. This is the entry contract the body already
+    // enforces: a captured env file is a path inside the compose root, spelled
+    // lexically or through a linked (relocated) compose directory.
+    const absResolved = path.resolve(abs);
+    if (
+      !absResolved.startsWith(baseResolved + path.sep)
+      && !absResolved.startsWith(realBase + path.sep)
+    ) {
+      throw new Error(`Captured env-file path escapes stack directory for "${stackName}"`);
+    }
     const roots = [{ stackDir, base: baseResolved }];
     if (realBase !== baseResolved) {
       roots.push({ stackDir: path.join(realBase, stackName), base: realBase });
     }
-    const realAbs = await this.realCapturedPath(abs);
+    let realAbs: string;
+    try {
+      realAbs = await fs.promises.realpath(absResolved);
+    } catch {
+      // Compose reports a missing env file itself; an unresolvable path is
+      // not a path escape, so the guarded spelling stands.
+      realAbs = absResolved;
+    }
     for (const root of roots) {
       if (!isPathWithinBase(realAbs, root.stackDir)) continue;
       // The root that matched decides the coordinate system the path is rebased
