@@ -26,6 +26,7 @@ import {
 } from '../helpers/registryDeliveryOutbound';
 import { getRegistryDeliveryLockContext } from '../helpers/registryDeliveryContext';
 import { probeRemoteCapability } from '../helpers/remoteCapabilities';
+import { removeStackMuteRules } from '../helpers/notificationSuppressionSync';
 import { BLUEPRINT_DIGEST_PINS_V1_CAPABILITY } from './CapabilityRegistry';
 import { enforcePolicyForImageRefs } from './PolicyEnforcement';
 import { BlueprintAnalyzer } from './BlueprintAnalyzer';
@@ -1855,6 +1856,7 @@ export class BlueprintService {
         }
         if (res.status === 200) {
             DatabaseService.getInstance().deleteRoleAssignmentsByStack(node.id, blueprint.name);
+            removeStackMuteRules(node.id, blueprint.name);
             return { status: 'withdrawn' };
         }
         if (res.status === 409) {

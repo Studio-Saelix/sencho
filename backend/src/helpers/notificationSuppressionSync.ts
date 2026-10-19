@@ -8,6 +8,7 @@ import {
 } from '../services/CapabilityRegistry';
 import { remoteAdvertisesCapability } from './remoteCapabilities';
 import { getErrorMessage } from '../utils/errors';
+import { sanitizeForLog } from '../utils/safeLog';
 import { safeRemoteFetch } from '../utils/outboundTarget';
 
 const SYNC_TIMEOUT_MS = 15_000;
@@ -361,6 +362,42 @@ export function deleteSuppressionRuleFromFleet(rule: NotificationSuppressionRule
       }
     }),
   );
+}
+
+/**
+ * Remove the mute rules that target only this stack on this node (what the
+ * per-stack "Mute" actions create), so a deleted stack does not leave dead rules
+ * behind, or silently mute a later stack recreated under the same name.
+ * Wildcard, multi-stack, and all-nodes rules also cover other stacks and stay.
+ * Goes through the same permanent-delete path as the admin API, so remote
+ * replicas are retracted too. Best effort: the stack is already gone when this
+ * runs, so a failure is logged and never fails the delete.
+ */
+export function removeStackMuteRules(nodeId: number, stackName: string): void {
+  const safeStack = sanitizeForLog(stackName);
+  let db: DatabaseService;
+  let stackRules: NotificationSuppressionRule[];
+  try {
+    db = DatabaseService.getInstance();
+    stackRules = db.getNotificationSuppressionRules().filter(
+      (rule) => rule.node_id === nodeId && rule.stack_patterns.length === 1 && rule.stack_patterns[0] === stackName,
+    );
+  } catch (err) {
+    console.error(`[SuppressionSync] Failed to look up mute rules for deleted stack "${safeStack}" on node ${nodeId}:`, err);
+    return;
+  }
+  for (const rule of stackRules) {
+    try {
+      db.deleteNotificationSuppressionRule(rule.id, retractionFor('permanent', rule));
+      deleteSuppressionRuleFromFleet(rule);
+    } catch (err) {
+      console.error(
+        `[SuppressionSync] Failed to remove mute rule ${rule.id} for deleted stack "${safeStack}" on node ${nodeId}; ` +
+          'it can still mute a stack recreated under this name and can be deleted from notification settings:',
+        err,
+      );
+    }
+  }
 }
 
 /**

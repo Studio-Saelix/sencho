@@ -36,6 +36,7 @@ import {
 } from '../services/CapabilityRegistry';
 import { getErrorMessage } from '../utils/errors';
 import { DatabaseService } from '../services/DatabaseService';
+import { removeStackMuteRules } from '../helpers/notificationSuppressionSync';
 import { redactSensitiveText } from '../utils/safeLog';
 import { isValidStackName } from '../utils/validation';
 import { isDebugEnabled } from '../utils/debug';
@@ -298,6 +299,9 @@ export function createRemoteProxyMiddleware(): RequestHandler {
               getErrorMessage(cleanupErr, 'unknown'),
             );
           }
+          // Mute rules for the stack are authored on the hub, so the remote's own
+          // delete cleanup cannot reach them.
+          removeStackMuteRules(req.nodeId, route.stackName);
         }
       }
     },
