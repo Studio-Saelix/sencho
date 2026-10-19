@@ -11,6 +11,7 @@ import { GitProjectManifestService } from './GitProjectManifestService';
 import { collectManifestFilePaths } from '../helpers/manifestFilePaths';
 import { isHostAbsolutePath, parseDeclaredInputs } from '../helpers/composeInputParse';
 import { isValidRelativeStackPath, isValidStackName } from '../utils/validation';
+import { COMPOSE_OVERRIDE_FILENAMES, COMPOSE_ROOT_FILENAMES } from '../utils/composeFilenames';
 import {
   authoredComposeEnvFileArgs,
   authoredComposeFileArgs,
@@ -31,30 +32,6 @@ import type {
 } from '../types/rollbackGeneration';
 
 const DOT_ENV = '.' + 'env';
-
-/**
- * Compose's own auto-discovery names, in the order docker compose resolves them
- * (first existing file wins). It is not alphabetical and not uniform: the
- * compose.* family prefers .yaml over .yml, while the docker-compose.* family
- * and every override prefer .yml over .yaml. Verified against docker compose
- * v5, which warns and names its pick whenever a stack holds more than one
- * candidate. Sencho's import lists order the legacy family the other way round,
- * which is harmless for picking a file to read but wrong for the layer set a
- * recovery run must load.
- */
-const ROOT_COMPOSE_FILENAMES = [
-  'compose.yaml',
-  'compose.yml',
-  'docker-compose.yml',
-  'docker-compose.yaml',
-] as const;
-
-const OVERRIDE_COMPOSE_FILENAMES = [
-  'compose.override.yml',
-  'compose.override.yaml',
-  'docker-compose.override.yml',
-  'docker-compose.override.yaml',
-] as const;
 
 /**
  * A URL token inside a note: scheme, "://", and everything up to whitespace.
@@ -667,7 +644,7 @@ const capturable = async (
   // captured, so the stack deploys and a rollback reads the link's target.
   const composePaths: string[] = [];
   const selectedLayers: string[] = [];
-  for (const name of ROOT_COMPOSE_FILENAMES) {
+  for (const name of COMPOSE_ROOT_FILENAMES) {
     const resolved = resolveStackRel(stackRoot, name);
     if (!resolved) continue;
     const state = await capturable(resolved.relativePath, 'refuse');
@@ -685,7 +662,7 @@ const capturable = async (
     }
   }
 
-  const overrideName = await firstSelectedLayer(stackRoot, OVERRIDE_COMPOSE_FILENAMES);
+  const overrideName = await firstSelectedLayer(stackRoot, COMPOSE_OVERRIDE_FILENAMES);
   if (overrideName) {
     const resolved = resolveStackRel(stackRoot, overrideName);
     if (resolved) {
@@ -849,11 +826,14 @@ const capturable = async (
   }
 
   // A `-f` flag replaces Compose's own file discovery, and Compose ignores
-  // COMPOSE_FILE entirely once a `-f` list is given, so a captured prefix that
-  // already carries one leaves the layer choice alone. It does not leave the
-  // environment alone: Compose loads COMPOSE_ENV_FILES for interpolation either
-  // way, so the files it names are read in both cases.
-  const capturedPinsFiles = composeArgsPrefix.some((t) => t === '-f' || t === '--file');
+  // COMPOSE_FILE entirely once a `-f` list is given, so a run that carries one
+  // leaves the layer choice alone. Mesh injects its own `-f` list whenever it is
+  // enabled (the base file, the implicit override it would otherwise suppress,
+  // and the Mesh layer), so an enabled stack is a run that pins files even
+  // though the captured prefix holds none. It does not leave the environment
+  // alone: Compose loads COMPOSE_ENV_FILES for interpolation either way, so the
+  // files it names are read in both cases.
+  const capturedPinsFiles = composeArgsPrefix.some((t) => t === '-f' || t === '--file') || meshEnabled;
   const selection = await composeFileEnvVarSelection(stackName, nodeId);
   // COMPOSE_ENV_FILES names files Compose loads for interpolation that the
   // capture never holds (the inventory captures the project .env and the

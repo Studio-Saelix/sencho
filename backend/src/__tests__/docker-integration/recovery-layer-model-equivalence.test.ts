@@ -12,12 +12,13 @@
  *
  * Skipped automatically when Docker is unavailable.
  */
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import { execFileSync } from 'child_process';
 import { randomUUID } from 'crypto';
 import fs from 'fs';
 import path from 'path';
 import { setupTestDb, cleanupTestDb } from '../helpers/setupTestDb';
+import { generateOverrideYaml } from '../../services/MeshComposeOverride';
 
 function dockerAvailable(): boolean {
   try {
@@ -40,6 +41,19 @@ type Case = {
   processEnv?: Record<string, string>;
   /** Text a recorded omission note must contain, when the case is partial. */
   expectUncaptured?: string;
+  /**
+   * Mesh is enabled for the stack. The live run then injects its own explicit
+   * `-f` list (base, implicit override, Mesh layer), which suppresses Compose's
+   * discovery and `COMPOSE_FILE` along with it.
+   */
+  mesh?: boolean;
+  /**
+   * The injected list must load the same service definitions Compose's own
+   * discovery would: a Mesh layer may not change which competing file the stack
+   * deploys. Not set where the injection is meant to change the layer set, which
+   * is the `COMPOSE_FILE` case the `-f` list replaces.
+   */
+  meshMatchesDiscovery?: boolean;
 };
 
 const SERVICE = (image: string, command: string): string =>
@@ -260,6 +274,56 @@ const CASES: Case[] = [
     processEnv: { COMPOSE_ENV_FILES: 'select.env' },
     expectUncaptured: 'select.env is loaded by Compose through COMPOSE_ENV_FILES and is not captured',
   },
+  {
+    // Mesh injects an explicit -f list, so the live run pins the base and the
+    // implicit override instead of leaving either to discovery. The capture has
+    // to record that same pair, or the recovery pins the other competing file.
+    name: 'competing overrides under a Mesh run',
+    stack: 'layermeshoverride',
+    files: {
+      'compose.yaml': SERVICE('busybox:1.36.1', 'root'),
+      'compose.override.yaml': SERVICE('busybox:1.36.1', 'ovr-yaml'),
+      'compose.override.yml': SERVICE('busybox:1.36.1', 'ovr-yml'),
+    },
+    mesh: true,
+    meshMatchesDiscovery: true,
+  },
+  {
+    // Same injection, legacy family: Compose prefers .yml, so a live run that
+    // pins the base by its own filename order has to agree with discovery.
+    name: 'competing legacy roots under a Mesh run',
+    stack: 'layermeshlegacy',
+    files: {
+      'docker-compose.yaml': SERVICE('busybox:1.36.1', 'base-yaml'),
+      'docker-compose.yml': SERVICE('busybox:1.36.1', 'base-yml'),
+    },
+    mesh: true,
+    meshMatchesDiscovery: true,
+  },
+  {
+    // An injected -f list replaces COMPOSE_FILE, so the chain in .env selects
+    // nothing on the live run and must not select anything on the recovery.
+    name: 'a .env COMPOSE_FILE chain under a Mesh run',
+    stack: 'layermeshchain',
+    files: {
+      'compose.yaml': SERVICE('busybox:1.36.1', 'root'),
+      'prod.yaml': SERVICE('busybox:1.36.1', 'production'),
+      '.env': 'COMPOSE_FILE=compose.yaml:prod.yaml\n',
+    },
+    mesh: true,
+  },
+  {
+    // Compose validates an assignment name with Go's Unicode letter and number
+    // rules, so a non-ASCII key is an ordinary line. A reader that rejects it
+    // turns an unrelated .env line into a refused Compose action.
+    name: 'a Unicode assignment beside the chain',
+    stack: 'layerunicode',
+    files: {
+      'compose.yaml': SERVICE('busybox:1.36.1', 'root'),
+      'prod.yaml': SERVICE('busybox:1.36.1', 'production'),
+      '.env': 'UNICODE_é=value\n中文=值\nCOMPOSE_FILE=compose.yaml:prod.yaml\n',
+    },
+  },
 ];
 
 /** The rendered model, with the project name pinned so it cannot differ. */
@@ -270,6 +334,20 @@ function renderModel(globalArgs: string[], cwd: string, project: string): unknow
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   return JSON.parse(raw);
+}
+
+/**
+ * The stack-relative layers a global-flag prefix pins with `-f`, in order. An
+ * absolute entry is a generated layer (a Mesh override, a digest overlay) that
+ * lives outside the stack directory, so it is not a captured stack input.
+ */
+function pinnedStackLayers(prefix: string[]): string[] {
+  const layers: string[] = [];
+  for (let i = 0; i < prefix.length - 1; i++) {
+    if (prefix[i] !== '-f' && prefix[i] !== '--file') continue;
+    if (!path.isAbsolute(prefix[i + 1])) layers.push(prefix[i + 1]);
+  }
+  return layers;
 }
 
 describe.skipIf(!hasDocker)('recovery loads the model the capture-time run loaded', () => {
@@ -320,24 +398,69 @@ describe.skipIf(!hasDocker)('recovery loads the model the capture-time run loade
       try {
         const { resolveRollbackInventory } = await import('../../services/rollbackInventory');
         const { ComposeService } = await import('../../services/ComposeService');
+        const { MeshService } = await import('../../services/MeshService');
+
+        // Mesh is a live-execution input, not a stack file: the real deploy
+        // generates the layer in Sencho's data dir and appends it, so the test
+        // does the same rather than hand-building an argument list.
+        if (testCase.mesh) {
+          const overrideDir = path.join(tmpDir, 'mesh-overrides');
+          fs.mkdirSync(overrideDir, { recursive: true });
+          const overridePath = path.join(overrideDir, `${testCase.stack}.override.yml`);
+          fs.writeFileSync(
+            overridePath,
+            generateOverrideYaml({
+              services: ['web'],
+              aliases: [],
+              senchoIp: '172.30.0.2',
+            }),
+            'utf8',
+          );
+          DatabaseService.getInstance().insertMeshStack(nodeId, testCase.stack, null);
+          vi.spyOn(MeshService.getInstance(), 'ensureStackOverride').mockResolvedValue(overridePath);
+        }
+
         const inventory = await resolveRollbackInventory(nodeId, testCase.stack);
         expect(inventory.coverageRefusal).toBeNull();
         if (testCase.expectUncaptured) {
           expect(inventory.uncapturedInputs.join(' ')).toContain(testCase.expectUncaptured);
         }
 
+        // Recovery runs the persisted generation, not the in-memory inventory,
+        // so the invocation it reads back is the one under test.
+        const { RollbackGenerationStore } = await import('../../services/RollbackGenerationStore');
+        const generationId = randomUUID();
+        await RollbackGenerationStore.captureGeneration({
+          nodeId,
+          stackName: testCase.stack,
+          generationId,
+          inventory,
+        });
+        const manifest = await RollbackGenerationStore.readVerifiedGeneration(
+          nodeId,
+          testCase.stack,
+          generationId,
+        );
+
         const args = await ComposeService.getInstance(nodeId).buildComposeArgsWithRecoveryOverride(
           testCase.stack,
           ['config'],
           recoveryLayer,
-          inventory.invocation,
+          manifest.invocation,
         );
         const recoveryPrefix = args.slice(1, args.indexOf('config'));
-        // The live run is the capture-time invocation itself: its own global
-        // flags (a configured --env-file chain, a multi-file -f list) with no
-        // recovery layer on top. Comparing against a bare `docker compose`
-        // would grade the recovery against a run the deploy never made.
-        const livePrefix = inventory.invocation.composeArgsPrefix;
+        // The live run is the deploy's own global flags with no recovery layer,
+        // built by the production builder: a live run that pins files (Mesh
+        // injection, a deploy spec) pins them there, and a live run that leaves
+        // discovery alone stays bare. Rebuilding the prefix from the captured
+        // inventory would compare the recovery against itself.
+        const liveArgs = await ComposeService.getInstance(nodeId).buildComposeArgsWithRecoveryOverride(
+          testCase.stack,
+          ['config'],
+          null,
+          null,
+        );
+        const livePrefix = liveArgs.slice(1, liveArgs.indexOf('config'));
         // The recovery layer must come last, or it shadows every other layer
         // instead of refining the captured project.
         expect(recoveryPrefix[recoveryPrefix.length - 1]).toBe(recoveryLayer);
@@ -345,19 +468,46 @@ describe.skipIf(!hasDocker)('recovery loads the model the capture-time run loade
         if (inventory.invocation.composeLayers) {
           expect(recoveryPrefix).toEqual(expect.arrayContaining(inventory.invocation.composeLayers));
         }
+        // Complete coverage means every stack-relative layer the live run loads
+        // is either held by the generation or recorded as one it cannot hold.
+        // A layer the live run pins and the inventory never accounted for is
+        // the mismatch this suite exists to catch.
+        for (const layer of pinnedStackLayers(livePrefix)) {
+          const accountedFor = inventory.entries.some((e) => e.relativePath === layer)
+            || inventory.uncapturedRelativePaths.includes(layer);
+          expect(accountedFor, `capture must account for the live layer ${layer}`).toBe(true);
+        }
 
         const recovery = renderModel(recoveryPrefix, stackDir, testCase.stack) as {
-          services: Record<string, { command?: string[]; image?: string }>;
+          services: Record<string, { command?: string[]; image?: string; networks?: unknown }>;
         };
         const live = renderModel(livePrefix, stackDir, testCase.stack) as {
-          services: Record<string, { command?: string[]; image?: string }>;
+          services: Record<string, { command?: string[]; image?: string; networks?: unknown }>;
         };
         // The recovery layer only adds a label, so the service definitions the
         // deploy ran have to survive the rollback verbatim.
         expect(recovery.services.web.command).toEqual(live.services.web.command);
         expect(recovery.services.web.image).toBe(live.services.web.image);
+        if (testCase.mesh) {
+          // Both runs loaded the Mesh layer, so the comparison above is a
+          // statement about the same Mesh-enabled project on both sides.
+          expect(live.services.web.networks).toBeDefined();
+          expect(recovery.services.web.networks).toEqual(live.services.web.networks);
+        }
+        if (testCase.meshMatchesDiscovery) {
+          // The Mesh-injected -f list replaced discovery, so it has to name the
+          // files discovery would have picked: enabling Mesh must not change
+          // which competing file the stack deploys.
+          const discovered = renderModel([], stackDir, testCase.stack) as {
+            services: Record<string, { command?: string[]; image?: string }>;
+          };
+          expect(live.services.web.command).toEqual(discovered.services.web.command);
+          expect(live.services.web.image).toEqual(discovered.services.web.image);
+        }
       } finally {
         for (const name of appliedEnv) delete process.env[name];
+        vi.restoreAllMocks();
+        DatabaseService.getInstance().deleteMeshStack(nodeId, testCase.stack);
         DatabaseService.getInstance().setStackProjectEnvFiles(nodeId, testCase.stack, []);
       }
     });

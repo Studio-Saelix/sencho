@@ -8,6 +8,7 @@ import { pipeline } from 'stream/promises';
 import { NodeRegistry } from './NodeRegistry';
 import { DatabaseService } from './DatabaseService';
 import { isPathWithinBase, isValidStackName } from '../utils/validation';
+import { COMPOSE_OVERRIDE_FILENAMES, COMPOSE_ROOT_FILENAMES } from '../utils/composeFilenames';
 import { isBinaryBuffer } from '../utils/binaryDetect';
 import { sanitizeForLog } from '../utils/safeLog';
 import { sha256HexBuffer } from '../utils/hashing';
@@ -70,25 +71,21 @@ const EXPLORER_PROTECTED_STACK_FILES = new Set([
 // was taken; `.checksums` is the integrity manifest verified before a restore.
 const BACKUP_MARKER_FILES = new Set(['.timestamp', '.checksums']);
 
-// Compose filenames Sencho recognizes as a managed stack, in resolution-priority
-// order. Used by getStacks / hasComposeFile / firstComposeFilename.
-const IMPORT_COMPOSE_FILENAMES = ['compose.yaml', 'compose.yml', 'docker-compose.yaml', 'docker-compose.yml'] as const;
-const IMPORT_COMPOSE_FILENAME_SET = new Set<string>(IMPORT_COMPOSE_FILENAMES);
+// Compose filenames Sencho recognizes as a managed stack, in the resolution
+// order Compose itself uses. Used by getStacks / hasComposeFile /
+// firstComposeFilename, and by every read or save that has to pick the same
+// file Compose loads.
+const IMPORT_COMPOSE_FILENAME_SET = new Set<string>(COMPOSE_ROOT_FILENAMES);
 
 /** True when `name` is one of the four compose filenames Sencho resolves, and nothing else. */
 export function isComposeBasename(name: string): boolean {
   return IMPORT_COMPOSE_FILENAME_SET.has(name);
 }
-// Override filenames docker compose can auto-discover, listed in priority order (first
-// match wins, not paired to the chosen base file's family). We resolve the first that
-// exists, mirroring compose's default override resolution, to re-add it when an explicit
-// -f list (mesh injection) would otherwise suppress that discovery.
-const COMPOSE_OVERRIDE_FILENAMES = [
-  'compose.override.yaml',
-  'compose.override.yml',
-  'docker-compose.override.yaml',
-  'docker-compose.override.yml',
-] as const;
+// Override filenames docker compose can auto-discover, in the resolution order
+// Compose itself uses (first match wins, not paired to the chosen base file's
+// family). We resolve the first that exists, mirroring compose's default
+// override resolution, to re-add it when an explicit -f list (mesh injection)
+// would otherwise suppress that discovery.
 const COMPOSE_OVERRIDE_FILENAME_SET = new Set<string>(COMPOSE_OVERRIDE_FILENAMES);
 
 /** True for adopt-scan candidates: any .yml/.yaml that is not a compose override. */
@@ -244,8 +241,7 @@ export class FileSystemService {
 
   async hasComposeFile(dir: string): Promise<boolean> {
     this.assertWithinBase(dir);
-    const composeFiles = ['compose.yaml', 'compose.yml', 'docker-compose.yaml', 'docker-compose.yml'];
-    for (const file of composeFiles) {
+    for (const file of COMPOSE_ROOT_FILENAMES) {
       try {
         await fsPromises.access(path.join(dir, file));
         return true;
@@ -280,7 +276,7 @@ export class FileSystemService {
     // Containment sits on the lstat. The stack dir is already checked above,
     // and static analysis only credits the check that sits at the sink.
     const baseResolved = path.resolve(this.baseDir);
-    for (const file of IMPORT_COMPOSE_FILENAMES) {
+    for (const file of COMPOSE_ROOT_FILENAMES) {
       const filePath = path.resolve(stackDir, file);
       if (!filePath.startsWith(baseResolved + path.sep)) {
         throw Object.assign(new Error('Path escapes compose directory'), { code: 'INVALID_PATH' });
@@ -858,7 +854,7 @@ export class FileSystemService {
     const stackDir = this.resolveStackDir(stackName);
     await this.assertRealWithinBase(stackDir);
     const baseResolved = path.resolve(this.baseDir);
-    for (const file of IMPORT_COMPOSE_FILENAMES) {
+    for (const file of COMPOSE_ROOT_FILENAMES) {
       if (file === 'compose.yaml') continue;
       // Containment barrier at the unlink sink (same pattern as rollback orphan removal).
       const target = path.resolve(baseResolved, path.join(stackDir, file));
@@ -896,7 +892,7 @@ export class FileSystemService {
 
   private async firstComposeFilename(dir: string): Promise<string | null> {
     this.assertWithinBase(dir);
-    for (const file of IMPORT_COMPOSE_FILENAMES) {
+    for (const file of COMPOSE_ROOT_FILENAMES) {
       try {
         await fsPromises.access(path.join(dir, file));
         return file;
@@ -1486,8 +1482,7 @@ export class FileSystemService {
       checksums[file] = sha256HexBuffer(buf);
     };
 
-    const composeFiles = ['compose.yaml', 'compose.yml', 'docker-compose.yaml', 'docker-compose.yml'];
-    for (const file of composeFiles) {
+    for (const file of COMPOSE_ROOT_FILENAMES) {
       const src = path.resolve(baseResolved, path.join(stackDir, file));
       if (!src.startsWith(baseResolved + path.sep)) {
         throw Object.assign(new Error('Path escapes compose directory'), { code: 'INVALID_PATH' });

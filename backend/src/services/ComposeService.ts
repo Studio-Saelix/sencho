@@ -27,6 +27,7 @@ import { getErrorMessage } from '../utils/errors';
 import { normalizeContainerName } from '../utils/log-parsing';
 import { describeSpawnError } from '../utils/spawnErrors';
 import { isPathWithinBase, isValidStackName, isValidRelativeStackPath } from '../utils/validation';
+import { COMPOSE_OVERRIDE_FILENAMES, COMPOSE_ROOT_FILENAMES } from '../utils/composeFilenames';
 import { authoredComposeFileArgs, authoredComposeEnvFileArgs } from '../utils/authoredComposeArgs';
 import type { RollbackInvocationRecord } from '../types/rollbackGeneration';
 import { parseMissingRequiredVars } from '../helpers/envVarParse';
@@ -1941,12 +1942,9 @@ export class ComposeService {
       if (args[i] === '-f' || args[i] === '--file') files.push(args[i + 1]);
     }
     if (files.length === 0) {
-      files.push(
-        'compose.yaml', 'compose.yml',
-        'compose.override.yaml', 'compose.override.yml',
-        'docker-compose.yaml', 'docker-compose.yml',
-        'docker-compose.override.yaml', 'docker-compose.override.yml',
-      );
+      // No explicit -f, so Compose's own discovery decides: the two families in
+      // the order Compose resolves them, roots before the implicit override.
+      files.push(...COMPOSE_ROOT_FILENAMES, ...COMPOSE_OVERRIDE_FILENAMES);
     }
     for (const file of files) {
       const abs = path.resolve(resolvedStackDir, file);
