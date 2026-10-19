@@ -55,7 +55,7 @@ const EVIDENCE_OPTIONS = [
 ];
 
 /** Flat combobox trigger styling, matching the Security and Fleet filter rows. */
-const FILTER_CLASS = 'w-[200px] [&>button]:!bg-background';
+const FILTER_CLASS = 'w-[200px] [&>button]:!bg-control';
 
 export function PortfolioFilterBar({
   filters,
