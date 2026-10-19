@@ -62,6 +62,7 @@ function inventoryFor(
     coverageRefusal: null,
     uncapturedInputs: [],
     uncapturedRelativePaths: [],
+    applicationDataPaths: [],
   };
 }
 

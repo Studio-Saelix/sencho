@@ -235,6 +235,43 @@ export function selectedProjectEnvFile(
   return { kind: 'relative', relativePath };
 }
 
+/**
+ * The env files a recovery run must name so a pinned COMPOSE_FILE selection
+ * renders with the interpolation values the live run rendered with.
+ *
+ * Compose keeps the working directory's env file in the interpolation
+ * environment while it resolves a COMPOSE_FILE chain, on top of the project
+ * directory's default, with the working-directory file winning a key both
+ * define. An explicit `-f` list, which is what recovery pins, replaces that
+ * variable and drops the working-directory file, so a value only the stack
+ * root `.env` holds would fall back or flip after a rollback that reports
+ * complete coverage. The flags below reproduce the live order: Compose
+ * applies repeated `--env-file` arguments in sequence, the last one winning.
+ *
+ * Only files a recovery resolver can name are listed: a regular file, or a
+ * link whose target stays inside the compose root. An env file that links
+ * out of the compose root is left to the omission its classifier already
+ * records, because naming it would make recovery refuse the generation
+ * before Compose could read the file. `undefined` means no file needs
+ * naming, or none can be, and the recovery keeps the invocation recorded
+ * before this existed. A file this reader cannot inspect throws, and the
+ * caller refuses the capture: a list built around an unreadable file could
+ * omit one the live run loaded, which is the silent divergence this field
+ * exists to prevent.
+ */
+async function capturedInterpolationEnvFiles(
+  stackRoot: string,
+  projectEnvRel: string,
+): Promise<string[] | undefined> {
+  const projectEnvState = await classifyAuthoredFile(stackRoot, projectEnvRel);
+  const rootEnvState = await classifyAuthoredFile(stackRoot, DOT_ENV);
+  if (projectEnvState === 'outside' || rootEnvState === 'outside') return undefined;
+  const files: string[] = [];
+  if (projectEnvState === 'file' || projectEnvState === 'shared') files.push(projectEnvRel);
+  if (rootEnvState === 'file' || rootEnvState === 'shared') files.push(DOT_ENV);
+  return files.length > 0 ? files : undefined;
+}
+
 async function pathExistsAsFile(stackRoot: string, relativePath: string): Promise<boolean> {
   // Inline barrier at the lstat sink.
   const baseResolved = path.resolve(stackRoot);
@@ -431,6 +468,17 @@ const UNCAPTURED_SILENT_KINDS = new Set<RollbackEntryKind>([
   'dockerfile',
 ]);
 
+/**
+ * True for entry kinds that are application data or build inputs. A restore
+ * forwards live entries as managed cleanup candidates; these kinds are not
+ * managed paths, so a live entry of one never travels, and a data file or
+ * link that appeared after capture survives the restore. Captured entries of
+ * these kinds are still held files the restore writes back.
+ */
+export function isApplicationDataKind(kind: RollbackEntryKind): boolean {
+  return UNCAPTURED_SILENT_KINDS.has(kind);
+}
+
 function authoredSensitivity(kind: RollbackEntryKind): InputSensitivity {
   if (kind === 'secret' || kind === 'config' || kind === 'build-secret') return 'high';
   if (
@@ -481,6 +529,7 @@ function refusedGitInventory(
     coverageRefusal,
     uncapturedInputs: [],
     uncapturedRelativePaths: [],
+    applicationDataPaths: [],
   };
 }
 
@@ -678,6 +727,14 @@ async function resolveGitInventory(
     uncapturedRelativePaths: refusal === null
       ? [...uncapturedPaths].sort((a, b) => a.localeCompare(b))
       : [],
+    // The manifest names one input per path, so a path's kind is its only
+    // role here; there is no merged-kind ambiguity to protect against.
+    applicationDataPaths: refusal === null
+      ? [...map.values()]
+        .filter((entry) => isApplicationDataKind(entry.dependencyKind))
+        .map((entry) => entry.relativePath)
+        .sort((a, b) => a.localeCompare(b))
+      : [],
   };
 }
 
@@ -692,6 +749,10 @@ async function resolveAuthoredInventory(
   const caseCollisions: string[] = [];
   const uncaptured = new Set<string>();
   const uncapturedPaths = new Set<string>();
+  // Paths any silent-kind input references, whatever their file state and
+  // whatever managed input also names them: the sticky ownership record a
+  // restore reads to keep application data out of live cleanup.
+  const appDataPaths = new Set<string>();
 
   /**
    * Notes reach logs and the readiness API, and a URL include can carry
@@ -735,11 +796,14 @@ function literalTailCandidate(sourcePath: string): string | null {
  * - captured: a regular file, or a link to one inside the stack, whose bytes
  *   the generation holds.
  * - omitted: present and selected by Compose, but left out of the generation.
- *   The path joins `uncapturedRelativePaths` so a restore never deletes it, and
- *   a rollback uses its current content. `mode` decides how it is reported:
- *   'refuse' records a plain omission for a Compose layer (a shared main file
- *   the stack legitimately deploys), 'note' also adds an operator note, and
- *   'silent' skips the note for application data.
+ *   For a managed input the path joins `uncapturedRelativePaths` so readiness
+ *   lists it and a restore never deletes it, and a rollback uses its current
+ *   content. `mode` decides how it is reported: 'refuse' records a plain
+ *   omission for a Compose layer (a shared main file the stack legitimately
+ *   deploys), 'note' also adds an operator note, and 'silent' records neither
+ *   the note nor the path, because application data and build inputs are not
+ *   managed paths: no restore may ever treat them as files a generation owns
+ *   or cleans up, so a data link that appears after capture survives it.
  * - absent: nothing usable there. For 'refuse' that is either no file at all or
  *   a link a capture must stop on, which pushes a coverage note.
  */
@@ -753,9 +817,7 @@ const capturable = async (
   try {
     state = await classifyAuthoredFile(stackRoot, relativePath);
   } catch (e) {
-    if (mode === 'silent') {
-      uncapturedPaths.add(relativePath);
-    } else {
+    if (mode !== 'silent') {
       coverageNotes.push(`Could not inspect ${relativePath} for rollback capture: ${(e as Error).message}`);
     }
     return 'absent';
@@ -766,12 +828,11 @@ const capturable = async (
     // Compose reads the link, so the layer stays selected, but the bytes belong
     // to the shared target: the generation cannot hold them and a restore must
     // never write through the link. The omission is what keeps readiness honest.
+    if (mode === 'silent') return 'omitted';
     uncapturedPaths.add(relativePath);
-    if (mode !== 'silent') {
-      addUncaptured(
-        `${relativePath} ${LINK_PROBLEMS.shared} and is not captured; a rollback reads the linked file's current content`,
-      );
-    }
+    addUncaptured(
+      `${relativePath} ${LINK_PROBLEMS.shared} and is not captured; a rollback reads the linked file's current content`,
+    );
     return 'omitted';
   }
   const problem = LINK_PROBLEMS[state];
@@ -780,6 +841,7 @@ const capturable = async (
     coverageNotes.push(`Compose file ${relativePath} ${problem}${hint}`);
     return 'absent';
   }
+  if (mode === 'silent') return 'omitted';
   uncapturedPaths.add(relativePath);
   if (mode === 'note') addUncaptured(`${relativePath} ${problem} and is not captured`);
   return 'omitted';
@@ -896,12 +958,19 @@ const capturable = async (
         coverageNotes.push(...parsed.parseErrors);
       }
       for (const dyn of parsed.dynamic) {
-        if (UNCAPTURED_SILENT_KINDS.has(dyn.kind)) continue;
+        const candidate = literalTailCandidate(dyn.sourcePath);
+        if (UNCAPTURED_SILENT_KINDS.has(dyn.kind)) {
+          // Application data Compose resolves at deploy time. The one name the
+          // substitution could settle on is never a cleanup candidate, the
+          // same over-reporting the managed kinds below accept, in the safe
+          // direction: it can only leave an operator-owned file in place.
+          if (candidate) appDataPaths.add(candidate);
+          continue;
+        }
         const refs = dyn.kind === 'include' || dyn.kind === 'extends' ? ' (and the files it references)' : '';
         addUncaptured(
           `${dyn.kind} ${dyn.sourcePath}${refs} is resolved by Compose at deploy time and is not captured`,
         );
-        const candidate = literalTailCandidate(dyn.sourcePath);
         // A path that is interpolated end to end (`include: [ $FILE ]`) names
         // no filename a capture could protect by path, and Compose resolves it
         // to whatever the variable holds later. Any conventional compose file
@@ -934,6 +1003,7 @@ const capturable = async (
         if (!resolved) continue;
         const kind = input.kind;
         const mode = UNCAPTURED_SILENT_KINDS.has(kind) ? 'silent' : 'note';
+        if (mode === 'silent') appDataPaths.add(resolved.relativePath);
         if ((await capturable(resolved.relativePath, mode)) !== 'captured') continue;
 
         upsertEntry(map, foldedOwners, {
@@ -1017,6 +1087,12 @@ const capturable = async (
     );
   }
   let composeLayers: string[] = [...selectedLayers];
+  // Set when the COMPOSE_FILE translation produced the layer set above, so the
+  // project-env accounting below knows a recovery invocation will pin these
+  // layers as an explicit -f list and has to reconstruct the interpolation
+  // environment that translation would otherwise drop.
+  let chainPinned = false;
+  let interpolationEnvFiles: string[] | undefined;
   if (!capturedPinsFiles) {
     if (selection.kind === 'absent') {
       // Compose's own discovery decides, and selectedLayers already holds it.
@@ -1047,12 +1123,16 @@ const capturable = async (
           break;
         }
         resolvedChain.push(resolved.relativePath);
-        // The layer is loaded whatever it is, so it is pinned either way. What
-        // the capture can hold is a separate question, asked the same way it
-        // is for every other declared input: a link that leaves the stack, a
-        // link to nothing, or a path no captured compose file declares is
-        // recorded as not captured and never deleted by a restore.
-        await capturable(resolved.relativePath, 'note');
+        // The layer is loaded whatever it is, so it is pinned either way. The
+        // capture question uses the compose-layer policy, the same one the
+        // root and override candidates and the recovery layer validator
+        // apply: a target inside the compose root stays a recorded omission
+        // the generation cannot hold, while a layer that leaves the compose
+        // root, dangles, or is not a file is a refusal, because recovery
+        // refuses that same target before Compose runs and an accepted
+        // generation must never carry an invocation its own rollback cannot
+        // launch.
+        await capturable(resolved.relativePath, 'refuse');
         if (map.has(resolved.relativePath)) continue;
         // A regular file that no captured compose file declares: the
         // generation cannot hold it, so a restore must leave whatever is
@@ -1060,8 +1140,12 @@ const capturable = async (
         uncapturedPaths.add(resolved.relativePath);
         addUncaptured(`compose layer ${resolved.relativePath} is selected by COMPOSE_FILE and is not captured`);
       }
-      if (unusable === null) composeLayers = resolvedChain;
-      else coverageNotes.push(unusable);
+      if (unusable === null) {
+        composeLayers = resolvedChain;
+        chainPinned = true;
+      } else {
+        coverageNotes.push(unusable);
+      }
     }
   }
 
@@ -1076,14 +1160,28 @@ const capturable = async (
     const resolved = resolveStackRel(stackRoot, projectEnv.relativePath);
     if (!resolved) {
       addUncaptured(PROJECT_ENV_OUTSIDE_NOTE);
-    } else if ((await capturable(resolved.relativePath, 'note')) === 'captured') {
-      upsertEntry(map, foldedOwners, {
-        relativePath: resolved.relativePath,
-        dependencyKind: 'interpolation-env',
-        provenance: 'authored',
-        sensitivity: authoredSensitivity('interpolation-env'),
-        absolutePath: resolved.absolutePath,
-      }, caseCollisions);
+    } else {
+      if ((await capturable(resolved.relativePath, 'note')) === 'captured') {
+        upsertEntry(map, foldedOwners, {
+          relativePath: resolved.relativePath,
+          dependencyKind: 'interpolation-env',
+          provenance: 'authored',
+          sensitivity: authoredSensitivity('interpolation-env'),
+          absolutePath: resolved.absolutePath,
+        }, caseCollisions);
+      }
+      if (chainPinned && !defaultProjectEnvSuppressed(composeArgsPrefix)) {
+        try {
+          interpolationEnvFiles = await capturedInterpolationEnvFiles(stackRoot, resolved.relativePath);
+        } catch (e) {
+          // Same rule the capturable pass applies to a file it cannot inspect:
+          // refuse rather than reconstruct an invocation around an unreadable
+          // env file.
+          coverageNotes.push(
+            `Could not inspect the interpolation env files for rollback capture: ${(e as Error).message}`,
+          );
+        }
+      }
     }
   }
   if (caseCollisions.length > 0 && !coverageNotes.includes(caseCollisions[0])) {
@@ -1103,6 +1201,7 @@ const capturable = async (
       // The layer set Compose actually loaded, so recovery pins exactly that
       // rather than a root chosen from the stack directory alone.
       composeLayers,
+      interpolationEnvFiles,
       meshOverrideRelativePath: null,
       meshEnabled,
     },
@@ -1116,6 +1215,9 @@ const capturable = async (
     uncapturedInputs: coverageRefusal === null ? [...uncaptured] : [],
     uncapturedRelativePaths: coverageRefusal === null
       ? [...uncapturedPaths].sort((a, b) => a.localeCompare(b))
+      : [],
+    applicationDataPaths: coverageRefusal === null
+      ? [...appDataPaths].sort((a, b) => a.localeCompare(b))
       : [],
   };
 }

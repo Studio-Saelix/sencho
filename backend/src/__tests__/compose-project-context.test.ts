@@ -98,6 +98,7 @@ describe('composeProjectContext backupFromContext', () => {
       coverageRefusal: null,
       uncapturedInputs: [],
       uncapturedRelativePaths: [],
+      applicationDataPaths: [],
     });
     vi.spyOn(RollbackGenerationStore, 'captureGeneration').mockRejectedValue(
       new Error('injected capture failure'),
@@ -143,6 +144,7 @@ describe('composeProjectContext backupFromContext coverage', () => {
       coverageRefusal: null,
       uncapturedInputs: [],
       uncapturedRelativePaths: [],
+      applicationDataPaths: [],
       ...over,
     };
   }

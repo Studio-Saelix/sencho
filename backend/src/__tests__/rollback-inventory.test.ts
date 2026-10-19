@@ -925,6 +925,185 @@ describe('resolveRollbackInventory: the layer set recovery pins', () => {
     expect(inventory.invocation.composeLayers).toEqual(['compose.yaml']);
   });
 
+  it('refuses a selected COMPOSE_FILE layer that links outside the compose directory', async () => {
+    await write('compose.yaml', 'services:\n  web:\n    image: nginx\n');
+    // A regular file outside the compose directory, linked under a name the
+    // chain selects. Compose follows the link live, but recovery refuses the
+    // same target before Compose runs, so capture has to refuse first: an
+    // accepted generation may not carry an invocation its own rollback
+    // cannot launch.
+    const outsideDir = await fsPromises.mkdtemp(path.join(os.tmpdir(), 'sencho-layer-out-'));
+    try {
+      await fsPromises.writeFile(
+        path.join(outsideDir, 'chosen.yaml'),
+        'services:\n  web:\n    image: nginx\n',
+        'utf8',
+      );
+      await fsPromises.symlink(path.join(outsideDir, 'chosen.yaml'), path.join(composeDir, STACK, 'chosen.yaml'));
+      mockComposeFileEnvVarSelection.mockResolvedValue({
+        kind: 'value',
+        value: 'chosen.yaml',
+        pathSeparator: ':',
+        composeEnvFiles: [],
+        loadedEnvFiles: [],
+      });
+
+      const inventory = await resolveRollbackInventory(1, STACK);
+
+      expect(inventory.coverageRefusal).toContain('chosen.yaml links outside the compose directory');
+    } finally {
+      await fsPromises.rm(outsideDir, { recursive: true, force: true });
+    }
+  });
+
+  it('holds a selected COMPOSE_FILE layer that links into the shared compose directory', async () => {
+    await write('compose.yaml', 'services:\n  web:\n    image: nginx\n');
+    await fsPromises.mkdir(path.join(composeDir, 'shared'), { recursive: true });
+    await fsPromises.writeFile(
+      path.join(composeDir, 'shared', 'chosen.yaml'),
+      'services:\n  web:\n    image: nginx\n',
+      'utf8',
+    );
+    await fsPromises.symlink(path.join(composeDir, 'shared', 'chosen.yaml'), path.join(composeDir, STACK, 'chosen.yaml'));
+    mockComposeFileEnvVarSelection.mockResolvedValue({
+      kind: 'value',
+      value: 'chosen.yaml',
+      pathSeparator: ':',
+      composeEnvFiles: [],
+      loadedEnvFiles: [],
+    });
+
+    const inventory = await resolveRollbackInventory(1, STACK);
+
+    // A target inside the compose root stays an accepted omission: Compose
+    // reads the link live and recovery allows the same target, so the partial
+    // generation is one its own rollback can still launch.
+    expect(inventory.coverageRefusal).toBeNull();
+    expect(inventory.invocation.composeLayers).toEqual(['chosen.yaml']);
+    expect(inventory.uncapturedRelativePaths).toContain('chosen.yaml');
+    expect(inventory.uncapturedInputs.join(' ')).toContain('chosen.yaml');
+    expect(storedRestoreCoverage({ uncapturedInputs: inventory.uncapturedInputs })).toBe('omits_inputs');
+  });
+
+  it('records the interpolation env files of a COMPOSE_FILE chain in a subdirectory', async () => {
+    await fsPromises.mkdir(path.join(composeDir, STACK, 'sub'), { recursive: true });
+    await write('compose.yaml', 'services:\n  web:\n    image: nginx\n');
+    await write('sub/compose.yaml', 'services:\n  web:\n    image: nginx\n');
+    await write('.env', 'COMPOSE_FILE=sub/compose.yaml\nROOT_ONLY=captured\n');
+    await write('sub/.env', 'SUBVAR=captured\n');
+    mockComposeFileEnvVarSelection.mockResolvedValue({
+      kind: 'value',
+      value: 'sub/compose.yaml',
+      pathSeparator: ':',
+      composeEnvFiles: [],
+      loadedEnvFiles: [],
+    });
+
+    const inventory = await resolveRollbackInventory(1, STACK);
+
+    // The live run applies the project file first and the stack root file
+    // second, so the root file wins a key both define; recovery replays the
+    // same order and the same winner.
+    expect(inventory.coverageRefusal).toBeNull();
+    expect(inventory.invocation.composeLayers).toEqual(['sub/compose.yaml']);
+    expect(inventory.invocation.interpolationEnvFiles).toEqual(['sub/.env', '.env']);
+  });
+
+  it('records only the stack root env file when the selected project directory has none', async () => {
+    await fsPromises.mkdir(path.join(composeDir, STACK, 'sub'), { recursive: true });
+    await write('compose.yaml', 'services:\n  web:\n    image: nginx\n');
+    await write('sub/compose.yaml', 'services:\n  web:\n    image: nginx\n');
+    await write('.env', 'COMPOSE_FILE=sub/compose.yaml\nROOT_ONLY=captured\n');
+    mockComposeFileEnvVarSelection.mockResolvedValue({
+      kind: 'value',
+      value: 'sub/compose.yaml',
+      pathSeparator: ':',
+      composeEnvFiles: [],
+      loadedEnvFiles: [],
+    });
+
+    const inventory = await resolveRollbackInventory(1, STACK);
+
+    // The project directory has no .env, so the live run loaded the stack
+    // root file alone; without this record a pinned recovery would load none.
+    expect(inventory.coverageRefusal).toBeNull();
+    expect(inventory.invocation.interpolationEnvFiles).toEqual(['.env']);
+  });
+
+  it('records no interpolation env files for a chain at the stack root', async () => {
+    await write('compose.yaml', 'services:\n  web:\n    image: nginx\n');
+    await write('.env', 'COMPOSE_FILE=compose.yaml\nROOT_ONLY=captured\n');
+    mockComposeFileEnvVarSelection.mockResolvedValue({
+      kind: 'value',
+      value: 'compose.yaml',
+      pathSeparator: ':',
+      composeEnvFiles: [],
+      loadedEnvFiles: [],
+    });
+
+    const inventory = await resolveRollbackInventory(1, STACK);
+
+    // The project directory is the stack root, so the recovery's own default
+    // loads the same file the live run loaded.
+    expect(inventory.coverageRefusal).toBeNull();
+    expect(inventory.invocation.interpolationEnvFiles).toBeUndefined();
+  });
+
+  it('records no interpolation env files when the invocation selects its own env file', async () => {
+    await fsPromises.mkdir(path.join(composeDir, STACK, 'sub'), { recursive: true });
+    await write('compose.yaml', 'services:\n  web:\n    image: nginx\n');
+    await write('sub/compose.yaml', 'services:\n  web:\n    image: nginx\n');
+    await write('select.env', 'COMPOSE_FILE=sub/compose.yaml\n');
+    mockAuthoredComposeEnvFileArgs.mockResolvedValue([
+      '--env-file', path.join(composeDir, STACK, 'select.env'),
+    ]);
+    mockComposeFileEnvVarSelection.mockResolvedValue({
+      kind: 'value',
+      value: 'sub/compose.yaml',
+      pathSeparator: ':',
+      composeEnvFiles: [],
+      loadedEnvFiles: [path.join(composeDir, STACK, 'select.env')],
+    });
+
+    const inventory = await resolveRollbackInventory(1, STACK);
+
+    // The captured prefix already names the env file, and recovery replays
+    // it: the live run loaded nothing the replay misses.
+    expect(inventory.coverageRefusal).toBeNull();
+    expect(inventory.invocation.interpolationEnvFiles).toBeUndefined();
+  });
+
+  it('records no interpolation env files when the project env file links outside the compose directory', async () => {
+    await fsPromises.mkdir(path.join(composeDir, STACK, 'sub'), { recursive: true });
+    await write('compose.yaml', 'services:\n  web:\n    image: nginx\n');
+    await write('sub/compose.yaml', 'services:\n  web:\n    image: nginx\n');
+    await write('.env', 'COMPOSE_FILE=sub/compose.yaml\n');
+    const outsideDir = await fsPromises.mkdtemp(path.join(os.tmpdir(), 'sencho-env-out-'));
+    try {
+      await fsPromises.writeFile(path.join(outsideDir, 'sub.env'), 'SUBVAR=captured\n', 'utf8');
+      await fsPromises.symlink(path.join(outsideDir, 'sub.env'), path.join(composeDir, STACK, 'sub', '.env'));
+      mockComposeFileEnvVarSelection.mockResolvedValue({
+        kind: 'value',
+        value: 'sub/compose.yaml',
+        pathSeparator: ':',
+        composeEnvFiles: [],
+        loadedEnvFiles: [],
+      });
+
+      const inventory = await resolveRollbackInventory(1, STACK);
+
+      // The recovery resolver cannot name a file that links out of the
+      // compose directory, so no reconstruction is recorded. The omission it
+      // already records keeps the coverage claim partial.
+      expect(inventory.coverageRefusal).toBeNull();
+      expect(inventory.invocation.interpolationEnvFiles).toBeUndefined();
+      expect(inventory.uncapturedInputs.join(' ')).toContain('sub/.env');
+      expect(storedRestoreCoverage({ uncapturedInputs: inventory.uncapturedInputs })).toBe('omits_inputs');
+    } finally {
+      await fsPromises.rm(outsideDir, { recursive: true, force: true });
+    }
+  });
+
   it('pins an absolute COMPOSE_FILE chain that stays inside the stack', async () => {
     await write('compose.yaml', 'services:\n  web:\n    image: nginx\n');
     await write('prod.yaml', 'services:\n  web:\n    command: ["false"]\n');
@@ -1280,16 +1459,20 @@ describe('resolveRollbackInventory: inputs that cannot be captured', () => {
     expect(inventory.entries.map((e) => e.relativePath)).toEqual(['compose.yaml']);
   });
 
-  it('keeps an application-data link out of the notes but protects its path from restore', async () => {
+  it('keeps an application-data link out of the notes and out of the managed set', async () => {
     await writeCompose('services:\n  web:\n    image: nginx\n    volumes:\n      - ./data:/data\n');
     await fsPromises.mkdir(path.join(composeDir, 'shared-common', 'data'));
     await fsPromises.symlink(path.join(composeDir, 'shared-common', 'data'), path.join(stackDir, 'data'));
 
     const inventory = await resolveRollbackInventory(1, STACK);
 
+    // Application data is not a managed path: no note, and no path a restore
+    // could later treat as a file the generation owns or cleans up. A data
+    // link that appears after capture survives the restore for the same
+    // reason: it never travels with the managed inputs.
     expect(inventory.coverageRefusal).toBeNull();
     expect(inventory.uncapturedInputs).toEqual([]);
-    expect(inventory.uncapturedRelativePaths).toEqual(['data']);
+    expect(inventory.uncapturedRelativePaths).toEqual([]);
   });
 
   it('lists only the non-silent input when silent kinds sit beside it', async () => {

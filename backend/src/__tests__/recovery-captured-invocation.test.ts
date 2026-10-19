@@ -654,4 +654,102 @@ describe('captured invocation on recovery Compose args', () => {
       layerInvocation(stackName, ['compose.yaml']),
     )).rejects.toMatchObject({ code: 'SYMLINK_ESCAPE' });
   });
+
+  it('replays the recorded interpolation env files of a pinned COMPOSE_FILE selection in order', async () => {
+    const stackName = 'inv-interpolation-env';
+    const stackDir = path.join(composeDir, stackName);
+    await fs.promises.mkdir(path.join(stackDir, 'sub'), { recursive: true });
+    await fs.promises.writeFile(
+      path.join(stackDir, 'compose.yaml'),
+      'services:\n  web:\n    extends:\n      file: sub/compose.yaml\n      service: web\n',
+      'utf8',
+    );
+    await fs.promises.writeFile(
+      path.join(stackDir, 'sub', 'compose.yaml'),
+      'services:\n  web:\n    image: nginx\n',
+      'utf8',
+    );
+    await fs.promises.writeFile(path.join(stackDir, '.env'), 'COMPOSE_FILE=sub/compose.yaml\nROOT_ONLY=captured\n', 'utf8');
+    await fs.promises.writeFile(path.join(stackDir, 'sub', '.env'), 'SUBVAR=captured\n', 'utf8');
+
+    // A real authored capture: the chain moves the project directory into the
+    // subdirectory, so the invocation records the env files the live run
+    // applied, the project file first and the stack root file last.
+    const { resolveRollbackInventory } = await import('../services/rollbackInventory');
+    const inventory = await resolveRollbackInventory(nodeId, stackName);
+    expect(inventory.coverageRefusal).toBeNull();
+    expect(inventory.invocation.composeLayers).toEqual(['sub/compose.yaml']);
+    expect(inventory.invocation.interpolationEnvFiles).toEqual(['sub/.env', '.env']);
+
+    const { ComposeService } = await import('../services/ComposeService');
+    const args = await ComposeService.getInstance(nodeId).buildComposeArgsWithRecoveryOverride(
+      stackName,
+      ['up', '-d'],
+      null,
+      inventory.invocation,
+    );
+    // The flags keep the live order, because Compose applies repeated
+    // --env-file arguments in sequence and the last one wins a key both
+    // files define: without them the root values the live run rendered with
+    // fall back after the rollback.
+    expect(args).toEqual([
+      'compose',
+      '-f', 'sub/compose.yaml',
+      '--env-file', path.resolve(stackDir, 'sub', '.env'),
+      '--env-file', path.resolve(stackDir, '.env'),
+      'up', '-d',
+    ]);
+  });
+
+  it('adds no env-file flags for a generation captured before interpolation env files were recorded', async () => {
+    const stackName = 'inv-legacy-interpolation';
+    const stackDir = path.join(composeDir, stackName);
+    await fs.promises.mkdir(stackDir, { recursive: true });
+    await fs.promises.writeFile(path.join(stackDir, 'compose.yaml'), 'services:\n  web:\n    image: nginx\n', 'utf8');
+
+    const { ComposeService } = await import('../services/ComposeService');
+    const args = await ComposeService.getInstance(nodeId).buildComposeArgsWithRecoveryOverride(
+      stackName,
+      ['up', '-d'],
+      null,
+      layerInvocation(stackName, ['compose.yaml']),
+    );
+    expect(args).toEqual(['compose', '-f', 'compose.yaml', 'up', '-d']);
+  });
+
+  it('keeps a prefix that names its own env file, and refuses an escaping recorded one', async () => {
+    const stackName = 'inv-interpolation-guard';
+    const stackDir = path.join(composeDir, stackName);
+    await fs.promises.mkdir(path.join(stackDir, 'sub'), { recursive: true });
+    await fs.promises.writeFile(path.join(stackDir, 'sub', 'compose.yaml'), 'services:\n  web:\n    image: nginx\n', 'utf8');
+    await fs.promises.writeFile(path.join(stackDir, 'select.env'), 'A=1\n', 'utf8');
+
+    const { ComposeService } = await import('../services/ComposeService');
+    const svc = ComposeService.getInstance(nodeId);
+    // The captured prefix already selected its env file, so the recorded list
+    // is not replayed beside it.
+    const replayed = await svc.buildComposeArgsWithRecoveryOverride(
+      stackName,
+      ['up', '-d'],
+      null,
+      {
+        ...layerInvocation(stackName, ['sub/compose.yaml'], ['--env-file', path.join(stackDir, 'select.env')]),
+        interpolationEnvFiles: ['sub/.env', '.env'],
+      },
+    );
+    expect(replayed.join('\0')).toContain('--env-file\0' + path.resolve(stackDir, 'select.env'));
+    expect(replayed).not.toContain('.env');
+
+    // A recorded path that escapes the stack directory is refused rather
+    // than followed.
+    await expect(svc.buildComposeArgsWithRecoveryOverride(
+      stackName,
+      ['up', '-d'],
+      null,
+      {
+        ...layerInvocation(stackName, ['sub/compose.yaml']),
+        interpolationEnvFiles: ['../escape.env'],
+      },
+    )).rejects.toThrow(/Invalid captured interpolation env file/);
+  });
 });

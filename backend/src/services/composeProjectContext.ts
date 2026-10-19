@@ -12,7 +12,7 @@ import { FileSystemService } from './FileSystemService';
 import { buildEffectiveServiceModel } from './effectiveServiceModel';
 import { getErrorMessage } from '../utils/errors';
 import { sanitizeForLog } from '../utils/safeLog';
-import { resolveRollbackInventory } from './rollbackInventory';
+import { isApplicationDataKind, resolveRollbackInventory } from './rollbackInventory';
 import { RollbackGenerationStore } from './RollbackGenerationStore';
 import type {
   RollbackGenerationManifest,
@@ -131,16 +131,26 @@ class AuthoredComposeProjectContext implements ComposeProjectContext {
     }
 
     const inventory = await resolveRollbackInventory(this.nodeId, this.stackName);
-    // The live uncaptured paths travel with the entries: they are the managed
-    // inputs this generation cannot hold, and a restore that never saw them
-    // would leave a link created after capture in place and read its target.
+    // The live managed paths travel with the entries: they are the inputs this
+    // generation cannot hold or no longer holds, and a restore that never saw
+    // them would leave a link created after capture in place and read its
+    // target. Application data and build inputs are not managed paths, so
+    // neither their omissions nor their live entries travel: a path any live
+    // input declares as application data never becomes a cleanup candidate,
+    // even when another input also uses it as a managed file, and a data file
+    // or link that appears after capture survives the restore. A captured
+    // entry at such a path is still a held file the restore writes back.
+    const applicationData = new Set(inventory.applicationDataPaths);
     return RollbackGenerationStore.restoreGeneration(
       this.nodeId,
       this.stackName,
       generationId,
       [
-        ...inventory.entries.map((e) => e.relativePath),
-        ...inventory.uncapturedRelativePaths,
+        ...inventory.entries
+          .filter((entry) => !applicationData.has(entry.relativePath)
+            && !isApplicationDataKind(entry.dependencyKind))
+          .map((entry) => entry.relativePath),
+        ...inventory.uncapturedRelativePaths.filter((rel) => !applicationData.has(rel)),
       ],
       transactionMeta,
     );

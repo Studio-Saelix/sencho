@@ -983,6 +983,7 @@ describe('Snapshot restore: recovery generation contract', () => {
             coverageRefusal: null,
             uncapturedInputs: [],
             uncapturedRelativePaths: [],
+            applicationDataPaths: [],
         };
     }
 

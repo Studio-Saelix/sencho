@@ -2148,6 +2148,31 @@ export class ComposeService {
         out.push('-f', layer);
       }
     }
+    // Pinning a COMPOSE_FILE selection as an -f list drops the working
+    // directory's env file out of the interpolation environment. The recorded
+    // files go back as ordered --env-file flags, the same order the live run
+    // applied them in, so a value only the stack root .env holds survives the
+    // translation and a key both files define keeps its live winner. Repeated
+    // --env-file flags replace the project directory default, which is why
+    // the recorded list carries that file too instead of letting the flags
+    // drop it. A prefix that already named an env file selected its own and
+    // is replayed below unchanged.
+    if (
+      invocation.interpolationEnvFiles !== undefined
+      && invocation.interpolationEnvFiles.length > 0
+      && !raw.includes('--env-file')
+    ) {
+      for (const envRel of invocation.interpolationEnvFiles) {
+        if (!isValidRelativeStackPath(envRel)) {
+          throw new Error(`Invalid captured interpolation env file for stack "${stackName}": "${envRel}"`);
+        }
+        const envAbs = path.resolve(stackDir, envRel);
+        if (!isPathWithinBase(envAbs, stackDir)) {
+          throw new Error(`Captured interpolation env file escapes stack directory for "${stackName}"`);
+        }
+        out.push('--env-file', await this.resolveCapturedEnvFile(stackName, envAbs, stackDir, pathRoot));
+      }
+    }
     for (let i = 0; i < raw.length; i++) {
       const token = raw[i];
       if (token === '-f' || token === '--file') {

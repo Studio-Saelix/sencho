@@ -871,6 +871,100 @@ describe.skipIf(!hasDocker)('recovery loads the model the capture-time run loade
     expect(live.services.web.command).toEqual(['echo', 'captured']);
   });
 
+  it('reconstructs the interpolation environment a COMPOSE_FILE selection loaded', async () => {
+    const stack = 'layerenvreconstruct';
+    const stackDir = path.join(composeDir, stack);
+    fs.mkdirSync(path.join(stackDir, 'sub'), { recursive: true });
+    // The root file extends the selected service, so the inventory holds both
+    // YAML files; the live run loads the selected project alone.
+    fs.writeFileSync(path.join(stackDir, 'compose.yaml'), [
+      'services:',
+      '  web:',
+      '    extends:',
+      '      file: sub/compose.yaml',
+      '      service: web',
+      '',
+    ].join('\n'), 'utf8');
+    fs.writeFileSync(
+      path.join(stackDir, 'sub', 'compose.yaml'),
+      'services:\n  web:\n    image: busybox:1.36.1\n    command: ["echo", "${ROOT_ONLY:-fallback}", "${SUBVAR:-nosub}", "${BOTH:-noboth}"]\n',
+      'utf8',
+    );
+    // A root-only value, a project-only value, and a key both files define:
+    // the live run applies the project file first and the root file second,
+    // so the root value wins the shared key.
+    fs.writeFileSync(
+      path.join(stackDir, '.env'),
+      'COMPOSE_FILE=sub/compose.yaml\nROOT_ONLY=captured-root\nBOTH=fromroot\n',
+      'utf8',
+    );
+    fs.writeFileSync(path.join(stackDir, 'sub', '.env'), 'SUBVAR=captured-sub\nBOTH=fromsub\n', 'utf8');
+    const recoveryLayer = path.join(stackDir, '.sencho-recovery-test.yml');
+    fs.writeFileSync(
+      recoveryLayer,
+      'services:\n  web:\n    labels:\n      sencho.recovery-test: "1"\n',
+      'utf8',
+    );
+
+    const { resolveRollbackInventory } = await import('../../services/rollbackInventory');
+    const { RollbackGenerationStore } = await import('../../services/RollbackGenerationStore');
+    const { storedRestoreCoverage } = await import('../../services/updateGuard/readiness');
+    const { resolveComposeProjectContextForGeneration } = await import('../../services/composeProjectContext');
+    const { ComposeService } = await import('../../services/ComposeService');
+
+    const inventory = await resolveRollbackInventory(nodeId, stack);
+    expect(inventory.coverageRefusal).toBeNull();
+    // The generation claims complete coverage, so its invocation has to carry
+    // the interpolation environment the live run used.
+    expect(inventory.uncapturedInputs).toEqual([]);
+    expect(inventory.invocation.composeLayers).toEqual(['sub/compose.yaml']);
+    expect(inventory.invocation.interpolationEnvFiles).toEqual(['sub/.env', '.env']);
+
+    const generationId = randomUUID();
+    await RollbackGenerationStore.captureGeneration({ nodeId, stackName: stack, generationId, inventory });
+    const stored = await RollbackGenerationStore.readVerifiedGeneration(nodeId, stack, generationId);
+    expect(storedRestoreCoverage(stored)).toBe('complete');
+    expect(stored.invocation.interpolationEnvFiles).toEqual(['sub/.env', '.env']);
+
+    // The literal values the live run renders, pinned so a recovery that
+    // loses either file or flips the shared key cannot pass as equivalent.
+    const live = renderModel([], stackDir, stack) as {
+      services: Record<string, { command?: string[] }>;
+    };
+    expect(live.services.web.command).toEqual(['echo', 'captured-root', 'captured-sub', 'fromroot']);
+
+    // Both env files change on disk; the restore puts the captured bytes back.
+    fs.writeFileSync(path.join(stackDir, 'sub', '.env'), 'SUBVAR=changed\nBOTH=changed-sub\n', 'utf8');
+    fs.writeFileSync(path.join(stackDir, '.env'), 'COMPOSE_FILE=sub/compose.yaml\nROOT_ONLY=changed\n', 'utf8');
+    const ctx = await resolveComposeProjectContextForGeneration(nodeId, stack, generationId);
+    await ctx.restoreFromContext();
+    expect(fs.readFileSync(path.join(stackDir, 'sub', '.env'), 'utf8')).toBe('SUBVAR=captured-sub\nBOTH=fromsub\n');
+    expect(fs.readFileSync(path.join(stackDir, '.env'), 'utf8')).toBe(
+      'COMPOSE_FILE=sub/compose.yaml\nROOT_ONLY=captured-root\nBOTH=fromroot\n',
+    );
+
+    const args = await ComposeService.getInstance(nodeId).buildComposeArgsWithRecoveryOverride(
+      stack,
+      ['config'],
+      recoveryLayer,
+      stored.invocation,
+    );
+    const prefix = args.slice(1, args.indexOf('config'));
+    // The recorded order is the live run's: the project file first, the stack
+    // root file last, so a key both define keeps the root value.
+    expect(prefix).toEqual([
+      '-f', 'sub/compose.yaml',
+      '--env-file', path.join(stackDir, 'sub', '.env'),
+      '--env-file', path.join(stackDir, '.env'),
+      '-f', recoveryLayer,
+    ]);
+
+    const recovery = renderModel(prefix, stackDir, stack) as {
+      services: Record<string, { command?: string[] }>;
+    };
+    expect(recovery.services.web.command).toEqual(['echo', 'captured-root', 'captured-sub', 'fromroot']);
+  });
+
   it('expands literal braces the way the Compose CLI does', async () => {
     const { expandComposeEnvTemplate } = await import('../../utils/composeDotenv');
     const cases: Array<{ name: string; template: string; env: string; set: boolean; expected: string | null }> = [

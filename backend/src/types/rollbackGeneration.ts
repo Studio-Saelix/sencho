@@ -63,6 +63,19 @@ export interface RollbackInvocationRecord {
    * with the implicit override, because nothing else in that prefix pins them.
    */
   composeLayers?: string[];
+  /**
+   * Stack-relative env files, in the order the captured run applied them, that
+   * a recovery invocation must name with `--env-file` when it pins
+   * `composeLayers`. Translating a `COMPOSE_FILE` selection into an explicit
+   * `-f` list drops the working directory's env file out of the interpolation
+   * environment; these flags put it back with the original precedence, because
+   * Compose applies repeated `--env-file` arguments in order with the last one
+   * winning. Recorded only when the selection moved the project directory off
+   * the stack root and every named file stays inside the compose root, so a
+   * recovery resolver can launch with them. Omitted on generations captured
+   * before it was recorded: those keep the invocation they were captured with.
+   */
+  interpolationEnvFiles?: string[];
   /** Stack-relative mesh override path when Mesh was part of the capture invocation. */
   meshOverrideRelativePath?: string | null;
   /** True when Mesh was enabled for the stack at capture time. */
@@ -102,9 +115,10 @@ export interface RollbackGenerationManifest {
    */
   managedRelativePaths: string[];
   /**
-   * Stack-relative paths of links left out of the capture (pointing outside
-   * the stack, at nothing, or at a non-file). Restore neither writes nor
-   * deletes them. Omitted on generations captured before this was recorded.
+   * Stack-relative paths of managed inputs left out of the capture (links
+   * pointing outside the stack, at nothing, or at a non-file). Restore neither
+   * writes nor deletes them. Omitted on generations captured before this was
+   * recorded.
    */
   uncapturedRelativePaths?: string[];
   /** The operator-facing notes for everything left out of the capture. Omitted on older generations. */
@@ -202,10 +216,25 @@ export interface ResolvedRollbackInventory {
    */
   uncapturedInputs: string[];
   /**
-   * Stack-relative paths of links inside the stack that were left out of the
-   * capture (they point outside the stack, at nothing, or at a non-file).
-   * Restore neither writes nor deletes these paths. Not every note in
-   * `uncapturedInputs` has a path here.
+   * Stack-relative paths of managed inputs the capture left out: links inside
+   * the stack that point outside it, at nothing, or at a non-file. Restore
+   * neither writes nor deletes them, and a live restore may still remove one
+   * that became a link after capture, because the generation owns that managed
+   * path. Application data and build inputs (bind mounts, build contexts,
+   * dockerfiles) are never managed paths and never appear here: a restore
+   * leaves them alone whether they existed at capture or appeared afterwards.
+   * Not every note in `uncapturedInputs` has a path here.
    */
   uncapturedRelativePaths: string[];
+  /**
+   * Stack-relative paths any live input declares as application data or a
+   * build input, whatever else also uses them. A path can be both a bind
+   * mount and a managed input, and the merged entry kind follows the last
+   * input that named it, so this set is the sticky ownership record: a
+   * restore never forwards one of these paths as a cleanup candidate, from
+   * the live entries or the live omissions, while a captured entry at the
+   * path is still a held file the restore writes back. Empty when
+   * `coverageRefusal` is set.
+   */
+  applicationDataPaths: string[];
 }
