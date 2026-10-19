@@ -2460,6 +2460,10 @@ stmt.run('gitops_schema_version', '1');
         // SSO role sync defaults off: admin-set roles persist across SSO sign-ins;
         // operators who want IdP group membership to drive roles opt in via Settings > SSO.
         stmt.run('sso_role_sync', '0');
+        // Off-site snapshot archives stay plaintext unless an operator opts in.
+        // A missing key reads as off. The passphrase is a separate secret and is
+        // not seeded.
+        stmt.run('cloud_backup_encrypt_archives', '0');
 
         // Seed the default local node if none exists
         const nodeCount = (this.db.prepare('SELECT COUNT(*) as count FROM nodes').get() as any)?.count || 0;
@@ -7262,6 +7266,51 @@ stmt.run('gitops_schema_version', '1');
             }
         });
         insertMany(files);
+    }
+
+    /**
+     * Insert a cloud-imported snapshot and its files in one transaction.
+     * The header and file rows commit together, so a failed file write rolls
+     * the snapshot row back. File bodies and documentation are encrypted with
+     * the instance key, matching a locally captured snapshot.
+     */
+    public importSnapshotArchive(snapshot: {
+        description: string;
+        createdBy: string;
+        createdAt: number;
+        nodeCount: number;
+        stackCount: number;
+        skippedNodes: string;
+        skippedStacks: string;
+        documentation: string;
+        files: Array<{ nodeId: number; nodeName: string; stackName: string; filename: string; content: string }>;
+    }): number {
+        const crypto = CryptoService.getInstance();
+        const storedDocs = snapshot.documentation === '' ? '' : crypto.encrypt(snapshot.documentation);
+        const insertSnap = this.db.prepare(
+            'INSERT INTO fleet_snapshots (description, created_by, node_count, stack_count, skipped_nodes, skipped_stacks, documentation, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
+        );
+        const insertFile = this.db.prepare(
+            'INSERT INTO fleet_snapshot_files (snapshot_id, node_id, node_name, stack_name, filename, content) VALUES (?, ?, ?, ?, ?, ?)'
+        );
+        const write = this.db.transaction(() => {
+            const result = insertSnap.run(
+                snapshot.description,
+                snapshot.createdBy,
+                snapshot.nodeCount,
+                snapshot.stackCount,
+                snapshot.skippedNodes,
+                snapshot.skippedStacks,
+                storedDocs,
+                snapshot.createdAt,
+            );
+            const snapshotId = Number(result.lastInsertRowid);
+            for (const row of snapshot.files) {
+                insertFile.run(snapshotId, row.nodeId, row.nodeName, row.stackName, row.filename, crypto.encrypt(row.content));
+            }
+            return snapshotId;
+        });
+        return write();
     }
 
     // The encrypted `documentation` blob is deliberately excluded from these

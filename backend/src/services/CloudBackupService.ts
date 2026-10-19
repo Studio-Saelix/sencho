@@ -24,6 +24,14 @@ import {
 } from '../helpers/snapshotFileDecrypt';
 import { getErrorMessage } from '../utils/errors';
 import { isDebugEnabled } from '../utils/debug';
+import {
+    ArchiveFormatError,
+    decryptArchive,
+    encryptArchive,
+    isEncryptedArchive,
+    MAX_ARCHIVE_OBJECT_BYTES,
+    openSnapshotArchive,
+} from './cloudBackupArchive';
 
 // Cloud backup is opt-in (paid feature) and the AWS SDK v3 client pulls
 // in dozens of @smithy/* and @aws-sdk/middleware-* packages, so installs
@@ -74,6 +82,15 @@ export interface CloudSnapshotEntry {
     sizeBytes: number;
     lastModified: string | null;
     snapshotId: number | null;
+    encrypted: boolean;
+}
+
+/** The object key is not under this instance's snapshot prefix. */
+export class SnapshotKeyError extends Error {
+    constructor(message: string) {
+        super(message);
+        this.name = 'SnapshotKeyError';
+    }
 }
 
 export interface ProvisionResult {
@@ -132,6 +149,10 @@ export class CloudBackupService {
     public isAutoUploadOn(): boolean {
         const cfg = this.getResolvedConfig();
         return cfg?.autoUpload === true;
+    }
+
+    public archivesAreEncrypted(): boolean {
+        return DatabaseService.getInstance().getGlobalSettings().cloud_backup_encrypt_archives === '1';
     }
 
     public getResolvedConfig(): ResolvedCloudConfig | null {
@@ -257,7 +278,7 @@ export class CloudBackupService {
         if (!snapshot) throw new Error(`Snapshot ${snapshotId} not found.`);
         const files = db.getSnapshotFiles(snapshotId);
         const documentation = db.getSnapshotDocumentation(snapshotId);
-        const objectKey = this.buildObjectKey(cfg, snapshot.id, snapshot.description, snapshot.created_at);
+        let objectKey = this.buildObjectKey(cfg, snapshot.id, snapshot.description, snapshot.created_at, false);
 
         const availableFiles = files.filter(isAvailableSnapshotFile);
         if (availableFiles.length !== files.length) {
@@ -269,16 +290,19 @@ export class CloudBackupService {
         this.setStatus(snapshotId, { status: 'uploading', objectKey, updatedAt: Date.now() });
         try {
             const archive = await this.buildArchive(snapshot, availableFiles, documentation);
+            const protectedBody = await this.protectArchive(archive);
+            objectKey = this.buildObjectKey(cfg, snapshot.id, snapshot.description, snapshot.created_at, protectedBody.encrypted);
+            this.setStatus(snapshotId, { status: 'uploading', objectKey, updatedAt: Date.now() });
             const { client, sdk } = await this.buildS3Client(cfg);
             await client.send(new sdk.PutObjectCommand({
                 Bucket: cfg.bucket,
                 Key: objectKey,
-                Body: archive,
-                ContentType: 'application/gzip',
+                Body: protectedBody.body,
+                ContentType: protectedBody.encrypted ? 'application/octet-stream' : 'application/gzip',
             }));
             this.setStatus(snapshotId, { status: 'success', objectKey, updatedAt: Date.now() });
             if (isDebugEnabled()) {
-                console.log(`[CloudBackup:debug] Uploaded snapshot ${snapshotId} (${archive.byteLength} bytes) to ${cfg.bucket}/${objectKey}`);
+                console.log(`[CloudBackup:debug] Uploaded snapshot ${snapshotId} (${protectedBody.body.byteLength} bytes) to ${cfg.bucket}/${objectKey}`);
             }
         } catch (err) {
             const message = getErrorMessage(err, 'Cloud upload failed.');
@@ -287,14 +311,25 @@ export class CloudBackupService {
         }
     }
 
-    public async downloadSnapshot(objectKey: string): Promise<Buffer> {
-        const cfg = this.getResolvedConfig();
-        if (!cfg) throw new Error('Cloud backup is not configured.');
-        const { client, sdk } = await this.buildS3Client(cfg);
-        const result = await client.send(new sdk.GetObjectCommand({ Bucket: cfg.bucket, Key: objectKey }));
-        const body = result.Body as Readable | undefined;
-        if (!body) throw new Error('Empty response body.');
-        return await streamToBuffer(body);
+    public async downloadSnapshot(objectKey: string, passphraseOverride: string | null = null): Promise<Buffer> {
+        this.assertSnapshotObjectKey(objectKey);
+        const raw = await this.fetchObject(objectKey);
+        if (!isEncryptedArchive(raw)) return raw;
+        const passphrase = passphraseOverride || this.storedArchivePassphrase();
+        if (!passphrase) {
+            throw new ArchiveFormatError('PASSPHRASE_REQUIRED', 'A passphrase is required to read this archive');
+        }
+        return decryptArchive(raw, passphrase);
+    }
+
+    public async importSnapshot(objectKey: string, passphraseOverride: string | null = null): Promise<number> {
+        this.assertSnapshotObjectKey(objectKey);
+        const raw = await this.fetchObject(objectKey);
+        const passphrase = isEncryptedArchive(raw)
+            ? (passphraseOverride || this.storedArchivePassphrase())
+            : null;
+        const parsed = await openSnapshotArchive(raw, passphrase);
+        return DatabaseService.getInstance().importSnapshotArchive(parsed);
     }
 
     public async listCloudSnapshots(): Promise<CloudSnapshotEntry[]> {
@@ -319,16 +354,27 @@ export class CloudBackupService {
                     sizeBytes: o.Size ?? 0,
                     lastModified: o.LastModified ? o.LastModified.toISOString() : null,
                     snapshotId: idMatch ? parseInt(idMatch[1], 10) : null,
+                    encrypted: key.endsWith('.tar.gz.senc'),
                 };
             })
             .sort((a, b) => (b.lastModified || '').localeCompare(a.lastModified || ''));
     }
 
     public async deleteCloudSnapshot(objectKey: string): Promise<void> {
+        this.assertSnapshotObjectKey(objectKey);
         const cfg = this.getResolvedConfig();
         if (!cfg) throw new Error('Cloud backup is not configured.');
         const { client, sdk } = await this.buildS3Client(cfg);
         await client.send(new sdk.DeleteObjectCommand({ Bucket: cfg.bucket, Key: objectKey }));
+    }
+
+    public assertSnapshotObjectKey(objectKey: string): void {
+        const cfg = this.getResolvedConfig();
+        if (!cfg) throw new Error('Cloud backup is not configured.');
+        const prefix = `${cfg.pathPrefix}instances/${this.getInstanceId()}/snapshots/`;
+        if (!objectKey.startsWith(prefix)) {
+            throw new SnapshotKeyError('Object key is outside this instance snapshot prefix');
+        }
     }
 
     // ─── Status tracking ───────────────────────────────────────────────────────
@@ -367,10 +413,44 @@ export class CloudBackupService {
         return DatabaseService.getInstance().getSystemState('instance_id') || 'unknown';
     }
 
-    private buildObjectKey(cfg: ResolvedCloudConfig, snapshotId: number, description: string, createdAt: number): string {
+    private buildObjectKey(cfg: ResolvedCloudConfig, snapshotId: number, description: string, createdAt: number, encrypted: boolean): string {
         const ts = new Date(createdAt).toISOString().replace(/[:.]/g, '-');
         const slug = description.slice(0, 40).replace(/[^a-z0-9]+/gi, '-').replace(/^-+|-+$/g, '').toLowerCase() || 'snapshot';
-        return `${cfg.pathPrefix}instances/${this.getInstanceId()}/snapshots/${snapshotId}_${ts}_${slug}.tar.gz`;
+        const ext = encrypted ? '.tar.gz.senc' : '.tar.gz';
+        return `${cfg.pathPrefix}instances/${this.getInstanceId()}/snapshots/${snapshotId}_${ts}_${slug}${ext}`;
+    }
+
+    private storedArchivePassphrase(): string | null {
+        const raw = DatabaseService.getInstance().getGlobalSettings().cloud_backup_archive_passphrase;
+        if (!raw) return null;
+        try {
+            return CryptoService.getInstance().decrypt(raw) || null;
+        } catch (err) {
+            console.error('[CloudBackup] Stored archive passphrase could not be decrypted:', err);
+            return null;
+        }
+    }
+
+    private async protectArchive(gzip: Buffer): Promise<{ body: Buffer; encrypted: boolean }> {
+        if (!this.archivesAreEncrypted()) return { body: gzip, encrypted: false };
+        const passphrase = this.storedArchivePassphrase();
+        if (!passphrase) throw new Error('Archive encryption is on, but no passphrase is saved');
+        return { body: await encryptArchive(gzip, passphrase), encrypted: true };
+    }
+
+    private async fetchObject(objectKey: string): Promise<Buffer> {
+        const cfg = this.getResolvedConfig();
+        if (!cfg) throw new Error('Cloud backup is not configured.');
+        const { client, sdk } = await this.buildS3Client(cfg);
+        const result = await client.send(new sdk.GetObjectCommand({ Bucket: cfg.bucket, Key: objectKey }));
+        const body = result.Body as Readable | undefined;
+        if (!body) throw new Error('Empty response body.');
+        if (typeof result.ContentLength === 'number' && result.ContentLength > MAX_ARCHIVE_OBJECT_BYTES) {
+            body.on('error', () => undefined);
+            body.destroy();
+            throw new ArchiveFormatError('TOO_LARGE', 'Archive is larger than the import limit');
+        }
+        return streamToBuffer(body, MAX_ARCHIVE_OBJECT_BYTES);
     }
 
     private async buildArchive(
@@ -423,10 +503,20 @@ export class CloudBackupService {
 
 // ─── Helpers ───────────────────────────────────────────────────────────────────
 
-function streamToBuffer(stream: Readable): Promise<Buffer> {
+function streamToBuffer(stream: Readable, maxBytes: number): Promise<Buffer> {
     return new Promise<Buffer>((resolve, reject) => {
         const chunks: Buffer[] = [];
-        stream.on('data', (chunk: Buffer) => chunks.push(chunk));
+        let total = 0;
+        stream.on('data', (chunk: Buffer | string) => {
+            const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+            total += buf.length;
+            if (total > maxBytes) {
+                stream.destroy();
+                reject(new ArchiveFormatError('TOO_LARGE', 'Archive is larger than the import limit'));
+                return;
+            }
+            chunks.push(buf);
+        });
         stream.on('end', () => resolve(Buffer.concat(chunks)));
         stream.on('error', reject);
     });

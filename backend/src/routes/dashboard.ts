@@ -46,6 +46,7 @@ export interface ConfigurationStatus {
   backup: {
     provider: 'disabled' | 'sencho' | 'custom';
     autoUpload: boolean;
+    encryptArchives: boolean;
     locked: boolean;
   };
 }
@@ -164,6 +165,7 @@ async function buildLocalConfigurationStatus(
       // dashboard-level lock is meaningful.
       provider: cloudProvider,
       autoUpload: cloudAutoUpload,
+      encryptArchives: cloudSvc.archivesAreEncrypted(),
       locked: false,
     },
   };
