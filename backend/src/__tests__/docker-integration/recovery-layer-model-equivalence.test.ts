@@ -513,6 +513,65 @@ describe.skipIf(!hasDocker)('recovery loads the model the capture-time run loade
     });
   }
 
+  it.each([
+    ['the project .env', 'file'],
+    ['the process environment', 'process'],
+  ])('pins an absolute same-stack chain read from %s', async (_label, source) => {
+    const stack = `layerabsolutepath${source}`;
+    const stackDir = path.join(composeDir, stack);
+    fs.mkdirSync(stackDir, { recursive: true });
+    const rootAbs = path.join(stackDir, 'compose.yaml');
+    const prodAbs = path.join(stackDir, 'prod.yaml');
+    fs.writeFileSync(rootAbs, SERVICE('busybox:1.36.1', 'root'), 'utf8');
+    fs.writeFileSync(prodAbs, SERVICE('busybox:1.36.1', 'production'), 'utf8');
+    const recoveryLayer = path.join(stackDir, '.sencho-recovery-test.yml');
+    fs.writeFileSync(
+      recoveryLayer,
+      'services:\n  web:\n    labels:\n      sencho.recovery-test: "1"\n',
+      'utf8',
+    );
+
+    const chain = `${rootAbs}:${prodAbs}`;
+    const appliedEnv: string[] = [];
+    if (source === 'file') {
+      fs.writeFileSync(path.join(stackDir, '.env'), `COMPOSE_FILE=${chain}\n`, 'utf8');
+    } else {
+      // Compose resolves the variable in the process environment above every
+      // file, so both sources reach the same selection reader.
+      process.env.COMPOSE_FILE = chain;
+      appliedEnv.push('COMPOSE_FILE');
+    }
+
+    try {
+      const { resolveRollbackInventory } = await import('../../services/rollbackInventory');
+      const { ComposeService } = await import('../../services/ComposeService');
+
+      const captured = await resolveRollbackInventory(nodeId, stack);
+      // An absolute spelling of a file inside the stack is the same layer as
+      // its relative one, so the capture pins the relative name and does not
+      // refuse a project Compose runs.
+      expect(captured.coverageRefusal).toBeNull();
+      expect(captured.invocation.composeLayers).toEqual(['compose.yaml', 'prod.yaml']);
+
+      const args = await ComposeService.getInstance(nodeId).buildComposeArgsWithRecoveryOverride(
+        stack,
+        ['config'],
+        recoveryLayer,
+        captured.invocation,
+      );
+      const recovery = renderModel(args.slice(1, args.indexOf('config')), stackDir, stack) as {
+        services: Record<string, { command?: string[] }>;
+      };
+      const live = renderModel([], stackDir, stack) as {
+        services: Record<string, { command?: string[] }>;
+      };
+      expect(live.services.web.command).toEqual(['echo', 'production']);
+      expect(recovery.services.web.command).toEqual(live.services.web.command);
+    } finally {
+      for (const name of appliedEnv) delete process.env[name];
+    }
+  });
+
   it('keeps a local override an uncaptured external include extends from, and both projects render', async () => {
     const stack = 'layerpartialinclude';
     const stackDir = path.join(composeDir, stack);

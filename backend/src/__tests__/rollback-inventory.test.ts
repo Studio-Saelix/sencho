@@ -634,6 +634,72 @@ describe('resolveRollbackInventory: the layer set recovery pins', () => {
     expect(inventory.invocation.composeLayers).toEqual(['compose.yaml']);
   });
 
+  it('pins an absolute COMPOSE_FILE chain that stays inside the stack', async () => {
+    await write('compose.yaml', 'services:\n  web:\n    image: nginx\n');
+    await write('prod.yaml', 'services:\n  web:\n    command: ["false"]\n');
+    const stackDir = path.join(composeDir, STACK);
+    // Compose takes an absolute entry as written and a relative one against its
+    // working directory, so the two spellings are the same layer. The chain is
+    // pinned by its stack-relative name, which is the form a recovery run can
+    // rebuild under an overlay.
+    mockComposeFileEnvVarSelection.mockResolvedValue({
+      kind: 'value',
+      value: `${path.join(stackDir, 'compose.yaml')}:${path.join(stackDir, 'prod.yaml')}`,
+      pathSeparator: ':',
+      composeEnvFiles: [],
+      loadedEnvFiles: [],
+    });
+
+    const inventory = await resolveRollbackInventory(1, STACK);
+
+    expect(inventory.coverageRefusal).toBeNull();
+    expect(inventory.invocation.composeLayers).toEqual(['compose.yaml', 'prod.yaml']);
+  });
+
+  it('pins an absolute COMPOSE_FILE chain spelled through a relocated compose root', async () => {
+    await write('compose.yaml', 'services:\n  web:\n    image: nginx\n');
+    await write('prod.yaml', 'services:\n  web:\n    command: ["false"]\n');
+    // A compose directory that is itself a link (a relocated data directory).
+    // Compose loads the physical path a chain names, so that spelling has to be
+    // accepted too, and the layer is still pinned by its stack-relative name.
+    const linkedRoot = path.join(composeDir, 'relocated');
+    await fsPromises.symlink(composeDir, linkedRoot, 'dir');
+    mockState.composeDir = linkedRoot;
+    const realRoot = await fsPromises.realpath(composeDir);
+    mockComposeFileEnvVarSelection.mockResolvedValue({
+      kind: 'value',
+      value: `${path.join(realRoot, STACK, 'compose.yaml')}:${path.join(realRoot, STACK, 'prod.yaml')}`,
+      pathSeparator: ':',
+      composeEnvFiles: [],
+      loadedEnvFiles: [],
+    });
+
+    const inventory = await resolveRollbackInventory(1, STACK);
+
+    expect(inventory.coverageRefusal).toBeNull();
+    expect(inventory.invocation.composeLayers).toEqual(['compose.yaml', 'prod.yaml']);
+  });
+
+  it('refuses an absolute COMPOSE_FILE chain that names another stack', async () => {
+    await write('compose.yaml', 'services:\n  web:\n    image: nginx\n');
+    const otherStackDir = path.join(composeDir, 'other');
+    await fsPromises.mkdir(otherStackDir, { recursive: true });
+    await fsPromises.writeFile(path.join(otherStackDir, 'prod.yaml'), 'services: {}\n', 'utf8');
+    mockComposeFileEnvVarSelection.mockResolvedValue({
+      kind: 'value',
+      value: `compose.yaml:${path.join(otherStackDir, 'prod.yaml')}`,
+      pathSeparator: ':',
+      composeEnvFiles: [],
+      loadedEnvFiles: [],
+    });
+
+    const inventory = await resolveRollbackInventory(1, STACK);
+
+    // An absolute path is not a licence to pin a layer outside the stack: the
+    // recovery run could not rebuild it and the capture cannot hold it.
+    expect(inventory.coverageRefusal).toMatch(/COMPOSE_FILE/);
+  });
+
   it('splits the chain only on the separator Compose uses', async () => {
     await write('compose.yaml', 'services:\n  web:\n    image: nginx\n');
     // A semicolon is a legal character in a filename on this platform, so a

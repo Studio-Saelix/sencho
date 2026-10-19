@@ -262,6 +262,56 @@ function parseComposeFileChain(value: string, separator: string): string[] {
 }
 
 /**
+ * The stack directory's physical path, for a compose root that is itself a
+ * link (a relocated data directory). Only the parent is resolved and the stack
+ * name is re-joined, so a stack directory that links elsewhere is not followed.
+ * Mirrors the rule `classifyAuthoredFile` applies to a captured candidate.
+ */
+async function realStackRoot(stackRoot: string): Promise<string> {
+  const baseResolved = path.resolve(stackRoot);
+  const realBase = await fsPromises.realpath(path.dirname(baseResolved));
+  return path.join(realBase, path.basename(baseResolved));
+}
+
+/**
+ * A COMPOSE_FILE chain entry resolved the way the live run loads it. Compose
+ * takes an absolute entry as written and resolves a relative one against its
+ * working directory, which is the stack directory for every Sencho spawn, so an
+ * absolute path that names a file inside the authorized stack is the same layer
+ * as its relative spelling and is normalized to it: a recovery run pins layers
+ * by their stack-relative name so an overlay can rebuild them. The real root is
+ * matched as well, so a relocated (linked) compose directory resolves, the same
+ * way every other containment check in the capture treats it. Only a path
+ * proven inside the stack is normalized; anything else stays unpinnable and is
+ * reported by the caller.
+ */
+async function resolveChainLayer(
+  stackRoot: string,
+  entry: string,
+): Promise<{ relativePath: string; absolutePath: string } | null> {
+  const direct = resolveStackRel(stackRoot, entry);
+  if (direct) return direct;
+  if (!isHostAbsolutePath(entry)) return null;
+  const absolute = path.resolve(entry);
+  const baseResolved = path.resolve(stackRoot);
+  let realRoot: string;
+  try {
+    realRoot = await realStackRoot(baseResolved);
+  } catch {
+    // The compose root cannot be resolved, so nothing can be shown to live
+    // inside it and the lexical comparison stands as the only one.
+    realRoot = baseResolved;
+  }
+  for (const root of [baseResolved, realRoot]) {
+    if (!absolute.startsWith(root + path.sep)) continue;
+    const relative = posixRel(path.relative(root, absolute));
+    const resolved = relative ? resolveStackRel(stackRoot, relative) : null;
+    if (resolved) return resolved;
+  }
+  return null;
+}
+
+/**
  * The implicit override docker compose would auto-discover: the first candidate
  * whose target stats as something, which is compose's own rule. A dangling link
  * is skipped exactly as Compose skips it, while a link to a real file elsewhere
@@ -881,7 +931,7 @@ const capturable = async (
       const resolvedChain: string[] = [];
       let unusable: string | null = null;
       for (const entry of chain) {
-        const resolved = entry.length === 0 ? null : resolveStackRel(stackRoot, entry);
+        const resolved = entry.length === 0 ? null : await resolveChainLayer(stackRoot, entry);
         if (!resolved) {
           // A layer that is not a stack-relative path cannot be pinned at all,
           // and Compose rejects a chain that names an empty entry.
