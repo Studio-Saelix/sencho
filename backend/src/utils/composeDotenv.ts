@@ -83,6 +83,12 @@ function isNameRest(char: string): boolean {
  * only the ASCII range. This is the assignment grammar alone. The template
  * grammar above stays ASCII, because a reference Compose resolves is read with
  * its own rules.
+ *
+ * The character tables are the ones this Node build ships, so a letter added to
+ * Unicode after the Compose binary was built is accepted here and refused
+ * there. That direction is the safe one: over-accepting a name Compose refuses
+ * cannot block a stack Compose runs, and the deploy still fails on Compose's
+ * own error.
  */
 const NAME_LETTER_OR_NUMBER = /^[\p{L}\p{N}]$/u;
 
