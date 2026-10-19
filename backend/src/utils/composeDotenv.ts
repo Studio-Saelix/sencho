@@ -77,6 +77,15 @@ function isNameRest(char: string): boolean {
   return isNameStart(char) || (char >= '0' && char <= '9');
 }
 
+/**
+ * Go's unicode.IsLetter / unicode.IsNumber, which is the check Compose makes on
+ * an assignment name: any Unicode letter or number is a name character, not
+ * only the ASCII range. This is the assignment grammar alone. The template
+ * grammar above stays ASCII, because a reference Compose resolves is read with
+ * its own rules.
+ */
+const NAME_LETTER_OR_NUMBER = /^[\p{L}\p{N}]$/u;
+
 /** The name at `from`, or '' when the text does not start with one. */
 function readName(text: string, from: number): string {
   if (from >= text.length || !isNameStart(text[from])) return '';
@@ -242,16 +251,20 @@ function parseEnvFileText(
 
     let keyEnd = -1;
     let inherited = false;
-    for (let i = 0; i < statement.length; i++) {
-      const char = statement[i];
+    // Read by code point, as Compose reads by rune: a name may hold a character
+    // outside the basic plane, and half of one is not a name character.
+    let offset = 0;
+    for (const char of statement) {
+      const at = offset;
+      offset += char.length;
       if (isEnvSpace(char)) continue;
       if (char === '=' || char === ':' || char === '\n') {
-        keyEnd = i;
+        keyEnd = at;
         inherited = char === '\n';
         break;
       }
       if (char === '_' || char === '.' || char === '-' || char === '[' || char === ']') continue;
-      if (isNameRest(char)) continue;
+      if (NAME_LETTER_OR_NUMBER.test(char)) continue;
       throw new ComposeEnvFileError(`unexpected character ${JSON.stringify(char)} in a variable name`);
     }
     if (keyEnd === -1) return;

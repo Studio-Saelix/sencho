@@ -89,6 +89,11 @@ describe('ComposeEnvFiles', () => {
     ['an unterminated single quote', "COMPOSE_FILE='compose.yaml\n"],
     ['a space inside a name', 'COMPOSE FILE=compose.yaml\n'],
     ['a character Compose does not allow in a name', 'COMPOSE%FILE=compose.yaml\n'],
+    ['a dollar in a name', 'COMPOSE$FILE=compose.yaml\n'],
+    ['an at sign in a name', 'COMPOSE@FILE=compose.yaml\n'],
+    ['a slash in a name', 'COMPOSE/FILE=compose.yaml\n'],
+    ['a plus in a name', 'COMPOSE+FILE=compose.yaml\n'],
+    ['a question mark in a name', 'COMPOSE?FILE=compose.yaml\n'],
     ['an invalid template', 'COMPOSE_FILE=${1BAD}\n'],
     ['an unclosed template', 'COMPOSE_FILE=${BAD\n'],
     ['a name followed by junk in braces', 'COMPOSE_FILE=${A.B}\n'],
@@ -101,6 +106,25 @@ describe('ComposeEnvFiles', () => {
     const files = readEnvFile('1KEY=value\n');
 
     expect(files.lookup('1KEY')).toBe('value');
+  });
+
+  it.each([
+    ['a Latin-1 letter', 'UNICODE_é=value\n', 'UNICODE_é', 'value'],
+    ['a Greek letter', 'Ω=value\n', 'Ω', 'value'],
+    ['a CJK name', '中文_键=值\n', '中文_键', '值'],
+    ['an astral-plane letter', '𝔘=value\n', '𝔘', 'value'],
+    ['a non-ASCII digit', 'NAME١=value\n', 'NAME١', 'value'],
+  ])('reads an assignment named with %s', (_label, text, name, expected) => {
+    // Compose validates a name with Go's unicode.IsLetter/IsNumber over runes,
+    // so a name outside ASCII is an ordinary assignment. Refusing it made an
+    // unrelated line in .env refuse every Compose action on the stack.
+    expect(readEnvFile(text).lookup(name)).toBe(expected);
+  });
+
+  it('does not let a Unicode assignment disturb the chain that follows it', () => {
+    const files = readEnvFile('UNICODE_é=value\nCOMPOSE_FILE=compose.yaml:prod.yaml\n');
+
+    expect(files.lookup('COMPOSE_FILE')).toBe('compose.yaml:prod.yaml');
   });
 
   it('reports an unset variable', () => {
