@@ -67,7 +67,7 @@ describe('restore selects the captured Compose project', () => {
     await fsPromises.rm(dataDir, { recursive: true, force: true });
   });
 
-  it('restores a partial generation without a later compose root or override shadowing it', async () => {
+  it('restores a partial generation without deleting a later compose root or override', async () => {
     await fsPromises.mkdir(path.join(composeDir, 'shared'), { recursive: true });
     await fsPromises.writeFile(path.join(composeDir, 'shared', 'base.yaml'), 'services: {}\n', 'utf8');
     await fsPromises.writeFile(
@@ -93,26 +93,33 @@ describe('restore selects the captured Compose project', () => {
     expect(manifest.invocation.explicitComposeFiles).toEqual(['docker-compose.yml']);
 
     // A later edit adds a higher-priority root and an implicit override.
-    await fsPromises.writeFile(
-      path.join(stackDir, 'compose.yaml'),
-      'services:\n  web:\n    image: nginx\n    command: ["false"]\n',
-      'utf8',
-    );
-    await fsPromises.writeFile(
-      path.join(stackDir, 'docker-compose.override.yml'),
-      'services:\n  web:\n    command: ["false"]\n',
-      'utf8',
-    );
+    const laterRoot = 'services:\n  web:\n    image: nginx\n    command: ["false"]\n';
+    const laterOverride = 'services:\n  web:\n    command: ["false"]\n';
+    await fsPromises.writeFile(path.join(stackDir, 'compose.yaml'), laterRoot, 'utf8');
+    await fsPromises.writeFile(path.join(stackDir, 'docker-compose.override.yml'), laterOverride, 'utf8');
 
     const ctx = await resolveComposeProjectContextForGeneration(NODE, 'app', generationId);
     await ctx.restoreFromContext();
 
     const restored = await fsPromises.readFile(path.join(stackDir, 'docker-compose.yml'), 'utf8');
     expect(restored).toBe('include:\n  - path: ../shared/base.yaml\nservices:\n  web:\n    image: nginx\n');
-    // Only one root may survive, or docker compose auto-discovery picks the
-    // wrong one for the next ordinary action as well as for recovery.
-    await expect(fsPromises.lstat(path.join(stackDir, 'compose.yaml'))).rejects.toMatchObject({ code: 'ENOENT' });
-    await expect(fsPromises.lstat(path.join(stackDir, 'docker-compose.override.yml'))).rejects.toMatchObject({ code: 'ENOENT' });
+    // The uncaptured shared include can pull in a local override, so a name
+    // that looks like a Compose layer is no proof of ownership: both later
+    // files stay, and the recovery run pins the captured layer instead of
+    // letting discovery decide.
+    expect(await fsPromises.readFile(path.join(stackDir, 'compose.yaml'), 'utf8')).toBe(laterRoot);
+    expect(await fsPromises.readFile(path.join(stackDir, 'docker-compose.override.yml'), 'utf8')).toBe(laterOverride);
+
+    const { ComposeService } = await import('../services/ComposeService');
+    const args = await ComposeService.getInstance(NODE).buildComposeArgsWithRecoveryOverride(
+      'app',
+      ['up', '-d'],
+      null,
+      manifest.invocation,
+    );
+    // An explicit -f list suppresses Compose's own discovery and the implicit
+    // override merge, so the later root cannot shadow the captured project.
+    expect(args).toEqual(['compose', '-f', 'docker-compose.yml', 'up', '-d']);
   });
 
   it('keeps a link that was deliberately left out of the capture', async () => {
@@ -276,7 +283,6 @@ describe('restore selects the captured Compose project', () => {
   const captured = await resolveRollbackInventory(NODE, 'app');
   expect(captured.coverageRefusal).toBeNull();
   expect(captured.uncapturedInputs.length).toBeGreaterThan(0);
-  expect(captured.hasUnnamedDynamicInput).toBe(true);
 
   const generationId = randomUUID();
   await RollbackGenerationStore.captureGeneration({
@@ -372,5 +378,115 @@ it('reinstates an external symlink when a restore is later reconciled', async ()
 
     expect(await fsPromises.readFile(path.join(composeDir, 'shared', 'common.env'), 'utf8')).toBe('A=1\n');
     expect(await fsPromises.readFile(path.join(composeDir, 'shared', 'other.env'), 'utf8')).toBe('B=2\n');
+  });
+
+  it('keeps a local override that an uncaptured external include extends from', async () => {
+    // The shared project is captured as an omission, and it can refer back to a
+    // conventional compose name inside this stack. That name proves nothing
+    // about ownership, so restore must not delete it.
+    await fsPromises.mkdir(path.join(composeDir, 'shared'), { recursive: true });
+    const sharedFile = path.join(composeDir, 'shared', 'base.yaml');
+    await fsPromises.writeFile(sharedFile, 'services:\n  shared:\n    image: busybox\n', 'utf8');
+    await fsPromises.writeFile(
+      path.join(stackDir, 'docker-compose.yml'),
+      'include:\n  - path: ../shared/base.yaml\nservices:\n  web:\n    image: nginx\n',
+      'utf8',
+    );
+
+    const captured = await resolveRollbackInventory(NODE, 'app');
+    expect(captured.coverageRefusal).toBeNull();
+    expect(captured.uncapturedInputs.join(' ')).toContain('../shared/base.yaml');
+    expect(captured.invocation.composeLayers).toEqual(['docker-compose.yml']);
+
+    const generationId = randomUUID();
+    await RollbackGenerationStore.captureGeneration({
+      nodeId: NODE,
+      stackName: 'app',
+      generationId,
+      inventory: captured,
+    });
+    const manifest = await RollbackGenerationStore.readVerifiedGeneration(NODE, 'app', generationId);
+
+    // The shared file now extends a service from a local override that appeared
+    // after capture, so the override is a dependency of the uncaptured input.
+    const helper = 'services:\n  helper:\n    image: busybox\n    command: ["true"]\n';
+    await fsPromises.writeFile(path.join(stackDir, 'compose.override.yml'), helper, 'utf8');
+    await fsPromises.writeFile(
+      sharedFile,
+      'services:\n  shared:\n    extends:\n      file: ../app/compose.override.yml\n      service: helper\n',
+      'utf8',
+    );
+
+    const ctx = await resolveComposeProjectContextForGeneration(NODE, 'app', generationId);
+    await ctx.restoreFromContext();
+
+    expect(await fsPromises.readFile(path.join(stackDir, 'compose.override.yml'), 'utf8')).toBe(helper);
+    expect(await fsPromises.readFile(sharedFile, 'utf8')).toContain('extends');
+    expect(await fsPromises.readFile(path.join(stackDir, 'docker-compose.yml'), 'utf8')).toBe(
+      'include:\n  - path: ../shared/base.yaml\nservices:\n  web:\n    image: nginx\n',
+    );
+
+    const { ComposeService } = await import('../services/ComposeService');
+    const args = await ComposeService.getInstance(NODE).buildComposeArgsWithRecoveryOverride(
+      'app',
+      ['up', '-d'],
+      null,
+      manifest.invocation,
+    );
+    expect(args).toEqual(['compose', '-f', 'docker-compose.yml', 'up', '-d']);
+  });
+
+  it('restores a stack whose main compose file links into the shared compose directory', async () => {
+    await fsPromises.mkdir(path.join(composeDir, 'shared'), { recursive: true });
+    const sharedFile = path.join(composeDir, 'shared', 'base.yaml');
+    await fsPromises.writeFile(sharedFile, 'services:\n  web:\n    image: nginx\n', 'utf8');
+    const link = path.join(stackDir, 'compose.yaml');
+    await fsPromises.symlink(sharedFile, link);
+    await fsPromises.writeFile(path.join(stackDir, '.env'), 'TAG=1\n', 'utf8');
+
+    const captured = await resolveRollbackInventory(NODE, 'app');
+    expect(captured.coverageRefusal).toBeNull();
+    // The main file is the shared target's content, so the generation pins the
+    // layer without holding its bytes.
+    expect(captured.invocation.composeLayers).toEqual(['compose.yaml']);
+    expect(captured.entries.map((e) => e.relativePath)).toEqual(['.env']);
+    expect(captured.uncapturedRelativePaths).toContain('compose.yaml');
+
+    const generationId = randomUUID();
+    await RollbackGenerationStore.captureGeneration({
+      nodeId: NODE,
+      stackName: 'app',
+      generationId,
+      inventory: captured,
+    });
+    const manifest = await RollbackGenerationStore.readVerifiedGeneration(NODE, 'app', generationId);
+
+    // The shared file moves on, a higher-priority root appears, and the env file
+    // is edited after capture.
+    const sharedNow = 'services:\n  web:\n    image: nginx:2\n';
+    await fsPromises.writeFile(sharedFile, sharedNow, 'utf8');
+    const laterRoot = 'services:\n  web:\n    image: busybox\n';
+    await fsPromises.writeFile(path.join(stackDir, 'compose.yml'), laterRoot, 'utf8');
+    await fsPromises.writeFile(path.join(stackDir, '.env'), 'TAG=2\n', 'utf8');
+
+    const ctx = await resolveComposeProjectContextForGeneration(NODE, 'app', generationId);
+    await ctx.restoreFromContext();
+
+    // The captured env file comes back, the link stays a link, its target keeps
+    // the content a rollback reads, and the later root is not deleted.
+    expect(await fsPromises.readFile(path.join(stackDir, '.env'), 'utf8')).toBe('TAG=1\n');
+    expect((await fsPromises.lstat(link)).isSymbolicLink()).toBe(true);
+    expect(await fsPromises.readFile(sharedFile, 'utf8')).toBe(sharedNow);
+    expect(await fsPromises.readFile(path.join(stackDir, 'compose.yml'), 'utf8')).toBe(laterRoot);
+
+    // Recovery pins the captured layer, which resolves through the link.
+    const { ComposeService } = await import('../services/ComposeService');
+    const args = await ComposeService.getInstance(NODE).buildComposeArgsWithRecoveryOverride(
+      'app',
+      ['up', '-d'],
+      null,
+      manifest.invocation,
+    );
+    expect(args).toEqual(['compose', '-f', 'compose.yaml', 'up', '-d']);
   });
 });

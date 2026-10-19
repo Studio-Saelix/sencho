@@ -91,11 +91,6 @@ const COMPOSE_OVERRIDE_FILENAMES = [
 ] as const;
 const COMPOSE_OVERRIDE_FILENAME_SET = new Set<string>(COMPOSE_OVERRIDE_FILENAMES);
 
-/** True when `name` is an override filename docker compose can auto-discover, and nothing else. */
-export function isComposeOverrideBasename(name: string): boolean {
-  return COMPOSE_OVERRIDE_FILENAME_SET.has(name);
-}
-
 /** True for adopt-scan candidates: any .yml/.yaml that is not a compose override. */
 function isAdoptYamlFilename(name: string): boolean {
   return !COMPOSE_OVERRIDE_FILENAME_SET.has(name) && (name.endsWith('.yml') || name.endsWith('.yaml'));
@@ -263,11 +258,22 @@ export class FileSystemService {
 
   /**
    * The compose file this stack resolves to, or null when none of the four
-   * filenames exists. A symlink that escapes the stack's own directory (into
-   * a sibling stack or out of the compose dir), or a dangling link, is
-   * rejected here and is not treated as a missing file.
+   * filenames exists.
+   *
+   * `access` decides what a link may point at. A read ('read', the default)
+   * follows a compose file that links anywhere inside the shared compose
+   * directory, which is how a stack shares a main file or an override; the
+   * stack's own directory is never followed, so a stack directory that is
+   * itself a link to another location is refused either way. A write ('write')
+   * additionally requires the file to resolve inside the stack directory, so a
+   * save never lands in another stack's file. A link that reaches outside the
+   * compose directory, or a dangling one, is rejected in both modes and is not
+   * treated as a missing file.
    */
-  private async resolveComposeFile(stackName: string): Promise<{ filename: string; absolute: string } | null> {
+  private async resolveComposeFile(
+    stackName: string,
+    access: 'read' | 'write' = 'read',
+  ): Promise<{ filename: string; absolute: string } | null> {
     const stackDir = this.resolveStackDir(stackName);
     await this.assertRealWithinBase(stackDir);
     await this.assertRealWithinStack(stackName, stackDir);
@@ -286,15 +292,15 @@ export class FileSystemService {
         throw err;
       }
       await this.assertRealWithinBase(filePath);
-      await this.assertRealWithinStack(stackName, filePath);
+      if (access === 'write') await this.assertRealWithinStack(stackName, filePath);
       if (isDebugEnabled()) console.debug('[FileSystemService:debug] Resolved compose file', { stackName, file });
       return { filename: file, absolute: filePath };
     }
     return null;
   }
 
-  private async getComposeFilePath(stackName: string): Promise<string> {
-    const resolved = await this.resolveComposeFile(stackName);
+  private async getComposeFilePath(stackName: string, access: 'read' | 'write' = 'read'): Promise<string> {
+    const resolved = await this.resolveComposeFile(stackName, access);
     if (!resolved) throw new Error(`No compose file found for stack: ${stackName}`);
     return resolved.absolute;
   }
@@ -304,17 +310,20 @@ export class FileSystemService {
   }
 
   /**
-   * Reject a compose file that resolves outside this stack. A missing file is
-   * not an error: there is nothing to follow. Also rejects the first override
-   * file docker compose merges on its own, which is a different path from the
-   * compose file read and save check.
+   * Reject a compose file a read or a render must not follow. A missing file is
+   * not an error: there is nothing to follow. A link into the shared compose
+   * directory is allowed, because Compose itself loads it and the stack
+   * legitimately deploys it. A link that leaves the compose directory, and a
+   * stack directory that is itself a link, are rejected. Also rejects the first
+   * override file docker compose merges on its own, which is a different path
+   * from the compose file read and save check.
    */
-  async assertComposeFileWithinStack(stackName: string): Promise<void> {
-    await this.resolveComposeFile(stackName);
-    await this.assertDiscoveredOverrideWithinStack(stackName);
+  async assertComposeFileReadable(stackName: string): Promise<void> {
+    await this.resolveComposeFile(stackName, 'read');
+    await this.assertDiscoveredOverrideReadable(stackName);
   }
 
-  private async assertDiscoveredOverrideWithinStack(stackName: string): Promise<void> {
+  private async assertDiscoveredOverrideReadable(stackName: string): Promise<void> {
     const stackDir = this.resolveStackDir(stackName);
     const baseResolved = path.resolve(this.baseDir);
     for (const file of COMPOSE_OVERRIDE_FILENAMES) {
@@ -329,7 +338,6 @@ export class FileSystemService {
         throw err;
       }
       await this.assertRealWithinBase(target);
-      await this.assertRealWithinStack(stackName, target);
       return;
     }
   }
@@ -479,7 +487,10 @@ export class FileSystemService {
     | { ok: true; mtimeMs: number; filename: string }
     | { ok: false; reason: 'mtime' | 'source'; currentMtimeMs: number; currentContent: string; filename: string | null }
   > {
-    const resolved = await this.resolveComposeFile(stackName);
+    // A write resolution refuses a compose file that links out of the stack
+    // directory: the save would otherwise land in the shared target, which the
+    // read path deliberately follows.
+    const resolved = await this.resolveComposeFile(stackName, 'write');
     if (expectedFilename !== null && (!resolved || resolved.filename !== expectedFilename)) {
       if (!resolved) {
         return { ok: false, reason: 'source', currentMtimeMs: 0, currentContent: '', filename: null };
@@ -505,6 +516,10 @@ export class FileSystemService {
       throw Object.assign(new Error('Path escapes compose directory'), { code: 'INVALID_PATH' });
     }
     await this.assertRealWithinBase(safePath);
+    // The resolved file is where the write lands, so ownership is checked again
+    // at the sink: a link that appeared after the resolution above is refused
+    // rather than followed into another stack's file.
+    await this.assertRealWithinStack(stackName, safePath);
 
     if (expectedMtimeMs !== null && resolved) {
       let fh: import('fs/promises').FileHandle | null = null;
@@ -526,7 +541,7 @@ export class FileSystemService {
     }
 
     if (expectedFilename !== null) {
-      const latest = await this.resolveComposeFile(stackName);
+      const latest = await this.resolveComposeFile(stackName, 'write');
       if (!latest || latest.filename !== expectedFilename) {
         if (!latest) {
           return { ok: false, reason: 'source', currentMtimeMs: 0, currentContent: '', filename: null };
@@ -565,10 +580,17 @@ export class FileSystemService {
   }
 
   /**
-   * Optimistic-concurrency write for arbitrary paths under the stack dir
-   * (used for .env files; the path was already validated by the caller).
+   * Optimistic-concurrency write for an env file under a stack directory (the
+   * path was already validated by the caller).
+   *
+   * `stackName` is the stack the write is authorized for, and the target must
+   * resolve inside that stack's own directory: an env file that links into
+   * another stack is refused, exactly like a compose save, so a stack-scoped
+   * save never lands in another stack's file. A link that stays inside the
+   * stack keeps working.
    */
   async writeFileIfUnchanged(
+    stackName: string,
     untrustedTargetPath: string,
     content: string,
     expectedMtimeMs: number | null,
@@ -584,6 +606,7 @@ export class FileSystemService {
       throw Object.assign(new Error('Path escapes compose directory'), { code: 'INVALID_PATH' });
     }
     await this.assertRealWithinBase(safePath);
+    await this.assertRealWithinStack(stackName, safePath);
 
     if (expectedMtimeMs !== null) {
       let fh: import('fs/promises').FileHandle | null = null;
@@ -781,6 +804,9 @@ export class FileSystemService {
     const stackDir = this.resolveStackDir(stackName);
     const envPath = path.join(stackDir, '.env');
     await this.assertRealWithinBase(envPath);
+    // The write follows the path, so ownership is checked at the sink: a .env
+    // that links into another stack is refused rather than overwritten.
+    await this.assertRealWithinStack(stackName, envPath);
     try {
       await fsPromises.writeFile(envPath, content, 'utf-8');
     } catch (error) {

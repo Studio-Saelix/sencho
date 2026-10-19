@@ -259,15 +259,14 @@ describe('effective-anatomy route', () => {
     expect(res.status).toBe(401);
   });
 
-  it.skipIf(process.platform === 'win32')('refuses a compose file that links at a sibling stack', async () => {
+  it.skipIf(process.platform === 'win32')('renders the project a compose-root-contained sibling link selects', async () => {
     const siblingName = 'effanat-sibling';
     const sibling = path.join(path.dirname(stackDir), siblingName);
-    const secret = 'https://sibling.example/private';
     fs.rmSync(sibling, { recursive: true, force: true });
     fs.mkdirSync(sibling);
     fs.writeFileSync(
       path.join(sibling, 'compose.yaml'),
-      `services:\n  other:\n    ports:\n      - "9090:90"\n    labels:\n      sencho.service.url: ${secret}\n`,
+      'services:\n  other:\n    ports:\n      - "9090:90"\n    labels:\n      sencho.service.url: https://sibling.example/private\n',
     );
     fs.rmSync(path.join(stackDir, 'compose.yaml'));
     fs.symlinkSync(`../${siblingName}/compose.yaml`, path.join(stackDir, 'compose.yaml'));
@@ -275,7 +274,7 @@ describe('effective-anatomy route', () => {
       rendered: JSON.stringify({
         services: {
           other: {
-            labels: { 'sencho.service.url': secret },
+            labels: { 'sencho.service.url': 'https://sibling.example/private' },
             ports: [{ target: 90, published: '9090', protocol: 'tcp' }],
           },
         },
@@ -285,33 +284,33 @@ describe('effective-anatomy route', () => {
       timedOut: false,
     });
     try {
+      // The link stays inside the compose root, so this stack deploys the shared
+      // file and the dossier describes the same project. A link out of the
+      // compose directory is refused (see the sibling-override case below).
       const res = await request(app).get(`/api/stacks/${STACK}/effective-anatomy`).set('Authorization', authHeader);
-      expect(res.status).toBe(409);
-      expect(res.body).toEqual({ error: 'The compose file links outside the stack directory. Use include: to share a file between stacks.' });
-      expect(render).not.toHaveBeenCalled();
+      expect(res.status).toBe(200);
+      expect(render).toHaveBeenCalled();
+      expect(res.body.services).toEqual(['other']);
     } finally {
       fs.rmSync(sibling, { recursive: true, force: true });
     }
   });
 
-  it.skipIf(process.platform === 'win32')('refuses an override file that links at a sibling stack', async () => {
+  it.skipIf(process.platform === 'win32')('renders the project a compose-root-contained sibling override selects', async () => {
     const siblingName = 'effanat-override-sibling';
     const sibling = path.join(path.dirname(stackDir), siblingName);
-    const secret = 'https://override.example/private';
     fs.rmSync(sibling, { recursive: true, force: true });
     fs.mkdirSync(sibling);
     fs.writeFileSync(
       path.join(sibling, 'compose.override.yaml'),
-      `services:\n  other:\n    ports:\n      - "9091:91"\n    labels:\n      sencho.service.url: ${secret}\n`,
+      'services:\n  other:\n    ports:\n      - "9091:91"\n',
     );
     fs.symlinkSync(`../${siblingName}/compose.override.yaml`, path.join(stackDir, 'compose.override.yaml'));
     const render = vi.spyOn(ComposeService.prototype, 'renderConfig').mockResolvedValue({
       rendered: JSON.stringify({
         services: {
-          other: {
-            labels: { 'sencho.service.url': secret },
-            ports: [{ target: 91, published: '9091', protocol: 'tcp' }],
-          },
+          web: { image: 'nginx:latest' },
+          other: { ports: [{ target: 91, published: '9091', protocol: 'tcp' }] },
         },
       }),
       stderr: '',
@@ -320,12 +319,24 @@ describe('effective-anatomy route', () => {
     });
     try {
       const res = await request(app).get(`/api/stacks/${STACK}/effective-anatomy`).set('Authorization', authHeader);
-      expect(res.status).toBe(409);
-      expect(res.body).toEqual({ error: 'The compose file links outside the stack directory. Use include: to share a file between stacks.' });
-      expect(render).not.toHaveBeenCalled();
+      expect(res.status).toBe(200);
+      expect(render).toHaveBeenCalled();
+      expect(res.body.services).toEqual(['web', 'other']);
     } finally {
       fs.rmSync(sibling, { recursive: true, force: true });
     }
+  });
+
+  it.skipIf(process.platform === 'win32')('refuses a compose file that links out of the compose directory', async () => {
+    const outside = path.join(tmpDir, 'outside-compose.yaml');
+    fs.writeFileSync(outside, 'services:\n  outside:\n    ports:\n      - "9092:92"\n');
+    fs.rmSync(path.join(stackDir, 'compose.yaml'));
+    fs.symlinkSync(outside, path.join(stackDir, 'compose.yaml'));
+    const render = vi.spyOn(ComposeService.prototype, 'renderConfig');
+    const res = await request(app).get(`/api/stacks/${STACK}/effective-anatomy`).set('Authorization', authHeader);
+    expect(res.status).toBe(409);
+    expect(res.body).toEqual({ error: 'The compose file links outside the stack directory. Use include: to share a file between stacks.' });
+    expect(render).not.toHaveBeenCalled();
   });
 
   it('returns 404 for a stack that does not exist', async () => {

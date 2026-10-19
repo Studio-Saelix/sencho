@@ -36,7 +36,7 @@ vi.mock('../utils/authoredComposeArgs', () => ({
   authoredComposeFileArgs: () => ['-f', 'compose.yaml'],
   authoredComposeEnvFileArgs: async () => [],
   DEFAULT_PATH_SEPARATOR: ':',
-  composeFileEnvVarSelection: async () => ({ kind: 'absent' }),
+  composeFileEnvVarSelection: async () => ({ kind: 'absent', composeEnvFiles: [] }),
 }));
 
 import { resolveRollbackInventory } from '../services/rollbackInventory';

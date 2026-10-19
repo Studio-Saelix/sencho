@@ -14,6 +14,7 @@
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { execFileSync } from 'child_process';
+import { randomUUID } from 'crypto';
 import fs from 'fs';
 import path from 'path';
 import { setupTestDb, cleanupTestDb } from '../helpers/setupTestDb';
@@ -35,6 +36,10 @@ type Case = {
   files: Record<string, string>;
   /** Project env files configured on the node, as the Environment tab would. */
   projectEnvFiles?: string[];
+  /** Process environment the live run and the reader both see. */
+  processEnv?: Record<string, string>;
+  /** Text a recorded omission note must contain, when the case is partial. */
+  expectUncaptured?: string;
 };
 
 const SERVICE = (image: string, command: string): string =>
@@ -94,6 +99,132 @@ const CASES: Case[] = [
       'compose.override.yml': SERVICE('busybox:1.36.1', 'ovr-yml'),
     },
   },
+  {
+    // COMPOSE_ENV_FILES replaces the project .env, so the reader has to load
+    // exactly that list or it answers for a variable Compose never consulted.
+    name: 'a COMPOSE_ENV_FILES chain',
+    stack: 'layercomposeenvfiles',
+    files: {
+      'compose.yaml': SERVICE('busybox:1.36.1', 'root'),
+      'prod.yaml': SERVICE('busybox:1.36.1', 'production'),
+      'select.env': 'COMPOSE_FILE=compose.yaml:prod.yaml\n',
+    },
+    processEnv: { COMPOSE_ENV_FILES: 'select.env' },
+    // The inventory captures the project .env and the configured project env
+    // files, not this operator-level list, so the generation records it.
+    expectUncaptured: 'select.env is loaded by Compose through COMPOSE_ENV_FILES and is not captured',
+  },
+  {
+    // A quoted value spans lines, so the first layer's filename ends with a
+    // newline. Reading only the first physical line would pin compose.yaml and
+    // run the wrong project: the truncated name resolves to a real file here.
+    name: 'a multiline quoted COMPOSE_FILE value',
+    stack: 'layermultiline',
+    files: {
+      'compose.yaml': SERVICE('busybox:1.36.1', 'wrong-root'),
+      'compose.yaml\n': SERVICE('busybox:1.36.1', 'newline-root'),
+      'prod.yaml': SERVICE('busybox:1.36.1', 'production'),
+      '.env': 'COMPOSE_FILE="compose.yaml\n:prod.yaml"\n',
+    },
+  },
+  {
+    // Ordinary dotenv interpolation. The reader has to expand the reference the
+    // same way, or it refuses a working stack (or pins a different chain).
+    name: 'an interpolated COMPOSE_FILE chain',
+    stack: 'layerinterpolated',
+    files: {
+      'compose.yaml': SERVICE('busybox:1.36.1', 'root'),
+      'prod.yaml': SERVICE('busybox:1.36.1', 'production'),
+      '.env': 'BASE_FILE=compose.yaml\nCOMPOSE_FILE=${BASE_FILE}:prod.yaml\n',
+    },
+  },
+  {
+    // A single-quoted value is verbatim, so the chain is the literal text.
+    name: 'a single-quoted chain',
+    stack: 'layerquoted',
+    files: {
+      'compose.yaml': SERVICE('busybox:1.36.1', 'root'),
+      'prod.yaml': SERVICE('busybox:1.36.1', 'production'),
+      'select.env': "COMPOSE_FILE='compose.yaml:prod.yaml'\n",
+    },
+    processEnv: { COMPOSE_ENV_FILES: 'select.env' },
+    expectUncaptured: 'select.env is loaded by Compose through COMPOSE_ENV_FILES and is not captured',
+  },
+  {
+    // `$$` is a literal dollar, so this names a file that starts with one and
+    // must not be read as a variable reference. The distinct file is last, so a
+    // reader that dropped it would render a different command.
+    name: 'a dollar-escaped layer name',
+    stack: 'layerdollar',
+    files: {
+      'compose.yaml': SERVICE('busybox:1.36.1', 'root'),
+      '$root.yaml': SERVICE('busybox:1.36.1', 'dollar-root'),
+      'select.env': 'COMPOSE_FILE="compose.yaml:$$root.yaml"\n',
+    },
+    processEnv: { COMPOSE_ENV_FILES: 'select.env' },
+    expectUncaptured: 'select.env is loaded by Compose through COMPOSE_ENV_FILES and is not captured',
+  },
+  {
+    // A double-quoted value expands Go escapes, and an octal one is a byte.
+    name: 'an octal-escaped layer name',
+    stack: 'layeroctal',
+    files: {
+      'compose.yaml': SERVICE('busybox:1.36.1', 'root'),
+      'Sprod.yaml': SERVICE('busybox:1.36.1', 'octal-root'),
+      'select.env': 'COMPOSE_FILE="compose.yaml:\\0123prod.yaml"\n',
+    },
+    processEnv: { COMPOSE_ENV_FILES: 'select.env' },
+    expectUncaptured: 'select.env is loaded by Compose through COMPOSE_ENV_FILES and is not captured',
+  },
+  {
+    // A soft default resolves inside the file that holds it.
+    name: 'a defaulted reference',
+    stack: 'layerdefault',
+    files: {
+      'compose.yaml': SERVICE('busybox:1.36.1', 'root'),
+      'prod.yaml': SERVICE('busybox:1.36.1', 'production'),
+      'select.env': 'COMPOSE_FILE=${BASE_FILE:-compose.yaml}:prod.yaml\n',
+    },
+    processEnv: { COMPOSE_ENV_FILES: 'select.env' },
+    expectUncaptured: 'select.env is loaded by Compose through COMPOSE_ENV_FILES and is not captured',
+  },
+  {
+    // The separator can come from the file that holds the chain.
+    name: 'a file-selected path separator',
+    stack: 'layerseparator',
+    files: {
+      'compose.yaml': SERVICE('busybox:1.36.1', 'root'),
+      'prod.yaml': SERVICE('busybox:1.36.1', 'production'),
+      'select.env': 'COMPOSE_PATH_SEPARATOR=;\nCOMPOSE_FILE=compose.yaml;prod.yaml\n',
+    },
+    processEnv: { COMPOSE_ENV_FILES: 'select.env' },
+    expectUncaptured: 'select.env is loaded by Compose through COMPOSE_ENV_FILES and is not captured',
+  },
+  {
+    // An unquoted value ends at a space-hash comment.
+    name: 'a chain with an inline comment',
+    stack: 'layercomment',
+    files: {
+      'compose.yaml': SERVICE('busybox:1.36.1', 'root'),
+      'prod.yaml': SERVICE('busybox:1.36.1', 'production'),
+      'select.env': 'COMPOSE_FILE=compose.yaml:prod.yaml # production\n',
+    },
+    processEnv: { COMPOSE_ENV_FILES: 'select.env' },
+    expectUncaptured: 'select.env is loaded by Compose through COMPOSE_ENV_FILES and is not captured',
+  },
+  {
+    // Two listed files, applied in order, so the later one decides.
+    name: 'two listed env files',
+    stack: 'layertwofiles',
+    files: {
+      'compose.yaml': SERVICE('busybox:1.36.1', 'root'),
+      'prod.yaml': SERVICE('busybox:1.36.1', 'production'),
+      'first.env': 'COMPOSE_FILE=compose.yaml\n',
+      'second.env': 'COMPOSE_FILE=compose.yaml:prod.yaml\n',
+    },
+    processEnv: { COMPOSE_ENV_FILES: 'first.env,second.env' },
+    expectUncaptured: 'first.env is loaded by Compose through COMPOSE_ENV_FILES and is not captured',
+  },
 ];
 
 /** The rendered model, with the project name pinned so it cannot differ. */
@@ -146,11 +277,19 @@ describe.skipIf(!hasDocker)('recovery loads the model the capture-time run loade
       const { DatabaseService } = await import('../../services/DatabaseService');
       DatabaseService.getInstance().setStackProjectEnvFiles(nodeId, testCase.stack, testCase.projectEnvFiles ?? []);
 
+      const appliedEnv: string[] = [];
+      for (const [name, value] of Object.entries(testCase.processEnv ?? {})) {
+        process.env[name] = value;
+        appliedEnv.push(name);
+      }
       try {
         const { resolveRollbackInventory } = await import('../../services/rollbackInventory');
         const { ComposeService } = await import('../../services/ComposeService');
         const inventory = await resolveRollbackInventory(nodeId, testCase.stack);
         expect(inventory.coverageRefusal).toBeNull();
+        if (testCase.expectUncaptured) {
+          expect(inventory.uncapturedInputs.join(' ')).toContain(testCase.expectUncaptured);
+        }
 
         const args = await ComposeService.getInstance(nodeId).buildComposeArgsWithRecoveryOverride(
           testCase.stack,
@@ -183,8 +322,162 @@ describe.skipIf(!hasDocker)('recovery loads the model the capture-time run loade
         expect(recovery.services.web.command).toEqual(live.services.web.command);
         expect(recovery.services.web.image).toBe(live.services.web.image);
       } finally {
+        for (const name of appliedEnv) delete process.env[name];
         DatabaseService.getInstance().setStackProjectEnvFiles(nodeId, testCase.stack, []);
       }
     });
   }
+
+  it('keeps a local override an uncaptured external include extends from, and both projects render', async () => {
+    const stack = 'layerpartialinclude';
+    const stackDir = path.join(composeDir, stack);
+    const sharedDir = path.join(composeDir, 'shared');
+    fs.mkdirSync(stackDir, { recursive: true });
+    fs.mkdirSync(sharedDir, { recursive: true });
+    const sharedFile = path.join(sharedDir, 'base.yaml');
+    fs.writeFileSync(
+      sharedFile,
+      ['services:', '  shared:', '    image: busybox:1.36.1', '    command: ["echo","shared"]', ''].join('\n'),
+      'utf8',
+    );
+    fs.writeFileSync(
+      path.join(stackDir, 'docker-compose.yml'),
+      `include:\n  - path: ../shared/base.yaml\n${SERVICE('busybox:1.36.1', 'root')}`,
+      'utf8',
+    );
+    const recoveryLayer = path.join(stackDir, '.sencho-recovery-test.yml');
+    fs.writeFileSync(
+      recoveryLayer,
+      'services:\n  web:\n    labels:\n      sencho.recovery-test: "1"\n',
+      'utf8',
+    );
+
+    const { resolveRollbackInventory } = await import('../../services/rollbackInventory');
+    const { RollbackGenerationStore } = await import('../../services/RollbackGenerationStore');
+    const { resolveComposeProjectContextForGeneration } = await import('../../services/composeProjectContext');
+    const { ComposeService } = await import('../../services/ComposeService');
+
+    const captured = await resolveRollbackInventory(nodeId, stack);
+    expect(captured.coverageRefusal).toBeNull();
+    expect(captured.uncapturedInputs.join(' ')).toContain('../shared/base.yaml');
+
+    const generationId = randomUUID();
+    await RollbackGenerationStore.captureGeneration({
+      nodeId,
+      stackName: stack,
+      generationId,
+      inventory: captured,
+    });
+    const manifest = await RollbackGenerationStore.readVerifiedGeneration(nodeId, stack, generationId);
+
+    // The live shared file now extends a service from a local override that
+    // appeared after capture, so that override is a dependency of the project
+    // the partial generation rolls back to.
+    const helper = SERVICE('busybox:1.36.1', 'helper');
+    fs.writeFileSync(path.join(stackDir, 'compose.override.yml'), helper, 'utf8');
+    fs.writeFileSync(
+      sharedFile,
+      [
+        'services:',
+        '  shared:',
+        '    image: busybox:1.36.1',
+        '    extends:',
+        `      file: ../${stack}/compose.override.yml`,
+        '      service: web',
+        '',
+      ].join('\n'),
+      'utf8',
+    );
+
+    const ctx = await resolveComposeProjectContextForGeneration(nodeId, stack, generationId);
+    await ctx.restoreFromContext();
+
+    // The dependency the uncaptured input needs is still there, and the project
+    // it renders is complete. Discovery loads the post-capture override, while
+    // the recovery run pins the captured layer and leaves that edit alone: the
+    // rollback runs what the generation holds.
+    expect(fs.readFileSync(path.join(stackDir, 'compose.override.yml'), 'utf8')).toBe(helper);
+    const live = renderModel([], stackDir, stack) as {
+      services: Record<string, { command?: string[]; image?: string }>;
+    };
+    expect(Object.keys(live.services).sort()).toEqual(['shared', 'web']);
+    expect(live.services.web.command).toEqual(['echo', 'helper']);
+
+    const args = await ComposeService.getInstance(nodeId).buildComposeArgsWithRecoveryOverride(
+      stack,
+      ['config'],
+      recoveryLayer,
+      manifest.invocation,
+    );
+    const recovery = renderModel(args.slice(1, args.indexOf('config')), stackDir, stack) as {
+      services: Record<string, { command?: string[]; image?: string }>;
+    };
+    expect(Object.keys(recovery.services).sort()).toEqual(['shared', 'web']);
+    expect(recovery.services.web.command).toEqual(['echo', 'root']);
+    // The extends target in the shared file resolved: the bytes survive and the
+    // restored project still renders through them.
+    expect(recovery.services.shared.command).toEqual(['echo', 'helper']);
+  });
+
+  it('renders a shared main compose file through its link, using the current target content', async () => {
+    const stack = 'layersharemain';
+    const stackDir = path.join(composeDir, stack);
+    const sharedDir = path.join(composeDir, 'shared');
+    fs.mkdirSync(stackDir, { recursive: true });
+    fs.mkdirSync(sharedDir, { recursive: true });
+    const sharedFile = path.join(sharedDir, 'base.yaml');
+    fs.writeFileSync(sharedFile, SERVICE('busybox:1.36.1', 'shared-v1'), 'utf8');
+    const link = path.join(stackDir, 'compose.yaml');
+    fs.symlinkSync(sharedFile, link);
+    const recoveryLayer = path.join(stackDir, '.sencho-recovery-test.yml');
+    fs.writeFileSync(
+      recoveryLayer,
+      'services:\n  web:\n    labels:\n      sencho.recovery-test: "1"\n',
+      'utf8',
+    );
+
+    const { resolveRollbackInventory } = await import('../../services/rollbackInventory');
+    const { RollbackGenerationStore } = await import('../../services/RollbackGenerationStore');
+    const { resolveComposeProjectContextForGeneration } = await import('../../services/composeProjectContext');
+    const { ComposeService } = await import('../../services/ComposeService');
+
+    const captured = await resolveRollbackInventory(nodeId, stack);
+    expect(captured.coverageRefusal).toBeNull();
+    // The shared file is selected and pinned, and recorded as not captured.
+    expect(captured.invocation.composeLayers).toEqual(['compose.yaml']);
+    expect(captured.uncapturedRelativePaths).toContain('compose.yaml');
+    expect(captured.entries).toEqual([]);
+
+    const generationId = randomUUID();
+    await RollbackGenerationStore.captureGeneration({
+      nodeId,
+      stackName: stack,
+      generationId,
+      inventory: captured,
+    });
+    const manifest = await RollbackGenerationStore.readVerifiedGeneration(nodeId, stack, generationId);
+
+    // The shared file moves on, which is what a rollback reads: the generation
+    // cannot hold it, so the link is the input and its target is the content.
+    const sharedNow = SERVICE('busybox:1.36.1', 'shared-v2');
+    fs.writeFileSync(sharedFile, sharedNow, 'utf8');
+
+    const ctx = await resolveComposeProjectContextForGeneration(nodeId, stack, generationId);
+    await ctx.restoreFromContext();
+
+    // The restore wrote nothing through the link and left the target alone.
+    expect(fs.lstatSync(link).isSymbolicLink()).toBe(true);
+    expect(fs.readFileSync(sharedFile, 'utf8')).toBe(sharedNow);
+
+    const args = await ComposeService.getInstance(nodeId).buildComposeArgsWithRecoveryOverride(
+      stack,
+      ['config'],
+      recoveryLayer,
+      manifest.invocation,
+    );
+    const recovery = renderModel(args.slice(1, args.indexOf('config')), stackDir, stack) as {
+      services: Record<string, { command?: string[] }>;
+    };
+    expect(recovery.services.web.command).toEqual(['echo', 'shared-v2']);
+  });
 });

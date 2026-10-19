@@ -146,6 +146,8 @@ vi.mock('../utils/authoredComposeArgs', () => ({
   authoredComposeFileArgs: vi.fn().mockResolvedValue(['-f', 'compose.yaml']),
   authoredComposeEnvFileArgs: vi.fn().mockResolvedValue([]),
   candidateValidationEnvFileArgs: vi.fn().mockResolvedValue([]),
+  DEFAULT_PATH_SEPARATOR: ':',
+  composeFileEnvVarSelection: vi.fn().mockResolvedValue({ kind: 'absent', composeEnvFiles: [] }),
 }));
 
 const mockGetGitSource = vi.fn();

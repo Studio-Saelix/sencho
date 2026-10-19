@@ -199,15 +199,30 @@ async function pathExistsAsFile(stackRoot: string, relativePath: string): Promis
  * What an authored candidate path is, resolved the way capture will read it.
  * - file: a regular file, or a link to one, that stays inside the stack.
  * - absent: nothing there, or a directory or special file.
- * - outside: resolves outside the stack directory (a link on the path itself
+ * - shared: a link whose target is inside the shared compose directory but
+ *   outside this stack. A read or a deploy follows it, a save and a restore do
+ *   not, so it is recorded as an input the generation cannot hold.
+ * - outside: resolves outside the compose directory (a link on the path itself
  *   or on any parent directory).
+ * - relocated: the stack directory itself is a link to another location, so the
+ *   file belongs to whatever directory it really lives in.
  * - dangling / loop: a link that reaches nothing, or never ends.
  * - not-a-file: a link whose target is a directory or special file.
  */
-type AuthoredFileState = 'file' | 'absent' | 'outside' | 'dangling' | 'loop' | 'not-a-file';
+type AuthoredFileState =
+  | 'file'
+  | 'absent'
+  | 'shared'
+  | 'outside'
+  | 'relocated'
+  | 'dangling'
+  | 'loop'
+  | 'not-a-file';
 
 const LINK_PROBLEMS: Record<Exclude<AuthoredFileState, 'file' | 'absent'>, string> = {
-  outside: 'links outside the stack directory',
+  shared: 'links outside the stack directory into the shared compose directory',
+  outside: 'links outside the compose directory',
+  relocated: 'is in a stack directory that links to another location',
   dangling: 'is a link to a missing file',
   loop: 'is a link that never resolves',
   'not-a-file': 'is a link to something that is not a regular file',
@@ -244,9 +259,15 @@ async function classifyAuthoredFile(stackRoot: string, relativePath: string): Pr
   }
   // Same root capture uses: the real compose dir plus the stack name, so a
   // stack dir that links elsewhere is refused and a linked compose dir is not.
-  const realRoot = path.join(await fsPromises.realpath(path.dirname(baseResolved)), path.basename(baseResolved));
-  if (!real.startsWith(realRoot + path.sep)) return 'outside';
-  return (await fsPromises.stat(real)).isFile() ? 'file' : 'not-a-file';
+  const realBase = await fsPromises.realpath(path.dirname(baseResolved));
+  const realRoot = path.join(realBase, path.basename(baseResolved));
+  if (real.startsWith(realRoot + path.sep)) {
+    return (await fsPromises.stat(real)).isFile() ? 'file' : 'not-a-file';
+  }
+  // A stack directory that is itself a link is a different stack's directory,
+  // not a shared file, so it keeps the refusal the read and write guards raise.
+  if ((await fsPromises.realpath(baseResolved)) !== realRoot) return 'relocated';
+  return real.startsWith(realBase + path.sep) ? 'shared' : 'outside';
 }
 
 /**
@@ -256,11 +277,11 @@ async function classifyAuthoredFile(stackRoot: string, relativePath: string): Pr
  * name into two unresolvable ones. Compose applies the same naive split to
  * whatever separator it is given, so matching it exactly is what reproduces the
  * chain. An empty COMPOSE_PATH_SEPARATOR falls back to the default, as it does
- * there.
+ * there. An empty entry is kept: Compose rejects a chain that names one, so
+ * dropping it here would pin a layer set the live run never loaded.
  */
 function parseComposeFileChain(value: string, separator: string): string[] {
-  return value.split(separator.length > 0 ? separator : DEFAULT_PATH_SEPARATOR)
-    .filter((entry) => entry.length > 0);
+  return value.split(separator.length > 0 ? separator : DEFAULT_PATH_SEPARATOR);
 }
 
 /**
@@ -282,6 +303,20 @@ async function firstSelectedLayer(
     return resolved.relativePath;
   }
   return null;
+}
+
+/**
+ * Why a COMPOSE_FILE chain entry cannot be pinned. Compose rejects a chain that
+ * names an empty entry, so that case is named as such rather than described as a
+ * path. A dollar sign is not itself a reason to refuse: the reader expands every
+ * template Compose would expand, so a `$` that survives is a literal character
+ * in a filename, which Compose loads.
+ */
+function describeUnusableLayer(entry: string): string {
+  if (entry.length === 0) {
+    return 'COMPOSE_FILE names an empty compose layer, which Compose rejects';
+  }
+  return `Compose layer "${entry}" is selected by COMPOSE_FILE and is not a path inside the stack directory`;
 }
 
 /** Kinds that are application data or build inputs, never part of a generation. */
@@ -494,8 +529,6 @@ async function resolveAuthoredInventory(
   const caseCollisions: string[] = [];
   const uncaptured = new Set<string>();
   const uncapturedPaths = new Set<string>();
-  /** A dynamic input whose filename is interpolated end to end, so nothing names it. */
-  let hasUnnamedDynamicInput = false;
 
   /**
    * Notes reach logs and the readiness API, and a URL include can carry
@@ -535,77 +568,107 @@ function literalTailCandidate(sourcePath: string): string | null {
 }
 
 /**
- * True only for a regular file, or a link to one that stays inside the stack.
-   * Anything else returns false. A link capture cannot hold is recorded by
-   * `mode`: 'refuse' stops the capture (compose files), 'note' lists it as not
-   * captured, 'silent' skips the note for application data. In the last two its
-   * path joins `uncapturedRelativePaths`, so a restore never deletes it.
-   */
-  const capturable = async (
-    relativePath: string,
-    mode: 'refuse' | 'note' | 'silent',
-  ): Promise<boolean> => {
-    let state: AuthoredFileState;
-    try {
-      state = await classifyAuthoredFile(stackRoot, relativePath);
-    } catch (e) {
-      if (mode === 'silent') {
-        uncapturedPaths.add(relativePath);
-      } else {
-        coverageNotes.push(`Could not inspect ${relativePath} for rollback capture: ${(e as Error).message}`);
-      }
-      return false;
-    }
-    if (state === 'file') return true;
-    if (state === 'absent') return false;
-    const problem = LINK_PROBLEMS[state];
-    if (mode === 'refuse') {
-      const hint = state === 'outside' ? '. Use include: to share a file between stacks' : '';
-      coverageNotes.push(`Compose file ${relativePath} ${problem}${hint}`);
-      return false;
-    }
-    uncapturedPaths.add(relativePath);
-    if (mode === 'note') addUncaptured(`${relativePath} ${problem} and is not captured`);
-    return false;
-  };
+ * What capture can do with one authored candidate.
+ * - captured: a regular file, or a link to one inside the stack, whose bytes
+ *   the generation holds.
+ * - omitted: present and selected by Compose, but left out of the generation.
+ *   The path joins `uncapturedRelativePaths` so a restore never deletes it, and
+ *   a rollback uses its current content. `mode` decides how it is reported:
+ *   'refuse' records a plain omission for a Compose layer (a shared main file
+ *   the stack legitimately deploys), 'note' also adds an operator note, and
+ *   'silent' skips the note for application data.
+ * - absent: nothing usable there. For 'refuse' that is either no file at all or
+ *   a link a capture must stop on, which pushes a coverage note.
+ */
+type CapturableState = 'captured' | 'omitted' | 'absent';
 
-  // Every capturable root is captured, but Compose selects exactly one and adds
-// its implicit override. composePaths holds the whole captured set;
-// selectedLayers holds what a compose run with no explicit -f would load.
-const composePaths: string[] = [];
+const capturable = async (
+  relativePath: string,
+  mode: 'refuse' | 'note' | 'silent',
+): Promise<CapturableState> => {
+  let state: AuthoredFileState;
+  try {
+    state = await classifyAuthoredFile(stackRoot, relativePath);
+  } catch (e) {
+    if (mode === 'silent') {
+      uncapturedPaths.add(relativePath);
+    } else {
+      coverageNotes.push(`Could not inspect ${relativePath} for rollback capture: ${(e as Error).message}`);
+    }
+    return 'absent';
+  }
+  if (state === 'file') return 'captured';
+  if (state === 'absent') return 'absent';
+  if (state === 'shared') {
+    // Compose reads the link, so the layer stays selected, but the bytes belong
+    // to the shared target: the generation cannot hold them and a restore must
+    // never write through the link. The omission is what keeps readiness honest.
+    uncapturedPaths.add(relativePath);
+    if (mode !== 'silent') {
+      addUncaptured(
+        `${relativePath} ${LINK_PROBLEMS.shared} and is not captured; a rollback reads the linked file's current content`,
+      );
+    }
+    return 'omitted';
+  }
+  const problem = LINK_PROBLEMS[state];
+  if (mode === 'refuse') {
+    const hint = state === 'outside' ? '. Use include: to share a file between stacks' : '';
+    coverageNotes.push(`Compose file ${relativePath} ${problem}${hint}`);
+    return 'absent';
+  }
+  uncapturedPaths.add(relativePath);
+  if (mode === 'note') addUncaptured(`${relativePath} ${problem} and is not captured`);
+  return 'omitted';
+};
+
+  // Every root Compose could select is recorded, but Compose loads exactly one
+  // and adds its implicit override. composePaths holds the whole selected set;
+  // selectedLayers holds what a run with no explicit -f would load. A root that
+  // links into the shared compose directory is selected and pinned without being
+  // captured, so the stack deploys and a rollback reads the link's target.
+  const composePaths: string[] = [];
   const selectedLayers: string[] = [];
   for (const name of ROOT_COMPOSE_FILENAMES) {
     const resolved = resolveStackRel(stackRoot, name);
     if (!resolved) continue;
-    if (!(await capturable(resolved.relativePath, 'refuse'))) continue;
+    const state = await capturable(resolved.relativePath, 'refuse');
+    if (state === 'absent') continue;
     composePaths.push(resolved.relativePath);
     if (selectedLayers.length === 0) selectedLayers.push(resolved.relativePath);
-    upsertEntry(map, foldedOwners, {
-      relativePath: resolved.relativePath,
-      dependencyKind: 'compose-root',
-      provenance: 'authored',
-      sensitivity: 'low',
-      absolutePath: resolved.absolutePath,
-    }, caseCollisions);
+    if (state === 'captured') {
+      upsertEntry(map, foldedOwners, {
+        relativePath: resolved.relativePath,
+        dependencyKind: 'compose-root',
+        provenance: 'authored',
+        sensitivity: 'low',
+        absolutePath: resolved.absolutePath,
+      }, caseCollisions);
+    }
   }
 
   const overrideName = await firstSelectedLayer(stackRoot, OVERRIDE_COMPOSE_FILENAMES);
   if (overrideName) {
     const resolved = resolveStackRel(stackRoot, overrideName);
-    if (resolved && await capturable(resolved.relativePath, 'refuse')) {
-      if (!composePaths.includes(resolved.relativePath)) {
-        composePaths.push(resolved.relativePath);
-        // Same first-match-wins rule, so a stack holding both compose.yaml and
-        // docker-compose.yml pins only the one Compose would have discovered.
-        if (selectedLayers.length === 1) selectedLayers.push(resolved.relativePath);
+    if (resolved) {
+      const state = await capturable(resolved.relativePath, 'refuse');
+      if (state !== 'absent') {
+        if (!composePaths.includes(resolved.relativePath)) {
+          composePaths.push(resolved.relativePath);
+          // Same first-match-wins rule, so a stack holding both compose.yaml and
+          // docker-compose.yml pins only the one Compose would have discovered.
+          if (selectedLayers.length === 1) selectedLayers.push(resolved.relativePath);
+        }
+        if (state === 'captured') {
+          upsertEntry(map, foldedOwners, {
+            relativePath: resolved.relativePath,
+            dependencyKind: 'implicit-override',
+            provenance: 'authored',
+            sensitivity: 'low',
+            absolutePath: resolved.absolutePath,
+          }, caseCollisions);
+        }
       }
-      upsertEntry(map, foldedOwners, {
-        relativePath: resolved.relativePath,
-        dependencyKind: 'implicit-override',
-        provenance: 'authored',
-        sensitivity: 'low',
-        absolutePath: resolved.absolutePath,
-      }, caseCollisions);
     }
   }
 
@@ -619,7 +682,7 @@ const composePaths: string[] = [];
       addUncaptured(`${envFile} is not a path inside the stack directory and is not captured`);
       continue;
     }
-    if (!(await capturable(resolved.relativePath, 'note'))) continue;
+    if ((await capturable(resolved.relativePath, 'note')) !== 'captured') continue;
     upsertEntry(map, foldedOwners, {
       relativePath: resolved.relativePath,
       dependencyKind: envFile === DOT_ENV ? 'interpolation-env' : 'project-env',
@@ -683,7 +746,6 @@ const composePaths: string[] = [];
         // an unrecorded one as disposable. Over-reporting only leaves an
         // operator-owned file in place.
         if (candidate) uncapturedPaths.add(candidate);
-        else hasUnnamedDynamicInput = true;
       }
 
       for (const input of parsed.inputs) {
@@ -709,7 +771,7 @@ const composePaths: string[] = [];
         if (!resolved) continue;
         const kind = input.kind;
         const mode = UNCAPTURED_SILENT_KINDS.has(kind) ? 'silent' : 'note';
-        if (!(await capturable(resolved.relativePath, mode))) continue;
+        if ((await capturable(resolved.relativePath, mode)) !== 'captured') continue;
 
         upsertEntry(map, foldedOwners, {
           relativePath: resolved.relativePath,
@@ -750,19 +812,46 @@ const composePaths: string[] = [];
 
   // A `-f` flag replaces Compose's own file discovery, and Compose ignores
   // COMPOSE_FILE entirely once a `-f` list is given, so a captured prefix that
-  // already carries one leaves nothing to reconcile.
+  // already carries one leaves the layer choice alone. It does not leave the
+  // environment alone: Compose loads COMPOSE_ENV_FILES for interpolation either
+  // way, so the files it names are read in both cases.
   const capturedPinsFiles = composeArgsPrefix.some((t) => t === '-f' || t === '--file');
+  const selection = await composeFileEnvVarSelection(stackName, nodeId);
+  // COMPOSE_ENV_FILES names files Compose loads for interpolation that the
+  // capture never holds (the inventory captures the project .env and the
+  // configured project env files, not this operator-level list). Recording them
+  // keeps a generation that pins its layers correctly from claiming exact
+  // coverage of the environment those layers are rendered with. An unreadable
+  // list needs no note: Compose refuses to run with a file it cannot read, so
+  // there is no live project whose coverage could be overstated.
+  if (selection.kind !== 'unknown') {
+    for (const envPath of selection.composeEnvFiles) {
+      const resolved = resolveStackRel(stackRoot, posixRel(path.relative(stackRoot, envPath)));
+      if (!resolved) {
+        addUncaptured(
+          `${path.basename(envPath)} is loaded by Compose through COMPOSE_ENV_FILES from outside the stack directory and is not captured`,
+        );
+        continue;
+      }
+      if (map.has(resolved.relativePath)) continue;
+      uncapturedPaths.add(resolved.relativePath);
+      addUncaptured(
+        `${resolved.relativePath} is loaded by Compose through COMPOSE_ENV_FILES and is not captured`,
+      );
+    }
+  }
   let composeLayers: string[] = [...selectedLayers];
   if (!capturedPinsFiles) {
-    const selection = await composeFileEnvVarSelection(stackName, nodeId);
     if (selection.kind === 'absent') {
       // Compose's own discovery decides, and selectedLayers already holds it.
     } else if (selection.kind === 'unknown') {
       // Nothing here can say what the variable holds, and a recovery run always
       // appends a layer of its own, which suppresses the variable along with
       // discovery. Guessing the chain would restore a project the capture never
-      // held.
-      coverageNotes.push('Could not read the environment that selects the compose layers through COMPOSE_FILE');
+      // held. The reason names the file, so the operator can fix it.
+      coverageNotes.push(
+        `Could not read the environment that selects the compose layers through COMPOSE_FILE: ${selection.reason}`,
+      );
     } else {
       // COMPOSE_FILE replaces discovery, and `-f a -f b` loads exactly the layers
       // `COMPOSE_FILE=a:b` does, so pinning the chain reproduces the capture-time
@@ -771,40 +860,32 @@ const composePaths: string[] = [];
       // different stack. An entry that does not resolve refuses below, which
       // also covers a value this reader could not reproduce in full.
       const chain = parseComposeFileChain(selection.value, selection.pathSeparator);
-      if (chain.length === 0) {
-        // An empty value selects no file, and a run that pins none would load a
-        // different project than the one this stack runs.
-        coverageNotes.push('COMPOSE_FILE selects compose layers this generation cannot reproduce: it names no layer');
-      } else {
-        const resolvedChain: string[] = [];
-        let unusable: string | null = null;
-        for (const entry of chain) {
-          const resolved = entry.includes('$') ? null : resolveStackRel(stackRoot, entry);
-          if (!resolved) {
-            // A layer that is not a stack-relative path cannot be pinned at all,
-            // and an entry still holding a variable cannot be resolved here.
-            unusable = redactNoteCredentials(entry.includes('$')
-              ? `Compose layer "${entry}" is selected by COMPOSE_FILE and still holds an unresolved variable`
-              : `Compose layer "${entry}" is selected by COMPOSE_FILE and is not a path inside the stack directory`);
-            break;
-          }
-          resolvedChain.push(resolved.relativePath);
-          // The layer is loaded whatever it is, so it is pinned either way. What
-          // the capture can hold is a separate question, asked the same way it
-          // is for every other declared input: a link that leaves the stack, a
-          // link to nothing, or a path no captured compose file declares is
-          // recorded as not captured and never deleted by a restore.
-          await capturable(resolved.relativePath, 'note');
-          if (map.has(resolved.relativePath)) continue;
-          // A regular file that no captured compose file declares: the
-          // generation cannot hold it, so a restore must leave whatever is
-          // there alone and read its current content.
-          uncapturedPaths.add(resolved.relativePath);
-          addUncaptured(`compose layer ${resolved.relativePath} is selected by COMPOSE_FILE and is not captured`);
+      const resolvedChain: string[] = [];
+      let unusable: string | null = null;
+      for (const entry of chain) {
+        const resolved = entry.length === 0 ? null : resolveStackRel(stackRoot, entry);
+        if (!resolved) {
+          // A layer that is not a stack-relative path cannot be pinned at all,
+          // and Compose rejects a chain that names an empty entry.
+          unusable = redactNoteCredentials(describeUnusableLayer(entry));
+          break;
         }
-        if (unusable === null) composeLayers = resolvedChain;
-        else coverageNotes.push(unusable);
+        resolvedChain.push(resolved.relativePath);
+        // The layer is loaded whatever it is, so it is pinned either way. What
+        // the capture can hold is a separate question, asked the same way it
+        // is for every other declared input: a link that leaves the stack, a
+        // link to nothing, or a path no captured compose file declares is
+        // recorded as not captured and never deleted by a restore.
+        await capturable(resolved.relativePath, 'note');
+        if (map.has(resolved.relativePath)) continue;
+        // A regular file that no captured compose file declares: the
+        // generation cannot hold it, so a restore must leave whatever is
+        // there alone and read its current content.
+        uncapturedPaths.add(resolved.relativePath);
+        addUncaptured(`compose layer ${resolved.relativePath} is selected by COMPOSE_FILE and is not captured`);
       }
+      if (unusable === null) composeLayers = resolvedChain;
+      else coverageNotes.push(unusable);
     }
   }
 
@@ -835,7 +916,6 @@ const composePaths: string[] = [];
     uncapturedRelativePaths: coverageRefusal === null
       ? [...uncapturedPaths].sort((a, b) => a.localeCompare(b))
       : [],
-    hasUnnamedDynamicInput: coverageRefusal === null && hasUnnamedDynamicInput,
   };
 }
 

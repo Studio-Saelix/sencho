@@ -12,7 +12,7 @@ import { createHash, randomUUID } from 'crypto';
 import { promises as fsPromises } from 'fs';
 import path from 'path';
 import { CryptoService } from './CryptoService';
-import { FileSystemService, isComposeBasename, isComposeOverrideBasename } from './FileSystemService';
+import { FileSystemService } from './FileSystemService';
 import { isValidStackName } from '../utils/validation';
 import {
   ROLLBACK_GENERATION_SCHEMA_VERSION,
@@ -386,7 +386,6 @@ export class RollbackGenerationStore {
         managedRelativePaths,
         uncapturedRelativePaths: [...inventory.uncapturedRelativePaths],
         uncapturedInputs: [...inventory.uncapturedInputs],
-        hasUnnamedDynamicInput: inventory.hasUnnamedDynamicInput === true,
         invocation: inventory.invocation,
         git: inventory.git,
         priorRecords: {
@@ -553,14 +552,18 @@ export class RollbackGenerationStore {
    * but not present in the generation (tombstones and post-capture additions
    * inside the managed set). Paths outside both sets are left untouched, and
    * so are the manifest's uncapturedRelativePaths even when a caller lists them.
-   * A generation that recorded uncaptured inputs ignores liveManagedPaths for
-   * deletes, because it cannot tell which live files those inputs named, except
-   * for Compose layers: Compose selects a root or an implicit override by name
-   * and never through an interpolatable input, so a live layer the generation
-   * did not record was added after capture and must not shadow the captured
-   * project. An input interpolated end to end names no file at all, so such a
-   * generation deletes nothing from the live discovery. Compose layers are
-   * removed as leaves, so a shared target is never followed or deleted.
+   *
+   * A generation that recorded any uncaptured input deletes nothing from the
+   * caller's live discovery. An uncaptured input can name a file the generation
+   * never held, at any path, and its name is no proof of ownership: a shared
+   * include can pull in a local override, and an interpolated include can name a
+   * conventional compose file, so deleting a live file because its basename
+   * looks like a Compose layer can remove a required dependency. Recovery stays
+   * exact without that deletion because the generation pins the layers it
+   * captured, and an explicit `-f` list suppresses both discovery and the
+   * implicit override merge. A generation with no uncaptured input may still
+   * delete the caller's live discovery set, because it holds every input its
+   * project declared.
    *
    * Durability: copies the affected live paths into pre-restore/ and writes
    * restore-intent.json (including Git DB + manifesto preimage) before mutation.
@@ -603,24 +606,15 @@ export class RollbackGenerationStore {
       if (entry.state === 'tombstoned') considerDelete(entry.relativePath);
     }
     // A partial generation cannot say what its uncaptured inputs resolved to,
-    // so a file that appeared since capture may be one of them (an env file a
-    // ${VAR} path now names). A Compose layer is normally the exception: Compose
-    // picks a root or an implicit override by name and never resolves one
-    // through an interpolatable input, so a live layer the generation did not
-    // record was added after capture and would otherwise shadow the captured
-    // project. That exception needs a name to be safe against, though, and an
-    // input interpolated end to end (`include: [ $FILE ]`) has none: it can
-    // resolve to a conventional compose filename, which is then a required
-    // dependency rather than disposable content, and deleting it stops the
-    // restored project from rendering at all. A generation that recorded such an
-    // input therefore keeps every unrecorded live file.
+    // so a file that appeared since capture may be one of them: an env file a
+    // ${VAR} path now names, or a local override an external include extends
+    // from. A Compose basename is no proof of ownership, so a generation that
+    // recorded any uncaptured input keeps every unrecorded live file. Recovery
+    // still runs the captured project: the generation pins the layers it
+    // selected, and an explicit -f list suppresses Compose's own discovery and
+    // the implicit override merge.
     if ((manifest.uncapturedInputs ?? []).length === 0) {
       for (const rel of liveManagedPaths) considerDelete(rel);
-    } else if (manifest.hasUnnamedDynamicInput !== true) {
-      for (const rel of liveManagedPaths) {
-        const key = posixRel(rel);
-        if (isComposeBasename(key) || isComposeOverrideBasename(key)) considerDelete(key);
-      }
     }
 
     const restores: Array<{
@@ -1026,10 +1020,10 @@ export class RollbackGenerationStore {
         }
         const realSrc = await fsPromises.realpath(srcCandidate);
         if (!realSrc.startsWith(realStackRoot + path.sep)) continue;
-        // Open the validated path once and stat and read on that descriptor, so
-        // the containment check and the bytes come from the same inode.
-        // Anything that can write inside the stack could otherwise swap the
-        // checked file for a link out of it between the two calls.
+        // Stat and read on one descriptor of the validated path, so the metadata
+        // and the bytes describe the same inode even if the path is replaced
+        // between the calls. The realpath check above is a string check on the
+        // path, not on this descriptor, so it does not establish that identity.
         const fh = await fsPromises.open(realSrc, 'r');
         try {
           const st = await fh.stat();
@@ -1311,9 +1305,6 @@ export class RollbackGenerationStore {
       if (field !== undefined && !(Array.isArray(field) && field.every((v) => typeof v === 'string'))) {
         throw new Error('Generation manifest has a malformed uncaptured list');
       }
-    }
-    if (manifest.hasUnnamedDynamicInput !== undefined && typeof manifest.hasUnnamedDynamicInput !== 'boolean') {
-      throw new Error('Generation manifest has a malformed hasUnnamedDynamicInput flag');
     }
     await this.verifyManifestContent(genResolved, manifest);
     return manifest;

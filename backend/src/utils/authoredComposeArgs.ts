@@ -5,6 +5,8 @@ import { FileSystemService } from '../services/FileSystemService';
 import { gitSecretsAreaBase, managedAreaBase } from '../services/gitops/managedPaths';
 import { NodeRegistry } from '../services/NodeRegistry';
 import { isPathWithinBase, isValidRelativeStackPath } from './validation';
+import { ComposeEnvFiles, DEFAULT_PATH_SEPARATOR } from './composeDotenv';
+import { getErrorMessage } from './errors';
 
 /**
  * Build the `docker compose` global-flag prefix (`-f` per file, `-p <project>`,
@@ -309,44 +311,33 @@ export async function authoredComposeEnvFileArgs(
  * the same layers. Sencho never sets it, so a stack that does selects its layers
  * from something the stack directory alone does not describe.
  *
- * `unknown` means an env file Compose loads could not be read, so nothing here
- * can claim what the variable holds. Callers must treat it as deciding, because
+ * The value is read out of the same files, in the same order, with the same
+ * quoting, escapes and interpolation Compose applies (`ComposeEnvFiles`), so the
+ * chain this returns is the chain the deploy ran.
+ *
+ * `unknown` means a file Compose loads could not be read, or its syntax is one
+ * this reader cannot reproduce. Callers must treat it as deciding, because
  * inferring a layer set and pinning it is the failure this exists to prevent.
+ *
+ * `composeEnvFiles` names the files COMPOSE_ENV_FILES supplied, absolute, so a
+ * capture can report that it does not hold them.
  */
 export type ComposeFileEnvSelection =
-  | { kind: 'absent' }
-  | { kind: 'value'; value: string; pathSeparator: string }
-  | { kind: 'unknown' };
+  | { kind: 'absent'; composeEnvFiles: string[] }
+  | { kind: 'value'; value: string; pathSeparator: string; composeEnvFiles: string[] }
+  | { kind: 'unknown'; reason: string };
 
-/** Compose's chain separator when COMPOSE_PATH_SEPARATOR is unset or empty. */
-export const DEFAULT_PATH_SEPARATOR = ':';
-
-/** One dotenv assignment, with Compose's quoting and comment rules applied. */
-function unquoteDotenvValue(raw: string): string {
-  const quote = raw[0];
-  if (quote === '"' || quote === "'") {
-    const closing = raw.indexOf(quote, 1);
-    return closing === -1 ? raw.slice(1) : raw.slice(1, closing);
-  }
-  return raw.replace(/\s+#.*$/, '').trim();
-}
+export { DEFAULT_PATH_SEPARATOR };
 
 /**
- * Every assignment in dotenv text, last definition of a name winning.
- *
- * Covers the single-line forms Compose reads the same way: an unquoted trailing
- * `# ...` is a comment, a quoted value keeps its `#` verbatim, and a value may
- * be wrapped in matching single or double quotes. A quoted value continued on a
- * following line is read as its first line only, which for COMPOSE_FILE means the
- * chain does not resolve and the capture refuses rather than pinning a guess.
+ * The files COMPOSE_ENV_FILES names, or [] when it is unset or empty. Compose
+ * splits the value on commas, ignores empty entries, and falls back to the
+ * project .env when the result names no file.
  */
-export function parseDotenv(content: string): Map<string, string> {
-  const assignments = new Map<string, string>();
-  for (const line of content.split(/\r?\n/)) {
-    const match = /^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$/.exec(line);
-    if (match) assignments.set(match[1], unquoteDotenvValue(match[2]));
-  }
-  return assignments;
+function composeEnvFilesFromProcess(): string[] {
+  const raw = process.env.COMPOSE_ENV_FILES;
+  if (raw === undefined || raw === '') return [];
+  return raw.split(',').filter((entry) => entry.length > 0);
 }
 
 export async function composeFileEnvVarSelection(stackName: string, nodeId?: number): Promise<ComposeFileEnvSelection> {
@@ -355,34 +346,77 @@ export async function composeFileEnvVarSelection(stackName: string, nodeId?: num
   let envArgs: string[];
   try {
     envArgs = await authoredComposeEnvFileArgs(stackName, resolvedNodeId);
-  } catch {
-    return { kind: 'unknown' };
+  } catch (e) {
+    return { kind: 'unknown', reason: getErrorMessage(e, 'a selected env file could not be read') };
   }
   const selected = envArgs.filter((_, index) => index % 2 === 1 && envArgs[index - 1] === '--env-file');
-  // Compose reads a selected --env-file INSTEAD of the project .env, so the
-  // project file only decides the value when no --env-file was given. Reading
-  // both and taking one of them would answer for a variable Compose never
-  // consulted.
-  const sources = selected.length > 0 ? selected : [null];
-  // Compose applies env files in the order given and lets a later one win.
-  const merged = new Map<string, string>();
-  for (const envPath of sources) {
+  // Compose reads one set of files. An explicit --env-file wins over
+  // COMPOSE_ENV_FILES, which wins over the project .env, so a file the lower
+  // source sets is never consulted. A relative COMPOSE_ENV_FILES entry resolves
+  // against the working directory, which is the stack directory for every
+  // Sencho spawn.
+  const listed = selected.length > 0 ? [] : composeEnvFilesFromProcess();
+  const stackDir = path.resolve(NodeRegistry.getInstance().getComposeDir(resolvedNodeId), stackName);
+  const sources: Array<{ path: string | null; listed: boolean }> = selected.length > 0
+    ? selected.map((envPath) => ({ path: envPath, listed: false }))
+    : listed.length > 0
+      ? listed.map((entry) => ({ path: path.resolve(stackDir, entry), listed: true }))
+      : [{ path: null, listed: false }];
+
+  const reader = new ComposeEnvFiles((name) => process.env[name]);
+  const composeEnvFiles: string[] = [];
+  for (const source of sources) {
     let content: string;
-    try {
-      content = envPath === null ? await fsSvc.getEnvContent(stackName) : await fsSvc.readFile(envPath);
-    } catch (err) {
-      if (envPath === null && (err as NodeJS.ErrnoException).code === 'ENOENT') continue;
-      return { kind: 'unknown' };
+    if (source.path === null) {
+      try {
+        content = await fsSvc.getEnvContent(stackName);
+      } catch (err) {
+        // A stack with no project .env is an ordinary run, not an unknown.
+        if ((err as NodeJS.ErrnoException).code === 'ENOENT') continue;
+        return { kind: 'unknown', reason: 'the project .env could not be read' };
+      }
+    } else {
+      try {
+        // A selected file was already validated against the compose root and its
+        // configured areas by authoredComposeEnvFileArgs. A COMPOSE_ENV_FILES
+        // entry is read where the operator's own process environment points,
+        // which is where Compose reads it: the stack-relative containment rule
+        // governs stack input, not this process-level setting. Only the
+        // selection variables below are read out of either.
+        content = source.listed
+          ? await fsPromises.readFile(source.path, 'utf-8')
+          : await fsSvc.readFile(source.path);
+      } catch {
+        // Compose refuses to run when a file it was told to read is missing or
+        // unreadable, so nothing here can claim which layers the run would load.
+        return {
+          kind: 'unknown',
+          reason: `the env file ${source.listed ? source.path : path.basename(source.path)} could not be read`,
+        };
+      }
+      if (source.listed) composeEnvFiles.push(source.path);
     }
-    for (const [name, value] of parseDotenv(content)) merged.set(name, value);
+    try {
+      reader.read(content);
+    } catch (e) {
+      // Unsupported syntax: refuse rather than pin a guess.
+      return {
+        kind: 'unknown',
+        reason: `${source.listed && source.path !== null ? `${source.path} ` : ''}cannot be read the way Compose reads it: ${getErrorMessage(e, 'unsupported syntax')}`,
+      };
+    }
   }
-  // The process environment sits above every file.
-  const value = process.env.COMPOSE_FILE ?? merged.get('COMPOSE_FILE');
-  if (value === undefined) return { kind: 'absent' };
+
+  // The process environment sits above every file, and the files in the order
+  // Compose reads them.
+  const value = reader.lookup('COMPOSE_FILE');
+  if (value === undefined) return { kind: 'absent', composeEnvFiles };
+  const separator = reader.lookup('COMPOSE_PATH_SEPARATOR');
   return {
     kind: 'value',
     value,
-    pathSeparator: process.env.COMPOSE_PATH_SEPARATOR ?? merged.get('COMPOSE_PATH_SEPARATOR') ?? DEFAULT_PATH_SEPARATOR,
+    pathSeparator: separator === undefined || separator === '' ? DEFAULT_PATH_SEPARATOR : separator,
+    composeEnvFiles,
   };
 }
 
