@@ -113,6 +113,27 @@ async function writePrivate(target: string, data: string | Buffer): Promise<void
   await chmodPrivate(target, 0o600);
 }
 
+/**
+ * The bytes and permission bits of one snapshot source, read through the
+ * descriptor the caller already opened after its containment check. Stat and
+ * read share that descriptor, so a path swapped between the two calls cannot
+ * give the metadata of one file and the bytes of another. A non-regular file is
+ * refused before any read, so a device or a fifo can never be read as content.
+ */
+async function readSnapshotBytes(
+  fh: import('fs/promises').FileHandle,
+  rel: string,
+): Promise<{ bytes: Buffer; mode: number }> {
+  const st = await fh.stat();
+  if (!st.isFile()) {
+    throw Object.assign(
+      new Error(`Managed path "${rel}" is not a regular file; refusing to snapshot it as absent`),
+      { code: 'DIRECTORY_COLLISION' },
+    );
+  }
+  return { bytes: await fh.readFile(), mode: st.mode & 0o777 };
+}
+
 function assertSafeGenerationId(generationId: string): void {
   if (
     !generationId
@@ -1026,16 +1047,7 @@ export class RollbackGenerationStore {
         // path, not on this descriptor, so it does not establish that identity.
         const fh = await fsPromises.open(realSrc, 'r');
         try {
-          const st = await fh.stat();
-          if (!st.isFile()) {
-            throw Object.assign(
-              new Error(
-                `Managed path "${rel}" is not a regular file; refusing to snapshot it as absent`,
-              ),
-              { code: 'DIRECTORY_COLLISION' },
-            );
-          }
-          const bytes = await fh.readFile();
+          const { bytes, mode } = await readSnapshotBytes(fh, rel);
           const blobId = randomUUID();
           const blobPath = path.resolve(blobsRoot, blobId);
           if (!blobPath.startsWith(blobsRoot + path.sep)) continue;
@@ -1054,7 +1066,7 @@ export class RollbackGenerationStore {
             relativePath: rel,
             state: 'present',
             blobId,
-            mode: st.mode & 0o777,
+            mode,
             encrypted,
             linkTarget,
           });
