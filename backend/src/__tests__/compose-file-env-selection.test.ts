@@ -37,7 +37,12 @@ vi.mock('../services/DatabaseService', () => ({
 }));
 
 import { composeFileEnvVarSelection } from '../utils/authoredComposeArgs';
-import { ComposeEnvFiles, ComposeEnvFileError, expandComposeEnvTemplate } from '../utils/composeDotenv';
+import {
+  ComposeEnvFiles,
+  ComposeEnvFileError,
+  expandComposeEnvEscapes,
+  expandComposeEnvTemplate,
+} from '../utils/composeDotenv';
 
 const STACK = 'app';
 
@@ -203,6 +208,38 @@ describe('ComposeEnvFiles', () => {
     // Only the file's first bytes are trimmed, so a BOM further in is a name
     // character Compose rejects rather than something to swallow silently.
     expect(() => readEnvFile('A=1\n\uFEFFB=2\n')).toThrow(ComposeEnvFileError);
+  });
+});
+
+describe('expandComposeEnvEscapes', () => {
+  // Compose unquotes each match with Go's strconv.UnquoteChar: `\ooo` is exactly
+  // three octal digits holding a byte, and a `\0` prefix is rewritten to `\`
+  // before that call. A spelling Go refuses comes back in the rewritten form,
+  // which is what the deploy's own layer selection used.
+  it.each([
+    ['a valid byte octal', '\\0123', 'S'],
+    ['a three-digit octal for a control byte', '\\0000', '\x00'],
+    ['an incomplete octal', '\\012', '\\12'],
+    ['an incomplete octal with one digit', '\\01', '\\1'],
+    ['a bare octal prefix', '\\0', '\\'],
+    ['an octal prefix with two digits', '\\00', '\\0'],
+    ['an octal prefix with a non-octal digit', '\\089', '\\89'],
+    ['an out-of-range octal', '\\0400', '\\400'],
+    ['an octal without the prefix', '\\123', '\\123'],
+    ['an octal above the byte range', '\\400', '\\400'],
+    ['a digit that is not octal', '\\8', '\\8'],
+    ['a Go escape Compose does not list', '\\c', '\\c'],
+    ['a hexadecimal escape Go has and Compose does not', '\\x41', '\\x41'],
+    ['a Unicode escape Go has and Compose does not', '\\u0041', '\\u0041'],
+    ['the Go escapes Compose does list', '\\a\\b\\f\\n\\r\\t\\v', '\x07\b\f\n\r\t\v'],
+    ['an escaped backslash', '\\\\', '\\'],
+    ['an escaped double quote', '\\"', '"'],
+    ['an escaped dollar, which interpolation reads as a literal', '\\$', '$$'],
+    ['an escape inside a name', 'a\\0b', 'a\\b'],
+    ['a valid escape beside an incomplete one', '\\0123\\012', 'S\\12'],
+    ['text with no escape at all', 'compose.yaml', 'compose.yaml'],
+  ])('expands %s', (_label, raw, expected) => {
+    expect(expandComposeEnvEscapes(raw)).toBe(expected);
   });
 });
 

@@ -42,6 +42,12 @@ type Case = {
   /** Text a recorded omission note must contain, when the case is partial. */
   expectUncaptured?: string;
   /**
+   * The layer list the capture must record, when the case pins its own chain.
+   * The model comparison below catches a wrong project, but only this asserts
+   * the literal selection the generation stores.
+   */
+  expectLayers?: string[];
+  /**
    * Mesh is enabled for the stack. The live run then injects its own explicit
    * `-f` list (base, implicit override, Mesh layer), which suppresses Compose's
    * discovery and `COMPOSE_FILE` along with it.
@@ -324,6 +330,58 @@ const CASES: Case[] = [
       '.env': 'UNICODE_é=value\n中文=值\nCOMPOSE_FILE=compose.yaml:prod.yaml\n',
     },
   },
+  {
+    // The separator is an incomplete octal escape: Go's UnquoteChar wants
+    // exactly three digits, so the spelling survives as the literal `\12` and
+    // splits the chain there. Expanding it to a newline selects one layer named
+    // after the whole value, and the recovery run then loads nothing at all.
+    name: 'a separator that is an incomplete octal escape',
+    stack: 'layerseparatoroctal',
+    files: {
+      'compose.yaml': SERVICE('busybox:1.36.1', 'root'),
+      'prod.yaml': SERVICE('busybox:1.36.1', 'production'),
+      '.env': 'COMPOSE_FILE=compose.yaml\\12prod.yaml\nCOMPOSE_PATH_SEPARATOR="\\012"\n',
+    },
+    expectLayers: ['compose.yaml', 'prod.yaml'],
+  },
+  {
+    // A `\0` with no digits at all. Compose rewrites the prefix and Go refuses
+    // the bare backslash, so the value is one backslash and the chain splits on
+    // it; a reader that keeps `\0` splits nothing.
+    name: 'a separator that is a bare octal prefix',
+    stack: 'layerseparatoroctalzero',
+    files: {
+      'compose.yaml': SERVICE('busybox:1.36.1', 'root'),
+      'prod.yaml': SERVICE('busybox:1.36.1', 'production'),
+      '.env': 'COMPOSE_FILE=compose.yaml\\prod.yaml\nCOMPOSE_PATH_SEPARATOR="\\0"\n',
+    },
+    expectLayers: ['compose.yaml', 'prod.yaml'],
+  },
+  {
+    // Three octal digits naming a byte above 255: Go refuses the escape, and
+    // the rewritten spelling is what survives, so the separator is `\400`.
+    name: 'a separator that is an out-of-range octal escape',
+    stack: 'layerseparatoroctalrange',
+    files: {
+      'compose.yaml': SERVICE('busybox:1.36.1', 'root'),
+      'prod.yaml': SERVICE('busybox:1.36.1', 'production'),
+      '.env': 'COMPOSE_FILE=compose.yaml\\400prod.yaml\nCOMPOSE_PATH_SEPARATOR="\\0400"\n',
+    },
+    expectLayers: ['compose.yaml', 'prod.yaml'],
+  },
+  {
+    // A valid byte octal, the shape the reader already reproduces: `\0123`
+    // becomes `S`, so `S` is the separator. Kept beside the invalid spellings
+    // so a reader that stops expanding octals fails here instead.
+    name: 'a separator that is a valid byte octal escape',
+    stack: 'layerseparatoroctalbyte',
+    files: {
+      'compose.yaml': SERVICE('busybox:1.36.1', 'root'),
+      'prod.yaml': SERVICE('busybox:1.36.1', 'production'),
+      '.env': 'COMPOSE_FILE=compose.yamlSprod.yaml\nCOMPOSE_PATH_SEPARATOR="\\0123"\n',
+    },
+    expectLayers: ['compose.yaml', 'prod.yaml'],
+  },
 ];
 
 /** The rendered model, with the project name pinned so it cannot differ. */
@@ -424,6 +482,9 @@ describe.skipIf(!hasDocker)('recovery loads the model the capture-time run loade
         expect(inventory.coverageRefusal).toBeNull();
         if (testCase.expectUncaptured) {
           expect(inventory.uncapturedInputs.join(' ')).toContain(testCase.expectUncaptured);
+        }
+        if (testCase.expectLayers) {
+          expect(inventory.invocation.composeLayers).toEqual(testCase.expectLayers);
         }
 
         // Recovery runs the persisted generation, not the in-memory inventory,

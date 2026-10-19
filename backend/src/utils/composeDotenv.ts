@@ -46,6 +46,9 @@ const COMMENT = '#';
 /** The escape sequences Compose expands inside a double-quoted value. */
 const ESCAPE_SEQUENCE = /(\\(?:[abcfnrtv$"\\]|0\d{0,3}))/g;
 
+/** Go's octal escape: a backslash and exactly three octal digits. */
+const OCTAL_ESCAPE = /^\\[0-7]{3}$/;
+
 const GO_ESCAPES: Record<string, string> = {
   a: '\x07',
   b: '\b',
@@ -119,18 +122,26 @@ function matchingBrace(text: string, openIndex: number): number {
 /**
  * Expand the shell escape sequences Compose recognizes in a double-quoted
  * value. `\$` becomes `$$`, which the interpolation pass then reads as a
- * literal dollar, and `\0...` is an octal escape. Anything else is kept as
- * written, as Go's unquote does for a sequence it does not accept.
+ * literal dollar. Anything else the sequence regex matched is unquoted with
+ * Go's `strconv.UnquoteChar`, as Compose does, and a sequence Go refuses is
+ * kept as written.
+ *
+ * Go accepts `\ooo` only as exactly three octal digits holding a byte, and
+ * Compose rewrites a `\0` prefix to `\` before that call. A spelling that fails
+ * the unquote comes back in the rewritten form, so `"\012"` is the two-character
+ * `\12` rather than a newline and `"\0"` is a single backslash. Turning either
+ * into another character would select a different layer set than the deploy ran.
  */
 export function expandComposeEnvEscapes(raw: string): string {
   return raw.replace(ESCAPE_SEQUENCE, (match) => {
     if (match === '\\$') return '$$';
     const body = match.startsWith('\\0') ? `\\${match.slice(2)}` : match;
     if (body.length === 2 && body[1] in GO_ESCAPES) return GO_ESCAPES[body[1]];
-    if (body.length > 1 && /^[0-7]+$/.test(body.slice(1))) {
-      return String.fromCharCode(parseInt(body.slice(1), 8));
+    if (OCTAL_ESCAPE.test(body)) {
+      const value = parseInt(body.slice(1), 8);
+      if (value <= 255) return String.fromCharCode(value);
     }
-    return match;
+    return body;
   });
 }
 
