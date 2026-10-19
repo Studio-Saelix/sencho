@@ -377,15 +377,11 @@ export async function composeFileEnvVarSelection(stackName: string, nodeId?: num
       }
     } else {
       try {
-        // A selected file was already validated against the compose root and its
-        // configured areas by authoredComposeEnvFileArgs. A COMPOSE_ENV_FILES
-        // entry is read where the operator's own process environment points,
-        // which is where Compose reads it: the stack-relative containment rule
-        // governs stack input, not this process-level setting. Only the
-        // selection variables below are read out of either.
-        content = source.listed
-          ? await fsPromises.readFile(source.path, 'utf-8')
-          : await fsSvc.readFile(source.path);
+        // A COMPOSE_ENV_FILES entry is read through the compose-root containment
+        // rule every other env-file read uses, so a path outside it is refused
+        // rather than read, and the reason below names the file so the operator
+        // can move it into the compose folder.
+        content = await fsSvc.readFile(source.path);
       } catch {
         // Compose refuses to run when a file it was told to read is missing or
         // unreadable, so nothing here can claim which layers the run would load.

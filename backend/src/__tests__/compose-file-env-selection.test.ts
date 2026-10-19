@@ -396,19 +396,18 @@ describe('composeFileEnvVarSelection', () => {
       expect(selection.kind === 'unknown' ? selection.reason : '').toContain('missing.env');
     });
 
-    it('reads a listed file that lives outside the compose directory', async () => {
+    it('refuses a listed file outside the compose directory, naming it', async () => {
       const outside = path.join(mockState.composeDir, '..', 'outside.env');
       fs.writeFileSync(outside, 'COMPOSE_FILE=compose.yaml:prod.yaml\n', 'utf8');
       process.env.COMPOSE_ENV_FILES = outside;
 
-      // The operator set this path in the process environment, which is where
-      // Compose reads it, so it is read here too rather than refused.
-      expect(await composeFileEnvVarSelection(STACK, 1)).toEqual({
-        kind: 'value',
-        value: 'compose.yaml:prod.yaml',
-        pathSeparator: ':',
-        composeEnvFiles: [outside],
-      });
+      // Compose reads that file, and this reader cannot under the compose-root
+      // containment rule, so the selection is unknown rather than guessed. The
+      // reason names the path, so the operator can move it into the compose
+      // folder.
+      const selection = await composeFileEnvVarSelection(STACK, 1);
+      expect(selection).toMatchObject({ kind: 'unknown' });
+      expect(selection.kind === 'unknown' ? selection.reason : '').toContain(outside);
     });
 
     it('reports unknown with the file named when a listed file cannot be parsed', async () => {
