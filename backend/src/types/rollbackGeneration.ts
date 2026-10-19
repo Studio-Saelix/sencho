@@ -59,8 +59,8 @@ export interface RollbackInvocationRecord {
    * prefix carries no `-f`, so a root that appeared after capture cannot shadow
    * the captured project through Compose's own auto-discovery. Omitted on
    * generations captured before it was recorded: those keep the prefix they were
-   * captured with, so a rollback that also re-applies a recovery override names
-   * the base compose file without the implicit override.
+   * captured with, and a recovery override names the base compose file together
+   * with the implicit override, because nothing else in that prefix pins them.
    */
   composeLayers?: string[];
   /** Stack-relative mesh override path when Mesh was part of the capture invocation. */
@@ -186,17 +186,19 @@ export interface ResolvedRollbackInventory {
   manifestGeneration: string | null;
   /**
    * Why capture must not proceed, or null: for example no readable compose
-   * file, a compose file that links outside the stack, case-colliding paths,
-   * or an unreadable Mesh setting. This is the only signal that blocks a
-   * capture; inputs listed in `uncapturedInputs` do not.
+   * file, a compose file whose link leaves the compose directory, a stack
+   * directory that links elsewhere, case-colliding paths, or an unreadable Mesh
+   * setting. This is the only signal that blocks a capture; inputs listed in
+   * `uncapturedInputs` do not.
    */
   coverageRefusal: string | null;
   /**
    * Operator-facing notes, one per declared input a generation cannot hold:
    * files outside the stack directory, paths Compose resolves at deploy time,
-   * and links that leave the stack or point at nothing. The deploy proceeds and
+   * links that leave the stack or point at nothing, and env files the run loads
+   * for interpolation that the generation does not hold. The deploy proceeds and
    * a rollback uses their current content. Always empty when `coverageRefusal`
-   * is set, and for Git-managed inventories.
+   * is set.
    */
   uncapturedInputs: string[];
   /**
