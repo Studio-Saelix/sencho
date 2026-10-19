@@ -889,24 +889,34 @@ const capturable = async (
   // capture never holds (the inventory captures the project .env and the
   // configured project env files, not this operator-level list). Recording them
   // keeps a generation that pins its layers correctly from claiming exact
-  // coverage of the environment those layers are rendered with. An unreadable
-  // list needs no note: Compose refuses to run with a file it cannot read, so
-  // there is no live project whose coverage could be overstated.
-  if (selection.kind !== 'unknown') {
-    for (const envPath of selection.composeEnvFiles) {
-      const resolved = resolveStackRel(stackRoot, posixRel(path.relative(stackRoot, envPath)));
-      if (!resolved) {
-        addUncaptured(
-          `${path.basename(envPath)} is loaded by Compose through COMPOSE_ENV_FILES from outside the stack directory and is not captured`,
-        );
-        continue;
-      }
-      if (map.has(resolved.relativePath)) continue;
-      uncapturedPaths.add(resolved.relativePath);
+  // coverage of the environment those layers are rendered with.
+  //
+  // A selection this reader cannot decide names its files anyway, and that is
+  // the case where the accounting matters most: a path the compose-root
+  // containment refuses here is one Compose can still read, so the run renders
+  // the captured layers with a file the generation never held. Leaving it out
+  // would certify complete coverage of an input the rollback cannot reproduce.
+  // Only a selection that names no file at all (env args Sencho could not
+  // build) leaves nothing to record. An omission never blocks a capture, so
+  // over-reporting is the safe direction, and the Git inventory applies the
+  // same rule to its manifest.
+  const envFilesToAccount = selection.kind === 'unknown' ? selection.loadedEnvFiles : selection.composeEnvFiles;
+  // The source is named only where it is known: an undecided selection is a set
+  // of paths, not a statement about which variable supplied them.
+  const loadedBy = selection.kind === 'unknown' ? ' for interpolation' : ' through COMPOSE_ENV_FILES';
+  for (const envPath of envFilesToAccount) {
+    const resolved = resolveStackRel(stackRoot, posixRel(path.relative(stackRoot, envPath)));
+    if (!resolved) {
       addUncaptured(
-        `${resolved.relativePath} is loaded by Compose through COMPOSE_ENV_FILES and is not captured`,
+        `${path.basename(envPath)} is loaded by Compose${loadedBy} from outside the stack directory and is not captured`,
       );
+      continue;
     }
+    if (map.has(resolved.relativePath)) continue;
+    uncapturedPaths.add(resolved.relativePath);
+    addUncaptured(
+      `${resolved.relativePath} is loaded by Compose${loadedBy} and is not captured`,
+    );
   }
   let composeLayers: string[] = [...selectedLayers];
   if (!capturedPinsFiles) {

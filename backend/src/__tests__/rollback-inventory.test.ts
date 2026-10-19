@@ -1140,6 +1140,48 @@ describe('resolveRollbackInventory: inputs that cannot be captured', () => {
     expect(override.invocation.composeLayers).toEqual(['compose.yaml', 'compose.override.yaml']);
   });
 
+  it('records every loaded env file when the layer-selection reader cannot decide', async () => {
+    await writeCompose('services:\n  web:\n    image: nginx\n');
+    const outside = path.join(composeDir, '..', 'operator.env');
+    mockComposeFileEnvVarSelection.mockResolvedValue({
+      kind: 'unknown',
+      reason: `the env file ${outside} could not be read`,
+      loadedEnvFiles: [outside, path.join(stackDir, 'later.env')],
+    });
+
+    const inventory = await resolveRollbackInventory(1, STACK);
+
+    // A captured -f list is what lets this stack capture at all: the reader's
+    // unknown state names the files the run still loads, so it is not itself a
+    // refusal.
+    expect(inventory.coverageRefusal).toBeNull();
+    expect(inventory.uncapturedInputs).toEqual([
+      'operator.env is loaded by Compose for interpolation from outside the stack directory and is not captured',
+      'later.env is loaded by Compose for interpolation and is not captured',
+    ]);
+    // An outside path cannot be protected by a stack-relative name, so only the
+    // in-stack entry joins the list a restore never deletes.
+    expect(inventory.uncapturedRelativePaths).toEqual(['later.env']);
+  });
+
+  it('skips a loaded env file the generation already holds when the reader cannot decide', async () => {
+    await writeCompose('services:\n  web:\n    image: nginx\n');
+    await fsPromises.writeFile(path.join(stackDir, '.env'), 'A=1\n', 'utf8');
+    mockComposeFileEnvVarSelection.mockResolvedValue({
+      kind: 'unknown',
+      reason: 'the env file select.env could not be read',
+      loadedEnvFiles: [path.join(stackDir, '.env')],
+    });
+
+    const inventory = await resolveRollbackInventory(1, STACK);
+
+    expect(inventory.coverageRefusal).toBeNull();
+    expect(inventory.entries.map((e) => e.relativePath)).toEqual(['.env', 'compose.yaml']);
+    // The project .env is an entry, so it is held and is not an omission.
+    expect(inventory.uncapturedInputs).toEqual([]);
+    expect(inventory.uncapturedRelativePaths).toEqual([]);
+  });
+
   it('fails closed when a first-apply Git stack also has a refused authored inventory', async () => {
     mockGetGitSource.mockReturnValue({
       stack_name: STACK,
