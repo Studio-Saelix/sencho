@@ -253,6 +253,11 @@ describe.skipIf(!hasDocker)('a Git generation records the env files it does not 
       expect(fs.readFileSync(outside, 'utf8')).toBe('GREETING=outside-new\n');
 
       const recoveryLayer = path.join(stackDir, '.sencho-recovery-test.yml');
+      fs.writeFileSync(
+        recoveryLayer,
+        'services:\n  web:\n    labels:\n      sencho.recovery-test: "1"\n',
+        'utf8',
+      );
       const args = await ComposeService.getInstance(nodeId).buildComposeArgsWithRecoveryOverride(
         STACK,
         ['config'],
