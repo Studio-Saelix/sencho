@@ -69,6 +69,7 @@ export function DeployFeedbackModal({ isMinimized, onMinimize }: DeployFeedbackM
       // eslint-disable-next-line react-hooks/set-state-in-effect
       setUserScrolledUp(false);
       startTimeRef.current = 0;
+      autoCloseHoveredRef.current = false;
     }
   }, [isOpen]);
 
@@ -135,6 +136,17 @@ export function DeployFeedbackModal({ isMinimized, onMinimize }: DeployFeedbackM
       clearCountdownInterval();
     };
   }, [canAutoClose, startCountdown, clearCountdownInterval]);
+
+  // Minimizing unmounts the dialog content, so its mouseleave never fires. Drop
+  // the hover hold (and resume a countdown the hover had cancelled) or a
+  // minimized pill would never close once the task succeeds.
+  useEffect(() => {
+    if (!isMinimized) return;
+    autoCloseHoveredRef.current = false;
+    if (canAutoClose && countdownIntervalRef.current === null) {
+      startCountdown();
+    }
+  }, [isMinimized, canAutoClose, startCountdown]);
 
   useEffect(() => {
     if (!userScrolledUp && scrollRef.current) {
