@@ -135,7 +135,7 @@ export function OverviewToolbar({
                             value={prefs.sortBy}
                             onValueChange={(v) => onPrefsChange({ sortBy: v as SortField })}
                             placeholder="Sort by..."
-                            className="[&>button]:!bg-background"
+                            className="[&>button]:!bg-control"
                         />
                     </div>
                     <TooltipProvider>
