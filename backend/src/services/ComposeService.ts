@@ -2035,15 +2035,17 @@ export class ComposeService {
     // generation store applies, so a stack dir that links elsewhere stays out.
     const realBase = await this.realCapturedPath(baseResolved);
     // Canonical js/path-injection barrier inline with the realpath read below:
-    // the check sits at the read because static analysis credits neither the
-    // caller's check nor a helper. This is the entry contract the body already
-    // enforces: a captured env file is a path inside the compose root, spelled
-    // lexically or through a linked (relocated) compose directory.
-    const absResolved = path.resolve(abs);
-    if (
-      !absResolved.startsWith(baseResolved + path.sep)
-      && !absResolved.startsWith(realBase + path.sep)
-    ) {
+    // the guard sits at the read and covers one constant root, because the
+    // analysis does not credit a guard over two alternative roots. A linked
+    // compose root lets a captured env file be spelled through the physical
+    // root; that spelling is rebased onto the lexical root first, so the one
+    // barrier covers both spellings and refuses everything outside the compose
+    // root with the message the refusal already used.
+    let absResolved = path.resolve(abs);
+    if (realBase !== baseResolved && absResolved.startsWith(realBase + path.sep)) {
+      absResolved = path.join(baseResolved, absResolved.slice(realBase.length + path.sep.length));
+    }
+    if (!absResolved.startsWith(baseResolved + path.sep)) {
       throw new Error(`Captured env-file path escapes stack directory for "${stackName}"`);
     }
     const roots = [{ stackDir, base: baseResolved }];
