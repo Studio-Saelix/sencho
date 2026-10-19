@@ -5,6 +5,7 @@
  * remote replicas are retracted.
  */
 import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from 'vitest';
+import { format } from 'node:util';
 import request from 'supertest';
 import { setupTestDb, cleanupTestDb, loginAsTestAdmin } from './helpers/setupTestDb';
 
@@ -134,7 +135,7 @@ describe('DELETE /api/stacks/:stackName removes its mute rules', () => {
     expect(res.status).toBe(200);
     expect(ruleNames()).toEqual(['Mute web']);
     expect(db.getNotificationSuppressionRule(second.id)).toBeUndefined();
-    expect(logged.mock.calls.some((args) => String(args[0]).includes(`mute rule ${first.id}`))).toBe(true);
+    expect(logged.mock.calls.some((args) => format(String(args[0]), ...args.slice(1)).includes(`mute rule ${first.id}`))).toBe(true);
   });
 
   it('leaves the rule in place when removing the stack files fails', async () => {

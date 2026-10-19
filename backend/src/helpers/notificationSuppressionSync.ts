@@ -383,7 +383,7 @@ export function removeStackMuteRules(nodeId: number, stackName: string): void {
       (rule) => rule.node_id === nodeId && rule.stack_patterns.length === 1 && rule.stack_patterns[0] === stackName,
     );
   } catch (err) {
-    console.error(`[SuppressionSync] Failed to look up mute rules for deleted stack "${safeStack}" on node ${nodeId}:`, err);
+    console.error('[SuppressionSync] Failed to look up mute rules for deleted stack "%s" on node %d:', safeStack, nodeId, err);
     return;
   }
   for (const rule of stackRules) {
@@ -392,8 +392,11 @@ export function removeStackMuteRules(nodeId: number, stackName: string): void {
       deleteSuppressionRuleFromFleet(rule);
     } catch (err) {
       console.error(
-        `[SuppressionSync] Failed to remove mute rule ${rule.id} for deleted stack "${safeStack}" on node ${nodeId}; ` +
+        '[SuppressionSync] Failed to remove mute rule %d for deleted stack "%s" on node %d; ' +
           'it can still mute a stack recreated under this name and can be deleted from notification settings:',
+        rule.id,
+        safeStack,
+        nodeId,
         err,
       );
     }
