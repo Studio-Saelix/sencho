@@ -499,6 +499,42 @@ async function resolveGitInventory(
     meshEnabled,
   };
 
+  const refusal = coverageRefusal ?? meshReadFailed;
+  const uncaptured = new Set<string>();
+  const uncapturedPaths = new Set<string>();
+  if (refusal === null) {
+    // The manifest is this generation's canonical file inventory, so it is also
+    // its coverage boundary: an env file the run loads for interpolation that the
+    // manifest does not hold can never be captured here. Compose reads those on
+    // top of the -f list the manifest pins, so a -f pin says which layers the
+    // project has, not which environment renders it. Recording them keeps the
+    // generation from claiming an exact restore it cannot make; a partial restore
+    // reads their current content, which is what the note says.
+    //
+    // This runs for an unknown selection too, because unknown means this reader
+    // could not decide rather than that the run failed: a path the compose-root
+    // containment refused here is one Compose can still read, so skipping it would
+    // certify coverage the generation does not have. Only a selection with no
+    // nameable file at all (a file list Compose would refuse, or env args Sencho
+    // could not build) leaves nothing to record. An omission never blocks a
+    // capture, so over-reporting here is the safe direction.
+    const selection = await composeFileEnvVarSelection(stackName, nodeId);
+    for (const envPath of selection.loadedEnvFiles) {
+      const resolved = resolveStackRel(stackRoot, posixRel(path.relative(stackRoot, envPath)));
+      if (!resolved) {
+        uncaptured.add(redactNoteCredentials(
+          `${path.basename(envPath)} is loaded by Compose for interpolation from outside the stack directory and is not captured`,
+        ));
+        continue;
+      }
+      if (map.has(resolved.relativePath)) continue;
+      uncapturedPaths.add(resolved.relativePath);
+      uncaptured.add(redactNoteCredentials(
+        `${resolved.relativePath} is loaded by Compose for interpolation and is not captured`,
+      ));
+    }
+  }
+
   return {
     entries: [...map.values()].sort((a, b) => a.relativePath.localeCompare(b.relativePath)),
     invocation,
@@ -512,9 +548,11 @@ async function resolveGitInventory(
     lastAppliedContentHash: gitSource.last_applied_content_hash,
     manifestState: gitSource.manifest_state,
     manifestGeneration: gitSource.manifest_generation,
-    coverageRefusal: coverageRefusal ?? meshReadFailed,
-    uncapturedInputs: [],
-    uncapturedRelativePaths: [],
+    coverageRefusal: refusal,
+    uncapturedInputs: refusal === null ? [...uncaptured] : [],
+    uncapturedRelativePaths: refusal === null
+      ? [...uncapturedPaths].sort((a, b) => a.localeCompare(b))
+      : [],
   };
 }
 

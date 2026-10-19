@@ -12,7 +12,7 @@ const mockGetStackProjectEnvFiles = vi.fn().mockReturnValue([]);
 const mockBuildAuthoredComposeArgs = vi.fn().mockResolvedValue(['compose', '-f', 'compose.yaml', 'config', '--quiet']);
 const mockAuthoredComposeFileArgs = vi.fn().mockReturnValue(['-f', 'compose.yaml']);
 const mockAuthoredComposeEnvFileArgs = vi.fn().mockResolvedValue([]);
-const mockComposeFileEnvVarSelection = vi.fn().mockResolvedValue({ kind: 'absent', composeEnvFiles: [] });
+const mockComposeFileEnvVarSelection = vi.fn().mockResolvedValue({ kind: 'absent', composeEnvFiles: [], loadedEnvFiles: [] });
 
 vi.mock('../services/DatabaseService', () => ({
   DatabaseService: {
@@ -78,7 +78,7 @@ describe('resolveRollbackInventory', () => {
     mockBuildAuthoredComposeArgs.mockResolvedValue(['compose', '-f', 'compose.yaml', 'config', '--quiet']);
     mockAuthoredComposeFileArgs.mockReturnValue(['-f', 'compose.yaml']);
     mockAuthoredComposeEnvFileArgs.mockResolvedValue([]);
-    mockComposeFileEnvVarSelection.mockResolvedValue({ kind: 'absent', composeEnvFiles: [] });
+    mockComposeFileEnvVarSelection.mockResolvedValue({ kind: 'absent', composeEnvFiles: [], loadedEnvFiles: [] });
   });
 
   it('merges authored files with Git identity on first apply when manifesto is missing', async () => {
@@ -303,6 +303,237 @@ describe('resolveRollbackInventory', () => {
   });
 });
 
+/**
+ * A Git generation's file inventory is the managed-project manifesto, and a
+ * manifest does not hold the operator-level env files a run loads for
+ * interpolation. Compose reads those on top of the -f list the manifest pins, so
+ * coverage that claims completeness while they stay live is a false promise.
+ */
+describe('resolveRollbackInventory: the env files a Git run loads', () => {
+  let composeDir: string;
+  const STACK = 'gitapp';
+  const REPO = 'https://example.com/repo.git';
+
+  function manifest(extraInputs: unknown[] = []): unknown {
+    return {
+      schemaVersion: 1,
+      manifestVersion: 4,
+      state: 'active',
+      repo: { url: REPO, branch: 'main' },
+      resolvedRevision: { commitSha: 'abc1234', fetchedAt: 1 },
+      project: {
+        root: null,
+        composeFiles: ['compose.yaml'],
+        effectiveProjectDir: null,
+        projectName: STACK,
+        invocation: ['-f', 'compose.yaml', '-p', STACK],
+      },
+      inputs: [{
+        sourcePath: 'compose.yaml',
+        materializedPath: 'compose.yaml',
+        role: 'compose-primary',
+        dependencyKind: 'explicit',
+        ownership: 'managed',
+        provenance: 'fetch',
+        sensitivity: 'low',
+        contentSha256: null,
+        sizeBytes: null,
+        state: 'present',
+        deletionAuthority: 'sencho',
+        note: null,
+      }, ...extraInputs],
+      refusals: [],
+      buildContexts: [],
+      counts: { managed: 1 + extraInputs.length, unmanaged: 0, refused: 0 },
+    };
+  }
+
+  beforeEach(async () => {
+    vi.clearAllMocks();
+    composeDir = await fsPromises.mkdtemp(path.join(os.tmpdir(), 'sencho-inv-gitenv-'));
+    mockState.composeDir = composeDir;
+    const stackDir = path.join(composeDir, STACK);
+    await fsPromises.mkdir(stackDir, { recursive: true });
+    await fsPromises.writeFile(path.join(stackDir, 'compose.yaml'), 'services:\n  web:\n    image: nginx\n', 'utf8');
+    await fsPromises.writeFile(path.join(stackDir, 'operator.env'), 'GREETING=old\n', 'utf8');
+    mockGetGitSource.mockReturnValue({
+      stack_name: STACK,
+      repo_url: REPO,
+      branch: 'main',
+      last_applied_commit_sha: 'abc1234',
+      last_applied_content_hash: 'hash',
+      applied_deploy_spec: { files: ['compose.yaml'], contextDir: null },
+      sync_env: false,
+      manifest_version: 4,
+      manifest_state: 'active',
+      manifest_generation: null,
+    });
+    mockReadManifest.mockResolvedValue(manifest());
+    mockGetStackProjectEnvFiles.mockReturnValue([]);
+    mockAuthoredComposeFileArgs.mockReturnValue(['-f', 'compose.yaml', '-p', STACK]);
+    mockAuthoredComposeEnvFileArgs.mockResolvedValue([]);
+    mockComposeFileEnvVarSelection.mockResolvedValue({ kind: 'absent', composeEnvFiles: [], loadedEnvFiles: [] });
+  });
+
+  it('records an operator env file the manifest does not hold as not captured', async () => {
+    const operatorEnv = path.join(composeDir, STACK, 'operator.env');
+    mockComposeFileEnvVarSelection.mockResolvedValue({
+      kind: 'value',
+      value: 'compose.yaml',
+      pathSeparator: ':',
+      composeEnvFiles: [operatorEnv],
+      loadedEnvFiles: [operatorEnv],
+    });
+
+    const inventory = await resolveRollbackInventory(1, STACK);
+
+    // The manifest still decides the layers and the file set, and the operator
+    // env file it cannot hold is recorded instead of being certified complete.
+    expect(inventory.coverageRefusal).toBeNull();
+    expect(inventory.invocation.composeLayers).toEqual(['compose.yaml']);
+    expect(inventory.entries.map((e) => e.relativePath)).toEqual(['compose.yaml']);
+    expect(inventory.uncapturedRelativePaths).toContain('operator.env');
+    expect(inventory.uncapturedInputs).toEqual([
+      expect.stringContaining('operator.env'),
+    ]);
+  });
+
+  it('records a live project .env the manifest does not hold as not captured', async () => {
+    const projectEnv = path.join(composeDir, STACK, '.env');
+    await fsPromises.writeFile(projectEnv, 'GREETING=old\n', 'utf8');
+    mockComposeFileEnvVarSelection.mockResolvedValue({
+      kind: 'absent',
+      composeEnvFiles: [],
+      loadedEnvFiles: [projectEnv],
+    });
+
+    const inventory = await resolveRollbackInventory(1, STACK);
+
+    expect(inventory.coverageRefusal).toBeNull();
+    expect(inventory.uncapturedRelativePaths).toContain('.env');
+    expect(inventory.uncapturedInputs.join(' ')).toContain('.env');
+  });
+
+  it('leaves an env file the manifest holds out of the omissions', async () => {
+    const projectEnv = path.join(composeDir, STACK, '.env');
+    await fsPromises.writeFile(projectEnv, 'GREETING=old\n', 'utf8');
+    mockReadManifest.mockResolvedValue(manifest([{
+      sourcePath: '.env',
+      materializedPath: '.env',
+      role: 'env',
+      dependencyKind: 'sync-env',
+      ownership: 'managed',
+      provenance: 'migration',
+      sensitivity: 'high',
+      contentSha256: null,
+      sizeBytes: null,
+      state: 'present',
+      deletionAuthority: 'sencho',
+      note: null,
+    }]));
+    mockComposeFileEnvVarSelection.mockResolvedValue({
+      kind: 'absent',
+      composeEnvFiles: [],
+      loadedEnvFiles: [projectEnv],
+    });
+
+    const inventory = await resolveRollbackInventory(1, STACK);
+
+    // The generation captures that file, so naming it as an input it does not
+    // hold would be wrong.
+    expect(inventory.uncapturedInputs).toEqual([]);
+    expect(inventory.uncapturedRelativePaths).toEqual([]);
+  });
+
+  it('names an env file outside the stack without claiming it is protected', async () => {
+    const outside = path.join(composeDir, '..', 'operator.env');
+    mockComposeFileEnvVarSelection.mockResolvedValue({
+      kind: 'value',
+      value: 'compose.yaml',
+      pathSeparator: ':',
+      composeEnvFiles: [outside],
+      loadedEnvFiles: [outside],
+    });
+
+    const inventory = await resolveRollbackInventory(1, STACK);
+
+    expect(inventory.coverageRefusal).toBeNull();
+    expect(inventory.uncapturedRelativePaths).toEqual([]);
+    expect(inventory.uncapturedInputs.join(' ')).toContain('operator.env');
+  });
+
+  it('records nothing when the run\'s env files could not be read at all', async () => {
+    mockComposeFileEnvVarSelection.mockResolvedValue({
+      kind: 'unknown',
+      reason: 'the env file operator.env could not be read',
+      loadedEnvFiles: [],
+    });
+
+    const inventory = await resolveRollbackInventory(1, STACK);
+
+    // Compose refuses to run with a file it cannot read, so there is no live
+    // project whose coverage could be overstated.
+    expect(inventory.coverageRefusal).toBeNull();
+    expect(inventory.uncapturedInputs).toEqual([]);
+  });
+
+  it('records every named env file when the reader could not decide', async () => {
+    const operatorEnv = path.join(composeDir, STACK, 'operator.env');
+    const outside = path.join(composeDir, '..', 'operator-outside.env');
+    mockComposeFileEnvVarSelection.mockResolvedValue({
+      kind: 'unknown',
+      reason: 'the env file operator-outside.env could not be read',
+      loadedEnvFiles: [outside, operatorEnv],
+    });
+
+    const inventory = await resolveRollbackInventory(1, STACK);
+
+    // The reader could not decide, but Compose reads what it was given, so both
+    // names are recorded and an omission never blocks the capture.
+    expect(inventory.coverageRefusal).toBeNull();
+    expect(inventory.uncapturedRelativePaths).toContain('operator.env');
+    expect(inventory.uncapturedInputs.join(' ')).toContain('operator-outside.env');
+    expect(inventory.uncapturedInputs.join(' ')).toContain('operator.env');
+  });
+
+  it('blocks the capture instead of recording an established pinned stack\'s env list', async () => {
+    const stackName = 'pinnedenv';
+    const stackDir = path.join(composeDir, stackName);
+    await fsPromises.mkdir(stackDir, { recursive: true });
+    await fsPromises.writeFile(path.join(stackDir, 'compose.yaml'), 'services:\n  web:\n    image: nginx\n', 'utf8');
+    await fsPromises.writeFile(path.join(stackDir, 'operator.env'), 'GREETING=old\n', 'utf8');
+
+    // An applied deploy spec is what pins files with -f, and it is also what
+    // makes the Git inventory established. A missing manifesto therefore fails
+    // closed here, so no capture can reach the authored inventory and claim
+    // coverage of an operator env file it never recorded.
+    mockGetGitSource.mockReturnValue({
+      stack_name: stackName,
+      repo_url: REPO,
+      branch: 'main',
+      last_applied_commit_sha: null,
+      last_applied_content_hash: null,
+      applied_deploy_spec: { files: ['compose.yaml'], contextDir: null },
+      sync_env: false,
+      manifest_version: null,
+      manifest_state: null,
+      manifest_generation: null,
+    });
+    mockReadManifest.mockResolvedValue(null);
+    mockComposeFileEnvVarSelection.mockResolvedValue({
+      kind: 'unknown',
+      reason: 'the env file operator.env could not be read',
+      loadedEnvFiles: [path.join(stackDir, 'operator.env')],
+    });
+
+    const inventory = await resolveRollbackInventory(1, stackName);
+
+    expect(inventory.coverageRefusal).toMatch(/missing/i);
+    expect(inventory.uncapturedInputs).toEqual([]);
+    expect(inventory.uncapturedRelativePaths).toEqual([]);
+  });
+});
+
 describe('resolveRollbackInventory: the layer set recovery pins', () => {
   let composeDir: string;
   const STACK = 'layers';
@@ -316,7 +547,7 @@ describe('resolveRollbackInventory: the layer set recovery pins', () => {
     mockGetStackProjectEnvFiles.mockReturnValue([]);
     mockAuthoredComposeFileArgs.mockReturnValue([]);
     mockAuthoredComposeEnvFileArgs.mockResolvedValue([]);
-    mockComposeFileEnvVarSelection.mockResolvedValue({ kind: 'absent', composeEnvFiles: [] });
+    mockComposeFileEnvVarSelection.mockResolvedValue({ kind: 'absent', composeEnvFiles: [], loadedEnvFiles: [] });
   });
 
   async function write(name: string, body: string): Promise<void> {
@@ -359,7 +590,7 @@ describe('resolveRollbackInventory: the layer set recovery pins', () => {
     // The captured root declares prod.yaml, so the generation holds it.
     await write('compose.yaml', 'include:\n  - ./prod.yaml\nservices:\n  web:\n    image: nginx\n');
     await write('prod.yaml', 'services:\n  web:\n    command: ["false"]\n');
-    mockComposeFileEnvVarSelection.mockResolvedValue({ kind: 'value', value: 'compose.yaml:prod.yaml', pathSeparator: ':', composeEnvFiles: [] });
+    mockComposeFileEnvVarSelection.mockResolvedValue({ kind: 'value', value: 'compose.yaml:prod.yaml', pathSeparator: ':', composeEnvFiles: [], loadedEnvFiles: [] });
 
     const inventory = await resolveRollbackInventory(1, STACK);
 
@@ -373,7 +604,7 @@ describe('resolveRollbackInventory: the layer set recovery pins', () => {
   it('holds a COMPOSE_FILE layer the generation cannot capture as a partial input', async () => {
     await write('compose.yaml', 'services:\n  web:\n    image: nginx\n');
     await write('prod.yaml', 'services:\n  web:\n    command: ["false"]\n');
-    mockComposeFileEnvVarSelection.mockResolvedValue({ kind: 'value', value: 'compose.yaml:prod.yaml', pathSeparator: ':', composeEnvFiles: [] });
+    mockComposeFileEnvVarSelection.mockResolvedValue({ kind: 'value', value: 'compose.yaml:prod.yaml', pathSeparator: ':', composeEnvFiles: [], loadedEnvFiles: [] });
 
     const inventory = await resolveRollbackInventory(1, STACK);
 
@@ -392,7 +623,7 @@ describe('resolveRollbackInventory: the layer set recovery pins', () => {
     ['a layer that escapes the stack', '../shared/prod.yaml'],
   ])('refuses a COMPOSE_FILE chain naming %s', async (_label, value) => {
     await write('compose.yaml', 'services:\n  web:\n    image: nginx\n');
-    mockComposeFileEnvVarSelection.mockResolvedValue({ kind: 'value', value: `compose.yaml:${value}`, pathSeparator: ':', composeEnvFiles: [] });
+    mockComposeFileEnvVarSelection.mockResolvedValue({ kind: 'value', value: `compose.yaml:${value}`, pathSeparator: ':', composeEnvFiles: [], loadedEnvFiles: [] });
 
     const inventory = await resolveRollbackInventory(1, STACK);
 
@@ -480,7 +711,7 @@ describe('resolveRollbackInventory: the layer set recovery pins', () => {
 ])('accepts %s', async (_label, pathSeparator, value) => {
   await write('compose.yaml', 'include:\n  - ./prod\nservices:\n  web:\n    image: nginx\n');
   await write('prod', 'services:\n  web:\n    command: ["false"]\n');
-  mockComposeFileEnvVarSelection.mockResolvedValue({ kind: 'value', value, pathSeparator, composeEnvFiles: [] });
+  mockComposeFileEnvVarSelection.mockResolvedValue({ kind: 'value', value, pathSeparator, composeEnvFiles: [], loadedEnvFiles: [] });
 
   const inventory = await resolveRollbackInventory(1, STACK);
 
@@ -493,7 +724,7 @@ it('records a COMPOSE_FILE layer that links outside the stack as not captured', 
     await fsPromises.mkdir(path.join(composeDir, 'shared'), { recursive: true });
     await fsPromises.writeFile(path.join(composeDir, 'shared', 'prod.yaml'), 'services: {}\n', 'utf8');
     await fsPromises.symlink(path.join(composeDir, 'shared', 'prod.yaml'), path.join(composeDir, STACK, 'prod.yaml'));
-    mockComposeFileEnvVarSelection.mockResolvedValue({ kind: 'value', value: 'compose.yaml:prod.yaml', pathSeparator: ':', composeEnvFiles: [] });
+    mockComposeFileEnvVarSelection.mockResolvedValue({ kind: 'value', value: 'compose.yaml:prod.yaml', pathSeparator: ':', composeEnvFiles: [], loadedEnvFiles: [] });
 
     const inventory = await resolveRollbackInventory(1, STACK);
 
@@ -508,7 +739,7 @@ it('records a COMPOSE_FILE layer that links outside the stack as not captured', 
 
   it('refuses when the environment that selects the layers cannot be read', async () => {
     await write('compose.yaml', 'services:\n  web:\n    image: nginx\n');
-    mockComposeFileEnvVarSelection.mockResolvedValue({ kind: 'unknown', reason: 'the env file select.env could not be read' });
+    mockComposeFileEnvVarSelection.mockResolvedValue({ kind: 'unknown', reason: 'the env file select.env could not be read', loadedEnvFiles: [] });
 
     const inventory = await resolveRollbackInventory(1, STACK);
 
@@ -560,7 +791,7 @@ describe('resolveRollbackInventory: inputs that cannot be captured', () => {
     mockGetStackProjectEnvFiles.mockReturnValue([]);
     mockAuthoredComposeFileArgs.mockReturnValue(['-f', 'compose.yaml']);
     mockAuthoredComposeEnvFileArgs.mockResolvedValue([]);
-    mockComposeFileEnvVarSelection.mockResolvedValue({ kind: 'absent', composeEnvFiles: [] });
+    mockComposeFileEnvVarSelection.mockResolvedValue({ kind: 'absent', composeEnvFiles: [], loadedEnvFiles: [] });
   });
 
   it.each([

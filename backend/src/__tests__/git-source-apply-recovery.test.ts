@@ -147,7 +147,7 @@ vi.mock('../utils/authoredComposeArgs', () => ({
   authoredComposeEnvFileArgs: vi.fn().mockResolvedValue([]),
   candidateValidationEnvFileArgs: vi.fn().mockResolvedValue([]),
   DEFAULT_PATH_SEPARATOR: ':',
-  composeFileEnvVarSelection: vi.fn().mockResolvedValue({ kind: 'absent', composeEnvFiles: [] }),
+  composeFileEnvVarSelection: vi.fn().mockResolvedValue({ kind: 'absent', composeEnvFiles: [], loadedEnvFiles: [] }),
 }));
 
 const mockGetGitSource = vi.fn();

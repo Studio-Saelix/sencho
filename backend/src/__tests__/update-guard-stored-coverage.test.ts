@@ -80,7 +80,7 @@ vi.mock('../utils/authoredComposeArgs', () => ({
   authoredComposeFileArgs: () => ['-f', 'compose.yaml'],
   authoredComposeEnvFileArgs: async () => [],
   DEFAULT_PATH_SEPARATOR: ':',
-  composeFileEnvVarSelection: async () => ({ kind: 'absent', composeEnvFiles: [] }),
+  composeFileEnvVarSelection: async () => ({ kind: 'absent', composeEnvFiles: [], loadedEnvFiles: [] }),
 }));
 
 vi.mock('systeminformation', () => ({ default: { fsSize: async () => [{ mount: '/', use: 10 }] } }));
