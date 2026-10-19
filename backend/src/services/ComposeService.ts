@@ -2007,18 +2007,21 @@ export class ComposeService {
   /**
    * Resolve a captured `--env-file` to the path recovery must launch with.
    *
-   * Capture emits the resolved real path of a selected project env file, and
-   * the helper that produced it authorizes any path inside the compose root,
-   * not only inside the stack directory. A stack whose selected env file links
-   * to a sibling in that root therefore captures an env-file recovery has to
-   * accept, so recovery validates against the same root instead of a narrower
-   * one. Containment is decided on the real path, as capture does, so a name
-   * inside the root whose link target leaves it is refused rather than followed.
-   * An in-stack path is mirrored under the overlay root; an authorized path
-   * outside the stack directory keeps its live location, because a recovery
-   * overlay mirrors the stack directory alone. Both the lexical and the real
-   * compose root are matched, so a relocated (symlinked) compose directory
-   * still resolves. Anything outside the compose root is refused.
+   * Capture emits the path of a selected project env file, which is the real
+   * path for a configured file and the compose-root spelling for the
+   * context-directory fallback, and the helper that produced it authorizes any
+   * path inside the compose root, not only inside the stack directory. A stack
+   * whose selected env file links to a sibling in that root therefore captures
+   * an env-file recovery has to accept, so recovery validates against the same
+   * root instead of a narrower one. Containment is decided on the real path, as
+   * capture does, so a name inside the root whose link target leaves it is
+   * refused rather than followed. An in-stack path is mirrored under the
+   * overlay root; an authorized path outside the stack directory keeps its live
+   * location, because a recovery overlay mirrors the stack directory alone.
+   * Both the lexical and the real compose root are matched, so a relocated
+   * (symlinked) compose directory still resolves, and the mirror is derived in
+   * the coordinates of the root that matched. Anything outside the compose root
+   * is refused.
    */
   private async resolveCapturedEnvFile(
     stackName: string,
@@ -2037,7 +2040,13 @@ export class ComposeService {
     const realAbs = await this.realCapturedPath(abs);
     for (const root of roots) {
       if (!isPathWithinBase(realAbs, root.stackDir)) continue;
-      const remapped = this.remapCapturedAbsToRoot(abs, root.stackDir, pathRoot);
+      // The root that matched decides the coordinate system the path is rebased
+      // in. A captured spelling that already lives under it is kept, so a stack
+      // file that links to a sibling keeps its own name; otherwise the real path
+      // is used, because a linked compose root puts the captured lexical name
+      // outside the real stack directory while the file itself is inside it.
+      const matched = isPathWithinBase(abs, root.stackDir) ? abs : realAbs;
+      const remapped = this.remapCapturedAbsToRoot(matched, root.stackDir, pathRoot);
       if (!remapped) {
         throw new Error(`Captured env-file path escapes overlay directory for "${stackName}"`);
       }

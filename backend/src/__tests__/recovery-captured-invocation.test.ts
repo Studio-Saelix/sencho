@@ -331,6 +331,104 @@ describe('captured invocation on recovery Compose args', () => {
     }
   });
 
+  it('mirrors a captured env file under the overlay when the compose root is a symlink', async () => {
+    // The context-directory fallback captures the compose-root spelling of the
+    // project .env, not its real path, so a linked compose root leaves the
+    // captured name outside the real stack directory while the file itself is
+    // inside it. Rebasing that name in the wrong coordinate system produces a
+    // path that escapes the overlay, and recovery refuses a valid generation.
+    const stackName = 'inv-linked-root-overlay';
+    const realComposeDir = path.join(composeDir, 'real-root-overlay');
+    const linkedComposeDir = path.join(composeDir, 'linked-root-overlay');
+    const realStackDir = path.join(realComposeDir, stackName);
+    const linkedStackDir = path.join(linkedComposeDir, stackName);
+    const overlayDir = path.join(composeDir, 'overlay-linked');
+    await fs.promises.mkdir(path.join(realStackDir, 'ctx'), { recursive: true });
+    await fs.promises.mkdir(path.join(overlayDir, 'ctx'), { recursive: true });
+    await fs.promises.symlink(realComposeDir, linkedComposeDir);
+    const compose = 'services:\n  web:\n    image: nginx\n';
+    await fs.promises.writeFile(path.join(realStackDir, 'compose.yaml'), compose, 'utf8');
+    await fs.promises.writeFile(path.join(realStackDir, '.env'), 'MARK=original\n', 'utf8');
+    await fs.promises.writeFile(path.join(overlayDir, 'compose.yaml'), compose, 'utf8');
+    await fs.promises.writeFile(path.join(overlayDir, '.env'), 'MARK=decrypted\n', 'utf8');
+
+    const { DatabaseService } = await import('../services/DatabaseService');
+    const db = DatabaseService.getInstance();
+    db.getDb().prepare('UPDATE nodes SET compose_dir = ? WHERE id = ?').run(linkedComposeDir, nodeId);
+    db.upsertGitSource({
+      stack_name: stackName,
+      repo_url: 'https://example.com/operator/repo.git',
+      branch: 'main',
+      compose_path: 'compose.yaml',
+      compose_paths: ['compose.yaml'],
+      context_dir: 'ctx',
+      sync_env: false,
+      env_path: null,
+      auth_type: 'none',
+      encrypted_token: null, encrypted_deploy_key: null, ssh_known_hosts_entry: null, ssh_host_key_fingerprint: null,
+      encrypted_ca_bundle: null,
+      auto_apply_on_webhook: false,
+      auto_deploy_on_apply: false,
+      last_applied_commit_sha: 'a'.repeat(40),
+      last_applied_content_hash: 'content',
+      pending_commit_sha: null,
+      pending_compose_content: null,
+      pending_env_content: null,
+      pending_fetched_at: null,
+      last_debounce_at: null,
+    });
+    db.setGitSourceAppliedSpec(stackName, { files: ['compose.yaml'], contextDir: 'ctx' });
+    try {
+      const { GitProjectManifestService } = await import('../services/GitProjectManifestService');
+      const manifestService = GitProjectManifestService.getInstance();
+      const gitSource = db.getGitSource(stackName);
+      if (!gitSource) throw new Error('missing Git source');
+      await manifestService.writeManifest(
+        stackName,
+        await manifestService.buildMigratedManifest(stackName, gitSource),
+      );
+
+      const { resolveRollbackInventory } = await import('../services/rollbackInventory');
+      const { RollbackGenerationStore } = await import('../services/RollbackGenerationStore');
+      const { ComposeService } = await import('../services/ComposeService');
+
+      const inventory = await resolveRollbackInventory(nodeId, stackName);
+      expect(inventory.coverageRefusal).toBeNull();
+      const generationId = randomUUID();
+      const captured = await RollbackGenerationStore.captureGeneration({
+        nodeId,
+        stackName,
+        generationId,
+        inventory,
+      });
+      const capturedEnv = captured.invocation.composeArgsPrefix[
+        captured.invocation.composeArgsPrefix.indexOf('--env-file') + 1
+      ];
+      // The fallback records the compose-root spelling, which is the linked one.
+      expect(capturedEnv).toBe(path.join(linkedStackDir, '.env'));
+
+      const args = await ComposeService.getInstance(nodeId).buildComposeArgsWithRecoveryOverride(
+        stackName,
+        ['up', '-d'],
+        null,
+        captured.invocation,
+        overlayDir,
+      );
+      // The mirror is the overlay's counterpart of the file the run loads, not
+      // the overlay root plus a name that only exists in the linked spelling.
+      expect(args[args.indexOf('--env-file') + 1]).toBe(path.join(overlayDir, '.env'));
+      expect(fs.readFileSync(path.join(realStackDir, '.env'), 'utf8')).toBe('MARK=original\n');
+    } finally {
+      db.getDb().prepare('UPDATE nodes SET compose_dir = ? WHERE id = ?').run(composeDir, nodeId);
+      // The fixtures share this file's compose root with every other test in
+      // it, so the link and the trees it introduced are removed rather than
+      // left for a later test to resolve through.
+      await fs.promises.rm(linkedComposeDir, { force: true });
+      await fs.promises.rm(realComposeDir, { recursive: true, force: true });
+      await fs.promises.rm(overlayDir, { recursive: true, force: true });
+    }
+  });
+
   it('pins the captured root when an ordinary stack captured no -f and a higher-priority root appeared', async () => {
     const stackName = 'inv-late-root';
     const stackDir = path.join(composeDir, stackName);
