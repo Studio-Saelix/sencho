@@ -208,15 +208,17 @@ export function OverviewToolbar({
                             </div>
                             <div className="space-y-1.5">
                                 <label className={FILTER_SECTION_LABEL_CLASS}>Severity</label>
-                                <Button
-                                    variant={prefs.filterCritical ? 'default' : 'outline'}
-                                    size="sm"
-                                    className="h-7 text-xs px-2.5"
-                                    onClick={() => onPrefsChange({ filterCritical: !prefs.filterCritical })}
-                                >
-                                    <AlertTriangle className="w-3 h-3 mr-1" />
-                                    Critical Only
-                                </Button>
+                                <div className="flex items-center gap-1.5">
+                                    <Button
+                                        variant={prefs.filterCritical ? 'default' : 'outline'}
+                                        size="sm"
+                                        className="h-7 text-xs px-2.5"
+                                        onClick={() => onPrefsChange({ filterCritical: !prefs.filterCritical })}
+                                    >
+                                        <AlertTriangle className="w-3 h-3 mr-1" />
+                                        Critical Only
+                                    </Button>
+                                </div>
                             </div>
                             <div className="space-y-1.5">
                                 <label className={FILTER_SECTION_LABEL_CLASS}>Networking</label>
