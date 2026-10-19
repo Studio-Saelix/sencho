@@ -10,6 +10,10 @@
  * `COMPOSE_FILE` and `COMPOSE_PATH_SEPARATOR` come out of that reading, so a
  * reader that disagrees picks a different project than the deploy ran.
  *
+ * A file whose bytes begin with a UTF-8 BOM is read from after it, the way
+ * Compose trims one before parsing. It is the file's first bytes only: a BOM
+ * anywhere else is a name character Compose rejects.
+ *
  * Anything this reader cannot reproduce exactly (an unterminated quote, a
  * malformed template, a required variable with no value, a name it cannot
  * parse) throws `ComposeEnvFileError`. Callers turn that into an explicit
@@ -31,6 +35,9 @@ export class ComposeEnvFileError extends Error {
 
 /** Compose's chain separator when COMPOSE_PATH_SEPARATOR is unset or empty. */
 export const DEFAULT_PATH_SEPARATOR = ':';
+
+/** The byte-order mark Compose drops from the start of an env file's bytes. */
+const UTF8_BOM = '\uFEFF';
 
 const DOUBLE_QUOTE = '"';
 const SINGLE_QUOTE = "'";
@@ -335,7 +342,12 @@ export class ComposeEnvFiles {
 
   /** Read one file's text, adding its assignments. Throws on unreadable syntax. */
   read(content: string): void {
-    parseEnvFileText(content, (name) => this.lookup(name), (name, value) => {
+    // Compose reads a file's bytes and drops a leading BOM before parsing it
+    // (`bytes.TrimPrefix(data, utf8BOM)`), which is what an editor-saved file
+    // starts with. Only the first character is considered, so a BOM elsewhere
+    // stays the character Compose rejects in a name.
+    const text = content.startsWith(UTF8_BOM) ? content.slice(1) : content;
+    parseEnvFileText(text, (name) => this.lookup(name), (name, value) => {
       this.values.set(name, value);
     });
   }

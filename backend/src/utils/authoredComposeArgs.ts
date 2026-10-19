@@ -321,11 +321,23 @@ export async function authoredComposeEnvFileArgs(
  *
  * `composeEnvFiles` names the files COMPOSE_ENV_FILES supplied, absolute, so a
  * capture can report that it does not hold them.
+ *
+ * `loadedEnvFiles` names every env file the run is given to load for
+ * interpolation, in the order Compose reads them, whichever source selected
+ * them, whether or not this reader could read the file: a path the compose-root
+ * containment refuses here is one Compose can still read, and a file this
+ * reader cannot reproduce at all is still one the run was told to load. A stack's
+ * layers can be pinned by `-f` while those files still render every value in
+ * them, so a capture that claims complete coverage has to account for the ones it
+ * does not hold; naming a file the run cannot read costs a note and never widens
+ * what a generation holds. The project `.env` is the one optional source, so it
+ * is named only when it exists; a run with no source at all (no selected file and
+ * the default env file disabled) reads no file.
  */
 export type ComposeFileEnvSelection =
-  | { kind: 'absent'; composeEnvFiles: string[] }
-  | { kind: 'value'; value: string; pathSeparator: string; composeEnvFiles: string[] }
-  | { kind: 'unknown'; reason: string };
+  | { kind: 'absent'; composeEnvFiles: string[]; loadedEnvFiles: string[] }
+  | { kind: 'value'; value: string; pathSeparator: string; composeEnvFiles: string[]; loadedEnvFiles: string[] }
+  | { kind: 'unknown'; reason: string; loadedEnvFiles: string[] };
 
 export { DEFAULT_PATH_SEPARATOR };
 
@@ -340,6 +352,56 @@ function composeEnvFilesFromProcess(): string[] {
   return raw.split(',').filter((entry) => entry.length > 0);
 }
 
+/**
+ * True or false as Go's strconv.ParseBool reads it, which is the check Compose
+ * makes on COMPOSE_DISABLE_ENV_FILE; null for a value it refuses, so the run
+ * fails instead of choosing a default.
+ */
+function parseGoBoolean(raw: string): boolean | null {
+  switch (raw) {
+    case '1': case 't': case 'T': case 'TRUE': case 'true': case 'True':
+      return true;
+    case '0': case 'f': case 'F': case 'FALSE': case 'false': case 'False':
+      return false;
+    default:
+      return null;
+  }
+}
+
+/**
+ * The env files a run reads for interpolation, in read order. Compose reads one
+ * set: an explicit --env-file wins over COMPOSE_ENV_FILES, which wins over the
+ * project .env. A relative COMPOSE_ENV_FILES entry resolves against the working
+ * directory, which is the stack directory for every Sencho spawn. A `path` of
+ * null is the project .env, which is read through the stack's own accessor.
+ */
+function envFileSources(
+  stackDir: string,
+  selected: string[],
+  listed: string[],
+): { sources: Array<{ path: string | null; listed: boolean }> } | { reason: string } {
+  if (selected.length > 0) {
+    return { sources: selected.map((envPath) => ({ path: envPath, listed: false })) };
+  }
+  if (listed.length > 0) {
+    return { sources: listed.map((entry) => ({ path: path.resolve(stackDir, entry), listed: true })) };
+  }
+  // Compose loads the project .env only when nothing above selected a file, and
+  // it refuses to run when COMPOSE_DISABLE_ENV_FILE holds a value its boolean
+  // parser does not accept. An ignored file must not decide anything here.
+  const disabledRaw = process.env.COMPOSE_DISABLE_ENV_FILE;
+  if (disabledRaw !== undefined) {
+    const disabled = parseGoBoolean(disabledRaw);
+    if (disabled === null) {
+      return {
+        reason: `COMPOSE_DISABLE_ENV_FILE is set to ${JSON.stringify(disabledRaw)}, which Compose does not accept as a boolean`,
+      };
+    }
+    if (disabled) return { sources: [] };
+  }
+  return { sources: [{ path: null, listed: false }] };
+}
+
 export async function composeFileEnvVarSelection(stackName: string, nodeId?: number): Promise<ComposeFileEnvSelection> {
   const resolvedNodeId = nodeId ?? NodeRegistry.getInstance().getDefaultNodeId();
   const fsSvc = FileSystemService.getInstance(resolvedNodeId);
@@ -347,34 +409,53 @@ export async function composeFileEnvVarSelection(stackName: string, nodeId?: num
   try {
     envArgs = await authoredComposeEnvFileArgs(stackName, resolvedNodeId);
   } catch (e) {
-    return { kind: 'unknown', reason: getErrorMessage(e, 'a selected env file could not be read') };
+    return {
+      kind: 'unknown',
+      reason: getErrorMessage(e, 'a selected env file could not be read'),
+      loadedEnvFiles: [],
+    };
   }
   const selected = envArgs.filter((_, index) => index % 2 === 1 && envArgs[index - 1] === '--env-file');
-  // Compose reads one set of files. An explicit --env-file wins over
-  // COMPOSE_ENV_FILES, which wins over the project .env, so a file the lower
-  // source sets is never consulted. A relative COMPOSE_ENV_FILES entry resolves
-  // against the working directory, which is the stack directory for every
-  // Sencho spawn.
   const listed = selected.length > 0 ? [] : composeEnvFilesFromProcess();
   const stackDir = path.resolve(NodeRegistry.getInstance().getComposeDir(resolvedNodeId), stackName);
-  const sources: Array<{ path: string | null; listed: boolean }> = selected.length > 0
-    ? selected.map((envPath) => ({ path: envPath, listed: false }))
-    : listed.length > 0
-      ? listed.map((entry) => ({ path: path.resolve(stackDir, entry), listed: true }))
-      : [{ path: null, listed: false }];
+  const resolvedSources = envFileSources(stackDir, selected, listed);
+  if ('reason' in resolvedSources) {
+    return { kind: 'unknown', reason: resolvedSources.reason, loadedEnvFiles: [] };
+  }
+  const sources = resolvedSources.sources;
 
   const reader = new ComposeEnvFiles((name) => process.env[name]);
   const composeEnvFiles: string[] = [];
+  // Every file the run was given to load, in read order. Named before any read,
+  // because a read that fails stops this reader while the file list Compose
+  // holds is still what it loads: a caller accounting for coverage has to see
+  // every name, including the ones after a file this reader refused. The project
+  // .env is the one optional source, so it is named only once it is read.
+  const loadedEnvFiles: string[] = [];
+  for (const source of sources) {
+    if (source.path !== null) loadedEnvFiles.push(source.path);
+  }
+  const unreadable = (reason: string): ComposeFileEnvSelection => ({
+    kind: 'unknown',
+    reason,
+    loadedEnvFiles,
+  });
   for (const source of sources) {
     let content: string;
     if (source.path === null) {
+      const projectEnv = path.resolve(stackDir, '.env');
       try {
         content = await fsSvc.getEnvContent(stackName);
       } catch (err) {
-        // A stack with no project .env is an ordinary run, not an unknown.
+        // A stack with no project .env is an ordinary run, not an unknown, and
+        // an absent default file is not one Compose loads either.
         if ((err as NodeJS.ErrnoException).code === 'ENOENT') continue;
-        return { kind: 'unknown', reason: 'the project .env could not be read' };
+        // The file is there but this reader could not read it, so the run reads
+        // it wherever Compose can and the name is kept for the reason above.
+        loadedEnvFiles.push(projectEnv);
+        return unreadable('the project .env could not be read');
       }
+      loadedEnvFiles.push(projectEnv);
     } else {
       try {
         // A COMPOSE_ENV_FILES entry is read through the compose-root containment
@@ -385,34 +466,34 @@ export async function composeFileEnvVarSelection(stackName: string, nodeId?: num
       } catch {
         // Compose refuses to run when a file it was told to read is missing or
         // unreadable, so nothing here can claim which layers the run would load.
-        return {
-          kind: 'unknown',
-          reason: `the env file ${source.listed ? source.path : path.basename(source.path)} could not be read`,
-        };
+        return unreadable(
+          `the env file ${source.listed ? source.path : path.basename(source.path)} could not be read`,
+        );
       }
       if (source.listed) composeEnvFiles.push(source.path);
     }
     try {
       reader.read(content);
     } catch (e) {
-      // Unsupported syntax: refuse rather than pin a guess.
-      return {
-        kind: 'unknown',
-        reason: `${source.listed && source.path !== null ? `${source.path} ` : ''}cannot be read the way Compose reads it: ${getErrorMessage(e, 'unsupported syntax')}`,
-      };
+      // Unsupported syntax: refuse rather than pin a guess. The file is already
+      // named, because Compose reads it whatever this reader can reproduce.
+      return unreadable(
+        `${source.listed && source.path !== null ? `${source.path} ` : ''}cannot be read the way Compose reads it: ${getErrorMessage(e, 'unsupported syntax')}`,
+      );
     }
   }
 
   // The process environment sits above every file, and the files in the order
   // Compose reads them.
   const value = reader.lookup('COMPOSE_FILE');
-  if (value === undefined) return { kind: 'absent', composeEnvFiles };
+  if (value === undefined) return { kind: 'absent', composeEnvFiles, loadedEnvFiles };
   const separator = reader.lookup('COMPOSE_PATH_SEPARATOR');
   return {
     kind: 'value',
     value,
     pathSeparator: separator === undefined || separator === '' ? DEFAULT_PATH_SEPARATOR : separator,
     composeEnvFiles,
+    loadedEnvFiles,
   };
 }
 

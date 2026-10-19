@@ -225,6 +225,41 @@ const CASES: Case[] = [
     processEnv: { COMPOSE_ENV_FILES: 'first.env,second.env' },
     expectUncaptured: 'first.env is loaded by Compose through COMPOSE_ENV_FILES and is not captured',
   },
+  {
+    // The process disables the default env file, so Compose never reads the
+    // chain it holds: the run loads compose.yaml alone. Pinning the chain from
+    // an ignored file would roll the stack back to a project it never ran.
+    name: 'a .env COMPOSE_FILE chain the process disables',
+    stack: 'layerdisabledenv',
+    files: {
+      'compose.yaml': SERVICE('busybox:1.36.1', 'root'),
+      'prod.yaml': SERVICE('busybox:1.36.1', 'production'),
+      '.env': 'COMPOSE_FILE=compose.yaml:prod.yaml\n',
+    },
+    processEnv: { COMPOSE_DISABLE_ENV_FILE: 'true' },
+  },
+  {
+    // A BOM is a valid env file to Compose, which trims it before parsing, so a
+    // reader that rejects it refuses a stack that deploys.
+    name: 'a BOM-prefixed .env COMPOSE_FILE chain',
+    stack: 'layerbom',
+    files: {
+      'compose.yaml': SERVICE('busybox:1.36.1', 'root'),
+      'prod.yaml': SERVICE('busybox:1.36.1', 'production'),
+      '.env': '\uFEFFCOMPOSE_FILE=compose.yaml:prod.yaml\n',
+    },
+  },
+  {
+    name: 'a BOM-prefixed listed env file',
+    stack: 'layerbomlisted',
+    files: {
+      'compose.yaml': SERVICE('busybox:1.36.1', 'root'),
+      'prod.yaml': SERVICE('busybox:1.36.1', 'production'),
+      'select.env': '\uFEFFCOMPOSE_FILE=compose.yaml:prod.yaml\n',
+    },
+    processEnv: { COMPOSE_ENV_FILES: 'select.env' },
+    expectUncaptured: 'select.env is loaded by Compose through COMPOSE_ENV_FILES and is not captured',
+  },
 ];
 
 /** The rendered model, with the project name pinned so it cannot differ. */
