@@ -844,7 +844,7 @@ it('restores a snapshotted Git manifesto on compensate path helper', async () =>
     expect(await fsPromises.readFile(path.join(stackDir, 'compose.yaml', 'sentinel.txt'), 'utf8')).toBe('keep-me\n');
   });
 
-  it.skipIf(process.platform === 'win32')('rejects a managed file replaced by a fifo before opening it', async () => {
+  it.skipIf(process.platform === 'win32')('rejects a managed file replaced by a fifo without a writer', async () => {
     const stackName = 'fiforestore';
     const stackDir = path.join(composeDir, stackName);
     await fsPromises.mkdir(stackDir, { recursive: true });

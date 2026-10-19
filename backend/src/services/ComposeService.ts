@@ -2070,7 +2070,18 @@ export class ComposeService {
    * too.
    */
   private async assertCapturedComposeLayerTarget(layer: string, pathRoot: string): Promise<void> {
-    const lexical = path.resolve(pathRoot, layer);
+    // Canonical js/path-injection barrier inline with the sinks below: the
+    // containment check sits at the sink because static analysis credits
+    // neither the caller's check nor a helper. The layer is opened relative to
+    // the working directory, so that directory is the base.
+    const rootResolved = path.resolve(pathRoot);
+    const lexical = path.resolve(rootResolved, layer);
+    if (!lexical.startsWith(rootResolved + path.sep)) {
+      throw Object.assign(
+        new Error(`Captured compose layer "${layer}" escapes the recovery working directory`),
+        { code: 'SYMLINK_ESCAPE' },
+      );
+    }
     try {
       await fs.promises.lstat(lexical);
     } catch (e) {

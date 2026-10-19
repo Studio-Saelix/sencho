@@ -1041,17 +1041,11 @@ export class RollbackGenerationStore {
         }
         const realSrc = await fsPromises.realpath(srcCandidate);
         if (!realSrc.startsWith(realStackRoot + path.sep)) continue;
-        // Refuse a fifo, device, or directory before opening it. A blocking
-        // open of a fifo waits for a writer and never reaches the descriptor
-        // check. Stat does not block. O_NONBLOCK covers a fifo swapped in
-        // between this stat and the open; the descriptor check still rejects it.
-        const srcStat = await fsPromises.stat(realSrc);
-        if (!srcStat.isFile()) {
-          throw Object.assign(
-            new Error(`Managed path "${rel}" is not a regular file; refusing to snapshot it as absent`),
-            { code: 'DIRECTORY_COLLISION' },
-          );
-        }
+        // Open without blocking, then check the descriptor: a fifo, device, or
+        // directory is refused there, and a blocking open of a fifo waits for a
+        // writer and never reaches that check. O_NONBLOCK keeps the open from
+        // waiting when a fifo is swapped in after the path was resolved, and
+        // the descriptor the check reads is the one the bytes come from.
         const fh = await fsPromises.open(realSrc, fsConstants.O_RDONLY | fsConstants.O_NONBLOCK);
         try {
           const { bytes, mode } = await readSnapshotBytes(fh, rel);
