@@ -30,7 +30,7 @@ import { ReclaimHero } from './resources/ReclaimHero';
 import { FootprintTreemap } from './resources/FootprintTreemap';
 import { ImageDetailsSheet } from './resources/ImageDetailsSheet';
 import { RollbackGenerationsTab, type RollbackGeneration } from './resources/RollbackGenerationsTab';
-import { TableSkeleton } from './resources/TableSkeleton';
+import { TableSkeleton, TableLoadError } from './resources/TableSkeleton';
 import { VolumeBrowserSheet } from './resources/VolumeBrowserSheet';
 import { VolumeNameLabel } from './resources/VolumeNameLabel';
 import { useTableSort } from '@/hooks/useTableSort';
@@ -96,6 +96,7 @@ interface UnmanagedContainer {
 }
 
 type ResourceFilter = 'all' | 'managed' | 'unmanaged';
+type LoadState = 'loading' | 'ready' | 'error';
 
 const PLAN_PREVIEW_CAP = 30;
 
@@ -395,7 +396,11 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
     const [orphans, setOrphans] = useState<Record<string, UnmanagedContainer[]>>({});
     const [rollbackGenerations, setRollbackGenerations] = useState<RollbackGeneration[]>([]);
 
-    const [isLoading, setIsLoading] = useState(true);
+    // Inventory (tables) and disk usage load as separate requests on separate
+    // clocks, so the tables never wait on the usage figures.
+    const [inventoryState, setInventoryState] = useState<LoadState>('loading');
+    const [usageState, setUsageState] = useState<LoadState>('loading');
+    const isLoading = inventoryState === 'loading';
     const [isActioning, setIsActioning] = useState(false);
 
     // Filter state
@@ -424,7 +429,7 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
     const planFetchGenRef = useRef(0);
 
     // Reclaim banner visibility: the per-node opt-in setting (loaded in
-    // fetchAllData) and the per-browser dismiss snapshot for the active node.
+    // loadInventory) and the per-browser dismiss snapshot for the active node.
     const [reclaimHeroEnabled, setReclaimHeroEnabled] = useState(false);
     const [heroDismissedBytes, setHeroDismissedBytes] = useState<number | null>(null);
 
@@ -446,17 +451,30 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
     // cancelled; the scan keeps running server-side, only the client poll stops.
     const scanAbortRef = useRef<AbortController | null>(null);
 
-    // Generation counter so a slow fetch for a previously-active node cannot
+    // Generation counters so a slow fetch for a previously-active node cannot
     // stomp the visible resources after the user switches nodes. Each call
     // claims a generation; only the latest call is allowed to write state.
-    const fetchGenerationRef = useRef(0);
+    const inventoryGenerationRef = useRef(0);
+    const usageGenerationRef = useRef(0);
 
-    const fetchAllData = async () => {
-        const generation = ++fetchGenerationRef.current;
-        setIsLoading(true);
+    // `background` refreshes keep the current rows on screen (after a prune or
+    // delete); a foreground load (mount, node switch, Retry) shows skeletons.
+    // A background failure still ends a superseded foreground load, so the
+    // tables can never stay on skeletons.
+    const failInventory = (background: boolean) => {
+        if (background) {
+            toast.error('Failed to refresh resources');
+            setInventoryState((state) => (state === 'loading' ? 'error' : state));
+        } else {
+            setInventoryState('error');
+        }
+    };
+
+    const loadInventory = async ({ background = false }: { background?: boolean } = {}) => {
+        const generation = ++inventoryGenerationRef.current;
+        if (!background) setInventoryState('loading');
         try {
-            const [usageRes, resourcesRes, orphansRes, summariesRes, settingsRes, rollbackRes] = await Promise.all([
-                apiFetch('/system/docker-df'),
+            const [resourcesRes, orphansRes, summariesRes, settingsRes, rollbackRes] = await Promise.all([
                 apiFetch('/system/resources'),
                 apiFetch('/system/orphans'),
                 apiFetch('/security/image-summaries').catch(() => null),
@@ -466,24 +484,26 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
 
             // Resolve every body before the staleness check so a stale
             // generation cannot write any subset of the resource slices.
-            const usageData = usageRes.ok ? await usageRes.json() : null;
             const resourcesData = resourcesRes.ok ? await resourcesRes.json() : null;
             const orphansData = orphansRes.ok ? await orphansRes.json() : null;
             const summariesData = summariesRes && summariesRes.ok ? await summariesRes.json() : null;
             const settingsData = settingsRes && settingsRes.ok ? await settingsRes.json() : null;
             const rollbackData = rollbackRes && rollbackRes.ok ? await rollbackRes.json() : null;
 
-            if (fetchGenerationRef.current !== generation) return;
+            if (inventoryGenerationRef.current !== generation) return;
 
             // Set unconditionally: a failed /settings (settingsData null) or a
             // missing key falls back to the default-off state for this node
             // rather than inheriting the previously active node's value.
             setReclaimHeroEnabled(settingsData?.reclaim_hero === '1');
-            if (usageData) setUsage(usageData);
             if (resourcesData) {
                 setImages(resourcesData.images ?? []);
                 setVolumes(resourcesData.volumes ?? []);
                 setNetworks(resourcesData.networks ?? []);
+                setInventoryState('ready');
+            } else {
+                console.error('Failed to fetch resources', resourcesRes.status);
+                failInventory(background);
             }
             if (orphansData) {
                 setOrphans(orphansData);
@@ -492,15 +512,61 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
             if (summariesData) setScanSummaries(summariesData);
             setRollbackGenerations(Array.isArray(rollbackData) ? rollbackData : []);
         } catch (err) {
-            if (fetchGenerationRef.current !== generation) return;
+            if (inventoryGenerationRef.current !== generation) return;
             console.error('Failed to fetch data', err);
-            toast.error('Failed to load resources data');
-        } finally {
-            if (fetchGenerationRef.current === generation) setIsLoading(false);
+            if (!background) toast.error('Failed to load resources data');
+            failInventory(background);
         }
     };
 
-    useEffect(() => { fetchAllData(); }, [activeNode]);
+    // A failed usage load drops the figures rather than keeping stale ones: the
+    // footprint then shows the error with its Retry instead of a number that
+    // may already be out of date.
+    const failUsage = (reason: unknown) => {
+        console.error('Failed to fetch disk usage', reason);
+        setUsage(null);
+        setUsageState('error');
+    };
+
+    const loadUsage = async ({ background = false }: { background?: boolean } = {}) => {
+        const generation = ++usageGenerationRef.current;
+        if (!background) setUsageState('loading');
+        try {
+            const res = await apiFetch('/system/docker-df');
+            const data = res.ok ? await res.json() : null;
+            if (usageGenerationRef.current !== generation) return;
+            if (data) {
+                setUsage(data);
+                setUsageState('ready');
+            } else {
+                failUsage(res.status);
+            }
+        } catch (err) {
+            if (usageGenerationRef.current !== generation) return;
+            failUsage(err);
+        }
+    };
+
+    /** After a mutation: refresh the tables (awaited) and the usage figures (not awaited; the tables should not wait on them). */
+    const refreshAll = async () => {
+        void loadUsage({ background: true });
+        await loadInventory({ background: true });
+    };
+
+    useEffect(() => {
+        // Nothing from the previous node may show under the new one while its
+        // data loads, including when that load fails.
+        setUsage(null);
+        setImages([]);
+        setVolumes([]);
+        setNetworks([]);
+        setOrphans({});
+        setSelectedOrphans([]);
+        setRollbackGenerations([]);
+        setReclaimHeroEnabled(false);
+        void loadInventory();
+        void loadUsage();
+    }, [activeNode]);
 
     // Load the per-node reclaim-banner dismiss snapshot when the node changes.
     useEffect(() => {
@@ -514,9 +580,12 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
         return () => scanAbortRef.current?.abort();
     }, [activeNode]);
 
-    // Bump the fetch generation on unmount so a fetch that resolves after the
+    // Bump the fetch generations on unmount so a fetch that resolves after the
     // view is gone cannot run state setters or surface a load-error toast.
-    useEffect(() => () => { fetchGenerationRef.current += 1; }, []);
+    useEffect(() => () => {
+        inventoryGenerationRef.current += 1;
+        usageGenerationRef.current += 1;
+    }, []);
 
     type PrunePlanRequest = { target?: PruneTarget; targets?: PruneTarget[]; scope: PruneScope };
 
@@ -610,7 +679,7 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
             } else {
                 toast.success(`Pruned ${scopeLabel} ${confirmPrune.target}.${reclaimedLabel}`);
             }
-            await fetchAllData();
+            await refreshAll();
             setConfirmPrune(null);
         } catch (error) {
             console.error('Failed to prune', error);
@@ -637,7 +706,7 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
                 throw new Error(data?.error || `Failed to delete ${confirmDelete.type.slice(0, -1)}`);
             }
             toast.success(`Deleted ${confirmDelete.type.slice(0, -1)}`);
-            await fetchAllData();
+            await refreshAll();
         } catch (error) {
             const err = error as Record<string, unknown>;
             toast.error(String(err?.message || `Failed to delete ${confirmDelete.type.slice(0, -1)}`));
@@ -670,7 +739,7 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
                 throw new Error(data?.error || 'Failed to purge selected containers');
             }
             toast.success(`Purged ${selectedOrphans.length} unmanaged container(s)`);
-            await fetchAllData();
+            await refreshAll();
         } catch (error) {
             const err = error as Record<string, unknown>;
             toast.error(String(err?.message || 'Failed to purge selected containers.'));
@@ -828,7 +897,7 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
             } else {
                 toast.success(`Reclaimed unused images, stopped containers, and dangling volumes.${reclaimedLabel}`);
             }
-            await fetchAllData();
+            await refreshAll();
             setConfirmReclaim(false);
         } catch (error) {
             console.error('Failed to reclaim', error);
@@ -877,6 +946,11 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
                                 reclaimableBytes={totalReclaimableBytes}
                                 onFilter={(f) => handleFootprintFilter(treemapFilterToResourceFilter(f))}
                             />
+                        ) : usageState === 'error' ? (
+                            <div className="flex h-[150px] flex-col items-center justify-center gap-3 text-sm text-muted-foreground">
+                                <span>Could not load disk usage.</span>
+                                <Button variant="outline" size="sm" onClick={() => void loadUsage()}>Retry</Button>
+                            </div>
                         ) : (
                             <Skeleton className="h-[150px] w-full rounded-md" />
                         )}
@@ -1050,7 +1124,9 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
                                     <TableHead className="text-right text-[11px]">Action</TableHead>
                                 </TableRow>
                             </TableHeader>
-                            {isLoading ? <TableSkeleton cols={5} /> : (
+                            {isLoading ? <TableSkeleton cols={5} /> : inventoryState === 'error' ? (
+                                <TableLoadError cols={5} noun="images" onRetry={() => void loadInventory()} />
+                            ) : (
                                 <TableBody>
                                     {imageSort.sorted.length === 0 ? (
                                         <TableRow><TableCell colSpan={5} className="text-center py-8 text-muted-foreground text-sm">No images found.</TableCell></TableRow>
@@ -1224,7 +1300,9 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
                                     <TableHead className="text-right text-[11px]">Action</TableHead>
                                 </TableRow>
                             </TableHeader>
-                            {isLoading ? <TableSkeleton cols={5} /> : (
+                            {isLoading ? <TableSkeleton cols={5} /> : inventoryState === 'error' ? (
+                                <TableLoadError cols={5} noun="volumes" onRetry={() => void loadInventory()} />
+                            ) : (
                                 <TableBody>
                                     {volumeSort.sorted.length === 0 ? (
                                         <TableRow><TableCell colSpan={5} className="text-center py-8 text-muted-foreground text-sm">No volumes found.</TableCell></TableRow>
@@ -1319,7 +1397,14 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
                             </Button>}
                         </div>
 
-                        {totalOrphansCount === 0 ? (
+                        {totalOrphansCount === 0 && inventoryState === 'loading' ? (
+                            <div className="p-4"><Skeleton className="h-24 w-full rounded-md" /></div>
+                        ) : totalOrphansCount === 0 && inventoryState === 'error' ? (
+                            <div className="flex flex-col items-center gap-3 p-12 text-sm text-muted-foreground">
+                                <span>Could not load unmanaged containers.</span>
+                                <Button variant="outline" size="sm" onClick={() => void loadInventory()}>Retry</Button>
+                            </div>
+                        ) : totalOrphansCount === 0 ? (
                             <div className="flex-1 flex flex-col items-center justify-center p-12 text-muted-foreground animate-in fade-in-0 duration-300">
                                 <div className="w-12 h-12 rounded-full bg-success-muted flex items-center justify-center mb-3">
                                     <ShieldCheck className="w-6 h-6 text-success" />
@@ -1387,7 +1472,7 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
                             isLoading={isLoading}
                             isAdmin={isAdmin}
                             nodeId={activeNode?.id}
-                            onReleased={fetchAllData}
+                            onReleased={refreshAll}
                         />
                     </TabsContent>
                 </div>
