@@ -140,9 +140,15 @@ function readName(text: string, from: number): string {
  * Compose's template pattern. A literal `{` is text inside a default; only
  * `${` starts another template. The `}` that ends a match is the pattern's
  * own closer, which is why `${UNSET:-foo{bar}` is a complete template.
+ *
+ * The default is `[^\n]*`, not `.*`. Go's dot excludes only LF, while
+ * JavaScript's also excludes CR and the U+2028/U+2029 separators. A `\r`
+ * escape, a literal CR, or a U+2028/U+2029 separator inside a default is
+ * valid Compose; with `.*` the template would not match and the file would be
+ * refused as malformed.
  */
 const COMPOSE_TEMPLATE =
-  /\$(?:(\$)|([_a-zA-Z][_a-zA-Z0-9]*)|\{(?:([_a-zA-Z][_a-zA-Z0-9]*(?::?[-+?](.*))?)\}|()))/g;
+  /\$(?:(\$)|([_a-zA-Z][_a-zA-Z0-9]*)|\{(?:([_a-zA-Z][_a-zA-Z0-9]*(?::?[-+?]([^\n]*))?)\}|()))/g;
 
 /**
  * Where Compose cuts a matched template so the remainder is expanded on its

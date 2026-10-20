@@ -96,6 +96,18 @@ const CASES: Case[] = [
     expectLayers: ['compose.yaml'],
   },
   {
+    // Go's template dot excludes only LF, so a `\r` escape in a default is
+    // valid Compose. The assignment selects no layer, and a reader that cannot
+    // hold it refuses a project Compose runs.
+    name: 'an unrelated default holding an escaped carriage return',
+    stack: 'layercarriage',
+    files: {
+      'compose.yaml': SERVICE('busybox:1.36.1', 'plain'),
+      '.env': 'B=healthy\nLABEL="${B:-unused\\rvalue}"\n',
+    },
+    expectLayers: ['compose.yaml'],
+  },
+  {
     // The legacy family prefers .yml over .yaml, the compose.* family the other
     // way round, and every override prefers .yml.
     name: 'competing legacy roots and overrides',
@@ -1226,6 +1238,56 @@ describe.skipIf(!hasDocker)('recovery loads the model the capture-time run loade
         expect(expandComposeEnvTemplate(testCase.template, lookup(testCase.set)), testCase.name)
           .toBe(testCase.expected);
       }
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('reads a default holding CR or a Unicode separator the way the Compose CLI does', async () => {
+    const { ComposeEnvFiles, ComposeEnvFileError } = await import('../../utils/composeDotenv');
+    const separators = [
+      ['escaped-cr', '\\r', '\r'],
+      ['literal-cr', '\r', '\r'],
+      ['line-separator', '\u2028', '\u2028'],
+      ['paragraph-separator', '\u2029', '\u2029'],
+    ] as const;
+    const root = fs.mkdtempSync(path.join(composeDir, 'separator-cli-'));
+    try {
+      for (const [name, written, expanded] of separators) {
+        for (const set of [true, false]) {
+          const project = `sep${name}${set ? 'unused' : 'used'}`;
+          const dir = path.join(root, project);
+          fs.mkdirSync(dir, { recursive: true });
+          fs.writeFileSync(path.join(dir, 'compose.yaml'), SERVICE('busybox:1.36.1', '${LABEL}'), 'utf8');
+          // `set` exercises a default Compose parses and discards, `!set` the
+          // same default used as the value.
+          const env = set
+            ? `B=healthy\nLABEL="\${B:-unused${written}value}"\n`
+            : `LABEL="\${UNSET:-unused${written}value}"\n`;
+          fs.writeFileSync(path.join(dir, '.env'), env, 'utf8');
+
+          const expected = set ? 'healthy' : `unused${expanded}value`;
+          const model = renderModel([], dir, project) as {
+            services: Record<string, { command?: string[] }>;
+          };
+          expect(model.services.web.command?.[1], project).toBe(expected);
+
+          const files = new ComposeEnvFiles((variable) => (set && variable === 'B' ? 'healthy' : undefined));
+          files.read(env);
+          expect(files.lookup('LABEL'), project).toBe(expected);
+        }
+      }
+
+      // Compose refuses the LF an escaped newline expands to, so the reader has
+      // to keep refusing it rather than read a template the run never resolved.
+      const newlineDir = path.join(root, 'newline');
+      fs.mkdirSync(newlineDir, { recursive: true });
+      fs.writeFileSync(path.join(newlineDir, 'compose.yaml'), SERVICE('busybox:1.36.1', '${LABEL}'), 'utf8');
+      const newlineEnv = 'LABEL="${UNSET:-unused\\nvalue}"\n';
+      fs.writeFileSync(path.join(newlineDir, '.env'), newlineEnv, 'utf8');
+      expect(() => renderModel([], newlineDir, 'sepnewline')).toThrow(/Invalid template/);
+      const files = new ComposeEnvFiles(() => undefined);
+      expect(() => files.read(newlineEnv)).toThrow(ComposeEnvFileError);
     } finally {
       fs.rmSync(root, { recursive: true, force: true });
     }

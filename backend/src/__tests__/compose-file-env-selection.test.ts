@@ -49,6 +49,17 @@ import {
 
 const STACK = 'app';
 
+/**
+ * Spellings of CR and the Unicode separators that JavaScript's `.*` excludes
+ * and Go's `.` does not. Go's template dot excludes LF alone.
+ */
+const TEMPLATE_SEPARATORS: ReadonlyArray<readonly [string, string, string]> = [
+  ['an escaped carriage return', '\\r', '\r'],
+  ['a literal carriage return', '\r', '\r'],
+  ['a line separator', '\u2028', '\u2028'],
+  ['a paragraph separator', '\u2029', '\u2029'],
+];
+
 function writeStackFile(name: string, body: string): string {
   const abs = path.join(mockState.composeDir, STACK, name);
   fs.mkdirSync(path.dirname(abs), { recursive: true });
@@ -196,6 +207,24 @@ describe('ComposeEnvFiles', () => {
 
   it('expands a nested default', () => {
     expect(expandComposeEnvTemplate('${A:-${B:-deep}}', () => undefined)).toBe('deep');
+  });
+
+  it.each(TEMPLATE_SEPARATORS)('reads a default holding %s, as Compose does', (_label, written, expected) => {
+    // Go's template dot excludes LF only. JavaScript's `.*` also excludes CR
+    // and the Unicode separators, so it refused a default the Compose CLI
+    // accepts and turned a valid unrelated assignment into a capture refusal.
+    const unused = readEnvFile('B=healthy\nLABEL="${B:-unused' + written + 'value}"\n');
+    expect(unused.lookup('LABEL')).toBe('healthy');
+
+    const used = readEnvFile('LABEL="${UNSET:-unused' + written + 'value}"\n');
+    expect(used.lookup('LABEL')).toBe(`unused${expected}value`);
+  });
+
+  it('refuses a default holding a newline, which Compose refuses too', () => {
+    // Escapes expand before interpolation and Go's dot excludes the LF an
+    // escaped newline produces. Keeping that refusal matters: accepting it
+    // would read a template the deploy never resolved.
+    expect(() => readEnvFile('LABEL="${UNSET:-unused\\nvalue}"\n')).toThrow(ComposeEnvFileError);
   });
 
   // A literal `{` is text. Compose closes the template at the `}` the pattern
@@ -359,6 +388,37 @@ describe('composeFileEnvVarSelection', () => {
     const inventory = await resolveRollbackInventory(1, STACK);
     expect(inventory.coverageRefusal).toBeNull();
     expect(inventory.invocation.composeLayers).toEqual(['compose.yaml']);
+  });
+
+  it.each(TEMPLATE_SEPARATORS)('captures a stack whose used default holds %s', async (_label, separator) => {
+    // The variable is unset, so the default is the value. A reader that cannot
+    // hold the separator reports unknown and refuses the lifecycle operation,
+    // even though Compose accepts the file.
+    writeStackFile('.env', 'LABEL="${UNSET:-unused' + separator + 'value}"\n');
+
+    const selection = await composeFileEnvVarSelection(STACK, 1);
+    expect(selection.kind).toBe('absent');
+
+    const inventory = await resolveRollbackInventory(1, STACK);
+    expect(inventory.coverageRefusal).toBeNull();
+    expect(inventory.invocation.composeLayers).toEqual(['compose.yaml']);
+  });
+
+  it.each(TEMPLATE_SEPARATORS)('keeps a COMPOSE_FILE chain beside an unused default holding %s', async (_label, separator) => {
+    // B is set, so the default is discarded. Compose still parses it, and the
+    // selection and recorded layer list have to survive it unchanged.
+    writeStackFile(
+      '.env',
+      'B=healthy\nCOMPOSE_FILE=compose.yaml:prod.yaml\nLABEL="${B:-unused' + separator + 'value}"\n',
+    );
+    writeStackFile('prod.yaml', 'services:\n  web:\n    image: nginx\n');
+
+    const selection = await composeFileEnvVarSelection(STACK, 1);
+    expect(selection).toMatchObject({ kind: 'value', value: 'compose.yaml:prod.yaml' });
+
+    const inventory = await resolveRollbackInventory(1, STACK);
+    expect(inventory.coverageRefusal).toBeNull();
+    expect(inventory.invocation.composeLayers).toEqual(['compose.yaml', 'prod.yaml']);
   });
 
   it('captures a COMPOSE_FILE chain with no conventional root file', async () => {
