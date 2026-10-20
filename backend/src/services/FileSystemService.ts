@@ -59,6 +59,18 @@ const PROTECTED_STACK_FILES = new Set([
   '.env',
 ]);
 
+/**
+ * Refuse a compose file that is not a regular file. A directory or a special
+ * file (FIFO, socket, device) cannot be read as a compose project, and opening a
+ * FIFO in blocking mode has no writer to end the wait. The code lets a route
+ * report the stack as unreadable without guessing at a project.
+ */
+function nonRegularComposeFileError(file: string): Error & { code: 'NOT_A_FILE' } {
+  return Object.assign(new Error(`Compose file ${file} is not a regular file`), {
+    code: 'NOT_A_FILE' as const,
+  });
+}
+
 // Explorer-only protection: includes the blueprint ownership marker without
 // putting it in PROTECTED_STACK_FILES (backup/rollback orphan removal).
 const EXPLORER_PROTECTED_STACK_FILES = new Set([
@@ -289,6 +301,13 @@ export class FileSystemService {
       }
       await this.assertRealWithinBase(filePath);
       if (access === 'write') await this.assertRealWithinStack(stackName, filePath);
+      // Containment says where the path lands, not what it lands on. A shared
+      // main file or override is a legitimate regular file; a directory or a
+      // FIFO is not a project, and opening the FIFO in blocking mode would wait
+      // for a writer that never comes. Refuse before any read opens it.
+      if (!(await fsPromises.stat(filePath)).isFile()) {
+        throw nonRegularComposeFileError(file);
+      }
       if (isDebugEnabled()) console.debug('[FileSystemService:debug] Resolved compose file', { stackName, file });
       return { filename: file, absolute: filePath };
     }
@@ -334,6 +353,12 @@ export class FileSystemService {
         throw err;
       }
       await this.assertRealWithinBase(target);
+      // Discovery stops at the first name that exists, exactly as Compose does,
+      // but only a regular file can be merged. A directory/FIFO/socket here would
+      // make the render block or fail, so it is refused at the admission point.
+      if (!(await fsPromises.stat(target)).isFile()) {
+        throw nonRegularComposeFileError(file);
+      }
       return;
     }
   }
@@ -437,9 +462,15 @@ export class FileSystemService {
     if (!safePath.startsWith(baseResolved + path.sep)) {
       throw Object.assign(new Error('Path escapes compose directory'), { code: 'INVALID_PATH' });
     }
-    const fh = await fsPromises.open(safePath, 'r');
+    // Open non-blocking before asking the descriptor what it is. O_NONBLOCK has
+    // no effect on a regular file, but a FIFO that replaced the resolved file in
+    // the check/open gap gives this call a descriptor to inspect instead of
+    // sleeping until a writer appears. The descriptor's own type is authoritative,
+    // so the read still only ever returns a regular compose file.
+    const fh = await fsPromises.open(safePath, fsConstants.O_RDONLY | fsConstants.O_NONBLOCK);
     try {
       const stat = await fh.stat();
+      if (!stat.isFile()) throw nonRegularComposeFileError(path.basename(safePath));
       const content = await fh.readFile('utf-8');
       return { content, mtimeMs: stat.mtimeMs, filename: path.basename(safePath) };
     } finally {

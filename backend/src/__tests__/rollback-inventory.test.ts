@@ -4,6 +4,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import path from 'path';
 import os from 'os';
+import net from 'net';
+import { execFileSync } from 'child_process';
 import { promises as fsPromises } from 'fs';
 
 const mockGetGitSource = vi.fn();
@@ -983,6 +985,117 @@ describe('resolveRollbackInventory: the layer set recovery pins', () => {
     expect(inventory.uncapturedRelativePaths).toContain('chosen.yaml');
     expect(inventory.uncapturedInputs.join(' ')).toContain('chosen.yaml');
     expect(storedRestoreCoverage({ uncapturedInputs: inventory.uncapturedInputs })).toBe('omits_inputs');
+  });
+
+  it('refuses a shared COMPOSE_FILE layer that resolves to a directory without blocking', async () => {
+    await write('compose.yaml', 'services:\n  web:\n    image: nginx\n');
+    await fsPromises.mkdir(path.join(composeDir, 'shared'), { recursive: true });
+    const target = path.join(composeDir, 'shared', 'target');
+    await fsPromises.mkdir(target);
+    await fsPromises.rm(path.join(composeDir, STACK, 'compose.yaml'));
+    await fsPromises.symlink(target, path.join(composeDir, STACK, 'compose.yaml'));
+
+    // Classification sees the target type before any read opens it.
+    const inventory = await resolveRollbackInventory(1, STACK);
+
+    expect(inventory.coverageRefusal).toContain(
+      'compose.yaml is a link to something that is not a regular file',
+    );
+    expect(inventory.invocation.composeLayers).toEqual([]);
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'refuses a shared COMPOSE_FILE layer that resolves to a fifo without blocking',
+    async () => {
+      await write('compose.yaml', 'services:\n  web:\n    image: nginx\n');
+      await fsPromises.mkdir(path.join(composeDir, 'shared'), { recursive: true });
+      const target = path.join(composeDir, 'shared', 'pipe.yaml');
+      execFileSync('mkfifo', [target]);
+      await fsPromises.rm(path.join(composeDir, STACK, 'compose.yaml'));
+      await fsPromises.symlink(target, path.join(composeDir, STACK, 'compose.yaml'));
+
+      // Classification sees the target type before any read opens it, so a FIFO
+      // cannot hold the capture worker while it waits for a writer.
+      const inventory = await resolveRollbackInventory(1, STACK);
+
+      expect(inventory.coverageRefusal).toContain(
+        'compose.yaml is a link to something that is not a regular file',
+      );
+      expect(inventory.invocation.composeLayers).toEqual([]);
+    },
+    3_000,
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'refuses a shared COMPOSE_FILE layer that resolves to a socket without blocking',
+    async () => {
+      await write('compose.yaml', 'services:\n  web:\n    image: nginx\n');
+      await fsPromises.mkdir(path.join(composeDir, 'shared'), { recursive: true });
+      const target = path.join(composeDir, 'shared', 'target.sock');
+      const server = net.createServer();
+      await new Promise<void>((resolve, reject) => {
+        server.once('error', reject);
+        server.listen(target, resolve);
+      });
+      try {
+        await fsPromises.rm(path.join(composeDir, STACK, 'compose.yaml'));
+        await fsPromises.symlink(target, path.join(composeDir, STACK, 'compose.yaml'));
+
+        const inventory = await resolveRollbackInventory(1, STACK);
+
+        expect(inventory.coverageRefusal).toContain(
+          'compose.yaml is a link to something that is not a regular file',
+        );
+        expect(inventory.invocation.composeLayers).toEqual([]);
+      } finally {
+        await new Promise<void>((resolve) => server.close(() => resolve()));
+      }
+    },
+    3_000,
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'refuses an implicit override that links to a shared fifo without blocking',
+    async () => {
+      await write('compose.yaml', 'services:\n  web:\n    image: nginx\n');
+      await fsPromises.mkdir(path.join(composeDir, 'shared'), { recursive: true });
+      const fifo = path.join(composeDir, 'shared', 'pipe.yaml');
+      execFileSync('mkfifo', [fifo]);
+      await fsPromises.symlink(fifo, path.join(composeDir, STACK, 'compose.override.yaml'));
+
+      const inventory = await resolveRollbackInventory(1, STACK);
+
+      // Compose's discovery would choose this override and then block reading
+      // it, so the capture refuses the run rather than pinning a layer it cannot
+      // load.
+      expect(inventory.coverageRefusal).toContain(
+        'compose.override.yaml is a link to something that is not a regular file',
+      );
+      expect(inventory.invocation.composeLayers).toEqual(['compose.yaml']);
+    },
+    3_000,
+  );
+
+  it('keeps a regular shared implicit override as a supported omission', async () => {
+    await write('compose.yaml', 'services:\n  web:\n    image: nginx\n');
+    await fsPromises.mkdir(path.join(composeDir, 'shared'), { recursive: true });
+    await fsPromises.writeFile(
+      path.join(composeDir, 'shared', 'override.yaml'),
+      'services:\n  web:\n    command: ["true"]\n',
+      'utf8',
+    );
+    await fsPromises.symlink(
+      path.join(composeDir, 'shared', 'override.yaml'),
+      path.join(composeDir, STACK, 'compose.override.yaml'),
+    );
+
+    const inventory = await resolveRollbackInventory(1, STACK);
+
+    // The regular-file case the shared read policy exists to support must keep
+    // working: the layer is pinned and its bytes are recorded as not held.
+    expect(inventory.coverageRefusal).toBeNull();
+    expect(inventory.invocation.composeLayers).toEqual(['compose.yaml', 'compose.override.yaml']);
+    expect(inventory.uncapturedRelativePaths).toContain('compose.override.yaml');
   });
 
   it('records the interpolation env files of a COMPOSE_FILE chain in a subdirectory', async () => {

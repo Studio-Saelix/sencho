@@ -60,6 +60,12 @@ type Case = {
    * is the `COMPOSE_FILE` case the `-f` list replaces.
    */
   meshMatchesDiscovery?: boolean;
+  /**
+   * Image a real rollback's recovery layer holds. When the layer pins the image,
+   * a wrong layer selection can no longer be spotted by comparing images; the
+   * command and mounts still have to match the live run.
+   */
+  recoveryImage?: string;
 };
 
 const SERVICE = (image: string, command: string): string =>
@@ -293,6 +299,60 @@ const CASES: Case[] = [
     expectUncaptured: 'select.env is loaded by Compose through COMPOSE_ENV_FILES and is not captured',
   },
   {
+    // Only a file's leading BOM is dropped. A trailing BOM is an ordinary name
+    // character to Compose, so the two files below are different projects. A
+    // reader that trims it records the plain layer and a rollback runs the wrong
+    // command while its pinned image still looks correct.
+    name: 'a trailing BOM in the selected layer name',
+    stack: 'layertrailingbom',
+    files: {
+      'compose.yaml': SERVICE('alpine:3.20', 'plain'),
+      'compose.yaml\uFEFF': SERVICE('busybox:1.37', 'bom'),
+      '.env': 'COMPOSE_FILE=compose.yaml\uFEFF\n',
+    },
+    expectLayers: ['compose.yaml\uFEFF'],
+    recoveryImage: 'busybox:1.37',
+  },
+  {
+    // Go trims Unicode White_Space from an unquoted value, so a trailing en quad
+    // still selects the plain layer. Keeping it would select the second file.
+    name: 'trailing Unicode whitespace in the selected layer name',
+    stack: 'layertrailingunicode',
+    files: {
+      'compose.yaml': SERVICE('busybox:1.36.1', 'plain'),
+      'compose.yaml\u2000': SERVICE('alpine:3.20', 'wrong'),
+      '.env': 'COMPOSE_FILE=compose.yaml\u2000\n',
+    },
+    expectLayers: ['compose.yaml'],
+    recoveryImage: 'busybox:1.36.1',
+  },
+  {
+    // Compose skips statement whitespace with unicode.IsSpace, so a separator
+    // before an unrelated assignment is valid. A reader that rejects it turns a
+    // working stack into an unknown and refuses every capture.
+    name: 'an unrelated assignment after a Unicode separator',
+    stack: 'layerunicodeseparator',
+    files: {
+      'compose.yaml': SERVICE('busybox:1.36.1', 'plain'),
+      '.env': '\u2000LABEL=ordinary\nCOMPOSE_FILE=compose.yaml\n',
+    },
+    expectLayers: ['compose.yaml'],
+  },
+  {
+    // export consumes ASCII whitespace with its regexp, then Go trims the rest
+    // of the isSpace run. The NBSP after the space must not become part of the
+    // name, or the chain is invisible and discovery pins the root instead.
+    name: 'export followed by a space and a separator',
+    stack: 'layerexportseparator',
+    files: {
+      'compose.yaml': SERVICE('busybox:1.36.1', 'plain'),
+      'prod.yaml': SERVICE('alpine:3.20', 'production'),
+      '.env': 'export \u00a0COMPOSE_FILE=prod.yaml\n',
+    },
+    expectLayers: ['prod.yaml'],
+    recoveryImage: 'alpine:3.20',
+  },
+  {
     // Mesh injects an explicit -f list, so the live run pins the base and the
     // implicit override instead of leaving either to discovery. The capture has
     // to record that same pair, or the recovery pins the other competing file.
@@ -453,7 +513,14 @@ describe.skipIf(!hasDocker)('recovery loads the model the capture-time run loade
       const recoveryLayer = path.join(stackDir, '.sencho-recovery-test.yml');
       fs.writeFileSync(
         recoveryLayer,
-        'services:\n  web:\n    labels:\n      sencho.recovery-test: "1"\n',
+        [
+          'services:',
+          '  web:',
+          ...(testCase.recoveryImage ? [`    image: ${testCase.recoveryImage}`] : []),
+          '    labels:',
+          '      sencho.recovery-test: "1"',
+          '',
+        ].join('\n'),
         'utf8',
       );
 

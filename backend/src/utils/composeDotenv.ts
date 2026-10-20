@@ -46,6 +46,13 @@ const COMMENT = '#';
 /** The escape sequences Compose expands inside a double-quoted value. */
 const ESCAPE_SEQUENCE = /(\\(?:[abcfnrtv$"\\]|0\d{0,3}))/g;
 
+/**
+ * Go's `\s` in the `export` prefix pattern, which RE2 defines as the ASCII set
+ * below. JavaScript's `\s` also matches Unicode separators, so using it here
+ * would accept `export\u2000FOO=1`, which Compose rejects as a name character.
+ */
+const EXPORT_PREFIX = /^export[\t\n\f\r ]+/;
+
 /** Go's octal escape: a backslash and exactly three octal digits. */
 const OCTAL_ESCAPE = /^\\[0-7]{3}$/;
 
@@ -70,6 +77,32 @@ function isEnvSpace(char: string): boolean {
     || char === '\r'
     || char === '\x85'
     || char === '\xa0';
+}
+
+/**
+ * Go's unicode.IsSpace, which Compose uses at the statement level and to trim a
+ * name and an unquoted value. It is Unicode's White_Space property, including
+ * the line break this file's other predicate deliberately excludes.
+ *
+ * It is not JavaScript's `\s`: that set adds U+FEFF, which Compose keeps as an
+ * ordinary character everywhere except the file's first bytes. Trimming it
+ * changes a layer name (`compose.yaml\uFEFF` becomes `compose.yaml`) and so
+ * recovers a project the deploy never ran. The property also covers the
+ * separators (`\u1680`, `\u2000`-`\u200a`) Compose accepts before an assignment,
+ * which a line-break-only skip would reject.
+ */
+const GO_UNICODE_SPACE = /^\p{White_Space}$/u;
+
+function isUnicodeSpace(char: string): boolean {
+  return GO_UNICODE_SPACE.test(char);
+}
+
+/** Trim the whitespace Go trims from a name or an unquoted value. */
+function trimRightUnicodeSpace(text: string): string {
+  let end = text.length;
+  // Every White_Space code point is in the basic plane, so a code unit is a rune.
+  while (end > 0 && isUnicodeSpace(text[end - 1])) end--;
+  return text.slice(0, end);
 }
 
 function isNameStart(char: string): boolean {
@@ -241,7 +274,7 @@ function applyOperator(name: string, operator: string, argument: string, lookup:
 function skipToStatement(text: string, from: number): number {
   let i = from;
   for (;;) {
-    while (i < text.length && (text[i] === '\n' || isEnvSpace(text[i]))) i++;
+    while (i < text.length && isUnicodeSpace(text[i])) i++;
     if (i >= text.length) return i;
     if (text[i] !== COMMENT) return i;
     const lineEnd = text.indexOf('\n', i);
@@ -268,7 +301,16 @@ function parseEnvFileText(
     // `statement` is a suffix of `content`, so the offset it loses to the
     // `export` prefix is exactly the difference in length.
     let statement = content.slice(statementStart);
-    statement = statement.replace(/^export\s+/, '');
+    // Go matches the prefix with an ASCII-only regexp, then trims the rest of
+    // the isSpace run with TrimLeftFunc. A separator that is not ASCII
+    // whitespace (`\v`, NBSP, NEL) survives the regexp and is trimmed after it;
+    // leaving it in the name would hide the assignment from this reader.
+    const exportMatch = EXPORT_PREFIX.exec(statement);
+    if (exportMatch) {
+      let remainder = exportMatch[0].length;
+      while (remainder < statement.length && isEnvSpace(statement[remainder])) remainder++;
+      statement = statement.slice(remainder);
+    }
     cursor = content.length - statement.length;
 
     let keyEnd = -1;
@@ -291,7 +333,7 @@ function parseEnvFileText(
     }
     if (keyEnd === -1) return;
 
-    const key = statement.slice(0, keyEnd).trimEnd();
+    const key = trimRightUnicodeSpace(statement.slice(0, keyEnd));
     if (key.includes(' ')) throw new ComposeEnvFileError('a variable name cannot contain a space');
     cursor += keyEnd + 1;
 
@@ -318,8 +360,12 @@ function parseEnvFileText(
     const lineEnd = content.indexOf('\n', cursor);
     const end = lineEnd === -1 ? content.length : lineEnd;
     const commentAt = content.slice(cursor, end).indexOf(' #');
-    const rawValue = (commentAt === -1 ? content.slice(cursor, end) : content.slice(cursor, cursor + commentAt))
-      .replace(/[\s\x85\xa0]+$/, '');
+    // Go trims Unicode White_Space, which keeps U+FEFF: only a file's leading
+    // BOM is dropped, so a provenance marker or stray editor artifact at the end
+    // of a value is a filename character Compose selects with.
+    const rawValue = trimRightUnicodeSpace(
+      commentAt === -1 ? content.slice(cursor, end) : content.slice(cursor, cursor + commentAt),
+    );
     assign(key, expandComposeEnvTemplate(rawValue, lookup));
     cursor = lineEnd === -1 ? content.length : lineEnd + 1;
   }

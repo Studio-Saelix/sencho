@@ -3,7 +3,14 @@
  * must capture. Git-managed stacks consume the managed-project manifest;
  * authored stacks rediscover against the live stack directory.
  */
-import { promises as fsPromises, readFileSync } from 'fs';
+import {
+  promises as fsPromises,
+  readFileSync,
+  openSync,
+  fstatSync,
+  closeSync,
+  constants as fsConstants,
+} from 'fs';
 import path from 'path';
 import { DatabaseService, type StackGitSource } from './DatabaseService';
 import { FileSystemService } from './FileSystemService';
@@ -287,6 +294,38 @@ async function pathExistsAsFile(stackRoot: string, relativePath: string): Promis
 }
 
 /**
+ * Read a compose input as text only when the descriptor is a regular file.
+ * O_NONBLOCK returns immediately for a FIFO; the descriptor's own type then
+ * decides, so a target swapped after classification cannot hold this worker in
+ * a blocking open. A FIFO with no writer would otherwise wait forever.
+ */
+async function readComposeText(absolutePath: string): Promise<string> {
+  const fh = await fsPromises.open(absolutePath, fsConstants.O_RDONLY | fsConstants.O_NONBLOCK);
+  try {
+    if (!(await fh.stat()).isFile()) {
+      throw Object.assign(new Error('not a regular file'), { code: 'NOT_A_FILE' });
+    }
+    return await fh.readFile('utf-8');
+  } finally {
+    await fh.close();
+  }
+}
+
+/** The synchronous form used by the declared-input walker; null when unreadable. */
+function readComposeTextSync(absolutePath: string): string | null {
+  let fd: number | null = null;
+  try {
+    fd = openSync(absolutePath, fsConstants.O_RDONLY | fsConstants.O_NONBLOCK);
+    if (!fstatSync(fd).isFile()) return null;
+    return readFileSync(fd, 'utf8');
+  } catch {
+    return null;
+  } finally {
+    if (fd !== null) closeSync(fd);
+  }
+}
+
+/**
  * What an authored candidate path is, resolved the way capture will read it.
  * - file: a regular file, or a link to one, that stays inside the stack.
  * - absent: nothing there, or a directory or special file.
@@ -358,7 +397,12 @@ async function classifyAuthoredFile(stackRoot: string, relativePath: string): Pr
   // A stack directory that is itself a link is a different stack's directory,
   // not a shared file, so it keeps the refusal the read and write guards raise.
   if ((await fsPromises.realpath(baseResolved)) !== realRoot) return 'relocated';
-  return real.startsWith(realBase + path.sep) ? 'shared' : 'outside';
+  if (!real.startsWith(realBase + path.sep)) return 'outside';
+  // The shared directory may hold a directory, FIFO, or socket under a name a
+  // stack links to. Compose can read only a regular target; classifying one as
+  // `shared` would list it as an omission and then try to read it, blocking on a
+  // FIFO. A shared regular file stays `shared` and keeps its supported read path.
+  return (await fsPromises.stat(real)).isFile() ? 'shared' : 'not-a-file';
 }
 
 /**
@@ -925,7 +969,7 @@ const capturable = async (
     const abs = path.resolve(baseResolved, relativePath);
     if (!abs.startsWith(baseResolved + path.sep)) return null;
     try {
-      return readFileSync(abs, 'utf8');
+      return readComposeTextSync(abs);
     } catch {
       return null;
     }
@@ -940,7 +984,7 @@ const capturable = async (
       const abs = path.resolve(baseResolved, rel);
       if (!abs.startsWith(baseResolved + path.sep)) continue;
       try {
-        const content = await fsPromises.readFile(abs, 'utf8');
+        const content = await readComposeText(abs);
         orderedContents.push({ path: rel, content });
       } catch (e) {
         coverageNotes.push(`Could not read compose file ${rel}: ${(e as Error).message}`);

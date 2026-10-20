@@ -12,10 +12,69 @@
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { promises as fs } from 'fs';
+import { execFileSync, spawnSync } from 'child_process';
+import net from 'net';
 import path from 'path';
 import os from 'os';
 
 const isWindows = process.platform === 'win32';
+const BACKEND_ROOT = path.resolve(__dirname, '..', '..');
+
+/**
+ * Read a stack's compose file through the production service in a child
+ * process. A regression that opens a FIFO in blocking mode would hang the child
+ * instead of the test worker; the external deadline kills it and the signal is
+ * reported as the failure.
+ */
+async function readStackInChild(workDir: string, composeDir: string, stackName: string) {
+  const script = path.join(workDir, 'fifo-read-child.cjs');
+  await fs.writeFile(
+    script,
+    [
+      "const path = require('path');",
+      'const backendRoot = process.argv[2];',
+      'const composeDir = process.argv[3];',
+      'const stackName = process.argv[4];',
+      "const registryPath = require.resolve(path.join(backendRoot, 'src/services/NodeRegistry'));",
+      'require.cache[registryPath] = {',
+      '  id: registryPath,',
+      '  filename: registryPath,',
+      '  loaded: true,',
+      '  exports: {',
+      '    NodeRegistry: {',
+      '      getInstance: () => ({ getComposeDir: () => composeDir, getDefaultNodeId: () => 1 }),',
+      '    },',
+      '  },',
+      '};',
+      "const { FileSystemService } = require(path.join(backendRoot, 'src/services/FileSystemService'));",
+      'new FileSystemService(1).getStackContentWithMtime(stackName).then(',
+      "  (read) => { process.stdout.write('OK ' + read.content); },",
+      "  (error) => { process.stdout.write('ERR ' + (error && error.code)); process.exitCode = 2; },",
+      ');',
+      '',
+    ].join('\n'),
+    'utf8',
+  );
+  return spawnSync(
+    process.execPath,
+    ['-r', 'ts-node/register', script, BACKEND_ROOT, composeDir, stackName],
+    {
+      cwd: BACKEND_ROOT,
+      encoding: 'utf8',
+      timeout: 10_000,
+      killSignal: 'SIGKILL',
+      env: {
+        ...process.env,
+        TS_NODE_TRANSPILE_ONLY: '1',
+        TS_NODE_COMPILER_OPTIONS: JSON.stringify({
+          module: 'commonjs',
+          moduleResolution: 'node10',
+          ignoreDeprecations: '6.0',
+        }),
+      },
+    },
+  );
+}
 
 // Mutable state the mocked NodeRegistry reads; beforeEach rewrites it before any
 // FileSystemService is instantiated (the constructor reads composeDir eagerly).
@@ -499,6 +558,72 @@ describe.skipIf(isWindows)('FileSystemService: compose file linked into the shar
     expect(read).toMatchObject({ content: 'services:\n  shared: {}\n', filename: 'compose.yaml' });
     await expect(svc.getStackContent(STACK)).resolves.toBe('services:\n  shared: {}\n');
     await expect(svc.assertComposeFileReadable(STACK)).resolves.toBeUndefined();
+  });
+
+  it('refuses a shared target that is a directory', async () => {
+    await fs.rm(path.join(stackDir, 'compose.yaml'));
+    const target = path.join(sharedDir, 'nested');
+    await fs.mkdir(target);
+    await fs.symlink(target, path.join(stackDir, 'compose.yaml'));
+    const svc = FileSystemService.getInstance();
+
+    // Containment admits a link inside the compose root, but only a regular
+    // file is a project. A directory must be refused before any read.
+    await expect(svc.getStackContentWithMtime(STACK)).rejects.toMatchObject({ code: 'NOT_A_FILE' });
+    await expect(svc.assertComposeFileReadable(STACK)).rejects.toMatchObject({ code: 'NOT_A_FILE' });
+    await expect(svc.getComposeFilename(STACK)).rejects.toMatchObject({ code: 'NOT_A_FILE' });
+  });
+
+  it.skipIf(isWindows)('refuses a shared target that is a socket', async () => {
+    await fs.rm(path.join(stackDir, 'compose.yaml'));
+    const target = path.join(sharedDir, 'target.sock');
+    const server = net.createServer();
+    await new Promise<void>((resolve, reject) => {
+      server.once('error', reject);
+      server.listen(target, resolve);
+    });
+    try {
+      await fs.symlink(target, path.join(stackDir, 'compose.yaml'));
+      const svc = FileSystemService.getInstance();
+      await expect(svc.getStackContentWithMtime(STACK)).rejects.toMatchObject({ code: 'NOT_A_FILE' });
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+
+  it.skipIf(isWindows)('refuses a shared target that is a fifo without waiting for a writer', async () => {
+    const target = path.join(sharedDir, 'pipe.yaml');
+    execFileSync('mkfifo', [target]);
+    await fs.rm(path.join(stackDir, 'compose.yaml'));
+    await fs.symlink(target, path.join(stackDir, 'compose.yaml'));
+
+    // Run in a child with an external deadline: a blocking open on a FIFO with
+    // no writer would otherwise hold this test worker indefinitely.
+    const result = await readStackInChild(tmpBase, composeDir, STACK);
+
+    expect(result.signal, `child did not finish (status=${result.status}): ${result.stderr}`).toBeNull();
+    expect(result.stdout).toContain('ERR NOT_A_FILE');
+    expect(result.status).toBe(2);
+  }, 15_000);
+
+  it('refuses a shared override that is a directory', async () => {
+    const target = path.join(sharedDir, 'override-target');
+    await fs.mkdir(target);
+    await fs.symlink(target, path.join(stackDir, 'compose.override.yaml'));
+    const svc = FileSystemService.getInstance();
+
+    await expect(svc.assertComposeFileReadable(STACK)).rejects.toMatchObject({ code: 'NOT_A_FILE' });
+    // The main file is a regular shared file and stays readable.
+    await expect(svc.getStackContentWithMtime(STACK)).resolves.toMatchObject({ filename: 'compose.yaml' });
+  });
+
+  it.skipIf(isWindows)('refuses a shared override that is a fifo', async () => {
+    const target = path.join(sharedDir, 'override-target');
+    execFileSync('mkfifo', [target]);
+    await fs.symlink(target, path.join(stackDir, 'compose.override.yaml'));
+    const svc = FileSystemService.getInstance();
+
+    await expect(svc.assertComposeFileReadable(STACK)).rejects.toMatchObject({ code: 'NOT_A_FILE' });
   });
 
   it('refuses every save through the link and leaves the target untouched', async () => {

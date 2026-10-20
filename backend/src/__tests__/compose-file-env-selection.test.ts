@@ -242,6 +242,54 @@ describe('ComposeEnvFiles', () => {
     // character Compose rejects rather than something to swallow silently.
     expect(() => readEnvFile('A=1\n\uFEFFB=2\n')).toThrow(ComposeEnvFileError);
   });
+
+  describe('Go whitespace rules', () => {
+    it('keeps a trailing BOM in an unquoted value, which Compose selects with', () => {
+      // Go trims Unicode White_Space, and U+FEFF is not in that property. A
+      // JavaScript trim (`\s` includes U+FEFF) would drop the last filename
+      // character and pin a different project than the deploy ran.
+      expect(readEnvFile('COMPOSE_FILE=compose.yaml\uFEFF\n').lookup('COMPOSE_FILE'))
+        .toBe('compose.yaml\uFEFF');
+    });
+
+    it('trims the Unicode whitespace Go trims from an unquoted value', () => {
+      expect(readEnvFile('COMPOSE_FILE=compose.yaml\u2000\n').lookup('COMPOSE_FILE'))
+        .toBe('compose.yaml');
+    });
+
+    it.each([
+      ['an en quad', '\u2000'],
+      ['an ogham space mark', '\u1680'],
+      ['a line separator', '\u2028'],
+    ])('reads an assignment after %s at the statement start', (_label, separator) => {
+      // Compose skips statement whitespace with unicode.IsSpace, so a separator
+      // before an unrelated assignment is not a name character.
+      const files = readEnvFile(`${separator}LABEL=ordinary\nCOMPOSE_FILE=compose.yaml\n`);
+
+      expect(files.lookup('LABEL')).toBe('ordinary');
+      expect(files.lookup('COMPOSE_FILE')).toBe('compose.yaml');
+    });
+
+    it('trims the whitespace Go trims from a name', () => {
+      // The name loop skips isSpace runes and Go trims the same set on the right.
+      expect(readEnvFile('COMPOSE_FILE\u00a0=compose.yaml\n').lookup('COMPOSE_FILE'))
+        .toBe('compose.yaml');
+    });
+
+    it('trims a separator after export that the ASCII regexp does not consume', () => {
+      // Go's export pattern consumes ASCII whitespace, then TrimLeftFunc trims
+      // the rest of the isSpace run. Leaving the NBSP in the name loses the
+      // assignment and with it the selected layer.
+      expect(readEnvFile('export \u00a0COMPOSE_FILE=compose.yaml\n').lookup('COMPOSE_FILE'))
+        .toBe('compose.yaml');
+    });
+
+    it('refuses export followed by a separator Go does not treat as regexp whitespace', () => {
+      // Go's `\s` in the export pattern is ASCII only. Compose rejects this as a
+      // name character; accepting it would read an assignment the run never made.
+      expect(() => readEnvFile('export\u2000COMPOSE_FILE=compose.yaml\n')).toThrow(ComposeEnvFileError);
+    });
+  });
 });
 
 describe('expandComposeEnvEscapes', () => {
