@@ -26,7 +26,7 @@ import { isDebugEnabled } from '../utils/debug';
 import { getErrorMessage } from '../utils/errors';
 import { normalizeContainerName } from '../utils/log-parsing';
 import { describeSpawnError } from '../utils/spawnErrors';
-import { isPathWithinBase, isValidStackName, isValidRelativeStackPath } from '../utils/validation';
+import { isPathWithinBase, isValidStackName, isValidRelativeStackPath, resolveOperatorConfiguredPath } from '../utils/validation';
 import { COMPOSE_OVERRIDE_FILENAMES, COMPOSE_ROOT_FILENAMES } from '../utils/composeFilenames';
 import { authoredComposeFileArgs, authoredComposeEnvFileArgs } from '../utils/authoredComposeArgs';
 import type { RollbackInvocationRecord } from '../types/rollbackGeneration';
@@ -1802,7 +1802,7 @@ export class ComposeService {
     // Compose trims each entry and skips empty ones, so the check has to name
     // the same paths it will open.
     for (const entry of raw.split(',').map((value) => value.trim()).filter((value) => value.length > 0)) {
-      const abs = path.resolve(workingDir, entry);
+      const abs = resolveOperatorConfiguredPath(workingDir, entry);
       let stat: import('fs').Stats;
       try {
         stat = await fs.promises.stat(abs);
