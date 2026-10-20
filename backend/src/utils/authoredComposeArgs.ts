@@ -356,9 +356,10 @@ export { DEFAULT_PATH_SEPARATOR };
 /**
  * The files COMPOSE_ENV_FILES names, or [] when it is unset or empty. Compose
  * splits the value on commas, ignores empty entries, and falls back to the
- * project .env when the result names no file.
+ * project .env when the result names no file. Every non-empty entry is used
+ * verbatim, spaces included: Compose treats them as part of the filename.
  */
-function composeEnvFilesFromProcess(): string[] {
+export function composeEnvFilesFromProcess(): string[] {
   const raw = process.env.COMPOSE_ENV_FILES;
   if (raw === undefined || raw === '') return [];
   return raw.split(',').filter((entry) => entry.length > 0);

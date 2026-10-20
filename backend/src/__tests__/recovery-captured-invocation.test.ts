@@ -1098,4 +1098,99 @@ describe('captured invocation on recovery Compose args', () => {
       }
     },
   );
+
+  it.skipIf(process.platform === 'win32')(
+    'recovers through a spaced COMPOSE_ENV_FILES entry under the name Compose opens',
+    async () => {
+      const stackName = 'inv-process-env-spaced';
+      const stackDir = path.join(composeDir, stackName);
+      // Compose uses a non-empty entry verbatim, so the spaces are filename
+      // characters. The plain sibling directory is the target a reader that
+      // trimmed the entry would stat instead.
+      const spacedEnv = path.join(stackDir, ' plain.env ');
+      await fs.promises.mkdir(stackDir, { recursive: true });
+      await fs.promises.mkdir(path.join(stackDir, 'plain.env'));
+      await fs.promises.writeFile(path.join(stackDir, 'compose.yaml'), 'services:\n  web:\n    image: nginx\n', 'utf8');
+      await fs.promises.writeFile(spacedEnv, 'VALUE=spaced\n', 'utf8');
+      await fs.promises.writeFile(path.join(stackDir, 'select.env'), 'VALUE=explicit\n', 'utf8');
+
+      const previous = process.env.COMPOSE_ENV_FILES;
+      process.env.COMPOSE_ENV_FILES = ' plain.env ';
+      try {
+        const { resolveRollbackInventory } = await import('../services/rollbackInventory');
+        const inventory = await resolveRollbackInventory(nodeId, stackName);
+        expect(inventory.coverageRefusal).toBeNull();
+        // The capture names the same spaced file, so the guard below and the
+        // omission note share one entry selection.
+        expect(inventory.uncapturedInputs.some(
+          (note) => note.includes(' plain.env ') && note.includes('COMPOSE_ENV_FILES'),
+        )).toBe(true);
+
+        const { ComposeService } = await import('../services/ComposeService');
+        const svc = ComposeService.getInstance(nodeId);
+        const execute = vi.spyOn(svc as unknown as {
+          execute: (...args: unknown[]) => Promise<void>;
+        }, 'execute').mockResolvedValue(undefined);
+
+        await expect(svc.composeUpWithRecoveryOverride(
+          stackName,
+          path.join(stackDir, '.sencho-recovery-unused.yml'),
+        )).resolves.toEqual({ mutatedByCompose: true });
+        expect(execute).toHaveBeenCalledTimes(1);
+        // The child inherits the variable verbatim: the guard inspects the file
+        // Compose opens and never rewrites the value it passes on.
+        expect(process.env.COMPOSE_ENV_FILES).toBe(' plain.env ');
+
+        // An explicit --env-file replaces the process list for interpolation,
+        // so the spaced entry cannot reach this run and must not refuse it.
+        await expect(svc.composeUpWithRecoveryOverride(
+          stackName,
+          path.join(stackDir, '.sencho-recovery-unused.yml'),
+          undefined,
+          layerInvocation(stackName, [], ['--env-file', path.join(stackDir, 'select.env')]),
+        )).resolves.toEqual({ mutatedByCompose: true });
+        expect(execute).toHaveBeenCalledTimes(2);
+      } finally {
+        if (previous === undefined) delete process.env.COMPOSE_ENV_FILES;
+        else process.env.COMPOSE_ENV_FILES = previous;
+      }
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'refuses a recovery run when the spaced COMPOSE_ENV_FILES entry is not a regular file',
+    async () => {
+      const stackName = 'inv-process-env-spaced-special';
+      const stackDir = path.join(composeDir, stackName);
+      const spacedEnv = path.join(stackDir, ' plain.env ');
+      await fs.promises.mkdir(stackDir, { recursive: true });
+      await fs.promises.writeFile(path.join(stackDir, 'compose.yaml'), 'services:\n  web:\n    image: nginx\n', 'utf8');
+
+      const previous = process.env.COMPOSE_ENV_FILES;
+      process.env.COMPOSE_ENV_FILES = ' plain.env ';
+      try {
+        const { ComposeService } = await import('../services/ComposeService');
+        const svc = ComposeService.getInstance(nodeId);
+        const execute = vi.spyOn(svc as unknown as {
+          execute: (...args: unknown[]) => Promise<void>;
+        }, 'execute').mockResolvedValue(undefined);
+
+        // The exact spaced name is the one Compose would open, so a FIFO or a
+        // directory under it is a refusal rather than a reason to fall back to
+        // the trimmed name.
+        for (const kind of ['fifo', 'directory'] as const) {
+          await replaceWithSpecialFile(spacedEnv, kind, async () => {
+            await expect(svc.composeUpWithRecoveryOverride(
+              stackName,
+              path.join(stackDir, '.sencho-recovery-unused.yml'),
+            )).rejects.toMatchObject({ code: 'NOT_A_FILE' });
+          });
+        }
+        expect(execute).not.toHaveBeenCalled();
+      } finally {
+        if (previous === undefined) delete process.env.COMPOSE_ENV_FILES;
+        else process.env.COMPOSE_ENV_FILES = previous;
+      }
+    },
+  );
 });

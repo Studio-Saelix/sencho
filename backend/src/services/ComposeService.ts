@@ -28,7 +28,11 @@ import { normalizeContainerName } from '../utils/log-parsing';
 import { describeSpawnError } from '../utils/spawnErrors';
 import { isPathWithinBase, isValidStackName, isValidRelativeStackPath } from '../utils/validation';
 import { COMPOSE_OVERRIDE_FILENAMES, COMPOSE_ROOT_FILENAMES } from '../utils/composeFilenames';
-import { authoredComposeFileArgs, authoredComposeEnvFileArgs } from '../utils/authoredComposeArgs';
+import {
+  authoredComposeFileArgs,
+  authoredComposeEnvFileArgs,
+  composeEnvFilesFromProcess,
+} from '../utils/authoredComposeArgs';
 import type { RollbackInvocationRecord } from '../types/rollbackGeneration';
 import { parseMissingRequiredVars } from '../helpers/envVarParse';
 import { redactSensitiveText, sanitizeForLog } from '../utils/safeLog';
@@ -1797,11 +1801,11 @@ export class ComposeService {
    */
   private async assertProcessEnvFilesRegular(workingDir: string, args: string[]): Promise<void> {
     if (this.hasExplicitEnvFileFlag(args)) return;
-    const raw = process.env.COMPOSE_ENV_FILES;
-    if (raw === undefined || raw === '') return;
-    // Compose trims each entry and skips empty ones, so the check has to name
-    // the same paths it will open.
-    for (const entry of raw.split(',').map((value) => value.trim()).filter((value) => value.length > 0)) {
+    // The capture reads the same selection, so the guard names the file Compose
+    // opens. Compose splits on commas and skips empty entries, but every
+    // non-empty entry is used verbatim: spaces around a name are filename
+    // characters, not separators.
+    for (const entry of composeEnvFilesFromProcess()) {
       const abs = path.resolve(workingDir, entry);
       let stat: import('fs').Stats;
       try {

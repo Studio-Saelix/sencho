@@ -1114,6 +1114,86 @@ describe.skipIf(!hasDocker)('recovery loads the model the capture-time run loade
     }
   });
 
+  it('opens the spaced COMPOSE_ENV_FILES name Compose opens when recovery runs', async () => {
+    const stack = 'layerspacedenvfiles';
+    const stackDir = path.join(composeDir, stack);
+    fs.mkdirSync(stackDir, { recursive: true });
+    // Compose uses a non-empty entry verbatim, so the spaces are filename
+    // characters. The plain sibling directory is the target a reader that
+    // trimmed the entry would open instead.
+    fs.writeFileSync(path.join(stackDir, ' plain.env '), 'VALUE=spaced\n', 'utf8');
+    fs.mkdirSync(path.join(stackDir, 'plain.env'));
+    fs.writeFileSync(
+      path.join(stackDir, 'compose.yaml'),
+      SERVICE('busybox:1.36.1', '${VALUE:-missing}'),
+      'utf8',
+    );
+    const recoveryLayer = path.join(stackDir, '.sencho-recovery-test.yml');
+    fs.writeFileSync(
+      recoveryLayer,
+      'services:\n  web:\n    labels:\n      sencho.recovery-test: "1"\n',
+      'utf8',
+    );
+
+    const previous = process.env.COMPOSE_ENV_FILES;
+    process.env.COMPOSE_ENV_FILES = ' plain.env ';
+    try {
+      const { resolveRollbackInventory } = await import('../../services/rollbackInventory');
+      const { RollbackGenerationStore } = await import('../../services/RollbackGenerationStore');
+      const { ComposeService } = await import('../../services/ComposeService');
+
+      const inventory = await resolveRollbackInventory(nodeId, stack);
+      expect(inventory.coverageRefusal).toBeNull();
+      expect(inventory.uncapturedInputs.some(
+        (note) => note.includes(' plain.env ') && note.includes('COMPOSE_ENV_FILES'),
+      )).toBe(true);
+
+      const generationId = randomUUID();
+      const manifest = await RollbackGenerationStore.captureGeneration({
+        nodeId,
+        stackName: stack,
+        generationId,
+        inventory,
+      });
+      // The generation cannot hold this file, so it records the omission and
+      // recovery reads the live one. The live model is what Compose renders
+      // from the spaced name.
+      expect(manifest.uncapturedInputs?.some((note) => note.includes(' plain.env '))).toBe(true);
+      const live = renderModel([], stackDir, stack) as {
+        services: Record<string, { command?: string[] }>;
+      };
+      expect(live.services.web.command).toEqual(['echo', 'spaced']);
+
+      const svc = ComposeService.getInstance(nodeId);
+      const execute = vi.spyOn(svc as unknown as {
+        execute: (...args: unknown[]) => Promise<void>;
+      }, 'execute').mockResolvedValue(undefined);
+
+      await expect(svc.composeUpWithRecoveryOverride(
+        stack,
+        recoveryLayer,
+        undefined,
+        manifest.invocation,
+      )).resolves.toEqual({ mutatedByCompose: true });
+      expect(execute).toHaveBeenCalledTimes(1);
+
+      // The launcher reached the spawn with the inherited variable intact.
+      // Rendering that exact prefix with the real CLI proves the file it opens
+      // is the spaced one, not the trimmed sibling directory.
+      const spawnArgs = execute.mock.calls[0][1] as string[];
+      expect(spawnArgs[0]).toBe('compose');
+      const globalArgs = spawnArgs.slice(1, spawnArgs.indexOf('up'));
+      const recovery = renderModel(globalArgs, stackDir, stack) as {
+        services: Record<string, { command?: string[] }>;
+      };
+      expect(recovery.services.web.command).toEqual(live.services.web.command);
+      expect(process.env.COMPOSE_ENV_FILES).toBe(' plain.env ');
+    } finally {
+      if (previous === undefined) delete process.env.COMPOSE_ENV_FILES;
+      else process.env.COMPOSE_ENV_FILES = previous;
+    }
+  });
+
   it('expands literal braces the way the Compose CLI does', async () => {
     const { expandComposeEnvTemplate } = await import('../../utils/composeDotenv');
     const cases: Array<{ name: string; template: string; env: string; set: boolean; expected: string | null }> = [
