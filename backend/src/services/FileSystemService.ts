@@ -243,11 +243,20 @@ export class FileSystemService {
   }
 
   async hasComposeFile(dir: string): Promise<boolean> {
-    this.assertWithinBase(dir);
+    // Canonical inline js/path-injection barrier at the fs sink below: CodeQL
+    // credits neither the wrapped isPathWithinBase helper nor a check in a
+    // caller's scope, so the containment check has to be here. The compose base
+    // itself is not a stack, and every caller passes a stack directory, so the
+    // prefix check is the whole rule.
+    const baseResolved = path.resolve(this.baseDir);
+    const resolvedDir = path.resolve(dir);
+    if (!resolvedDir.startsWith(baseResolved + path.sep)) {
+      throw Object.assign(new Error('Path escapes compose directory'), { code: 'INVALID_PATH' });
+    }
     const composeFiles = ['compose.yaml', 'compose.yml', 'docker-compose.yaml', 'docker-compose.yml'];
     for (const file of composeFiles) {
       try {
-        await fsPromises.access(path.join(dir, file));
+        await fsPromises.access(path.join(resolvedDir, file));
         return true;
       } catch {
         // continue
