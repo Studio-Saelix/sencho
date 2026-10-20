@@ -10,6 +10,7 @@ import { describe, it, expect, vi, beforeEach, afterEach, afterAll } from 'vites
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
+import net from 'net';
 
 const mockState = { composeDir: fs.mkdtempSync(path.join(os.tmpdir(), 'sencho-composeargs-')) };
 
@@ -666,6 +667,27 @@ describe('composeFileEnvVarSelection', () => {
         const selection = await composeFileEnvVarSelection(STACK, 1);
         expect(selection).toMatchObject({ kind: 'invalid' });
         expect(selection.kind === 'invalid' ? selection.reason : '').toContain('app.env');
+      },
+    );
+
+    it.skipIf(process.platform === 'win32')(
+      'reports invalid when a listed env file is a socket',
+      async () => {
+        // A socket cannot be opened for reading at all, so the descriptor check
+        // never runs; the open error has to map to the same refusal.
+        const server = net.createServer();
+        await new Promise<void>((resolve, reject) => {
+          server.once('error', reject);
+          server.listen(stackPath('select.env'), resolve);
+        });
+        process.env.COMPOSE_ENV_FILES = 'select.env';
+        try {
+          const selection = await composeFileEnvVarSelection(STACK, 1);
+          expect(selection).toMatchObject({ kind: 'invalid' });
+          expect(selection.kind === 'invalid' ? selection.reason : '').toContain('select.env');
+        } finally {
+          await new Promise<void>((resolve) => server.close(() => resolve()));
+        }
       },
     );
 

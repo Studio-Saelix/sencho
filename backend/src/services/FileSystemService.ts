@@ -820,24 +820,48 @@ export class FileSystemService {
   }
 
   /**
-   * Read an env file only when the descriptor is a regular file.
+   * Open an env file without blocking and refuse the descriptor unless it is a
+   * regular file.
    *
-   * Compose loads a listed env file for interpolation on every run, and a path
-   * that became a FIFO after the caller's check would hold a blocking read
-   * until a writer appears. The type is checked before the open (a socket or
-   * device may not open at all) and again on the descriptor (a FIFO swapped in
-   * during that gap must not block), and the open is non-blocking so no
-   * descriptor-level check can sleep.
+   * Compose loads env files for interpolation on every run, and a path that
+   * became a FIFO after a caller-side check would hold a blocking read until a
+   * writer appears. The type is decided on the descriptor that is then read
+   * (O_NONBLOCK has no effect on a regular file), so no check/open gap can
+   * sleep and no second lookup can redirect the read to another file. A socket
+   * cannot be opened at all and a directory is not openable for reading on
+   * every platform, so both are refused as the same unusable input.
+   */
+  private async openRegularEnvFile(
+    filePath: string,
+    label: string,
+  ): Promise<import('fs/promises').FileHandle> {
+    let fh: import('fs/promises').FileHandle;
+    try {
+      fh = await fsPromises.open(filePath, fsConstants.O_RDONLY | fsConstants.O_NONBLOCK);
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code === 'ENXIO' || code === 'EISDIR') throw nonRegularEnvFileError(label);
+      throw error;
+    }
+    try {
+      if (!(await fh.stat()).isFile()) throw nonRegularEnvFileError(label);
+      return fh;
+    } catch (error) {
+      await fh.close().catch(() => undefined);
+      throw error;
+    }
+  }
+
+  /**
+   * Read an env file only when the descriptor is a regular file. Used for the
+   * interpolation env files a Compose run is told to load, where a FIFO with no
+   * writer must produce a refusal instead of a wait.
    */
   async readEnvFile(filePath: string, encoding: BufferEncoding = 'utf-8'): Promise<string> {
     this.assertWithinBase(filePath);
     await this.assertRealWithinBase(filePath);
-    if (!(await fsPromises.stat(filePath)).isFile()) {
-      throw nonRegularEnvFileError(path.basename(filePath));
-    }
-    const fh = await fsPromises.open(filePath, fsConstants.O_RDONLY | fsConstants.O_NONBLOCK);
+    const fh = await this.openRegularEnvFile(filePath, path.basename(filePath));
     try {
-      if (!(await fh.stat()).isFile()) throw nonRegularEnvFileError(path.basename(filePath));
       return await fh.readFile(encoding);
     } finally {
       await fh.close();
@@ -866,15 +890,10 @@ export class FileSystemService {
     try {
       // The project .env is read for interpolation on every Compose run, so a
       // FIFO that replaced it would hold this read until a writer appears. The
-      // type is checked before the open (a socket or device may not open at
-      // all) and again on the non-blocking descriptor (a FIFO swapped in during
-      // that gap must not block).
-      if (!(await fsPromises.stat(envPath)).isFile()) {
-        throw nonRegularEnvFileError(`${path.basename(stackName)}/.env`);
-      }
-      const fh = await fsPromises.open(envPath, fsConstants.O_RDONLY | fsConstants.O_NONBLOCK);
+      // descriptor is opened non-blocking and its type is checked before the
+      // read, so no check/open gap can sleep.
+      const fh = await this.openRegularEnvFile(envPath, `${path.basename(stackName)}/.env`);
       try {
-        if (!(await fh.stat()).isFile()) throw nonRegularEnvFileError(`${path.basename(stackName)}/.env`);
         return await fh.readFile('utf-8');
       } finally {
         await fh.close();

@@ -1789,6 +1789,11 @@ export class ComposeService {
    * unresolvable entry is left to Compose, which reports it without waiting.
    * An explicit `--env-file` replaces the variable for interpolation, so a list
    * that run never reads cannot refuse it.
+   *
+   * The working directory is the validated stack path, and the entry is the
+   * operator's own process environment, never request data. The check is a
+   * metadata stat only: the same value is already passed unchanged to the
+   * Compose child, so refusing to inspect it would not narrow the child's reach.
    */
   private async assertProcessEnvFilesRegular(workingDir: string, args: string[]): Promise<void> {
     if (this.hasExplicitEnvFileFlag(args)) return;
@@ -1837,7 +1842,7 @@ export class ComposeService {
     if (overlay?.overlayDir && overlay.overlayBinding) {
       GitOpsDecryptOverlay.getInstance().assertBinding(overlay.overlayDir, overlay.overlayBinding);
     }
-    const stackDir = overlay?.overlayDir ?? path.join(this.baseDir, stackName);
+    const stackDir = overlay?.overlayDir ?? this.resolveValidatedStackDir(stackName);
     const sendOutput = (data: string) => {
       if (ws && ws.readyState === WebSocket.OPEN) ws.send(data);
     };
