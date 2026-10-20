@@ -360,6 +360,22 @@ describe('composeFileEnvVarSelection', () => {
     expect(inventory.invocation.composeLayers).toEqual(['compose.yaml']);
   });
 
+  it('captures a COMPOSE_FILE chain with no conventional root file', async () => {
+    fs.rmSync(stackPath('compose.yaml'));
+    writeStackFile('.env', 'COMPOSE_FILE=custom.yaml\n');
+    writeStackFile('custom.yaml', 'services:\n  web:\n    image: nginx\n');
+
+    const inventory = await resolveRollbackInventory(1, STACK);
+
+    // Compose selects and runs custom.yaml even though no conventional root
+    // exists. Refusing capture here would block a project Compose can run.
+    expect(inventory.coverageRefusal).toBeNull();
+    expect(inventory.invocation.composeLayers).toEqual(['custom.yaml']);
+    expect(inventory.uncapturedInputs.join(' ')).toContain(
+      'compose layer custom.yaml is selected by COMPOSE_FILE and is not captured',
+    );
+  });
+
   it('reports absent when no env file sets it', async () => {
     writeStackFile('.env', 'IMAGE=nginx\n');
 
@@ -857,18 +873,52 @@ describe('composeFileEnvVarSelection', () => {
       fs.rmSync(realRoot, { recursive: true, force: true });
     });
 
-    it('names a configured env file it cannot read at the path the deploy uses', async () => {
+    it('reads a configured env file through the linked compose root', async () => {
       mockGetStackProjectEnvFiles.mockReturnValue(['select.env']);
 
       const selection = await composeFileEnvVarSelection(STACK, 1);
 
-      // The deploy passes this file to Compose, which reads it, so the capture
-      // has to name it as an input it does not hold rather than call the stack
-      // fully covered.
-      const realEnvPath = path.join(realRoot, STACK, 'select.env');
-      expect(selection).toMatchObject({ kind: 'unknown' });
-      expect(selection.loadedEnvFiles).toEqual([realEnvPath]);
-      expect(selection.kind === 'unknown' ? selection.reason : '').toContain('select.env');
+      // The deploy hands Compose the physical path, which is outside the
+      // lexical compose root. The reader translates it back to the root's
+      // spelling before the containment guard, so the file the deploy reads is
+      // the file this reader reads.
+      expect(selection).toMatchObject({ kind: 'value', value: 'compose.yaml' });
+      expect(selection.loadedEnvFiles).toEqual([path.join(realRoot, STACK, 'select.env')]);
+    });
+
+    it('pins a COMPOSE_FILE chain named by a configured env file', async () => {
+      fs.writeFileSync(path.join(realRoot, STACK, 'select.env'), 'COMPOSE_FILE=compose.yaml:prod.yaml\n', 'utf8');
+      fs.writeFileSync(path.join(realRoot, STACK, 'prod.yaml'), 'services:\n  web:\n    image: nginx\n', 'utf8');
+      mockGetStackProjectEnvFiles.mockReturnValue(['select.env']);
+
+      const inventory = await resolveRollbackInventory(1, STACK);
+
+      // Before the lexical translation this selection was `unknown`, so the
+      // capture could not see the chain. It now pins the same layer set the
+      // deploy loads.
+      expect(inventory.coverageRefusal).toBeNull();
+      expect(inventory.invocation.composeLayers).toEqual(['compose.yaml', 'prod.yaml']);
+    });
+
+    it('still refuses a configured env file that links outside the compose root', async () => {
+      const outsideDir = fs.mkdtempSync(path.join(os.tmpdir(), 'sencho-composeargs-out-'));
+      try {
+        const outsideEnv = path.join(outsideDir, 'outside.env');
+        fs.writeFileSync(outsideEnv, 'COMPOSE_FILE=compose.yaml\n', 'utf8');
+        fs.symlinkSync(outsideEnv, path.join(realRoot, STACK, 'escape.env'));
+        mockGetStackProjectEnvFiles.mockReturnValue(['escape.env']);
+
+        const selection = await composeFileEnvVarSelection(STACK, 1);
+
+        // The lexical translation only moves a path inside the real compose
+        // root. A link that resolves outside it keeps its physical spelling and
+        // remains refused rather than read.
+        expect(selection.kind).toBe('unknown');
+        expect(selection.kind === 'unknown' ? selection.reason : '').toContain('escape.env');
+        expect(selection.loadedEnvFiles).toEqual([]);
+      } finally {
+        fs.rmSync(outsideDir, { recursive: true, force: true });
+      }
     });
 
     it('reads the project .env through the link, as Compose does', async () => {

@@ -1032,6 +1032,88 @@ describe.skipIf(!hasDocker)('recovery loads the model the capture-time run loade
     expect(recovery.services.web.command).toEqual(['echo', 'captured-root', 'captured-sub', 'fromroot']);
   });
 
+  it('keeps a dynamically resolved bind source that is also an optional env file', async () => {
+    const stack = 'dynamicbindrestore';
+    const stackDir = path.join(composeDir, stack);
+    fs.mkdirSync(path.join(stackDir, 'sub'), { recursive: true });
+    const original = [
+      'services:',
+      '  web:',
+      '    image: busybox:1.36.1',
+      '    command: ["sleep","infinity"]',
+      '    volumes:',
+      '      - ./${DATA_SUBDIR}/data.env:/data',
+      '    env_file:',
+      '      - path: ./sub/data.env',
+      '        required: false',
+      '',
+    ].join('\n');
+    fs.writeFileSync(path.join(stackDir, 'compose.yaml'), original, 'utf8');
+
+    const previousSubdir = process.env.DATA_SUBDIR;
+    process.env.DATA_SUBDIR = 'sub';
+    try {
+      const { resolveRollbackInventory } = await import('../../services/rollbackInventory');
+      const { RollbackGenerationStore } = await import('../../services/RollbackGenerationStore');
+      const { resolveComposeProjectContextForGeneration } = await import('../../services/composeProjectContext');
+
+      const captured = await resolveRollbackInventory(nodeId, stack);
+      expect(captured.coverageRefusal).toBeNull();
+      expect(captured.uncapturedInputs).toEqual([]);
+      // The capture cannot know what the variable resolves to, so it records
+      // the source and does not guess a literal tail.
+      expect(captured.dynamicApplicationDataSources).toEqual(['./${DATA_SUBDIR}/data.env']);
+      expect(captured.applicationDataPaths).not.toContain('data.env');
+      expect(captured.applicationDataPaths).not.toContain('sub/data.env');
+
+      const generationId = randomUUID();
+      await RollbackGenerationStore.captureGeneration({
+        nodeId,
+        stackName: stack,
+        generationId,
+        inventory: captured,
+      });
+
+      // The optional file appears with application data, and Compose resolves
+      // the bind to that file. The compose file also moves on, so restore has
+      // real work to do.
+      const dataFile = path.join(stackDir, 'sub', 'data.env');
+      fs.writeFileSync(dataFile, 'DATA_TOKEN=application-data\n', 'utf8');
+      fs.writeFileSync(
+        path.join(stackDir, 'compose.yaml'),
+        original.replace('image: busybox:1.36.1', 'image: busybox:1.36.2'),
+        'utf8',
+      );
+
+      const live = renderModel([], stackDir, stack) as {
+        services: Record<string, { volumes?: Array<{ source?: string; target?: string }> }>;
+      };
+      expect(live.services.web.volumes).toEqual([
+        expect.objectContaining({ source: dataFile, target: '/data' }),
+      ]);
+
+      const ctx = await resolveComposeProjectContextForGeneration(nodeId, stack, generationId);
+      await ctx.restoreFromContext();
+
+      // Restore returned the captured compose file and did not unlink the path
+      // the interpolation resolves to.
+      expect(fs.readFileSync(path.join(stackDir, 'compose.yaml'), 'utf8')).toBe(original);
+      expect(fs.readFileSync(dataFile, 'utf8')).toBe('DATA_TOKEN=application-data\n');
+
+      // The restored project still mounts the file real Compose resolved before
+      // the rollback, so this is the same bind source end to end.
+      const recovered = renderModel([], stackDir, stack) as {
+        services: Record<string, { volumes?: Array<{ source?: string; target?: string }> }>;
+      };
+      expect(recovered.services.web.volumes).toEqual([
+        expect.objectContaining({ source: dataFile, target: '/data' }),
+      ]);
+    } finally {
+      if (previousSubdir === undefined) delete process.env.DATA_SUBDIR;
+      else process.env.DATA_SUBDIR = previousSubdir;
+    }
+  });
+
   it('expands literal braces the way the Compose CLI does', async () => {
     const { expandComposeEnvTemplate } = await import('../../utils/composeDotenv');
     const cases: Array<{ name: string; template: string; env: string; set: boolean; expected: string | null }> = [

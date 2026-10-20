@@ -14,7 +14,7 @@ import os from 'os';
 import { promises as fsPromises } from 'fs';
 import { randomUUID } from 'crypto';
 
-const mockState = { composeDir: '', dataDir: '' };
+const mockState = { composeDir: '', dataDir: '', projectEnvFiles: [] as string[] };
 
 vi.mock('../services/NodeRegistry', () => ({
   NodeRegistry: {
@@ -31,7 +31,7 @@ vi.mock('../services/DatabaseService', () => ({
   DatabaseService: {
     getInstance: () => ({
       getGitSource: () => undefined,
-      getStackProjectEnvFiles: () => [],
+      getStackProjectEnvFiles: () => mockState.projectEnvFiles,
       isMeshStackEnabled: () => false,
     }),
   },
@@ -59,6 +59,7 @@ describe('restore selects the captured Compose project', () => {
     mockState.dataDir = dataDir;
     originalDataDir = process.env.DATA_DIR;
     process.env.DATA_DIR = dataDir;
+    mockState.projectEnvFiles = [];
     stackDir = path.join(composeDir, 'app');
     await fsPromises.mkdir(stackDir, { recursive: true });
   });
@@ -376,29 +377,32 @@ describe('restore selects the captured Compose project', () => {
     expect(await fsPromises.readFile(path.join(stackDir, 'shared.env'), 'utf8')).toBe('TOKEN=app-data\n');
   });
 
-  it('keeps a file a dynamic bind can resolve to when it also serves as an env file', async () => {
-    await fsPromises.writeFile(
-      path.join(stackDir, 'docker-compose.yml'),
-      [
-        'services:',
-        '  web:',
-        '    image: nginx',
-        '    volumes:',
-        '      - ./${DATA_DIR}/shared.env:/run/secrets/shared.env',
-        '    env_file:',
-        '      - path: ./shared.env',
-        '        required: false',
-        '',
-      ].join('\n'),
-      'utf8',
-    );
+  it.each([
+    ['a variable that names a directory', './${DATA_SUBDIR}/data.env', './sub/data.env', 'sub/data.env'],
+    ['a variable that names the whole source', '${DATA_FILE}', './data.env', 'data.env'],
+  ])('keeps application data a dynamic bind resolves to: %s', async (_label, bindSource, envFile, livePath) => {
+    await fsPromises.mkdir(path.join(stackDir, path.dirname(livePath)), { recursive: true });
+    const original = [
+      'services:',
+      '  web:',
+      '    image: nginx',
+      '    volumes:',
+      `      - ${bindSource}:/data`,
+      '    env_file:',
+      `      - path: ${envFile}`,
+      '        required: false',
+      '',
+    ].join('\n');
+    await fsPromises.writeFile(path.join(stackDir, 'compose.yaml'), original, 'utf8');
 
     const captured = await resolveRollbackInventory(NODE, 'app');
     expect(captured.coverageRefusal).toBeNull();
-    // The bind source is resolved at deploy time, so it is silent: no note,
-    // and the generation is complete because the env file is absent.
+    // The env file is absent, so the generation is complete.
     expect(captured.uncapturedInputs).toEqual([]);
-    expect(captured.applicationDataPaths).toContain('shared.env');
+    // The substitution is unknown, so the capture records the declared source
+    // rather than a literal tail: the tail names data.env here, not sub/data.env.
+    expect(captured.dynamicApplicationDataSources).toEqual([bindSource]);
+    expect(captured.applicationDataPaths).not.toContain(livePath);
 
     const generationId = randomUUID();
     await RollbackGenerationStore.captureGeneration({
@@ -408,18 +412,637 @@ describe('restore selects the captured Compose project', () => {
       inventory: captured,
     });
 
-    // The file appears and the substitution can point the bind at it. The
-    // live inventory sees only the managed env-file entry; the ownership
-    // record from the dynamic bind keeps it out of the forward.
-    await fsPromises.writeFile(path.join(stackDir, 'shared.env'), 'TOKEN=app-data\n', 'utf8');
+    // The path appears as application data and the compose file moves on. The
+    // live inventory sees only the managed env-file entry; the generation's
+    // unresolved application-data record keeps every unrecorded live file.
+    await fsPromises.writeFile(path.join(stackDir, livePath), 'TOKEN=application-data\n', 'utf8');
+    const movedOn = original.replace('image: nginx', 'image: nginx:2');
+    await fsPromises.writeFile(path.join(stackDir, 'compose.yaml'), movedOn, 'utf8');
     const live = await resolveRollbackInventory(NODE, 'app');
-    expect(live.entries.find((entry) => entry.relativePath === 'shared.env')?.dependencyKind).toBe('env_file');
-    expect(live.applicationDataPaths).toContain('shared.env');
+    expect(live.entries.find((entry) => entry.relativePath === livePath)?.dependencyKind).toBe('env_file');
+    expect(live.dynamicApplicationDataSources).toEqual([bindSource]);
 
     const ctx = await resolveComposeProjectContextForGeneration(NODE, 'app', generationId);
     await ctx.restoreFromContext();
 
-    expect(await fsPromises.readFile(path.join(stackDir, 'shared.env'), 'utf8')).toBe('TOKEN=app-data\n');
+    // Restore returned the captured compose file and left the application data
+    // it never held in place.
+    expect(await fsPromises.readFile(path.join(stackDir, 'compose.yaml'), 'utf8')).toBe(original);
+    expect(await fsPromises.readFile(path.join(stackDir, livePath), 'utf8')).toBe('TOKEN=application-data\n');
+  });
+
+  it('keeps a storage link a dynamic bind resolves to', async () => {
+    await fsPromises.mkdir(path.join(stackDir, 'sub'), { recursive: true });
+    await fsPromises.mkdir(path.join(composeDir, 'shared'), { recursive: true });
+    const target = path.join(composeDir, 'shared', 'data.env');
+    await fsPromises.writeFile(target, 'TOKEN=application-data\n', 'utf8');
+    const original = [
+      'services:',
+      '  web:',
+      '    image: nginx',
+      '    volumes:',
+      '      - ./${DATA_SUBDIR}/data.env:/data',
+      '    env_file:',
+      '      - path: ./sub/data.env',
+      '        required: false',
+      '',
+    ].join('\n');
+    await fsPromises.writeFile(path.join(stackDir, 'compose.yaml'), original, 'utf8');
+
+    const captured = await resolveRollbackInventory(NODE, 'app');
+    expect(captured.coverageRefusal).toBeNull();
+    expect(captured.dynamicApplicationDataSources).toEqual(['./${DATA_SUBDIR}/data.env']);
+
+    const generationId = randomUUID();
+    await RollbackGenerationStore.captureGeneration({
+      nodeId: NODE,
+      stackName: 'app',
+      generationId,
+      inventory: captured,
+    });
+
+    // The bind source appears as a link to persistent storage the generation
+    // never held, and the compose file moves on.
+    const link = path.join(stackDir, 'sub', 'data.env');
+    await fsPromises.symlink(target, link);
+    await fsPromises.writeFile(
+      path.join(stackDir, 'compose.yaml'),
+      original.replace('image: nginx', 'image: nginx:2'),
+      'utf8',
+    );
+
+    const ctx = await resolveComposeProjectContextForGeneration(NODE, 'app', generationId);
+    await ctx.restoreFromContext();
+
+    // Restore unlinked nothing: the storage link and the data behind it survive.
+    const restoredLink = await fsPromises.lstat(link);
+    expect(restoredLink.isSymbolicLink()).toBe(true);
+    expect(await fsPromises.readlink(link)).toBe(target);
+    expect(await fsPromises.readFile(target, 'utf8')).toBe('TOKEN=application-data\n');
+    expect(await fsPromises.readFile(path.join(stackDir, 'compose.yaml'), 'utf8')).toBe(original);
+  });
+
+  it('keeps live application data when a stored generation predates dynamic sources', async () => {
+    await fsPromises.mkdir(path.join(stackDir, 'sub'), { recursive: true });
+    const original = [
+      'services:',
+      '  web:',
+      '    image: nginx',
+      '    volumes:',
+      '      - ./${DATA_SUBDIR}/data.env:/data',
+      '    env_file:',
+      '      - path: ./sub/data.env',
+      '        required: false',
+      '',
+    ].join('\n');
+    await fsPromises.writeFile(path.join(stackDir, 'compose.yaml'), original, 'utf8');
+
+    const captured = await resolveRollbackInventory(NODE, 'app');
+    expect(captured.dynamicApplicationDataSources).toEqual(['./${DATA_SUBDIR}/data.env']);
+    const generationId = randomUUID();
+    await RollbackGenerationStore.captureGeneration({
+      nodeId: NODE,
+      stackName: 'app',
+      generationId,
+      inventory: captured,
+    });
+
+    // A generation written before this field existed looks exactly like this.
+    const manifestPath = path.join(
+      RollbackGenerationStore.getGenerationDir(NODE, 'app', generationId),
+      'generation.json',
+    );
+    const manifest = JSON.parse(await fsPromises.readFile(manifestPath, 'utf8'));
+    delete manifest.dynamicApplicationDataSources;
+    await fsPromises.writeFile(manifestPath, JSON.stringify(manifest), 'utf8');
+
+    // The live project still declares the dynamic source, so restore cannot
+    // know which live path it resolves to even though the old manifest has no
+    // record of it.
+    await fsPromises.writeFile(path.join(stackDir, 'sub', 'data.env'), 'TOKEN=application-data\n', 'utf8');
+    await fsPromises.writeFile(
+      path.join(stackDir, 'compose.yaml'),
+      original.replace('image: nginx', 'image: nginx:2'),
+      'utf8',
+    );
+
+    const ctx = await resolveComposeProjectContextForGeneration(NODE, 'app', generationId);
+    await ctx.restoreFromContext();
+
+    expect(await fsPromises.readFile(path.join(stackDir, 'compose.yaml'), 'utf8')).toBe(original);
+    expect(await fsPromises.readFile(path.join(stackDir, 'sub', 'data.env'), 'utf8')).toBe(
+      'TOKEN=application-data\n',
+    );
+  });
+
+  it('keeps application data when a refused live inventory clears its ownership records', async () => {
+    await fsPromises.mkdir(path.join(stackDir, 'sub'), { recursive: true });
+    const original = [
+      'services:',
+      '  web:',
+      '    image: nginx',
+      '    env_file:',
+      '      - path: ./sub/data.env',
+      '        required: false',
+      '',
+    ].join('\n');
+    await fsPromises.writeFile(path.join(stackDir, 'compose.yaml'), original, 'utf8');
+
+    const captured = await resolveRollbackInventory(NODE, 'app');
+    expect(captured.coverageRefusal).toBeNull();
+    const generationId = randomUUID();
+    await RollbackGenerationStore.captureGeneration({
+      nodeId: NODE,
+      stackName: 'app',
+      generationId,
+      inventory: captured,
+    });
+
+    // The interpolated bind arrives after capture, the optional env file now
+    // holds application data, and unrelated case-colliding configured env
+    // files make the live inventory refuse. A refused inventory returns no
+    // application-data records, but it also cannot prove any live path is safe
+    // to delete, so restore must not forward its entries as cleanup.
+    const withBind = original.replace(
+      '    env_file:',
+      '    volumes:\n      - ./${DATA_SUBDIR}/data.env:/data\n    env_file:',
+    ).replace('image: nginx', 'image: nginx:2');
+    await fsPromises.writeFile(path.join(stackDir, 'compose.yaml'), withBind, 'utf8');
+    await fsPromises.writeFile(path.join(stackDir, 'sub', 'data.env'), 'TOKEN=application-data\n', 'utf8');
+    await fsPromises.writeFile(path.join(stackDir, 'Probe.env'), 'A=1\n', 'utf8');
+    await fsPromises.writeFile(path.join(stackDir, 'probe.env'), 'A=1\n', 'utf8');
+    mockState.projectEnvFiles = ['Probe.env', 'probe.env'];
+
+    const live = await resolveRollbackInventory(NODE, 'app');
+    expect(live.coverageRefusal).toContain('Case-colliding managed paths');
+    expect(live.dynamicApplicationDataSources).toEqual([]);
+
+    const ctx = await resolveComposeProjectContextForGeneration(NODE, 'app', generationId);
+    await ctx.restoreFromContext();
+
+    expect(await fsPromises.readFile(path.join(stackDir, 'compose.yaml'), 'utf8')).toBe(original);
+    expect(await fsPromises.readFile(path.join(stackDir, 'sub', 'data.env'), 'utf8')).toBe(
+      'TOKEN=application-data\n',
+    );
+  });
+
+  it('keeps an absolute bind-mounted file inside the stack that also serves as an env file', async () => {
+    const dataPath = path.join(stackDir, 'data.env');
+    const original = [
+      'services:',
+      '  web:',
+      '    image: nginx',
+      '    volumes:',
+      `      - ${dataPath}:/data`,
+      '    env_file:',
+      '      - path: ./data.env',
+      '        required: false',
+      '',
+    ].join('\n');
+    await fsPromises.writeFile(path.join(stackDir, 'compose.yaml'), original, 'utf8');
+
+    const captured = await resolveRollbackInventory(NODE, 'app');
+    expect(captured.coverageRefusal).toBeNull();
+    // The absolute spelling names a file inside the stack, so it records the
+    // same stack-relative ownership a relative spelling would.
+    expect(captured.applicationDataPaths).toEqual(['data.env']);
+    expect(captured.uncapturedInputs).toEqual([]);
+
+    const generationId = randomUUID();
+    await RollbackGenerationStore.captureGeneration({
+      nodeId: NODE,
+      stackName: 'app',
+      generationId,
+      inventory: captured,
+    });
+
+    await fsPromises.writeFile(dataPath, 'TOKEN=application-data\n', 'utf8');
+    await fsPromises.writeFile(
+      path.join(stackDir, 'compose.yaml'),
+      original.replace('image: nginx', 'image: nginx:2'),
+      'utf8',
+    );
+
+    const ctx = await resolveComposeProjectContextForGeneration(NODE, 'app', generationId);
+    await ctx.restoreFromContext();
+
+    expect(await fsPromises.readFile(path.join(stackDir, 'compose.yaml'), 'utf8')).toBe(original);
+    expect(await fsPromises.readFile(dataPath, 'utf8')).toBe('TOKEN=application-data\n');
+  });
+
+  it('keeps an authored bind whose outside alias targets a stack file', async () => {
+    const dataPath = path.join(stackDir, 'data.env');
+    const aliasPath = path.join(composeDir, 'data-alias.env');
+    await fsPromises.symlink(dataPath, aliasPath);
+    const original = [
+      'services:',
+      '  web:',
+      '    image: nginx',
+      '    volumes:',
+      `      - ${aliasPath}:/data`,
+      '    env_file:',
+      '      - path: ./data.env',
+      '        required: false',
+      '',
+    ].join('\n');
+    await fsPromises.writeFile(path.join(stackDir, 'compose.yaml'), original, 'utf8');
+
+    const captured = await resolveRollbackInventory(NODE, 'app');
+    expect(captured.coverageRefusal).toBeNull();
+    // The target does not exist at capture, so the alias cannot be mapped yet.
+    // Once the file appears, the live inventory resolves the same alias to the
+    // stack path and keeps it out of live forwarding.
+    expect(captured.applicationDataPaths).toEqual([]);
+
+    const generationId = randomUUID();
+    await RollbackGenerationStore.captureGeneration({
+      nodeId: NODE,
+      stackName: 'app',
+      generationId,
+      inventory: captured,
+    });
+
+    await fsPromises.writeFile(dataPath, 'TOKEN=application-data\n', 'utf8');
+
+    const live = await resolveRollbackInventory(NODE, 'app');
+    expect(live.applicationDataPaths).toEqual(['data.env']);
+
+    const ctx = await resolveComposeProjectContextForGeneration(NODE, 'app', generationId);
+    await ctx.restoreFromContext();
+
+    expect(await fsPromises.readFile(dataPath, 'utf8')).toBe('TOKEN=application-data\n');
+    expect(await fsPromises.readFile(path.join(stackDir, 'compose.yaml'), 'utf8')).toBe(original);
+  });
+
+  it('keeps an authored bind that names an in-stack symlink to a managed file', async () => {
+    const dataPath = path.join(stackDir, 'data.env');
+    const aliasPath = path.join(stackDir, 'alias.env');
+    await fsPromises.symlink(dataPath, aliasPath);
+    const original = [
+      'services:',
+      '  web:',
+      '    image: nginx',
+      '    volumes:',
+      '      - ./alias.env:/data',
+      '    env_file:',
+      '      - path: ./data.env',
+      '        required: false',
+      '',
+    ].join('\n');
+    await fsPromises.writeFile(path.join(stackDir, 'compose.yaml'), original, 'utf8');
+
+    const captured = await resolveRollbackInventory(NODE, 'app');
+    expect(captured.coverageRefusal).toBeNull();
+    expect(captured.applicationDataPaths).toContain('alias.env');
+
+    const generationId = randomUUID();
+    await RollbackGenerationStore.captureGeneration({
+      nodeId: NODE,
+      stackName: 'app',
+      generationId,
+      inventory: captured,
+    });
+
+    // The alias was dangling at capture. The target appears later as the live
+    // env file; the bind mounts it, so it is data rather than a stale managed
+    // addition.
+    await fsPromises.writeFile(dataPath, 'TOKEN=application-data\n', 'utf8');
+
+    const live = await resolveRollbackInventory(NODE, 'app');
+    expect(live.applicationDataPaths).toContain('data.env');
+
+    const ctx = await resolveComposeProjectContextForGeneration(NODE, 'app', generationId);
+    await ctx.restoreFromContext();
+
+    expect(await fsPromises.readFile(dataPath, 'utf8')).toBe('TOKEN=application-data\n');
+    expect(await fsPromises.readFile(path.join(stackDir, 'compose.yaml'), 'utf8')).toBe(original);
+  });
+
+  it('keeps application data when a bind mounts the stack root', async () => {
+    const original = [
+      'services:',
+      '  web:',
+      '    image: nginx',
+      '    volumes:',
+      '      - .:/workspace',
+      '    env_file:',
+      '      - path: ./app.env',
+      '        required: false',
+      '',
+    ].join('\n');
+    await fsPromises.writeFile(path.join(stackDir, 'compose.yaml'), original, 'utf8');
+
+    const captured = await resolveRollbackInventory(NODE, 'app');
+    expect(captured.coverageRefusal).toBeNull();
+    // The whole stack is mounted, so no live path is provably disposable.
+    expect(captured.dynamicApplicationDataSources).toEqual(['<bind source contains the stack>']);
+
+    const generationId = randomUUID();
+    await RollbackGenerationStore.captureGeneration({
+      nodeId: NODE,
+      stackName: 'app',
+      generationId,
+      inventory: captured,
+    });
+
+    await fsPromises.writeFile(path.join(stackDir, 'app.env'), 'TOKEN=application-data\n', 'utf8');
+
+    const live = await resolveRollbackInventory(NODE, 'app');
+    expect(live.dynamicApplicationDataSources).toEqual(['<bind source contains the stack>']);
+
+    const ctx = await resolveComposeProjectContextForGeneration(NODE, 'app', generationId);
+    await ctx.restoreFromContext();
+
+    expect(await fsPromises.readFile(path.join(stackDir, 'app.env'), 'utf8')).toBe(
+      'TOKEN=application-data\n',
+    );
+    expect(await fsPromises.readFile(path.join(stackDir, 'compose.yaml'), 'utf8')).toBe(original);
+  });
+
+  it('keeps managed files beneath a bind-mounted directory', async () => {
+    const dataDir = path.join(stackDir, 'data');
+    await fsPromises.mkdir(dataDir, { recursive: true });
+    const original = [
+      'services:',
+      '  web:',
+      '    image: nginx',
+      '    volumes:',
+      '      - ./data:/data',
+      '    env_file:',
+      '      - path: ./data/app.env',
+      '        required: false',
+      '',
+    ].join('\n');
+    await fsPromises.writeFile(path.join(stackDir, 'compose.yaml'), original, 'utf8');
+
+    const captured = await resolveRollbackInventory(NODE, 'app');
+    expect(captured.coverageRefusal).toBeNull();
+    // The bind is a directory, so every file beneath it is mounted data.
+    expect(captured.applicationDataPaths).toContain('data');
+    expect(captured.applicationDataPathPrefixes).toEqual(['data']);
+
+    const generationId = randomUUID();
+    await RollbackGenerationStore.captureGeneration({
+      nodeId: NODE,
+      stackName: 'app',
+      generationId,
+      inventory: captured,
+    });
+
+    // The optional env file was absent at capture, so the generation holds no
+    // entry for it. It appears later as data inside the bound directory.
+    await fsPromises.writeFile(path.join(dataDir, 'app.env'), 'TOKEN=application-data\n', 'utf8');
+
+    const live = await resolveRollbackInventory(NODE, 'app');
+    expect(live.applicationDataPathPrefixes).toEqual(['data']);
+
+    const ctx = await resolveComposeProjectContextForGeneration(NODE, 'app', generationId);
+    await ctx.restoreFromContext();
+
+    expect(await fsPromises.readFile(path.join(dataDir, 'app.env'), 'utf8')).toBe(
+      'TOKEN=application-data\n',
+    );
+    expect(await fsPromises.readFile(path.join(stackDir, 'compose.yaml'), 'utf8')).toBe(original);
+  });
+
+  it('keeps application data when the live project selects an uncaptured COMPOSE_FILE layer', async () => {
+    await fsPromises.mkdir(path.join(stackDir, 'sub'), { recursive: true });
+    const root = [
+      'services:',
+      '  web:',
+      '    image: nginx',
+      '    env_file:',
+      '      - path: ./sub/data.env',
+      '        required: false',
+      '',
+    ].join('\n');
+    await fsPromises.writeFile(path.join(stackDir, 'compose.yaml'), root, 'utf8');
+
+    const captured = await resolveRollbackInventory(NODE, 'app');
+    expect(captured.coverageRefusal).toBeNull();
+    expect(captured.uncapturedInputs).toEqual([]);
+    const generationId = randomUUID();
+    await RollbackGenerationStore.captureGeneration({
+      nodeId: NODE,
+      stackName: 'app',
+      generationId,
+      inventory: captured,
+    });
+
+    // After capture the stack switches to a custom layer that declares the
+    // bind. The capture never parsed that layer, so the only live record of
+    // the change is the layer's omission itself; the live env-file entry from
+    // the conventional root must not become a cleanup candidate because of it.
+    await fsPromises.writeFile(
+      path.join(stackDir, '.env'),
+      'COMPOSE_FILE=prod.yaml\nDATA_SUBDIR=sub\n',
+      'utf8',
+    );
+    await fsPromises.writeFile(
+      path.join(stackDir, 'prod.yaml'),
+      [
+        'services:',
+        '  web:',
+        '    volumes:',
+        '      - ./${DATA_SUBDIR}/data.env:/data',
+        '',
+      ].join('\n'),
+      'utf8',
+    );
+    await fsPromises.writeFile(path.join(stackDir, 'sub', 'data.env'), 'TOKEN=application-data\n', 'utf8');
+    await fsPromises.writeFile(
+      path.join(stackDir, 'compose.yaml'),
+      root.replace('image: nginx', 'image: nginx:2'),
+      'utf8',
+    );
+
+    const live = await resolveRollbackInventory(NODE, 'app');
+    expect(live.invocation.composeLayers).toEqual(['prod.yaml']);
+    expect(live.uncapturedInputs.join(' ')).toContain('prod.yaml');
+    expect(live.uncapturedInputs.join(' ')).toContain('is not captured');
+    expect(live.unparsedComposeSources).toEqual(['prod.yaml']);
+    expect(live.dynamicApplicationDataSources).toEqual([]);
+
+    const ctx = await resolveComposeProjectContextForGeneration(NODE, 'app', generationId);
+    await ctx.restoreFromContext();
+
+    expect(await fsPromises.readFile(path.join(stackDir, 'compose.yaml'), 'utf8')).toBe(root);
+    expect(await fsPromises.readFile(path.join(stackDir, 'sub', 'data.env'), 'utf8')).toBe(
+      'TOKEN=application-data\n',
+    );
+  });
+
+  it('keeps application data when the live project adds an outside include', async () => {
+    await fsPromises.mkdir(path.join(stackDir, 'sub'), { recursive: true });
+    const root = [
+      'services:',
+      '  web:',
+      '    image: nginx',
+      '    env_file:',
+      '      - path: ./sub/data.env',
+      '        required: false',
+      '',
+    ].join('\n');
+    await fsPromises.writeFile(path.join(stackDir, 'compose.yaml'), root, 'utf8');
+
+    const captured = await resolveRollbackInventory(NODE, 'app');
+    expect(captured.coverageRefusal).toBeNull();
+    expect(captured.uncapturedInputs).toEqual([]);
+    const generationId = randomUUID();
+    await RollbackGenerationStore.captureGeneration({
+      nodeId: NODE,
+      stackName: 'app',
+      generationId,
+      inventory: captured,
+    });
+
+    // The outside include arrives after capture and declares a bind to the
+    // same file the conventional root lists as an optional env file. Its
+    // declarations were never read, so the live env-file entry must not become
+    // a cleanup candidate.
+    await fsPromises.mkdir(path.join(composeDir, 'shared'), { recursive: true });
+    await fsPromises.writeFile(
+      path.join(composeDir, 'shared', 'base.yaml'),
+      [
+        'services:',
+        '  web:',
+        '    volumes:',
+        '      - ../app/sub/data.env:/data',
+        '',
+      ].join('\n'),
+      'utf8',
+    );
+    await fsPromises.writeFile(
+      path.join(stackDir, 'compose.yaml'),
+      [
+        'include:',
+        '  - ../shared/base.yaml',
+        'services:',
+        '  web:',
+        '    image: nginx:2',
+        '    env_file:',
+        '      - path: ./sub/data.env',
+        '        required: false',
+        '',
+      ].join('\n'),
+      'utf8',
+    );
+    await fsPromises.writeFile(path.join(stackDir, 'sub', 'data.env'), 'TOKEN=application-data\n', 'utf8');
+
+    const live = await resolveRollbackInventory(NODE, 'app');
+    expect(live.uncapturedInputs.join(' ')).toContain('include ../shared/base.yaml');
+    expect(live.unparsedComposeSources).toContain('../shared/base.yaml');
+    expect(live.applicationDataPaths).toEqual([]);
+
+    const ctx = await resolveComposeProjectContextForGeneration(NODE, 'app', generationId);
+    await ctx.restoreFromContext();
+
+    expect(await fsPromises.readFile(path.join(stackDir, 'compose.yaml'), 'utf8')).toBe(root);
+    expect(await fsPromises.readFile(path.join(stackDir, 'sub', 'data.env'), 'utf8')).toBe(
+      'TOKEN=application-data\n',
+    );
+  });
+
+  it('keeps an absolute bind under the physical path of a linked compose root', async () => {
+    const physicalRoot = path.join(composeDir, 'physical');
+    const linkedRoot = path.join(composeDir, 'linked');
+    const physicalStack = path.join(physicalRoot, 'app');
+    await fsPromises.mkdir(physicalStack, { recursive: true });
+    await fsPromises.symlink(physicalRoot, linkedRoot, 'dir');
+    mockState.composeDir = linkedRoot;
+
+    const dataPath = path.join(physicalStack, 'data.env');
+    const original = [
+      'services:',
+      '  web:',
+      '    image: nginx',
+      '    volumes:',
+      `      - ${dataPath}:/data`,
+      '    env_file:',
+      '      - path: ./data.env',
+      '        required: false',
+      '',
+    ].join('\n');
+    await fsPromises.writeFile(path.join(physicalStack, 'compose.yaml'), original, 'utf8');
+
+    const captured = await resolveRollbackInventory(NODE, 'app');
+    expect(captured.coverageRefusal).toBeNull();
+    // The bind uses the physical spelling, which is outside the lexical stack
+    // root. It still names the same stack file as ./data.env, so the ownership
+    // record must carry the stack-relative name.
+    expect(captured.applicationDataPaths).toEqual(['data.env']);
+    expect(captured.uncapturedInputs).toEqual([]);
+
+    const generationId = randomUUID();
+    await RollbackGenerationStore.captureGeneration({
+      nodeId: NODE,
+      stackName: 'app',
+      generationId,
+      inventory: captured,
+    });
+
+    await fsPromises.writeFile(dataPath, 'TOKEN=application-data\n', 'utf8');
+    await fsPromises.writeFile(
+      path.join(physicalStack, 'compose.yaml'),
+      original.replace('image: nginx', 'image: nginx:2'),
+      'utf8',
+    );
+
+    const live = await resolveRollbackInventory(NODE, 'app');
+    expect(live.applicationDataPaths).toEqual(['data.env']);
+
+    const ctx = await resolveComposeProjectContextForGeneration(NODE, 'app', generationId);
+    await ctx.restoreFromContext();
+
+    expect(await fsPromises.readFile(path.join(physicalStack, 'compose.yaml'), 'utf8')).toBe(original);
+    expect(await fsPromises.readFile(dataPath, 'utf8')).toBe('TOKEN=application-data\n');
+  });
+
+  it('keeps a bind whose relative parent spelling re-enters the stack', async () => {
+    const dataPath = path.join(stackDir, 'data.env');
+    const original = [
+      'services:',
+      '  web:',
+      '    image: nginx',
+      '    volumes:',
+      '      - ../app/data.env:/data',
+      '    env_file:',
+      '      - path: ./data.env',
+      '        required: false',
+      '',
+    ].join('\n');
+    await fsPromises.writeFile(path.join(stackDir, 'compose.yaml'), original, 'utf8');
+
+    const captured = await resolveRollbackInventory(NODE, 'app');
+    expect(captured.coverageRefusal).toBeNull();
+    // The spelling leaves the stack lexically and resolves back to the same
+    // file as ./data.env. One path must carry the application-data record.
+    expect(captured.applicationDataPaths).toEqual(['data.env']);
+    expect(captured.uncapturedInputs).toEqual([]);
+
+    const generationId = randomUUID();
+    await RollbackGenerationStore.captureGeneration({
+      nodeId: NODE,
+      stackName: 'app',
+      generationId,
+      inventory: captured,
+    });
+
+    await fsPromises.writeFile(dataPath, 'TOKEN=application-data\n', 'utf8');
+    await fsPromises.writeFile(
+      path.join(stackDir, 'compose.yaml'),
+      original.replace('image: nginx', 'image: nginx:2'),
+      'utf8',
+    );
+
+    const live = await resolveRollbackInventory(NODE, 'app');
+    expect(live.applicationDataPaths).toEqual(['data.env']);
+
+    const ctx = await resolveComposeProjectContextForGeneration(NODE, 'app', generationId);
+    await ctx.restoreFromContext();
+
+    expect(await fsPromises.readFile(path.join(stackDir, 'compose.yaml'), 'utf8')).toBe(original);
+    expect(await fsPromises.readFile(dataPath, 'utf8')).toBe('TOKEN=application-data\n');
   });
 
   it('refuses capture when a selected COMPOSE_FILE layer links outside the compose directory', async () => {

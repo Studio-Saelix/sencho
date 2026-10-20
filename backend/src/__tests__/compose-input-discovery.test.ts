@@ -168,6 +168,10 @@ configs:
         expect(unmanaged.some((i) => i.dependencyKind === 'bind-mount')).toBe(true);
         expect(unmanaged.some((i) => i.dependencyKind === 'config' && i.sourcePath === null)).toBe(true);
         expect(unmanaged.every((i) => i.deletionAuthority === 'none')).toBe(true);
+        const hostBind = unmanaged.find((i) => i.hostSourcePath === '/var/run/docker.sock');
+        expect(hostBind).toBeTruthy();
+        expect(hostBind?.sourcePath).toBeNull();
+        expect(hostBind?.materializedPath).toBeNull();
     });
 
     it('materializes build contexts with dockerignore filtering and stable byte accounting', async () => {

@@ -360,7 +360,35 @@ export type RestoreCoverage = 'complete' | 'omits_inputs' | 'unreadable' | 'not_
 /** The current recovery generation. */
 export type RecoveryGenerationInfo =
   | { exists: false }
-  | { exists: true; shortId?: string; restoreCoverage: RestoreCoverage };
+  | {
+    exists: true;
+    shortId?: string;
+    restoreCoverage: RestoreCoverage;
+    /** Whether the generation holds the compose layers it selected. */
+    composeCoverage?: StoredComposeCoverage;
+  };
+
+/** What a stored generation holds of the compose layers it selected. */
+export type StoredComposeCoverage = 'held' | 'current_content' | 'not_recorded';
+
+/**
+ * Coverage of the compose layers a stored generation selected. A shared main
+ * file is selected and pinned but deliberately not captured, so the generation
+ * restores its link while a rollback reads the target's current content. Older
+ * generations did not record their layer set, so their content is unknown.
+ */
+export function storedComposeCoverage(
+  manifest: Pick<RollbackGenerationManifest, 'entries' | 'invocation'>,
+): StoredComposeCoverage {
+  const layers = manifest.invocation.composeLayers;
+  if (!layers || layers.length === 0) return 'not_recorded';
+  const held = new Set(
+    manifest.entries
+      .filter((entry) => entry.state === 'present')
+      .map((entry) => entry.relativePath),
+  );
+  return layers.every((layer) => held.has(layer)) ? 'held' : 'current_content';
+}
 
 /** Coverage of a stored generation, from the omissions it recorded. */
 export function storedRestoreCoverage(
@@ -492,7 +520,11 @@ export function buildRollbackItems(inputs: RollbackInputs, now: number): Rollbac
       id: 'compose_source',
       state: 'ready',
       label: 'Previous compose file',
-      detail: 'The compose files in the stack directory are covered by the current recovery generation.',
+      detail: recoveryInfo?.composeCoverage === 'current_content'
+        ? 'The current recovery generation selects a compose file it does not hold; a rollback reads that file\'s current content.'
+        : recoveryInfo?.composeCoverage === 'not_recorded'
+          ? 'What compose files the current recovery generation holds was not recorded.'
+          : 'The compose files in the stack directory are covered by the current recovery generation.',
     });
   } else if (inputs.backup === 'error') {
     items.push({ id: 'compose_source', state: 'unknown', label: 'Previous compose file', detail: 'The backup slot could not be read.' });

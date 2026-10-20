@@ -123,6 +123,19 @@ export interface RollbackGenerationManifest {
   uncapturedRelativePaths?: string[];
   /** The operator-facing notes for everything left out of the capture. Omitted on older generations. */
   uncapturedInputs?: string[];
+  /**
+   * Raw declared source paths of application data or build inputs whose path
+   * holds a Compose variable (`./${DATA_DIR}/data.env`, `$BUILD_CONTEXT`). The
+   * capture cannot know what the substitution resolves to at restore time, and
+   * a literal suffix is not proof: the variable may stand for a directory name
+   * or for the whole path. A generation that recorded one deletes nothing from
+   * the live stack, because any file there may be the operator's data. A
+   * legacy Git host declaration whose path was not recorded, or a bind source
+   * that mounts the stack root or an ancestor of it, is represented by a
+   * marker value here, with the same delete-none effect. Omitted on
+   * generations captured before this was recorded.
+   */
+  dynamicApplicationDataSources?: string[];
   invocation: RollbackInvocationRecord;
   git: RollbackGitIdentity | null;
   /** Prior applied/deployed/LKG refs when known (opaque strings). */
@@ -237,4 +250,33 @@ export interface ResolvedRollbackInventory {
    * `coverageRefusal` is set.
    */
   applicationDataPaths: string[];
+  /**
+   * Stack-relative bind-mount sources that are directories. Their descendants
+   * are application data too: a live managed file beneath one is never a
+   * cleanup candidate, because deleting it would delete the data the directory
+   * bind mounts. Build-context directories are excluded; their files are
+   * managed build inputs. Empty when `coverageRefusal` is set.
+   */
+  applicationDataPathPrefixes: string[];
+  /**
+   * Raw declared source paths of application data or build inputs whose path
+   * holds a Compose variable, so the resolved source is unknown at capture and
+   * can change before restore. A literal suffix is not proof of the resolved
+   * path, so a restore that sees one here deletes nothing from the live stack.
+   * A legacy Git host declaration whose path was not recorded, or a bind
+   * source that mounts the stack root or an ancestor of it, is represented by
+   * a marker value here, because it may name any stack path. Empty when
+   * `coverageRefusal` is set.
+   */
+  dynamicApplicationDataSources: string[];
+  /**
+   * Compose declarations whose referenced content was not parsed: a selected
+   * COMPOSE_FILE layer that is not a conventional root candidate, or an
+   * include/extends source outside the stack or selected through a variable.
+   * The inventory pins a chain layer as an omission and records an outside
+   * include as a note, but either can declare an input the live inventory did
+   * not see. A restore cannot treat the live project's remaining paths as
+   * complete while one exists. Empty when `coverageRefusal` is set.
+   */
+  unparsedComposeSources: string[];
 }

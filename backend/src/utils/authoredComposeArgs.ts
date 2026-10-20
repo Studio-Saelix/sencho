@@ -402,6 +402,31 @@ function envFileSources(
   return { sources: [{ path: null, listed: false }] };
 }
 
+/**
+ * Express an authorized compose-root file path in the compose root's lexical
+ * spelling.
+ *
+ * `authoredComposeEnvFileArgs` returns the physical path after realpath, which
+ * is what the deploy hands Compose. The compose-root read guard works against
+ * the lexical `getComposeDir`, so when COMPOSE_DIR is itself a link the two
+ * prefixes differ and an ordinary stack-local file reads as an escape. Only a
+ * path inside the physical root is rewritten; anything else keeps its spelling
+ * and stays subject to the guard's real-path check.
+ */
+async function lexicalComposePath(nodeId: number, physicalPath: string): Promise<string> {
+  const lexicalRoot = path.resolve(NodeRegistry.getInstance().getComposeDir(nodeId));
+  try {
+    const realRoot = await fsPromises.realpath(lexicalRoot);
+    if (physicalPath === realRoot || physicalPath.startsWith(realRoot + path.sep)) {
+      return path.join(lexicalRoot, path.relative(realRoot, physicalPath));
+    }
+  } catch (e) {
+    // A compose root that does not exist yet has no physical spelling to map.
+    if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw e;
+  }
+  return physicalPath;
+}
+
 export async function composeFileEnvVarSelection(stackName: string, nodeId?: number): Promise<ComposeFileEnvSelection> {
   const resolvedNodeId = nodeId ?? NodeRegistry.getInstance().getDefaultNodeId();
   const fsSvc = FileSystemService.getInstance(resolvedNodeId);
@@ -462,7 +487,7 @@ export async function composeFileEnvVarSelection(stackName: string, nodeId?: num
         // rule every other env-file read uses, so a path outside it is refused
         // rather than read, and the reason below names the file so the operator
         // can move it into the compose folder.
-        content = await fsSvc.readFile(source.path);
+        content = await fsSvc.readFile(await lexicalComposePath(resolvedNodeId, source.path));
       } catch {
         // Compose refuses to run when a file it was told to read is missing or
         // unreadable, so nothing here can claim which layers the run would load.

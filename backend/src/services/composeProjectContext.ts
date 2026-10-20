@@ -153,6 +153,23 @@ class AuthoredComposeProjectContext implements ComposeProjectContext {
         ...inventory.uncapturedRelativePaths.filter((rel) => !applicationData.has(rel)),
       ],
       transactionMeta,
+      // A generation captured before it recorded dynamic application-data
+      // sources still gets the safe behaviour: if the live project has one, the
+      // resolved path is unknown and restore must delete nothing. A refused
+      // live inventory clears its application-data records too, so it cannot
+      // establish which live paths are safe to delete either.
+      inventory.dynamicApplicationDataSources.length > 0 || inventory.coverageRefusal !== null,
+      // A selected COMPOSE_FILE layer or an outside include/extends source was
+      // never parsed for declarations, so the live project cannot prove any
+      // path is disposable even when the stored generation was complete. The
+      // restore deletes nothing; the generation still restores its own files.
+      inventory.unparsedComposeSources.length > 0,
+      // A path the live project uses for application data is never a cleanup
+      // candidate, even when the generation carries a tombstone for the same
+      // name from a managed role it held at capture. A directory bind extends
+      // that rule to everything beneath it.
+      inventory.applicationDataPaths,
+      inventory.applicationDataPathPrefixes,
     );
   }
 

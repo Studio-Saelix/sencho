@@ -245,7 +245,9 @@ services:
         const binds = byKind(result, 'bind-mount');
         // Relative binds resolve against the project base; absolute and
         // ../-escaping binds are host paths (never adopted from the repo).
-        expect(binds.map((b) => b.sourcePath)).toEqual(['data', '../shared', null, null, 'config']);
+        // Host binds keep their raw spelling so the caller can recognize an
+        // absolute path that points back inside the stack.
+        expect(binds.map((b) => b.sourcePath)).toEqual(['data', '../shared', '/etc/hosts', '~/cache', 'config']);
         expect(binds.map((b) => b.baseDir)).toEqual(['project-root', 'host', 'host', 'host', 'project-root']);
         expect(binds.map((b) => b.materializedPath)).toEqual(['data', null, null, null, 'config']);
     });
@@ -383,9 +385,9 @@ services: {}
         });
         const binds = byKind(result, 'bind-mount');
         // Drive-letter, drive-relative, and UNC short binds are recorded as
-        // host entries (sourcePath null per the host-bind convention) instead
-        // of being mistaken for named volumes and dropped; ./data resolves
-        // project-relative; named-vol is not a bind.
+        // host entries (with their raw spelling) instead of being mistaken for
+        // named volumes and dropped; ./data resolves project-relative;
+        // named-vol is not a bind.
         expect(binds).toHaveLength(5);
         expect(binds.map((b) => b.baseDir)).toEqual(['host', 'host', 'host', 'project-root', 'host']);
         expect(binds.find((b) => b.kind === 'bind-mount' && b.materializedPath === 'data')?.sourcePath).toBe('data');

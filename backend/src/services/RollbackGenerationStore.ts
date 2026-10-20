@@ -407,6 +407,9 @@ export class RollbackGenerationStore {
         managedRelativePaths,
         uncapturedRelativePaths: [...inventory.uncapturedRelativePaths],
         uncapturedInputs: [...inventory.uncapturedInputs],
+        ...(inventory.dynamicApplicationDataSources.length > 0
+          ? { dynamicApplicationDataSources: [...inventory.dynamicApplicationDataSources] }
+          : {}),
         invocation: inventory.invocation,
         git: inventory.git,
         priorRecords: {
@@ -586,6 +589,26 @@ export class RollbackGenerationStore {
    * delete the caller's live discovery set, because it holds every input its
    * project declared.
    *
+   * The same rule applies, more broadly, to application data whose path holds a
+   * Compose variable. The variable may resolve to a directory name or the whole
+   * path, so neither the recorded managed paths nor the caller's live discovery
+   * can establish ownership: a file there may be the operator's data. Such a
+   * generation writes its held files and deletes nothing. `liveUnresolved` lets
+   * a caller protect a generation captured before it recorded its dynamic
+   * sources, when the live project still shows one.
+   *
+   * `liveOwnershipUnclear` is the live counterpart of the dynamic rule: the
+   * live project selected a COMPOSE_FILE layer or an include/extends source
+   * whose declarations the inventory never parsed. That source can name any
+   * path, including one the generation recorded as managed or tombstoned, so no
+   * deletion is safe. The generation still writes what it holds.
+   *
+   * `liveProtectedPaths` are paths the live inventory proved are application
+   * data or build inputs. They are never cleanup candidates from any source,
+   * including a manifest tombstone or a managed path that shares the name,
+   * because the live project is using the path for data. A present entry at the
+   * path is still written back.
+   *
    * Durability: copies the affected live paths into pre-restore/ and writes
    * restore-intent.json (including Git DB + manifesto preimage) before mutation.
    * Failure or restart reverts from that snapshot so a hybrid managed project
@@ -597,6 +620,10 @@ export class RollbackGenerationStore {
     generationId: string,
     liveManagedPaths: string[],
     transactionMeta?: RollbackRestoreTransactionMeta,
+    liveUnresolvedApplicationData = false,
+    liveOwnershipUnclear = false,
+    liveProtectedPaths: readonly string[] = [],
+    liveProtectedPrefixes: readonly string[] = [],
   ): Promise<RollbackGenerationManifest> {
     assertSafeStackName(stackName);
     assertSafeGenerationId(generationId);
@@ -615,27 +642,47 @@ export class RollbackGenerationStore {
     // there now is the operator's, so it is not stale managed content to remove,
     // even when the caller's live discovery lists it.
     const uncapturedKeys = new Set((manifest.uncapturedRelativePaths ?? []).map(posixRel));
+    const protectedKeys = new Set(liveProtectedPaths.map(posixRel));
+    const protectedPrefixes = [...new Set(liveProtectedPrefixes.map(posixRel))]
+      .filter((prefix) => prefix.length > 0 && prefix !== '.' && prefix !== '..' && !prefix.startsWith('../'));
     const deleteRelByKey = new Map<string, string>();
     const considerDelete = (relRaw: string): void => {
       const rel = posixRel(relRaw);
-      if (presentByKey.has(rel) || deleteRelByKey.has(rel) || uncapturedKeys.has(rel)) return;
+      if (
+        presentByKey.has(rel)
+        || protectedKeys.has(rel)
+        || protectedPrefixes.some((prefix) => rel.startsWith(prefix + '/'))
+        || deleteRelByKey.has(rel)
+        || uncapturedKeys.has(rel)
+      ) return;
       deleteRelByKey.set(rel, rel);
     };
 
-    for (const rel of manifest.managedRelativePaths) considerDelete(rel);
-    for (const entry of manifest.entries) {
-      if (entry.state === 'tombstoned') considerDelete(entry.relativePath);
-    }
-    // A partial generation cannot say what its uncaptured inputs resolved to,
-    // so a file that appeared since capture may be one of them: an env file a
-    // ${VAR} path now names, or a local override an external include extends
-    // from. A Compose basename is no proof of ownership, so a generation that
-    // recorded any uncaptured input keeps every unrecorded live file. Recovery
-    // still runs the captured project: the generation pins the layers it
-    // selected, and an explicit -f list suppresses Compose's own discovery and
-    // the implicit override merge.
-    if ((manifest.uncapturedInputs ?? []).length === 0) {
-      for (const rel of liveManagedPaths) considerDelete(rel);
+    // An application-data source with a variable in its path cannot be tied to
+    // a live path: a literal suffix is no proof when the variable can contain
+    // directories or name the whole source, and the value can change between
+    // capture and restore. Every recorded path may therefore be that data, so
+    // this generation deletes nothing and only writes what it holds.
+    const unresolvedApplicationData = (manifest.dynamicApplicationDataSources ?? []).length > 0
+      || liveUnresolvedApplicationData
+      || liveOwnershipUnclear;
+
+    if (!unresolvedApplicationData) {
+      for (const rel of manifest.managedRelativePaths) considerDelete(rel);
+      for (const entry of manifest.entries) {
+        if (entry.state === 'tombstoned') considerDelete(entry.relativePath);
+      }
+      // A partial generation cannot say what its uncaptured inputs resolved to,
+      // so a file that appeared since capture may be one of them: an env file a
+      // ${VAR} path now names, or a local override an external include extends
+      // from. A Compose basename is no proof of ownership, so a generation that
+      // recorded any uncaptured input keeps every unrecorded live file. Recovery
+      // still runs the captured project: the generation pins the layers it
+      // selected, and an explicit -f list suppresses Compose's own discovery and
+      // the implicit override merge.
+      if ((manifest.uncapturedInputs ?? []).length === 0) {
+        for (const rel of liveManagedPaths) considerDelete(rel);
+      }
     }
 
     const restores: Array<{
@@ -1314,7 +1361,11 @@ export class RollbackGenerationStore {
     if (!Array.isArray(manifest.entries) || !Array.isArray(manifest.managedRelativePaths)) {
       throw new Error('Generation manifest is missing entries or managedRelativePaths');
     }
-    for (const field of [manifest.uncapturedRelativePaths, manifest.uncapturedInputs]) {
+    for (const field of [
+      manifest.uncapturedRelativePaths,
+      manifest.uncapturedInputs,
+      manifest.dynamicApplicationDataSources,
+    ]) {
       if (field !== undefined && !(Array.isArray(field) && field.every((v) => typeof v === 'string'))) {
         throw new Error('Generation manifest has a malformed uncaptured list');
       }

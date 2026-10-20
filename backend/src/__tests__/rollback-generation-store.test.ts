@@ -63,6 +63,9 @@ function inventoryFor(
     uncapturedInputs: [],
     uncapturedRelativePaths: [],
     applicationDataPaths: [],
+    applicationDataPathPrefixes: [],
+    dynamicApplicationDataSources: [],
+    unparsedComposeSources: [],
   };
 }
 
@@ -128,6 +131,137 @@ describe('RollbackGenerationStore', () => {
       'services:\n  app:\n    image: a\n',
     );
     expect(await fsPromises.readFile(path.join(stackDir, nestedRel), 'utf8')).toBe('services: {}\n');
+  });
+
+  it('keeps a live application-data path that the generation records as a tombstone', async () => {
+    const stackName = 'protected';
+    const stackDir = path.join(composeDir, stackName);
+    await fsPromises.mkdir(path.join(stackDir, 'sub'), { recursive: true });
+    await fsPromises.writeFile(path.join(stackDir, 'compose.yaml'), 'services: {}\n', 'utf8');
+
+    const generationId = randomUUID();
+    const inv = inventoryFor(stackName, [
+      { relativePath: 'compose.yaml', absolutePath: path.join(stackDir, 'compose.yaml') },
+      {
+        relativePath: 'sub/data.env',
+        absolutePath: null,
+        kind: 'env_file',
+        sensitivity: 'medium',
+      },
+    ]);
+    await RollbackGenerationStore.captureGeneration({
+      nodeId: NODE,
+      stackName,
+      generationId,
+      inventory: inv,
+    });
+
+    // The file appears after capture, but the live project uses the same path
+    // as application data. The managed-role tombstone must not delete it.
+    await fsPromises.writeFile(path.join(stackDir, 'sub', 'data.env'), 'TOKEN=application-data\n', 'utf8');
+
+    await RollbackGenerationStore.restoreGeneration(
+      NODE,
+      stackName,
+      generationId,
+      ['compose.yaml', 'sub/data.env'],
+      undefined,
+      false,
+      false,
+      ['sub/data.env'],
+    );
+
+    expect(await fsPromises.readFile(path.join(stackDir, 'sub', 'data.env'), 'utf8')).toBe(
+      'TOKEN=application-data\n',
+    );
+  });
+
+  it('deletes nothing when live ownership is unclear', async () => {
+    const stackName = 'unclear';
+    const stackDir = path.join(composeDir, stackName);
+    await fsPromises.mkdir(path.join(stackDir, 'sub'), { recursive: true });
+    await fsPromises.writeFile(path.join(stackDir, 'compose.yaml'), 'services: {}\n', 'utf8');
+
+    const generationId = randomUUID();
+    const inv = inventoryFor(stackName, [
+      { relativePath: 'compose.yaml', absolutePath: path.join(stackDir, 'compose.yaml') },
+      {
+        relativePath: 'sub/data.env',
+        absolutePath: null,
+        kind: 'env_file',
+        sensitivity: 'medium',
+      },
+    ]);
+    await RollbackGenerationStore.captureGeneration({
+      nodeId: NODE,
+      stackName,
+      generationId,
+      inventory: inv,
+    });
+
+    await fsPromises.writeFile(path.join(stackDir, 'sub', 'data.env'), 'TOKEN=application-data\n', 'utf8');
+
+    // An unparsed live compose source can name any path, including this
+    // tombstoned one. The safe rule is the dynamic-source rule: write what the
+    // generation holds and delete nothing.
+    await RollbackGenerationStore.restoreGeneration(
+      NODE,
+      stackName,
+      generationId,
+      ['compose.yaml', 'sub/data.env'],
+      undefined,
+      false,
+      true,
+    );
+
+    expect(await fsPromises.readFile(path.join(stackDir, 'sub', 'data.env'), 'utf8')).toBe(
+      'TOKEN=application-data\n',
+    );
+  });
+
+  it('does not delete a managed path beneath a protected directory', async () => {
+    const stackName = 'dirbind';
+    const stackDir = path.join(composeDir, stackName);
+    await fsPromises.mkdir(path.join(stackDir, 'data'), { recursive: true });
+    await fsPromises.writeFile(path.join(stackDir, 'compose.yaml'), 'services: {}\n', 'utf8');
+
+    const generationId = randomUUID();
+    const inv = inventoryFor(stackName, [
+      { relativePath: 'compose.yaml', absolutePath: path.join(stackDir, 'compose.yaml') },
+      { relativePath: 'data/app.env', absolutePath: null, kind: 'env_file' },
+      { relativePath: 'database.env', absolutePath: null, kind: 'env_file' },
+    ]);
+    await RollbackGenerationStore.captureGeneration({
+      nodeId: NODE,
+      stackName,
+      generationId,
+      inventory: inv,
+    });
+
+    await fsPromises.writeFile(path.join(stackDir, 'data', 'app.env'), 'TOKEN=application-data\n', 'utf8');
+    await fsPromises.writeFile(path.join(stackDir, 'database.env'), 'TOKEN=stale\n', 'utf8');
+
+    await RollbackGenerationStore.restoreGeneration(
+      NODE,
+      stackName,
+      generationId,
+      ['compose.yaml', 'data/app.env', 'database.env'],
+      undefined,
+      false,
+      false,
+      [],
+      ['data'],
+    );
+
+    // A directory bind mounts everything beneath it, so a managed file there
+    // is data. A sibling prefix such as `database.env` is not a descendant and
+    // is still removed.
+    expect(await fsPromises.readFile(path.join(stackDir, 'data', 'app.env'), 'utf8')).toBe(
+      'TOKEN=application-data\n',
+    );
+    await expect(fsPromises.stat(path.join(stackDir, 'database.env'))).rejects.toMatchObject({
+      code: 'ENOENT',
+    });
   });
 
   it('leaves no final generation dir when capture fails mid-write', async () => {
@@ -1326,6 +1460,22 @@ describe('RollbackGenerationStore uncaptured paths', () => {
     await fsPromises.writeFile(genJson, JSON.stringify(broken), 'utf8');
 
     await expect(RollbackGenerationStore.readVerifiedGeneration(NODE, 'malformed', generationId))
+      .rejects.toThrow(/malformed uncaptured list/);
+  });
+
+  it('rejects a generation manifest whose dynamic application-data list is malformed', async () => {
+    const { generationId } = await captureWithExcludedEnv('malformed-dynamic');
+    const genJson = path.join(
+      RollbackGenerationStore.getGenerationDir(NODE, 'malformed-dynamic', generationId),
+      'generation.json',
+    );
+    const broken = JSON.parse(await fsPromises.readFile(genJson, 'utf8'));
+    broken.dynamicApplicationDataSources = {};
+    await fsPromises.writeFile(genJson, JSON.stringify(broken), 'utf8');
+
+    // A malformed safety field must not read as "no dynamic sources" and then
+    // license deletes the field was meant to prevent.
+    await expect(RollbackGenerationStore.readVerifiedGeneration(NODE, 'malformed-dynamic', generationId))
       .rejects.toThrow(/malformed uncaptured list/);
   });
 

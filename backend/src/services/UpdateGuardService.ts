@@ -19,8 +19,10 @@ import {
   buildServicesSignal,
   containersSignal,
   describeRollbackManagedInputs,
+  storedComposeCoverage,
   storedRestoreCoverage,
   type RestoreCoverage,
+  type StoredComposeCoverage,
   diskSignal,
   driftSignal,
   healthchecksSignal,
@@ -262,9 +264,12 @@ export class UpdateGuardService {
       : storedManifest === 'error'
         ? 'unreadable'
         : storedRestoreCoverage(storedManifest);
+    const composeCoverage: StoredComposeCoverage = storedManifest === null || storedManifest === 'error'
+      ? 'not_recorded'
+      : storedComposeCoverage(storedManifest);
 
     const recoveryGeneration = currentGen
-      ? { exists: true as const, shortId: shortGenerationId(currentGen.id), restoreCoverage }
+      ? { exists: true as const, shortId: shortGenerationId(currentGen.id), restoreCoverage, composeCoverage }
       : { exists: false as const };
 
     const policyEligibility = currentGen

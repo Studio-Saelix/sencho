@@ -116,7 +116,11 @@ describe('rollback readiness coverage comes from the stored generation', () => {
   async function report() {
     const result = await UpdateGuardService.getInstance().computeRollbackReadiness(NODE, STACK);
     const item = (id: string) => result.items.find((i) => i.id === id)!;
-    return { managed: item('managed_inputs'), recovery: item('recovery_generation') };
+    return {
+      managed: item('managed_inputs'),
+      recovery: item('recovery_generation'),
+      compose: item('compose_source'),
+    };
   }
 
   beforeEach(async () => {
@@ -202,6 +206,23 @@ describe('rollback readiness coverage comes from the stored generation', () => {
 
     expect(managed.state).toBe('warning');
     expect(managed.detail).toBe('What the current recovery generation holds was not recorded.');
+  });
+
+  it('describes a shared main compose file as current content, not as held', async () => {
+    await fsPromises.writeFile(path.join(composeDir, 'shared-common', 'base.yaml'), PLAIN, 'utf8');
+    await fsPromises.symlink(path.join(composeDir, 'shared-common', 'base.yaml'), path.join(stackDir, 'compose.yaml'));
+    await captureCurrent();
+
+    const { compose, recovery } = await report();
+
+    // The generation pins the selected layer but deliberately omits the shared
+    // file's bytes. The row stays ready (a rollback reads the target), but it
+    // no longer says the files are covered.
+    expect(compose.state).toBe('ready');
+    expect(compose.detail).toContain('does not hold');
+    expect(compose.detail).toContain('current content');
+    expect(compose.detail).not.toMatch(/are covered/);
+    expect(recovery.detail).toMatch(/does not hold every input/i);
   });
 
   it('still warns that the next capture would be refused while a complete generation is current', async () => {

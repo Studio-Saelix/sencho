@@ -984,6 +984,9 @@ describe('Snapshot restore: recovery generation contract', () => {
             uncapturedInputs: [],
             uncapturedRelativePaths: [],
             applicationDataPaths: [],
+            applicationDataPathPrefixes: [],
+            dynamicApplicationDataSources: [],
+            unparsedComposeSources: [],
         };
     }
 

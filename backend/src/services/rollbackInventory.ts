@@ -16,7 +16,7 @@ import { DatabaseService, type StackGitSource } from './DatabaseService';
 import { FileSystemService } from './FileSystemService';
 import { GitProjectManifestService } from './GitProjectManifestService';
 import { collectManifestFilePaths } from '../helpers/manifestFilePaths';
-import { isHostAbsolutePath, parseDeclaredInputs } from '../helpers/composeInputParse';
+import { isDynamicPath, isHostAbsolutePath, parseDeclaredInputs } from '../helpers/composeInputParse';
 import { isValidRelativeStackPath, isValidStackName } from '../utils/validation';
 import { COMPOSE_OVERRIDE_FILENAMES, COMPOSE_ROOT_FILENAMES } from '../utils/composeFilenames';
 import {
@@ -432,25 +432,52 @@ async function realStackRoot(stackRoot: string): Promise<string> {
 }
 
 /**
- * A COMPOSE_FILE chain entry resolved the way the live run loads it. Compose
- * takes an absolute entry as written and resolves a relative one against its
- * working directory, which is the stack directory for every Sencho spawn, so an
- * absolute path that names a file inside the authorized stack is the same layer
- * as its relative spelling and is normalized to it: a recovery run pins layers
- * by their stack-relative name so an overlay can rebuild them. The real root is
- * matched as well, so a relocated (linked) compose directory resolves, the same
- * way every other containment check in the capture treats it. Only a path
- * proven inside the stack is normalized; anything else stays unpinnable and is
- * reported by the caller.
+ * The physical path a binding target resolves to. An existing target is
+ * resolved in full; a target that does not exist yet is resolved through its
+ * real parent, so a symlink alias into the stack is still recognized once the
+ * file it names appears. A path whose parent cannot be resolved keeps no
+ * physical form. This is what makes an alias transparent: a bind may name a
+ * symlink outside the stack whose target is a managed file inside it, and
+ * deleting that target would delete the mounted data.
  */
-async function resolveChainLayer(
+async function physicalEntry(absolute: string): Promise<string | null> {
+  try {
+    return await fsPromises.realpath(absolute);
+  } catch {
+    try {
+      const parent = await fsPromises.realpath(path.dirname(absolute));
+      return path.join(parent, path.basename(absolute));
+    } catch {
+      return null;
+    }
+  }
+}
+
+/**
+ * A Compose source spelling resolved the way the live run loads it. Compose
+ * takes an absolute entry as written and resolves a relative one against its
+ * working directory, which is the stack directory for every Sencho spawn, so a
+ * spelling that names a file inside the authorized stack is the same source as
+ * its plain relative form and is normalized to it: a recovery run pins layers
+ * by their stack-relative name, and application-data ownership must see one
+ * path, not two spellings. A relative `..` that leaves and re-enters the stack
+ * resolves too, and so does an alias outside the stack whose physical target
+ * is inside it. The real root is matched as well, so a relocated (linked)
+ * compose directory resolves, the same way every other containment check in the
+ * capture treats it. Only a path proven inside the stack is normalized;
+ * anything else stays unpinnable and is reported by the caller.
+ */
+async function resolveStackSource(
   stackRoot: string,
   entry: string,
 ): Promise<{ relativePath: string; absolutePath: string } | null> {
-  const direct = resolveStackRel(stackRoot, entry);
+  const hostSpelling = isHostAbsolutePath(entry);
+  // Home-relative, drive-relative, and non-native absolute forms are host
+  // spellings, not relative names. They must not fall through to the lexical
+  // relative resolver, which would adopt a literal `~` directory in the stack.
+  if (hostSpelling && !path.isAbsolute(entry)) return null;
+  const direct = hostSpelling ? null : resolveStackRel(stackRoot, entry);
   if (direct) return direct;
-  if (!isHostAbsolutePath(entry)) return null;
-  const absolute = path.resolve(entry);
   const baseResolved = path.resolve(stackRoot);
   let realRoot: string;
   try {
@@ -460,13 +487,117 @@ async function resolveChainLayer(
     // inside it and the lexical comparison stands as the only one.
     realRoot = baseResolved;
   }
+  // An absolute spelling is taken as written. A relative one is resolved
+  // against the stack working directory, and against the physical root too
+  // when the root is a link; `..` is allowed as long as the result stays
+  // inside. Each spelling is also resolved through its physical form, so an
+  // alias whose target is a stack file is normalized to that file's path.
+  const spellings = isHostAbsolutePath(entry)
+    ? [path.resolve(entry)]
+    : [path.resolve(baseResolved, entry), path.resolve(realRoot, entry)];
+  const candidates: string[] = [];
+  for (const absolute of spellings) {
+    candidates.push(absolute);
+    const physical = await physicalEntry(absolute);
+    if (physical && physical !== absolute) candidates.push(physical);
+  }
   for (const root of [baseResolved, realRoot]) {
-    if (!absolute.startsWith(root + path.sep)) continue;
-    const relative = posixRel(path.relative(root, absolute));
-    const resolved = relative ? resolveStackRel(stackRoot, relative) : null;
-    if (resolved) return resolved;
+    for (const absolute of candidates) {
+      if (!absolute.startsWith(root + path.sep)) continue;
+      const relative = posixRel(path.relative(root, absolute));
+      const resolved = relative ? resolveStackRel(stackRoot, relative) : null;
+      if (resolved) return resolved;
+    }
   }
   return null;
+}
+
+/**
+ * The stack-relative name of the physical file a resolved source points to,
+ * when that file is itself inside the stack. A relative bind can name a symlink
+ * inside the stack (`./alias.env` -> `./data.env`); both names must carry the
+ * ownership record, because deleting the target deletes the data the bind
+ * mounts even though the spelling named the link. A source with no physical
+ * form, or one whose target is outside, adds nothing.
+ */
+async function physicalStackPath(
+  stackRoot: string,
+  absolutePath: string,
+): Promise<string | null> {
+  const physical = await physicalEntry(absolutePath);
+  if (!physical) return null;
+  const baseResolved = path.resolve(stackRoot);
+  let realRoot: string;
+  try {
+    realRoot = await realStackRoot(baseResolved);
+  } catch {
+    realRoot = baseResolved;
+  }
+  for (const root of [baseResolved, realRoot]) {
+    if (!physical.startsWith(root + path.sep)) continue;
+    const relative = posixRel(path.relative(root, physical));
+    const resolved = relative ? resolveStackRel(stackRoot, relative) : null;
+    if (resolved) return resolved.relativePath;
+  }
+  return null;
+}
+
+/** Whether a source stats as a directory, following links; false if absent. */
+async function isDirectoryPath(absolutePath: string): Promise<boolean> {
+  try {
+    return (await fsPromises.stat(absolutePath)).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Whether a bind source is the stack root or an ancestor of it. Such a source
+ * mounts every stack path, so no live file is provably disposable. The source
+ * is checked in both coordinate systems and through its physical form, which
+ * covers `.`, `..`, an absolute root spelling, and an alias to the root or an
+ * ancestor.
+ */
+async function bindContainsStack(
+  stackRoot: string,
+  sourcePath: string | null,
+  materializedPath: string | null,
+): Promise<boolean> {
+  const baseResolved = path.resolve(stackRoot);
+  let realRoot: string;
+  try {
+    realRoot = await realStackRoot(baseResolved);
+  } catch {
+    realRoot = baseResolved;
+  }
+  const roots = [baseResolved, realRoot];
+  const spellings = new Set<string>();
+  let unresolvedDrive = false;
+  const addSpelling = (raw: string | null, base: string): void => {
+    if (raw === null) return;
+    if (isHostAbsolutePath(raw)) {
+      if (path.isAbsolute(raw)) spellings.add(path.resolve(raw));
+      // A drive-relative spelling (`C:.`, `C:..`, `C:foo`) is resolved by the
+      // host against the current directory on that drive. The stack may be
+      // there, so it is unresolved rather than provably outside.
+      else if (/^[A-Za-z]:/.test(raw)) unresolvedDrive = true;
+      return;
+    }
+    spellings.add(path.resolve(base, raw));
+  };
+  for (const base of roots) {
+    addSpelling(sourcePath, base);
+    addSpelling(materializedPath, base);
+  }
+  if (unresolvedDrive) return true;
+  for (const spelling of spellings) {
+    if (roots.some((root) => spelling === root || root.startsWith(spelling + path.sep))) return true;
+    const physical = await physicalEntry(spelling);
+    if (physical && roots.some((root) => physical === root || root.startsWith(physical + path.sep))) {
+      return true;
+    }
+  }
+  return false;
 }
 
 /**
@@ -511,6 +642,22 @@ const UNCAPTURED_SILENT_KINDS = new Set<RollbackEntryKind>([
   'build-additional-context',
   'dockerfile',
 ]);
+
+/**
+ * Stand-in for a silent host declaration in a Git manifest written before
+ * host-form source spellings were recorded. The manifest kept no path, so the
+ * live inventory cannot tell whether the declaration names a stack path. The
+ * value travels in `dynamicApplicationDataSources`, whose consumer only asks
+ * whether the set is non-empty, and keeps a restore from deleting anything.
+ */
+const LEGACY_HOST_SOURCE_MARKER = '<legacy host declaration: path not recorded>';
+
+/**
+ * A bind source that is the stack root itself or an ancestor of it mounts
+ * every stack path. No live path is provably disposable, so the same
+ * delete-none signal as a dynamic source is recorded.
+ */
+const STACK_CONTAINING_BIND_MARKER = '<bind source contains the stack>';
 
 /**
  * True for entry kinds that are application data or build inputs. A restore
@@ -574,6 +721,9 @@ function refusedGitInventory(
     uncapturedInputs: [],
     uncapturedRelativePaths: [],
     applicationDataPaths: [],
+    applicationDataPathPrefixes: [],
+    dynamicApplicationDataSources: [],
+    unparsedComposeSources: [],
   };
 }
 
@@ -663,6 +813,57 @@ async function resolveGitInventory(
       sensitivity: meta.sensitivity,
       absolutePath: exists ? resolved.absolutePath : null,
     }, caseCollisions);
+  }
+
+  // The manifest persists application-data declarations separately from the
+  // managed file list: host forms have no path, dynamic forms keep only the
+  // source template, and an in-repo bind is an unmanaged or managed input. The
+  // generation's managed-path record is not enough to keep a restore from
+  // treating one of those paths as disposable, so collect their ownership here
+  // the same way the authored inventory does.
+  const gitAppDataPaths = new Set<string>();
+  const gitAppDataPathPrefixes = new Set<string>();
+  const gitDynamicAppDataSources = new Set<string>();
+  for (const input of read.inputs) {
+    if (!UNCAPTURED_SILENT_KINDS.has(input.dependencyKind)) continue;
+    if (input.sourcePath !== null && isDynamicPath(input.sourcePath)) {
+      gitDynamicAppDataSources.add(input.sourcePath);
+      continue;
+    }
+    const hostSourcePath = input.hostSourcePath ?? null;
+    if (input.sourcePath === null && input.materializedPath === null && hostSourcePath === null) {
+      // A manifest from before host-source recording has no spelling for a
+      // host bind or build input. It may name any stack path, so record the
+      // same delete-none signal a dynamic source uses.
+      gitDynamicAppDataSources.add(LEGACY_HOST_SOURCE_MARKER);
+      continue;
+    }
+    // A host-form declaration keeps its raw spelling separately because the
+    // manifest's sourcePath is null for every host reference. Resolve that
+    // spelling too, so an absolute or `..` bind that names a stack path is
+    // protected exactly like a relative bind.
+    const candidate = hostSourcePath ?? input.materializedPath ?? input.sourcePath;
+    if (
+      input.dependencyKind === 'bind-mount'
+      && await bindContainsStack(stackRoot, candidate, input.materializedPath)
+    ) {
+      // Mounting the stack root or an ancestor mounts every managed path.
+      gitDynamicAppDataSources.add(STACK_CONTAINING_BIND_MARKER);
+      continue;
+    }
+    if (!candidate) continue;
+    const resolved = await resolveStackSource(stackRoot, candidate);
+    if (resolved) {
+      gitAppDataPaths.add(resolved.relativePath);
+      const physical = await physicalStackPath(stackRoot, resolved.absolutePath);
+      if (physical) gitAppDataPaths.add(physical);
+      // A directory bind mounts everything beneath it. A managed env file that
+      // appears under that directory later is data, not a stale file.
+      if (input.dependencyKind === 'bind-mount' && await isDirectoryPath(resolved.absolutePath)) {
+        gitAppDataPathPrefixes.add(resolved.relativePath);
+        if (physical) gitAppDataPathPrefixes.add(physical);
+      }
+    }
   }
 
   const refused = read.refusals.length > 0
@@ -772,13 +973,28 @@ async function resolveGitInventory(
       ? [...uncapturedPaths].sort((a, b) => a.localeCompare(b))
       : [],
     // The manifest names one input per path, so a path's kind is its only
-    // role here; there is no merged-kind ambiguity to protect against.
+    // role here; there is no merged-kind ambiguity to protect against. An
+    // unmanaged bind may not appear in the managed file map, so the collected
+    // set is unioned in.
     applicationDataPaths: refusal === null
-      ? [...map.values()]
-        .filter((entry) => isApplicationDataKind(entry.dependencyKind))
-        .map((entry) => entry.relativePath)
-        .sort((a, b) => a.localeCompare(b))
+      ? [...new Set([
+        ...[...map.values()]
+          .filter((entry) => isApplicationDataKind(entry.dependencyKind))
+          .map((entry) => entry.relativePath),
+        ...gitAppDataPaths,
+      ])].sort((a, b) => a.localeCompare(b))
       : [],
+    applicationDataPathPrefixes: refusal === null
+      ? [...gitAppDataPathPrefixes].sort((a, b) => a.localeCompare(b))
+      : [],
+    // A dynamic managed input has no path to hold; the manifest preserves its
+    // source template as an unmanaged entry, so a restore knows it cannot
+    // prove any remaining live path is disposable. A legacy host declaration
+    // with no recorded spelling is reported the same way.
+    dynamicApplicationDataSources: refusal === null
+      ? [...gitDynamicAppDataSources].sort((a, b) => a.localeCompare(b))
+      : [],
+    unparsedComposeSources: [],
   };
 }
 
@@ -797,6 +1013,16 @@ async function resolveAuthoredInventory(
   // whatever managed input also names them: the sticky ownership record a
   // restore reads to keep application data out of live cleanup.
   const appDataPaths = new Set<string>();
+  const appDataPathPrefixes = new Set<string>();
+  // Application-data sources whose path holds a variable. The resolved path is
+  // unknown and can change before restore, so a suffix is no proof of ownership;
+  // a generation that records one deletes nothing from the live discovery set.
+  const dynamicAppDataSources = new Set<string>();
+  // Compose declarations whose referenced content was not parsed: a selected
+  // COMPOSE_FILE layer outside the conventional root candidates, or an
+  // include/extends source outside the stack or selected through a variable.
+  // A restore cannot treat the live project as complete while one exists.
+  const unparsedComposeSources = new Set<string>();
 
   /**
    * Notes reach logs and the readiness API, and a URL include can carry
@@ -811,14 +1037,18 @@ async function resolveAuthoredInventory(
 const INTERPOLATION_PATTERN = /\$\{[^}]*\}|\$[A-Za-z_][A-Za-z0-9_]*/g;
 
 /**
- * The one stack-relative path a dynamic source path could still resolve to: the
- * literal suffix after its last interpolation, with the substituted value
+ * The one stack-relative path a dynamic managed input could still resolve to:
+ * the literal suffix after its last interpolation, with the substituted value
  * standing in for the directory above it. A capture that cannot read the
  * substitution has to treat that name as an input it does not hold, because
  * Compose may point the input at it later. A source that escapes the stack, or
  * whose suffix does, names nothing a capture could have held. Over-reporting
  * only leaves a file the operator owns in place; it never widens what a
  * generation captures.
+ *
+ * This is deliberately not used for application data: the substituted value may
+ * contain a directory (`sub/data.env`) or be the whole path, so a suffix is not
+ * proof of the resolved bind source and a restore must not delete on it.
  */
 function literalTailCandidate(sourcePath: string): string | null {
   if (isHostAbsolutePath(sourcePath)) return null;
@@ -1002,19 +1232,27 @@ const capturable = async (
         coverageNotes.push(...parsed.parseErrors);
       }
       for (const dyn of parsed.dynamic) {
-        const candidate = literalTailCandidate(dyn.sourcePath);
         if (UNCAPTURED_SILENT_KINDS.has(dyn.kind)) {
-          // Application data Compose resolves at deploy time. The one name the
-          // substitution could settle on is never a cleanup candidate, the
-          // same over-reporting the managed kinds below accept, in the safe
-          // direction: it can only leave an operator-owned file in place.
-          if (candidate) appDataPaths.add(candidate);
+          // Application data Compose resolves at deploy time. The capture cannot
+          // read the substitution, and the literal suffix is not the resolved
+          // path: the variable may name a directory above the suffix or the
+          // whole source. Record the declared source so a restore knows its
+          // ownership of every unrecorded live path is unknown, and delete none
+          // of them rather than guess.
+          dynamicAppDataSources.add(dyn.sourcePath);
           continue;
         }
+        const candidate = literalTailCandidate(dyn.sourcePath);
         const refs = dyn.kind === 'include' || dyn.kind === 'extends' ? ' (and the files it references)' : '';
         addUncaptured(
           `${dyn.kind} ${dyn.sourcePath}${refs} is resolved by Compose at deploy time and is not captured`,
         );
+        if (dyn.kind === 'include' || dyn.kind === 'extends') {
+          // A dynamic composition source can declare any input, and its
+          // declarations were not read. Recovery pins the captured layers, but
+          // a live restore must not forward other live paths as disposable.
+          unparsedComposeSources.add(redactNoteCredentials(dyn.sourcePath));
+        }
         // A path that is interpolated end to end (`include: [ $FILE ]`) names
         // no filename a capture could protect by path, and Compose resolves it
         // to whatever the variable holds later. Any conventional compose file
@@ -1025,9 +1263,36 @@ const capturable = async (
       }
 
       for (const input of parsed.inputs) {
-        const hostAbs = (input.sourcePath !== null && isHostAbsolutePath(input.sourcePath))
+        if (
+          input.kind === 'bind-mount'
+          && await bindContainsStack(stackRoot, input.sourcePath, input.materializedPath)
+        ) {
+          // Mounting the stack root or an ancestor mounts every managed path.
+          dynamicAppDataSources.add(STACK_CONTAINING_BIND_MARKER);
+          continue;
+        }
+        // A host spelling can still name a file inside this stack: an absolute
+        // path under the lexical or physical root of a relocated compose
+        // directory, or a `..` path that leaves and re-enters the stack.
+        // Resolve it to the same stack-relative path its plain relative
+        // spelling would use, so one file has one ownership and capture record.
+        // Only silent kinds are rewritten; managed host inputs keep their
+        // existing outside-the-stack accounting.
+        const absoluteSource = UNCAPTURED_SILENT_KINDS.has(input.kind)
+          && input.sourcePath !== null
+          && (
+            input.baseDir === 'host'
+            || input.materializedPath === null
+            || isHostAbsolutePath(input.sourcePath)
+          )
+          ? await resolveStackSource(stackRoot, input.sourcePath)
+          : null;
+
+        const hostAbs = absoluteSource === null && (
+          (input.sourcePath !== null && isHostAbsolutePath(input.sourcePath))
           || input.baseDir === 'host'
-          || input.materializedPath === null;
+          || input.materializedPath === null
+        );
 
         if (hostAbs) {
           if (input.sourcePath !== null && !UNCAPTURED_SILENT_KINDS.has(input.kind)) {
@@ -1038,16 +1303,34 @@ const capturable = async (
               `${input.kind} ${input.sourcePath}${refs} is outside the stack directory and is not captured`,
             );
           }
+          if (input.kind === 'include' || input.kind === 'extends') {
+            // The referenced file was not read, so it can declare a bind or env
+            // file the live inventory never saw. Keep every live path out of
+            // cleanup until the layer set no longer has an outside source.
+            unparsedComposeSources.add(
+              redactNoteCredentials(input.sourcePath ?? `${input.kind} without a path`),
+            );
+          }
           continue;
         }
 
-        const candidate = input.materializedPath ?? input.sourcePath;
+        const candidate = absoluteSource?.relativePath ?? input.materializedPath ?? input.sourcePath;
         if (!candidate) continue;
-        const resolved = resolveStackRel(stackRoot, candidate);
+        const resolved = absoluteSource ?? resolveStackRel(stackRoot, candidate);
         if (!resolved) continue;
         const kind = input.kind;
         const mode = UNCAPTURED_SILENT_KINDS.has(kind) ? 'silent' : 'note';
-        if (mode === 'silent') appDataPaths.add(resolved.relativePath);
+        if (mode === 'silent') {
+          appDataPaths.add(resolved.relativePath);
+          const physical = await physicalStackPath(stackRoot, resolved.absolutePath);
+          if (physical) appDataPaths.add(physical);
+          // A directory bind mounts everything beneath it. A managed env file
+          // that appears under that directory later is data, not a stale file.
+          if (kind === 'bind-mount' && await isDirectoryPath(resolved.absolutePath)) {
+            appDataPathPrefixes.add(resolved.relativePath);
+            if (physical) appDataPathPrefixes.add(physical);
+          }
+        }
         if ((await capturable(resolved.relativePath, mode)) !== 'captured') continue;
 
         upsertEntry(map, foldedOwners, {
@@ -1159,7 +1442,7 @@ const capturable = async (
       const resolvedChain: string[] = [];
       let unusable: string | null = null;
       for (const entry of chain) {
-        const resolved = entry.length === 0 ? null : await resolveChainLayer(stackRoot, entry);
+        const resolved = entry.length === 0 ? null : await resolveStackSource(stackRoot, entry);
         if (!resolved) {
           // A layer that is not a stack-relative path cannot be pinned at all,
           // and Compose rejects a chain that names an empty entry.
@@ -1167,6 +1450,9 @@ const capturable = async (
           break;
         }
         resolvedChain.push(resolved.relativePath);
+        if (!composePaths.includes(resolved.relativePath)) {
+          unparsedComposeSources.add(resolved.relativePath);
+        }
         // The layer is loaded whatever it is, so it is pinned either way. The
         // capture question uses the compose-layer policy, the same one the
         // root and override candidates and the recovery layer validator
@@ -1233,7 +1519,7 @@ const capturable = async (
   }
 
   const coverageRefusal = coverageNotes[0]
-    ?? (composePaths.length === 0 ? 'No compose file found in the stack directory' : null);
+    ?? (composeLayers.length === 0 ? 'No compose file found in the stack directory' : null);
 
   return {
     entries: [...map.values()].sort((a, b) => a.relativePath.localeCompare(b.relativePath)),
@@ -1262,6 +1548,15 @@ const capturable = async (
       : [],
     applicationDataPaths: coverageRefusal === null
       ? [...appDataPaths].sort((a, b) => a.localeCompare(b))
+      : [],
+    applicationDataPathPrefixes: coverageRefusal === null
+      ? [...appDataPathPrefixes].sort((a, b) => a.localeCompare(b))
+      : [],
+    dynamicApplicationDataSources: coverageRefusal === null
+      ? [...dynamicAppDataSources].sort((a, b) => a.localeCompare(b))
+      : [],
+    unparsedComposeSources: coverageRefusal === null
+      ? [...unparsedComposeSources].sort((a, b) => a.localeCompare(b))
       : [],
   };
 }

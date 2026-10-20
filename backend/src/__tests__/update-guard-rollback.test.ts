@@ -23,6 +23,7 @@ import {
   describeManagedInputs,
   describeRollbackManagedInputs,
   describeStoredManagedInputs,
+  storedComposeCoverage,
   type RollbackInputs,
 } from '../services/updateGuard/readiness';
 import type { ContainerProbe } from '../services/updateGuard/types';
@@ -198,6 +199,34 @@ describe('describeRollbackManagedInputs', () => {
   });
 });
 
+describe('storedComposeCoverage', () => {
+  const manifest = (composeLayers: string[] | undefined, entries: Array<[string, 'present' | 'tombstoned']>) => ({
+    entries: entries.map(([relativePath, state]) => ({ relativePath, state })),
+    invocation: { composeLayers },
+  }) as unknown as Parameters<typeof storedComposeCoverage>[0];
+
+  it('is held when the generation holds every selected layer', () => {
+    expect(storedComposeCoverage(manifest(
+      ['compose.yaml', 'prod.yaml'],
+      [['compose.yaml', 'present'], ['prod.yaml', 'present']],
+    ))).toBe('held');
+  });
+
+  it('is current_content when a selected layer was deliberately omitted', () => {
+    // A shared main file is selected and pinned but its bytes stay with the
+    // shared target, so the generation only has whatever is there at restore.
+    expect(storedComposeCoverage(manifest(
+      ['compose.yaml'],
+      [['compose.yaml', 'tombstoned']],
+    ))).toBe('current_content');
+  });
+
+  it('is not_recorded when the generation stored no layer set', () => {
+    expect(storedComposeCoverage(manifest(undefined, [['compose.yaml', 'present']]))).toBe('not_recorded');
+    expect(storedComposeCoverage(manifest([], [['compose.yaml', 'present']]))).toBe('not_recorded');
+  });
+});
+
 describe('buildRollbackItems', () => {
   it.each([
     ['complete', /^Current recovery generation abc123 is available for exact restore\.$/],
@@ -228,9 +257,40 @@ describe('buildRollbackItems', () => {
 
   it('names the compose files in the stack directory, not every input, as covered', () => {
     const item = itemById(baseInputs({
-      recoveryGeneration: { exists: true, shortId: 'abc123', restoreCoverage: 'omits_inputs' },
+      recoveryGeneration: { exists: true, shortId: 'abc123', restoreCoverage: 'omits_inputs', composeCoverage: 'held' },
     }), 'compose_source');
     expect(item.detail).toBe('The compose files in the stack directory are covered by the current recovery generation.');
+  });
+
+  it('does not claim a shared main compose file is held', () => {
+    const item = itemById(baseInputs({
+      recoveryGeneration: {
+        exists: true,
+        shortId: 'abc123',
+        restoreCoverage: 'omits_inputs',
+        composeCoverage: 'current_content',
+      },
+    }), 'compose_source');
+
+    expect(item.state).toBe('ready');
+    expect(item.detail).toContain('it does not hold');
+    expect(item.detail).toContain("reads that file's current content");
+    expect(item.detail).not.toMatch(/are covered/);
+  });
+
+  it('does not claim coverage for a generation that recorded no layer set', () => {
+    const item = itemById(baseInputs({
+      recoveryGeneration: {
+        exists: true,
+        shortId: 'abc123',
+        restoreCoverage: 'omits_inputs',
+        composeCoverage: 'not_recorded',
+      },
+    }), 'compose_source');
+
+    expect(item.state).toBe('ready');
+    expect(item.detail).toContain('was not recorded');
+    expect(item.detail).not.toMatch(/are covered/);
   });
 
   it('reports the full set of rollback readiness items', () => {

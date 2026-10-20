@@ -241,7 +241,9 @@ function shortFormBindSource(volume: string): string | null {
 function collectBindMounts(volumes: unknown, fromFile: string, refs: ComposeRefs, ctx: FileContext): void {
     const emitBindSource = (src: string): void => {
         if (isHostAbsolutePath(src)) {
-            emitInput(refs, src, null, null, 'bind-mount', 'bind-mount', fromFile, 'host');
+            // Keep the raw host spelling so a caller that knows the stack root
+            // can tell an absolute path inside the stack from one outside it.
+            emitInput(refs, src, src, null, 'bind-mount', 'bind-mount', fromFile, 'host');
         } else {
             emitProjectRelative(refs, src, 'bind-mount', 'bind-mount', fromFile, ctx, 'project-root');
         }

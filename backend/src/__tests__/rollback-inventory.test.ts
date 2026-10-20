@@ -448,6 +448,216 @@ describe('resolveRollbackInventory: the env files a Git run loads', () => {
     expect(inventory.uncapturedRelativePaths).toEqual([]);
   });
 
+  it('collects unmanaged static and dynamic bind paths from the manifest', async () => {
+    mockReadManifest.mockResolvedValue(manifest([
+      {
+        sourcePath: 'data.env',
+        materializedPath: 'data.env',
+        role: 'bind-mount',
+        dependencyKind: 'bind-mount',
+        ownership: 'unmanaged',
+        provenance: 'fetch',
+        sensitivity: 'medium',
+        contentSha256: null,
+        sizeBytes: null,
+        state: 'present',
+        deletionAuthority: 'none',
+        note: null,
+      },
+      {
+        sourcePath: './${DATA_DIR}/private.env',
+        materializedPath: null,
+        role: 'bind-mount',
+        dependencyKind: 'bind-mount',
+        ownership: 'unmanaged',
+        provenance: 'fetch',
+        sensitivity: 'medium',
+        contentSha256: null,
+        sizeBytes: null,
+        state: 'present',
+        deletionAuthority: 'none',
+        note: null,
+      },
+    ]));
+
+    const inventory = await resolveRollbackInventory(1, STACK);
+
+    // The managed file map excludes unmanaged inputs, but their application
+    // data role still has to reach restore. A dynamic source activates the
+    // global deletion safeguard; a static path is protected by name.
+    expect(inventory.applicationDataPaths).toEqual(['data.env']);
+    expect(inventory.dynamicApplicationDataSources).toEqual(['./${DATA_DIR}/private.env']);
+  });
+
+  it('resolves a host-form bind spelling that names a stack path', async () => {
+    const inStack = path.join(composeDir, STACK, 'sub', 'data.env');
+    const outside = path.join(composeDir, '..', 'data.env');
+    const hostBind = (hostSourcePath: string): unknown => ({
+      sourcePath: null,
+      hostSourcePath,
+      materializedPath: null,
+      role: 'bind-mount',
+      dependencyKind: 'bind-mount',
+      ownership: 'unmanaged',
+      provenance: 'fetch',
+      sensitivity: 'medium',
+      contentSha256: null,
+      sizeBytes: null,
+      state: 'present',
+      deletionAuthority: 'none',
+      note: 'Host path; provided by the node, not materialized from the repository',
+    });
+    mockReadManifest.mockResolvedValue(manifest([hostBind(inStack), hostBind(outside)]));
+
+    const inventory = await resolveRollbackInventory(1, STACK);
+
+    // Host manifests blank `sourcePath`, so the raw spelling is the only way
+    // to see that the in-stack bind owns the same path as a managed env file.
+    // A host path outside the stack must not be adopted.
+    expect(inventory.applicationDataPaths).toEqual(['sub/data.env']);
+  });
+
+  it('records a bind-mounted directory as a prefix but not a build context', async () => {
+    await fsPromises.mkdir(path.join(composeDir, STACK, 'data'), { recursive: true });
+    await fsPromises.mkdir(path.join(composeDir, STACK, 'web'), { recursive: true });
+    const silent = (sourcePath: string, dependencyKind: string): unknown => ({
+      sourcePath,
+      materializedPath: sourcePath,
+      role: dependencyKind,
+      dependencyKind,
+      ownership: 'unmanaged',
+      provenance: 'fetch',
+      sensitivity: 'medium',
+      contentSha256: null,
+      sizeBytes: null,
+      state: 'present',
+      deletionAuthority: 'none',
+      note: null,
+    });
+    mockReadManifest.mockResolvedValue(manifest([
+      silent('data', 'bind-mount'),
+      silent('web', 'build-context'),
+    ]));
+
+    const inventory = await resolveRollbackInventory(1, STACK);
+
+    // A directory bind mounts everything beneath it. A build context is also a
+    // directory, but its files are managed build inputs, not mounted data, so
+    // it must not become a protected prefix.
+    expect(inventory.applicationDataPaths).toEqual(['data', 'web']);
+    expect(inventory.applicationDataPathPrefixes).toEqual(['data']);
+  });
+
+  it('treats a bind of the stack root as unresolved', async () => {
+    const rootBind = (sourcePath: string | null, materializedPath: string | null, hostSourcePath?: string): unknown => ({
+      sourcePath,
+      ...(hostSourcePath ? { hostSourcePath } : {}),
+      materializedPath,
+      role: 'bind-mount',
+      dependencyKind: 'bind-mount',
+      ownership: 'unmanaged',
+      provenance: 'fetch',
+      sensitivity: 'medium',
+      contentSha256: null,
+      sizeBytes: null,
+      state: 'present',
+      deletionAuthority: 'none',
+      note: null,
+    });
+    mockReadManifest.mockResolvedValue(manifest([
+      rootBind('.', '.'),
+      rootBind(null, null, path.join(composeDir, STACK)),
+    ]));
+
+    const inventory = await resolveRollbackInventory(1, STACK);
+
+    // Mounting the root covers every managed path, so no live path is safe to
+    // delete. Both the relative and absolute spellings must set the signal.
+    expect(inventory.dynamicApplicationDataSources).toEqual(['<bind source contains the stack>']);
+    expect(inventory.applicationDataPaths).toEqual([]);
+  });
+
+  it('treats a drive-relative bind source as unresolved', async () => {
+    mockReadManifest.mockResolvedValue(manifest([{
+      sourcePath: 'C:..',
+      materializedPath: null,
+      role: 'bind-mount',
+      dependencyKind: 'bind-mount',
+      ownership: 'unmanaged',
+      provenance: 'fetch',
+      sensitivity: 'medium',
+      contentSha256: null,
+      sizeBytes: null,
+      state: 'present',
+      deletionAuthority: 'none',
+      note: null,
+    }]));
+
+    const inventory = await resolveRollbackInventory(1, STACK);
+
+    // The host resolves a drive-relative spelling against the current
+    // directory on that drive; it may name the stack or an ancestor.
+    expect(inventory.dynamicApplicationDataSources).toEqual(['<bind source contains the stack>']);
+  });
+
+  it('resolves an outside alias whose target is a stack file', async () => {
+    const target = path.join(composeDir, STACK, 'sub', 'data.env');
+    await fsPromises.mkdir(path.dirname(target), { recursive: true });
+    await fsPromises.writeFile(target, 'TOKEN=application-data\n', 'utf8');
+    const alias = path.join(composeDir, 'data-alias.env');
+    await fsPromises.symlink(target, alias);
+
+    mockReadManifest.mockResolvedValue(manifest([{
+      sourcePath: null,
+      hostSourcePath: alias,
+      materializedPath: null,
+      role: 'bind-mount',
+      dependencyKind: 'bind-mount',
+      ownership: 'unmanaged',
+      provenance: 'fetch',
+      sensitivity: 'medium',
+      contentSha256: null,
+      sizeBytes: null,
+      state: 'present',
+      deletionAuthority: 'none',
+      note: 'Host path; provided by the node, not materialized from the repository',
+    }]));
+
+    const inventory = await resolveRollbackInventory(1, STACK);
+
+    // The bind names an alias outside the stack, but mounting it reads the
+    // stack file. Deleting that managed path would delete the mounted data, so
+    // the physical target supplies the ownership record.
+    expect(inventory.applicationDataPaths).toEqual(['sub/data.env']);
+  });
+
+  it('treats a legacy host bind without a recorded path as unresolved', async () => {
+    // Manifests written before host-source recording kept no spelling for a
+    // host bind. It may name any stack path, so the capture must keep the
+    // delete-none signal rather than assume the path is outside the stack.
+    mockReadManifest.mockResolvedValue(manifest([{
+      sourcePath: null,
+      materializedPath: null,
+      role: 'bind-mount',
+      dependencyKind: 'bind-mount',
+      ownership: 'unmanaged',
+      provenance: 'fetch',
+      sensitivity: 'medium',
+      contentSha256: null,
+      sizeBytes: null,
+      state: 'present',
+      deletionAuthority: 'none',
+      note: 'Host path; provided by the node, not materialized from the repository',
+    }]));
+
+    const inventory = await resolveRollbackInventory(1, STACK);
+
+    expect(inventory.applicationDataPaths).toEqual([]);
+    expect(inventory.dynamicApplicationDataSources).toEqual([
+      '<legacy host declaration: path not recorded>',
+    ]);
+  });
+
   it('names an env file outside the stack without claiming it is protected', async () => {
     const outside = path.join(composeDir, '..', 'operator.env');
     mockComposeFileEnvVarSelection.mockResolvedValue({
@@ -1493,6 +1703,25 @@ describe('resolveRollbackInventory: inputs that cannot be captured', () => {
 
     expect(inventory.coverageRefusal).toBeNull();
     expect(inventory.uncapturedInputs).toEqual([]);
+  });
+
+  it('does not adopt a home-relative bind as a stack path', async () => {
+    await writeCompose([
+      'services:',
+      '  web:',
+      '    image: nginx',
+      '    volumes:',
+      '      - ~/.cache/data.env:/data',
+      '',
+    ].join('\n'));
+
+    const inventory = await resolveRollbackInventory(1, STACK);
+
+    expect(inventory.coverageRefusal).toBeNull();
+    // The home spelling names a file outside the stack. It must not become a
+    // literal `~` path that capture would snapshot from inside the stack.
+    expect(inventory.applicationDataPaths).toEqual([]);
+    expect(inventory.entries.map((e) => e.relativePath)).toEqual(['compose.yaml']);
   });
 
   it('excludes a managed file that links outside the stack without writing a tombstone', async () => {

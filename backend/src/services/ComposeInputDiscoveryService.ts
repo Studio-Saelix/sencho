@@ -726,6 +726,7 @@ export class ComposeInputDiscoveryService {
                 inputs.push({
                     sourcePath: null,
                     materializedPath: null,
+                    ...(input.sourcePath !== null ? { hostSourcePath: input.sourcePath } : {}),
                     role: input.role,
                     dependencyKind: kind,
                     ownership: 'unmanaged',
