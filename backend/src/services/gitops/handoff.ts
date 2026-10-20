@@ -40,7 +40,7 @@ import {
   type HealthRolloutPolicy,
 } from './healthPolicy';
 import { probeRemoteCapability, type RemoteCapabilityProbe } from '../../helpers/remoteCapabilities';
-import { HEALTH_ROLLOUT_POLICY_CAPABILITY } from '../CapabilityRegistry';
+import { HEALTH_GATE_OBSERVATION_CAPABILITY } from '../CapabilityRegistry';
 import { HealthGateService } from '../HealthGateService';
 import type { HealthRolloutExecutor } from './healthRolloutExecutor';
 import { DatabaseService, type Node } from '../DatabaseService';
@@ -906,13 +906,13 @@ function deployStackNameFor(
  * observe.
  *
  * The hub runs a health gate on a target's behalf by reading that target's
- * Docker directly, and a remote node's Docker is not directly reachable; all
- * access to it goes through the HTTP proxy. Sending non-observe health work to a
- * node that cannot serve the verdict would leave the rollout waiting on evidence
- * that can never arrive, so the refusal happens before the apply is dispatched
- * and before any run is reserved.
+ * runtime facts, and for a remote node those come from the node's own
+ * observation route over the HTTP proxy. A node too old to serve them cannot
+ * produce a verdict, and sending non-observe health work to one would leave the
+ * rollout waiting on evidence that can never arrive, so the refusal happens
+ * before the apply is dispatched and before any run is reserved.
  *
- * A local target is not probed: this instance can already read it, so there is
+ * A local target is not probed: this instance reads it itself, so there is
  * nothing to confirm.
  */
 async function refuseUngatedRemoteTarget(
@@ -922,12 +922,12 @@ async function refuseUngatedRemoteTarget(
   if (node.type !== 'remote') return null;
   const probe = healthCapabilityProbeForTests
     ? await healthCapabilityProbeForTests(node.id)
-    : await probeRemoteCapability(node.id, HEALTH_ROLLOUT_POLICY_CAPABILITY);
+    : await probeRemoteCapability(node.id, HEALTH_GATE_OBSERVATION_CAPABILITY);
   if (probe.kind === 'supported') return null;
   if (probe.kind === 'unreachable') {
     return `Node ${node.name} could not be asked whether it supports health-gated rollout (${probe.detail}); the rollout policy "${policy}" was not applied.`;
   }
-  return `Node ${node.name} does not support health-gated rollout, so the policy "${policy}" cannot run against it. Choose "observe" for this application, or move the target to a node that supports it.`;
+  return `Node ${node.name} does not report the observed health this policy needs, so the policy "${policy}" cannot run against it. Update Sencho on that node, choose "observe" for this application, or move the target to a node that supports it.`;
 }
 
 type ReservedTargetRun =

@@ -27,6 +27,10 @@ import {
 import { GitSourceService, GitSourceError, repoHost as gitRepoHost, type SourcePolicy } from '../services/GitSourceService';
 import { repoUrlRejectionMessage } from '../services/gitops/repoIdentity';
 import { observeStackRuntimeArtifact } from '../services/gitops/artifactResolve';
+import {
+  readStackDeclaredRestartIntent,
+  readStackHealthFacts,
+} from '../services/health/stackHealthFacts';
 import { loadEffectiveArtifactContext, readNodePlatform } from '../services/gitops/effectiveArtifactContext';
 import { encodeObservedArtifactIdentity } from '../services/gitops/json';
 import { parseRestoreFailureClass } from '../services/gitops/rolloutRecovery';
@@ -1458,6 +1462,55 @@ stacksRouter.get('/:stackName/runtime-artifact-identity', async (req: Request, r
       error,
     );
     res.status(500).json({ error: 'Failed to observe runtime artifact identity' });
+  }
+});
+
+/**
+ * This node's own runtime facts for a stack: the evidence a hub-driven health
+ * gate reads for a rollout target on it.
+ *
+ * Served by the instance that hosts the containers, because a remote node's
+ * Docker daemon is not reachable from the instance running the rollout. The
+ * route exists so a rollout to a remote target gets a real verdict instead of
+ * an observation that can only end unknown.
+ *
+ * `?declaredRestart=1` adds the declared Compose restart intent, which the
+ * caller reads once per observation to tell a completed one-shot apart from a
+ * container that died. It renders the stack, so it is opt-in rather than part
+ * of every poll.
+ */
+stacksRouter.get('/:stackName/health-observation', async (req: Request, res: Response) => {
+  const stackName = req.params.stackName as string;
+  if (!requirePermission(req, res, 'stack:read', 'stack', stackName)) return;
+  if (!(await requireStackExists(req.nodeId, stackName, res))) return;
+  try {
+    const facts = await readStackHealthFacts({ nodeId: req.nodeId, stackName });
+    if (facts.kind !== 'ok') {
+      // A node that cannot read its own containers is answering about itself,
+      // and the answer may be different in a moment: reported as unavailable
+      // rather than as a failure of the request.
+      console.warn(
+        '[Stacks] Health observation unavailable for %s on node %d:',
+        sanitizeForLog(stackName), req.nodeId,
+        facts.kind === 'unavailable' ? facts.detail : facts.kind,
+      );
+      res.status(503).json({ error: 'Could not read this node\'s containers for the stack' });
+      return;
+    }
+    const declared = req.query.declaredRestart === '1'
+      ? await readStackDeclaredRestartIntent({ nodeId: req.nodeId, stackName })
+      : null;
+    res.json({
+      containers: facts.containers,
+      declaredRestartByService: declared ? Object.fromEntries(declared) : null,
+    });
+  } catch (error) {
+    console.error(
+      '[Stacks] Failed to observe runtime facts for %s:',
+      sanitizeForLog(stackName),
+      error,
+    );
+    res.status(500).json({ error: 'Failed to observe stack runtime facts' });
   }
 });
 

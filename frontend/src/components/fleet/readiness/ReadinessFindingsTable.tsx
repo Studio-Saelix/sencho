@@ -27,7 +27,7 @@ import { describeDismissal } from './describeDismissal';
 
 const HEAD = 'text-[10px] uppercase tracking-[0.18em]';
 const PRIMARY_ACTION = 'h-auto min-h-7 max-w-[min(8rem,100%)] whitespace-normal px-2 py-1 text-right text-xs leading-tight';
-const FILTER_CLASS = 'w-[200px] [&>button]:!bg-background';
+const FILTER_CLASS = 'w-[200px] [&>button]:!bg-control';
 const PAGE_SIZE = 25;
 
 /** The canonical verdict a finding restates, in that verdict's own surface's words. */
