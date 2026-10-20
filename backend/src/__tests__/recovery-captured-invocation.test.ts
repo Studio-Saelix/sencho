@@ -1157,6 +1157,143 @@ describe('captured invocation on recovery Compose args', () => {
     },
   );
 
+  it('keeps live paths when the current env selection cannot be decided', async () => {
+    const stackName = 'inv-undecidable-live-env';
+    const stackDir = path.join(composeDir, stackName);
+    const composeFile = path.join(stackDir, 'compose.yaml');
+    const laterEnv = path.join(stackDir, 'later.env');
+    await fs.promises.mkdir(stackDir, { recursive: true });
+    await fs.promises.writeFile(composeFile, [
+      'services:',
+      '  web:',
+      '    image: busybox',
+      '    env_file:',
+      '      - path: later.env',
+      '        required: false',
+      '',
+    ].join('\n'), 'utf8');
+
+    const { DatabaseService } = await import('../services/DatabaseService');
+    const db = DatabaseService.getInstance();
+    // An enabled Mesh stack pins its own -f list, so an undecidable live
+    // selection holds the coverage claim at Partial instead of refusing.
+    db.insertMeshStack(nodeId, stackName, null);
+
+    const { resolveRollbackInventory } = await import('../services/rollbackInventory');
+    const { RollbackGenerationStore } = await import('../services/RollbackGenerationStore');
+    const { resolveComposeProjectContextForGeneration } = await import('../services/composeProjectContext');
+
+    const carried = await resolveRollbackInventory(nodeId, stackName);
+    expect(carried.coverageRefusal).toBeNull();
+    const generationId = randomUUID();
+    await RollbackGenerationStore.captureGeneration({
+      nodeId,
+      stackName,
+      generationId,
+      inventory: carried,
+    });
+
+    // A file appears after capture at a path the live project manages, and the
+    // live selection becomes one this reader cannot reproduce.
+    await fs.promises.writeFile(composeFile, [
+      'services:',
+      '  web:',
+      '    image: nginx',
+      '    env_file:',
+      '      - path: later.env',
+      '        required: false',
+      '',
+    ].join('\n'), 'utf8');
+    await fs.promises.writeFile(laterEnv, 'X=1\n', 'utf8');
+    await fs.promises.writeFile(path.join(stackDir, 'select.env'), 'BAD="unterminated\n', 'utf8');
+    const previous = process.env.COMPOSE_ENV_FILES;
+    process.env.COMPOSE_ENV_FILES = 'select.env';
+    try {
+      const live = await resolveRollbackInventory(nodeId, stackName);
+      expect(live.coverageRefusal).toBeNull();
+      expect(live.recoveryRefusal).not.toBeNull();
+
+      const ctx = await resolveComposeProjectContextForGeneration(nodeId, stackName, generationId);
+      await ctx.restoreFromContext();
+      await RollbackGenerationStore.commitRestoreTransaction(nodeId, stackName, generationId);
+
+      expect(await fs.promises.readFile(composeFile, 'utf8')).toContain('busybox');
+      await expect(fs.promises.access(laterEnv)).resolves.toBeUndefined();
+    } finally {
+      if (previous === undefined) delete process.env.COMPOSE_ENV_FILES;
+      else process.env.COMPOSE_ENV_FILES = previous;
+    }
+
+    // Control: a decidable selection makes the same live path a cleanup
+    // candidate, so the survival above is the ownership guard and not a path
+    // the restore never considered.
+    const control = await resolveComposeProjectContextForGeneration(nodeId, stackName, generationId);
+    await control.restoreFromContext();
+    await RollbackGenerationStore.commitRestoreTransaction(nodeId, stackName, generationId);
+    await expect(fs.promises.access(laterEnv)).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
+  it('restores a captured env file after the live selection moves to an unusable one', async () => {
+    const stackName = 'inv-unrelated-live-env';
+    const stackDir = path.join(composeDir, stackName);
+    const original = 'services:\n  web:\n    image: busybox\n    command: ["echo", "${MARK}"]\n';
+    const override = 'services:\n  web:\n    image: nginx\n';
+    const composeFile = path.join(stackDir, 'compose.yaml');
+    const overrideFile = path.join(stackDir, 'compose.override.yaml');
+    const oldEnv = path.join(stackDir, 'old.env');
+    const newEnv = path.join(stackDir, 'new.env');
+    await fs.promises.mkdir(stackDir, { recursive: true });
+    await fs.promises.writeFile(composeFile, original, 'utf8');
+    await fs.promises.writeFile(oldEnv, 'MARK=captured\n', 'utf8');
+
+    const { DatabaseService } = await import('../services/DatabaseService');
+    const db = DatabaseService.getInstance();
+    db.setStackProjectEnvFiles(nodeId, stackName, ['old.env']);
+
+    const { resolveComposeProjectContext } = await import('../services/composeProjectContext');
+    const { RollbackGenerationStore } = await import('../services/RollbackGenerationStore');
+    const { ComposeService } = await import('../services/ComposeService');
+
+    const context = await resolveComposeProjectContext(nodeId, stackName);
+    const generationId = await context.backupFromContext('deployment');
+    const stored = await RollbackGenerationStore.readVerifiedGeneration(nodeId, stackName, generationId);
+    expect(stored.invocation.composeArgsPrefix).toEqual(['--env-file', oldEnv]);
+
+    // Control: while the captured selection is still live, a file created after
+    // capture is a live managed path, so the restore removes it.
+    await fs.promises.writeFile(composeFile, original.replace('busybox', 'nginx'), 'utf8');
+    await fs.promises.writeFile(overrideFile, override, 'utf8');
+    await context.restoreFromContext();
+    await RollbackGenerationStore.commitRestoreTransaction(nodeId, stackName, generationId);
+    expect(await fs.promises.readFile(composeFile, 'utf8')).toBe(original);
+    await expect(fs.promises.access(overrideFile)).rejects.toMatchObject({ code: 'ENOENT' });
+
+    // The operator then selects a different env file that is a directory. The
+    // generation still replays old.env, so the restore must proceed: the
+    // unrelated selection stays untouched, and no live path is deleted on an
+    // ownership the unusable selection cannot establish.
+    await fs.promises.mkdir(newEnv);
+    db.setStackProjectEnvFiles(nodeId, stackName, ['new.env']);
+    await fs.promises.writeFile(composeFile, original.replace('busybox', 'alpine'), 'utf8');
+    await fs.promises.writeFile(overrideFile, override, 'utf8');
+
+    await context.restoreFromContext();
+    await RollbackGenerationStore.commitRestoreTransaction(nodeId, stackName, generationId);
+
+    expect(await fs.promises.readFile(composeFile, 'utf8')).toBe(original);
+    expect((await fs.promises.stat(newEnv)).isDirectory()).toBe(true);
+    expect(await fs.promises.readFile(overrideFile, 'utf8')).toBe(override);
+
+    const args = await ComposeService.getInstance(nodeId).buildComposeArgsWithRecoveryOverride(
+      stackName,
+      ['up', '-d'],
+      path.join(stackDir, '.sencho-recovery-aaaaaaaaaaaa.yml'),
+      stored.invocation,
+    );
+    expect(args).toContain(oldEnv);
+    expect(args).not.toContain(newEnv);
+  });
+
   it.skipIf(process.platform === 'win32')(
     'refuses a recovery run when the spaced COMPOSE_ENV_FILES entry is not a regular file',
     async () => {

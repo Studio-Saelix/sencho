@@ -1996,6 +1996,9 @@ describe('resolveRollbackInventory: inputs that cannot be captured', () => {
     // The project .env is an entry, so it is held and is not an omission.
     expect(inventory.uncapturedInputs).toEqual([]);
     expect(inventory.uncapturedRelativePaths).toEqual([]);
+    // The live selection still could not be decided, so a restore may not
+    // delete live paths on evidence this reader cannot classify.
+    expect(inventory.recoveryRefusal).toBe('the env file select.env could not be read');
   });
 
   it('fails closed when a first-apply Git stack also has a refused authored inventory', async () => {

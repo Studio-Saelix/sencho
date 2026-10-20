@@ -22,6 +22,7 @@ import { COMPOSE_OVERRIDE_FILENAMES, COMPOSE_ROOT_FILENAMES } from '../utils/com
 import {
   authoredComposeEnvFileArgs,
   authoredComposeFileArgs,
+  composeEnvFilesFromProcess,
   composeFileEnvVarSelection,
   DEFAULT_PATH_SEPARATOR,
 } from '../utils/authoredComposeArgs';
@@ -178,6 +179,15 @@ function flagValue(args: readonly string[], flag: string): string | undefined {
   return undefined;
 }
 
+/** Every value of a repeated flag, in order: `--env-file` is applied per file. */
+function flagValues(args: readonly string[], flag: string): string[] {
+  const values: string[] = [];
+  for (let i = 0; i < args.length - 1; i++) {
+    if (args[i] === flag) values.push(args[i + 1]);
+  }
+  return values;
+}
+
 /**
  * Compose replaces the default project `.env` when the invocation names
  * `--env-file`, when COMPOSE_ENV_FILES lists a file, or when
@@ -240,6 +250,80 @@ export function selectedProjectEnvFile(
   if (relativePath === DOT_ENV) return null;
   if (!isValidRelativeStackPath(relativePath)) return { kind: 'outside' };
   return { kind: 'relative', relativePath };
+}
+
+/**
+ * One env file a stored recovery invocation reads for interpolation.
+ */
+export interface RecoveryEnvInput {
+  /** Absolute path of the file the run opens, in read order. */
+  absolutePath: string;
+  /**
+   * True when the operator's own process environment selected the file
+   * (COMPOSE_ENV_FILES). That value is handed to the child unchanged and is not
+   * stored-invocation or request data, so a restore may classify the target
+   * outside the compose root, as the spawn guard does.
+   */
+  fromProcessEnv: boolean;
+}
+
+/**
+ * The interpolation env files a stored recovery invocation reads, in read order.
+ *
+ * Recovery replays the captured global-flag prefix instead of the live project
+ * selection, and Compose reads one set: an explicit `--env-file` wins over
+ * COMPOSE_ENV_FILES, which wins over the project `.env`. So an invocation that
+ * names a file reads that file and nothing the current settings select. A
+ * COMPOSE_FILE chain pin is replayed as the recorded `--env-file` list, which is
+ * why the recorded list ranks with the captured flags. Only an invocation that
+ * names no file falls back to the process list and the project `.env`.
+ *
+ * `stackRoot` is the working directory the recovery spawns in: a relative
+ * COMPOSE_ENV_FILES entry resolves against it, and an unnamed project `.env` is
+ * looked for there or in the selected project directory below it.
+ */
+export function recoveryInvocationEnvFiles(
+  invocation: RollbackInvocationRecord,
+  stackRoot: string,
+): RecoveryEnvInput[] {
+  const explicit = flagValues(invocation.composeArgsPrefix, '--env-file');
+  if (explicit.length > 0) {
+    return explicit.map((envPath) => ({
+      absolutePath: path.resolve(envPath),
+      fromProcessEnv: false,
+    }));
+  }
+  const recorded = invocation.interpolationEnvFiles ?? [];
+  if (recorded.length > 0) {
+    return recorded.map((rel) => ({
+      absolutePath: path.resolve(stackRoot, rel),
+      fromProcessEnv: false,
+    }));
+  }
+  const listed = composeEnvFilesFromProcess();
+  if (listed.length > 0) {
+    return listed.map((entry) => ({
+      absolutePath: path.resolve(stackRoot, entry),
+      fromProcessEnv: true,
+    }));
+  }
+  const disabled = process.env.COMPOSE_DISABLE_ENV_FILE;
+  if (disabled !== undefined && GO_BOOL_TRUE.has(disabled)) return [];
+  const projectEnv = selectedProjectEnvFile(
+    invocation.composeArgsPrefix,
+    invocation.composeLayers,
+    stackRoot,
+  );
+  if (projectEnv?.kind === 'relative') {
+    return [{
+      absolutePath: path.resolve(stackRoot, projectEnv.relativePath),
+      fromProcessEnv: false,
+    }];
+  }
+  // An outside project directory names a file no stack-relative check can
+  // classify; Compose reports it itself, so it is not this refusal.
+  if (projectEnv?.kind === 'outside') return [];
+  return [{ absolutePath: path.resolve(stackRoot, DOT_ENV), fromProcessEnv: false }];
 }
 
 /**
@@ -902,6 +986,9 @@ async function resolveGitInventory(
   const uncaptured = new Set<string>();
   const uncapturedPaths = new Set<string>();
   let recoveryRefusal: string | null = null;
+  // Only an invalid selection refuses the capture here; an unknown one is an
+  // accepted partial input the manifest can still pin layers over.
+  let invalidSelectionRefusal: string | null = null;
   if (refusal === null) {
     // The manifest is this generation's canonical file inventory, so it is also
     // its coverage boundary: an env file the run loads for interpolation that the
@@ -922,10 +1009,15 @@ async function resolveGitInventory(
     // A selected file that is not a regular file is the one case that is not an
     // omission: Compose cannot read it, so a run would wait on it or fail on it
     // instead of rendering the project. Refuse, whatever pinned the layer set.
+    // An undecidable selection is not a refusal but still leaves the live
+    // project's resolved paths unprovable, so both keep a restore from deleting
+    // live paths on evidence it cannot classify.
     const selection = await composeFileEnvVarSelection(stackName, nodeId);
-    if (selection.kind === 'invalid') {
+    if (selection.kind === 'invalid') invalidSelectionRefusal = selection.reason;
+    if (selection.kind === 'invalid' || selection.kind === 'unknown') {
       recoveryRefusal = selection.reason;
-    } else {
+    }
+    if (selection.kind !== 'invalid') {
       for (const envPath of selection.loadedEnvFiles) {
         const resolved = resolveStackRel(stackRoot, posixRel(path.relative(stackRoot, envPath)));
         if (!resolved) {
@@ -963,7 +1055,7 @@ async function resolveGitInventory(
       }
     }
   }
-  const liveRefusal = refusal ?? recoveryRefusal;
+  const liveRefusal = refusal ?? invalidSelectionRefusal;
 
   return {
     entries: [...map.values()].sort((a, b) => a.relativePath.localeCompare(b.relativePath)),
@@ -1035,9 +1127,11 @@ async function resolveAuthoredInventory(
   // include/extends source outside the stack or selected through a variable.
   // A restore cannot treat the live project as complete while one exists.
   const unparsedComposeSources = new Set<string>();
-  // Set when the run loads an interpolation env file that is not a regular
-  // file. Capture refuses through coverageNotes below; restore reads this field
-  // to refuse before any project file moves.
+  // Set when the live project loads an interpolation env file that is not a
+  // regular file. Capture refuses through coverageNotes below. A restore keeps it
+  // as a live-ownership signal: the stored invocation may read a different file,
+  // so the restore decides the refusal from that file and keeps every live path
+  // when this one is unusable.
   let recoveryRefusal: string | null = null;
 
   /**
@@ -1413,10 +1507,14 @@ const capturable = async (
   // same rule to its manifest.
   // A selected file that is not a regular file is not an omission: Compose
   // cannot read it, so it would wait on it or fail on it instead of rendering
-  // the project. Refuse, whatever pinned the layer set, and remember the reason
-  // so a restore refuses before it moves any project file.
+  // the project. Refuse, whatever pinned the layer set. Either an invalid or an
+  // undecidable selection leaves the live project's resolved paths unprovable,
+  // so the reason also keeps a restore from deleting live paths it cannot
+  // classify.
   if (selection.kind === 'invalid') {
     coverageNotes.push(selection.reason);
+  }
+  if (selection.kind === 'invalid' || selection.kind === 'unknown') {
     recoveryRefusal = selection.reason;
   }
   const envFilesToAccount = selection.kind === 'unknown'

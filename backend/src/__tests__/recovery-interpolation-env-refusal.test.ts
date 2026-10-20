@@ -95,6 +95,42 @@ describe('recovery refuses an interpolation env input that is not a regular file
   );
 
   it.skipIf(process.platform === 'win32')(
+    'refuses a project .env that is a link to a FIFO outside the compose root',
+    async () => {
+      const run = await runHarness('restore-project-env-escaping-fifo');
+
+      expect(run.timedOut).toBe(false);
+      expect(run.exitCode).toBe(0);
+      expect(run.stdout).not.toContain('COMPOSE_SPAWN_ATTEMPTED');
+      expect(harnessResult(run)).toMatchObject({
+        scenario: 'restore-project-env-escaping-fifo',
+        outcome: 'restore-refused',
+        code: 'NOT_A_FILE',
+        bytesUnchanged: true,
+      });
+    },
+    HARNESS_TEST_TIMEOUT_MS,
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'refuses a FIFO that the process environment selects from outside the compose root',
+    async () => {
+      const run = await runHarness('restore-process-env-outside-fifo');
+
+      expect(run.timedOut).toBe(false);
+      expect(run.exitCode).toBe(0);
+      expect(run.stdout).not.toContain('COMPOSE_SPAWN_ATTEMPTED');
+      expect(harnessResult(run)).toMatchObject({
+        scenario: 'restore-process-env-outside-fifo',
+        outcome: 'restore-refused',
+        code: 'NOT_A_FILE',
+        bytesUnchanged: true,
+      });
+    },
+    HARNESS_TEST_TIMEOUT_MS,
+  );
+
+  it.skipIf(process.platform === 'win32')(
     'refuses a FIFO that is already in place when the capture starts',
     async () => {
       const run = await runHarness('capture-listed-fifo');
@@ -106,6 +142,23 @@ describe('recovery refuses an interpolation env input that is not a regular file
         scenario: 'capture-listed-fifo',
         outcome: 'capture-refused',
         code: 'ROLLBACK_COVERAGE_UNAVAILABLE',
+        bytesUnchanged: true,
+      });
+    },
+    HARNESS_TEST_TIMEOUT_MS,
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'restores a generation whose captured env file the live selection no longer names',
+    async () => {
+      const run = await runHarness('restore-unrelated-selection-fifo');
+
+      expect(run.timedOut).toBe(false);
+      expect(run.exitCode).toBe(0);
+      expect(run.stdout).not.toContain('COMPOSE_SPAWN_ATTEMPTED');
+      expect(harnessResult(run)).toMatchObject({
+        scenario: 'restore-unrelated-selection-fifo',
+        outcome: 'restored-unrelated-selection',
         bytesUnchanged: true,
       });
     },

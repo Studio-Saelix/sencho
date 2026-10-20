@@ -6,16 +6,23 @@
  * and builds the exact Compose invocation used for deploy/update/rollback.
  */
 import path from 'path';
+import { promises as fsPromises } from 'fs';
 import { randomUUID } from 'crypto';
 import { ComposeService } from './ComposeService';
 import { FileSystemService } from './FileSystemService';
 import { buildEffectiveServiceModel } from './effectiveServiceModel';
 import { getErrorMessage } from '../utils/errors';
 import { sanitizeForLog } from '../utils/safeLog';
-import { isApplicationDataKind, resolveRollbackInventory } from './rollbackInventory';
+import { lexicalComposePath } from '../utils/authoredComposeArgs';
+import {
+  isApplicationDataKind,
+  recoveryInvocationEnvFiles,
+  resolveRollbackInventory,
+} from './rollbackInventory';
 import { RollbackGenerationStore } from './RollbackGenerationStore';
 import type {
   RollbackGenerationManifest,
+  RollbackInvocationRecord,
   RollbackOperationKind,
   RollbackRestoreTransactionMeta,
 } from '../types/rollbackGeneration';
@@ -118,30 +125,13 @@ class AuthoredComposeProjectContext implements ComposeProjectContext {
       return;
     }
 
-    const present = await RollbackGenerationStore.verifyGenerationContent(
-      this.nodeId,
-      this.stackName,
-      generationId,
-    );
-    if (!present) {
-      throw Object.assign(
-        new Error('Recovery generation content is missing or incomplete'),
-        { code: 'GENERATION_CONTENT_MISSING' },
-      );
-    }
+    const generation = await this.loadGeneration(generationId);
+    // Recovery launches the generation's own invocation, so the env files it
+    // reads are the ones that can make the run unusable. A live selection those
+    // files replace is not an input of this rollback.
+    await this.assertRecoveryEnvInputs(generation.invocation);
 
     const inventory = await resolveRollbackInventory(this.nodeId, this.stackName);
-    // A live interpolation input that is no longer a regular file cannot be
-    // read by the run. Compose would wait on a FIFO or fail on a directory
-    // instead of naming the input, so refuse before any project file moves:
-    // the generation may have captured the file while it was regular, and the
-    // restore must not leave the project written but unlaunchable.
-    if (inventory.recoveryRefusal !== null) {
-      throw Object.assign(
-        new Error(inventory.recoveryRefusal),
-        { code: 'NOT_A_FILE' },
-      );
-    }
     // The live managed paths travel with the entries: they are the inputs this
     // generation cannot hold or no longer holds, and a restore that never saw
     // them would leave a link created after capture in place and read its
@@ -168,8 +158,13 @@ class AuthoredComposeProjectContext implements ComposeProjectContext {
       // sources still gets the safe behaviour: if the live project has one, the
       // resolved path is unknown and restore must delete nothing. A refused
       // live inventory clears its application-data records too, so it cannot
-      // establish which live paths are safe to delete either.
-      inventory.dynamicApplicationDataSources.length > 0 || inventory.coverageRefusal !== null,
+      // establish which live paths are safe to delete either. An unusable live
+      // interpolation selection leaves the same gap even when the generation's
+      // own invocation never reads it: the live project is not fully known, so
+      // nothing unrecorded is deleted on that evidence.
+      inventory.dynamicApplicationDataSources.length > 0
+        || inventory.coverageRefusal !== null
+        || inventory.recoveryRefusal !== null,
       // A selected COMPOSE_FILE layer or an outside include/extends source was
       // never parsed for declarations, so the live project cannot prove any
       // path is disposable even when the stored generation was complete. The
@@ -182,6 +177,75 @@ class AuthoredComposeProjectContext implements ComposeProjectContext {
       inventory.applicationDataPaths,
       inventory.applicationDataPathPrefixes,
     );
+  }
+
+  /**
+   * The generation with every held byte verified, or the one
+   * GENERATION_CONTENT_MISSING contract callers already handle: a restore that
+   * cannot trust the bytes never writes them.
+   */
+  private async loadGeneration(generationId: string): Promise<RollbackGenerationManifest> {
+    try {
+      return await RollbackGenerationStore.readVerifiedGeneration(
+        this.nodeId,
+        this.stackName,
+        generationId,
+      );
+    } catch (cause) {
+      throw Object.assign(
+        new Error('Recovery generation content is missing or incomplete', { cause }),
+        { code: 'GENERATION_CONTENT_MISSING' },
+      );
+    }
+  }
+
+  /**
+   * Refuse before any project file moves when an env file the stored invocation
+   * reads for interpolation is not a regular file: Compose would wait on a FIFO
+   * or fail on a directory instead of naming the input, and a restore that moved
+   * the project first would leave it written but unlaunchable. The check stats
+   * the target Compose opens, which follows a link and never blocks on a FIFO or
+   * a socket, so a link out of the compose root to one is refused here too. A
+   * missing file is an ordinary run Compose reports itself, and a
+   * stored-invocation path outside the compose root is refused by the captured
+   * invocation validation before Compose starts.
+   */
+  private async assertRecoveryEnvInputs(invocation: RollbackInvocationRecord): Promise<void> {
+    const base = path.resolve(FileSystemService.getInstance(this.nodeId).getBaseDir());
+    const projectEnv = path.resolve(this.stackDir, '.env');
+    for (const input of recoveryInvocationEnvFiles(invocation, this.stackDir)) {
+      // A captured spelling may sit under a linked compose root's physical
+      // path. Map it onto the lexical root the same way the inventory does.
+      let checkPath: string;
+      try {
+        checkPath = await lexicalComposePath(this.nodeId, input.absolutePath);
+      } catch {
+        checkPath = input.absolutePath;
+      }
+      // Inline barrier at the stat sink: a stored-invocation path is only
+      // classified inside the compose root. A path COMPOSE_ENV_FILES named is
+      // the operator's own environment value, the same one handed to the child,
+      // and Compose reads it wherever it points, so the spawn guard classifies
+      // that one outside the root too.
+      const target = path.resolve(checkPath);
+      if (!input.fromProcessEnv && !target.startsWith(base + path.sep)) continue;
+      let stats;
+      try {
+        stats = await fsPromises.stat(target);
+      } catch {
+        // A file this reader cannot inspect is left to the recovery run and to
+        // Compose, which both name what they cannot open.
+        continue;
+      }
+      if (stats.isFile()) continue;
+      const named = target === projectEnv
+        ? 'The project .env'
+        : `The env file ${path.basename(target)}`;
+      throw Object.assign(
+        new Error(`${named} is not a regular file, so Compose cannot read it for interpolation`),
+        { code: 'NOT_A_FILE' },
+      );
+    }
   }
 
   async resolveServiceImageMap(): Promise<Map<string, string | null>> {

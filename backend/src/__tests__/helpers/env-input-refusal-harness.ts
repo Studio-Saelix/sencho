@@ -16,6 +16,13 @@
  *   capture-listed-fifo      COMPOSE_ENV_FILES file already a FIFO at capture
  *   restore-listed-regular   COMPOSE_ENV_FILES file regular throughout
  *   restore-listed-linked    in-root linked COMPOSE_ENV_FILES file throughout
+ *   restore-unrelated-selection-fifo
+ *                            captured old.env, current selection a FIFO new.env
+ *   restore-project-env-escaping-fifo
+ *                            captured .env, then a link to a FIFO outside the root
+ *   restore-process-env-outside-fifo
+ *                            captured with no env file, then COMPOSE_ENV_FILES
+ *                            names a FIFO outside the compose root
  */
 import fs from 'fs';
 import path from 'path';
@@ -34,7 +41,10 @@ type Scenario =
   | 'restore-project-env-fifo'
   | 'capture-listed-fifo'
   | 'restore-listed-regular'
-  | 'restore-listed-linked';
+  | 'restore-listed-linked'
+  | 'restore-unrelated-selection-fifo'
+  | 'restore-project-env-escaping-fifo'
+  | 'restore-process-env-outside-fifo';
 
 const SCENARIOS: Scenario[] = [
   'restore-listed-fifo',
@@ -42,6 +52,9 @@ const SCENARIOS: Scenario[] = [
   'capture-listed-fifo',
   'restore-listed-regular',
   'restore-listed-linked',
+  'restore-unrelated-selection-fifo',
+  'restore-project-env-escaping-fifo',
+  'restore-process-env-outside-fifo',
 ];
 
 /**
@@ -84,21 +97,30 @@ async function runScenario(scenario: Scenario): Promise<Record<string, unknown>>
   fs.mkdirSync(stackDir, { recursive: true });
   fs.writeFileSync(path.join(stackDir, 'compose.yaml'), 'services:\n  web:\n    image: nginx\n', 'utf8');
 
-  const usesProjectEnv = scenario === 'restore-project-env-fifo';
-  const envFile = path.join(stackDir, usesProjectEnv ? '.env' : 'operator.env');
-  if (scenario === 'restore-listed-linked') {
-    const sharedDir = path.join(composeDir, 'shared');
-    fs.mkdirSync(sharedDir, { recursive: true });
-    fs.writeFileSync(path.join(sharedDir, 'operator.env'), 'MARK=shared\n', 'utf8');
-    fs.symlinkSync(path.join(sharedDir, 'operator.env'), envFile);
-  } else {
-    fs.writeFileSync(envFile, 'MARK=captured\n', 'utf8');
+  const unrelatedSelection = scenario === 'restore-unrelated-selection-fifo';
+  const usesProjectEnv = scenario === 'restore-project-env-fifo'
+    || scenario === 'restore-project-env-escaping-fifo'
+    || scenario === 'restore-process-env-outside-fifo';
+  const envFile = path.join(stackDir, usesProjectEnv ? '.env' : unrelatedSelection ? 'old.env' : 'operator.env');
+  if (!unrelatedSelection) {
+    if (scenario === 'restore-listed-linked') {
+      const sharedDir = path.join(composeDir, 'shared');
+      fs.mkdirSync(sharedDir, { recursive: true });
+      fs.writeFileSync(path.join(sharedDir, 'operator.env'), 'MARK=shared\n', 'utf8');
+      fs.symlinkSync(path.join(sharedDir, 'operator.env'), envFile);
+    } else {
+      fs.writeFileSync(envFile, 'MARK=captured\n', 'utf8');
+    }
+    if (!usesProjectEnv) process.env.COMPOSE_ENV_FILES = path.basename(envFile);
   }
-  if (!usesProjectEnv) process.env.COMPOSE_ENV_FILES = path.basename(envFile);
 
   const { DatabaseService } = await import('../../services/DatabaseService');
   const nodeId = DatabaseService.getInstance().getDefaultNode()?.id;
   if (!nodeId) fail('no default node in the test database');
+  if (unrelatedSelection) {
+    fs.writeFileSync(envFile, 'MARK=captured\n', 'utf8');
+    DatabaseService.getInstance().setStackProjectEnvFiles(nodeId, stackName, ['old.env']);
+  }
   const { resolveComposeProjectContext } = await import('../../services/composeProjectContext');
   const context = await resolveComposeProjectContext(nodeId, stackName);
 
@@ -126,9 +148,25 @@ async function runScenario(scenario: Scenario): Promise<Record<string, unknown>>
   const generationId = await context.backupFromContext('deployment');
   if (!generationId) fail('capture returned no generation id');
 
-  if (scenario === 'restore-listed-fifo' || scenario === 'restore-project-env-fifo') {
-    fs.rmSync(envFile);
-    execFileSync('mkfifo', [envFile]);
+  if (
+    scenario === 'restore-listed-fifo'
+    || scenario === 'restore-project-env-fifo'
+    || scenario === 'restore-project-env-escaping-fifo'
+  ) {
+    if (scenario === 'restore-project-env-escaping-fifo') {
+      // The project .env is now a link to a FIFO outside the compose root. The
+      // containment guard cannot classify it by reading, so the restore has to
+      // judge the target's type without opening it.
+      const outsideDir = path.join(path.dirname(composeDir), 'outside-env');
+      fs.mkdirSync(outsideDir, { recursive: true });
+      const outsideFifo = path.join(outsideDir, 'secret.env');
+      execFileSync('mkfifo', [outsideFifo]);
+      fs.rmSync(envFile);
+      fs.symlinkSync(outsideFifo, envFile);
+    } else {
+      fs.rmSync(envFile);
+      execFileSync('mkfifo', [envFile]);
+    }
     // Snapshot the state the restore actually starts from: the replacement
     // itself is an intended change, anything after it is not.
     const before = snapshotTree(stackDir);
@@ -145,6 +183,75 @@ async function runScenario(scenario: Scenario): Promise<Record<string, unknown>>
     }
     if (snapshotTree(stackDir) !== before) fail('restore changed the project bytes before refusing');
     return { scenario, outcome: 'restore-refused', code: restoreError.code, bytesUnchanged: true };
+  }
+
+  if (scenario === 'restore-process-env-outside-fifo') {
+    // A file the operator's own COMPOSE_ENV_FILES names, outside the compose
+    // root, that became a FIFO after capture. Compose reads it wherever it
+    // points, so the restore has to refuse before moving project files.
+    const outsideDir = path.join(path.dirname(composeDir), 'outside-process-env');
+    fs.mkdirSync(outsideDir, { recursive: true });
+    const outsideFifo = path.join(outsideDir, 'process.env');
+    execFileSync('mkfifo', [outsideFifo]);
+    process.env.COMPOSE_ENV_FILES = outsideFifo;
+    fs.writeFileSync(path.join(stackDir, 'compose.yaml'), 'services:\n  web:\n    image: busybox\n', 'utf8');
+
+    const before = snapshotTree(stackDir);
+    const restoreError = await context.restoreFromContext().then(
+      () => null,
+      (error: unknown) => error as NodeJS.ErrnoException,
+    );
+    if (restoreError === null) fail('restore accepted an outside FIFO named by COMPOSE_ENV_FILES');
+    if (restoreError.code !== 'NOT_A_FILE') {
+      fail(`restore refused with ${String(restoreError.code)} instead of NOT_A_FILE`);
+    }
+    if (!String(restoreError.message).includes('process.env')) {
+      fail(`restore refusal does not name the invalid file: ${restoreError.message}`);
+    }
+    if (snapshotTree(stackDir) !== before) fail('restore changed the project bytes before refusing');
+    return { scenario, outcome: 'restore-refused', code: restoreError.code, bytesUnchanged: true };
+  }
+
+  if (unrelatedSelection) {
+    // A live selection the rollback never reads, on top of a file that appeared
+    // after capture. Neither may stop the restore or be deleted by it.
+    const newEnv = path.join(stackDir, 'new.env');
+    execFileSync('mkfifo', [newEnv]);
+    DatabaseService.getInstance().setStackProjectEnvFiles(nodeId, stackName, ['new.env']);
+    const capturedCompose = 'services:\n  web:\n    image: nginx\n';
+    fs.writeFileSync(
+      path.join(stackDir, 'compose.yaml'),
+      'services:\n  web:\n    image: busybox\n',
+      'utf8',
+    );
+    fs.writeFileSync(
+      path.join(stackDir, 'compose.override.yaml'),
+      'services:\n  web:\n    image: alpine\n',
+      'utf8',
+    );
+
+    await context.restoreFromContext();
+
+    if (fs.readFileSync(path.join(stackDir, 'compose.yaml'), 'utf8') !== capturedCompose) {
+      fail('restore did not write the captured compose file back');
+    }
+    if (!fs.statSync(newEnv).isFIFO()) fail('restore changed the unrelated live selection');
+    if (!fs.existsSync(path.join(stackDir, 'compose.override.yaml'))) {
+      fail('restore deleted a live path the unusable selection could not classify');
+    }
+
+    const { RollbackGenerationStore } = await import('../../services/RollbackGenerationStore');
+    const { ComposeService } = await import('../../services/ComposeService');
+    const stored = await RollbackGenerationStore.readVerifiedGeneration(nodeId, stackName, generationId);
+    const args = await ComposeService.getInstance(nodeId).buildComposeArgsWithRecoveryOverride(
+      stackName,
+      ['up', '-d'],
+      path.join(stackDir, '.sencho-recovery-aaaaaaaaaaaa.yml'),
+      stored.invocation,
+    );
+    if (!args.includes(envFile)) fail('recovery args do not replay the captured env file');
+    if (args.includes(newEnv)) fail('recovery args name the unrelated live selection');
+    return { scenario, outcome: 'restored-unrelated-selection', bytesUnchanged: true };
   }
 
   const before = snapshotTree(stackDir);

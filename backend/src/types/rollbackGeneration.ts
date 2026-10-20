@@ -220,13 +220,14 @@ export interface ResolvedRollbackInventory {
    */
   coverageRefusal: string | null;
   /**
-   * Why recovery must not run against this live project, or null. Set when an
-   * interpolation env file the run loads exists but is not a regular file:
-   * Compose would open it and wait for a writer (a FIFO) or fail on it (a
-   * directory) instead of reporting the input. Capture refuses for the same
-   * condition, but a generation captured while the file was regular can meet
-   * it only at restore, so this survives into the restore decision and stops
-   * the run before any project file moves.
+   * Why the live project's interpolation env selection is unusable, or null.
+   * Set when a file the live selection loads exists but is not a regular file
+   * (a FIFO, socket, device, or directory), or when the selection cannot be
+   * decided at all. Capture refuses the first case for the same reason. At
+   * restore it is a live-ownership signal rather than a verdict: recovery
+   * replays the generation's own invocation, so the restore refuses only for a
+   * nonregular file that invocation reads, and keeps every live path when the
+   * live selection is unusable.
    */
   recoveryRefusal: string | null;
   /**

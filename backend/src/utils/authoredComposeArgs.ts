@@ -426,7 +426,7 @@ function envFileSources(
  * path inside the physical root is rewritten; anything else keeps its spelling
  * and stays subject to the guard's real-path check.
  */
-async function lexicalComposePath(nodeId: number, physicalPath: string): Promise<string> {
+export async function lexicalComposePath(nodeId: number, physicalPath: string): Promise<string> {
   const lexicalRoot = path.resolve(NodeRegistry.getInstance().getComposeDir(nodeId));
   try {
     const realRoot = await fsPromises.realpath(lexicalRoot);

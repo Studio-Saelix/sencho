@@ -950,6 +950,65 @@ describe.skipIf(!hasDocker)('recovery loads the model the capture-time run loade
     expect(live.services.web.command).toEqual(['echo', 'captured']);
   });
 
+  it('renders the captured env value after the live selection moves to an unusable file', async () => {
+    const stack = 'layerunrelatedenv';
+    const stackDir = path.join(composeDir, stack);
+    fs.mkdirSync(stackDir, { recursive: true });
+    const capturedCompose = SERVICE('busybox:1.36.1', '${MARK}');
+    fs.writeFileSync(path.join(stackDir, 'compose.yaml'), capturedCompose, 'utf8');
+    fs.writeFileSync(path.join(stackDir, 'old.env'), 'MARK=captured\n', 'utf8');
+
+    const { DatabaseService } = await import('../../services/DatabaseService');
+    const db = DatabaseService.getInstance();
+    db.setStackProjectEnvFiles(nodeId, stack, ['old.env']);
+
+    const { resolveRollbackInventory } = await import('../../services/rollbackInventory');
+    const { RollbackGenerationStore } = await import('../../services/RollbackGenerationStore');
+    const { resolveComposeProjectContextForGeneration } = await import('../../services/composeProjectContext');
+    const { ComposeService } = await import('../../services/ComposeService');
+
+    const inventory = await resolveRollbackInventory(nodeId, stack);
+    expect(inventory.coverageRefusal).toBeNull();
+    const generationId = randomUUID();
+    await RollbackGenerationStore.captureGeneration({
+      nodeId,
+      stackName: stack,
+      generationId,
+      inventory,
+    });
+    const stored = await RollbackGenerationStore.readVerifiedGeneration(nodeId, stack, generationId);
+    expect(stored.invocation.composeArgsPrefix).toEqual([
+      '--env-file', path.join(stackDir, 'old.env'),
+    ]);
+
+    // The live selection moves to a directory the rollback never reads, and the
+    // project changes. The restore has to proceed and replay the captured file.
+    fs.mkdirSync(path.join(stackDir, 'new.env'));
+    db.setStackProjectEnvFiles(nodeId, stack, ['new.env']);
+    fs.writeFileSync(path.join(stackDir, 'compose.yaml'), SERVICE('busybox:1.36.1', 'mutated'), 'utf8');
+    const changed = renderModel([], stackDir, stack) as {
+      services: Record<string, { command?: string[] }>;
+    };
+    expect(changed.services.web.command).toEqual(['echo', 'mutated']);
+
+    const ctx = await resolveComposeProjectContextForGeneration(nodeId, stack, generationId);
+    await ctx.restoreFromContext();
+    await RollbackGenerationStore.commitRestoreTransaction(nodeId, stack, generationId);
+    expect(fs.readFileSync(path.join(stackDir, 'compose.yaml'), 'utf8')).toBe(capturedCompose);
+    expect(fs.statSync(path.join(stackDir, 'new.env')).isDirectory()).toBe(true);
+
+    const args = await ComposeService.getInstance(nodeId).buildComposeArgsWithRecoveryOverride(
+      stack,
+      ['config'],
+      null,
+      stored.invocation,
+    );
+    const recovery = renderModel(args.slice(1, args.indexOf('config')), stackDir, stack) as {
+      services: Record<string, { command?: string[] }>;
+    };
+    expect(recovery.services.web.command).toEqual(['echo', 'captured']);
+  });
+
   it('reconstructs the interpolation environment a COMPOSE_FILE selection loaded', async () => {
     const stack = 'layerenvreconstruct';
     const stackDir = path.join(composeDir, stack);
