@@ -52,7 +52,6 @@ const FULL_SETTINGS: Record<string, string> = {
     global_crash: '1',
     docker_janitor_gb: '5',
     prune_on_update: '1',
-    reclaim_hero: '1',
     mesh_auto_recreate: '0',
     snapshot_documentation: '0',
     metrics_retention_hours: '24',

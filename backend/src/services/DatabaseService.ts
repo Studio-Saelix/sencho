@@ -2421,7 +2421,6 @@ export class DatabaseService {
         // Managed by /api/sso/auth-mode, not the generic /api/settings route
         // (activation needs safety validation).
         stmt.run('authentication_mode', 'local_and_sso');
-        stmt.run('reclaim_hero', '0');
         stmt.run('health_gate_enabled', '1');
         stmt.run('health_gate_window_seconds', '90');
         // Superseded-generation retention (days) and a per-stack cap on total

@@ -21,7 +21,6 @@ export const SETTING_WRITE_PERMISSIONS: Record<string, PermissionAction> = {
   global_crash: 'node:manage',
   template_registry_url: 'node:manage',
   prune_on_update: 'node:manage',
-  reclaim_hero: 'node:manage',
   health_gate_enabled: 'node:manage',
   health_gate_window_seconds: 'node:manage',
   // `system:settings`, not `node:manage`: this is instance-scoped rather than
@@ -120,7 +119,6 @@ const SettingsPatchSchema = z.object({
   scan_history_per_image_limit: z.coerce.number().int().min(5).max(1000).transform(String),
   prune_orphaned_scans: z.enum(['0', '1']),
   prune_on_update: z.enum(['0', '1']),
-  reclaim_hero: z.enum(['0', '1']),
   snapshot_documentation: z.enum(['0', '1']),
   health_gate_enabled: z.enum(['0', '1']),
   health_gate_window_seconds: z.coerce.number().int().min(15).max(600).transform(String),
