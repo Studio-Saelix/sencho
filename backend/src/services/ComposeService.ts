@@ -2023,6 +2023,10 @@ export class ComposeService {
    * the coordinates of the root that matched. Anything outside the compose root
    * is refused, at the entry barrier in the form static analysis credits and
    * again on the real path below.
+   *
+   * A target that exists has to be a regular file: the generation omitted it, so
+   * a restore never replaced whatever now sits there, and a FIFO reaching Compose
+   * waits for a writer instead of naming the invalid input.
    */
   private async resolveCapturedEnvFile(
     stackName: string,
@@ -2060,6 +2064,7 @@ export class ComposeService {
       // not a path escape, so the guarded spelling stands.
       realAbs = absResolved;
     }
+    const overlayResolved = path.resolve(pathRoot);
     for (const root of roots) {
       if (!isPathWithinBase(realAbs, root.stackDir)) continue;
       // The root that matched decides the coordinate system the path is rebased
@@ -2072,24 +2077,73 @@ export class ComposeService {
       if (!remapped) {
         throw new Error(`Captured env-file path escapes overlay directory for "${stackName}"`);
       }
+      // Canonical js/path-injection barrier inline with the stat below, in the
+      // same single-root shape as the entry barrier. The type is checked on the
+      // path recovery passes to Compose, not the captured spelling: an in-stack
+      // file is read through the overlay, and a captured link may only keep
+      // working because the overlay holds the target.
+      const overlayPath = path.resolve(remapped);
+      if (!overlayPath.startsWith(overlayResolved + path.sep)) {
+        throw new Error(`Captured env-file path escapes overlay directory for "${stackName}"`);
+      }
+      let overlayIsFile: boolean;
+      try {
+        overlayIsFile = (await fs.promises.stat(overlayPath)).isFile();
+      } catch (e) {
+        const code = (e as NodeJS.ErrnoException).code;
+        // A missing file is left for Compose, which reports it itself.
+        if (code === 'ENOENT') return remapped;
+        if (code !== 'ELOOP' && code !== 'ENOTDIR') throw e;
+        overlayIsFile = false;
+      }
+      if (!overlayIsFile) {
+        throw Object.assign(
+          new Error(`Captured env-file for stack "${stackName}" is not a regular file`),
+          { code: 'NOT_A_FILE' },
+        );
+      }
       return remapped;
     }
-    if (roots.some(root => isPathWithinBase(realAbs, root.base))) return abs;
+    if (roots.some(root => isPathWithinBase(realAbs, root.base))) {
+      // Authorized input outside the stack directory keeps its live location.
+      // The checked spelling is the one the entry barrier covered, which is how
+      // a linked compose root rebases the physical spelling onto the lexical
+      // one; both resolve to the same file.
+      let liveIsFile: boolean;
+      try {
+        liveIsFile = (await fs.promises.stat(absResolved)).isFile();
+      } catch (e) {
+        const code = (e as NodeJS.ErrnoException).code;
+        if (code === 'ENOENT') return abs;
+        if (code !== 'ELOOP' && code !== 'ENOTDIR') throw e;
+        liveIsFile = false;
+      }
+      if (!liveIsFile) {
+        throw Object.assign(
+          new Error(`Captured env-file for stack "${stackName}" is not a regular file`),
+          { code: 'NOT_A_FILE' },
+        );
+      }
+      return abs;
+    }
     throw new Error(`Captured env-file path escapes stack directory for "${stackName}"`);
   }
 
   /**
    * Refuse a captured compose layer whose real target Compose would open
-   * outside the compose root. The path is the one recovery passes to `-f`,
-   * resolved against the working directory (the stack, or an overlay outside
-   * that root). A lexical name inside the stack can still be a symlink.
+   * outside the compose root, and one that exists but is not a regular file. The
+   * path is the one recovery passes to `-f`, resolved against the working
+   * directory (the stack, or an overlay outside that root). A lexical name
+   * inside the stack can still be a symlink.
    * A missing path is left for Compose: restore writes held files back, and an
    * omitted layer that is simply absent is not an escape. A dangling or
    * looping link cannot be shown to stay inside the root, so it is refused.
    * A target inside the compose root stays allowed, including a shared file
-   * outside the stack directory. When the working directory itself is an
-   * overlay outside the compose root, a target inside that overlay is allowed
-   * too.
+   * outside the stack directory, but only while it is a regular file: a FIFO or
+   * socket there reaches Compose and waits or fails there instead of naming the
+   * invalid input, and the generation omitted the file, so a restore never
+   * replaced it. When the working directory itself is an overlay outside the
+   * compose root, a target inside that overlay is allowed too.
    */
   private async assertCapturedComposeLayerTarget(layer: string, pathRoot: string): Promise<void> {
     // Canonical js/path-injection barrier inline with the sinks below: the
@@ -2125,13 +2179,36 @@ export class ComposeService {
     }
     const baseResolved = path.resolve(this.baseDir);
     const realBase = await this.realCapturedPath(baseResolved);
-    if (isPathWithinBase(real, baseResolved) || isPathWithinBase(real, realBase)) return;
     const cwdInside = isPathWithinBase(pathRoot, baseResolved) || isPathWithinBase(pathRoot, realBase);
-    if (!cwdInside && isPathWithinBase(real, pathRoot)) return;
-    throw Object.assign(
-      new Error(`Captured compose layer "${layer}" resolves outside the compose directory`),
-      { code: 'SYMLINK_ESCAPE' },
-    );
+    const allowed = isPathWithinBase(real, baseResolved)
+      || isPathWithinBase(real, realBase)
+      || (!cwdInside && isPathWithinBase(real, pathRoot));
+    if (!allowed) {
+      throw Object.assign(
+        new Error(`Captured compose layer "${layer}" resolves outside the compose directory`),
+        { code: 'SYMLINK_ESCAPE' },
+      );
+    }
+    // Containment is settled; now ask what Compose would actually open. A shared
+    // layer inside the compose root is a supported partial input, but only
+    // while it stays a regular file: a FIFO or socket there would reach Compose
+    // and wait or fail there instead of naming the input. The stat follows the
+    // link to the target Compose opens, and a missing file is left for Compose.
+    let targetIsFile: boolean;
+    try {
+      targetIsFile = (await fs.promises.stat(lexical)).isFile();
+    } catch (e) {
+      const code = (e as NodeJS.ErrnoException).code;
+      if (code === 'ENOENT') return;
+      if (code !== 'ELOOP' && code !== 'ENOTDIR') throw e;
+      targetIsFile = false;
+    }
+    if (!targetIsFile) {
+      throw Object.assign(
+        new Error(`Captured compose layer "${layer}" is not a regular file`),
+        { code: 'NOT_A_FILE' },
+      );
+    }
   }
 
   /**

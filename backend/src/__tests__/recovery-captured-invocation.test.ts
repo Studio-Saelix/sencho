@@ -2,9 +2,11 @@
  * Recovery must execute the generation-captured Compose invocation, not the
  * live database-derived file / env selection after capture.
  */
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import path from 'path';
 import fs from 'fs';
+import net from 'net';
+import { execFileSync } from 'child_process';
 import { randomUUID } from 'crypto';
 import { setupTestDb, cleanupTestDb } from './helpers/setupTestDb';
 
@@ -27,6 +29,10 @@ describe('captured invocation on recovery Compose args', () => {
 
   afterAll(() => {
     if (tmpDir) cleanupTestDb(tmpDir);
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
   });
 
   it('uses captured -f order and env-file when live settings diverge', async () => {
@@ -716,6 +722,249 @@ describe('captured invocation on recovery Compose args', () => {
     );
     expect(args).toEqual(['compose', '-f', 'compose.yaml', 'up', '-d']);
   });
+
+  /**
+   * Put a special file where an omitted shared input used to be. The capture
+   * never held these bytes, so the restore leaves the path alone: only recovery
+   * can notice that Compose is about to be handed something it cannot read.
+   */
+  async function replaceWithSpecialFile(
+    target: string,
+    kind: 'fifo' | 'directory' | 'socket',
+    run: () => Promise<void>,
+  ): Promise<void> {
+    await fs.promises.rm(target, { recursive: true, force: true });
+    if (kind === 'directory') {
+      await fs.promises.mkdir(target);
+      await run();
+      return;
+    }
+    if (kind === 'fifo') {
+      execFileSync('mkfifo', [target]);
+      await run();
+      return;
+    }
+    const server = net.createServer();
+    await new Promise<void>((resolve, reject) => {
+      server.once('error', reject);
+      server.listen(target, resolve);
+    });
+    try {
+      await run();
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  }
+
+  async function captureSharedComposeLayer() {
+    const stackName = 'inv-special-layer';
+    const stackDir = path.join(composeDir, stackName);
+    const sharedDir = path.join(composeDir, 'shared-special-layer');
+    const shared = path.join(sharedDir, 'base.yaml');
+    await fs.promises.mkdir(stackDir, { recursive: true });
+    await fs.promises.mkdir(sharedDir, { recursive: true });
+    await fs.promises.writeFile(shared, 'services:\n  web:\n    image: nginx\n', 'utf8');
+    await fs.promises.symlink(shared, path.join(stackDir, 'compose.yaml'));
+
+    const { resolveRollbackInventory } = await import('../services/rollbackInventory');
+    const { RollbackGenerationStore } = await import('../services/RollbackGenerationStore');
+    const inventory = await resolveRollbackInventory(nodeId, stackName);
+    expect(inventory.coverageRefusal).toBeNull();
+    expect(inventory.uncapturedRelativePaths).toEqual(['compose.yaml']);
+    const manifest = await RollbackGenerationStore.captureGeneration({
+      nodeId,
+      stackName,
+      generationId: randomUUID(),
+      inventory,
+    });
+    expect(manifest.invocation.composeLayers).toEqual(['compose.yaml']);
+    return { stackName, stackDir, shared, invocation: manifest.invocation };
+  }
+
+  async function captureSharedEnvFile() {
+    const stackName = 'inv-special-env';
+    const stackDir = path.join(composeDir, stackName);
+    const sharedDir = path.join(composeDir, 'shared-special-env');
+    const shared = path.join(sharedDir, 'app.env');
+    await fs.promises.mkdir(stackDir, { recursive: true });
+    await fs.promises.mkdir(sharedDir, { recursive: true });
+    await fs.promises.writeFile(path.join(stackDir, 'compose.yaml'), 'services:\n  web:\n    image: nginx\n', 'utf8');
+    await fs.promises.writeFile(shared, 'TOKEN=shared\n', 'utf8');
+    await fs.promises.symlink(shared, path.join(stackDir, 'app.env'));
+
+    const { DatabaseService } = await import('../services/DatabaseService');
+    DatabaseService.getInstance().setStackProjectEnvFiles(nodeId, stackName, ['app.env']);
+
+    const { resolveRollbackInventory } = await import('../services/rollbackInventory');
+    const { RollbackGenerationStore } = await import('../services/RollbackGenerationStore');
+    const inventory = await resolveRollbackInventory(nodeId, stackName);
+    expect(inventory.coverageRefusal).toBeNull();
+    expect(inventory.uncapturedRelativePaths).toEqual(['app.env']);
+    const manifest = await RollbackGenerationStore.captureGeneration({
+      nodeId,
+      stackName,
+      generationId: randomUUID(),
+      inventory,
+    });
+    const realSharedEnv = await fs.promises.realpath(shared);
+    expect(manifest.invocation.composeArgsPrefix).toEqual(['--env-file', realSharedEnv]);
+    return { stackName, stackDir, shared, realSharedEnv, invocation: manifest.invocation };
+  }
+
+  it.skipIf(process.platform === 'win32')(
+    'refuses a captured shared compose layer that became a special file after capture',
+    async () => {
+      const { stackName, stackDir, shared, invocation } = await captureSharedComposeLayer();
+      const { ComposeService } = await import('../services/ComposeService');
+      const svc = ComposeService.getInstance(nodeId);
+      const execute = vi.spyOn(svc as unknown as {
+        execute: (...args: unknown[]) => Promise<void>;
+      }, 'execute').mockResolvedValue(undefined);
+
+      // A regular shared target keeps the supported partial recovery path.
+      await expect(svc.buildComposeArgsWithRecoveryOverride(
+        stackName,
+        ['up', '-d'],
+        null,
+        invocation,
+      )).resolves.toEqual(['compose', '-f', 'compose.yaml', 'up', '-d']);
+
+      for (const kind of ['fifo', 'directory', 'socket'] as const) {
+        await replaceWithSpecialFile(shared, kind, async () => {
+          await expect(svc.buildComposeArgsWithRecoveryOverride(
+            stackName,
+            ['up', '-d'],
+            null,
+            invocation,
+          )).rejects.toMatchObject({ code: 'NOT_A_FILE' });
+          // The refusal comes from rebuilding the invocation, so it lands
+          // before the execution boundary: a FIFO never reaches Compose, which
+          // would wait for a writer instead of naming the invalid input.
+          await expect(svc.composeUpWithRecoveryOverride(
+            stackName,
+            path.join(stackDir, '.sencho-recovery-unused.yml'),
+            undefined,
+            invocation,
+          )).rejects.toMatchObject({ code: 'NOT_A_FILE' });
+        });
+      }
+      expect(execute).not.toHaveBeenCalled();
+
+      // A target that comes back as a regular file is accepted again.
+      await fs.promises.writeFile(shared, 'services:\n  web:\n    image: nginx\n', 'utf8');
+      await expect(svc.buildComposeArgsWithRecoveryOverride(
+        stackName,
+        ['up', '-d'],
+        null,
+        invocation,
+      )).resolves.toEqual(['compose', '-f', 'compose.yaml', 'up', '-d']);
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'refuses a captured shared env file that became a special file after capture',
+    async () => {
+      const { stackName, stackDir, shared, realSharedEnv, invocation } = await captureSharedEnvFile();
+      const { ComposeService } = await import('../services/ComposeService');
+      const svc = ComposeService.getInstance(nodeId);
+      const execute = vi.spyOn(svc as unknown as {
+        execute: (...args: unknown[]) => Promise<void>;
+      }, 'execute').mockResolvedValue(undefined);
+
+      const regular = await svc.buildComposeArgsWithRecoveryOverride(
+        stackName,
+        ['up', '-d'],
+        null,
+        invocation,
+      );
+      expect(regular[regular.indexOf('--env-file') + 1]).toBe(realSharedEnv);
+
+      for (const kind of ['fifo', 'directory', 'socket'] as const) {
+        await replaceWithSpecialFile(shared, kind, async () => {
+          await expect(svc.buildComposeArgsWithRecoveryOverride(
+            stackName,
+            ['up', '-d'],
+            null,
+            invocation,
+          )).rejects.toMatchObject({ code: 'NOT_A_FILE' });
+          await expect(svc.composeUpWithRecoveryOverride(
+            stackName,
+            path.join(stackDir, '.sencho-recovery-unused.yml'),
+            undefined,
+            invocation,
+          )).rejects.toMatchObject({ code: 'NOT_A_FILE' });
+        });
+      }
+      expect(execute).not.toHaveBeenCalled();
+
+      await fs.promises.writeFile(shared, 'TOKEN=shared\n', 'utf8');
+      const restored = await svc.buildComposeArgsWithRecoveryOverride(
+        stackName,
+        ['up', '-d'],
+        null,
+        invocation,
+      );
+      expect(restored[restored.indexOf('--env-file') + 1]).toBe(realSharedEnv);
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'refuses a captured env file that the recovery overlay holds as a special file',
+    async () => {
+      // The captured env file is a regular in-stack file, so the generation
+      // holds it, but recovery reads the overlay mirror when one is in play.
+      // The check has to land on that mirror, which is the path Compose opens.
+      const stackName = 'inv-overlay-special-env';
+      const stackDir = path.join(composeDir, stackName);
+      const overlayDir = path.join(composeDir, 'overlay-special-env');
+      await fs.promises.mkdir(stackDir, { recursive: true });
+      await fs.promises.mkdir(overlayDir, { recursive: true });
+      await fs.promises.writeFile(path.join(stackDir, 'compose.yaml'), 'services:\n  web:\n    image: nginx\n', 'utf8');
+      await fs.promises.writeFile(path.join(stackDir, 'app.env'), 'TOKEN=held\n', 'utf8');
+      await fs.promises.writeFile(path.join(overlayDir, 'compose.yaml'), 'services:\n  web:\n    image: nginx\n', 'utf8');
+
+      const { DatabaseService } = await import('../services/DatabaseService');
+      DatabaseService.getInstance().setStackProjectEnvFiles(nodeId, stackName, ['app.env']);
+
+      const { resolveRollbackInventory } = await import('../services/rollbackInventory');
+      const { RollbackGenerationStore } = await import('../services/RollbackGenerationStore');
+      const inventory = await resolveRollbackInventory(nodeId, stackName);
+      expect(inventory.coverageRefusal).toBeNull();
+      const manifest = await RollbackGenerationStore.captureGeneration({
+        nodeId,
+        stackName,
+        generationId: randomUUID(),
+        inventory,
+      });
+      expect(manifest.invocation.composeArgsPrefix).toEqual([
+        '--env-file',
+        await fs.promises.realpath(path.join(stackDir, 'app.env')),
+      ]);
+
+      const { ComposeService } = await import('../services/ComposeService');
+      const svc = ComposeService.getInstance(nodeId);
+      const overlayEnv = path.join(overlayDir, 'app.env');
+      await fs.promises.writeFile(overlayEnv, 'TOKEN=decrypted\n', 'utf8');
+      const args = await svc.buildComposeArgsWithRecoveryOverride(
+        stackName,
+        ['up', '-d'],
+        null,
+        manifest.invocation,
+        overlayDir,
+      );
+      expect(args[args.indexOf('--env-file') + 1]).toBe(overlayEnv);
+
+      await replaceWithSpecialFile(overlayEnv, 'fifo', async () => {
+        await expect(svc.buildComposeArgsWithRecoveryOverride(
+          stackName,
+          ['up', '-d'],
+          null,
+          manifest.invocation,
+          overlayDir,
+        )).rejects.toMatchObject({ code: 'NOT_A_FILE' });
+      });
+    },
+  );
 
   it('keeps a prefix that names its own env file, and refuses an escaping recorded one', async () => {
     const stackName = 'inv-interpolation-guard';
