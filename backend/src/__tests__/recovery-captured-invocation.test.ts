@@ -1218,7 +1218,7 @@ describe('captured invocation on recovery Compose args', () => {
       await RollbackGenerationStore.commitRestoreTransaction(nodeId, stackName, generationId);
 
       expect(await fs.promises.readFile(composeFile, 'utf8')).toContain('busybox');
-      await expect(fs.promises.access(laterEnv)).resolves.toBeUndefined();
+      await expect(fs.promises.readFile(laterEnv, 'utf8')).resolves.toBe('X=1\n');
     } finally {
       if (previous === undefined) delete process.env.COMPOSE_ENV_FILES;
       else process.env.COMPOSE_ENV_FILES = previous;
@@ -1230,7 +1230,7 @@ describe('captured invocation on recovery Compose args', () => {
     const control = await resolveComposeProjectContextForGeneration(nodeId, stackName, generationId);
     await control.restoreFromContext();
     await RollbackGenerationStore.commitRestoreTransaction(nodeId, stackName, generationId);
-    await expect(fs.promises.access(laterEnv)).rejects.toMatchObject({ code: 'ENOENT' });
+    await expect(fs.promises.readFile(laterEnv, 'utf8')).rejects.toMatchObject({ code: 'ENOENT' });
   });
 
   it('restores a captured env file after the live selection moves to an unusable one', async () => {
@@ -1266,7 +1266,7 @@ describe('captured invocation on recovery Compose args', () => {
     await context.restoreFromContext();
     await RollbackGenerationStore.commitRestoreTransaction(nodeId, stackName, generationId);
     expect(await fs.promises.readFile(composeFile, 'utf8')).toBe(original);
-    await expect(fs.promises.access(overrideFile)).rejects.toMatchObject({ code: 'ENOENT' });
+    await expect(fs.promises.readFile(overrideFile, 'utf8')).rejects.toMatchObject({ code: 'ENOENT' });
 
     // The operator then selects a different env file that is a directory. The
     // generation still replays old.env, so the restore must proceed: the
