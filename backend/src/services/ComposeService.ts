@@ -1842,7 +1842,17 @@ export class ComposeService {
     if (overlay?.overlayDir && overlay.overlayBinding) {
       GitOpsDecryptOverlay.getInstance().assertBinding(overlay.overlayDir, overlay.overlayBinding);
     }
-    const stackDir = overlay?.overlayDir ?? this.resolveValidatedStackDir(stackName);
+    // Canonical js/path-injection barrier at the working directory shared by
+    // the spawn and the inherited env-file guard: the stack name is resolved
+    // against the compose root and must stay inside it. An overlay working
+    // directory is prepared by Sencho for this operation and carries no
+    // request path.
+    const overlayDir = overlay?.overlayDir;
+    const baseResolved = path.resolve(this.baseDir);
+    const stackDir = overlayDir ?? this.resolveValidatedStackDir(stackName);
+    if (!overlayDir && !stackDir.startsWith(baseResolved + path.sep)) {
+      throw new Error('Invalid stack path');
+    }
     const sendOutput = (data: string) => {
       if (ws && ws.readyState === WebSocket.OPEN) ws.send(data);
     };
