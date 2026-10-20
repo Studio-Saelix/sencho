@@ -126,18 +126,3 @@ export function isPathWithinBase(resolvedPath: string, baseDir: string): boolean
     normalizedPath.startsWith(normalizedBase + path.sep)
   );
 }
-
-/**
- * Resolve a path the operator named in the Sencho process environment against
- * the directory the Compose child will run in.
- *
- * Compose reads `COMPOSE_ENV_FILES` entries as written and resolves a relative
- * one against that working directory. This is process configuration, not
- * request data: the same value is inherited by every Compose child, so a type
- * check in Sencho does not widen what the operator can reach. Callers must
- * never pass a value that came from a request. The CodeQL path-injection model
- * for this helper records that boundary (`.github/codeql/extensions/validation.model.yml`).
- */
-export function resolveOperatorConfiguredPath(workingDir: string, entry: string): string {
-  return path.resolve(workingDir, entry);
-}

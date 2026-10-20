@@ -5,8 +5,3 @@ extensions:
     data:
       - ["backend/src/utils/validation", "Member[isValidStackName].ReturnValue", "path-injection"]
       - ["backend/src/utils/validation", "Member[isPathWithinBase].ReturnValue", "path-injection"]
-      # Operator process configuration, not request data: COMPOSE_ENV_FILES
-      # entries are inherited by every Compose child unchanged, so inspecting
-      # a path's type in Sencho does not widen what the operator can reach.
-      # The helper's contract (and only caller) is documented in its source.
-      - ["backend/src/utils/validation", "Member[resolveOperatorConfiguredPath].ReturnValue", "path-injection"]
