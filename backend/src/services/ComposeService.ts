@@ -1753,6 +1753,67 @@ export class ComposeService {
 
 
   /**
+   * True when the global-flag prefix carries an explicit `--env-file`.
+   * Positional scan: a compose file or env file literally named `--env-file`
+   * is a flag value, not the flag itself, so skip each flag's value token.
+   * Sencho always emits the two-token form, and the `=` form is accepted too
+   * so a future writer cannot silently defeat the check.
+   */
+  private hasExplicitEnvFileFlag(args: string[]): boolean {
+    for (let i = 0; i < args.length; i++) {
+      const token = args[i];
+      if (token.startsWith('--env-file=')) return true;
+      if (
+        token === '-f'
+        || token === '--file'
+        || token === '--env-file'
+        || token === '--project-directory'
+        || token === '-p'
+        || token === '--project-name'
+      ) {
+        if (token === '--env-file') return true;
+        i++;
+      }
+    }
+    return false;
+  }
+
+  /**
+   * Refuse a process-selected interpolation env file that is not a regular file.
+   *
+   * Every Compose child inherits `COMPOSE_ENV_FILES` from the Sencho process,
+   * while a recovery replay only pins the files its generation recorded. A FIFO
+   * named there is not in the argv at all, so Compose would open it and wait for
+   * a writer instead of naming the unusable input. Entries resolve against the
+   * working directory Compose gets, the way Compose resolves them. A missing or
+   * unresolvable entry is left to Compose, which reports it without waiting.
+   * An explicit `--env-file` replaces the variable for interpolation, so a list
+   * that run never reads cannot refuse it.
+   */
+  private async assertProcessEnvFilesRegular(workingDir: string, args: string[]): Promise<void> {
+    if (this.hasExplicitEnvFileFlag(args)) return;
+    const raw = process.env.COMPOSE_ENV_FILES;
+    if (raw === undefined || raw === '') return;
+    // Compose trims each entry and skips empty ones, so the check has to name
+    // the same paths it will open.
+    for (const entry of raw.split(',').map((value) => value.trim()).filter((value) => value.length > 0)) {
+      const abs = path.resolve(workingDir, entry);
+      let stat: import('fs').Stats;
+      try {
+        stat = await fs.promises.stat(abs);
+      } catch {
+        continue;
+      }
+      if (!stat.isFile()) {
+        throw Object.assign(
+          new Error(`Env file ${entry} selected by COMPOSE_ENV_FILES is not a regular file`),
+          { code: 'NOT_A_FILE' },
+        );
+      }
+    }
+  }
+
+  /**
    * Pinned compose-up with a recovery override layered last
    * (`--pull never --no-build`). Used by manual rollback and deploy/update
    * compensation. When `invocation` is set, Compose args come from the
@@ -1801,6 +1862,10 @@ export class ComposeService {
       args.slice(0, args.length - upAction.length),
     );
     await this.withRegistryAuth(async (env) => {
+      // The child inherits COMPOSE_ENV_FILES from this process whether or not
+      // the invocation names that file, so check it at the last moment before
+      // the spawn.
+      await this.assertProcessEnvFilesRegular(stackDir, args);
       await this.execute(
         'docker',
         args,

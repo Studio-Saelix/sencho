@@ -629,6 +629,46 @@ describe('composeFileEnvVarSelection', () => {
       expect(selection.kind === 'unknown' ? selection.reason : '').toContain('missing.env');
     });
 
+    it.skipIf(process.platform === 'win32')(
+      'reports invalid when the project .env is not a regular file',
+      async () => {
+        fs.mkdirSync(stackPath('.env'));
+
+        // A directory (like a FIFO or socket) is not something Compose can read
+        // for interpolation, so this is a refusal rather than an omission.
+        const selection = await composeFileEnvVarSelection(STACK, 1);
+        expect(selection).toMatchObject({ kind: 'invalid' });
+        expect(selection.kind === 'invalid' ? selection.reason : '').toContain('.env');
+        expect(selection.loadedEnvFiles).toEqual([stackPath('.env')]);
+      },
+    );
+
+    it.skipIf(process.platform === 'win32')(
+      'reports invalid when a listed env file is not a regular file',
+      async () => {
+        fs.mkdirSync(stackPath('select.env'));
+        process.env.COMPOSE_ENV_FILES = 'select.env';
+
+        const selection = await composeFileEnvVarSelection(STACK, 1);
+        expect(selection).toMatchObject({ kind: 'invalid' });
+        expect(selection.kind === 'invalid' ? selection.reason : '').toContain('select.env');
+        // The file is named, so a caller can say which input is unusable.
+        expect(selection.loadedEnvFiles).toEqual([stackPath('select.env')]);
+      },
+    );
+
+    it.skipIf(process.platform === 'win32')(
+      'reports invalid when a configured project env file is not a regular file',
+      async () => {
+        fs.mkdirSync(stackPath('app.env'));
+        mockGetStackProjectEnvFiles.mockReturnValue(['app.env']);
+
+        const selection = await composeFileEnvVarSelection(STACK, 1);
+        expect(selection).toMatchObject({ kind: 'invalid' });
+        expect(selection.kind === 'invalid' ? selection.reason : '').toContain('app.env');
+      },
+    );
+
     it('refuses a listed file outside the compose directory, naming it', async () => {
       const outside = path.join(mockState.composeDir, '..', 'outside.env');
       fs.writeFileSync(outside, 'COMPOSE_FILE=compose.yaml:prod.yaml\n', 'utf8');

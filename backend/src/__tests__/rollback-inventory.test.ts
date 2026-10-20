@@ -2018,6 +2018,38 @@ describe('resolveRollbackInventory: inputs that cannot be captured', () => {
     expect(inventory.coverageRefusal).toMatch(/manifest is missing/i);
   });
 
+  it('keeps the live interpolation refusal when a refused Git inventory is returned', async () => {
+    await writeCompose('services:\n  web:\n    image: nginx\n');
+    mockGetGitSource.mockReturnValue({
+      stack_name: STACK,
+      repo_url: 'https://example.com/repo.git',
+      branch: 'main',
+      last_applied_commit_sha: null,
+      last_applied_content_hash: null,
+      applied_deploy_spec: null,
+      sync_env: false,
+      manifest_version: null,
+      manifest_state: null,
+      manifest_generation: null,
+    });
+    mockReadManifest.mockResolvedValue(null);
+    mockComposeFileEnvVarSelection.mockResolvedValue({
+      kind: 'invalid',
+      reason: 'The project .env is not a regular file, so Compose cannot read it for interpolation',
+      loadedEnvFiles: [path.join(composeDir, STACK, '.env')],
+    });
+
+    const inventory = await resolveRollbackInventory(1, STACK);
+
+    // The Git manifest refusal still owns the capture, but the live env input
+    // is a restore-time condition the manifest says nothing about: dropping it
+    // would let a restore write the project and then hand Compose a FIFO.
+    expect(inventory.coverageRefusal).toMatch(/manifest is missing/i);
+    expect(inventory.recoveryRefusal).toBe(
+      'The project .env is not a regular file, so Compose cannot read it for interpolation',
+    );
+  });
+
   it('still refuses when the compose file cannot be parsed', async () => {
     await writeCompose('services: [unclosed\n');
 

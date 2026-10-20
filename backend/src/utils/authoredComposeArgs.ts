@@ -101,7 +101,7 @@ async function readClaimedAreaEnv(
   }
   const stat = await fsPromises.stat(realEnvPath);
   if (!stat.isFile()) {
-    throw new Error(`Stack root .env for stack "${stackName}" is not a regular file.`);
+    throw notRegularEnvFileError(`Stack root .env for stack "${stackName}" is not a regular file.`);
   }
   return ['--env-file', realEnvPath];
 }
@@ -117,6 +117,11 @@ function rejectBadProjectEnvName(stackName: string, file: string): void {
       `Update the project env file selection in the Environment tab.`
     );
   }
+}
+
+/** Refusal for a configured env file that exists but is not a regular file. */
+function notRegularEnvFileError(message: string): Error & { code: 'NOT_A_FILE' } {
+  return Object.assign(new Error(message), { code: 'NOT_A_FILE' as const });
 }
 
 /** Refusal for a configured env file that resolves outside its authorized tree. */
@@ -249,7 +254,7 @@ export async function authoredComposeEnvFileArgs(
       }
       const stat = await fsPromises.stat(realEnvPath);
       if (!stat.isFile()) {
-        throw new Error(
+        throw notRegularEnvFileError(
           `Project env file "${file}" configured for stack "${stackName}" is not a regular file. ` +
           `Update the project env file selection in the Environment tab.`
         );
@@ -319,6 +324,12 @@ export async function authoredComposeEnvFileArgs(
  * this reader cannot reproduce. Callers must treat it as deciding, because
  * inferring a layer set and pinning it is the failure this exists to prevent.
  *
+ * `invalid` means a file the run is told to load exists but is not a regular
+ * file, so Compose cannot read it at all. Unlike `unknown` this is never an
+ * omission a capture may leave out: Compose would wait on a FIFO or fail on a
+ * directory instead of rendering the project, so a capture refuses and a
+ * recovery refuses to launch.
+ *
  * `composeEnvFiles` names the files COMPOSE_ENV_FILES supplied, absolute, so a
  * capture can report that it does not hold them.
  *
@@ -337,7 +348,8 @@ export async function authoredComposeEnvFileArgs(
 export type ComposeFileEnvSelection =
   | { kind: 'absent'; composeEnvFiles: string[]; loadedEnvFiles: string[] }
   | { kind: 'value'; value: string; pathSeparator: string; composeEnvFiles: string[]; loadedEnvFiles: string[] }
-  | { kind: 'unknown'; reason: string; loadedEnvFiles: string[] };
+  | { kind: 'unknown'; reason: string; loadedEnvFiles: string[] }
+  | { kind: 'invalid'; reason: string; loadedEnvFiles: string[] };
 
 export { DEFAULT_PATH_SEPARATOR };
 
@@ -434,6 +446,16 @@ export async function composeFileEnvVarSelection(stackName: string, nodeId?: num
   try {
     envArgs = await authoredComposeEnvFileArgs(stackName, resolvedNodeId);
   } catch (e) {
+    // A configured env file that exists but is not a regular file is a refusal
+    // the run cannot proceed past, not a selection this reader could not
+    // decide: Compose would open it and wait or fail there.
+    if ((e as NodeJS.ErrnoException).code === 'NOT_A_FILE') {
+      return {
+        kind: 'invalid',
+        reason: (e as Error).message,
+        loadedEnvFiles: [],
+      };
+    }
     return {
       kind: 'unknown',
       reason: getErrorMessage(e, 'a selected env file could not be read'),
@@ -465,6 +487,11 @@ export async function composeFileEnvVarSelection(stackName: string, nodeId?: num
     reason,
     loadedEnvFiles,
   });
+  const invalid = (reason: string): ComposeFileEnvSelection => ({
+    kind: 'invalid',
+    reason,
+    loadedEnvFiles,
+  });
   for (const source of sources) {
     let content: string;
     if (source.path === null) {
@@ -478,6 +505,9 @@ export async function composeFileEnvVarSelection(stackName: string, nodeId?: num
         // The file is there but this reader could not read it, so the run reads
         // it wherever Compose can and the name is kept for the reason above.
         loadedEnvFiles.push(projectEnv);
+        if ((err as NodeJS.ErrnoException).code === 'NOT_A_FILE') {
+          return invalid('The project .env is not a regular file, so Compose cannot read it for interpolation');
+        }
         return unreadable('the project .env could not be read');
       }
       loadedEnvFiles.push(projectEnv);
@@ -486,14 +516,17 @@ export async function composeFileEnvVarSelection(stackName: string, nodeId?: num
         // A COMPOSE_ENV_FILES entry is read through the compose-root containment
         // rule every other env-file read uses, so a path outside it is refused
         // rather than read, and the reason below names the file so the operator
-        // can move it into the compose folder.
-        content = await fsSvc.readFile(await lexicalComposePath(resolvedNodeId, source.path));
-      } catch {
+        // can move it into the compose folder. The read itself refuses a target
+        // that is not a regular file without blocking on it.
+        content = await fsSvc.readEnvFile(await lexicalComposePath(resolvedNodeId, source.path));
+      } catch (err) {
+        const named = source.listed ? source.path : path.basename(source.path);
+        if ((err as NodeJS.ErrnoException).code === 'NOT_A_FILE') {
+          return invalid(`The env file ${named} is not a regular file, so Compose cannot read it for interpolation`);
+        }
         // Compose refuses to run when a file it was told to read is missing or
         // unreadable, so nothing here can claim which layers the run would load.
-        return unreadable(
-          `the env file ${source.listed ? source.path : path.basename(source.path)} could not be read`,
-        );
+        return unreadable(`the env file ${named} could not be read`);
       }
       if (source.listed) composeEnvFiles.push(source.path);
     }

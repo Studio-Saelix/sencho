@@ -981,6 +981,7 @@ describe('Snapshot restore: recovery generation contract', () => {
             manifestState: null,
             manifestGeneration: null,
             coverageRefusal: null,
+            recoveryRefusal: null,
             uncapturedInputs: [],
             uncapturedRelativePaths: [],
             applicationDataPaths: [],

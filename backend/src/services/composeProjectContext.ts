@@ -131,6 +131,17 @@ class AuthoredComposeProjectContext implements ComposeProjectContext {
     }
 
     const inventory = await resolveRollbackInventory(this.nodeId, this.stackName);
+    // A live interpolation input that is no longer a regular file cannot be
+    // read by the run. Compose would wait on a FIFO or fail on a directory
+    // instead of naming the input, so refuse before any project file moves:
+    // the generation may have captured the file while it was regular, and the
+    // restore must not leave the project written but unlaunchable.
+    if (inventory.recoveryRefusal !== null) {
+      throw Object.assign(
+        new Error(inventory.recoveryRefusal),
+        { code: 'NOT_A_FILE' },
+      );
+    }
     // The live managed paths travel with the entries: they are the inputs this
     // generation cannot hold or no longer holds, and a restore that never saw
     // them would leave a link created after capture in place and read its

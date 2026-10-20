@@ -1001,4 +1001,101 @@ describe('captured invocation on recovery Compose args', () => {
       },
     )).rejects.toThrow(/Invalid captured interpolation env file/);
   });
+
+  it.skipIf(process.platform === 'win32')(
+    'refuses a restore before any project file moves when a live interpolation input is not a regular file',
+    async () => {
+      const stackName = 'inv-restore-env-special';
+      const stackDir = path.join(composeDir, stackName);
+      await fs.promises.mkdir(stackDir, { recursive: true });
+      await fs.promises.writeFile(path.join(stackDir, 'compose.yaml'), 'services:\n  web:\n    image: nginx\n', 'utf8');
+      await fs.promises.writeFile(path.join(stackDir, '.env'), 'MARK=captured\n', 'utf8');
+
+      const { resolveComposeProjectContext } = await import('../services/composeProjectContext');
+      const context = await resolveComposeProjectContext(nodeId, stackName);
+      expect(await context.backupFromContext('deployment')).toBeTruthy();
+
+      // The generation holds the old bytes, so a restore would normally write
+      // them back. An unreadable live interpolation input has to stop it first:
+      // a directory is prompt for every reader, so this exercises the refusal
+      // path without needing the FIFO's external deadline.
+      await fs.promises.writeFile(path.join(stackDir, 'compose.yaml'), 'services:\n  web:\n    image: changed\n', 'utf8');
+      await fs.promises.rm(path.join(stackDir, '.env'));
+      await fs.promises.mkdir(path.join(stackDir, '.env'));
+
+      await expect(context.restoreFromContext()).rejects.toMatchObject({
+        code: 'NOT_A_FILE',
+        message: expect.stringContaining('.env'),
+      });
+      expect(await fs.promises.readFile(path.join(stackDir, 'compose.yaml'), 'utf8')).toBe(
+        'services:\n  web:\n    image: changed\n',
+      );
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'refuses a recovery run whose process-selected env file is not a regular file',
+    async () => {
+      const stackName = 'inv-process-env-special';
+      const stackDir = path.join(composeDir, stackName);
+      const envFile = path.join(stackDir, 'operator.env');
+      await fs.promises.mkdir(stackDir, { recursive: true });
+      await fs.promises.writeFile(path.join(stackDir, 'compose.yaml'), 'services:\n  web:\n    image: nginx\n', 'utf8');
+
+      const previous = process.env.COMPOSE_ENV_FILES;
+      process.env.COMPOSE_ENV_FILES = 'operator.env';
+      try {
+        const { ComposeService } = await import('../services/ComposeService');
+        const svc = ComposeService.getInstance(nodeId);
+        const execute = vi.spyOn(svc as unknown as {
+          execute: (...args: unknown[]) => Promise<void>;
+        }, 'execute').mockResolvedValue(undefined);
+
+        for (const kind of ['fifo', 'directory'] as const) {
+          await replaceWithSpecialFile(envFile, kind, async () => {
+            // The captured invocation does not name this file, so only the
+            // inherited variable carries it into the child; the refusal has to
+            // land before the spawn.
+            await expect(svc.composeUpWithRecoveryOverride(
+              stackName,
+              path.join(stackDir, '.sencho-recovery-unused.yml'),
+            )).rejects.toMatchObject({ code: 'NOT_A_FILE' });
+          });
+        }
+        expect(execute).not.toHaveBeenCalled();
+
+        // An explicit --env-file replaces the process list for interpolation,
+        // so a stale special file there cannot reach this run and must not
+        // refuse it.
+        await fs.promises.writeFile(path.join(stackDir, 'app.env'), 'A=1\n', 'utf8');
+        await expect(svc.composeUpWithRecoveryOverride(
+          stackName,
+          path.join(stackDir, '.sencho-recovery-unused.yml'),
+          undefined,
+          layerInvocation(stackName, [], ['--env-file', path.join(stackDir, 'app.env')]),
+        )).resolves.toEqual({ mutatedByCompose: true });
+        expect(execute).toHaveBeenCalledTimes(1);
+
+        // A compose layer literally named `--env-file` is the `-f` operand, not
+        // an env-file flag, so Compose still reads the process list and the
+        // guard has to keep checking it.
+        await fs.promises.rm(path.join(stackDir, 'app.env'));
+        await fs.promises.writeFile(
+          path.join(stackDir, '--env-file'),
+          'services:\n  web:\n    image: nginx\n',
+          'utf8',
+        );
+        await expect(svc.composeUpWithRecoveryOverride(
+          stackName,
+          path.join(stackDir, '.sencho-recovery-unused.yml'),
+          undefined,
+          layerInvocation(stackName, ['--env-file']),
+        )).rejects.toMatchObject({ code: 'NOT_A_FILE' });
+        expect(execute).toHaveBeenCalledTimes(1);
+      } finally {
+        if (previous === undefined) delete process.env.COMPOSE_ENV_FILES;
+        else process.env.COMPOSE_ENV_FILES = previous;
+      }
+    },
+  );
 });

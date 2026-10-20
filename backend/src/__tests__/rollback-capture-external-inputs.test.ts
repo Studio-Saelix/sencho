@@ -9,7 +9,12 @@ import os from 'os';
 import { promises as fsPromises } from 'fs';
 import { randomUUID } from 'crypto';
 
-const mockState = { composeDir: '' };
+const mockState = {
+  composeDir: '',
+  selection: { kind: 'absent', composeEnvFiles: [], loadedEnvFiles: [] } as
+    | { kind: 'absent'; composeEnvFiles: string[]; loadedEnvFiles: string[] }
+    | { kind: 'invalid'; reason: string; loadedEnvFiles: string[] },
+};
 
 vi.mock('../services/NodeRegistry', () => ({
   NodeRegistry: {
@@ -36,7 +41,7 @@ vi.mock('../utils/authoredComposeArgs', () => ({
   authoredComposeFileArgs: () => ['-f', 'compose.yaml'],
   authoredComposeEnvFileArgs: async () => [],
   DEFAULT_PATH_SEPARATOR: ':',
-  composeFileEnvVarSelection: async () => ({ kind: 'absent', composeEnvFiles: [], loadedEnvFiles: [] }),
+  composeFileEnvVarSelection: async () => mockState.selection,
 }));
 
 import { resolveRollbackInventory } from '../services/rollbackInventory';
@@ -55,6 +60,7 @@ describe('rollback capture with inputs outside the stack', () => {
     composeDir = await fsPromises.mkdtemp(path.join(os.tmpdir(), 'sencho-ext-'));
     dataDir = await fsPromises.mkdtemp(path.join(os.tmpdir(), 'sencho-extdata-'));
     mockState.composeDir = composeDir;
+    mockState.selection = { kind: 'absent', composeEnvFiles: [], loadedEnvFiles: [] };
     originalDataDir = process.env.DATA_DIR;
     process.env.DATA_DIR = dataDir;
     stackDir = path.join(composeDir, STACK);
@@ -234,5 +240,30 @@ describe('rollback capture with inputs outside the stack', () => {
 
     expect(await fsPromises.readFile(path.join(stackDir, 'compose.yaml'), 'utf8')).toBe('services: {}\n');
     await expect(fsPromises.access(path.join(stackDir, 'stale.env'))).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
+  it('refuses an interpolation env input that is not a regular file even when the invocation pins files', async () => {
+    // The mock builds `-f compose.yaml`, so the layer set is pinned by the
+    // invocation. An unknown selection is a recorded omission in that case, but
+    // an invalid one is not: Compose cannot read the file at all.
+    await fsPromises.writeFile(path.join(stackDir, 'compose.yaml'), 'services: {}\n', 'utf8');
+    mockState.selection = {
+      kind: 'invalid',
+      reason: 'The env file operator.env is not a regular file, so Compose cannot read it for interpolation',
+      loadedEnvFiles: [path.join(stackDir, 'operator.env')],
+    };
+
+    const inventory = await resolveRollbackInventory(NODE, STACK);
+
+    expect(inventory.invocation.composeArgsPrefix).toEqual(['-f', 'compose.yaml']);
+    expect(inventory.coverageRefusal).toBe(
+      'The env file operator.env is not a regular file, so Compose cannot read it for interpolation',
+    );
+    expect(inventory.recoveryRefusal).toBe(
+      'The env file operator.env is not a regular file, so Compose cannot read it for interpolation',
+    );
+    // A refused capture carries no partial-capture lists.
+    expect(inventory.uncapturedInputs).toEqual([]);
+    expect(inventory.uncapturedRelativePaths).toEqual([]);
   });
 });

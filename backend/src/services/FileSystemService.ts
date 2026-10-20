@@ -71,6 +71,18 @@ function nonRegularComposeFileError(file: string): Error & { code: 'NOT_A_FILE' 
   });
 }
 
+/**
+ * Refuse an env file that is not a regular file. Compose loads these for
+ * interpolation on every run, and opening a FIFO in blocking mode has no writer
+ * to end the wait. The code lets the caller name the invalid input instead of
+ * reporting it as merely unreadable.
+ */
+function nonRegularEnvFileError(file: string): Error & { code: 'NOT_A_FILE' } {
+  return Object.assign(new Error(`Env file ${file} is not a regular file`), {
+    code: 'NOT_A_FILE' as const,
+  });
+}
+
 // Explorer-only protection: includes the blueprint ownership marker without
 // putting it in PROTECTED_STACK_FILES (backup/rollback orphan removal).
 const EXPLORER_PROTECTED_STACK_FILES = new Set([
@@ -807,6 +819,31 @@ export class FileSystemService {
     return fsPromises.readFile(filePath, encoding);
   }
 
+  /**
+   * Read an env file only when the descriptor is a regular file.
+   *
+   * Compose loads a listed env file for interpolation on every run, and a path
+   * that became a FIFO after the caller's check would hold a blocking read
+   * until a writer appears. The type is checked before the open (a socket or
+   * device may not open at all) and again on the descriptor (a FIFO swapped in
+   * during that gap must not block), and the open is non-blocking so no
+   * descriptor-level check can sleep.
+   */
+  async readEnvFile(filePath: string, encoding: BufferEncoding = 'utf-8'): Promise<string> {
+    this.assertWithinBase(filePath);
+    await this.assertRealWithinBase(filePath);
+    if (!(await fsPromises.stat(filePath)).isFile()) {
+      throw nonRegularEnvFileError(path.basename(filePath));
+    }
+    const fh = await fsPromises.open(filePath, fsConstants.O_RDONLY | fsConstants.O_NONBLOCK);
+    try {
+      if (!(await fh.stat()).isFile()) throw nonRegularEnvFileError(path.basename(filePath));
+      return await fh.readFile(encoding);
+    } finally {
+      await fh.close();
+    }
+  }
+
   async writeFile(filePath: string, content: string, encoding: BufferEncoding = 'utf-8'): Promise<void> {
     this.assertWithinBase(filePath);
     await this.assertRealWithinBase(filePath);
@@ -827,7 +864,21 @@ export class FileSystemService {
     }
     await this.assertRealWithinBase(envPath);
     try {
-      return await fsPromises.readFile(envPath, 'utf-8');
+      // The project .env is read for interpolation on every Compose run, so a
+      // FIFO that replaced it would hold this read until a writer appears. The
+      // type is checked before the open (a socket or device may not open at
+      // all) and again on the non-blocking descriptor (a FIFO swapped in during
+      // that gap must not block).
+      if (!(await fsPromises.stat(envPath)).isFile()) {
+        throw nonRegularEnvFileError(`${path.basename(stackName)}/.env`);
+      }
+      const fh = await fsPromises.open(envPath, fsConstants.O_RDONLY | fsConstants.O_NONBLOCK);
+      try {
+        if (!(await fh.stat()).isFile()) throw nonRegularEnvFileError(`${path.basename(stackName)}/.env`);
+        return await fh.readFile('utf-8');
+      } finally {
+        await fh.close();
+      }
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
         console.error('Error reading env file:', error);

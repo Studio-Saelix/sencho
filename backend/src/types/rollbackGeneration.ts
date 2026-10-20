@@ -220,6 +220,16 @@ export interface ResolvedRollbackInventory {
    */
   coverageRefusal: string | null;
   /**
+   * Why recovery must not run against this live project, or null. Set when an
+   * interpolation env file the run loads exists but is not a regular file:
+   * Compose would open it and wait for a writer (a FIFO) or fail on it (a
+   * directory) instead of reporting the input. Capture refuses for the same
+   * condition, but a generation captured while the file was regular can meet
+   * it only at restore, so this survives into the restore decision and stops
+   * the run before any project file moves.
+   */
+  recoveryRefusal: string | null;
+  /**
    * Operator-facing notes, one per declared input a generation cannot hold:
    * files outside the stack directory, paths Compose resolves at deploy time,
    * links that leave the stack or point at nothing, and env files the run loads

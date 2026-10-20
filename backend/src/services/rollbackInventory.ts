@@ -718,6 +718,7 @@ function refusedGitInventory(
     manifestState: gitSource.manifest_state,
     manifestGeneration: gitSource.manifest_generation,
     coverageRefusal,
+    recoveryRefusal: null,
     uncapturedInputs: [],
     uncapturedRelativePaths: [],
     applicationDataPaths: [],
@@ -900,6 +901,7 @@ async function resolveGitInventory(
   const refusal = coverageRefusal ?? meshReadFailed;
   const uncaptured = new Set<string>();
   const uncapturedPaths = new Set<string>();
+  let recoveryRefusal: string | null = null;
   if (refusal === null) {
     // The manifest is this generation's canonical file inventory, so it is also
     // its coverage boundary: an env file the run loads for interpolation that the
@@ -916,43 +918,52 @@ async function resolveGitInventory(
     // nameable file at all (a file list Compose would refuse, or env args Sencho
     // could not build) leaves nothing to record. An omission never blocks a
     // capture, so over-reporting here is the safe direction.
+    //
+    // A selected file that is not a regular file is the one case that is not an
+    // omission: Compose cannot read it, so a run would wait on it or fail on it
+    // instead of rendering the project. Refuse, whatever pinned the layer set.
     const selection = await composeFileEnvVarSelection(stackName, nodeId);
-    for (const envPath of selection.loadedEnvFiles) {
-      const resolved = resolveStackRel(stackRoot, posixRel(path.relative(stackRoot, envPath)));
-      if (!resolved) {
+    if (selection.kind === 'invalid') {
+      recoveryRefusal = selection.reason;
+    } else {
+      for (const envPath of selection.loadedEnvFiles) {
+        const resolved = resolveStackRel(stackRoot, posixRel(path.relative(stackRoot, envPath)));
+        if (!resolved) {
+          uncaptured.add(redactNoteCredentials(
+            `${path.basename(envPath)} is loaded by Compose for interpolation from outside the stack directory and is not captured`,
+          ));
+          continue;
+        }
+        if (map.has(resolved.relativePath)) continue;
+        uncapturedPaths.add(resolved.relativePath);
         uncaptured.add(redactNoteCredentials(
-          `${path.basename(envPath)} is loaded by Compose for interpolation from outside the stack directory and is not captured`,
+          `${resolved.relativePath} is loaded by Compose for interpolation and is not captured`,
         ));
-        continue;
       }
-      if (map.has(resolved.relativePath)) continue;
-      uncapturedPaths.add(resolved.relativePath);
-      uncaptured.add(redactNoteCredentials(
-        `${resolved.relativePath} is loaded by Compose for interpolation and is not captured`,
-      ));
-    }
-    // A `-f` or COMPOSE_FILE chain moves the project directory, and Compose then
-    // loads that directory's `.env` as well as any file the invocation named.
-    // The manifest is still the coverage boundary, so a file it does not hold
-    // is an omission rather than a capture.
-    const projectEnv = selectedProjectEnvFile(
-      invocation.composeArgsPrefix,
-      invocation.composeLayers,
-      stackRoot,
-    );
-    if (projectEnv?.kind === 'outside') {
-      uncaptured.add(redactNoteCredentials(PROJECT_ENV_OUTSIDE_NOTE));
-    } else if (
-      projectEnv?.kind === 'relative'
-      && !map.has(projectEnv.relativePath)
-      && await pathExistsAsFile(stackRoot, projectEnv.relativePath)
-    ) {
-      uncapturedPaths.add(projectEnv.relativePath);
-      uncaptured.add(redactNoteCredentials(
-        `${projectEnv.relativePath} is loaded by Compose from the selected project directory and is not captured`,
-      ));
+      // A `-f` or COMPOSE_FILE chain moves the project directory, and Compose then
+      // loads that directory's `.env` as well as any file the invocation named.
+      // The manifest is still the coverage boundary, so a file it does not hold
+      // is an omission rather than a capture.
+      const projectEnv = selectedProjectEnvFile(
+        invocation.composeArgsPrefix,
+        invocation.composeLayers,
+        stackRoot,
+      );
+      if (projectEnv?.kind === 'outside') {
+        uncaptured.add(redactNoteCredentials(PROJECT_ENV_OUTSIDE_NOTE));
+      } else if (
+        projectEnv?.kind === 'relative'
+        && !map.has(projectEnv.relativePath)
+        && await pathExistsAsFile(stackRoot, projectEnv.relativePath)
+      ) {
+        uncapturedPaths.add(projectEnv.relativePath);
+        uncaptured.add(redactNoteCredentials(
+          `${projectEnv.relativePath} is loaded by Compose from the selected project directory and is not captured`,
+        ));
+      }
     }
   }
+  const liveRefusal = refusal ?? recoveryRefusal;
 
   return {
     entries: [...map.values()].sort((a, b) => a.relativePath.localeCompare(b.relativePath)),
@@ -967,16 +978,17 @@ async function resolveGitInventory(
     lastAppliedContentHash: gitSource.last_applied_content_hash,
     manifestState: gitSource.manifest_state,
     manifestGeneration: gitSource.manifest_generation,
-    coverageRefusal: refusal,
-    uncapturedInputs: refusal === null ? [...uncaptured] : [],
-    uncapturedRelativePaths: refusal === null
+    coverageRefusal: liveRefusal,
+    recoveryRefusal,
+    uncapturedInputs: liveRefusal === null ? [...uncaptured] : [],
+    uncapturedRelativePaths: liveRefusal === null
       ? [...uncapturedPaths].sort((a, b) => a.localeCompare(b))
       : [],
     // The manifest names one input per path, so a path's kind is its only
     // role here; there is no merged-kind ambiguity to protect against. An
     // unmanaged bind may not appear in the managed file map, so the collected
     // set is unioned in.
-    applicationDataPaths: refusal === null
+    applicationDataPaths: liveRefusal === null
       ? [...new Set([
         ...[...map.values()]
           .filter((entry) => isApplicationDataKind(entry.dependencyKind))
@@ -984,14 +996,14 @@ async function resolveGitInventory(
         ...gitAppDataPaths,
       ])].sort((a, b) => a.localeCompare(b))
       : [],
-    applicationDataPathPrefixes: refusal === null
+    applicationDataPathPrefixes: liveRefusal === null
       ? [...gitAppDataPathPrefixes].sort((a, b) => a.localeCompare(b))
       : [],
     // A dynamic managed input has no path to hold; the manifest preserves its
     // source template as an unmanaged entry, so a restore knows it cannot
     // prove any remaining live path is disposable. A legacy host declaration
     // with no recorded spelling is reported the same way.
-    dynamicApplicationDataSources: refusal === null
+    dynamicApplicationDataSources: liveRefusal === null
       ? [...gitDynamicAppDataSources].sort((a, b) => a.localeCompare(b))
       : [],
     unparsedComposeSources: [],
@@ -1023,6 +1035,10 @@ async function resolveAuthoredInventory(
   // include/extends source outside the stack or selected through a variable.
   // A restore cannot treat the live project as complete while one exists.
   const unparsedComposeSources = new Set<string>();
+  // Set when the run loads an interpolation env file that is not a regular
+  // file. Capture refuses through coverageNotes below; restore reads this field
+  // to refuse before any project file moves.
+  let recoveryRefusal: string | null = null;
 
   /**
    * Notes reach logs and the readiness API, and a URL include can carry
@@ -1395,7 +1411,19 @@ const capturable = async (
   // build) leaves nothing to record. An omission never blocks a capture, so
   // over-reporting is the safe direction, and the Git inventory applies the
   // same rule to its manifest.
-  const envFilesToAccount = selection.kind === 'unknown' ? selection.loadedEnvFiles : selection.composeEnvFiles;
+  // A selected file that is not a regular file is not an omission: Compose
+  // cannot read it, so it would wait on it or fail on it instead of rendering
+  // the project. Refuse, whatever pinned the layer set, and remember the reason
+  // so a restore refuses before it moves any project file.
+  if (selection.kind === 'invalid') {
+    coverageNotes.push(selection.reason);
+    recoveryRefusal = selection.reason;
+  }
+  const envFilesToAccount = selection.kind === 'unknown'
+    ? selection.loadedEnvFiles
+    : selection.kind === 'invalid'
+      ? []
+      : selection.composeEnvFiles;
   // The source is named only where it is known: an undecided selection is a set
   // of paths, not a statement about which variable supplied them.
   const loadedBy = selection.kind === 'unknown' ? ' for interpolation' : ' through COMPOSE_ENV_FILES';
@@ -1431,7 +1459,7 @@ const capturable = async (
       coverageNotes.push(
         `Could not read the environment that selects the compose layers through COMPOSE_FILE: ${selection.reason}`,
       );
-    } else {
+    } else if (selection.kind === 'value') {
       // COMPOSE_FILE replaces discovery, and `-f a -f b` loads exactly the layers
       // `COMPOSE_FILE=a:b` does, so pinning the chain reproduces the capture-time
       // project and still layers a trailing recovery override on top of it.
@@ -1541,6 +1569,7 @@ const capturable = async (
     manifestState: null,
     manifestGeneration: null,
     coverageRefusal,
+    recoveryRefusal,
     // A refused capture writes nothing, so it carries no partial-capture lists.
     uncapturedInputs: coverageRefusal === null ? [...uncaptured] : [],
     uncapturedRelativePaths: coverageRefusal === null
@@ -1591,10 +1620,14 @@ export async function resolveRollbackInventory(
       );
       const firstApplyCorrupt = Boolean(gitInventory.coverageRefusal?.includes('unreadable'));
       // Fail closed when the Git state is established, the manifest is
-      // unreadable, or the authored inventory is refused. Otherwise merge the
-      // Git identity onto the authored inventory for a true first apply.
+      // unreadable, or the authored inventory is refused. The live
+      // interpolation refusal still travels: a restore reads the live
+      // environment before it launches Compose, and the Git manifest says
+      // nothing about whether an env file it does not hold is readable now.
       if (established || firstApplyCorrupt || authored.coverageRefusal !== null) {
-        return gitInventory;
+        return authored.recoveryRefusal === null
+          ? gitInventory
+          : { ...gitInventory, recoveryRefusal: authored.recoveryRefusal };
       }
       return {
         ...authored,
