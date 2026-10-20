@@ -1,63 +1,49 @@
 ---
 title: Resources Hub
-description: Browse, filter, scan, and clean up Docker images, volumes, and unmanaged containers from a single view.
+description: Browse, filter, scan, and clean up Docker images, volumes, and external containers from a single view.
 ---
 
-The **Resources** tab shows everything Docker is storing on your host, broken down by ownership, with one-click cleanup and on-demand vulnerability scanning.
+The **Resources** tab shows everything Docker is storing on your host, broken down by ownership, with itemized cleanup and on-demand vulnerability scanning.
 
 <Frame>
-  <img src="/images/resources/resources-reclaim.png" alt="Resources Hub with the You can reclaim banner, Docker Disk Footprint tiles, Quick Clean panel, and the Images tab populated below" />
+  <img src="/images/resources/resources-reclaim.png" alt="Resources Hub with the masthead showing reclaimable space, the Reclaim button in the tab strip, and the Images tab populated below" />
 </Frame>
 
-## Reclaim hero
+## Masthead
 
-Once enabled for a node, an amber banner leads the view whenever there is reclaimable disk space (unused images, stopped containers, or dangling volumes), showing the total amount you can free and a `·`-separated breakdown of what contributes to it (for example, `2 unused images · 10 dangling volumes`). Click **Review & prune** to open a confirmation dialog that lists the exact items that will be removed (capped in the preview with an "and N more" note when the list is long). Confirm only after the plan is ready; Sencho rechecks the list at execute time and skips anything that is no longer eligible.
+The masthead answers one question: how much space a cleanup would free on this node. Its headline is one of four states:
 
-The hero stays hidden when there is nothing to reclaim, keeping the view focused on the rest of your inventory.
+| Headline | Meaning |
+|----------|---------|
+| **`<size>` reclaimable** (amber) | Unused images, stopped containers, and dangling volumes that a cleanup can free, with a `·`-separated breakdown underneath (for example `2 unused images · 1 dangling volume`) |
+| **Tidy** | Nothing to reclaim on this node |
+| **Measuring disk** | The node is still computing disk usage. The tables below load first and do not wait for it |
+| **Disk usage unknown** | The node could not report disk usage. Use **Retry disk usage** in the tab strip. An unreadable node never reads as Tidy |
 
-The total does not include images Sencho holds as rollback protection points: a prune plan never removes those images. They surface in the Rollback tab and are freed once the hold is released or superseded.
+The two figures on the right split what Docker stores: **Managed** is the images and volumes your Sencho stacks use, and **External** is the images and volumes used by other Docker projects on the host.
 
-To set the banner aside without pruning, use the **×** in its top-right corner. It stays hidden on that browser until the reclaimable total grows past the amount it held when you dismissed it, so a small, stubborn remainder will not keep reappearing while a genuine new build-up still surfaces.
+The reclaimable total counts the bytes an unused image does not share with another image, so it can be lower than a layer-by-layer total when several unused images share a base. It does not include images Sencho holds as rollback protection points: a prune plan never removes those. They surface in the Rollback tab and are freed once the hold is released or superseded.
 
-The banner is off by default and applies per node. To turn it on, open **Settings → Monitoring → Docker & Storage** and switch on **Show reclaimable-space banner**.
+## Cleanup
 
-<Note>
-  The banner and the **Review & prune** action are admin-only. Read-only roles still see the rest of the page but cannot trigger destructive operations.
-</Note>
+Every cleanup action opens an itemized preview before anything is removed.
 
-## Docker Disk Footprint
+| Where | Action | What it removes |
+|-------|--------|-----------------|
+| Tab strip | **Reclaim** | Every unused image, stopped container, and dangling volume on the node, including those from external projects. Shown when there is something to reclaim |
+| Images tab | **Prune unused** | Unused images |
+| Volumes tab | **Prune unused** | Volumes not attached to any container |
+| Tab strip **⋯** menu | **Prune unused networks** | Networks not connected to any container |
+| Tab strip **⋯** menu | **Prune stopped containers** | Containers that are created, exited, or dead |
 
-The left card under the hero breaks down your Docker disk usage into three tiles:
+The preview for **Prune unused**, **Prune unused networks**, and **Prune stopped containers** has a scope switch. **Sencho-managed** is the default and leaves external Docker projects alone. **All Docker** also removes unused resources that belong to other Compose projects sharing the daemon, so use it carefully. Switching the scope rebuilds the list for that scope. **Reclaim** always covers the whole node.
 
-| Tile | Meaning |
-|------|---------|
-| **Sencho managed** (green) | Images and volumes **currently used** by stacks in your `COMPOSE_DIR` |
-| **External** (amber) | Images and volumes used by Docker projects outside Sencho |
-| **Reclaimable** (neutral) | Unused images, stopped containers, and dangling volumes Docker can free. Images Sencho holds as rollback protection points are not included; they surface in the Rollback tab and are freed once the hold is released or superseded |
+Managed image prune is broader than the **Managed** figure in the masthead: after a stack update leaves an older tag unused, that free image can appear in the managed prune plan when a running stack container still uses the same image repository. Images labeled for Compose projects Sencho does not manage stay out of managed prune (use **All Docker** for a full host reclaim). Untagged dangling layers have no repository to match and usually require **All Docker**.
 
-The managed tile does not count free (unused) images. Those rows appear under reclaimable space and in the Images tab as unused until you prune them.
-
-Each tile shows its size and its share of the total footprint as a percentage. The layout itself is fixed (Sencho managed on the left, External and Reclaimable stacked on the right); tile size does not scale with the percentage, so read the numbers rather than the proportions. Click any tile to filter the resource tabs below to that category.
-
-## Quick Clean
-
-The right card under the hero exposes four prune actions. Each tile has a single primary button that targets **Sencho-managed resources only**, so by default the action will not touch external Docker projects.
-
-| Action | What it removes |
-|--------|----------------|
-| **Prune Unused Images** | Free images owned by or still matching repositories used by your Sencho stacks |
-| **Prune Unused Volumes** | Volumes not attached to any Sencho container |
-| **Prune Dead Networks** | Networks not connected to any Sencho container |
-| **Purge Unmanaged Containers** | Containers Sencho doesn't recognize (started outside it) |
-
-Managed image prune is broader than the green **Sencho managed** tile: after a stack update leaves an older tag unused, that free image can appear in the managed prune plan when a running stack container still uses the same image repository. Images labeled for Compose projects Sencho does not manage stay out of managed prune (use **All Docker** for a full host reclaim). Untagged dangling layers have no repository to match and usually require **All Docker** / all-scope prune.
-
-The first three tiles also show a **More options** menu with a single destructive entry, **All Docker (includes external)**, that broadens the prune to every Docker resource on the host. Use it carefully, since it can affect other Compose projects sharing the same daemon. The **Purge Unmanaged Containers** tile has no menu and always targets unmanaged containers only.
-
-A confirmation dialog appears before any destructive prune. Sencho first builds an itemized plan of exactly which resources will be removed, shows that list in the dialog, and only then enables confirm. The confirm action is bound to that plan: if the daemon state changes before you confirm, Sencho refreshes the plan instead of deleting a different set. While the operation runs, a loading notification keeps you informed; on completion it is replaced with a success or error notification, including how much space was reclaimed.
+The preview lists the exact items that will be removed (capped with an "and N more" note when the list is long), and confirm stays disabled until the plan is ready. The confirm action is bound to that plan: if the daemon state changes before you confirm, Sencho refreshes the plan instead of deleting a different set. While the operation runs, the confirm button shows its progress; on completion a notification reports success, a partial failure, or an error, including how much space was reclaimed.
 
 <Note>
-  Quick Clean is admin-only. The panel is hidden for users without admin permissions.
+  Reclaim and every prune action are admin-only.
 </Note>
 
 <Note>
@@ -66,11 +52,11 @@ A confirmation dialog appears before any destructive prune. Sencho first builds 
 
 ## Resource tabs
 
-Below the hero, three tabs partition your inventory: **Images**, **Volumes**, and **Unmanaged**. The Unmanaged tab shows a count badge whenever orphan containers are detected.
+Four tabs partition your inventory: **Images**, **Volumes**, **External**, and **Rollback**. Each tab shows a count. If the Images or Volumes list fails to load, the tab shows an error with a **Retry** button instead of an empty list.
 
-Network inventory, topology, inspect, and findings live on the dedicated [Networking](/features/networking) page. **Quick Clean** still includes **Prune Dead Networks**.
+Network inventory, topology, inspect, and findings live on the dedicated [Networking](/features/networking) page. **Prune unused networks** is in the **⋯** menu of the tab strip.
 
-Each of the first three tabs shares the same toolbar pattern: a collapsible search (click the magnifying glass to open a text filter, matching by name or repository tag) and an **All / Managed / External** filter with a live count on each chip. Sortable columns toggle ascending/descending order when clicked.
+The Images and Volumes tabs share the same toolbar pattern: a collapsible search (click the magnifying glass to open a text filter, matching by name or repository tag), an **All / Managed / External** filter with a live count on each option, and **Prune unused**. Sortable columns toggle ascending/descending order when clicked.
 
 A **Scan history** button sits on the right of the Images tab's toolbar when image vulnerability scanning is configured for the node. It takes you to the [Security page](/features/security) History tab so you can review past results without launching a new scan. See [Vulnerability scanning](/features/vulnerability-scanning) for the full workflow.
 
@@ -82,11 +68,12 @@ A **Scan history** button sits on the right of the Images tab's toolbar when ima
 
 Lists all Docker images on the host with their ID, repository tag, size, and status. Click **Repository:Tag**, **Size**, or **Status** to sort.
 
-**Filter chips:** `All`, `Managed`, `External`. Each chip shows the matching count, for example `All 18 · Managed 15 · External 3`.
+**Filter:** `All`, `Managed`, `External`. Each option shows the matching count, for example `All 18 · Managed 15 · External 3`.
 
 **Status column** combines two pieces of information per row:
 
 - A usage badge: `In Use` plus one chip per Sencho stack that uses the image (click a chip to open that stack), `In Use` plus `External` when it runs only in another Docker project, or `Unused` when no container references it.
+- A **Rollback protected** badge when the image is held as a rollback point. For a held full-stack rollback point, click the badge to open the Rollback tab.
 - A severity badge from any image scan: `Clean` (no findings at all), a CVE severity (`LOW`, `MEDIUM`, `HIGH`, `CRITICAL`, or `UNKNOWN`), or `Findings` (no CVEs, but a secret or misconfiguration finding). Click the badge to open the scan results.
 
 **Per-row actions** sit on the right:
@@ -119,7 +106,7 @@ The inspect sheet is available to all roles. Registry tag browsing is admin-only
 
 Lists all Docker volumes with name, driver, mount point, and managed status. Click **Name** or **Driver** to sort.
 
-**Filter chips:** `All`, `Managed`, `External`, each with its count.
+**Filter:** `All`, `Managed`, `External`, each with its count.
 
 Anonymous volumes (Docker-generated 64-character hash names, typical of a container that declares a volume without naming it) show a shortened label with an **anonymous** chip so the table stays readable; hover the name for the full hash.
 
@@ -141,24 +128,24 @@ Click the folder icon on any volume row (admin-only) to open a read-only browser
   Volumes commonly contain database files, password hashes, certificates, and other secrets. Treat the volume browser as a high-power admin tool.
 </Warning>
 
-### Unmanaged
+### External
 
 <Frame>
-  <img src="/images/resources/resources-unmanaged-tab.png" alt="Unmanaged tab showing the No unmanaged containers success state" />
+  <img src="/images/resources/resources-unmanaged-tab.png" alt="External tab showing the No external containers success state" />
 </Frame>
 
-Lists containers running on the host that are not part of any Sencho-managed stack: containers started with `docker run`, or Compose projects outside your `COMPOSE_DIR`. The tab shows a count badge when any are detected. The running Sencho container itself is excluded from this list so it cannot be purged by accident.
+Lists containers running on the host that are not part of any Sencho-managed stack: containers started with `docker run`, or Compose projects outside your `COMPOSE_DIR`. The running Sencho container itself is excluded from this list so it cannot be purged by accident.
 
-Containers are grouped by their external Compose project. Each group has an **External Project** header with the project name and a container count. Each container row shows:
+Containers are grouped by their external Compose project. Each group has a header with the project name and a container count. Each container row shows:
 
 - A row checkbox for multi-selection.
 - The container name (or short ID if unnamed).
 - A state pill, for example `running`.
 - The image reference, in monospace below the name.
 
-The toolbar above the list provides a **Select all** checkbox and a destructive **Purge Selected (N)** button. The button stays disabled until at least one row is checked, and is admin-only.
+The toolbar above the list provides a **Select all** checkbox and a destructive **Purge selected (N)** button. The button stays disabled until at least one row is checked, and is admin-only.
 
-When no unmanaged containers are detected, the tab shows a success state with the message "No unmanaged containers" and the subline "All running containers are managed by Sencho."
+When no external containers are detected, the tab shows a success state with the message "No external containers" and the subline "All running containers are managed by Sencho."
 
 ## Troubleshooting
 
@@ -166,11 +153,14 @@ When no unmanaged containers are detected, the tab shows a success state with th
   <Accordion title="The delete button is greyed out on an image, network, or volume row">
     The row carries a **Sencho** pill, which means the resource is the running Sencho instance's own image, attached network, or named volume. Sencho refuses to delete the resources that keep itself running so an admin cannot take the dashboard offline by accident. Bind-mounted host paths are not shown in the Volumes tab and are not affected.
   </Accordion>
-  <Accordion title="I expected to see the Sencho container in the Unmanaged tab and it is not there">
-    The Unmanaged tab filters the running Sencho container out by design so it cannot be selected and purged. Other containers started outside Sencho (with `docker run` or by a Compose project outside `COMPOSE_DIR`) still appear normally. To inspect the Sencho container itself, use **Host Console** or `docker ps` on the host.
+  <Accordion title="I expected to see the Sencho container in the External tab and it is not there">
+    The External tab filters the running Sencho container out by design so it cannot be selected and purged. Other containers started outside Sencho (with `docker run` or by a Compose project outside `COMPOSE_DIR`) still appear normally. To inspect the Sencho container itself, use **Host Console** or `docker ps` on the host.
   </Accordion>
-  <Accordion title="The reclaim banner will not go away, or shows a small amount that will not prune">
-    The banner starts from what Docker reports as reclaimable on the node, subtracts images Sencho holds as rollback protection points, and counts only the resources a standard prune can actually remove. Held images are never part of that total and never appear in a prune plan, so the residue after a prune is normally the storage driver still reporting a few megabytes that the prune did not free. Held images are listed in the **Rollback** tab and are freed once the hold is released or superseded. To stop the banner drawing attention to a stubborn remainder, dismiss it with the **×** in its top-right corner; it stays hidden until the reclaimable total grows past that point. To turn it off for the node entirely, switch off **Show reclaimable-space banner** in **Settings → Monitoring → Docker & Storage**.
+  <Accordion title="The masthead still shows a small reclaimable amount after a prune">
+    The figure starts from the unused images, stopped containers, and dangling volumes the node reports, counts only the bytes an unused image does not share with another image, and leaves out images Sencho holds as rollback protection points. Held images are never part of that total and never appear in a prune plan, so the residue after a prune is normally a few megabytes that the storage driver did not free. Held images are listed in the **Rollback** tab and are freed once the hold is released or superseded.
+  </Accordion>
+  <Accordion title="The masthead says Disk usage unknown">
+    The node did not return its disk usage, so Sencho does not claim the node is tidy. Click **Retry disk usage** in the tab strip. If it keeps failing, check that the node is reachable and that its Docker daemon is running; the tables below load from a separate request and may still be available.
   </Accordion>
   <Accordion title="A prune plan lists several tags for one image">
     Unused images often carry more than one name, such as a version tag and `latest`. Sencho includes every reviewed tag in the prune confirmation. Confirming removes those tags one by one, and Docker deletes the image once no names remain.

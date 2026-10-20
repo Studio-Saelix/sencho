@@ -58,7 +58,7 @@ test.describe('Modal title wrapping contract', () => {
     });
     await loginAs(page);
     await page.getByRole('button', { name: /resources/i }).click();
-    await page.getByRole('button', { name: /Prune Unused Images/ }).click();
+    await page.getByRole('button', { name: 'Prune unused' }).click();
   });
 
   test('prune confirmation wraps on word boundaries with no orphaned letters', async ({ page }) => {

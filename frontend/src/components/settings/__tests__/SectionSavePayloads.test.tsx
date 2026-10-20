@@ -53,7 +53,6 @@ const FULL_SETTINGS: Record<string, string> = {
     global_crash: '1',
     docker_janitor_gb: '5',
     prune_on_update: '1',
-    reclaim_hero: '1',
     mesh_auto_recreate: '0',
     snapshot_documentation: '0',
     metrics_retention_hours: '24',
@@ -147,10 +146,10 @@ describe('split section save payloads', () => {
     it('DockerStorageSection patches only docker and storage keys', async () => {
         render(<DockerStorageSection />);
         const save = await screen.findByRole('button', { name: /save settings/i });
-        fireEvent.click(screen.getAllByRole('switch')[0]); // reclaim_hero
+        fireEvent.click(screen.getAllByRole('switch')[0]); // prune_on_update
         fireEvent.click(save);
         await waitFor(() => expect(mockedFetch.mock.calls.some(c => c[1]?.method === 'PATCH')).toBe(true));
-        expect(patchedKeys()).toEqual(['docker_janitor_gb', 'prune_on_update', 'reclaim_hero']);
+        expect(patchedKeys()).toEqual(['docker_janitor_gb', 'prune_on_update']);
     });
 
     it('FleetMeshSection patches both fleet keys when experimental discovery is on', async () => {
