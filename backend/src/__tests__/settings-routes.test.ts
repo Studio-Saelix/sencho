@@ -905,30 +905,18 @@ describe('Paid-only setting keys (audit_retention_days)', () => {
   });
 });
 
-describe('reclaim_hero setting', () => {
-  it('is allowlisted and seeds to "0" (banner off by default)', async () => {
+describe('retired reclaim_hero setting', () => {
+  it('is neither projected nor writable, even when an old database still holds the row', async () => {
+    DatabaseService.getInstance().updateGlobalSetting('reclaim_hero', '1');
     const res = await request(app).get('/api/settings').set('Cookie', adminCookie);
     expect(res.status).toBe(200);
-    expect(res.body.reclaim_hero).toBe('0');
-  });
+    expect(res.body).not.toHaveProperty('reclaim_hero');
 
-  it('accepts a well-formed write and rejects a non-enum value', async () => {
-    const ok = await request(app)
+    const write = await request(app)
       .patch('/api/settings')
       .set('Cookie', adminCookie)
       .send({ reclaim_hero: '1' });
-    expect(ok.status).toBe(200);
+    expect(write.status).toBe(400);
     expect(DatabaseService.getInstance().getGlobalSettings().reclaim_hero).toBe('1');
-
-    const bad = await request(app)
-      .patch('/api/settings')
-      .set('Cookie', adminCookie)
-      .send({ reclaim_hero: 'banana' });
-    expect(bad.status).toBe(400);
-    expect(bad.body.error).toBe('Validation failed');
-    expect(DatabaseService.getInstance().getGlobalSettings().reclaim_hero).toBe('1');
-
-    // Reset for any later reads of the shared test DB.
-    DatabaseService.getInstance().updateGlobalSetting('reclaim_hero', '0');
   });
 });
