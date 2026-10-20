@@ -5,6 +5,9 @@
  *  - M-1: a slow resource fetch for a previously-active node must not overwrite
  *    the newly-selected node's data (node-switch generation guard).
  *  - M-2: a failed prune must surface the server error, never a false success.
+ *  - Load behaviour: the tables render without waiting on the disk-usage
+ *    call, a refresh after an action keeps the rows on screen, and a failed
+ *    inventory load reads as an error with a Retry, never as "No images found."
  *  - Reclaim banner: "Review & prune" reclaims every advertised category and a
  *    partial failure reports a warning, never a false success; dismiss snoozes
  *    the banner until the reclaimable total grows past the dismissed snapshot.
@@ -57,7 +60,12 @@ vi.mock('../resources/ReclaimHero', () => ({
       </div>
     ),
 }));
-vi.mock('../resources/FootprintTreemap', () => ({ FootprintTreemap: () => null }));
+// Surfaces the external bytes it was given so a test can tell whose usage is shown.
+vi.mock('../resources/FootprintTreemap', () => ({
+  FootprintTreemap: ({ unmanagedBytes }: { unmanagedBytes: number }) => (
+    <div data-testid="footprint">{unmanagedBytes}</div>
+  ),
+}));
 vi.mock('../resources/ImageDetailsSheet', () => ({ ImageDetailsSheet: () => null }));
 vi.mock('../resources/VolumeBrowserSheet', () => ({ VolumeBrowserSheet: () => null }));
 vi.mock('../NetworkTopologyView', () => ({ default: () => null }));
@@ -204,6 +212,183 @@ describe('ResourcesView', () => {
     await Promise.resolve();
 
     expect(toast.error).not.toHaveBeenCalled();
+  });
+
+  it('renders the image table while the disk-usage request is still pending', async () => {
+    mockedFetch.mockImplementation((url: string) => {
+      if (url === '/system/docker-df') return new Promise<Response>(() => {});
+      if (url === '/system/resources') {
+        return Promise.resolve(jsonResponse({ images: [image('fast:latest')], volumes: [], networks: [] }));
+      }
+      return Promise.resolve(jsonResponse({}));
+    });
+
+    render(<ResourcesView />);
+
+    expect(await screen.findByText('fast:latest')).toBeInTheDocument();
+  });
+
+  it('keeps the rows on screen while a post-prune refresh is in flight', async () => {
+    let resourcesCalls = 0;
+    let releaseRefresh: ((r: Response) => void) | undefined;
+    mockedFetch.mockImplementation((url: string, opts?: RequestInit) => {
+      if (url === '/system/prune/plan' && opts?.method === 'POST') {
+        return Promise.resolve(jsonResponse(samplePrunePlan()));
+      }
+      if (url === '/system/prune/system' && opts?.method === 'POST') {
+        return Promise.resolve(jsonResponse({ success: true, reclaimedBytes: 1000, outcomes: [] }));
+      }
+      if (url === '/system/resources') {
+        resourcesCalls += 1;
+        if (resourcesCalls === 1) {
+          return Promise.resolve(jsonResponse({ images: [image('keep:me')], volumes: [], networks: [] }));
+        }
+        return new Promise<Response>((resolve) => { releaseRefresh = resolve; });
+      }
+      return Promise.resolve(jsonResponse({}));
+    });
+
+    const user = userEvent.setup();
+    render(<ResourcesView />);
+    expect(await screen.findByText('keep:me')).toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: /Prune Unused Images/ }));
+    await user.click(await screen.findByRole('button', { name: /Prune/ }));
+    await waitFor(() => expect(releaseRefresh).toBeDefined());
+
+    // The refresh is still pending: the row stays and no skeleton replaces it.
+    expect(screen.getByText('keep:me')).toBeInTheDocument();
+
+    releaseRefresh!(jsonResponse({ images: [], volumes: [], networks: [] }));
+    await waitFor(() => expect(screen.queryByText('keep:me')).not.toBeInTheDocument());
+  });
+
+  it('shows an error with Retry when the inventory fails to load, not an empty table', async () => {
+    let attempt = 0;
+    mockedFetch.mockImplementation((url: string) => {
+      if (url === '/system/resources') {
+        attempt += 1;
+        return Promise.resolve(attempt === 1
+          ? jsonResponse({ error: 'boom' }, { ok: false, status: 500 })
+          : jsonResponse({ images: [image('back:again')], volumes: [], networks: [] }));
+      }
+      return Promise.resolve(jsonResponse({}));
+    });
+
+    const user = userEvent.setup();
+    render(<ResourcesView />);
+
+    expect(await screen.findByText('Could not load images.')).toBeInTheDocument();
+    expect(screen.queryByText('No images found.')).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: 'Retry' }));
+    expect(await screen.findByText('back:again')).toBeInTheDocument();
+  });
+
+  it('shows a Retry in the footprint card when disk usage fails, and reloads only usage', async () => {
+    let dfCalls = 0;
+    mockedFetch.mockImplementation((url: string) => {
+      if (url === '/system/docker-df') {
+        dfCalls += 1;
+        return Promise.resolve(dfCalls === 1
+          ? jsonResponse({ error: 'slow' }, { ok: false, status: 500 })
+          : jsonResponse(reclaimableUsage(0, 0)));
+      }
+      if (url === '/system/resources') {
+        return Promise.resolve(jsonResponse({ images: [], volumes: [], networks: [] }));
+      }
+      return Promise.resolve(jsonResponse({}));
+    });
+
+    const user = userEvent.setup();
+    render(<ResourcesView />);
+
+    expect(await screen.findByText('Could not load disk usage.')).toBeInTheDocument();
+    const resourcesCallsBefore = mockedFetch.mock.calls.filter(([u]) => u === '/system/resources').length;
+
+    await user.click(screen.getByRole('button', { name: 'Retry' }));
+    await waitFor(() => expect(screen.queryByText('Could not load disk usage.')).not.toBeInTheDocument());
+    expect(mockedFetch.mock.calls.filter(([u]) => u === '/system/resources')).toHaveLength(resourcesCallsBefore);
+  });
+
+  it('keeps the rows and warns when a background refresh fails, without a Retry row', async () => {
+    let resourcesCalls = 0;
+    mockedFetch.mockImplementation((url: string, opts?: RequestInit) => {
+      if (url === '/system/prune/plan' && opts?.method === 'POST') {
+        return Promise.resolve(jsonResponse(samplePrunePlan()));
+      }
+      if (url === '/system/prune/system' && opts?.method === 'POST') {
+        return Promise.resolve(jsonResponse({ success: true, reclaimedBytes: 1000, outcomes: [] }));
+      }
+      if (url === '/system/resources') {
+        resourcesCalls += 1;
+        return Promise.resolve(resourcesCalls === 1
+          ? jsonResponse({ images: [image('still:here')], volumes: [], networks: [] })
+          : jsonResponse({ error: 'boom' }, { ok: false, status: 500 }));
+      }
+      return Promise.resolve(jsonResponse({}));
+    });
+
+    const user = userEvent.setup();
+    render(<ResourcesView />);
+    expect(await screen.findByText('still:here')).toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: /Prune Unused Images/ }));
+    await user.click(await screen.findByRole('button', { name: /Prune/ }));
+
+    await waitFor(() => expect(toast.error).toHaveBeenCalledWith('Failed to refresh resources'));
+    expect(screen.getByText('still:here')).toBeInTheDocument();
+    expect(screen.queryByText('Could not load images.')).not.toBeInTheDocument();
+  });
+
+  it('drops the previous node usage when a node switch loads, and ignores its late usage response', async () => {
+    const dfResolvers: Array<(r: Response) => void> = [];
+    mockedFetch.mockImplementation((url: string) => {
+      if (url === '/system/docker-df') {
+        return new Promise<Response>((resolve) => dfResolvers.push(resolve));
+      }
+      if (url === '/system/resources') {
+        return Promise.resolve(jsonResponse({ images: [], volumes: [], networks: [] }));
+      }
+      return Promise.resolve(jsonResponse({}));
+    });
+
+    const { rerender } = render(<ResourcesView />);
+    await waitFor(() => expect(dfResolvers).toHaveLength(1));
+
+    nodesState.activeNode = { id: 2 };
+    rerender(<ResourcesView />);
+    await waitFor(() => expect(dfResolvers).toHaveLength(2));
+
+    // Node 1's slow answer arrives after the switch and must not render.
+    dfResolvers[0](jsonResponse({ ...reclaimableUsage(0, 0), unmanagedImageBytes: 777_000_000 }));
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(screen.queryByTestId('footprint')).not.toBeInTheDocument();
+
+    dfResolvers[1](jsonResponse({ ...reclaimableUsage(0, 0), unmanagedImageBytes: 5_000_000 }));
+    expect(await screen.findByTestId('footprint')).toHaveTextContent('5000000');
+  });
+
+  it('shows the disk-usage error with Retry when the usage request throws', async () => {
+    let dfCalls = 0;
+    mockedFetch.mockImplementation((url: string) => {
+      if (url === '/system/docker-df') {
+        dfCalls += 1;
+        return dfCalls === 1 ? Promise.reject(new Error('network down')) : Promise.resolve(jsonResponse(reclaimableUsage(0, 0)));
+      }
+      if (url === '/system/resources') {
+        return Promise.resolve(jsonResponse({ images: [], volumes: [], networks: [] }));
+      }
+      return Promise.resolve(jsonResponse({}));
+    });
+
+    const user = userEvent.setup();
+    render(<ResourcesView />);
+    expect(await screen.findByText('Could not load disk usage.')).toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: 'Retry' }));
+    await waitFor(() => expect(screen.queryByText('Could not load disk usage.')).not.toBeInTheDocument());
   });
 
   it('fetches a prune plan before enabling confirm, then sends the fingerprint', async () => {
