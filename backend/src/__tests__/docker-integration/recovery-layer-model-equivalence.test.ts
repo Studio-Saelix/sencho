@@ -1103,6 +1103,183 @@ describe.skipIf(!hasDocker)('recovery loads the model the capture-time run loade
     expect(recovery.services.web.command).toEqual(['echo', 'captured-root', 'captured-sub', 'fromroot']);
   });
 
+  it('refuses a chain whose nested project env link leaves the compose root', async () => {
+    const stack = 'layeroutsideprojectenv';
+    const stackDir = path.join(composeDir, stack);
+    fs.mkdirSync(path.join(stackDir, 'sub'), { recursive: true });
+    // The root file extends the selected service, so the generation holds both
+    // YAML files; the live run itself loads only the selected project.
+    fs.writeFileSync(
+      path.join(stackDir, 'compose.yaml'),
+      'services:\n  web:\n    extends:\n      file: sub/compose.yaml\n      service: web\n',
+      'utf8',
+    );
+    fs.writeFileSync(
+      path.join(stackDir, 'sub', 'compose.yaml'),
+      'services:\n  web:\n    image: busybox:1.36.1\n    command: ["echo", "${VALUE:-fallback}"]\n',
+      'utf8',
+    );
+    // The project env file is a link that leaves the compose root, so no
+    // recovery `--env-file` may name its target.
+    const outsideEnv = path.join(composeDir, '..', 'layeroutsideprojectenv.env');
+    fs.writeFileSync(outsideEnv, 'VALUE=from-project\n', 'utf8');
+    fs.symlinkSync(outsideEnv, path.join(stackDir, 'sub', '.env'));
+    fs.writeFileSync(
+      path.join(stackDir, '.env'),
+      'COMPOSE_FILE=sub/compose.yaml\nVALUE=from-root\n',
+      'utf8',
+    );
+    // The layer a rollback appends last. It only adds a label, so it cannot
+    // change the value under comparison.
+    const recoveryLayer = path.join(stackDir, '.sencho-recovery-test.yml');
+    fs.writeFileSync(
+      recoveryLayer,
+      'services:\n  web:\n    labels:\n      sencho.recovery-test: "1"\n',
+      'utf8',
+    );
+
+    // The live run applies the project file first and the stack root file
+    // second, so the held root value wins a key both files define.
+    const live = renderModel([], stackDir, stack) as {
+      services: Record<string, { command?: string[] }>;
+    };
+    expect(live.services.web.command).toEqual(['echo', 'from-root']);
+
+    // The invocation an accepted generation without a recorded env list
+    // produces: the pinned layer set and no replay. It renders the nested
+    // value, which is what the live run overrode, so accepting it would have
+    // restored a different runtime configuration with no input changing.
+    const withoutReplay = renderModel(
+      ['-f', 'sub/compose.yaml', '-f', recoveryLayer],
+      stackDir,
+      stack,
+    ) as { services: Record<string, { command?: string[] }> };
+    expect(withoutReplay.services.web.command).toEqual(['echo', 'from-project']);
+
+    const { resolveRollbackInventory } = await import('../../services/rollbackInventory');
+    const { resolveComposeProjectContext } = await import('../../services/composeProjectContext');
+
+    const inventory = await resolveRollbackInventory(nodeId, stack);
+    // Replaying only the stack root file would drop a source the live run
+    // read, and leaving the list unrecorded hands the shared key to the
+    // project file, which is the value the live run lost. No accepted
+    // invocation renders this project the same way, so the capture refuses.
+    expect(inventory.coverageRefusal).toContain('sub/.env');
+    expect(inventory.coverageRefusal).toContain('leaves the compose directory');
+    expect(inventory.uncapturedInputs).toEqual([]);
+    expect(inventory.invocation.interpolationEnvFiles).toBeUndefined();
+
+    // Deploy and update capture through this context first, before a backup,
+    // an image tag, or any file is written.
+    const context = await resolveComposeProjectContext(nodeId, stack);
+    await expect(context.backupFromContext('update')).rejects.toMatchObject({
+      code: 'ROLLBACK_COVERAGE_UNAVAILABLE',
+      message: expect.stringContaining('sub/.env'),
+    });
+    expect(fs.readFileSync(path.join(stackDir, '.env'), 'utf8')).toBe(
+      'COMPOSE_FILE=sub/compose.yaml\nVALUE=from-root\n',
+    );
+  });
+
+  it('replays a chain project env link that stays inside the compose root', async () => {
+    const stack = 'layersharedprojectenv';
+    const stackDir = path.join(composeDir, stack);
+    fs.mkdirSync(path.join(stackDir, 'sub'), { recursive: true });
+    // The root file extends the selected service, so the generation holds both
+    // YAML files; the live run itself loads only the selected project.
+    fs.writeFileSync(
+      path.join(stackDir, 'compose.yaml'),
+      'services:\n  web:\n    extends:\n      file: sub/compose.yaml\n      service: web\n',
+      'utf8',
+    );
+    fs.writeFileSync(
+      path.join(stackDir, 'sub', 'compose.yaml'),
+      'services:\n  web:\n    image: busybox:1.36.1\n    command: ["echo", "${VALUE:-fallback}", "${SHARED_ONLY:-nosub}"]\n',
+      'utf8',
+    );
+    // The project env file is a link that leaves the stack directory but stays
+    // inside the compose root, so a recovery may name the link and Compose
+    // opens the shared target through it.
+    const sharedEnv = path.join(composeDir, 'layersharedprojectenv.env');
+    fs.writeFileSync(sharedEnv, 'VALUE=from-shared\nSHARED_ONLY=shared-sub\n', 'utf8');
+    fs.symlinkSync(sharedEnv, path.join(stackDir, 'sub', '.env'));
+    fs.writeFileSync(
+      path.join(stackDir, '.env'),
+      'COMPOSE_FILE=sub/compose.yaml\nVALUE=from-root\n',
+      'utf8',
+    );
+    // The layer a rollback appends last. It only adds a label, so it cannot
+    // change the value under comparison.
+    const recoveryLayer = path.join(stackDir, '.sencho-recovery-test.yml');
+    fs.writeFileSync(
+      recoveryLayer,
+      'services:\n  web:\n    labels:\n      sencho.recovery-test: "1"\n',
+      'utf8',
+    );
+
+    // The live run reads the shared file through the link, then the stack root
+    // file, which wins the key both define.
+    const live = renderModel([], stackDir, stack) as {
+      services: Record<string, { command?: string[] }>;
+    };
+    expect(live.services.web.command).toEqual(['echo', 'from-root', 'shared-sub']);
+
+    const { resolveRollbackInventory } = await import('../../services/rollbackInventory');
+    const { RollbackGenerationStore } = await import('../../services/RollbackGenerationStore');
+    const { storedRestoreCoverage } = await import('../../services/updateGuard/readiness');
+    const { resolveComposeProjectContextForGeneration } = await import('../../services/composeProjectContext');
+    const { ComposeService } = await import('../../services/ComposeService');
+
+    const inventory = await resolveRollbackInventory(nodeId, stack);
+    // The target inside the compose root can be named, so the ordered replay
+    // keeps both sources. The link itself is not captured as a file, which is
+    // what keeps the generation partial rather than refused.
+    expect(inventory.coverageRefusal).toBeNull();
+    expect(inventory.invocation.composeLayers).toEqual(['sub/compose.yaml']);
+    expect(inventory.invocation.interpolationEnvFiles).toEqual(['sub/.env', '.env']);
+    expect(inventory.uncapturedRelativePaths).toContain('sub/.env');
+
+    const generationId = randomUUID();
+    await RollbackGenerationStore.captureGeneration({ nodeId, stackName: stack, generationId, inventory });
+    const stored = await RollbackGenerationStore.readVerifiedGeneration(nodeId, stack, generationId);
+    expect(storedRestoreCoverage(stored)).toBe('omits_inputs');
+    expect(stored.invocation.interpolationEnvFiles).toEqual(['sub/.env', '.env']);
+
+    // The stack root env file changes on disk; the restore puts the captured
+    // bytes back, while the shared target is read live through the link.
+    fs.writeFileSync(
+      path.join(stackDir, '.env'),
+      'COMPOSE_FILE=sub/compose.yaml\nVALUE=changed-root\n',
+      'utf8',
+    );
+    const ctx = await resolveComposeProjectContextForGeneration(nodeId, stack, generationId);
+    await ctx.restoreFromContext();
+    expect(fs.readFileSync(path.join(stackDir, '.env'), 'utf8')).toBe(
+      'COMPOSE_FILE=sub/compose.yaml\nVALUE=from-root\n',
+    );
+
+    const args = await ComposeService.getInstance(nodeId).buildComposeArgsWithRecoveryOverride(
+      stack,
+      ['config'],
+      recoveryLayer,
+      stored.invocation,
+    );
+    const prefix = args.slice(1, args.indexOf('config'));
+    // The recorded order is the live run's: the shared project file first, the
+    // stack root file last, so a key both define keeps the root value.
+    expect(prefix).toEqual([
+      '-f', 'sub/compose.yaml',
+      '--env-file', path.join(stackDir, 'sub', '.env'),
+      '--env-file', path.join(stackDir, '.env'),
+      '-f', recoveryLayer,
+    ]);
+
+    const recovery = renderModel(prefix, stackDir, stack) as {
+      services: Record<string, { command?: string[] }>;
+    };
+    expect(recovery.services.web.command).toEqual(['echo', 'from-root', 'shared-sub']);
+  });
+
   it('keeps a stack .env disable of the nested project .env when the chain is pinned', async () => {
     const stack = 'layerdisabledprojectenv';
     const stackDir = path.join(composeDir, stack);

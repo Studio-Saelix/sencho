@@ -386,6 +386,24 @@ export function recoveryInvocationEnvFiles(
 }
 
 /**
+ * How a recovery invocation reproduces the interpolation env files the live run
+ * read, or why it cannot.
+ *
+ * `recorded` lists every source, in read order, for the ordered `--env-file`
+ * replay. `discovery` leaves the choice to Compose, which then reads the
+ * selected project directory's `.env` in place: the one case where leaving a
+ * source out of a recorded list is exact, because that source is the file
+ * discovery loads and nothing has to be replayed beside it. `refused` is a
+ * source the invocation cannot name while another source has to be replayed:
+ * replaying the rest would drop a file the live run read or invert the
+ * precedence between two files, and neither is a faithful recovery.
+ */
+type CapturedInterpolationSources =
+  | { kind: 'recorded'; files: string[] }
+  | { kind: 'discovery' }
+  | { kind: 'refused'; reason: string };
+
+/**
  * The env files a recovery run must name so a pinned COMPOSE_FILE selection
  * renders with the interpolation values the live run rendered with.
  *
@@ -395,8 +413,8 @@ export function recoveryInvocationEnvFiles(
  * define. An explicit `-f` list, which is what recovery pins, replaces that
  * variable and drops the working-directory file, so a value only the stack
  * root `.env` holds would fall back or flip after a rollback that reports
- * complete coverage. The flags below reproduce the live order: Compose
- * applies repeated `--env-file` arguments in sequence, the last one winning.
+ * complete coverage. The replay reproduces the live order: Compose applies
+ * repeated `--env-file` arguments in sequence, the last one winning.
  *
  * `relativePaths` is the set the live run read, in that order: the project
  * directory's own `.env` only when Compose loaded it, then the stack root
@@ -404,26 +422,42 @@ export function recoveryInvocationEnvFiles(
  * read no interpolation env file, and recovery has to pin that absence.
  *
  * Only files a recovery resolver can name are listed: a regular file, or a
- * link whose target stays inside the compose root. An env file that links
- * out of the compose root is left to the omission its classifier already
- * records, because naming it would make recovery refuse the generation
- * before Compose could read the file. `undefined` means one of those files
- * cannot be named, so the invocation is recorded without a list. A file this
- * reader cannot inspect throws, and the caller refuses the capture: a list
- * built around an unreadable file could omit one the live run loaded, which is
- * the silent divergence this field exists to prevent.
+ * link whose target stays inside the compose root. An env file that links out
+ * of the compose root has no name recovery may hand to `--env-file`, because
+ * the containment check refuses a target outside the compose root before
+ * Compose runs. Compose's own discovery still reads that file in place, so it
+ * is exact only where it is the project env file and nothing else has to be
+ * replayed; the file list the run read then stays unrecorded. Every other
+ * shape refuses the capture: an ordered replay that names the remaining files
+ * would drop a source the live run read, or move the winning file out of last
+ * place, and the generation would replay different interpolation values
+ * without a single input changing. A file this reader cannot inspect throws,
+ * and the caller refuses the capture: a list built around an unreadable file
+ * could omit one the live run loaded, which is the silent divergence this
+ * field exists to prevent.
  */
 async function capturedInterpolationEnvFiles(
   stackRoot: string,
   relativePaths: readonly string[],
-): Promise<string[] | undefined> {
+  projectEnvRelativePath: string | null,
+): Promise<CapturedInterpolationSources> {
   const files: string[] = [];
   for (const relativePath of relativePaths) {
     const state = await classifyAuthoredFile(stackRoot, relativePath);
-    if (state === 'outside') return undefined;
+    if (state === 'outside') {
+      // Compose loads this file in place, but only when the invocation names
+      // no env file at all and the file is the one discovery picks.
+      if (relativePaths.length === 1 && projectEnvRelativePath === relativePath) {
+        return { kind: 'discovery' };
+      }
+      return {
+        kind: 'refused',
+        reason: `The interpolation env file ${relativePath} is a link whose target leaves the compose directory, so a recovery cannot replay it beside the other env files this run read. A regular file at that path is captured and replayed.`,
+      };
+    }
     if (state === 'file' || state === 'shared') files.push(relativePath);
   }
-  return files;
+  return { kind: 'recorded', files };
 }
 
 /**
@@ -1802,7 +1836,20 @@ const capturable = async (
       const readByRun: string[] = [];
       if (projectEnv?.kind === 'relative') readByRun.push(projectEnv.relativePath);
       if (stackEnvApplied) readByRun.push(DOT_ENV);
-      interpolationEnvFiles = await capturedInterpolationEnvFiles(stackRoot, readByRun);
+      const captured = await capturedInterpolationEnvFiles(
+        stackRoot,
+        readByRun,
+        projectEnv?.kind === 'relative' ? projectEnv.relativePath : null,
+      );
+      if (captured.kind === 'recorded') {
+        interpolationEnvFiles = captured.files;
+      } else if (captured.kind === 'refused') {
+        // An accepted generation must replay the same interpolation
+        // environment its live run rendered. Leaving the list unrecorded here
+        // is what let a nested project env file win a key the held stack root
+        // `.env` had won, so the combination refuses the capture instead.
+        coverageNotes.push(captured.reason);
+      }
     } catch (e) {
       // Same rule the capturable pass applies to a file it cannot inspect:
       // refuse rather than reconstruct an invocation around an unreadable

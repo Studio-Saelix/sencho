@@ -1677,6 +1677,73 @@ describe('resolveRollbackInventory: the layer set recovery pins', () => {
     }
   });
 
+  it('refuses a chain project env link outside the compose directory when the stack .env was read', async () => {
+    await fsPromises.mkdir(path.join(composeDir, STACK, 'sub'), { recursive: true });
+    await write('compose.yaml', 'services:\n  web:\n    image: nginx\n');
+    await write('sub/compose.yaml', 'services:\n  web:\n    image: nginx\n');
+    // The stack .env selects the chain and wins a key both files define, so a
+    // recovery has to replay it after the project env file.
+    await write('.env', 'COMPOSE_FILE=sub/compose.yaml\nVALUE=from-root\n');
+    const outsideDir = await fsPromises.mkdtemp(path.join(os.tmpdir(), 'sencho-env-out-'));
+    try {
+      await fsPromises.writeFile(path.join(outsideDir, 'sub.env'), 'VALUE=from-project\n', 'utf8');
+      await fsPromises.symlink(path.join(outsideDir, 'sub.env'), path.join(composeDir, STACK, 'sub', '.env'));
+      mockComposeFileEnvVarSelection.mockResolvedValue({
+        kind: 'value',
+        value: 'sub/compose.yaml',
+        pathSeparator: ':',
+        composeEnvFiles: [],
+        loadedEnvFiles: [path.join(composeDir, STACK, '.env')],
+        stackEnvRead: true,
+        projectEnvDisabled: false,
+      });
+
+      const inventory = await resolveRollbackInventory(1, STACK);
+
+      // Recovery cannot name the linked target, and replaying only the stack
+      // .env would drop a source the live run read while leaving the list
+      // unrecorded hands the winning key to the project file. Neither is the
+      // captured invocation, so the capture refuses before any mutation.
+      expect(inventory.coverageRefusal).toContain('sub/.env');
+      expect(inventory.coverageRefusal).toContain('leaves the compose directory');
+      expect(inventory.invocation.interpolationEnvFiles).toBeUndefined();
+      // A refusal writes nothing, so it carries no partial-capture lists.
+      expect(inventory.uncapturedInputs).toEqual([]);
+    } finally {
+      await fsPromises.rm(outsideDir, { recursive: true, force: true });
+    }
+  });
+
+  it('replays a chain project env link that stays inside the compose directory', async () => {
+    await fsPromises.mkdir(path.join(composeDir, STACK, 'sub'), { recursive: true });
+    await write('compose.yaml', 'services:\n  web:\n    image: nginx\n');
+    await write('sub/compose.yaml', 'services:\n  web:\n    image: nginx\n');
+    await write('.env', 'COMPOSE_FILE=sub/compose.yaml\nVALUE=from-root\n');
+    await fsPromises.writeFile(path.join(composeDir, 'shared.env'), 'VALUE=from-shared\n', 'utf8');
+    await fsPromises.symlink(
+      path.join(composeDir, 'shared.env'),
+      path.join(composeDir, STACK, 'sub', '.env'),
+    );
+    mockComposeFileEnvVarSelection.mockResolvedValue({
+      kind: 'value',
+      value: 'sub/compose.yaml',
+      pathSeparator: ':',
+      composeEnvFiles: [],
+      loadedEnvFiles: [path.join(composeDir, STACK, '.env')],
+      stackEnvRead: true,
+      projectEnvDisabled: false,
+    });
+
+    const inventory = await resolveRollbackInventory(1, STACK);
+
+    // A shared env file is read live by a recovery resolver, so the ordered
+    // replay names it and the root .env that wins after it. The file itself
+    // stays an omission, which is what keeps the generation partial.
+    expect(inventory.coverageRefusal).toBeNull();
+    expect(inventory.invocation.interpolationEnvFiles).toEqual(['sub/.env', '.env']);
+    expect(inventory.uncapturedRelativePaths).toContain('sub/.env');
+  });
+
   it('records an empty interpolation env list when no default env file exists at capture', async () => {
     await write('compose.yaml', 'services:\n  web:\n    image: nginx\n');
 
