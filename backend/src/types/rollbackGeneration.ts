@@ -65,15 +65,25 @@ export interface RollbackInvocationRecord {
   composeLayers?: string[];
   /**
    * Stack-relative env files, in the order the captured run applied them, that
-   * a recovery invocation must name with `--env-file` when it pins
-   * `composeLayers`. Translating a `COMPOSE_FILE` selection into an explicit
-   * `-f` list drops the working directory's env file out of the interpolation
+   * a recovery invocation names with `--env-file` in place of Compose's own
+   * discovery of the default `.env`. When a `COMPOSE_FILE` selection moved the
+   * project directory off the stack root, translating it into an explicit `-f`
+   * list drops the working directory's env file out of the interpolation
    * environment; these flags put it back with the original precedence, because
    * Compose applies repeated `--env-file` arguments in order with the last one
-   * winning. Recorded only when the selection moved the project directory off
-   * the stack root and every named file stays inside the compose root, so a
-   * recovery resolver can launch with them. Omitted on generations captured
-   * before it was recorded: those keep the invocation they were captured with.
+   * winning. Every named file stays inside the compose root, so a recovery
+   * resolver can launch with them.
+   *
+   * An empty list is a recorded fact, not an absence: the capture-time run
+   * left the default `.env` to Compose and none existed. Recovery then names
+   * an empty env input instead of leaving the choice to discovery, so an
+   * `.env` created after capture, which a restore may have to leave in place,
+   * never becomes an interpolation input of the recovered project.
+   *
+   * Omitted (`undefined`) when the environment or the captured flags select
+   * the env files, when a default env file exists outside a `COMPOSE_FILE`
+   * chain or cannot be named, and on generations captured before it was
+   * recorded: those keep the invocation they were captured with.
    */
   interpolationEnvFiles?: string[];
   /** Stack-relative mesh override path when Mesh was part of the capture invocation. */

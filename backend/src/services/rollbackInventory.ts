@@ -276,7 +276,8 @@ export interface RecoveryEnvInput {
  * names a file reads that file and nothing the current settings select. A
  * COMPOSE_FILE chain pin is replayed as the recorded `--env-file` list, which is
  * why the recorded list ranks with the captured flags. Only an invocation that
- * names no file falls back to the process list and the project `.env`.
+ * names no file falls back to the process list and the project `.env`. An
+ * empty recorded list counts as naming an empty input, so it reads nothing.
  *
  * `stackRoot` is the working directory the recovery spawns in: a relative
  * COMPOSE_ENV_FILES entry resolves against it, and an unnamed project `.env` is
@@ -293,8 +294,10 @@ export function recoveryInvocationEnvFiles(
       fromProcessEnv: false,
     }));
   }
-  const recorded = invocation.interpolationEnvFiles ?? [];
-  if (recorded.length > 0) {
+  const recorded = invocation.interpolationEnvFiles;
+  if (recorded !== undefined) {
+    // An empty record is replayed as an empty env input, which also replaces a
+    // COMPOSE_ENV_FILES list and the project `.env`, so nothing is read.
     return recorded.map((rel) => ({
       absolutePath: path.resolve(stackRoot, rel),
       fromProcessEnv: false,
@@ -343,9 +346,10 @@ export function recoveryInvocationEnvFiles(
  * link whose target stays inside the compose root. An env file that links
  * out of the compose root is left to the omission its classifier already
  * records, because naming it would make recovery refuse the generation
- * before Compose could read the file. `undefined` means no file needs
- * naming, or none can be, and the recovery keeps the invocation recorded
- * before this existed. A file this reader cannot inspect throws, and the
+ * before Compose could read the file. `undefined` means this function names
+ * no file: either every default env file is absent, which the caller records
+ * as an empty list (see defaultEnvFilesAbsent), or one cannot be named, which
+ * leaves the invocation recorded without a list. A file this reader cannot inspect throws, and the
  * caller refuses the capture: a list built around an unreadable file could
  * omit one the live run loaded, which is the silent divergence this field
  * exists to prevent.
@@ -361,6 +365,43 @@ async function capturedInterpolationEnvFiles(
   if (projectEnvState === 'file' || projectEnvState === 'shared') files.push(projectEnvRel);
   if (rootEnvState === 'file' || rootEnvState === 'shared') files.push(DOT_ENV);
   return files.length > 0 ? files : undefined;
+}
+
+/**
+ * True when nothing exists at any default env path the captured invocation
+ * leaves to Compose: the stack root `.env`, and the selected project
+ * directory's `.env` when the layers moved the project off the root. A
+ * pinned `COMPOSE_FILE` chain keeps the working directory's `.env` in the
+ * interpolation environment beside the project directory's, so both count
+ * there; an explicit `-f` or `--project-directory` moves the project and
+ * Compose reads only the project directory's file. Recovery
+ * cannot pin a file that does not exist, so the absence is recorded and
+ * replayed instead. Anything present (a file, a link, a directory, a special
+ * file) is not an absence: the inventory entry, the classifier's omission
+ * notes, or the restore-time type check already accounts for it.
+ */
+async function defaultEnvFilesAbsent(
+  stackRoot: string,
+  projectEnvRel: string | null,
+  chainPinned: boolean,
+): Promise<boolean> {
+  const candidates = projectEnvRel === null
+    ? [DOT_ENV]
+    : chainPinned ? [projectEnvRel, DOT_ENV] : [projectEnvRel];
+  const baseResolved = path.resolve(stackRoot);
+  for (const rel of candidates) {
+    // Inline barrier at the lstat sink.
+    const abs = path.resolve(baseResolved, rel);
+    if (!abs.startsWith(baseResolved + path.sep)) return false;
+    try {
+      await fsPromises.lstat(abs);
+      return false;
+    } catch (e) {
+      const code = (e as NodeJS.ErrnoException).code;
+      if (code !== 'ENOENT' && code !== 'ENOTDIR') throw e;
+    }
+  }
+  return true;
 }
 
 async function pathExistsAsFile(stackRoot: string, relativePath: string): Promise<boolean> {
@@ -1638,6 +1679,25 @@ const capturable = async (
           );
         }
       }
+    }
+  }
+  // The chain pinned no env files, nothing in the captured flags or the
+  // process environment selects any, and none exists for Compose to discover.
+  // A recovery that left the choice to discovery would read an `.env` created
+  // after capture, which a restore leaves in place whenever it cannot prove the
+  // file is disposable, so the absence is part of the invocation.
+  if (
+    interpolationEnvFiles === undefined
+    && projectEnv?.kind !== 'outside'
+    && !defaultProjectEnvSuppressed(composeArgsPrefix)
+  ) {
+    try {
+      const projectEnvRel = projectEnv?.kind === 'relative' ? projectEnv.relativePath : null;
+      if (await defaultEnvFilesAbsent(stackRoot, projectEnvRel, chainPinned)) interpolationEnvFiles = [];
+    } catch (e) {
+      coverageNotes.push(
+        `Could not inspect the interpolation env files for rollback capture: ${(e as Error).message}`,
+      );
     }
   }
   if (caseCollisions.length > 0 && !coverageNotes.includes(caseCollisions[0])) {

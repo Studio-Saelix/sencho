@@ -1185,6 +1185,147 @@ describe.skipIf(!hasDocker)('recovery loads the model the capture-time run loade
     }
   });
 
+  /**
+   * A stack captured with no default env file, a dynamic data bind (so a
+   * restore deletes nothing unrecorded) and an interpolated command. An `.env`
+   * and application data appear after capture. The restore must keep both,
+   * and the recovered project must still render the captured command.
+   */
+  async function provesAbsentEnvIsNotRead(options: {
+    stack: string;
+    composePath: string;
+    lateEnvFiles: string[];
+    /** Declares the selected layer through a root file, the way a chain's layers are held. */
+    declaringRoot?: string;
+  }): Promise<void> {
+    const { stack, composePath, lateEnvFiles, declaringRoot } = options;
+    const stackDir = path.join(composeDir, stack);
+    const composeFile = path.join(stackDir, composePath);
+    const projectDir = path.dirname(composeFile);
+    fs.mkdirSync(projectDir, { recursive: true });
+    const original = [
+      'services:',
+      '  web:',
+      '    image: busybox:1.36.1',
+      '    command: ["echo","${CMD:-captured}"]',
+      '    volumes:',
+      '      - type: bind',
+      '        source: ./data/${DIR:-store}',
+      '        target: /data',
+      '',
+    ].join('\n');
+    fs.writeFileSync(composeFile, original, 'utf8');
+    if (declaringRoot) fs.writeFileSync(path.join(stackDir, 'compose.yaml'), declaringRoot, 'utf8');
+
+    const { resolveRollbackInventory } = await import('../../services/rollbackInventory');
+    const { RollbackGenerationStore } = await import('../../services/RollbackGenerationStore');
+    const { storedRestoreCoverage } = await import('../../services/updateGuard/readiness');
+    const { resolveComposeProjectContextForGeneration } = await import('../../services/composeProjectContext');
+    const { ComposeService } = await import('../../services/ComposeService');
+
+    const inventory = await resolveRollbackInventory(nodeId, stack);
+    expect(inventory.coverageRefusal).toBeNull();
+    // The generation claims complete coverage, so its invocation has to carry
+    // the fact that no default env file existed.
+    expect(inventory.uncapturedInputs).toEqual([]);
+    expect(inventory.dynamicApplicationDataSources).toEqual(['./data/${DIR:-store}']);
+    expect(inventory.invocation.interpolationEnvFiles).toEqual([]);
+
+    const live = renderModel([], stackDir, stack) as { services: Record<string, { command?: string[] }> };
+    expect(live.services.web.command).toEqual(['echo', 'captured']);
+
+    const generationId = randomUUID();
+    await RollbackGenerationStore.captureGeneration({ nodeId, stackName: stack, generationId, inventory });
+
+    for (const rel of lateEnvFiles) {
+      fs.writeFileSync(path.join(stackDir, rel), 'CMD=post-capture\n', 'utf8');
+    }
+    const marker = path.join(projectDir, 'data', 'store', 'marker');
+    fs.mkdirSync(path.dirname(marker), { recursive: true });
+    fs.writeFileSync(marker, 'keep application data', 'utf8');
+    fs.writeFileSync(composeFile, original.replace('busybox:1.36.1', 'busybox:1.36.2'), 'utf8');
+
+    const ctx = await resolveComposeProjectContextForGeneration(nodeId, stack, generationId);
+    await ctx.restoreFromContext();
+
+    // The restore returned the captured compose file and deleted nothing it
+    // could not prove disposable.
+    expect(fs.readFileSync(composeFile, 'utf8')).toBe(original);
+    expect(fs.readFileSync(marker, 'utf8')).toBe('keep application data');
+    for (const rel of lateEnvFiles) {
+      expect(fs.readFileSync(path.join(stackDir, rel), 'utf8')).toBe('CMD=post-capture\n');
+    }
+
+    const stored = await RollbackGenerationStore.readVerifiedGeneration(nodeId, stack, generationId);
+    expect(storedRestoreCoverage(stored)).toBe('complete');
+    const args = await ComposeService.getInstance(nodeId).buildComposeArgsWithRecoveryOverride(
+      stack,
+      ['config'],
+      null,
+      stored.invocation,
+    );
+    const prefix = args.slice(1, args.indexOf('config'));
+    expect(prefix).toEqual(['-f', composePath, '--env-file', '/dev/null']);
+
+    const recovered = renderModel(prefix, stackDir, stack) as {
+      services: Record<string, { command?: string[] }>;
+    };
+    expect(recovered.services.web.command).toEqual(['echo', 'captured']);
+
+    // A process-level env file list set after capture is not an input either:
+    // the explicit empty input replaces it for the recovered project.
+    fs.writeFileSync(path.join(stackDir, 'process-late.env'), 'CMD=process-late\n', 'utf8');
+    const previousEnvFiles = process.env.COMPOSE_ENV_FILES;
+    process.env.COMPOSE_ENV_FILES = 'process-late.env';
+    try {
+      const underProcessList = renderModel(prefix, stackDir, stack) as {
+        services: Record<string, { command?: string[] }>;
+      };
+      expect(underProcessList.services.web.command).toEqual(['echo', 'captured']);
+    } finally {
+      if (previousEnvFiles === undefined) delete process.env.COMPOSE_ENV_FILES;
+      else process.env.COMPOSE_ENV_FILES = previousEnvFiles;
+    }
+
+    // The preserved file is a real interpolation input: without the empty env
+    // input the same pinned layers resolve the post-capture value.
+    const discovery = renderModel(prefix.slice(0, 2), stackDir, stack) as {
+      services: Record<string, { command?: string[] }>;
+    };
+    expect(discovery.services.web.command).toEqual(['echo', 'post-capture']);
+  }
+
+  it('does not read an .env created after capture when the data bind keeps it in place', async () => {
+    await provesAbsentEnvIsNotRead({
+      stack: 'absentenvroot',
+      composePath: 'compose.yaml',
+      lateEnvFiles: ['.env'],
+    });
+  });
+
+  it('does not read a project or root .env created after capture for a COMPOSE_FILE subdirectory chain', async () => {
+    const previous = process.env.COMPOSE_FILE;
+    process.env.COMPOSE_FILE = 'sub/compose.yaml';
+    try {
+      await provesAbsentEnvIsNotRead({
+        stack: 'absentenvchain',
+        composePath: 'sub/compose.yaml',
+        lateEnvFiles: ['sub/.env', '.env'],
+        declaringRoot: [
+          'services:',
+          '  web:',
+          '    extends:',
+          '      file: sub/compose.yaml',
+          '      service: web',
+          '',
+        ].join('\n'),
+      });
+    } finally {
+      if (previous === undefined) delete process.env.COMPOSE_FILE;
+      else process.env.COMPOSE_FILE = previous;
+    }
+  });
+
   it('opens the spaced COMPOSE_ENV_FILES name Compose opens when recovery runs', async () => {
     const stack = 'layerspacedenvfiles';
     const stackDir = path.join(composeDir, stack);

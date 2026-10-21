@@ -165,6 +165,9 @@ export function getComposeCommandTimeoutMs(): number {
 // extracts; operators on slow links or heavy local builds can raise it.
 const DEFAULT_COMPOSE_STALL_TIMEOUT_MS = 10 * 60 * 1000;
 
+/** An empty env input: naming it replaces Compose's discovery of the default `.env`. */
+const EMPTY_ENV_FILE = '/dev/null';
+
 function getComposeStallTimeoutMs(): number {
   const configured = Number(process.env.SENCHO_COMPOSE_STALL_TIMEOUT_MS);
   if (Number.isFinite(configured) && configured > 0) {
@@ -2340,11 +2343,13 @@ export class ComposeService {
     // the recorded list carries that file too instead of letting the flags
     // drop it. A prefix that already named an env file selected its own and
     // is replayed below unchanged.
-    if (
-      invocation.interpolationEnvFiles !== undefined
-      && invocation.interpolationEnvFiles.length > 0
-      && !raw.includes('--env-file')
-    ) {
+    // The list is also recorded outside a COMPOSE_FILE chain, but only as an
+    // empty list that pins the absence of a default env file; see below.
+    if (invocation.interpolationEnvFiles !== undefined && !raw.includes('--env-file')) {
+      // An empty record means no default env file existed at capture. Naming
+      // an empty input replaces discovery, so an `.env` that appeared since
+      // stays out of the recovered project's interpolation environment.
+      if (invocation.interpolationEnvFiles.length === 0) out.push('--env-file', EMPTY_ENV_FILE);
       for (const envRel of invocation.interpolationEnvFiles) {
         if (!isValidRelativeStackPath(envRel)) {
           throw new Error(`Invalid captured interpolation env file for stack "${stackName}": "${envRel}"`);

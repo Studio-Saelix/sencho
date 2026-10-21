@@ -541,7 +541,9 @@ describe('captured invocation on recovery Compose args', () => {
       null,
       inventory.invocation,
     );
-    expect(args).toEqual(['compose', '-f', 'docker-compose.yml', 'up', '-d']);
+    // The stack held no `.env` at capture, so the recovery names an empty env
+    // input instead of leaving the choice to discovery.
+    expect(args).toEqual(['compose', '-f', 'docker-compose.yml', '--env-file', '/dev/null', 'up', '-d']);
   });
 
   function layerInvocation(stackName: string, layers: string[], prefix: string[] = []) {
@@ -827,7 +829,7 @@ describe('captured invocation on recovery Compose args', () => {
         ['up', '-d'],
         null,
         invocation,
-      )).resolves.toEqual(['compose', '-f', 'compose.yaml', 'up', '-d']);
+      )).resolves.toEqual(['compose', '-f', 'compose.yaml', '--env-file', '/dev/null', 'up', '-d']);
 
       for (const kind of ['fifo', 'directory', 'socket'] as const) {
         await replaceWithSpecialFile(shared, kind, async () => {
@@ -857,7 +859,7 @@ describe('captured invocation on recovery Compose args', () => {
         ['up', '-d'],
         null,
         invocation,
-      )).resolves.toEqual(['compose', '-f', 'compose.yaml', 'up', '-d']);
+      )).resolves.toEqual(['compose', '-f', 'compose.yaml', '--env-file', '/dev/null', 'up', '-d']);
     },
   );
 
@@ -966,6 +968,49 @@ describe('captured invocation on recovery Compose args', () => {
     },
   );
 
+  it('names an empty env input for an empty recorded list, and not beside a prefix env file', async () => {
+    const stackName = 'inv-empty-env-record';
+    const stackDir = path.join(composeDir, stackName);
+    await fs.promises.mkdir(stackDir, { recursive: true });
+    await fs.promises.writeFile(path.join(stackDir, 'compose.yaml'), 'services:\n  web:\n    image: nginx\n', 'utf8');
+    // Created after capture: it must not become an interpolation input.
+    await fs.promises.writeFile(path.join(stackDir, '.env'), 'VALUE=post-capture\n', 'utf8');
+
+    const { ComposeService } = await import('../services/ComposeService');
+    const svc = ComposeService.getInstance(nodeId);
+    const withEmptyRecord = await svc.buildComposeArgsWithRecoveryOverride(
+      stackName,
+      ['config'],
+      null,
+      { ...layerInvocation(stackName, ['compose.yaml']), interpolationEnvFiles: [] },
+    );
+    expect(withEmptyRecord).toEqual(['compose', '-f', 'compose.yaml', '--env-file', '/dev/null', 'config']);
+
+    // A generation that never recorded the field keeps the invocation it was
+    // captured with.
+    const unrecorded = await svc.buildComposeArgsWithRecoveryOverride(
+      stackName,
+      ['config'],
+      null,
+      layerInvocation(stackName, ['compose.yaml']),
+    );
+    expect(unrecorded).toEqual(['compose', '-f', 'compose.yaml', 'config']);
+
+    // The captured prefix selected its own env file, which is replayed alone.
+    const prefixEnv = path.join(stackDir, 'select.env');
+    await fs.promises.writeFile(prefixEnv, 'A=1\n', 'utf8');
+    const withPrefixEnv = await svc.buildComposeArgsWithRecoveryOverride(
+      stackName,
+      ['config'],
+      null,
+      {
+        ...layerInvocation(stackName, ['compose.yaml'], ['--env-file', prefixEnv]),
+        interpolationEnvFiles: [],
+      },
+    );
+    expect(withPrefixEnv).toEqual(['compose', '-f', 'compose.yaml', '--env-file', path.resolve(prefixEnv), 'config']);
+  });
+
   it('keeps a prefix that names its own env file, and refuses an escaping recorded one', async () => {
     const stackName = 'inv-interpolation-guard';
     const stackDir = path.join(composeDir, stackName);
@@ -1000,6 +1045,27 @@ describe('captured invocation on recovery Compose args', () => {
         interpolationEnvFiles: ['../escape.env'],
       },
     )).rejects.toThrow(/Invalid captured interpolation env file/);
+  });
+
+  it('does not stat a default .env the recovery never reads when the generation recorded none', async () => {
+    const stackName = 'inv-restore-env-empty-record';
+    const stackDir = path.join(composeDir, stackName);
+    await fs.promises.mkdir(stackDir, { recursive: true });
+    await fs.promises.writeFile(path.join(stackDir, 'compose.yaml'), 'services:\n  web:\n    image: nginx\n', 'utf8');
+
+    const { resolveComposeProjectContext } = await import('../services/composeProjectContext');
+    const context = await resolveComposeProjectContext(nodeId, stackName);
+    expect(await context.backupFromContext('deployment')).toBeTruthy();
+
+    // The stored invocation names an empty env input, so a default .env that
+    // appeared afterwards is not an input of the rollback, whatever it is.
+    await fs.promises.writeFile(path.join(stackDir, 'compose.yaml'), 'services:\n  web:\n    image: changed\n', 'utf8');
+    await fs.promises.mkdir(path.join(stackDir, '.env'));
+
+    await expect(context.restoreFromContext()).resolves.not.toThrow();
+    expect(await fs.promises.readFile(path.join(stackDir, 'compose.yaml'), 'utf8')).toBe(
+      'services:\n  web:\n    image: nginx\n',
+    );
   });
 
   it.skipIf(process.platform === 'win32')(

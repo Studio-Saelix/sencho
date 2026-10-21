@@ -73,6 +73,16 @@ describe('recoveryInvocationEnvFiles', () => {
     ]);
   });
 
+  it('reads nothing for an empty recorded list, whatever the live settings select', () => {
+    process.env.COMPOSE_ENV_FILES = 'listed.env';
+
+    // The capture found no default env file and replays an empty env input,
+    // which replaces the process list and a project `.env` created since.
+    expect(recoveryInvocationEnvFiles(invocation({
+      interpolationEnvFiles: [],
+    }), STACK_ROOT)).toEqual([]);
+  });
+
   it('falls back to the process list, resolved against the recovery working directory', () => {
     process.env.COMPOSE_ENV_FILES = 'one.env,,/abs/two.env';
 

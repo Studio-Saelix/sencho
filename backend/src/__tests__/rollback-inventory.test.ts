@@ -1427,6 +1427,134 @@ describe('resolveRollbackInventory: the layer set recovery pins', () => {
     }
   });
 
+  it('records an empty interpolation env list when no default env file exists at capture', async () => {
+    await write('compose.yaml', 'services:\n  web:\n    image: nginx\n');
+
+    const inventory = await resolveRollbackInventory(1, STACK);
+
+    // Recovery would otherwise leave the choice to discovery and read an
+    // `.env` created after capture, so the absence is part of the invocation.
+    expect(inventory.coverageRefusal).toBeNull();
+    expect(inventory.invocation.interpolationEnvFiles).toEqual([]);
+  });
+
+  it('records an empty interpolation env list for a subdirectory chain with neither env file', async () => {
+    await fsPromises.mkdir(path.join(composeDir, STACK, 'sub'), { recursive: true });
+    await write('compose.yaml', 'services:\n  web:\n    image: nginx\n');
+    await write('sub/compose.yaml', 'services:\n  web:\n    image: nginx\n');
+    mockComposeFileEnvVarSelection.mockResolvedValue({
+      kind: 'value',
+      value: 'sub/compose.yaml',
+      pathSeparator: ':',
+      composeEnvFiles: [],
+      loadedEnvFiles: [],
+    });
+
+    const inventory = await resolveRollbackInventory(1, STACK);
+
+    expect(inventory.coverageRefusal).toBeNull();
+    expect(inventory.invocation.composeLayers).toEqual(['sub/compose.yaml']);
+    expect(inventory.invocation.interpolationEnvFiles).toEqual([]);
+  });
+
+  it('records an empty env list when an explicit -f moves the project and only the root env file exists', async () => {
+    await fsPromises.mkdir(path.join(composeDir, STACK, 'sub'), { recursive: true });
+    await write('compose.yaml', 'services:\n  web:\n    image: nginx\n');
+    await write('sub/compose.yaml', 'services:\n  web:\n    image: nginx\n');
+    await write('.env', 'VALUE=root\n');
+    mockAuthoredComposeFileArgs.mockReturnValue(['-f', 'sub/compose.yaml', '-p', STACK]);
+
+    const inventory = await resolveRollbackInventory(1, STACK);
+
+    // Compose reads only the project directory's `.env` here, so the root file
+    // is not an input and the missing project file is what recovery must pin.
+    expect(inventory.coverageRefusal).toBeNull();
+    expect(inventory.invocation.interpolationEnvFiles).toEqual([]);
+  });
+
+  it('records no empty env list when an explicit -f moves the project and its env file exists', async () => {
+    await fsPromises.mkdir(path.join(composeDir, STACK, 'sub'), { recursive: true });
+    await write('compose.yaml', 'services:\n  web:\n    image: nginx\n');
+    await write('sub/compose.yaml', 'services:\n  web:\n    image: nginx\n');
+    await write('sub/.env', 'VALUE=sub\n');
+    mockAuthoredComposeFileArgs.mockReturnValue(['-f', 'sub/compose.yaml', '-p', STACK]);
+
+    const inventory = await resolveRollbackInventory(1, STACK);
+
+    expect(inventory.invocation.interpolationEnvFiles).toBeUndefined();
+  });
+
+  it('records no empty env list when the stack root env file exists', async () => {
+    await write('compose.yaml', 'services:\n  web:\n    image: nginx\n');
+    await write('.env', 'VALUE=captured\n');
+
+    const inventory = await resolveRollbackInventory(1, STACK);
+
+    expect(inventory.invocation.interpolationEnvFiles).toBeUndefined();
+  });
+
+  it.each(['dangling', 'loop', 'outside', 'shared'] as const)(
+    'records no empty env list when the default env path is a %s link',
+    async (kind) => {
+      await write('compose.yaml', 'services:\n  web:\n    image: nginx\n');
+      const envPath = path.join(composeDir, STACK, '.env');
+      const outsideDir = await fsPromises.mkdtemp(path.join(os.tmpdir(), 'sencho-env-link-'));
+      try {
+        if (kind === 'dangling') {
+          await fsPromises.symlink(path.join(composeDir, STACK, 'missing.env'), envPath);
+        } else if (kind === 'loop') {
+          await fsPromises.symlink(envPath, envPath);
+        } else if (kind === 'outside') {
+          await fsPromises.writeFile(path.join(outsideDir, 'target.env'), 'VALUE=outside\n', 'utf8');
+          await fsPromises.symlink(path.join(outsideDir, 'target.env'), envPath);
+        } else {
+          await fsPromises.mkdir(path.join(composeDir, 'shared'), { recursive: true });
+          await fsPromises.writeFile(path.join(composeDir, 'shared', 'shared.env'), 'VALUE=shared\n', 'utf8');
+          await fsPromises.symlink(path.join(composeDir, 'shared', 'shared.env'), envPath);
+        }
+
+        const inventory = await resolveRollbackInventory(1, STACK);
+
+        // Something is linked there, so the capture-time run may have read it.
+        // The classifier's own accounting stands; no absence is replayed.
+        expect(inventory.invocation.interpolationEnvFiles).toBeUndefined();
+      } finally {
+        await fsPromises.rm(outsideDir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it('records no empty env list when the default env path holds a directory', async () => {
+    await write('compose.yaml', 'services:\n  web:\n    image: nginx\n');
+    await fsPromises.mkdir(path.join(composeDir, STACK, '.env'));
+
+    const inventory = await resolveRollbackInventory(1, STACK);
+
+    // Something exists there, so it is not an absence to replay; the restore
+    // keeps refusing a non-regular env input instead of running around it.
+    expect(inventory.invocation.interpolationEnvFiles).toBeUndefined();
+  });
+
+  it.each([
+    ['COMPOSE_ENV_FILES', 'custom.env'],
+    ['COMPOSE_DISABLE_ENV_FILE', 'true'],
+  ])('records no empty env list when %s replaces the default env file', async (key, value) => {
+    const previous = process.env[key];
+    process.env[key] = value;
+    try {
+      await write('compose.yaml', 'services:\n  web:\n    image: nginx\n');
+
+      const inventory = await resolveRollbackInventory(1, STACK);
+
+      // The process environment selects the env input here, and recovery
+      // reads it live, so there is no default to pin.
+      expect(inventory.invocation.interpolationEnvFiles).toBeUndefined();
+    } finally {
+      if (previous === undefined) delete process.env[key];
+      else process.env[key] = previous;
+    }
+  });
+
   it('pins an absolute COMPOSE_FILE chain that stays inside the stack', async () => {
     await write('compose.yaml', 'services:\n  web:\n    image: nginx\n');
     await write('prod.yaml', 'services:\n  web:\n    command: ["false"]\n');

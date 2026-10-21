@@ -123,7 +123,7 @@ describe('restore selects the captured Compose project', () => {
     );
     // An explicit -f list suppresses Compose's own discovery and the implicit
     // override merge, so the later root cannot shadow the captured project.
-    expect(args).toEqual(['compose', '-f', 'docker-compose.yml', 'up', '-d']);
+    expect(args).toEqual(['compose', '-f', 'docker-compose.yml', '--env-file', '/dev/null', 'up', '-d']);
   });
 
   it('keeps a link that was deliberately left out of the capture', async () => {
@@ -1139,7 +1139,7 @@ describe('restore selects the captured Compose project', () => {
       captured.invocation,
     );
     // Merging both roots would run a configuration the deploy never ran.
-    expect(args).toEqual(['compose', '-f', 'compose.yaml', 'up', '-d']);
+    expect(args).toEqual(['compose', '-f', 'compose.yaml', '--env-file', '/dev/null', 'up', '-d']);
   });
 
   it.each([
@@ -1362,7 +1362,7 @@ it('reinstates an external symlink when a restore is later reconciled', async ()
       null,
       manifest.invocation,
     );
-    expect(args).toEqual(['compose', '-f', 'docker-compose.yml', 'up', '-d']);
+    expect(args).toEqual(['compose', '-f', 'docker-compose.yml', '--env-file', '/dev/null', 'up', '-d']);
   });
 
   it('restores a stack whose main compose file links into the shared compose directory', async () => {
