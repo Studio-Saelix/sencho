@@ -1530,7 +1530,9 @@ describe('resolveRollbackInventory: the layer set recovery pins', () => {
       value: 'sub/compose.yaml',
       pathSeparator: ':',
       composeEnvFiles: [],
-      loadedEnvFiles: [],
+      loadedEnvFiles: [path.join(composeDir, STACK, '.env')],
+      stackEnvRead: true,
+      projectEnvDisabled: false,
     });
 
     const inventory = await resolveRollbackInventory(1, STACK);
@@ -1543,6 +1545,41 @@ describe('resolveRollbackInventory: the layer set recovery pins', () => {
     expect(inventory.invocation.interpolationEnvFiles).toEqual(['sub/.env', '.env']);
   });
 
+  it('records an empty env list when the stack .env disables itself and the project one', async () => {
+    await fsPromises.mkdir(path.join(composeDir, STACK, 'sub'), { recursive: true });
+    // The conventional root holds the selected layer through an extends, so the
+    // generation can capture it and the fixture has no unrelated omission.
+    await write('compose.yaml', 'services:\n  web:\n    extends:\n      file: sub/compose.yaml\n      service: web\n');
+    await write('sub/compose.yaml', 'services:\n  web:\n    image: nginx\n    environment:\n      MARKER: ${VALUE:-default}\n');
+    // Compose evaluates COMPOSE_DISABLE_ENV_FILE from the environment it builds
+    // while it reads this file, so the project directory's own `.env` is never
+    // loaded even though the same run read this one.
+    await write('.env', 'COMPOSE_FILE=sub/compose.yaml\nCOMPOSE_DISABLE_ENV_FILE=true\n');
+    await write('sub/.env', 'VALUE=child\n');
+    mockComposeFileEnvVarSelection.mockResolvedValue({
+      kind: 'value',
+      value: 'sub/compose.yaml',
+      pathSeparator: ':',
+      composeEnvFiles: [],
+      loadedEnvFiles: [path.join(composeDir, STACK, '.env')],
+      stackEnvRead: true,
+      projectEnvDisabled: true,
+    });
+
+    const inventory = await resolveRollbackInventory(1, STACK);
+
+    // The disabled file was not an input of the captured run, so the generation
+    // must neither hold it nor replay it. Compose used the stack `.env` to
+    // resolve COMPOSE_FILE but did not load its values for interpolation, so
+    // the empty record pins that absence instead of letting recovery reload the
+    // file and introduce values the live run never saw.
+    expect(inventory.coverageRefusal).toBeNull();
+    expect(inventory.uncapturedInputs).toEqual([]);
+    expect(inventory.invocation.composeLayers).toEqual(['sub/compose.yaml']);
+    expect(inventory.invocation.interpolationEnvFiles).toEqual([]);
+    expect(inventory.entries.map((e) => e.relativePath)).not.toContain('sub/.env');
+  });
+
   it('records only the stack root env file when the selected project directory has none', async () => {
     await fsPromises.mkdir(path.join(composeDir, STACK, 'sub'), { recursive: true });
     await write('compose.yaml', 'services:\n  web:\n    image: nginx\n');
@@ -1553,7 +1590,9 @@ describe('resolveRollbackInventory: the layer set recovery pins', () => {
       value: 'sub/compose.yaml',
       pathSeparator: ':',
       composeEnvFiles: [],
-      loadedEnvFiles: [],
+      loadedEnvFiles: [path.join(composeDir, STACK, '.env')],
+      stackEnvRead: true,
+      projectEnvDisabled: false,
     });
 
     const inventory = await resolveRollbackInventory(1, STACK);
@@ -1693,6 +1732,58 @@ describe('resolveRollbackInventory: the layer set recovery pins', () => {
     const inventory = await resolveRollbackInventory(1, STACK);
 
     expect(inventory.invocation.interpolationEnvFiles).toBeUndefined();
+  });
+
+  it('keeps the project env file when an explicit -f starts outside the stack root', async () => {
+    await fsPromises.mkdir(path.join(composeDir, STACK, 'sub'), { recursive: true });
+    await write('compose.yaml', 'services:\n  web:\n    image: nginx\n');
+    await write('sub/compose.yaml', 'services:\n  web:\n    image: nginx\n');
+    // The stack root file would disable the project env if Compose read it, but
+    // an explicit -f makes the project start in sub, so Compose never opens the
+    // root file and loads sub/.env normally.
+    await write('.env', 'COMPOSE_FILE=sub/compose.yaml\nCOMPOSE_DISABLE_ENV_FILE=true\n');
+    await write('sub/.env', 'VALUE=sub\n');
+    mockAuthoredComposeFileArgs.mockReturnValue(['-f', 'sub/compose.yaml', '-p', STACK]);
+    mockComposeFileEnvVarSelection.mockResolvedValue({
+      kind: 'value',
+      value: 'sub/compose.yaml',
+      pathSeparator: ':',
+      composeEnvFiles: [],
+      loadedEnvFiles: [path.join(composeDir, STACK, '.env')],
+      stackEnvRead: true,
+      projectEnvDisabled: true,
+    });
+
+    const inventory = await resolveRollbackInventory(1, STACK);
+
+    expect(inventory.coverageRefusal).toBeNull();
+    expect(inventory.entries.map((e) => e.relativePath)).toContain('sub/.env');
+    expect(inventory.uncapturedInputs.join(' ')).not.toContain('sub/.env');
+  });
+
+  it('records an empty env list when the stack .env disables itself and no project file exists', async () => {
+    await fsPromises.mkdir(path.join(composeDir, STACK, 'sub'), { recursive: true });
+    await write('compose.yaml', 'services:\n  web:\n    extends:\n      file: sub/compose.yaml\n      service: web\n');
+    await write('sub/compose.yaml', 'services:\n  web:\n    image: nginx\n');
+    await write('.env', 'COMPOSE_FILE=sub/compose.yaml\nCOMPOSE_DISABLE_ENV_FILE=true\n');
+    mockComposeFileEnvVarSelection.mockResolvedValue({
+      kind: 'value',
+      value: 'sub/compose.yaml',
+      pathSeparator: ':',
+      composeEnvFiles: [],
+      loadedEnvFiles: [path.join(composeDir, STACK, '.env')],
+      stackEnvRead: true,
+      projectEnvDisabled: true,
+    });
+
+    const inventory = await resolveRollbackInventory(1, STACK);
+
+    // The self-disabled stack file selected the layers but supplied no
+    // interpolation values, so recovery pins an empty input instead of
+    // reloading the file.
+    expect(inventory.coverageRefusal).toBeNull();
+    expect(inventory.invocation.composeLayers).toEqual(['sub/compose.yaml']);
+    expect(inventory.invocation.interpolationEnvFiles).toEqual([]);
   });
 
   it('records no empty env list when the stack root env file exists', async () => {

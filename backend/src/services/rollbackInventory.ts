@@ -25,6 +25,7 @@ import {
   composeEnvFilesFromProcess,
   composeFileEnvVarSelection,
   DEFAULT_PATH_SEPARATOR,
+  type ComposeFileEnvSelection,
 } from '../utils/authoredComposeArgs';
 import { gitSourceLocalComposeFiles } from '../utils/gitComposeFiles';
 import type {
@@ -189,16 +190,68 @@ function flagValues(args: readonly string[], flag: string): string[] {
 }
 
 /**
+ * True when no explicit `--env-file` or non-empty COMPOSE_ENV_FILES entry
+ * replaces Compose's default env-file discovery.
+ */
+function defaultEnvInputSelected(args: readonly string[]): boolean {
+  if (flagValue(args, '--env-file') !== undefined) return false;
+  const listed = process.env.COMPOSE_ENV_FILES;
+  return listed === undefined || !listed.split(',').some((entry) => entry.length > 0);
+}
+
+/**
  * Compose replaces the default project `.env` when the invocation names
  * `--env-file`, when COMPOSE_ENV_FILES lists a file, or when
- * COMPOSE_DISABLE_ENV_FILE is true. Those cases are accounted for elsewhere.
+ * COMPOSE_DISABLE_ENV_FILE is true.
+ *
+ * This is the process-level rule. A value the stack `.env` supplies is decided
+ * by `projectEnvDisabledFor`, which also has to know where the run started.
  */
 function defaultProjectEnvSuppressed(args: readonly string[]): boolean {
-  if (flagValue(args, '--env-file') !== undefined) return true;
-  const listed = process.env.COMPOSE_ENV_FILES;
-  if (listed !== undefined && listed.split(',').some((entry) => entry.length > 0)) return true;
+  if (!defaultEnvInputSelected(args)) return true;
   const disabled = process.env.COMPOSE_DISABLE_ENV_FILE;
   return disabled !== undefined && GO_BOOL_TRUE.has(disabled);
+}
+
+/**
+ * The project directory Compose starts from, before a COMPOSE_FILE selection
+ * can move it: `--project-directory` when set, otherwise the directory of the
+ * first `-f` / `--file`, otherwise the stack root.
+ *
+ * This is the directory whose `.env` Compose reads first. A disable value that
+ * file supplies cannot decide a run that starts somewhere else, because Compose
+ * never opens it.
+ */
+function initialProjectDirectory(args: readonly string[], stackRoot: string): string {
+  const explicit = flagValue(args, '--project-directory');
+  if (explicit !== undefined && explicit.length > 0) {
+    return path.resolve(stackRoot, explicit.replace(/\\/g, '/'));
+  }
+  for (let i = 0; i < args.length - 1; i++) {
+    if (args[i] !== '-f' && args[i] !== '--file') continue;
+    return path.resolve(stackRoot, path.dirname(args[i + 1].replace(/\\/g, '/')));
+  }
+  return path.resolve(stackRoot);
+}
+
+/**
+ * Whether Compose skips the selected project directory's `.env`.
+ *
+ * An explicit or listed env file, or a process-level disable, always does. A
+ * value the stack root `.env` supplies does too, but only when Compose reads
+ * that file as its initial project env. With a `-f` or `--project-directory`
+ * that starts elsewhere, Compose never opens the stack root `.env`, so a value
+ * there cannot decide this run.
+ */
+function projectEnvDisabledFor(
+  selection: ComposeFileEnvSelection,
+  args: readonly string[],
+  stackRoot: string,
+): boolean {
+  if (defaultProjectEnvSuppressed(args)) return true;
+  if (selection.kind !== 'absent' && selection.kind !== 'value') return false;
+  if (!selection.projectEnvDisabled) return false;
+  return initialProjectDirectory(args, stackRoot) === path.resolve(stackRoot);
 }
 
 /** The directory whose `.env` Compose loads once the project directory is chosen. */
@@ -225,6 +278,8 @@ function selectedProjectDirectory(
  * of the first captured layer. A root project loads only the stack `.env`.
  * An explicit env file, COMPOSE_ENV_FILES, or COMPOSE_DISABLE_ENV_FILE replaces
  * that default, so this returns null and the other accounting stands.
+ * `projectEnvDisabled` is the decision the caller already made from the run's
+ * evaluated environment; without it the process environment alone is consulted.
  *
  * The project directory is resolved against the stack root, so a directory that
  * lands inside the stack names a file the generation can hold. A deploy spec
@@ -237,8 +292,9 @@ export function selectedProjectEnvFile(
   composeArgs: readonly string[],
   composeLayers: readonly string[] | undefined,
   stackRoot: string,
+  projectEnvDisabled?: boolean,
 ): { kind: 'relative'; relativePath: string } | { kind: 'outside' } | null {
-  if (defaultProjectEnvSuppressed(composeArgs)) return null;
+  if (projectEnvDisabled ?? defaultProjectEnvSuppressed(composeArgs)) return null;
   const projectDir = selectedProjectDirectory(composeArgs, composeLayers ?? []);
   if (projectDir === null || projectDir === '.' || projectDir === '') return null;
   const baseResolved = path.resolve(stackRoot);
@@ -342,29 +398,32 @@ export function recoveryInvocationEnvFiles(
  * complete coverage. The flags below reproduce the live order: Compose
  * applies repeated `--env-file` arguments in sequence, the last one winning.
  *
+ * `relativePaths` is the set the live run read, in that order: the project
+ * directory's own `.env` only when Compose loaded it, then the stack root
+ * `.env` only when this run read it. An empty set is a real answer: the run
+ * read no interpolation env file, and recovery has to pin that absence.
+ *
  * Only files a recovery resolver can name are listed: a regular file, or a
  * link whose target stays inside the compose root. An env file that links
  * out of the compose root is left to the omission its classifier already
  * records, because naming it would make recovery refuse the generation
- * before Compose could read the file. `undefined` means this function names
- * no file: either every default env file is absent, which the caller records
- * as an empty list (see defaultEnvFilesAbsent), or one cannot be named, which
- * leaves the invocation recorded without a list. A file this reader cannot inspect throws, and the
- * caller refuses the capture: a list built around an unreadable file could
- * omit one the live run loaded, which is the silent divergence this field
- * exists to prevent.
+ * before Compose could read the file. `undefined` means one of those files
+ * cannot be named, so the invocation is recorded without a list. A file this
+ * reader cannot inspect throws, and the caller refuses the capture: a list
+ * built around an unreadable file could omit one the live run loaded, which is
+ * the silent divergence this field exists to prevent.
  */
 async function capturedInterpolationEnvFiles(
   stackRoot: string,
-  projectEnvRel: string,
+  relativePaths: readonly string[],
 ): Promise<string[] | undefined> {
-  const projectEnvState = await classifyAuthoredFile(stackRoot, projectEnvRel);
-  const rootEnvState = await classifyAuthoredFile(stackRoot, DOT_ENV);
-  if (projectEnvState === 'outside' || rootEnvState === 'outside') return undefined;
   const files: string[] = [];
-  if (projectEnvState === 'file' || projectEnvState === 'shared') files.push(projectEnvRel);
-  if (rootEnvState === 'file' || rootEnvState === 'shared') files.push(DOT_ENV);
-  return files.length > 0 ? files : undefined;
+  for (const relativePath of relativePaths) {
+    const state = await classifyAuthoredFile(stackRoot, relativePath);
+    if (state === 'outside') return undefined;
+    if (state === 'file' || state === 'shared') files.push(relativePath);
+  }
+  return files;
 }
 
 /**
@@ -1095,10 +1154,12 @@ async function resolveGitInventory(
       // loads that directory's `.env` as well as any file the invocation named.
       // The manifest is still the coverage boundary, so a file it does not hold
       // is an omission rather than a capture.
+      const projectEnvDisabled = projectEnvDisabledFor(selection, invocation.composeArgsPrefix, stackRoot);
       const projectEnv = selectedProjectEnvFile(
         invocation.composeArgsPrefix,
         invocation.composeLayers,
         stackRoot,
+        projectEnvDisabled,
       );
       if (projectEnv?.kind === 'outside') {
         uncaptured.add(redactNoteCredentials(PROJECT_ENV_OUTSIDE_NOTE));
@@ -1121,7 +1182,7 @@ async function resolveGitInventory(
       const projectEnvRel = projectEnv?.kind === 'relative' ? projectEnv.relativePath : null;
       if (
         projectEnv?.kind !== 'outside'
-        && !defaultProjectEnvSuppressed(invocation.composeArgsPrefix)
+        && !projectEnvDisabled
         && !map.has(projectEnvRel ?? DOT_ENV)
       ) {
         try {
@@ -1689,8 +1750,12 @@ const capturable = async (
   // After the layer set is final: a project directory other than the stack root
   // loads its own `.env`. Hold a regular file inside the stack so a restore
   // puts it back. A link that cannot be held is already an omission. A directory
-  // outside the stack is recorded without its path.
-  const projectEnv = selectedProjectEnvFile(composeArgsPrefix, composeLayers, stackRoot);
+  // outside the stack is recorded without its path. The suppression decision
+  // comes from the environment this run evaluates, so a stack `.env` value that
+  // stops Compose loading the project `.env` also stops the capture from
+  // recording it as an input.
+  const projectEnvDisabled = projectEnvDisabledFor(selection, composeArgsPrefix, stackRoot);
+  const projectEnv = selectedProjectEnvFile(composeArgsPrefix, composeLayers, stackRoot, projectEnvDisabled);
   if (projectEnv?.kind === 'outside') {
     addUncaptured(PROJECT_ENV_OUTSIDE_NOTE);
   } else if (projectEnv?.kind === 'relative') {
@@ -1707,29 +1772,55 @@ const capturable = async (
           absolutePath: resolved.absolutePath,
         }, caseCollisions);
       }
-      if (chainPinned && !defaultProjectEnvSuppressed(composeArgsPrefix)) {
-        try {
-          interpolationEnvFiles = await capturedInterpolationEnvFiles(stackRoot, resolved.relativePath);
-        } catch (e) {
-          // Same rule the capturable pass applies to a file it cannot inspect:
-          // refuse rather than reconstruct an invocation around an unreadable
-          // env file.
-          coverageNotes.push(
-            `Could not inspect the interpolation env files for rollback capture: ${(e as Error).message}`,
-          );
-        }
-      }
+    }
+  }
+  // A pinned chain drops COMPOSE_FILE, and with it the working directory's env
+  // file, so a recovery that pins the layers would read a different set than
+  // the live run. When the chain moved the project directory off the stack
+  // root, the files the live run read are recorded and replayed: the project
+  // directory's own `.env` only when Compose loaded it, then the stack root
+  // `.env` only when its values reached interpolation. A stack root `.env` that
+  // disables itself supplied COMPOSE_FILE but no interpolation values, so the
+  // record is empty and recovery replays an explicit empty input instead of
+  // letting discovery load the file. A project directory outside the stack
+  // keeps its omission rather than a list that silently drops its file.
+  const projectDir = selectedProjectDirectory(composeArgsPrefix, composeLayers);
+  const projectDirMoved = projectDir !== null && projectDir !== '.' && projectDir !== '';
+  const selectionReadEnv = selection.kind === 'absent' || selection.kind === 'value';
+  const stackEnvApplied = selectionReadEnv
+    && initialProjectDirectory(composeArgsPrefix, stackRoot) === path.resolve(stackRoot)
+    && selection.stackEnvRead
+    && !selection.projectEnvDisabled;
+  if (
+    chainPinned
+    && projectDirMoved
+    && projectEnv?.kind !== 'outside'
+    && selectionReadEnv
+    && defaultEnvInputSelected(composeArgsPrefix)
+  ) {
+    try {
+      const readByRun: string[] = [];
+      if (projectEnv?.kind === 'relative') readByRun.push(projectEnv.relativePath);
+      if (stackEnvApplied) readByRun.push(DOT_ENV);
+      interpolationEnvFiles = await capturedInterpolationEnvFiles(stackRoot, readByRun);
+    } catch (e) {
+      // Same rule the capturable pass applies to a file it cannot inspect:
+      // refuse rather than reconstruct an invocation around an unreadable
+      // env file.
+      coverageNotes.push(
+        `Could not inspect the interpolation env files for rollback capture: ${(e as Error).message}`,
+      );
     }
   }
   // The chain pinned no env files, nothing in the captured flags or the
-  // process environment selects any, and none exists for Compose to discover.
+  // evaluated environment selects any, and none exists for Compose to discover.
   // A recovery that left the choice to discovery would read an `.env` created
   // after capture, which a restore leaves in place whenever it cannot prove the
   // file is disposable, so the absence is part of the invocation.
   if (
     interpolationEnvFiles === undefined
     && projectEnv?.kind !== 'outside'
-    && !defaultProjectEnvSuppressed(composeArgsPrefix)
+    && !projectEnvDisabled
   ) {
     try {
       const projectEnvRel = projectEnv?.kind === 'relative' ? projectEnv.relativePath : null;

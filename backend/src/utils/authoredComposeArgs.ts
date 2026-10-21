@@ -344,10 +344,51 @@ export async function authoredComposeEnvFileArgs(
  * what a generation holds. The project `.env` is the one optional source, so it
  * is named only when it exists; a run with no source at all (no selected file and
  * the default env file disabled) reads no file.
+ *
+ * `stackEnvRead` and `projectEnvDisabled` describe the default env input the run
+ * builds before it selects a project directory. Compose reads the working
+ * directory's `.env` there, and it decides whether to load the selected project
+ * directory's own `.env` from the environment that read produced. When the
+ * stack `.env` itself supplies `COMPOSE_DISABLE_ENV_FILE=true`, Compose still
+ * uses the file to resolve COMPOSE_FILE but does not load its assignments for
+ * interpolation, and it skips the nested project `.env` too. A process-level
+ * `false` wins over the file and keeps both enabled. Callers that replay the
+ * invocation must use the evaluated decision and must not treat `stackEnvRead`
+ * alone as proof that the file's values were applied.
  */
 export type ComposeFileEnvSelection =
-  | { kind: 'absent'; composeEnvFiles: string[]; loadedEnvFiles: string[] }
-  | { kind: 'value'; value: string; pathSeparator: string; composeEnvFiles: string[]; loadedEnvFiles: string[] }
+  | {
+    kind: 'absent';
+    composeEnvFiles: string[];
+    loadedEnvFiles: string[];
+    /**
+     * True when the stack root `.env` was read: Compose looks for the default
+     * env input in the working directory before it knows the project
+     * directory, and that file is the only one it can read there. This alone
+     * does not mean its values reached interpolation; see `projectEnvDisabled`.
+     */
+    stackEnvRead: boolean;
+    /**
+     * True when Compose does not load the selected project directory's `.env`.
+     * An explicit source replaces it, the process environment can disable it,
+     * and so can the value the run evaluates for COMPOSE_DISABLE_ENV_FILE
+     * after it has read the stack root `.env`. When the stack root `.env`
+     * supplies the disable, its own assignments are also left out of the
+     * interpolation environment.
+     */
+    projectEnvDisabled: boolean;
+  }
+  | {
+    kind: 'value';
+    value: string;
+    pathSeparator: string;
+    composeEnvFiles: string[];
+    loadedEnvFiles: string[];
+    /** See the `absent` variant. */
+    stackEnvRead: boolean;
+    /** See the `absent` variant. */
+    projectEnvDisabled: boolean;
+  }
   | { kind: 'unknown'; reason: string; loadedEnvFiles: string[] }
   | { kind: 'invalid'; reason: string; loadedEnvFiles: string[] };
 
@@ -471,6 +512,10 @@ export async function composeFileEnvVarSelection(stackName: string, nodeId?: num
     return { kind: 'unknown', reason: resolvedSources.reason, loadedEnvFiles: [] };
   }
   const sources = resolvedSources.sources;
+  // Compose looks for its default env input in the working directory, so that
+  // input is the stack root `.env` when nothing replaced it.
+  const defaultPathActive = sources.some((source) => source.path === null);
+  let stackEnvRead = false;
 
   const reader = new ComposeEnvFiles((name) => process.env[name]);
   const composeEnvFiles: string[] = [];
@@ -512,6 +557,7 @@ export async function composeFileEnvVarSelection(stackName: string, nodeId?: num
         return unreadable('the project .env could not be read');
       }
       loadedEnvFiles.push(projectEnv);
+      stackEnvRead = true;
     } else {
       try {
         // A COMPOSE_ENV_FILES entry is read through the compose-root containment
@@ -542,10 +588,33 @@ export async function composeFileEnvVarSelection(stackName: string, nodeId?: num
     }
   }
 
+  // Compose decides whether to load the project directory's own `.env` from the
+  // environment it built before selecting that directory. An explicit source,
+  // or a process-level disable, leaves the default input unread, so it is
+  // suppressed too. A value the stack `.env` supplies is evaluated here: when
+  // true, Compose used the file for config details but did not load its values
+  // for interpolation, and it also skips the nested project `.env`. A value its
+  // boolean parser refuses stops Compose before any project is rendered.
+  let projectEnvDisabled = !defaultPathActive;
+  if (defaultPathActive) {
+    const disabledRaw = reader.lookup('COMPOSE_DISABLE_ENV_FILE');
+    if (disabledRaw !== undefined) {
+      const disabled = parseGoBoolean(disabledRaw);
+      if (disabled === null) {
+        return unreadable(
+          `COMPOSE_DISABLE_ENV_FILE is set to ${JSON.stringify(disabledRaw)}, which Compose does not accept as a boolean`,
+        );
+      }
+      projectEnvDisabled = disabled;
+    }
+  }
+
   // The process environment sits above every file, and the files in the order
   // Compose reads them.
   const value = reader.lookup('COMPOSE_FILE');
-  if (value === undefined) return { kind: 'absent', composeEnvFiles, loadedEnvFiles };
+  if (value === undefined) {
+    return { kind: 'absent', composeEnvFiles, loadedEnvFiles, stackEnvRead, projectEnvDisabled };
+  }
   const separator = reader.lookup('COMPOSE_PATH_SEPARATOR');
   return {
     kind: 'value',
@@ -553,6 +622,8 @@ export async function composeFileEnvVarSelection(stackName: string, nodeId?: num
     pathSeparator: separator === undefined || separator === '' ? DEFAULT_PATH_SEPARATOR : separator,
     composeEnvFiles,
     loadedEnvFiles,
+    stackEnvRead,
+    projectEnvDisabled,
   };
 }
 

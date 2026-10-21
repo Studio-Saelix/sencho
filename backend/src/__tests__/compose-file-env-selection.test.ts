@@ -442,6 +442,8 @@ describe('composeFileEnvVarSelection', () => {
 
     expect(await composeFileEnvVarSelection(STACK, 1)).toEqual({
       kind: 'absent',
+      stackEnvRead: true,
+      projectEnvDisabled: false,
       composeEnvFiles: [],
       loadedEnvFiles: [stackPath('.env')],
     });
@@ -450,6 +452,8 @@ describe('composeFileEnvVarSelection', () => {
   it('reports absent when the stack has no env file at all', async () => {
     expect(await composeFileEnvVarSelection(STACK, 1)).toEqual({
       kind: 'absent',
+      stackEnvRead: false,
+      projectEnvDisabled: false,
       composeEnvFiles: [],
       loadedEnvFiles: [],
     });
@@ -460,6 +464,8 @@ describe('composeFileEnvVarSelection', () => {
 
     expect(await composeFileEnvVarSelection(STACK, 1)).toEqual({
       kind: 'value',
+      stackEnvRead: true,
+      projectEnvDisabled: false,
       value: 'compose.yaml:prod.yaml',
       pathSeparator: ':',
       composeEnvFiles: [],
@@ -474,6 +480,8 @@ describe('composeFileEnvVarSelection', () => {
     // would pin a layer path that ends in the comment text.
     expect(await composeFileEnvVarSelection(STACK, 1)).toEqual({
       kind: 'value',
+      stackEnvRead: true,
+      projectEnvDisabled: false,
       value: 'compose.yaml:prod.yaml',
       pathSeparator: ':',
       composeEnvFiles: [],
@@ -490,6 +498,8 @@ describe('composeFileEnvVarSelection', () => {
     // project file must not decide the value here.
     expect(await composeFileEnvVarSelection(STACK, 1)).toEqual({
       kind: 'value',
+      stackEnvRead: false,
+      projectEnvDisabled: true,
       value: 'from-selected-env.yaml',
       pathSeparator: ':',
       composeEnvFiles: [],
@@ -506,6 +516,8 @@ describe('composeFileEnvVarSelection', () => {
     // COMPOSE_FILE only in the project file does not apply and discovery does.
     expect(await composeFileEnvVarSelection(STACK, 1)).toEqual({
       kind: 'absent',
+      stackEnvRead: false,
+      projectEnvDisabled: true,
       composeEnvFiles: [],
       loadedEnvFiles: [stackPath('select.env')],
     });
@@ -517,6 +529,8 @@ describe('composeFileEnvVarSelection', () => {
 
     expect(await composeFileEnvVarSelection(STACK, 1)).toEqual({
       kind: 'value',
+      stackEnvRead: true,
+      projectEnvDisabled: false,
       value: 'from-process-env.yaml',
       pathSeparator: ':',
       composeEnvFiles: [],
@@ -534,6 +548,8 @@ describe('composeFileEnvVarSelection', () => {
     // Answering with the first one pins a chain the deployed command never ran.
     expect(await composeFileEnvVarSelection(STACK, 1)).toEqual({
       kind: 'value',
+      stackEnvRead: false,
+      projectEnvDisabled: true,
       value: 'second.yaml',
       pathSeparator: ':',
       composeEnvFiles: [],
@@ -545,6 +561,8 @@ describe('composeFileEnvVarSelection', () => {
     writeStackFile('.env', 'COMPOSE_PATH_SEPARATOR=;\nCOMPOSE_FILE=first;second\n');
     expect(await composeFileEnvVarSelection(STACK, 1)).toEqual({
       kind: 'value',
+      stackEnvRead: true,
+      projectEnvDisabled: false,
       value: 'first;second',
       pathSeparator: ';',
       composeEnvFiles: [],
@@ -554,6 +572,8 @@ describe('composeFileEnvVarSelection', () => {
     writeStackFile('.env', 'COMPOSE_FILE=first:second\n');
     expect(await composeFileEnvVarSelection(STACK, 1)).toEqual({
       kind: 'value',
+      stackEnvRead: true,
+      projectEnvDisabled: false,
       value: 'first:second',
       pathSeparator: ':',
       composeEnvFiles: [],
@@ -567,6 +587,8 @@ describe('composeFileEnvVarSelection', () => {
 
     expect(await composeFileEnvVarSelection(STACK, 1)).toEqual({
       kind: 'value',
+      stackEnvRead: true,
+      projectEnvDisabled: false,
       value: 'first;second',
       pathSeparator: ';',
       composeEnvFiles: [],
@@ -582,6 +604,8 @@ describe('composeFileEnvVarSelection', () => {
 
     expect(await composeFileEnvVarSelection(STACK, 1)).toEqual({
       kind: 'value',
+      stackEnvRead: true,
+      projectEnvDisabled: false,
       value: 'first;second',
       pathSeparator: ':',
       composeEnvFiles: [],
@@ -618,6 +642,8 @@ describe('composeFileEnvVarSelection', () => {
 
       expect(await composeFileEnvVarSelection(STACK, 1)).toEqual({
         kind: 'value',
+        stackEnvRead: false,
+        projectEnvDisabled: true,
         value: 'compose.yaml:prod.yaml',
         pathSeparator: ':',
         composeEnvFiles: [listed],
@@ -634,6 +660,8 @@ describe('composeFileEnvVarSelection', () => {
       // Compose ignores COMPOSE_ENV_FILES once a file is selected explicitly.
       expect(await composeFileEnvVarSelection(STACK, 1)).toEqual({
         kind: 'absent',
+        stackEnvRead: false,
+        projectEnvDisabled: true,
         composeEnvFiles: [],
         loadedEnvFiles: [explicit],
       });
@@ -653,6 +681,8 @@ describe('composeFileEnvVarSelection', () => {
 
       expect(await composeFileEnvVarSelection(STACK, 1)).toEqual({
         kind: 'value',
+        stackEnvRead: true,
+        projectEnvDisabled: false,
         value: 'from-project-env.yaml',
         pathSeparator: ':',
         composeEnvFiles: [],
@@ -832,6 +862,8 @@ describe('composeFileEnvVarSelection', () => {
         // decide which layers the run loads.
         expect(await composeFileEnvVarSelection(STACK, 1)).toEqual({
           kind: 'absent',
+          stackEnvRead: false,
+          projectEnvDisabled: true,
           composeEnvFiles: [],
           loadedEnvFiles: [],
         });
@@ -846,6 +878,8 @@ describe('composeFileEnvVarSelection', () => {
 
         expect(await composeFileEnvVarSelection(STACK, 1)).toEqual({
           kind: 'value',
+          stackEnvRead: true,
+          projectEnvDisabled: false,
           value: 'compose.yaml:prod.yaml',
           pathSeparator: ':',
           composeEnvFiles: [],
@@ -870,6 +904,71 @@ describe('composeFileEnvVarSelection', () => {
       },
     );
 
+    it('records a disable value the stack .env supplies as the run decision', async () => {
+      writeStackFile('.env', 'COMPOSE_FILE=compose.yaml:prod.yaml\nCOMPOSE_DISABLE_ENV_FILE=true\n');
+
+      // Compose reads the stack .env before it selects the project directory
+      // and keeps that assignment while it moves there, so the file's chain
+      // still decides the layers while the nested project .env stays unloaded.
+      expect(await composeFileEnvVarSelection(STACK, 1)).toEqual({
+        kind: 'value',
+        stackEnvRead: true,
+        projectEnvDisabled: true,
+        value: 'compose.yaml:prod.yaml',
+        pathSeparator: ':',
+        composeEnvFiles: [],
+        loadedEnvFiles: [stackPath('.env')],
+      });
+    });
+
+    it('lets the process environment re-enable the project .env a stack .env disables', async () => {
+      writeStackFile('.env', 'COMPOSE_FILE=compose.yaml:prod.yaml\nCOMPOSE_DISABLE_ENV_FILE=true\n');
+      process.env.COMPOSE_DISABLE_ENV_FILE = 'false';
+
+      // The process environment sits above the file for interpolation, so a
+      // `false` there keeps the nested default file enabled even though the
+      // stack .env says otherwise.
+      expect(await composeFileEnvVarSelection(STACK, 1)).toEqual({
+        kind: 'value',
+        stackEnvRead: true,
+        projectEnvDisabled: false,
+        value: 'compose.yaml:prod.yaml',
+        pathSeparator: ':',
+        composeEnvFiles: [],
+        loadedEnvFiles: [stackPath('.env')],
+      });
+    });
+
+    it('reports unknown when the stack .env supplies a value Compose refuses to parse', async () => {
+      writeStackFile('.env', 'COMPOSE_DISABLE_ENV_FILE=yes\n');
+
+      // Compose parses the evaluated assignment, so a value outside the
+      // boolean table stops the run after the file has been read.
+      const selection = await composeFileEnvVarSelection(STACK, 1);
+      expect(selection).toMatchObject({ kind: 'unknown' });
+      expect(selection.kind === 'unknown' ? selection.reason : '').toContain('COMPOSE_DISABLE_ENV_FILE');
+      expect(selection.kind === 'unknown' ? selection.reason : '').toContain('"yes"');
+    });
+
+    it('does not evaluate a disable value from a file that replaced the default input', async () => {
+      writeStackFile('.env', 'COMPOSE_DISABLE_ENV_FILE=true\n');
+      writeStackFile('select.env', 'COMPOSE_FILE=compose.yaml:prod.yaml\nCOMPOSE_DISABLE_ENV_FILE=banana\n');
+      mockGetStackProjectEnvFiles.mockReturnValue(['select.env']);
+
+      // Compose consults the variable only for the default input. A selected
+      // env file supplies the chain, and a value Compose would refuse on the
+      // default path must not fail this run.
+      expect(await composeFileEnvVarSelection(STACK, 1)).toEqual({
+        kind: 'value',
+        stackEnvRead: false,
+        projectEnvDisabled: true,
+        value: 'compose.yaml:prod.yaml',
+        pathSeparator: ':',
+        composeEnvFiles: [],
+        loadedEnvFiles: [stackPath('select.env')],
+      });
+    });
+
     it('does not read a malformed project .env it disables', async () => {
       // The file would be an unknown if it were read, and Compose never reads
       // it, so a stack that deploys must not be refused here.
@@ -878,6 +977,8 @@ describe('composeFileEnvVarSelection', () => {
 
       expect(await composeFileEnvVarSelection(STACK, 1)).toEqual({
         kind: 'absent',
+        stackEnvRead: false,
+        projectEnvDisabled: true,
         composeEnvFiles: [],
         loadedEnvFiles: [],
       });
@@ -892,6 +993,8 @@ describe('composeFileEnvVarSelection', () => {
       // configured project env file still decides the chain.
       expect(await composeFileEnvVarSelection(STACK, 1)).toEqual({
         kind: 'value',
+        stackEnvRead: false,
+        projectEnvDisabled: true,
         value: 'compose.yaml:prod.yaml',
         pathSeparator: ':',
         composeEnvFiles: [],
@@ -919,6 +1022,8 @@ describe('composeFileEnvVarSelection', () => {
       // reads from its own environment.
       expect(await composeFileEnvVarSelection(STACK, 1)).toEqual({
         kind: 'value',
+        stackEnvRead: false,
+        projectEnvDisabled: true,
         value: 'from-process-env.yaml',
         pathSeparator: ':',
         composeEnvFiles: [],
@@ -1048,6 +1153,8 @@ describe('composeFileEnvVarSelection', () => {
 
       expect(await composeFileEnvVarSelection(STACK, 1)).toEqual({
         kind: 'value',
+        stackEnvRead: true,
+        projectEnvDisabled: false,
         value: 'compose.yaml',
         pathSeparator: ':',
         composeEnvFiles: [],
@@ -1062,6 +1169,8 @@ describe('composeFileEnvVarSelection', () => {
 
       expect(await composeFileEnvVarSelection(STACK, 1)).toEqual({
         kind: 'value',
+        stackEnvRead: true,
+        projectEnvDisabled: false,
         value: 'compose.yaml:prod.yaml',
         pathSeparator: ':',
         composeEnvFiles: [],
@@ -1075,6 +1184,8 @@ describe('composeFileEnvVarSelection', () => {
 
       expect(await composeFileEnvVarSelection(STACK, 1)).toEqual({
         kind: 'absent',
+        stackEnvRead: true,
+        projectEnvDisabled: false,
         composeEnvFiles: [],
         loadedEnvFiles: [path.join(mockState.composeDir, STACK, '.env')],
       });
@@ -1086,6 +1197,8 @@ describe('composeFileEnvVarSelection', () => {
 
       expect(await composeFileEnvVarSelection(STACK, 1)).toEqual({
         kind: 'value',
+        stackEnvRead: false,
+        projectEnvDisabled: true,
         value: 'compose.yaml:prod.yaml',
         pathSeparator: ':',
         composeEnvFiles: [listed],
@@ -1099,6 +1212,8 @@ describe('composeFileEnvVarSelection', () => {
 
       expect(await composeFileEnvVarSelection(STACK, 1)).toEqual({
         kind: 'value',
+        stackEnvRead: false,
+        projectEnvDisabled: true,
         value: 'compose.yaml:prod.yaml',
         pathSeparator: ':',
         composeEnvFiles: [],

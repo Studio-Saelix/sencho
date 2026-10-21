@@ -1103,6 +1103,86 @@ describe.skipIf(!hasDocker)('recovery loads the model the capture-time run loade
     expect(recovery.services.web.command).toEqual(['echo', 'captured-root', 'captured-sub', 'fromroot']);
   });
 
+  it('keeps a stack .env disable of the nested project .env when the chain is pinned', async () => {
+    const stack = 'layerdisabledprojectenv';
+    const stackDir = path.join(composeDir, stack);
+    fs.mkdirSync(path.join(stackDir, 'sub'), { recursive: true });
+    // The root file holds the selected layer through an extends so the
+    // generation can capture it; the live run itself loads only the selection.
+    fs.writeFileSync(
+      path.join(stackDir, 'compose.yaml'),
+      'services:\n  web:\n    extends:\n      file: sub/compose.yaml\n      service: web\n',
+      'utf8',
+    );
+    fs.writeFileSync(
+      path.join(stackDir, 'sub', 'compose.yaml'),
+      'services:\n  web:\n    image: busybox:1.36.1\n    command: ["echo", "${SUB_ONLY:-absent}", "${ROOT_ONLY:-missing}"]\n',
+      'utf8',
+    );
+    // Compose reads this file in the working directory before it selects the
+    // subdirectory project, and keeps the disable it supplies while it moves
+    // there. The nested file must not reach the live run's interpolation.
+    fs.writeFileSync(
+      path.join(stackDir, '.env'),
+      'COMPOSE_FILE=sub/compose.yaml\nCOMPOSE_DISABLE_ENV_FILE=true\nROOT_ONLY=captured-root\n',
+      'utf8',
+    );
+    fs.writeFileSync(path.join(stackDir, 'sub', '.env'), 'SUB_ONLY=child\n', 'utf8');
+    const recoveryLayer = path.join(stackDir, '.sencho-recovery-test.yml');
+    fs.writeFileSync(
+      recoveryLayer,
+      'services:\n  web:\n    image: busybox:1.36.1\n    labels:\n      sencho.recovery-test: "1"\n',
+      'utf8',
+    );
+
+    const { resolveRollbackInventory } = await import('../../services/rollbackInventory');
+    const { RollbackGenerationStore } = await import('../../services/RollbackGenerationStore');
+    const { ComposeService } = await import('../../services/ComposeService');
+
+    const inventory = await resolveRollbackInventory(nodeId, stack);
+    expect(inventory.coverageRefusal).toBeNull();
+    expect(inventory.uncapturedInputs).toEqual([]);
+    expect(inventory.invocation.composeLayers).toEqual(['sub/compose.yaml']);
+    // Compose used the stack `.env` to resolve COMPOSE_FILE but, because that
+    // same file disables the default input, it loaded no interpolation values
+    // from it. The empty record pins that absence; naming either file would let
+    // recovery introduce a value the live run never saw.
+    expect(inventory.invocation.interpolationEnvFiles).toEqual([]);
+    expect(inventory.entries.map((e) => e.relativePath)).toContain('.env');
+
+    const generationId = randomUUID();
+    await RollbackGenerationStore.captureGeneration({ nodeId, stackName: stack, generationId, inventory });
+    const stored = await RollbackGenerationStore.readVerifiedGeneration(nodeId, stack, generationId);
+
+    const args = await ComposeService.getInstance(nodeId).buildComposeArgsWithRecoveryOverride(
+      stack,
+      ['config'],
+      recoveryLayer,
+      stored.invocation,
+    );
+    const prefix = args.slice(1, args.indexOf('config'));
+    expect(prefix).toEqual([
+      '-f', 'sub/compose.yaml',
+      '--env-file', '/dev/null',
+      '-f', recoveryLayer,
+    ]);
+    // Neither the disabled project file nor the self-disabled root file is
+    // replayed, so neither can supply a value the live run never saw.
+    expect(prefix).not.toContain(path.join(stackDir, 'sub', '.env'));
+    expect(prefix).not.toContain(path.join(stackDir, '.env'));
+
+    const live = renderModel([], stackDir, stack) as {
+      services: Record<string, { command?: string[] }>;
+    };
+    // The live run fell back: the self-disabled file contributed no values.
+    expect(live.services.web.command).toEqual(['echo', 'absent', 'missing']);
+
+    const recovery = renderModel(prefix, stackDir, stack) as {
+      services: Record<string, { command?: string[] }>;
+    };
+    expect(recovery.services.web.command).toEqual(live.services.web.command);
+  });
+
   it('keeps a dynamically resolved bind source that is also an optional env file', async () => {
     const stack = 'dynamicbindrestore';
     const stackDir = path.join(composeDir, stack);
