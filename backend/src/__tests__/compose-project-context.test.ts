@@ -22,7 +22,8 @@ vi.mock('../utils/debug', () => ({
   isDebugEnabled: () => false,
 }));
 
-vi.mock('../services/rollbackInventory', () => ({
+vi.mock('../services/rollbackInventory', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../services/rollbackInventory')>()),
   resolveRollbackInventory: vi.fn(),
 }));
 
@@ -37,7 +38,10 @@ vi.mock('../services/DatabaseService', () => ({
 import { FileSystemService } from '../services/FileSystemService';
 import { RollbackGenerationStore } from '../services/RollbackGenerationStore';
 import { resolveRollbackInventory } from '../services/rollbackInventory';
-import { resolveComposeProjectContext } from '../services/composeProjectContext';
+import {
+  resolveComposeProjectContext,
+  resolveComposeProjectContextForGeneration,
+} from '../services/composeProjectContext';
 
 describe('composeProjectContext backupFromContext', () => {
   let composeDir: string;
@@ -99,6 +103,7 @@ describe('composeProjectContext backupFromContext', () => {
       recoveryRefusal: null,
       uncapturedInputs: [],
       uncapturedRelativePaths: [],
+      ownedUncapturedRelativePaths: [],
       applicationDataPaths: [],
       applicationDataPathPrefixes: [],
       dynamicApplicationDataSources: [],
@@ -149,6 +154,7 @@ describe('composeProjectContext backupFromContext coverage', () => {
       recoveryRefusal: null,
       uncapturedInputs: [],
       uncapturedRelativePaths: [],
+      ownedUncapturedRelativePaths: [],
       applicationDataPaths: [],
       applicationDataPathPrefixes: [],
       dynamicApplicationDataSources: [],
@@ -188,6 +194,38 @@ describe('composeProjectContext backupFromContext coverage', () => {
     expect(manifest.entries.map((e) => e.relativePath)).toEqual(['compose.yaml']);
     expect(warn).toHaveBeenCalledTimes(1);
     expect(warn.mock.calls[0][0]).toContain('../shared/base.yaml');
+  });
+
+  describe('restoring over a file the capture left out', () => {
+    // The live inventory reports a path the generation did not record. For a
+    // generation that recorded no omission of its own, whether the restore may
+    // remove it depends on whether the inventory owns it.
+    async function restoreWithLiveOmission(owned: string[]): Promise<void> {
+      vi.mocked(resolveRollbackInventory).mockResolvedValue(inventory());
+      const ctx = await resolveComposeProjectContext(1, stackName);
+      const generationId = await ctx.backupFromContext('deployment');
+
+      await fsPromises.writeFile(path.join(composeDir, stackName, 'extra.env'), 'KEEP=me\n', 'utf8');
+      vi.mocked(resolveRollbackInventory).mockResolvedValue(inventory({
+        uncapturedRelativePaths: ['extra.env'],
+        ownedUncapturedRelativePaths: owned,
+        uncapturedInputs: ['extra.env is loaded by Compose for interpolation and is not captured'],
+      }));
+      const restoreCtx = await resolveComposeProjectContextForGeneration(1, stackName, generationId);
+      await restoreCtx.restoreFromContext();
+    }
+
+    it('keeps an omission the inventory does not own', async () => {
+      await restoreWithLiveOmission([]);
+
+      expect(await fsPromises.readFile(path.join(composeDir, stackName, 'extra.env'), 'utf8')).toBe('KEEP=me\n');
+    });
+
+    it('removes an owned omission the generation never held', async () => {
+      await restoreWithLiveOmission(['extra.env']);
+
+      await expect(fsPromises.stat(path.join(composeDir, stackName, 'extra.env'))).rejects.toMatchObject({ code: 'ENOENT' });
+    });
   });
 
   it('refuses before writing anything when the inventory has a blocking reason', async () => {

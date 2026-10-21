@@ -864,6 +864,217 @@ describe('resolveRollbackInventory: the env files a Git run loads', () => {
     expect(inventory.uncapturedRelativePaths).not.toContain('sub/.env');
     expect(storedRestoreCoverage({ uncapturedInputs: inventory.uncapturedInputs })).toBe('complete');
   });
+
+  describe('files the manifest does not own', () => {
+    const implicitOverride = (name: string, over: Record<string, unknown> = {}) => ({
+      sourcePath: name,
+      materializedPath: name,
+      role: 'compose-override',
+      dependencyKind: 'implicit-override',
+      ownership: 'managed',
+      provenance: 'fetch',
+      sensitivity: 'medium',
+      contentSha256: null,
+      sizeBytes: null,
+      state: 'present',
+      deletionAuthority: 'sencho',
+      note: null,
+      ...over,
+    });
+
+    function singleFile(extraInputs: unknown[] = []): unknown {
+      const body = manifest(extraInputs);
+      (body as { project: { invocation: string[] } }).project.invocation = [];
+      return body;
+    }
+
+    it('offers none of its omitted env files as a cleanup candidate', async () => {
+      const operatorEnv = path.join(composeDir, STACK, 'operator.env');
+      const projectEnv = path.join(composeDir, STACK, '.env');
+      await fsPromises.writeFile(projectEnv, 'GREETING=old\n', 'utf8');
+      mockComposeFileEnvVarSelection.mockResolvedValue({
+        kind: 'absent',
+        composeEnvFiles: [operatorEnv],
+        loadedEnvFiles: [operatorEnv, projectEnv],
+      });
+
+      const inventory = await resolveRollbackInventory(1, STACK);
+
+      // Both are recorded as omissions, but neither is the inventory's to remove.
+      expect(inventory.uncapturedRelativePaths).toEqual(['.env', 'operator.env']);
+      expect(inventory.ownedUncapturedRelativePaths).toEqual([]);
+    });
+
+    it('pins the absence of a default env file the manifest does not hold', async () => {
+      mockReadManifest.mockResolvedValue(singleFile());
+
+      const inventory = await resolveRollbackInventory(1, STACK);
+
+      expect(inventory.coverageRefusal).toBeNull();
+      expect(inventory.invocation.interpolationEnvFiles).toEqual([]);
+      expect(inventory.uncapturedInputs).toEqual([]);
+    });
+
+    it('leaves the env choice to Compose when a default env file exists', async () => {
+      const projectEnv = path.join(composeDir, STACK, '.env');
+      await fsPromises.writeFile(projectEnv, 'GREETING=old\n', 'utf8');
+      mockReadManifest.mockResolvedValue(singleFile());
+      mockComposeFileEnvVarSelection.mockResolvedValue({
+        kind: 'absent',
+        composeEnvFiles: [],
+        loadedEnvFiles: [projectEnv],
+      });
+
+      const inventory = await resolveRollbackInventory(1, STACK);
+
+      expect(inventory.invocation.interpolationEnvFiles).toBeUndefined();
+      expect(inventory.uncapturedRelativePaths).toEqual(['.env']);
+    });
+
+    it('leaves the env choice to Compose when the manifest holds the env file', async () => {
+      mockReadManifest.mockResolvedValue(singleFile([{
+        sourcePath: '.env',
+        materializedPath: '.env',
+        role: 'env',
+        dependencyKind: 'sync-env',
+        ownership: 'managed',
+        provenance: 'migration',
+        sensitivity: 'high',
+        contentSha256: null,
+        sizeBytes: null,
+        state: 'present',
+        deletionAuthority: 'sencho',
+        note: null,
+      }]));
+      await fsPromises.writeFile(path.join(composeDir, STACK, '.env'), 'GREETING=held\n', 'utf8');
+
+      const inventory = await resolveRollbackInventory(1, STACK);
+
+      expect(inventory.entries.map((e) => e.relativePath)).toContain('.env');
+      expect(inventory.invocation.interpolationEnvFiles).toBeUndefined();
+    });
+
+    it('pins the absence of the project directory env file, not the stack root one', async () => {
+      const stackDir = path.join(composeDir, STACK);
+      await fsPromises.mkdir(path.join(stackDir, 'sub'), { recursive: true });
+      await fsPromises.writeFile(path.join(stackDir, 'sub', 'compose.yaml'), 'services:\n  web:\n    image: nginx\n', 'utf8');
+      await fsPromises.writeFile(path.join(stackDir, '.env'), 'ROOT=1\n', 'utf8');
+      const body = manifest();
+      const project = (body as { project: { composeFiles: string[]; invocation: string[] } }).project;
+      project.composeFiles = ['sub/compose.yaml'];
+      project.invocation = ['-f', 'sub/compose.yaml', '-p', STACK];
+      mockReadManifest.mockResolvedValue(body);
+
+      const inventory = await resolveRollbackInventory(1, STACK);
+
+      // Compose reads only the project directory's file here, and it is absent.
+      expect(inventory.invocation.interpolationEnvFiles).toEqual([]);
+      expect(inventory.uncapturedRelativePaths).toEqual([]);
+    });
+
+    it('leaves the env choice to Compose when the project directory env file exists', async () => {
+      const stackDir = path.join(composeDir, STACK);
+      await fsPromises.mkdir(path.join(stackDir, 'sub'), { recursive: true });
+      await fsPromises.writeFile(path.join(stackDir, 'sub', 'compose.yaml'), 'services:\n  web:\n    image: nginx\n', 'utf8');
+      await fsPromises.writeFile(path.join(stackDir, 'sub', '.env'), 'SUBVAR=1\n', 'utf8');
+      const body = manifest();
+      const project = (body as { project: { composeFiles: string[]; invocation: string[] } }).project;
+      project.composeFiles = ['sub/compose.yaml'];
+      project.invocation = ['-f', 'sub/compose.yaml', '-p', STACK];
+      mockReadManifest.mockResolvedValue(body);
+
+      const inventory = await resolveRollbackInventory(1, STACK);
+
+      expect(inventory.invocation.interpolationEnvFiles).toBeUndefined();
+      expect(inventory.uncapturedRelativePaths).toEqual(['sub/.env']);
+    });
+
+    it('refuses the capture when a default env path cannot be inspected', async () => {
+      mockReadManifest.mockResolvedValue(singleFile());
+      const realLstat = fsPromises.lstat.bind(fsPromises);
+      const lstat = vi.spyOn(fsPromises, 'lstat').mockImplementation(async (target, ...rest) => {
+        if (String(target).endsWith(`${path.sep}${STACK}${path.sep}.env`)) {
+          throw Object.assign(new Error('permission denied'), { code: 'EACCES' });
+        }
+        return realLstat(target, ...(rest as []));
+      });
+      try {
+        const inventory = await resolveRollbackInventory(1, STACK);
+
+        expect(inventory.coverageRefusal).toMatch(/Could not inspect the interpolation env files.*permission denied/);
+        expect(inventory.uncapturedRelativePaths).toEqual([]);
+        expect(inventory.ownedUncapturedRelativePaths).toEqual([]);
+      } finally {
+        lstat.mockRestore();
+      }
+    });
+
+    it('does not pin an absence when the invocation already selects its env files', async () => {
+      const body = singleFile();
+      (body as { project: { invocation: string[] } }).project.invocation = ['--env-file', 'operator.env'];
+      mockReadManifest.mockResolvedValue(body);
+
+      const inventory = await resolveRollbackInventory(1, STACK);
+
+      expect(inventory.invocation.interpolationEnvFiles).toBeUndefined();
+    });
+
+    it('pins the implicit override the manifest holds after the configured file', async () => {
+      await fsPromises.writeFile(path.join(composeDir, STACK, 'compose.override.yml'), 'services: {}\n', 'utf8');
+      mockReadManifest.mockResolvedValue(singleFile([implicitOverride('compose.override.yml')]));
+
+      const inventory = await resolveRollbackInventory(1, STACK);
+
+      expect(inventory.invocation.composeLayers).toEqual(['compose.yaml', 'compose.override.yml']);
+      expect(inventory.invocation.explicitComposeFiles).toEqual(['compose.yaml']);
+    });
+
+    it.each([
+      'compose.override.yaml',
+      'docker-compose.override.yml',
+      'docker-compose.override.yaml',
+    ])('pins the override the manifest selected when it is %s', async (name) => {
+      await fsPromises.writeFile(path.join(composeDir, STACK, name), 'services: {}\n', 'utf8');
+      mockReadManifest.mockResolvedValue(singleFile([implicitOverride(name)]));
+
+      const inventory = await resolveRollbackInventory(1, STACK);
+
+      expect(inventory.invocation.composeLayers).toEqual(['compose.yaml', name]);
+    });
+
+    it('does not pin an override that is missing from disk', async () => {
+      mockReadManifest.mockResolvedValue(singleFile([implicitOverride('compose.override.yml')]));
+
+      const inventory = await resolveRollbackInventory(1, STACK);
+
+      expect(inventory.invocation.composeLayers).toEqual(['compose.yaml']);
+    });
+
+    it('does not pin an override the manifest does not own or no longer holds', async () => {
+      mockReadManifest.mockResolvedValue(singleFile([
+        implicitOverride('compose.override.yml', { ownership: 'unmanaged', deletionAuthority: 'none' }),
+        implicitOverride('compose.override.yaml', { state: 'absent' }),
+      ]));
+
+      const inventory = await resolveRollbackInventory(1, STACK);
+
+      expect(inventory.invocation.composeLayers).toEqual(['compose.yaml']);
+    });
+
+    it('keeps an explicit multi-file selection in its configured order', async () => {
+      const body = manifest([{
+        ...implicitOverride('extra.yaml', { dependencyKind: 'explicit', role: 'compose-additional' }),
+      }]);
+      const project = (body as { project: { composeFiles: string[]; invocation: string[] } }).project;
+      project.composeFiles = ['compose.yaml', 'extra.yaml'];
+      project.invocation = ['-f', 'compose.yaml', '-f', 'extra.yaml', '-p', STACK];
+      mockReadManifest.mockResolvedValue(body);
+
+      const inventory = await resolveRollbackInventory(1, STACK);
+
+      expect(inventory.invocation.composeLayers).toEqual(['compose.yaml', 'extra.yaml']);
+    });
+  });
 });
 
 describe('selectedProjectEnvFile', () => {
@@ -1862,6 +2073,9 @@ describe('resolveRollbackInventory: inputs that cannot be captured', () => {
     expect(inventory.coverageRefusal).toBeNull();
     expect(inventory.entries.map((e) => e.relativePath)).toEqual(['compose.yaml']);
     expect(inventory.uncapturedRelativePaths).toEqual(['.env']);
+    // An authored stack owns what it omits, so a link that became a file can
+    // still be cleaned up.
+    expect(inventory.ownedUncapturedRelativePaths).toEqual(['.env']);
     expect(inventory.uncapturedInputs).toEqual([expect.stringMatching(/^\.env links outside the stack directory/)]);
   });
 

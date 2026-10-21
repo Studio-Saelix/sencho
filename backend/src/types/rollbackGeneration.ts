@@ -250,16 +250,26 @@ export interface ResolvedRollbackInventory {
    */
   uncapturedInputs: string[];
   /**
-   * Stack-relative paths of managed inputs the capture left out: links inside
-   * the stack that point outside it, at nothing, or at a non-file. Restore
-   * neither writes nor deletes them, and a live restore may still remove one
-   * that became a link after capture, because the generation owns that managed
-   * path. Application data and build inputs (bind mounts, build contexts,
+   * Stack-relative paths of inputs the capture left out: links inside the
+   * stack that point outside it, at nothing, or at a non-file, and env files the
+   * run loads for interpolation that the generation does not hold. Restore
+   * neither writes nor deletes them. Whether a live restore may remove one that
+   * appears after capture is decided by `ownedUncapturedRelativePaths`, not by
+   * this list. Application data and build inputs (bind mounts, build contexts,
    * dockerfiles) are never managed paths and never appear here: a restore
    * leaves them alone whether they existed at capture or appeared afterwards.
    * Not every note in `uncapturedInputs` has a path here.
    */
   uncapturedRelativePaths: string[];
+  /**
+   * The subset of `uncapturedRelativePaths` the inventory owns, so a restore may
+   * remove one that appears after a generation that did not record it. A Git
+   * manifest owns no omitted path: an env file it does not hold belongs to the
+   * operator whatever Compose reads, so none of its omissions is a cleanup
+   * candidate even though each is recorded and reported. Empty when
+   * `coverageRefusal` is set.
+   */
+  ownedUncapturedRelativePaths: string[];
   /**
    * Stack-relative paths any live input declares as application data or a
    * build input, whatever else also uses them. A path can be both a bind

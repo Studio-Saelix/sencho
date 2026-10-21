@@ -63,6 +63,7 @@ function inventoryFor(
     recoveryRefusal: null,
     uncapturedInputs: [],
     uncapturedRelativePaths: [],
+    ownedUncapturedRelativePaths: [],
     applicationDataPaths: [],
     applicationDataPathPrefixes: [],
     dynamicApplicationDataSources: [],

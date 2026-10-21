@@ -846,6 +846,7 @@ function refusedGitInventory(
     recoveryRefusal: null,
     uncapturedInputs: [],
     uncapturedRelativePaths: [],
+    ownedUncapturedRelativePaths: [],
     applicationDataPaths: [],
     applicationDataPathPrefixes: [],
     dynamicApplicationDataSources: [],
@@ -1016,9 +1017,25 @@ async function resolveGitInventory(
     projectDirectory: read.project.effectiveProjectDir,
     projectName: read.project.projectName || stackName,
     explicitComposeFiles: [...gitSourceLocalComposeFiles(read.project.composeFiles)],
-    // The manifest's compose files are the deploy's own -f list, so they are
-    // also its complete set of project-root layers.
-    composeLayers: [...gitSourceLocalComposeFiles(read.project.composeFiles)],
+    // The manifest's compose files are the deploy's own -f list. A single-file
+    // project with no context directory leaves the invocation to Compose's
+    // discovery, which also loads the implicit override the manifest holds, so
+    // that override is a layer of the project too. Pinning only the configured
+    // file would drop it from every recovery run. An override missing from disk
+    // is not pinned: Compose skips an absent optional override, but an explicit
+    // -f for it would fail the run.
+    composeLayers: [
+      ...gitSourceLocalComposeFiles(read.project.composeFiles),
+      ...read.inputs.flatMap((input) => (
+        input.dependencyKind === 'implicit-override'
+        && input.ownership === 'managed'
+        && input.state === 'present'
+        && input.materializedPath !== null
+        && map.get(posixRel(input.materializedPath))?.absolutePath != null
+          ? [input.materializedPath]
+          : []
+      )),
+    ],
     meshOverrideRelativePath: null,
     meshEnabled,
   };
@@ -1027,8 +1044,9 @@ async function resolveGitInventory(
   const uncaptured = new Set<string>();
   const uncapturedPaths = new Set<string>();
   let recoveryRefusal: string | null = null;
-  // Only an invalid selection refuses the capture here; an unknown one is an
-  // accepted partial input the manifest can still pin layers over.
+  // Only an invalid selection, or env files this reader cannot inspect, refuse
+  // the capture here; an unknown selection is an accepted partial input the
+  // manifest can still pin layers over.
   let invalidSelectionRefusal: string | null = null;
   if (refusal === null) {
     // The manifest is this generation's canonical file inventory, so it is also
@@ -1094,6 +1112,24 @@ async function resolveGitInventory(
           `${projectEnv.relativePath} is loaded by Compose from the selected project directory and is not captured`,
         ));
       }
+      // A default env file the manifest does not hold and that does not exist
+      // is part of the captured project, not a gap in it. A recovery that left
+      // discovery to Compose would read a file the operator creates afterwards,
+      // which a restore keeps because the manifest never owned it, so the
+      // absence is recorded and replayed as an empty env input. A file that
+      // exists is the omission recorded above and its current content is read.
+      const projectEnvRel = projectEnv?.kind === 'relative' ? projectEnv.relativePath : null;
+      if (
+        projectEnv?.kind !== 'outside'
+        && !defaultProjectEnvSuppressed(invocation.composeArgsPrefix)
+        && !map.has(projectEnvRel ?? DOT_ENV)
+      ) {
+        try {
+          if (await defaultEnvFilesAbsent(stackRoot, projectEnvRel, false)) invocation.interpolationEnvFiles = [];
+        } catch (e) {
+          invalidSelectionRefusal = `Could not inspect the interpolation env files for rollback capture: ${(e as Error).message}`;
+        }
+      }
     }
   }
   const liveRefusal = refusal ?? invalidSelectionRefusal;
@@ -1117,6 +1153,10 @@ async function resolveGitInventory(
     uncapturedRelativePaths: liveRefusal === null
       ? [...uncapturedPaths].sort((a, b) => a.localeCompare(b))
       : [],
+    // Every path above is an env file the manifest deliberately does not own
+    // (deletionAuthority 'none'), so none is a cleanup candidate: the operator's
+    // file stays whether it existed at capture or appeared afterwards.
+    ownedUncapturedRelativePaths: [],
     // The manifest names one input per path, so a path's kind is its only
     // role here; there is no merged-kind ambiguity to protect against. An
     // unmanaged bind may not appear in the managed file map, so the collected
@@ -1731,6 +1771,9 @@ const capturable = async (
     // A refused capture writes nothing, so it carries no partial-capture lists.
     uncapturedInputs: coverageRefusal === null ? [...uncaptured] : [],
     uncapturedRelativePaths: coverageRefusal === null
+      ? [...uncapturedPaths].sort((a, b) => a.localeCompare(b))
+      : [],
+    ownedUncapturedRelativePaths: coverageRefusal === null
       ? [...uncapturedPaths].sort((a, b) => a.localeCompare(b))
       : [],
     applicationDataPaths: coverageRefusal === null

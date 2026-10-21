@@ -135,7 +135,9 @@ class AuthoredComposeProjectContext implements ComposeProjectContext {
     // The live managed paths travel with the entries: they are the inputs this
     // generation cannot hold or no longer holds, and a restore that never saw
     // them would leave a link created after capture in place and read its
-    // target. Application data and build inputs are not managed paths, so
+    // target. Only omissions the inventory owns travel: a Git manifest owns
+    // none, so an operator env file it does not hold is never a candidate.
+    // Application data and build inputs are not managed paths, so
     // neither their omissions nor their live entries travel: a path any live
     // input declares as application data never becomes a cleanup candidate,
     // even when another input also uses it as a managed file, and a data file
@@ -151,7 +153,7 @@ class AuthoredComposeProjectContext implements ComposeProjectContext {
           .filter((entry) => !applicationData.has(entry.relativePath)
             && !isApplicationDataKind(entry.dependencyKind))
           .map((entry) => entry.relativePath),
-        ...inventory.uncapturedRelativePaths.filter((rel) => !applicationData.has(rel)),
+        ...inventory.ownedUncapturedRelativePaths.filter((rel) => !applicationData.has(rel)),
       ],
       transactionMeta,
       // A generation captured before it recorded dynamic application-data
