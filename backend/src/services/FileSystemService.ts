@@ -2207,12 +2207,25 @@ export class FileSystemService {
    * giving the caller a definitive "did not exist when we wrote it" signal.
    * The non-exclusive default uses rename, which is atomic against partial
    * reads but clobbers any existing target.
+   *
+   * `mode` is applied to the staging file's descriptor before it is promoted. A
+   * plain chmod after the rename would briefly expose the new content with the
+   * process umask's creation mode, and a chmod failure would leave the write
+   * committed but the mode wrong. Staging the mode keeps the promotion
+   * all-or-nothing: the target either keeps its previous content and mode, or
+   * gets the new content with the requested mode.
    */
   private async writeStackFileAtomic(
     safePath: string,
     data: string | Buffer | Readable,
-    opts: { exclusive?: boolean } = {},
+    opts: { exclusive?: boolean; mode?: number } = {},
   ): Promise<void> {
+    if (
+      opts.mode !== undefined
+      && (!Number.isInteger(opts.mode) || opts.mode < 0 || opts.mode > 0o777)
+    ) {
+      throw Object.assign(new Error('Invalid permission bits'), { code: 'INVALID_PATH' });
+    }
     await fsPromises.mkdir(path.dirname(safePath), { recursive: true });
     // crypto.randomBytes gives a guaranteed-length high-entropy suffix; Math.random
     // can drop leading zeros which narrows entropy unpredictably.
@@ -2229,6 +2242,7 @@ export class FileSystemService {
         await pipeline(data, ws);
         const synced = await fsPromises.open(tmpPath, 'r+');
         try {
+          if (opts.mode !== undefined) await synced.chmod(opts.mode);
           await synced.sync();
         } finally {
           await synced.close();
@@ -2238,6 +2252,7 @@ export class FileSystemService {
         stagedTmp = true;
         try {
           await fh.writeFile(data);
+          if (opts.mode !== undefined) await fh.chmod(opts.mode);
           await fh.sync();
         } finally {
           await fh.close();
@@ -2266,11 +2281,16 @@ export class FileSystemService {
     }
   }
 
+  /**
+   * Write `content` to a stack-relative path. `mode`, when given, is set on the
+   * staging file before promotion, so the target lands with exactly that mode
+   * instead of the process umask's creation mode.
+   */
   async writeStackFile(
     stackName: string,
     relPath: string,
     content: string | Buffer,
-    opts?: { exclusive?: boolean },
+    opts?: { exclusive?: boolean; mode?: number },
   ): Promise<void> {
     const safePath = await this.resolveSafeStackPath(stackName, relPath);
     await this.writeStackFileAtomic(safePath, content, opts);

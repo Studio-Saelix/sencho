@@ -1247,26 +1247,36 @@ export class RollbackGenerationStore {
       if (typeof entry.linkTarget === 'string' && entry.linkTarget !== '') {
         await this.restoreManagedLinkShape(nodeId, stackName, rel, entry.linkTarget);
       }
-      await fsSvc.writeStackFile(stackName, rel, buf);
-      // The mode is the target's, and chmodStackPath deliberately refuses to
-      // follow a link (so a file-explorer click on a link never mutates a file
-      // with a different name). The bytes are back, which is what the revert
-      // exists for, so leave the mode rather than abort the whole revert and
-      // leave a half-applied restore behind.
-      if (typeof entry.mode === 'number' && entry.linkTarget === undefined && process.platform !== 'win32') {
-        try {
-          await fsSvc.chmodStackPath(stackName, rel, entry.mode & 0o777, scope);
-        } catch (e) {
-          throw Object.assign(
-            new Error(
-              `Could not restore pre-restore permissions on "${rel}": ${(e as Error).message}`,
-            ),
-            { code: 'RESTORE_CHMOD_FAILED', cause: e },
-          );
-        }
-      }
+      // The write follows an in-stack link, so `entry.mode` is the target's mode
+      // and applying it to the staged file restores the target's bytes and
+      // permissions in one atomic promotion. A permission failure therefore
+      // leaves the preimage untouched and this revert throwing, which keeps the
+      // snapshot and restore-intent.json for a retry instead of reporting a
+      // compensation that only put the bytes back.
+      const mode = this.preRestoreWriteMode(rel, entry.mode);
+      await fsSvc.writeStackFile(stackName, rel, buf, mode === undefined ? undefined : { mode });
     }
     await fsPromises.rm(preRoot, { recursive: true, force: true });
+  }
+
+  /**
+   * The mode to reapply when reverting one present entry, or undefined when the
+   * snapshot recorded none (or the platform has no POSIX modes). A malformed
+   * value is refused rather than masked, so a corrupt index cannot quietly
+   * widen the permissions of the file it restores.
+   */
+  private static preRestoreWriteMode(
+    rel: string,
+    recorded: number | null | undefined,
+  ): number | undefined {
+    if (recorded === undefined || recorded === null) return undefined;
+    if (!Number.isInteger(recorded) || recorded < 0 || recorded > 0o777) {
+      throw Object.assign(
+        new Error(`Pre-restore entry for "${rel}" has invalid permission bits`),
+        { code: 'PRE_RESTORE_INDEX_INVALID' },
+      );
+    }
+    return process.platform === 'win32' ? undefined : recorded;
   }
 
   /** Resolve a pre-restore blob id under blobsRoot; rejects traversal. */
