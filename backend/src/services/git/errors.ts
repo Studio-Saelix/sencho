@@ -244,7 +244,7 @@ export function classifyGitFailure(
     if (/hostname mismatch|certificate subject name does not match|doesn't match.*altnames|subject alternative name|no alternative certificate subject name/.test(raw)) {
         return { code: 'GIT_ERROR', message: `TLS certificate error reaching${dest}. The certificate hostname does not match the repository URL.` };
     }
-    if (/ssl certificate problem|server certificate verification failed|unable to get local issuer certificate|self[- ]signed certificate|unknown ca|certificate signed by unknown authority/.test(raw)) {
+    if (/ssl certificate problem|server certificate verification failed|certificate signer not trusted|unable to get local issuer certificate|self[- ]signed certificate|unknown ca|certificate signed by unknown authority/.test(raw)) {
         return { code: 'GIT_ERROR', message: `TLS certificate error reaching${dest}. The host certificate could not be verified. If this server uses a private CA, upload the CA certificate on the git source.` };
     }
 
