@@ -629,10 +629,16 @@ describe('RollbackGenerationStore', () => {
     // content the failed restore wrote through the link. The mode application
     // then fails before the preimage bytes are promoted, so the revert must not
     // claim completeness: the caller classifies the failure as post-mutation,
-    // and the durable evidence stays for retry.
+    // and the durable evidence stays for retry. Read and stat through one
+    // descriptor so the assertions cannot straddle a path swap.
     expect(failure).toMatchObject({ code: 'RESTORE_CHMOD_FAILED', restoreRevertFailed: true });
-    expect(await fsPromises.readFile(targetPath, 'utf8')).toBe('MARK=captured\n');
-    expect((await fsPromises.stat(targetPath)).mode & 0o777).not.toBe(0o600);
+    const afterFailure = await fsPromises.open(targetPath, 'r');
+    try {
+      expect(await afterFailure.readFile('utf8')).toBe('MARK=captured\n');
+      expect((await afterFailure.stat()).mode & 0o777).not.toBe(0o600);
+    } finally {
+      await afterFailure.close();
+    }
 
     const genDir = RollbackGenerationStore.getGenerationDir(NODE, stackName, generationId);
     await expect(
@@ -647,8 +653,13 @@ describe('RollbackGenerationStore', () => {
     await expect(
       RollbackGenerationStore.reconcileInterruptedRestore(NODE, stackName, generationId),
     ).resolves.toBe(true);
-    expect(await fsPromises.readFile(targetPath, 'utf8')).toBe('MARK=before-restore\n');
-    expect((await fsPromises.stat(targetPath)).mode & 0o777).toBe(0o600);
+    const afterRetry = await fsPromises.open(targetPath, 'r');
+    try {
+      expect(await afterRetry.readFile('utf8')).toBe('MARK=before-restore\n');
+      expect((await afterRetry.stat()).mode & 0o777).toBe(0o600);
+    } finally {
+      await afterRetry.close();
+    }
     expect((await fsPromises.lstat(path.join(stackDir, 'app.env'))).isSymbolicLink()).toBe(true);
     expect(await fsPromises.readlink(path.join(stackDir, 'app.env'))).toBe('target.env');
     await expect(
