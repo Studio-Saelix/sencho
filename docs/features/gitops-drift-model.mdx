@@ -5,7 +5,7 @@ description: "The drift classes Sencho derives for every Git-managed stack and B
 
 Sencho reports drift in two layers. The **spatial** layer compares the effective Compose model against the containers running right now and is covered in [Drift Detection](/features/stack-drift). The **GitOps** layer compares what you intended against what Sencho has proven, accepted, and observed over time, for anything managed by a Git source or a [Blueprint](/features/blueprint-model).
 
-This page is the reference for that second layer: the classes it reports, the evidence each one rests on, and the policy that decides what happens after a class is reported.
+This page is the reference for that second layer: the classes it reports, the evidence each one rests on, and the policy that decides what happens after a class is reported. The vocabulary (generation, stage, authority step) is defined in the [GitOps overview](/features/gitops-overview).
 
 ## The seven classes
 
@@ -130,37 +130,16 @@ Drift is derived from what Sencho has recorded, so missing evidence is never rou
 
 Each of those is listed as a caveat under the state it applies to, on the Drift tab and in the application sheet, saying what could not be proven. The per-service digest view says the same in its own words: a target with no per-service evidence on either side says nothing rather than showing an empty comparison that would read as agreement.
 
-## The policy domains
+## Which policy acts on a class
 
-A drift class reports; a policy decides. Each decision below is independent, and none of them authorizes another. Three of them answer the same question at three points in the chain: who is allowed to decide. The other two answer what happens after something has already gone wrong or already drifted.
+A drift class reports; a policy decides. Each policy is independent, and none authorizes another. They are defined together in the [GitOps overview](/features/gitops-overview#who-decides-each-step). The two that act after something has drifted:
 
-| Policy | Where it lives | What it governs |
-|---|---|---|
-| **Source policy** | Per Git source: Manual, Review only, Auto-write files, or Auto-deploy. | How far Sencho goes on its own after a fetch. Manual takes the source out of the cadence entirely, so nothing happens until you ask for a pull. Review only records the result and waits for you. A withdrawn stateful target always waits for you, whatever the source policy says. |
-| **Placement policy** | Per application, beside the placement approval. | Which placement changes are approved without you. **Operator approves each change** is the only option unless you choose **One stateless change at a time**, and that option approves exactly one stateless addition or one stateless removal, falling back to you with a stated reason for everything else. |
-| **Rollout authorization policy** | Per application. On an Inline Blueprint it sits beside the placement policy. On a Git-managed Blueprint it sits in the rollout overflow. | Which rollouts are authorized without you. On an Inline Blueprint it also decides whether a placement the placement policy already approved runs on the next tick. A rollout cannot start before its placement is approved. |
-| **Drift mode** | Per Blueprint: Observe, Suggest, or Enforce. | What happens when the Blueprint's own drift is detected: surface it, notify you, or redeploy it. |
-| **Health rollout policy** | Per application, beside the two above. | Whether a deploy must prove healthy before it is allowed to finish, and what a failure does next: observe, pause, retry once, stop, or roll back. |
+| Policy | What it decides |
+|---|---|
+| **Drift mode** (Observe, Suggest, Enforce) | What happens when a Blueprint's own drift is detected: surface it, notify you, or redeploy it |
+| **Health rollout policy** | Whether a deploy must prove healthy before it finishes, and what a failure does next. See [Health rollout policy](/features/health-rollout-policy) |
 
 Two rules keep them honest. A digest repair redeploys against the approved identity rather than pulling whatever the tag now points at, and a stateful change always re-enters operator confirmation, whatever the drift mode says.
-
-Every rollout freezes the policy snapshot it executes, and every placement approval carries the snapshot that decided it. That is why a policy edit changes what the next decision may do and nothing else: no standing approval is withdrawn, no generation is invalidated, and the card for work already in flight says which value it was actually decided under rather than the one configured now.
-
-The three "who decides" policies are recorded together as one snapshot, so no reader can reach a single value that appears to govern more than one of them.
-
-### What a new application starts on
-
-A new or newly adopted application waits for an operator at every step. That is
-the safe default for something with no history: nothing about it has yet proved
-that a node can take a generation, and the placement policy starts on operator
-review for the same reason.
-
-An application that already existed before these settings were introduced keeps
-what it was doing, and only that. If you adopt a Blueprint after the fact, or
-convert one twice, it starts on operator review rather than inheriting the
-behavior of applications that were around earlier. The setting is beside the
-rollout authorization action it governs, so turning it on is one click rather
-than a request.
 
 ## Related
 
@@ -168,11 +147,11 @@ than a request.
   <Card title="Drift Detection" icon="magnifying-glass" href="/features/stack-drift">
     The spatial layer: effective Compose model against the containers running now.
   </Card>
-  <Card title="Git Sources" icon="git-branch" href="/features/git-sources">
-    Where the source policy, commits, and acceptance live.
+  <Card title="GitOps overview" icon="route" href="/features/gitops-overview">
+    The chain from commit to container, and who decides each step.
   </Card>
   <Card title="Blueprints" icon="layers" href="/features/blueprint-model">
-    Who decides each step, drift modes, and digest drift on a fleet template.
+    Drift modes and digest drift on a fleet template.
   </Card>
   <Card title="GitOps portfolio" icon="chart-pie" href="/features/gitops-portfolio">
     Every application in one table, with drift by class and the attention queue.

@@ -1,0 +1,174 @@
+---
+title: Git-managed Blueprints
+description: Run one Git repository across several nodes. Convert a Git source onto a Blueprint, then accept source, approve placement, and authorize rollout as separate steps, with pause, resume, and rollback along the way.
+---
+
+A **Git-managed Blueprint** is a [Blueprint](/features/blueprint-model) whose Compose content comes from one live Git source instead of the editor. Git is the content authority. A commit becomes a candidate generation, and nothing reaches a node until the generation is accepted, its placement is approved, and its rollout is authorized.
+
+The vocabulary used here, including the three authority steps and the policies that can take them for you, is defined in the [GitOps overview](/features/gitops-overview).
+
+## The lifecycle at a glance
+
+<Steps>
+  <Step title="Convert a Git source">
+    Move a live Git source onto a Blueprint. Placement approval returns to pending.
+  </Step>
+  <Step title="Accept source">
+    Record that a fetched candidate generation is the content to run.
+  </Step>
+  <Step title="Review and approve placement">
+    Confirm the exact nodes to place or remove.
+  </Step>
+  <Step title="Authorize rollout">
+    Open an immutable rollout generation. Sencho deploys to the approved targets one after another.
+  </Step>
+  <Step title="Follow new commits">
+    A newer commit becomes a new candidate and the chain runs again. Placement stays approved unless the selector or roster changes.
+  </Step>
+</Steps>
+
+Each step is offered as an action on the Blueprint sheet's **GitOps** section and on the application's page in GitOps, for as long as that step is outstanding. Once every step is recorded they offer nothing.
+
+## Convert a Git source
+
+**Convert to Git** moves an existing live Git source onto the Blueprint. Pick the source, review the preview, and confirm. The Blueprint becomes Git-managed. The previous YAML is kept as a frozen **detach snapshot** only, and a placement never runs from it. Credentials stay with the Git source.
+
+On the Git Source sheet for that stack, **Save** and **Detach** are withheld. **Pull source** fetches the next commit when the sheet is reading this Sencho's own source. A source read from another node keeps its Blueprint number on that node, so this sheet does not pull a Blueprint of the same number here. **Pull source** and **Accept source** sit on the sheet's Overview beside the source status.
+
+One repository backs at most one Git-managed Blueprint. Sencho matches repositories across the forms a Git URL can take, so the HTTPS and SSH URLs for the same clone count as one repository, whatever the port, with or without a `.git` suffix, and whatever the host casing. Converting a second source that points at an already claimed repository is refused. Pick a different source, or run **Retire to Direct** or **Detach Git** on the Blueprint that holds the claim.
+
+A live Direct source can also be moved from the stack side with **Adopt onto Blueprint** on its Git Source sheet.
+
+## Accept source, approve placement, authorize rollout
+
+- **Accept source** records that a fetched candidate is the content to run. It asks first, and it appears whenever the source policy holds a candidate for review, which is always the case for a source whose policy is not automatic. After acceptance Sencho materializes the generation and tries to resolve its executable artifact identity. If resolution cannot complete, the reconciler retries it before the next authorization.
+- **Review and approve placement** opens the rollout preview, the same reviewed plan the Inline flow shows: every node to place or remove, with its reachability. Confirming records the placement approval and freezes that set for the current intent, so a later edit or roster change needs a fresh review. The button appears once source is accepted and the candidate has no placement approval.
+- **Authorize rollout** runs registry preflight, records the authorization, and starts the sequential rollout across the approved targets. It appears while the rollout is not authorized, or while the recorded authorization was granted against earlier inputs. If a target cannot start, the authorization is still recorded and the surface says what stopped the rollout.
+
+Authorization needs resolved executable artifact evidence for the accepted generation, which the artifact card reports. While that evidence is unresolved or unavailable, authorization is refused with the artifact identity as the reason, and the lifecycle controls do not work around it. A blocked registry preflight refuses it with the registry reason. Fix the registry and authorize again.
+
+A generation whose compose the artifact resolver cannot model is refused rather than resolved from a guess. That covers an interpolated image reference, `profiles`, `extends`, `include`, and YAML merge keys. The reason is recorded on the Blueprint with its evidence, and the generation waits for a later commit the resolver can read.
+
+A disabled Blueprint withholds placement approval and rollout authorization until you enable it. Accepting source stays available, because reviewing content changes nothing on the fleet. **Apply now** is Inline-only; for a Git-managed Blueprint the rollout preview is a placement review, and its confirm writes the placement approval.
+
+### The confirmation travels with the request
+
+**Accept source** and, on an automatic source, **Pull source** ask before they act. The prompt names the commit, the nodes the recorded placement approves, and whether rollout authorization can start a rollout without you, because the same request can record the commit and begin a rollout.
+
+That prompt binds to the state you saw. If the approved placement changes, or rollout authorization starts authorizing without an operator, before you confirm, Sencho refuses and asks you to review again. The check runs a second time when the commit is recorded, so a change while it is running leaves the commit unrecorded.
+
+An accepted commit keeps what you confirmed, including a placement that was not approved and a rollout that was going to wait for you. The check still holds when the rollout starts later, from the background, or after a restart. If the placement changed, appeared after you confirmed there was none, or rollout authorization became automatic, the rollout waits and the application says why. Review it and resume, or authorize the rollout yourself.
+
+## What a new commit does
+
+A Git-managed Blueprint keeps tracking its source. **Pull source** fetches the next commit, and review and automatic sources also fetch on the poll cadence when polling is on. A manual source is not polled, and provider hooks do not fetch it.
+
+- On a manual or review source, the pull is the whole action.
+- On an automatic source, the pull can record the commit and start a rollout in the same request, after the confirmation above.
+
+The result says whether the commit was only fetched, recorded, held, or used to start a rollout. A started rollout is not a finished one: when preparation or the rollout is still running, the result says so and that work continues. When a step fails instead of answering, the result says it failed and does not call it running. The pull itself is not reported as failed, and a reason from preparation is included.
+
+A fetch that finds a newer commit creates a new candidate generation, and the chain runs again:
+
+- **Accept source** takes the new generation after the confirmation. Under **Authorizes without an operator** the system then starts the rollout from the accepted generation.
+- **Placement stays approved.** A content change does not move the target set. A selector or roster change is what requires a fresh review.
+- **Authorize rollout** records the authorization for the new generation and starts the rollout. Under **Authorizes without an operator** the system attempts it after acceptance and keeps trying: the reconciler retries a preparation whose artifact identity is not ready and re-drives a handoff that was skipped (a slow preparation, a disabled Blueprint) or transiently refused. An authorization an operator withdrew waits for a person to authorize again.
+
+### When a rollout is held
+
+An authorized dispatch that is refused for a durable reason is held with the reason, instead of reading as queued. **Resume rollout** answers it, and a resume that is refused again records the new reason.
+
+| Hold | Cleared by |
+|---|---|
+| A dispatch hold, including a transient refusal under a health-gated rollout | A new commit, or **Resume rollout** |
+| A health policy decision (a stop, pause, or rollback) | You. A new commit does not clear it |
+| An operator pause | You, with **Resume rollout** |
+| An unfinished rollback | Finishing the rollback, then resuming. It also stops a new automatic rollout |
+
+A refusal that says another operation is already advancing, or that a pause is already on record, is not held: the reconciler re-drives the handoff on a later pass.
+
+## Who decides each step
+
+The source, placement, and rollout authorization policies are independent, and changing one leaves the other two alone. They are described in the [GitOps overview](/features/gitops-overview#who-decides-each-step).
+
+On a Git-managed Blueprint the source policy is set on the Git source, in its apply behavior. The placement policy sits beside **Review and approve placement**. The rollout authorization policy sits in the rollout overflow next to the health rollout policy, because both answer the same question about a rollout: what the system may do on its own, and what it should do when one fails. A policy is offered only to a session that may act on what it governs, and is absent rather than disabled when it may not.
+
+Under **Evidence**, each decision carries its own policy line. The line says who is configured to decide, what the policy did, and when it recorded a decline.
+
+## Pause, resume, replan, or supersede a rollout
+
+A live rollout offers lifecycle controls in the **Rollout controls** row of the GitOps section:
+
+- **Pause rollout** stops the rollout from advancing and asks for a reason. Nodes keep running what they already deployed, and a paused rollout never reads as converged.
+- **Resume rollout** clears the pause and continues the sequential rollout when it is still authorized. If the authorization is no longer live, the surface says so instead of starting anything.
+- **Replan placement** re-derives the target nodes and opens a fresh placement review, which withdraws the existing placement approval and rollout authorization. It sits in the overflow menu and refuses when the current placement already matches, so an accurate review is not invalidated for nothing.
+- **Supersede rollout** withdraws the rollout authorization and marks that rollout generation superseded. Nodes that already received it keep running it. The rollout reads as superseded until you authorize a new one.
+
+The rollout can also react to health outcomes on its own; see [Health rollout policy](/features/health-rollout-policy).
+
+## Roll back a rollout
+
+Every Git-managed rollout deploy captures the node's previous project as a recovery generation before it applies anything. **Roll back rollout** lists the application's earlier generations, newest first, and asks for a scope: one target, the targets recorded as failed, unreachable, or stale, or every changed target. A target already running the selected generation is skipped.
+
+Each node in the scope must hold a recovery generation that names the selected application generation. A node keeps the generation captured immediately before its latest rollout, so an older selection has nothing to restore from and is reported as a failed target; the rollout then reads as a partially failed rollback, not a completion.
+
+- A target refused before the restore changes anything stays failed on its own row but does not hold the application. The next successful deploy to that target retires the stale failure.
+- Only a rollback that may have changed a target holds automated work.
+- A target can have one rollback at a time. Another request is refused until the restore finishes.
+
+Rollback restores the authored project. It does not restore application data, and a locally built image is rebuilt from its authored inputs unless the node's recovery generation still holds the previous image. The per-target result states what happened.
+
+A Blueprint with drift mode **Enforce** keeps enforcing its current revision and will re-apply the accepted generation on the next reconciliation after a rollback. Switch it to Observe or Suggest while the rollback should stand.
+
+## Detach Git
+
+**Detach Git** restores Inline editing from the frozen snapshot and records that snapshot as a new revision. Placement approval is cleared and rollout authorization returns to operator-authorized, including when it was automatic. Later Git commits are not written back.
+
+Detach is refused when the snapshot is empty, because no generation exists to restore. After detaching, **Apply now** and compose editing return. Running nodes keep their current content until you apply, and automatic placement adds no node until every node that stays runs this revision.
+
+## Retire to Direct
+
+**Retire to Direct** returns Direct GitOps targeting to the original source stack once every non-withdrawn deployment is gone. Credentials and the Git Source sheet return to that stack, the Blueprint is Inline again with no bound application, and the stack's source is editable.
+
+Retire is refused while deployments are still active. Withdraw them first, then retire.
+
+## Troubleshooting
+
+<AccordionGroup>
+  <Accordion title="Authorize rollout is refused">
+    Read the reason on the rollout. An unresolved or unavailable artifact identity means Sencho could not prove which images the generation runs, so check the artifact card. A blocked registry preflight names the registry to fix. A compose shape the resolver cannot model waits for a later commit.
+  </Accordion>
+
+  <Accordion title="The rollout is waiting and says why">
+    The approved placement changed, or rollout authorization became automatic, after you confirmed. Open the application, review the placement, and **Resume rollout** or **Authorize rollout**.
+  </Accordion>
+
+  <Accordion title="Apply now is not offered">
+    Git-managed Blueprints have no **Apply now**. Content comes from Git, and a placement runs from an authorized accepted generation. Use **Detach Git** if you need Inline editing and a confirmed apply.
+  </Accordion>
+
+  <Accordion title="Delete is refused">
+    A Git-managed Blueprint cannot be deleted until you **Detach Git** or **Retire to Direct**, so deleting the Blueprint never severs the Git source.
+  </Accordion>
+
+  <Accordion title="Converting a source is refused">
+    Another Git-managed Blueprint already holds this repository. Pick a different source, or release the repository with **Retire to Direct** or **Detach Git** on that Blueprint.
+  </Accordion>
+</AccordionGroup>
+
+## Related
+
+<CardGroup cols={2}>
+  <Card title="Blueprints" icon="layers" href="/features/blueprint-model">
+    The catalog, editor, drift modes, and deployment states shared by every Blueprint.
+  </Card>
+  <Card title="Health rollout policy" icon="heart-pulse" href="/features/health-rollout-policy">
+    What a failed health check does to a rollout in progress.
+  </Card>
+  <Card title="GitOps portfolio" icon="chart-pie" href="/features/gitops-portfolio">
+    Every application in one place, with the outstanding step as an action.
+  </Card>
+  <Card title="Git sources" icon="git-branch" href="/features/git-sources">
+    The Git side of a converted source: fetching, polling, and change plans.
+  </Card>
+</CardGroup>

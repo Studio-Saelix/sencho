@@ -116,13 +116,17 @@ Before an update, a readiness dialog gives a single verdict drawn from Compose D
 
 Block deploys that violate a scan policy before `docker compose up` runs, with an admin bypass path and a full audit trail. The pre-flight gate enumerates images and blocks a deploy when an image meets or exceeds the policy's severity threshold. [Learn more →](/features/deploy-enforcement)
 
+### GitOps
+
+Run stacks and fleet templates from Git with a recorded decision at every step: the commit Sencho accepted, the nodes it approved, and the rollout it authorized. The overview defines the model, the policies, and the words every GitOps page uses, and the portfolio lists every Git-managed application with one attention queue. [Learn more →](/features/gitops-overview)
+
 ### Git sources
 
 Link a stack to a Git repository and keep one or more compose files in sync via manual pulls or webhook triggers. Merge a base file with environment overrides in order, review a diff before applying, and create stacks directly from a repo. [Learn more →](/features/git-sources)
 
 ### Blueprints
 
-Fleet-wide compose templates that Sencho keeps in sync across the nodes you choose. One declaration covers many nodes via label selectors, drift detection always runs, and stateful blueprints get a confirmation prompt before first deploy and before eviction. [Learn more →](/features/blueprint-model)
+Fleet-wide compose templates that Sencho keeps in sync across the nodes you choose. One declaration covers many nodes via label selectors, drift detection always runs, and stateful blueprints get a confirmation prompt before first deploy and before eviction. A Blueprint can also take its content from Git. [Learn more →](/features/blueprint-model)
 
 ### Scheduled operations
 

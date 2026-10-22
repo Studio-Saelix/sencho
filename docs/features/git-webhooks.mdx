@@ -1,0 +1,119 @@
+---
+title: Trigger pulls from Git hosts and CI
+sidebarTitle: Git webhooks
+description: Let a push to your repository fetch a Git source, either from the Git host directly with a signed provider hook or from CI with a generic webhook.
+---
+
+A push event can start a fetch on a linked Git source in two ways. Use whichever fits your setup.
+
+| | Provider hook | CI webhook |
+|---|---|---|
+| **Who calls Sencho** | Your Git host (GitHub, GitLab, Gitea, Forgejo, Bitbucket Cloud) | Your pipeline, with a `curl` step |
+| **Verified by** | The host's own signature or token header | Sencho's webhook HMAC signature |
+| **Set up** | **Automation** tab of the Git Source sheet | **Settings → Automation → Webhooks**, action **Git source sync** |
+| **Use it when** | The host can reach Sencho and you want no pipeline step | CI already orchestrates the release, or the host cannot reach Sencho directly |
+
+Either path queues the same reconciliation as **Pull now** or polling. The source's [apply behavior](/features/git-sources#apply-behavior) then decides the outcome:
+
+- **Review only:** fetch, validate, diff, mark pending.
+- **Auto-write files:** fetch, validate, write to disk.
+- **Auto-deploy:** fetch, validate, write, deploy.
+
+A **Manual** source is never joined to a webhook. A suspended source ignores them until you resume it.
+
+## Provider hooks
+
+Sencho exposes one ingest URL per stack and provider, verifies the host's signature or shared secret, and queues reconciliation through the Git source pipeline. Provider hooks apply only to a **direct** stack-owned source. A source that belongs to a Git-managed Blueprint cannot register an endpoint; use **Detach Git** or **Retire to Direct** on the Blueprint first.
+
+### Create an endpoint
+
+<Steps>
+  <Step title="Open the Automation tab">
+    Open the stack's **Git Source** sheet, select **Automation**, and find **Provider hooks**.
+  </Step>
+  <Step title="Add a hook">
+    Click **Add provider hook**, choose the **Provider**, and pick an **Event scope**, then click **Create**. **Configured ref** reacts to pushes on the branch or tag named in **Ref**. **Ref + PRs** also accepts pull request events from the same repository, which helps when the ref tracks a long-lived branch and you want preview stacks. A hook can be switched on or off, and its scope changed, after it is created.
+  </Step>
+  <Step title="Copy the secret">
+    The **Copy your webhook secret now** notice shows the secret once. Sencho never shows it again, so copy it before you dismiss the notice. **Rotate** issues a new secret and keeps the previous one valid for 24 hours so you can update the host without a gap.
+  </Step>
+  <Step title="Register it on the Git host">
+    Copy the **Webhook URL** from the hook. In the repository's webhook settings, add that URL and paste the secret into the field the host expects: GitHub **Secret**, GitLab **Secret token**, Gitea and Forgejo **Secret**, Bitbucket Cloud **Secret**. Enable push events, and pull request events (merge request events on GitLab) when the scope includes PRs.
+  </Step>
+</Steps>
+
+The webhook URL always carries the node id and endpoint id:
+
+```
+POST /api/gitops/hooks/{nodeId}/{endpointId}
+```
+
+Use the public Sencho base URL your Git host can reach. On a fleet hub, the node id is the node that owns the stack, usually **Local**. Ingest is served on the control instance even when the stack runs on a remote node; the hub forwards the payload to the owning instance over the node mesh. You can register one endpoint per provider per stack; a second create for the same provider returns **409**.
+
+### What happens on delivery
+
+Sencho authenticates every delivery with provider-specific headers, then applies policy before touching the repository.
+
+| Check | Outcome when it fails |
+| --- | --- |
+| Unknown endpoint, disabled endpoint, or bad signature | **404 Not found**, the same response for every rejection so callers cannot probe ids |
+| Malformed JSON or unsupported payload shape | **400 Bad request** |
+| Body larger than 1 MiB | **413 Payload too large** |
+| The event names a different repository than the linked source (`.git` suffix, ssh versus https, port, and letter case still match) | **202 Accepted**, recorded as ignored (`source_mismatch`) |
+| Push ref does not match the configured ref | **202 Accepted**, ignored (`ref_policy`) |
+| Pull request event while scope is **Configured ref** | **202 Accepted**, ignored (`ref_policy`) |
+| Ping or connectivity test from the host | **202 Accepted**, ignored (`ping`) |
+| Duplicate delivery id inside the debounce window | **202 Accepted**, recorded as a duplicate. The window is 10 seconds per source, the same as generic webhooks |
+
+Open **Recent deliveries** on a hook to see its latest deliveries with state, outcome, event type, ref, and time. After saving the hook on your Git host, send its test event and reopen the list to confirm Sencho received it.
+
+Ingest is rate limited to 120 requests per minute per endpoint in production. Bursts above that return **429 Too many provider hook deliveries**.
+
+### Provider signing reference
+
+| Provider | Header Sencho verifies |
+| --- | --- |
+| **GitHub** | `X-Hub-Signature-256` (`sha256=` HMAC of the raw body) |
+| **GitLab** | `X-Gitlab-Token` (shared secret) |
+| **Gitea** | `X-Gitea-Signature` (hex HMAC-SHA256 of the raw body) |
+| **Forgejo** | `X-Forgejo-Signature`, or `X-Gitea-Signature` when Forgejo omits its own header |
+| **Bitbucket Cloud** | `X-Hub-Signature` (`sha256=` HMAC of the raw body) |
+
+Delivery ids come from the host's idempotency headers when present (`X-GitHub-Delivery`, `X-Gitea-Delivery`, `X-Forgejo-Delivery`, `Idempotency-Key`, `X-Request-UUID`, and others), so retries dedupe cleanly.
+
+## Trigger from CI
+
+When CI already orchestrates your pipeline, or your Git host cannot call Sencho, use Sencho's generic webhook. Create a webhook under **Settings → Automation → Webhooks** that targets the stack with the **Git source sync** action. The action is only selectable for a stack that already has a Git source. See [Webhooks](/features/webhooks) for signing and execution history.
+
+<Frame>
+  <img src="/images/git-sources/webhook-action.png" alt="New webhook form with Name, Stack and Action fields. The Action select is open, showing Deploy, Restart, Stop, Start, Pull and Update, and Git source sync as options, with Git source sync highlighted at the bottom" />
+</Frame>
+
+Triggers for one source are debounced on a 10-second window so a runaway pipeline cannot overwhelm Sencho or your host's rate limits. The execution history records each skipped trigger.
+
+```yaml
+- name: Sync compose via Sencho
+  run: |
+    BODY='{}'
+    SIGNATURE=$(echo -n "$BODY" | openssl dgst -sha256 -hmac "${{ secrets.SENCHO_WEBHOOK_SECRET }}" | cut -d' ' -f2)
+    curl -X POST "${{ secrets.SENCHO_URL }}/api/webhooks/${{ secrets.SENCHO_WEBHOOK_ID }}/trigger" \
+      -H "Content-Type: application/json" \
+      -H "X-Webhook-Signature: sha256=$SIGNATURE" \
+      -d "$BODY"
+```
+
+## Troubleshooting
+
+<AccordionGroup>
+  <Accordion title="Webhook skipped (rate limited)">
+    Sencho debounces rapid triggers on a 10-second window per source. Wait at least 10 seconds and retry, or consolidate several CI triggers into one call at the end of the pipeline. Skipped triggers appear in the webhook's execution history.
+  </Accordion>
+
+  <Accordion title="The Git host reports a failed delivery">
+    A 404 means the endpoint is unknown or disabled, or the signature did not verify. Sencho gives the same answer for all three so callers cannot probe ids. Check that the secret on the host matches the current one (rotating issues a new secret), and that the URL uses the node id of the node that owns the stack.
+  </Accordion>
+
+  <Accordion title="A delivery arrives but nothing is fetched">
+    The delivery was accepted and ignored. Open the endpoint's recent deliveries: `source_mismatch` means the event names another repository, `ref_policy` means the pushed ref is not the configured one (or the event is a pull request and the scope is **Configured ref**), and `ping` is the host's connectivity test.
+  </Accordion>
+</AccordionGroup>

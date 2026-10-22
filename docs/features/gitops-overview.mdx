@@ -1,0 +1,152 @@
+---
+title: GitOps overview
+sidebarTitle: Overview
+description: How Sencho runs stacks and fleet templates from Git. Direct sources versus Blueprints, the chain from commit to container, who decides each step, and the words every GitOps page uses.
+---
+
+GitOps in Sencho means a Git repository is the source of truth for a stack's Compose files, and Sencho moves what is running toward it without skipping a decision. Every step between a commit and a container is recorded separately: the commit Sencho accepted, the images it resolved, the nodes it approved, the rollout it authorized, and what the node reports back.
+
+This page defines the model once. The other GitOps pages link here instead of explaining it again.
+
+<Note>
+  GitOps is available on every tier, including Community.
+</Note>
+
+## Two ways to manage from Git
+
+| | Direct Git source | Git-managed Blueprint |
+|---|---|---|
+| **What it is** | A Git source linked to one stack on one node | A fleet template whose Compose content comes from one Git source, placed on the nodes a selector chooses |
+| **Where you work** | The **Git Source** sheet in the stack editor | **Fleet · Blueprints**, and the application's page in **GitOps** |
+| **What a commit does** | The source policy decides how far Sencho goes on its own: nothing, stage a plan, write files, or write and deploy | A new candidate generation. Accepting it, approving its placement, and authorizing its rollout are three separate steps |
+| **Reach** | One node | Every node the approved placement names, deployed one after another |
+| **Guide** | [Git sources](/features/git-sources) | [Git-managed Blueprints](/features/git-managed-blueprints) |
+
+Choose a **Direct** source when one stack on one node should follow a repository. Choose a **Git-managed Blueprint** when the same project should run on several nodes, or when you want an explicit approval and rollout record for each change. Both kinds of application appear together in the [GitOps portfolio](/features/gitops-portfolio).
+
+An **Inline** Blueprint is edited in Sencho and has no Git source; see [Blueprints](/features/blueprint-model). **Convert to Git** on a Blueprint moves a live Direct source onto it, and **Adopt onto Blueprint** on the Git Source sheet does the same from the stack side. **Detach Git** and **Retire to Direct** reverse the move.
+
+## The chain from commit to container
+
+Every application is described by up to five stages, in this order.
+
+| Stage | The question it answers |
+|---|---|
+| **Source** | Which commit did Sencho fetch and accept as the generation to run? |
+| **Artifact** | Which container images would that generation run, as proven digests? |
+| **Placement** | Which nodes is the generation approved for? |
+| **Rollout** | Has the authorized deploy reached those nodes, and how did each one answer? |
+| **Runtime** | What is running now, and does it match what was approved? |
+
+A stage that does not apply to an application is left out. A Direct source has no separate placement or rollout, and an Inline Blueprint has no Git source or artifact set.
+
+## Who decides each step
+
+A Git-managed Blueprint takes three authority steps. Each is its own action, and one never implies another.
+
+| Step | What it records | Policy that can take it for you |
+|---|---|---|
+| **Accept source** | The fetched candidate is the content to run | **Source policy** |
+| **Review and approve placement** | The exact nodes to place or remove, frozen for the current intent | **Placement policy** |
+| **Authorize rollout** | The accepted generation, its artifact set, and the placement, opened as an immutable rollout generation | **Rollout authorization policy** |
+
+Two more policies decide what happens after a rollout starts or after something drifts. Every policy is independent of the others.
+
+| Policy | Options | Where it lives |
+|---|---|---|
+| **Source policy** | Manual, Review only, Auto-write files, Auto-deploy | The Git source's **Automation** tab |
+| **Placement policy** | Operator approves each change, One stateless change at a time | Beside **Review and approve placement** |
+| **Rollout authorization policy** | Operator authorizes each rollout, Authorizes without an operator | Beside the placement policy on an Inline Blueprint, in the rollout overflow on a Git-managed Blueprint |
+| **Drift mode** | Observe, Suggest, Enforce | The Blueprint editor. See [Blueprints](/features/blueprint-model#drift-policy) |
+| **Health rollout policy** | Observe, Pause, Retry once, Stop, Roll back | The application's **Rollout controls**. See [Health rollout policy](/features/health-rollout-policy) |
+
+A new application, and any Blueprint you convert or adopt, starts on operator review at every step. Nothing about it has yet proved that a node can take a generation. Each setting sits beside the action it governs, so turning one on is a single click.
+
+Every rollout freezes the policy values it executes, and every placement approval carries the values that decided it. Editing a policy changes what the next decision may do and nothing else: no standing approval is withdrawn and no generation is invalidated. The one exception is switching the placement or rollout authorization policy on again: an approval that policy made earlier is withdrawn, so the change it decided waits for you again.
+
+### Source policy names
+
+The Git source form and the policy lines in the application's **Evidence** name the same setting differently. They map one to one, with one pair sharing a name.
+
+| Apply behavior on the Git source | Source policy as written in Evidence |
+|---|---|
+| **Manual** | Operator applies each revision |
+| **Review only** | Operator reviews each revision |
+| **Auto-write files**, **Auto-deploy** | Applies without an operator |
+
+Auto-write files stops after writing the files; Auto-deploy also redeploys the stack. On a Git-managed Blueprint both mean the source is accepted without an operator, and the rollout authorization policy decides whether a rollout starts. A withdrawn stateful target always waits for you, whatever the source policy says.
+
+### What One stateless change at a time may do
+
+This is the whole of what the placement policy approves without you, and it is deliberately narrow. Sencho approves a placement change on its own only when it adds exactly one node or removes exactly one, and the workload is stateless. Everything else falls back to you with the reason on the placement card:
+
+- A change that adds and removes nodes, or moves more than one node either way.
+- A workload that carries data, or whose contents Sencho could not establish.
+- A first placement that spans more than one node.
+- A node that is cordoned, not answering, or last seen unreachable.
+- A node that has not reported, or that this Sencho does not know.
+- A change that would leave the application with nothing running it.
+- An operation already in flight for the application or for a node in the plan.
+
+A withdrawal is judged from what the node itself reported: it must be answering now and must have reported the workload that ran there. A node that has never reported keeps running where it is, and the withdrawal falls back to you. A cordoned node is never withdrawn automatically, because cordoning says where work may not go, not that work should leave. The workload keeps running there; uncordon the node or approve the move yourself.
+
+The policy records its reason at the moment it runs and decides again only when something changes. A reason recorded because an operation was in flight is still what is recorded after that operation finishes, which is why Evidence also shows when the reason was recorded.
+
+## Source states
+
+A commit SHA says which files Sencho wrote. It does not say whether that commit was accepted, whether something newer is waiting, or whether an operation stopped halfway. The **source state** answers those in one short phrase that means the same thing on the Git Source sheet, the Drift tab, the stack list, and the dashboard's stack rows.
+
+| State | What it means |
+| --- | --- |
+| **Never reconciled** | No commit from this repository has been accepted yet. |
+| **Fetching** | Sencho is reading from the repository right now. |
+| **Accepted** | The fetched commit has been accepted as the current generation. |
+| **Pending update** | A fetched commit is ready to apply. |
+| **Review required** | A fetched commit is waiting for review before it can apply. |
+| **Pending update blocked** | The change plan has local conflicts. Apply stays disabled until they are resolved. |
+| **Reconcile required** | What was reconciled no longer matches the configuration in force. Pull again to rebuild the plan. |
+| **Applying** | A commit is being written to the stack directory. |
+| **Retry scheduled** | The last attempt failed and another is queued. |
+| **Suspended** | Reconciliation is paused until you resume. Polling, webhooks, automatic apply, and Pull now stay off for this source. |
+| **Source failed** | The last operation on this source failed. |
+| **Outcome unknown** | An operation was interrupted, so Sencho cannot confirm how it ended. |
+| **Recovering** | A recovery is running on this stack. |
+
+The last two matter most. Sencho reports an interrupted operation as unknown rather than guessing, so a stack whose pull was cut short by a restart says so instead of reading as up to date.
+
+Some state comes with qualifications: a managed manifest that does not identify this stack on this node, an approval that could not be restored after a recovery, a record that has gone. Each is its own line at the top of the status. They are not failures. They tell you which part of the state to trust less, because a stack with partly missing evidence would otherwise look identical to one with complete evidence.
+
+## Reading a status: answer, path, evidence
+
+Wherever Sencho shows an application, the Git Source sheet, a Blueprint sheet, and the portfolio's application sheet, it uses the same three-part block.
+
+- **Answer.** One toned state and the reason that needs an operator first, with a count of any others. It says when the evidence behind it is partial.
+- **Path.** A single row naming each stage that applies, with its state. A stage that is blocking says why on its own line.
+- **Evidence.** Opens what backs the answer: the steps with a recorded grant (**Source accepted**, **Placement approved**, **Rollout authorized**), the settled stages, each decision's policy line, and everything Sencho could not prove.
+
+A policy line says who is configured to decide that stage and what the policy actually did. A recorded decline also says when it was recorded, so a reason kept from an earlier moment reads as a fact about that moment. While a rollout is in flight it also names the value it was decided under.
+
+## Executable identity
+
+**Source state** says whether a commit was accepted. **Executable identity** says whether Sencho can prove which container images that generation runs, without rewriting your Compose files.
+
+When a generation is accepted, Sencho resolves each service image against the target node's platform. Registry tags become digest evidence, and a multi-platform image records the child digest for that node. Services with a local `build:` stay unverified across nodes, because Sencho does not claim a portable digest for them.
+
+After a deploy, Sencho inspects what is running and compares it to the frozen expected set. If a registry tag moved after acceptance, it records stale artifact evidence and leaves the expected set alone. If a running digest disagrees with the expected fingerprint, runtime state reports artifact drift while the source can still read as accepted. [GitOps drift](/features/gitops-drift-model) covers the comparison.
+
+## Where to go next
+
+<CardGroup cols={2}>
+  <Card title="Git sources" icon="git-branch" href="/features/git-sources">
+    Link a stack to a repository, set an apply behavior, and review the change plan.
+  </Card>
+  <Card title="Git-managed Blueprints" icon="layers" href="/features/git-managed-blueprints">
+    Convert, accept, approve, authorize, pause, and roll back across the fleet.
+  </Card>
+  <Card title="GitOps portfolio" icon="chart-pie" href="/features/gitops-portfolio">
+    Every application in one place, with one attention queue.
+  </Card>
+  <Card title="GitOps drift" icon="magnifying-glass" href="/features/gitops-drift-model">
+    The seven drift classes and what each one proves.
+  </Card>
+</CardGroup>

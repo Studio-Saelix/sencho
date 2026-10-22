@@ -128,22 +128,37 @@
                 ]
               },
               {
-                "group": "Deploy and automate",
+                "group": "Deploy and recover",
                 "pages": [
                   "features/deploy-progress",
                   "features/atomic-deployments",
                   "features/health-gated-updates",
-                  "features/deploy-enforcement",
-                  "features/git-sources",
-                  "features/git-transport-support",
-                  "features/gitops-portfolio",
-                  "features/gitops-drift-model",
-                  "features/health-rollout-policy",
-                  "features/blueprint-model",
+                  "features/deploy-enforcement"
+                ]
+              },
+              {
+                "group": "Automate",
+                "pages": [
                   "features/scheduled-operations",
                   "features/auto-update-policies",
                   "features/auto-heal-policies",
                   "features/webhooks"
+                ]
+              },
+              {
+                "group": "GitOps",
+                "pages": [
+                  "features/gitops-overview",
+                  "features/git-sources",
+                  "features/git-authentication",
+                  "features/git-transport-support",
+                  "features/git-webhooks",
+                  "features/git-secrets",
+                  "features/blueprint-model",
+                  "features/git-managed-blueprints",
+                  "features/gitops-portfolio",
+                  "features/gitops-drift-model",
+                  "features/health-rollout-policy"
                 ]
               },
               {
