@@ -12,7 +12,7 @@ This page states exactly what Git Sources supports today: which transports, refe
 
 Every "Supported" row here is backed by a test that runs on every change to Sencho, or by a dated pass against a real instance of that host. A row marked "Not yet verified" is not a claim of failure: it means that specific combination has not been exercised yet, so it is not advertised as working. Nothing on this page is inferred from a related combination that behaved correctly.
 
-<!-- GENERATED:BEGIN (run `npm run matrix:render` in backend/ to regenerate, do not edit by hand) -->
+{/* GENERATED:BEGIN (run `npm run matrix:render` in backend/ to regenerate, do not edit by hand) */}
 
 ## Transports
 
@@ -65,7 +65,7 @@ Every "Supported" row here is backed by a test that runs on every change to Senc
 - **Outbound target restrictions.** Repository targets that resolve to loopback, link-local, multicast, or selected special-use addresses are refused before any request is sent. Private hosts on an operator's own LAN or VPN are not affected by this restriction.
 - **Branch/tag name collisions.** A bare ref name resolves as a branch first, then as a tag. If an operator renames a branch and a tag of the same name later appears, the source silently starts resolving the tag instead. A ref name that is also a valid 40 or 64 character hex string resolves as a commit SHA before either lookup.
 
-<!-- GENERATED:END -->
+{/* GENERATED:END */}
 
 ## How these claims are verified
 
