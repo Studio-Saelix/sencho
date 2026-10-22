@@ -1,0 +1,95 @@
+---
+title: Git hosts and authentication
+sidebarTitle: Hosts and authentication
+description: Connect a Git source to a private repository with a personal access token or an SSH deploy key, trust a private certificate authority, and understand how redirects and host keys are handled.
+---
+
+A Git source reaches its repository over HTTPS or SSH. Public repositories need nothing. Private ones need a credential, and self-hosted servers may need you to tell Sencho which certificate authority or host key to trust. Credentials belong to the Git source and stay with it when you [convert it onto a Blueprint](/features/git-managed-blueprints#convert-a-git-source).
+
+For the full list of supported transports, ref types, and Git hosts, with the evidence behind each, see [Git transport support](/features/git-transport-support).
+
+## Choose a method
+
+| Repository | Authentication | Notes |
+|---|---|---|
+| Public, HTTPS | **Public (no auth)** | Nothing to configure. |
+| Private, HTTPS | **Personal Access Token** | Read-only token. Optional custom CA for a private server certificate. |
+| Private, SSH | **Deploy key (SSH)** | Read-only key plus a confirmed host key. Use an `ssh://` URL for a nonstandard port. |
+
+<Frame caption="The authentication choices on the From Git form. Deploy key (SSH) adds the Fetch host key fingerprint button and a field for the private key. The same fields appear on the Git Source sheet.">
+  <img src="/images/git-authentication/ssh-deploy-key.png" alt="New stack dialog on the From Git tab with Deploy key (SSH) selected, showing the Fetch host key fingerprint button, an empty PEM private key field, and the apply behavior options Manual, Review only, Auto-write files, and Auto-deploy" />
+</Frame>
+
+Sencho stores tokens, deploy keys, and CA bundles encrypted at rest and never returns them in API responses or the UI. When you edit a source later, a secret field shows a masked placeholder. Leave it blank to keep the stored value, or type a new one to replace it. Switching **Authentication** away from a method clears what that method stored.
+
+## HTTPS with a personal access token
+
+Create a token with read access to the target repository only:
+
+- **GitHub:** a fine-grained token with **Contents: Read** on the repository, or a classic token with the `repo` scope.
+- **GitLab:** a project or group access token with the `read_repository` scope.
+- **Bitbucket:** an app password with **Repositories: Read**.
+
+Paste it into the **Token** field and save. Every pull caches the fetched compose and env content in the database so the change plan can reopen without refetching. That cache is encrypted the same way as the token, because compose files often embed secrets through env interpolation.
+
+## SSH with a deploy key
+
+<Steps>
+  <Step title="Generate a key pair">
+    On a trusted machine, run `ssh-keygen -t ed25519 -f deploy-key -N ""`.
+  </Step>
+  <Step title="Register the public key">
+    Add the public key to the Git host as a deploy key with read access. On GitHub this is **Settings → Deploy keys** on the repository.
+  </Step>
+  <Step title="Paste the private key">
+    In Sencho, set **Authentication** to **Deploy key (SSH)** and paste the private key.
+  </Step>
+  <Step title="Confirm the host key">
+    Click **Fetch host key fingerprint**. Sencho probes the host with `ssh-keyscan`, shows the SHA256 fingerprint, and stores the matching `known_hosts` line. Compare the fingerprint with the host's published value before you save.
+  </Step>
+</Steps>
+
+Sencho checks the host key on every fetch against the stored line. If the server's key changes, pulls fail with a host-key error until you review the new fingerprint and update trust deliberately.
+
+The familiar `git@host:org/repo.git` form assumes port 22. When the Git server listens elsewhere, use `ssh://git@git.example.com:2222/org/repo.git`.
+
+## Private HTTPS with a custom CA
+
+Self-hosted Git servers often present certificates signed by a private certificate authority. By default Sencho trusts the system certificate store on the host running the fetch. When your server uses a private CA, paste its certificate (PEM) into **Custom CA certificate** on the Git source form.
+
+Sencho combines your CA with the system trust anchors instead of replacing them, so public hosts such as GitHub keep validating. Leave the field empty when the server's certificate is publicly trusted.
+
+Removing a stored CA always saves, even when the server currently needs it. Retiring a certificate you no longer trust should never be blocked by the unreachability that retiring it causes. If the server still needs a private CA afterward, the next pull reports a certificate trust error until you upload one again.
+
+## Redirects
+
+Some Git servers answer with a redirect, for example when a repository moves to a canonical path. Sencho follows a redirect that stays on the same server (same scheme, host, and port) and only changes the path, so a relocated repository keeps working.
+
+A redirect to a different server is refused, and the pull reports that the host redirected elsewhere. Sencho does not contact that server or send it your credentials. If a repository has genuinely moved to a new host, update the repository URL on the source.
+
+## Troubleshooting
+
+<AccordionGroup>
+  <Accordion title="Repository not found or not accessible">
+    Verify the URL is reachable from the Sencho host and ends with `.git`. GitHub returns "not found" both for missing repositories and for private repositories you cannot read, so Sencho tailors its hint to what you supplied.
+
+    - **No token configured:** the repository may be private. Switch **Authentication** to **Personal Access Token** and paste a token with read access.
+    - **Token configured:** check the URL, and that the token can read this specific repository. Fine-grained tokens need **Contents: Read** on it; classic tokens need the `repo` scope.
+  </Accordion>
+
+  <Accordion title="Authentication failed">
+    The Git host rejected the credentials. For HTTPS, the token may be missing, expired, or lack read access: generate a new one and replace the value. For SSH, the deploy key may be wrong or not registered on the host: paste the matching private key or add the public key on the host. Sencho returns this as a 400 form error rather than a 401, so an upstream failure does not sign you out of the dashboard.
+  </Accordion>
+
+  <Accordion title="SSH host key verification failed">
+    The server's host key no longer matches the fingerprint you accepted. That can mean a man-in-the-middle or an intentional key rotation. Click **Fetch host key fingerprint** again, compare the SHA256 value out of band with your operator, and save only if you intend to trust the new key.
+  </Accordion>
+
+  <Accordion title="Certificate trust error on an HTTPS host">
+    The server's certificate is not signed by an authority Sencho trusts. Paste the issuing CA into **Custom CA certificate** on the source and pull again.
+  </Accordion>
+
+  <Accordion title="Only unsupported URL schemes">
+    Git sources accept `https://` URLs and SSH URLs (`git@host:org/repo.git` or `ssh://git@host:port/path`). Other schemes are rejected when you save.
+  </Accordion>
+</AccordionGroup>

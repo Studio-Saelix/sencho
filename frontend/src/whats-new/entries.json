@@ -59,7 +59,7 @@
     "id": "git-managed-blueprints",
     "title": "Git-managed Blueprint content",
     "blurb": "Move a live Git source onto a Blueprint so that Blueprint's compose comes from Git instead of the editor. Accept a generation, approve the placement, and authorize the rollout to deploy it; a later commit runs the chain again, automatically when the source policy applies without an operator. Detach restores Inline editing.",
-    "docUrl": "https://docs.sencho.io/features/blueprint-model"
+    "docUrl": "https://docs.sencho.io/features/git-managed-blueprints"
   },
   {
     "id": "native-hub-tls",
@@ -77,13 +77,13 @@
     "id": "gitops-authority-actions",
     "title": "Decomposed approval actions",
     "blurb": "Accept source, approve placement, and authorize rollout as separate actions on a Git-managed Blueprint, so each authority step is reviewed and recorded on its own.",
-    "docUrl": "https://docs.sencho.io/features/blueprint-model#accept-source-approve-placement-authorize-rollout"
+    "docUrl": "https://docs.sencho.io/features/git-managed-blueprints#accept-source-approve-placement-authorize-rollout"
   },
   {
     "id": "gitops-rollout-controls",
     "title": "Rollout lifecycle controls",
     "blurb": "Pause, resume, replan, supersede, or roll back a Blueprint rollout from the GitOps application view, with an explicit recovery scope and per-target results.",
-    "docUrl": "https://docs.sencho.io/features/blueprint-model#pause-resume-replan-or-supersede-a-rollout"
+    "docUrl": "https://docs.sencho.io/features/git-managed-blueprints#pause-resume-replan-or-supersede-a-rollout"
   },
   {
     "id": "home-fleet-triage",
