@@ -123,6 +123,13 @@ function projectFixture(fixture: Seeded) {
   return projectApplication(fixture.applicationId, false)!;
 }
 
+/** The stack a seeded Blueprint deploys, as its intent names it. */
+function deployedStackName(applicationId: string): string {
+  const store = GitOpsStore.getInstance();
+  const app = store.getApplication(applicationId)!;
+  return store.getIntentRevision(app.intent_revision_id!)!.deploy_stack_name;
+}
+
 /**
  * The arguments of the most recent deploy, so a test can assert what a retry was
  * told to do.
@@ -146,7 +153,7 @@ function reserveRunFor(
   const run: HealthGateRunRow = {
     id: `run-orphan-${randomUUID()}`,
     node_id: nodeId,
-    stack_name: `src-${fixture.applicationId}`,
+    stack_name: deployedStackName(fixture.applicationId),
     trigger_action: 'rollout',
     status,
     reason: null,
@@ -1816,6 +1823,9 @@ describe('retry, stop, and rollback', () => {
 
     expect(restoreSpy).toHaveBeenCalledTimes(1);
     expect(restoreSpy.mock.calls[0]![0].generationId).toBe(genId(fixture, 'pre-rollout'));
+    // The restore addresses the stack the apply wrote, not the source stack the
+    // Blueprint was converted from.
+    expect(restoreSpy.mock.calls[0]![0].stackName).toBe(deployedStackName(fixture.applicationId));
 
     // The completion is the part that was never exercised, and it is the part
     // that has to land: the target is back on the pre-rollout generation, the
@@ -1826,6 +1836,24 @@ describe('retry, stop, and rollback', () => {
     expect(after.health_stop_reason).toBe('rollback_completed');
     const app = GitOpsStore.getInstance().getApplication(fixture.applicationId)!;
     expect(app.pause_at).not.toBeNull();
+  });
+
+  it('a rollback whose target has no intent of its own still restores the deploy stack', async () => {
+    const fixture = await gatedAttempt('rollback');
+    seedOwnedGeneration(fixture, genId(fixture, 'pre-rollout'));
+    markRecoveryPoint(fixture, 'rec-pre-rollout', genId(fixture, 'pre-rollout'));
+    // A recovery point can outlive the intent pointer a Blueprint ack writes.
+    // The restore still addresses the stack the apply wrote, never the source
+    // stack the Blueprint was converted from.
+    const store = GitOpsStore.getInstance();
+    const target = store.getTarget(fixture.applicationId, fixture.nodeId!)!;
+    store.upsertTarget({ ...target, intent_revision_id: null });
+    const restoreSpy = await mockRestore();
+
+    await decide(fixture, 'failed', spyExecutor(), 'rollback');
+
+    expect(restoreSpy).toHaveBeenCalledTimes(1);
+    expect(restoreSpy.mock.calls[0]![0].stackName).toBe(deployedStackName(fixture.applicationId));
   });
 
   it('a completion that cannot be recorded is a partial failure, and the rollout stays held', async () => {
@@ -2346,6 +2374,11 @@ describe('remote targets', () => {
     expect(reserved).toHaveLength(1);
     expect(reserved[0]!.node_id).toBe(fixture.nodeId);
     expect(reserved[0]!.status).toBe('observing');
+    // The leaf is asked about the stack the apply writes, not the source stack
+    // the Blueprint adopted: the source stack does not exist there.
+    const app = GitOpsStore.getInstance().getApplication(fixture.applicationId)!;
+    expect(reserved[0]!.stack_name).toBe(deployedStackName(fixture.applicationId));
+    expect(reserved[0]!.stack_name).not.toBe(app.configured_source_stack_name);
   });
 
   it('treats an unreachable target as refused, not as supported', async () => {
@@ -2372,6 +2405,29 @@ describe('remote targets', () => {
     if (result.status === 'blocked') throw new Error(result.reason);
     expect(result.status).toBe('dispatched');
     expect(deploySpy).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('the stack a first rollout observes', () => {
+  it('reserves the run under the deploy stack, not the adopted source stack', async () => {
+    const fixture = await authorizeWithPolicy('pause', 1);
+    const store = GitOpsStore.getInstance();
+    const app = store.getApplication(fixture.applicationId)!;
+    // A target with no intent of its own has not acked a Blueprint rollout yet,
+    // which is the state a first rollout reserves its run in.
+    expect(store.getTarget(fixture.applicationId, fixture.nodeId!)!.intent_revision_id).toBeNull();
+    expect(deployedStackName(fixture.applicationId)).not.toBe(app.configured_source_stack_name);
+    const deploySpy = vi.spyOn(BlueprintService.getInstance(), 'deployAuthorizedMaterialization')
+      .mockResolvedValue({ status: 'active' });
+
+    const result = await dispatch(fixture);
+
+    if (result.status === 'blocked') throw new Error(result.reason);
+    expect(result.status).toBe('dispatched');
+    expect(deploySpy).toHaveBeenCalledTimes(1);
+    const reserved = finishedRolloutRuns(fixture);
+    expect(reserved).toHaveLength(1);
+    expect(reserved[0]!.stack_name).toBe(deployedStackName(fixture.applicationId));
   });
 });
 
@@ -2614,7 +2670,7 @@ function beginReplacementAttempt(fixture: Seeded): string {
   DatabaseService.getInstance().insertHealthGateRun({
     id: runId,
     node_id: fixture.nodeId!,
-    stack_name: `src-${fixture.applicationId}`,
+    stack_name: deployedStackName(fixture.applicationId),
     trigger_action: 'rollout',
     status: 'observing',
     reason: null,
@@ -2652,7 +2708,7 @@ function recordCompletedRun(fixture: Seeded, nodeId: number, status: 'passed' | 
   DatabaseService.getInstance().insertHealthGateRun({
     id: runId,
     node_id: nodeId,
-    stack_name: `src-${fixture.applicationId}`,
+    stack_name: deployedStackName(fixture.applicationId),
     trigger_action: 'deploy',
     status: 'observing',
     reason: null,
@@ -2751,6 +2807,9 @@ async function decide(
 
 async function writeAppliedCompose(applicationId: string): Promise<void> {
   const app = GitOpsStore.getInstance().getApplication(applicationId)!;
+  // The hub-side applied materialization is keyed by the retained source stack,
+  // which is where the accepted generation's compose is staged. It is not the
+  // stack a target deploys.
   const stackName = app.configured_source_stack_name!;
   const generation = GitOpsStore.getInstance().getGeneration(app.accepted_generation_id!)!;
   const nodeId = (await import('../services/NodeRegistry')).NodeRegistry.getInstance().getDefaultNodeId();
@@ -2764,13 +2823,18 @@ async function writeAppliedCompose(applicationId: string): Promise<void> {
 }
 
 function intentRow(id: string, applicationId: string, blueprintId: number): GitOpsIntentRevisionRow {
+  // The name the apply writes, and the one every health run for this target has
+  // to observe. It differs from the retained source stack name on purpose: a
+  // seed where the two match cannot catch a first rollout reserving its run
+  // under the source stack.
+  const deployedName = DatabaseService.getInstance().getBlueprint(blueprintId)!.name;
   return {
     id,
     application_id: applicationId,
     blueprint_id: blueprintId,
     compose_content_sha256: 'a'.repeat(64),
     blueprint_revision: 1,
-    deploy_stack_name: `src-${applicationId}`,
+    deploy_stack_name: deployedName,
     selector_json: JSON.stringify({ type: 'nodes', ids: [] }),
     pinned_node_id: null,
     cordon_implications_json: JSON.stringify({ pinnedOverridesCordon: false }),
