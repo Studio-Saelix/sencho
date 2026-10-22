@@ -90,7 +90,7 @@ RUN if [ "$TARGETARCH" = "$BUILDARCH" ]; then \
         npm ci --omit=dev; \
     fi
 
-# Stage 4a: Build Docker CLI from source against Go 1.27.2
+# Stage 4a: Build Docker CLI from source against Go 1.27.3
 #
 # CLI v29.4.1 ships otel/sdk v1.43.0, resolving CVE-2026-39883 (BSD kenv) and
 # CVE-2026-39882 (OTLP response OOM). Building against grpc v1.83.2 below
@@ -98,7 +98,7 @@ RUN if [ "$TARGETARCH" = "$BUILDARCH" ]; then \
 # CVE-2026-41178 (baggage header parsing dropped its raw-length cap, allowing
 # resource exhaustion via an oversized header, present through v1.43.0). It
 # also carries the CVE-2025-15558 fix (Windows plugin search path LPE, fixed
-# since v29.2.0). Building from source with Go 1.27.2 additionally eliminates
+# since v29.2.0). Building from source with Go 1.27.3 additionally eliminates
 # Go stdlib CVEs present in the upstream static binary.
 #
 # Runs on the BUILD platform; GOARCH cross-compiles the static binary for
@@ -125,10 +125,11 @@ RUN if [ "$TARGETARCH" = "$BUILDARCH" ]; then \
 # than building fully offline.
 # Base image pinned by digest so the Go toolchain that compiles the static
 # Docker CLI binary cannot change without an explicit Dependabot bump. The
-# 1.27.2 toolchain carries the stdlib fixes for CVE-2026-78667 (net/http
+# 1.27.3 toolchain carries the stdlib fixes for CVE-2026-111943 (crypto/x509
+# intermediate-certificate verification), CVE-2026-78667 (net/http
 # Range-header denial of service) and CVE-2026-97031 (crypto/tls ECH denial
 # of service).
-FROM --platform=$BUILDPLATFORM golang:1.27.2-alpine@sha256:f92b6ef800e499660581efdabdf25d9d817a9d124eaf900924f0504e7e27e12d AS cli-builder
+FROM --platform=$BUILDPLATFORM golang:1.27.3-alpine@sha256:d530cf60723abf1ffae0cd16bb546b379ec0550d2f3815e5b16ed69dbc00fba4 AS cli-builder
 
 ARG TARGETARCH
 
@@ -157,16 +158,17 @@ RUN cp vendor.mod go.mod && cp vendor.sum go.sum && \
       -mod=mod \
       -ldflags "-extldflags=-static \
         -X github.com/docker/cli/cli/version.Version=29.4.1 \
-        -X github.com/docker/cli/cli/version.GitCommit=source-go1.27.2" \
+        -X github.com/docker/cli/cli/version.GitCommit=source-go1.27.3" \
       -o /build/docker \
       ./cmd/docker
 
-# Stage 4b: Build Docker Compose from source against Go 1.27.2
+# Stage 4b: Build Docker Compose from source against Go 1.27.3
 #
-# Compose v5.6.0 requires Go 1.26.8 or newer, which the pinned 1.27.2 toolchain
-# satisfies. That toolchain also carries the stdlib fixes for CVE-2026-78667
-# (net/http Range-header denial of service) and CVE-2026-97031 (crypto/tls ECH
-# denial of service), so the binary's SBOM carries no Go stdlib CVEs.
+# Compose v5.6.0 requires Go 1.26.8 or newer, which the pinned 1.27.3 toolchain
+# satisfies. That toolchain also carries the stdlib fixes for CVE-2026-111943
+# (crypto/x509 intermediate-certificate verification), CVE-2026-78667 (net/http
+# Range-header denial of service) and CVE-2026-97031 (crypto/tls ECH denial of
+# service), so the binary's SBOM carries no Go stdlib CVEs.
 #
 # The v5.6.0 tag lifts almost every module floor this stage used to carry by
 # hand. Its own go.mod resolves otel/sdk v1.46.0 (CVE-2026-39883,
@@ -198,7 +200,7 @@ RUN cp vendor.mod go.mod && cp vendor.sum go.sum && \
 # move together.
 # Base image pinned by digest (same image as cli-builder above) so both
 # source builds share an identical, immutable Go toolchain.
-FROM --platform=$BUILDPLATFORM golang:1.27.2-alpine@sha256:f92b6ef800e499660581efdabdf25d9d817a9d124eaf900924f0504e7e27e12d AS compose-builder
+FROM --platform=$BUILDPLATFORM golang:1.27.3-alpine@sha256:d530cf60723abf1ffae0cd16bb546b379ec0550d2f3815e5b16ed69dbc00fba4 AS compose-builder
 
 ARG TARGETARCH
 
@@ -295,7 +297,7 @@ RUN echo "apk cache bust: ${APK_CACHE_BUST}" && \
     mkdir -p /usr/local/lib/docker/cli-plugins
 
 # Copy the source-built Docker CLI and Compose plugin from their builder stages.
-# These binaries were compiled with Go 1.27.2, resolving all Go stdlib CVEs that
+# These binaries were compiled with Go 1.27.3, resolving all Go stdlib CVEs that
 # were present in the upstream static release binaries.
 COPY --from=cli-builder /build/docker /usr/local/bin/docker
 COPY --from=compose-builder /build/docker-compose /usr/local/lib/docker/cli-plugins/docker-compose
