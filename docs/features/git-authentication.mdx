@@ -14,7 +14,11 @@ For the full list of supported transports, ref types, and Git hosts, with the ev
 |---|---|---|
 | Public, HTTPS | **Public (no auth)** | Nothing to configure. |
 | Private, HTTPS | **Personal Access Token** | Read-only token. Optional custom CA for a private server certificate. |
-| Private, SSH | **SSH deploy key** | Read-only key plus a confirmed host key. Use an `ssh://` URL for a nonstandard port. |
+| Private, SSH | **Deploy key (SSH)** | Read-only key plus a confirmed host key. Use an `ssh://` URL for a nonstandard port. |
+
+<Frame caption="The authentication choices on the From Git form. Deploy key (SSH) adds the Fetch host key fingerprint button and a field for the private key. The same fields appear on the Git Source sheet.">
+  <img src="/images/git-authentication/ssh-deploy-key.png" alt="New stack dialog on the From Git tab with Deploy key (SSH) selected, showing the Fetch host key fingerprint button, an empty PEM private key field, and the apply behavior options Manual, Review only, Auto-write files, and Auto-deploy" />
+</Frame>
 
 Sencho stores tokens, deploy keys, and CA bundles encrypted at rest and never returns them in API responses or the UI. When you edit a source later, a secret field shows a masked placeholder. Leave it blank to keep the stored value, or type a new one to replace it. Switching **Authentication** away from a method clears what that method stored.
 
@@ -38,7 +42,7 @@ Paste it into the **Token** field and save. Every pull caches the fetched compos
     Add the public key to the Git host as a deploy key with read access. On GitHub this is **Settings → Deploy keys** on the repository.
   </Step>
   <Step title="Paste the private key">
-    In Sencho, set **Authentication** to **SSH deploy key** and paste the private key.
+    In Sencho, set **Authentication** to **Deploy key (SSH)** and paste the private key.
   </Step>
   <Step title="Confirm the host key">
     Click **Fetch host key fingerprint**. Sencho probes the host with `ssh-keyscan`, shows the SHA256 fingerprint, and stores the matching `known_hosts` line. Compare the fingerprint with the host's published value before you save.

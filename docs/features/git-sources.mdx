@@ -23,7 +23,7 @@ Writes land in the stack's existing directory, using the same storage as the in-
 ## Anatomy of the sheet
 
 <Frame>
-  <img src="/images/git-sources/panel.png" alt="Git Source sheet opened from the stack editor, with crumb Stack, stack name, Git source, heading Git source, a toolbar of Update, Pull now, and Detach and a body of Status, Repository, and Manifest sections" />
+  <img src="/images/git-sources/panel.png" alt="Git Source sheet opened from the stack editor, with crumb Stack, stack name, Git source, a toolbar of Pull now and Detach, the Overview, Source, Automation, and Secrets tabs, and an Overview showing Review required with a Review update button and a path row of source, artifact, and runtime" />
 </Frame>
 
 Git Source opens as a right-side sheet from the editor toolbar. It has a crumb (`Stack › {name} › Git source`), a one-line summary of the linked ref, a toolbar, tabs, and a freshness line in the footer. A stack with no source yet has no tabs; the sheet opens on the form.
@@ -68,7 +68,7 @@ Sencho fetches the compose files, validates the merged result with `docker compo
 | **Compose files** | One or more paths in the repository, merged in the listed order. The first file is the primary. Reorder by dragging (or the arrows on a phone) and remove with **×**. |
 | **Project directory** | Optional path passed to `docker compose --project-directory`, so relative build contexts, bind mounts, and `env_file` references resolve from that base. Blank uses the stack root. |
 | **Also sync sibling `.env` file** | Also pulls the `.env` next to the primary compose file. The form shows the resolved path inline. |
-| **Authentication** | **Public (no auth)**, **Personal Access Token**, or **SSH deploy key**. See [Git hosts and authentication](/features/git-authentication). |
+| **Authentication** | **Public (no auth)**, **Personal Access Token**, or **Deploy key (SSH)**. See [Git hosts and authentication](/features/git-authentication). |
 | **Apply behavior** | How far Sencho goes after a fetch. See below. |
 
 Private hosts on your LAN or VPN are supported. Sencho refuses repository targets that resolve to loopback, link-local, multicast, or selected special-use addresses.
@@ -119,12 +119,12 @@ Linked sources inherit the interval. Manual sources are never polled. Review-onl
 Click **Pull now** to fetch the latest commit on the configured branch, tag, or commit.
 
 <Frame>
-  <img src="/images/git-sources/diff-dialog.png" alt="GIT · CHANGE PLAN dialog for the demo-app stack, listing classified file operations (add, modify, remove) with a Deploy after apply checkbox and an Apply button in the footer" />
+  <img src="/images/git-sources/diff-dialog.png" alt="GIT · CHANGE PLAN dialog for the demo-app stack, listing a modified compose.yaml and a count of unchanged files, with a Deploy after apply checkbox and Dismiss and Apply buttons in the footer" />
 </Frame>
 
 The change plan shows:
 
-- The `GIT · CHANGE PLAN` kicker and the short SHA of the incoming commit.
+- The `GIT · CHANGE PLAN` kicker and the stack name.
 - One row per classified operation: add, modify, remove, rename, a Compose invocation change, or a local conflict. Unchanged files collapse to a count.
 - An **Incoming compose failed validation** banner when the incoming compose fails `docker compose config`. Apply stays disabled until validation passes.
 - A **Local conflicts block apply** banner when a managed file was edited or removed on disk, or an unmanaged file sits in the way. Sencho does not overwrite them.

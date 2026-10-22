@@ -42,6 +42,10 @@ Sencho exposes one ingest URL per stack and provider, verifies the host's signat
   </Step>
 </Steps>
 
+<Frame caption="A new GitHub provider hook on the Automation tab. The secret is shown once, with the hook's event scope, Webhook URL, and the setup note for the host below it.">
+  <img src="/images/git-webhooks/provider-hooks.png" alt="Automation tab of the Git Source sheet with a Copy your webhook secret now notice, an Add provider hook button, and a GitHub hook showing Enabled, an On toggle, Rotate, an Event scope control with Configured ref selected, the Webhook URL, and a Recent deliveries link" />
+</Frame>
+
 The webhook URL always carries the node id and endpoint id:
 
 ```
@@ -86,7 +90,7 @@ Delivery ids come from the host's idempotency headers when present (`X-GitHub-De
 When CI already orchestrates your pipeline, or your Git host cannot call Sencho, use Sencho's generic webhook. Create a webhook under **Settings → Automation → Webhooks** that targets the stack with the **Git source sync** action. The action is only selectable for a stack that already has a Git source. See [Webhooks](/features/webhooks) for signing and execution history.
 
 <Frame>
-  <img src="/images/git-sources/webhook-action.png" alt="New webhook form with Name, Stack and Action fields. The Action select is open, showing Deploy, Restart, Stop, Start, Pull and Update, and Git source sync as options, with Git source sync highlighted at the bottom" />
+  <img src="/images/git-webhooks/webhook-action.png" alt="New webhook form with Name, Stack, Node, and Action fields. The Action select is open, showing Deploy (down + up), Restart, Stop, Start, Pull & Update, and Git source sync, with Git source sync at the bottom of the list" />
 </Frame>
 
 Triggers for one source are debounced on a 10-second window so a runaway pipeline cannot overwhelm Sencho or your host's rate limits. The execution history records each skipped trigger.

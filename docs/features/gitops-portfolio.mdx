@@ -18,7 +18,7 @@ Select **GitOps** in the main navigation (next to Fleet), or navigate to `/nodes
 ## Reading the page
 
 <Frame>
-  <img src="/images/gitops-portfolio/workplace.png" alt="The GitOps portfolio: a masthead reading Needs action with application and attention counts, a coverage notice naming an unreachable node, a filter bar, an Attention required list of source failed and review required entries, and an application table with source, runtime, health, drift, and last activity columns" />
+  <img src="/images/gitops-portfolio/workplace.png" alt="The GitOps portfolio: a masthead reading Needs action with application and attention counts, an Attention required list with Source failed, Review required, and Placement review entries each ending in its action, a filter bar, and an application table with source, rollout, runtime, health, drift, and last activity columns" />
 </Frame>
 
 The masthead leads with the portfolio's verdict, followed by counts for applications, pending (in progress), drifted, converged, and attention-required applications. Its meta line says how many nodes are reporting and when the data was last updated, and reads `refreshing` while a refresh is in flight.
@@ -72,7 +72,7 @@ A stack whose health check failed stops asking for you while that same version i
 Selecting an application, from the list or the attention queue, opens it over the portfolio, which stays where it was underneath. A Direct application is its stack's Git source, so it opens that stack's Git Source sheet. A Blueprint application opens its own sheet:
 
 <Frame>
-  <img src="/images/gitops-portfolio/application-view.png" alt="A Blueprint application sheet opened over the portfolio: a toolbar with Open Blueprint, an identity card, and an application state block with its stage row and an Evidence control" />
+  <img src="/images/gitops-portfolio/application-view.png" alt="A Blueprint application sheet opened over the portfolio: a toolbar with Open Blueprint, an identity card, an application state block with its stage row and an Evidence control, a next authority step row offering Pull source and Review and approve placement, a Rollout controls row, and a target card" />
 </Frame>
 
 - **Identity.** The target, the repository and ref, the desired and fetched commits, the candidate and accepted source generations, and for a Blueprint the rollout generation.

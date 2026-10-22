@@ -33,6 +33,10 @@ Each step is offered as an action on the Blueprint sheet's **GitOps** section an
 
 **Convert to Git** moves an existing live Git source onto the Blueprint. Pick the source, review the preview, and confirm. The Blueprint becomes Git-managed. The previous YAML is kept as a frozen **detach snapshot** only, and a placement never runs from it. Credentials stay with the Git source.
 
+<Frame caption="Convert to Git-managed content. Pick a live Git source and the preview names the repository, the ref, and the nodes the Blueprint will manage.">
+  <img src="/images/git-managed-blueprints/convert-preview.png" alt="Convert to Git-managed content dialog with a Live Git source select showing a demo-app source, a preview of the repository and ref, a target node card, and Cancel and Convert buttons" />
+</Frame>
+
 On the Git Source sheet for that stack, **Save** and **Detach** are withheld. **Pull source** fetches the next commit when the sheet is reading this Sencho's own source. A source read from another node keeps its Blueprint number on that node, so this sheet does not pull a Blueprint of the same number here. **Pull source** and **Accept source** sit on the sheet's Overview beside the source status.
 
 One repository backs at most one Git-managed Blueprint. Sencho matches repositories across the forms a Git URL can take, so the HTTPS and SSH URLs for the same clone count as one repository, whatever the port, with or without a `.git` suffix, and whatever the host casing. Converting a second source that points at an already claimed repository is refused. Pick a different source, or run **Retire to Direct** or **Detach Git** on the Blueprint that holds the claim.
@@ -41,9 +45,17 @@ A live Direct source can also be moved from the stack side with **Adopt onto Blu
 
 ## Accept source, approve placement, authorize rollout
 
+<Frame caption="The GitOps section of a Blueprint sheet with source accepted and placement waiting for review. The next authority step row offers Pull source and Review and approve placement, and the policy controls sit at the right.">
+  <img src="/images/git-managed-blueprints/gitops-section.png" alt="Blueprint sheet for a Git-managed Blueprint with a GitOps section showing Placement review pending, a path row, a Next authority step row with Pull source and Review and approve placement buttons, a Rollout controls row, and Detach Git and Retire to Direct buttons" />
+</Frame>
+
 - **Accept source** records that a fetched candidate is the content to run. It asks first, and it appears whenever the source policy holds a candidate for review, which is always the case for a source whose policy is not automatic. After acceptance Sencho materializes the generation and tries to resolve its executable artifact identity. If resolution cannot complete, the reconciler retries it before the next authorization.
 - **Review and approve placement** opens the rollout preview, the same reviewed plan the Inline flow shows: every node to place or remove, with its reachability. Confirming records the placement approval and freezes that set for the current intent, so a later edit or roster change needs a fresh review. The button appears once source is accepted and the candidate has no placement approval.
 - **Authorize rollout** runs registry preflight, records the authorization, and starts the sequential rollout across the approved targets. It appears while the rollout is not authorized, or while the recorded authorization was granted against earlier inputs. If a target cannot start, the authorization is still recorded and the surface says what stopped the rollout.
+
+<Frame caption="The rollout preview for a Git-managed Blueprint. It is a placement review: the approval covers the reviewed place and remove outcomes, and rollout authorization stays a separate step.">
+  <img src="/images/git-managed-blueprints/placement-review.png" alt="Confirm rollout dialog with counts of safe items, warnings, and blockers, the GitOps authority and evidence block, identity rows for repository, ref, commits, and generations, and Cancel and Approve placement buttons" />
+</Frame>
 
 Authorization needs resolved executable artifact evidence for the accepted generation, which the artifact card reports. While that evidence is unresolved or unavailable, authorization is refused with the artifact identity as the reason, and the lifecycle controls do not work around it. A blocked registry preflight refuses it with the registry reason. Fix the registry and authorize again.
 
@@ -98,6 +110,10 @@ Under **Evidence**, each decision carries its own policy line. The line says who
 ## Pause, resume, replan, or supersede a rollout
 
 A live rollout offers lifecycle controls in the **Rollout controls** row of the GitOps section:
+
+<Frame caption="The overflow menu of the Rollout controls row. Replan placement, Health rollout policy, and Rollout authorization policy are here. Pause, resume, supersede, and rollback are offered when they apply to the rollout.">
+  <img src="/images/git-managed-blueprints/rollout-controls.png" alt="Blueprint sheet with the Rollout controls overflow menu open, listing Replan placement, Health rollout policy, and Rollout authorization policy" />
+</Frame>
 
 - **Pause rollout** stops the rollout from advancing and asks for a reason. Nodes keep running what they already deployed, and a paused rollout never reads as converged.
 - **Resume rollout** clears the pause and continues the sequential rollout when it is still authorized. If the authorization is no longer live, the surface says so instead of starting anything.
