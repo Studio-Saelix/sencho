@@ -64,15 +64,22 @@ A new application, and any Blueprint you convert or adopt, starts on operator re
 
 Every rollout freezes the policy values it executes, and every placement approval carries the values that decided it. Editing a policy changes what the next decision may do and nothing else: no standing approval is withdrawn and no generation is invalidated. The one exception is switching the placement or rollout authorization policy on again: an approval that policy made earlier is withdrawn, so the change it decided waits for you again.
 
-### Source policy names
+### How the policy names map
 
-The Git source form and the policy lines in the application's **Evidence** name the same setting differently. They map one to one, with one pair sharing a name.
+**Evidence** labels its three policy lines **Source policy**, **Placement policy**, and **Rollout policy** (the rollout authorization policy). The source policy line uses different words from the Git source form, and the policy controls show short forms of the other two. The names map one to one, except that Auto-write files and Auto-deploy share a value.
 
 | Apply behavior on the Git source | Source policy as written in Evidence |
 |---|---|
 | **Manual** | Operator applies each revision |
 | **Review only** | Operator reviews each revision |
 | **Auto-write files**, **Auto-deploy** | Applies without an operator |
+
+| Policy control, short form | Full name |
+|---|---|
+| **Operator** | Operator approves each change |
+| **Bounded auto** | One stateless change at a time |
+| **Manual** | Operator authorizes each rollout |
+| **Automatic** | Authorizes without an operator |
 
 Auto-write files stops after writing the files; Auto-deploy also redeploys the stack. On a Git-managed Blueprint both mean the source is accepted without an operator, and the rollout authorization policy decides whether a rollout starts. A withdrawn stateful target always waits for you, whatever the source policy says.
 
